@@ -10,6 +10,8 @@ import type { SessionRecord } from "./domain/session.js";
 import { appStateDirectory, brokerSocketPath } from "./paths.js";
 import { RpcClient, RpcError } from "./client/rpc-client.js";
 import { attachSession } from "./client/attach.js";
+import { runDashboard } from "./client/dashboard.js";
+import { launchCockpit } from "./tmux/cockpit.js";
 import { CYBERDECK_VERSION } from "./version.js";
 
 interface StartOptions {
@@ -217,6 +219,15 @@ export function createProgram(): Command {
   program.command("watch")
     .argument("<id>", "session UUID")
     .action((sessionId: string) => runAttachment(sessionId, "watch"));
+
+  program.command("dashboard").action(async () => {
+    const client = await RpcClient.connect(brokerSocketPath);
+    await runDashboard(client);
+  });
+
+  program.command("cockpit").action(() => {
+    launchCockpit({ cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)) });
+  });
 
   return program;
 }
