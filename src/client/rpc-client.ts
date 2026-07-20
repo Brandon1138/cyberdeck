@@ -22,6 +22,7 @@ export class RpcClient {
   private readonly decoder = new JsonlDecoder(ServerFrameSchema);
   private readonly pending = new Map<number, PendingRequest>();
   private readonly listeners = new Set<(frame: ServerFrame) => void>();
+  private readonly closeListeners = new Set<() => void>();
   private nextRequestId = 1;
   private closed = false;
 
@@ -82,6 +83,11 @@ export class RpcClient {
     return () => this.listeners.delete(listener);
   }
 
+  onClose(listener: () => void): () => void {
+    this.closeListeners.add(listener);
+    return () => this.closeListeners.delete(listener);
+  }
+
   close(): void {
     if (this.closed) return;
     this.socket.end();
@@ -93,5 +99,6 @@ export class RpcClient {
     const error = new RpcError("BROKER_DISCONNECTED", "Broker connection closed");
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    for (const listener of this.closeListeners) listener();
   }
 }

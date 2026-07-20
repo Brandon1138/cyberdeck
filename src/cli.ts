@@ -9,6 +9,7 @@ import { runBroker } from "./broker/main.js";
 import type { SessionRecord } from "./domain/session.js";
 import { appStateDirectory, brokerSocketPath } from "./paths.js";
 import { RpcClient, RpcError } from "./client/rpc-client.js";
+import { attachSession } from "./client/attach.js";
 import { CYBERDECK_VERSION } from "./version.js";
 
 interface StartOptions {
@@ -99,6 +100,21 @@ async function startDetachedBroker(): Promise<void> {
   process.stdout.write(`Cyberdeck broker is running at ${brokerSocketPath}\n`);
 }
 
+async function runAttachment(sessionId: string, mode: "control" | "watch"): Promise<void> {
+  process.stdout.write("Detach with Ctrl-]\n");
+  const client = await RpcClient.connect(brokerSocketPath);
+  try {
+    const status = await attachSession({ sessionId, mode, transport: client });
+    if (status !== 0) process.exitCode = status;
+  } catch (error) {
+    client.close();
+    if (error instanceof RpcError && error.code === "SESSION_ALREADY_CONTROLLED") {
+      throw new RpcError(error.code, `${error.message}; use cyberdeck watch ${sessionId}`);
+    }
+    throw error;
+  }
+}
+
 function sessionRequest(options: StartOptions, parentSessionId?: string) {
   return {
     provider: options.provider,
@@ -141,7 +157,7 @@ export function createProgram(): Command {
       const record = await withClient((client) => client.request<SessionRecord>("session.start", sessionRequest(options)));
       process.stdout.write(`${record.id}\n`);
       if (options.attach === true) {
-        process.stdout.write(`Session started for control attachment; run cyberdeck attach ${record.id}\n`);
+        await runAttachment(record.id, "control");
       }
     });
 
@@ -193,6 +209,14 @@ export function createProgram(): Command {
       const snapshot = await withClient((client) => client.request<{ data: string }>("session.snapshot", { sessionId }));
       process.stdout.write(Buffer.from(snapshot.data, "base64"));
     });
+
+  program.command("attach")
+    .argument("<id>", "session UUID")
+    .action((sessionId: string) => runAttachment(sessionId, "control"));
+
+  program.command("watch")
+    .argument("<id>", "session UUID")
+    .action((sessionId: string) => runAttachment(sessionId, "watch"));
 
   return program;
 }
