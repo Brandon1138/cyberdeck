@@ -72,19 +72,21 @@ Observed results:
 
 No authentication state was changed.
 
-## Capability ledger before live acceptance
+## Capability ledger after live acceptance
 
 An observed capability is something demonstrated by the native runtime or Cyberdeck in this environment. A desired Cyberdeck capability is a product requirement and is not evidence that the underlying runtime has already demonstrated it.
 
 | Capability | Codex observation | Claude observation | Desired Cyberdeck capability |
 | --- | --- | --- | --- |
-| Interactive start | Not yet exercised | Not yet exercised; auth currently unavailable | Start only with an explicit provider |
-| Detach | Not yet exercised | Not yet exercised | Detach the view without stopping the provider |
-| Reattach | Not yet exercised | Not yet exercised | Reattach to the same broker-owned PTY |
-| Steering | Not yet exercised | Not yet exercised | A controller can send input after attachment |
-| Cancellation | Not yet exercised | Not yet exercised | `cyberdeck stop` explicitly terminates the session |
-| Native session persistence | Not yet exercised | Not yet exercised | Phase 1 preserves the live PTY for the broker lifetime; provider-native persistence is separate |
+| Interactive start | Verified with Codex 0.144.6 in a broker-owned PTY | Native Claude 2.1.214 UI started and attached despite the status command reporting logged out | Start only with an explicit provider |
+| Detach | Verified with `Ctrl-]`; the same PID continued while detached | Verified mechanically before any prompt was sent | Detach the view without stopping the provider |
+| Reattach | Verified; the existing screen and completed output replayed | Verified mechanically before any prompt was sent | Reattach to the same broker-owned PTY |
+| Steering | Verified for a top-level session and a delegated session | Not exercised because the native default shown by Claude was Fable | A controller can send input after attachment |
+| Cancellation | Verified by stopping both Codex sessions and the Claude session, then checking their PIDs were gone | Verified mechanically with `cyberdeck stop` | `cyberdeck stop` explicitly terminates the session |
+| Native session persistence | The same Codex PID completed a read-only response after the view detached | Not verified; no Claude model call was made | Phase 1 preserves the live PTY for the broker lifetime; provider-native persistence is separate |
 
 ## Premium-model boundary
 
 No Fable call belongs in setup validation or the Phase 1 acceptance pass. A top-level Fable start may be explicitly typed by a human, but delegated Fable must be rejected before any provider process starts.
+
+The installed Claude runtime displayed `Fable 5 with high effort` when launched without a model flag. Acceptance detached immediately and sent no prompt, so it made no Fable call. This conflicts with the plan's assumption that the configured native default would be an ordinary model. The broker did not substitute a model automatically.
