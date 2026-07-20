@@ -10,10 +10,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "pretest": "pnpm run postinstall",
     "test": "vitest run",
     "test:watch": "vitest",
     "probe": "tsx scripts/probe-runtimes.ts",
-    "dev": "tsx src/cli.ts"
+    "dev": "tsx src/cli.ts",
+    "postinstall": "node -e \"const fs=require('node:fs'),path=require('node:path');if(process.platform==='darwin'){const helper=path.join(path.dirname(require.resolve('node-pty/package.json')),'prebuilds',process.platform+'-'+process.arch,'spawn-helper');if(fs.existsSync(helper))fs.chmodSync(helper,0o755)}\""
   },
   "dependencies": {
     "commander": "^15.0.0",
