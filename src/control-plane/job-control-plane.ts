@@ -23,6 +23,7 @@ import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
 import {
   JobReportSchema,
   JobRequestSchema,
+  JobResultSchema,
   type JobRecord,
   type JobRequest,
   type JobResult,
@@ -69,7 +70,7 @@ export const ReportBackRecordSchema = z.object({
   correlationId: CorrelationIdSchema,
   parentJobId: JobIdSchema.optional(),
   parentSessionId: SessionIdSchema.optional(),
-  result: z.custom<JobResult>(),
+  result: JobResultSchema,
   usage: UsageReportSchema.optional(),
   state: ReportBackStateSchema,
   attempts: z.number().int().nonnegative(),
@@ -92,6 +93,18 @@ export interface JobSnapshot {
   reportBack?: ReportBackRecord;
 }
 
+/** Complete durable state for one job. Runtime handles are deliberately excluded. */
+export interface PersistedJobState extends JobSnapshot {
+  idempotencyKey: string;
+  parentSessionId?: string;
+}
+
+/** Narrow persistence port implemented by the append-only A3 job store. */
+export interface JobStateRepository {
+  append(state: PersistedJobState): Promise<void>;
+  load(): Promise<PersistedJobState[]>;
+}
+
 export interface SubmitResult {
   job: JobRecord;
   /** True when an identical idempotency key was already submitted; no new job was created. */
@@ -110,6 +123,7 @@ interface JournalLike {
 export interface JobControlPlaneOptions {
   registry: ProviderRegistry;
   journal?: JournalLike;
+  store?: JobStateRepository;
   now?: () => string;
   idFactory?: () => string;
 }
@@ -160,8 +174,54 @@ export class JobControlPlane {
   private readonly byIdempotencyKey = new Map<string, string>();
   private readonly adapters = new Map<string, JobDispatchAdapter>();
   private readonly unsubscribes = new Map<string, () => void>();
+  private pendingReports: Promise<void> = Promise.resolve();
+  private pendingReportError: unknown;
 
   constructor(private readonly options: JobControlPlaneOptions) {}
+
+  /**
+   * Rebuild durable state without dispatching anything. Nonterminal work belonged to a runtime
+   * whose ownership cannot be verified after broker death, so it becomes explicitly interrupted.
+   */
+  async recover(): Promise<void> {
+    if (this.options.store === undefined) return;
+    const states = await this.options.store.load();
+    this.jobs.clear();
+    this.byIdempotencyKey.clear();
+
+    for (const state of states) {
+      const entry: JobEntry = {
+        record: cloneJobRecord(state.record),
+        idempotencyKey: state.idempotencyKey,
+        ...(state.parentSessionId !== undefined ? { parentSessionId: state.parentSessionId } : {}),
+        ...(state.usage !== undefined ? { usage: state.usage } : {}),
+        ...(state.reportBack !== undefined ? { reportBack: { ...state.reportBack } } : {}),
+      };
+      this.jobs.set(entry.record.id, entry);
+      this.byIdempotencyKey.set(entry.idempotencyKey, entry.record.id);
+    }
+
+    for (const entry of this.jobs.values()) {
+      if (
+        entry.record.lifecycle.status === "queued" ||
+        entry.record.lifecycle.status === "dispatched" ||
+        entry.record.lifecycle.status === "running"
+      ) {
+        const now = this.now();
+        entry.record = {
+          ...entry.record,
+          lifecycle: {
+            status: "interrupted",
+            interruptedAt: now,
+            reason:
+              "Broker restarted; previous runtime ownership is unverifiable and explicit recovery is required",
+          },
+          updatedAt: now,
+        };
+        await this.persist(entry);
+      }
+    }
+  }
 
   /**
    * Register an in-process adapter for its provider and subscribe to its report stream. Reports are
@@ -171,7 +231,13 @@ export class JobControlPlane {
   registerAdapter(adapter: JobDispatchAdapter): () => void {
     this.adapters.set(adapter.provider, adapter);
     const unsubscribe = adapter.onReport((report) => {
-      void this.ingestReport(report);
+      this.pendingReports = this.pendingReports
+        .then(async () => {
+          await this.ingestReport(report);
+        })
+        .catch((error: unknown) => {
+          this.pendingReportError = error;
+        });
     });
     this.unsubscribes.set(adapter.provider, unsubscribe);
     return () => {
@@ -179,6 +245,12 @@ export class JobControlPlane {
       this.adapters.delete(adapter.provider);
       this.unsubscribes.delete(adapter.provider);
     };
+  }
+
+  /** Wait until asynchronously emitted adapter reports have been durably ingested. */
+  async whenIdle(): Promise<void> {
+    await this.pendingReports;
+    if (this.pendingReportError !== undefined) throw this.pendingReportError;
   }
 
   async submit(input: unknown): Promise<SubmitResult> {
@@ -262,6 +334,7 @@ export class JobControlPlane {
     };
     this.jobs.set(jobId, entry);
     this.byIdempotencyKey.set(spec.idempotencyKey, jobId);
+    await this.persist(entry);
 
     await this.emit("job.submitted", {
       jobId,
@@ -322,6 +395,7 @@ export class JobControlPlane {
       lifecycle: { status: "dispatched", dispatchedAt: now },
       updatedAt: now,
     };
+    await this.persist(entry);
     await this.emit("job.dispatched", { jobId: entry.record.id, provider });
   }
 
@@ -348,7 +422,11 @@ export class JobControlPlane {
     }
 
     const adapter = this.adapters.get(entry.record.request.provider);
-    if (entry.record.lifecycle.status === "queued" || adapter === undefined) {
+    if (
+      entry.record.lifecycle.status === "queued" ||
+      entry.record.lifecycle.status === "interrupted" ||
+      adapter === undefined
+    ) {
       // Nothing was handed to a live adapter; settle directly without a port round-trip.
       await this.settle(entry, {
         outcome: "cancelled",
@@ -379,6 +457,7 @@ export class JobControlPlane {
     if (rb.state === "delivered") return { ...rb };
     const now = this.now();
     entry.reportBack = { ...rb, state: "delivered", deliveredAt: now, updatedAt: now };
+    await this.persist(entry);
     await this.emit("job.report.acknowledged", {
       jobId: entry.record.id,
       parentJobId: rb.parentJobId ?? null,
@@ -398,6 +477,7 @@ export class JobControlPlane {
       lastError: error,
       updatedAt: now,
     };
+    await this.persist(entry);
     await this.emit("job.report.failed", {
       jobId: entry.record.id,
       parentJobId: rb.parentJobId ?? null,
@@ -427,13 +507,6 @@ export class JobControlPlane {
     };
     if (usage !== undefined) entry.usage = usage;
 
-    await this.emit("job.settled", {
-      jobId: entry.record.id,
-      provider: entry.record.request.provider,
-      outcome: result.outcome,
-      errorCode: result.outcome === "failed" ? result.error.code : null,
-    });
-
     const hasParent = entry.record.parentJobId !== undefined || entry.parentSessionId !== undefined;
     if (hasParent) {
       entry.reportBack = {
@@ -449,6 +522,16 @@ export class JobControlPlane {
         ...(entry.parentSessionId !== undefined ? { parentSessionId: entry.parentSessionId } : {}),
         ...(usage !== undefined ? { usage } : {}),
       };
+    }
+
+    await this.persist(entry);
+    await this.emit("job.settled", {
+      jobId: entry.record.id,
+      provider: entry.record.request.provider,
+      outcome: result.outcome,
+      errorCode: result.outcome === "failed" ? result.error.code : null,
+    });
+    if (hasParent) {
       await this.emit("job.reported", {
         jobId: entry.record.id,
         state: "pending",
@@ -475,6 +558,17 @@ export class JobControlPlane {
 
   private registeredIds(): string[] {
     return this.options.registry.list().map((descriptor) => descriptor.id);
+  }
+
+  private async persist(entry: JobEntry): Promise<void> {
+    if (this.options.store === undefined) return;
+    await this.options.store.append({
+      record: cloneJobRecord(entry.record),
+      idempotencyKey: entry.idempotencyKey,
+      ...(entry.parentSessionId !== undefined ? { parentSessionId: entry.parentSessionId } : {}),
+      ...(entry.usage !== undefined ? { usage: entry.usage } : {}),
+      ...(entry.reportBack !== undefined ? { reportBack: { ...entry.reportBack } } : {}),
+    });
   }
 
   private async emit(type: BrokerEventType, data: Record<string, unknown>): Promise<void> {

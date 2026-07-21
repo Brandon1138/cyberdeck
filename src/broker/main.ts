@@ -6,6 +6,7 @@ import { JobControlPlane } from "../control-plane/job-control-plane.js";
 import { defaultProviderRegistry } from "../control-plane/provider-registry.js";
 import type { BrokerEvent } from "../domain/events.js";
 import { appStateDirectory, brokerSocketPath } from "../paths.js";
+import { JobStore } from "../persistence/job-store.js";
 import { ClaudeProviderAdapter } from "../providers/claude.js";
 import { CodexProviderAdapter } from "../providers/codex.js";
 import { PtyProcess } from "../runtime/pty-process.js";
@@ -22,8 +23,11 @@ function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<st
   };
 }
 
-export async function runBroker(socketPath = brokerSocketPath): Promise<BrokerServer> {
-  const journal = new Journal(appStateDirectory);
+export async function runBroker(
+  socketPath = brokerSocketPath,
+  stateDirectory = appStateDirectory,
+): Promise<BrokerServer> {
+  const journal = new Journal(stateDirectory);
   const registry = new SessionRegistry({
     adapters: {
       codex: new CodexProviderAdapter(),
@@ -37,13 +41,19 @@ export async function runBroker(socketPath = brokerSocketPath): Promise<BrokerSe
   // The control plane owns durable job state. Provider dispatch adapters (Agent B, B2+) register
   // themselves at runtime; until then job.* methods respond but a submit settles as DISPATCH_REJECTED
   // for lack of an adapter.
-  const controlPlane = new JobControlPlane({ registry: defaultProviderRegistry(), journal });
+  const controlPlane = new JobControlPlane({
+    registry: defaultProviderRegistry(),
+    journal,
+    store: new JobStore(stateDirectory),
+  });
+  await controlPlane.recover();
 
   let shuttingDown = false;
   let server: BrokerServer;
   const shutdown = async (reason: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    await controlPlane.whenIdle();
     await registry.stopAll();
     await journal.append(brokerEvent("broker.shutdown", { reason, pid: process.pid }));
     await server.close();

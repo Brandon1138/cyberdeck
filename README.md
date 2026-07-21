@@ -37,6 +37,8 @@ cyberdeck broker stop
 ```
 
 Broker shutdown ends active PTYs in Phase 1. Sessions survive client and pane detachment, but they do not survive broker death or restart.
+Bounded control-plane jobs are different: their records and terminal results are rebuilt on restart,
+while unverifiable nonterminal jobs become `interrupted` and are never automatically redispatched.
 
 ## Start a session
 
@@ -110,12 +112,14 @@ Phase 1 provides broker-owned Claude and Codex PTYs, explicit starts, one bounde
 
 See `docs/architecture/session-model.md` for the precise state and ownership model and `docs/setup/phase-1-acceptance.md` for verified live behavior and current limitations.
 
-## Phase 2/3 control plane (planned)
+## Phase 2/3 control plane
 
 Phase 2/3 adds a neutral control plane for bounded **jobs** — distinct from Phase 1 sessions — with
 structured delegation, persistence and recovery, artifacts, leases, concurrency, and budgets. The
 shared, runtime-validated contracts are defined in `src/domain/` and documented in
 `docs/architecture/control-plane.md`; the sequenced implementation plan is
-`docs/superpowers/plans/2026-07-21-cyberdeck-phase-2-3.md`. No Phase 2/3 execution feature is shipped
-yet, and the neutral policy — explicit provider, opaque model/role, no ranking or routing, no
-automation-launched Fable — is unchanged.
+`docs/superpowers/plans/2026-07-21-cyberdeck-phase-2-3.md`. Job submission, structured delegation,
+report-back, persistence/recovery, and structured artifact storage are implemented. The neutral
+policy — explicit provider, opaque model/role, no ranking or routing, no automation-launched Fable
+— is unchanged. Exact recovery and storage operations are documented in
+`docs/architecture/persistence-and-recovery.md`.

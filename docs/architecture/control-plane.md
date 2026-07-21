@@ -61,8 +61,9 @@ absence means unknown and must never be interpreted as zero. The `JobDispatchAda
 itself remains unchanged.
 
 **Invalid lifecycle data is unrepresentable.** `JobLifecycleSchema` is a discriminated union where
-only the `settled` status carries a `result`. A running job cannot hold a terminal result, and a
-settled job cannot omit one. `JobResultSchema` pairs each outcome with exactly its required payload
+only the `settled` status carries a `result`. A running job cannot hold a terminal result, a
+recovered `interrupted` job must carry an interruption timestamp and reason, and a settled job
+cannot omit its result. `JobResultSchema` pairs each outcome with exactly its required payload
 (`failed` requires an error; `completed`/`failed` require an artifacts array). `CancellationResult`
 cannot be a refusal without a code.
 
@@ -137,6 +138,16 @@ claims a B-owned production adapter exists yet.
   the broker does not import concrete adapters.
 - Presentation (CLI, tmux, dashboard) depends on the client/broker protocol, never on domain
   internals directly beyond the shared schemas.
+
+## A3 durability boundary
+
+Bounded jobs, terminal results, usage, idempotency keys, lineage, and report-back state are rebuilt
+from a validated append-only store at broker startup. Unverifiable nonterminal work becomes
+`interrupted`; it is never automatically redispatched. Live PTYs remain outside that boundary and
+are not reconstructed. Structured artifact bytes and metadata live in a separate atomic,
+content-addressed store. See
+[`persistence-and-recovery.md`](persistence-and-recovery.md) for the file layout, corruption rules,
+restart mapping, and artifact integrity guarantees.
 
 Within domain, the contract module dependency direction is:
 `control-plane → provider-registration`, `artifact → control-plane`,

@@ -53,6 +53,10 @@ describe("JobLifecycleSchema", () => {
     expect(JobLifecycleSchema.parse({ status: "queued", enqueuedAt: now }).status).toBe("queued");
     expect(JobLifecycleSchema.parse({ status: "dispatched", dispatchedAt: now }).status).toBe("dispatched");
     expect(JobLifecycleSchema.parse({ status: "running", startedAt: now }).status).toBe("running");
+    expect(
+      JobLifecycleSchema.parse({ status: "interrupted", interruptedAt: now, reason: "restart" })
+        .status,
+    ).toBe("interrupted");
   });
 
   it("requires a terminal result once settled and rejects unknown statuses", () => {

@@ -69,6 +69,11 @@ export const JobLifecycleSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("queued"), enqueuedAt: TimestampSchema }),
   z.object({ status: z.literal("dispatched"), dispatchedAt: TimestampSchema }),
   z.object({ status: z.literal("running"), startedAt: TimestampSchema }),
+  z.object({
+    status: z.literal("interrupted"),
+    interruptedAt: TimestampSchema,
+    reason: z.string().min(1),
+  }),
   z.object({ status: z.literal("settled"), finishedAt: TimestampSchema, result: JobResultSchema }),
 ]);
 export type JobLifecycle = z.infer<typeof JobLifecycleSchema>;
