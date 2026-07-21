@@ -112,7 +112,7 @@ export interface SubmitResult {
 }
 
 export type IngestResult = {
-  status: "settled" | "already-settled" | "unknown-job";
+  status: "settled" | "interrupted" | "already-settled" | "unknown-job";
   jobId: JobId;
 };
 
@@ -406,6 +406,30 @@ export class JobControlPlane {
     if (entry === undefined) return { status: "unknown-job", jobId: parsed.jobId };
     if (entry.record.lifecycle.status === "settled") {
       return { status: "already-settled", jobId: parsed.jobId };
+    }
+    if (
+      parsed.result.outcome === "failed" &&
+      parsed.result.error.code === "RUNTIME_INTERRUPTED"
+    ) {
+      const now = this.now();
+      entry.record = {
+        ...entry.record,
+        lifecycle: {
+          status: "interrupted",
+          interruptedAt: now,
+          reason: parsed.result.error.message,
+        },
+        updatedAt: now,
+      };
+      if (parsed.usage !== undefined) entry.usage = parsed.usage;
+      await this.persist(entry);
+      await this.emit("job.interrupted", {
+        jobId: entry.record.id,
+        provider: entry.record.request.provider,
+        correlationId: entry.record.correlationId,
+        reason: parsed.result.error.message,
+      });
+      return { status: "interrupted", jobId: parsed.jobId };
     }
     await this.settle(entry, parsed.result, parsed.usage);
     return { status: "settled", jobId: parsed.jobId };

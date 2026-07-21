@@ -119,7 +119,10 @@ structured delegation, persistence and recovery, artifacts, leases, concurrency,
 shared, runtime-validated contracts are defined in `src/domain/` and documented in
 `docs/architecture/control-plane.md`; the sequenced implementation plan is
 `docs/superpowers/plans/2026-07-21-cyberdeck-phase-2-3.md`. Job submission, structured delegation,
-report-back, persistence/recovery, and structured artifact storage are implemented. The neutral
+report-back, persistence/recovery, structured artifact storage, supervised Codex App Server
+transport, and durable canonical-path worktree leases are implemented. The neutral
 policy — explicit provider, opaque model/role, no ranking or routing, no automation-launched Fable
 — is unchanged. Exact recovery and storage operations are documented in
-`docs/architecture/persistence-and-recovery.md`.
+`docs/architecture/persistence-and-recovery.md`. App Server compatibility, interruption mapping,
+lease fencing, and orphan remediation are in
+`docs/architecture/app-server-and-worktree-leases.md`.

@@ -60,6 +60,12 @@ provider-neutral usage through the frozen dispatch/report port. This additive fi
 absence means unknown and must never be interpreted as zero. The `JobDispatchAdapter` interface
 itself remains unchanged.
 
+**A4 runtime interruption extension.** `RUNTIME_INTERRUPTED` is a neutral transport-loss error used
+when a supervised runtime disappears before validated terminal completion. The control plane maps
+that report to the existing durable `interrupted` lifecycle rather than fabricating a terminal
+provider result. It retains correlation diagnostics and never redispatches. See
+[`app-server-and-worktree-leases.md`](app-server-and-worktree-leases.md).
+
 **Invalid lifecycle data is unrepresentable.** `JobLifecycleSchema` is a discriminated union where
 only the `settled` status carries a `result`. A running job cannot hold a terminal result, a
 recovered `interrupted` job must carry an interruption timestamp and reason, and a settled job
@@ -148,6 +154,15 @@ are not reconstructed. Structured artifact bytes and metadata live in a separate
 content-addressed store. See
 [`persistence-and-recovery.md`](persistence-and-recovery.md) for the file layout, corruption rules,
 restart mapping, and artifact integrity guarantees.
+
+## A4 App Server and lease boundary
+
+Codex App Server is an explicit Codex job transport behind the unchanged `JobDispatchAdapter` port,
+not a route or fallback. Durable canonical-path leases provide read-only sharing, exclusive
+workspace-write ownership, expiry, heartbeat, and monotonically fenced replacement. Startup treats
+unverifiable held leases as blocking orphans and never performs Git cleanup. Exact protocol and
+operations behavior is documented in
+[`app-server-and-worktree-leases.md`](app-server-and-worktree-leases.md).
 
 Within domain, the contract module dependency direction is:
 `control-plane → provider-registration`, `artifact → control-plane`,

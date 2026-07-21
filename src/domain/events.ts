@@ -13,6 +13,7 @@ export const BrokerEventTypeSchema = z.enum([
   // outcome metadata only — never the instruction (prompt) body or any secret.
   "job.submitted",
   "job.dispatched",
+  "job.interrupted",
   "job.settled",
   "delegation.created",
   "job.reported",

@@ -11,6 +11,7 @@ Under the configured Cyberdeck state directory (injectable in tests):
 ```text
 events.jsonl                         diagnostic broker/session/job events
 control-plane/jobs.jsonl             append-only validated job-state snapshots
+control-plane/leases.jsonl           append-only validated lease-state snapshots
 artifacts/metadata/<artifact-id>.json validated artifact descriptor and logical kind
 artifacts/sha256/<hex-digest>         content-addressed bytes
 ```
@@ -65,3 +66,8 @@ unresolved-external-reference conditions are distinct errors. Inline references 
 validated locally. External references are never fetched by the local store. The metadata API has
 no credential or arbitrary-secret fields; unstructured terminal replay is never promoted to an
 artifact unless an adapter explicitly submits validated content.
+
+Lease replay uses the same fail-closed JSONL rules. A held, unexpired lease cannot prove that its
+old owner still controls the worktree, so startup persists it as an orphan and blocks reuse until
+explicit operator remediation. Expired leases become released. Recovery never removes Git
+worktrees or directories; see `app-server-and-worktree-leases.md` for fencing and remediation.
