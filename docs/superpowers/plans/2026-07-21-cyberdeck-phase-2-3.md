@@ -214,7 +214,7 @@ Codex App Server transport client is a documented handoff to Agent B where it to
   adapter, protocol validation, durable fenced lease manager/store, non-destructive orphan handling,
   and fixture-only interruption/lease integration coverage.
 
-### A5 — Integration, concurrency, budgets, reconciliation — **DONE (`feat: reconcile jobs and enforce budgets`)**
+### A5 — Integration, concurrency, budgets, reconciliation — **DONE (`7187679`)**
 
 **Prerequisite:** A4 **and** B4 integrated. **Owner:** Agent A.
 
@@ -274,6 +274,27 @@ copy, dashboard and cockpit rendering, and any provider-facing CLI UX over the `
 `job.*` queries. **Documented B-facing handoff:** the `PhaseOneConfigSchema` → `BrokerRuntimeConfigSchema`
 rename touched `tests/integration/session-lifecycle.test.ts` as a single mechanical import/name
 change with no behavioral edit. Codex Gate 2 remains outstanding.
+
+#### A5 integration evidence — PASS (2026-07-21)
+
+The human integration session verified that A5 commit
+`718767955e2a56c1c314c13d6ac406b39e19370a` is a single clean descendant of the recorded A4+B4
+baseline `dbd56a404f9df4c055179af8c18f57ac8eec217c` and fast-forwarded it onto canonical `main`.
+Review of the complete diff found no B-owned adapter or presentation edit: A5 changes A-owned
+control-plane, broker, config, domain, persistence, tests, and documentation, with only the planned
+mechanical `BrokerRuntimeConfig` rename in the Phase 1 integration test. Concrete B2–B4 adapters are
+composed unchanged through the frozen dispatch port.
+
+- Focused A5 verification passed **8 files / 71 tests**.
+- Full verification passed **47 files / 357 tests**; `mise exec -- pnpm check`,
+  `mise exec -- pnpm build`, and `git diff --check` also passed.
+- Verification used fakes and temporary repositories only. No provider executable, provider/model
+  call, Fable call, paid usage, auth mutation, automatic routing/fallback, or destructive recovery
+  action occurred.
+
+A5 is human-integrated and B5 is unblocked from this evidence baseline. B5 remains responsible only
+for presentation, operational acceptance, and accurate documentation; final completion still waits
+for B5 integration plus independent Codex Gate 2.
 
 ---
 
