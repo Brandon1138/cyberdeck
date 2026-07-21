@@ -276,18 +276,39 @@ state, one scenario, clean, verify PIDs/socket/panes).
 
 **Pass conditions (all required):**
 
-- [ ] A parent submits a bounded job; a **structured delegation** creates a child job; the child
+- [x] A parent submits a bounded job; a **structured delegation** creates a child job; the child
   settles and its `JobReport` is routed back to the parent by `correlationId`, observed live.
-- [ ] The delegated worker uses an **explicit Codex** provider (or a fake), with an arbitrary opaque
+- [x] The delegated worker uses an **explicit Codex** provider (or a fake), with an arbitrary opaque
   role preserved and no role semantics applied.
-- [ ] A delegated **Fable** attempt is refused before any process starts
+- [x] A delegated **Fable** attempt is refused before any process starts
   (`FABLE_REQUIRES_EXPLICIT_HUMAN_START`), and no new job/session/PID appears.
-- [ ] An **omitted-model Claude** start (top-level or delegated) is **refused before any process
+- [x] An **omitted-model Claude** start (top-level or delegated) is **refused before any process
   spawns** via the B2-wired `evaluateClaudeLaunchSafety`; no Claude process is created. (If B2's
   enforcement is not yet integrated, the omitted-model Claude live check stays hard-blocked and the
   gate fails.)
-- [ ] No Fable process is ever launched. Job and session records stay distinct.
-- [ ] Starting state proven before, teardown verified after (PIDs gone, socket removed, panes closed).
+- [x] No Fable process is ever launched. Job and session records stay distinct.
+- [x] Starting state proven before, teardown verified after (PIDs gone, socket removed, panes closed).
+
+**Gate 1 evidence — PASS (2026-07-21, human-launched top-level Codex).** B2 commit `8ecaac5`
+was integrated without content drift as `fbc91a5` on `integration/a1-b1-a2` (stable patch id
+`b52e42492513ac3e6394600db2b7143535c3084e`). The operator first found one pre-existing broker
+with only an already-exited detached Codex record, stopped it through the targeted `broker stop`
+request, and then verified no broker PID, `/tmp/cyberdeck-501.sock`, or `cyberdeck` tmux session.
+
+A temporary fixture-only harness composed A2's real `JobControlPlane` with B2's real
+`ClaudeJobDispatchAdapter` through `registerAdapter`. It observed exactly one parent, one structured
+child, one fake process construction, one validated terminal report with the requested
+`correlationId`, one pending then acknowledged report-back, and a deduplicated retry. The arbitrary
+role `luna-high-scout` remained on the job record and never affected argv/model selection. Delegated
+Fable plus top-level and delegated omitted-model Claude attempts all failed before the adapter spawn
+count or job count changed. The harness passed once and was removed after the run.
+
+Focused verification passed 5 files / 60 tests. The full gate passed 30 files / 213 tests, followed
+by successful `pnpm check`, `pnpm build`, and `git diff --check`. B1 fixtures were used; the real
+Claude or Codex executable was never resolved or spawned by the gate, no Fable or paid-provider call
+occurred, and no live-model acceptance was attempted. Final teardown again showed no broker PID,
+socket, or tmux cockpit. Pre-existing Claude Desktop sessions used an explicit Opus model and were
+not Cyberdeck children. A3 and B3 are unblocked from this verified integrated baseline.
 
 ### Codex Gate 2 — after final A5 + B5 integration, before Phase 2/3 is declared complete
 
