@@ -38,14 +38,11 @@ export interface DashboardSnapshot {
 /**
  * The shape `control.reconciliation` actually puts on the wire.
  *
- * The A-owned {@link ReconciliationReport} types `reconciledAt` as `string`, but the broker answers
- * `{ reconciledAt: null, findings: [], quarantinedJobIds: [] }` when it is composed without a
- * control-plane runtime. Rather than edit an A-owned contract, the presentation layer widens the
- * field locally and renders the `null` case as an explicit "never reconciled". The mismatch is
- * reported to the integration gate rather than papered over here.
+ * The shared {@link ReconciliationReport} carries `string | null`: the broker answers null before a
+ * control-plane reconciliation pass, and the presentation renders that honest state as
+ * "never reconciled".
  */
-export type ReconciliationView =
-  Omit<ReconciliationReport, "reconciledAt"> & { reconciledAt: string | null };
+export type ReconciliationView = ReconciliationReport;
 
 const UNAVAILABLE = "  unavailable — the broker did not answer this query";
 

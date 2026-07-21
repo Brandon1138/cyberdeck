@@ -34,7 +34,8 @@ export interface ReconciliationFinding {
 }
 
 export interface ReconciliationReport {
-  reconciledAt: string;
+  /** Null only for a composed broker whose control-plane reconciliation pass has not run. */
+  reconciledAt: string | null;
   findings: ReconciliationFinding[];
   quarantinedJobIds: string[];
 }

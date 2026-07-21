@@ -18,7 +18,7 @@ export interface AppServerJsonDecoderOptions {
   maxFrameBytes?: number;
 }
 
-/** Newline-delimited JSON-RPC decoder with a hard per-frame bound. */
+/** Newline-delimited App Server RPC decoder with a hard per-frame bound. */
 export class AppServerJsonDecoder {
   private pending = Buffer.alloc(0);
   private readonly maxFrameBytes: number;
@@ -65,10 +65,13 @@ export class AppServerJsonDecoder {
         throw new AppServerProtocolError("MALFORMED_FRAME", "Malformed App Server frame: expected object");
       }
       const frame = decoded as Record<string, unknown>;
-      if (frame.jsonrpc !== "2.0") {
+      // Codex 0.144.6 accepts JSON-RPC 2.0 requests but omits the `jsonrpc` member on responses and
+      // notifications. Accept that observed wire shape; if a server explicitly declares a version,
+      // it must still be 2.0 so a genuinely incompatible protocol fails closed.
+      if (frame.jsonrpc !== undefined && frame.jsonrpc !== "2.0") {
         throw new AppServerProtocolError(
           "PROTOCOL_MISMATCH",
-          "App Server frame did not declare JSON-RPC 2.0",
+          "App Server frame declared an incompatible JSON-RPC version",
         );
       }
       frames.push(frame);

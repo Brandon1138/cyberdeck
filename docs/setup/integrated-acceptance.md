@@ -3,15 +3,15 @@
 Captured on **2026-07-21** in Europe/Bucharest on darwin 27.0.0 arm64, against the integrated A5
 baseline with the B1–B4 adapters composed.
 
-This document describes the cockpit and the acceptance pass B5 actually ran. It does not restate
+This document describes the cockpit, the zero-call acceptance pass B5 ran, and the independent live
+Codex Gate 2 that followed. It does not restate
 Phase 1 history: [phase-1-acceptance.md](phase-1-acceptance.md) and
 [runtime-baseline.md](runtime-baseline.md) remain the record of what Phase 1 verified, and
 [provider-capability-evidence.md](provider-capability-evidence.md) remains the B1 read-only capture.
 
-> **No provider or model call was made.** No prompt was sent to any provider, no `--print`/`--prompt`
-> mode was used, no model was selected, no authentication was changed, and no install/update command
-> was issued. Fable was not started, called, or targeted. Every conversational check below is
-> recorded as `NOT RUN — explicit paid-runtime authorization absent`.
+> **B5 itself made no provider or model call.** After explicit operator authorization, Gate 2 made
+> exactly one read-only Codex App Server model turn. No Claude, Cursor, Antigravity, or Fable process
+> was started; no authentication, configuration, install, or update command was issued.
 
 ## Evidence kinds
 
@@ -23,12 +23,13 @@ The cockpit and the code register keep these separate and never promote one into
 | `fixture-proven` | Cyberdeck's own mechanics are proven by a deterministic fixture. Proves what Cyberdeck constructs and parses — never what the provider does with it. |
 | `help-advertised` | The CLI's own help mentions it. Not proof it works. |
 | `operationally observed` | Observed by running real Cyberdeck control paths (broker, cockpit, tmux) with no provider process involved. |
-| `live-proven` | Demonstrated by a real authorized model call. **Nothing in this document is live-proven.** |
+| `live-proven` | Demonstrated by a real authorized model call; Gate 2 provides this only for the Codex App Server path. |
 | `unsupported` | Cyberdeck deliberately does not do this, or the provider documents no surface for it. |
 | `not run` | Not attempted, and why. |
 
-`live-proven` has no entries anywhere. `tests/client/provider-capability-view.test.ts` asserts that
-no row in the shipped register claims it, so the category cannot be granted by editing prose.
+The B5 presentation register has no `live-proven` entries because it covers the B-track provider
+claims that were not called. `tests/client/provider-capability-view.test.ts` enforces that boundary.
+Gate 2's separate Codex evidence below is granted only by the recorded authorized turn.
 
 ## Provider-by-mode acceptance matrix
 
@@ -46,7 +47,7 @@ Row order is alphabetical by provider id and encodes no preference. Cyberdeck ra
 | Structured streaming framing | — | yes (newline framing only) | — | — | — | real frame schema |
 | read-only → `--permission-mode plan` | help-advertised | argv construction | — | — | — | runtime confirmation |
 | workspace-write → `--permission-mode manual` | help-advertised | argv construction | — | — | — | runtime confirmation |
-| Omitted-model safety | — | — | — | — | **yes — the guard rejects only an explicitly supplied unsafe model** | — |
+| Omitted-model safety | — | yes — interactive and headless launch boundaries refuse before process construction | — | — | omission remains unsupported for real starts | live negative process proof intentionally unnecessary |
 | Durable headless conversation | — | — | — | — | yes (no resume/continue/session-id emitted) | — |
 | Automatic model selection / fallback | — | — | — | — | yes | — |
 | Conversation continuation after start | — | — | — | — | — | **NOT RUN — paid authorization absent** |
@@ -88,9 +89,42 @@ Rows are derived in code from `ANTIGRAVITY_CAPABILITIES`, not hand-copied.
 
 ### Codex (`codex`)
 
-Codex is a Phase 1 built-in with no B-track adapter in this wave. `codex --version` reported
-`codex-cli 0.144.6` (metadata-observed). Its Phase 1 live behavior is recorded in
-[runtime-baseline.md](runtime-baseline.md) and is not re-claimed here.
+Codex is a Phase 1 built-in with an A4 App Server adapter rather than a B-track adapter.
+`codex --version` reported `codex-cli 0.144.6` (metadata-observed). Gate 2 live-proved one read-only
+headless turn through that adapter, including terminal result, durable artifact, report-back, and
+restart reconstruction. Phase 1 interactive behavior remains recorded separately in
+[runtime-baseline.md](runtime-baseline.md).
+
+## Final Codex Gate 2 — PASS
+
+Captured on **2026-07-21** after integrating B5 commit `5925cfe7e0fdc29298d9734b85143c180b638f1c`.
+The operator explicitly authorized one paid, authenticated, read-only Codex App Server call using
+the configured model. The instruction was exactly `Reply with exactly CYBERDECK_GATE_OK. Do not use
+tools.`
+
+- Live job `04e3c57e-87c7-48f7-84ec-aabb5588589b` completed once through explicit provider `codex`;
+  opaque role `gate-opaque-role` remained presentation data, and no model was selected or inferred
+  by Cyberdeck.
+- The exact response `CYBERDECK_GATE_OK` was stored as a 17-byte content-addressed artifact,
+  resolved before restart, reconstructed from durable job state after restart, and resolved again.
+- The delegated child retained correlation with its deterministic parent and its report-back reached
+  `delivered` exactly once.
+- A third job in the same tree was refused `BUDGET_EXCEEDED`; a conflicting writable lease was
+  refused `LEASE_CONFLICT`; the accepted lease was released.
+- An omitted-model Claude submission was refused
+  `CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL` before any adapter/process boundary. No Fable
+  process was started.
+- The first live attempt exposed that installed Codex `0.144.6` omits `jsonrpc` on response and
+  notification frames. It failed during initialize before `thread/start`, so no model turn was
+  spent. The decoder now accepts that observed shape while rejecting an explicitly incompatible
+  version; the subsequent single model turn passed.
+- Startup found zero jobs/findings/provider processes. Restart reconstructed terminal state with
+  zero provider processes and zero reconciliation findings. Teardown found no Cyberdeck broker,
+  Codex App Server child, socket, dashboard, or gate temp directory. The pre-existing attached tmux
+  session named `main` was left untouched.
+
+The permanent `gate:live-codex` harness is fail-closed behind
+`CYBERDECK_RUN_LIVE_CODEX_GATE=1`. Automated tests never set it and make no provider call.
 
 ## Cockpit and dashboard
 
@@ -182,19 +216,16 @@ bypass, or a real provider executable resolution.
 
 These are limitations, not pending features, and none is a verified claim about future behavior.
 
-- **No live provider evidence exists for any adapter.** Command construction and parsing are
-  fixture-proven; nothing proves a provider accepts what Cyberdeck builds. A Claude result would not
-  prove Cursor or Antigravity behavior, and starting a process would not prove conversation
-  continuation.
-- **The omitted-Claude-model gap is open.** The delegated-Fable guard rejects only an explicitly
-  supplied `fable` model. An omitted model still passes, and the recorded baseline observed the
-  native default displaying Fable. Every real Claude start must name an explicit ordinary non-Fable
-  model. Broker policy does not close this.
-- **`control.reconciliation` has a contract/type mismatch.** The broker answers
-  `{ reconciledAt: null, … }` when composed without a control-plane runtime, but the A-owned
-  `ReconciliationReport` types `reconciledAt` as `string`. B5 widened the field in the presentation
-  layer (`ReconciliationView`) rather than edit an A-owned contract. **The final integration gate
-  should decide where this is fixed.**
+- **Live provider evidence exists only for the Codex App Server adapter.** Claude, Cursor, and
+  Antigravity remain fixture/help/metadata-proven only; the Codex result does not prove their runtime
+  behavior or any conversation-continuation capability.
+- **Omitted Claude remains intentionally unsupported, and now fails closed at launch.** The neutral
+  stored/delegation policy retains omission, while both current interactive and headless Claude
+  launch boundaries reject it before process construction. The recorded native default displayed
+  Fable, so every real Claude start still must name an explicit ordinary non-Fable model.
+- **`control.reconciliation` has an honest nullable pre-pass state.** The shared
+  `ReconciliationReport` now types `reconciledAt` as `string | null`, matching the broker's
+  `{ reconciledAt: null, … }` response before a control-plane reconciliation pass.
 - **The session contract carries no watcher count.** The cockpit states the one-controller/
   many-watcher invariant but cannot display how many watchers are attached, because no field exists.
   It does not invent one.
@@ -205,8 +236,6 @@ These are limitations, not pending features, and none is a verified claim about 
   excluded from adding CLI routing, so this state is reachable only through `cyberdeck dashboard`.
 - **Antigravity self-updates.** `agy` replaced itself on disk during the B1 read-only capture. No
   `agy` probe can be described as leaving the installation untouched.
-- **`pnpm probe` misreports the Node version.** It resolves `node` with `/usr/bin/which`, so it
-  reported `/opt/homebrew/bin/node` `v26.4.0` while the project actually runs under the mise-pinned
-  `v24.18.0` (`mise exec -- node --version`). This is pre-existing behavior in
-  `scripts/probe-runtimes.ts`, which is not B5-owned; it is reported rather than changed. The
-  provider rows are unaffected — `claude`, `agent`, `agy`, and `codex` are not shadowed this way.
+- **The final-gate probe resolves the pinned Node correctly.** On 2026-07-21,
+  `mise exec -- pnpm probe` reported the mise path and `v24.18.0`; the earlier B5 observation of a
+  Homebrew Node was not reproduced and is superseded by the final-gate capture.

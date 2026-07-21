@@ -15,6 +15,7 @@ import { JobReportSchema, type JobReport, type JobResult } from "../domain/job.j
 import type { ProviderId } from "../domain/provider-registration.js";
 import type { UsageReport } from "../domain/usage.js";
 import type { LeaseGrant, WorktreeLeaseManager } from "../control-plane/worktree-lease-manager.js";
+import type { ArtifactStore } from "../persistence/artifact-store.js";
 import {
   AppServerJsonDecoder,
   AppServerProtocolError,
@@ -60,6 +61,8 @@ export interface AppServerJobDispatchAdapterOptions {
   maxOutputBytes?: number;
   compatibleCodexMinor?: string;
   leaseManager?: WorktreeLeaseManager;
+  /** Persist the validated terminal agent message as a job artifact when the runtime supplies one. */
+  artifactStore?: ArtifactStore;
   leaseTtlMs?: number;
 }
 
@@ -496,12 +499,33 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
     }
     entry.pending.clear();
     await this.cleanup(entry);
+    let terminalResult = result;
+    if (
+      result.outcome === "completed" &&
+      result.summary !== undefined &&
+      this.options.artifactStore !== undefined
+    ) {
+      try {
+        const stored = await this.options.artifactStore.write({
+          name: "codex-result.txt",
+          logicalKind: "provider-result",
+          mediaType: "text/plain",
+          content: result.summary,
+          producedByJobId: entry.request.jobId,
+        });
+        terminalResult = { ...result, artifacts: [stored.descriptor] };
+      } catch (error) {
+        terminalResult = failed(
+          `Codex result artifact persistence failed: ${error instanceof Error ? error.message : "unknown error"}; correlationId=${entry.request.correlationId}`,
+        );
+      }
+    }
     const report = JobReportSchema.parse({
       schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
       jobId: entry.request.jobId,
       correlationId: entry.request.correlationId,
       reportedAt: this.now(),
-      result,
+      result: terminalResult,
       ...(entry.usage !== undefined ? { usage: entry.usage } : {}),
     });
     for (const listener of [...this.listeners]) listener(report);

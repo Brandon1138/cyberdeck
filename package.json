@@ -14,6 +14,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "probe": "tsx scripts/probe-runtimes.ts",
+    "gate:live-codex": "tsx scripts/run-live-codex-gate.ts",
     "dev": "tsx src/cli.ts",
     "postinstall": "node -e \"const fs=require('node:fs'),path=require('node:path');if(process.platform==='darwin'){const helper=path.join(path.dirname(require.resolve('node-pty/package.json')),'prebuilds',process.platform+'-'+process.arch,'spawn-helper');if(fs.existsSync(helper))fs.chmodSync(helper,0o755)}\""
   },

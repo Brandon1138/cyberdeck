@@ -112,9 +112,9 @@ const CLAUDE_ROWS: readonly ProviderCapabilityRow[] = [
   {
     provider: "claude",
     capability: "omitted-model-safety",
-    evidence: "unsupported",
+    evidence: "fixture-proven",
     reason:
-      "the launch guard rejects only an explicitly supplied unsafe model, so an omitted model is not made safe and every real start must name an explicit ordinary model",
+      "both interactive and headless live-launch boundaries reject omission before process construction; an explicit operator-verified ordinary model is still required",
   },
   {
     provider: "claude",

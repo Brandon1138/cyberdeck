@@ -26,10 +26,15 @@ export interface ControlPlaneRuntimeOptions {
   journal?: JournalLike;
   /**
    * Dispatch adapters to compose. Each one's provider id is registered as it is wired in. A factory
-   * receives the runtime's own lease manager so an adapter that takes writable leases shares the
-   * single durable lease service rather than constructing a second one.
+   * receives the runtime's own lease manager and artifact store so adapters share the single
+   * durable services rather than constructing competing instances.
    */
-  adapters?: JobDispatchAdapter[] | ((context: { leases: WorktreeLeaseManager }) => JobDispatchAdapter[]);
+  adapters?:
+    | JobDispatchAdapter[]
+    | ((context: {
+        leases: WorktreeLeaseManager;
+        artifacts: ArtifactStore;
+      }) => JobDispatchAdapter[]);
   /** Extra provider descriptors (display names) for adapters that want a friendlier label. */
   providers?: ProviderDescriptor[];
   runtimes?: RuntimeInspector[];
@@ -95,7 +100,7 @@ export class ControlPlaneRuntime {
     });
     const adapters =
       typeof options.adapters === "function"
-        ? options.adapters({ leases: this.leases })
+        ? options.adapters({ leases: this.leases, artifacts: this.artifacts })
         : (options.adapters ?? []);
     for (const adapter of adapters) {
       // Registration is what makes an explicitly requested provider selectable. It grants no rank.

@@ -545,16 +545,16 @@ CLI option.
   change, no dangerous bypass. All conversational checks are recorded
   `NOT RUN — explicit paid-runtime authorization absent`.
 
-**Reported to the final gate, not fixed by B5:** `control.reconciliation` answers
-`{ reconciledAt: null, … }` when the broker is composed without a control-plane runtime, but the
-A-owned `ReconciliationReport` types `reconciledAt` as `string`. B5 widened the field in the
-presentation layer (`ReconciliationView`) rather than edit an A-owned contract; the gate should
-decide where this belongs. Also unchanged: `src/domain/session.ts` still closes `ProviderIdSchema` to
+**Resolved by the final integration repair:** `ReconciliationReport.reconciledAt` is now honestly
+`string | null`; the Codex App Server adapter persists its validated terminal text through the
+runtime's existing artifact store and fails closed if persistence fails; and the decoder accepts
+Codex `0.144.6` response frames that omit `jsonrpc` while rejecting explicitly incompatible
+versions. Still unchanged: `src/domain/session.ts` closes `ProviderIdSchema` to
 `codex | claude`, so sessions cannot name `cursor`/`antigravity` even though jobs can; the session
 contract carries no watcher count; and no CLI surface exists for jobs/budgets/queue/reconciliation.
 
 Full acceptance matrix and limitations: [docs/setup/integrated-acceptance.md](../../setup/integrated-acceptance.md).
-**Codex Gate 2 has not run and is not claimed.**
+**Codex Gate 2 is recorded below.**
 
 ### Codex Gate 2 — after final A5 + B5 integration, before Phase 2/3 is declared complete
 
@@ -562,19 +562,42 @@ Full acceptance matrix and limitations: [docs/setup/integrated-acceptance.md](..
 
 **Pass conditions (all required):**
 
-- [ ] Full job lifecycle on live Codex: submit → dispatch → run → settle → `JobReport` → artifacts
+- [x] Full job lifecycle on live Codex: submit → dispatch → run → settle → `JobReport` → artifacts
   persisted and resolvable.
-- [ ] Recovery: after a deliberate broker restart, durable **job** records and terminal results are
+- [x] Recovery: after a deliberate broker restart, durable **job** records and terminal results are
   reconstructed; live PTYs are correctly **not** recovered (Phase 1 boundary preserved).
-- [ ] A repository/worktree **lease** is acquired and released; a conflicting acquire is refused
+- [x] A repository/worktree **lease** is acquired and released; a conflicting acquire is refused
   (`LEASE_CONFLICT`).
-- [ ] Concurrency and budget limits are honored (`BUDGET_EXCEEDED` on exhaustion); reconciliation
+- [x] Concurrency and budget limits are honored (`BUDGET_EXCEEDED` on exhaustion); reconciliation
   cleans orphaned jobs/leases after a simulated crash.
-- [ ] Neutrality preserved throughout: explicit provider, opaque model/role, no ranking/routing/
+- [x] Neutrality preserved throughout: explicit provider, opaque model/role, no ranking/routing/
   fallback/role-catalog observed.
-- [ ] An **omitted-model Claude** start is still refused before any process spawns; no Fable process
+- [x] An **omitted-model Claude** start is still refused before any process spawns; no Fable process
   is ever launched.
-- [ ] Starting state proven before, teardown verified after.
+- [x] Starting state proven before, teardown verified after.
+
+**Gate 2 evidence — PASS (2026-07-21, human-launched top-level Codex).** Integrated baseline B5
+commit `5925cfe7e0fdc29298d9734b85143c180b638f1c` is a clean descendant of A5 integration record
+`30969c672e70f3c1e766c3e125124912d39afb45`. The gate added only narrow cross-track integration
+repairs and a fail-closed live harness.
+
+The operator explicitly authorized one paid, authenticated, read-only Codex App Server turn. Live
+job `04e3c57e-87c7-48f7-84ec-aabb5588589b` returned exactly `CYBERDECK_GATE_OK`, settled once, stored
+and resolved a 17-byte artifact, delivered its delegated report-back, survived deliberate runtime
+restart as terminal durable state, and recovered no provider process. A third tree job was refused
+`BUDGET_EXCEEDED`; conflicting writable acquisition was refused `LEASE_CONFLICT`; omitted-model
+Claude was refused `CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL` before adapter invocation. No
+Fable process, provider fallback, auth/config mutation, destructive recovery, or duplicate dispatch
+occurred.
+
+The installed Codex `0.144.6` handshake exposed one fixture drift: responses/notifications omit the
+`jsonrpc` member. The first attempt stopped at initialize before `thread/start` and spent no model
+turn. The decoder was repaired to accept omission but reject an explicitly incompatible version;
+the one authorized model turn then passed. Result persistence and nullable pre-reconciliation state
+were also repaired at their existing seams. Full automated verification passed **49 files / 388
+tests**, then check/build/probes and `git diff --check` passed. Final inspection found no Cyberdeck
+broker, Codex App Server child, socket, dashboard, or gate temp directory; the pre-existing attached
+tmux session `main` was preserved.
 
 ---
 

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { BrokerRuntimeConfigSchema } from "../config.js";
 import { ControlPlaneRuntime } from "../control-plane/runtime.js";
 import type { WorktreeLeaseManager } from "../control-plane/worktree-lease-manager.js";
+import type { ArtifactStore } from "../persistence/artifact-store.js";
 import { AppServerJobDispatchAdapter } from "../app-server/dispatch-adapter.js";
 import type { JobDispatchAdapter } from "../domain/dispatch.js";
 import type { BrokerEvent } from "../domain/events.js";
@@ -35,9 +36,13 @@ function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<st
  */
 export function composeJobDispatchAdapters(context: {
   leases: WorktreeLeaseManager;
+  artifacts: ArtifactStore;
 }): JobDispatchAdapter[] {
   return [
-    new AppServerJobDispatchAdapter({ leaseManager: context.leases }),
+    new AppServerJobDispatchAdapter({
+      leaseManager: context.leases,
+      artifactStore: context.artifacts,
+    }),
     new ClaudeJobDispatchAdapter(),
     new CursorJobDispatchAdapter(),
     new AntigravityJobDispatchAdapter(),

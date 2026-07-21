@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { DispatchRequest } from "../../src/domain/dispatch.js";
 import type { JobReport } from "../../src/domain/job.js";
@@ -8,6 +11,7 @@ import {
   type AppServerSpawn,
 } from "../../src/app-server/dispatch-adapter.js";
 import { AppServerJsonDecoder } from "../../src/app-server/protocol.js";
+import { ArtifactStore } from "../../src/persistence/artifact-store.js";
 
 const NOW = "2026-07-21T12:00:00.000Z";
 
@@ -116,8 +120,9 @@ describe("AppServerJsonDecoder", () => {
     expect(decoder.push(Buffer.from('{"jsonrpc":"2.0"'))).toEqual([]);
     expect(decoder.push(Buffer.from(',"id":1}\n'))).toEqual([{ jsonrpc: "2.0", id: 1 }]);
     expect(() => decoder.push(Buffer.from("not-json\n"))).toThrow(/malformed/i);
-    expect(() => new AppServerJsonDecoder().push(Buffer.from('{"id":1}\n'))).toThrow(
-      /JSON-RPC 2\.0/i,
+    expect(new AppServerJsonDecoder().push(Buffer.from('{"id":1}\n'))).toEqual([{ id: 1 }]);
+    expect(() => new AppServerJsonDecoder().push(Buffer.from('{"jsonrpc":"1.0","id":1}\n'))).toThrow(
+      /incompatible JSON-RPC/i,
     );
     expect(() => new AppServerJsonDecoder({ maxFrameBytes: 4 }).push(Buffer.from("12345"))).toThrow(
       /bounded/i,
@@ -195,6 +200,83 @@ describe("AppServerJobDispatchAdapter", () => {
     expect(progress).toHaveLength(2);
     expect(process.stdinEnded).toBe(true);
     expect(process.kills).toContain("SIGTERM");
+  });
+
+  it("persists the validated terminal message as a resolvable job artifact", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "cyberdeck-app-server-artifact-"));
+    try {
+      const process = new FakeProcess();
+      const artifacts = new ArtifactStore(stateDirectory, { now: () => NOW });
+      const adapter = new AppServerJobDispatchAdapter({
+        spawn: () => process,
+        now: () => NOW,
+        artifactStore: artifacts,
+      });
+      const report = nextReport(adapter);
+      const input = await begin(adapter, process);
+      process.stdout({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          item: { id: "item-1", type: "agentMessage", text: "fixture result" },
+        },
+      });
+      process.stdout({
+        jsonrpc: "2.0",
+        method: "turn/completed",
+        params: { turn: { id: "turn-1", status: "completed" } },
+      });
+
+      const settled = await report;
+      if (settled.result.outcome !== "completed") throw new Error("expected completion");
+      const descriptor = settled.result.artifacts[0];
+      expect(descriptor).toMatchObject({
+        name: "codex-result.txt",
+        mediaType: "text/plain",
+        producedByJobId: input.jobId,
+      });
+      expect((await artifacts.resolve(descriptor!)).toString("utf8")).toBe("fixture result");
+    } finally {
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a terminal failure when validated result persistence fails", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "cyberdeck-app-server-artifact-failure-"));
+    try {
+      const process = new FakeProcess();
+      const adapter = new AppServerJobDispatchAdapter({
+        spawn: () => process,
+        now: () => NOW,
+        artifactStore: new ArtifactStore(stateDirectory, { maxArtifactBytes: 2 }),
+      });
+      const report = nextReport(adapter);
+      await begin(adapter, process);
+      process.stdout({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: { item: { type: "agentMessage", text: "too large" } },
+      });
+      process.stdout({
+        jsonrpc: "2.0",
+        method: "turn/completed",
+        params: { turn: { id: "turn-1", status: "completed" } },
+      });
+
+      expect(await report).toMatchObject({
+        result: {
+          outcome: "failed",
+          error: {
+            code: "DISPATCH_REJECTED",
+            message: expect.stringMatching(/artifact persistence failed/i),
+          },
+          artifacts: [],
+        },
+      });
+      expect(adapter.activeJobCount).toBe(0);
+    } finally {
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
   });
 
   it("fails closed on a server-version mismatch before submitting a thread", async () => {

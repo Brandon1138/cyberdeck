@@ -136,9 +136,9 @@ cyberdeck start --provider claude --cwd /absolute/project/path --sandbox read-on
 cyberdeck start --provider codex  --cwd /absolute/project/path --sandbox read-only --model MODEL_NAME
 ```
 
-> **Omitting `--model` is not safe for Claude.** The delegated-Fable guard rejects only an *explicitly supplied* `fable` model; an omitted model still passes, and the recorded baseline observed Claude's native default displaying Fable. Name an explicit ordinary model on every real Claude start.
+> **Omitting `--model` is not safe for Claude.** The neutral stored/delegation policy retains an omitted model, but both current interactive and headless Claude launch boundaries reject it before process construction because the recorded native default displayed Fable. Name an explicit ordinary model on every real Claude start.
 
-Capability claims are graded and never merged: `metadata-observed`, `fixture-proven`, `help-advertised`, `operationally observed`, `unsupported`, `not run` — and `live-proven`, which currently has **no entries at all**. Metadata observations are date- and version-sensitive because these runtimes update themselves. See [docs/setup/integrated-acceptance.md](docs/setup/integrated-acceptance.md) for the full matrix and current limitations.
+Capability claims are graded and never merged: `metadata-observed`, `fixture-proven`, `help-advertised`, `operationally observed`, `unsupported`, `not run`, and `live-proven`. The B-track presentation register has no `live-proven` entries; final Gate 2 separately records one authorized live Codex App Server turn. Metadata observations are date- and version-sensitive because these runtimes update themselves. See [docs/setup/integrated-acceptance.md](docs/setup/integrated-acceptance.md) for the full matrix and current limitations.
 
 ## Phase 1 boundary
 
