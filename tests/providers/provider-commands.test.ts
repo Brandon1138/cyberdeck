@@ -44,12 +44,17 @@ describe("CodexProviderAdapter", () => {
   });
 });
 
+// Claude's launch safety, headless path, and stream decoding are covered in depth by
+// tests/providers/claude-adapter.test.ts. This block keeps the side-by-side command-construction
+// comparison with Codex only.
 describe("ClaudeProviderAdapter", () => {
   it.each([
     ["read-only", "plan"],
     ["workspace-write", "manual"],
   ] as const)("maps %s to %s without choosing a model", (sandbox, permissionMode) => {
-    const record = session({ provider: "claude", sandbox, name: "proof" });
+    // A model must be supplied explicitly: unlike Codex, a Claude launch with an omitted model is
+    // refused outright, because the recorded native default displayed Fable.
+    const record = session({ provider: "claude", sandbox, name: "proof", model: "sonnet" });
     const spec = new ClaudeProviderAdapter().buildLaunchSpec(record);
     expect(spec.executable).toBe("claude");
     expect(spec.args).toEqual([
@@ -59,11 +64,13 @@ describe("ClaudeProviderAdapter", () => {
       "proof",
       "--permission-mode",
       permissionMode,
+      "--model",
+      "sonnet",
     ]);
     expect(spec.env.DISABLE_UPDATES).toBe("1");
   });
 
-  it("adds only an explicitly supplied model", () => {
+  it("forwards only the explicitly supplied model", () => {
     const spec = new ClaudeProviderAdapter().buildLaunchSpec(
       session({ provider: "claude", name: "proof", model: "sonnet" }),
     );
