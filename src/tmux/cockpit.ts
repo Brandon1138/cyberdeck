@@ -4,8 +4,8 @@ import { spawnSync as nodeSpawnSync } from "node:child_process";
 export type SpawnSyncLike = (
   command: string,
   args: string[],
-  options?: { stdio?: "ignore" | "inherit" },
-) => { status: number | null };
+  options?: { stdio?: "ignore" | "inherit"; encoding?: "utf8" },
+) => { status: number | null; stdout?: string };
 
 export interface CockpitOptions {
   cliPath: string;
@@ -13,6 +13,26 @@ export interface CockpitOptions {
   spawnSync?: SpawnSyncLike;
 }
 
+/** Options for the presentation-only cockpit helpers that never touch a provider process. */
+export interface CockpitPresentationOptions {
+  spawnSync?: SpawnSyncLike;
+}
+
+export interface CockpitPane {
+  paneId: string;
+  index: number;
+  command: string;
+}
+
+/**
+ * tmux is presentation only.
+ *
+ * The cockpit multiplexes *views* of broker-owned state. It never starts, signals, or terminates a
+ * provider process, and it deliberately emits no `kill-session`, `kill-pane`, `kill-server`,
+ * `respawn-pane`, or `send-keys` verb. A session's lifetime belongs to the broker; closing or
+ * detaching a pane changes only what the operator is looking at. Stopping actual work is
+ * `cyberdeck stop <id>`, which goes through the broker.
+ */
 export function launchCockpit(options: CockpitOptions): void {
   const spawnSync = options.spawnSync ?? (nodeSpawnSync as SpawnSyncLike);
   const nodePath = options.nodePath ?? process.execPath;
@@ -39,6 +59,41 @@ export function launchCockpit(options: CockpitOptions): void {
     spawnSync("tmux", ["attach-session", "-t", "cyberdeck"], { stdio: "inherit" }),
     "attach cyberdeck tmux session",
   );
+}
+
+/**
+ * Detach every client from the cockpit session without ending it.
+ *
+ * `detach-client` is the only verb used, so this is observably a presentation change: the tmux
+ * session, its panes, and every broker-owned runtime keep running. A missing cockpit session is
+ * already the desired end state, so it is not an error.
+ */
+export function detachCockpit(options: CockpitPresentationOptions = {}): void {
+  const spawnSync = options.spawnSync ?? (nodeSpawnSync as SpawnSyncLike);
+  spawnSync("tmux", ["detach-client", "-s", "cyberdeck"], { stdio: "ignore" });
+}
+
+/**
+ * Read-only pane metadata for the cockpit session. Used to verify cockpit layout and cleanup
+ * without inferring anything about provider processes: `pane_current_command` is the command tmux
+ * sees in the pane, which is not evidence about a broker-owned provider runtime.
+ */
+export function inspectCockpitPanes(options: CockpitPresentationOptions = {}): CockpitPane[] {
+  const spawnSync = options.spawnSync ?? (nodeSpawnSync as SpawnSyncLike);
+  const result = spawnSync(
+    "tmux",
+    ["list-panes", "-t", "cyberdeck", "-F", "#{pane_id} #{pane_index} #{pane_current_command}"],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) return [];
+  return (result.stdout ?? "")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .flatMap((line) => {
+      const [paneId, index, ...rest] = line.trim().split(" ");
+      if (paneId === undefined || index === undefined) return [];
+      return [{ paneId, index: Number(index), command: rest.join(" ") }];
+    });
 }
 
 function requireSuccess(result: { status: number | null }, action: string): void {

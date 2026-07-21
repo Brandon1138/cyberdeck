@@ -511,6 +511,51 @@ occurred, and no live-model acceptance was attempted. Final teardown again showe
 socket, or tmux cockpit. Pre-existing Claude Desktop sessions used an explicit Opus model and were
 not Cyberdeck children. A3 and B3 are unblocked from this verified integrated baseline.
 
+#### B5 implementation evidence (2026-07-21, no provider or model call)
+
+Baseline: the human-integrated A5 commit `718767955e2a56c1c314c13d6ac406b39e19370a` with
+`30969c672e70f3c1e766c3e125124912d39afb45` (`docs: record A5 integration`) at `HEAD`. Verified green
+before any change: **47 files / 357 tests**, matching the recorded A5 evidence exactly.
+
+B-owned changes only: `src/client/dashboard.ts`, `src/client/provider-capability-view.ts` (new),
+`src/tmux/cockpit.ts`, three test files, and documentation. **No A-owned file was edited** — no
+domain, protocol, broker, registry, policy, control-plane, or CLI change, and no new RPC method or
+CLI option.
+
+- **Cockpit.** `renderDashboard` became a five-panel read-only render over queries A5 already
+  exposes (`session.list`, `job.list`, `control.queue`, `control.budget`, `control.reconciliation`).
+  Sessions are labelled `interactive`, jobs `headless`. Unknown facts are rendered as unknown:
+  `native-default`, `unassigned`, `unknown` tokens (never `0`), `never reconciled`, and `unavailable`
+  for a panel the broker did not answer — deliberately distinct from empty.
+- **Neutrality.** Tests assert the render carries no ranking, recommendation, default-choice, or
+  fallback language, never renders Fable, and emits no ANSI escapes in the body.
+- **Capability view.** A presentation-only register grades every claim
+  (`metadata-observed` / `fixture-proven` / `help-advertised` / `live-unverified` / `unsupported`).
+  Antigravity rows are *derived* from `ANTIGRAVITY_CAPABILITIES` rather than copied, and a test
+  asserts no row anywhere claims `live-proven`, so that category cannot be granted by editing prose.
+- **tmux presentation-only.** Added `detachCockpit` (`detach-client` only) and `inspectCockpitPanes`
+  (read-only `list-panes -F`). Tests assert no `kill-session`/`kill-pane`/`kill-server`/
+  `respawn-pane`/`send-keys` verb is ever emitted. Operationally verified: killing the entire tmux
+  server left the broker healthy on the same pid with the dashboard still rendering.
+- **Verification.** `mise exec -- pnpm test` — **49 files / 386 tests passed** (+29 from B5);
+  `pnpm check`, `pnpm build`, `pnpm probe`, the `--read-only` capability probe, and `git diff --check`
+  all passed. A real broker was started, queried, and stopped; teardown left no broker process,
+  socket, tmux server, or dashboard process.
+- **Zero paid calls.** No provider or model call, no Fable start or allowance test, no auth/config
+  change, no dangerous bypass. All conversational checks are recorded
+  `NOT RUN — explicit paid-runtime authorization absent`.
+
+**Reported to the final gate, not fixed by B5:** `control.reconciliation` answers
+`{ reconciledAt: null, … }` when the broker is composed without a control-plane runtime, but the
+A-owned `ReconciliationReport` types `reconciledAt` as `string`. B5 widened the field in the
+presentation layer (`ReconciliationView`) rather than edit an A-owned contract; the gate should
+decide where this belongs. Also unchanged: `src/domain/session.ts` still closes `ProviderIdSchema` to
+`codex | claude`, so sessions cannot name `cursor`/`antigravity` even though jobs can; the session
+contract carries no watcher count; and no CLI surface exists for jobs/budgets/queue/reconciliation.
+
+Full acceptance matrix and limitations: [docs/setup/integrated-acceptance.md](../../setup/integrated-acceptance.md).
+**Codex Gate 2 has not run and is not claimed.**
+
 ### Codex Gate 2 — after final A5 + B5 integration, before Phase 2/3 is declared complete
 
 **Purpose:** accept the full control plane end to end on live Codex.

@@ -50,3 +50,39 @@ Consequently, closing a tmux pane or the whole cockpit detaches presentation but
 Durability in Phase 1 means a session survives client detach, terminal closure, and tmux-pane closure while the broker stays alive. Session metadata is journaled, and recent terminal output is available from the broker replay buffer.
 
 The broker is still the process owner. If the broker dies or is deliberately shut down, its active PTYs and provider processes end. Phase 1 does not reconstruct a live PTY after broker failure or restart.
+
+## Cockpit presentation (Phase 2/3, added 2026-07-21)
+
+Everything above describes Phase 1 and is unchanged. This section describes only how the Phase 2/3 cockpit *presents* state; it adds no session semantics.
+
+### Two runtimes, one vocabulary
+
+The cockpit renders sessions and jobs in separate panels because they are different things, and it labels each with a runtime mode:
+
+- A **session** is a live broker-owned PTY that may run indefinitely, so its runtime mode is `interactive`.
+- A **job** is bounded work with a terminal outcome, so its runtime mode is `headless`.
+
+`interactive` and `headless` remain runtime/presentation distinctions, never provider categories. Headless is one-shot per job for every provider: a bounded job is a fresh invocation claiming no conversation continuity.
+
+### What the cockpit refuses to imply
+
+The dashboard is read-only and derives every field from existing contracts. It never ranks providers, badges quality, marks a default, or suggests a model — and it never renders Fable.
+
+Where a fact is unknown it says so instead of substituting a plausible value:
+
+| Situation | Rendered as | Why not the alternative |
+| --- | --- | --- |
+| No explicit model | `native-default` | The native default is not knowable from the record, and on Claude it may be Fable. |
+| No role | `unassigned` | Role is opaque and grants nothing. |
+| Provider reported no tokens | `unknown` | Absence and a genuine zero are different facts. |
+| No reconciliation pass yet | `never reconciled` | An empty finding list would read as a clean pass. |
+| Broker did not answer a query | `unavailable` | "No jobs" and "the job surface is unavailable" are different facts. |
+| Reconciliation findings | operator actions | Reconciliation never deletes, kills, resumes, or retries; it must not appear to have repaired anything. |
+
+The cockpit states the one-controller/many-watcher invariant but does not display a watcher count, because the session contract carries none. It does not invent one.
+
+### tmux ownership, restated operationally
+
+tmux owns nothing. `src/tmux/cockpit.ts` emits no `kill-session`, `kill-pane`, `kill-server`, `respawn-pane`, or `send-keys` verb; detach uses only `detach-client` and pane inspection uses only a read-only `list-panes -F` query.
+
+This was verified operationally on 2026-07-21: killing the entire tmux server left the broker healthy on the same pid with its state intact. Closing a pane is never a way to stop work — `cyberdeck stop <id>` is, and it goes through the broker.

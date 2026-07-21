@@ -90,3 +90,19 @@ An observed capability is something demonstrated by the native runtime or Cyberd
 No Fable call belongs in setup validation or the Phase 1 acceptance pass. A top-level Fable start may be explicitly typed by a human, but delegated Fable must be rejected before any provider process starts.
 
 The installed Claude runtime displayed `Fable 5 with high effort` when launched without a model flag. Acceptance detached immediately and sent no prompt, so it made no Fable call. This conflicts with the plan's assumption that the configured native default would be an ordinary model. The broker did not substitute a model automatically.
+
+## Version drift since this capture
+
+Everything above is the 2026-07-20 capture and is left unchanged. Later read-only probes observed
+these runtimes updating themselves, with no update command issued by Cyberdeck:
+
+| Runtime | 2026-07-20 (this baseline) | 2026-07-21 (B1 capture) | 2026-07-21 (B5 acceptance) |
+| --- | --- | --- | --- |
+| `claude` | 2.1.214 | 2.1.215 | **2.1.216** |
+| `agent` | 2026.07.16-899851b | 2026.07.17-3e2a980 | 2026.07.17-3e2a980 |
+| `agy` | 1.1.4 | 1.1.4 → 1.1.5 mid-capture | 1.1.5 |
+| `codex` | 0.144.6 | — | 0.144.6 |
+
+Any capability recorded as `metadata-observed` is therefore a statement about a specific binary on a
+specific date, not a durable property. Re-probe rather than trusting these indefinitely. See
+[integrated-acceptance.md](integrated-acceptance.md) for the graded evidence categories.

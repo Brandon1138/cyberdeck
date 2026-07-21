@@ -30,6 +30,12 @@ cyberdeck list
 
 The cockpit creates a tmux session with a read-only dashboard and an ordinary shell. Create or close additional panes freely; the broker, not tmux, owns provider sessions.
 
+`cyberdeck dashboard` renders five panels over control-plane queries: **SESSIONS** (interactive runtime — broker-owned PTYs), **JOBS** (headless runtime — bounded work), **ADMISSION**, **BUDGET**, and **RECONCILIATION**. It is read-only and ranks nothing.
+
+Interactive and headless are runtime/presentation distinctions, not provider categories. The dashboard states what it does not know rather than guessing: an omitted model shows `native-default`, an omitted role shows `unassigned`, unreported token usage shows `unknown` (never `0`), a reconciliation pass that never ran shows `never reconciled`, and a panel the broker does not answer shows `unavailable` — which is not the same as empty.
+
+tmux is presentation only. The cockpit issues no `kill-session`, `kill-pane`, `kill-server`, or `send-keys` verb. Killing the entire tmux server leaves the broker and its sessions running.
+
 Shut down deliberately when finished:
 
 ```bash
@@ -104,7 +110,35 @@ mise exec -- pnpm build
 mise exec -- pnpm probe
 ```
 
-`probe` is read-only: it reports installed runtime versions and does not start provider sessions or change authentication.
+`probe` is read-only: it reports installed runtime versions and does not start provider sessions or change authentication. The deeper capability probe refuses to run without `--read-only`:
+
+```bash
+mise exec -- pnpm exec tsx scripts/probe-provider-capabilities.ts --read-only
+```
+
+That is the complete zero-call workflow. No test or probe resolves a real provider executable for a model call, and no automated path may start Fable — including as a "just checking" allowance test.
+
+## Providers, executables, and modes
+
+| Provider id | Executable | Interactive | Headless | Read-only mapping | Workspace-write mapping |
+| --- | --- | --- | --- | --- | --- |
+| `claude` | `claude` | broker-owned PTY | one-shot per job, not durable | `--permission-mode plan` | `--permission-mode manual` |
+| `cursor` | `agent` | broker-owned PTY | one-shot per job, not durable | `--mode plan --sandbox enabled` | unsupported — no `--mode` emitted |
+| `antigravity` | `agy` | broker-owned PTY | one-shot per job, not durable | `--mode plan --sandbox` | **refused** — `ANTIGRAVITY_WORKSPACE_WRITE_UNSUPPORTED` before argv is built |
+| `codex` | `codex` | broker-owned PTY | Phase 1 session only | `-s read-only -a on-request` | `-s workspace-write -a on-request` |
+
+Headless is **one-shot per job for every provider**: each bounded job is a fresh invocation that claims no conversation continuity. No `--resume`, `--continue`, or session-continuation flag is emitted, and no `--fallback-model` or automatic-selection flag exists anywhere.
+
+Explicit-model examples that cannot accidentally invoke Fable — always name the model:
+
+```bash
+cyberdeck start --provider claude --cwd /absolute/project/path --sandbox read-only --model claude-opus-4-8
+cyberdeck start --provider codex  --cwd /absolute/project/path --sandbox read-only --model MODEL_NAME
+```
+
+> **Omitting `--model` is not safe for Claude.** The delegated-Fable guard rejects only an *explicitly supplied* `fable` model; an omitted model still passes, and the recorded baseline observed Claude's native default displaying Fable. Name an explicit ordinary model on every real Claude start.
+
+Capability claims are graded and never merged: `metadata-observed`, `fixture-proven`, `help-advertised`, `operationally observed`, `unsupported`, `not run` — and `live-proven`, which currently has **no entries at all**. Metadata observations are date- and version-sensitive because these runtimes update themselves. See [docs/setup/integrated-acceptance.md](docs/setup/integrated-acceptance.md) for the full matrix and current limitations.
 
 ## Phase 1 boundary
 
