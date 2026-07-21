@@ -176,24 +176,24 @@ git status --short
   adapter; the control plane consumes the unchanged A1 port; full suite/check/build green. A3 has
   not begun.
 
-### A3 — Persistence, recovery, and structured artifacts
+### A3 — Persistence, recovery, and structured artifacts — **DONE (`1448b38`)**
 
 **Prerequisite:** A2 **and** B2 integrated, **and Codex Gate 1 passed.** **Owner:** Agent A.
 
-- [ ] Persist job records and reports to durable storage (extend the journal or add a job store),
+- [x] Persist job records and reports to durable storage (extend the journal or add a job store),
   append-only, validated on write, forward-compatible on read (`schemaVersion` gating,
   `SCHEMA_VERSION_UNSUPPORTED` on unknown).
-- [ ] Implement recovery: on broker restart, reconstruct job records and their terminal state from
+- [x] Implement recovery: on broker restart, reconstruct job records and their terminal state from
   storage. Preserve the Phase 1 boundary — a live PTY is not recovered; a **job's** durable record
   and terminal result are. Make the session-vs-job recovery distinction explicit and tested.
-- [ ] Implement structured artifact persistence behind `ArtifactDescriptor`/`ContentReference`
+- [x] Implement structured artifact persistence behind `ArtifactDescriptor`/`ContentReference`
   (inline/file/external), without changing the descriptor contract. Digest/byteLength populated on
   write.
-- [ ] Tests (fakes only): write→read round-trip; recovery after simulated broker restart; forward-
+- [x] Tests (fakes only): write→read round-trip; recovery after simulated broker restart; forward-
   compat unknown-field tolerance; artifact reference resolution; negative tests for corrupt/older
   records. No model calls.
-- **Stop condition:** recovery reconstructs job state and artifacts deterministically; full
-  suite/check/build green; one commit.
+- **Outcome:** commit `1448b38f2f44bb3825db15b06f5c3cacfdf29b9c` reconstructs jobs and
+  artifacts deterministically; full suite/check/build green; one ownership-isolated commit.
 
 ### A4 — Codex App Server control-plane integration + repository/worktree leases
 
@@ -241,8 +241,9 @@ Agent B is a separate human-launched peer working from its dedicated track workt
   Implement `JobDispatchAdapter` for Claude, wire `evaluateClaudeLaunchSafety` at every real Claude
   spawn boundary, and use B1 fixtures for all automated behavior. Live behavior is proven only at
   Gate 1.
-- **B3 — Cursor dispatch adapter + job presentation.** Parallel-wave prereq: B2 + Gate 1; runs from
-  the same shared baseline as A3. Use canonical id `cursor` and executable evidence `agent`.
+- **B3 — Cursor dispatch adapter + job presentation — DONE (`2304025`).** Parallel-wave prereq: B2
+  + Gate 1; implemented from the integrated A3 result in this inline wave while preserving the B
+  ownership boundary. Uses canonical id `cursor` and executable evidence `agent`.
 - **B4 — Antigravity dispatch adapter.** Parallel-wave prereq: integrated A3+B3; runs alongside A4. Use
   canonical id `antigravity` and executable evidence `agy`.
 - **B5 — Cockpit/dashboard/CLI for jobs, delegation, artifacts, budgets; final presentation.**
@@ -258,6 +259,74 @@ A4 + B4               integrate before A5
 A5                    integrate before B5
 B5                    integrate, then Codex Gate 2
 ```
+
+## A3+B3 integration evidence — PASS (2026-07-21)
+
+The wave starts at verified baseline `994d555e74c8cf477e42e02220c530949978e0b4`. A3 is the
+ownership-isolated commit `1448b38f2f44bb3825db15b06f5c3cacfdf29b9c` (`feat: persist jobs and
+structured artifacts`). B3 starts from that committed result and is the ownership-isolated commit
+`2304025e3ef54fcf38ffd3ab9393c8922902e9d8` (`feat: add cursor runtime adapter`). Review of
+`994d555..2304025` found no ownership crossover: B3 adds only Cursor provider code, its focused
+tests, and Cursor adapter documentation. It consumes A1/A2 domain ports and registration seams and
+does not import or depend on A3 persistence internals.
+
+### Persistence, recovery, and artifact evidence
+
+- `control-plane/jobs.jsonl` is append-only, schema-validated, provenance-tagged, and fsynced on
+  each complete state snapshot. Replay retains ordering, strips unknown fields on schema version 1,
+  rejects unsupported versions and earlier corruption, rejects duplicate persistence event IDs,
+  and tolerates only an unterminated final crash fragment.
+- Restart reconstructs immutable requests, terminal results, usage, lineage, idempotency keys, and
+  report-back state. Stored `queued`, `dispatched`, or `running` work becomes `interrupted` because
+  old runtime ownership is unverifiable. `interrupted` and `settled` records are preserved.
+  Recovery never redispatches, retries, resumes, routes, or delivers report-back; repeated recovery
+  is idempotent and a recovered idempotency key prevents duplicate dispatch.
+- An omitted Claude model stays omitted data on recovery and is never interpreted as safe to
+  relaunch. Live PTYs are not reconstructed.
+- Artifact content is SHA-256-addressed with collision-safe descriptor UUIDs. Metadata records
+  logical name/kind, media type, byte length, digest, creation time, and producing job. Content and
+  metadata use write-temp, file fsync, atomic rename, and directory fsync. Bounded reads validate
+  UUID, version/schema, root containment, exact content path, regular-file type, length, and digest;
+  missing, corrupt, oversized, traversal, and unresolved-external cases are explicit errors.
+
+### Cursor fixture evidence and limits
+
+- The B1 evidence-backed provider id/executable mapping is `cursor -> agent`. A read-only
+  `agent --help` metadata inspection confirmed the current `--workspace`, `--sandbox`, `--mode`,
+  `--print`, `--output-format stream-json`, `--stream-partial-output`, and `--model` surface. It
+  started no session and sent no prompt.
+- Deterministic fixtures prove interactive command construction and bounded/headless mechanics:
+  explicit cwd/workspace, read-only `--sandbox enabled --mode plan`, workspace-write with explicit
+  sandbox and no fabricated read-only mode, positional headless instruction, explicit-model-only
+  forwarding, split/multiple frames, malformed/truncated output, injected terminal interpretation,
+  non-zero exit, process error, cancellation, timeout, cleanup, and duplicate protection.
+- Tests prove the adapter emits none of `--force`, `--yolo`, `--auto-review`, `--approve-mcps`,
+  `--trust`, continuation/resume, worktree, API-key, fallback, or unrequested-model flags. Every
+  adapter test injects the recording fixture or an in-memory process; the installed `agent` cannot
+  be spawned by those tests.
+- Cursor's real `stream-json` field schema, terminal-result fields, plan/ask runtime behavior,
+  workspace-write runtime behavior, provider-native continuation, and live model execution remain
+  **live-unverified**. The default result interpreter fails closed. Phase 1's closed interactive
+  session union still makes broker registration of Cursor interactive sessions unsupported; B3
+  supplies the broker-PTY-ready command builder without editing that A-owned contract.
+
+### Verification and teardown
+
+- A3 focused: `mise exec -- pnpm exec vitest run tests/persistence/job-store.test.ts
+  tests/persistence/artifact-store.test.ts tests/integration/job-recovery.test.ts
+  tests/integration/broker-recovery.test.ts tests/control-plane/job-control-plane.test.ts
+  tests/domain/job.test.ts` — **6 files / 55 tests passed**.
+- B3 focused: `mise exec -- pnpm exec vitest run tests/providers/cursor-adapter.test.ts` — **1 file
+  / 15 tests passed**.
+- Full: `mise exec -- pnpm test` — **35 files / 248 tests passed**; `mise exec -- pnpm check`,
+  `mise exec -- pnpm build`, and `git diff --check` all passed.
+- No real Cursor/Claude/Codex/Antigravity session, provider/model call, paid usage, Fable call,
+  authentication mutation, automatic routing, model selection, or fallback occurred. Final
+  read-only inspection found no Cyberdeck socket, `cyberdeck` tmux session, exact Cursor CLI
+  process, recording fixture process, or Cyberdeck broker process.
+
+The A3+B3 wave is integrated. A4 and B4 are unblocked from the resulting evidence commit; neither
+has begun in this session.
 
 Integrate a track session only after its prerequisite baseline is verified. Never overlap live checks
 across worktrees.
