@@ -109,3 +109,13 @@ mise exec -- pnpm probe
 Phase 1 provides broker-owned Claude and Codex PTYs, explicit starts, one bounded delegation primitive, attach/watch/detach, input steering, replay, explicit stop, and a tmux projection. It does not provide workflows, automatic routing or fallback, provider ranking, model recommendations, semantic memory, worktree orchestration, Cursor, or Antigravity.
 
 See `docs/architecture/session-model.md` for the precise state and ownership model and `docs/setup/phase-1-acceptance.md` for verified live behavior and current limitations.
+
+## Phase 2/3 control plane (planned)
+
+Phase 2/3 adds a neutral control plane for bounded **jobs** — distinct from Phase 1 sessions — with
+structured delegation, persistence and recovery, artifacts, leases, concurrency, and budgets. The
+shared, runtime-validated contracts are defined in `src/domain/` and documented in
+`docs/architecture/control-plane.md`; the sequenced implementation plan is
+`docs/superpowers/plans/2026-07-21-cyberdeck-phase-2-3.md`. No Phase 2/3 execution feature is shipped
+yet, and the neutral policy — explicit provider, opaque model/role, no ranking or routing, no
+automation-launched Fable — is unchanged.

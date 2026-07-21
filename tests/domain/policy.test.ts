@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StartSessionRequest } from "../../src/domain/session.js";
-import { evaluateStart, isFableModel } from "../../src/domain/policy.js";
+import { evaluateClaudeLaunchSafety, evaluateStart, isFableModel } from "../../src/domain/policy.js";
 
 const baseRequest: StartSessionRequest = {
   provider: "claude",
@@ -58,5 +58,38 @@ describe("evaluateStart", () => {
 
   it.each(["scout", "writer", "cheap-task"])("ignores opaque role %s", (role) => {
     expect(evaluateStart({ ...baseRequest, role }, [])).toEqual({ allowed: true });
+  });
+
+  it("keeps model optional for delegated Claude in the neutral stored contract", () => {
+    // The stored start policy stays neutral: an omitted model is not blocked here. Omission is
+    // unsafe only at the live launch boundary, which evaluateClaudeLaunchSafety guards separately.
+    expect(
+      evaluateStart({ ...baseRequest, provider: "claude", parentSessionId: "parent" }, [parent]),
+    ).toEqual({ allowed: true });
+  });
+});
+
+describe("evaluateClaudeLaunchSafety", () => {
+  it("refuses a Claude launch with an omitted model because the native default may be Fable", () => {
+    expect(evaluateClaudeLaunchSafety("claude", undefined)).toEqual({
+      safe: false,
+      code: "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL",
+    });
+  });
+
+  it("refuses a Claude launch with an explicit Fable model", () => {
+    expect(evaluateClaudeLaunchSafety("claude", "claude-fable-5")).toEqual({
+      safe: false,
+      code: "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL",
+    });
+  });
+
+  it("allows a Claude launch with an explicit ordinary model", () => {
+    expect(evaluateClaudeLaunchSafety("claude", "opus")).toEqual({ safe: true });
+  });
+
+  it("does not constrain non-Claude providers", () => {
+    expect(evaluateClaudeLaunchSafety("codex", undefined)).toEqual({ safe: true });
+    expect(evaluateClaudeLaunchSafety("cursor", undefined)).toEqual({ safe: true });
   });
 });
