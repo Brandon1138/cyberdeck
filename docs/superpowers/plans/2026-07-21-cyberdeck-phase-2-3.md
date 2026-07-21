@@ -195,21 +195,24 @@ git status --short
 - **Outcome:** commit `1448b38f2f44bb3825db15b06f5c3cacfdf29b9c` reconstructs jobs and
   artifacts deterministically; full suite/check/build green; one ownership-isolated commit.
 
-### A4 — Codex App Server control-plane integration + repository/worktree leases
+### A4 — Codex App Server control-plane integration + repository/worktree leases — **DONE (`f54318d`)**
 
 **Prerequisite:** the A3+B3 wave integrated. **Owner:** Agent A (control-plane transport + lease service);
 Codex App Server transport client is a documented handoff to Agent B where it touches provider code.
 
-- [ ] Define the control-plane transport for the Codex App Server integration on the A side (request
+- [x] Define the control-plane transport for the Codex App Server integration on the A side (request
   correlation, completion, cancellation) mapped onto the `JobDispatchAdapter` port. Do not implement
   Fable; do not launch any model in tests.
-- [ ] Implement the repository/worktree **lease service** behind `WorktreeLeaseSchema`: acquire,
+- [x] Implement the repository/worktree **lease service** behind `WorktreeLeaseSchema`: acquire,
   release, conflict detection, expiry — **without** mutating real worktrees in tests (inject a fake
   git/worktree port). A held lease blocks a conflicting acquire (`LEASE_CONFLICT`).
-- [ ] Tests (fakes only): dispatch/complete/cancel over the transport with a fake Codex App Server;
+- [x] Tests (fakes only): dispatch/complete/cancel over the transport with a fake Codex App Server;
   lease acquire/release/conflict/expiry; recovery of lease records. No model calls.
 - **Stop condition:** transport + leases pass against fakes; full suite/check/build green; one commit.
   Live Codex App Server acceptance is deferred to Gate 2 under the human operator.
+- **Outcome:** commit `f54318d870e0dab94b5e76babfb2e30e0787ef68` adds the bounded App Server
+  adapter, protocol validation, durable fenced lease manager/store, non-destructive orphan handling,
+  and fixture-only interruption/lease integration coverage.
 
 ### A5 — Integration, concurrency, budgets, reconciliation
 
@@ -244,8 +247,9 @@ Agent B is a separate human-launched peer working from its dedicated track workt
 - **B3 — Cursor dispatch adapter + job presentation — DONE (`2304025`).** Parallel-wave prereq: B2
   + Gate 1; implemented from the integrated A3 result in this inline wave while preserving the B
   ownership boundary. Uses canonical id `cursor` and executable evidence `agent`.
-- **B4 — Antigravity dispatch adapter.** Parallel-wave prereq: integrated A3+B3; runs alongside A4. Use
-  canonical id `antigravity` and executable evidence `agy`.
+- **B4 — Antigravity dispatch adapter — DONE (`4919a31`).** Parallel-wave prereq: integrated A3+B3;
+  implemented the canonical `antigravity` / `agy` interactive command builder and bounded plain-text
+  dispatch adapter without widening A-owned contracts or making a real provider call.
 - **B5 — Cockpit/dashboard/CLI for jobs, delegation, artifacts, budgets; final presentation.**
   Prereq: A5.
 
@@ -327,6 +331,57 @@ does not import or depend on A3 persistence internals.
 
 The A3+B3 wave is integrated. A4 and B4 are unblocked from the resulting evidence commit; neither
 has begun in this session.
+
+## A4+B4 integration evidence — PASS (2026-07-21)
+
+The wave starts at the recorded A3+B3 integration baseline
+`9239a81f840ec85b2784c9aa06bc6a054bd2a3b6`. A4 is
+`f54318d870e0dab94b5e76babfb2e30e0787ef68` (`feat: add app server and worktree leases`), and B4 is
+`4919a31e08ceb7dfe14acbf237c3092f5bfc7c56` (`feat: add antigravity runtime adapter`). Both commits
+are present directly in the canonical `main` ancestry. Review found no cross-wave conflict: A4 owns
+the App Server transport, job interruption mapping, and durable lease service; B4 adds only
+Antigravity provider modules, its focused tests, and adapter documentation. B4 consumes A1's open
+provider/dispatch contracts and does not depend on A4 internals.
+
+### App Server and lease evidence
+
+- The fixture-backed App Server adapter performs validated JSON-RPC initialization, explicit
+  `thread/start` and `turn/start`, correlated completion, `turn/interrupt` cancellation/timeout,
+  bounded diagnostics, duplicate suppression, and exact-once cleanup. It never routes or falls back
+  to another provider, and missing model/usage data remains omitted rather than inferred.
+- Repository/worktree identities are canonicalized, read-only sharing and workspace-write conflicts
+  are enforced, fencing tokens increase monotonically, and acquire/renew/release/expiry changes are
+  persisted before return. Restarted held leases become blocking orphans until explicit matching-token
+  resolution; no Git directory, branch, or worktree is ever deleted automatically.
+- Installed Codex inspection was metadata-only. App Server execution remains fixture-proven and
+  live-unverified until the final human-launched gate.
+
+### Antigravity evidence and limits
+
+- The evidence-backed mapping is `antigravity -> agy`. Read-only commands use documented
+  `--mode plan --sandbox`; workspace-write fails closed because the documented `accept-edits` mode
+  would widen semantics. Explicit models are forwarded once, omitted models stay omitted, and role
+  is never mapped to `--agent`.
+- Headless instructions use the documented `--print` value and empty stdin. Output remains bounded,
+  untrusted plain text because `agy` exposes no structured output contract; the default terminal
+  interpreter therefore fails closed rather than treating exit zero as proof of success.
+- Fixtures prove construction, output bounds, cancellation, timeout, duplicate protection, and
+  cleanup without resolving or spawning installed `agy`. Interactive registration remains blocked by
+  the intentionally closed Phase 1 session-provider union and is left for A5 composition review/B5
+  presentation rather than patched across ownership boundaries.
+
+### Verification and teardown
+
+- Focused A4+B4 verification passed **5 files / 40 tests**.
+- Full verification passed **40 files / 288 tests**; `mise exec -- pnpm check`,
+  `mise exec -- pnpm build`, and `git diff --check` also passed.
+- The initial sandboxed full-test attempt failed only because the managed sandbox denied temporary
+  Unix-socket listeners (`EPERM`); the same suite passed unchanged with socket permission.
+- No real provider/model call, Fable call, authentication mutation, automatic routing, model
+  selection, fallback, or destructive worktree action occurred.
+
+The A4+B4 wave is integrated. A5 is unblocked from this recorded baseline; B5 remains blocked until
+A5 is completed and human-integrated, preserving the required sequential order.
 
 Integrate a track session only after its prerequisite baseline is verified. Never overlap live checks
 across worktrees.
