@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BrokerServer } from "../../src/broker/server.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
 import { RpcClient } from "../../src/client/rpc-client.js";
-import { PhaseOneConfigSchema } from "../../src/config.js";
+import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import type { ProviderAdapter } from "../../src/providers/provider.js";
 import { PtyProcess } from "../../src/runtime/pty-process.js";
@@ -52,7 +52,7 @@ describe("complete session lifecycle", () => {
         adapters: { codex: fakeAdapter("codex"), claude: fakeAdapter("claude") },
         ptyFactory,
         journal: { append: async () => {} },
-        config: PhaseOneConfigSchema.parse({ maxConcurrentSessions: 8 }),
+        config: BrokerRuntimeConfigSchema.parse({ maxConcurrentSessions: 8 }),
       });
       const server = new BrokerServer({ socketPath, registry });
       await server.listen();

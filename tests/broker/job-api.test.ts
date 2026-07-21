@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { connect, type Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import { BrokerServer } from "../../src/broker/server.js";
+import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { SessionRegistry } from "../../src/broker/session-registry.js";
 import { JobControlPlane } from "../../src/control-plane/job-control-plane.js";
 import { defaultProviderRegistry } from "../../src/control-plane/provider-registry.js";
+import { ControlPlaneRuntime } from "../../src/control-plane/runtime.js";
 import type { JobDispatchAdapter } from "../../src/domain/dispatch.js";
 import type { JobRecord } from "../../src/domain/job.js";
 import { ServerFrameSchema, type ServerFrame } from "../../src/protocol/frames.js";
@@ -87,6 +89,28 @@ async function harness() {
   return { server, socketPath };
 }
 
+/** The full composed runtime (admission, budgets, leases, reconciliation) behind the socket. */
+async function composedHarness() {
+  const directory = await mkdtemp(join(tmpdir(), "cyberdeck-job-api-"));
+  const socketPath = join(directory, "broker.sock");
+  const runtime = new ControlPlaneRuntime({
+    stateDirectory: directory,
+    config: BrokerRuntimeConfigSchema.parse({}),
+    adapters: [acceptingAdapter("codex")],
+    now: () => NOW,
+  });
+  await runtime.start();
+  const registry = { releaseClient: async () => {} } as unknown as SessionRegistry;
+  const server = new BrokerServer({
+    socketPath,
+    registry,
+    controlPlane: runtime.controlPlane,
+    controlPlaneRuntime: runtime,
+  });
+  await server.listen();
+  return { server, socketPath, runtime };
+}
+
 interface Snapshot {
   record: JobRecord;
   reportBack?: { state: string };
@@ -151,6 +175,43 @@ describe("broker job control-plane API", () => {
       await expect(client.request("job.cancel", { jobId: randomUUID() })).rejects.toMatchObject({
         code: "JOB_NOT_FOUND",
       });
+    } finally {
+      client.socket.destroy();
+      await server.close();
+    }
+  });
+
+  it("answers queue, budget, report-back, and reconciliation queries over the socket", async () => {
+    const { server, socketPath, runtime } = await composedHarness();
+    const client = await TestClient.open(socketPath);
+    try {
+      const submitted = await client.request<{ job: JobRecord }>("job.submit", {
+        request: baseRequest,
+        idempotencyKey: "k-observability",
+      });
+
+      const queue = await client.request<{
+        admissionOpen: boolean;
+        reservations: Array<{ jobId: string }>;
+        queued: unknown[];
+      }>("control.queue", {});
+      expect(queue.admissionOpen).toBe(true);
+      expect(queue.reservations.map((entry) => entry.jobId)).toEqual([submitted.job.id]);
+
+      const budget = await client.request<{ scopes: Array<{ scopeId: string }> }>(
+        "control.budget",
+        {},
+      );
+      expect(budget.scopes.map((scope) => scope.scopeId)).toEqual([submitted.job.id]);
+
+      const reconciliation = await client.request<{ findings: unknown[] }>(
+        "control.reconciliation",
+        {},
+      );
+      expect(reconciliation.findings).toEqual([]);
+
+      expect(await client.request("job.reportBacks", {})).toEqual([]);
+      await runtime.shutdown("test");
     } finally {
       client.socket.destroy();
       await server.close();

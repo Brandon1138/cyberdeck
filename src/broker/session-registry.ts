@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { PhaseOneConfig } from "../config.js";
+import type { BrokerRuntimeConfig } from "../config.js";
 import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
 import { evaluateStart, type SessionAncestryEntry, type StartPolicyCode } from "../domain/policy.js";
 import {
@@ -44,7 +44,7 @@ export interface SessionRegistryOptions {
   adapters: Record<"codex" | "claude", ProviderAdapter>;
   ptyFactory: PtyFactory;
   journal: JournalLike;
-  config: PhaseOneConfig;
+  config: BrokerRuntimeConfig;
 }
 
 export class RegistryError extends Error {

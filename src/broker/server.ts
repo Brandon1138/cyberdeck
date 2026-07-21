@@ -9,6 +9,7 @@ import {
   IngestReportParamsSchema,
   type JobControlPlane,
 } from "../control-plane/job-control-plane.js";
+import type { ControlPlaneRuntime } from "../control-plane/runtime.js";
 import { StartSessionRequestSchema } from "../domain/session.js";
 import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type RequestFrame } from "../protocol/frames.js";
 import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
@@ -28,6 +29,8 @@ export interface BrokerServerOptions {
   socketPath: string;
   registry: SessionRegistry;
   controlPlane?: JobControlPlane;
+  /** Supplies the reconciliation view; queue/budget queries work from the control plane alone. */
+  controlPlaneRuntime?: Pick<ControlPlaneRuntime, "lastReconciliation">;
   onShutdown?: () => void;
 }
 
@@ -210,6 +213,22 @@ export class BrokerServer {
         const { jobId } = AcknowledgeReportParamsSchema.parse(frame.params);
         return this.requireControlPlane().acknowledgeReport(jobId);
       }
+      // Neutral, non-presentational control-plane queries. They return structured state only;
+      // rendering, copy, and dashboards belong to the client/presentation layer.
+      case "control.queue":
+        return this.requireControlPlane().queueSnapshot();
+      case "control.budget":
+        return this.requireControlPlane().budgetReport();
+      case "control.reconciliation":
+        return (
+          this.options.controlPlaneRuntime?.lastReconciliation() ?? {
+            reconciledAt: null,
+            findings: [],
+            quarantinedJobIds: [],
+          }
+        );
+      case "job.reportBacks":
+        return this.requireControlPlane().listReportBacks();
       case "broker.status":
         return { healthy: true, pid: process.pid };
       case "broker.shutdown":

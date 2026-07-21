@@ -30,4 +30,36 @@ describe("concurrency and budget declarations", () => {
     });
     expect(usage.jobsStarted).toBe(3);
   });
+
+  it("declares an optional per-repository concurrency limit", () => {
+    const decl = ConcurrencyDeclarationSchema.parse({ maxConcurrentPerRepository: 1 });
+    expect(decl.maxConcurrentPerRepository).toBe(1);
+    expect(() => ConcurrencyDeclarationSchema.parse({ maxConcurrentPerRepository: 0 })).toThrow();
+  });
+
+  it("declares only measurable ceilings", () => {
+    const decl = BudgetDeclarationSchema.parse({
+      maxJobs: 10,
+      maxWallClockMs: 60_000,
+      maxTotalTokens: 100_000,
+      maxArtifactBytes: 1_024,
+    });
+    expect(decl.maxTotalTokens).toBe(100_000);
+    expect(decl.maxArtifactBytes).toBe(1_024);
+    expect(() => BudgetDeclarationSchema.parse({ maxTotalTokens: -1 })).toThrow();
+  });
+
+  it("keeps unreported token usage unknown rather than zero", () => {
+    const usage = BudgetUsageSchema.parse({
+      jobsStarted: 1,
+      jobsSettled: 1,
+      wallClockMs: 10,
+      artifactBytes: 0,
+      jobsWithUnknownUsage: 1,
+      updatedAt: "2026-07-21T00:00:00.000Z",
+    });
+    expect(usage.totalTokens).toBeUndefined();
+    expect(usage.jobsWithUnknownUsage).toBe(1);
+    expect(usage.artifactBytes).toBe(0);
+  });
 });

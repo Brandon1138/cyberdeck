@@ -214,22 +214,66 @@ Codex App Server transport client is a documented handoff to Agent B where it to
   adapter, protocol validation, durable fenced lease manager/store, non-destructive orphan handling,
   and fixture-only interruption/lease integration coverage.
 
-### A5 — Integration, concurrency, budgets, reconciliation
+### A5 — Integration, concurrency, budgets, reconciliation — **DONE (`feat: reconcile jobs and enforce budgets`)**
 
 **Prerequisite:** A4 **and** B4 integrated. **Owner:** Agent A.
 
-- [ ] Rename `PhaseOneConfig` → a neutral config (e.g. `BrokerRuntimeConfig`/`ControlPlaneConfig`) as
+- [x] Rename `PhaseOneConfig` → a neutral config (e.g. `BrokerRuntimeConfig`/`ControlPlaneConfig`) as
   the scoped cleanup, updating A-owned broker code; coordinate the single B-facing integration-test
   update as a documented handoff.
-- [ ] Implement concurrency admission and budget accounting behind `ConcurrencyDeclaration`,
+- [x] Implement concurrency admission and budget accounting behind `ConcurrencyDeclaration`,
   `BudgetDeclaration`, and `BudgetUsage` — enforcement only now, no ranking. Over-limit submissions
   are refused (`BUDGET_EXCEEDED`) or queued deterministically.
-- [ ] Implement reconciliation: on restart, reconcile persisted job/lease/budget state with live
+- [x] Implement reconciliation: on restart, reconcile persisted job/lease/budget state with live
   runtime (orphaned jobs marked settled/failed with a reason; released leases; usage recomputed).
-- [ ] Tests (fakes only): concurrency ceilings; budget exhaustion; reconciliation of orphaned
+- [x] Tests (fakes only): concurrency ceilings; budget exhaustion; reconciliation of orphaned
   jobs/leases after simulated crash; end-to-end control-plane flow with fake adapters. No model calls.
-- **Stop condition:** concurrency, budgets, and reconciliation pass; full suite/check/build green;
-  one commit. Then **Codex Gate 2**.
+- **Outcome:** admission, budgets, reconciliation, startup/shutdown ordering, and the neutral backend
+  composition are implemented and fixture-proven; full suite/check/build green; one commit. **Codex
+  Gate 2 has not run and is not claimed.**
+
+#### A5 implementation evidence (2026-07-21, automated fakes only)
+
+Baseline: the recorded A4+B4 integration commit `dbd56a404f9df4c055179af8c18f57ac8eec217c`, with A4
+`f54318d870e0dab94b5e76babfb2e30e0787ef68` and B4 `4919a31e08ceb7dfe14acbf237c3092f5bfc7c56` in
+ancestry and B5 not begun. Verified green before any change: **40 files / 288 tests**.
+
+New A-owned modules: `src/control-plane/admission-scheduler.ts`, `budget-ledger.ts`, `reconciler.ts`,
+`runtime.ts`; additive contract fields in `src/domain/budget.ts`; `src/config.ts` renamed to
+`BrokerRuntimeConfig`; `ArtifactStore.listIds()` for read-only reconciliation; broker composition and
+`control.*` / `job.reportBacks` queries. No B-owned adapter implementation was edited.
+
+- **Scheduling.** Total deterministic order (`enqueuedAt`, then `jobId`); a job is passed over only
+  when its own provider/repository bucket is saturated, so within-bucket order is strictly FIFO and
+  no job starves. Exactly one slot is reserved before dispatch and released exactly once on
+  settlement, failed launch, adapter-reported interruption, quarantine, and cancellation.
+- **Neutrality.** Capacity affects only *when* a job runs. No provider/model substitution, ranking,
+  routing, or fallback exists at any admission path; an unregistered provider is refused outright.
+- **Budgets.** Scope = job tree root; children debit their root exactly once. Units are limited to
+  admitted jobs, elapsed wall clock, reported tokens, and persisted artifact bytes — no model, role,
+  or currency cost model. Admission enforces counts/elapsed/recorded totals before any launch;
+  tokens and bytes are debited post-run. Unreported usage stays **unknown**, never zero, and a
+  declared token ceiling then fails closed (`UNPROVABLE_TOKEN_USAGE`).
+- **Claude safety.** `evaluateClaudeLaunchSafety` is re-checked at the admission boundary, so free
+  capacity can never start a live Claude job with an omitted or Fable model. This is defence in
+  depth; A5 makes **no** claim that the native-default-Claude gap is closed.
+- **Reconciliation.** Quarantines unverifiable in-flight work (idempotently, never as a terminal
+  outcome), fences only provably expired leases under the A4 rules, and reports orphaned runtimes,
+  leases, artifacts, and pending report-backs as findings with `destructive: false` and explicit
+  operator actions. A second pass changes nothing and returns identical findings.
+- **Ordering.** Admission starts closed: startup runs persistence → recovery → reconciliation →
+  open admission, and never resumes work it found persisted. Shutdown closes admission first, then
+  drains/cancels and persists final state; it is idempotent.
+- **Verification.** `mise exec -- pnpm test` — **47 files / 357 tests passed**;
+  `mise exec -- pnpm check`, `mise exec -- pnpm build`, and `git diff --check` all passed. Every new
+  test uses fakes plus real temporary Git repositories; no provider executable was resolved or
+  spawned, no model/Fable call occurred, and no paid usage was spent.
+
+Remaining for B5 (not done here, not claimed): job/delegation/artifact/budget presentation, command
+copy, dashboard and cockpit rendering, and any provider-facing CLI UX over the `control.*` and
+`job.*` queries. **Documented B-facing handoff:** the `PhaseOneConfigSchema` → `BrokerRuntimeConfigSchema`
+rename touched `tests/integration/session-lifecycle.test.ts` as a single mechanical import/name
+change with no behavioral edit. Codex Gate 2 remains outstanding.
 
 ---
 
@@ -251,7 +295,12 @@ Agent B is a separate human-launched peer working from its dedicated track workt
   implemented the canonical `antigravity` / `agy` interactive command builder and bounded plain-text
   dispatch adapter without widening A-owned contracts or making a real provider call.
 - **B5 — Cockpit/dashboard/CLI for jobs, delegation, artifacts, budgets; final presentation.**
-  Prereq: A5.
+  Prereq: A5 (now met once A5 is human-integrated). A5 leaves the backend reachable and neutral:
+  adapters for `codex`, `claude`, `cursor`, and `antigravity` are composed and registered, and the
+  broker answers `job.submit`/`job.delegate`/`job.get`/`job.list`/`job.cancel`/`job.report`/
+  `job.acknowledgeReport`/`job.reportBacks` plus `control.queue`, `control.budget`, and
+  `control.reconciliation` with structured state only. B5 owns all rendering and command copy over
+  those queries; A5 added no CLI commands for them.
 
 ## Ordered integration prerequisites (both tracks)
 
@@ -382,6 +431,13 @@ provider/dispatch contracts and does not depend on A4 internals.
 
 The A4+B4 wave is integrated. A5 is unblocked from this recorded baseline; B5 remains blocked until
 A5 is completed and human-integrated, preserving the required sequential order.
+
+## A5 status (2026-07-21)
+
+A5 is implemented as one ownership-isolated commit on top of `dbd56a4` and is **awaiting human
+integration**. Its implementation evidence is recorded in the A5 section above; it is automated
+fake-runtime evidence only, with no live provider evidence. B5 stays blocked until the operator
+integrates A5 into the checkout supplied to B5. Codex Gate 2 has not run.
 
 Integrate a track session only after its prerequisite baseline is verified. Never overlap live checks
 across worktrees.

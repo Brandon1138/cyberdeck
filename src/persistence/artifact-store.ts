@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, stat } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { z } from "zod";
 import {
@@ -240,6 +240,21 @@ export class ArtifactStore {
       throw new ArtifactStoreError("ARTIFACT_CORRUPT", "Artifact descriptor does not match metadata");
     }
     return stored.content;
+  }
+
+  /**
+   * Every stored artifact id, for read-only reconciliation. A missing store is an empty inventory,
+   * and anything that is not a valid artifact metadata file is ignored rather than guessed at.
+   */
+  async listIds(): Promise<string[]> {
+    const entries = await readdir(this.metadataRoot).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [] as string[];
+      throw error;
+    });
+    return entries
+      .filter((entry) => entry.endsWith(".json"))
+      .map((entry) => entry.slice(0, -".json".length))
+      .filter((id) => ArtifactIdSchema.safeParse(id).success);
   }
 
   metadataPath(id: string): string {

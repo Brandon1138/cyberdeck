@@ -164,6 +164,30 @@ unverifiable held leases as blocking orphans and never performs Git cleanup. Exa
 operations behavior is documented in
 [`app-server-and-worktree-leases.md`](app-server-and-worktree-leases.md).
 
+## A5 admission, budget, and reconciliation boundary
+
+A5 adds the enforcement layer over the A1 declarations without widening the shared ports. Admission
+reserves exactly one slot per job before dispatch and releases it exactly once on every terminal or
+failed-to-launch path, ordered deterministically and starvation-resistantly; capacity influences
+only *when* a job runs, never *which* provider serves it, and never promotes an omitted/Fable Claude
+model into a launch. Budgets are per job-tree scopes measured only from data Cyberdeck holds
+(admitted jobs, elapsed time, reported tokens, persisted artifact bytes); unreported usage stays
+unknown and makes a declared token ceiling fail closed. Reconciliation quarantines unverifiable
+in-flight work, fences only provably expired leases, and reports orphaned runtimes/leases/artifacts
+and pending report-backs as non-destructive findings requiring explicit operator action. Startup
+recovers and reconciles before opening admission; shutdown closes admission before draining. Full
+detail is in [`concurrency-budgets-and-reconciliation.md`](concurrency-budgets-and-reconciliation.md).
+
+A5 also completes the neutral backend composition: the A4 `codex` App Server adapter and the B-owned
+`claude`, `cursor`, and `antigravity` dispatch adapters are registered unmodified through the frozen
+port, and `control.queue` / `control.budget` / `control.reconciliation` / `job.reportBacks` expose
+structured control-plane state. Presentation of any of it remains Agent B's B5 work.
+
+The A1 `PhaseOneConfig` was renamed to `BrokerRuntimeConfig` (`src/config.ts`) as the scoped cleanup
+the plan deferred to A5; it now carries the concurrency and budget declarations alongside the
+Phase 1 session limits. The B-facing integration test `tests/integration/session-lifecycle.test.ts`
+was updated in the same commit as a single mechanical import/name change — see the B5 handoff note.
+
 Within domain, the contract module dependency direction is:
 `control-plane → provider-registration`, `artifact → control-plane`,
 `job → {control-plane, provider-registration, session, artifact}`,

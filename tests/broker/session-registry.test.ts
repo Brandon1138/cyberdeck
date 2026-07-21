@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PhaseOneConfigSchema } from "../../src/config.js";
+import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { StartSessionRequest } from "../../src/domain/session.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
@@ -77,7 +77,7 @@ function harness() {
     adapters,
     ptyFactory,
     journal: { append: async (event) => { events.push(event); } },
-    config: PhaseOneConfigSchema.parse({}),
+    config: BrokerRuntimeConfigSchema.parse({}),
   });
   return { registry, ptys, events, ptyFactory };
 }

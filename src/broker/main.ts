@@ -1,14 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PhaseOneConfigSchema } from "../config.js";
-import { JobControlPlane } from "../control-plane/job-control-plane.js";
-import { defaultProviderRegistry } from "../control-plane/provider-registry.js";
+import { BrokerRuntimeConfigSchema } from "../config.js";
+import { ControlPlaneRuntime } from "../control-plane/runtime.js";
+import type { WorktreeLeaseManager } from "../control-plane/worktree-lease-manager.js";
+import { AppServerJobDispatchAdapter } from "../app-server/dispatch-adapter.js";
+import type { JobDispatchAdapter } from "../domain/dispatch.js";
 import type { BrokerEvent } from "../domain/events.js";
 import { appStateDirectory, brokerSocketPath } from "../paths.js";
-import { JobStore } from "../persistence/job-store.js";
+import { AntigravityJobDispatchAdapter } from "../providers/antigravity/dispatch-adapter.js";
 import { ClaudeProviderAdapter } from "../providers/claude.js";
+import { ClaudeJobDispatchAdapter } from "../providers/claude/dispatch-adapter.js";
 import { CodexProviderAdapter } from "../providers/codex.js";
+import { CursorJobDispatchAdapter } from "../providers/cursor/dispatch-adapter.js";
 import { PtyProcess } from "../runtime/pty-process.js";
 import { Journal } from "./journal.js";
 import { BrokerServer } from "./server.js";
@@ -23,11 +27,29 @@ function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<st
   };
 }
 
+/**
+ * The neutral backend composition for the job plane: one dispatch adapter per canonical provider id,
+ * each selected only when a request names it explicitly. Registration order carries no ranking,
+ * priority, or preference, and nothing here routes, substitutes, or falls back between providers.
+ * The Agent B adapter implementations are consumed as-is through the frozen dispatch port.
+ */
+export function composeJobDispatchAdapters(context: {
+  leases: WorktreeLeaseManager;
+}): JobDispatchAdapter[] {
+  return [
+    new AppServerJobDispatchAdapter({ leaseManager: context.leases }),
+    new ClaudeJobDispatchAdapter(),
+    new CursorJobDispatchAdapter(),
+    new AntigravityJobDispatchAdapter(),
+  ];
+}
+
 export async function runBroker(
   socketPath = brokerSocketPath,
   stateDirectory = appStateDirectory,
 ): Promise<BrokerServer> {
   const journal = new Journal(stateDirectory);
+  const config = BrokerRuntimeConfigSchema.parse({});
   const registry = new SessionRegistry({
     adapters: {
       codex: new CodexProviderAdapter(),
@@ -35,25 +57,27 @@ export async function runBroker(
     },
     ptyFactory: (spec, replayBytes) => new PtyProcess(spec, replayBytes),
     journal,
-    config: PhaseOneConfigSchema.parse({}),
+    config,
   });
 
-  // The control plane owns durable job state. Provider dispatch adapters (Agent B, B2+) register
-  // themselves at runtime; until then job.* methods respond but a submit settles as DISPATCH_REJECTED
-  // for lack of an adapter.
-  const controlPlane = new JobControlPlane({
-    registry: defaultProviderRegistry(),
+  // The control plane owns durable job state, admission, budgets, leases, and reconciliation. Its
+  // runtime enforces the ordering: persistence, then recovery, then reconciliation, and only then is
+  // admission opened. The B-owned dispatch adapters are composed in without being modified.
+  const runtime = new ControlPlaneRuntime({
+    stateDirectory,
+    config,
     journal,
-    store: new JobStore(stateDirectory),
+    adapters: composeJobDispatchAdapters,
   });
-  await controlPlane.recover();
+  await runtime.start();
 
   let shuttingDown = false;
   let server: BrokerServer;
   const shutdown = async (reason: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    await controlPlane.whenIdle();
+    // Admission stops first, then in-flight jobs drain and persist, then live sessions stop.
+    await runtime.shutdown(reason);
     await registry.stopAll();
     await journal.append(brokerEvent("broker.shutdown", { reason, pid: process.pid }));
     await server.close();
@@ -62,7 +86,8 @@ export async function runBroker(
   server = new BrokerServer({
     socketPath,
     registry,
-    controlPlane,
+    controlPlane: runtime.controlPlane,
+    controlPlaneRuntime: runtime,
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();

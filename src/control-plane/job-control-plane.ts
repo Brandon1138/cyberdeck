@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import type { AdmissionScheduler, AdmissionSnapshot } from "./admission-scheduler.js";
+import type { BudgetLedger, BudgetReport } from "./budget-ledger.js";
 import {
   CONTROL_PLANE_SCHEMA_VERSION,
   CorrelationIdSchema,
@@ -44,7 +46,8 @@ import { UsageReportSchema, type UsageReport } from "../domain/usage.js";
 export type ControlPlaneErrorClassCode =
   | ControlPlaneErrorCode
   | "FABLE_REQUIRES_EXPLICIT_HUMAN_START"
-  | "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL";
+  | "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL"
+  | "MAX_DELEGATION_DEPTH";
 
 export class ControlPlaneError extends Error {
   constructor(
@@ -124,6 +127,16 @@ export interface JobControlPlaneOptions {
   registry: ProviderRegistry;
   journal?: JournalLike;
   store?: JobStateRepository;
+  /**
+   * Optional admission control. When absent the control plane dispatches an accepted job
+   * immediately (the A2–A4 behavior); when present, a job is only dispatched once it holds exactly
+   * one reserved slot.
+   */
+  scheduler?: AdmissionScheduler;
+  /** Optional explicit budgets. When absent no ceiling is declared and none is invented. */
+  budgets?: BudgetLedger;
+  /** Job-tree delegation depth, mirroring the session policy. Defaults to 1. */
+  maxDelegationDepth?: number;
   now?: () => string;
   idFactory?: () => string;
 }
@@ -151,6 +164,8 @@ interface JobEntry {
   parentSessionId?: string;
   usage?: UsageReport;
   reportBack?: ReportBackRecord;
+  /** True between reserving a concurrency slot and returning it; makes the release exactly-once. */
+  holdsSlot?: boolean;
 }
 
 interface CreateSpec {
@@ -176,6 +191,7 @@ export class JobControlPlane {
   private readonly unsubscribes = new Map<string, () => void>();
   private pendingReports: Promise<void> = Promise.resolve();
   private pendingReportError: unknown;
+  private pumping = false;
 
   constructor(private readonly options: JobControlPlaneOptions) {}
 
@@ -247,6 +263,11 @@ export class JobControlPlane {
     };
   }
 
+  /** Offer free capacity to the queue, e.g. once startup has opened admission. */
+  async pumpQueue(): Promise<void> {
+    await this.pump();
+  }
+
   /** Wait until asynchronously emitted adapter reports have been durably ingested. */
   async whenIdle(): Promise<void> {
     await this.pendingReports;
@@ -267,6 +288,16 @@ export class JobControlPlane {
     const intent: DelegationIntent = DelegationIntentSchema.parse(input);
     if (intent.parentJobId !== undefined && !this.jobs.has(intent.parentJobId)) {
       throw new ControlPlaneError("JOB_NOT_FOUND", `Unknown parent job ${intent.parentJobId}`);
+    }
+    if (intent.parentJobId !== undefined) {
+      const maxDepth = this.options.maxDelegationDepth ?? 1;
+      const depth = this.lineage(intent.parentJobId).length;
+      if (depth >= maxDepth) {
+        throw new ControlPlaneError(
+          "MAX_DELEGATION_DEPTH",
+          `Delegation depth ${depth + 1} exceeds the configured maximum of ${maxDepth}`,
+        );
+      }
     }
     return this.create({
       request: intent.request,
@@ -315,6 +346,21 @@ export class JobControlPlane {
     }
 
     const jobId = JobIdSchema.parse(this.newId());
+    // Budget admission runs before the record exists so a refused submission creates nothing and
+    // launches nothing. The scope is the root of the job tree, so a child debits its parent. A job
+    // counted here that then fails to persist stays counted as an attempt rather than being
+    // silently refunded — an attempt that touched durable state is not proven free.
+    const scopeId = spec.parentJobId === undefined ? jobId : this.scopeOf(spec.parentJobId);
+    if (this.options.budgets !== undefined) {
+      const decision = this.options.budgets.admit(scopeId, jobId);
+      if (!decision.ok) {
+        throw new ControlPlaneError(
+          "BUDGET_EXCEEDED",
+          `Budget scope ${scopeId} refused another job: ${decision.reason}`,
+        );
+      }
+    }
+
     const now = this.now();
     const record: JobRecord = {
       schemaVersion: CONTROL_PLANE_SCHEMA_VERSION,
@@ -352,8 +398,57 @@ export class JobControlPlane {
       });
     }
 
-    await this.dispatch(entry);
+    if (this.options.scheduler === undefined) {
+      await this.dispatch(entry);
+    } else {
+      this.options.scheduler.enqueue({
+        jobId,
+        provider: request.provider,
+        repositoryKey: request.cwd,
+        enqueuedAt: now,
+        ...(request.model !== undefined ? { model: request.model } : {}),
+      });
+      await this.pump();
+    }
     return { job: cloneJobRecord(entry.record), deduplicated: false };
+  }
+
+  /**
+   * Dispatch every job that can hold a slot right now. Re-entrant calls (a dispatch that settles
+   * synchronously and releases its own slot) collapse into the running loop, so a job is never
+   * dispatched twice and a freed slot is always re-offered.
+   */
+  private async pump(): Promise<void> {
+    const scheduler = this.options.scheduler;
+    if (scheduler === undefined || this.pumping) return;
+    this.pumping = true;
+    try {
+      for (;;) {
+        const reservation = scheduler.admitNext();
+        if (reservation === undefined) return;
+        const entry = this.jobs.get(reservation.jobId);
+        if (entry === undefined || entry.record.lifecycle.status !== "queued") {
+          scheduler.release(reservation.jobId);
+          continue;
+        }
+        entry.holdsSlot = true;
+        await this.dispatch(entry);
+      }
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  /** Return a job's slot exactly once, then re-offer the freed capacity to the queue. */
+  private async releaseSlot(entry: JobEntry): Promise<void> {
+    const scheduler = this.options.scheduler;
+    if (scheduler === undefined) return;
+    scheduler.withdraw(entry.record.id);
+    if (entry.holdsSlot) {
+      entry.holdsSlot = false;
+      scheduler.release(entry.record.id);
+    }
+    await this.pump();
   }
 
   private async dispatch(entry: JobEntry): Promise<void> {
@@ -429,6 +524,9 @@ export class JobControlPlane {
         correlationId: entry.record.correlationId,
         reason: parsed.result.error.message,
       });
+      // An interrupted job is no longer running, so its slot goes back even though it is not
+      // terminal; its budget is not debited because its outcome was never observed.
+      await this.releaseSlot(entry);
       return { status: "interrupted", jobId: parsed.jobId };
     }
     await this.settle(entry, parsed.result, parsed.usage);
@@ -510,6 +608,35 @@ export class JobControlPlane {
     return { ...entry.reportBack };
   }
 
+  /**
+   * Move one unverifiable in-flight job to `interrupted` and return its slot. Idempotent: a job
+   * that is already interrupted or settled is left exactly as it is, so a repeated reconciliation
+   * pass neither rewrites history nor releases a slot twice. Quarantine is not a terminal outcome —
+   * it never fabricates success or failure, and it never retries.
+   */
+  async quarantine(jobId: unknown, reason: string): Promise<boolean> {
+    const entry = this.jobs.get(JobIdSchema.parse(jobId));
+    if (entry === undefined) return false;
+    const { status } = entry.record.lifecycle;
+    if (status === "settled" || status === "interrupted") return false;
+
+    const now = this.now();
+    entry.record = {
+      ...entry.record,
+      lifecycle: { status: "interrupted", interruptedAt: now, reason },
+      updatedAt: now,
+    };
+    await this.persist(entry);
+    await this.emit("job.interrupted", {
+      jobId: entry.record.id,
+      provider: entry.record.request.provider,
+      correlationId: entry.record.correlationId,
+      reason,
+    });
+    await this.releaseSlot(entry);
+    return true;
+  }
+
   getJob(jobId: unknown): JobSnapshot {
     const entry = this.jobs.get(JobIdSchema.parse(jobId));
     if (entry === undefined) {
@@ -562,6 +689,74 @@ export class JobControlPlane {
         parentJobId: entry.record.parentJobId ?? null,
       });
     }
+    // Post-run enforcement: debit measured usage exactly once, then hand the slot back.
+    this.debitBudget(entry, result, usage);
+    await this.releaseSlot(entry);
+  }
+
+  /**
+   * Debit a settled job against its budget scope. Unreported usage is recorded as unknown, and
+   * artifact bytes are only counted when the descriptor actually carries a length.
+   */
+  private debitBudget(entry: JobEntry, result: JobResult, usage?: UsageReport): void {
+    if (this.options.budgets === undefined) return;
+    const artifacts = "artifacts" in result ? result.artifacts : [];
+    let artifactBytes = 0;
+    for (const artifact of artifacts) {
+      if (artifact.byteLength !== undefined) artifactBytes += artifact.byteLength;
+    }
+    this.options.budgets.settle(this.scopeOf(entry.record.id), entry.record.id, {
+      ...(usage !== undefined ? { usage } : {}),
+      artifactBytes,
+    });
+  }
+
+  /** The root of a job's delegation tree; a child always reconciles to its root's budget scope. */
+  private scopeOf(jobId: string): string {
+    const chain = this.lineage(jobId);
+    return chain.at(-1) ?? jobId;
+  }
+
+  /** Ancestor job ids from nearest parent to root, guarded against a cyclic parent chain. */
+  private lineage(jobId: string): string[] {
+    const chain: string[] = [];
+    const seen = new Set<string>([jobId]);
+    let current = this.jobs.get(jobId)?.record.parentJobId;
+    while (current !== undefined && !seen.has(current)) {
+      chain.push(current);
+      seen.add(current);
+      current = this.jobs.get(current)?.record.parentJobId;
+    }
+    return chain;
+  }
+
+  /** Stable queue/admission view for control-plane queries. */
+  queueSnapshot(): AdmissionSnapshot {
+    return (
+      this.options.scheduler?.snapshot() ?? {
+        limits: { schemaVersion: CONTROL_PLANE_SCHEMA_VERSION },
+        admissionOpen: false,
+        reservations: [],
+        queued: [],
+      }
+    );
+  }
+
+  /** Stable budget view for control-plane queries; empty when no budget is declared. */
+  budgetReport(): BudgetReport {
+    return (
+      this.options.budgets?.report() ?? {
+        declaration: { schemaVersion: CONTROL_PLANE_SCHEMA_VERSION },
+        scopes: [],
+      }
+    );
+  }
+
+  /** Every report-back handoff and its delivery state, newest state included. */
+  listReportBacks(): ReportBackRecord[] {
+    return [...this.jobs.values()].flatMap((entry) =>
+      entry.reportBack === undefined ? [] : [{ ...entry.reportBack }],
+    );
   }
 
   private requireReportBack(jobId: unknown): JobEntry {

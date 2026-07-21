@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect, type Socket } from "node:net";
 import { describe, expect, it, vi } from "vitest";
-import { PhaseOneConfigSchema } from "../../src/config.js";
+import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import { BrokerServer } from "../../src/broker/server.js";
 import { SessionRegistry, type PtyHandle } from "../../src/broker/session-registry.js";
 import type { ProviderAdapter } from "../../src/providers/provider.js";
@@ -106,7 +106,7 @@ async function harness() {
     adapters,
     ptyFactory,
     journal: { append: async () => {} },
-    config: PhaseOneConfigSchema.parse({ maxConcurrentSessions: 8 }),
+    config: BrokerRuntimeConfigSchema.parse({ maxConcurrentSessions: 8 }),
   });
   let server: BrokerServer;
   server = new BrokerServer({
