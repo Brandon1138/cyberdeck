@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   BUILTIN_PROVIDER_IDS,
+  CANONICAL_PROVIDER_IDS,
+  PLANNED_PROVIDER_IDS,
   ProviderDescriptorSchema,
   ProviderIdSchema,
   validateRegisteredProvider,
@@ -9,7 +11,9 @@ import {
 describe("provider registration contract", () => {
   it("keeps the provider id open beyond the built-ins", () => {
     expect(BUILTIN_PROVIDER_IDS).toEqual(["codex", "claude"]);
-    // A future provider id is syntactically valid without reopening this shared type.
+    expect(PLANNED_PROVIDER_IDS).toEqual(["cursor", "antigravity"]);
+    expect(CANONICAL_PROVIDER_IDS).toEqual(["codex", "claude", "cursor", "antigravity"]);
+    // A future provider id remains syntactically valid without reopening this shared type.
     expect(ProviderIdSchema.parse("cursor")).toBe("cursor");
     expect(ProviderIdSchema.parse("antigravity")).toBe("antigravity");
   });
@@ -24,6 +28,10 @@ describe("provider registration contract", () => {
     const registered = ["codex", "claude"];
     expect(validateRegisteredProvider("codex", registered)).toEqual({ ok: true, id: "codex" });
     expect(validateRegisteredProvider("cursor", registered)).toEqual({
+      ok: false,
+      code: "PROVIDER_NOT_REGISTERED",
+    });
+    expect(validateRegisteredProvider("antigravity", registered)).toEqual({
       ok: false,
       code: "PROVIDER_NOT_REGISTERED",
     });

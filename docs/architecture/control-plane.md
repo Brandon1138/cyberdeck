@@ -48,10 +48,17 @@ only (id + display name); it has no rank, priority, or capability field.
 
 **Extensible provider identity.** The shared provider type is a slug, not a `codex | claude` union,
 so adding a provider does not reopen a closed type. `BUILTIN_PROVIDER_IDS` seeds the known providers.
-Concrete Cursor/Antigravity identifiers are finalized from integrated Agent B1 evidence and
-registered by Agent B; they are deliberately absent from A1. The Phase 1 session contract keeps its
+Integrated B1 evidence finalizes the canonical provider ids as `cursor` and `antigravity`, with
+observed executable mappings `cursor -> agent` and `antigravity -> agy`. They are listed as planned
+ids by the shared registration module but remain unsupported until a concrete adapter is registered;
+an id being canonical does not claim that its adapter exists. The Phase 1 session contract keeps its
 closed `ProviderIdSchema` enum for now; reconciling the session enum to the open registration
-contract is a scheduled plan task, not an A1 change (it needs B-side work).
+contract is a scheduled integration task.
+
+**A2 contract ratification.** A2 added optional `usage` to `JobReportSchema` so adapters can report
+provider-neutral usage through the frozen dispatch/report port. This additive field is approved:
+absence means unknown and must never be interpreted as zero. The `JobDispatchAdapter` interface
+itself remains unchanged.
 
 **Invalid lifecycle data is unrepresentable.** `JobLifecycleSchema` is a discriminated union where
 only the `settled` status carries a `result`. A running job cannot hold a terminal result, and a
@@ -88,21 +95,23 @@ A1 keeps the two boundaries separate on purpose:
 
 **Safe live-launch invariant.** A live Claude start (top-level or delegated) is forbidden unless a
 human operator supplies and has independently verified an explicit ordinary non-Fable model. An
-omitted model is unsafe at the live Claude launch boundary. Until Agent B wires
+omitted model is unsafe at the live Claude launch boundary. Until B2 wires
 `evaluateClaudeLaunchSafety` at the actual spawn boundary and a human-launched Codex gate verifies
-it live, the plan hard-blocks all omitted-model Claude live checks.
+it, the plan hard-blocks all omitted-model Claude live checks.
 
 ## Ownership boundaries
 
 | Area | Owner |
 |------|-------|
 | `src/domain/**`, `src/protocol/**`, `src/broker/**`, `src/config.ts`, persistence/recovery contracts | Agent A (control plane) |
-| `src/providers/**`, `src/runtime/**`, `src/client/**`, `src/tmux/**`, dashboard/cockpit, provider-facing CLI UX, concrete provider registration + dispatch/PTY adapters | Agent B (adapters/presentation) |
+| `src/providers/**`, `src/runtime/**`, `src/client/**`, `src/tmux/**`, dashboard/cockpit, provider-facing CLI UX, concrete dispatch/PTY adapters | Agent B (adapters/presentation) |
 | Live broker/provider/tmux acceptance, both mandatory gates | Human operator (serialized, one at a time) |
 
-A1 freezes the shared ports (`JobDispatchAdapter`, `ProviderRegistry`) and the registration seam.
-It does not implement any B-owned adapter. A contract change that needs B-side work is documented as
-a handoff in the plan, never implemented on the B side here.
+A1 froze the shared ports (`JobDispatchAdapter`, `ProviderRegistry`) and registration seam. B1
+supplied read-only capability probes and deterministic fixtures. A2 implemented the concrete
+control-plane registry/service and canonicalized the evidence-backed planned ids; B2 consumes those
+extension points and owns Claude launch-safety wiring at the real spawn boundary. No completed step
+claims a B-owned production adapter exists yet.
 
 ## Allowed dependency direction
 

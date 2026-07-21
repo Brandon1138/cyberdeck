@@ -7,10 +7,10 @@ import {
 
 /**
  * A minimal concrete {@link ProviderRegistry} the control plane can run against. A1 froze the
- * registration contract but deliberately left the concrete registry (and the canonical Cursor /
- * Antigravity identifiers) to Agent B. This Phase 2 default seeds only the Phase 1 built-ins so the
- * control plane can enforce unsupported-until-registered behavior today; Agent B registers further
- * providers through {@link register} without changing the control plane.
+ * registration contract; A2 supplies this implementation. The default seeds only the Phase 1
+ * built-ins so the control plane can enforce unsupported-until-registered behavior today. Provider
+ * adapters register further canonical ids through {@link register} without changing the control
+ * plane.
  */
 export class InMemoryProviderRegistry implements ProviderRegistry {
   private readonly byId = new Map<string, ProviderDescriptor>();

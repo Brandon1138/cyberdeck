@@ -7,16 +7,31 @@ concurrency, budgets, and reconciliation — without ever adding provider rankin
 recommendation, automatic fallback, or a role catalog, and without ever launching Fable through
 automation.
 
-**Baseline:** Phase 1, ending at `docs: define cyberdeck phase one boundary`, plus A1's control-plane
-contracts (this commit). A1 froze the shared ports and the provider-registration seam and wrote this
-plan; it implemented no job execution, adapter, persistence, transport, worktree mutation, scheduler,
-budget, or reconciliation.
+**Recovered baseline:** Phase 1 plus integrated A1 (`7a4aa0c`), B1 (`da6a445`), and A2
+(`8db5543`). A1 froze the shared ports and registration seam. B1 supplied capability probes and
+deterministic fixtures. A2 implemented the durable job control plane and concrete registry. The
+optional `usage` field A2 added to `JobReport` is ratified as an additive contract extension;
+absence remains unknown, never zero.
 
-**Execution model:** Ten sequential sessions — five Agent A (control plane) and five Agent B
-(adapters/presentation) — plus two human-launched top-level Codex gates. They are **not** concurrent
-workers. Within each track, never start the next session before its prerequisite baseline is
-integrated and verified. Each session works inline in its own isolated worktree, spawns no subagents,
-leaves exactly one clean conventional commit, and does not touch the other track's owned areas.
+**Execution model:** Ten implementation shots arranged in dependency-safe parallel waves, plus two
+human-launched top-level Codex gates:
+
+```text
+A1 + B1
+A2 + B2
+Codex Gate 1
+A3 + B3
+A4 + B4
+A5
+B5
+Codex Gate 2
+```
+
+Each track reuses its own isolated worktree, and a human integration session advances both
+worktrees to the verified shared baseline between waves. Parallel implementation is allowed only
+within the displayed wave; live broker/provider/tmux checks remain serialized under one operator.
+Each shot works inline, spawns no subagents, leaves exactly one clean conventional commit, and does
+not touch the other track's owned areas.
 
 ---
 
@@ -82,11 +97,11 @@ Handling:
 - The neutral stored policy (`evaluateStart`) deliberately keeps `model` optional; enforcing there
   would conflate stored neutrality with launch safety and break Phase 1 fake-adapter delegation
   tests.
-- **B (B1) wires `evaluateClaudeLaunchSafety` at the real Claude launch boundary** (real
+- **B2 wires `evaluateClaudeLaunchSafety` at the real Claude launch boundary** (real
   adapter/PTY path), so real Claude spawns with an omitted/Fable model are refused before a process
   starts, while fake adapters used in tests bypass it. This is the enforcement point that closes the
   gap.
-- **Until B1's enforcement is integrated AND a human-launched Codex gate verifies it live, this plan
+- **Until B2's enforcement is integrated AND a human-launched Codex gate verifies it, this plan
   hard-blocks all omitted-model Claude live checks.** No live Claude start (top-level or delegated)
   may occur with an omitted model. Both gates below verify that an omitted-model Claude start is
   refused before any process spawns.
@@ -98,8 +113,8 @@ See `docs/architecture/control-plane.md`. Summary:
 - **Agent A** owns `src/domain/**`, `src/protocol/**`, `src/broker/**`, `src/config.ts`, and the
   persistence/recovery contracts and services.
 - **Agent B** owns `src/providers/**`, `src/runtime/**`, `src/client/**`, `src/tmux/**`, the
-  dashboard/cockpit, provider-facing CLI UX, and the concrete provider registration and
-  dispatch/PTY adapters.
+  dashboard/cockpit, provider-facing CLI UX, and concrete dispatch/PTY adapters. B1 owns only its
+  capability probes and fixtures; A2 owns the concrete registry/control-plane service.
 - **Human operator** owns all live broker/provider/tmux acceptance and both mandatory gates,
   serialized one scenario at a time.
 - Dependency direction: `src/domain/**` depends only on `zod` + node stdlib; broker and persistence
@@ -129,7 +144,7 @@ git status --short
 
 ## Agent A sequence
 
-### A1 — Control-plane contracts, executable plan, cleanup decision — **DONE (this commit)**
+### A1 — Control-plane contracts, executable plan, cleanup decision — **DONE (`7a4aa0c`)**
 
 - [x] Runtime-validated, serializable contracts under `src/domain/`: control-plane primitives,
   extensible provider registration, bounded job (immutable request + lifecycle union), delegation
@@ -141,27 +156,25 @@ git status --short
 - [x] This executable plan with the recovered A sequence, B sequence, and both Codex gates.
 - [x] Focused red/green tests for every contract; full suite, check, and build green.
 
-### A2 — Durable jobs, structured delegation, results, report-back
+### A2 — Durable jobs, structured delegation, results, report-back — **DONE (`8db5543`)**
 
 **Prerequisite:** A1 integrated and verified. **Owner:** Agent A.
 
-- [ ] Add `job.*` broker events to `BrokerEventTypeSchema` (`job.created`, `job.dispatched`,
-  `job.settled`, `job.reported`) with a focused failing test first.
-- [ ] Implement an in-memory `JobRegistry` (analogous to `SessionRegistry`) that accepts a
+- [x] Add typed job/delegation/report events to `BrokerEventTypeSchema` with focused coverage.
+- [x] Implement an in-memory job control-plane service that accepts a
   `JobRequest`, assigns a `JobId` + `CorrelationId`, tracks the `JobLifecycle`, and records a
   terminal `JobResult`. Inject the `JobDispatchAdapter` port; do not import concrete adapters.
-- [ ] Implement structured delegation: a parent (job or session) submits a `DelegationIntent`; the
+- [x] Implement structured delegation: a parent (job or session) submits a `DelegationIntent`; the
   registry records `parentJobId`/`parentSessionId`, dispatches the child, and routes the child's
   `JobReport` back to the parent by `correlationId`. Enforce delegation depth reuse of the existing
   policy; keep a job separate from a session.
-- [ ] Extend the RPC protocol (`src/protocol/frames.ts`) and broker server with
-  `job.submit`, `job.get`, `job.list`, `job.cancel`, and a report-back event frame. Validate every
-  frame; return structured errors with `ControlPlaneErrorCode`.
-- [ ] Tests (fakes only): job submit→dispatch→settle→report; delegation with correlated report-back;
+- [x] Extend the broker server with typed `job.*` methods while preserving Phase 1 session methods.
+- [x] Tests (fakes only): job submit→dispatch→settle→report; delegation with correlated report-back;
   negative tests for invalid lifecycle transitions and unregistered providers; neutrality tests
   (arbitrary model/role opaque, provider explicit). No model calls.
-- **Stop condition:** durable jobs, delegation, and report-back pass with a fake dispatch adapter;
-  full suite/check/build green; one commit. Do **not** begin persistence/recovery.
+- **Outcome:** durable jobs, delegation, and acknowledged report-back pass with a fake dispatch
+  adapter; the control plane consumes the unchanged A1 port; full suite/check/build green. A3 has
+  not begun.
 
 ### A3 — Persistence, recovery, and structured artifacts
 
@@ -184,7 +197,7 @@ git status --short
 
 ### A4 — Codex App Server control-plane integration + repository/worktree leases
 
-**Prerequisite:** A3 integrated. **Owner:** Agent A (control-plane transport + lease service);
+**Prerequisite:** the A3+B3 wave integrated. **Owner:** Agent A (control-plane transport + lease service);
 Codex App Server transport client is a documented handoff to Agent B where it touches provider code.
 
 - [ ] Define the control-plane transport for the Codex App Server integration on the A side (request
@@ -219,33 +232,31 @@ Codex App Server transport client is a documented handoff to Agent B where it to
 
 ## Agent B sequence (peer track — summary and prerequisites)
 
-Agent B is a separate human-launched peer. A1 specifies only the prerequisites and handoffs; it does
-not implement any B task.
+Agent B is a separate human-launched peer working from its dedicated track worktree.
 
-- **B1 — Provider registration + launch-safety enforcement + provider identifier evidence.**
-  Prereq: A1 integrated. Implement `ProviderRegistry`; register `codex`/`claude` descriptors; wire
-  `evaluateClaudeLaunchSafety` at the **real** Claude launch boundary so real omitted/Fable Claude
-  spawns are refused before a process starts (fakes bypass). Produce integrated evidence to finalize
-  the concrete **Cursor** and **Antigravity** provider slugs and register their descriptors. This
-  evidence is the prerequisite for B3/B4.
-- **B2 — Provider-neutral job dispatch adapters (Codex, Claude).** Prereq: A2 integrated + B1.
-  Implement `JobDispatchAdapter` for Codex and Claude at the job level, distinct from the Phase 1 PTY
-  session adapter. Fakes in A2 tests remain the automated path; live behavior is proven at Gate 1.
-- **B3 — Cursor dispatch adapter + job presentation.** Prereq: B2 + A3 + finalized B1 Cursor id.
-- **B4 — Antigravity dispatch adapter.** Prereq: B3 + A4 + finalized B1 Antigravity id.
+- **B1 — Provider capability probes and fixtures — DONE (`da6a445`).** Read-only evidence finalized
+  canonical ids `cursor` and `antigravity` and executable mappings `agent` and `agy`. B1 did not
+  implement the registry, a production adapter, or launch-safety wiring.
+- **B2 — Claude job dispatch adapter + launch-safety wiring.** Prereq: reconciled A1+B1+A2.
+  Implement `JobDispatchAdapter` for Claude, wire `evaluateClaudeLaunchSafety` at every real Claude
+  spawn boundary, and use B1 fixtures for all automated behavior. Live behavior is proven only at
+  Gate 1.
+- **B3 — Cursor dispatch adapter + job presentation.** Parallel-wave prereq: B2 + Gate 1; runs from
+  the same shared baseline as A3. Use canonical id `cursor` and executable evidence `agent`.
+- **B4 — Antigravity dispatch adapter.** Parallel-wave prereq: integrated A3+B3; runs alongside A4. Use
+  canonical id `antigravity` and executable evidence `agy`.
 - **B5 — Cockpit/dashboard/CLI for jobs, delegation, artifacts, budgets; final presentation.**
   Prereq: A5.
 
 ## Ordered integration prerequisites (both tracks)
 
-```
-A1 ─┬─ B1
-    A2 ─── B2
-            └── Codex Gate 1  (after A2 + B2, structured delegation works end to end)
-    A3 ─── B3          (A3 requires A2 + B2 + Gate 1)
-    A4 ─── B4
-    A5 ─── B5
-            └── Codex Gate 2  (after final A5 + B5 integration)
+```text
+A1 + B1               integrated
+A2 + B2               integrate, then Codex Gate 1
+A3 + B3               integrate before the next wave
+A4 + B4               integrate before A5
+A5                    integrate before B5
+B5                    integrate, then Codex Gate 2
 ```
 
 Integrate a track session only after its prerequisite baseline is verified. Never overlap live checks
@@ -272,7 +283,7 @@ state, one scenario, clean, verify PIDs/socket/panes).
 - [ ] A delegated **Fable** attempt is refused before any process starts
   (`FABLE_REQUIRES_EXPLICIT_HUMAN_START`), and no new job/session/PID appears.
 - [ ] An **omitted-model Claude** start (top-level or delegated) is **refused before any process
-  spawns** via the B1-wired `evaluateClaudeLaunchSafety`; no Claude process is created. (If B1's
+  spawns** via the B2-wired `evaluateClaudeLaunchSafety`; no Claude process is created. (If B2's
   enforcement is not yet integrated, the omitted-model Claude live check stays hard-blocked and the
   gate fails.)
 - [ ] No Fable process is ever launched. Job and session records stay distinct.
@@ -307,5 +318,5 @@ state, one scenario, clean, verify PIDs/socket/panes).
 - Stop any session that finds a dirty worktree, a missing prerequisite baseline, or unexplained
   cross-track changes; report the mismatch without editing.
 - Never launch Fable through automation. Never claim explicit-string rejection closes the
-  native-default-Claude gap. Hard-block omitted-model Claude live checks until B1 enforcement is
+  native-default-Claude gap. Hard-block omitted-model Claude live checks until B2 enforcement is
   integrated and gate-verified.

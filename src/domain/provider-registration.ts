@@ -6,9 +6,9 @@ import { z } from "zod";
  * The provider id is an open, runtime-validated lowercase slug rather than a closed union, so the
  * shared control-plane type is never permanently limited to `codex | claude`. Explicit selection is
  * still enforced: an id is only usable once its descriptor has been registered (see
- * {@link validateRegisteredProvider}). Concrete Cursor/Antigravity identifiers are finalized from
- * integrated Agent B1 evidence and registered by Agent B — they are deliberately not hard-coded
- * here. The contract carries neutral identity metadata only: no rank, priority, or capability field.
+ * {@link validateRegisteredProvider}). The provider identifiers below are canonical product ids,
+ * while executable names remain adapter details. The contract carries neutral identity metadata
+ * only: no rank, priority, or capability field.
  */
 export const ProviderIdSchema = z
   .string()
@@ -19,6 +19,17 @@ export type ProviderId = z.infer<typeof ProviderIdSchema>;
 /** Providers Phase 1 already ships. The type stays open; this is a known-good seed, not a ceiling. */
 export const BUILTIN_PROVIDER_IDS = ["codex", "claude"] as const;
 
+/**
+ * Canonical ids for the adapters planned from B1's observed executables: Cursor Agent (`agent`)
+ * and Antigravity (`agy`). They remain unsupported until a concrete adapter registers them.
+ */
+export const PLANNED_PROVIDER_IDS = ["cursor", "antigravity"] as const;
+
+export const CANONICAL_PROVIDER_IDS = [
+  ...BUILTIN_PROVIDER_IDS,
+  ...PLANNED_PROVIDER_IDS,
+] as const;
+
 export const ProviderDescriptorSchema = z.object({
   id: ProviderIdSchema,
   displayName: z.string().min(1),
@@ -26,8 +37,8 @@ export const ProviderDescriptorSchema = z.object({
 export type ProviderDescriptor = z.infer<typeof ProviderDescriptorSchema>;
 
 /**
- * Registration port implemented by Agent B. The contract defines the shape and runtime validation
- * only; A1 does not implement a concrete registry.
+ * Registration port frozen by A1 and implemented by A2's control-plane registry. Provider adapters
+ * register through this seam; planned ids remain unsupported until that registration occurs.
  */
 export interface ProviderRegistry {
   register(descriptor: ProviderDescriptor): void;
