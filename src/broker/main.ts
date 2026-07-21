@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PhaseOneConfigSchema } from "../config.js";
+import { JobControlPlane } from "../control-plane/job-control-plane.js";
+import { defaultProviderRegistry } from "../control-plane/provider-registry.js";
 import type { BrokerEvent } from "../domain/events.js";
 import { appStateDirectory, brokerSocketPath } from "../paths.js";
 import { ClaudeProviderAdapter } from "../providers/claude.js";
@@ -32,6 +34,11 @@ export async function runBroker(socketPath = brokerSocketPath): Promise<BrokerSe
     config: PhaseOneConfigSchema.parse({}),
   });
 
+  // The control plane owns durable job state. Provider dispatch adapters (Agent B, B2+) register
+  // themselves at runtime; until then job.* methods respond but a submit settles as DISPATCH_REJECTED
+  // for lack of an adapter.
+  const controlPlane = new JobControlPlane({ registry: defaultProviderRegistry(), journal });
+
   let shuttingDown = false;
   let server: BrokerServer;
   const shutdown = async (reason: string): Promise<void> => {
@@ -45,6 +52,7 @@ export async function runBroker(socketPath = brokerSocketPath): Promise<BrokerSe
   server = new BrokerServer({
     socketPath,
     registry,
+    controlPlane,
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();

@@ -9,6 +9,15 @@ export const BrokerEventTypeSchema = z.enum([
   "session.input",
   "session.exited",
   "session.stopped",
+  // Control-plane job/delegation/result/report events. Event `data` carries neutral identifiers and
+  // outcome metadata only — never the instruction (prompt) body or any secret.
+  "job.submitted",
+  "job.dispatched",
+  "job.settled",
+  "delegation.created",
+  "job.reported",
+  "job.report.acknowledged",
+  "job.report.failed",
 ]);
 
 export const BrokerEventSchema = z.object({

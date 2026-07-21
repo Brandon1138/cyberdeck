@@ -2,6 +2,13 @@ import { randomUUID } from "node:crypto";
 import { lstat, unlink } from "node:fs/promises";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { z } from "zod";
+import {
+  AcknowledgeReportParamsSchema,
+  CancelJobParamsSchema,
+  GetJobParamsSchema,
+  IngestReportParamsSchema,
+  type JobControlPlane,
+} from "../control-plane/job-control-plane.js";
 import { StartSessionRequestSchema } from "../domain/session.js";
 import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type RequestFrame } from "../protocol/frames.js";
 import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
@@ -20,6 +27,7 @@ interface ConnectionContext {
 export interface BrokerServerOptions {
   socketPath: string;
   registry: SessionRegistry;
+  controlPlane?: JobControlPlane;
   onShutdown?: () => void;
 }
 
@@ -180,6 +188,28 @@ export class BrokerServer {
         context.attachments.delete(sessionId);
         return { detached: true };
       }
+      case "job.submit":
+        return this.requireControlPlane().submit(frame.params);
+      case "job.delegate":
+        return this.requireControlPlane().delegate(frame.params);
+      case "job.get": {
+        const { jobId } = GetJobParamsSchema.parse(frame.params);
+        return this.requireControlPlane().getJob(jobId);
+      }
+      case "job.list":
+        return this.requireControlPlane().listJobs();
+      case "job.cancel": {
+        const { jobId, reason } = CancelJobParamsSchema.parse(frame.params);
+        return this.requireControlPlane().cancel(jobId, reason);
+      }
+      case "job.report": {
+        const { report } = IngestReportParamsSchema.parse(frame.params);
+        return this.requireControlPlane().ingestReport(report);
+      }
+      case "job.acknowledgeReport": {
+        const { jobId } = AcknowledgeReportParamsSchema.parse(frame.params);
+        return this.requireControlPlane().acknowledgeReport(jobId);
+      }
       case "broker.status":
         return { healthy: true, pid: process.pid };
       case "broker.shutdown":
@@ -187,6 +217,13 @@ export class BrokerServer {
       default:
         throw Object.assign(new Error(`Unknown method ${frame.method}`), { code: "METHOD_NOT_FOUND" });
     }
+  }
+
+  private requireControlPlane(): JobControlPlane {
+    if (this.options.controlPlane === undefined) {
+      throw Object.assign(new Error("Control plane is not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.options.controlPlane;
   }
 
   private async attach(

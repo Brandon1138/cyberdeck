@@ -11,6 +11,7 @@ import {
 } from "./control-plane.js";
 import { ProviderIdSchema } from "./provider-registration.js";
 import { SandboxSchema } from "./session.js";
+import { UsageReportSchema } from "./usage.js";
 
 /**
  * An immutable, bounded job request. Unlike a session (a live PTY that may run indefinitely), a job
@@ -90,12 +91,18 @@ export const JobRecordSchema = z.object({
 });
 export type JobRecord = z.infer<typeof JobRecordSchema>;
 
-/** The terminal report-back envelope a dispatch adapter emits when a job settles. */
+/**
+ * The terminal report-back envelope a dispatch adapter emits when a job settles. `usage` is an
+ * additive, forward-compatible field: the {@link JobDispatchAdapter} port interface is unchanged and
+ * the envelope still validates when a provider omits usage, in which case usage stays unknown (it is
+ * never fabricated as zero).
+ */
 export const JobReportSchema = z.object({
   schemaVersion: schemaVersionField,
   jobId: JobIdSchema,
   correlationId: CorrelationIdSchema,
   reportedAt: TimestampSchema,
   result: JobResultSchema,
+  usage: UsageReportSchema.optional(),
 });
 export type JobReport = z.infer<typeof JobReportSchema>;
