@@ -1,22 +1,29 @@
 # Agent B4 — Antigravity/agy interactive/headless adapter
 
-You are the fourth **Agent B** implementation shot for Cyberdeck's runtimes/presentation track. Work directly and inline as one top-level Opus High session. **Do not spawn subagents, delegate work, or ask another agent to implement or review anything.**
+You are the fourth **Agent B** implementation shot for Cyberdeck's runtimes/presentation track. Work directly and inline as one top-level session. **Do not spawn subagents, delegate work, or ask another agent to implement or review anything.**
+
+## How to run this prompt (portable — shell/CLI or Claude Desktop)
+
+This prompt is designed to be pasted as-is into either a shell-backed coding session or Claude Desktop. It does **not** require the session to start in a particular directory, branch, or Git worktree.
+
+- The canonical repository is `/Users/brandon/code/personal/cyberdeck`. The intended Agent B checkout is `.claude/worktrees/agent-b-future`, but that path is an operator convenience, not an implementation precondition.
+- Do not create, switch, repair, merge, or rebase worktrees/branches merely to satisfy this prompt. Use the Cyberdeck checkout or connected folder the operator supplied.
+- Never stop solely because the current top-level path, branch name, Git common directory, or worktree layout differs or cannot be inspected from Desktop.
+- If shell/Git access is available, record the current top level, status, SHA, and recent history. If Git metadata is unavailable, inspect the actual source/contracts/tests and state which baseline facts were source-verified versus assumed.
+- Deliver one cohesive B4 change. Commit it only when the session is in a clean isolated checkout and can do so safely; otherwise make the edits in the connected folder or return one applicable patch plus verification output. Lack of commit capability is not a reason to abandon implementation.
 
 ## Repository and coordination model
 
-- Canonical repository and primary checkout: `/Users/brandon/code/personal/cyberdeck` (reference only; do **not** work there).
-- Your already-provisioned worktree is exactly `/Users/brandon/code/personal/cyberdeck/.claude/worktrees/agent-b-future`; work only there. It is reused for B2–B5. Agent A uses `/Users/brandon/code/personal/cyberdeck/.claude/worktrees/agent-a-future`. Do not create, request, switch, or repair another worktree.
 - Agent A is a separate human-launched top-level peer in another worktree. It owns shared contracts/control-plane work and is not your subagent.
-- Before reading or editing, verify `git rev-parse --show-toplevel`, `git rev-parse --git-common-dir`, and `git worktree list --porcelain`. The current top level must equal `/Users/brandon/code/personal/cyberdeck/.claude/worktrees/agent-b-future`, not the primary checkout and not Agent A's worktree. Require the continuing Agent B branch and a clean status. The worktree is already provisioned; do not request or create another.
 - Do not inspect or mutate Agent A's worktree. Do not merge, cherry-pick, rebase, or integrate branches; the human/integration session supplies the approved baseline.
 - Do not edit A-owned shared contracts/control-plane code. Likely examples are `src/domain/**`, `src/protocol/**`, `src/broker/**`, A1 provider/runtime interfaces, and CLI routing. Verify actual ownership from history and notes.
-- Your deliverable is exactly one clean conventional commit containing only the Antigravity adapter slice.
+- Your deliverable is exactly one cohesive Antigravity adapter slice, committed when safe or returned as one patch otherwise.
 
 ## Required baseline
 
-Start only from the clean human-integrated A3+B3 baseline. The independent Codex A2+B2 gate must already be green and remain in the ancestry/evidence. B4 may run in parallel with A4 and must not require A4's unintegrated changes.
+The required **code baseline** is the human-integrated A3+B3 wave. The independent Codex A2+B2 gate must already be green in the available ancestry/evidence, and B4 must not require A4's unintegrated changes. B4 is intended to run in parallel with A4 from that same code baseline regardless of whether one session is in a shell and the other is in Claude Desktop.
 
-Before editing, record `git status --short --branch`, `git rev-parse HEAD`, recent history, the B1–B3 commits/features, relevant A commits/features, and the gate evidence. Do not integrate missing prerequisites yourself. If the `agy` provider cannot plug in without changing A-owned contracts, stop and report the exact missing extension point.
+When Git is available, record `git status --short --branch`, `git rev-parse HEAD`, recent history, the B1–B3 commits/features, relevant A commits/features, and gate evidence. In Desktop without Git metadata, verify the corresponding adapter patterns, contracts, tests, and evidence from reachable source. Do not hard-stop over placement or unavailable history. Stop only if the required code is genuinely absent/incompatible, conflicts are unresolved, the repository cannot be reached, or `agy` cannot plug in without changing A-owned contracts; report the exact mismatch.
 
 Read the Phase 1 plan, README, architecture/acceptance docs, B1 probes/fixtures, A1 contracts, B2/B3 adapter patterns, and all current provider/runtime/tmux source/tests. Preserve provider neutrality and process ownership.
 
@@ -83,20 +90,20 @@ git status --short
 
 Prove tests cannot spawn the real `agy` executable and explicitly reject dangerous permission bypass, implicit model/agent selection, and fabricated structured-event assumptions.
 
-Then create exactly one commit, suggested subject:
+If committing is safe in the current checkout, create exactly one commit, suggested subject:
 
 ```text
 feat: add antigravity runtime adapter
 ```
 
-Stage only B4-owned files. Do not amend, push, merge, or begin B5.
+Stage only B4-owned files. Otherwise deliver the same cohesive change as one patch/diff and identify verification that could not run on the current surface. Do not amend, push, merge, or begin B5.
 
 ## Required report-back
 
 Report:
 
 - Starting baseline SHA and exact integrated prerequisite commits/features.
-- Final commit SHA/subject and every changed path.
+- Final commit SHA/subject when committed, or a clear patch-delivery note, plus every changed path.
 - Exact interactive/headless argv/env/input/output mapping and sandbox mapping.
 - Every unsupported or live-unverified `agy` capability, especially structured streaming and continuation.
 - Evidence classification: read-only CLI metadata, deterministic fixture, or unverified live behavior.
@@ -104,6 +111,6 @@ Report:
 - Confirmation that no real provider session, network-dependent model call, authentication/config change, dangerous bypass, automatic model/agent choice, or Fable start/call occurred.
 - Confirmation that no A-owned files or other adapters changed.
 - Any integration/acceptance risk B5 must surface.
-- Final clean `git status --short --branch`.
+- Final `git status --short --branch` when Git is available.
 
 Stop after the one commit and report. Do not begin B5.

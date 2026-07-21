@@ -1,10 +1,19 @@
 # Agent A4 — Codex App Server and repository/worktree leases
 
-You are the fourth **Agent A** implementation shot. `/Users/brandon/code/personal/cyberdeck` is the canonical repository and primary checkout, but you must **not** work there. Your already-provisioned worktree is exactly `/Users/brandon/code/personal/cyberdeck/.claude/worktrees/agent-a-future`; work only there. It is reused for A3–A5, while Agent B uses `/Users/brandon/code/personal/cyberdeck/.claude/worktrees/agent-b-future`. Do not create, request, switch, or repair another worktree. Use Claude Opus High. Do not use Fable.
+You are the fourth **Agent A** implementation shot. Work directly and inline as one top-level session. **Do not spawn subagents, delegate implementation/review, or use Fable.**
+
+## How to run this prompt (portable — shell/CLI or Claude Desktop)
+
+This prompt is designed to be pasted as-is into either a shell-backed coding session or Claude Desktop. It does **not** require the session to start in a particular directory, branch, or Git worktree.
+
+- The canonical repository is `/Users/brandon/code/personal/cyberdeck`. The intended Agent A checkout is `.claude/worktrees/agent-a-future`, but that path is an operator convenience, not an implementation precondition.
+- Do not create, switch, repair, merge, or rebase worktrees/branches merely to satisfy this prompt. Use the Cyberdeck checkout or connected folder the operator supplied.
+- Never stop solely because the current top-level path, branch name, Git common directory, or worktree layout differs or cannot be inspected from Desktop.
+- If shell/Git access is available, record the current top level, status, SHA, and recent history. If Git metadata is unavailable, inspect the actual source/contracts/tests and state which baseline facts were source-verified versus assumed.
+- Deliver one cohesive A4 change. Commit it only when the session is in a clean isolated checkout and can do so safely; otherwise make the edits in the connected folder or return one applicable patch plus verification output. Lack of commit capability is not a reason to abandon implementation.
 
 ## Operating rules
 
-- Work inline alone. **Do not spawn subagents, delegate work, or request agent-based review.**
 - Agent B is a separate human-launched top-level peer in another worktree. Do not contact it, manage it, merge/cherry-pick its commits, or edit B-owned adapter/presentation code.
 - Continue to treat `src/providers/**`, `src/client/**`, `src/tmux/**`, dashboard/cockpit, and provider-facing CLI UX as B-owned unless the committed ownership map says otherwise. The App Server work in this session is the control-plane transport/runtime integration, not a rewrite of B's terminal provider adapters or presentation.
 - Preserve neutral provider/model/role policy. App Server support is an explicitly selected Codex execution transport, not a preferred provider, automatic route, fallback, or role mapping.
@@ -12,12 +21,12 @@ You are the fourth **Agent A** implementation shot. `/Users/brandon/code/persona
 - Current explicit-string rejection does not prevent an omitted Claude model from resolving to native-default Fable; that happened in Phase 1. Never claim otherwise. Any live Claude start is forbidden without a human-supplied, independently operator-verified explicit ordinary non-Fable model. This Codex App Server session must not use Claude as a fallback.
 - The implementation runs in dependency-safe parallel waves. A4 may run alongside B4 only from the human-integrated A3+B3 baseline.
 - Serialize every live broker/App Server/provider/tmux check under one human operator. Do not overlap checks across worktrees; verify the broker PID, socket, App Server child, and tmux panes are clean before the next scenario.
-- Before reading or editing, verify `git rev-parse --show-toplevel`, `git rev-parse --git-common-dir`, and `git worktree list --porcelain`. The current top level must equal `/Users/brandon/code/personal/cyberdeck/.claude/worktrees/agent-a-future`, not the primary checkout and not Agent B's worktree. Require the continuing Agent A branch and a clean status. The worktree is already provisioned; do not request or create another. Any worktree behavior implemented in this shot must operate only through tested product abstractions and fixtures.
-- Make one clean conventional commit. Do not push, merge, rebase, or amend earlier commits.
+- Any worktree behavior implemented in this shot must operate only through tested product abstractions and fixtures; prompt placement never authorizes manipulating the operator's implementation worktrees.
+- Do not push, merge, rebase, or amend earlier commits.
 
 ## Baseline and prerequisites
 
-Verify a clean worktree and inspect recent commits. The baseline must be the human-integrated A3+B3 wave and contain the passed post-A2+B2 Codex gate evidence. This session must not perform that integration. Persistence/recovery and artifact storage must already pass their restart tests. Stop without edits if those prerequisites are missing or if ownership boundaries are ambiguous.
+The required **code baseline** is the human-integrated A3+B3 wave with the passed post-A2+B2 Codex gate evidence. Persistence/recovery and artifact storage must already exist and pass their restart tests. Verify this from Git ancestry when available; in Desktop, verify the corresponding source, contracts, tests, and recorded gate evidence. Do not hard-stop over checkout placement or unavailable Git metadata. Stop only for a real prerequisite failure: the required A3/B3 code is absent/incompatible, conflicts are unresolved, the repository cannot be reached, or A4 cannot proceed without crossing the committed ownership boundary. Report the exact mismatch.
 
 Read the executable plan, App Server-related contracts/ports, job service, persistence/recovery, artifact store, current Codex terminal adapter only for boundary context, and relevant tests. Before coding against Codex App Server, inspect the **currently installed** Codex CLI's read-only help/protocol capabilities and any repository-pinned official protocol/schema material. Do not rely on remembered flags or launch a model. If the installed App Server protocol cannot be established safely, stop and report exact evidence rather than guessing.
 
@@ -71,22 +80,24 @@ mise exec -- pnpm build
 git diff --check
 ```
 
-Create exactly one conventional commit, expected shape:
+If committing is safe in the current checkout, create exactly one conventional commit, expected shape:
 
 ```text
 feat: add app server and worktree leases
 ```
 
+Otherwise deliver the same cohesive change as one patch/diff; report verification as pending where the current surface cannot execute it.
+
 ## Report back
 
 Return:
 
-- commit hash and subject;
+- commit hash and subject, or a clear patch-delivery note when the current surface cannot commit safely;
 - changed files and their App Server/lease responsibilities;
 - observed installed App Server command/protocol/version evidence and the compatibility behavior implemented;
 - process supervision, cancellation, disconnect, and duplicate-submission guarantees;
 - confirmation that App Server failure cannot route to Claude and that omitted-model Claude safety was not overstated;
 - lease canonical key, exclusivity, expiry, fencing, persistence, and orphan behavior;
 - tests run with red/green evidence and full test/check/build results;
-- `git status --short` after commit;
+- `git status --short` after commit when Git is available;
 - exact prerequisites and open handoffs for A5 or Agent B, with no peer merge performed.
