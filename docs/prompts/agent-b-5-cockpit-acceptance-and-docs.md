@@ -1,21 +1,28 @@
 # Agent B5 — Cockpit UX, provider acceptance, and documentation
 
-You are the fifth and final **Agent B** implementation shot for Cyberdeck's runtimes/presentation track. Work directly and inline as one top-level Opus High session. **Do not spawn subagents, delegate work, or ask another agent to implement or review anything.**
+You are the fifth and final **Agent B** implementation shot for Cyberdeck's runtimes/presentation track. Work directly and inline as one top-level session. **Do not spawn subagents, delegate work, or ask another agent to implement or review anything.**
+
+## How to run this prompt (portable — shell/CLI or Claude Desktop)
+
+This prompt is designed to be pasted as-is into either a shell-backed coding session or Claude Desktop. It does **not** require the session to start in a particular directory, branch, or Git worktree.
+
+- The canonical repository is `/Users/brandon/code/personal/cyberdeck`. The intended Agent B checkout is `.claude/worktrees/agent-b-future`, but that path is an operator convenience, not an implementation precondition.
+- Do not create, switch, repair, merge, or rebase worktrees/branches merely to satisfy this prompt. Use the Cyberdeck checkout or connected folder the operator supplied.
+- Never stop solely because the current top-level path, branch name, Git common directory, or worktree layout differs or cannot be inspected from Desktop.
+- If shell/Git access is available, record the current top level, status, SHA, and recent history. If Git metadata is unavailable, inspect the actual source/contracts/tests and state which baseline facts were source-verified versus assumed.
+- Deliver one cohesive B5 change. Commit it only when the session is in a clean isolated checkout and can do so safely; otherwise make the edits in the connected folder or return one applicable patch plus verification output. Lack of commit capability is not a reason to abandon implementation.
 
 ## Repository and coordination model
 
-- Canonical repository and primary checkout: `/Users/brandon/code/personal/cyberdeck` (reference only; do **not** work there).
-- Your already-provisioned worktree is exactly `/Users/brandon/code/personal/cyberdeck/.claude/worktrees/agent-b-future`; work only there. It is reused for B2–B5. Agent A uses `/Users/brandon/code/personal/cyberdeck/.claude/worktrees/agent-a-future`. Do not create, request, switch, or repair another worktree.
 - Agent A is a separate human-launched top-level peer in another worktree. It owns shared contracts/control-plane code and is not your subagent.
-- Before reading or editing, verify `git rev-parse --show-toplevel`, `git rev-parse --git-common-dir`, and `git worktree list --porcelain`. The current top level must equal `/Users/brandon/code/personal/cyberdeck/.claude/worktrees/agent-b-future`, not the primary checkout and not Agent A's worktree. Require the continuing Agent B branch and a clean status. The worktree is already provisioned; do not request or create another.
 - Do not inspect or mutate Agent A's worktree. Do not merge, cherry-pick, rebase, or integrate any branch. A human/integration session must supply the complete approved baseline.
 - Do not edit A-owned shared contracts/control-plane code. Likely examples are `src/domain/**`, `src/protocol/**`, `src/broker/**`, shared runtime/provider interfaces, and CLI routing. Confirm ownership from the integrated history.
 - B5 may edit B-owned presentation code and user-facing docs, but must use existing A-track extension points. If UX requires a shared contract change, stop and report it rather than crossing ownership.
-- Your deliverable is exactly one clean conventional commit containing only B5 cockpit, acceptance, and documentation work.
+- Your deliverable is exactly one cohesive B5 cockpit, acceptance, and documentation change, committed when safe or returned as one patch otherwise.
 
 ## Required integrated baseline
 
-Start only from a clean human-prepared integration baseline containing:
+The required **code baseline** contains:
 
 - B1 capability probes/fixtures;
 - B2 Claude adapter;
@@ -24,7 +31,7 @@ Start only from a clean human-prepared integration baseline containing:
 - the approved Agent A sequence through A5; and
 - a green independent Codex A2+B2 integration-gate report that applies to the current ancestry.
 
-Before editing, record `git status --short --branch`, `git rev-parse HEAD`, recent history, all relevant A/B commit SHAs/features, and the earlier gate evidence. If any component is missing, conflicts are unresolved, the worktree is dirty, or the earlier gate is stale, stop without changes. Do not perform the integration yourself.
+This must be the operator-integrated A5 baseline; B5 is intentionally sequential after A5, not parallel with it. When Git is available, record `git status --short --branch`, `git rev-parse HEAD`, recent history, all relevant A/B commit SHAs/features, and the earlier gate evidence. In Desktop without Git metadata, verify the corresponding source, contracts, tests, and recorded evidence from the connected folder. Do not hard-stop over checkout placement, branch naming, worktree layout, or unavailable history. Stop only if required A1–A5/B1–B4 code is genuinely absent/incompatible, conflicts are unresolved, the repository cannot be reached, or B5 cannot proceed without changing an A-owned contract. Report the exact mismatch.
 
 Read the current Phase 1 plan, README, session architecture, runtime baseline and acceptance docs, all A-track contract/control-plane docs, B1 evidence, B2–B4 adapter reports/code/tests, and current provider/runtime/tmux/dashboard/CLI source/tests. Inspect actual behavior before deciding the UI; file ownership listed below is a hypothesis.
 
@@ -39,7 +46,7 @@ Read the current Phase 1 plan, README, session architecture, runtime baseline an
 - If paid calls are not explicitly authorized, do not ask a real provider a prompt. Complete deterministic and operational acceptance, mark conversational checks `NOT RUN — explicit paid-runtime authorization absent`, and do not overclaim them.
 - Never run auth/login/logout/update/install commands, dangerous permission bypass, Cursor force/yolo/Smart Auto, or Antigravity permission bypass.
 
-The implementation runs in dependency-safe parallel waves. B5 begins only after A5 is integrated into this human-prepared baseline. All live broker, tmux, and provider scenarios must also be serialized: start one scenario, capture evidence, clean it up, and verify state before the next. Do not reuse a session when the scenario requires isolation.
+B5 begins only after A5 is integrated/applied into the checkout or connected folder supplied by the operator; no particular worktree path is required. All live broker, tmux, and provider scenarios must also be serialized: start one scenario, capture evidence, clean it up, and verify state before the next. Do not reuse a session when the scenario requires isolation.
 
 ## Objective
 
@@ -118,15 +125,15 @@ git status --short
 
 Run any new provider-capability probe only in its allowlisted read-only mode. Verify temporary broker/tmux/socket/process cleanup with exact read-only inspection commands.
 
-Then create exactly one commit, suggested subject:
+If committing is safe in the current checkout, create exactly one commit, suggested subject:
 
 ```text
 feat: complete provider cockpit acceptance
 ```
 
-Stage only B5-owned presentation/docs/tests. Do not amend, push, or merge.
+Stage only B5-owned presentation/docs/tests. Otherwise deliver the same cohesive change as one patch/diff and identify verification that could not run on the current surface. Do not amend, push, or merge.
 
-After B5 commits, **stop for the mandatory final independent Codex gate over the integrated A5+B5 baseline**. Do not declare the overall phase complete and do not bypass the gate. The human/integration session must place the approved A5 and B5 commits together, then launch a separate top-level Codex verification session to:
+After B5 finishes, **stop for the mandatory final independent Codex gate over the integrated A5+B5 baseline**. Do not declare the overall phase complete and do not bypass the gate. The human operator launches a new top-level Codex integration session, supplies the approved A5+B5 changes regardless of their original worktree placement, and has it perform runtime-environment testing plus any narrowly required integration repair/polish before it verifies:
 
 1. inspect A/B ownership and contract conformance;
 2. run focused provider, runtime, broker/control-plane, tmux/dashboard, and acceptance tests;
@@ -144,14 +151,14 @@ Only that independent green gate may authorize the integration coordinator to ca
 Report:
 
 - Starting baseline SHA and every integrated A1–A5/B1–B4 prerequisite commit/feature you verified.
-- Final B5 commit SHA/subject and every changed path.
+- Final B5 commit SHA/subject when committed, or a clear patch-delivery note, plus every changed path.
 - Cockpit/dashboard behavior added and the exact contract data used.
 - A provider-by-mode acceptance matrix with separate columns for metadata-observed, fixture-proven, operationally observed, live-proven, unsupported, and not run.
 - Exact probe, test, check, build, cockpit/tmux, cleanup, and any authorized live commands plus results/counts.
 - Explicit confirmation of whether paid calls were authorized and made; name the explicit ordinary models if so.
 - Explicit confirmation that no Fable start/call, automatic model selection/fallback, auth/config change, dangerous bypass, or A-owned edit occurred.
 - Remaining limitations and any adapter/contract issue the final verifier must examine.
-- Final clean `git status --short --branch` and cleanup evidence.
+- Final `git status --short --branch` when Git is available, plus cleanup evidence.
 - A clear handoff line: `READY FOR FINAL CODEX A5+B5 INTEGRATION GATE` or a concrete blocker.
 
-Stop after the one commit and report. Do not perform integration or begin another implementation phase.
+Stop after the one cohesive change and report. Do not perform final integration or begin another implementation phase.
