@@ -7,7 +7,7 @@ import { loadBrokerRuntimeConfig } from "../src/runtime-config.js";
 describe("loadBrokerRuntimeConfig", () => {
   it("uses defaults when the persistent config is absent", () => {
     expect(loadBrokerRuntimeConfig("/definitely/missing/cyberdeck-config.json").maxConcurrentWorkers)
-      .toBe(24);
+      .toBe(64);
   });
 
   it("loads an explicit unlimited worker setting", async () => {

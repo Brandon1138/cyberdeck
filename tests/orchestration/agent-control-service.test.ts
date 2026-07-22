@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { AgentControlService } from "../../src/orchestration/agent-control-service.js";
+import {
+  AgentControlService,
+  AgentStartWorkersParamsSchema,
+  AgentWaitWorkersParamsSchema,
+} from "../../src/orchestration/agent-control-service.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 
@@ -37,6 +41,21 @@ const binding: OrchestratorBinding = {
 };
 
 describe("AgentControlService", () => {
+  it("accepts 64-worker start and wait batches from one orchestrator turn", () => {
+    const workers = Array.from({ length: 64 }, (_, index) => ({
+      provider: "codex" as const,
+      cwd: "/repo/one",
+      prompt: `Worker ${index}`,
+    }));
+    const targets = Array.from({ length: 64 }, () => ({
+      sessionId: crypto.randomUUID(),
+      completionTarget: 1,
+    }));
+
+    expect(AgentStartWorkersParamsSchema.parse({ actorSessionId: ACTOR, workers }).workers).toHaveLength(64);
+    expect(AgentWaitWorkersParamsSchema.parse({ actorSessionId: ACTOR, targets }).targets).toHaveLength(64);
+  });
+
   it("lists and reads only threads inside the bound workspace", async () => {
     const outside = { ...worker, id: crypto.randomUUID(), cwd: "/repo/two" };
     const service = new AgentControlService(
@@ -123,6 +142,86 @@ describe("AgentControlService", () => {
       completionTarget: 1,
     });
     expect(start).toHaveBeenCalledWith(expect.objectContaining({ effort: "low" }), "Return 8 + 1000");
+  });
+
+  it("snapshots an enabled Caveman preference into newly started workers", async () => {
+    const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+      { get: vi.fn(async () => ({ caveman: true })) } as never,
+    );
+
+    await service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd: "/repo/one",
+      prompt: "Inspect",
+    });
+
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "worker",
+      workerMode: "caveman",
+    }), "Inspect");
+  });
+
+  it("denies Fable workers until the operator grant is enabled", async () => {
+    const start = vi.fn();
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "claude",
+      model: "fable",
+      effort: "high",
+      cwd: "/repo/one",
+      prompt: "Review the architecture",
+    })).rejects.toMatchObject({
+      code: "CAPABILITY_DENIED",
+      message: expect.stringContaining("/fable-workers on"),
+    });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("allows an explicitly selected Fable worker after the operator grant is enabled", async () => {
+    const enabled: OrchestratorBinding = {
+      ...binding,
+      grant: {
+        ...binding.grant,
+        capabilities: [...binding.grant.capabilities, "worker.start.fable"],
+      },
+    };
+    const start = vi.fn(async (request) => ({
+      ...worker,
+      ...request,
+      provider: "claude",
+      id: WORKER,
+      name: request.name,
+    }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => enabled) } as never,
+      {} as never,
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "claude",
+      model: "fable",
+      effort: "high",
+      cwd: "/repo/one",
+      prompt: "Review the architecture",
+    })).resolves.toMatchObject({ provider: "claude", model: "fable" });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      parentSessionId: ACTOR,
+      model: "fable",
+    }), "Review the architecture");
   });
 
   it("rejects guessed Codex aliases and unsupported effort before launch", async () => {

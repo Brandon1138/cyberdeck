@@ -1,25 +1,43 @@
 # Cyberdeck
 
-Cyberdeck is a neutral local broker for durable Claude and Codex terminal sessions. Provider processes run in broker-owned PTYs, so they can move between attached/interactive and detached/headless presentation without being restarted. tmux is an optional cockpit view, not the session owner.
+[![CI](https://github.com/Brandon1138/cyberdeck/actions/workflows/ci.yml/badge.svg)](https://github.com/Brandon1138/cyberdeck/actions/workflows/ci.yml)
+[![npm prerelease](https://img.shields.io/npm/v/%40brandon1138%2Fcyberdeck/next.svg)](https://www.npmjs.com/package/@brandon1138/cyberdeck)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-> **Stop and detach are different.** `cyberdeck stop <session-id>` terminates the provider process. Pressing `Ctrl-]`, closing an attached terminal, or closing a tmux pane only detaches that view; the session keeps running while the broker is alive.
+Cyberdeck is a neutral local broker for durable Codex, Claude, Cursor, and Antigravity terminal sessions. Provider processes run in broker-owned PTYs, so they can move between attached/interactive and detached/headless presentation without being restarted. tmux is an optional cockpit view, not the session owner.
+
+> **Stop and detach are different.** `cyberdeck stop <session-id>` terminates the selected provider process and, for an orchestrator, its owned worker tree. Pressing `Ctrl-]`, closing an attached terminal, or closing a tmux pane only detaches that view; the session keeps running while the broker is alive.
+
+> **Alpha software.** `0.1.0-alpha.1` is a macOS developer preview. Persisted schemas and provider compatibility may change before the first stable release.
 
 ## Requirements and installation
 
-The project pins Node 24.18.0 through mise and pnpm 11.5.0 through Corepack/package metadata. Claude Code and Codex CLI must be installed for their corresponding providers. The cockpit requires the native system `tmux` binary; Cyberdeck does not bundle, build, silently install, or emulate tmux. The plain Fleet remains usable without it.
+Cyberdeck requires macOS and Node.js 24.18 or newer in the Node 24 release line. Install and authenticate each provider CLI you intend to use. The cockpit also requires the native system `tmux` binary; Cyberdeck does not bundle, build, silently install, or emulate tmux. The plain Fleet remains usable without it.
+
+Install the public prerelease from npm:
 
 ```bash
-cd /Users/brandon/code/personal/cyberdeck
+npm install --global @brandon1138/cyberdeck@next
+cyberdeck
+```
+
+For source development, the repository pins Node 24.18.0 through mise and pnpm 11.5.0 through Corepack:
+
+```bash
+git clone https://github.com/Brandon1138/cyberdeck.git
+cd cyberdeck
 mise install
 mise exec -- corepack enable
 mise exec -- pnpm install --frozen-lockfile
 mise exec -- pnpm build
-(cd /tmp && mise exec -- pnpm add --global /Users/brandon/code/personal/cyberdeck)
+mise exec -- pnpm dev
 ```
 
-If the global install is not desired, replace `cyberdeck` in the examples with `node dist/src/cli.js` from the repository root.
-
 Run `cyberdeck` with no arguments to start the broker when needed and open the interactive fleet.
+
+Cyberdeck is an independent open-source project. It is not affiliated with,
+endorsed by, or sponsored by OpenAI, Anthropic, Cursor, or Google. Provider
+product names are used only to describe interoperability.
 
 ## Broker and cockpit
 
@@ -27,7 +45,7 @@ Run `cyberdeck` with no arguments to start the broker when needed and open the i
 cyberdeck broker start
 cyberdeck broker status
 cyberdeck broker restart
-cd ~/code/personal/soma
+cd /path/to/your/project
 cyberdeck cockpit --orchestrator codex --model gpt-5.6-sol --effort high
 cyberdeck list
 ```
@@ -65,19 +83,28 @@ Fleet controls:
 - `Right`, or `Enter` while the bottom composer is empty: open the selected provider TUI. A live
   thread attaches to its existing PTY; a terminal thread resumes that exact provider-native
   conversation first.
-- `Left` from a provider TUI: detach and return to the fleet. `Ctrl+]` remains an alternate detach
-  key.
+- `Left` from a worker TUI: detach and return to the fleet. Orchestrators keep Left for native TUI
+  input and detach only with `Ctrl+]`.
 - Enter `/model` to choose from the flat model catalog, then choose effort. The explicit selection
   applies immediately and is persisted per project.
+- Enter `/fable-workers status`, `/fable-workers on`, or `/fable-workers off` to inspect or change
+  autonomous Fable access for the selected/bound orchestrator. The grant is durable with that
+  binding; disabling it blocks new Fable workers without stopping existing threads.
+- Enter `/caveman-workers status`, `/caveman-workers on`, or `/caveman-workers off` to control the
+  durable, default-off box preference for subsequently started workers. It is independent of Orc
+  bindings and survives broker and Orc replacement. An optional box skill supplies the full policy;
+  Cyberdeck uses a compact built-in fallback when that skill is absent.
 - Type a task in the persistent bottom composer and press `Enter`: start a new thread using the
   visible model, effort, sandbox, and project context, then attach to its native TUI.
 - `?`: toggle the shortcut panel. It documents reorder, view switch, rename, multiline, pin, numbered
   opening, and contextual stop/delete controls.
-- `Esc`: close an active picker/edit mode, clear a draft, or leave Fleet from the base/help view.
-- `Ctrl+X` on a live agent: stop it through the broker.
-- `Ctrl+X` on a stopped, done, or failed thread: show the red `press ctrl+x again to delete`
-  confirmation. Press `Ctrl+X` once more to delete the thread record.
-- `Ctrl+C`: leave the fleet. This does not stop an agent.
+- `Esc`: close an active picker/edit mode or clear a draft. It never exits Fleet.
+- `Ctrl+X` on a live worker: stop it through the broker. On an orchestrator, stop the orchestrator
+  and every owned worker while keeping all thread history visible.
+- `Ctrl+X` on a terminal thread or fully stopped orchestrator tree: show the exact red deletion
+  confirmation. Press `Ctrl+X` once more to delete the thread or tree leaf-first.
+- `Ctrl+C` twice consecutively: leave Fleet. The first press shows a red inline confirmation near the
+  footer; any other key cancels it. Exiting does not stop an agent.
 
 New-thread tasks are passed to the provider as one initial positional argument. The full task body is
 not stored in the session record; a normalized 72-character thread title is retained as `name` for
@@ -111,6 +138,12 @@ binding without editing JSONL files:
 ```bash
 cyberdeck stop ORCHESTRATOR_SESSION_ID
 cyberdeck orchestrator reset
+cyberdeck orchestrator fable-workers status
+cyberdeck orchestrator fable-workers on
+cyberdeck orchestrator fable-workers off
+cyberdeck orchestrator caveman-workers status
+cyberdeck orchestrator caveman-workers on
+cyberdeck orchestrator caveman-workers off
 ```
 
 An explicit different provider/model can then replace an inactive latest binding cleanly. Pass
@@ -169,13 +202,13 @@ cyberdeck broker stop
 `cyberdeck broker restart` requests a graceful shutdown, waits for the old socket to close, starts
 the built broker in the background, and waits for the replacement to report healthy.
 
-Cyberdeck admits 24 active workers by default. Orchestrators do not consume worker slots. Override
+Cyberdeck admits 64 active workers by default. Orchestrators do not consume worker slots. Override
 the ceiling persistently in `~/Library/Application Support/Cyberdeck/config.json`, then restart the
 broker:
 
 ```json
 {
-  "maxConcurrentWorkers": 48
+  "maxConcurrentWorkers": 128
 }
 ```
 
@@ -229,7 +262,7 @@ cyberdeck send SESSION_ID "Summarize the current state without changing files."
 cyberdeck logs SESSION_ID
 ```
 
-`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press Left or `Ctrl-]` to detach from either view. Terminal threads refuse attachment until they have been resumed, and provider exit automatically releases every controller and watcher.
+`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press Left or `Ctrl-]` to return from a worker. Orchestrators reserve Left for their native TUI and detach only with `Ctrl-]`. Terminal threads refuse attachment until they have been resumed, and provider exit automatically releases every controller and watcher.
 
 `send` submits one logical prompt without opening an interactive client. The selected provider
 adapter encodes its terminal's actual Enter key, so steering does not depend on a portable newline
@@ -243,7 +276,10 @@ Delegation still requires an explicit provider; the role is only an optional use
 cyberdeck delegate --parent PARENT_SESSION_ID --provider codex --cwd /absolute/project/path --sandbox read-only --role my-label --name child-session
 ```
 
-Cyberdeck does not infer a provider or model from the role. Delegated Fable is rejected before launch with `FABLE_REQUIRES_EXPLICIT_HUMAN_START`. A top-level Fable start can only be a deliberate human command and is never needed for tests or runtime probes. Opus has no special restriction.
+Cyberdeck does not infer a provider or model from the role. An explicit operator start may select
+Fable directly. Autonomous Fable workers are disabled by default and fail before launch unless the
+bound orchestrator has the durable `worker.start.fable` capability. Only the operator Fleet/CLI
+surface can change that grant; an orchestrator cannot enable itself. Opus has no special restriction.
 
 ## Stop and inspect
 
@@ -253,11 +289,12 @@ cyberdeck logs SESSION_ID
 cyberdeck stop SESSION_ID
 ```
 
-Use `stop` only when the provider process should end. Closing a terminal or tmux pane is not a substitute for `stop`, and `stop` is not a detach operation.
+Use `stop` only when the selected runtime should end. Stopping an orchestrator also stops its owned workers. Closing a terminal or tmux pane is not a substitute for `stop`, and `stop` is not a detach operation.
 
-Deleting a thread is separate from stopping it. The fleet refuses deletion until the provider
-process has exited, then requires the visible two-press confirmation described above. A parent
-thread cannot be deleted while child thread records still exist.
+Deleting history is separate from stopping a runtime. The fleet refuses deletion until the full
+selected tree has exited and requires the visible two-press confirmation described above. Confirmed
+tree deletion removes descendants leaf-first, clears an orchestrator binding, and removes the root
+last.
 
 ## Test, check, build, and probe
 
@@ -289,14 +326,15 @@ That is the complete zero-call workflow. No test or probe resolves a real provid
 
 Headless is **one-shot per job for every provider**: each bounded job is a fresh invocation that claims no conversation continuity. No `--resume`, `--continue`, or session-continuation flag is emitted, and no `--fallback-model` or automatic-selection flag exists anywhere.
 
-Explicit-model examples that cannot accidentally invoke Fable — always name the model:
+Explicit-model examples — always name the model:
 
 ```bash
 cyberdeck start --provider claude --cwd /absolute/project/path --sandbox read-only --model claude-opus-4-8
+cyberdeck start --provider claude --cwd /absolute/project/path --sandbox read-only --model fable
 cyberdeck start --provider codex  --cwd /absolute/project/path --sandbox read-only --model MODEL_NAME
 ```
 
-> **Omitting `--model` is not safe for Claude.** The neutral stored/delegation policy retains an omitted model, but both current interactive and headless Claude launch boundaries reject it before process construction because the recorded native default displayed Fable. Name an explicit ordinary model on every real Claude start.
+> **Omitting `--model` is not safe for Claude.** The neutral stored contract retains an omitted model, but both current interactive and headless Claude launch boundaries reject it before process construction because omission is not an explicit operator choice. Name the intended model on every real Claude start.
 
 Capability claims are graded and never merged: `metadata-observed`, `fixture-proven`, `help-advertised`, `operationally observed`, `unsupported`, `not run`, and `live-proven`. The B-track presentation register has no `live-proven` entries; final Gate 2 separately records one authorized live Codex App Server turn. Metadata observations are date- and version-sensitive because these runtimes update themselves. See [docs/setup/integrated-acceptance.md](docs/setup/integrated-acceptance.md) for the full matrix and current limitations.
 
@@ -319,8 +357,24 @@ shared, runtime-validated contracts are defined in `src/domain/` and documented 
 `docs/superpowers/plans/2026-07-21-cyberdeck-phase-2-3.md`. Job submission, structured delegation,
 report-back, persistence/recovery, structured artifact storage, supervised Codex App Server
 transport, and durable canonical-path worktree leases are implemented. The neutral
-policy — explicit provider, opaque model/role, no ranking or routing, no automation-launched Fable
+policy — explicit provider, opaque model/role, no ranking or routing, no unauthorized Fable delegation
 — is unchanged. Exact recovery and storage operations are documented in
 `docs/architecture/persistence-and-recovery.md`. App Server compatibility, interruption mapping,
 lease fencing, and orphan remediation are in
 `docs/architecture/app-server-and-worktree-leases.md`.
+
+## Security, privacy, and contributing
+
+Cyberdeck stores local session metadata and transcripts below
+`~/Library/Application Support/Cyberdeck/`. These files can contain sensitive
+prompts, source code, paths, and provider output. Provider processes inherit the
+launching environment and remain governed by their own sandbox, network,
+telemetry, authentication, and service terms.
+
+Read [SECURITY.md](SECURITY.md) before operating Cyberdeck on sensitive
+repositories. Vulnerabilities should be reported privately through GitHub's
+Security tab, not through a public issue.
+
+Cyberdeck is licensed under [Apache-2.0](LICENSE). Contributions are welcome
+under the [contribution guide](CONTRIBUTING.md) and Developer Certificate of
+Origin. Project branding is covered separately by [TRADEMARKS.md](TRADEMARKS.md).

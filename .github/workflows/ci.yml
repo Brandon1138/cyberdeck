@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Scan repository history for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          registry-url: https://registry.npmjs.org/
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm check
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level=high
+
+      - name: Pack and inspect publication
+        run: |
+          npm pack --ignore-scripts --json --silent > package-output.json
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const [result] = JSON.parse(readFileSync("package-output.json", "utf8"));
+            const names = new Set(result.files.map(({ path }) => path));
+            for (const required of ["LICENSE", "README.md", "dist/src/cli.js"]) {
+              if (!names.has(required)) throw new Error(`Packed artifact is missing ${required}`);
+            }
+            if ([...names].some((name) => name.startsWith("tests/") || name.startsWith("docs/prompts/"))) {
+              throw new Error("Packed artifact contains development-only files");
+            }
+            console.log(result.filename);
+          '
+
+      - name: Clean-install packed CLI
+        run: |
+          package_file=$(node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const [result] = JSON.parse(readFileSync("package-output.json", "utf8"));
+            process.stdout.write(result.filename);
+          ')
+          install_root=$(mktemp -d)
+          npm install --global --prefix "$install_root" "./$package_file"
+          "$install_root/bin/cyberdeck" --version
+          "$install_root/bin/cyberdeck" broker start
+          "$install_root/bin/cyberdeck" broker status
+          "$install_root/bin/cyberdeck" broker stop

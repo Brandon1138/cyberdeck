@@ -14,6 +14,7 @@ import type { JobDispatchAdapter } from "../../src/domain/dispatch.js";
 import type { JobRecord } from "../../src/domain/job.js";
 import { ServerFrameSchema, type ServerFrame } from "../../src/protocol/frames.js";
 import { JsonlDecoder, encodeFrame } from "../../src/protocol/jsonl.js";
+import { WorkerPreferenceStore } from "../../src/persistence/worker-preference-store.js";
 
 const NOW = "2026-07-21T00:00:00.000Z";
 
@@ -78,13 +79,20 @@ class TestClient {
   }
 }
 
-async function harness() {
+async function harness(workerMode?: "caveman") {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-job-api-"));
   const socketPath = join(directory, "broker.sock");
   const controlPlane = new JobControlPlane({ registry: defaultProviderRegistry(), now: () => NOW });
   controlPlane.registerAdapter(acceptingAdapter("codex"));
   const registry = { releaseClient: async () => {} } as unknown as SessionRegistry;
-  const server = new BrokerServer({ socketPath, registry, controlPlane });
+  const workerPreferences = new WorkerPreferenceStore(directory);
+  if (workerMode === "caveman") await workerPreferences.set({ caveman: true });
+  const server = new BrokerServer({
+    socketPath,
+    registry,
+    controlPlane,
+    workerPreferences,
+  });
   await server.listen();
   return { server, socketPath };
 }
@@ -117,6 +125,24 @@ interface Snapshot {
 }
 
 describe("broker job control-plane API", () => {
+  it("snapshots the box Caveman preference into delegated bounded jobs", async () => {
+    const { server, socketPath } = await harness("caveman");
+    const client = await TestClient.open(socketPath);
+    try {
+      const result = await client.request<{ job: JobRecord }>("job.delegate", {
+        schemaVersion: 1,
+        delegationId: randomUUID(),
+        correlationId: randomUUID(),
+        parentSessionId: randomUUID(),
+        request: baseRequest,
+      });
+      expect(result.job.request.workerMode).toBe("caveman");
+    } finally {
+      client.socket.destroy();
+      await server.close();
+    }
+  });
+
   it("submits, ingests completion, and acknowledges a delegated report-back over the socket", async () => {
     const { server, socketPath } = await harness();
     const client = await TestClient.open(socketPath);

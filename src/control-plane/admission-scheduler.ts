@@ -25,7 +25,7 @@ export type AdmissionBlockReason =
   | "MAX_CONCURRENT_JOBS"
   | "MAX_CONCURRENT_PER_PROVIDER"
   | "MAX_CONCURRENT_PER_REPOSITORY"
-  | "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL";
+  | "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL";
 
 export interface QueuedEntryView {
   jobId: string;
@@ -66,8 +66,9 @@ export interface AdmissionSchedulerOptions {
  * explicitly requested.
  *
  * **Launch safety.** Free capacity is not a reason to start a live Claude job whose model is omitted
- * or Fable. Those candidates are held (never admitted) and surfaced as blocked, so an unknown model
- * stays unsafe rather than being converted into a default.
+ * is omitted. Those candidates are held (never admitted) and surfaced as blocked, so an unknown
+ * model stays unsafe rather than being converted into a default. Explicit Fable authorization is
+ * enforced at the operator/delegation boundary, not by concurrency admission.
  */
 export class AdmissionScheduler {
   private readonly queue = new Map<string, AdmissionCandidate>();
@@ -168,7 +169,7 @@ export class AdmissionScheduler {
 
   private blockReason(candidate: AdmissionCandidate): AdmissionBlockReason | undefined {
     if (!evaluateClaudeLaunchSafety(candidate.provider, candidate.model).safe) {
-      return "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL";
+      return "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL";
     }
     const { maxConcurrentJobs, maxConcurrentPerProvider, maxConcurrentPerRepository } =
       this.options.limits;

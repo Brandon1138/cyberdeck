@@ -23,6 +23,8 @@ import { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js
 import { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import { SessionStore } from "../persistence/session-store.js";
 import { FleetPreferenceStore } from "../persistence/fleet-preference-store.js";
+import { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
+import { ensurePrivateDirectory } from "../persistence/private-files.js";
 import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import { AgentControlService } from "../orchestration/agent-control-service.js";
 import { InstructionQueue } from "../orchestration/instruction-queue.js";
@@ -65,6 +67,7 @@ export async function runBroker(
   socketPath = brokerSocketPath,
   stateDirectory = appStateDirectory,
 ): Promise<BrokerServer> {
+  await ensurePrivateDirectory(stateDirectory);
   const journal = new Journal(stateDirectory);
   const transcripts = new ThreadTranscriptStore(stateDirectory);
   await transcripts.init();
@@ -73,6 +76,7 @@ export async function runBroker(
   const config = loadBrokerRuntimeConfig(resolve(stateDirectory, "config.json"));
   const sessionStore = new SessionStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
+  const workerPreferences = new WorkerPreferenceStore(stateDirectory);
   const recoveredSessions = await sessionStore.load();
   const registry = new SessionRegistry({
     adapters: {
@@ -90,8 +94,8 @@ export async function runBroker(
   });
   await registry.ready();
   const orchestratorStore = new OrchestratorStore(stateDirectory);
-  const orchestrators = new OrchestratorManager(registry, orchestratorStore);
-  const agentControl = new AgentControlService(registry, orchestratorStore, transcripts);
+  const orchestrators = new OrchestratorManager(registry, orchestratorStore, workerPreferences);
+  const agentControl = new AgentControlService(registry, orchestratorStore, transcripts, workerPreferences);
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
   instructions.start();
   const workflows = new WorkflowService(
@@ -136,6 +140,7 @@ export async function runBroker(
     controlPlane: runtime.controlPlane,
     controlPlaneRuntime: runtime,
     fleetPreferences,
+    workerPreferences,
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();

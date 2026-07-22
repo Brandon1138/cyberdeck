@@ -1,4 +1,6 @@
 import type { JobRequest } from "../../domain/job.js";
+import { jobLaunchEnvironment } from "../launch-environment.js";
+import { applyWorkerMode } from "../worker-mode.js";
 
 type CursorInteractiveRequest = Pick<JobRequest, "cwd" | "sandbox" | "model">;
 
@@ -25,7 +27,12 @@ export function buildCursorInteractiveCommand(
   const args = cursorSafetyArgs(request);
   if (request.model !== undefined) args.push("--model", request.model);
   if (initialPrompt !== undefined) args.push(initialPrompt);
-  return { executable: "agent", args, cwd: request.cwd, env: { ...process.env } };
+  return {
+    executable: "agent",
+    args,
+    cwd: request.cwd,
+    env: { ...process.env },
+  };
 }
 
 /**
@@ -40,8 +47,13 @@ export function buildCursorHeadlessCommand(
   if (options.streamPartialOutput === true) args.push("--stream-partial-output");
   args.push(...cursorSafetyArgs(request));
   if (request.model !== undefined) args.push("--model", request.model);
-  args.push(request.instruction);
-  return { executable: "agent", args, cwd: request.cwd, env: { ...process.env } };
+  args.push(applyWorkerMode(request.instruction, request.workerMode));
+  return {
+    executable: "agent",
+    args,
+    cwd: request.cwd,
+    env: jobLaunchEnvironment({ ...process.env }, request),
+  };
 }
 
 function cursorSafetyArgs(request: Pick<JobRequest, "cwd" | "sandbox">): string[] {

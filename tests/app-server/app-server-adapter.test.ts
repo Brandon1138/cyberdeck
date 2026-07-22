@@ -144,7 +144,10 @@ describe("AppServerJobDispatchAdapter", () => {
       executable: "codex",
       args: ["app-server", "--stdio", "--strict-config"],
       cwd: "/tmp/repo",
-      env: expect.any(Object),
+      env: expect.objectContaining({
+        CYBERDECK_PROCESS_ROLE: "worker",
+        CYBERDECK_WORKER_MODE: "normal",
+      }),
     });
     expect(process.writes[1]).toMatchObject({ method: "initialized" });
     expect(process.take("thread/start")).toMatchObject({
@@ -311,6 +314,23 @@ describe("AppServerJobDispatchAdapter", () => {
       expect(JSON.stringify(process.writes)).not.toContain(forbidden);
     }
     process.stdout({ jsonrpc: "2.0", method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } } });
+    await report;
+  });
+
+  it("injects Caveman policy into the actual Codex App Server turn", async () => {
+    const process = new FakeProcess();
+    const adapter = new AppServerJobDispatchAdapter({ spawn: () => process, now: () => NOW });
+    const report = nextReport(adapter);
+    await begin(adapter, process, request({ workerMode: "caveman" }));
+
+    const turn = process.take("turn/start") as { params: { input: Array<{ text: string }> } };
+    expect(turn.params.input[0]?.text).toContain("CAVEMAN MODE ACTIVE");
+    expect(turn.params.input[0]?.text).toContain("WORKER TASK\ninspect the fake repository");
+    process.stdout({
+      jsonrpc: "2.0",
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
+    });
     await report;
   });
 

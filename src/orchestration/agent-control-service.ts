@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { MAX_FANOUT_BATCH } from "../limits.js";
 import { grantAllows, type CapabilityGrant, type CyberdeckCapability } from "../domain/capability.js";
+import { isFableModel } from "../domain/policy.js";
 import {
   ProviderIdSchema,
   ReasoningEffortSchema,
@@ -10,6 +12,7 @@ import type { ThreadReadResult } from "../domain/thread.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
+import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import { validateWorkerSelection } from "./worker-capabilities.js";
 
 export const AgentActorParamsSchema = z.object({ actorSessionId: z.uuid() });
@@ -28,13 +31,13 @@ export const AgentStartWorkerParamsSchema = AgentActorParamsSchema.extend({
   name: z.string().optional(),
 });
 export const AgentStartWorkersParamsSchema = AgentActorParamsSchema.extend({
-  workers: z.array(AgentStartWorkerParamsSchema.omit({ actorSessionId: true })).min(1).max(24),
+  workers: z.array(AgentStartWorkerParamsSchema.omit({ actorSessionId: true })).min(1).max(MAX_FANOUT_BATCH),
 });
 export const AgentWaitWorkersParamsSchema = AgentActorParamsSchema.extend({
   targets: z.array(z.object({
     sessionId: z.uuid(),
     completionTarget: z.number().int().positive().default(1),
-  })).min(1).max(24),
+  })).min(1).max(MAX_FANOUT_BATCH),
   timeoutSeconds: z.number().int().min(1).max(600).default(300),
   maxResultChars: z.number().int().min(200).max(4_000).default(1_200),
 });
@@ -72,6 +75,7 @@ export class AgentControlService {
     private readonly registry: SessionRegistry,
     private readonly orchestrators: OrchestratorStore,
     private readonly transcripts: ThreadTranscriptStore,
+    private readonly workerPreferences?: WorkerPreferenceStore,
   ) {}
 
   async listThreads(actorSessionId: string): Promise<SessionRecord[]> {
@@ -110,6 +114,16 @@ export class AgentControlService {
     const request = AgentStartWorkerParamsSchema.parse(input);
     const binding = await this.requireBinding(request.actorSessionId);
     this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
+    if (isFableModel(request.model) && !grantAllows(
+      binding.grant,
+      "worker.start.fable",
+      { cwd: request.cwd },
+    )) {
+      throw new AgentControlError(
+        "CAPABILITY_DENIED",
+        "Fable workers are disabled for this orchestrator; the operator can run /fable-workers on",
+      );
+    }
     const selection = validateWorkerSelection({
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
@@ -117,6 +131,7 @@ export class AgentControlService {
     });
     if (!selection.ok) throw new AgentControlError(selection.code, selection.message);
     const name = request.name ?? taskName(request.prompt);
+    const workerMode = (await this.workerPreferences?.get())?.caveman === true ? "caveman" : "normal";
     const worker = await this.registry.start({
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
@@ -127,6 +142,7 @@ export class AgentControlService {
       parentSessionId: request.actorSessionId,
       kind: "worker",
       role: "worker",
+      workerMode,
       name,
     }, request.prompt);
     return {

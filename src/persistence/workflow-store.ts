@@ -1,11 +1,12 @@
-import { mkdir, open, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   WorkflowMessageSchema,
   WorkflowRunSchema,
   type WorkflowMessage,
   type WorkflowRun,
 } from "../domain/workflow.js";
+import { openPrivateAppendFile } from "./private-files.js";
 
 export class WorkflowStore {
   private readonly runsPath: string;
@@ -42,8 +43,7 @@ export class WorkflowStore {
 }
 
 async function append(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const handle = await open(path, "a", 0o600);
+  const handle = await openPrivateAppendFile(path);
   try {
     await handle.write(`${JSON.stringify(value)}\n`, undefined, "utf8");
     await handle.sync();
@@ -61,4 +61,3 @@ async function readLines<T>(path: string, parse: (value: unknown) => T): Promise
   if (!content.endsWith("\n")) lines.pop();
   return lines.filter((line) => line.trim() !== "").map((line) => parse(JSON.parse(line)));
 }
-

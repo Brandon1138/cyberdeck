@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a reproducible Cyberdeck defect
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, private transcripts, or sensitive source code. Report vulnerabilities privately through the Security tab.
+  - type: input
+    id: version
+    attributes:
+      label: Cyberdeck version
+      placeholder: 0.1.0-alpha.1
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - None / broker only
+        - Codex
+        - Claude
+        - Cursor
+        - Antigravity
+        - Multiple
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Include minimal reproduction steps, expected behavior, and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS, Node.js, tmux, and provider CLI versions as relevant.
+    validations:
+      required: true

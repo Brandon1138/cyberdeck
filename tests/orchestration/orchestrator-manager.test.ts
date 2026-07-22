@@ -85,6 +85,105 @@ describe("OrchestratorManager", () => {
     expect(instructions).toContain("never reread from cursor zero");
     expect(start.mock.calls[0]).toHaveLength(1);
     expect(put).toHaveBeenCalledOnce();
+    expect(result.binding.grant.capabilities).not.toContain("worker.start.fable");
+  });
+
+  it("persists operator-controlled Fable worker access on the binding", async () => {
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const manager = new OrchestratorManager(
+      {} as never,
+      { get: vi.fn(async () => binding), put } as never,
+    );
+
+    await expect(manager.fableWorkers({
+      cwd: "/repo/one",
+      scope: "workspace",
+      enabled: true,
+    })).resolves.toEqual({
+      key: "workspace:/repo/one",
+      configured: true,
+      enabled: true,
+      sessionId: SESSION_ID,
+    });
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({
+      grant: expect.objectContaining({
+        capabilities: ["thread.list", "worker.start.fable"],
+      }),
+    }));
+  });
+
+  it("persists operator-controlled Caveman mode as a box preference", async () => {
+    const set = vi.fn(async (preferences) => preferences);
+    const manager = new OrchestratorManager(
+      {} as never,
+      {} as never,
+      { get: vi.fn(async () => ({ caveman: false })), set } as never,
+    );
+
+    await expect(manager.cavemanWorkers({
+      enabled: true,
+    })).resolves.toEqual({
+      scope: "box",
+      enabled: true,
+    });
+    expect(set).toHaveBeenCalledWith({ caveman: true });
+  });
+
+  it("reports the box default without requiring an orchestrator binding", async () => {
+    const manager = new OrchestratorManager(
+      {} as never,
+      {} as never,
+      { get: vi.fn(async () => ({ caveman: false })) } as never,
+    );
+    await expect(manager.cavemanWorkers({})).resolves.toEqual({
+      scope: "box",
+      enabled: false,
+    });
+  });
+
+  it("resolves Caveman mode from the box default", async () => {
+    const manager = new OrchestratorManager(
+      {} as never,
+      {} as never,
+      { get: vi.fn(async () => ({ caveman: true })) } as never,
+    );
+    await expect(manager.workerMode()).resolves.toBe("caveman");
+  });
+
+  it("reports disabled without creating a grant when no orchestrator is bound", async () => {
+    const manager = new OrchestratorManager(
+      {} as never,
+      { get: vi.fn(async () => undefined) } as never,
+    );
+    await expect(manager.fableWorkers({ cwd: "/repo/one", scope: "workspace" })).resolves.toEqual({
+      key: "workspace:/repo/one",
+      configured: false,
+      enabled: false,
+    });
+  });
+
+  it("disables future Fable starts without removing unrelated capabilities", async () => {
+    const enabled: OrchestratorBinding = {
+      ...binding,
+      grant: {
+        ...binding.grant,
+        capabilities: ["thread.list", "worker.start", "worker.start.fable"],
+      },
+    };
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const manager = new OrchestratorManager(
+      {} as never,
+      { get: vi.fn(async () => enabled), put } as never,
+    );
+
+    await expect(manager.fableWorkers({
+      cwd: "/repo/one",
+      scope: "workspace",
+      enabled: false,
+    })).resolves.toMatchObject({ enabled: false });
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({
+      grant: expect.objectContaining({ capabilities: ["thread.list", "worker.start"] }),
+    }));
   });
 
   it("creates one cwd-independent fleet grant", async () => {
@@ -268,5 +367,19 @@ describe("OrchestratorManager", () => {
       message: expect.stringContaining(`cyberdeck stop ${SESSION_ID}`),
     });
     expect(reset).not.toHaveBeenCalled();
+  });
+
+  it("clears the matching binding before an orchestrator session record is deleted", async () => {
+    const reset = vi.fn(async () => undefined);
+    const manager = new OrchestratorManager(
+      {} as never,
+      { findBySessionId: vi.fn(async () => binding), reset } as never,
+    );
+
+    await expect(manager.resetSessionBinding(SESSION_ID)).resolves.toEqual({
+      reset: true,
+      key: "workspace:/repo/one",
+    });
+    expect(reset).toHaveBeenCalledWith("workspace:/repo/one");
   });
 });

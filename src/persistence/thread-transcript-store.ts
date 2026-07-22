@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   ThreadEventSchema,
   type ThreadEvent,
@@ -8,6 +8,7 @@ import {
   type ThreadEventSource,
   type ThreadReadResult,
 } from "../domain/thread.js";
+import { openPrivateAppendFile } from "./private-files.js";
 
 export interface AppendThreadEvent {
   sessionId: string;
@@ -99,8 +100,7 @@ export class ThreadTranscriptStore {
   }
 
   private async persist(event: ThreadEvent): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true });
-    const handle = await open(this.path, "a", 0o600);
+    const handle = await openPrivateAppendFile(this.path);
     try {
       await handle.write(`${JSON.stringify(event)}\n`, undefined, "utf8");
       await handle.sync();
@@ -109,4 +109,3 @@ export class ThreadTranscriptStore {
     }
   }
 }
-

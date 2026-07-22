@@ -22,7 +22,7 @@ describe("Cyberdeck MCP server", () => {
         ]),
       },
     });
-    const tools = (response?.result as { tools: Array<{ name: string; inputSchema: { properties?: { provider?: { enum?: string[] } } } }> }).tools;
+    const tools = (response?.result as { tools: Array<{ name: string; inputSchema: { properties?: Record<string, { enum?: string[]; maxItems?: number }> } }> }).tools;
     const workerStart = tools.find(({ name }) => name === "cyberdeck_worker_start");
     expect(workerStart?.inputSchema.properties?.provider?.enum).toEqual([
       "codex",
@@ -36,6 +36,10 @@ describe("Cyberdeck MCP server", () => {
     } | undefined;
     expect(threadRead?.inputSchema.required).toContain("afterCursor");
     expect(threadRead?.inputSchema.properties?.limit?.maximum).toBe(100);
+    const workersStart = tools.find(({ name }) => name === "cyberdeck_workers_start");
+    const workersWait = tools.find(({ name }) => name === "cyberdeck_workers_wait");
+    expect(workersStart?.inputSchema.properties?.workers?.maxItems).toBe(64);
+    expect(workersWait?.inputSchema.properties?.targets?.maxItems).toBe(64);
   });
 
   it("adds the bound actor identity to every broker operation", async () => {

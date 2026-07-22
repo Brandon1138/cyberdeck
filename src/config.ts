@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { BudgetDeclarationSchema, ConcurrencyDeclarationSchema } from "./domain/budget.js";
 import { CONTROL_PLANE_SCHEMA_VERSION } from "./domain/control-plane.js";
+import { DEFAULT_MAX_CONCURRENT_WORKERS } from "./limits.js";
 
 /**
  * Broker-wide runtime configuration.
@@ -12,7 +13,7 @@ import { CONTROL_PLANE_SCHEMA_VERSION } from "./domain/control-plane.js";
  */
 export const BrokerRuntimeConfigSchema = z.object({
   /** Active workers only; orchestrators are excluded. `null` explicitly disables the ceiling. */
-  maxConcurrentWorkers: z.number().int().positive().nullable().default(24),
+  maxConcurrentWorkers: z.number().int().positive().nullable().default(DEFAULT_MAX_CONCURRENT_WORKERS),
   maxDelegationDepth: z.literal(1).default(1),
   replayBytes: z.number().int().positive().default(128 * 1024),
   concurrency: ConcurrencyDeclarationSchema.default({ schemaVersion: CONTROL_PLANE_SCHEMA_VERSION }),

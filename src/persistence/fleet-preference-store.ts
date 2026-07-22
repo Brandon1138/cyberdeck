@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { z } from "zod";
 import { ProviderIdSchema } from "../domain/provider-registration.js";
 import { ReasoningEffortSchema } from "../domain/session.js";
+import { openPrivateAppendFile } from "./private-files.js";
 
 export const FleetLaunchProfileSchema = z.object({
   provider: ProviderIdSchema,
@@ -36,8 +37,7 @@ export class FleetPreferenceStore {
       cwd,
       profile,
     });
-    await mkdir(dirname(this.path), { recursive: true });
-    const handle = await open(this.path, "a", 0o600);
+    const handle = await openPrivateAppendFile(this.path);
     try {
       await handle.write(`${JSON.stringify(record)}\n`, undefined, "utf8");
       await handle.sync();

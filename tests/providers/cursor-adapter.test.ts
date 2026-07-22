@@ -166,6 +166,16 @@ describe("Cursor command construction", () => {
       "inspect the fixture repository",
     ]);
     expect(command.cwd).toBe("/tmp/repo");
+    expect(command.env).toMatchObject({
+      CYBERDECK_PROCESS_ROLE: "worker",
+      CYBERDECK_WORKER_MODE: "normal",
+    });
+  });
+
+  it("injects Caveman policy into the actual Cursor worker prompt", () => {
+    const command = buildCursorHeadlessCommand(request({ workerMode: "caveman" }).request);
+    expect(command.args.at(-1)).toContain("CAVEMAN MODE ACTIVE");
+    expect(command.args.at(-1)).toContain("WORKER TASK\ninspect the fixture repository");
   });
 
   it("keeps workspace-write sandboxed without inventing a read-only mode", () => {

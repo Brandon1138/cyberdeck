@@ -12,7 +12,7 @@ describe("worker provider capabilities", () => {
         models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
         efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
       }),
-      expect.objectContaining({ provider: "claude", models: ["haiku", "sonnet", "opus"] }),
+      expect.objectContaining({ provider: "claude", models: ["haiku", "sonnet", "opus", "fable"] }),
       expect.objectContaining({ provider: "cursor", models: ["composer"], efforts: [] }),
       expect.objectContaining({
         provider: "antigravity",
@@ -35,6 +35,8 @@ describe("worker provider capabilities", () => {
     expect(validateWorkerSelection({ provider: "claude", model: "haiku", effort: "low" }))
       .toEqual({ ok: true });
     expect(validateWorkerSelection({ provider: "codex", model: "gpt-5.6-sol", effort: "ultra" }))
+      .toEqual({ ok: true });
+    expect(validateWorkerSelection({ provider: "claude", model: "fable", effort: "high" }))
       .toEqual({ ok: true });
   });
 

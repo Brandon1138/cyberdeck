@@ -1,13 +1,20 @@
 import {
+  CavemanWorkersRequestSchema,
   EnsureOrchestratorRequestSchema,
+  FableWorkersRequestSchema,
   orchestratorKey,
+  type CavemanWorkersRequest,
+  type CavemanWorkersResult,
   type EnsureOrchestratorRequest,
+  type FableWorkersRequest,
+  type FableWorkersResult,
   type OrchestratorBinding,
   type OrchestratorScope,
   type ResetOrchestratorRequest,
 } from "../domain/orchestrator.js";
 import type { SessionRecord } from "../domain/session.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
 
 export interface OrchestratorManagerResult {
@@ -22,10 +29,16 @@ export interface OrchestratorResetResult {
   sessionId?: string;
 }
 
+export interface OrchestratorSessionResetResult {
+  reset: boolean;
+  key?: string;
+}
+
 export class OrchestratorManager {
   constructor(
     private readonly registry: SessionRegistry,
     private readonly store: OrchestratorStore,
+    private readonly workerPreferences?: WorkerPreferenceStore,
   ) {}
 
   async ensure(input: EnsureOrchestratorRequest): Promise<OrchestratorManagerResult> {
@@ -120,6 +133,63 @@ export class OrchestratorManager {
     return session === undefined ? undefined : { binding, session, created: false };
   }
 
+  /** Operator-owned durable control over whether this binding may start Fable workers. */
+  async fableWorkers(input: FableWorkersRequest): Promise<FableWorkersResult> {
+    const request = FableWorkersRequestSchema.parse(input);
+    const scope: OrchestratorScope = request.scope === "fleet"
+      ? { kind: "fleet" }
+      : { kind: "workspace", cwd: request.cwd };
+    const key = orchestratorKey(scope);
+    const binding = await this.store.get(key);
+    if (binding === undefined) {
+      if (request.enabled !== undefined) {
+        throw Object.assign(
+          new Error(`No orchestrator binding exists for ${key}; choose an orchestrator first`),
+          { code: "ORCHESTRATOR_NOT_CONFIGURED" },
+        );
+      }
+      return { key, configured: false, enabled: false };
+    }
+
+    const enabled = binding.grant.capabilities.includes("worker.start.fable");
+    if (request.enabled === undefined || request.enabled === enabled) {
+      return { key, configured: true, enabled, sessionId: binding.sessionId };
+    }
+
+    const capabilities = request.enabled
+      ? [...binding.grant.capabilities, "worker.start.fable" as const]
+      : binding.grant.capabilities.filter((capability) => capability !== "worker.start.fable");
+    const updated: OrchestratorBinding = {
+      ...binding,
+      grant: { ...binding.grant, capabilities },
+      updatedAt: new Date().toISOString(),
+    };
+    await this.store.put(updated);
+    return {
+      key,
+      configured: true,
+      enabled: request.enabled,
+      sessionId: binding.sessionId,
+    };
+  }
+
+  /** Operator-owned box default for Caveman communication in subsequently started workers. */
+  async cavemanWorkers(input: CavemanWorkersRequest): Promise<CavemanWorkersResult> {
+    const request = CavemanWorkersRequestSchema.parse(input);
+    const preferences = this.requireWorkerPreferences();
+    const current = await preferences.get();
+    if (request.enabled === undefined || request.enabled === current.caveman) {
+      return { scope: "box", enabled: current.caveman };
+    }
+    const updated = await preferences.set({ ...current, caveman: request.enabled });
+    return { scope: "box", enabled: updated.caveman };
+  }
+
+  /** Resolve the current box default to snapshot into a newly started worker. */
+  async workerMode(): Promise<"caveman" | "normal"> {
+    return (await this.requireWorkerPreferences().get()).caveman ? "caveman" : "normal";
+  }
+
   async reset(input: ResetOrchestratorRequest): Promise<OrchestratorResetResult> {
     const scope: OrchestratorScope = input.scope === "fleet"
       ? { kind: "fleet" }
@@ -137,6 +207,14 @@ export class OrchestratorManager {
     }
     await this.store.reset(key);
     return { key, reset: true, sessionId: binding.sessionId };
+  }
+
+  /** Clear a binding as the final durable step before its terminal session record is deleted. */
+  async resetSessionBinding(sessionId: string): Promise<OrchestratorSessionResetResult> {
+    const binding = await this.store.findBySessionId(sessionId);
+    if (binding === undefined) return { reset: false };
+    await this.store.reset(binding.key);
+    return { reset: true, key: binding.key };
   }
 
   private async resumeExisting(binding: OrchestratorBinding): Promise<SessionRecord | undefined> {
@@ -157,6 +235,13 @@ export class OrchestratorManager {
     } catch {
       return false;
     }
+  }
+
+  private requireWorkerPreferences(): WorkerPreferenceStore {
+    if (this.workerPreferences === undefined) {
+      throw Object.assign(new Error("Worker preferences are not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.workerPreferences;
   }
 }
 

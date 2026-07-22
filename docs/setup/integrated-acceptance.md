@@ -111,8 +111,8 @@ tools.`
   `delivered` exactly once.
 - A third job in the same tree was refused `BUDGET_EXCEEDED`; a conflicting writable lease was
   refused `LEASE_CONFLICT`; the accepted lease was released.
-- An omitted-model Claude submission was refused
-  `CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL` before any adapter/process boundary. No Fable
+- An omitted-model Claude submission was refused by the then-current explicit-model safety gate
+  before any adapter/process boundary. No Fable
   process was started.
 - The first live attempt exposed that installed Codex `0.144.6` omits `jsonrpc` on response and
   notification frames. It failed during initialize before `thread/start`, so no model turn was
@@ -222,7 +222,8 @@ These are limitations, not pending features, and none is a verified claim about 
 - **Omitted Claude remains intentionally unsupported, and now fails closed at launch.** The neutral
   stored/delegation policy retains omission, while both current interactive and headless Claude
   launch boundaries reject it before process construction. The recorded native default displayed
-  Fable, so every real Claude start still must name an explicit ordinary non-Fable model.
+  Fable, so every real Claude start must name the intended explicit model. Explicit Fable is now an
+  operator choice; autonomous Fable workers require `worker.start.fable`.
 - **`control.reconciliation` has an honest nullable pre-pass state.** The shared
   `ReconciliationReport` now types `reconciledAt` as `string | null`, matching the broker's
   `{ reconciledAt: null, … }` response before a control-plane reconciliation pass.

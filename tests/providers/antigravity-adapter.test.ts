@@ -226,9 +226,21 @@ describe("Antigravity command construction", () => {
       executable: "agy",
       args: ["--print", "inspect the fixture repository", "--mode", "plan", "--sandbox"],
       cwd: "/tmp/repo",
-      env: CONTROLLED_ENV,
+      env: {
+        ...CONTROLLED_ENV,
+        CYBERDECK_PROCESS_ROLE: "worker",
+        CYBERDECK_WORKER_MODE: "normal",
+      },
       stdin: "",
     });
+  });
+
+  it("injects Caveman policy into the actual Antigravity worker prompt", () => {
+    const command = buildAntigravityHeadlessCommand(request({ workerMode: "caveman" }).request, {
+      env: CONTROLLED_ENV,
+    });
+    expect(command.args[1]).toContain("CAVEMAN MODE ACTIVE");
+    expect(command.args[1]).toContain("WORKER TASK\ninspect the fixture repository");
   });
 
   it("rejects workspace-write because accept-edits is not proven equivalent", () => {
@@ -352,7 +364,11 @@ describe("AntigravityJobDispatchAdapter", () => {
       executable: "agy",
       args: ["--print", "inspect the fixture repository", "--mode", "plan", "--sandbox"],
       cwd: workspace,
-      env: CONTROLLED_ENV,
+      env: {
+        ...CONTROLLED_ENV,
+        CYBERDECK_PROCESS_ROLE: "worker",
+        CYBERDECK_WORKER_MODE: "normal",
+      },
       stdin: "",
     });
     expect(recording).toMatchObject({

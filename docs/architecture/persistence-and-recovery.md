@@ -48,7 +48,8 @@ acknowledges or retries it. Repeating recovery is idempotent.
 
 An omitted Claude model is persisted as omitted. Recovery does not reinterpret omission as a safe
 model choice and does not relaunch it; every future live Claude boundary must still require an
-operator-verified explicit ordinary non-Fable model.
+operator-selected explicit model. Disabling autonomous Fable changes future session creation only;
+it does not rewrite, stop, or delete an already-created session during recovery.
 
 ## Artifact guarantees
 

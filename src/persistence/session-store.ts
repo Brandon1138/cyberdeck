@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { z } from "zod";
 import { SessionRecordSchema, type SessionRecord } from "../domain/session.js";
+import { openPrivateAppendFile } from "./private-files.js";
 
 const SessionSnapshotSchema = z.object({
   recordType: z.literal("session.snapshot"),
@@ -81,8 +82,7 @@ export class SessionStore {
 
   private async enqueue(record: z.infer<typeof SessionStoreEnvelopeSchema>): Promise<void> {
     this.writeTail = this.writeTail.then(async () => {
-      await mkdir(dirname(this.path), { recursive: true });
-      const handle = await open(this.path, "a", 0o600);
+      const handle = await openPrivateAppendFile(this.path);
       try {
         await handle.write(`${JSON.stringify(record)}\n`, undefined, "utf8");
         await handle.sync();

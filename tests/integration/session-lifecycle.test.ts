@@ -103,17 +103,19 @@ describe("complete session lifecycle", () => {
         expect(child.role).toBe("luna-high-scout");
         expect(ptyFactory).toHaveBeenCalledTimes(3);
 
-        await expect(admin.request("session.start", {
+        const fable = await admin.request<SessionRecord>("session.start", {
           provider: "claude",
           cwd: "/tmp",
           detached: true,
           sandbox: "read-only",
           model: "fable",
           parentSessionId: codex.id,
-        })).rejects.toMatchObject({ code: "FABLE_REQUIRES_EXPLICIT_HUMAN_START" });
-        expect(ptyFactory).toHaveBeenCalledTimes(3);
+        });
+        expect(fable.model).toBe("fable");
+        expect(ptyFactory).toHaveBeenCalledTimes(4);
 
         await admin.request("session.stop", { sessionId: child.id });
+        await admin.request("session.stop", { sessionId: fable.id });
         await admin.request("session.stop", { sessionId: codex.id });
         await admin.request("session.stop", { sessionId: claude.id });
       } finally {

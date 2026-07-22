@@ -96,8 +96,8 @@ describe("Cyberdeck CLI", () => {
     let help = "";
     const program = createProgram().configureOutput({ writeOut: (chunk) => { help += chunk; } });
     program.outputHelp();
-    expect(help).toContain("Top-level Fable");
-    expect(help).toContain("delegated Fable is refused");
+    expect(help).toContain("operator-selected Fable starts are allowed");
+    expect(help).toContain("worker.start.fable grant");
   });
 
   it("preflights tmux before ensuring an orchestrator", async () => {
@@ -234,5 +234,48 @@ describe("Cyberdeck CLI", () => {
     }
 
     expect(resetOrchestrator).toHaveBeenCalledWith(expect.objectContaining({ scope: "fleet" }));
+  });
+
+  it("enables Fable workers on the fleet binding through the operator CLI", async () => {
+    const fableWorkers = vi.fn(async () => ({
+      key: "fleet",
+      configured: true,
+      enabled: true,
+      sessionId: "11111111-1111-4111-8111-111111111111",
+    }));
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const program = createProgram({ fableWorkers });
+    const orchestrator = program.commands.find((candidate) => candidate.name() === "orchestrator")!;
+    const command = orchestrator.commands.find((candidate) => candidate.name() === "fable-workers")!;
+
+    try {
+      await command.parseAsync(["on"], { from: "user" });
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(fableWorkers).toHaveBeenCalledWith(expect.objectContaining({
+      scope: "fleet",
+      enabled: true,
+    }));
+  });
+
+  it("enables the box-wide Caveman worker default through the operator CLI", async () => {
+    const cavemanWorkers = vi.fn(async () => ({
+      scope: "box" as const,
+      enabled: true,
+    }));
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const program = createProgram({ cavemanWorkers });
+    const orchestrator = program.commands.find((candidate) => candidate.name() === "orchestrator")!;
+    const command = orchestrator.commands.find((candidate) => candidate.name() === "caveman-workers")!;
+
+    try {
+      await command.parseAsync(["on"], { from: "user" });
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(cavemanWorkers).toHaveBeenCalledWith({ enabled: true });
   });
 });

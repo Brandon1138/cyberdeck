@@ -32,11 +32,10 @@ Focused invariants live in `tests/control-plane/admission-scheduler.test.ts`,
   evidence is fixture-based.
 - Live broker/tmux acceptance of admission, budgets, and reconciliation. These belong to the
   human-launched final gate, serialized one scenario at a time.
-- The native-default-Claude gap is **not** closed by A5. Explicit-string Fable rejection does not
-  protect an omitted Claude model. A live Claude start remains forbidden unless a human supplies and
-  independently verifies an explicit ordinary non-Fable model. A5 re-checks this at the admission
-  boundary so free capacity can never promote an unknown model into a launch, but that is defence in
-  depth, not proof that the gap is closed.
+- Omitted Claude remains forbidden because it is not an explicit operator choice. Explicit Fable is
+  permitted on operator paths; autonomous Fable workers require the durable `worker.start.fable`
+  grant before the launch boundary. Admission still prevents free capacity from promoting an
+  omitted model into a launch.
 
 ## Operator runbook
 

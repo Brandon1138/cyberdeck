@@ -301,7 +301,7 @@ describe("fleet controls", () => {
     const active = fleet({ record: session() });
     const initial = createFleetState(active);
     const stop = transitionFleet(initial, active, "ctrl+x", NOW_MS);
-    expect(stop.action).toEqual({ type: "stop", sessionId: session().id });
+    expect(stop.action).toEqual({ type: "stop-tree", sessionId: session().id });
     expect(stop.state.deleteConfirmation).toBeUndefined();
 
     const stopped = fleet({ record: session({ executionState: "cancelled", exitCode: 0 }) });
@@ -317,9 +317,77 @@ describe("fleet controls", () => {
       home: "/Users/brandon",
     });
     expect(rendered).toContain("Delete thread? press ctrl+x again");
+    expect(rendered.match(/Delete thread\?/gu)).toHaveLength(1);
 
     const remove = transitionFleet(armed.state, stopped, "ctrl+x", NOW_MS + 1);
-    expect(remove.action).toEqual({ type: "delete", sessionId: session().id });
+    expect(remove.action).toEqual({ type: "delete-tree", sessionId: session().id });
+  });
+
+  it("stops and deletes an orchestrator tree from the parent row without hunting children", () => {
+    const root = session({ kind: "orchestrator", childIds: ["22222222-2222-4222-8222-222222222222"] });
+    const child = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "worker",
+      role: "worker",
+      parentSessionId: root.id,
+    });
+    const active = fleet({ record: root }, { record: child });
+    const stop = transitionFleet(createFleetState(active), active, "ctrl+x", NOW_MS);
+
+    expect(stop.action).toEqual({ type: "stop-tree", sessionId: root.id });
+    expect(stop.state.notice).toBe("Stopping orchestrator + 1 worker · 0/2 stopped");
+    const stopping = renderFleet(active, stop.state, {
+      color: true,
+      width: 140,
+      height: 30,
+      now: NOW_MS,
+      home: "/Users/brandon",
+    });
+    expect(stopping).toContain("\u001b[38;2;212;168;91mStopping orchestrator + 1 worker · 0/2 stopped");
+    expect(stopping).not.toContain("\u001b[38;2;217;108;117mStopping orchestrator");
+
+    const terminal = fleet(
+      { record: { ...root, executionState: "cancelled", attentionState: "stopped", exitCode: 0 } },
+      { record: { ...child, executionState: "cancelled", attentionState: "stopped", exitCode: 0 } },
+    );
+    const armed = transitionFleet(stop.state, terminal, "ctrl+x", NOW_MS);
+    expect(armed.state.notice).toBe("Delete orchestrator + 1 child thread? press ctrl+x again");
+    const rendered = renderFleet(terminal, armed.state, {
+      color: true,
+      width: 140,
+      height: 30,
+      now: NOW_MS,
+      home: "/Users/brandon",
+    });
+    expect(rendered).toContain("\u001b[38;2;217;108;117mDelete orchestrator + 1 child thread? press ctrl+x again");
+    expect(rendered).not.toContain("Delete tree?");
+    expect(transitionFleet(armed.state, terminal, "ctrl+x", NOW_MS + 1).action).toEqual({
+      type: "delete-tree",
+      sessionId: root.id,
+    });
+  });
+
+  it("retries tree cleanup with progress instead of reporting only that the agent is stopping", () => {
+    const root = session({
+      kind: "orchestrator",
+      executionState: "cancelled",
+      attentionState: "stopping",
+      exitCode: null,
+      childIds: ["22222222-2222-4222-8222-222222222222"],
+    });
+    const child = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "worker",
+      parentSessionId: root.id,
+      executionState: "cancelled",
+      attentionState: "stopped",
+      exitCode: 0,
+    });
+    const snapshot = fleet({ record: root }, { record: child });
+    const retry = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+x", NOW_MS);
+
+    expect(retry.action).toEqual({ type: "stop-tree", sessionId: root.id });
+    expect(retry.state.notice).toBe("Stopping orchestrator + 1 worker · 1/2 stopped");
   });
 
   it("cancels pending deletion when selection moves or confirmation expires", () => {
@@ -340,6 +408,34 @@ describe("fleet controls", () => {
     expect(expired.state.deleteConfirmation?.expiresAt).toBe(NOW_MS + 11_000);
   });
 
+  it("requires two consecutive Ctrl+C presses and never exits on Escape", () => {
+    const snapshot = fleet({ record: session() });
+    const initial = createFleetState(snapshot);
+
+    const armed = transitionFleet(initial, snapshot, "ctrl+c", NOW_MS);
+    expect(armed.action).toBeUndefined();
+    expect(armed.state.notice).toBe("Press ctrl+c again to exit");
+    expect(armed.state.quitConfirmation?.expiresAt).toBe(NOW_MS + 5_000);
+
+    const cancelled = transitionFleet(armed.state, snapshot, "?", NOW_MS + 1);
+    expect(cancelled.state.quitConfirmation).toBeUndefined();
+    expect(cancelled.state.notice).toBeUndefined();
+    expect(transitionFleet(cancelled.state, snapshot, "ctrl+c", NOW_MS + 2).action).toBeUndefined();
+
+    const confirmed = transitionFleet(armed.state, snapshot, "ctrl+c", NOW_MS + 1);
+    expect(confirmed.action).toEqual({ type: "quit" });
+
+    const expired = transitionFleet(armed.state, snapshot, "ctrl+c", NOW_MS + 5_001);
+    expect(expired.action).toBeUndefined();
+    expect(expired.state.quitConfirmation?.expiresAt).toBe(NOW_MS + 10_001);
+
+    expect(transitionFleet(initial, snapshot, "escape", NOW_MS).action).toBeUndefined();
+    const help = transitionFleet(initial, snapshot, "?", NOW_MS).state;
+    const closedHelp = transitionFleet(help, snapshot, "escape", NOW_MS);
+    expect(closedHelp.action).toBeUndefined();
+    expect(closedHelp.state.helpOpen).toBe(false);
+  });
+
   it("configures a new worker through /model then effort with no confirmation", () => {
     const snapshot = fleet({ record: session() });
     const command = { ...createFleetState(snapshot), draft: "/model" };
@@ -348,6 +444,7 @@ describe("fleet controls", () => {
     const rendered = renderFleet(snapshot, model.state, { color: false, width: 100, height: 28 });
     expect(rendered).toContain("Codex Luna");
     expect(rendered).toContain("Claude Opus");
+    expect(rendered).toContain("Claude Fable");
     expect(rendered).toContain("Cursor Composer");
     expect(rendered).toContain("Gemini 3.6 Flash");
 
@@ -388,6 +485,48 @@ describe("fleet controls", () => {
     const picker = transitionFleet(initial, snapshot, "enter", NOW_MS);
     expect(picker.action).toBeUndefined();
     expect(picker.state.workerPicker).toMatchObject({ cwd: "/repo/empty", returnDraft: "Fix the failing test" });
+  });
+
+  it("routes /fable-workers on to the selected durable orchestrator binding", () => {
+    const orchestrator = session({
+      kind: "orchestrator",
+      provider: "claude",
+      model: "fable",
+      cwd: "/repo/one",
+      orchestratorScope: "workspace",
+    });
+    const snapshot = fleet({ record: orchestrator });
+    const state = { ...createFleetState(snapshot), draft: "/fable-workers on" };
+
+    expect(transitionFleet(state, snapshot, "enter", NOW_MS)).toMatchObject({
+      state: { draft: "" },
+      action: {
+        type: "fable-workers",
+        request: { cwd: "/repo/one", scope: "workspace", enabled: true },
+      },
+    });
+  });
+
+  it("routes /caveman-workers on to the box preference without an orchestrator", () => {
+    const snapshot = fleet();
+    const state = { ...createFleetState(snapshot), draft: "/caveman-workers on" };
+
+    expect(transitionFleet(state, snapshot, "enter", NOW_MS)).toMatchObject({
+      state: { draft: "" },
+      action: {
+        type: "caveman-workers",
+        request: { enabled: true },
+      },
+    });
+  });
+
+  it("reports the missing orchestrator instead of treating /fable-workers as a task", () => {
+    const snapshot = fleet();
+    const state = { ...createFleetState(snapshot), draft: "/fable-workers status" };
+    const transition = transitionFleet(state, snapshot, "enter", NOW_MS);
+
+    expect(transition.action).toBeUndefined();
+    expect(transition.state.notice).toContain("No orchestrator is bound");
   });
 
   it("toggles the shortcut panel and exposes keyboard interactions", () => {
@@ -493,7 +632,7 @@ describe("runFleet", () => {
       scope: "fleet",
     }));
 
-    input.emit("data", Buffer.from([0x03]));
+    input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
   });
 
@@ -549,10 +688,69 @@ describe("runFleet", () => {
     expect(renderedAfterDetach).toContain("\u001b[?1003l");
     expect(renderedAfterDetach).toContain("\u001b[?1006l");
     input.emit("data", Buffer.from("\u001b[<35;103;24M"));
-    input.emit("data", Buffer.from([0x03]));
+    input.emit("data", Buffer.from([0x03, 0x03]));
 
     await expect(running).resolves.toBeUndefined();
     expect(transport.close).toHaveBeenCalledOnce();
     expect(Buffer.concat(output.chunks).toString()).not.toContain("› <35;103;24M");
+  });
+
+  it("stops a detached orchestrator on the first Ctrl+X without deleting it", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      write(_chunk: string | Uint8Array): boolean { return true; }
+    }
+
+    const orchestrator = session({
+      kind: "orchestrator",
+      executionState: "active",
+      attachmentState: "detached",
+      detached: true,
+      exitCode: null,
+    });
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [orchestrator];
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "session.stop") {
+          return {
+            rootSessionId: orchestrator.id,
+            rootKind: "orchestrator",
+            childCount: 0,
+            total: 1,
+            active: 0,
+            stopping: 1,
+            terminal: 0,
+          };
+        }
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) { closeListeners.add(listener); return () => closeListeners.delete(listener); },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const running = runFleet(transport as never, input, new Output(), new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from([0x18]));
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.stop", {
+      sessionId: orchestrator.id,
+    }));
+    expect(transport.request).not.toHaveBeenCalledWith("session.deleteTree", expect.anything());
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
   });
 });

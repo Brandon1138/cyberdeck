@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, unlink } from "node:fs/promises";
+import { chmod, lstat, unlink } from "node:fs/promises";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { z } from "zod";
 import {
@@ -7,10 +7,12 @@ import {
   CancelJobParamsSchema,
   GetJobParamsSchema,
   IngestReportParamsSchema,
+  SubmitJobParamsSchema,
   type JobControlPlane,
 } from "../control-plane/job-control-plane.js";
 import type { ControlPlaneRuntime } from "../control-plane/runtime.js";
 import { StartSessionRequestSchema } from "../domain/session.js";
+import { DelegationIntentSchema } from "../domain/delegation.js";
 import {
   FleetLaunchProfileSchema,
   type FleetPreferenceStore,
@@ -19,9 +21,12 @@ import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type Requ
 import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
 import { RegistryError, type AttachmentMode, type SessionRegistry } from "./session-registry.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
+import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import type { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import {
+  CavemanWorkersRequestSchema,
   EnsureOrchestratorRequestSchema,
+  FableWorkersRequestSchema,
   ResetOrchestratorRequestSchema,
 } from "../domain/orchestrator.js";
 import {
@@ -78,6 +83,7 @@ export interface BrokerServerOptions {
   /** Supplies the reconciliation view; queue/budget queries work from the control plane alone. */
   controlPlaneRuntime?: Pick<ControlPlaneRuntime, "lastReconciliation">;
   fleetPreferences?: FleetPreferenceStore;
+  workerPreferences?: WorkerPreferenceStore;
   onShutdown?: () => void;
 }
 
@@ -107,6 +113,12 @@ export class BrokerServer {
       this.server.once("listening", onListening);
       this.server.listen(this.options.socketPath);
     });
+    try {
+      await chmod(this.options.socketPath, 0o600);
+    } catch (error) {
+      await this.close();
+      throw error;
+    }
   }
 
   close(): Promise<void> {
@@ -206,11 +218,13 @@ export class BrokerServer {
 
   private async routeRequest(context: ConnectionContext, frame: RequestFrame): Promise<unknown> {
     switch (frame.method) {
-      case "session.start":
-        return this.options.registry.start(StartSessionRequestSchema.parse(frame.params));
+      case "session.start": {
+        const request = await this.withSessionWorkerMode(StartSessionRequestSchema.parse(frame.params));
+        return this.options.registry.start(request);
+      }
       case "session.startWithPrompt": {
         const { initialPrompt, ...request } = StartSessionWithPromptParamsSchema.parse(frame.params);
-        return this.options.registry.start(request, initialPrompt);
+        return this.options.registry.start(await this.withSessionWorkerMode(request), initialPrompt);
       }
       case "session.list":
         return this.options.registry.list();
@@ -233,6 +247,10 @@ export class BrokerServer {
         const request = EnsureOrchestratorRequestSchema.pick({ cwd: true, scope: true }).parse(frame.params);
         return this.requireOrchestrators().get(request.cwd, request.scope);
       }
+      case "orchestrator.fableWorkers":
+        return this.requireOrchestrators().fableWorkers(FableWorkersRequestSchema.parse(frame.params));
+      case "orchestrator.cavemanWorkers":
+        return this.requireOrchestrators().cavemanWorkers(CavemanWorkersRequestSchema.parse(frame.params));
       case "agent.thread.list": {
         const { actorSessionId } = AgentActorParamsSchema.parse(frame.params);
         return this.requireAgentControl().listThreads(actorSessionId);
@@ -285,8 +303,7 @@ export class BrokerServer {
       }
       case "session.stop": {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
-        await this.options.registry.stop(sessionId);
-        return { stopped: true };
+        return this.options.registry.stopTree(sessionId);
       }
       case "session.resume": {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
@@ -296,6 +313,14 @@ export class BrokerServer {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         await this.options.registry.delete(sessionId);
         return { deleted: true };
+      }
+      case "session.deleteTree": {
+        const { sessionId } = SessionIdParamsSchema.parse(frame.params);
+        return this.options.registry.deleteTree(sessionId, async () => {
+          if (this.options.registry.get(sessionId).kind === "orchestrator") {
+            await this.options.orchestrators?.resetSessionBinding(sessionId);
+          }
+        });
       }
       case "session.rename": {
         const { sessionId, name } = RenameSessionParamsSchema.parse(frame.params);
@@ -347,10 +372,24 @@ export class BrokerServer {
         context.attachments.delete(sessionId);
         return { detached: true };
       }
-      case "job.submit":
-        return this.requireControlPlane().submit(frame.params);
+      case "job.submit": {
+        const request = SubmitJobParamsSchema.parse(frame.params);
+        return this.requireControlPlane().submit({
+          ...request,
+          request: await this.withJobWorkerMode(request.request),
+        });
+      }
       case "job.delegate":
-        return this.requireControlPlane().delegate(frame.params);
+      {
+        const intent = DelegationIntentSchema.parse(frame.params);
+        const request = intent.parentJobId === undefined
+          ? await this.withJobWorkerMode(intent.request)
+          : intent.request;
+        return this.requireControlPlane().delegate({
+          ...intent,
+          request,
+        });
+      }
       case "job.get": {
         const { jobId } = GetJobParamsSchema.parse(frame.params);
         return this.requireControlPlane().getJob(jobId);
@@ -399,6 +438,28 @@ export class BrokerServer {
       throw Object.assign(new Error("Control plane is not available"), { code: "METHOD_NOT_FOUND" });
     }
     return this.options.controlPlane;
+  }
+
+  private async withSessionWorkerMode<T extends z.infer<typeof StartSessionRequestSchema>>(
+    request: T,
+  ): Promise<T> {
+    if ((request.kind ?? "worker") !== "worker" || request.workerMode !== undefined) return request;
+    const preferences = await this.options.workerPreferences?.get();
+    return {
+      ...request,
+      workerMode: preferences?.caveman === true ? "caveman" : "normal",
+    };
+  }
+
+  private async withJobWorkerMode<T extends z.infer<typeof SubmitJobParamsSchema>["request"]>(
+    request: T,
+  ): Promise<T> {
+    if (request.workerMode !== undefined) return request;
+    const preferences = await this.options.workerPreferences?.get();
+    return {
+      ...request,
+      workerMode: preferences?.caveman === true ? "caveman" : "normal",
+    };
   }
 
   private requireTranscripts(): ThreadTranscriptStore {

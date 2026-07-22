@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { BrokerRuntimeConfigSchema } from "../src/config.js";
 
 describe("broker runtime config", () => {
-  it("defaults to 24 workers while excluding orchestrators from that policy", () => {
+  it("defaults to 64 workers while excluding orchestrators from that policy", () => {
     const config = BrokerRuntimeConfigSchema.parse({});
-    expect(config.maxConcurrentWorkers).toBe(24);
+    expect(config.maxConcurrentWorkers).toBe(64);
     expect(config.maxDelegationDepth).toBe(1);
     expect(config.replayBytes).toBe(128 * 1024);
   });

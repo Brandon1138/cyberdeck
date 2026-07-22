@@ -130,14 +130,13 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     // The native default displayed Fable, so an omitted model must fail before the launch spec
     // (and therefore before any process) is constructed.
     expect(() => new ClaudeProviderAdapter().buildLaunchSpec(session({ model: undefined }))).toThrow(
-      /CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL/,
+      /CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL/,
     );
   });
 
-  it("refuses to build a launch spec for a Fable model", () => {
-    expect(() =>
-      new ClaudeProviderAdapter().buildLaunchSpec(session({ model: "claude-fable-5" })),
-    ).toThrow(/CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL/);
+  it("builds a launch spec for an explicitly selected Fable model", () => {
+    const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ model: "claude-fable-5" }));
+    expect(spec.args).toContain("claude-fable-5");
   });
 
   it("preserves the Phase 1 interactive argv for an explicit ordinary model", () => {
@@ -183,7 +182,20 @@ describe("buildClaudeHeadlessCommand", () => {
     ]);
     expect(command.cwd).toBe("/tmp/repo");
     expect(command.env.DISABLE_UPDATES).toBe("1");
+    expect(command.env).toMatchObject({
+      CYBERDECK_PROCESS_ROLE: "worker",
+      CYBERDECK_WORKER_MODE: "normal",
+    });
     expect(command.stdin).toBe("summarise the repository");
+  });
+
+  it("marks an opted-in bounded worker as Caveman", () => {
+    const command = buildClaudeHeadlessCommand(
+      dispatchRequest({ workerMode: "caveman" }).request,
+    );
+    expect(command.env.CYBERDECK_WORKER_MODE).toBe("caveman");
+    expect(command.stdin).toContain("CAVEMAN MODE ACTIVE");
+    expect(command.stdin).toContain("WORKER TASK\nsummarise the repository");
   });
 
   it("maps workspace-write to manual and never emits a bypass permission mode", () => {
@@ -220,13 +232,13 @@ describe("buildClaudeHeadlessCommand", () => {
     expect(command.args[command.args.indexOf("--model") + 1]).toBe("opus");
   });
 
-  it("refuses an omitted or Fable model before constructing a command", () => {
+  it("refuses an omitted model but accepts explicitly selected Fable", () => {
     expect(() => buildClaudeHeadlessCommand(dispatchRequest({ model: undefined }).request)).toThrow(
-      /CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL/,
+      /CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL/,
     );
-    expect(() =>
-      buildClaudeHeadlessCommand(dispatchRequest({ model: "claude-fable-5-preview" }).request),
-    ).toThrow(/CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL/);
+    expect(
+      buildClaudeHeadlessCommand(dispatchRequest({ model: "claude-fable-5-preview" }).request).args,
+    ).toContain("claude-fable-5-preview");
   });
 
   it("emits include-partial-messages only when explicitly requested", () => {
@@ -494,7 +506,7 @@ describe("ClaudeJobDispatchAdapter", () => {
     const spawn = vi.fn();
     const adapter = new ClaudeJobDispatchAdapter({ spawn: spawn as unknown as ClaudeSpawn });
     await expect(adapter.dispatch(dispatchRequest({ model: undefined }))).rejects.toThrow(
-      /CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL/,
+      /CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL/,
     );
     expect(spawn).not.toHaveBeenCalled();
   });

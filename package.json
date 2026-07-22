@@ -1,15 +1,53 @@
 {
-  "name": "cyberdeck",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@brandon1138/cyberdeck",
+  "version": "0.1.0-alpha.1",
+  "description": "A provider-neutral local control plane for durable AI coding-agent sessions.",
+  "license": "Apache-2.0",
+  "author": "Brandon Aron",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Brandon1138/cyberdeck.git"
+  },
+  "homepage": "https://github.com/Brandon1138/cyberdeck#readme",
+  "bugs": {
+    "url": "https://github.com/Brandon1138/cyberdeck/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "cli",
+    "codex",
+    "claude",
+    "terminal",
+    "tmux"
+  ],
   "type": "module",
   "packageManager": "pnpm@11.5.0",
+  "engines": {
+    "node": ">=24.18.0 <25"
+  },
+  "os": [
+    "darwin"
+  ],
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "SECURITY.md",
+    "TRADEMARKS.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "bin": {
     "cyberdeck": "dist/src/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "pnpm test && pnpm check",
     "pretest": "pnpm run postinstall",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -1,6 +1,8 @@
 import type { JobRequest } from "../../domain/job.js";
 import { evaluateClaudeLaunchSafety } from "../../domain/policy.js";
 import { claudePermissionMode } from "./permissions.js";
+import { jobLaunchEnvironment } from "../launch-environment.js";
+import { applyWorkerMode } from "../worker-mode.js";
 
 /** A fully-resolved headless invocation. `stdin` is written to the process and then closed. */
 export interface ClaudeHeadlessCommand {
@@ -69,16 +71,16 @@ export function buildClaudeHeadlessCommand(
     executable: "claude",
     args,
     cwd: request.cwd,
-    env: { ...process.env, DISABLE_UPDATES: "1" },
-    stdin: request.instruction,
+    env: jobLaunchEnvironment({ ...process.env, DISABLE_UPDATES: "1" }, request),
+    stdin: applyWorkerMode(request.instruction, request.workerMode),
   };
 }
 
 export class ClaudeLaunchSafetyError extends Error {
-  constructor(readonly code: "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL") {
+  constructor(readonly code: "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL") {
     super(
-      `${code}: a live Claude launch requires an operator-verified explicit non-Fable model; ` +
-        "an omitted model is not treated as implicitly non-Fable",
+      `${code}: a live Claude launch requires an explicit operator-selected model; ` +
+        "an omitted model is not treated as implicit authorization for the provider default",
     );
     this.name = "ClaudeLaunchSafetyError";
   }

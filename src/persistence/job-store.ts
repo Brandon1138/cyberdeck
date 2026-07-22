@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { z } from "zod";
 import {
   ReportBackRecordSchema,
@@ -10,6 +10,7 @@ import {
 import { CONTROL_PLANE_SCHEMA_VERSION, schemaVersionField } from "../domain/control-plane.js";
 import { JobRecordSchema } from "../domain/job.js";
 import { UsageReportSchema } from "../domain/usage.js";
+import { openPrivateAppendFile } from "./private-files.js";
 
 const PersistedJobStateSchema = z.object({
   record: JobRecordSchema,
@@ -73,8 +74,7 @@ export class JobStore implements JobStateRepository {
       state: validated,
     });
 
-    await mkdir(dirname(this.path), { recursive: true });
-    const handle = await open(this.path, "a", 0o600);
+    const handle = await openPrivateAppendFile(this.path);
     try {
       await handle.write(`${JSON.stringify(envelope)}\n`, undefined, "utf8");
       await handle.sync();

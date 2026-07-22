@@ -34,10 +34,10 @@ describe("evaluateStart", () => {
     expect(evaluateStart({ ...baseRequest, model: "fable" }, [])).toEqual({ allowed: true });
   });
 
-  it("rejects delegated Fable", () => {
+  it("leaves delegated Fable authorization to the orchestrator capability boundary", () => {
     expect(
       evaluateStart({ ...baseRequest, model: "fable", parentSessionId: "parent" }, [parent]),
-    ).toEqual({ allowed: false, code: "FABLE_REQUIRES_EXPLICIT_HUMAN_START" });
+    ).toEqual({ allowed: true });
   });
 
   it("rejects delegation beyond one level", () => {
@@ -51,13 +51,13 @@ describe("evaluateStart", () => {
 
   it("enforces the worker limit with useful counts", () => {
     expect(evaluateStart(baseRequest, [], {
-      activeWorkerCount: 24,
-      maxConcurrentWorkers: 24,
+      activeWorkerCount: 64,
+      maxConcurrentWorkers: 64,
     })).toEqual({
       allowed: false,
       code: "MAX_CONCURRENT_WORKERS",
-      activeWorkers: 24,
-      maxConcurrentWorkers: 24,
+      activeWorkers: 64,
+      maxConcurrentWorkers: 64,
     });
   });
 
@@ -89,15 +89,12 @@ describe("evaluateClaudeLaunchSafety", () => {
   it("refuses a Claude launch with an omitted model because the native default may be Fable", () => {
     expect(evaluateClaudeLaunchSafety("claude", undefined)).toEqual({
       safe: false,
-      code: "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL",
+      code: "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL",
     });
   });
 
-  it("refuses a Claude launch with an explicit Fable model", () => {
-    expect(evaluateClaudeLaunchSafety("claude", "claude-fable-5")).toEqual({
-      safe: false,
-      code: "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL",
-    });
+  it("allows an explicitly selected Fable model", () => {
+    expect(evaluateClaudeLaunchSafety("claude", "claude-fable-5")).toEqual({ safe: true });
   });
 
   it("allows a Claude launch with an explicit ordinary model", () => {

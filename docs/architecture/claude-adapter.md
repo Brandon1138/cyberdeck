@@ -15,10 +15,11 @@ processes.
   its pty factory, so a refusal happens before the process is constructed.
 - Headless — inside `buildClaudeHeadlessCommand`, before `spawn` is reached.
 
-An **omitted** model is refused as firmly as a Fable model. The recorded native default displayed
-Fable, and broker policy can only inspect an explicit model string, so omission is not treated as
-implicitly ordinary. Cyberdeck never selects, defaults, ranks, or substitutes a model, and never
-emits `--fallback-model`. `role` is an opaque label and is never forwarded.
+An **omitted** model is refused because it is not an explicit operator choice. An explicitly named
+Fable model is valid on an operator start path. Autonomous worker starts pass through the separate
+orchestrator capability boundary and require `worker.start.fable` before this adapter is reached.
+Cyberdeck never selects, defaults, ranks, or substitutes a model, and never emits
+`--fallback-model`. `role` is an opaque label and is never forwarded.
 
 ## Commands
 

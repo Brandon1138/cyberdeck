@@ -40,13 +40,13 @@ import { UsageReportSchema, type UsageReport } from "../domain/usage.js";
 /**
  * Every code the control plane can surface. It is the frozen cross-process vocabulary plus the two
  * live-launch safety codes (a delegated Fable request and a Claude launch without an explicit
- * non-Fable model). Stored terminal {@link JobResult} errors still use only the frozen enum; these
+ * model). Stored terminal {@link JobResult} errors still use only the frozen enum; these
  * extra codes are for the synchronous rejections that happen *before* a job is even dispatched.
  */
 export type ControlPlaneErrorClassCode =
   | ControlPlaneErrorCode
   | "FABLE_REQUIRES_EXPLICIT_HUMAN_START"
-  | "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL"
+  | "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL"
   | "MAX_DELEGATION_DEPTH";
 
 export class ControlPlaneError extends Error {
@@ -318,7 +318,15 @@ export class JobControlPlane {
       }
     }
 
-    const { request } = spec;
+    const parentWorkerMode = spec.parentJobId === undefined
+      ? undefined
+      : this.jobs.get(spec.parentJobId)?.record.request.workerMode;
+    const request = JobRequestSchema.parse({
+      ...spec.request,
+      ...(spec.request.workerMode === undefined && parentWorkerMode !== undefined
+        ? { workerMode: parentWorkerMode }
+        : {}),
+    });
 
     const providerCheck = validateRegisteredProvider(request.provider, this.registeredIds());
     if (!providerCheck.ok) {
@@ -338,10 +346,10 @@ export class JobControlPlane {
     }
     const safety = evaluateClaudeLaunchSafety(request.provider, request.model);
     if (!safety.safe) {
-      // An omitted model is unsafe here too — it is not treated as implicitly non-Fable.
+      // An omitted model is unsafe here too — it is not treated as operator selection.
       throw new ControlPlaneError(
         safety.code,
-        "A live Claude launch requires an operator-verified explicit non-Fable model",
+        "A live Claude launch requires an explicit operator-selected model",
       );
     }
 

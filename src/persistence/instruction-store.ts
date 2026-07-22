@@ -1,6 +1,7 @@
-import { mkdir, open, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { InstructionRecordSchema, type InstructionRecord } from "../domain/instruction.js";
+import { openPrivateAppendFile } from "./private-files.js";
 
 /** Append-only instruction snapshots. Latest record per id is the current mailbox state. */
 export class InstructionStore {
@@ -12,8 +13,7 @@ export class InstructionStore {
 
   async put(record: InstructionRecord): Promise<void> {
     const parsed = InstructionRecordSchema.parse(record);
-    await mkdir(dirname(this.path), { recursive: true });
-    const handle = await open(this.path, "a", 0o600);
+    const handle = await openPrivateAppendFile(this.path);
     try {
       await handle.write(`${JSON.stringify(parsed)}\n`, undefined, "utf8");
       await handle.sync();
@@ -38,4 +38,3 @@ export class InstructionStore {
     return [...latest.values()].filter((record) => targetSessionId === undefined || record.targetSessionId === targetSessionId);
   }
 }
-

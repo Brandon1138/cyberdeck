@@ -10,6 +10,7 @@ import {
 } from "../domain/session.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../providers/provider.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
+import { applyWorkerMode } from "../providers/worker-mode.js";
 import {
   compactTerminalResult,
   latestAssistantParagraphPreview,
@@ -86,6 +87,20 @@ export interface WorkerWaitResult {
   results: WorkerResultSnapshot[];
 }
 
+export interface SessionTreeProgress {
+  rootSessionId: string;
+  rootKind: "worker" | "orchestrator";
+  childCount: number;
+  total: number;
+  active: number;
+  stopping: number;
+  terminal: number;
+}
+
+export interface SessionTreeDeleteResult extends SessionTreeProgress {
+  deleted: number;
+}
+
 export interface SessionRegistryOptions {
   adapters: Record<string, ProviderAdapter>;
   ptyFactory: PtyFactory;
@@ -108,7 +123,9 @@ export class RegistryError extends Error {
       | "NOT_SESSION_CONTROLLER"
       | "SESSION_BUSY"
       | "SESSION_STILL_ACTIVE"
-      | "SESSION_HAS_CHILDREN",
+      | "SESSION_HAS_CHILDREN"
+      | "SESSION_TREE_STILL_ACTIVE"
+      | "PARENT_SESSION_NOT_ACTIVE",
     message: string,
   ) {
     super(message);
@@ -152,6 +169,7 @@ export class SessionRegistry {
 
   async start(request: StartSessionRequest, initialPrompt?: string): Promise<SessionRecord> {
     const parsed = StartSessionRequestSchema.parse(request);
+    this.requireActiveParent(parsed.parentSessionId);
     const ancestry = this.resolveAncestry(parsed.parentSessionId);
     const decision = evaluateStart(parsed, ancestry, {
       activeWorkerCount: this.activeWorkerCount(),
@@ -182,8 +200,12 @@ export class SessionRegistry {
       meaningfulUpdatedAt: now,
     };
     const adapter = this.requireAdapter(parsed.provider);
-    const launchSpec = adapter.buildLaunchSpec(provisional, initialPrompt);
+    const launchSpec = adapter.buildLaunchSpec(
+      provisional,
+      initialPrompt === undefined ? undefined : applyWorkerMode(initialPrompt, provisional.workerMode),
+    );
     if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(provisional, launchSpec);
+    this.requireActiveParent(parsed.parentSessionId);
     if (initialPrompt !== undefined) {
       await this.options.transcripts?.append({
         sessionId: id,
@@ -193,6 +215,7 @@ export class SessionRegistry {
         data: { initial: true },
       });
     }
+    this.requireActiveParent(parsed.parentSessionId);
     const pty = this.options.ptyFactory(
       launchSpec,
       this.options.config.replayBytes,
@@ -416,13 +439,25 @@ export class SessionRegistry {
 
   async stop(sessionId: string): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
-    if (runtime.stopRequested || runtime.record.executionState !== "active") return;
+    if (runtime.record.exitCode !== null) return;
+    if (runtime.stopRequested) {
+      this.requirePty(runtime).kill();
+      return;
+    }
+    if (runtime.record.executionState !== "active") return;
     runtime.stopRequested = true;
     runtime.record.executionState = "cancelled";
     await this.setAttention(runtime, "stopping", true);
     this.requirePty(runtime).kill();
     await this.appendEvent("session.stopped", sessionId, {});
     await this.appendTranscript(sessionId, "lifecycle", "broker", "session stopped", {});
+  }
+
+  async stopTree(sessionId: string): Promise<SessionTreeProgress> {
+    const tree = this.sessionTree(sessionId);
+    await this.stop(sessionId);
+    await Promise.all(tree.slice(1).map((runtime) => this.stop(runtime.record.id)));
+    return this.treeProgress(sessionId);
   }
 
   async stopAll(): Promise<void> {
@@ -499,8 +534,28 @@ export class SessionRegistry {
         await this.persist(parent);
       }
     }
-    this.sessions.delete(sessionId);
     await this.options.store?.delete(sessionId);
+    this.sessions.delete(sessionId);
+  }
+
+  async deleteTree(
+    sessionId: string,
+    beforeRootDelete?: () => Promise<void>,
+  ): Promise<SessionTreeDeleteResult> {
+    const tree = this.sessionTree(sessionId);
+    const progress = this.progressForTree(tree);
+    if (progress.terminal !== progress.total) {
+      throw new RegistryError(
+        "SESSION_TREE_STILL_ACTIVE",
+        `Stop the full agent tree before deleting it (${progress.terminal}/${progress.total} stopped)`,
+      );
+    }
+
+    const descendantsLeafFirst = tree.slice(1).reverse();
+    for (const runtime of descendantsLeafFirst) await this.delete(runtime.record.id);
+    await beforeRootDelete?.();
+    await this.delete(sessionId);
+    return { ...progress, deleted: progress.total };
   }
 
   async rename(sessionId: string, name: string): Promise<SessionRecord> {
@@ -576,6 +631,54 @@ export class SessionRegistry {
       throw new RegistryError("SESSION_NOT_FOUND", `Session ${sessionId} was not found`);
     }
     return runtime;
+  }
+
+  private requireActiveParent(parentSessionId: string | undefined): void {
+    if (parentSessionId === undefined) return;
+    const parent = this.requireRuntime(parentSessionId);
+    if (parent.record.executionState !== "active" || parent.stopRequested) {
+      throw new RegistryError(
+        "PARENT_SESSION_NOT_ACTIVE",
+        `Parent session ${parentSessionId} is not active`,
+      );
+    }
+  }
+
+  private sessionTree(sessionId: string): RuntimeSession[] {
+    const root = this.requireRuntime(sessionId);
+    const ordered: RuntimeSession[] = [];
+    const visited = new Set<string>();
+    const visit = (runtime: RuntimeSession) => {
+      if (visited.has(runtime.record.id)) return;
+      visited.add(runtime.record.id);
+      ordered.push(runtime);
+      for (const childId of runtime.record.childIds) {
+        const child = this.sessions.get(childId);
+        if (child !== undefined) visit(child);
+      }
+    };
+    visit(root);
+    return ordered;
+  }
+
+  private treeProgress(sessionId: string): SessionTreeProgress {
+    return this.progressForTree(this.sessionTree(sessionId));
+  }
+
+  private progressForTree(tree: readonly RuntimeSession[]): SessionTreeProgress {
+    const root = tree[0]!;
+    const terminal = tree.filter(({ record }) => record.exitCode !== null).length;
+    const active = tree.filter(({ record }) =>
+      record.executionState === "active" || record.executionState === "starting").length;
+    return {
+      rootSessionId: root.record.id,
+      rootKind: root.record.kind ?? "worker",
+      childCount: tree.length - 1,
+      total: tree.length,
+      active,
+      stopping: tree.length - active - terminal,
+      terminal,
+    };
   }
 
   private requireAdapter(provider: string): ProviderAdapter {

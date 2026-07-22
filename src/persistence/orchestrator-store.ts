@@ -1,10 +1,11 @@
-import { mkdir, open, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   OrchestratorBindingResetSchema,
   OrchestratorBindingSchema,
   type OrchestratorBinding,
 } from "../domain/orchestrator.js";
+import { openPrivateAppendFile } from "./private-files.js";
 
 /** Append-only latest-binding registry. Rebinding never erases the prior audit trail. */
 export class OrchestratorStore {
@@ -35,8 +36,7 @@ export class OrchestratorStore {
   }
 
   private async append(record: OrchestratorBinding | { recordType: "reset"; key: string; resetAt: string }): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true });
-    const handle = await open(this.path, "a", 0o600);
+    const handle = await openPrivateAppendFile(this.path);
     try {
       await handle.write(`${JSON.stringify(record)}\n`, undefined, "utf8");
       await handle.sync();

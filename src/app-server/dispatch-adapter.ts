@@ -14,6 +14,9 @@ import {
 import { JobReportSchema, type JobReport, type JobResult } from "../domain/job.js";
 import type { ProviderId } from "../domain/provider-registration.js";
 import type { UsageReport } from "../domain/usage.js";
+import { jobLaunchEnvironment } from "../providers/launch-environment.js";
+import { applyWorkerMode } from "../providers/worker-mode.js";
+import { CYBERDECK_VERSION } from "../version.js";
 import type { LeaseGrant, WorktreeLeaseManager } from "../control-plane/worktree-lease-manager.js";
 import type { ArtifactStore } from "../persistence/artifact-store.js";
 import {
@@ -197,7 +200,7 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
     try {
       const initialize = requireObject(
         await this.rpc(entry, "initialize", {
-          clientInfo: { name: "cyberdeck", title: "Cyberdeck", version: "0.1.0" },
+          clientInfo: { name: "cyberdeck", title: "Cyberdeck", version: CYBERDECK_VERSION },
           capabilities: { experimentalApi: false },
         }),
         "initialize result",
@@ -222,7 +225,10 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
       const turn = requireObject(
         await this.rpc(entry, "turn/start", {
           threadId: entry.threadId,
-          input: [{ type: "text", text: request.request.instruction }],
+          input: [{
+            type: "text",
+            text: applyWorkerMode(request.request.instruction, request.request.workerMode),
+          }],
           cwd: request.request.cwd,
           approvalPolicy: "on-request",
         }),
@@ -558,7 +564,7 @@ export function buildAppServerCommand(request: DispatchRequest): AppServerComman
     executable: "codex",
     args: ["app-server", "--stdio", "--strict-config"],
     cwd: request.request.cwd,
-    env: { ...process.env },
+    env: jobLaunchEnvironment({ ...process.env }, request.request),
   };
 }
 

@@ -28,13 +28,18 @@ class FakeTransport implements AttachTransport {
   private readonly frameListeners = new Set<(frame: ServerFrame) => void>();
   private readonly closeListeners = new Set<() => void>();
 
+  constructor(private readonly sessionKind?: "worker" | "orchestrator") {}
+
   async request<T>(): Promise<T> {
     this.emitFrame({
       type: "output",
       sessionId: TEST_SESSION_ID,
       data: Buffer.from("LIVE").toString("base64"),
     });
-    return { data: Buffer.from("REPLAY").toString("base64") } as T;
+    return {
+      data: Buffer.from("REPLAY").toString("base64"),
+      ...(this.sessionKind === undefined ? {} : { session: { kind: this.sessionKind } }),
+    } as T;
   }
   sendFrame(frame: ClientFrame): void { this.sent.push(frame); }
   onFrame(listener: (frame: ServerFrame) => void): () => void {
@@ -154,6 +159,34 @@ describe("attachSession", () => {
     await expect(attached).resolves.toBe(0);
     expect(transport.sent).toContainEqual({ type: "detach", sessionId: TEST_SESSION_ID });
     expect(transport.sent.some((frame) => frame.type === "input")).toBe(false);
+  });
+
+  it("forwards Left Arrow inside an orchestrator and keeps Ctrl-] as its detach key", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport("orchestrator");
+    const attached = attachSession({
+      sessionId: TEST_SESSION_ID,
+      mode: "control",
+      transport,
+      input,
+      output: new FakeOutput(),
+      signals: new EventEmitter(),
+      closeTransport: false,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    input.emit("data", Buffer.from("\u001b[D"));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(transport.sent).toContainEqual({
+      type: "input",
+      sessionId: TEST_SESSION_ID,
+      data: Buffer.from("\u001b[D").toString("base64"),
+    });
+    expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
+
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+    expect(transport.sent).toContainEqual({ type: "detach", sessionId: TEST_SESSION_ID });
   });
 
   it("returns and cleans up raw mode when the provider exits while attached", async () => {

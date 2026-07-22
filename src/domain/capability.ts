@@ -5,6 +5,7 @@ export const CyberdeckCapabilitySchema = z.enum([
   "thread.read",
   "thread.enqueue",
   "worker.start",
+  "worker.start.fable",
   "workflow.run",
 ]);
 
@@ -32,4 +33,3 @@ export function grantAllows(
   if (parsed.scope.kind === "self") return target.sessionId === parsed.subjectSessionId;
   return target.cwd !== undefined && target.cwd === parsed.scope.cwd;
 }
-

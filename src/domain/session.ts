@@ -15,6 +15,7 @@ export const SessionExecutionStateSchema = z.enum([
 ]);
 export const AttachmentStateSchema = z.enum(["detached", "controlled", "watched"]);
 export const SessionKindSchema = z.enum(["worker", "orchestrator"]);
+export const WorkerModeSchema = z.enum(["normal", "caveman"]);
 export const ThreadAttentionStateSchema = z.enum([
   "working",
   "needs-input",
@@ -38,6 +39,7 @@ export const StartSessionRequestSchema = z.object({
   kind: SessionKindSchema.optional(),
   orchestratorScope: z.enum(["workspace", "fleet"]).optional(),
   providerInstructions: z.string().trim().min(1).optional(),
+  workerMode: WorkerModeSchema.optional(),
 });
 
 export const SessionRecordSchema = StartSessionRequestSchema.extend({
@@ -62,6 +64,7 @@ export type Sandbox = z.infer<typeof SandboxSchema>;
 export type SessionExecutionState = z.infer<typeof SessionExecutionStateSchema>;
 export type AttachmentState = z.infer<typeof AttachmentStateSchema>;
 export type SessionKind = z.infer<typeof SessionKindSchema>;
+export type WorkerMode = z.infer<typeof WorkerModeSchema>;
 export type ThreadAttentionState = z.infer<typeof ThreadAttentionStateSchema>;
 export type StartSessionRequest = z.infer<typeof StartSessionRequestSchema>;
 export type SessionRecord = z.infer<typeof SessionRecordSchema>;

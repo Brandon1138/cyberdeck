@@ -111,8 +111,8 @@ export class ClaudeJobDispatchAdapter implements JobDispatchAdapter {
       throw new Error(`Job ${request.jobId} was already dispatched`);
     }
 
-    // Command construction runs the launch-safety gate, so an omitted or Fable model throws here,
-    // before anything is spawned.
+    // Command construction runs the launch-safety gate, so an omitted model throws here before
+    // anything is spawned. Delegated Fable authorization is checked before dispatch.
     const command = buildClaudeHeadlessCommand(request.request, this.options.headless ?? {});
 
     this.seen.add(request.jobId);

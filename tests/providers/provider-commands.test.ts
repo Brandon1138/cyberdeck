@@ -53,6 +53,17 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args).toContain("model_reasoning_effort=\"xhigh\"");
   });
 
+  it("marks worker mode without disturbing the inherited launch environment", () => {
+    const spec = new CodexProviderAdapter().buildLaunchSpec(session({
+      kind: "worker",
+      workerMode: "caveman",
+    }));
+    expect(spec.env).toMatchObject({
+      CYBERDECK_PROCESS_ROLE: "worker",
+      CYBERDECK_WORKER_MODE: "caveman",
+    });
+  });
+
   it("starts an orchestrator with native developer instructions and MCP but no positional user prompt", () => {
     const mcp = { nodePath: "/node", cliPath: "/cyberdeck.js" };
     const orchestrator = session({
@@ -135,6 +146,18 @@ describe("CodexProviderAdapter", () => {
 // tests/providers/claude-adapter.test.ts. This block keeps the side-by-side command-construction
 // comparison with Codex only.
 describe("ClaudeProviderAdapter", () => {
+  it("marks orchestrators normal even when the broker inherited stale worker metadata", () => {
+    const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({
+      provider: "claude",
+      model: "sonnet",
+      kind: "orchestrator",
+    }));
+    expect(spec.env).toMatchObject({
+      CYBERDECK_PROCESS_ROLE: "orchestrator",
+      CYBERDECK_WORKER_MODE: "normal",
+    });
+  });
+
   it("starts an orchestrator with native system instructions and MCP but no positional user prompt", () => {
     const orchestrator = session({
       provider: "claude",

@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect, type Socket } from "node:net";
@@ -10,6 +10,9 @@ import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/pr
 import { ServerFrameSchema, type ServerFrame, type WireFrame } from "../../src/protocol/frames.js";
 import { JsonlDecoder, encodeFrame } from "../../src/protocol/jsonl.js";
 import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-store.js";
+import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
+import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
+import { WorkerPreferenceStore } from "../../src/persistence/worker-preference-store.js";
 
 class FakePty implements PtyHandle {
   readonly pid: number;
@@ -119,19 +122,59 @@ async function harness() {
     transcripts,
     config: BrokerRuntimeConfigSchema.parse({ maxConcurrentWorkers: 8 }),
   });
+  const orchestratorStore = new OrchestratorStore(directory);
+  const workerPreferences = new WorkerPreferenceStore(directory);
+  const orchestrators = new OrchestratorManager(registry, orchestratorStore, workerPreferences);
   let server: BrokerServer;
   server = new BrokerServer({
     socketPath,
     registry,
     transcripts,
+    orchestrators,
+    workerPreferences,
     onShutdown: () => { void server.close(); },
   });
   await server.listen();
-  return { server, socketPath, ptyFactory };
+  return { server, socketPath, ptyFactory, orchestratorStore, workerPreferences };
 }
 
 describe("BrokerServer", () => {
-  it("routes lifecycle requests, streams output, and rejects delegated Fable", async () => {
+  it("restricts the broker socket to the current user", async () => {
+    const { server, socketPath } = await harness();
+    try {
+      expect((await stat(socketPath)).mode & 0o777).toBe(0o600);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("persists Caveman mode without an Orc and injects it into new worker tasks", async () => {
+    const { server, socketPath, ptyFactory, workerPreferences } = await harness();
+    const client = await TestClient.open(socketPath);
+    try {
+      await expect(client.request("orchestrator.cavemanWorkers", { enabled: true })).resolves.toEqual({
+        scope: "box",
+        enabled: true,
+      });
+      const worker = await client.request<{ id: string; workerMode: string }>("session.startWithPrompt", {
+        provider: "codex",
+        cwd: "/tmp/repo",
+        detached: true,
+        sandbox: "read-only",
+        initialPrompt: "Describe the result",
+      });
+
+      expect(worker.workerMode).toBe("caveman");
+      expect(ptyFactory.mock.calls[0]?.[0].args[0]).toContain("CAVEMAN MODE ACTIVE");
+      expect(ptyFactory.mock.calls[0]?.[0].args[0]).toContain("WORKER TASK\nDescribe the result");
+      await expect(workerPreferences.get()).resolves.toEqual({ caveman: true });
+    } finally {
+      client.socket.destroy();
+      await server.close();
+    }
+  });
+
+  it("routes lifecycle requests and treats direct broker starts as operator-owned", async () => {
     const { server, socketPath, ptyFactory } = await harness();
     const client = await TestClient.open(socketPath);
     try {
@@ -163,15 +206,15 @@ describe("BrokerServer", () => {
       await expect(client.request("session.start", {
         provider: "claude", cwd: "/tmp/repo", detached: true, sandbox: "read-only",
         model: "fable", parentSessionId: parent.id,
-      })).rejects.toMatchObject({ code: "FABLE_REQUIRES_EXPLICIT_HUMAN_START" });
-      expect(ptyFactory).toHaveBeenCalledTimes(2);
+      })).resolves.toMatchObject({ model: "fable", parentSessionId: parent.id });
+      expect(ptyFactory).toHaveBeenCalledTimes(3);
 
       await client.request("session.stop", { sessionId: second.id });
       await expect(client.request("session.attach", { sessionId: second.id }))
         .rejects.toMatchObject({ code: "SESSION_NOT_ACTIVE" });
       await expect(client.request("session.resume", { sessionId: second.id }))
         .resolves.toMatchObject({ id: second.id, executionState: "active", exitCode: null });
-      expect(ptyFactory).toHaveBeenCalledTimes(3);
+      expect(ptyFactory).toHaveBeenCalledTimes(4);
       await client.request("session.stop", { sessionId: second.id });
       await expect(client.request("session.delete", { sessionId: second.id })).resolves.toEqual({ deleted: true });
       await expect(client.request("session.snapshot", { sessionId: second.id }))
@@ -207,6 +250,63 @@ describe("BrokerServer", () => {
     } finally {
       watcher.socket.destroy();
       successor.socket.destroy();
+      await server.close();
+    }
+  });
+
+  it("stops and deletes an orchestrator tree while clearing its durable binding", async () => {
+    const { server, socketPath, orchestratorStore, workerPreferences } = await harness();
+    const client = await TestClient.open(socketPath);
+    try {
+      const ensured = await client.request<{ session: { id: string } }>("orchestrator.ensure", {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        cwd: "/tmp/repo",
+        scope: "fleet",
+      });
+      await expect(client.request("orchestrator.fableWorkers", {
+        cwd: "/tmp/repo",
+        scope: "fleet",
+        enabled: true,
+      })).resolves.toMatchObject({
+        key: "fleet",
+        configured: true,
+        enabled: true,
+        sessionId: ensured.session.id,
+      });
+      await expect(client.request("orchestrator.cavemanWorkers", {
+        enabled: true,
+      })).resolves.toMatchObject({
+        scope: "box",
+        enabled: true,
+      });
+      await expect(orchestratorStore.get("fleet")).resolves.toMatchObject({
+        grant: { capabilities: expect.arrayContaining(["worker.start.fable"]) },
+      });
+      await expect(workerPreferences.get()).resolves.toEqual({ caveman: true });
+      const child = await client.request<{ id: string }>("session.start", {
+        provider: "codex",
+        cwd: "/tmp/repo",
+        detached: true,
+        sandbox: "read-only",
+        kind: "worker",
+        parentSessionId: ensured.session.id,
+      });
+
+      await expect(client.request("session.stop", { sessionId: ensured.session.id })).resolves.toMatchObject({
+        total: 2,
+        terminal: 2,
+      });
+      await expect(client.request("session.deleteTree", { sessionId: ensured.session.id })).resolves.toMatchObject({
+        deleted: 2,
+      });
+      await expect(client.request("session.list", {})).resolves.toEqual([]);
+      await expect(orchestratorStore.findBySessionId(ensured.session.id)).resolves.toBeUndefined();
+      await expect(client.request("session.snapshot", { sessionId: child.id }))
+        .rejects.toMatchObject({ code: "SESSION_NOT_FOUND" });
+    } finally {
+      client.socket.destroy();
       await server.close();
     }
   });

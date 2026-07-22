@@ -3,6 +3,7 @@ name: Cyberdeck Fleet
 description: A restrained terminal register for durable, provider-neutral agent sessions.
 colors:
   primary: "#9EB6FF"
+  logo: "#B69EFF"
   canvas: "#0E1116"
   surface: "#151922"
   text-strong: "#D7DCE4"
@@ -37,8 +38,8 @@ spacing:
   pair: "2ch"
   group: "4ch"
 components:
-  logo-placeholder:
-    textColor: "{colors.text-muted}"
+  logo-mark:
+    textColor: "{colors.logo}"
     typography: "{typography.body}"
     width: "8ch"
     height: "3em"
@@ -107,13 +108,14 @@ The palette is cool graphite with one pale signal-blue accent. Semantic cyan, am
 ### Primary
 
 - **Signal Blue** (`#9EB6FF`): selected markers, project paths, active picker rows, and the composer mode indicator. It occupies less than ten percent of the screen and never fills an entire thread row.
+- **Octo Violet** (`#B69EFF`): the 8-bit octopus logo mark in the header bay, and nothing else. It carries no state meaning and never appears in rows, pickers, or copy.
 
 ### Neutral
 
 - **Ink Slate** (`#0E1116`): intended canvas for renderers that own their background. Terminal clients may preserve the user's equivalent dark background.
 - **Deep Slate** (`#151922`): optional footer or inline-picker surface. It is never used to create nested cards.
 - **Frosted Gray** (`#D7DCE4`): primary titles, selected thread names, prompts, and important values.
-- **Cool Ash** (`#7B8490`): previews, ages, inactive markers, placeholder pixels, and stopped states.
+- **Cool Ash** (`#7B8490`): previews, ages, inactive markers, and stopped states.
 - **Steel Hairline** (`#343B46`): footer separators and the tmux pane boundary.
 
 ### Semantic
@@ -167,17 +169,17 @@ The footer uses one dim horizontal separator above the composer and a second sep
 The header occupies the upper-left of Fleet and establishes identity, current orchestration context, and attention counts.
 
 ```text
-░ ░ ░    Cyberdeck
- ░ ░     Codex Sol · high · ~/code/personal/mikoshi
-░ ░ ░    18 agents · 1 needs input · 2 working · 14 done · 1 failed
+ ▄████▄   Cyberdeck
+▟█▄██▄█▙  Codex Sol · high · ~/code/personal/mikoshi
+▌▌▌▌▐▐▐▐  18 agents · 1 needs input · 2 working · 14 done · 1 failed
 ```
 
 - Reserve an `8ch` by `3-row` logo bay with a `2ch` gap before text. The final 8-bit Cyberdeck logo must fit this box without moving the metadata column.
-- Until the final asset exists, render the sparse `░` placeholder above in Cool Ash. It is intentionally quiet, has no outline, and is not a provisional logo concept.
+- The mark is the 8-bit Cyberdeck octopus above, rendered in Octo Violet from half-block and quadrant glyphs: a domed mantle, two notch eyes, and eight one-pixel tentacles. It is the only 8-bit artwork in the interface.
 - Render `Cyberdeck` in strong bold text.
 - The second line shows the bound orchestrator's friendly model, effort, and scope. The normal global binding is labeled `fleet`; an explicitly isolated workspace binding shows its shortened path. If none exists, show `No orchestrator · ctrl+o to choose` without implying a model default.
 - The third line shows total threads plus nonzero attention counts. `Stopped`, `Interrupted`, and `Failed` are never folded into `done`.
-- Keep the full logo bay in regular and half-width cockpit panes. Below `64` columns, omit the placeholder pixels but retain the same header text order.
+- Keep the full logo bay in regular and half-width cockpit panes. Below `64` columns, omit the logo pixels but retain the same header text order.
 
 ### Project Groups and Thread Rows
 
@@ -243,7 +245,7 @@ enter open/start · space reply · /model configure · ? shortcuts
 
 - Empty composer plus `Enter` opens the selected thread. Nonempty composer plus `Enter` starts a new worker with the visible model, effort, sandbox, and project context.
 - `Space` from an empty composer enters reply mode for the selected thread. Reply mode names its target and does not change the new-worker configuration.
-- `Ctrl+J` inserts a newline. `Esc` leaves reply, rename, or picker mode before it can clear a draft; from the base or help view it quits Fleet without stopping agents.
+- `Ctrl+J` inserts a newline. `Esc` leaves reply, rename, or picker mode before it can clear a draft; from the base view it does nothing and never exits Fleet.
 - If no explicit new-worker model has been selected, the context line reads `▶ /model required · read-only · <project>`, and submission opens the picker instead of starting anything.
 - Persist the last explicit model and effort per project. Selecting a thread never silently rewrites this configuration.
 - Notices appear directly above the first separator. Errors are red; neutral confirmations use normal text. No toast or modal is used.
@@ -263,7 +265,7 @@ If a provider exposes no effort control, show a single `Provider managed` choice
 Pressing `?` with an empty composer expands a help panel in the footer. Pressing `?` again closes it. Within a nonempty draft, `?` remains literal input.
 
 ```text
-shift+↑↓ reorder   ctrl+s switch views   @ mention          alt+1–9 open   esc quit
+shift+↑↓ reorder   ctrl+s switch views   @ mention          alt+1–9 open   esc back/clear
 ctrl+r rename      ctrl+j newline         ctrl+t pin to top  ctrl+x stop   ? close
 ```
 
@@ -273,13 +275,13 @@ ctrl+r rename      ctrl+j newline         ctrl+t pin to top  ctrl+x stop   ? clo
 - `Alt+1` through `Alt+9` opens the corresponding visible thread.
 - `Ctrl+R` renames the selected thread inline and persists the title.
 - `Ctrl+T` toggles pinning at the top of the project group.
-- `Ctrl+X` is contextual. Help says `stop` for a live runtime and `delete` for a terminal thread. The visible confirmation must repeat the exact destructive action.
-- `Esc` quits from the base or help view. In an edit, reply, picker, or nonempty draft it backs out first. `Ctrl+C` remains an immediate non-destructive Fleet exit.
+- `Ctrl+X` is contextual. Help says `stop` while any selected-tree runtime is live and `delete` only when the full tree is terminal. The visible confirmation must repeat the exact destructive action and descendant count.
+- `Esc` backs out of help, an edit, a reply, a picker, or a nonempty draft and never exits Fleet. Two consecutive `Ctrl+C` presses within five seconds exit without stopping agents; the first press shows the only red inline exit confirmation near the footer, and any other key cancels it.
 - At narrow widths, wrap the panel into two columns or one column. Never truncate key names or cover thread rows.
 
 ### Destructive and Failure Feedback
 
-Stopping and deleting are separate controls. On a live row, `Ctrl+X` sends stop and changes the row to `Stopping`. On a terminal row, the first `Ctrl+X` replaces its status with `Delete thread? press ctrl+x again`; the second press within the confirmation window deletes history. The confirmation is red and includes `thread`, while stop copy always says `agent` or `runtime`.
+Stopping and deleting are separate controls. On a live worker, `Ctrl+X` sends stop and changes the row to `Stopping`. On an orchestrator, the same key drains the owned tree and reports literal progress such as `Stopping orchestrator + 3 workers · 2/4 stopped`; repeated presses retry unfinished stops without requiring row hunting. Once the full tree is terminal, the first `Ctrl+X` asks to delete the exact thread or orchestrator plus child-thread count, and the second press within the confirmation window deletes history leaf-first. The confirmation is red; stop progress remains amber.
 
 Failure copy keeps the thread visible, preserves its last assistant preview, and places the exact recoverable next action near the composer. Never translate broker unavailability into an empty Fleet.
 
@@ -287,7 +289,7 @@ Failure copy keeps the thread visible, preserves its last assistant preview, and
 
 ### Do:
 
-- **Do** reserve the `8ch` by `3-row` upper-left bay for the final 8-bit logo and use only the quiet Cool Ash placeholder until that asset exists.
+- **Do** reserve the `8ch` by `3-row` upper-left bay for the 8-bit octopus mark and render it only in Octo Violet.
 - **Do** keep task, friendly model and effort, truthful state, assistant preview, and age visually adjacent.
 - **Do** show `Done` when an active provider has completed its turn and awaits an ordinary next prompt.
 - **Do** reserve `Needs input` for a concrete blocking intervention and preserve its literal text in reduced-color terminals.

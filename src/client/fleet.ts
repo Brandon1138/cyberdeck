@@ -1,5 +1,11 @@
 import { homedir } from "node:os";
-import type { EnsureOrchestratorRequest } from "../domain/orchestrator.js";
+import type {
+  CavemanWorkersRequest,
+  CavemanWorkersResult,
+  EnsureOrchestratorRequest,
+  FableWorkersRequest,
+  FableWorkersResult,
+} from "../domain/orchestrator.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
 import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
@@ -50,6 +56,10 @@ export interface DeleteConfirmation {
   expiresAt: number;
 }
 
+export interface QuitConfirmation {
+  expiresAt: number;
+}
+
 export type OrchestratorPickerStep = "model" | "effort";
 
 export interface OrchestratorPickerState {
@@ -77,11 +87,14 @@ export interface RenameState {
   draft: string;
 }
 
+export type FleetNoticeTone = "neutral" | "warning" | "error" | "confirmation";
+
 export interface FleetState {
   selectedSessionId?: string | undefined;
   fallbackCwd: string;
   draft: string;
   deleteConfirmation?: DeleteConfirmation | undefined;
+  quitConfirmation?: QuitConfirmation | undefined;
   orchestratorPicker?: OrchestratorPickerState | undefined;
   workerPicker?: WorkerPickerState | undefined;
   launchProfiles: Record<string, LaunchProfile>;
@@ -89,15 +102,18 @@ export interface FleetState {
   helpOpen?: boolean | undefined;
   rename?: RenameState | undefined;
   notice?: string | undefined;
+  noticeTone?: FleetNoticeTone | undefined;
 }
 
 export type FleetAction =
-  | { type: "stop"; sessionId: string }
-  | { type: "delete"; sessionId: string }
+  | { type: "stop-tree"; sessionId: string }
+  | { type: "delete-tree"; sessionId: string }
   | { type: "attach"; sessionId: string }
   | { type: "resume"; sessionId: string }
   | { type: "start"; request: StartSessionRequest & { initialPrompt: string } }
   | { type: "orchestrator"; request: EnsureOrchestratorRequest }
+  | { type: "fable-workers"; request: FableWorkersRequest }
+  | { type: "caveman-workers"; request: CavemanWorkersRequest }
   | { type: "rename"; sessionId: string; name: string }
   | { type: "pin"; sessionId: string }
   | { type: "reorder"; sessionId: string; direction: "up" | "down" }
@@ -140,11 +156,24 @@ interface OrchestratorModelChoice {
   label: string;
 }
 
+interface SessionTreeProgress {
+  rootSessionId: string;
+  rootKind: "worker" | "orchestrator";
+  childCount: number;
+  total: number;
+  active: number;
+  stopping: number;
+  terminal: number;
+  deleted?: number;
+}
+
 export interface FleetRuntimeOptions {
   openOrchestrator?: ((request: EnsureOrchestratorRequest) => Promise<void>) | undefined;
 }
 
 const DELETE_CONFIRMATION_MS = 5_000;
+const QUIT_CONFIRMATION_MS = 5_000;
+const QUIT_CONFIRMATION_NOTICE = "Press ctrl+c again to exit";
 const WORKER_MODEL_CHOICES: readonly WorkerModelChoice[] = WORKER_PROVIDER_CAPABILITIES.flatMap((capability) =>
   (capability.provider === "antigravity" ? ["gemini-3.6-flash"] : capability.models)
     .map((model): WorkerModelChoice => ({
@@ -180,6 +209,7 @@ const ANSI = {
   bold: "\u001b[1m",
   dim: "\u001b[2m",
   blue: "\u001b[38;2;158;182;255m",
+  purple: "\u001b[38;2;182;158;255m",
   cyan: "\u001b[38;2;102;194;208m",
   yellow: "\u001b[38;2;212;168;91m",
   green: "\u001b[38;2;120;198;121m",
@@ -246,13 +276,35 @@ export function transitionFleet(
   key: string,
   now = Date.now(),
 ): FleetTransition {
-  const state = normalizeState(current, snapshot, now);
+  const normalized = normalizeState(current, snapshot, now);
   const threads = orderedThreads(snapshot);
-  const selected = threads.find(({ record }) => record.id === state.selectedSessionId);
 
   if (key === "ctrl+c") {
-    return { state, action: { type: "quit" } };
+    if (normalized.quitConfirmation !== undefined) {
+      return {
+        state: { ...normalized, quitConfirmation: undefined, notice: undefined },
+        action: { type: "quit" },
+      };
+    }
+    return {
+      state: {
+        ...normalized,
+        deleteConfirmation: undefined,
+        quitConfirmation: { expiresAt: now + QUIT_CONFIRMATION_MS },
+        notice: QUIT_CONFIRMATION_NOTICE,
+        noticeTone: "confirmation",
+      },
+    };
   }
+
+  const state = normalized.quitConfirmation === undefined
+    ? normalized
+    : {
+        ...normalized,
+        quitConfirmation: undefined,
+        ...(normalized.notice === QUIT_CONFIRMATION_NOTICE ? { notice: undefined } : {}),
+      };
+  const selected = threads.find(({ record }) => record.id === state.selectedSessionId);
 
   if (key === "ctrl+s") {
     return {
@@ -271,7 +323,7 @@ export function transitionFleet(
     if (key === "escape") return { state: { ...state, rename: undefined, notice: undefined } };
     if (key === "enter") {
       const name = state.rename.draft.trim();
-      if (name === "") return { state: { ...state, notice: "Thread name cannot be empty" } };
+      if (name === "") return { state: { ...state, notice: "Thread name cannot be empty", noticeTone: "error" } };
       return {
         state: { ...state, rename: undefined, notice: undefined },
         action: { type: "rename", sessionId: state.rename.sessionId, name },
@@ -353,25 +405,23 @@ export function transitionFleet(
   }
 
   if (key === "ctrl+x" && selected !== undefined) {
-    if (selected.record.executionState === "active" || selected.record.executionState === "starting") {
-      return {
-        state: { ...state, deleteConfirmation: undefined, notice: undefined },
-        action: { type: "stop", sessionId: selected.record.id },
-      };
-    }
-    if (selected.record.exitCode === null) {
+    const tree = sessionTree(snapshot, selected.record.id);
+    const terminal = tree.filter(({ record }) => isTerminalSession(record)).length;
+    if (terminal !== tree.length) {
       return {
         state: {
           ...state,
           deleteConfirmation: undefined,
-          notice: "Agent is still stopping",
+          notice: stoppingTreeNotice(selected.record, tree.length - 1, terminal, tree.length),
+          noticeTone: "warning",
         },
+        action: { type: "stop-tree", sessionId: selected.record.id },
       };
     }
     if (state.deleteConfirmation?.sessionId === selected.record.id) {
       return {
         state: { ...state, deleteConfirmation: undefined, notice: undefined },
-        action: { type: "delete", sessionId: selected.record.id },
+        action: { type: "delete-tree", sessionId: selected.record.id },
       };
     }
     return {
@@ -381,7 +431,8 @@ export function transitionFleet(
           sessionId: selected.record.id,
           expiresAt: now + DELETE_CONFIRMATION_MS,
         },
-        notice: "Delete thread? press ctrl+x again",
+        notice: deleteTreeConfirmation(selected.record, tree.length - 1),
+        noticeTone: "confirmation",
       },
     };
   }
@@ -400,6 +451,8 @@ export function transitionFleet(
   }
   if (key === "enter" && selected !== undefined) {
     const initialPrompt = state.draft.trim();
+    const workerPolicy = workerPolicyTransition(state, snapshot, initialPrompt);
+    if (workerPolicy !== undefined) return workerPolicy;
     if (initialPrompt === "/model") {
       return openWorkerPicker(state, snapshot, "");
     }
@@ -412,8 +465,11 @@ export function transitionFleet(
     return startTransition(state, selected.record, initialPrompt);
   }
   if (key === "enter" && selected === undefined && state.draft.trim() !== "") {
-    if (state.draft.trim() === "/model") return openWorkerPicker(state, snapshot, "");
-    return startTransition(state, undefined, state.draft.trim());
+    const initialPrompt = state.draft.trim();
+    const workerPolicy = workerPolicyTransition(state, snapshot, initialPrompt);
+    if (workerPolicy !== undefined) return workerPolicy;
+    if (initialPrompt === "/model") return openWorkerPicker(state, snapshot, "");
+    return startTransition(state, undefined, initialPrompt);
   }
   if (key === "up" || key === "down") {
     const currentIndex = Math.max(0, threads.findIndex(({ record }) => record.id === state.selectedSessionId));
@@ -435,9 +491,9 @@ export function transitionFleet(
     return { state: { ...state, draft: `${state.draft}\n`, notice: undefined } };
   }
   if (key === "escape") {
-    if (state.helpOpen === true) return { state, action: { type: "quit" } };
+    if (state.helpOpen === true) return { state: { ...state, helpOpen: false, notice: undefined } };
     if (state.draft !== "") return { state: { ...state, draft: "", notice: undefined } };
-    return { state, action: { type: "quit" } };
+    return { state };
   }
   if (key === "@" && state.draft === "" && selected !== undefined) {
     const reference = (selected.record.name ?? selected.record.id.slice(0, 8)).replace(/\s+/gu, "-");
@@ -551,6 +607,7 @@ function transitionWorkerPicker(state: FleetState, key: string): FleetTransition
       draft: picker.returnDraft,
       launchProfiles: { ...state.launchProfiles, [picker.cwd]: profile },
       notice: `Selected ${choice.label} · ${friendlyEffort(effort)}`,
+      noticeTone: "neutral",
     },
     action: { type: "profile", cwd: picker.cwd, profile },
   };
@@ -602,9 +659,9 @@ function renderFleetList(
   }
 
   const selected = threads.find(({ record }) => record.id === state.selectedSessionId);
+  const selectedTree = selected === undefined ? [] : sessionTree(snapshot, selected.record.id);
   const terminal = selected !== undefined
-    && !["active", "starting"].includes(selected.record.executionState)
-    && selected.record.exitCode !== null;
+    && selectedTree.every(({ record }) => isTerminalSession(record));
   const destructiveHint = terminal ? "ctrl+x delete thread" : "ctrl+x stop agent";
   const cwd = composerCwd(state, snapshot);
   const profile = state.launchProfiles[cwd];
@@ -619,13 +676,13 @@ function renderFleetList(
     ? shortcutHelp(options.width, terminal ? "delete" : "stop")
     : [];
   const footer = [
-    ...(state.notice === undefined ? [] : [paint(fit(state.notice, options.width), "red", options.color)]),
+    ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
     paint("─".repeat(options.width), "dim", options.color),
     ...composerLines,
     paint("─".repeat(options.width), "dim", options.color),
     ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
     paint(fit(launchContext, options.width), "dim", options.color),
-    paint(fit(`enter open/start · space reply · /model configure · ? shortcuts · ${destructiveHint}`, options.width), "dim", options.color),
+    paint(fit(`enter open/start · space reply · /model · /fable-workers · /caveman-workers · ? shortcuts · ${destructiveHint}`, options.width), "dim", options.color),
   ];
   const bodyHeight = Math.max(0, options.height - footer.length);
   const body = lines.slice(0, bodyHeight);
@@ -665,14 +722,14 @@ function renderHeader(
     paint(fit(counts, Math.max(1, options.width - 10)), "dim", options.color),
   ];
   if (options.width < 64) return textLines;
-  const logo = ["░ ░ ░", " ░ ░", "░ ░ ░"];
+  const logo = [" ▄████▄", "▟█▄██▄█▙", "▌▌▌▌▐▐▐▐"];
   return textLines.map((line, index) =>
-    `${paint(pad(logo[index] ?? "", 8), "gray", options.color)}  ${line}`);
+    `${paint(pad(logo[index] ?? "", 8), "purple", options.color)}  ${line}`);
 }
 
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
-    "shift+↑↓ reorder", "ctrl+s switch views", "@ mention", "alt+1–9 open", "esc quit",
+    "shift+↑↓ reorder", "ctrl+s switch views", "@ mention", "alt+1–9 open", "esc back/clear",
     "ctrl+r rename", "ctrl+j newline", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
   ];
   if (width >= 110) return [entries.slice(0, 5).join("   "), entries.slice(5).join("   ")];
@@ -759,7 +816,7 @@ function renderOrchestratorPicker(
   }
 
   const footer = [
-    ...(state.notice === undefined ? [] : [paint(fit(state.notice, options.width), "red", options.color)]),
+    ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
     paint("─".repeat(options.width), "dim", options.color),
     paint(fit(`${selection.provider.label} · ${selection.model} · ${selection.effort ?? "Provider managed"}`, options.width), "cyan", options.color),
     paint(
@@ -816,8 +873,7 @@ function renderThreadRow(
   const baseTitle = thread.record.name ?? thread.record.role ?? `Untitled ${thread.record.id.slice(0, 8)}`;
   const title = `${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
   const identity = `${friendlyModel(thread.record.provider, thread.record.model)} · ${friendlyEffort(thread.record.effort ?? "provider-managed")}`;
-  const pendingDelete = state.deleteConfirmation?.sessionId === thread.record.id;
-  const status = pendingDelete ? "Delete thread?" : threadStatus(thread);
+  const status = threadStatus(thread);
   const preview = thread.record.latestPreview ?? latestTerminalPreview(thread.replay);
   const age = relativeTime(thread.record.meaningfulUpdatedAt ?? thread.record.updatedAt, options.now);
 
@@ -828,7 +884,7 @@ function renderThreadRow(
     const first = [
       `${paint(prefix, selected ? "bold" : "dim", options.color)} ${selected ? paint(fit(title, firstAvailable), "bold", options.color) : fit(title, firstAvailable)}`,
       ...(identityWidth === 0 ? [] : [paint(pad(identity, identityWidth), "dim", options.color)]),
-      statusText(pad(status, statusWidth), pendingDelete, options.color),
+      statusText(pad(status, statusWidth), false, options.color),
       age,
     ].join("  ");
     const second = `  ${paint(fit(preview, Math.max(8, options.width - 2)), "dim", options.color)}`;
@@ -844,7 +900,7 @@ function renderThreadRow(
     paint(prefix, selected ? "bold" : "dim", options.color),
     selected ? paint(pad(title, titleWidth), "bold", options.color) : pad(title, titleWidth),
     paint(pad(identity, identityWidth), "dim", options.color),
-    statusText(pad(status, statusWidth), pendingDelete, options.color),
+    statusText(pad(status, statusWidth), false, options.color),
     paint(fit(preview, previewWidth), "dim", options.color),
     padStart(age, 5),
   ].join(" ");
@@ -907,9 +963,9 @@ export async function runFleet(
         signals,
         closeTransport: false,
       });
-      if (status !== 0) state = { ...state, notice: "Provider attachment closed unexpectedly" };
+      if (status !== 0) state = { ...state, notice: "Provider attachment closed unexpectedly", noticeTone: "error" };
     } catch (error) {
-      state = { ...state, notice: error instanceof Error ? error.message : String(error) };
+      state = { ...state, notice: error instanceof Error ? error.message : String(error), noticeTone: "error" };
     } finally {
       attaching = false;
       if (!stopped) {
@@ -925,7 +981,7 @@ export async function runFleet(
 
   const openOrchestrator = async (request: EnsureOrchestratorRequest) => {
     if (runtime.openOrchestrator === undefined) {
-      state = { ...state, notice: "Orchestrator presentation is unavailable in this client" };
+      state = { ...state, notice: "Orchestrator presentation is unavailable in this client", noticeTone: "error" };
       return;
     }
     attaching = true;
@@ -960,10 +1016,18 @@ export async function runFleet(
       return;
     }
     try {
-      if (action?.type === "stop") {
-        await client.request("session.stop", { sessionId: action.sessionId });
-      } else if (action?.type === "delete") {
-        await client.request("session.delete", { sessionId: action.sessionId });
+      if (action?.type === "stop-tree") {
+        const progress = await client.request<SessionTreeProgress>("session.stop", { sessionId: action.sessionId });
+        state = {
+          ...state,
+          notice: progress.terminal === progress.total
+            ? stoppedTreeNotice(progress)
+            : stoppingProgressNotice(progress),
+          noticeTone: progress.terminal === progress.total ? "neutral" : "warning",
+        };
+      } else if (action?.type === "delete-tree") {
+        const progress = await client.request<SessionTreeProgress>("session.deleteTree", { sessionId: action.sessionId });
+        state = { ...state, notice: deletedTreeNotice(progress), noticeTone: "neutral" };
       } else if (action?.type === "attach") {
         await openNativeThread(action.sessionId);
       } else if (action?.type === "resume") {
@@ -977,6 +1041,18 @@ export async function runFleet(
         await openNativeThread(record.id);
       } else if (action?.type === "orchestrator") {
         await openOrchestrator(action.request);
+      } else if (action?.type === "fable-workers") {
+        const result = await client.request<FableWorkersResult>(
+          "orchestrator.fableWorkers",
+          action.request,
+        );
+        state = { ...state, notice: fableWorkersNotice(result), noticeTone: "neutral" };
+      } else if (action?.type === "caveman-workers") {
+        const result = await client.request<CavemanWorkersResult>(
+          "orchestrator.cavemanWorkers",
+          action.request,
+        );
+        state = { ...state, notice: cavemanWorkersNotice(result), noticeTone: "neutral" };
       } else if (action?.type === "rename") {
         await client.request("session.rename", { sessionId: action.sessionId, name: action.name });
       } else if (action?.type === "pin") {
@@ -999,6 +1075,7 @@ export async function runFleet(
         notice: error instanceof RpcError && error.code === "METHOD_NOT_FOUND"
           ? "Restart the Cyberdeck broker to enable this fleet action"
           : error instanceof Error ? error.message : String(error),
+        noticeTone: "error",
       };
     }
     notify();
@@ -1021,7 +1098,8 @@ export async function runFleet(
   input.setRawMode?.(true);
   input.on("data", onInput);
   input.resume?.();
-  signals.on("SIGINT", stop);
+  const onSigint = () => { queueKeys(["ctrl+c"]); };
+  signals.on("SIGINT", onSigint);
   signals.on("SIGTERM", stop);
   output.write(ENTER_FLEET_SCREEN);
 
@@ -1037,7 +1115,11 @@ export async function runFleet(
       const width = Math.max(50, output.columns ?? 120);
       if (state.view === "diagnostics") {
         const diagnostics = renderDashboard(await collectDashboardSnapshot(client)).split("\n");
-        const footer = [paint("─".repeat(width), "dim", output.isTTY === true), "ctrl+s Fleet · ctrl+c quit"];
+        const footer = [
+          ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, width, output.isTTY === true)]),
+          paint("─".repeat(width), "dim", output.isTTY === true),
+          "ctrl+s Fleet · ctrl+c twice to exit",
+        ];
         const body = diagnostics.slice(0, Math.max(0, height - footer.length));
         while (body.length < height - footer.length) body.push("");
         output.write(`\u001b[2J\u001b[H${[...body, ...footer].join("\n")}\u001b[?25l`);
@@ -1055,7 +1137,7 @@ export async function runFleet(
     await inputQueue;
   } finally {
     unsubscribeClose();
-    signals.off("SIGINT", stop);
+    signals.off("SIGINT", onSigint);
     signals.off("SIGTERM", stop);
     input.off("data", onInput);
     input.pause?.();
@@ -1195,19 +1277,85 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
   const deleteConfirmation = state.deleteConfirmation !== undefined && state.deleteConfirmation.expiresAt > now
     ? state.deleteConfirmation
     : undefined;
+  const quitConfirmation = state.quitConfirmation !== undefined && state.quitConfirmation.expiresAt > now
+    ? state.quitConfirmation
+    : undefined;
+  const confirmationExpired = (state.deleteConfirmation !== undefined && deleteConfirmation === undefined)
+    || (state.quitConfirmation !== undefined && quitConfirmation === undefined);
   return {
     ...state,
     selectedSessionId: selectedExists ? state.selectedSessionId : threads[0]?.record.id,
     deleteConfirmation,
-    ...(state.deleteConfirmation !== undefined && deleteConfirmation === undefined
+    quitConfirmation,
+    ...(confirmationExpired
       ? { notice: undefined }
       : {}),
   };
 }
 
+function isTerminalSession(record: SessionRecord): boolean {
+  if (record.executionState === "active" || record.executionState === "starting") return false;
+  return record.exitCode !== null;
+}
+
 function orderedThreads(snapshot: FleetSnapshot): FleetThread[] {
   return groupThreads(snapshot.threads)
     .flatMap(({ threads }) => threads);
+}
+
+function sessionTree(snapshot: FleetSnapshot, rootSessionId: string): FleetThread[] {
+  const byId = new Map(snapshot.threads.map((thread) => [thread.record.id, thread]));
+  const tree: FleetThread[] = [];
+  const visited = new Set<string>();
+  const visit = (sessionId: string) => {
+    if (visited.has(sessionId)) return;
+    visited.add(sessionId);
+    const thread = byId.get(sessionId);
+    if (thread === undefined) return;
+    tree.push(thread);
+    for (const childId of thread.record.childIds) visit(childId);
+  };
+  visit(rootSessionId);
+  return tree;
+}
+
+function stoppingTreeNotice(
+  root: SessionRecord,
+  childCount: number,
+  terminal: number,
+  total: number,
+): string {
+  return `Stopping ${treeSubject(root.kind ?? "worker", childCount, "worker")} · ${terminal}/${total} stopped`;
+}
+
+function deleteTreeConfirmation(root: SessionRecord, childCount: number): string {
+  if (root.kind !== "orchestrator") return "Delete thread? press ctrl+x again";
+  if (childCount === 0) return "Delete orchestrator? press ctrl+x again";
+  return `Delete ${treeSubject("orchestrator", childCount, "child thread")}? press ctrl+x again`;
+}
+
+function stoppingProgressNotice(progress: SessionTreeProgress): string {
+  return `Stopping ${treeSubject(progress.rootKind, progress.childCount, "worker")} · ${progress.terminal}/${progress.total} stopped`;
+}
+
+function stoppedTreeNotice(progress: SessionTreeProgress): string {
+  return `Stopped ${treeSubject(progress.rootKind, progress.childCount, "worker")}`;
+}
+
+function deletedTreeNotice(progress: SessionTreeProgress): string {
+  if (progress.rootKind !== "orchestrator") return "Deleted thread";
+  if (progress.childCount === 0) return "Deleted orchestrator";
+  return `Deleted ${treeSubject(progress.rootKind, progress.childCount, "child thread")}`;
+}
+
+function treeSubject(
+  rootKind: "worker" | "orchestrator",
+  childCount: number,
+  childLabel: "worker" | "child thread",
+): string {
+  const root = rootKind === "orchestrator" ? "orchestrator" : "agent";
+  if (childCount === 0) return root;
+  return `${root} + ${childCount} ${childLabel}${childCount === 1 ? "" : "s"}`;
 }
 
 function groupThreads(threads: readonly FleetThread[]): Array<{ cwd: string; threads: FleetThread[] }> {
@@ -1280,7 +1428,7 @@ function startTransition(
   draft: string,
 ): FleetTransition {
   if (draft.startsWith("/")) {
-    return { state: { ...state, notice: "Use /model to configure a new worker" } };
+    return { state: { ...state, notice: "Use /model to configure a new worker", noticeTone: "error" } };
   }
   const cwd = selected?.cwd ?? state.fallbackCwd;
   const profile = state.launchProfiles[cwd];
@@ -1304,6 +1452,105 @@ function startTransition(
       },
     },
   };
+}
+
+function fableWorkersTransition(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  command: string,
+): FleetTransition | undefined {
+  if (!command.startsWith("/fable-workers")) return undefined;
+  const match = /^\/fable-workers(?:\s+(status|on|off))?$/u.exec(command);
+  if (match === null) {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        notice: "Usage: /fable-workers status|on|off",
+        noticeTone: "error",
+      },
+    };
+  }
+  const orchestrator = policyOrchestrator(snapshot, state);
+  if (orchestrator === undefined) {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        notice: "No orchestrator is bound; press ctrl+o to choose one",
+        noticeTone: "error",
+      },
+    };
+  }
+  const mode = match[1] ?? "status";
+  return {
+    state: { ...state, draft: "", notice: undefined },
+    action: {
+      type: "fable-workers",
+      request: {
+        cwd: orchestrator.cwd,
+        scope: orchestrator.orchestratorScope ?? "workspace",
+        ...(mode === "status" ? {} : { enabled: mode === "on" }),
+      },
+    },
+  };
+}
+
+function cavemanWorkersTransition(
+  state: FleetState,
+  _snapshot: FleetSnapshot,
+  command: string,
+): FleetTransition | undefined {
+  if (!command.startsWith("/caveman-workers")) return undefined;
+  const match = /^\/caveman-workers(?:\s+(status|on|off))?$/u.exec(command);
+  if (match === null) {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        notice: "Usage: /caveman-workers status|on|off",
+        noticeTone: "error",
+      },
+    };
+  }
+  const mode = match[1] ?? "status";
+  return {
+    state: { ...state, draft: "", notice: undefined },
+    action: {
+      type: "caveman-workers",
+      request: {
+        ...(mode === "status" ? {} : { enabled: mode === "on" }),
+      },
+    },
+  };
+}
+
+function workerPolicyTransition(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  command: string,
+): FleetTransition | undefined {
+  return fableWorkersTransition(state, snapshot, command)
+    ?? cavemanWorkersTransition(state, snapshot, command);
+}
+
+function policyOrchestrator(snapshot: FleetSnapshot, state: FleetState): SessionRecord | undefined {
+  const selected = snapshot.threads.find(({ record }) => record.id === state.selectedSessionId)?.record;
+  if (selected?.kind === "orchestrator") return selected;
+  return snapshot.threads.find(({ record }) =>
+    record.kind === "orchestrator" && record.orchestratorScope === "fleet")?.record
+    ?? snapshot.threads.find(({ record }) =>
+      record.kind === "orchestrator" && record.cwd === state.fallbackCwd)?.record
+    ?? snapshot.threads.find(({ record }) => record.kind === "orchestrator")?.record;
+}
+
+function fableWorkersNotice(result: FableWorkersResult): string {
+  if (!result.configured) return `Fable workers: OFF · no orchestrator bound for ${result.key}`;
+  return `Fable workers: ${result.enabled ? "ON" : "OFF"} · ${result.key} · ${result.sessionId}`;
+}
+
+function cavemanWorkersNotice(result: CavemanWorkersResult): string {
+  return `Caveman workers: ${result.enabled ? "ON" : "OFF"} · box default · new workers`;
 }
 
 function shortPath(path: string, home: string): string {
@@ -1332,6 +1579,18 @@ function statusText(status: string, pendingDelete: boolean, color: boolean): str
 
 function paint(value: string, tone: keyof typeof ANSI, enabled: boolean): string {
   return enabled ? `${ANSI[tone]}${value}${ANSI.reset}` : value;
+}
+
+function renderNotice(
+  notice: string,
+  tone: FleetNoticeTone | undefined,
+  width: number,
+  color: boolean,
+): string {
+  const value = fit(notice, width);
+  if (tone === "warning") return paint(value, "yellow", color);
+  if (tone === "error" || tone === "confirmation") return paint(value, "red", color);
+  return value;
 }
 
 function fit(value: string, width: number): string {

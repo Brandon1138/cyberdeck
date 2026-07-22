@@ -38,6 +38,8 @@ export interface AttachSessionOptions {
   signals?: SignalSource;
   /** Keep a shared transport alive when returning to an enclosing client such as the fleet. */
   closeTransport?: boolean;
+  /** Workers use Left Arrow as directional return. Orchestrators keep it for native TUI input. */
+  detachOnLeftArrow?: boolean;
 }
 
 export async function attachSession(options: AttachSessionOptions): Promise<number> {
@@ -55,6 +57,7 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
     let rawModeChanged = false;
     let attachmentClaimed = false;
     let finished = false;
+    let detachOnLeftArrow = options.detachOnLeftArrow ?? true;
 
     const onFrame = (frame: ServerFrame) => {
       if (frame.type === "session-ended" && frame.sessionId === options.sessionId) {
@@ -92,7 +95,7 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
     const onInput = (value: Buffer | string) => {
       const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
       const controlDetachIndex = chunk.indexOf(0x1d);
-      const leftArrowIndex = chunk.indexOf(Buffer.from("\u001b[D"));
+      const leftArrowIndex = detachOnLeftArrow ? chunk.indexOf(Buffer.from("\u001b[D")) : -1;
       const detachIndex = controlDetachIndex === -1
         ? leftArrowIndex
         : leftArrowIndex === -1
@@ -123,10 +126,14 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
 
     const unsubscribeClose = options.transport.onClose(() => finish(1, false));
     const method = options.mode === "control" ? "session.attach" : "session.watch";
-    void options.transport.request<{ data: string }>(method, { sessionId: options.sessionId })
-      .then(({ data }) => {
+    void options.transport.request<{
+      data: string;
+      session?: { kind?: "worker" | "orchestrator" };
+    }>(method, { sessionId: options.sessionId })
+      .then(({ data, session }) => {
         if (finished) return;
         attachmentClaimed = true;
+        detachOnLeftArrow = options.detachOnLeftArrow ?? (session?.kind !== "orchestrator");
         output.write(Buffer.from(data, "base64"));
         replayWritten = true;
         for (const chunk of liveBeforeReplay) output.write(chunk);

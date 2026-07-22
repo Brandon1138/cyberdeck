@@ -3,6 +3,7 @@ import { evaluateClaudeLaunchSafety } from "../domain/policy.js";
 import { ClaudeLaunchSafetyError } from "./claude/headless-command.js";
 import { claudePermissionMode } from "./claude/permissions.js";
 import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
+import { sessionLaunchEnvironment } from "./launch-environment.js";
 
 /**
  * Claude's durable interactive (PTY) launch. The bounded/headless path lives in
@@ -23,7 +24,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec {
     // The session registry evaluates this call as the argument to its pty factory, so throwing here
     // fails the launch before any process is constructed. An omitted model is unsafe rather than
-    // implicitly ordinary: the recorded native default displayed Fable.
+    // implicitly operator-selected: the recorded native default displayed Fable.
     const safety = evaluateClaudeLaunchSafety(this.id, session.model);
     if (!safety.safe) {
       throw new ClaudeLaunchSafetyError(safety.code);
@@ -55,7 +56,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       executable: "claude",
       args,
       cwd: session.cwd,
-      env: { ...process.env, DISABLE_UPDATES: "1" },
+      env: sessionLaunchEnvironment({ ...process.env, DISABLE_UPDATES: "1" }, session),
     };
   }
 
@@ -82,7 +83,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       executable: "claude",
       args,
       cwd: session.cwd,
-      env: { ...process.env, DISABLE_UPDATES: "1" },
+      env: sessionLaunchEnvironment({ ...process.env, DISABLE_UPDATES: "1" }, session),
     };
   }
 

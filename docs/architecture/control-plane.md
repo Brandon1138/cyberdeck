@@ -83,28 +83,23 @@ not yet understand and raise `SCHEMA_VERSION_UNSUPPORTED`.
 `JobId` is expected is a type error. They remain plain UUID strings at runtime. A `SessionId` is
 left unbranded to interoperate with the existing `SessionRecord`.
 
-## Fable / native-default-Claude safety (priority)
+## Fable / native-default-Claude safety
 
-Phase 1's delegated-Fable rejection examines only an **explicitly supplied** model string
-(`isFableModel(request.model)`), so an **omitted** Claude model — which the installed runtime
-resolved to native-default Fable — is not prevented by the neutral start policy. **Current policy
-does not close this gap, and this document does not claim it does.**
+Cyberdeck separates explicit model selection from autonomous delegation authority:
 
-A1 keeps the two boundaries separate on purpose:
+- **Live Claude launch boundary** (`evaluateClaudeLaunchSafety`): an omitted model is unsafe and
+  fails with `CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL`. Any explicitly selected model, including
+  Fable, can proceed through an operator-owned start path.
+- **Autonomous worker boundary** (`AgentControlService.startWorker`): an explicit Fable request
+  additionally requires `worker.start.fable` in the bound orchestrator's capability grant. The
+  request fails before session/process creation when the grant is absent.
+- **Operator provenance**: direct Fleet/CLI/broker starts and orchestrator binding changes are
+  operator control paths. The MCP worker path can consume a grant but exposes no method or request
+  field for minting one, so an orchestrator cannot self-authorize.
 
-- **Neutral stored contract** (`evaluateStart`): `model` stays optional. Blocking omitted-model
-  delegated Claude here would conflate stored neutrality with launch safety and would break the
-  Phase 1 fake-adapter tests that legitimately delegate Claude with no model.
-- **Live launch boundary** (`evaluateClaudeLaunchSafety`): a new, tested pure guard that treats a
-  Claude launch with an **omitted OR Fable** model as unsafe (`CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL`)
-  and leaves non-Claude providers unconstrained. It expresses the invariant as code but does
-  **not** enforce anything until it is called at the real Claude process-spawn boundary.
-
-**Safe live-launch invariant.** A live Claude start (top-level or delegated) is forbidden unless a
-human operator supplies and has independently verified an explicit ordinary non-Fable model. An
-omitted model is unsafe at the live Claude launch boundary. Until B2 wires
-`evaluateClaudeLaunchSafety` at the actual spawn boundary and a human-launched Codex gate verifies
-it, the plan hard-blocks all omitted-model Claude live checks.
+The grant is durable on the append-only orchestrator binding and scoped identically to
+`worker.start`. Disabling it affects future starts only; already-created sessions keep their normal
+lifecycle and are never killed as a side effect.
 
 ## Ownership boundaries
 
@@ -169,8 +164,8 @@ operations behavior is documented in
 A5 adds the enforcement layer over the A1 declarations without widening the shared ports. Admission
 reserves exactly one slot per job before dispatch and releases it exactly once on every terminal or
 failed-to-launch path, ordered deterministically and starvation-resistantly; capacity influences
-only *when* a job runs, never *which* provider serves it, and never promotes an omitted/Fable Claude
-model into a launch. Budgets are per job-tree scopes measured only from data Cyberdeck holds
+only *when* a job runs, never *which* provider serves it, and never promotes an omitted Claude model
+into a launch. Budgets are per job-tree scopes measured only from data Cyberdeck holds
 (admitted jobs, elapsed time, reported tokens, persisted artifact bytes); unreported usage stays
 unknown and makes a declared token ceiling fail closed. Reconciliation quarantines unverifiable
 in-flight work, fences only provably expired leases, and reports orphaned runtimes/leases/artifacts

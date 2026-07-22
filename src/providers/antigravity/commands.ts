@@ -1,6 +1,8 @@
 import type { JobRequest } from "../../domain/job.js";
 import { isFableModel } from "../../domain/policy.js";
 import type { ReasoningEffort, Sandbox } from "../../domain/session.js";
+import { jobLaunchEnvironment } from "../launch-environment.js";
+import { applyWorkerMode } from "../worker-mode.js";
 
 type AntigravityInteractiveRequest = Pick<JobRequest, "provider" | "cwd" | "sandbox" | "model"> & {
   effort?: ReasoningEffort;
@@ -53,9 +55,14 @@ export function buildAntigravityHeadlessCommand(
   options: AntigravityCommandOptions = {},
 ): AntigravityCommand {
   assertAntigravityRequest(request);
-  const args = ["--print", request.instruction, ...antigravitySandboxArgs(request.sandbox)];
+  const args = [
+    "--print",
+    applyWorkerMode(request.instruction, request.workerMode),
+    ...antigravitySandboxArgs(request.sandbox),
+  ];
   appendExplicitModel(args, request.model);
-  return command(request, args, options);
+  const built = command(request, args, options);
+  return { ...built, env: jobLaunchEnvironment(built.env, request) };
 }
 
 function command(

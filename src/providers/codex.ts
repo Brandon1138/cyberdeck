@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
 import type { SessionRecord } from "../domain/session.js";
+import { sessionLaunchEnvironment } from "./launch-environment.js";
 
 const CODEX_SESSION_MATCH_WINDOW_MS = 30_000;
 
@@ -57,7 +58,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       executable: "codex",
       args,
       cwd: session.cwd,
-      env: { ...process.env },
+      env: sessionLaunchEnvironment({ ...process.env }, session),
     };
   }
 
@@ -84,7 +85,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       executable: "codex",
       args,
       cwd: session.cwd,
-      env: { ...process.env },
+      env: sessionLaunchEnvironment({ ...process.env }, session),
     };
   }
 

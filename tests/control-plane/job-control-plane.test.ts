@@ -176,10 +176,26 @@ describe("JobControlPlane launch safety", () => {
     expect(claude.dispatched).toHaveLength(0);
   });
 
+  it("inherits Caveman worker mode through a bounded job tree", async () => {
+    const parent = await plane.submit({
+      request: { ...baseRequest, workerMode: "caveman" },
+      idempotencyKey: "parent-caveman",
+    });
+    const child = await plane.delegate({
+      delegationId: randomUUID(),
+      correlationId: randomUUID(),
+      parentJobId: parent.job.id,
+      request: baseRequest,
+    });
+
+    expect(child.job.request.workerMode).toBe("caveman");
+    expect(codex.dispatched.at(-1)?.request.workerMode).toBe("caveman");
+  });
+
   it("rejects a live Claude job with an omitted model, not treating omission as safe", async () => {
     await expectCode(
       plane.submit({ request: { ...baseRequest, provider: "claude" }, idempotencyKey: "k-omit" }),
-      "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL",
+      "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL",
     );
     expect(claude.dispatched).toHaveLength(0);
   });
@@ -190,6 +206,14 @@ describe("JobControlPlane launch safety", () => {
       idempotencyKey: "k-claude-ok",
     });
     expect(job.lifecycle.status).toBe("dispatched");
+    expect(claude.dispatched).toHaveLength(1);
+  });
+
+  it("dispatches an operator-submitted Claude job with an explicit Fable model", async () => {
+    await plane.submit({
+      request: { ...baseRequest, provider: "claude", model: "fable-5" },
+      idempotencyKey: "k-fable-top-level",
+    });
     expect(claude.dispatched).toHaveLength(1);
   });
 });

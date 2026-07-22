@@ -26,10 +26,13 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
   },
   {
     provider: "claude",
-    models: ["haiku", "sonnet", "opus"],
+    models: ["haiku", "sonnet", "opus", "fable"],
     efforts: ["low", "medium", "high", "xhigh", "max"],
-    modelIdRule: "haiku, sonnet, and opus are provider-native Claude aliases.",
-    notes: ["Delegated Fable is forbidden.", "An explicit ordinary model is required."],
+    modelIdRule: "haiku, sonnet, opus, and fable are provider-native Claude aliases.",
+    notes: [
+      "Fable requires the operator-controlled worker.start.fable grant for autonomous delegation.",
+      "An explicit model is required.",
+    ],
   },
   {
     provider: "cursor",

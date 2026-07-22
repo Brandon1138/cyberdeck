@@ -15,7 +15,7 @@ class FakePty implements PtyHandle {
   private readonly exitListeners = new Set<(exitCode: number, signal?: number) => void>();
   private replay = "";
 
-  constructor(pid: number) {
+  constructor(pid: number, private readonly exitOnKill = true) {
     this.pid = pid;
   }
 
@@ -24,7 +24,7 @@ class FakePty implements PtyHandle {
   snapshot(): Buffer { return Buffer.from(this.replay); }
   kill(): void {
     this.killCount += 1;
-    this.emitExit(0);
+    if (this.exitOnKill) this.emitExit(0);
   }
   onOutput(listener: (chunk: Buffer) => void): () => void {
     this.outputListeners.add(listener);
@@ -86,12 +86,12 @@ function request(overrides: Partial<StartSessionRequest> = {}): StartSessionRequ
   };
 }
 
-function harness(options: { failAttachJournal?: boolean; maxConcurrentWorkers?: number | null } = {}) {
+function harness(options: { failAttachJournal?: boolean; maxConcurrentWorkers?: number | null; exitOnKill?: boolean } = {}) {
   const ptys: FakePty[] = [];
   const events: BrokerEvent[] = [];
   const transcripts: AppendThreadEvent[] = [];
   const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => {
-    const pty = new FakePty(1000 + ptys.length);
+    const pty = new FakePty(1000 + ptys.length, options.exitOnKill ?? true);
     ptys.push(pty);
     return pty;
   });
@@ -398,6 +398,52 @@ describe("SessionRegistry", () => {
     await expect(registry.delete(parent.id)).resolves.toBeUndefined();
   });
 
+  it("stops an owned tree from the root and deletes terminal records leaf-first", async () => {
+    const { registry, ptys } = harness();
+    const parent = await registry.start(request({ kind: "orchestrator", role: "orchestrator" }));
+    const first = await registry.start(request({ parentSessionId: parent.id, kind: "worker" }));
+    const second = await registry.start(request({ parentSessionId: parent.id, kind: "worker" }));
+
+    await expect(registry.stopTree(parent.id)).resolves.toMatchObject({
+      rootSessionId: parent.id,
+      rootKind: "orchestrator",
+      total: 3,
+      terminal: 3,
+      stopping: 0,
+    });
+    expect(ptys.map((pty) => pty.killCount)).toEqual([1, 1, 1]);
+
+    await expect(registry.deleteTree(parent.id)).resolves.toMatchObject({ deleted: 3 });
+    expect(registry.list()).toEqual([]);
+    expect(() => registry.get(first.id)).toThrow();
+    expect(() => registry.get(second.id)).toThrow();
+  });
+
+  it("keeps a tree visible when any process has not confirmed exit and allows cleanup retry", async () => {
+    const { registry, ptys } = harness({ exitOnKill: false });
+    const parent = await registry.start(request({ kind: "orchestrator" }));
+    await registry.start(request({ parentSessionId: parent.id, kind: "worker" }));
+
+    await expect(registry.stopTree(parent.id)).resolves.toMatchObject({
+      total: 2,
+      terminal: 0,
+      stopping: 2,
+    });
+    await expect(registry.deleteTree(parent.id)).rejects.toMatchObject({ code: "SESSION_TREE_STILL_ACTIVE" });
+
+    ptys.forEach((pty) => pty.emitExit(0));
+    await expect(registry.deleteTree(parent.id)).resolves.toMatchObject({ deleted: 2 });
+  });
+
+  it("refuses new children as soon as their parent begins stopping", async () => {
+    const { registry } = harness({ exitOnKill: false });
+    const parent = await registry.start(request({ kind: "orchestrator" }));
+    await registry.stopTree(parent.id);
+
+    await expect(registry.start(request({ parentSessionId: parent.id, kind: "worker" })))
+      .rejects.toMatchObject({ code: "PARENT_SESSION_NOT_ACTIVE" });
+  });
+
   it("records delegated children under their parent", async () => {
     const { registry } = harness();
     const parent = await registry.start(request());
@@ -405,13 +451,13 @@ describe("SessionRegistry", () => {
     expect(registry.get(parent.id).childIds).toContain(child.id);
   });
 
-  it("rejects delegated Fable before creating a PTY", async () => {
+  it("allows an operator-owned child start with an explicit Fable model", async () => {
     const { registry, ptyFactory } = harness();
     const parent = await registry.start(request());
     await expect(
       registry.start(request({ provider: "claude", model: "fable", parentSessionId: parent.id })),
-    ).rejects.toMatchObject({ code: "FABLE_REQUIRES_EXPLICIT_HUMAN_START" });
-    expect(ptyFactory).toHaveBeenCalledTimes(1);
+    ).resolves.toMatchObject({ model: "fable", parentSessionId: parent.id });
+    expect(ptyFactory).toHaveBeenCalledTimes(2);
   });
 
   it.each(["scout", "writer", "cheap-task"])("does not interpret role %s", async (role) => {

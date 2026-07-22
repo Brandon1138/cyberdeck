@@ -12,7 +12,14 @@ import type {
   OrchestratorManagerResult,
   OrchestratorResetResult,
 } from "./orchestration/orchestrator-manager.js";
-import type { EnsureOrchestratorRequest, ResetOrchestratorRequest } from "./domain/orchestrator.js";
+import type {
+  CavemanWorkersRequest,
+  CavemanWorkersResult,
+  EnsureOrchestratorRequest,
+  FableWorkersRequest,
+  FableWorkersResult,
+  ResetOrchestratorRequest,
+} from "./domain/orchestrator.js";
 import { appStateDirectory, brokerSocketPath } from "./paths.js";
 import { RpcClient, RpcError } from "./client/rpc-client.js";
 import { attachSession } from "./client/attach.js";
@@ -235,6 +242,8 @@ interface CreateProgramOptions {
   ensureOrchestrator?: (request: EnsureOrchestratorRequest) => Promise<OrchestratorManagerResult>;
   stopSession?: (sessionId: string) => Promise<void>;
   resetOrchestrator?: (request: ResetOrchestratorRequest) => Promise<OrchestratorResetResult>;
+  fableWorkers?: (request: FableWorkersRequest) => Promise<FableWorkersResult>;
+  cavemanWorkers?: (request: CavemanWorkersRequest) => Promise<CavemanWorkersResult>;
 }
 
 export function createProgram(options: CreateProgramOptions = {}): Command {
@@ -248,13 +257,17 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     withClient((client) => client.request<void>("session.stop", { sessionId })));
   const resetOrchestrator = options.resetOrchestrator ?? ((request) =>
     withClient((client) => client.request<OrchestratorResetResult>("orchestrator.reset", request)));
+  const fableWorkers = options.fableWorkers ?? ((request) =>
+    withClient((client) => client.request<FableWorkersResult>("orchestrator.fableWorkers", request)));
+  const cavemanWorkers = options.cavemanWorkers ?? ((request) =>
+    withClient((client) => client.request<CavemanWorkersResult>("orchestrator.cavemanWorkers", request)));
   const program = new Command()
     .name("cyberdeck")
     .version(CYBERDECK_VERSION)
     .description("Neutral broker for durable Claude and Codex terminal sessions")
     .addHelpText(
       "after",
-      "\nTop-level Fable starts require an explicit human command; delegated Fable is refused before launch.\n",
+      "\nExplicit operator-selected Fable starts are allowed. Autonomous Fable workers require the durable worker.start.fable grant.\n",
     )
     .action(runDefault);
 
@@ -395,6 +408,44 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
       } else {
         process.stdout.write(`No orchestrator binding exists for ${result.key}\n`);
       }
+    });
+
+  orchestrator.command("fable-workers")
+    .description("inspect or change delegated Fable access for one orchestrator binding")
+    .argument("[mode]", "status, on, or off", "status")
+    .option("--cwd <absolute-path>", "workspace path (defaults to the current directory)")
+    .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("fleet"))
+    .action(async (mode: string, options: { cwd?: string; scope: "workspace" | "fleet" }) => {
+      if (mode !== "status" && mode !== "on" && mode !== "off") {
+        throw new Error("mode must be status, on, or off");
+      }
+      const result = await fableWorkers({
+        cwd: resolve(options.cwd ?? process.cwd()),
+        scope: options.scope,
+        ...(mode === "status" ? {} : { enabled: mode === "on" }),
+      });
+      if (!result.configured) {
+        process.stdout.write(`Fable workers: OFF · no orchestrator bound for ${result.key}\n`);
+        return;
+      }
+      process.stdout.write(
+        `Fable workers: ${result.enabled ? "ON" : "OFF"} · ${result.key} · ${result.sessionId}\n`,
+      );
+    });
+
+  orchestrator.command("caveman-workers")
+    .description("inspect or change the box default for subsequently started workers")
+    .argument("[mode]", "status, on, or off", "status")
+    .action(async (mode: string) => {
+      if (mode !== "status" && mode !== "on" && mode !== "off") {
+        throw new Error("mode must be status, on, or off");
+      }
+      const result = await cavemanWorkers({
+        ...(mode === "status" ? {} : { enabled: mode === "on" }),
+      });
+      process.stdout.write(
+        `Caveman workers: ${result.enabled ? "ON" : "OFF"} · box default · new workers\n`,
+      );
     });
 
   const workflow = program.command("workflow").description("inspect or stop bounded orchestration workflows");

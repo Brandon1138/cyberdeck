@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readdir, readFile, rename, stat } from "node:fs/promises";
+import { open, readdir, readFile, rename, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { z } from "zod";
 import {
@@ -9,6 +9,7 @@ import {
   schemaVersionField,
 } from "../domain/control-plane.js";
 import { ArtifactDescriptorSchema, type ArtifactDescriptor } from "../domain/artifact.js";
+import { ensurePrivateDirectory } from "./private-files.js";
 
 const DEFAULT_MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
 
@@ -105,8 +106,8 @@ export class ArtifactStore {
     const contentPath = join(this.contentRoot, digestHex);
     this.assertInsideRoot(contentPath);
 
-    await mkdir(this.contentRoot, { recursive: true });
-    await mkdir(this.metadataRoot, { recursive: true });
+    await ensurePrivateDirectory(this.contentRoot);
+    await ensurePrivateDirectory(this.metadataRoot);
     const existing = await readFile(contentPath).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return undefined;
       throw error;
@@ -305,7 +306,7 @@ function verifyContent(descriptor: ArtifactDescriptor, content: Buffer): void {
 }
 
 async function atomicWrite(path: string, content: Buffer): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  await ensurePrivateDirectory(dirname(path));
   const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
   const handle = await open(temporary, "wx", 0o600);
   try {

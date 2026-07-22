@@ -10,7 +10,7 @@ import {
   schemaVersionField,
 } from "./control-plane.js";
 import { ProviderIdSchema } from "./provider-registration.js";
-import { SandboxSchema } from "./session.js";
+import { SandboxSchema, WorkerModeSchema } from "./session.js";
 import { UsageReportSchema } from "./usage.js";
 
 /**
@@ -29,6 +29,7 @@ export const JobRequestSchema = z
     model: z.string().optional(),
     role: z.string().optional(),
     name: z.string().optional(),
+    workerMode: WorkerModeSchema.optional(),
   })
   .readonly();
 export type JobRequest = z.infer<typeof JobRequestSchema>;

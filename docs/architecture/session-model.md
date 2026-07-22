@@ -33,7 +33,12 @@ A session permits one controlling attachment at a time. The controller receives 
 
 Every top-level start and every delegation requires an explicit provider. Cyberdeck performs no automatic routing, provider ranking, model selection, or fallback.
 
-Fable has one narrow policy boundary: a top-level Fable start is allowed only as an explicit human action, while delegation of Fable is rejected before a provider process starts. Phase 1 never starts Fable through delegation or automation. Opus has no special broker restriction and is treated like any other ordinary Claude model permitted by the session configuration.
+Fable has one narrow policy boundary: an explicit operator start is allowed, including a Fable
+orchestrator or top-level worker. Autonomous Fable delegation is disabled by default and requires
+the bound orchestrator's durable `worker.start.fable` capability. The grant can be changed only by
+the operator Fleet/CLI path, persists with the append-only binding, and disappears when that binding
+is reset or deleted. Disabling it blocks new Fable workers without stopping existing threads. Opus
+has no special broker restriction.
 
 Cyberdeck supplies `DISABLE_UPDATES=1` to every Claude process. It otherwise preserves the native provider's model behavior. In particular, an omitted model is not proof that the native default is non-Fable; the operator must know or explicitly choose the intended provider model.
 
@@ -95,6 +100,22 @@ orphaned provider; the operator must stop that exact session first. Once inactiv
 scope unbound without rewriting history, and an explicit different provider/model writes a clean new
 latest binding. Model strings remain opaque and provider-native: no alias translation or fallback is
 performed.
+
+`/fable-workers status|on|off` in Fleet and `cyberdeck orchestrator fable-workers status|on|off`
+operate on the selected/bound orchestrator scope. The orchestrator MCP surface can observe Fable in
+the explicit provider catalog and request it only when granted; it has no tool for changing its own
+grant.
+
+`/caveman-workers status|on|off` and its `cyberdeck orchestrator caveman-workers` CLI equivalent
+manage a box-level worker preference independent of every orchestrator binding. It defaults off,
+persists across broker and Orc replacement, and is snapshotted when a worker session or bounded job
+starts; changing it does not rewrite already-running conversations.
+Provider child processes receive `CYBERDECK_PROCESS_ROLE=worker|orchestrator|session` and
+`CYBERDECK_WORKER_MODE=normal|caveman` after their inherited environment is copied. These values are
+integration hints, not authorization boundaries. Caveman policy is also added to each worker's
+actual task input, which makes the behavior provider-neutral rather than dependent on SessionStart
+hooks. An installed box skill supplies the full policy; a compact built-in fallback keeps an enabled
+setting functional without making Caveman installation a Cyberdeck prerequisite.
 
 Worker steering passes through a durable instruction queue. A human control attachment has absolute
 writer priority. If a controller exists, the message remains queued; controller release causes the

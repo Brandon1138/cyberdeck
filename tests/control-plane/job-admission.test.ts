@@ -315,6 +315,6 @@ describe("job control plane admission and budgets", () => {
 
     await expect(
       submit(controlPlane, { provider: "claude", model: undefined }),
-    ).rejects.toMatchObject({ code: "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL" });
+    ).rejects.toMatchObject({ code: "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL" });
   });
 });

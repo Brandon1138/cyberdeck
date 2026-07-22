@@ -1,6 +1,6 @@
-import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { BrokerEventSchema, type BrokerEvent } from "../domain/events.js";
+import { openPrivateAppendFile } from "../persistence/private-files.js";
 
 export class Journal {
   readonly path: string;
@@ -11,7 +11,11 @@ export class Journal {
 
   async append(event: BrokerEvent): Promise<void> {
     const validated = BrokerEventSchema.parse(event);
-    await mkdir(this.stateDirectory, { recursive: true });
-    await appendFile(this.path, `${JSON.stringify(validated)}\n`, "utf8");
+    const handle = await openPrivateAppendFile(this.path);
+    try {
+      await handle.write(`${JSON.stringify(validated)}\n`);
+    } finally {
+      await handle.close();
+    }
   }
 }

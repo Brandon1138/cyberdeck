@@ -1,7 +1,9 @@
 import { createInterface } from "node:readline";
+import { MAX_FANOUT_BATCH } from "../limits.js";
 import type { Readable, Writable } from "node:stream";
 import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
 import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
+import { CYBERDECK_VERSION } from "../version.js";
 
 export interface McpBrokerTransport {
   request<T = unknown>(method: string, params: unknown): Promise<T>;
@@ -47,7 +49,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_worker_start",
-    description: "Start one explicit worker and return a compact sessionId/completionTarget. Exact IDs: Codex gpt-5.6-luna|terra|sol; Claude haiku|sonnet|opus; Cursor composer; Antigravity gemini-3.6-flash-low|medium|high with matching effort. Pass effort for Codex/Claude/Antigravity, omit it for Cursor. Prefer cyberdeck_workers_start for fan-out, then call cyberdeck_workers_wait once.",
+    description: "Start one explicit worker and return a compact sessionId/completionTarget. Exact IDs: Codex gpt-5.6-luna|terra|sol; Claude haiku|sonnet|opus|fable; Cursor composer; Antigravity gemini-3.6-flash-low|medium|high with matching effort. Fable requires the operator-controlled worker.start.fable grant. Pass effort for Codex/Claude/Antigravity, omit it for Cursor. Prefer cyberdeck_workers_start for fan-out, then call cyberdeck_workers_wait once.",
     inputSchema: {
       type: "object",
       properties: {
@@ -65,14 +67,14 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_workers_start",
-    description: "Start up to 24 explicitly selected workers in one compact call. Each result is independently ok/error and successful results include sessionId plus completionTarget for cyberdeck_workers_wait.",
+    description: `Start up to ${MAX_FANOUT_BATCH} explicitly selected workers in one compact call. Each result is independently ok/error and successful results include sessionId plus completionTarget for cyberdeck_workers_wait.`,
     inputSchema: {
       type: "object",
       properties: {
         workers: {
           type: "array",
           minItems: 1,
-          maxItems: 24,
+          maxItems: MAX_FANOUT_BATCH,
           items: {
             type: "object",
             properties: {
@@ -102,7 +104,7 @@ const TOOLS = [
         targets: {
           type: "array",
           minItems: 1,
-          maxItems: 24,
+          maxItems: MAX_FANOUT_BATCH,
           items: {
             type: "object",
             properties: {
@@ -236,7 +238,7 @@ export async function handleMcpRequest(
       return success(request.id, {
         protocolVersion: "2025-03-26",
         capabilities: { tools: {} },
-        serverInfo: { name: "cyberdeck", version: "0.1.0" },
+        serverInfo: { name: "cyberdeck", version: CYBERDECK_VERSION },
       });
     }
     if (request.method === "ping") return success(request.id, {});

@@ -144,19 +144,14 @@ describe("admission scheduler", () => {
     expect(admission.admitNext()?.jobId).toBe("codex-ok");
     expect(admission.admitNext()).toBeUndefined();
     expect(admission.snapshot().queued[0]?.blockedBy).toBe(
-      "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_NON_FABLE_MODEL",
+      "CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL",
     );
   });
 
-  it("refuses to admit a Claude job that explicitly requests Fable", () => {
+  it("admits a Claude job that explicitly requests Fable", () => {
     const admission = scheduler({ maxConcurrentJobs: 4 });
     admission.enqueue(candidate("fable", { provider: "claude", model: "claude-fable-5" }));
-    expect(admission.admitNext()).toBeUndefined();
-
-    admission.enqueue(
-      candidate("ordinary", { provider: "claude", model: "claude-opus-4-8", enqueuedAt: at(9) }),
-    );
-    expect(admission.admitNext()?.jobId).toBe("ordinary");
+    expect(admission.admitNext()?.jobId).toBe("fable");
   });
 
   it("drops a queued job that never launched without consuming a slot", () => {
