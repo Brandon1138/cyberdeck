@@ -192,6 +192,32 @@ describe("Antigravity command construction", () => {
     });
   });
 
+  it("uses agy's documented prompt-interactive mode for an initial worker prompt", () => {
+    const command = buildAntigravityInteractiveCommand({
+      ...request().request,
+      effort: "low",
+    }, {
+      env: CONTROLLED_ENV,
+      initialPrompt: "Ping back",
+    });
+    expect(command.args).toEqual([
+      "--prompt-interactive",
+      "Ping back",
+      "--mode",
+      "plan",
+      "--sandbox",
+      "--effort",
+      "low",
+    ]);
+  });
+
+  it("rejects effort values outside agy's documented low-medium-high range", () => {
+    expect(() => buildAntigravityInteractiveCommand({
+      ...request().request,
+      effort: "xhigh",
+    })).toThrow(expect.objectContaining({ code: "ANTIGRAVITY_LAUNCH_UNSAFE" }));
+  });
+
   it("maps the documented headless prompt to argv and closes empty stdin", () => {
     const command = buildAntigravityHeadlessCommand(request().request, {
       env: CONTROLLED_ENV,

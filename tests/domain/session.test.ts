@@ -14,6 +14,15 @@ describe("StartSessionRequestSchema", () => {
     expect(parsed.role).toBe("scout");
   });
 
+  it.each(["cursor", "antigravity"])("accepts registered provider slug %s", (provider) => {
+    expect(StartSessionRequestSchema.parse({
+      provider,
+      cwd: "/tmp/repo",
+      detached: true,
+      sandbox: "read-only",
+    }).provider).toBe(provider);
+  });
+
   it("does not require a model or role", () => {
     const parsed = StartSessionRequestSchema.parse({
       provider: "codex",
@@ -23,6 +32,26 @@ describe("StartSessionRequestSchema", () => {
     });
     expect(parsed.model).toBeUndefined();
     expect(parsed.role).toBeUndefined();
+    expect(parsed.effort).toBeUndefined();
+  });
+
+  it("accepts an explicit provider-native reasoning effort", () => {
+    const parsed = StartSessionRequestSchema.parse({
+      provider: "codex",
+      cwd: "/tmp/repo",
+      detached: true,
+      sandbox: "read-only",
+      effort: "xhigh",
+    });
+
+    expect(parsed.effort).toBe("xhigh");
+    expect(() => StartSessionRequestSchema.parse({
+      provider: "codex",
+      cwd: "/tmp/repo",
+      detached: true,
+      sandbox: "read-only",
+      effort: "automatic",
+    })).toThrow();
   });
 
   it("rejects a missing provider rather than routing implicitly", () => {

@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
 import { CodexProviderAdapter } from "../../src/providers/codex.js";
+import { CursorProviderAdapter } from "../../src/providers/cursor/session-adapter.js";
+import { AntigravityProviderAdapter } from "../../src/providers/antigravity/session-adapter.js";
 
 function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
   const now = new Date().toISOString();
@@ -44,6 +46,11 @@ describe("CodexProviderAdapter", () => {
     const spec = new CodexProviderAdapter().buildLaunchSpec(session({ model: "opus" }));
     expect(spec.args).toContain("-m");
     expect(spec.args).toContain("opus");
+  });
+
+  it("forwards explicit reasoning effort through native Codex config", () => {
+    const spec = new CodexProviderAdapter().buildLaunchSpec(session({ effort: "xhigh" }));
+    expect(spec.args).toContain("model_reasoning_effort=\"xhigh\"");
   });
 
   it("starts an orchestrator with native developer instructions and MCP but no positional user prompt", () => {
@@ -174,6 +181,20 @@ describe("ClaudeProviderAdapter", () => {
     expect(spec.args.slice(-2)).toEqual(["--model", "sonnet"]);
   });
 
+  it("forwards explicit Claude effort on launch and resume", () => {
+    const record = session({
+      provider: "claude",
+      name: "proof",
+      model: "sonnet",
+      effort: "high",
+      executionState: "cancelled",
+      exitCode: 0,
+    });
+    expect(new ClaudeProviderAdapter().buildLaunchSpec(record).args).toContain("--effort");
+    expect(new ClaudeProviderAdapter().buildLaunchSpec(record).args).toContain("high");
+    expect(new ClaudeProviderAdapter().buildResumeSpec(record).args).toContain("--effort");
+  });
+
   it("passes a new thread's initial task as one positional argument", () => {
     const spec = new ClaudeProviderAdapter().buildLaunchSpec(
       session({ provider: "claude", name: "proof", model: "sonnet" }),
@@ -183,7 +204,8 @@ describe("ClaudeProviderAdapter", () => {
   });
 
   it("encodes one logical submit using Claude's terminal Enter key", () => {
-    expect(new ClaudeProviderAdapter().submitInput("ping").toString("utf8")).toBe("ping\r");
+    expect(new ClaudeProviderAdapter().submitInput("ping").toString("utf8"))
+      .toBe("ping\u001b[13u");
   });
 
   it("resumes the exact Claude conversation using the UUID Cyberdeck assigned at launch", () => {
@@ -214,5 +236,58 @@ describe("ClaudeProviderAdapter", () => {
       "--mcp-config",
       expect.stringContaining(record.id),
     ]);
+  });
+});
+
+describe("extended interactive provider adapters", () => {
+  it("starts Cursor Composer with the exact initial prompt and explicit model", () => {
+    const adapter = new CursorProviderAdapter();
+    const spec = adapter.buildLaunchSpec(
+      session({ provider: "cursor", model: "composer" }),
+      "Return eight bits",
+    );
+
+    expect(spec.executable).toBe("agent");
+    expect(spec.args).toEqual([
+      "--workspace",
+      "/tmp/repo",
+      "--sandbox",
+      "enabled",
+      "--mode",
+      "plan",
+      "--model",
+      "composer",
+      "Return eight bits",
+    ]);
+  });
+
+  it("starts Antigravity with the exact initial prompt and Gemini model", () => {
+    const adapter = new AntigravityProviderAdapter();
+    const spec = adapter.buildLaunchSpec(
+      session({ provider: "antigravity", model: "gemini-3.6-flash-low", effort: "low" }),
+      "Return eight bits",
+    );
+
+    expect(spec.executable).toBe("agy");
+    expect(spec.args).toEqual([
+      "--prompt-interactive",
+      "Return eight bits",
+      "--mode",
+      "plan",
+      "--sandbox",
+      "--model",
+      "gemini-3.6-flash-low",
+      "--effort",
+      "low",
+    ]);
+  });
+
+  it.each([
+    ["cursor", new CursorProviderAdapter()],
+    ["antigravity", new AntigravityProviderAdapter()],
+  ] as const)("fails %s resume explicitly rather than creating a new conversation", (_provider, adapter) => {
+    expect(() => adapter.buildResumeSpec(session({ provider: adapter.id }))).toThrow(
+      expect.objectContaining({ code: "SESSION_RESUME_UNAVAILABLE" }),
+    );
   });
 });

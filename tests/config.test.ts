@@ -2,11 +2,16 @@ import { describe, expect, it } from "vitest";
 import { BrokerRuntimeConfigSchema } from "../src/config.js";
 
 describe("broker runtime config", () => {
-  it("keeps the Phase 1 session defaults under the neutral name", () => {
+  it("defaults to 24 workers while excluding orchestrators from that policy", () => {
     const config = BrokerRuntimeConfigSchema.parse({});
-    expect(config.maxConcurrentSessions).toBe(4);
+    expect(config.maxConcurrentWorkers).toBe(24);
     expect(config.maxDelegationDepth).toBe(1);
     expect(config.replayBytes).toBe(128 * 1024);
+  });
+
+  it("allows an explicit unlimited worker setting", () => {
+    expect(BrokerRuntimeConfigSchema.parse({ maxConcurrentWorkers: null }).maxConcurrentWorkers)
+      .toBeNull();
   });
 
   it("carries neutral concurrency and budget declarations for the job plane", () => {

@@ -15,7 +15,9 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
   constructor(private readonly options: { mcp?: CyberdeckMcpLaunch } = {}) {}
 
   submitInput(message: string): Buffer {
-    return Buffer.from(`${message}\r`);
+    // Claude enables Kitty keyboard disambiguation in its PTY (`CSI > 1 u`). A legacy carriage
+    // return is then only text-editing input; synthesize the negotiated Enter key to submit.
+    return Buffer.from(`${message}\u001b[13u`);
   }
 
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec {
@@ -38,6 +40,10 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     // Forwarded only because the caller explicitly supplied it; Cyberdeck never chooses a model.
     if (session.model !== undefined) {
       args.push("--model", session.model);
+    }
+    if (session.effort !== undefined) {
+      if (session.effort === "ultra") throw new Error("Claude does not support ultra effort");
+      args.push("--effort", session.effort);
     }
     this.addProviderInstructions(args, session);
     this.addCyberdeckMcp(args, session);
@@ -66,6 +72,10 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       claudePermissionMode(session.sandbox),
     ];
     if (session.model !== undefined) args.push("--model", session.model);
+    if (session.effort !== undefined) {
+      if (session.effort === "ultra") throw new Error("Claude does not support ultra effort");
+      args.push("--effort", session.effort);
+    }
     this.addProviderInstructions(args, session);
     this.addCyberdeckMcp(args, session);
     return {

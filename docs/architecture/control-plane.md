@@ -50,10 +50,10 @@ only (id + display name); it has no rank, priority, or capability field.
 so adding a provider does not reopen a closed type. `BUILTIN_PROVIDER_IDS` seeds the known providers.
 Integrated B1 evidence finalizes the canonical provider ids as `cursor` and `antigravity`, with
 observed executable mappings `cursor -> agent` and `antigravity -> agy`. They are listed as planned
-ids by the shared registration module but remain unsupported until a concrete adapter is registered;
-an id being canonical does not claim that its adapter exists. The Phase 1 session contract keeps its
-closed `ProviderIdSchema` enum for now; reconciling the session enum to the open registration
-contract is a scheduled integration task.
+ids by the shared registration module, and both now have bounded job adapters plus interactive
+session adapters registered by the broker. An arbitrary syntactically valid id still remains
+unsupported until a concrete adapter is registered. The session contract consumes the same open
+`ProviderIdSchema`; the CLI and MCP presentation list the four canonical registered providers.
 
 **A2 contract ratification.** A2 added optional `usage` to `JobReportSchema` so adapters can report
 provider-neutral usage through the frozen dispatch/report port. This additive field is approved:

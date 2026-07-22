@@ -1,13 +1,18 @@
 import type { StartSessionRequest } from "./session.js";
 
 export type StartPolicyCode =
-  | "MAX_CONCURRENT_SESSIONS"
+  | "MAX_CONCURRENT_WORKERS"
   | "MAX_DELEGATION_DEPTH"
   | "FABLE_REQUIRES_EXPLICIT_HUMAN_START";
 
 export type StartPolicyDecision =
   | { allowed: true }
-  | { allowed: false; code: StartPolicyCode };
+  | {
+    allowed: false;
+    code: StartPolicyCode;
+    activeWorkers?: number;
+    maxConcurrentWorkers?: number;
+  };
 
 export interface SessionAncestryEntry {
   id: string;
@@ -15,8 +20,8 @@ export interface SessionAncestryEntry {
 }
 
 export interface StartPolicyContext {
-  activeSessionCount?: number;
-  maxConcurrentSessions?: number;
+  activeWorkerCount?: number;
+  maxConcurrentWorkers?: number | null;
   maxDelegationDepth?: 1;
 }
 
@@ -56,12 +61,23 @@ export function evaluateStart(
   ancestry: readonly SessionAncestryEntry[],
   context: StartPolicyContext = {},
 ): StartPolicyDecision {
-  const activeSessionCount = context.activeSessionCount ?? 0;
-  const maxConcurrentSessions = context.maxConcurrentSessions ?? 4;
+  const activeWorkerCount = context.activeWorkerCount ?? 0;
+  const maxConcurrentWorkers = context.maxConcurrentWorkers === undefined
+    ? 24
+    : context.maxConcurrentWorkers;
   const maxDelegationDepth = context.maxDelegationDepth ?? 1;
 
-  if (activeSessionCount >= maxConcurrentSessions) {
-    return { allowed: false, code: "MAX_CONCURRENT_SESSIONS" };
+  if (
+    request.kind !== "orchestrator"
+    && maxConcurrentWorkers !== null
+    && activeWorkerCount >= maxConcurrentWorkers
+  ) {
+    return {
+      allowed: false,
+      code: "MAX_CONCURRENT_WORKERS",
+      activeWorkers: activeWorkerCount,
+      maxConcurrentWorkers,
+    };
   }
 
   if (request.parentSessionId !== undefined && ancestry.length > maxDelegationDepth) {

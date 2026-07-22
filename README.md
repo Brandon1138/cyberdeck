@@ -28,12 +28,12 @@ cyberdeck broker start
 cyberdeck broker status
 cyberdeck broker restart
 cd ~/code/personal/soma
-cyberdeck cockpit --orchestrator codex --model gpt-5.6-sol
+cyberdeck cockpit --orchestrator codex --model gpt-5.6-sol --effort high
 cyberdeck list
 ```
 
-The first cockpit launch for a workspace requires an explicit orchestrator provider and optional
-provider-native model. It creates a workspace-namespaced native tmux session with the interactive
+The first cockpit launch for a workspace requires an explicit orchestrator provider, with optional
+provider-native model and effort. It creates a workspace-namespaced native tmux session with the interactive
 Fleet in the left pane and a broker-owned orchestrator attachment in the right pane. Later launches
 can omit the provider while that orchestrator remains owned by the current broker. Use `--scope
 fleet` only when the orchestrator should see threads from every working directory.
@@ -52,22 +52,26 @@ rollback failure is reported after the original presentation error. Ordinary det
 operations still never stop a provider.
 
 `cyberdeck dashboard` groups durable agent threads by project. Every row shows the thread name,
-provider, explicit model (or `native-default`), role when present, status, latest replay preview, and
-relative activity time. It never ranks providers or chooses a model.
+friendly model and effort, truthful attention status, normalized assistant preview, and relative
+meaningful activity time. It never ranks providers or chooses a model.
 
 Fleet controls:
 
+- `Ctrl+O`: open the workspace orchestrator picker. Choose provider, model, and provider-supported
+  effort in sequence. The effort choice applies immediately, with no confirmation screen.
 - `Up` / `Down`: select a thread.
 - `Right`, or `Enter` while the bottom composer is empty: open the selected provider TUI. A live
   thread attaches to its existing PTY; a terminal thread resumes that exact provider-native
   conversation first.
 - `Left` from a provider TUI: detach and return to the fleet. `Ctrl+]` remains an alternate detach
   key.
+- Enter `/model` to choose from the flat model catalog, then choose effort. The explicit selection
+  applies immediately and is persisted per project.
 - Type a task in the persistent bottom composer and press `Enter`: start a new thread using the
-  selected row's visible provider, model, sandbox, and project context, then attach to its native TUI.
-- With no suitable row, `/codex task`, `/codex:MODEL task`, or `/claude:MODEL task` explicitly
-  bootstraps a read-only session in the dashboard's current working directory.
-- `Esc`: clear the new-thread composer.
+  visible model, effort, sandbox, and project context, then attach to its native TUI.
+- `?`: toggle the shortcut panel. It documents reorder, view switch, rename, multiline, pin, numbered
+  opening, and contextual stop/delete controls.
+- `Esc`: close an active picker/edit mode, clear a draft, or leave Fleet from the base/help view.
 - `Ctrl+X` on a live agent: stop it through the broker.
 - `Ctrl+X` on a stopped, done, or failed thread: show the red `press ctrl+x again to delete`
   confirmation. Press `Ctrl+X` once more to delete the thread record.
@@ -75,8 +79,8 @@ Fleet controls:
 
 New-thread tasks are passed to the provider as one initial positional argument. The full task body is
 not stored in the session record; a normalized 72-character thread title is retained as `name` for
-the fleet. Cyberdeck does not infer a provider or model: changing launch context means
-selecting a row whose explicit context matches the session you want.
+the fleet. Cyberdeck does not infer a provider or model: changing launch context requires an
+explicit `/model` selection.
 
 Other standard terminal and tmux shortcuts are preserved while attached. `cyberdeck diagnostics` retains the
 read-only **SESSIONS**, **JOBS**, **ADMISSION**, **BUDGET**, and **RECONCILIATION** panels for detailed
@@ -89,7 +93,7 @@ invocation. Killing the entire tmux server still leaves the broker and its sessi
 ## Orchestrator, transcripts, and MCP
 
 An orchestrator is a durable, typed Cyberdeck binding, not a privileged role label. The binding pins
-an explicit provider, optional model, workspace or fleet scope, read-only filesystem sandbox, and a
+an explicit provider, optional model and reasoning effort, workspace or fleet scope, read-only filesystem sandbox, and a
 capability grant. Cyberdeck injects its session-scoped stdio MCP server into broker-launched Codex
 and Claude sessions. Broker RPC remains the source of truth and rechecks every MCP call.
 
@@ -109,11 +113,20 @@ cyberdeck orchestrator reset --scope workspace --cwd /absolute/workspace/path
 
 An explicit different provider/model can then replace an inactive latest binding cleanly. Cyberdeck
 does not translate model aliases, choose a fallback, or silently resume a reset binding.
+If an inactive provider-native conversation can no longer be located, an explicit provider, model,
+and effort selection appends a fresh binding instead of leaving the workspace stuck. A closed
+orchestrator pane is recreated on the next launch; closing a pane still detaches presentation and
+never stops the broker-owned provider process.
 
-The orchestrator can list in-scope workers, read cursor-based thread changes, start explicitly
-selected workers, and queue complete instructions. A human attachment always owns the only writer
-lease: orchestrator input remains queued until that controller detaches. Cyberdeck never steers a
-worker through tmux.
+The orchestrator can list in-scope workers, query Cyberdeck's authoritative provider/model/effort
+catalog, batch-start explicitly selected Codex, Claude, Cursor, or Antigravity workers, and wait
+inside the broker for compact results. Normal result collection is one `workers_start` call followed
+by one blocking `workers_wait` call; it does not poll or feed raw terminal transcripts back into the
+model. `thread_read` remains a bounded debugging escape hatch, requires an explicit cursor, and
+refuses to move an orchestrator backward behind a cursor it has already consumed.
+
+A human attachment always owns the only writer lease: orchestrator input remains queued until that
+controller detaches. Cyberdeck never steers a worker through tmux.
 
 Interactive prompts, normalized provider output, orchestrator instructions, and lifecycle changes
 are stored locally in an append-only transcript at:
@@ -152,7 +165,23 @@ cyberdeck broker stop
 `cyberdeck broker restart` requests a graceful shutdown, waits for the old socket to close, starts
 the built broker in the background, and waits for the replacement to report healthy.
 
-Broker shutdown ends active PTYs in Phase 1. Sessions survive client and pane detachment, but they do not survive broker death or restart.
+Cyberdeck admits 24 active workers by default. Orchestrators do not consume worker slots. Override
+the ceiling persistently in `~/Library/Application Support/Cyberdeck/config.json`, then restart the
+broker:
+
+```json
+{
+  "maxConcurrentWorkers": 48
+}
+```
+
+Set `maxConcurrentWorkers` to `null` for explicitly unlimited workers. A reached ceiling is rejected
+with the active and allowed worker counts; durable interactive sessions are not silently queued.
+
+Broker shutdown still ends active PTYs, but the durable session catalog, project grouping, model
+metadata, normalized preview, and native conversation identity survive broker death or restart.
+Threads whose live ownership cannot be proven are rehydrated as `Interrupted`; opening one uses the
+provider's exact resume path rather than inventing a replacement conversation.
 Bounded control-plane jobs are different: their records and terminal results are rebuilt on restart,
 while unverifiable nonterminal jobs become `interrupted` and are never automatically redispatched.
 
@@ -171,6 +200,17 @@ Attached/interactive Claude using an explicitly chosen provider-native model str
 ```bash
 cyberdeck start --provider claude --cwd /absolute/project/path --sandbox workspace-write --model MODEL_NAME --role any-user-defined-label --attach
 ```
+
+Cursor and Antigravity are also broker-owned interactive sessions:
+
+```bash
+cyberdeck start --provider cursor --cwd /absolute/project/path --sandbox read-only --attach
+cyberdeck start --provider antigravity --cwd /absolute/project/path --sandbox read-only --model MODEL_NAME --attach
+```
+
+Their initial prompt paths are fixture-proven but still live-unverified. Provider-native resume is
+not claimed for either provider: reopening a terminal Cursor or Antigravity thread fails explicitly
+instead of starting a different conversation.
 
 Cyberdeck does not recommend or automatically select a model. If `--model` is omitted, the provider's native default is used. Confirm that default yourself: an omitted Claude model may be Fable depending on local configuration.
 

@@ -55,6 +55,7 @@ export class OrchestratorManager {
       existing !== undefined
       && existing.provider === request.provider
       && existing.model === request.model
+      && existing.effort === request.effort
     ) {
       const session = await this.resumeExisting(existing);
       if (session !== undefined) return { binding: existing, session, created: false };
@@ -70,6 +71,7 @@ export class OrchestratorManager {
     const session = await this.registry.start({
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
+      ...(request.effort === undefined ? {} : { effort: request.effort }),
       cwd: request.cwd,
       detached: true,
       sandbox: "read-only",
@@ -84,6 +86,7 @@ export class OrchestratorManager {
       sessionId: session.id,
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
+      ...(request.effort === undefined ? {} : { effort: request.effort }),
       cwd: request.cwd,
       sandbox: "read-only",
       scope,
@@ -139,9 +142,10 @@ export class OrchestratorManager {
     try {
       const session = this.registry.get(binding.sessionId);
       if (session.executionState === "active" || session.executionState === "starting") return session;
-      return this.registry.resume(binding.sessionId);
-    } catch {
-      return undefined;
+      return await this.registry.resume(binding.sessionId);
+    } catch (error) {
+      if (isRecoverableResumeError(error)) return undefined;
+      throw error;
     }
   }
 
@@ -155,12 +159,20 @@ export class OrchestratorManager {
   }
 }
 
+function isRecoverableResumeError(error: unknown): boolean {
+  if (!(error instanceof Error) || !("code" in error)) return false;
+  return error.code === "SESSION_NOT_FOUND" || error.code === "SESSION_RESUME_UNAVAILABLE";
+}
+
 function orchestratorPrompt(scope: OrchestratorScope): string {
   const description = scope.kind === "fleet" ? "the full Cyberdeck fleet" : `threads in ${scope.cwd}`;
   return [
     "You are the user's Cyberdeck orchestrator.",
     `Your authority is scoped to ${description}.`,
     "Use Cyberdeck's semantic tools to inspect changes, summarize workers, and enqueue complete instructions.",
+    "Treat cyberdeck_provider_capabilities as authoritative for model IDs and effort support; never inspect repository source, config, or memory to discover Cyberdeck behavior.",
+    "For fan-out, call cyberdeck_workers_start once. Then call cyberdeck_workers_wait once with successful sessionId and completionTarget values; do not poll and do not read raw transcripts for ordinary result collection.",
+    "cyberdeck_thread_read is a bounded debugging escape hatch only. Always continue from its returned cursor and never reread from cursor zero.",
     "Never manipulate tmux panes or type through tmux send-keys.",
     "Do not stop, delete, or widen a worker's permissions without explicit human approval.",
   ].join(" ");

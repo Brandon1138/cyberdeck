@@ -13,6 +13,7 @@ class FakePty implements PtyHandle {
   readonly writes: Buffer[] = [];
   private readonly outputListeners = new Set<(chunk: Buffer) => void>();
   private readonly exitListeners = new Set<(exitCode: number, signal?: number) => void>();
+  private replay = "";
 
   constructor(pid: number) {
     this.pid = pid;
@@ -20,7 +21,7 @@ class FakePty implements PtyHandle {
 
   write(data: Buffer): void { this.writes.push(Buffer.from(data)); }
   resize(): void {}
-  snapshot(): Buffer { return Buffer.from("REPLAY"); }
+  snapshot(): Buffer { return Buffer.from(this.replay); }
   kill(): void {
     this.killCount += 1;
     this.emitExit(0);
@@ -34,6 +35,7 @@ class FakePty implements PtyHandle {
     return () => this.exitListeners.delete(listener);
   }
   emitOutput(text: string): void {
+    this.replay += text;
     for (const listener of this.outputListeners) listener(Buffer.from(text));
   }
   emitExit(exitCode = 0): void {
@@ -84,7 +86,7 @@ function request(overrides: Partial<StartSessionRequest> = {}): StartSessionRequ
   };
 }
 
-function harness(options: { failAttachJournal?: boolean } = {}) {
+function harness(options: { failAttachJournal?: boolean; maxConcurrentWorkers?: number | null } = {}) {
   const ptys: FakePty[] = [];
   const events: BrokerEvent[] = [];
   const transcripts: AppendThreadEvent[] = [];
@@ -106,7 +108,11 @@ function harness(options: { failAttachJournal?: boolean } = {}) {
       transcripts.push(event);
       return {} as never;
     } } as never,
-    config: BrokerRuntimeConfigSchema.parse({}),
+    config: BrokerRuntimeConfigSchema.parse({
+      ...(options.maxConcurrentWorkers === undefined
+        ? {}
+        : { maxConcurrentWorkers: options.maxConcurrentWorkers }),
+    }),
   });
   return { registry, ptys, events, transcripts, ptyFactory };
 }
@@ -116,6 +122,134 @@ describe("SessionRegistry", () => {
     const { registry } = harness();
     const record = await registry.start(request({ provider: "claude", model: "opus", role: "writer" }));
     expect(record).toMatchObject({ provider: "claude", model: "opus", role: "writer", pid: 1000 });
+  });
+
+  it("rehydrates a broker-lost conversation as interrupted and resumes exact provider state", async () => {
+    const persisted = {
+      id: "11111111-1111-4111-8111-111111111111",
+      provider: "codex" as const,
+      model: "gpt-5.6-sol",
+      cwd: "/tmp/repo",
+      detached: true,
+      sandbox: "read-only" as const,
+      kind: "worker" as const,
+      name: "Persist me",
+      createdAt: "2026-07-22T10:00:00.000Z",
+      updatedAt: "2026-07-22T10:01:00.000Z",
+      meaningfulUpdatedAt: "2026-07-22T10:01:00.000Z",
+      executionState: "active" as const,
+      attachmentState: "detached" as const,
+      pid: 4321,
+      exitCode: null,
+      childIds: [],
+      attentionState: "done" as const,
+      latestPreview: "Persisted answer",
+    };
+    const ptys: FakePty[] = [];
+    const puts: unknown[] = [];
+    const registry = new SessionRegistry({
+      adapters,
+      recoveredSessions: [persisted],
+      store: {
+        put: async (value) => { puts.push(value); },
+        delete: async () => {},
+      },
+      ptyFactory: vi.fn(() => {
+        const pty = new FakePty(9001);
+        ptys.push(pty);
+        return pty;
+      }),
+      journal: { append: async () => {} },
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+
+    await registry.ready();
+    expect(registry.list()).toEqual([expect.objectContaining({
+      id: persisted.id,
+      executionState: "cancelled",
+      attentionState: "interrupted",
+      latestPreview: "Persisted answer",
+    })]);
+    expect(registry.snapshot(persisted.id)).toEqual(Buffer.alloc(0));
+    await registry.resume(persisted.id);
+    expect(ptys).toHaveLength(1);
+    expect(registry.get(persisted.id)).toMatchObject({ executionState: "active", attentionState: "done" });
+    expect(puts.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("runs provider preflight after command validation and before PTY spawn", async () => {
+    const prepareLaunch = vi.fn(async () => undefined);
+    const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(1000));
+    const registry = new SessionRegistry({
+      adapters: { codex: { ...adapters.codex, prepareLaunch } },
+      ptyFactory,
+      journal: { append: async () => {} },
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+
+    await registry.start(request());
+
+    expect(prepareLaunch).toHaveBeenCalledOnce();
+    expect(ptyFactory).toHaveBeenCalledOnce();
+    expect(prepareLaunch.mock.invocationCallOrder[0]).toBeLessThan(ptyFactory.mock.invocationCallOrder[0]!);
+  });
+
+  it("idles until a worker returns to input and emits only a compact result", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ name: "math-worker", model: "gpt-5.6-sol", effort: "low" }));
+    const waiting = registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
+
+    ptys[0]!.emitOutput("\u001b]0;⠹ math-worker\u0007\u001b[2JWorking");
+    ptys[0]!.emitOutput("\u001b[2J42 + 1000 = 1042\r\n\u001b]0;math-worker\u0007");
+
+    await expect(waiting).resolves.toEqual({
+      timedOut: false,
+      results: [{
+        sessionId: record.id,
+        name: "math-worker",
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "low",
+        status: "completed",
+        completedTurns: 1,
+        text: expect.stringContaining("1042"),
+      }],
+    });
+    expect((await waiting).results[0]!.text.length).toBeLessThanOrEqual(300);
+  });
+
+  it("returns a blocking provider prompt without waiting for the timeout", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request());
+    ptys[0]!.emitOutput("Do you trust the contents of this project?\r\n> Yes, I trust this folder");
+
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000)).resolves.toMatchObject({
+      timedOut: false,
+      results: [{ status: "blocked", completedTurns: 0 }],
+    });
+  });
+
+  it("limits workers independently from orchestrators and reports the active count", async () => {
+    const { registry } = harness({ maxConcurrentWorkers: 1 });
+    await registry.start(request({ kind: "orchestrator" }));
+    await registry.start(request({ kind: "worker" }));
+    expect(registry.workerCapacity()).toEqual({ activeWorkers: 1, maxConcurrentWorkers: 1 });
+
+    await expect(registry.start(request({ kind: "worker" }))).rejects.toMatchObject({
+      code: "MAX_CONCURRENT_WORKERS",
+      message: "Worker limit reached: 1 active / 1 allowed",
+    });
+  });
+
+  it("rejects a syntactically valid provider without an interactive adapter", async () => {
+    const { registry } = harness();
+    await expect(registry.start(request({ provider: "cursor" }))).rejects.toMatchObject({
+      code: "PROVIDER_NOT_REGISTERED",
+    });
   });
 
   it("forwards an initial task to the provider without persisting it in the session record", async () => {

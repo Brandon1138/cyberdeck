@@ -54,6 +54,9 @@ describe("launchCockpit", () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
       calls.push({ command, args });
+      if (args[0] === "list-panes") {
+        return { status: 0, stdout: `/absolute/node /absolute/cli.js attach ${orchestratorSessionId}\n` };
+      }
       return { status: 0 };
     });
     launchCockpit({
@@ -66,8 +69,37 @@ describe("launchCockpit", () => {
     });
     expect(calls).toEqual([
       { command: "tmux", args: ["has-session", "-t", target] },
+      { command: "tmux", args: ["list-panes", "-t", target, "-F", "#{pane_start_command}"] },
       { command: "tmux", args: ["attach-session", "-t", target] },
     ]);
+  });
+
+  it("recreates a closed orchestrator pane in an existing cockpit", () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
+      calls.push({ command, args });
+      if (args[0] === "list-panes") {
+        return { status: 0, stdout: "/absolute/node /absolute/cli.js dashboard\n" };
+      }
+      return { status: 0 };
+    });
+
+    launchCockpit({
+      cliPath: "/absolute/cli.js",
+      nodePath: "/absolute/node",
+      cwd,
+      orchestratorSessionId,
+      spawnSync,
+      preflight: outsideTmux,
+    });
+
+    expect(calls).toContainEqual({
+      command: "tmux",
+      args: [
+        "split-window", "-h", "-t", target,
+        "/absolute/node", "/absolute/cli.js", "attach", orchestratorSessionId,
+      ],
+    });
   });
 
   it("never terminates presentation state on a successful launch", () => {

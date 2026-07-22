@@ -1,6 +1,11 @@
 import { homedir } from "node:os";
-import type { SessionRecord, StartSessionRequest } from "../domain/session.js";
+import type { EnsureOrchestratorRequest } from "../domain/orchestrator.js";
+import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
+import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
+import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
+import { latestTerminalPreview, providerTerminalActivity, stripTerminalControl } from "../runtime/terminal-replay.js";
 import { attachSession, type AttachTransport } from "./attach.js";
+import { collectDashboardSnapshot, renderDashboard } from "./dashboard.js";
 import { RpcError } from "./rpc-client.js";
 
 export interface FleetTransport {
@@ -45,11 +50,44 @@ export interface DeleteConfirmation {
   expiresAt: number;
 }
 
+export type OrchestratorPickerStep = "model" | "effort";
+
+export interface OrchestratorPickerState {
+  step: OrchestratorPickerStep;
+  choiceIndex: number;
+  effortIndex: number;
+}
+
+export interface LaunchProfile {
+  provider: ProviderId;
+  model: string;
+  effort?: ReasoningEffort;
+}
+
+export interface WorkerPickerState {
+  step: "model" | "effort";
+  modelIndex: number;
+  effortIndex: number;
+  cwd: string;
+  returnDraft: string;
+}
+
+export interface RenameState {
+  sessionId: string;
+  draft: string;
+}
+
 export interface FleetState {
   selectedSessionId?: string | undefined;
   fallbackCwd: string;
   draft: string;
   deleteConfirmation?: DeleteConfirmation | undefined;
+  orchestratorPicker?: OrchestratorPickerState | undefined;
+  workerPicker?: WorkerPickerState | undefined;
+  launchProfiles: Record<string, LaunchProfile>;
+  view: "fleet" | "diagnostics";
+  helpOpen?: boolean | undefined;
+  rename?: RenameState | undefined;
   notice?: string | undefined;
 }
 
@@ -59,6 +97,11 @@ export type FleetAction =
   | { type: "attach"; sessionId: string }
   | { type: "resume"; sessionId: string }
   | { type: "start"; request: StartSessionRequest & { initialPrompt: string } }
+  | { type: "orchestrator"; request: EnsureOrchestratorRequest }
+  | { type: "rename"; sessionId: string; name: string }
+  | { type: "pin"; sessionId: string }
+  | { type: "reorder"; sessionId: string; direction: "up" | "down" }
+  | { type: "profile"; cwd: string; profile: LaunchProfile }
   | { type: "quit" };
 
 export interface FleetTransition {
@@ -66,7 +109,7 @@ export interface FleetTransition {
   action?: FleetAction;
 }
 
-export type ThreadStatus = "Working" | "Needs input" | "Done" | "Stopping" | "Stopped" | "Failed";
+export type ThreadStatus = "Working" | "Needs input" | "Done" | "Stopping" | "Stopped" | "Interrupted" | "Failed";
 
 export interface FleetRenderOptions {
   color?: boolean | undefined;
@@ -84,13 +127,42 @@ interface ResolvedFleetRenderOptions {
   home: string;
 }
 
+interface WorkerModelChoice {
+  provider: ProviderId;
+  model: string;
+  label: string;
+  efforts: readonly (ReasoningEffort | "provider-managed")[];
+}
+
+interface OrchestratorModelChoice {
+  provider: (typeof ORCHESTRATOR_CATALOG)[number];
+  model: string;
+  label: string;
+}
+
+export interface FleetRuntimeOptions {
+  openOrchestrator?: ((request: EnsureOrchestratorRequest) => Promise<void>) | undefined;
+}
+
 const DELETE_CONFIRMATION_MS = 5_000;
-const OSC_TITLE = /\u001b\]0;([^\u0007\u001b]*)(?:\u0007|\u001b\\)/gu;
-const OSC_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)/gu;
-const HORIZONTAL_CURSOR_SEQUENCE = /\u001b\[(?:\d+)?[CG]/gu;
-const CSI_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/gu;
-const OTHER_ESCAPE = /\u001b(?:[()][0-9A-Z]|[@-_])/gu;
-const BRAILLE_SPINNER = /^[\u2800-\u28ff]/u;
+const WORKER_MODEL_CHOICES: readonly WorkerModelChoice[] = WORKER_PROVIDER_CAPABILITIES.flatMap((capability) =>
+  (capability.provider === "antigravity" ? ["gemini-3.6-flash"] : capability.models)
+    .map((model): WorkerModelChoice => ({
+    provider: capability.provider,
+    model,
+    label: friendlyModel(capability.provider, model),
+    efforts: capability.efforts.length === 0
+        ? ["provider-managed"]
+        : capability.efforts,
+    })),
+);
+const ORCHESTRATOR_MODEL_CHOICES: readonly OrchestratorModelChoice[] = ORCHESTRATOR_CATALOG.flatMap((provider) =>
+  provider.models.map((model) => ({
+    provider,
+    model,
+    label: friendlyModel(provider.provider, model),
+  })),
+);
 const DISABLE_INHERITED_TERMINAL_INPUT_MODES = [
   "\u001b[?1000l", // basic mouse tracking
   "\u001b[?1002l", // button-event mouse tracking
@@ -107,12 +179,12 @@ const ANSI = {
   reset: "\u001b[0m",
   bold: "\u001b[1m",
   dim: "\u001b[2m",
-  blue: "\u001b[34m",
-  cyan: "\u001b[36m",
-  yellow: "\u001b[33m",
-  green: "\u001b[32m",
-  red: "\u001b[31m",
-  gray: "\u001b[90m",
+  blue: "\u001b[38;2;158;182;255m",
+  cyan: "\u001b[38;2;102;194;208m",
+  yellow: "\u001b[38;2;212;168;91m",
+  green: "\u001b[38;2;120;198;121m",
+  red: "\u001b[38;2;217;108;117m",
+  gray: "\u001b[38;2;123;132;144m",
 } as const;
 
 export async function collectFleetSnapshot(client: FleetTransport): Promise<FleetSnapshot> {
@@ -136,19 +208,34 @@ export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.
     selectedSessionId: orderedThreads(snapshot)[0]?.record.id,
     fallbackCwd,
     draft: "",
+    launchProfiles: {},
+    view: "fleet",
   };
 }
 
 export function threadStatus(thread: FleetThread): ThreadStatus {
+  const persisted = thread.record.attentionState;
+  if (persisted !== undefined) {
+    return ({
+      working: "Working",
+      "needs-input": "Needs input",
+      done: "Done",
+      stopping: "Stopping",
+      stopped: "Stopped",
+      interrupted: "Interrupted",
+      failed: "Failed",
+    } as const)[persisted];
+  }
   switch (thread.record.executionState) {
     case "starting": return "Working";
     case "exited": return "Done";
     case "failed": return "Failed";
     case "cancelled": return thread.record.exitCode === null ? "Stopping" : "Stopped";
     case "active": {
-      const title = lastTerminalTitle(thread.replay);
-      if (title !== undefined) return BRAILLE_SPINNER.test(title) ? "Working" : "Needs input";
-      return /esc to interrupt/i.test(stripTerminalControl(thread.replay)) ? "Working" : "Needs input";
+      const activity = providerTerminalActivity(thread.record.provider, thread.replay);
+      if (activity === "working") return "Working";
+      if (activity === "blocked") return "Needs input";
+      return "Done";
     }
   }
 }
@@ -165,6 +252,104 @@ export function transitionFleet(
 
   if (key === "ctrl+c") {
     return { state, action: { type: "quit" } };
+  }
+
+  if (key === "ctrl+s") {
+    return {
+      state: {
+        ...state,
+        view: state.view === "fleet" ? "diagnostics" : "fleet",
+        helpOpen: false,
+        notice: undefined,
+      },
+    };
+  }
+
+  if (state.view === "diagnostics") return { state };
+
+  if (state.rename !== undefined) {
+    if (key === "escape") return { state: { ...state, rename: undefined, notice: undefined } };
+    if (key === "enter") {
+      const name = state.rename.draft.trim();
+      if (name === "") return { state: { ...state, notice: "Thread name cannot be empty" } };
+      return {
+        state: { ...state, rename: undefined, notice: undefined },
+        action: { type: "rename", sessionId: state.rename.sessionId, name },
+      };
+    }
+    if (key === "backspace") {
+      return {
+        state: {
+          ...state,
+          rename: { ...state.rename, draft: [...state.rename.draft].slice(0, -1).join("") },
+          notice: undefined,
+        },
+      };
+    }
+    if ([...key].length === 1 && key.charCodeAt(0) >= 0x20) {
+      return {
+        state: { ...state, rename: { ...state.rename, draft: `${state.rename.draft}${key}` }, notice: undefined },
+      };
+    }
+    return { state };
+  }
+
+  if (state.workerPicker !== undefined) {
+    return transitionWorkerPicker(state, key);
+  }
+
+  if (key === "ctrl+o") {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        deleteConfirmation: undefined,
+        notice: undefined,
+        orchestratorPicker: initialOrchestratorPicker(snapshot, state.fallbackCwd),
+      },
+    };
+  }
+
+  if (state.orchestratorPicker !== undefined) {
+    return transitionOrchestratorPicker(state, key);
+  }
+
+  if (key === "?" && state.draft === "") {
+    return { state: { ...state, helpOpen: state.helpOpen !== true, notice: undefined } };
+  }
+
+  if (key === "ctrl+r" && selected !== undefined) {
+    return {
+      state: {
+        ...state,
+        rename: { sessionId: selected.record.id, draft: selected.record.name ?? "" },
+        helpOpen: false,
+        notice: undefined,
+      },
+    };
+  }
+
+  if (key === "ctrl+t" && selected !== undefined) {
+    return { state: { ...state, helpOpen: false, notice: undefined }, action: { type: "pin", sessionId: selected.record.id } };
+  }
+
+  if ((key === "shift+up" || key === "shift+down") && selected !== undefined) {
+    return {
+      state: { ...state, helpOpen: false, notice: undefined },
+      action: {
+        type: "reorder",
+        sessionId: selected.record.id,
+        direction: key === "shift+up" ? "up" : "down",
+      },
+    };
+  }
+
+  if (/^alt\+[1-9]$/u.test(key)) {
+    const index = Number(key.slice(-1)) - 1;
+    const target = threads[index];
+    return target === undefined
+      ? { state }
+      : { state: { ...state, selectedSessionId: target.record.id }, action: openAction(target.record) };
   }
 
   if (key === "ctrl+x" && selected !== undefined) {
@@ -196,7 +381,7 @@ export function transitionFleet(
           sessionId: selected.record.id,
           expiresAt: now + DELETE_CONFIRMATION_MS,
         },
-        notice: undefined,
+        notice: "Delete thread? press ctrl+x again",
       },
     };
   }
@@ -207,8 +392,17 @@ export function transitionFleet(
       action: openAction(selected.record),
     };
   }
+  if (key === " " && state.draft === "" && selected !== undefined) {
+    return {
+      state: { ...state, deleteConfirmation: undefined, helpOpen: false, notice: undefined },
+      action: openAction(selected.record),
+    };
+  }
   if (key === "enter" && selected !== undefined) {
     const initialPrompt = state.draft.trim();
+    if (initialPrompt === "/model") {
+      return openWorkerPicker(state, snapshot, "");
+    }
     if (initialPrompt === "") {
       return {
         state: { ...state, deleteConfirmation: undefined, notice: undefined },
@@ -218,6 +412,7 @@ export function transitionFleet(
     return startTransition(state, selected.record, initialPrompt);
   }
   if (key === "enter" && selected === undefined && state.draft.trim() !== "") {
+    if (state.draft.trim() === "/model") return openWorkerPicker(state, snapshot, "");
     return startTransition(state, undefined, state.draft.trim());
   }
   if (key === "up" || key === "down") {
@@ -236,8 +431,17 @@ export function transitionFleet(
   if (key === "backspace") {
     return { state: { ...state, draft: [...state.draft].slice(0, -1).join(""), notice: undefined } };
   }
+  if (key === "ctrl+j") {
+    return { state: { ...state, draft: `${state.draft}\n`, notice: undefined } };
+  }
   if (key === "escape") {
-    return { state: { ...state, draft: "", notice: undefined } };
+    if (state.helpOpen === true) return { state, action: { type: "quit" } };
+    if (state.draft !== "") return { state: { ...state, draft: "", notice: undefined } };
+    return { state, action: { type: "quit" } };
+  }
+  if (key === "@" && state.draft === "" && selected !== undefined) {
+    const reference = (selected.record.name ?? selected.record.id.slice(0, 8)).replace(/\s+/gu, "-");
+    return { state: { ...state, draft: `@${reference} `, notice: undefined } };
   }
   if ([...key].length === 1 && key.charCodeAt(0) >= 0x20) {
     return { state: { ...state, draft: `${state.draft}${key}`, notice: undefined } };
@@ -256,7 +460,124 @@ export function renderFleet(
   const color = options.color ?? true;
   const home = options.home ?? homedir();
   const state = normalizeState(current, snapshot, now);
+  if (state.workerPicker !== undefined) {
+    return renderWorkerPicker(state, { width, height, now, color, home });
+  }
+  if (state.orchestratorPicker !== undefined) {
+    return renderOrchestratorPicker(state, { width, height, now, color, home });
+  }
   return renderFleetList(snapshot, state, { width, height, now, color, home });
+}
+
+function openWorkerPicker(state: FleetState, snapshot: FleetSnapshot, returnDraft: string): FleetTransition {
+  const cwd = composerCwd(state, snapshot);
+  return openWorkerPickerForCwd(state, cwd, returnDraft);
+}
+
+function openWorkerPickerForCwd(state: FleetState, cwd: string, returnDraft: string): FleetTransition {
+  const current = state.launchProfiles[cwd];
+  const modelIndex = current === undefined
+    ? 0
+    : Math.max(0, WORKER_MODEL_CHOICES.findIndex((choice) =>
+      choice.provider === current.provider
+      && (choice.model === current.model
+        || (choice.provider === "antigravity" && current.model.startsWith(`${choice.model}-`)))));
+  const choice = WORKER_MODEL_CHOICES[modelIndex]!;
+  const effortIndex = current?.effort === undefined
+    ? 0
+    : Math.max(0, choice.efforts.indexOf(current.effort));
+  return {
+    state: {
+      ...state,
+      draft: "",
+      helpOpen: false,
+      notice: undefined,
+      workerPicker: { step: "model", modelIndex, effortIndex, cwd, returnDraft },
+    },
+  };
+}
+
+function transitionWorkerPicker(state: FleetState, key: string): FleetTransition {
+  const picker = state.workerPicker!;
+  if (key === "escape") {
+    if (picker.step === "effort") {
+      return { state: { ...state, workerPicker: { ...picker, step: "model" }, notice: undefined } };
+    }
+    return { state: { ...state, workerPicker: undefined, draft: picker.returnDraft, notice: undefined } };
+  }
+  if (key === "up" || key === "down") {
+    const delta = key === "up" ? -1 : 1;
+    if (picker.step === "model") {
+      return {
+        state: {
+          ...state,
+          workerPicker: {
+            ...picker,
+            modelIndex: boundedIndex(picker.modelIndex + delta, WORKER_MODEL_CHOICES.length),
+            effortIndex: 0,
+          },
+        },
+      };
+    }
+    const choice = WORKER_MODEL_CHOICES[picker.modelIndex]!;
+    return {
+      state: {
+        ...state,
+        workerPicker: {
+          ...picker,
+          effortIndex: boundedIndex(picker.effortIndex + delta, choice.efforts.length),
+        },
+      },
+    };
+  }
+  if (key !== "enter") return { state };
+  if (picker.step === "model") {
+    return { state: { ...state, workerPicker: { ...picker, step: "effort", effortIndex: 0 } } };
+  }
+  const choice = WORKER_MODEL_CHOICES[picker.modelIndex]!;
+  const effort = choice.efforts[picker.effortIndex]!;
+  const model = choice.provider === "antigravity" && effort !== "provider-managed"
+    ? `${choice.model}-${effort}`
+    : choice.model;
+  const profile: LaunchProfile = {
+    provider: choice.provider,
+    model,
+    ...(effort === "provider-managed" ? {} : { effort }),
+  };
+  return {
+    state: {
+      ...state,
+      workerPicker: undefined,
+      draft: picker.returnDraft,
+      launchProfiles: { ...state.launchProfiles, [picker.cwd]: profile },
+      notice: `Selected ${choice.label} · ${friendlyEffort(effort)}`,
+    },
+    action: { type: "profile", cwd: picker.cwd, profile },
+  };
+}
+
+function renderWorkerPicker(state: FleetState, options: ResolvedFleetRenderOptions): string {
+  const picker = state.workerPicker!;
+  const choice = WORKER_MODEL_CHOICES[picker.modelIndex]!;
+  const lines = renderHeader([], state, options);
+  lines.push("");
+  if (picker.step === "model") {
+    lines.push("Choose a model", "");
+    lines.push(...WORKER_MODEL_CHOICES.map((model, index) =>
+      pickerRow(`${model.label}  ${paint(model.provider, "dim", options.color)}`, index === picker.modelIndex, options.color)));
+  } else {
+    lines.push(`${choice.label} effort`, "");
+    lines.push(...choice.efforts.map((effort, index) =>
+      pickerRow(friendlyEffort(effort), index === picker.effortIndex, options.color)));
+  }
+  const footer = [
+    paint("─".repeat(options.width), "dim", options.color),
+    paint(fit(`${choice.label} · ${shortPath(picker.cwd, options.home)}`, options.width), "cyan", options.color),
+    paint(fit("↑↓ select · enter apply/next · esc back", options.width), "dim", options.color),
+  ];
+  const body = lines.slice(0, Math.max(0, options.height - footer.length));
+  while (body.length < options.height - footer.length) body.push("");
+  return [...body, ...footer].join("\n");
 }
 
 function renderFleetList(
@@ -265,15 +586,7 @@ function renderFleetList(
   options: ResolvedFleetRenderOptions,
 ): string {
   const threads = orderedThreads(snapshot);
-  const statuses = threads.map(threadStatus);
-  const working = statuses.filter((status) => status === "Working").length;
-  const waiting = statuses.filter((status) => status === "Needs input").length;
-  const completed = statuses.filter((status) => ["Done", "Stopped", "Failed"].includes(status)).length;
-  const lines = [
-    paint("CYBERDECK", "bold", options.color),
-    paint(`${threads.length} agents · ${waiting} awaiting input · ${working} working · ${completed} completed`, "dim", options.color),
-    "",
-  ];
+  const lines = [...renderHeader(threads, state, options), ""];
 
   const groups = groupThreads(threads);
   if (groups.length === 0) {
@@ -293,32 +606,197 @@ function renderFleetList(
     && !["active", "starting"].includes(selected.record.executionState)
     && selected.record.exitCode !== null;
   const destructiveHint = terminal ? "ctrl+x delete thread" : "ctrl+x stop agent";
-  const prompt = state.draft === ""
-    ? paint(
-      selected === undefined
-        ? "Use /codex task or /claude:MODEL task"
-        : "Describe a task for a new session",
-      "dim",
-      options.color,
-    )
-    : fit(state.draft, Math.max(1, options.width - 2));
-  const explicitLaunch = parseExplicitLaunch(state.draft.trim(), state.fallbackCwd);
-  const launchContext = explicitLaunch !== undefined
-    ? `new: ${explicitLaunch.provider} · ${explicitLaunch.model ?? "native-default"} · read-only · ${shortPath(explicitLaunch.cwd, options.home)}`
-    : selected === undefined
-      ? `new: explicit slash provider · read-only · ${shortPath(state.fallbackCwd, options.home)}`
-      : `new: ${selected.record.provider} · ${selected.record.model ?? "native-default"} · ${selected.record.sandbox} · ${shortPath(selected.record.cwd, options.home)}`;
+  const cwd = composerCwd(state, snapshot);
+  const profile = state.launchProfiles[cwd];
+  const draftLines = (state.rename?.draft ?? state.draft).split("\n").slice(-3);
+  const composerLines = draftLines.length === 1 && draftLines[0] === ""
+    ? [`› ${paint(state.rename === undefined ? "Describe a task for a new session" : "Rename thread", "dim", options.color)}`]
+    : draftLines.map((line, index) => `${index === 0 ? state.rename === undefined ? "›" : "Rename ›" : "  "} ${fit(line ?? "", Math.max(1, options.width - 3))}`);
+  const launchContext = profile === undefined
+    ? `▶ /model required · ${selected?.record.sandbox ?? "read-only"} · ${shortPath(cwd, options.home)}`
+    : `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"} · ${shortPath(cwd, options.home)}`;
+  const helpLines = state.helpOpen === true
+    ? shortcutHelp(options.width, terminal ? "delete" : "stop")
+    : [];
   const footer = [
     ...(state.notice === undefined ? [] : [paint(fit(state.notice, options.width), "red", options.color)]),
     paint("─".repeat(options.width), "dim", options.color),
-    `› ${prompt}`,
+    ...composerLines,
+    paint("─".repeat(options.width), "dim", options.color),
+    ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
     paint(fit(launchContext, options.width), "dim", options.color),
-    paint(fit(`↑↓ select · enter open/start · → open · esc clear · ${destructiveHint} · ctrl+c quit`, options.width), "dim", options.color),
+    paint(fit(`enter open/start · space reply · /model configure · ? shortcuts · ${destructiveHint}`, options.width), "dim", options.color),
   ];
   const bodyHeight = Math.max(0, options.height - footer.length);
   const body = lines.slice(0, bodyHeight);
   while (body.length < bodyHeight) body.push("");
   return [...body, ...footer].join("\n");
+}
+
+function renderHeader(
+  threads: readonly FleetThread[],
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): string[] {
+  const statuses = threads.map(threadStatus);
+  const count = (status: ThreadStatus) => statuses.filter((candidate) => candidate === status).length;
+  const counts = [
+    `${threads.length} agents`,
+    `${count("Needs input")} needs input`,
+    `${count("Working")} working`,
+    `${count("Done")} done`,
+    ...(count("Interrupted") === 0 ? [] : [`${count("Interrupted")} interrupted`]),
+    ...(count("Failed") === 0 ? [] : [`${count("Failed")} failed`]),
+  ].join(" · ");
+  const orchestrator = threads.find(({ record }) =>
+    record.kind === "orchestrator" && record.cwd === state.fallbackCwd)?.record
+    ?? threads.find(({ record }) => record.kind === "orchestrator")?.record;
+  const context = orchestrator === undefined
+    ? `No orchestrator · ctrl+o to choose · ${shortPath(state.fallbackCwd, options.home)}`
+    : `${friendlyModel(orchestrator.provider, orchestrator.model)} · ${friendlyEffort(orchestrator.effort ?? "provider-managed")} · ${shortPath(orchestrator.cwd, options.home)}`;
+  const textLines = [
+    paint("Cyberdeck", "bold", options.color),
+    paint(fit(context, Math.max(1, options.width - 10)), "dim", options.color),
+    paint(fit(counts, Math.max(1, options.width - 10)), "dim", options.color),
+  ];
+  if (options.width < 64) return textLines;
+  const logo = ["░ ░ ░", " ░ ░", "░ ░ ░"];
+  return textLines.map((line, index) =>
+    `${paint(pad(logo[index] ?? "", 8), "gray", options.color)}  ${line}`);
+}
+
+function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
+  const entries = [
+    "shift+↑↓ reorder", "ctrl+s switch views", "@ mention", "alt+1–9 open", "esc quit",
+    "ctrl+r rename", "ctrl+j newline", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
+  ];
+  if (width >= 110) return [entries.slice(0, 5).join("   "), entries.slice(5).join("   ")];
+  if (width >= 70) return [entries.slice(0, 3).join("   "), entries.slice(3, 6).join("   "), entries.slice(6).join("   ")];
+  return entries;
+}
+
+function transitionOrchestratorPicker(state: FleetState, key: string): FleetTransition {
+  const picker = state.orchestratorPicker!;
+  if (key === "escape") {
+    return {
+      state: {
+        ...state,
+        orchestratorPicker: picker.step === "effort" ? { ...picker, step: "model" } : undefined,
+        notice: undefined,
+      },
+    };
+  }
+
+  if (key === "up" || key === "down") {
+    const delta = key === "up" ? -1 : 1;
+    if (picker.step === "model") {
+      return {
+        state: {
+          ...state,
+          orchestratorPicker: {
+            ...picker,
+            choiceIndex: boundedIndex(picker.choiceIndex + delta, ORCHESTRATOR_MODEL_CHOICES.length),
+            effortIndex: 0,
+          },
+        },
+      };
+    }
+    const choice = ORCHESTRATOR_MODEL_CHOICES[picker.choiceIndex]!;
+    return {
+      state: {
+        ...state,
+        orchestratorPicker: {
+          ...picker,
+          effortIndex: boundedIndex(picker.effortIndex + delta, choice.provider.efforts.length),
+        },
+      },
+    };
+  }
+
+  if (key !== "enter") return { state };
+  if (picker.step === "model") {
+    return { state: { ...state, orchestratorPicker: { ...picker, step: "effort" } } };
+  }
+
+  const selection = orchestratorSelection(picker);
+  return {
+    state: { ...state, orchestratorPicker: undefined, notice: undefined },
+    action: {
+      type: "orchestrator",
+      request: {
+        provider: selection.provider.provider,
+        model: selection.model,
+        ...(selection.effort === undefined ? {} : { effort: selection.effort }),
+        cwd: state.fallbackCwd,
+        scope: "workspace",
+      },
+    },
+  };
+}
+
+function renderOrchestratorPicker(
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): string {
+  const picker = state.orchestratorPicker!;
+  const selection = orchestratorSelection(picker);
+  const stepNumber = picker.step === "model" ? 1 : 2;
+  const lines = [...renderHeader([], state, options), "", paint(`Orchestrator  ${stepNumber} of 2`, "dim", options.color), ""];
+
+  if (picker.step === "model") {
+    lines.push("Choose an orchestrator model", "");
+    lines.push(...ORCHESTRATOR_MODEL_CHOICES.map((choice, index) =>
+      pickerRow(`${choice.label}  ${paint(choice.provider.label, "dim", options.color)}`, index === picker.choiceIndex, options.color)));
+  } else {
+    lines.push(`${selection.provider.label} effort`, "");
+    lines.push(...selection.provider.efforts.map((effort, index) =>
+      pickerRow(effort === "native-default" ? "Provider managed" : effort, index === picker.effortIndex, options.color)));
+  }
+
+  const footer = [
+    ...(state.notice === undefined ? [] : [paint(fit(state.notice, options.width), "red", options.color)]),
+    paint("─".repeat(options.width), "dim", options.color),
+    paint(fit(`${selection.provider.label} · ${selection.model} · ${selection.effort ?? "Provider managed"}`, options.width), "cyan", options.color),
+    paint(
+      fit(picker.step === "effort" ? "↑↓ select · enter open · esc back" : "↑↓ select · enter next · esc back", options.width),
+      "dim",
+      options.color,
+    ),
+  ];
+  const body = lines.slice(0, Math.max(0, options.height - footer.length));
+  while (body.length < options.height - footer.length) body.push("");
+  return [...body, ...footer].join("\n");
+}
+
+function orchestratorSelection(picker: OrchestratorPickerState) {
+  const choice = ORCHESTRATOR_MODEL_CHOICES[picker.choiceIndex]!;
+  const provider = choice.provider;
+  const effort = provider.efforts[picker.effortIndex]!;
+  return {
+    provider,
+    model: choice.model,
+    effort: effort === "native-default" ? undefined : effort,
+  };
+}
+
+function initialOrchestratorPicker(snapshot: FleetSnapshot, cwd: string): OrchestratorPickerState {
+  const existing = orderedThreads(snapshot)
+    .find((thread) => thread.record.kind === "orchestrator" && thread.record.cwd === cwd)?.record;
+  const choiceIndex = existing === undefined
+    ? 0
+    : Math.max(0, ORCHESTRATOR_MODEL_CHOICES.findIndex((choice) =>
+      choice.provider.provider === existing.provider && choice.model === existing.model));
+  const choice = ORCHESTRATOR_MODEL_CHOICES[choiceIndex]!;
+  const effortIndex = Math.max(0, choice.provider.efforts.indexOf(existing?.effort ?? "native-default"));
+  return { step: "model", choiceIndex, effortIndex };
+}
+
+function pickerRow(value: string, selected: boolean, color: boolean): string {
+  return `${paint(selected ? "›" : "·", selected ? "bold" : "dim", color)} ${selected ? paint(value, "bold", color) : value}`;
+}
+
+function boundedIndex(value: number, length: number): number {
+  return Math.max(0, Math.min(length - 1, value));
 }
 
 function renderThreadRow(
@@ -327,34 +805,40 @@ function renderThreadRow(
   options: ResolvedFleetRenderOptions,
 ): string {
   const selected = thread.record.id === state.selectedSessionId;
-  const prefix = selected ? "›" : "·";
-  const title = thread.record.name ?? thread.record.role ?? `${thread.record.provider} ${thread.record.id.slice(0, 8)}`;
-  const identity = [thread.record.provider, thread.record.model ?? "native-default", thread.record.role]
-    .filter((part): part is string => part !== undefined)
-    .join(" · ");
+  const prefix = selected ? "*" : "·";
+  const baseTitle = thread.record.name ?? thread.record.role ?? `Untitled ${thread.record.id.slice(0, 8)}`;
+  const title = `${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
+  const identity = `${friendlyModel(thread.record.provider, thread.record.model)} · ${friendlyEffort(thread.record.effort ?? "provider-managed")}`;
   const pendingDelete = state.deleteConfirmation?.sessionId === thread.record.id;
-  const status = pendingDelete ? "press ctrl+x again to delete" : threadStatus(thread);
-  const preview = latestPreview(thread.replay);
-  const age = relativeTime(thread.record.updatedAt, options.now);
+  const status = pendingDelete ? "Delete thread?" : threadStatus(thread);
+  const preview = thread.record.latestPreview ?? latestTerminalPreview(thread.replay);
+  const age = relativeTime(thread.record.meaningfulUpdatedAt ?? thread.record.updatedAt, options.now);
 
-  if (options.width < 96) {
-    const firstAvailable = Math.max(10, options.width - 4 - 31 - 7);
-    const first = `${paint(prefix, selected ? "bold" : "dim", options.color)} ${fit(title, firstAvailable)}  ${statusText(status, pendingDelete, options.color)}  ${age}`;
-    const second = `  ${paint(fit(identity, 28), "dim", options.color)} · ${fit(preview, Math.max(8, options.width - 34))}`;
+  if (options.width < 100) {
+    const identityWidth = options.width < 60 ? 0 : Math.min(18, Math.max(10, Math.floor(options.width * 0.2)));
+    const statusWidth = Math.min(11, status.length);
+    const firstAvailable = Math.max(10, options.width - 4 - identityWidth - statusWidth - 7);
+    const first = [
+      `${paint(prefix, selected ? "bold" : "dim", options.color)} ${selected ? paint(fit(title, firstAvailable), "bold", options.color) : fit(title, firstAvailable)}`,
+      ...(identityWidth === 0 ? [] : [paint(pad(identity, identityWidth), "dim", options.color)]),
+      statusText(pad(status, statusWidth), pendingDelete, options.color),
+      age,
+    ].join("  ");
+    const second = `  ${paint(fit(preview, Math.max(8, options.width - 2)), "dim", options.color)}`;
     return `${first}\n${second}`;
   }
 
-  const titleWidth = Math.min(32, Math.max(22, Math.floor(options.width * 0.23)));
-  const identityWidth = Math.min(48, Math.max(22, Math.floor(options.width * 0.31)));
-  const statusWidth = 31;
-  const fixed = 2 + titleWidth + 2 + identityWidth + 2 + statusWidth + 2 + 6;
+  const titleWidth = Math.min(38, Math.max(24, Math.floor(options.width * 0.28)));
+  const identityWidth = Math.min(20, Math.max(12, Math.floor(options.width * 0.15)));
+  const statusWidth = Math.min(11, Math.max(4, status.length));
+  const fixed = 2 + titleWidth + 2 + identityWidth + 2 + statusWidth + 2 + 5;
   const previewWidth = Math.max(8, options.width - fixed);
   return [
     paint(prefix, selected ? "bold" : "dim", options.color),
-    pad(title, titleWidth),
+    selected ? paint(pad(title, titleWidth), "bold", options.color) : pad(title, titleWidth),
     paint(pad(identity, identityWidth), "dim", options.color),
     statusText(pad(status, statusWidth), pendingDelete, options.color),
-    fit(preview, previewWidth),
+    paint(fit(preview, previewWidth), "dim", options.color),
     padStart(age, 5),
   ].join(" ");
 }
@@ -364,9 +848,18 @@ export async function runFleet(
   input: FleetInput = process.stdin,
   output: FleetOutput = process.stdout,
   signals: FleetSignals = process,
+  runtime: FleetRuntimeOptions = {},
 ): Promise<void> {
   let snapshot = await collectFleetSnapshot(client);
   let state = createFleetState(snapshot);
+  try {
+    state = {
+      ...state,
+      launchProfiles: await client.request<Record<string, LaunchProfile>>("fleet.preferences", {}),
+    };
+  } catch {
+    // Older brokers and isolated presentation tests have no persisted preference surface.
+  }
   if (input.isTTY !== true) {
     output.write(`${renderFleet(snapshot, state, { color: false, width: output.columns, height: output.rows })}\n`);
     client.close();
@@ -423,6 +916,34 @@ export async function runFleet(
     }
   };
 
+  const openOrchestrator = async (request: EnsureOrchestratorRequest) => {
+    if (runtime.openOrchestrator === undefined) {
+      state = { ...state, notice: "Orchestrator presentation is unavailable in this client" };
+      return;
+    }
+    attaching = true;
+    notify();
+    keyDecoder.reset();
+    if (decoderFlushTimer !== undefined) clearTimeout(decoderFlushTimer);
+    input.off("data", onInput);
+    input.pause?.();
+    input.setRawMode?.(false);
+    output.write(`${LEAVE_FLEET_SCREEN}\u001b[2J\u001b[H`);
+    try {
+      await runtime.openOrchestrator(request);
+    } finally {
+      attaching = false;
+      if (!stopped) {
+        input.setRawMode?.(true);
+        input.on("data", onInput);
+        input.resume?.();
+        output.write(ENTER_FLEET_SCREEN);
+        snapshot = await collectFleetSnapshot(client);
+      }
+      notify();
+    }
+  };
+
   const perform = async (key: string) => {
     const transition = transitionFleet(state, snapshot, key);
     state = transition.state;
@@ -447,8 +968,21 @@ export async function runFleet(
         state = { ...state, selectedSessionId: record.id };
         snapshot = await collectFleetSnapshot(client);
         await openNativeThread(record.id);
+      } else if (action?.type === "orchestrator") {
+        await openOrchestrator(action.request);
+      } else if (action?.type === "rename") {
+        await client.request("session.rename", { sessionId: action.sessionId, name: action.name });
+      } else if (action?.type === "pin") {
+        await client.request("session.togglePin", { sessionId: action.sessionId });
+      } else if (action?.type === "reorder") {
+        await client.request("session.reorder", {
+          sessionId: action.sessionId,
+          direction: action.direction,
+        });
+      } else if (action?.type === "profile") {
+        await client.request("fleet.preference.set", { cwd: action.cwd, profile: action.profile });
       }
-      if (action !== undefined && action.type !== "attach" && action.type !== "resume" && action.type !== "start") {
+      if (action !== undefined && action.type !== "attach" && action.type !== "resume" && action.type !== "start" && action.type !== "orchestrator") {
         snapshot = await collectFleetSnapshot(client);
       }
     } catch (error) {
@@ -494,12 +1028,21 @@ export async function runFleet(
       state = normalizeState(state, snapshot, Date.now());
       const height = Math.max(16, output.rows ?? 32);
       const width = Math.max(50, output.columns ?? 120);
-      const composerColumn = Math.min(width, 3 + [...state.draft].length);
-      output.write(`\u001b[2J\u001b[H${renderFleet(snapshot, state, {
-        color: output.isTTY === true,
-        width,
-        height,
-      })}\u001b[${height - 2};${composerColumn}H\u001b[?25h`);
+      if (state.view === "diagnostics") {
+        const diagnostics = renderDashboard(await collectDashboardSnapshot(client)).split("\n");
+        const footer = [paint("─".repeat(width), "dim", output.isTTY === true), "ctrl+s Fleet · ctrl+c quit"];
+        const body = diagnostics.slice(0, Math.max(0, height - footer.length));
+        while (body.length < height - footer.length) body.push("");
+        output.write(`\u001b[2J\u001b[H${[...body, ...footer].join("\n")}\u001b[?25l`);
+      } else {
+        const rendered = renderFleet(snapshot, state, {
+          color: output.isTTY === true,
+          width,
+          height,
+        });
+        const cursor = composerCursor(rendered, state, width);
+        output.write(`\u001b[2J\u001b[H${rendered}\u001b[${cursor.row};${cursor.column}H\u001b[?25h`);
+      }
       await waitForRefresh((resume) => { wake = resume; }, () => { wake = undefined; });
     }
     await inputQueue;
@@ -528,6 +1071,21 @@ function waitForRefresh(register: (wake: () => void) => void, clear: () => void)
       resolve();
     });
   });
+}
+
+function composerCursor(rendered: string, state: FleetState, width: number): { row: number; column: number } {
+  const lines = rendered.split("\n");
+  const rowIndex = lines.findIndex((line) => {
+    const plain = stripTerminalControl(line);
+    return plain.startsWith("› ") || plain.startsWith("Rename › ");
+  });
+  const value = state.rename?.draft ?? state.draft;
+  const lastLine = value.split("\n").at(-1) ?? "";
+  const prefix = state.rename === undefined ? 2 : 9;
+  return {
+    row: Math.max(1, rowIndex + 1),
+    column: Math.min(width, prefix + [...lastLine].length + 1),
+  };
 }
 
 /**
@@ -571,6 +1129,8 @@ export class FleetKeyDecoder {
       ["\u001b[B", "down"],
       ["\u001b[D", "left"],
       ["\u001b[C", "right"],
+      ["\u001b[1;2A", "shift+up"],
+      ["\u001b[1;2B", "shift+down"],
       ["\u001b[13u", "enter"],
     ] as const;
     const match = special.find(([sequence]) => rest.startsWith(sequence));
@@ -592,11 +1152,22 @@ export class FleetKeyDecoder {
       this.pending = rest;
       break;
     }
+    const altDigit = /^\u001b([1-9])/u.exec(rest);
+    if (altDigit !== null) {
+      keys.push(`alt+${altDigit[1]}`);
+      index += altDigit[0].length;
+      continue;
+    }
     const code = value.charCodeAt(index);
     if (code === 0x03) keys.push("ctrl+c");
+    else if (code === 0x0a) keys.push("ctrl+j");
+    else if (code === 0x0f) keys.push("ctrl+o");
+    else if (code === 0x12) keys.push("ctrl+r");
+    else if (code === 0x13) keys.push("ctrl+s");
+    else if (code === 0x14) keys.push("ctrl+t");
     else if (code === 0x18) keys.push("ctrl+x");
     else if (code === 0x1b) keys.push("escape");
-    else if (code === 0x0d || code === 0x0a) keys.push("enter");
+    else if (code === 0x0d) keys.push("enter");
     else if (code === 0x7f || code === 0x08) keys.push("backspace");
     else if (code >= 0x20) keys.push(value[index]!);
     index += 1;
@@ -621,6 +1192,9 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
     ...state,
     selectedSessionId: selectedExists ? state.selectedSessionId : threads[0]?.record.id,
     deleteConfirmation,
+    ...(state.deleteConfirmation !== undefined && deleteConfirmation === undefined
+      ? { notice: undefined }
+      : {}),
   };
 }
 
@@ -639,11 +1213,19 @@ function groupThreads(threads: readonly FleetThread[]): Array<{ cwd: string; thr
   return [...groups.entries()]
     .map(([cwd, entries]) => ({
       cwd,
-      threads: entries.sort((left, right) => right.record.updatedAt.localeCompare(left.record.updatedAt)),
+      threads: entries.sort((left, right) => {
+        if (left.record.pinned !== right.record.pinned) return left.record.pinned === true ? -1 : 1;
+        const leftOrder = left.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
+        const rightOrder = right.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
+        if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+        const leftAt = left.record.meaningfulUpdatedAt ?? left.record.updatedAt;
+        const rightAt = right.record.meaningfulUpdatedAt ?? right.record.updatedAt;
+        return rightAt.localeCompare(leftAt);
+      }),
     }))
     .sort((left, right) => {
-      const leftLatest = left.threads[0]?.record.updatedAt ?? "";
-      const rightLatest = right.threads[0]?.record.updatedAt ?? "";
+      const leftLatest = left.threads[0]?.record.meaningfulUpdatedAt ?? left.threads[0]?.record.updatedAt ?? "";
+      const rightLatest = right.threads[0]?.record.meaningfulUpdatedAt ?? right.threads[0]?.record.updatedAt ?? "";
       return rightLatest.localeCompare(leftLatest);
     });
 }
@@ -653,110 +1235,68 @@ function taskName(instruction: string): string {
   return fit(singleLine, 72);
 }
 
+function composerCwd(state: FleetState, snapshot: FleetSnapshot): string {
+  return snapshot.threads.find(({ record }) => record.id === state.selectedSessionId)?.record.cwd
+    ?? state.fallbackCwd;
+}
+
+function friendlyModel(provider: string, model: string | undefined): string {
+  if (model === undefined) return `${titleCase(provider)} Native`;
+  const known: Record<string, string> = {
+    "gpt-5.6-luna": "Codex Luna",
+    "gpt-5.6-terra": "Codex Terra",
+    "gpt-5.6-sol": "Codex Sol",
+    haiku: "Claude Haiku",
+    sonnet: "Claude Sonnet",
+    opus: "Claude Opus",
+    fable: "Claude Fable",
+    composer: "Cursor Composer",
+    "gemini-3.6-flash": "Gemini 3.6 Flash",
+    "gemini-3.6-flash-low": "Gemini 3.6 Flash",
+    "gemini-3.6-flash-medium": "Gemini 3.6 Flash",
+    "gemini-3.6-flash-high": "Gemini 3.6 Flash",
+  };
+  return known[model] ?? `${titleCase(provider)} ${model}`;
+}
+
+function friendlyEffort(effort: ReasoningEffort | "provider-managed"): string {
+  return effort === "provider-managed" ? "Provider managed" : effort;
+}
+
+function titleCase(value: string): string {
+  return value.length === 0 ? value : `${value[0]!.toUpperCase()}${value.slice(1)}`;
+}
+
 function startTransition(
   state: FleetState,
   selected: SessionRecord | undefined,
   draft: string,
 ): FleetTransition {
-  const explicit = parseExplicitLaunch(draft, state.fallbackCwd);
-  if (draft.startsWith("/") && explicit === undefined) {
-    return {
-      state: {
-        ...state,
-        notice: "Use /codex task, /codex:MODEL task, or /claude:MODEL task",
-      },
-    };
+  if (draft.startsWith("/")) {
+    return { state: { ...state, notice: "Use /model to configure a new worker" } };
   }
-  if (explicit === undefined && selected === undefined) {
-    return {
-      state: {
-        ...state,
-        notice: "Select a thread or name an explicit provider with /codex or /claude:MODEL",
-      },
-    };
+  const cwd = selected?.cwd ?? state.fallbackCwd;
+  const profile = state.launchProfiles[cwd];
+  if (profile === undefined) {
+    return openWorkerPickerForCwd(state, cwd, draft);
   }
-
-  const initialPrompt = explicit?.initialPrompt ?? draft;
-  const context = explicit ?? {
-    provider: selected!.provider,
-    cwd: selected!.cwd,
-    sandbox: selected!.sandbox,
-    ...(selected!.model === undefined ? {} : { model: selected!.model }),
-    initialPrompt,
-  };
+  const initialPrompt = draft;
   return {
     state: { ...state, draft: "", deleteConfirmation: undefined, notice: undefined },
     action: {
       type: "start",
       request: {
-        ...context,
+        provider: profile.provider,
+        model: profile.model,
+        ...(profile.effort === undefined ? {} : { effort: profile.effort }),
+        cwd,
+        sandbox: selected?.sandbox ?? "read-only",
         detached: true,
         name: taskName(initialPrompt),
+        initialPrompt,
       },
     },
   };
-}
-
-function parseExplicitLaunch(
-  draft: string,
-  cwd: string,
-): Pick<StartSessionRequest, "provider" | "cwd" | "sandbox" | "model"> & { initialPrompt: string } | undefined {
-  const match = /^\/(codex|claude)(?::([^\s]+))?\s+([\s\S]+)$/u.exec(draft);
-  if (match === null) return undefined;
-  const [, provider, model, initialPrompt] = match;
-  if (
-    (provider !== "codex" && provider !== "claude")
-    || initialPrompt === undefined
-    || initialPrompt.trim() === ""
-  ) return undefined;
-  if (provider === "claude" && model === undefined) return undefined;
-  return {
-    provider,
-    cwd,
-    sandbox: "read-only",
-    ...(model === undefined ? {} : { model }),
-    initialPrompt: initialPrompt.trim(),
-  };
-}
-
-function lastTerminalTitle(replay: string): string | undefined {
-  let last: string | undefined;
-  for (const match of replay.matchAll(OSC_TITLE)) last = match[1];
-  return last;
-}
-
-function terminalLines(replay: string): string[] {
-  const stripped = stripTerminalControl(replay.replace(HORIZONTAL_CURSOR_SEQUENCE, " "))
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
-  const lines: string[] = [];
-  for (const raw of stripped.split("\n")) {
-    const line = raw.replace(/\s+/g, " ").trim();
-    if (line === "" || lines.at(-1) === line) continue;
-    lines.push(line);
-  }
-  return lines;
-}
-
-function stripTerminalControl(value: string): string {
-  return value
-    .replace(OSC_SEQUENCE, "")
-    .replace(CSI_SEQUENCE, "")
-    .replace(OTHER_ESCAPE, "")
-    .replace(/[\u000f]/g, "");
-}
-
-function latestPreview(replay: string): string {
-  const lines = terminalLines(replay);
-  const meaningful = lines.filter((line) => !isTerminalChrome(line));
-  return meaningful.at(-1) ?? lines.at(-1) ?? "No output yet";
-}
-
-function isTerminalChrome(line: string): boolean {
-  return /^(CYBERDECK|Claude Code|OpenAI Codex|Tips for getting|What's new|Use \/skills|Try \"|← for agents|Working|Starting MCP|Running .* hook|No output yet)/i.test(line)
-    || /esc to interrupt|ctrl\+g to edit|permission mode|plan mode on/i.test(line)
-    || /^[-─━═╭╰│┌└┐┘ ]+$/u.test(line);
 }
 
 function shortPath(path: string, home: string): string {
@@ -778,7 +1318,7 @@ function relativeTime(timestamp: string, now: number): string {
 function statusText(status: string, pendingDelete: boolean, color: boolean): string {
   if (pendingDelete || status === "Failed") return paint(status, "red", color);
   if (status === "Done") return paint(status, "green", color);
-  if (status === "Needs input") return paint(status, "yellow", color);
+  if (status === "Needs input" || status === "Stopping") return paint(status, "yellow", color);
   if (status === "Working") return paint(status, "cyan", color);
   return paint(status, "gray", color);
 }

@@ -58,7 +58,7 @@ describe("complete session lifecycle", () => {
         adapters: { codex: fakeAdapter("codex"), claude: fakeAdapter("claude") },
         ptyFactory,
         journal: { append: async () => {} },
-        config: BrokerRuntimeConfigSchema.parse({ maxConcurrentSessions: 8 }),
+        config: BrokerRuntimeConfigSchema.parse({ maxConcurrentWorkers: 8 }),
       });
       const server = new BrokerServer({ socketPath, registry });
       await server.listen();

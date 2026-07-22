@@ -6,7 +6,8 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 import { runBroker } from "./broker/main.js";
-import type { SessionRecord } from "./domain/session.js";
+import type { ReasoningEffort, SessionRecord } from "./domain/session.js";
+import { CANONICAL_PROVIDER_IDS, type ProviderId } from "./domain/provider-registration.js";
 import type {
   OrchestratorManagerResult,
   OrchestratorResetResult,
@@ -27,9 +28,10 @@ import { CYBERDECK_VERSION } from "./version.js";
 import { runMcpServer } from "./mcp/server.js";
 
 interface StartOptions {
-  provider: "codex" | "claude";
+  provider: ProviderId;
   cwd: string;
   model?: string;
+  effort?: ReasoningEffort;
   role?: string;
   name?: string;
   sandbox: "read-only" | "workspace-write";
@@ -42,7 +44,7 @@ interface DelegateOptions extends StartOptions {
 
 function providerOption(): Option {
   return new Option("--provider <provider>", "explicit provider")
-    .choices(["claude", "codex"])
+    .choices([...CANONICAL_PROVIDER_IDS])
     .makeOptionMandatory();
 }
 
@@ -55,6 +57,8 @@ function addSessionOptions(command: Command, allowAttach: boolean): Command {
     .addOption(providerOption())
     .addOption(cwdOption())
     .option("--model <model>", "explicit provider model")
+    .addOption(new Option("--effort <effort>", "explicit provider-native reasoning effort")
+      .choices(["low", "medium", "high", "xhigh", "max", "ultra"]))
     .option("--role <role>", "optional opaque user-defined role label")
     .option("--name <name>", "session name")
     .addOption(new Option("--sandbox <sandbox>").choices(["read-only", "workspace-write"]).default("read-only"));
@@ -153,7 +157,14 @@ async function runCyberdeck(): Promise<void> {
     await startDetachedBroker(false);
     client = await RpcClient.connect(brokerSocketPath);
   }
-  await runFleet(client);
+  await runFleet(client, process.stdin, process.stdout, process, {
+    openOrchestrator: (request) => openCockpit(request, {
+      preflight: () => preflightCockpit(),
+      ensure: (next) => client.request<OrchestratorManagerResult>("orchestrator.ensure", next),
+      stop: (sessionId) => client.request<void>("session.stop", { sessionId }),
+      present: launchCockpit,
+    }),
+  });
 }
 
 async function runAttachment(sessionId: string, mode: "control" | "watch"): Promise<void> {
@@ -178,10 +189,42 @@ function sessionRequest(options: StartOptions, parentSessionId?: string) {
     detached: parentSessionId !== undefined || options.attach !== true,
     sandbox: options.sandbox,
     ...(options.model === undefined ? {} : { model: options.model }),
+    ...(options.effort === undefined ? {} : { effort: options.effort }),
     ...(options.role === undefined ? {} : { role: options.role }),
     ...(options.name === undefined ? {} : { name: options.name }),
     ...(parentSessionId === undefined ? {} : { parentSessionId }),
   };
+}
+
+interface OpenCockpitServices {
+  preflight: () => CockpitPreflight;
+  ensure: (request: EnsureOrchestratorRequest) => Promise<OrchestratorManagerResult>;
+  stop: (sessionId: string) => Promise<void>;
+  present: (options: CockpitOptions) => void;
+}
+
+async function openCockpit(
+  request: EnsureOrchestratorRequest,
+  services: OpenCockpitServices,
+): Promise<void> {
+  const preflight = services.preflight();
+  const result = await services.ensure(request);
+  try {
+    services.present({
+      cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
+      cwd: request.cwd,
+      orchestratorSessionId: result.session.id,
+      preflight,
+    });
+  } catch (error) {
+    if (!result.created) throw error;
+    try {
+      await services.stop(result.session.id);
+    } catch (cleanupError) {
+      throw addCleanupContext(error, cleanupError, "stop the newly created orchestrator");
+    }
+    throw error;
+  }
 }
 
 interface CreateProgramOptions {
@@ -318,32 +361,23 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
       return value;
     })
     .option("--model <model>", "explicit orchestrator model")
+    .addOption(new Option("--effort <effort>", "explicit orchestrator reasoning effort")
+      .choices(["low", "medium", "high", "xhigh", "max", "ultra"]))
     .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("workspace"))
-    .action(async (options: { orchestrator?: "codex" | "claude"; model?: string; scope: "workspace" | "fleet" }) => {
+    .action(async (options: { orchestrator?: "codex" | "claude"; model?: string; effort?: ReasoningEffort; scope: "workspace" | "fleet" }) => {
       const cwd = process.cwd();
-      const preflight = runCockpitPreflight();
-      const result = await ensureOrchestrator({
+      await openCockpit({
         cwd,
         scope: options.scope,
         ...(options.orchestrator === undefined ? {} : { provider: options.orchestrator }),
         ...(options.model === undefined ? {} : { model: options.model }),
+        ...(options.effort === undefined ? {} : { effort: options.effort }),
+      }, {
+        preflight: runCockpitPreflight,
+        ensure: ensureOrchestrator,
+        stop: stopSession,
+        present: presentCockpit,
       });
-      try {
-        presentCockpit({
-          cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
-          cwd,
-          orchestratorSessionId: result.session.id,
-          preflight,
-        });
-      } catch (error) {
-        if (!result.created) throw error;
-        try {
-          await stopSession(result.session.id);
-        } catch (cleanupError) {
-          throw addCleanupContext(error, cleanupError, "stop the newly created orchestrator");
-        }
-        throw error;
-      }
     });
 
   const orchestrator = program.command("orchestrator").description("manage durable orchestrator bindings");

@@ -8,6 +8,7 @@ const record: SessionRecord = {
   id: SESSION_ID,
   provider: "codex",
   model: "gpt-5.6-sol",
+  effort: "high",
   cwd: "/repo/one",
   detached: true,
   sandbox: "read-only",
@@ -29,6 +30,7 @@ const binding: OrchestratorBinding = {
   sessionId: SESSION_ID,
   provider: "codex",
   model: "gpt-5.6-sol",
+  effort: "high",
   cwd: "/repo/one",
   sandbox: "read-only",
   scope: { kind: "workspace", cwd: "/repo/one" },
@@ -44,7 +46,7 @@ const binding: OrchestratorBinding = {
 describe("OrchestratorManager", () => {
   it("creates an explicit scoped orchestrator with native provider instructions and reports ownership", async () => {
     const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
-    const start = vi.fn(async () => record);
+    const start = vi.fn(async (_request: unknown) => record);
     const manager = new OrchestratorManager(
       { start, get: vi.fn(() => record), stop: vi.fn(async () => {}) } as never,
       { get: vi.fn(async () => undefined), put } as never,
@@ -53,6 +55,7 @@ describe("OrchestratorManager", () => {
     const result = await manager.ensure({
       provider: "codex",
       model: "gpt-5.6-sol",
+      effort: "high",
       cwd: "/repo/one",
       scope: "workspace",
     });
@@ -63,14 +66,22 @@ describe("OrchestratorManager", () => {
         sessionId: SESSION_ID,
         provider: "codex",
         model: "gpt-5.6-sol",
+        effort: "high",
         scope: { kind: "workspace", cwd: "/repo/one" },
         grant: { capabilities: expect.arrayContaining(["thread.read", "thread.enqueue"]) },
       },
     });
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       kind: "orchestrator",
+      effort: "high",
       providerInstructions: expect.stringContaining("Cyberdeck orchestrator"),
     }));
+    const startedRequest = start.mock.calls[0]![0] as { providerInstructions: string };
+    const instructions = startedRequest.providerInstructions;
+    expect(instructions).toContain("cyberdeck_provider_capabilities");
+    expect(instructions).toContain("cyberdeck_workers_start once");
+    expect(instructions).toContain("cyberdeck_workers_wait once");
+    expect(instructions).toContain("never reread from cursor zero");
     expect(start.mock.calls[0]).toHaveLength(1);
     expect(put).toHaveBeenCalledOnce();
   });
@@ -95,6 +106,59 @@ describe("OrchestratorManager", () => {
       session: { executionState: "active" },
     });
     expect(resume).toHaveBeenCalledWith(SESSION_ID);
+  });
+
+  it("creates a fresh explicit orchestrator when native resume is unavailable", async () => {
+    const stopped = { ...record, executionState: "cancelled" as const };
+    const replacement = {
+      ...record,
+      id: "22222222-2222-4222-8222-222222222222",
+    };
+    const resume = vi.fn(async () => {
+      throw Object.assign(new Error("native conversation missing"), { code: "SESSION_RESUME_UNAVAILABLE" });
+    });
+    const start = vi.fn(async () => replacement);
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const manager = new OrchestratorManager(
+      { get: vi.fn(() => stopped), resume, start } as never,
+      { get: vi.fn(async () => binding), put } as never,
+    );
+
+    await expect(manager.ensure({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).resolves.toMatchObject({
+      created: true,
+      session: { id: replacement.id },
+    });
+    expect(resume).toHaveBeenCalledWith(SESSION_ID);
+    expect(start).toHaveBeenCalledOnce();
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({ sessionId: replacement.id }));
+  });
+
+  it("does not create a duplicate when resume fails for an unrelated reason", async () => {
+    const stopped = { ...record, executionState: "cancelled" as const };
+    const start = vi.fn();
+    const manager = new OrchestratorManager(
+      {
+        get: vi.fn(() => stopped),
+        resume: vi.fn(async () => { throw new Error("PTY allocation failed"); }),
+        start,
+      } as never,
+      { get: vi.fn(async () => binding) } as never,
+    );
+
+    await expect(manager.ensure({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).rejects.toThrow("PTY allocation failed");
+    expect(start).not.toHaveBeenCalled();
   });
 
   it("refuses to orphan an active binding when explicit provider or model changes", async () => {

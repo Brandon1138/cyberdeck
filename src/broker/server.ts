@@ -11,6 +11,10 @@ import {
 } from "../control-plane/job-control-plane.js";
 import type { ControlPlaneRuntime } from "../control-plane/runtime.js";
 import { StartSessionRequestSchema } from "../domain/session.js";
+import {
+  FleetLaunchProfileSchema,
+  type FleetPreferenceStore,
+} from "../persistence/fleet-preference-store.js";
 import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type RequestFrame } from "../protocol/frames.js";
 import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
 import { RegistryError, type AttachmentMode, type SessionRegistry } from "./session-registry.js";
@@ -24,6 +28,8 @@ import {
   AgentActorParamsSchema,
   AgentReadParamsSchema,
   AgentStartWorkerParamsSchema,
+  AgentStartWorkersParamsSchema,
+  AgentWaitWorkersParamsSchema,
   type AgentControlService,
 } from "../orchestration/agent-control-service.js";
 import { EnqueueInstructionParamsSchema, type InstructionQueue } from "../orchestration/instruction-queue.js";
@@ -39,6 +45,8 @@ import {
 const SessionIdParamsSchema = z.object({ sessionId: z.uuid() });
 const SendParamsSchema = SessionIdParamsSchema.extend({ data: z.string() });
 const SubmitParamsSchema = SessionIdParamsSchema.extend({ message: z.string().min(1) });
+const RenameSessionParamsSchema = SessionIdParamsSchema.extend({ name: z.string().trim().min(1).max(120) });
+const ReorderSessionParamsSchema = SessionIdParamsSchema.extend({ direction: z.enum(["up", "down"]) });
 const StartSessionWithPromptParamsSchema = StartSessionRequestSchema.extend({
   initialPrompt: z.string().trim().min(1),
 });
@@ -69,6 +77,7 @@ export interface BrokerServerOptions {
   controlPlane?: JobControlPlane;
   /** Supplies the reconciliation view; queue/budget queries work from the control plane alone. */
   controlPlaneRuntime?: Pick<ControlPlaneRuntime, "lastReconciliation">;
+  fleetPreferences?: FleetPreferenceStore;
   onShutdown?: () => void;
 }
 
@@ -234,6 +243,10 @@ export class BrokerServer {
       }
       case "agent.worker.start":
         return this.requireAgentControl().startWorker(AgentStartWorkerParamsSchema.parse(frame.params));
+      case "agent.worker.startMany":
+        return this.requireAgentControl().startWorkers(AgentStartWorkersParamsSchema.parse(frame.params));
+      case "agent.worker.wait":
+        return this.requireAgentControl().waitForWorkers(AgentWaitWorkersParamsSchema.parse(frame.params));
       case "agent.thread.enqueue":
         return this.requireInstructions().enqueue(EnqueueInstructionParamsSchema.parse(frame.params));
       case "agent.instruction.list": {
@@ -283,6 +296,28 @@ export class BrokerServer {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         await this.options.registry.delete(sessionId);
         return { deleted: true };
+      }
+      case "session.rename": {
+        const { sessionId, name } = RenameSessionParamsSchema.parse(frame.params);
+        return this.options.registry.rename(sessionId, name);
+      }
+      case "session.togglePin": {
+        const { sessionId } = SessionIdParamsSchema.parse(frame.params);
+        return this.options.registry.togglePin(sessionId);
+      }
+      case "session.reorder": {
+        const { sessionId, direction } = ReorderSessionParamsSchema.parse(frame.params);
+        return this.options.registry.reorder(sessionId, direction);
+      }
+      case "fleet.preferences":
+        return this.requireFleetPreferences().list();
+      case "fleet.preference.set": {
+        const request = z.object({
+          cwd: z.string().startsWith("/"),
+          profile: FleetLaunchProfileSchema,
+        }).parse(frame.params);
+        await this.requireFleetPreferences().set(request.cwd, request.profile);
+        return { saved: true };
       }
       case "session.submit": {
         const { sessionId, message } = SubmitParamsSchema.parse(frame.params);
@@ -351,7 +386,7 @@ export class BrokerServer {
       case "job.reportBacks":
         return this.requireControlPlane().listReportBacks();
       case "broker.status":
-        return { healthy: true, pid: process.pid };
+        return { healthy: true, pid: process.pid, workers: this.options.registry.workerCapacity() };
       case "broker.shutdown":
         return { shuttingDown: true };
       default:
@@ -399,6 +434,13 @@ export class BrokerServer {
       throw Object.assign(new Error("Workflow service is not available"), { code: "METHOD_NOT_FOUND" });
     }
     return this.options.workflows;
+  }
+
+  private requireFleetPreferences(): FleetPreferenceStore {
+    if (this.options.fleetPreferences === undefined) {
+      throw Object.assign(new Error("Fleet preferences are not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.options.fleetPreferences;
   }
 
   private async attach(

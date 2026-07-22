@@ -8,6 +8,8 @@ import { RpcClient } from "../../src/client/rpc-client.js";
 import { CorrelationIdSchema, JobIdSchema } from "../../src/domain/control-plane.js";
 import type { JobSnapshot } from "../../src/control-plane/job-control-plane.js";
 import { JobStore } from "../../src/persistence/job-store.js";
+import { SessionStore } from "../../src/persistence/session-store.js";
+import type { SessionRecord } from "../../src/domain/session.js";
 
 const NOW = "2026-07-21T10:00:00.000Z";
 
@@ -43,6 +45,52 @@ describe("broker durable startup", () => {
       expect(jobs).toHaveLength(1);
       expect(jobs[0]?.record.id).toBe(jobId);
       expect(jobs[0]?.record.lifecycle.status).toBe("interrupted");
+    } finally {
+      client.close();
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rehydrates interactive thread metadata and preview without relaunching a provider", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-session-recovery-"));
+    const socketPath = join(directory, "broker.sock");
+    const sessionId = randomUUID();
+    const record: SessionRecord = {
+      id: sessionId,
+      provider: "claude",
+      model: "opus",
+      effort: "high",
+      cwd: "/tmp/repo",
+      detached: true,
+      sandbox: "read-only",
+      kind: "worker",
+      name: "Persistent conversation",
+      createdAt: NOW,
+      updatedAt: NOW,
+      meaningfulUpdatedAt: NOW,
+      executionState: "active",
+      attachmentState: "detached",
+      pid: 4321,
+      exitCode: null,
+      childIds: [],
+      attentionState: "done",
+      latestPreview: "The saved answer survives restart.",
+    };
+    await new SessionStore(directory).put(record);
+
+    const server = await runBroker(socketPath, directory);
+    const client = await RpcClient.connect(socketPath);
+    try {
+      await expect(client.request<SessionRecord[]>("session.list", {})).resolves.toEqual([
+        expect.objectContaining({
+          id: sessionId,
+          executionState: "cancelled",
+          attentionState: "interrupted",
+          latestPreview: "The saved answer survives restart.",
+        }),
+      ]);
+      await expect(client.request<{ data: string }>("session.snapshot", { sessionId })).resolves.toEqual({ data: "" });
     } finally {
       client.close();
       await server.close();

@@ -1,7 +1,10 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
+import { ProviderIdSchema } from "./provider-registration.js";
 
-export const ProviderIdSchema = z.enum(["codex", "claude"]);
+export { ProviderIdSchema } from "./provider-registration.js";
+
+export const ReasoningEffortSchema = z.enum(["low", "medium", "high", "xhigh", "max", "ultra"]);
 export const SandboxSchema = z.enum(["read-only", "workspace-write"]);
 export const SessionExecutionStateSchema = z.enum([
   "starting",
@@ -12,6 +15,15 @@ export const SessionExecutionStateSchema = z.enum([
 ]);
 export const AttachmentStateSchema = z.enum(["detached", "controlled", "watched"]);
 export const SessionKindSchema = z.enum(["worker", "orchestrator"]);
+export const ThreadAttentionStateSchema = z.enum([
+  "working",
+  "needs-input",
+  "done",
+  "stopping",
+  "stopped",
+  "interrupted",
+  "failed",
+]);
 
 export const StartSessionRequestSchema = z.object({
   provider: ProviderIdSchema,
@@ -19,6 +31,7 @@ export const StartSessionRequestSchema = z.object({
   detached: z.boolean(),
   sandbox: SandboxSchema,
   model: z.string().optional(),
+  effort: ReasoningEffortSchema.optional(),
   role: z.string().optional(),
   name: z.string().optional(),
   parentSessionId: z.uuid().optional(),
@@ -35,12 +48,19 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
   pid: z.number().int().positive(),
   exitCode: z.number().int().nullable(),
   childIds: z.array(z.uuid()),
+  attentionState: ThreadAttentionStateSchema.optional(),
+  latestPreview: z.string().optional(),
+  meaningfulUpdatedAt: z.iso.datetime().optional(),
+  pinned: z.boolean().optional(),
+  displayOrder: z.number().int().nonnegative().optional(),
 });
 
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
+export type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>;
 export type Sandbox = z.infer<typeof SandboxSchema>;
 export type SessionExecutionState = z.infer<typeof SessionExecutionStateSchema>;
 export type AttachmentState = z.infer<typeof AttachmentStateSchema>;
 export type SessionKind = z.infer<typeof SessionKindSchema>;
+export type ThreadAttentionState = z.infer<typeof ThreadAttentionStateSchema>;
 export type StartSessionRequest = z.infer<typeof StartSessionRequestSchema>;
 export type SessionRecord = z.infer<typeof SessionRecordSchema>;

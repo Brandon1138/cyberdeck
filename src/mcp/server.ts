@@ -1,5 +1,7 @@
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
+import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
 
 export interface McpBrokerTransport {
   request<T = unknown>(method: string, params: unknown): Promise<T>;
@@ -14,38 +16,107 @@ interface JsonRpcRequest {
 
 const TOOLS = [
   {
+    name: "cyberdeck_provider_capabilities",
+    description: "Return Cyberdeck's authoritative worker model IDs, effort values, and launch notes. Use this instead of inspecting repository source or guessing aliases.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", enum: [...CANONICAL_PROVIDER_IDS] },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "cyberdeck_threads_list",
     description: "List worker threads visible to this Cyberdeck orchestrator.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "cyberdeck_thread_read",
-    description: "Read durable events from one worker thread after a transcript cursor.",
+    description: "Incrementally read one worker transcript for debugging. afterCursor is mandatory; never reread from an older cursor. Prefer cyberdeck_workers_wait for normal result collection.",
     inputSchema: {
       type: "object",
       properties: {
         sessionId: { type: "string" },
         afterCursor: { type: "integer", minimum: 0 },
-        limit: { type: "integer", minimum: 1, maximum: 1000 },
+        limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
       },
-      required: ["sessionId"],
+      required: ["sessionId", "afterCursor"],
       additionalProperties: false,
     },
   },
   {
     name: "cyberdeck_worker_start",
-    description: "Start an explicitly selected worker inside this orchestrator's scope and budget.",
+    description: "Start one explicit worker and return a compact sessionId/completionTarget. Exact IDs: Codex gpt-5.6-luna|terra|sol; Claude haiku|sonnet|opus; Cursor composer; Antigravity gemini-3.6-flash-low|medium|high with matching effort. Pass effort for Codex/Claude/Antigravity, omit it for Cursor. Prefer cyberdeck_workers_start for fan-out, then call cyberdeck_workers_wait once.",
     inputSchema: {
       type: "object",
       properties: {
-        provider: { type: "string", enum: ["codex", "claude"] },
+        provider: { type: "string", enum: [...CANONICAL_PROVIDER_IDS] },
         model: { type: "string" },
+        effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
         cwd: { type: "string" },
         sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
         prompt: { type: "string" },
         name: { type: "string" },
       },
       required: ["provider", "cwd", "prompt"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_workers_start",
+    description: "Start up to 24 explicitly selected workers in one compact call. Each result is independently ok/error and successful results include sessionId plus completionTarget for cyberdeck_workers_wait.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workers: {
+          type: "array",
+          minItems: 1,
+          maxItems: 24,
+          items: {
+            type: "object",
+            properties: {
+              provider: { type: "string", enum: [...CANONICAL_PROVIDER_IDS] },
+              model: { type: "string" },
+              effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+              cwd: { type: "string" },
+              sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
+              prompt: { type: "string" },
+              name: { type: "string" },
+            },
+            required: ["provider", "cwd", "prompt"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["workers"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_workers_wait",
+    description: "Idle inside Cyberdeck until all named workers complete, block, fail, or the timeout expires; returns only compact useful result tails and never raw PTY transcripts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targets: {
+          type: "array",
+          minItems: 1,
+          maxItems: 24,
+          items: {
+            type: "object",
+            properties: {
+              sessionId: { type: "string" },
+              completionTarget: { type: "integer", minimum: 1, default: 1 },
+            },
+            required: ["sessionId", "completionTarget"],
+            additionalProperties: false,
+          },
+        },
+        timeoutSeconds: { type: "integer", minimum: 1, maximum: 600, default: 300 },
+        maxResultChars: { type: "integer", minimum: 200, maximum: 4000, default: 1200 },
+      },
+      required: ["targets"],
       additionalProperties: false,
     },
   },
@@ -193,6 +264,12 @@ async function callTool(
   name: unknown,
   args: Record<string, unknown>,
 ): Promise<unknown> {
+  if (name === "cyberdeck_provider_capabilities") {
+    const provider = typeof args.provider === "string" ? args.provider : undefined;
+    return provider === undefined
+      ? WORKER_PROVIDER_CAPABILITIES
+      : WORKER_PROVIDER_CAPABILITIES.filter((entry) => entry.provider === provider);
+  }
   if (name === "cyberdeck_threads_list") {
     return transport.request("agent.thread.list", { actorSessionId });
   }
@@ -201,6 +278,12 @@ async function callTool(
   }
   if (name === "cyberdeck_worker_start") {
     return transport.request("agent.worker.start", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_workers_start") {
+    return transport.request("agent.worker.startMany", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_workers_wait") {
+    return transport.request("agent.worker.wait", { actorSessionId, ...args });
   }
   if (name === "cyberdeck_thread_message") {
     return transport.request("agent.thread.enqueue", { actorSessionId, ...args });

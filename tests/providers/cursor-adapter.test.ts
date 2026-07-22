@@ -144,6 +144,11 @@ describe("Cursor command construction", () => {
     });
   });
 
+  it("adds an explicit initial prompt as Cursor's positional interactive prompt", () => {
+    expect(buildCursorInteractiveCommand(request().request, "Ping back").args.slice(-1))
+      .toEqual(["Ping back"]);
+  });
+
   it("builds headless stream-json argv with the documented positional prompt", () => {
     const command = buildCursorHeadlessCommand(request().request, { streamPartialOutput: true });
     expect(command.executable).toBe("agent");

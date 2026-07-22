@@ -6,9 +6,16 @@ import {
   StartSessionRequestSchema,
   type SessionRecord,
   type StartSessionRequest,
+  type ThreadAttentionState,
 } from "../domain/session.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../providers/provider.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
+import {
+  compactTerminalResult,
+  latestAssistantParagraphPreview,
+  providerTerminalActivity,
+  type ProviderTerminalActivity,
+} from "../runtime/terminal-replay.js";
 
 export interface PtyHandle {
   readonly pid: number;
@@ -29,6 +36,11 @@ interface JournalLike {
   append(event: BrokerEvent): Promise<void>;
 }
 
+interface SessionStoreLike {
+  put(record: SessionRecord): Promise<void>;
+  delete(sessionId: string): Promise<void>;
+}
+
 interface Controller {
   clientId: string;
   output: OutputSink;
@@ -42,17 +54,45 @@ interface Watcher {
 
 interface RuntimeSession {
   record: SessionRecord;
-  pty: PtyHandle;
+  pty?: PtyHandle;
   controller?: Controller;
   watchers: Map<string, Watcher>;
   stopRequested: boolean;
+  activity: ProviderTerminalActivity;
+  observedWorking: boolean;
+  completedTurns: number;
+  latestResult?: string;
+  idleTimer?: ReturnType<typeof setTimeout>;
+}
+
+export interface WorkerWaitTarget {
+  sessionId: string;
+  completionTarget: number;
+}
+
+export interface WorkerResultSnapshot {
+  sessionId: string;
+  name?: string;
+  provider: string;
+  model?: string;
+  effort?: string;
+  status: "completed" | "blocked" | "working" | "waiting" | "failed" | "stopped" | "exited";
+  completedTurns: number;
+  text: string;
+}
+
+export interface WorkerWaitResult {
+  timedOut: boolean;
+  results: WorkerResultSnapshot[];
 }
 
 export interface SessionRegistryOptions {
-  adapters: Record<"codex" | "claude", ProviderAdapter>;
+  adapters: Record<string, ProviderAdapter>;
   ptyFactory: PtyFactory;
   journal: JournalLike;
   transcripts?: ThreadTranscriptStore;
+  store?: SessionStoreLike;
+  recoveredSessions?: readonly SessionRecord[];
   config: BrokerRuntimeConfig;
 }
 
@@ -60,6 +100,7 @@ export class RegistryError extends Error {
   constructor(
     readonly code:
       | StartPolicyCode
+      | "PROVIDER_NOT_REGISTERED"
       | "SESSION_NOT_FOUND"
       | "SESSION_ALREADY_CONTROLLED"
       | "SESSION_NOT_ACTIVE"
@@ -78,8 +119,31 @@ export class RegistryError extends Error {
 export class SessionRegistry {
   private readonly sessions = new Map<string, RuntimeSession>();
   private readonly controllerReleasedListeners = new Set<(sessionId: string) => void>();
+  private readonly sessionUpdateListeners = new Set<(sessionId: string) => void>();
+  private readonly recovery: Promise<void>;
 
-  constructor(private readonly options: SessionRegistryOptions) {}
+  constructor(private readonly options: SessionRegistryOptions) {
+    const writes: Promise<void>[] = [];
+    for (const stored of options.recoveredSessions ?? []) {
+      const record = this.recoverRecord(stored);
+      this.sessions.set(record.id, {
+        record,
+        watchers: new Map(),
+        stopRequested: false,
+        activity: "unknown",
+        observedWorking: false,
+        completedTurns: 0,
+      });
+      if (record.attentionState === "interrupted") {
+        writes.push(this.options.store?.put(this.cloneRecord(record)) ?? Promise.resolve());
+      }
+    }
+    this.recovery = Promise.all(writes).then(() => undefined);
+  }
+
+  async ready(): Promise<void> {
+    await this.recovery;
+  }
 
   onControllerReleased(listener: (sessionId: string) => void): () => void {
     this.controllerReleasedListeners.add(listener);
@@ -90,12 +154,15 @@ export class SessionRegistry {
     const parsed = StartSessionRequestSchema.parse(request);
     const ancestry = this.resolveAncestry(parsed.parentSessionId);
     const decision = evaluateStart(parsed, ancestry, {
-      activeSessionCount: this.activeSessionCount(),
-      maxConcurrentSessions: this.options.config.maxConcurrentSessions,
+      activeWorkerCount: this.activeWorkerCount(),
+      maxConcurrentWorkers: this.options.config.maxConcurrentWorkers,
       maxDelegationDepth: this.options.config.maxDelegationDepth,
     });
     if (!decision.allowed) {
-      throw new RegistryError(decision.code, decision.code);
+      const message = decision.code === "MAX_CONCURRENT_WORKERS"
+        ? `Worker limit reached: ${decision.activeWorkers ?? 0} active / ${decision.maxConcurrentWorkers ?? "unknown"} allowed`
+        : decision.code;
+      throw new RegistryError(decision.code, message);
     }
 
     const id = randomUUID();
@@ -111,9 +178,12 @@ export class SessionRegistry {
       pid: 1,
       exitCode: null,
       childIds: [],
+      attentionState: initialPrompt === undefined ? "done" : "working",
+      meaningfulUpdatedAt: now,
     };
-    const adapter = this.options.adapters[parsed.provider];
+    const adapter = this.requireAdapter(parsed.provider);
     const launchSpec = adapter.buildLaunchSpec(provisional, initialPrompt);
+    if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(provisional, launchSpec);
     if (initialPrompt !== undefined) {
       await this.options.transcripts?.append({
         sessionId: id,
@@ -138,6 +208,9 @@ export class SessionRegistry {
       pty,
       watchers: new Map(),
       stopRequested: false,
+      activity: "unknown",
+      observedWorking: false,
+      completedTurns: 0,
     };
     this.sessions.set(id, runtime);
     pty.onOutput((chunk) => this.broadcast(runtime, chunk));
@@ -147,6 +220,7 @@ export class SessionRegistry {
       const parent = this.requireRuntime(parsed.parentSessionId);
       parent.record.childIds.push(id);
       parent.record.updatedAt = new Date().toISOString();
+      await this.persist(parent);
     }
 
     try {
@@ -161,6 +235,7 @@ export class SessionRegistry {
         provider: record.provider,
         model: record.model ?? null,
       });
+      await this.persist(runtime);
     } catch (error) {
       pty.kill();
       this.sessions.delete(id);
@@ -174,8 +249,50 @@ export class SessionRegistry {
     return [...this.sessions.values()].map(({ record }) => this.cloneRecord(record));
   }
 
+  workerCapacity(): { activeWorkers: number; maxConcurrentWorkers: number | null } {
+    return {
+      activeWorkers: this.activeWorkerCount(),
+      maxConcurrentWorkers: this.options.config.maxConcurrentWorkers,
+    };
+  }
+
   get(sessionId: string): SessionRecord {
     return this.cloneRecord(this.requireRuntime(sessionId).record);
+  }
+
+  async waitForWorkerResults(
+    targets: readonly WorkerWaitTarget[],
+    timeoutMs: number,
+    maxResultChars = 1_200,
+  ): Promise<WorkerWaitResult> {
+    const boundedTimeout = Math.max(1_000, Math.min(timeoutMs, 600_000));
+    const snapshot = (): WorkerResultSnapshot[] => targets.map((target) =>
+      this.workerResultSnapshot(target, maxResultChars)
+    );
+    const isSettled = (result: WorkerResultSnapshot): boolean =>
+      result.status !== "working" && result.status !== "waiting";
+
+    const initial = snapshot();
+    if (initial.every(isSettled)) return { timedOut: false, results: initial };
+
+    return new Promise<WorkerWaitResult>((resolve) => {
+      let settled = false;
+      const finish = (timedOut: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.sessionUpdateListeners.delete(onUpdate);
+        resolve({ timedOut, results: snapshot() });
+      };
+      const targetIds = new Set(targets.map(({ sessionId }) => sessionId));
+      const onUpdate = (sessionId: string) => {
+        if (!targetIds.has(sessionId)) return;
+        if (snapshot().every(isSettled)) finish(false);
+      };
+      const timer = setTimeout(() => finish(true), boundedTimeout);
+      this.sessionUpdateListeners.add(onUpdate);
+      if (snapshot().every(isSettled)) finish(false);
+    });
   }
 
   async attach(
@@ -189,6 +306,7 @@ export class SessionRegistry {
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active; resume it before attaching");
     }
+    const pty = this.requirePty(runtime);
     if (mode === "control") {
       if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
         throw new RegistryError("SESSION_ALREADY_CONTROLLED", "Session already has a controller");
@@ -207,7 +325,7 @@ export class SessionRegistry {
       this.updateAttachmentState(runtime);
       throw error;
     }
-    return runtime.pty.snapshot();
+    return pty.snapshot();
   }
 
   async detach(sessionId: string, clientId: string): Promise<void> {
@@ -244,15 +362,16 @@ export class SessionRegistry {
     if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
       throw new RegistryError("NOT_SESSION_CONTROLLER", "Another client controls this session");
     }
-    runtime.pty.write(data);
+    this.requirePty(runtime).write(data);
     await this.appendEvent("session.input", sessionId, { bytes: data.length });
   }
 
   async submit(sessionId: string, clientId: string | undefined, message: string): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
-    const adapter = this.options.adapters[runtime.record.provider];
+    const adapter = this.requireAdapter(runtime.record.provider);
     const data = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
     await this.appendTranscript(sessionId, "prompt", "human", message, {});
+    await this.setAttention(runtime, "working", true);
     await this.write(sessionId, clientId, data);
   }
 
@@ -269,13 +388,14 @@ export class SessionRegistry {
     if (runtime.controller !== undefined) {
       throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
     }
-    const adapter = this.options.adapters[runtime.record.provider];
+    const adapter = this.requireAdapter(runtime.record.provider);
     const encoded = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
     await this.appendTranscript(sessionId, "instruction", source, message, metadata);
     if (runtime.controller !== undefined) {
       throw new RegistryError("SESSION_BUSY", "A human controller claimed this thread before delivery");
     }
-    runtime.pty.write(encoded);
+    await this.setAttention(runtime, "working", true);
+    this.requirePty(runtime).write(encoded);
     await this.appendEvent("session.input", sessionId, { bytes: encoded.length, source });
   }
 
@@ -287,11 +407,11 @@ export class SessionRegistry {
     if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
       throw new RegistryError("NOT_SESSION_CONTROLLER", "Another client controls this session");
     }
-    runtime.pty.resize(cols, rows);
+    this.requirePty(runtime).resize(cols, rows);
   }
 
   snapshot(sessionId: string): Buffer {
-    return this.requireRuntime(sessionId).pty.snapshot();
+    return this.requireRuntime(sessionId).pty?.snapshot() ?? Buffer.alloc(0);
   }
 
   async stop(sessionId: string): Promise<void> {
@@ -299,8 +419,8 @@ export class SessionRegistry {
     if (runtime.stopRequested || runtime.record.executionState !== "active") return;
     runtime.stopRequested = true;
     runtime.record.executionState = "cancelled";
-    runtime.record.updatedAt = new Date().toISOString();
-    runtime.pty.kill();
+    await this.setAttention(runtime, "stopping", true);
+    this.requirePty(runtime).kill();
     await this.appendEvent("session.stopped", sessionId, {});
     await this.appendTranscript(sessionId, "lifecycle", "broker", "session stopped", {});
   }
@@ -317,7 +437,7 @@ export class SessionRegistry {
       throw new RegistryError("SESSION_ALREADY_ACTIVE", "Session is already active");
     }
 
-    const adapter = this.options.adapters[runtime.record.provider];
+    const adapter = this.requireAdapter(runtime.record.provider);
     const pty = this.options.ptyFactory(
       adapter.buildResumeSpec(this.cloneRecord(runtime.record)),
       this.options.config.replayBytes,
@@ -331,6 +451,11 @@ export class SessionRegistry {
     runtime.record.attachmentState = "detached";
     runtime.record.exitCode = null;
     runtime.record.updatedAt = new Date().toISOString();
+    runtime.record.attentionState = "done";
+    runtime.activity = "unknown";
+    runtime.observedWorking = false;
+    if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
+    delete runtime.idleTimer;
     pty.onOutput((chunk) => this.broadcast(runtime, chunk));
     pty.onExit((exitCode, signal) => this.handleExit(runtime, exitCode, signal));
     await this.appendEvent("session.resumed", sessionId, {
@@ -341,6 +466,7 @@ export class SessionRegistry {
     await this.appendTranscript(sessionId, "lifecycle", "broker", "session resumed", {
       pid: runtime.record.pid,
     });
+    await this.persist(runtime);
     return this.cloneRecord(runtime.record);
   }
 
@@ -370,13 +496,60 @@ export class SessionRegistry {
       if (parent !== undefined) {
         parent.record.childIds = parent.record.childIds.filter((childId) => childId !== sessionId);
         parent.record.updatedAt = new Date().toISOString();
+        await this.persist(parent);
       }
     }
     this.sessions.delete(sessionId);
+    await this.options.store?.delete(sessionId);
   }
 
-  private activeSessionCount(): number {
-    return [...this.sessions.values()].filter(({ record }) => record.executionState === "active").length;
+  async rename(sessionId: string, name: string): Promise<SessionRecord> {
+    const normalized = name.replace(/\s+/gu, " ").trim();
+    if (normalized === "") throw new Error("Thread name cannot be empty");
+    const runtime = this.requireRuntime(sessionId);
+    runtime.record.name = normalized.slice(0, 120);
+    runtime.record.updatedAt = new Date().toISOString();
+    await this.persist(runtime);
+    return this.cloneRecord(runtime.record);
+  }
+
+  async togglePin(sessionId: string): Promise<SessionRecord> {
+    const runtime = this.requireRuntime(sessionId);
+    runtime.record.pinned = runtime.record.pinned !== true;
+    runtime.record.updatedAt = new Date().toISOString();
+    await this.persist(runtime);
+    return this.cloneRecord(runtime.record);
+  }
+
+  async reorder(sessionId: string, direction: "up" | "down"): Promise<SessionRecord[]> {
+    const runtime = this.requireRuntime(sessionId);
+    const group = [...this.sessions.values()]
+      .filter((candidate) => candidate.record.cwd === runtime.record.cwd)
+      .sort((left, right) => this.compareDisplayOrder(left.record, right.record));
+    const index = group.findIndex((candidate) => candidate.record.id === sessionId);
+    const target = direction === "up" ? index - 1 : index + 1;
+    if (index < 0 || target < 0 || target >= group.length) return group.map(({ record }) => this.cloneRecord(record));
+    [group[index], group[target]] = [group[target]!, group[index]!];
+    await Promise.all(group.map(async (candidate, displayOrder) => {
+      candidate.record.displayOrder = displayOrder;
+      candidate.record.updatedAt = new Date().toISOString();
+      await this.persist(candidate);
+    }));
+    return group.map(({ record }) => this.cloneRecord(record));
+  }
+
+  private activeWorkerCount(): number {
+    return [...this.sessions.values()].filter(({ record }) =>
+      record.executionState === "active" && record.kind !== "orchestrator"
+    ).length;
+  }
+
+  private compareDisplayOrder(left: SessionRecord, right: SessionRecord): number {
+    if (left.pinned !== right.pinned) return left.pinned === true ? -1 : 1;
+    const leftOrder = left.displayOrder ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = right.displayOrder ?? Number.MAX_SAFE_INTEGER;
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    return (right.meaningfulUpdatedAt ?? right.updatedAt).localeCompare(left.meaningfulUpdatedAt ?? left.updatedAt);
   }
 
   private resolveAncestry(parentSessionId: string | undefined): SessionAncestryEntry[] {
@@ -405,6 +578,17 @@ export class SessionRegistry {
     return runtime;
   }
 
+  private requireAdapter(provider: string): ProviderAdapter {
+    const adapter = this.options.adapters[provider];
+    if (adapter === undefined) {
+      throw new RegistryError(
+        "PROVIDER_NOT_REGISTERED",
+        `Provider ${provider} is not registered for interactive sessions`,
+      );
+    }
+    return adapter;
+  }
+
   private updateAttachmentState(runtime: RuntimeSession): void {
     runtime.record.attachmentState = runtime.controller !== undefined
       ? "controlled"
@@ -416,6 +600,39 @@ export class SessionRegistry {
 
   private broadcast(runtime: RuntimeSession, chunk: Buffer): void {
     runtime.record.updatedAt = new Date().toISOString();
+    const pty = runtime.pty;
+    if (pty === undefined) return;
+    const replay = pty.snapshot().toString("utf8");
+    const activity = providerTerminalActivity(runtime.record.provider, replay);
+    if (activity === "working") {
+      runtime.observedWorking = true;
+      if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
+      delete runtime.idleTimer;
+      if (runtime.record.attentionState !== "working") {
+        void this.setAttention(runtime, "working", false);
+      }
+    }
+    runtime.activity = activity;
+    if (activity === "awaiting-input" && runtime.observedWorking) {
+      if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
+      runtime.idleTimer = setTimeout(() => {
+        delete runtime.idleTimer;
+        if (runtime.activity !== "awaiting-input" || !runtime.observedWorking) return;
+        runtime.completedTurns += 1;
+        runtime.observedWorking = false;
+        const completedReplay = runtime.pty?.snapshot().toString("utf8") ?? replay;
+        runtime.latestResult = compactTerminalResult(completedReplay);
+        runtime.record.latestPreview = latestAssistantParagraphPreview(completedReplay);
+        void this.setAttention(runtime, "done", true);
+        this.notifySessionUpdate(runtime.record.id);
+      }, 200);
+    } else if (activity === "blocked") {
+      runtime.latestResult = compactTerminalResult(replay);
+      runtime.record.latestPreview = latestAssistantParagraphPreview(replay);
+      if (runtime.record.attentionState !== "needs-input") {
+        void this.setAttention(runtime, "needs-input", true);
+      }
+    }
     void this.appendTranscript(runtime.record.id, "output", "provider", chunk.toString("utf8"), {
       byteLength: chunk.byteLength,
     }).catch(() => undefined);
@@ -423,9 +640,12 @@ export class SessionRegistry {
     for (const watcher of runtime.watchers.values()) {
       watcher.output(chunk);
     }
+    this.notifySessionUpdate(runtime.record.id);
   }
 
   private handleExit(runtime: RuntimeSession, exitCode: number, signal?: number): void {
+    if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
+    delete runtime.idleTimer;
     runtime.record.executionState = runtime.stopRequested
       ? "cancelled"
       : exitCode === 0
@@ -438,6 +658,12 @@ export class SessionRegistry {
     runtime.watchers.clear();
     runtime.record.attachmentState = "detached";
     runtime.record.updatedAt = new Date().toISOString();
+    runtime.record.attentionState = runtime.stopRequested
+      ? "stopped"
+      : exitCode === 0
+        ? "done"
+        : "failed";
+    runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
     controller?.ended(exitCode);
     for (const watcher of watchers) watcher.ended(exitCode);
     void this.appendEvent("session.exited", runtime.record.id, {
@@ -448,6 +674,82 @@ export class SessionRegistry {
       exitCode,
       signal: signal ?? null,
     }).catch(() => undefined);
+    void this.persist(runtime);
+    this.notifySessionUpdate(runtime.record.id);
+  }
+
+  private workerResultSnapshot(target: WorkerWaitTarget, maxResultChars: number): WorkerResultSnapshot {
+    const runtime = this.requireRuntime(target.sessionId);
+    const replay = runtime.pty?.snapshot().toString("utf8") ?? runtime.record.latestPreview ?? "";
+    const text = runtime.latestResult === undefined
+      ? compactTerminalResult(replay, maxResultChars)
+      : runtime.latestResult.length <= maxResultChars
+        ? runtime.latestResult
+        : runtime.latestResult.slice(runtime.latestResult.length - maxResultChars);
+    const base = {
+      sessionId: runtime.record.id,
+      ...(runtime.record.name === undefined ? {} : { name: runtime.record.name }),
+      provider: runtime.record.provider,
+      ...(runtime.record.model === undefined ? {} : { model: runtime.record.model }),
+      ...(runtime.record.effort === undefined ? {} : { effort: runtime.record.effort }),
+      completedTurns: runtime.completedTurns,
+      text,
+    };
+    if (runtime.completedTurns >= target.completionTarget) return { ...base, status: "completed" };
+    if (runtime.activity === "blocked") return { ...base, status: "blocked" };
+    if (runtime.record.executionState === "failed") return { ...base, status: "failed" };
+    if (runtime.record.executionState === "cancelled") return { ...base, status: "stopped" };
+    if (runtime.record.executionState === "exited") return { ...base, status: "exited" };
+    if (runtime.activity === "working") return { ...base, status: "working" };
+    return { ...base, status: "waiting" };
+  }
+
+  private notifySessionUpdate(sessionId: string): void {
+    for (const listener of this.sessionUpdateListeners) listener(sessionId);
+  }
+
+  private requirePty(runtime: RuntimeSession): PtyHandle {
+    if (runtime.pty === undefined) {
+      throw new RegistryError("SESSION_NOT_ACTIVE", "Session runtime is not active; resume it before use");
+    }
+    return runtime.pty;
+  }
+
+  private async setAttention(
+    runtime: RuntimeSession,
+    attentionState: ThreadAttentionState,
+    meaningful: boolean,
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    runtime.record.attentionState = attentionState;
+    runtime.record.updatedAt = now;
+    if (meaningful) runtime.record.meaningfulUpdatedAt = now;
+    await this.persist(runtime);
+  }
+
+  private async persist(runtime: RuntimeSession): Promise<void> {
+    await this.options.store?.put(this.cloneRecord(runtime.record));
+  }
+
+  private recoverRecord(stored: SessionRecord): SessionRecord {
+    const record = this.cloneRecord(stored);
+    record.attachmentState = "detached";
+    if (record.executionState === "active" || record.executionState === "starting") {
+      record.executionState = "cancelled";
+      record.exitCode = 0;
+      record.attentionState = "interrupted";
+      record.updatedAt = new Date().toISOString();
+      return record;
+    }
+    record.attentionState ??= record.executionState === "failed"
+      ? "failed"
+      : record.executionState === "cancelled"
+        ? "stopped"
+        : "done";
+    if (record.executionState === "cancelled" && record.attentionState === "stopping") {
+      record.attentionState = "stopped";
+    }
+    return record;
   }
 
   private async appendTranscript(

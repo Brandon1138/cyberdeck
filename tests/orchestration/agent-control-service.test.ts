@@ -62,5 +62,133 @@ describe("AgentControlService", () => {
       prompt: "Inspect",
     })).rejects.toMatchObject({ code: "CAPABILITY_DENIED" });
   });
-});
 
+  it("starts an advertised worker with effort and returns only compact wait coordinates", async () => {
+    const start = vi.fn(async (request) => ({
+      ...worker,
+      ...request,
+      id: WORKER,
+      name: request.name,
+    }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "low",
+      cwd: "/repo/one",
+      prompt: "Return 8 + 1000",
+      name: "connectivity-sol",
+    })).resolves.toEqual({
+      sessionId: WORKER,
+      name: "connectivity-sol",
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "low",
+      completionTarget: 1,
+    });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ effort: "low" }), "Return 8 + 1000");
+  });
+
+  it("rejects guessed Codex aliases and unsupported effort before launch", async () => {
+    const start = vi.fn();
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "sol",
+      cwd: "/repo/one",
+      prompt: "Ping",
+    })).rejects.toMatchObject({
+      code: "MODEL_ID_NOT_CANONICAL",
+      message: expect.stringContaining("gpt-5.6-sol"),
+    });
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "cursor",
+      model: "composer",
+      effort: "low",
+      cwd: "/repo/one",
+      prompt: "Ping",
+    })).rejects.toMatchObject({ code: "EFFORT_NOT_SUPPORTED" });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("prevents an orchestrator from rereading a transcript behind its durable cursor", async () => {
+    const read = vi.fn(async (_sessionId: string, afterCursor: number) => ({
+      events: [],
+      nextCursor: afterCursor === 0 ? 12 : afterCursor,
+    }));
+    const service = new AgentControlService(
+      { get: () => worker } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read } as never,
+    );
+
+    await expect(service.readThread(ACTOR, WORKER, 0)).resolves.toMatchObject({ nextCursor: 12 });
+    await expect(service.readThread(ACTOR, WORKER, 0)).rejects.toMatchObject({
+      code: "STALE_THREAD_CURSOR",
+      message: expect.stringContaining("cursor 12"),
+    });
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("waits for several worker results through the broker instead of reading transcripts", async () => {
+    const waitForWorkerResults = vi.fn(async () => ({ timedOut: false, results: [] }));
+    const service = new AgentControlService(
+      { get: () => worker, waitForWorkerResults } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read: vi.fn() } as never,
+    );
+
+    await expect(service.waitForWorkers({
+      actorSessionId: ACTOR,
+      targets: [{ sessionId: WORKER, completionTarget: 1 }],
+      timeoutSeconds: 30,
+      maxResultChars: 800,
+    })).resolves.toEqual({ timedOut: false, results: [] });
+    expect(waitForWorkerResults).toHaveBeenCalledWith(
+      [{ sessionId: WORKER, completionTarget: 1 }],
+      30_000,
+      800,
+    );
+  });
+
+  it("batch-starts workers and preserves independent validation errors", async () => {
+    const start = vi.fn(async (request) => ({ ...worker, ...request, id: crypto.randomUUID() }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    const results = await service.startWorkers({
+      actorSessionId: ACTOR,
+      workers: [
+        { provider: "codex", model: "gpt-5.6-sol", effort: "low", cwd: "/repo/one", prompt: "Ping" },
+        { provider: "codex", model: "sol", effort: "low", cwd: "/repo/one", prompt: "Ping" },
+      ],
+    });
+
+    expect(results).toEqual([
+      expect.objectContaining({ ok: true, provider: "codex", model: "gpt-5.6-sol" }),
+      expect.objectContaining({
+        ok: false,
+        provider: "codex",
+        model: "sol",
+        error: expect.objectContaining({ code: "MODEL_ID_NOT_CANONICAL" }),
+      }),
+    ]);
+    expect(start).toHaveBeenCalledOnce();
+  });
+});

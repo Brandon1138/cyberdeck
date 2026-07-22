@@ -1,6 +1,10 @@
 import type { JobRequest } from "../../domain/job.js";
 import { isFableModel } from "../../domain/policy.js";
-import type { Sandbox } from "../../domain/session.js";
+import type { ReasoningEffort, Sandbox } from "../../domain/session.js";
+
+type AntigravityInteractiveRequest = Pick<JobRequest, "provider" | "cwd" | "sandbox" | "model"> & {
+  effort?: ReasoningEffort;
+};
 
 export interface AntigravityCommand {
   executable: "agy";
@@ -14,22 +18,27 @@ export interface AntigravityCommand {
 export interface AntigravityCommandOptions {
   /** Injectable only so deterministic tests can use an empty PATH. Production inherits `process.env`. */
   env?: NodeJS.ProcessEnv;
+  /** Provider-documented interactive prompt mode; omitted for a promptless TUI launch. */
+  initialPrompt?: string;
 }
 
 /**
  * Interactive command suitable for a broker-owned PTY.
  *
- * The older Phase 1 session union is closed to Codex and Claude, so this accepts the bounded
- * request shape as neutral command-construction evidence and does not self-register with the
- * interactive broker. No prompt, continuation, agent, or automatic model is added.
+ * The session adapter consumes this builder after explicit provider registration. No continuation,
+ * agent, or automatic model is added; an optional initial prompt uses the documented interactive
+ * prompt flag.
  */
 export function buildAntigravityInteractiveCommand(
-  request: JobRequest,
+  request: AntigravityInteractiveRequest,
   options: AntigravityCommandOptions = {},
 ): AntigravityCommand {
   assertAntigravityRequest(request);
-  const args = antigravitySandboxArgs(request.sandbox);
+  const args = options.initialPrompt === undefined
+    ? antigravitySandboxArgs(request.sandbox)
+    : ["--prompt-interactive", options.initialPrompt, ...antigravitySandboxArgs(request.sandbox)];
   appendExplicitModel(args, request.model);
+  appendExplicitEffort(args, request.effort);
   return command(request, args, options);
 }
 
@@ -50,7 +59,7 @@ export function buildAntigravityHeadlessCommand(
 }
 
 function command(
-  request: JobRequest,
+  request: Pick<JobRequest, "cwd">,
   args: string[],
   options: AntigravityCommandOptions,
 ): AntigravityCommand {
@@ -74,7 +83,17 @@ function appendExplicitModel(args: string[], model: string | undefined): void {
   if (model !== undefined) args.push("--model", model);
 }
 
-function assertAntigravityRequest(request: JobRequest): void {
+function appendExplicitEffort(args: string[], effort: ReasoningEffort | undefined): void {
+  if (effort === undefined) return;
+  if (effort !== "low" && effort !== "medium" && effort !== "high") {
+    throw new AntigravityLaunchSafetyError(`unsupported effort ${effort}; agy supports low, medium, or high`);
+  }
+  args.push("--effort", effort);
+}
+
+function assertAntigravityRequest(
+  request: Pick<JobRequest, "provider" | "model">,
+): void {
   if (request.provider !== "antigravity") {
     throw new Error(`Antigravity adapter cannot run provider ${request.provider}`);
   }

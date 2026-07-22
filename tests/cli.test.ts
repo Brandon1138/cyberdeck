@@ -125,6 +125,24 @@ describe("Cyberdeck CLI", () => {
     }));
   });
 
+  it("forwards explicit orchestrator effort from the long command", async () => {
+    const ensureOrchestrator = vi.fn(async () => orchestratorResult(false));
+    const program = createProgram({
+      preflightCockpit: () => ({ tmuxVersion: "tmux 3.5a", presentationCommand: "attach-session" }),
+      ensureOrchestrator,
+      launchCockpit: vi.fn(),
+    });
+    const cockpit = program.commands.find((candidate) => candidate.name() === "cockpit")!;
+
+    await cockpit.parseAsync([
+      "--orchestrator", "codex",
+      "--model", "gpt-5.6-sol",
+      "--effort", "xhigh",
+    ], { from: "user" });
+
+    expect(ensureOrchestrator).toHaveBeenCalledWith(expect.objectContaining({ effort: "xhigh" }));
+  });
+
   it("stops a newly created orchestrator when cockpit presentation fails", async () => {
     const stopSession = vi.fn(async () => {});
     const program = createProgram({

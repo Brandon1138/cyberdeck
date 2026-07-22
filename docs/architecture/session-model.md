@@ -52,7 +52,10 @@ Consequently, closing a tmux pane or the whole cockpit detaches presentation but
 
 Durability in Phase 1 means a session survives client detach, terminal closure, and tmux-pane closure while the broker stays alive. Session metadata is journaled, and recent terminal output is available from the broker replay buffer.
 
-The broker is still the process owner. If the broker dies or is deliberately shut down, its active PTYs and provider processes end. Phase 1 does not reconstruct a live PTY after broker failure or restart.
+The broker is still the process owner. If the broker dies or is deliberately shut down, its active
+PTYs and provider processes end. The durable session catalog reconstructs conversation records, not
+live processes. Unverifiable active ownership becomes `Interrupted`; explicit open resumes the exact
+provider-native conversation.
 
 ## Durable thread feed
 
@@ -60,6 +63,12 @@ The PTY replay buffer remains bounded presentation state. A separate append-only
 stores prompts, provider output, orchestrator instructions, and lifecycle events under the local
 Cyberdeck state directory. Every event receives a global monotonic cursor. An orchestrator reads
 only events after its previous cursor instead of scraping panes or diffing terminal screens.
+
+Ordinary worker result collection does not read this raw feed. Cyberdeck tracks provider terminal
+activity in the broker, idles until each requested completion target settles, and returns only a
+bounded useful result tail. Batch start and blocking wait keep fan-out to two compact semantic tool
+calls. Raw reads are limited to 100 events and the agent-control boundary rejects a cursor older
+than that orchestrator's last consumed cursor.
 
 Prompt bodies deliberately do not enter the metadata journal, but they do enter this local
 transcript. The transcript file is created with user-only permissions. This privacy boundary is
@@ -114,8 +123,8 @@ active. Cleanup errors are secondary context on the original presentation failur
 ### Fleet and diagnostics
 
 `cyberdeck dashboard` is the operator-facing fleet. It groups durable sessions by canonical working
-directory and shows provider/model identity, user-defined role, lifecycle status, replay-derived
-preview, and recency. Enter on an empty composer or Right opens the selected native provider TUI.
+directory and shows friendly model/effort identity, attention status, normalized assistant preview,
+and meaningful recency. Enter on an empty composer or Right opens the selected native provider TUI.
 For an active thread this attaches directly to the existing broker-owned PTY. For a terminal thread,
 the broker first launches the provider's exact conversation-resume command, then attaches to the new
 PTY. Claude resumes the UUID Cyberdeck assigned at initial launch; Codex resolves its separately
@@ -127,17 +136,16 @@ controller and all watchers, sends an explicit terminal notification to attached
 returns the interactive fleet client to its list. An already-terminal PTY therefore cannot acquire
 a controller lease or strand a later open attempt behind `SESSION_ALREADY_CONTROLLED`.
 
-The persistent bottom composer creates a new thread. Its launch context is copied from the selected
-row and displayed before submission: provider, explicit model or `native-default`, sandbox, and
-working directory. The full task body is forwarded as one initial positional provider argument and
+The persistent bottom composer creates a new thread. `/model` opens one flat explicit model list,
+then the provider-supported effort list. The final choice applies immediately, persists per project,
+and remains visible with sandbox and working directory. The full task body is forwarded as one initial positional provider argument and
 is not added to the durable session record; a normalized 72-character title is retained as the
 session `name` for the fleet. This path does not trigger provider selection, model selection,
 routing, or fallback inside Cyberdeck.
 
-An empty fleet can be bootstrapped without leaving the view. `/codex task`, `/codex:MODEL task`,
-and `/claude:MODEL task` name the provider (and Claude model) explicitly, use the dashboard's visible
-current working directory, and fail closed to the read-only sandbox. An unqualified Claude command
-is rejected because its local native default is not safe to infer.
+An empty Fleet can be bootstrapped without leaving the view: choose `/model`, choose effort, then
+enter the task. Provider follows the explicit model catalog entry; no provider command syntax,
+implicit default, ranking, or fallback participates.
 
 `cyberdeck diagnostics` preserves the detailed control-plane panels. It renders sessions and jobs
 separately because they are different things:
@@ -156,8 +164,8 @@ provider-native conversation identity; this never changes provider or chooses a 
 Stopping and deleting are distinct broker operations. `session.stop` terminates a live provider but
 retains the thread record and replay. `session.delete` refuses active or still-stopping providers and
 refuses parents whose child thread records still exist. The fleet requires an additional visible
-confirmation before it sends `session.delete`; pending confirmation replaces the selected terminal
-status with red `press ctrl+x again to delete` text.
+confirmation before it sends `session.delete`; pending confirmation says exactly
+`Delete thread? press ctrl+x again` in red.
 
 ### What the cockpit refuses to imply
 

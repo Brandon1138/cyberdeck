@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BrokerRuntimeConfigSchema } from "../config.js";
 import { ControlPlaneRuntime } from "../control-plane/runtime.js";
 import type { WorktreeLeaseManager } from "../control-plane/worktree-lease-manager.js";
 import type { ArtifactStore } from "../persistence/artifact-store.js";
@@ -10,22 +9,27 @@ import type { JobDispatchAdapter } from "../domain/dispatch.js";
 import type { BrokerEvent } from "../domain/events.js";
 import { appStateDirectory, brokerSocketPath } from "../paths.js";
 import { AntigravityJobDispatchAdapter } from "../providers/antigravity/dispatch-adapter.js";
+import { AntigravityProviderAdapter } from "../providers/antigravity/session-adapter.js";
 import { ClaudeProviderAdapter } from "../providers/claude.js";
 import { ClaudeJobDispatchAdapter } from "../providers/claude/dispatch-adapter.js";
 import { CodexProviderAdapter } from "../providers/codex.js";
 import { CursorJobDispatchAdapter } from "../providers/cursor/dispatch-adapter.js";
+import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
 import { PtyProcess } from "../runtime/pty-process.js";
 import { Journal } from "./journal.js";
 import { BrokerServer } from "./server.js";
 import { SessionRegistry } from "./session-registry.js";
 import { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
 import { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import { SessionStore } from "../persistence/session-store.js";
+import { FleetPreferenceStore } from "../persistence/fleet-preference-store.js";
 import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import { AgentControlService } from "../orchestration/agent-control-service.js";
 import { InstructionQueue } from "../orchestration/instruction-queue.js";
 import { InstructionStore } from "../persistence/instruction-store.js";
 import { WorkflowStore } from "../persistence/workflow-store.js";
 import { WorkflowService } from "../orchestration/workflow-service.js";
+import { loadBrokerRuntimeConfig } from "../runtime-config.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -66,17 +70,25 @@ export async function runBroker(
   await transcripts.init();
   const cliPath = resolve(dirname(fileURLToPath(import.meta.url)), "../cli.js");
   const mcp = { nodePath: process.execPath, cliPath };
-  const config = BrokerRuntimeConfigSchema.parse({});
+  const config = loadBrokerRuntimeConfig(resolve(stateDirectory, "config.json"));
+  const sessionStore = new SessionStore(stateDirectory);
+  const fleetPreferences = new FleetPreferenceStore(stateDirectory);
+  const recoveredSessions = await sessionStore.load();
   const registry = new SessionRegistry({
     adapters: {
       codex: new CodexProviderAdapter({ mcp }),
       claude: new ClaudeProviderAdapter({ mcp }),
+      cursor: new CursorProviderAdapter(),
+      antigravity: new AntigravityProviderAdapter(),
     },
     ptyFactory: (spec, replayBytes) => new PtyProcess(spec, replayBytes),
     journal,
     transcripts,
+    store: sessionStore,
+    recoveredSessions,
     config,
   });
+  await registry.ready();
   const orchestratorStore = new OrchestratorStore(stateDirectory);
   const orchestrators = new OrchestratorManager(registry, orchestratorStore);
   const agentControl = new AgentControlService(registry, orchestratorStore, transcripts);
@@ -123,6 +135,7 @@ export async function runBroker(
     workflows,
     controlPlane: runtime.controlPlane,
     controlPlaneRuntime: runtime,
+    fleetPreferences,
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();

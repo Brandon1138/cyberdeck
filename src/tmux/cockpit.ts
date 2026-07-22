@@ -57,6 +57,7 @@ export function launchCockpit(options: CockpitOptions): void {
   let created = false;
 
   try {
+    let needsOrchestratorPane = true;
     if (hasSession.status !== 0) {
       requireSuccess(spawnSync("tmux", [
         "new-session",
@@ -68,6 +69,17 @@ export function launchCockpit(options: CockpitOptions): void {
         "dashboard",
       ], { stdio: "ignore" }), "create cyberdeck tmux session");
       created = true;
+    } else {
+      const panes = spawnSync(
+        "tmux",
+        ["list-panes", "-t", sessionName, "-F", "#{pane_start_command}"],
+        { encoding: "utf8" },
+      );
+      requireSuccess(panes, "inspect cyberdeck tmux panes");
+      needsOrchestratorPane = !(panes.stdout ?? "").includes(options.orchestratorSessionId);
+    }
+
+    if (needsOrchestratorPane) {
       requireSuccess(
         spawnSync("tmux", [
           "split-window",

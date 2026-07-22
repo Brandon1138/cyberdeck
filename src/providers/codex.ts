@@ -44,6 +44,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (session.model !== undefined) {
       args.push("-m", session.model);
     }
+    if (session.effort !== undefined) {
+      args.push("-c", `model_reasoning_effort=${JSON.stringify(session.effort)}`);
+    }
     this.addProviderInstructions(args, session);
     this.addCyberdeckMcp(args, session);
     if (initialPrompt !== undefined) {
@@ -71,6 +74,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
       "on-request",
     ];
     if (session.model !== undefined) args.push("-m", session.model);
+    if (session.effort !== undefined) {
+      args.push("-c", `model_reasoning_effort=${JSON.stringify(session.effort)}`);
+    }
     this.addProviderInstructions(args, session);
     this.addCyberdeckMcp(args, session);
     args.push(nativeSessionId);

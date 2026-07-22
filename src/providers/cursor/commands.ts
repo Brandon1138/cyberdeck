@@ -1,5 +1,7 @@
 import type { JobRequest } from "../../domain/job.js";
 
+type CursorInteractiveRequest = Pick<JobRequest, "cwd" | "sandbox" | "model">;
+
 export interface CursorCommand {
   executable: "agent";
   args: string[];
@@ -12,12 +14,17 @@ export interface CursorHeadlessOptions {
 }
 
 /**
- * Interactive Cursor Agent command suitable for a broker-owned PTY. No prompt, resume, trust,
- * worktree, or approval flag is emitted. `--workspace` and `cwd` deliberately name the same root.
+ * Interactive Cursor Agent command suitable for a broker-owned PTY. An explicit initial prompt is
+ * the documented positional operand; no resume, trust, worktree, or approval flag is emitted.
+ * `--workspace` and `cwd` deliberately name the same root.
  */
-export function buildCursorInteractiveCommand(request: JobRequest): CursorCommand {
+export function buildCursorInteractiveCommand(
+  request: CursorInteractiveRequest,
+  initialPrompt?: string,
+): CursorCommand {
   const args = cursorSafetyArgs(request);
   if (request.model !== undefined) args.push("--model", request.model);
+  if (initialPrompt !== undefined) args.push(initialPrompt);
   return { executable: "agent", args, cwd: request.cwd, env: { ...process.env } };
 }
 
@@ -37,7 +44,7 @@ export function buildCursorHeadlessCommand(
   return { executable: "agent", args, cwd: request.cwd, env: { ...process.env } };
 }
 
-function cursorSafetyArgs(request: JobRequest): string[] {
+function cursorSafetyArgs(request: Pick<JobRequest, "cwd" | "sandbox">): string[] {
   const args = ["--workspace", request.cwd, "--sandbox", "enabled"];
   if (request.sandbox === "read-only") args.push("--mode", "plan");
   // Cursor advertises only plan/ask as read-only modes. Workspace-write therefore omits --mode and

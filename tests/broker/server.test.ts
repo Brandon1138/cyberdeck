@@ -117,7 +117,7 @@ async function harness() {
     ptyFactory,
     journal: { append: async () => {} },
     transcripts,
-    config: BrokerRuntimeConfigSchema.parse({ maxConcurrentSessions: 8 }),
+    config: BrokerRuntimeConfigSchema.parse({ maxConcurrentWorkers: 8 }),
   });
   let server: BrokerServer;
   server = new BrokerServer({

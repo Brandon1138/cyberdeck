@@ -49,11 +49,27 @@ describe("evaluateStart", () => {
     ).toEqual({ allowed: false, code: "MAX_DELEGATION_DEPTH" });
   });
 
-  it("enforces the concurrent-session limit", () => {
-    expect(evaluateStart(baseRequest, [], { activeSessionCount: 4 })).toEqual({
+  it("enforces the worker limit with useful counts", () => {
+    expect(evaluateStart(baseRequest, [], {
+      activeWorkerCount: 24,
+      maxConcurrentWorkers: 24,
+    })).toEqual({
       allowed: false,
-      code: "MAX_CONCURRENT_SESSIONS",
+      code: "MAX_CONCURRENT_WORKERS",
+      activeWorkers: 24,
+      maxConcurrentWorkers: 24,
     });
+  });
+
+  it("does not count or block orchestrators and supports explicit unlimited workers", () => {
+    expect(evaluateStart({ ...baseRequest, kind: "orchestrator" }, [], {
+      activeWorkerCount: 24,
+      maxConcurrentWorkers: 24,
+    })).toEqual({ allowed: true });
+    expect(evaluateStart(baseRequest, [], {
+      activeWorkerCount: 100,
+      maxConcurrentWorkers: null,
+    })).toEqual({ allowed: true });
   });
 
   it.each(["scout", "writer", "cheap-task"])("ignores opaque role %s", (role) => {
