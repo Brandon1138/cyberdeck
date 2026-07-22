@@ -54,6 +54,19 @@ describe("StartSessionRequestSchema", () => {
     })).toThrow();
   });
 
+  it("persists the authority scope on orchestrator session projections", () => {
+    const parsed = StartSessionRequestSchema.parse({
+      provider: "codex",
+      cwd: "/tmp/repo",
+      detached: true,
+      sandbox: "read-only",
+      kind: "orchestrator",
+      orchestratorScope: "fleet",
+    });
+
+    expect(parsed.orchestratorScope).toBe("fleet");
+  });
+
   it("rejects a missing provider rather than routing implicitly", () => {
     expect(() => StartSessionRequestSchema.parse({ cwd: "/tmp/repo" })).toThrow();
   });

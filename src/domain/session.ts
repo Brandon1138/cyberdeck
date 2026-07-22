@@ -36,6 +36,7 @@ export const StartSessionRequestSchema = z.object({
   name: z.string().optional(),
   parentSessionId: z.uuid().optional(),
   kind: SessionKindSchema.optional(),
+  orchestratorScope: z.enum(["workspace", "fleet"]).optional(),
   providerInstructions: z.string().trim().min(1).optional(),
 });
 

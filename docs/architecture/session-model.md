@@ -77,7 +77,10 @@ required for durable summaries after the operator returns.
 ## Orchestrator and agent authority
 
 An orchestrator binding references a normal broker-owned provider session and separately records its
-provider, model, scope, and capability grant. The free-form `role` string grants nothing. The stdio
+provider, model, scope, and capability grant. Fleet scope is the default and uses one durable binding
+key regardless of the directory from which Cyberdeck was launched; launch `cwd` remains presentation
+and composer context rather than an authority boundary. Workspace scope remains an explicit isolation
+option. The free-form `role` string grants nothing. The stdio
 MCP adapter carries the calling session ID to broker RPC, where scope and capability are checked.
 
 Orchestrator startup is deliberately zero-turn: the provider TUI is opened without a positional user
@@ -87,7 +90,7 @@ session-scoped MCP configuration. The session record carries that provider guida
 provider-native resume reconstructs the same guidance and MCP arguments without submitting a turn.
 
 The binding registry is append-only and treats a reset record as a tombstone for the latest binding.
-`cyberdeck orchestrator reset` refuses while the bound broker session is active, preventing an
+`cyberdeck orchestrator reset` targets the fleet binding by default and refuses while the bound broker session is active, preventing an
 orphaned provider; the operator must stop that exact session first. Once inactive, reset makes the
 scope unbound without rewriting history, and an explicit different provider/model writes a clean new
 latest binding. Model strings remain opaque and provider-native: no alias translation or fallback is

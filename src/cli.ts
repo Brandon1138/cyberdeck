@@ -363,7 +363,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     .option("--model <model>", "explicit orchestrator model")
     .addOption(new Option("--effort <effort>", "explicit orchestrator reasoning effort")
       .choices(["low", "medium", "high", "xhigh", "max", "ultra"]))
-    .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("workspace"))
+    .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("fleet"))
     .action(async (options: { orchestrator?: "codex" | "claude"; model?: string; effort?: ReasoningEffort; scope: "workspace" | "fleet" }) => {
       const cwd = process.cwd();
       await openCockpit({
@@ -382,9 +382,9 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
 
   const orchestrator = program.command("orchestrator").description("manage durable orchestrator bindings");
   orchestrator.command("reset")
-    .description("invalidate an inactive workspace or fleet orchestrator binding")
+    .description("invalidate an inactive fleet or workspace orchestrator binding")
     .option("--cwd <absolute-path>", "workspace path (defaults to the current directory)")
-    .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("workspace"))
+    .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("fleet"))
     .action(async (options: { cwd?: string; scope: "workspace" | "fleet" }) => {
       const result = await resetOrchestrator({
         cwd: resolve(options.cwd ?? process.cwd()),

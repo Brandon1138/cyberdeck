@@ -63,6 +63,36 @@ describe("AgentControlService", () => {
     })).rejects.toMatchObject({ code: "CAPABILITY_DENIED" });
   });
 
+  it("allows a fleet orchestrator to start workers across repositories", async () => {
+    const fleetBinding: OrchestratorBinding = {
+      ...binding,
+      key: "fleet",
+      scope: { kind: "fleet" },
+      grant: { ...binding.grant, scope: { kind: "fleet" } },
+    };
+    const start = vi.fn(async (request) => ({
+      ...worker,
+      ...request,
+      id: WORKER,
+      name: request.name,
+    }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => fleetBinding) } as never,
+      {} as never,
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "low",
+      cwd: "/repo/two",
+      prompt: "Inspect the sibling repository",
+    })).resolves.toMatchObject({ sessionId: WORKER });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/repo/two" }), expect.any(String));
+  });
+
   it("starts an advertised worker with effort and returns only compact wait coordinates", async () => {
     const start = vi.fn(async (request) => ({
       ...worker,

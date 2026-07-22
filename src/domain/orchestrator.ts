@@ -26,7 +26,7 @@ export const EnsureOrchestratorRequestSchema = z.object({
   model: z.string().optional(),
   effort: ReasoningEffortSchema.optional(),
   cwd: z.string().min(1),
-  scope: z.enum(["workspace", "fleet"]).default("workspace"),
+  scope: z.enum(["workspace", "fleet"]).default("fleet"),
 });
 
 export const ResetOrchestratorRequestSchema = EnsureOrchestratorRequestSchema.pick({

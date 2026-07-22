@@ -32,11 +32,13 @@ cyberdeck cockpit --orchestrator codex --model gpt-5.6-sol --effort high
 cyberdeck list
 ```
 
-The first cockpit launch for a workspace requires an explicit orchestrator provider, with optional
-provider-native model and effort. It creates a workspace-namespaced native tmux session with the interactive
-Fleet in the left pane and a broker-owned orchestrator attachment in the right pane. Later launches
-can omit the provider while that orchestrator remains owned by the current broker. Use `--scope
-fleet` only when the orchestrator should see threads from every working directory.
+The first cockpit launch requires an explicit orchestrator provider, with optional provider-native
+model and effort. It creates a workspace-namespaced native tmux session with the interactive Fleet
+in the left pane and a broker-owned orchestrator attachment in the right pane. The orchestrator
+binding itself defaults to one fleet-wide singleton, so later launches from any directory reuse it
+and it can coordinate workers in every repository. The launch directory remains only the initial
+Fleet/composer context. Use `--scope workspace` when deliberate single-directory isolation is
+required.
 
 Create, split, or close panes freely; the broker, not tmux, owns every provider session. tmux is
 preflighted with `tmux -V` before an orchestrator is created or resumed. A missing binary produces an
@@ -57,7 +59,7 @@ meaningful activity time. It never ranks providers or chooses a model.
 
 Fleet controls:
 
-- `Ctrl+O`: open the workspace orchestrator picker. Choose provider, model, and provider-supported
+- `Ctrl+O`: open the fleet orchestrator picker. Choose provider, model, and provider-supported
   effort in sequence. The effort choice applies immediately, with no confirmation screen.
 - `Up` / `Down`: select a thread.
 - `Right`, or `Enter` while the bottom composer is empty: open the selected provider TUI. A live
@@ -108,11 +110,13 @@ binding without editing JSONL files:
 
 ```bash
 cyberdeck stop ORCHESTRATOR_SESSION_ID
-cyberdeck orchestrator reset --scope workspace --cwd /absolute/workspace/path
+cyberdeck orchestrator reset
 ```
 
-An explicit different provider/model can then replace an inactive latest binding cleanly. Cyberdeck
-does not translate model aliases, choose a fallback, or silently resume a reset binding.
+An explicit different provider/model can then replace an inactive latest binding cleanly. Pass
+`--scope workspace --cwd /absolute/workspace/path` to reset a deliberately isolated legacy or
+opt-in workspace binding. Cyberdeck does not translate model aliases, choose a fallback, or silently
+resume a reset binding.
 If an inactive provider-native conversation can no longer be located, an explicit provider, model,
 and effort selection appends a fresh binding instead of leaving the workspace stuck. A closed
 orchestrator pane is recreated on the next launch; closing a pane still detaches presentation and

@@ -77,6 +77,7 @@ export class OrchestratorManager {
       sandbox: "read-only",
       role: "orchestrator",
       kind: "orchestrator",
+      orchestratorScope: request.scope,
       name: `Cyberdeck orchestrator (${request.provider}${request.model === undefined ? "" : `:${request.model}`})`,
       providerInstructions: orchestratorPrompt(scope),
     });

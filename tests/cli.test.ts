@@ -120,9 +120,24 @@ describe("Cyberdeck CLI", () => {
     await cockpit.parseAsync([], { from: "user" });
 
     expect(order).toEqual(["preflight", "ensure", "present"]);
+    expect(ensureOrchestrator).toHaveBeenCalledWith(expect.objectContaining({ scope: "fleet" }));
     expect(launchCockpit).toHaveBeenCalledWith(expect.objectContaining({
       preflight: { tmuxVersion: "tmux 3.5a", presentationCommand: "switch-client" },
     }));
+  });
+
+  it("keeps workspace orchestration as an explicit isolation option", async () => {
+    const ensureOrchestrator = vi.fn(async () => orchestratorResult(false));
+    const program = createProgram({
+      preflightCockpit: () => ({ tmuxVersion: "tmux 3.5a", presentationCommand: "attach-session" }),
+      ensureOrchestrator,
+      launchCockpit: vi.fn(),
+    });
+    const cockpit = program.commands.find((candidate) => candidate.name() === "cockpit")!;
+
+    await cockpit.parseAsync(["--scope", "workspace", "--orchestrator", "codex"], { from: "user" });
+
+    expect(ensureOrchestrator).toHaveBeenCalledWith(expect.objectContaining({ scope: "workspace" }));
   });
 
   it("forwards explicit orchestrator effort from the long command", async () => {
@@ -203,5 +218,21 @@ describe("Cyberdeck CLI", () => {
     }
 
     expect(resetOrchestrator).toHaveBeenCalledWith({ cwd: "/Users/brandon", scope: "workspace" });
+  });
+
+  it("resets the fleet binding by default", async () => {
+    const resetOrchestrator = vi.fn(async () => ({ key: "fleet", reset: false }));
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const program = createProgram({ resetOrchestrator });
+    const orchestrator = program.commands.find((candidate) => candidate.name() === "orchestrator")!;
+    const reset = orchestrator.commands.find((candidate) => candidate.name() === "reset")!;
+
+    try {
+      await reset.parseAsync([], { from: "user" });
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(resetOrchestrator).toHaveBeenCalledWith(expect.objectContaining({ scope: "fleet" }));
   });
 });

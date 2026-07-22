@@ -178,7 +178,7 @@ describe("fleet controls", () => {
         model: "gpt-5.6-sol",
         effort: "low",
         cwd: "/repo/one",
-        scope: "workspace",
+        scope: "fleet",
       },
     });
     expect(launched.state.orchestratorPicker).toBeUndefined();
@@ -200,21 +200,40 @@ describe("fleet controls", () => {
     });
   });
 
-  it("preselects the current workspace orchestrator so quick Enter reopens it", () => {
+  it("preselects the fleet orchestrator so quick Enter reopens it from any project", () => {
     const current = session({
       provider: "claude",
       model: "opus",
       effort: "high",
       kind: "orchestrator",
       cwd: "/repo/one",
+      orchestratorScope: "fleet",
     });
     const snapshot = fleet({ record: current });
-    const opened = transitionFleet(createFleetState(snapshot, "/repo/one"), snapshot, "ctrl+o", NOW_MS);
+    const opened = transitionFleet(createFleetState(snapshot, "/repo/two"), snapshot, "ctrl+o", NOW_MS);
 
     expect(opened.state.orchestratorPicker).toMatchObject({
       choiceIndex: 3,
       effortIndex: 3,
     });
+  });
+
+  it("renders a fleet orchestrator independently of its process cwd", () => {
+    const current = session({
+      kind: "orchestrator",
+      cwd: "/repo/one",
+      orchestratorScope: "fleet",
+    });
+    const snapshot = fleet({ record: current });
+    const rendered = renderFleet(snapshot, createFleetState(snapshot, "/repo/two"), {
+      color: false,
+      width: 110,
+      height: 28,
+      now: NOW_MS,
+    });
+
+    expect(rendered).toContain("provider-native-model · Provider managed · fleet");
+    expect(rendered).not.toContain("provider-native-model · Provider managed · /repo/one");
   });
 
   it("decodes Ctrl+O without inserting it into the task composer", () => {
@@ -471,7 +490,7 @@ describe("runFleet", () => {
       provider: "codex",
       model: "gpt-5.6-sol",
       cwd: process.cwd(),
-      scope: "workspace",
+      scope: "fleet",
     }));
 
     input.emit("data", Buffer.from([0x03]));

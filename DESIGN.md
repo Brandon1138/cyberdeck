@@ -175,7 +175,7 @@ The header occupies the upper-left of Fleet and establishes identity, current or
 - Reserve an `8ch` by `3-row` logo bay with a `2ch` gap before text. The final 8-bit Cyberdeck logo must fit this box without moving the metadata column.
 - Until the final asset exists, render the sparse `░` placeholder above in Cool Ash. It is intentionally quiet, has no outline, and is not a provisional logo concept.
 - Render `Cyberdeck` in strong bold text.
-- The second line shows the bound orchestrator's friendly model, effort, and shortened scope path. If none exists, show `No orchestrator · ctrl+o to choose` without implying a default.
+- The second line shows the bound orchestrator's friendly model, effort, and scope. The normal global binding is labeled `fleet`; an explicitly isolated workspace binding shows its shortened path. If none exists, show `No orchestrator · ctrl+o to choose` without implying a model default.
 - The third line shows total threads plus nonzero attention counts. `Stopped`, `Interrupted`, and `Failed` are never folded into `done`.
 - Keep the full logo bay in regular and half-width cockpit panes. Below `64` columns, omit the placeholder pixels but retain the same header text order.
 

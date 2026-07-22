@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
-import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
+import { EnsureOrchestratorRequestSchema, type OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
@@ -73,6 +73,7 @@ describe("OrchestratorManager", () => {
     });
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       kind: "orchestrator",
+      orchestratorScope: "workspace",
       effort: "high",
       providerInstructions: expect.stringContaining("Cyberdeck orchestrator"),
     }));
@@ -84,6 +85,37 @@ describe("OrchestratorManager", () => {
     expect(instructions).toContain("never reread from cursor zero");
     expect(start.mock.calls[0]).toHaveLength(1);
     expect(put).toHaveBeenCalledOnce();
+  });
+
+  it("creates one cwd-independent fleet grant", async () => {
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const start = vi.fn(async (request: Partial<SessionRecord>) => ({ ...record, ...request }));
+    const manager = new OrchestratorManager(
+      { start, get: vi.fn(() => record), stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put } as never,
+    );
+
+    await expect(manager.ensure({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    })).resolves.toMatchObject({
+      binding: {
+        key: "fleet",
+        scope: { kind: "fleet" },
+        grant: { scope: { kind: "fleet" } },
+      },
+    });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: "/repo/one",
+      orchestratorScope: "fleet",
+    }));
+  });
+
+  it("defaults unscoped broker requests to the fleet binding", () => {
+    expect(EnsureOrchestratorRequestSchema.parse({ cwd: "/repo/one" }).scope).toBe("fleet");
   });
 
   it("requires an explicit provider for an unbound scope", async () => {

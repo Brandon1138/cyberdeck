@@ -649,11 +649,16 @@ function renderHeader(
     ...(count("Failed") === 0 ? [] : [`${count("Failed")} failed`]),
   ].join(" · ");
   const orchestrator = threads.find(({ record }) =>
-    record.kind === "orchestrator" && record.cwd === state.fallbackCwd)?.record
+    record.kind === "orchestrator" && record.orchestratorScope === "fleet")?.record
+    ?? threads.find(({ record }) =>
+      record.kind === "orchestrator" && record.cwd === state.fallbackCwd)?.record
     ?? threads.find(({ record }) => record.kind === "orchestrator")?.record;
+  const scope = orchestrator?.orchestratorScope === "fleet"
+    ? "fleet"
+    : shortPath(orchestrator?.cwd ?? state.fallbackCwd, options.home);
   const context = orchestrator === undefined
     ? `No orchestrator · ctrl+o to choose · ${shortPath(state.fallbackCwd, options.home)}`
-    : `${friendlyModel(orchestrator.provider, orchestrator.model)} · ${friendlyEffort(orchestrator.effort ?? "provider-managed")} · ${shortPath(orchestrator.cwd, options.home)}`;
+    : `${friendlyModel(orchestrator.provider, orchestrator.model)} · ${friendlyEffort(orchestrator.effort ?? "provider-managed")} · ${scope}`;
   const textLines = [
     paint("Cyberdeck", "bold", options.color),
     paint(fit(context, Math.max(1, options.width - 10)), "dim", options.color),
@@ -728,7 +733,7 @@ function transitionOrchestratorPicker(state: FleetState, key: string): FleetTran
         model: selection.model,
         ...(selection.effort === undefined ? {} : { effort: selection.effort }),
         cwd: state.fallbackCwd,
-        scope: "workspace",
+        scope: "fleet",
       },
     },
   };
@@ -781,7 +786,9 @@ function orchestratorSelection(picker: OrchestratorPickerState) {
 
 function initialOrchestratorPicker(snapshot: FleetSnapshot, cwd: string): OrchestratorPickerState {
   const existing = orderedThreads(snapshot)
-    .find((thread) => thread.record.kind === "orchestrator" && thread.record.cwd === cwd)?.record;
+    .find((thread) => thread.record.kind === "orchestrator" && thread.record.orchestratorScope === "fleet")?.record
+    ?? orderedThreads(snapshot)
+      .find((thread) => thread.record.kind === "orchestrator" && thread.record.cwd === cwd)?.record;
   const choiceIndex = existing === undefined
     ? 0
     : Math.max(0, ORCHESTRATOR_MODEL_CHOICES.findIndex((choice) =>
