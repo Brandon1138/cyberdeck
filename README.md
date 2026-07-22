@@ -14,25 +14,56 @@ mise install
 mise exec -- corepack enable
 mise exec -- pnpm install --frozen-lockfile
 mise exec -- pnpm build
-mise exec -- pnpm link --global
+(cd /tmp && mise exec -- pnpm add --global /Users/brandon/code/personal/cyberdeck)
 ```
 
-If the global link is not desired, replace `cyberdeck` in the examples with `node dist/src/cli.js` from the repository root.
+If the global install is not desired, replace `cyberdeck` in the examples with `node dist/src/cli.js` from the repository root.
+
+Run `cyberdeck` with no arguments to start the broker when needed and open the interactive fleet.
 
 ## Broker and cockpit
 
 ```bash
 cyberdeck broker start
 cyberdeck broker status
+cyberdeck broker restart
 cyberdeck cockpit
 cyberdeck list
 ```
 
-The cockpit creates a tmux session with a read-only dashboard and an ordinary shell. Create or close additional panes freely; the broker, not tmux, owns provider sessions.
+The cockpit creates a tmux session with the interactive fleet in one pane and an ordinary shell in
+another. Create, split, or close panes freely; the broker, not tmux, owns provider sessions.
 
-`cyberdeck dashboard` renders five panels over control-plane queries: **SESSIONS** (interactive runtime — broker-owned PTYs), **JOBS** (headless runtime — bounded work), **ADMISSION**, **BUDGET**, and **RECONCILIATION**. It is read-only and ranks nothing.
+`cyberdeck dashboard` groups durable agent threads by project. Every row shows the thread name,
+provider, explicit model (or `native-default`), role when present, status, latest replay preview, and
+relative activity time. It never ranks providers or chooses a model.
 
-Interactive and headless are runtime/presentation distinctions, not provider categories. The dashboard states what it does not know rather than guessing: an omitted model shows `native-default`, an omitted role shows `unassigned`, unreported token usage shows `unknown` (never `0`), a reconciliation pass that never ran shows `never reconciled`, and a panel the broker does not answer shows `unavailable` — which is not the same as empty.
+Fleet controls:
+
+- `Up` / `Down`: select a thread.
+- `Right`, or `Enter` while the bottom composer is empty: open the selected provider TUI. A live
+  thread attaches to its existing PTY; a terminal thread resumes that exact provider-native
+  conversation first.
+- `Left` from a provider TUI: detach and return to the fleet. `Ctrl+]` remains an alternate detach
+  key.
+- Type a task in the persistent bottom composer and press `Enter`: start a new thread using the
+  selected row's visible provider, model, sandbox, and project context, then attach to its native TUI.
+- With no suitable row, `/codex task`, `/codex:MODEL task`, or `/claude:MODEL task` explicitly
+  bootstraps a read-only session in the dashboard's current working directory.
+- `Esc`: clear the new-thread composer.
+- `Ctrl+X` on a live agent: stop it through the broker.
+- `Ctrl+X` on a stopped, done, or failed thread: show the red `press ctrl+x again to delete`
+  confirmation. Press `Ctrl+X` once more to delete the thread record.
+- `Ctrl+C`: leave the fleet. This does not stop an agent.
+
+New-thread tasks are passed to the provider as one initial positional argument. The full task body is
+not stored in the session record; a normalized 72-character thread title is retained as `name` for
+the fleet. Cyberdeck does not infer a provider or model: changing launch context means
+selecting a row whose explicit context matches the session you want.
+
+Other standard terminal and tmux shortcuts are preserved while attached. `cyberdeck diagnostics` retains the
+read-only **SESSIONS**, **JOBS**, **ADMISSION**, **BUDGET**, and **RECONCILIATION** panels for detailed
+control-plane inspection.
 
 tmux is presentation only. The cockpit issues no `kill-session`, `kill-pane`, `kill-server`, or `send-keys` verb. Killing the entire tmux server leaves the broker and its sessions running.
 
@@ -41,6 +72,9 @@ Shut down deliberately when finished:
 ```bash
 cyberdeck broker stop
 ```
+
+`cyberdeck broker restart` requests a graceful shutdown, waits for the old socket to close, starts
+the built broker in the background, and waits for the replacement to report healthy.
 
 Broker shutdown ends active PTYs in Phase 1. Sessions survive client and pane detachment, but they do not survive broker death or restart.
 Bounded control-plane jobs are different: their records and terminal results are rebuilt on restart,
@@ -75,9 +109,11 @@ cyberdeck send SESSION_ID "Summarize the current state without changing files."
 cyberdeck logs SESSION_ID
 ```
 
-`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press `Ctrl-]` to detach from either view.
+`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press Left or `Ctrl-]` to detach from either view. Terminal threads refuse attachment until they have been resumed, and provider exit automatically releases every controller and watcher.
 
-`send` submits input without opening an interactive client. `logs` prints the current replay snapshot.
+`send` submits one logical prompt without opening an interactive client. The selected provider
+adapter encodes its terminal's actual Enter key, so steering does not depend on a portable newline
+assumption. `logs` prints the current replay snapshot.
 
 ## Delegate one explicitly selected worker
 
@@ -98,6 +134,10 @@ cyberdeck stop SESSION_ID
 ```
 
 Use `stop` only when the provider process should end. Closing a terminal or tmux pane is not a substitute for `stop`, and `stop` is not a detach operation.
+
+Deleting a thread is separate from stopping it. The fleet refuses deletion until the provider
+process has exited, then requires the visible two-press confirmation described above. A parent
+thread cannot be deleted while child thread records still exist.
 
 ## Test, check, build, and probe
 

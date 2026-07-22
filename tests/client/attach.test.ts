@@ -116,4 +116,79 @@ describe("attachSession", () => {
       signals: new EventEmitter(),
     })).rejects.toThrow("TTY");
   });
+
+  it("can detach back to an enclosing fleet without closing its shared transport", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = attachSession({
+      sessionId: TEST_SESSION_ID,
+      mode: "control",
+      transport,
+      input,
+      output: new FakeOutput(),
+      signals: new EventEmitter(),
+      closeTransport: false,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    input.emit("data", Buffer.from([0x1d]));
+
+    await expect(attached).resolves.toBe(0);
+    expect(transport.close).not.toHaveBeenCalled();
+  });
+
+  it("uses Left Arrow as the directional return from a provider thread to the fleet", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = attachSession({
+      sessionId: TEST_SESSION_ID,
+      mode: "control",
+      transport,
+      input,
+      output: new FakeOutput(),
+      signals: new EventEmitter(),
+      closeTransport: false,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    input.emit("data", Buffer.from("\u001b[D"));
+
+    await expect(attached).resolves.toBe(0);
+    expect(transport.sent).toContainEqual({ type: "detach", sessionId: TEST_SESSION_ID });
+    expect(transport.sent.some((frame) => frame.type === "input")).toBe(false);
+  });
+
+  it("returns and cleans up raw mode when the provider exits while attached", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = attachSession({
+      sessionId: TEST_SESSION_ID,
+      mode: "control",
+      transport,
+      input,
+      output: new FakeOutput(),
+      signals: new EventEmitter(),
+      closeTransport: false,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    transport.emitFrame({ type: "session-ended", sessionId: TEST_SESSION_ID, exitCode: 0 });
+
+    await expect(attached).resolves.toBe(0);
+    expect(input.setRawMode).toHaveBeenLastCalledWith(false);
+    expect(transport.close).not.toHaveBeenCalled();
+  });
+
+  it("detaches a claimed controller if rendering the replay fails", async () => {
+    const transport = new FakeTransport();
+    const attached = attachSession({
+      sessionId: TEST_SESSION_ID,
+      mode: "control",
+      transport,
+      input: new FakeInput(),
+      output: { write: () => { throw new Error("terminal write failed"); } },
+      signals: new EventEmitter(),
+      closeTransport: false,
+    });
+
+    await expect(attached).rejects.toThrow("terminal write failed");
+    expect(transport.sent).toContainEqual({ type: "detach", sessionId: TEST_SESSION_ID });
+  });
 });

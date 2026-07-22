@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import { BrokerServer } from "../../src/broker/server.js";
 import { SessionRegistry, type PtyHandle } from "../../src/broker/session-registry.js";
-import type { ProviderAdapter } from "../../src/providers/provider.js";
+import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import { ServerFrameSchema, type ServerFrame, type WireFrame } from "../../src/protocol/frames.js";
 import { JsonlDecoder, encodeFrame } from "../../src/protocol/jsonl.js";
 
@@ -33,8 +33,16 @@ class FakePty implements PtyHandle {
 }
 
 const adapters: Record<"codex" | "claude", ProviderAdapter> = {
-  codex: { id: "codex", buildLaunchSpec: (session) => ({ executable: "fake", args: [], cwd: session.cwd, env: {} }) },
-  claude: { id: "claude", buildLaunchSpec: (session) => ({ executable: "fake", args: [], cwd: session.cwd, env: { DISABLE_UPDATES: "1" } }) },
+  codex: {
+    id: "codex",
+    buildLaunchSpec: (session, initialPrompt) => ({ executable: "fake", args: initialPrompt === undefined ? [] : [initialPrompt], cwd: session.cwd, env: {} }),
+    buildResumeSpec: (session) => ({ executable: "fake", args: ["resume", session.id], cwd: session.cwd, env: {} }),
+  },
+  claude: {
+    id: "claude",
+    buildLaunchSpec: (session, initialPrompt) => ({ executable: "fake", args: initialPrompt === undefined ? [] : [initialPrompt], cwd: session.cwd, env: { DISABLE_UPDATES: "1" } }),
+    buildResumeSpec: (session) => ({ executable: "fake", args: ["resume", session.id], cwd: session.cwd, env: { DISABLE_UPDATES: "1" } }),
+  },
 };
 
 class TestClient {
@@ -101,7 +109,7 @@ class TestClient {
 async function harness() {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-server-"));
   const socketPath = join(directory, "broker.sock");
-  const ptyFactory = vi.fn(() => new FakePty(2000 + ptyFactory.mock.calls.length));
+  const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(2000 + ptyFactory.mock.calls.length));
   const registry = new SessionRegistry({
     adapters,
     ptyFactory,
@@ -123,14 +131,16 @@ describe("BrokerServer", () => {
     const { server, socketPath, ptyFactory } = await harness();
     const client = await TestClient.open(socketPath);
     try {
-      const parent = await client.request<{ id: string }>("session.start", {
+      const parent = await client.request<{ id: string }>("session.startWithPrompt", {
         provider: "codex", cwd: "/tmp/repo", detached: true, sandbox: "read-only",
+        initialPrompt: "Inspect the failure",
       });
       const second = await client.request<{ id: string }>("session.start", {
         provider: "claude", cwd: "/tmp/repo", detached: true, sandbox: "read-only",
       });
       const listed = await client.request<Array<{ id: string }>>("session.list", {});
       expect(listed.map(({ id }) => id)).toEqual([parent.id, second.id]);
+      expect(ptyFactory.mock.calls[0]?.[0]).toMatchObject({ args: ["Inspect the failure"] });
 
       const snapshot = await client.request<{ data: string }>("session.snapshot", { sessionId: parent.id });
       expect(Buffer.from(snapshot.data, "base64").toString()).toContain("READY");
@@ -147,6 +157,15 @@ describe("BrokerServer", () => {
       expect(ptyFactory).toHaveBeenCalledTimes(2);
 
       await client.request("session.stop", { sessionId: second.id });
+      await expect(client.request("session.attach", { sessionId: second.id }))
+        .rejects.toMatchObject({ code: "SESSION_NOT_ACTIVE" });
+      await expect(client.request("session.resume", { sessionId: second.id }))
+        .resolves.toMatchObject({ id: second.id, executionState: "active", exitCode: null });
+      expect(ptyFactory).toHaveBeenCalledTimes(3);
+      await client.request("session.stop", { sessionId: second.id });
+      await expect(client.request("session.delete", { sessionId: second.id })).resolves.toEqual({ deleted: true });
+      await expect(client.request("session.snapshot", { sessionId: second.id }))
+        .rejects.toMatchObject({ code: "SESSION_NOT_FOUND" });
       await expect(client.request("broker.shutdown", {})).resolves.toEqual({ shuttingDown: true });
     } finally {
       client.socket.destroy();

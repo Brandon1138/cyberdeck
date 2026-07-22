@@ -20,6 +20,12 @@ function fakeAdapter(id: "codex" | "claude"): ProviderAdapter {
       cwd: session.cwd,
       env: { ...process.env },
     }),
+    buildResumeSpec: (session) => ({
+      executable: process.execPath,
+      args: [fixturePath],
+      cwd: session.cwd,
+      env: { ...process.env },
+    }),
   };
 }
 

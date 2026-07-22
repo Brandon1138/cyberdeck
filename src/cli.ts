@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,7 @@ import { appStateDirectory, brokerSocketPath } from "./paths.js";
 import { RpcClient, RpcError } from "./client/rpc-client.js";
 import { attachSession } from "./client/attach.js";
 import { runDashboard } from "./client/dashboard.js";
+import { runFleet } from "./client/fleet.js";
 import { launchCockpit } from "./tmux/cockpit.js";
 import { CYBERDECK_VERSION } from "./version.js";
 
@@ -80,7 +81,21 @@ async function waitForBroker(timeoutMs = 5_000): Promise<void> {
   throw new Error(`Broker did not become ready: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-async function startDetachedBroker(): Promise<void> {
+async function waitForBrokerStop(timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await withClient((client) => client.request("broker.status", {}));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } catch (error) {
+      if (isBrokerUnavailable(error)) return;
+      throw error;
+    }
+  }
+  throw new Error("Broker did not stop before the restart timeout");
+}
+
+async function startDetachedBroker(announce = true): Promise<void> {
   const brokerEntry = resolve(projectRoot(), "dist", "src", "broker", "main.js");
   if (!existsSync(brokerEntry)) {
     throw new Error("Built broker is missing; run `pnpm build` first");
@@ -99,7 +114,35 @@ async function startDetachedBroker(): Promise<void> {
     closeSync(logDescriptor);
   }
   await waitForBroker();
-  process.stdout.write(`Cyberdeck broker is running at ${brokerSocketPath}\n`);
+  if (announce) process.stdout.write(`Cyberdeck broker is running at ${brokerSocketPath}\n`);
+}
+
+function isBrokerUnavailable(error: unknown): boolean {
+  if (!(error instanceof Error) || !("code" in error)) return false;
+  return error.code === "ENOENT" || error.code === "ECONNREFUSED";
+}
+
+async function restartDetachedBroker(): Promise<void> {
+  try {
+    await withClient((client) => client.request("broker.shutdown", {}));
+    await waitForBrokerStop();
+  } catch (error) {
+    if (!isBrokerUnavailable(error)) throw error;
+  }
+  await startDetachedBroker(false);
+  process.stdout.write(`Cyberdeck broker restarted at ${brokerSocketPath}\n`);
+}
+
+async function runCyberdeck(): Promise<void> {
+  let client: RpcClient;
+  try {
+    client = await RpcClient.connect(brokerSocketPath);
+  } catch (error) {
+    if (!isBrokerUnavailable(error)) throw error;
+    await startDetachedBroker(false);
+    client = await RpcClient.connect(brokerSocketPath);
+  }
+  await runFleet(client);
 }
 
 async function runAttachment(sessionId: string, mode: "control" | "watch"): Promise<void> {
@@ -130,7 +173,14 @@ function sessionRequest(options: StartOptions, parentSessionId?: string) {
   };
 }
 
-export function createProgram(): Command {
+interface CreateProgramOptions {
+  runDefault?: () => Promise<void>;
+  restartBroker?: () => Promise<void>;
+}
+
+export function createProgram(options: CreateProgramOptions = {}): Command {
+  const runDefault = options.runDefault ?? runCyberdeck;
+  const restartBroker = options.restartBroker ?? restartDetachedBroker;
   const program = new Command()
     .name("cyberdeck")
     .version(CYBERDECK_VERSION)
@@ -138,7 +188,8 @@ export function createProgram(): Command {
     .addHelpText(
       "after",
       "\nTop-level Fable starts require an explicit human command; delegated Fable is refused before launch.\n",
-    );
+    )
+    .action(runDefault);
 
   const broker = program.command("broker").description("manage the durable broker process");
   broker.command("run").action(async () => {
@@ -153,6 +204,7 @@ export function createProgram(): Command {
     await withClient((client) => client.request("broker.shutdown", {}));
     process.stdout.write("Cyberdeck broker shutdown requested\n");
   });
+  broker.command("restart").description("gracefully replace the running broker").action(restartBroker);
 
   addSessionOptions(program.command("start").description("start a durable top-level session"), true)
     .action(async (options: StartOptions) => {
@@ -193,10 +245,7 @@ export function createProgram(): Command {
     .argument("<id>", "session UUID")
     .argument("<message>", "message to submit")
     .action(async (sessionId: string, message: string) => {
-      await withClient((client) => client.request("session.send", {
-        sessionId,
-        data: Buffer.from(`${message}\n`).toString("base64"),
-      }));
+      await withClient((client) => client.request("session.submit", { sessionId, message }));
     });
 
   program.command("stop")
@@ -220,7 +269,9 @@ export function createProgram(): Command {
     .argument("<id>", "session UUID")
     .action((sessionId: string) => runAttachment(sessionId, "watch"));
 
-  program.command("dashboard").action(async () => {
+  program.command("dashboard").action(runDefault);
+
+  program.command("diagnostics").action(async () => {
     const client = await RpcClient.connect(brokerSocketPath);
     await runDashboard(client);
   });
@@ -233,7 +284,9 @@ export function createProgram(): Command {
 }
 
 const invokedPath = process.argv[1] === undefined ? undefined : resolve(process.argv[1]);
-if (invokedPath === fileURLToPath(import.meta.url)) {
+const isMainModule = invokedPath !== undefined
+  && realpathSync(invokedPath) === realpathSync(fileURLToPath(import.meta.url));
+if (isMainModule) {
   await createProgram().parseAsync().catch((error) => {
     const prefix = error instanceof RpcError ? `${error.code}: ` : "";
     process.stderr.write(`${prefix}${error instanceof Error ? error.message : String(error)}\n`);

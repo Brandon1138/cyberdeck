@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createProgram } from "../src/cli.js";
 
 function quietCommand(name: string) {
@@ -7,6 +7,25 @@ function quietCommand(name: string) {
 }
 
 describe("Cyberdeck CLI", () => {
+  it("opens the fleet when invoked without a subcommand", async () => {
+    const runDefault = vi.fn(async () => {});
+
+    await createProgram({ runDefault }).parseAsync([], { from: "user" });
+
+    expect(runDefault).toHaveBeenCalledOnce();
+  });
+
+  it("exposes a graceful broker restart command", async () => {
+    const restartBroker = vi.fn(async () => {});
+    const program = createProgram({ restartBroker });
+    const broker = program.commands.find((candidate) => candidate.name() === "broker")!;
+    const restart = broker.commands.find((candidate) => candidate.name() === "restart")!;
+
+    await restart.parseAsync([], { from: "user" });
+
+    expect(restartBroker).toHaveBeenCalledOnce();
+  });
+
   it("requires explicit provider and cwd for start", async () => {
     await expect(
       quietCommand("start").parseAsync(["--cwd", "/tmp/repo"], { from: "user" }),

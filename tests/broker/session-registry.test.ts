@@ -20,7 +20,10 @@ class FakePty implements PtyHandle {
   write(data: Buffer): void { this.writes.push(Buffer.from(data)); }
   resize(): void {}
   snapshot(): Buffer { return Buffer.from("REPLAY"); }
-  kill(): void { this.killCount += 1; }
+  kill(): void {
+    this.killCount += 1;
+    this.emitExit(0);
+  }
   onOutput(listener: (chunk: Buffer) => void): () => void {
     this.outputListeners.add(listener);
     return () => this.outputListeners.delete(listener);
@@ -32,23 +35,38 @@ class FakePty implements PtyHandle {
   emitOutput(text: string): void {
     for (const listener of this.outputListeners) listener(Buffer.from(text));
   }
+  emitExit(exitCode = 0): void {
+    for (const listener of this.exitListeners) listener(exitCode);
+  }
 }
 
 const adapters: Record<"codex" | "claude", ProviderAdapter> = {
   codex: {
     id: "codex",
-    buildLaunchSpec: (session) => ({
+    buildLaunchSpec: (session, initialPrompt) => ({
       executable: "fake",
-      args: [session.provider],
+      args: [session.provider, ...(initialPrompt === undefined ? [] : [initialPrompt])],
+      cwd: session.cwd,
+      env: {},
+    }),
+    buildResumeSpec: (session) => ({
+      executable: "fake",
+      args: ["resume", session.id],
       cwd: session.cwd,
       env: {},
     }),
   },
   claude: {
     id: "claude",
-    buildLaunchSpec: (session) => ({
+    buildLaunchSpec: (session, initialPrompt) => ({
       executable: "fake",
-      args: [session.provider],
+      args: [session.provider, ...(initialPrompt === undefined ? [] : [initialPrompt])],
+      cwd: session.cwd,
+      env: { DISABLE_UPDATES: "1" },
+    }),
+    buildResumeSpec: (session) => ({
+      executable: "fake",
+      args: ["resume", session.id],
       cwd: session.cwd,
       env: { DISABLE_UPDATES: "1" },
     }),
@@ -65,7 +83,7 @@ function request(overrides: Partial<StartSessionRequest> = {}): StartSessionRequ
   };
 }
 
-function harness() {
+function harness(options: { failAttachJournal?: boolean } = {}) {
   const ptys: FakePty[] = [];
   const events: BrokerEvent[] = [];
   const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => {
@@ -76,7 +94,12 @@ function harness() {
   const registry = new SessionRegistry({
     adapters,
     ptyFactory,
-    journal: { append: async (event) => { events.push(event); } },
+    journal: { append: async (event) => {
+      if (options.failAttachJournal === true && event.type === "session.attached") {
+        throw new Error("journal unavailable");
+      }
+      events.push(event);
+    } },
     config: BrokerRuntimeConfigSchema.parse({}),
   });
   return { registry, ptys, events, ptyFactory };
@@ -87,6 +110,16 @@ describe("SessionRegistry", () => {
     const { registry } = harness();
     const record = await registry.start(request({ provider: "claude", model: "opus", role: "writer" }));
     expect(record).toMatchObject({ provider: "claude", model: "opus", role: "writer", pid: 1000 });
+  });
+
+  it("forwards an initial task to the provider without persisting it in the session record", async () => {
+    const { registry, ptyFactory } = harness();
+    const record = await registry.start(request(), "Inspect the failure");
+    expect(ptyFactory).toHaveBeenCalledWith(
+      expect.objectContaining({ args: ["codex", "Inspect the failure"] }),
+      expect.any(Number),
+    );
+    expect(record).not.toHaveProperty("initialPrompt");
   });
 
   it("allows one controller and multiple watchers and broadcasts output", async () => {
@@ -118,12 +151,86 @@ describe("SessionRegistry", () => {
     expect(ptys[0]!.killCount).toBe(0);
   });
 
+  it("releases attachments on provider exit and refuses to control a terminal PTY", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request());
+    const ended = vi.fn();
+    await registry.attach(record.id, "controller", "control", vi.fn(), ended);
+
+    ptys[0]!.emitExit(7);
+
+    expect(ended).toHaveBeenCalledWith(7);
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "failed",
+      attachmentState: "detached",
+      exitCode: 7,
+    });
+    await expect(registry.attach(record.id, "next", "control", vi.fn()))
+      .rejects.toMatchObject({ code: "SESSION_NOT_ACTIVE" });
+  });
+
+  it("rolls back a controller claim when attachment journaling fails", async () => {
+    const { registry } = harness({ failAttachJournal: true });
+    const record = await registry.start(request());
+
+    await expect(registry.attach(record.id, "controller", "control", vi.fn()))
+      .rejects.toThrow("journal unavailable");
+    expect(registry.get(record.id).attachmentState).toBe("detached");
+  });
+
   it("stops a session by killing its PTY exactly once", async () => {
     const { registry, ptys } = harness();
     const record = await registry.start(request());
     await registry.stop(record.id);
     await registry.stop(record.id);
     expect(ptys[0]!.killCount).toBe(1);
+  });
+
+  it("replaces a terminal PTY with the provider's exact resume command", async () => {
+    const { registry, ptys, ptyFactory, events } = harness();
+    const record = await registry.start(request());
+    await registry.stop(record.id);
+
+    const resumed = await registry.resume(record.id);
+
+    expect(resumed).toMatchObject({
+      id: record.id,
+      executionState: "active",
+      attachmentState: "detached",
+      exitCode: null,
+      pid: 1001,
+    });
+    expect(ptys).toHaveLength(2);
+    expect(ptyFactory.mock.calls[1]?.[0]).toMatchObject({ args: ["resume", record.id] });
+    expect(events.at(-1)).toMatchObject({ type: "session.resumed", sessionId: record.id });
+  });
+
+  it("submits a logical message through the selected provider adapter", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request());
+    await registry.submit(record.id, undefined, "ping");
+    expect(ptys[0]!.writes.at(-1)?.toString("utf8")).toBe("ping\n");
+  });
+
+  it("deletes only terminal sessions and journals the deletion", async () => {
+    const { registry, events } = harness();
+    const record = await registry.start(request());
+    await expect(registry.delete(record.id)).rejects.toMatchObject({ code: "SESSION_STILL_ACTIVE" });
+    await registry.stop(record.id);
+    await registry.delete(record.id);
+    expect(registry.list()).toEqual([]);
+    expect(events.at(-1)).toMatchObject({ type: "session.deleted", sessionId: record.id });
+  });
+
+  it("does not delete a parent while child thread records still exist", async () => {
+    const { registry } = harness();
+    const parent = await registry.start(request());
+    const child = await registry.start(request({ parentSessionId: parent.id }));
+    await registry.stop(parent.id);
+    await registry.stop(child.id);
+    await expect(registry.delete(parent.id)).rejects.toMatchObject({ code: "SESSION_HAS_CHILDREN" });
+    await registry.delete(child.id);
+    await expect(registry.delete(parent.id)).resolves.toBeUndefined();
   });
 
   it("records delegated children under their parent", async () => {

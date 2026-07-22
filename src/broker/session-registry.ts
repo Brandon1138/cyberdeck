@@ -22,6 +22,7 @@ export interface PtyHandle {
 export type PtyFactory = (spec: ProviderLaunchSpec, replayBytes: number) => PtyHandle;
 export type AttachmentMode = "control" | "watch";
 export type OutputSink = (chunk: Buffer) => void;
+export type ExitSink = (exitCode: number) => void;
 
 interface JournalLike {
   append(event: BrokerEvent): Promise<void>;
@@ -30,13 +31,19 @@ interface JournalLike {
 interface Controller {
   clientId: string;
   output: OutputSink;
+  ended: ExitSink;
+}
+
+interface Watcher {
+  output: OutputSink;
+  ended: ExitSink;
 }
 
 interface RuntimeSession {
   record: SessionRecord;
   pty: PtyHandle;
   controller?: Controller;
-  watchers: Map<string, OutputSink>;
+  watchers: Map<string, Watcher>;
   stopRequested: boolean;
 }
 
@@ -49,7 +56,15 @@ export interface SessionRegistryOptions {
 
 export class RegistryError extends Error {
   constructor(
-    readonly code: StartPolicyCode | "SESSION_NOT_FOUND" | "SESSION_ALREADY_CONTROLLED" | "NOT_SESSION_CONTROLLER",
+    readonly code:
+      | StartPolicyCode
+      | "SESSION_NOT_FOUND"
+      | "SESSION_ALREADY_CONTROLLED"
+      | "SESSION_NOT_ACTIVE"
+      | "SESSION_ALREADY_ACTIVE"
+      | "NOT_SESSION_CONTROLLER"
+      | "SESSION_STILL_ACTIVE"
+      | "SESSION_HAS_CHILDREN",
     message: string,
   ) {
     super(message);
@@ -62,7 +77,7 @@ export class SessionRegistry {
 
   constructor(private readonly options: SessionRegistryOptions) {}
 
-  async start(request: StartSessionRequest): Promise<SessionRecord> {
+  async start(request: StartSessionRequest, initialPrompt?: string): Promise<SessionRecord> {
     const parsed = StartSessionRequestSchema.parse(request);
     const ancestry = this.resolveAncestry(parsed.parentSessionId);
     const decision = evaluateStart(parsed, ancestry, {
@@ -89,7 +104,7 @@ export class SessionRegistry {
     };
     const adapter = this.options.adapters[parsed.provider];
     const pty = this.options.ptyFactory(
-      adapter.buildLaunchSpec(provisional),
+      adapter.buildLaunchSpec(provisional, initialPrompt),
       this.options.config.replayBytes,
     );
     const record: SessionRecord = {
@@ -144,19 +159,30 @@ export class SessionRegistry {
     clientId: string,
     mode: AttachmentMode,
     output: OutputSink,
+    ended: ExitSink = () => {},
   ): Promise<Buffer> {
     const runtime = this.requireRuntime(sessionId);
+    if (runtime.record.executionState !== "active") {
+      throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active; resume it before attaching");
+    }
     if (mode === "control") {
       if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
         throw new RegistryError("SESSION_ALREADY_CONTROLLED", "Session already has a controller");
       }
-      runtime.controller = { clientId, output };
+      runtime.controller = { clientId, output, ended };
       runtime.watchers.delete(clientId);
     } else {
-      runtime.watchers.set(clientId, output);
+      runtime.watchers.set(clientId, { output, ended });
     }
     this.updateAttachmentState(runtime);
-    await this.appendEvent("session.attached", sessionId, { clientId, mode });
+    try {
+      await this.appendEvent("session.attached", sessionId, { clientId, mode });
+    } catch (error) {
+      if (runtime.controller?.clientId === clientId) delete runtime.controller;
+      runtime.watchers.delete(clientId);
+      this.updateAttachmentState(runtime);
+      throw error;
+    }
     return runtime.pty.snapshot();
   }
 
@@ -183,6 +209,9 @@ export class SessionRegistry {
 
   async write(sessionId: string, clientId: string | undefined, data: Buffer): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
+    if (runtime.record.executionState !== "active") {
+      throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
+    }
     if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
       throw new RegistryError("NOT_SESSION_CONTROLLER", "Another client controls this session");
     }
@@ -190,8 +219,18 @@ export class SessionRegistry {
     await this.appendEvent("session.input", sessionId, { bytes: data.length });
   }
 
+  async submit(sessionId: string, clientId: string | undefined, message: string): Promise<void> {
+    const runtime = this.requireRuntime(sessionId);
+    const adapter = this.options.adapters[runtime.record.provider];
+    const data = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
+    await this.write(sessionId, clientId, data);
+  }
+
   resize(sessionId: string, clientId: string | undefined, cols: number, rows: number): void {
     const runtime = this.requireRuntime(sessionId);
+    if (runtime.record.executionState !== "active") {
+      throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
+    }
     if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
       throw new RegistryError("NOT_SESSION_CONTROLLER", "Another client controls this session");
     }
@@ -216,6 +255,66 @@ export class SessionRegistry {
     for (const sessionId of this.sessions.keys()) {
       await this.stop(sessionId);
     }
+  }
+
+  async resume(sessionId: string): Promise<SessionRecord> {
+    const runtime = this.requireRuntime(sessionId);
+    if (runtime.record.executionState === "active" || runtime.record.executionState === "starting") {
+      throw new RegistryError("SESSION_ALREADY_ACTIVE", "Session is already active");
+    }
+
+    const adapter = this.options.adapters[runtime.record.provider];
+    const pty = this.options.ptyFactory(
+      adapter.buildResumeSpec(this.cloneRecord(runtime.record)),
+      this.options.config.replayBytes,
+    );
+    runtime.pty = pty;
+    runtime.stopRequested = false;
+    delete runtime.controller;
+    runtime.watchers.clear();
+    runtime.record.pid = pty.pid;
+    runtime.record.executionState = "active";
+    runtime.record.attachmentState = "detached";
+    runtime.record.exitCode = null;
+    runtime.record.updatedAt = new Date().toISOString();
+    pty.onOutput((chunk) => this.broadcast(runtime, chunk));
+    pty.onExit((exitCode, signal) => this.handleExit(runtime, exitCode, signal));
+    await this.appendEvent("session.resumed", sessionId, {
+      provider: runtime.record.provider,
+      model: runtime.record.model ?? null,
+      pid: runtime.record.pid,
+    });
+    return this.cloneRecord(runtime.record);
+  }
+
+  async delete(sessionId: string): Promise<void> {
+    const runtime = this.requireRuntime(sessionId);
+    if (
+      runtime.record.executionState === "active"
+      || runtime.record.executionState === "starting"
+      || runtime.record.exitCode === null
+    ) {
+      throw new RegistryError("SESSION_STILL_ACTIVE", "Stop the agent before deleting its thread");
+    }
+    const existingChildren = runtime.record.childIds.filter((childId) => this.sessions.has(childId));
+    if (existingChildren.length > 0) {
+      throw new RegistryError(
+        "SESSION_HAS_CHILDREN",
+        "Delete this thread's child agents before deleting the parent thread",
+      );
+    }
+
+    await this.appendEvent("session.deleted", sessionId, {
+      executionState: runtime.record.executionState,
+    });
+    if (runtime.record.parentSessionId !== undefined) {
+      const parent = this.sessions.get(runtime.record.parentSessionId);
+      if (parent !== undefined) {
+        parent.record.childIds = parent.record.childIds.filter((childId) => childId !== sessionId);
+        parent.record.updatedAt = new Date().toISOString();
+      }
+    }
+    this.sessions.delete(sessionId);
   }
 
   private activeSessionCount(): number {
@@ -258,9 +357,10 @@ export class SessionRegistry {
   }
 
   private broadcast(runtime: RuntimeSession, chunk: Buffer): void {
+    runtime.record.updatedAt = new Date().toISOString();
     runtime.controller?.output(chunk);
-    for (const output of runtime.watchers.values()) {
-      output(chunk);
+    for (const watcher of runtime.watchers.values()) {
+      watcher.output(chunk);
     }
   }
 
@@ -271,7 +371,14 @@ export class SessionRegistry {
         ? "exited"
         : "failed";
     runtime.record.exitCode = exitCode;
+    const controller = runtime.controller;
+    const watchers = [...runtime.watchers.values()];
+    delete runtime.controller;
+    runtime.watchers.clear();
+    runtime.record.attachmentState = "detached";
     runtime.record.updatedAt = new Date().toISOString();
+    controller?.ended(exitCode);
+    for (const watcher of watchers) watcher.ended(exitCode);
     void this.appendEvent("session.exited", runtime.record.id, {
       exitCode,
       signal: signal ?? null,

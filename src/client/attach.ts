@@ -36,6 +36,8 @@ export interface AttachSessionOptions {
   input?: TerminalInput;
   output?: TerminalOutput;
   signals?: SignalSource;
+  /** Keep a shared transport alive when returning to an enclosing client such as the fleet. */
+  closeTransport?: boolean;
 }
 
 export async function attachSession(options: AttachSessionOptions): Promise<number> {
@@ -51,9 +53,14 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
     const previousRawMode = input.isRaw === true;
     let replayWritten = false;
     let rawModeChanged = false;
+    let attachmentClaimed = false;
     let finished = false;
 
     const onFrame = (frame: ServerFrame) => {
+      if (frame.type === "session-ended" && frame.sessionId === options.sessionId) {
+        finish(0, false);
+        return;
+      }
       if (frame.type !== "output" || frame.sessionId !== options.sessionId) return;
       const chunk = Buffer.from(frame.data, "base64");
       if (!replayWritten) liveBeforeReplay.push(chunk);
@@ -70,7 +77,7 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
       signals.off("SIGWINCH", onResize);
       input.pause?.();
       if (rawModeChanged) input.setRawMode?.(previousRawMode);
-      options.transport.close();
+      if (options.closeTransport !== false) options.transport.close();
     };
 
     const finish = (code: number, sendDetach: boolean) => {
@@ -84,7 +91,13 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
 
     const onInput = (value: Buffer | string) => {
       const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
-      const detachIndex = chunk.indexOf(0x1d);
+      const controlDetachIndex = chunk.indexOf(0x1d);
+      const leftArrowIndex = chunk.indexOf(Buffer.from("\u001b[D"));
+      const detachIndex = controlDetachIndex === -1
+        ? leftArrowIndex
+        : leftArrowIndex === -1
+          ? controlDetachIndex
+          : Math.min(controlDetachIndex, leftArrowIndex);
       const forwarded = detachIndex === -1 ? chunk : chunk.subarray(0, detachIndex);
       if (forwarded.length > 0) {
         options.transport.sendFrame({
@@ -113,6 +126,7 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
     void options.transport.request<{ data: string }>(method, { sessionId: options.sessionId })
       .then(({ data }) => {
         if (finished) return;
+        attachmentClaimed = true;
         output.write(Buffer.from(data, "base64"));
         replayWritten = true;
         for (const chunk of liveBeforeReplay) output.write(chunk);
@@ -124,9 +138,13 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
           input.on("data", onInput);
           signals.on("SIGWINCH", onResize);
           input.resume?.();
+          onResize();
         }
       })
       .catch((error: unknown) => {
+        if (attachmentClaimed) {
+          options.transport.sendFrame({ type: "detach", sessionId: options.sessionId });
+        }
         cleanup();
         reject(error);
       });

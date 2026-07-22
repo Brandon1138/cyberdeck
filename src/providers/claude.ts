@@ -12,7 +12,11 @@ import type { ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
 export class ClaudeProviderAdapter implements ProviderAdapter {
   readonly id = "claude" as const;
 
-  buildLaunchSpec(session: SessionRecord): ProviderLaunchSpec {
+  submitInput(message: string): Buffer {
+    return Buffer.from(`${message}\r`);
+  }
+
+  buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec {
     // The session registry evaluates this call as the argument to its pty factory, so throwing here
     // fails the launch before any process is constructed. An omitted model is unsafe rather than
     // implicitly ordinary: the recorded native default displayed Fable.
@@ -33,7 +37,31 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     if (session.model !== undefined) {
       args.push("--model", session.model);
     }
+    if (initialPrompt !== undefined) {
+      args.push("--", initialPrompt);
+    }
 
+    return {
+      executable: "claude",
+      args,
+      cwd: session.cwd,
+      env: { ...process.env, DISABLE_UPDATES: "1" },
+    };
+  }
+
+  buildResumeSpec(session: SessionRecord): ProviderLaunchSpec {
+    const safety = evaluateClaudeLaunchSafety(this.id, session.model);
+    if (!safety.safe) throw new ClaudeLaunchSafetyError(safety.code);
+
+    const args = [
+      "--resume",
+      session.id,
+      "--name",
+      session.name ?? session.id,
+      "--permission-mode",
+      claudePermissionMode(session.sandbox),
+    ];
+    if (session.model !== undefined) args.push("--model", session.model);
     return {
       executable: "claude",
       args,

@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
@@ -42,6 +45,56 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args).toContain("-m");
     expect(spec.args).toContain("opus");
   });
+
+  it("passes a new thread's initial task as one positional argument", () => {
+    const spec = new CodexProviderAdapter().buildLaunchSpec(session(), "Inspect the failure\nthen fix it");
+    expect(spec.args.slice(-2)).toEqual(["--", "Inspect the failure\nthen fix it"]);
+  });
+
+  it("encodes one logical submit using Codex's negotiated terminal Enter key", () => {
+    expect(new CodexProviderAdapter().submitInput("ping").toString("utf8"))
+      .toBe("ping\u001b[13u");
+  });
+
+  it("resumes the exact Codex conversation resolved from native session metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-codex-sessions-"));
+    const createdAt = "2026-07-21T22:55:21.806Z";
+    const day = join(root, "2026", "07", "22");
+    const nativeId = "019f86e4-16e4-7c61-9ee7-76b8b83b1017";
+    await mkdir(day, { recursive: true });
+    await writeFile(join(day, `rollout-${nativeId}.jsonl`), `${JSON.stringify({
+      timestamp: "2026-07-21T22:55:22.866Z",
+      type: "session_meta",
+      payload: {
+        id: nativeId,
+        timestamp: "2026-07-21T22:55:22.866Z",
+        cwd: "/tmp/repo",
+        originator: "codex-tui",
+      },
+    })}\n`);
+
+    const spec = new CodexProviderAdapter({ sessionsDirectory: root }).buildResumeSpec(session({
+      createdAt,
+      executionState: "exited",
+      exitCode: 0,
+      model: "gpt-test",
+    }));
+
+    expect(spec.executable).toBe("codex");
+    expect(spec.args).toEqual([
+      "resume",
+      "--no-alt-screen",
+      "-C",
+      "/tmp/repo",
+      "-s",
+      "read-only",
+      "-a",
+      "on-request",
+      "-m",
+      "gpt-test",
+      nativeId,
+    ]);
+  });
 });
 
 // Claude's launch safety, headless path, and stream decoding are covered in depth by
@@ -75,5 +128,40 @@ describe("ClaudeProviderAdapter", () => {
       session({ provider: "claude", name: "proof", model: "sonnet" }),
     );
     expect(spec.args.slice(-2)).toEqual(["--model", "sonnet"]);
+  });
+
+  it("passes a new thread's initial task as one positional argument", () => {
+    const spec = new ClaudeProviderAdapter().buildLaunchSpec(
+      session({ provider: "claude", name: "proof", model: "sonnet" }),
+      "Inspect the failure\nthen fix it",
+    );
+    expect(spec.args.slice(-2)).toEqual(["--", "Inspect the failure\nthen fix it"]);
+  });
+
+  it("encodes one logical submit using Claude's terminal Enter key", () => {
+    expect(new ClaudeProviderAdapter().submitInput("ping").toString("utf8")).toBe("ping\r");
+  });
+
+  it("resumes the exact Claude conversation using the UUID Cyberdeck assigned at launch", () => {
+    const record = session({
+      provider: "claude",
+      name: "claude-haiku-ping",
+      model: "haiku",
+      executionState: "cancelled",
+      exitCode: 129,
+    });
+    const spec = new ClaudeProviderAdapter().buildResumeSpec(record);
+
+    expect(spec.executable).toBe("claude");
+    expect(spec.args).toEqual([
+      "--resume",
+      record.id,
+      "--name",
+      "claude-haiku-ping",
+      "--permission-mode",
+      "plan",
+      "--model",
+      "haiku",
+    ]);
   });
 });

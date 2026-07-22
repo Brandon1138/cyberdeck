@@ -61,6 +61,12 @@ export const OutputFrameSchema = z.object({
   data: z.string(),
 });
 
+export const SessionEndedFrameSchema = z.object({
+  type: z.literal("session-ended"),
+  sessionId: z.uuid(),
+  exitCode: z.number().int(),
+});
+
 export const EventFrameSchema = z.object({
   type: z.literal("event"),
   event: BrokerEventSchema,
@@ -75,6 +81,7 @@ export const ProtocolErrorFrameSchema = z.object({
 export const ServerFrameSchema = z.union([
   ResponseFrameSchema,
   OutputFrameSchema,
+  SessionEndedFrameSchema,
   EventFrameSchema,
   ProtocolErrorFrameSchema,
 ]);
@@ -85,6 +92,7 @@ export type RequestFrame = z.infer<typeof RequestFrameSchema>;
 export type ClientFrame = z.infer<typeof ClientFrameSchema>;
 export type ResponseFrame = z.infer<typeof ResponseFrameSchema>;
 export type OutputFrame = z.infer<typeof OutputFrameSchema>;
+export type SessionEndedFrame = z.infer<typeof SessionEndedFrameSchema>;
 export type ProtocolErrorFrame = z.infer<typeof ProtocolErrorFrameSchema>;
 export type ServerFrame = z.infer<typeof ServerFrameSchema>;
 export type WireFrame = z.infer<typeof WireFrameSchema>;

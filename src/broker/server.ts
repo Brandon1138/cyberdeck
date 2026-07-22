@@ -17,6 +17,10 @@ import { RegistryError, type AttachmentMode, type SessionRegistry } from "./sess
 
 const SessionIdParamsSchema = z.object({ sessionId: z.uuid() });
 const SendParamsSchema = SessionIdParamsSchema.extend({ data: z.string() });
+const SubmitParamsSchema = SessionIdParamsSchema.extend({ message: z.string().min(1) });
+const StartSessionWithPromptParamsSchema = StartSessionRequestSchema.extend({
+  initialPrompt: z.string().trim().min(1),
+});
 const AttachParamsSchema = SessionIdParamsSchema;
 
 interface ConnectionContext {
@@ -161,6 +165,10 @@ export class BrokerServer {
     switch (frame.method) {
       case "session.start":
         return this.options.registry.start(StartSessionRequestSchema.parse(frame.params));
+      case "session.startWithPrompt": {
+        const { initialPrompt, ...request } = StartSessionWithPromptParamsSchema.parse(frame.params);
+        return this.options.registry.start(request, initialPrompt);
+      }
       case "session.list":
         return this.options.registry.list();
       case "session.snapshot": {
@@ -171,6 +179,24 @@ export class BrokerServer {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         await this.options.registry.stop(sessionId);
         return { stopped: true };
+      }
+      case "session.resume": {
+        const { sessionId } = SessionIdParamsSchema.parse(frame.params);
+        return this.options.registry.resume(sessionId);
+      }
+      case "session.delete": {
+        const { sessionId } = SessionIdParamsSchema.parse(frame.params);
+        await this.options.registry.delete(sessionId);
+        return { deleted: true };
+      }
+      case "session.submit": {
+        const { sessionId, message } = SubmitParamsSchema.parse(frame.params);
+        if (context.attachments.get(sessionId) === "watch") {
+          throw new RegistryError("NOT_SESSION_CONTROLLER", "Watch clients are read-only");
+        }
+        const clientId = context.attachments.get(sessionId) === "control" ? context.id : undefined;
+        await this.options.registry.submit(sessionId, clientId, message);
+        return { submitted: true };
       }
       case "session.send": {
         const { sessionId, data } = SendParamsSchema.parse(frame.params);
@@ -250,15 +276,29 @@ export class BrokerServer {
     sessionId: string,
     mode: AttachmentMode,
   ): Promise<unknown> {
-    const replay = await this.options.registry.attach(sessionId, context.id, mode, (chunk) => {
-      this.send(context.socket, {
-        type: "output",
-        sessionId,
-        data: chunk.toString("base64"),
-      });
-    });
     context.attachments.set(sessionId, mode);
-    return { session: this.options.registry.get(sessionId), data: replay.toString("base64") };
+    try {
+      const replay = await this.options.registry.attach(
+        sessionId,
+        context.id,
+        mode,
+        (chunk) => {
+          this.send(context.socket, {
+            type: "output",
+            sessionId,
+            data: chunk.toString("base64"),
+          });
+        },
+        (exitCode) => {
+          context.attachments.delete(sessionId);
+          this.send(context.socket, { type: "session-ended", sessionId, exitCode });
+        },
+      );
+      return { session: this.options.registry.get(sessionId), data: replay.toString("base64") };
+    } catch (error) {
+      context.attachments.delete(sessionId);
+      throw error;
+    }
   }
 
   private send(socket: Socket, frame: unknown): void {
