@@ -37,7 +37,10 @@ Fable has one narrow policy boundary: a top-level Fable start is allowed only as
 
 Cyberdeck supplies `DISABLE_UPDATES=1` to every Claude process. It otherwise preserves the native provider's model behavior. In particular, an omitted model is not proof that the native default is non-Fable; the operator must know or explicitly choose the intended provider model.
 
-Phase 1 contains no role catalog, model recommendation, workflow, automatic fallback, semantic memory, worktree orchestration, Cursor adapter, or Antigravity adapter. Those omissions keep the broker neutral and avoid encoding future assignments as current product policy.
+The original Phase 1 contained no role catalog, model recommendation, workflow, automatic fallback,
+or semantic memory. Later orchestration layers preserve the same neutrality: a role remains opaque,
+while typed orchestrator bindings and capability grants carry actual authority. Cyberdeck still does
+not rank providers, infer models, or route to fallbacks.
 
 ## Process ownership and tmux
 
@@ -51,11 +54,37 @@ Durability in Phase 1 means a session survives client detach, terminal closure, 
 
 The broker is still the process owner. If the broker dies or is deliberately shut down, its active PTYs and provider processes end. Phase 1 does not reconstruct a live PTY after broker failure or restart.
 
+## Durable thread feed
+
+The PTY replay buffer remains bounded presentation state. A separate append-only thread transcript
+stores prompts, provider output, orchestrator instructions, and lifecycle events under the local
+Cyberdeck state directory. Every event receives a global monotonic cursor. An orchestrator reads
+only events after its previous cursor instead of scraping panes or diffing terminal screens.
+
+Prompt bodies deliberately do not enter the metadata journal, but they do enter this local
+transcript. The transcript file is created with user-only permissions. This privacy boundary is
+required for durable summaries after the operator returns.
+
+## Orchestrator and agent authority
+
+An orchestrator binding references a normal broker-owned provider session and separately records its
+provider, model, scope, and capability grant. The free-form `role` string grants nothing. The stdio
+MCP adapter carries the calling session ID to broker RPC, where scope and capability are checked.
+
+Worker steering passes through a durable instruction queue. A human control attachment has absolute
+writer priority. If a controller exists, the message remains queued; controller release causes the
+broker to retry complete logical messages in FIFO order. No orchestration path emits tmux
+`send-keys`.
+
+Workflow messages are passive mailbox entries unless `wake` is explicitly true. Workflow
+membership, message IDs, causal hops, maximum messages, maximum wake turns, and cancellation are
+persisted and broker-enforced. Cancelling a workflow does not stop its participants.
+
 ## Cockpit presentation
 
-Everything above describes process ownership and remains unchanged. The v1 cockpit adds an
-interactive fleet projection plus explicit deletion of terminal thread records. It does not move
-provider ownership into tmux.
+Everything above describes process ownership and remains unchanged. The cockpit projects the
+interactive Fleet beside a controlling attachment to the selected broker-owned orchestrator. It does
+not move provider ownership into tmux.
 
 ### Fleet and diagnostics
 

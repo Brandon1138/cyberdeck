@@ -1,0 +1,114 @@
+import {
+  EnsureOrchestratorRequestSchema,
+  orchestratorKey,
+  type EnsureOrchestratorRequest,
+  type OrchestratorBinding,
+  type OrchestratorScope,
+} from "../domain/orchestrator.js";
+import type { SessionRecord } from "../domain/session.js";
+import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import type { SessionRegistry } from "../broker/session-registry.js";
+
+export interface OrchestratorManagerResult {
+  binding: OrchestratorBinding;
+  session: SessionRecord;
+}
+
+export class OrchestratorManager {
+  constructor(
+    private readonly registry: SessionRegistry,
+    private readonly store: OrchestratorStore,
+  ) {}
+
+  async ensure(input: EnsureOrchestratorRequest): Promise<OrchestratorManagerResult> {
+    const request = EnsureOrchestratorRequestSchema.parse(input);
+    const scope: OrchestratorScope = request.scope === "fleet"
+      ? { kind: "fleet" }
+      : { kind: "workspace", cwd: request.cwd };
+    const key = orchestratorKey(scope);
+    const existing = await this.store.get(key);
+    if (existing !== undefined && request.provider === undefined) {
+      const session = await this.resumeExisting(existing);
+      if (session === undefined) {
+        throw Object.assign(
+          new Error("The configured orchestrator is not owned by this broker; choose its provider again"),
+          { code: "ORCHESTRATOR_REBIND_REQUIRED" },
+        );
+      }
+      return { binding: existing, session };
+    }
+    if (request.provider === undefined) {
+      throw Object.assign(
+        new Error("No orchestrator is configured for this scope; name an explicit provider"),
+        { code: "ORCHESTRATOR_PROVIDER_REQUIRED" },
+      );
+    }
+    if (
+      existing !== undefined
+      && existing.provider === request.provider
+      && existing.model === request.model
+    ) {
+      const session = await this.resumeExisting(existing);
+      if (session !== undefined) return { binding: existing, session };
+    }
+
+    const session = await this.registry.start({
+      provider: request.provider,
+      ...(request.model === undefined ? {} : { model: request.model }),
+      cwd: request.cwd,
+      detached: true,
+      sandbox: "read-only",
+      role: "orchestrator",
+      kind: "orchestrator",
+      name: `Cyberdeck orchestrator (${request.provider}${request.model === undefined ? "" : `:${request.model}`})`,
+    }, orchestratorPrompt(scope));
+    const now = new Date().toISOString();
+    const binding: OrchestratorBinding = {
+      key,
+      sessionId: session.id,
+      provider: request.provider,
+      ...(request.model === undefined ? {} : { model: request.model }),
+      cwd: request.cwd,
+      sandbox: "read-only",
+      scope,
+      grant: {
+        subjectSessionId: session.id,
+        capabilities: ["thread.list", "thread.read", "thread.enqueue", "worker.start", "workflow.run"],
+        scope,
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    await this.store.put(binding);
+    return { binding, session };
+  }
+
+  async get(cwd: string, scopeKind: "workspace" | "fleet"): Promise<OrchestratorManagerResult | undefined> {
+    const scope: OrchestratorScope = scopeKind === "fleet" ? { kind: "fleet" } : { kind: "workspace", cwd };
+    const binding = await this.store.get(orchestratorKey(scope));
+    if (binding === undefined) return undefined;
+    const session = await this.resumeExisting(binding);
+    return session === undefined ? undefined : { binding, session };
+  }
+
+  private async resumeExisting(binding: OrchestratorBinding): Promise<SessionRecord | undefined> {
+    try {
+      const session = this.registry.get(binding.sessionId);
+      if (session.executionState === "active" || session.executionState === "starting") return session;
+      return this.registry.resume(binding.sessionId);
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function orchestratorPrompt(scope: OrchestratorScope): string {
+  const description = scope.kind === "fleet" ? "the full Cyberdeck fleet" : `threads in ${scope.cwd}`;
+  return [
+    "You are the user's Cyberdeck orchestrator.",
+    `Your authority is scoped to ${description}.`,
+    "Use Cyberdeck's semantic tools to inspect changes, summarize workers, and enqueue complete instructions.",
+    "Never manipulate tmux panes or type through tmux send-keys.",
+    "Do not stop, delete, or widen a worker's permissions without explicit human approval.",
+  ].join(" ");
+}

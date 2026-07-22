@@ -5,6 +5,7 @@ import type { StartSessionRequest } from "../../src/domain/session.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import type { PtyHandle } from "../../src/broker/session-registry.js";
+import type { AppendThreadEvent } from "../../src/persistence/thread-transcript-store.js";
 
 class FakePty implements PtyHandle {
   readonly pid: number;
@@ -86,6 +87,7 @@ function request(overrides: Partial<StartSessionRequest> = {}): StartSessionRequ
 function harness(options: { failAttachJournal?: boolean } = {}) {
   const ptys: FakePty[] = [];
   const events: BrokerEvent[] = [];
+  const transcripts: AppendThreadEvent[] = [];
   const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => {
     const pty = new FakePty(1000 + ptys.length);
     ptys.push(pty);
@@ -100,9 +102,13 @@ function harness(options: { failAttachJournal?: boolean } = {}) {
       }
       events.push(event);
     } },
+    transcripts: { append: async (event: AppendThreadEvent) => {
+      transcripts.push(event);
+      return {} as never;
+    } } as never,
     config: BrokerRuntimeConfigSchema.parse({}),
   });
-  return { registry, ptys, events, ptyFactory };
+  return { registry, ptys, events, transcripts, ptyFactory };
 }
 
 describe("SessionRegistry", () => {
@@ -113,13 +119,19 @@ describe("SessionRegistry", () => {
   });
 
   it("forwards an initial task to the provider without persisting it in the session record", async () => {
-    const { registry, ptyFactory } = harness();
+    const { registry, ptyFactory, transcripts } = harness();
     const record = await registry.start(request(), "Inspect the failure");
     expect(ptyFactory).toHaveBeenCalledWith(
       expect.objectContaining({ args: ["codex", "Inspect the failure"] }),
       expect.any(Number),
     );
     expect(record).not.toHaveProperty("initialPrompt");
+    expect(transcripts).toContainEqual(expect.objectContaining({
+      sessionId: record.id,
+      kind: "prompt",
+      source: "human",
+      text: "Inspect the failure",
+    }));
   });
 
   it("allows one controller and multiple watchers and broadcasts output", async () => {
@@ -206,10 +218,29 @@ describe("SessionRegistry", () => {
   });
 
   it("submits a logical message through the selected provider adapter", async () => {
-    const { registry, ptys } = harness();
+    const { registry, ptys, transcripts } = harness();
     const record = await registry.start(request());
     await registry.submit(record.id, undefined, "ping");
     expect(ptys[0]!.writes.at(-1)?.toString("utf8")).toBe("ping\n");
+    expect(transcripts).toContainEqual(expect.objectContaining({ kind: "prompt", text: "ping" }));
+  });
+
+  it("never lets an orchestrator instruction write through a human controller", async () => {
+    const { registry, ptys, transcripts } = harness();
+    const record = await registry.start(request());
+    await registry.attach(record.id, "human", "control", vi.fn());
+
+    await expect(registry.submitInstruction(record.id, "queued instruction"))
+      .rejects.toMatchObject({ code: "SESSION_BUSY" });
+    expect(ptys[0]!.writes).toEqual([]);
+    await registry.detach(record.id, "human");
+    await expect(registry.submitInstruction(record.id, "queued instruction")).resolves.toBeUndefined();
+    expect(ptys[0]!.writes.at(-1)?.toString()).toBe("queued instruction\n");
+    expect(transcripts).toContainEqual(expect.objectContaining({
+      kind: "instruction",
+      source: "orchestrator",
+      text: "queued instruction",
+    }));
   });
 
   it("deletes only terminal sessions and journals the deletion", async () => {

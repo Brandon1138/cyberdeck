@@ -15,3 +15,8 @@ export interface ProviderAdapter {
   /** Encode one logical prompt submission for the provider's negotiated interactive terminal. */
   submitInput?(message: string): Buffer;
 }
+
+export interface CyberdeckMcpLaunch {
+  nodePath: string;
+  cliPath: string;
+}

@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { spawnSync as nodeSpawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 export type SpawnSyncLike = (
   command: string,
@@ -9,6 +10,8 @@ export type SpawnSyncLike = (
 
 export interface CockpitOptions {
   cliPath: string;
+  cwd: string;
+  orchestratorSessionId: string;
   nodePath?: string;
   spawnSync?: SpawnSyncLike;
 }
@@ -37,28 +40,49 @@ export function launchCockpit(options: CockpitOptions): void {
   const spawnSync = options.spawnSync ?? (nodeSpawnSync as SpawnSyncLike);
   const nodePath = options.nodePath ?? process.execPath;
   const cliPath = resolve(options.cliPath);
-  const hasSession = spawnSync("tmux", ["has-session", "-t", "cyberdeck"], { stdio: "ignore" });
+  const version = spawnSync("tmux", ["-V"], { encoding: "utf8" });
+  if (version.status !== 0) {
+    throw Object.assign(
+      new Error("Native tmux is required for `cyberdeck cockpit`; install tmux and retry"),
+      { code: "TMUX_NOT_AVAILABLE" },
+    );
+  }
+  const sessionName = cockpitSessionName(options.cwd);
+  const hasSession = spawnSync("tmux", ["has-session", "-t", sessionName], { stdio: "ignore" });
 
   if (hasSession.status !== 0) {
     requireSuccess(spawnSync("tmux", [
       "new-session",
       "-d",
       "-s",
-      "cyberdeck",
+      sessionName,
       nodePath,
       cliPath,
       "dashboard",
     ], { stdio: "ignore" }), "create cyberdeck tmux session");
     requireSuccess(
-      spawnSync("tmux", ["split-window", "-h", "-t", "cyberdeck"], { stdio: "ignore" }),
-      "create cockpit shell pane",
+      spawnSync("tmux", [
+        "split-window",
+        "-h",
+        "-t",
+        sessionName,
+        nodePath,
+        cliPath,
+        "attach",
+        options.orchestratorSessionId,
+      ], { stdio: "ignore" }),
+      "create orchestrator attachment pane",
     );
   }
 
   requireSuccess(
-    spawnSync("tmux", ["attach-session", "-t", "cyberdeck"], { stdio: "inherit" }),
+    spawnSync("tmux", ["attach-session", "-t", sessionName], { stdio: "inherit" }),
     "attach cyberdeck tmux session",
   );
+}
+
+export function cockpitSessionName(cwd: string): string {
+  return `cyberdeck-${createHash("sha256").update(resolve(cwd)).digest("hex").slice(0, 10)}`;
 }
 
 /**

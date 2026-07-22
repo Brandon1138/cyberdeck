@@ -2,7 +2,7 @@ import type { SessionRecord } from "../domain/session.js";
 import { evaluateClaudeLaunchSafety } from "../domain/policy.js";
 import { ClaudeLaunchSafetyError } from "./claude/headless-command.js";
 import { claudePermissionMode } from "./claude/permissions.js";
-import type { ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
+import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
 
 /**
  * Claude's durable interactive (PTY) launch. The bounded/headless path lives in
@@ -11,6 +11,8 @@ import type { ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
  */
 export class ClaudeProviderAdapter implements ProviderAdapter {
   readonly id = "claude" as const;
+
+  constructor(private readonly options: { mcp?: CyberdeckMcpLaunch } = {}) {}
 
   submitInput(message: string): Buffer {
     return Buffer.from(`${message}\r`);
@@ -37,6 +39,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     if (session.model !== undefined) {
       args.push("--model", session.model);
     }
+    this.addCyberdeckMcp(args, session);
     if (initialPrompt !== undefined) {
       args.push("--", initialPrompt);
     }
@@ -62,11 +65,25 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       claudePermissionMode(session.sandbox),
     ];
     if (session.model !== undefined) args.push("--model", session.model);
+    this.addCyberdeckMcp(args, session);
     return {
       executable: "claude",
       args,
       cwd: session.cwd,
       env: { ...process.env, DISABLE_UPDATES: "1" },
     };
+  }
+
+  private addCyberdeckMcp(args: string[], session: SessionRecord): void {
+    if (session.kind === undefined || this.options.mcp === undefined) return;
+    args.push("--mcp-config", JSON.stringify({
+      mcpServers: {
+        cyberdeck: {
+          type: "stdio",
+          command: this.options.mcp.nodePath,
+          args: [this.options.mcp.cliPath, "mcp", "--actor-session", session.id],
+        },
+      },
+    }));
   }
 }

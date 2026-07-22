@@ -91,6 +91,17 @@ const HORIZONTAL_CURSOR_SEQUENCE = /\u001b\[(?:\d+)?[CG]/gu;
 const CSI_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/gu;
 const OTHER_ESCAPE = /\u001b(?:[()][0-9A-Z]|[@-_])/gu;
 const BRAILLE_SPINNER = /^[\u2800-\u28ff]/u;
+const DISABLE_INHERITED_TERMINAL_INPUT_MODES = [
+  "\u001b[?1000l", // basic mouse tracking
+  "\u001b[?1002l", // button-event mouse tracking
+  "\u001b[?1003l", // any-event mouse tracking
+  "\u001b[?1004l", // focus events
+  "\u001b[?1006l", // SGR mouse encoding
+  "\u001b[?1015l", // urxvt mouse encoding
+  "\u001b[?1016l", // SGR pixel mouse encoding
+].join("");
+const ENTER_FLEET_SCREEN = `${DISABLE_INHERITED_TERMINAL_INPUT_MODES}\u001b[?1049h\u001b[?25l`;
+const LEAVE_FLEET_SCREEN = `${DISABLE_INHERITED_TERMINAL_INPUT_MODES}\u001b[?25h\u001b[?1049l`;
 
 const ANSI = {
   reset: "\u001b[0m",
@@ -367,6 +378,8 @@ export async function runFleet(
   let attaching = false;
   let wake: (() => void) | undefined;
   let inputQueue = Promise.resolve();
+  const keyDecoder = new FleetKeyDecoder();
+  let decoderFlushTimer: ReturnType<typeof setTimeout> | undefined;
   const notify = () => { wake?.(); };
   const stop = () => {
     stopped = true;
@@ -378,10 +391,12 @@ export async function runFleet(
   const openNativeThread = async (sessionId: string) => {
     attaching = true;
     notify();
+    keyDecoder.reset();
+    if (decoderFlushTimer !== undefined) clearTimeout(decoderFlushTimer);
     input.off("data", onInput);
     input.pause?.();
     input.setRawMode?.(false);
-    output.write("\u001b[?25h\u001b[?1049l\u001b[2J\u001b[H");
+    output.write(`${LEAVE_FLEET_SCREEN}\u001b[2J\u001b[H`);
     try {
       const status = await attachSession({
         sessionId,
@@ -401,7 +416,7 @@ export async function runFleet(
         input.setRawMode?.(true);
         input.on("data", onInput);
         input.resume?.();
-        output.write("\u001b[?1049h\u001b[?25l");
+        output.write(ENTER_FLEET_SCREEN);
         snapshot = await collectFleetSnapshot(client);
       }
       notify();
@@ -447,10 +462,18 @@ export async function runFleet(
     }
     notify();
   };
+  const queueKeys = (keys: readonly string[]) => {
+    for (const key of keys) inputQueue = inputQueue.then(() => perform(key));
+  };
   const onInput = (value: Buffer | string) => {
     const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
-    for (const key of decodeKeys(bytes)) {
-      inputQueue = inputQueue.then(() => perform(key));
+    queueKeys(keyDecoder.push(bytes));
+    if (decoderFlushTimer !== undefined) clearTimeout(decoderFlushTimer);
+    if (keyDecoder.hasPendingInput) {
+      decoderFlushTimer = setTimeout(() => {
+        decoderFlushTimer = undefined;
+        queueKeys(keyDecoder.flush());
+      }, 25);
     }
   };
 
@@ -459,7 +482,7 @@ export async function runFleet(
   input.resume?.();
   signals.on("SIGINT", stop);
   signals.on("SIGTERM", stop);
-  output.write("\u001b[?1049h\u001b[?25l");
+  output.write(ENTER_FLEET_SCREEN);
 
   try {
     while (!stopped) {
@@ -487,7 +510,8 @@ export async function runFleet(
     input.off("data", onInput);
     input.pause?.();
     input.setRawMode?.(previousRawMode);
-    output.write("\u001b[?25h\u001b[?1049l");
+    if (decoderFlushTimer !== undefined) clearTimeout(decoderFlushTimer);
+    output.write(LEAVE_FLEET_SCREEN);
     client.close();
   }
 }
@@ -506,8 +530,39 @@ function waitForRefresh(register: (wake: () => void) => void, clear: () => void)
   });
 }
 
-function decodeKeys(bytes: Buffer): string[] {
-  const value = bytes.toString("utf8");
+/**
+ * Stateful terminal-input decoder for the fleet composer.
+ *
+ * Provider TUIs can leave mouse/focus reporting enabled on the shared pane. Those reports are CSI
+ * control sequences and may be split across arbitrary stdin chunks, so a per-chunk decoder would
+ * turn their printable suffixes into task text. This decoder buffers incomplete escape sequences,
+ * recognizes the fleet's navigation keys, and consumes every other complete CSI sequence.
+ */
+export class FleetKeyDecoder {
+  private pending = "";
+
+  get hasPendingInput(): boolean {
+    return this.pending !== "";
+  }
+
+  push(bytes: Buffer | string): string[] {
+    const value = this.pending + (Buffer.isBuffer(bytes) ? bytes.toString("utf8") : bytes);
+    this.pending = "";
+    return this.decode(value);
+  }
+
+  flush(): string[] {
+    if (this.pending === "") return [];
+    const pending = this.pending;
+    this.pending = "";
+    return pending === "\u001b" ? ["escape"] : [];
+  }
+
+  reset(): void {
+    this.pending = "";
+  }
+
+  private decode(value: string): string[] {
   const keys: string[] = [];
   for (let index = 0; index < value.length;) {
     const rest = value.slice(index);
@@ -524,6 +579,19 @@ function decodeKeys(bytes: Buffer): string[] {
       index += match[0].length;
       continue;
     }
+    if (rest.startsWith("\u001b[")) {
+      const csi = /^\u001b\[[0-?]*[ -/]*[@-~]/u.exec(rest);
+      if (csi === null) {
+        this.pending = rest;
+        break;
+      }
+      index += csi[0].length;
+      continue;
+    }
+    if (rest === "\u001b") {
+      this.pending = rest;
+      break;
+    }
     const code = value.charCodeAt(index);
     if (code === 0x03) keys.push("ctrl+c");
     else if (code === 0x18) keys.push("ctrl+x");
@@ -534,6 +602,7 @@ function decodeKeys(bytes: Buffer): string[] {
     index += 1;
   }
   return keys;
+  }
 }
 
 function openAction(record: SessionRecord): FleetAction {

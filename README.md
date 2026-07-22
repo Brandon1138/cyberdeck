@@ -6,7 +6,7 @@ Cyberdeck is a neutral local broker for durable Claude and Codex terminal sessio
 
 ## Requirements and installation
 
-The project pins Node 24.18.0 through mise and pnpm 11.5.0 through Corepack/package metadata. Claude Code, Codex CLI, and tmux must be installed separately for the corresponding live features.
+The project pins Node 24.18.0 through mise and pnpm 11.5.0 through Corepack/package metadata. Claude Code and Codex CLI must be installed for their corresponding providers. The cockpit requires the native system `tmux` binary; Cyberdeck does not bundle, build, silently install, or emulate tmux. The plain Fleet remains usable without it.
 
 ```bash
 cd /Users/brandon/code/personal/cyberdeck
@@ -27,12 +27,19 @@ Run `cyberdeck` with no arguments to start the broker when needed and open the i
 cyberdeck broker start
 cyberdeck broker status
 cyberdeck broker restart
-cyberdeck cockpit
+cyberdeck cockpit --orchestrator codex --model sol
 cyberdeck list
 ```
 
-The cockpit creates a tmux session with the interactive fleet in one pane and an ordinary shell in
-another. Create, split, or close panes freely; the broker, not tmux, owns provider sessions.
+The first cockpit launch for a workspace requires an explicit orchestrator provider and optional
+provider-native model. It creates a workspace-namespaced native tmux session with the interactive
+Fleet in the left pane and a broker-owned orchestrator attachment in the right pane. Later launches
+can omit the provider while that orchestrator remains owned by the current broker. Use `--scope
+fleet` only when the orchestrator should see threads from every working directory.
+
+Create, split, or close panes freely; the broker, not tmux, owns every provider session. tmux is
+preflighted with `tmux -V`, and a missing binary produces an installation error before the cockpit
+changes presentation.
 
 `cyberdeck dashboard` groups durable agent threads by project. Every row shows the thread name,
 provider, explicit model (or `native-default`), role when present, status, latest replay preview, and
@@ -66,6 +73,46 @@ read-only **SESSIONS**, **JOBS**, **ADMISSION**, **BUDGET**, and **RECONCILIATIO
 control-plane inspection.
 
 tmux is presentation only. The cockpit issues no `kill-session`, `kill-pane`, `kill-server`, or `send-keys` verb. Killing the entire tmux server leaves the broker and its sessions running.
+
+## Orchestrator, transcripts, and MCP
+
+An orchestrator is a durable, typed Cyberdeck binding, not a privileged role label. The binding pins
+an explicit provider, optional model, workspace or fleet scope, read-only filesystem sandbox, and a
+capability grant. Cyberdeck injects its session-scoped stdio MCP server into broker-launched Codex
+and Claude sessions. Broker RPC remains the source of truth and rechecks every MCP call.
+
+The orchestrator can list in-scope workers, read cursor-based thread changes, start explicitly
+selected workers, and queue complete instructions. A human attachment always owns the only writer
+lease: orchestrator input remains queued until that controller detaches. Cyberdeck never steers a
+worker through tmux.
+
+Interactive prompts, normalized provider output, orchestrator instructions, and lifecycle changes
+are stored locally in an append-only transcript at:
+
+```text
+~/Library/Application Support/Cyberdeck/threads/transcript.jsonl
+```
+
+This is a deliberate change from metadata-only journaling. The transcript is created with user-only
+permissions and supplies monotonic cursors for "what happened while I was away?" reads. Raw PTY
+replay remains separately bounded and presentation-oriented.
+
+## Bounded workflows
+
+MCP-capable Cyberdeck agents can participate in explicit workflows. A workflow declares its
+participants and hard maximums for messages, wake turns, and causal hops. Sending a mailbox message
+does **not** wake the recipient by default; `wake: true` is explicit and consumes one turn. Message
+IDs deduplicate retries, and causation IDs make loops auditable.
+
+The human kill switch does not stop any provider session:
+
+```bash
+cyberdeck workflow list
+cyberdeck workflow cancel WORKFLOW_ID --reason "operator stop"
+```
+
+Cancellation prevents further workflow messages or wakes. Explicit session stopping remains a
+separate operation.
 
 Shut down deliberately when finished:
 
@@ -180,9 +227,13 @@ cyberdeck start --provider codex  --cwd /absolute/project/path --sandbox read-on
 
 Capability claims are graded and never merged: `metadata-observed`, `fixture-proven`, `help-advertised`, `operationally observed`, `unsupported`, `not run`, and `live-proven`. The B-track presentation register has no `live-proven` entries; final Gate 2 separately records one authorized live Codex App Server turn. Metadata observations are date- and version-sensitive because these runtimes update themselves. See [docs/setup/integrated-acceptance.md](docs/setup/integrated-acceptance.md) for the full matrix and current limitations.
 
-## Phase 1 boundary
+## Original Phase 1 boundary and current extensions
 
-Phase 1 provides broker-owned Claude and Codex PTYs, explicit starts, one bounded delegation primitive, attach/watch/detach, input steering, replay, explicit stop, and a tmux projection. It does not provide workflows, automatic routing or fallback, provider ranking, model recommendations, semantic memory, worktree orchestration, Cursor, or Antigravity.
+Phase 1 provided broker-owned Claude and Codex PTYs, explicit starts, one bounded delegation
+primitive, attach/watch/detach, input steering, replay, explicit stop, and a tmux projection. The
+current implementation adds durable transcripts, explicit orchestrator bindings, capability-scoped
+MCP, safe instruction queues, and bounded workflows. It still provides no automatic routing or
+fallback, provider ranking, model recommendations, or implicit premium-model selection.
 
 See `docs/architecture/session-model.md` for the precise state and ownership model and `docs/setup/phase-1-acceptance.md` for verified live behavior and current limitations.
 

@@ -46,6 +46,17 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args).toContain("opus");
   });
 
+  it("injects a session-scoped Cyberdeck MCP command only for typed orchestrators", () => {
+    const mcp = { nodePath: "/node", cliPath: "/cyberdeck.js" };
+    const orchestrator = session({ kind: "orchestrator" });
+    const spec = new CodexProviderAdapter({ mcp }).buildLaunchSpec(orchestrator);
+
+    expect(spec.args.join(" ")).toContain("mcp_servers.cyberdeck.command");
+    expect(spec.args.join(" ")).toContain(orchestrator.id);
+    expect(new CodexProviderAdapter({ mcp }).buildLaunchSpec(session()).args.join(" "))
+      .not.toContain("mcp_servers.cyberdeck");
+  });
+
   it("passes a new thread's initial task as one positional argument", () => {
     const spec = new CodexProviderAdapter().buildLaunchSpec(session(), "Inspect the failure\nthen fix it");
     expect(spec.args.slice(-2)).toEqual(["--", "Inspect the failure\nthen fix it"]);
@@ -101,6 +112,15 @@ describe("CodexProviderAdapter", () => {
 // tests/providers/claude-adapter.test.ts. This block keeps the side-by-side command-construction
 // comparison with Codex only.
 describe("ClaudeProviderAdapter", () => {
+  it("injects a session-scoped MCP config for a typed orchestrator", () => {
+    const orchestrator = session({ provider: "claude", model: "opus", kind: "orchestrator" });
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildLaunchSpec(orchestrator);
+
+    expect(spec.args).toContain("--mcp-config");
+    expect(spec.args.join(" ")).toContain(orchestrator.id);
+  });
+
   it.each([
     ["read-only", "plan"],
     ["workspace-write", "manual"],

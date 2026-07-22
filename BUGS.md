@@ -1,5 +1,15 @@
 # Known bugs
 
+## Resolved: mouse movement wrote terminal coordinates into the Fleet composer
+
+A provider TUI could leave SGR mouse-motion reporting enabled after detachment. Fleet re-entered its
+alternate screen without reclaiming those terminal modes, and its per-chunk decoder interpreted the
+printable suffix of reports such as `ESC[<35;103;24M` as task text.
+
+Resolved by disabling inherited mouse/focus modes every time Fleet becomes active and by replacing
+the per-chunk decoder with a buffered CSI decoder. Complete and fragmented mouse reports are now
+consumed atomically instead of reaching the composer.
+
 ## Resolved: `cyberdeck send` did not submit prompts in current interactive providers
 
 Observed on 2026-07-22 with broker-owned Claude Code 2.1.216 and Codex CLI 0.144.6 PTYs.

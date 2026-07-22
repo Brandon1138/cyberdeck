@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BrokerRuntimeConfigSchema } from "../config.js";
 import { ControlPlaneRuntime } from "../control-plane/runtime.js";
@@ -18,6 +18,14 @@ import { PtyProcess } from "../runtime/pty-process.js";
 import { Journal } from "./journal.js";
 import { BrokerServer } from "./server.js";
 import { SessionRegistry } from "./session-registry.js";
+import { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
+import { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
+import { AgentControlService } from "../orchestration/agent-control-service.js";
+import { InstructionQueue } from "../orchestration/instruction-queue.js";
+import { InstructionStore } from "../persistence/instruction-store.js";
+import { WorkflowStore } from "../persistence/workflow-store.js";
+import { WorkflowService } from "../orchestration/workflow-service.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -54,16 +62,32 @@ export async function runBroker(
   stateDirectory = appStateDirectory,
 ): Promise<BrokerServer> {
   const journal = new Journal(stateDirectory);
+  const transcripts = new ThreadTranscriptStore(stateDirectory);
+  await transcripts.init();
+  const cliPath = resolve(dirname(fileURLToPath(import.meta.url)), "../cli.js");
+  const mcp = { nodePath: process.execPath, cliPath };
   const config = BrokerRuntimeConfigSchema.parse({});
   const registry = new SessionRegistry({
     adapters: {
-      codex: new CodexProviderAdapter(),
-      claude: new ClaudeProviderAdapter(),
+      codex: new CodexProviderAdapter({ mcp }),
+      claude: new ClaudeProviderAdapter({ mcp }),
     },
     ptyFactory: (spec, replayBytes) => new PtyProcess(spec, replayBytes),
     journal,
+    transcripts,
     config,
   });
+  const orchestratorStore = new OrchestratorStore(stateDirectory);
+  const orchestrators = new OrchestratorManager(registry, orchestratorStore);
+  const agentControl = new AgentControlService(registry, orchestratorStore, transcripts);
+  const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
+  instructions.start();
+  const workflows = new WorkflowService(
+    registry,
+    orchestratorStore,
+    new WorkflowStore(stateDirectory),
+    instructions,
+  );
 
   // The control plane owns durable job state, admission, budgets, leases, and reconciliation. Its
   // runtime enforces the ordering: persistence, then recovery, then reconciliation, and only then is
@@ -83,6 +107,7 @@ export async function runBroker(
     shuttingDown = true;
     // Admission stops first, then in-flight jobs drain and persist, then live sessions stop.
     await runtime.shutdown(reason);
+    instructions.stop();
     await registry.stopAll();
     await journal.append(brokerEvent("broker.shutdown", { reason, pid: process.pid }));
     await server.close();
@@ -91,6 +116,11 @@ export async function runBroker(
   server = new BrokerServer({
     socketPath,
     registry,
+    transcripts,
+    orchestrators,
+    agentControl,
+    instructions,
+    workflows,
     controlPlane: runtime.controlPlane,
     controlPlaneRuntime: runtime,
     onShutdown: () => { void shutdown("request"); },

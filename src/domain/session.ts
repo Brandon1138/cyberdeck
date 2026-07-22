@@ -11,6 +11,7 @@ export const SessionExecutionStateSchema = z.enum([
   "cancelled",
 ]);
 export const AttachmentStateSchema = z.enum(["detached", "controlled", "watched"]);
+export const SessionKindSchema = z.enum(["worker", "orchestrator"]);
 
 export const StartSessionRequestSchema = z.object({
   provider: ProviderIdSchema,
@@ -21,6 +22,7 @@ export const StartSessionRequestSchema = z.object({
   role: z.string().optional(),
   name: z.string().optional(),
   parentSessionId: z.uuid().optional(),
+  kind: SessionKindSchema.optional(),
 });
 
 export const SessionRecordSchema = StartSessionRequestSchema.extend({
@@ -38,5 +40,6 @@ export type ProviderId = z.infer<typeof ProviderIdSchema>;
 export type Sandbox = z.infer<typeof SandboxSchema>;
 export type SessionExecutionState = z.infer<typeof SessionExecutionStateSchema>;
 export type AttachmentState = z.infer<typeof AttachmentStateSchema>;
+export type SessionKind = z.infer<typeof SessionKindSchema>;
 export type StartSessionRequest = z.infer<typeof StartSessionRequestSchema>;
 export type SessionRecord = z.infer<typeof SessionRecordSchema>;

@@ -9,6 +9,7 @@ import { SessionRegistry, type PtyHandle } from "../../src/broker/session-regist
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import { ServerFrameSchema, type ServerFrame, type WireFrame } from "../../src/protocol/frames.js";
 import { JsonlDecoder, encodeFrame } from "../../src/protocol/jsonl.js";
+import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-store.js";
 
 class FakePty implements PtyHandle {
   readonly pid: number;
@@ -110,16 +111,19 @@ async function harness() {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-server-"));
   const socketPath = join(directory, "broker.sock");
   const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(2000 + ptyFactory.mock.calls.length));
+  const transcripts = new ThreadTranscriptStore(directory);
   const registry = new SessionRegistry({
     adapters,
     ptyFactory,
     journal: { append: async () => {} },
+    transcripts,
     config: BrokerRuntimeConfigSchema.parse({ maxConcurrentSessions: 8 }),
   });
   let server: BrokerServer;
   server = new BrokerServer({
     socketPath,
     registry,
+    transcripts,
     onShutdown: () => { void server.close(); },
   });
   await server.listen();
@@ -141,6 +145,12 @@ describe("BrokerServer", () => {
       const listed = await client.request<Array<{ id: string }>>("session.list", {});
       expect(listed.map(({ id }) => id)).toEqual([parent.id, second.id]);
       expect(ptyFactory.mock.calls[0]?.[0]).toMatchObject({ args: ["Inspect the failure"] });
+      const thread = await client.request<{ events: Array<{ text?: string }>; nextCursor: number }>(
+        "thread.read",
+        { sessionId: parent.id },
+      );
+      expect(thread.events).toContainEqual(expect.objectContaining({ text: "Inspect the failure" }));
+      expect(thread.nextCursor).toBeGreaterThan(0);
 
       const snapshot = await client.request<{ data: string }>("session.snapshot", { sessionId: parent.id });
       expect(Buffer.from(snapshot.data, "base64").toString()).toContain("READY");

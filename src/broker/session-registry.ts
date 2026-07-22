@@ -8,6 +8,7 @@ import {
   type StartSessionRequest,
 } from "../domain/session.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../providers/provider.js";
+import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
 
 export interface PtyHandle {
   readonly pid: number;
@@ -51,6 +52,7 @@ export interface SessionRegistryOptions {
   adapters: Record<"codex" | "claude", ProviderAdapter>;
   ptyFactory: PtyFactory;
   journal: JournalLike;
+  transcripts?: ThreadTranscriptStore;
   config: BrokerRuntimeConfig;
 }
 
@@ -63,6 +65,7 @@ export class RegistryError extends Error {
       | "SESSION_NOT_ACTIVE"
       | "SESSION_ALREADY_ACTIVE"
       | "NOT_SESSION_CONTROLLER"
+      | "SESSION_BUSY"
       | "SESSION_STILL_ACTIVE"
       | "SESSION_HAS_CHILDREN",
     message: string,
@@ -74,8 +77,14 @@ export class RegistryError extends Error {
 
 export class SessionRegistry {
   private readonly sessions = new Map<string, RuntimeSession>();
+  private readonly controllerReleasedListeners = new Set<(sessionId: string) => void>();
 
   constructor(private readonly options: SessionRegistryOptions) {}
+
+  onControllerReleased(listener: (sessionId: string) => void): () => void {
+    this.controllerReleasedListeners.add(listener);
+    return () => this.controllerReleasedListeners.delete(listener);
+  }
 
   async start(request: StartSessionRequest, initialPrompt?: string): Promise<SessionRecord> {
     const parsed = StartSessionRequestSchema.parse(request);
@@ -93,6 +102,7 @@ export class SessionRegistry {
     const now = new Date().toISOString();
     const provisional: SessionRecord = {
       ...parsed,
+      kind: parsed.kind ?? "worker",
       id,
       createdAt: now,
       updatedAt: now,
@@ -103,8 +113,18 @@ export class SessionRegistry {
       childIds: [],
     };
     const adapter = this.options.adapters[parsed.provider];
+    const launchSpec = adapter.buildLaunchSpec(provisional, initialPrompt);
+    if (initialPrompt !== undefined) {
+      await this.options.transcripts?.append({
+        sessionId: id,
+        kind: "prompt",
+        source: "human",
+        text: initialPrompt,
+        data: { initial: true },
+      });
+    }
     const pty = this.options.ptyFactory(
-      adapter.buildLaunchSpec(provisional, initialPrompt),
+      launchSpec,
       this.options.config.replayBytes,
     );
     const record: SessionRecord = {
@@ -136,6 +156,10 @@ export class SessionRegistry {
         role: record.role ?? null,
         parentSessionId: record.parentSessionId ?? null,
         pid: record.pid,
+      });
+      await this.appendTranscript(id, "lifecycle", "broker", "session created", {
+        provider: record.provider,
+        model: record.model ?? null,
       });
     } catch (error) {
       pty.kill();
@@ -189,9 +213,11 @@ export class SessionRegistry {
   async detach(sessionId: string, clientId: string): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
     let detached = false;
+    let controllerReleased = false;
     if (runtime.controller?.clientId === clientId) {
       delete runtime.controller;
       detached = true;
+      controllerReleased = true;
     }
     if (runtime.watchers.delete(clientId)) {
       detached = true;
@@ -199,6 +225,9 @@ export class SessionRegistry {
     if (!detached) return;
     this.updateAttachmentState(runtime);
     await this.appendEvent("session.detached", sessionId, { clientId });
+    if (controllerReleased) {
+      for (const listener of this.controllerReleasedListeners) listener(sessionId);
+    }
   }
 
   async releaseClient(clientId: string): Promise<void> {
@@ -223,7 +252,31 @@ export class SessionRegistry {
     const runtime = this.requireRuntime(sessionId);
     const adapter = this.options.adapters[runtime.record.provider];
     const data = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
+    await this.appendTranscript(sessionId, "prompt", "human", message, {});
     await this.write(sessionId, clientId, data);
+  }
+
+  async submitInstruction(
+    sessionId: string,
+    message: string,
+    source: "orchestrator" | "worker" = "orchestrator",
+    metadata: Record<string, unknown> = {},
+  ): Promise<void> {
+    const runtime = this.requireRuntime(sessionId);
+    if (runtime.record.executionState !== "active") {
+      throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
+    }
+    if (runtime.controller !== undefined) {
+      throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
+    }
+    const adapter = this.options.adapters[runtime.record.provider];
+    const encoded = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
+    await this.appendTranscript(sessionId, "instruction", source, message, metadata);
+    if (runtime.controller !== undefined) {
+      throw new RegistryError("SESSION_BUSY", "A human controller claimed this thread before delivery");
+    }
+    runtime.pty.write(encoded);
+    await this.appendEvent("session.input", sessionId, { bytes: encoded.length, source });
   }
 
   resize(sessionId: string, clientId: string | undefined, cols: number, rows: number): void {
@@ -249,6 +302,7 @@ export class SessionRegistry {
     runtime.record.updatedAt = new Date().toISOString();
     runtime.pty.kill();
     await this.appendEvent("session.stopped", sessionId, {});
+    await this.appendTranscript(sessionId, "lifecycle", "broker", "session stopped", {});
   }
 
   async stopAll(): Promise<void> {
@@ -284,6 +338,9 @@ export class SessionRegistry {
       model: runtime.record.model ?? null,
       pid: runtime.record.pid,
     });
+    await this.appendTranscript(sessionId, "lifecycle", "broker", "session resumed", {
+      pid: runtime.record.pid,
+    });
     return this.cloneRecord(runtime.record);
   }
 
@@ -307,6 +364,7 @@ export class SessionRegistry {
     await this.appendEvent("session.deleted", sessionId, {
       executionState: runtime.record.executionState,
     });
+    await this.appendTranscript(sessionId, "lifecycle", "broker", "session deleted", {});
     if (runtime.record.parentSessionId !== undefined) {
       const parent = this.sessions.get(runtime.record.parentSessionId);
       if (parent !== undefined) {
@@ -358,6 +416,9 @@ export class SessionRegistry {
 
   private broadcast(runtime: RuntimeSession, chunk: Buffer): void {
     runtime.record.updatedAt = new Date().toISOString();
+    void this.appendTranscript(runtime.record.id, "output", "provider", chunk.toString("utf8"), {
+      byteLength: chunk.byteLength,
+    }).catch(() => undefined);
     runtime.controller?.output(chunk);
     for (const watcher of runtime.watchers.values()) {
       watcher.output(chunk);
@@ -383,6 +444,20 @@ export class SessionRegistry {
       exitCode,
       signal: signal ?? null,
     });
+    void this.appendTranscript(runtime.record.id, "lifecycle", "broker", "session exited", {
+      exitCode,
+      signal: signal ?? null,
+    }).catch(() => undefined);
+  }
+
+  private async appendTranscript(
+    sessionId: string,
+    kind: "prompt" | "output" | "instruction" | "lifecycle",
+    source: "human" | "provider" | "orchestrator" | "worker" | "broker",
+    text: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    await this.options.transcripts?.append({ sessionId, kind, source, text, data });
   }
 
   private async appendEvent(

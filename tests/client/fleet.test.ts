@@ -4,6 +4,7 @@ import type { SessionRecord } from "../../src/domain/session.js";
 import {
   collectFleetSnapshot,
   createFleetState,
+  FleetKeyDecoder,
   renderFleet,
   runFleet,
   threadStatus,
@@ -136,6 +137,23 @@ describe("fleet presentation", () => {
 });
 
 describe("fleet controls", () => {
+  it("consumes complete and fragmented terminal mouse reports instead of typing coordinates", () => {
+    const decoder = new FleetKeyDecoder();
+
+    expect(decoder.push("\u001b[<35;103;24M")).toEqual([]);
+    expect(decoder.push("\u001b[<35;10")).toEqual([]);
+    expect(decoder.hasPendingInput).toBe(true);
+    expect(decoder.push("3;24Mhello")).toEqual(["h", "e", "l", "l", "o"]);
+    expect(decoder.hasPendingInput).toBe(false);
+  });
+
+  it("buffers Escape briefly while preserving a literal Escape key", () => {
+    const decoder = new FleetKeyDecoder();
+
+    expect(decoder.push("\u001b")).toEqual([]);
+    expect(decoder.flush()).toEqual(["escape"]);
+  });
+
   it("opens a live provider TUI with Enter or Right Arrow and moves between project threads", () => {
     const second = session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" });
     const snapshot = fleet({ record: session() }, { record: second });
@@ -325,9 +343,14 @@ describe("runFleet", () => {
     input.emit("data", Buffer.from([0x1d]));
     await vi.waitFor(() => expect(transport.sendFrame).toHaveBeenCalledWith({ type: "detach", sessionId: record.id }));
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
+    const renderedAfterDetach = Buffer.concat(output.chunks).toString();
+    expect(renderedAfterDetach).toContain("\u001b[?1003l");
+    expect(renderedAfterDetach).toContain("\u001b[?1006l");
+    input.emit("data", Buffer.from("\u001b[<35;103;24M"));
     input.emit("data", Buffer.from([0x03]));
 
     await expect(running).resolves.toBeUndefined();
     expect(transport.close).toHaveBeenCalledOnce();
+    expect(Buffer.concat(output.chunks).toString()).not.toContain("› <35;103;24M");
   });
 });

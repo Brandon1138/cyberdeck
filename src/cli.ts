@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 import { runBroker } from "./broker/main.js";
 import type { SessionRecord } from "./domain/session.js";
+import type { OrchestratorManagerResult } from "./orchestration/orchestrator-manager.js";
 import { appStateDirectory, brokerSocketPath } from "./paths.js";
 import { RpcClient, RpcError } from "./client/rpc-client.js";
 import { attachSession } from "./client/attach.js";
@@ -14,6 +15,7 @@ import { runDashboard } from "./client/dashboard.js";
 import { runFleet } from "./client/fleet.js";
 import { launchCockpit } from "./tmux/cockpit.js";
 import { CYBERDECK_VERSION } from "./version.js";
+import { runMcpServer } from "./mcp/server.js";
 
 interface StartOptions {
   provider: "codex" | "claude";
@@ -269,6 +271,18 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     .argument("<id>", "session UUID")
     .action((sessionId: string) => runAttachment(sessionId, "watch"));
 
+  program.command("mcp")
+    .description("serve capability-scoped Cyberdeck tools over stdio MCP")
+    .requiredOption("--actor-session <id>", "bound orchestrator session UUID")
+    .action(async (options: { actorSession: string }) => {
+      const client = await RpcClient.connect(brokerSocketPath);
+      try {
+        await runMcpServer(client, options.actorSession);
+      } finally {
+        client.close();
+      }
+    });
+
   program.command("dashboard").action(runDefault);
 
   program.command("diagnostics").action(async () => {
@@ -276,9 +290,45 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     await runDashboard(client);
   });
 
-  program.command("cockpit").action(() => {
-    launchCockpit({ cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)) });
+  program.command("cockpit")
+    .option("--orchestrator <provider>", "explicit orchestrator provider", (value: string) => {
+      if (value !== "codex" && value !== "claude") throw new Error("orchestrator provider must be codex or claude");
+      return value;
+    })
+    .option("--model <model>", "explicit orchestrator model")
+    .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("workspace"))
+    .action(async (options: { orchestrator?: "codex" | "claude"; model?: string; scope: "workspace" | "fleet" }) => {
+      const cwd = process.cwd();
+      const result = await withClient((client) => client.request<OrchestratorManagerResult>(
+        "orchestrator.ensure",
+        {
+          cwd,
+          scope: options.scope,
+          ...(options.orchestrator === undefined ? {} : { provider: options.orchestrator }),
+          ...(options.model === undefined ? {} : { model: options.model }),
+        },
+      ));
+      launchCockpit({
+        cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
+        cwd,
+        orchestratorSessionId: result.session.id,
+      });
+    });
+
+  const workflow = program.command("workflow").description("inspect or stop bounded orchestration workflows");
+  workflow.command("list").action(async () => {
+    const runs = await withClient((client) => client.request("workflow.list", {}));
+    process.stdout.write(`${JSON.stringify(runs, null, 2)}\n`);
   });
+  workflow.command("cancel")
+    .argument("<run-id>", "workflow UUID")
+    .option("--reason <reason>", "operator cancellation reason")
+    .action(async (runId: string, options: { reason?: string }) => {
+      await withClient((client) => client.request("workflow.cancel", {
+        runId,
+        ...(options.reason === undefined ? {} : { reason: options.reason }),
+      }));
+    });
 
   return program;
 }

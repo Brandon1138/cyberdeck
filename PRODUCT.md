@@ -14,8 +14,9 @@ without losing durable work when panes or terminal clients close.
 
 Cyberdeck is a provider-neutral local cockpit for durable agent sessions. It keeps provider process
 ownership in the broker, projects familiar views through tmux, and makes agent state, model choice,
-delegation, steering, stopping, and deletion explicit. Success means the fleet view becomes useful
-enough for daily work before broader orchestration features are added.
+delegation, steering, stopping, deletion, and bounded orchestration explicit. Success means the user
+can work primarily through one chosen orchestrator while retaining direct inspection and control of
+every worker thread.
 
 ## Brand Personality
 
@@ -35,6 +36,8 @@ Familiar, truthful, restrained.
 - Keep projects, agent state, the latest meaningful preview, and recency visible at a glance.
 - Treat detached sessions as the same durable runtime, never as disposable background work.
 - Let tmux own layout and navigation while the broker owns every provider process and PTY.
+- Keep messages passive by default; waking another agent must be explicit, bounded, and auditable.
+- Give human control attachments priority over every automated writer.
 - Add features only after daily use demonstrates that they earn space in the interface.
 
 ## Accessibility & Inclusion

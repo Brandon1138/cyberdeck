@@ -14,6 +14,24 @@ import { StartSessionRequestSchema } from "../domain/session.js";
 import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type RequestFrame } from "../protocol/frames.js";
 import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
 import { RegistryError, type AttachmentMode, type SessionRegistry } from "./session-registry.js";
+import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
+import type { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
+import { EnsureOrchestratorRequestSchema } from "../domain/orchestrator.js";
+import {
+  AgentActorParamsSchema,
+  AgentReadParamsSchema,
+  AgentStartWorkerParamsSchema,
+  type AgentControlService,
+} from "../orchestration/agent-control-service.js";
+import { EnqueueInstructionParamsSchema, type InstructionQueue } from "../orchestration/instruction-queue.js";
+import {
+  CreateWorkflowParamsSchema,
+  SendWorkflowMessageParamsSchema,
+  WorkflowActorParamsSchema,
+  WorkflowChangesParamsSchema,
+  WorkflowRunActorParamsSchema,
+  type WorkflowService,
+} from "../orchestration/workflow-service.js";
 
 const SessionIdParamsSchema = z.object({ sessionId: z.uuid() });
 const SendParamsSchema = SessionIdParamsSchema.extend({ data: z.string() });
@@ -22,6 +40,14 @@ const StartSessionWithPromptParamsSchema = StartSessionRequestSchema.extend({
   initialPrompt: z.string().trim().min(1),
 });
 const AttachParamsSchema = SessionIdParamsSchema;
+const ThreadReadParamsSchema = SessionIdParamsSchema.extend({
+  afterCursor: z.number().int().nonnegative().default(0),
+  limit: z.number().int().positive().max(1_000).default(200),
+});
+const ThreadChangesParamsSchema = z.object({
+  afterCursor: z.number().int().nonnegative().default(0),
+  limit: z.number().int().positive().max(2_000).default(500),
+});
 
 interface ConnectionContext {
   id: string;
@@ -32,6 +58,11 @@ interface ConnectionContext {
 export interface BrokerServerOptions {
   socketPath: string;
   registry: SessionRegistry;
+  transcripts?: ThreadTranscriptStore;
+  orchestrators?: OrchestratorManager;
+  agentControl?: AgentControlService;
+  instructions?: InstructionQueue;
+  workflows?: WorkflowService;
   controlPlane?: JobControlPlane;
   /** Supplies the reconciliation view; queue/budget queries work from the control plane alone. */
   controlPlaneRuntime?: Pick<ControlPlaneRuntime, "lastReconciliation">;
@@ -171,6 +202,65 @@ export class BrokerServer {
       }
       case "session.list":
         return this.options.registry.list();
+      case "thread.list":
+        return this.options.registry.list();
+      case "thread.read": {
+        const { sessionId, afterCursor, limit } = ThreadReadParamsSchema.parse(frame.params);
+        this.options.registry.get(sessionId);
+        return this.requireTranscripts().read(sessionId, afterCursor, limit);
+      }
+      case "thread.changes": {
+        const { afterCursor, limit } = ThreadChangesParamsSchema.parse(frame.params);
+        return this.requireTranscripts().changes(afterCursor, limit);
+      }
+      case "orchestrator.ensure":
+        return this.requireOrchestrators().ensure(EnsureOrchestratorRequestSchema.parse(frame.params));
+      case "orchestrator.get": {
+        const request = EnsureOrchestratorRequestSchema.pick({ cwd: true, scope: true }).parse(frame.params);
+        return this.requireOrchestrators().get(request.cwd, request.scope);
+      }
+      case "agent.thread.list": {
+        const { actorSessionId } = AgentActorParamsSchema.parse(frame.params);
+        return this.requireAgentControl().listThreads(actorSessionId);
+      }
+      case "agent.thread.read": {
+        const { actorSessionId, sessionId, afterCursor, limit } = AgentReadParamsSchema.parse(frame.params);
+        return this.requireAgentControl().readThread(actorSessionId, sessionId, afterCursor, limit);
+      }
+      case "agent.worker.start":
+        return this.requireAgentControl().startWorker(AgentStartWorkerParamsSchema.parse(frame.params));
+      case "agent.thread.enqueue":
+        return this.requireInstructions().enqueue(EnqueueInstructionParamsSchema.parse(frame.params));
+      case "agent.instruction.list": {
+        const params = z.object({ targetSessionId: z.uuid().optional() }).parse(frame.params);
+        return this.requireInstructions().list(params.targetSessionId);
+      }
+      case "agent.instruction.flush": {
+        const { sessionId } = SessionIdParamsSchema.parse(frame.params);
+        return this.requireInstructions().flush(sessionId);
+      }
+      case "agent.workflow.create":
+        return this.requireWorkflows().create(CreateWorkflowParamsSchema.parse(frame.params));
+      case "agent.workflow.list": {
+        const { actorSessionId } = WorkflowActorParamsSchema.parse(frame.params);
+        return this.requireWorkflows().list(actorSessionId);
+      }
+      case "agent.workflow.changes": {
+        const { actorSessionId, runId, afterCursor } = WorkflowChangesParamsSchema.parse(frame.params);
+        return this.requireWorkflows().changes(actorSessionId, runId, afterCursor);
+      }
+      case "agent.workflow.send":
+        return this.requireWorkflows().send(SendWorkflowMessageParamsSchema.parse(frame.params));
+      case "agent.workflow.cancel": {
+        const { actorSessionId, runId } = WorkflowRunActorParamsSchema.parse(frame.params);
+        return this.requireWorkflows().cancel(actorSessionId, runId, "cancelled by owner orchestrator");
+      }
+      case "workflow.list":
+        return this.requireWorkflows().listAll();
+      case "workflow.cancel": {
+        const request = z.object({ runId: z.uuid(), reason: z.string().optional() }).parse(frame.params);
+        return this.requireWorkflows().cancel(undefined, request.runId, request.reason);
+      }
       case "session.snapshot": {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         return { data: this.options.registry.snapshot(sessionId).toString("base64") };
@@ -269,6 +359,41 @@ export class BrokerServer {
       throw Object.assign(new Error("Control plane is not available"), { code: "METHOD_NOT_FOUND" });
     }
     return this.options.controlPlane;
+  }
+
+  private requireTranscripts(): ThreadTranscriptStore {
+    if (this.options.transcripts === undefined) {
+      throw Object.assign(new Error("Thread transcript store is not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.options.transcripts;
+  }
+
+  private requireOrchestrators(): OrchestratorManager {
+    if (this.options.orchestrators === undefined) {
+      throw Object.assign(new Error("Orchestrator manager is not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.options.orchestrators;
+  }
+
+  private requireAgentControl(): AgentControlService {
+    if (this.options.agentControl === undefined) {
+      throw Object.assign(new Error("Agent control service is not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.options.agentControl;
+  }
+
+  private requireInstructions(): InstructionQueue {
+    if (this.options.instructions === undefined) {
+      throw Object.assign(new Error("Instruction queue is not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.options.instructions;
+  }
+
+  private requireWorkflows(): WorkflowService {
+    if (this.options.workflows === undefined) {
+      throw Object.assign(new Error("Workflow service is not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.options.workflows;
   }
 
   private async attach(

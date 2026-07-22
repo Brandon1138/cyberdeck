@@ -1,7 +1,7 @@
 import { closeSync, openSync, readSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
+import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
 import type { SessionRecord } from "../domain/session.js";
 
 const CODEX_SESSION_MATCH_WINDOW_MS = 30_000;
@@ -17,6 +17,7 @@ export class CodexResumeError extends Error {
 
 export interface CodexProviderAdapterOptions {
   sessionsDirectory?: string;
+  mcp?: CyberdeckMcpLaunch;
 }
 
 export class CodexProviderAdapter implements ProviderAdapter {
@@ -43,6 +44,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (session.model !== undefined) {
       args.push("-m", session.model);
     }
+    this.addCyberdeckMcp(args, session);
     if (initialPrompt !== undefined) {
       args.push("--", initialPrompt);
     }
@@ -68,6 +70,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       "on-request",
     ];
     if (session.model !== undefined) args.push("-m", session.model);
+    this.addCyberdeckMcp(args, session);
     args.push(nativeSessionId);
     return {
       executable: "codex",
@@ -75,6 +78,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
       cwd: session.cwd,
       env: { ...process.env },
     };
+  }
+
+  private addCyberdeckMcp(args: string[], session: SessionRecord): void {
+    if (session.kind === undefined || this.options.mcp === undefined) return;
+    args.push(
+      "-c",
+      `mcp_servers.cyberdeck.command=${JSON.stringify(this.options.mcp.nodePath)}`,
+      "-c",
+      `mcp_servers.cyberdeck.args=${JSON.stringify([
+        this.options.mcp.cliPath,
+        "mcp",
+        "--actor-session",
+        session.id,
+      ])}`,
+    );
   }
 
   private findNativeSessionId(session: SessionRecord): string {
