@@ -27,7 +27,8 @@ Run `cyberdeck` with no arguments to start the broker when needed and open the i
 cyberdeck broker start
 cyberdeck broker status
 cyberdeck broker restart
-cyberdeck cockpit --orchestrator codex --model sol
+cd ~/code/personal/soma
+cyberdeck cockpit --orchestrator codex --model gpt-5.6-sol
 cyberdeck list
 ```
 
@@ -38,8 +39,17 @@ can omit the provider while that orchestrator remains owned by the current broke
 fleet` only when the orchestrator should see threads from every working directory.
 
 Create, split, or close panes freely; the broker, not tmux, owns every provider session. tmux is
-preflighted with `tmux -V`, and a missing binary produces an installation error before the cockpit
-changes presentation.
+preflighted with `tmux -V` before an orchestrator is created or resumed. A missing binary produces an
+installation error before any provider starts. Outside tmux, cockpit uses `attach-session`; when
+`$TMUX` is set, it keeps the inherited native tmux server and uses `switch-client` to avoid a nested
+client. Workspace-namespaced `cyberdeck-*` session names are unchanged.
+
+Cockpit presentation is transactional. If this invocation creates a tmux cockpit and its pane setup
+or final attach/switch fails, Cyberdeck removes only that newly created cockpit. A pre-existing
+cockpit, the user's `main` session, and the tmux server are never rollback targets. If this invocation
+also created the broker-owned orchestrator, it is stopped; a reused orchestrator is preserved. Any
+rollback failure is reported after the original presentation error. Ordinary detach and pane close
+operations still never stop a provider.
 
 `cyberdeck dashboard` groups durable agent threads by project. Every row shows the thread name,
 provider, explicit model (or `native-default`), role when present, status, latest replay preview, and
@@ -72,7 +82,9 @@ Other standard terminal and tmux shortcuts are preserved while attached. `cyberd
 read-only **SESSIONS**, **JOBS**, **ADMISSION**, **BUDGET**, and **RECONCILIATION** panels for detailed
 control-plane inspection.
 
-tmux is presentation only. The cockpit issues no `kill-session`, `kill-pane`, `kill-server`, or `send-keys` verb. Killing the entire tmux server leaves the broker and its sessions running.
+tmux is presentation only. The cockpit issues no `kill-pane`, `kill-server`, or `send-keys` verb.
+`kill-session` is reserved for transactional rollback of the exact cockpit created by the failing
+invocation. Killing the entire tmux server still leaves the broker and its sessions running.
 
 ## Orchestrator, transcripts, and MCP
 
@@ -80,6 +92,23 @@ An orchestrator is a durable, typed Cyberdeck binding, not a privileged role lab
 an explicit provider, optional model, workspace or fleet scope, read-only filesystem sandbox, and a
 capability grant. Cyberdeck injects its session-scoped stdio MCP server into broker-launched Codex
 and Claude sessions. Broker RPC remains the source of truth and rechecks every MCP call.
+
+Opening an orchestrator cockpit starts the provider TUI without a positional user prompt, so startup
+does not automatically submit a model turn. Guidance is supplied through native provider
+configuration (`developer_instructions` for Codex and `--append-system-prompt` for Claude), and both
+that guidance and the session-scoped MCP configuration are retained by provider-native resume.
+
+Bindings are append-only but explicitly recoverable. Reset refuses an active orchestrator and tells
+the operator which session to stop; after it is inactive, invalidate the latest workspace or fleet
+binding without editing JSONL files:
+
+```bash
+cyberdeck stop ORCHESTRATOR_SESSION_ID
+cyberdeck orchestrator reset --scope workspace --cwd /absolute/workspace/path
+```
+
+An explicit different provider/model can then replace an inactive latest binding cleanly. Cyberdeck
+does not translate model aliases, choose a fallback, or silently resume a reset binding.
 
 The orchestrator can list in-scope workers, read cursor-based thread changes, start explicitly
 selected workers, and queue complete instructions. A human attachment always owns the only writer

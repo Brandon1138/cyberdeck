@@ -16,7 +16,10 @@ import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
 import { RegistryError, type AttachmentMode, type SessionRegistry } from "./session-registry.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
 import type { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
-import { EnsureOrchestratorRequestSchema } from "../domain/orchestrator.js";
+import {
+  EnsureOrchestratorRequestSchema,
+  ResetOrchestratorRequestSchema,
+} from "../domain/orchestrator.js";
 import {
   AgentActorParamsSchema,
   AgentReadParamsSchema,
@@ -215,6 +218,8 @@ export class BrokerServer {
       }
       case "orchestrator.ensure":
         return this.requireOrchestrators().ensure(EnsureOrchestratorRequestSchema.parse(frame.params));
+      case "orchestrator.reset":
+        return this.requireOrchestrators().reset(ResetOrchestratorRequestSchema.parse(frame.params));
       case "orchestrator.get": {
         const request = EnsureOrchestratorRequestSchema.pick({ cwd: true, scope: true }).parse(frame.params);
         return this.requireOrchestrators().get(request.cwd, request.scope);

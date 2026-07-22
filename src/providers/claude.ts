@@ -39,6 +39,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     if (session.model !== undefined) {
       args.push("--model", session.model);
     }
+    this.addProviderInstructions(args, session);
     this.addCyberdeckMcp(args, session);
     if (initialPrompt !== undefined) {
       args.push("--", initialPrompt);
@@ -65,6 +66,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       claudePermissionMode(session.sandbox),
     ];
     if (session.model !== undefined) args.push("--model", session.model);
+    this.addProviderInstructions(args, session);
     this.addCyberdeckMcp(args, session);
     return {
       executable: "claude",
@@ -72,6 +74,11 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       cwd: session.cwd,
       env: { ...process.env, DISABLE_UPDATES: "1" },
     };
+  }
+
+  private addProviderInstructions(args: string[], session: SessionRecord): void {
+    if (session.providerInstructions === undefined) return;
+    args.push("--append-system-prompt", session.providerInstructions);
   }
 
   private addCyberdeckMcp(args: string[], session: SessionRecord): void {

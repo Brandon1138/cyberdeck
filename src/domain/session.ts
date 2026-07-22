@@ -23,6 +23,7 @@ export const StartSessionRequestSchema = z.object({
   name: z.string().optional(),
   parentSessionId: z.uuid().optional(),
   kind: SessionKindSchema.optional(),
+  providerInstructions: z.string().trim().min(1).optional(),
 });
 
 export const SessionRecordSchema = StartSessionRequestSchema.extend({

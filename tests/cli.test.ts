@@ -1,9 +1,50 @@
 import { describe, expect, it, vi } from "vitest";
 import { createProgram } from "../src/cli.js";
+import type { OrchestratorManagerResult } from "../src/orchestration/orchestrator-manager.js";
 
 function quietCommand(name: string) {
   const command = createProgram().commands.find((candidate) => candidate.name() === name)!;
   return command.exitOverride().configureOutput({ writeOut: () => {}, writeErr: () => {} });
+}
+
+function orchestratorResult(created: boolean): OrchestratorManagerResult {
+  const now = "2026-07-22T12:00:00.000Z";
+  const sessionId = "11111111-1111-4111-8111-111111111111";
+  const cwd = process.cwd();
+  const scope = { kind: "workspace" as const, cwd };
+  return {
+    created,
+    session: {
+      id: sessionId,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd,
+      detached: true,
+      sandbox: "read-only",
+      role: "orchestrator",
+      kind: "orchestrator",
+      providerInstructions: "guidance",
+      createdAt: now,
+      updatedAt: now,
+      executionState: "active",
+      attachmentState: "detached",
+      pid: 123,
+      exitCode: null,
+      childIds: [],
+    },
+    binding: {
+      key: `workspace:${cwd}`,
+      sessionId,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd,
+      sandbox: "read-only",
+      scope,
+      grant: { subjectSessionId: sessionId, capabilities: ["thread.list"], scope },
+      createdAt: now,
+      updatedAt: now,
+    },
+  };
 }
 
 describe("Cyberdeck CLI", () => {
@@ -57,5 +98,92 @@ describe("Cyberdeck CLI", () => {
     program.outputHelp();
     expect(help).toContain("Top-level Fable");
     expect(help).toContain("delegated Fable is refused");
+  });
+
+  it("preflights tmux before ensuring an orchestrator", async () => {
+    const order: string[] = [];
+    const ensureOrchestrator = vi.fn(async () => {
+      order.push("ensure");
+      return orchestratorResult(false);
+    });
+    const launchCockpit = vi.fn(() => order.push("present"));
+    const program = createProgram({
+      preflightCockpit: () => {
+        order.push("preflight");
+        return { tmuxVersion: "tmux 3.5a", presentationCommand: "switch-client" };
+      },
+      ensureOrchestrator,
+      launchCockpit,
+    });
+    const cockpit = program.commands.find((candidate) => candidate.name() === "cockpit")!;
+
+    await cockpit.parseAsync([], { from: "user" });
+
+    expect(order).toEqual(["preflight", "ensure", "present"]);
+    expect(launchCockpit).toHaveBeenCalledWith(expect.objectContaining({
+      preflight: { tmuxVersion: "tmux 3.5a", presentationCommand: "switch-client" },
+    }));
+  });
+
+  it("stops a newly created orchestrator when cockpit presentation fails", async () => {
+    const stopSession = vi.fn(async () => {});
+    const program = createProgram({
+      preflightCockpit: () => ({ tmuxVersion: "tmux 3.5a", presentationCommand: "attach-session" }),
+      ensureOrchestrator: vi.fn(async () => orchestratorResult(true)),
+      launchCockpit: () => { throw new Error("presentation failed"); },
+      stopSession,
+    });
+    const cockpit = program.commands.find((candidate) => candidate.name() === "cockpit")!;
+
+    await expect(cockpit.parseAsync([], { from: "user" })).rejects.toThrow("presentation failed");
+    expect(stopSession).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111");
+  });
+
+  it("preserves a reused orchestrator when cockpit presentation fails", async () => {
+    const stopSession = vi.fn(async () => {});
+    const program = createProgram({
+      preflightCockpit: () => ({ tmuxVersion: "tmux 3.5a", presentationCommand: "attach-session" }),
+      ensureOrchestrator: vi.fn(async () => orchestratorResult(false)),
+      launchCockpit: () => { throw new Error("presentation failed"); },
+      stopSession,
+    });
+    const cockpit = program.commands.find((candidate) => candidate.name() === "cockpit")!;
+
+    await expect(cockpit.parseAsync([], { from: "user" })).rejects.toThrow("presentation failed");
+    expect(stopSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps presentation failure primary when stopping a new orchestrator also fails", async () => {
+    const program = createProgram({
+      preflightCockpit: () => ({ tmuxVersion: "tmux 3.5a", presentationCommand: "attach-session" }),
+      ensureOrchestrator: vi.fn(async () => orchestratorResult(true)),
+      launchCockpit: () => { throw new Error("presentation failed"); },
+      stopSession: vi.fn(async () => { throw new Error("broker disconnected"); }),
+    });
+    const cockpit = program.commands.find((candidate) => candidate.name() === "cockpit")!;
+
+    await expect(cockpit.parseAsync([], { from: "user" })).rejects.toThrow(
+      "presentation failed; cleanup also failed to stop the newly created orchestrator: broker disconnected",
+    );
+  });
+
+  it("exposes workspace-scoped orchestrator binding reset", async () => {
+    const resetOrchestrator = vi.fn(async () => ({
+      key: "workspace:/Users/brandon",
+      reset: true,
+      sessionId: "11111111-1111-4111-8111-111111111111",
+    }));
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const program = createProgram({ resetOrchestrator });
+    const orchestrator = program.commands.find((candidate) => candidate.name() === "orchestrator")!;
+    const reset = orchestrator.commands.find((candidate) => candidate.name() === "reset")!;
+
+    try {
+      await reset.parseAsync(["--scope", "workspace", "--cwd", "/Users/brandon"], { from: "user" });
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(resetOrchestrator).toHaveBeenCalledWith({ cwd: "/Users/brandon", scope: "workspace" });
   });
 });

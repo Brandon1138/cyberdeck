@@ -14,11 +14,21 @@ export interface CockpitOptions {
   orchestratorSessionId: string;
   nodePath?: string;
   spawnSync?: SpawnSyncLike;
+  preflight?: CockpitPreflight;
 }
 
 /** Options for the presentation-only cockpit helpers that never touch a provider process. */
 export interface CockpitPresentationOptions {
   spawnSync?: SpawnSyncLike;
+}
+
+export interface CockpitPreflightOptions extends CockpitPresentationOptions {
+  insideTmux?: boolean;
+}
+
+export interface CockpitPreflight {
+  tmuxVersion: string;
+  presentationCommand: "attach-session" | "switch-client";
 }
 
 export interface CockpitPane {
@@ -31,15 +41,65 @@ export interface CockpitPane {
  * tmux is presentation only.
  *
  * The cockpit multiplexes *views* of broker-owned state. It never starts, signals, or terminates a
- * provider process, and it deliberately emits no `kill-session`, `kill-pane`, `kill-server`,
- * `respawn-pane`, or `send-keys` verb. A session's lifetime belongs to the broker; closing or
- * detaching a pane changes only what the operator is looking at. Stopping actual work is
- * `cyberdeck stop <id>`, which goes through the broker.
+ * provider process. The only terminating verb it may emit is `kill-session`, transactionally and
+ * only for a cockpit session created by this invocation when cockpit creation or presentation
+ * fails. A session's lifetime belongs to the broker; closing or detaching a pane changes only what
+ * the operator is looking at. Stopping actual work is `cyberdeck stop <id>`, which goes through the
+ * broker.
  */
 export function launchCockpit(options: CockpitOptions): void {
   const spawnSync = options.spawnSync ?? (nodeSpawnSync as SpawnSyncLike);
   const nodePath = options.nodePath ?? process.execPath;
   const cliPath = resolve(options.cliPath);
+  const preflight = options.preflight ?? preflightCockpit({ spawnSync });
+  const sessionName = cockpitSessionName(options.cwd);
+  const hasSession = spawnSync("tmux", ["has-session", "-t", sessionName], { stdio: "ignore" });
+  let created = false;
+
+  try {
+    if (hasSession.status !== 0) {
+      requireSuccess(spawnSync("tmux", [
+        "new-session",
+        "-d",
+        "-s",
+        sessionName,
+        nodePath,
+        cliPath,
+        "dashboard",
+      ], { stdio: "ignore" }), "create cyberdeck tmux session");
+      created = true;
+      requireSuccess(
+        spawnSync("tmux", [
+          "split-window",
+          "-h",
+          "-t",
+          sessionName,
+          nodePath,
+          cliPath,
+          "attach",
+          options.orchestratorSessionId,
+        ], { stdio: "ignore" }),
+        "create orchestrator attachment pane",
+      );
+    }
+
+    requireSuccess(
+      spawnSync("tmux", [preflight.presentationCommand, "-t", sessionName], { stdio: "inherit" }),
+      `${preflight.presentationCommand === "switch-client" ? "switch to" : "attach"} cyberdeck tmux session`,
+    );
+  } catch (error) {
+    if (!created) throw error;
+    const rollback = spawnSync("tmux", ["kill-session", "-t", sessionName], { stdio: "ignore" });
+    if (rollback.status !== 0) {
+      throw addCleanupContext(error, "tmux failed to remove the newly created cockpit session");
+    }
+    throw error;
+  }
+}
+
+/** Validate native tmux and choose presentation before a provider is created or resumed. */
+export function preflightCockpit(options: CockpitPreflightOptions = {}): CockpitPreflight {
+  const spawnSync = options.spawnSync ?? (nodeSpawnSync as SpawnSyncLike);
   const version = spawnSync("tmux", ["-V"], { encoding: "utf8" });
   if (version.status !== 0) {
     throw Object.assign(
@@ -47,38 +107,11 @@ export function launchCockpit(options: CockpitOptions): void {
       { code: "TMUX_NOT_AVAILABLE" },
     );
   }
-  const sessionName = cockpitSessionName(options.cwd);
-  const hasSession = spawnSync("tmux", ["has-session", "-t", sessionName], { stdio: "ignore" });
-
-  if (hasSession.status !== 0) {
-    requireSuccess(spawnSync("tmux", [
-      "new-session",
-      "-d",
-      "-s",
-      sessionName,
-      nodePath,
-      cliPath,
-      "dashboard",
-    ], { stdio: "ignore" }), "create cyberdeck tmux session");
-    requireSuccess(
-      spawnSync("tmux", [
-        "split-window",
-        "-h",
-        "-t",
-        sessionName,
-        nodePath,
-        cliPath,
-        "attach",
-        options.orchestratorSessionId,
-      ], { stdio: "ignore" }),
-      "create orchestrator attachment pane",
-    );
-  }
-
-  requireSuccess(
-    spawnSync("tmux", ["attach-session", "-t", sessionName], { stdio: "inherit" }),
-    "attach cyberdeck tmux session",
-  );
+  const insideTmux = options.insideTmux ?? Boolean(process.env.TMUX);
+  return {
+    tmuxVersion: (version.stdout ?? "").trim(),
+    presentationCommand: insideTmux ? "switch-client" : "attach-session",
+  };
 }
 
 export function cockpitSessionName(cwd: string): string {
@@ -122,4 +155,11 @@ export function inspectCockpitPanes(options: CockpitPresentationOptions = {}): C
 
 function requireSuccess(result: { status: number | null }, action: string): void {
   if (result.status !== 0) throw new Error(`tmux failed to ${action}`);
+}
+
+function addCleanupContext(primary: unknown, cleanupMessage: string): Error {
+  const primaryError = primary instanceof Error ? primary : new Error(String(primary));
+  const combined = new Error(`${primaryError.message}; cleanup also failed: ${cleanupMessage}`, { cause: primaryError });
+  if ("code" in primaryError) Object.assign(combined, { code: primaryError.code });
+  return combined;
 }

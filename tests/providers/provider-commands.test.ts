@@ -46,13 +46,18 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args).toContain("opus");
   });
 
-  it("injects a session-scoped Cyberdeck MCP command only for typed orchestrators", () => {
+  it("starts an orchestrator with native developer instructions and MCP but no positional user prompt", () => {
     const mcp = { nodePath: "/node", cliPath: "/cyberdeck.js" };
-    const orchestrator = session({ kind: "orchestrator" });
+    const orchestrator = session({
+      kind: "orchestrator",
+      providerInstructions: "Cyberdeck orchestrator guidance",
+    });
     const spec = new CodexProviderAdapter({ mcp }).buildLaunchSpec(orchestrator);
 
+    expect(spec.args).toContain("developer_instructions=\"Cyberdeck orchestrator guidance\"");
     expect(spec.args.join(" ")).toContain("mcp_servers.cyberdeck.command");
     expect(spec.args.join(" ")).toContain(orchestrator.id);
+    expect(spec.args).not.toContain("--");
     expect(new CodexProviderAdapter({ mcp }).buildLaunchSpec(session()).args.join(" "))
       .not.toContain("mcp_servers.cyberdeck");
   });
@@ -84,11 +89,16 @@ describe("CodexProviderAdapter", () => {
       },
     })}\n`);
 
-    const spec = new CodexProviderAdapter({ sessionsDirectory: root }).buildResumeSpec(session({
+    const spec = new CodexProviderAdapter({
+      sessionsDirectory: root,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    }).buildResumeSpec(session({
       createdAt,
       executionState: "exited",
       exitCode: 0,
       model: "gpt-test",
+      kind: "orchestrator",
+      providerInstructions: "Cyberdeck orchestrator guidance",
     }));
 
     expect(spec.executable).toBe("codex");
@@ -103,6 +113,12 @@ describe("CodexProviderAdapter", () => {
       "on-request",
       "-m",
       "gpt-test",
+      "-c",
+      "developer_instructions=\"Cyberdeck orchestrator guidance\"",
+      "-c",
+      "mcp_servers.cyberdeck.command=\"/node\"",
+      "-c",
+      expect.stringContaining("mcp_servers.cyberdeck.args="),
       nativeId,
     ]);
   });
@@ -112,13 +128,21 @@ describe("CodexProviderAdapter", () => {
 // tests/providers/claude-adapter.test.ts. This block keeps the side-by-side command-construction
 // comparison with Codex only.
 describe("ClaudeProviderAdapter", () => {
-  it("injects a session-scoped MCP config for a typed orchestrator", () => {
-    const orchestrator = session({ provider: "claude", model: "opus", kind: "orchestrator" });
+  it("starts an orchestrator with native system instructions and MCP but no positional user prompt", () => {
+    const orchestrator = session({
+      provider: "claude",
+      model: "opus",
+      kind: "orchestrator",
+      providerInstructions: "Cyberdeck orchestrator guidance",
+    });
     const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
       .buildLaunchSpec(orchestrator);
 
+    expect(spec.args).toContain("--append-system-prompt");
+    expect(spec.args).toContain("Cyberdeck orchestrator guidance");
     expect(spec.args).toContain("--mcp-config");
     expect(spec.args.join(" ")).toContain(orchestrator.id);
+    expect(spec.args).not.toContain("--");
   });
 
   it.each([
@@ -167,10 +191,13 @@ describe("ClaudeProviderAdapter", () => {
       provider: "claude",
       name: "claude-haiku-ping",
       model: "haiku",
+      kind: "orchestrator",
+      providerInstructions: "Cyberdeck orchestrator guidance",
       executionState: "cancelled",
       exitCode: 129,
     });
-    const spec = new ClaudeProviderAdapter().buildResumeSpec(record);
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildResumeSpec(record);
 
     expect(spec.executable).toBe("claude");
     expect(spec.args).toEqual([
@@ -182,6 +209,10 @@ describe("ClaudeProviderAdapter", () => {
       "plan",
       "--model",
       "haiku",
+      "--append-system-prompt",
+      "Cyberdeck orchestrator guidance",
+      "--mcp-config",
+      expect.stringContaining(record.id),
     ]);
   });
 });

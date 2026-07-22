@@ -71,6 +71,19 @@ An orchestrator binding references a normal broker-owned provider session and se
 provider, model, scope, and capability grant. The free-form `role` string grants nothing. The stdio
 MCP adapter carries the calling session ID to broker RPC, where scope and capability are checked.
 
+Orchestrator startup is deliberately zero-turn: the provider TUI is opened without a positional user
+prompt. Cyberdeck supplies its guidance through the provider's native instruction channel
+(`developer_instructions` in Codex configuration or Claude's `--append-system-prompt`) and injects
+session-scoped MCP configuration. The session record carries that provider guidance, so a
+provider-native resume reconstructs the same guidance and MCP arguments without submitting a turn.
+
+The binding registry is append-only and treats a reset record as a tombstone for the latest binding.
+`cyberdeck orchestrator reset` refuses while the bound broker session is active, preventing an
+orphaned provider; the operator must stop that exact session first. Once inactive, reset makes the
+scope unbound without rewriting history, and an explicit different provider/model writes a clean new
+latest binding. Model strings remain opaque and provider-native: no alias translation or fallback is
+performed.
+
 Worker steering passes through a durable instruction queue. A human control attachment has absolute
 writer priority. If a controller exists, the message remains queued; controller release causes the
 broker to retry complete logical messages in FIFO order. No orchestration path emits tmux
@@ -85,6 +98,18 @@ persisted and broker-enforced. Cancelling a workflow does not stop its participa
 Everything above describes process ownership and remains unchanged. The cockpit projects the
 interactive Fleet beside a controlling attachment to the selected broker-owned orchestrator. It does
 not move provider ownership into tmux.
+
+Cockpit preflight runs `tmux -V` and selects presentation mode before orchestrator ensure/create.
+Outside tmux it uses `attach-session`. When `$TMUX` is present, it uses `switch-client` in the
+inherited tmux server, never a separate Cyberdeck socket, so Ghostty and other named-server clients do
+not attempt a forbidden nested attach. Cockpit session names remain workspace-namespaced.
+
+Presentation and orchestrator creation form a transaction across the CLI boundary. A pane or final
+attach/switch failure removes only a cockpit session created by that invocation. A pre-existing
+cockpit, the user's `main` session, and the server are preserved. The broker reports whether
+orchestrator ensure created or reused the session; presentation failure stops only a newly created
+orchestrator, which also ends its provider-owned MCP child, while a reused orchestrator remains
+active. Cleanup errors are secondary context on the original presentation failure.
 
 ### Fleet and diagnostics
 
@@ -155,9 +180,10 @@ because the session contract carries none. It does not invent one.
 
 ### tmux ownership, restated operationally
 
-tmux owns no provider process. `src/tmux/cockpit.ts` emits no `kill-session`, `kill-pane`,
-`kill-server`, `respawn-pane`, or `send-keys` verb; detach uses only `detach-client` and pane
-inspection uses only a read-only `list-panes -F` query.
+tmux owns no provider process. `src/tmux/cockpit.ts` emits no `kill-pane`, `kill-server`,
+`respawn-pane`, or `send-keys` verb. Its only `kill-session` path is rollback of the exact
+workspace-namespaced cockpit created by the current failed invocation. Detach uses only
+`detach-client`, and pane inspection uses only a read-only `list-panes -F` query.
 
 This was verified operationally on 2026-07-21: killing the entire tmux server left the broker healthy
 on the same pid with its state intact. Closing a pane is never a way to stop work. `cyberdeck stop

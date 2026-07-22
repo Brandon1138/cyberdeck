@@ -1,5 +1,30 @@
 # Known bugs
 
+## Resolved: cockpit startup leaked an invisible tmux session and a failed orchestrator
+
+Observed on 2026-07-22 from a Ghostty shell already running inside a named tmux server. Two
+independent failures combined:
+
+- Cyberdeck inherited `$TMUX`, created its workspace cockpit in that server, then called
+  `attach-session`. tmux rejected the nested client and left the new `cyberdeck-*` session detached
+  and invisible.
+- The supplied Codex model string used an unsupported short alias; the exact local catalog identifier
+  is `gpt-5.6-sol`. Because orchestrator guidance was passed as the positional initial user prompt, the
+  provider attempted a model turn immediately and received a 400 before the cockpit was visible.
+
+Resolved transactionally. Cockpit preflights native tmux before provider ensure, uses
+`switch-client` when `$TMUX` is set and `attach-session` otherwise, and rolls back only a tmux session
+created by the failing invocation. Orchestrator ensure reports created versus reused; presentation
+failure stops only a newly created provider session, allowing its session-scoped MCP child to exit,
+and preserves a reused session. Cleanup errors are appended to the original presentation failure.
+
+Orchestrator startup now emits no positional initial prompt. Codex receives guidance through native
+`developer_instructions`; Claude receives `--append-system-prompt`; provider-native resume retains
+the same guidance and MCP configuration. The append-only binding registry now supports
+`cyberdeck orchestrator reset`, refuses to orphan an active orchestrator, and permits a clean explicit
+rebind after reset. Cyberdeck still treats model identifiers as opaque and performs no alias mapping
+or fallback.
+
 ## Resolved: mouse movement wrote terminal coordinates into the Fleet composer
 
 A provider TUI could leave SGR mouse-motion reporting enabled after detachment. Fleet re-entered its

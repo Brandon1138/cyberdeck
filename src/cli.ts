@@ -7,13 +7,22 @@ import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 import { runBroker } from "./broker/main.js";
 import type { SessionRecord } from "./domain/session.js";
-import type { OrchestratorManagerResult } from "./orchestration/orchestrator-manager.js";
+import type {
+  OrchestratorManagerResult,
+  OrchestratorResetResult,
+} from "./orchestration/orchestrator-manager.js";
+import type { EnsureOrchestratorRequest, ResetOrchestratorRequest } from "./domain/orchestrator.js";
 import { appStateDirectory, brokerSocketPath } from "./paths.js";
 import { RpcClient, RpcError } from "./client/rpc-client.js";
 import { attachSession } from "./client/attach.js";
 import { runDashboard } from "./client/dashboard.js";
 import { runFleet } from "./client/fleet.js";
-import { launchCockpit } from "./tmux/cockpit.js";
+import {
+  launchCockpit,
+  preflightCockpit,
+  type CockpitOptions,
+  type CockpitPreflight,
+} from "./tmux/cockpit.js";
 import { CYBERDECK_VERSION } from "./version.js";
 import { runMcpServer } from "./mcp/server.js";
 
@@ -178,11 +187,24 @@ function sessionRequest(options: StartOptions, parentSessionId?: string) {
 interface CreateProgramOptions {
   runDefault?: () => Promise<void>;
   restartBroker?: () => Promise<void>;
+  preflightCockpit?: () => CockpitPreflight;
+  launchCockpit?: (options: CockpitOptions) => void;
+  ensureOrchestrator?: (request: EnsureOrchestratorRequest) => Promise<OrchestratorManagerResult>;
+  stopSession?: (sessionId: string) => Promise<void>;
+  resetOrchestrator?: (request: ResetOrchestratorRequest) => Promise<OrchestratorResetResult>;
 }
 
 export function createProgram(options: CreateProgramOptions = {}): Command {
   const runDefault = options.runDefault ?? runCyberdeck;
   const restartBroker = options.restartBroker ?? restartDetachedBroker;
+  const runCockpitPreflight = options.preflightCockpit ?? (() => preflightCockpit());
+  const presentCockpit = options.launchCockpit ?? launchCockpit;
+  const ensureOrchestrator = options.ensureOrchestrator ?? ((request) =>
+    withClient((client) => client.request<OrchestratorManagerResult>("orchestrator.ensure", request)));
+  const stopSession = options.stopSession ?? ((sessionId) =>
+    withClient((client) => client.request<void>("session.stop", { sessionId })));
+  const resetOrchestrator = options.resetOrchestrator ?? ((request) =>
+    withClient((client) => client.request<OrchestratorResetResult>("orchestrator.reset", request)));
   const program = new Command()
     .name("cyberdeck")
     .version(CYBERDECK_VERSION)
@@ -299,20 +321,46 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("workspace"))
     .action(async (options: { orchestrator?: "codex" | "claude"; model?: string; scope: "workspace" | "fleet" }) => {
       const cwd = process.cwd();
-      const result = await withClient((client) => client.request<OrchestratorManagerResult>(
-        "orchestrator.ensure",
-        {
-          cwd,
-          scope: options.scope,
-          ...(options.orchestrator === undefined ? {} : { provider: options.orchestrator }),
-          ...(options.model === undefined ? {} : { model: options.model }),
-        },
-      ));
-      launchCockpit({
-        cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
+      const preflight = runCockpitPreflight();
+      const result = await ensureOrchestrator({
         cwd,
-        orchestratorSessionId: result.session.id,
+        scope: options.scope,
+        ...(options.orchestrator === undefined ? {} : { provider: options.orchestrator }),
+        ...(options.model === undefined ? {} : { model: options.model }),
       });
+      try {
+        presentCockpit({
+          cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
+          cwd,
+          orchestratorSessionId: result.session.id,
+          preflight,
+        });
+      } catch (error) {
+        if (!result.created) throw error;
+        try {
+          await stopSession(result.session.id);
+        } catch (cleanupError) {
+          throw addCleanupContext(error, cleanupError, "stop the newly created orchestrator");
+        }
+        throw error;
+      }
+    });
+
+  const orchestrator = program.command("orchestrator").description("manage durable orchestrator bindings");
+  orchestrator.command("reset")
+    .description("invalidate an inactive workspace or fleet orchestrator binding")
+    .option("--cwd <absolute-path>", "workspace path (defaults to the current directory)")
+    .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("workspace"))
+    .action(async (options: { cwd?: string; scope: "workspace" | "fleet" }) => {
+      const result = await resetOrchestrator({
+        cwd: resolve(options.cwd ?? process.cwd()),
+        scope: options.scope,
+      });
+      if (result.reset) {
+        process.stdout.write(`Reset orchestrator binding ${result.key} (${result.sessionId ?? "unknown session"})\n`);
+      } else {
+        process.stdout.write(`No orchestrator binding exists for ${result.key}\n`);
+      }
     });
 
   const workflow = program.command("workflow").description("inspect or stop bounded orchestration workflows");
@@ -331,6 +379,16 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     });
 
   return program;
+}
+
+function addCleanupContext(primary: unknown, cleanup: unknown, action: string): Error {
+  const primaryError = primary instanceof Error ? primary : new Error(String(primary));
+  const cleanupMessage = cleanup instanceof Error ? cleanup.message : String(cleanup);
+  const combined = new Error(`${primaryError.message}; cleanup also failed to ${action}: ${cleanupMessage}`, {
+    cause: primaryError,
+  });
+  if ("code" in primaryError) Object.assign(combined, { code: primaryError.code });
+  return combined;
 }
 
 const invokedPath = process.argv[1] === undefined ? undefined : resolve(process.argv[1]);

@@ -4,6 +4,7 @@ import {
   type EnsureOrchestratorRequest,
   type OrchestratorBinding,
   type OrchestratorScope,
+  type ResetOrchestratorRequest,
 } from "../domain/orchestrator.js";
 import type { SessionRecord } from "../domain/session.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
@@ -12,6 +13,13 @@ import type { SessionRegistry } from "../broker/session-registry.js";
 export interface OrchestratorManagerResult {
   binding: OrchestratorBinding;
   session: SessionRecord;
+  created: boolean;
+}
+
+export interface OrchestratorResetResult {
+  key: string;
+  reset: boolean;
+  sessionId?: string;
 }
 
 export class OrchestratorManager {
@@ -35,7 +43,7 @@ export class OrchestratorManager {
           { code: "ORCHESTRATOR_REBIND_REQUIRED" },
         );
       }
-      return { binding: existing, session };
+      return { binding: existing, session, created: false };
     }
     if (request.provider === undefined) {
       throw Object.assign(
@@ -49,7 +57,14 @@ export class OrchestratorManager {
       && existing.model === request.model
     ) {
       const session = await this.resumeExisting(existing);
-      if (session !== undefined) return { binding: existing, session };
+      if (session !== undefined) return { binding: existing, session, created: false };
+    } else if (existing !== undefined && this.isActive(existing.sessionId)) {
+      throw Object.assign(
+        new Error(
+          `Orchestrator ${existing.sessionId} is active; stop it before rebinding this scope`,
+        ),
+        { code: "ORCHESTRATOR_ACTIVE_REBIND_REFUSED" },
+      );
     }
 
     const session = await this.registry.start({
@@ -61,7 +76,8 @@ export class OrchestratorManager {
       role: "orchestrator",
       kind: "orchestrator",
       name: `Cyberdeck orchestrator (${request.provider}${request.model === undefined ? "" : `:${request.model}`})`,
-    }, orchestratorPrompt(scope));
+      providerInstructions: orchestratorPrompt(scope),
+    });
     const now = new Date().toISOString();
     const binding: OrchestratorBinding = {
       key,
@@ -79,8 +95,17 @@ export class OrchestratorManager {
       createdAt: now,
       updatedAt: now,
     };
-    await this.store.put(binding);
-    return { binding, session };
+    try {
+      await this.store.put(binding);
+    } catch (error) {
+      try {
+        await this.registry.stop(session.id);
+      } catch (cleanupError) {
+        throw addCleanupContext(error, cleanupError, "stop newly created orchestrator after binding failure");
+      }
+      throw error;
+    }
+    return { binding, session, created: true };
   }
 
   async get(cwd: string, scopeKind: "workspace" | "fleet"): Promise<OrchestratorManagerResult | undefined> {
@@ -88,7 +113,26 @@ export class OrchestratorManager {
     const binding = await this.store.get(orchestratorKey(scope));
     if (binding === undefined) return undefined;
     const session = await this.resumeExisting(binding);
-    return session === undefined ? undefined : { binding, session };
+    return session === undefined ? undefined : { binding, session, created: false };
+  }
+
+  async reset(input: ResetOrchestratorRequest): Promise<OrchestratorResetResult> {
+    const scope: OrchestratorScope = input.scope === "fleet"
+      ? { kind: "fleet" }
+      : { kind: "workspace", cwd: input.cwd };
+    const key = orchestratorKey(scope);
+    const binding = await this.store.get(key);
+    if (binding === undefined) return { key, reset: false };
+    if (this.isActive(binding.sessionId)) {
+      throw Object.assign(
+        new Error(
+          `Orchestrator ${binding.sessionId} is active; run \`cyberdeck stop ${binding.sessionId}\` before resetting its binding`,
+        ),
+        { code: "ORCHESTRATOR_ACTIVE_RESET_REFUSED" },
+      );
+    }
+    await this.store.reset(key);
+    return { key, reset: true, sessionId: binding.sessionId };
   }
 
   private async resumeExisting(binding: OrchestratorBinding): Promise<SessionRecord | undefined> {
@@ -98,6 +142,15 @@ export class OrchestratorManager {
       return this.registry.resume(binding.sessionId);
     } catch {
       return undefined;
+    }
+  }
+
+  private isActive(sessionId: string): boolean {
+    try {
+      const session = this.registry.get(sessionId);
+      return session.executionState === "active" || session.executionState === "starting";
+    } catch {
+      return false;
     }
   }
 }
@@ -111,4 +164,12 @@ function orchestratorPrompt(scope: OrchestratorScope): string {
     "Never manipulate tmux panes or type through tmux send-keys.",
     "Do not stop, delete, or widen a worker's permissions without explicit human approval.",
   ].join(" ");
+}
+
+function addCleanupContext(primary: unknown, cleanup: unknown, action: string): Error {
+  const primaryError = primary instanceof Error ? primary : new Error(String(primary));
+  const cleanupMessage = cleanup instanceof Error ? cleanup.message : String(cleanup);
+  return new Error(`${primaryError.message}; cleanup also failed to ${action}: ${cleanupMessage}`, {
+    cause: primaryError,
+  });
 }

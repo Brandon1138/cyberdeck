@@ -1,6 +1,10 @@
 import { mkdir, open, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { OrchestratorBindingSchema, type OrchestratorBinding } from "../domain/orchestrator.js";
+import {
+  OrchestratorBindingResetSchema,
+  OrchestratorBindingSchema,
+  type OrchestratorBinding,
+} from "../domain/orchestrator.js";
 
 /** Append-only latest-binding registry. Rebinding never erases the prior audit trail. */
 export class OrchestratorStore {
@@ -22,10 +26,19 @@ export class OrchestratorStore {
 
   async put(binding: OrchestratorBinding): Promise<void> {
     const parsed = OrchestratorBindingSchema.parse(binding);
+    await this.append(parsed);
+  }
+
+  async reset(key: string, resetAt = new Date().toISOString()): Promise<void> {
+    const parsed = OrchestratorBindingResetSchema.parse({ recordType: "reset", key, resetAt });
+    await this.append(parsed);
+  }
+
+  private async append(record: OrchestratorBinding | { recordType: "reset"; key: string; resetAt: string }): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true });
     const handle = await open(this.path, "a", 0o600);
     try {
-      await handle.write(`${JSON.stringify(parsed)}\n`, undefined, "utf8");
+      await handle.write(`${JSON.stringify(record)}\n`, undefined, "utf8");
       await handle.sync();
     } finally {
       await handle.close();
@@ -42,7 +55,13 @@ export class OrchestratorStore {
     if (!content.endsWith("\n")) lines.pop();
     for (const line of lines) {
       if (line.trim() === "") continue;
-      const binding = OrchestratorBindingSchema.parse(JSON.parse(line));
+      const value: unknown = JSON.parse(line);
+      const reset = OrchestratorBindingResetSchema.safeParse(value);
+      if (reset.success) {
+        latest.delete(reset.data.key);
+        continue;
+      }
+      const binding = OrchestratorBindingSchema.parse(value);
       latest.set(binding.key, binding);
     }
     return latest;
