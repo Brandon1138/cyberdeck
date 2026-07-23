@@ -1,5 +1,5 @@
 {
-  "name": "@brandon1138/cyberdeck",
+  "name": "@ishmael38/cyberdeck",
   "version": "0.1.0-alpha.1",
   "description": "A provider-neutral local control plane for durable AI coding-agent sessions.",
   "license": "Apache-2.0",

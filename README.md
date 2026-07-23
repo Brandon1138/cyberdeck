@@ -1,7 +1,7 @@
 # Cyberdeck
 
 [![CI](https://github.com/Brandon1138/cyberdeck/actions/workflows/ci.yml/badge.svg)](https://github.com/Brandon1138/cyberdeck/actions/workflows/ci.yml)
-[![npm prerelease](https://img.shields.io/npm/v/%40brandon1138%2Fcyberdeck/next.svg)](https://www.npmjs.com/package/@brandon1138/cyberdeck)
+[![npm prerelease](https://img.shields.io/npm/v/%40ishmael38%2Fcyberdeck/next.svg)](https://www.npmjs.com/package/@ishmael38/cyberdeck)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Cyberdeck is a neutral local broker for durable Codex, Claude, Cursor, and Antigravity terminal sessions. Provider processes run in broker-owned PTYs, so they can move between attached/interactive and detached/headless presentation without being restarted. tmux is an optional cockpit view, not the session owner.
@@ -17,7 +17,7 @@ Cyberdeck requires macOS and Node.js 24.18 or newer in the Node 24 release line.
 Install the public prerelease from npm:
 
 ```bash
-npm install --global @brandon1138/cyberdeck@next
+npm install --global @ishmael38/cyberdeck@next
 cyberdeck
 ```
 
