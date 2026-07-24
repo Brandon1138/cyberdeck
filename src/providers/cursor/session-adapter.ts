@@ -1,6 +1,10 @@
 import type { SessionRecord } from "../../domain/session.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../provider.js";
-import { SessionResumeUnavailableError, UnsupportedProviderEffortError } from "../session-adapter-errors.js";
+import {
+  SessionResumeUnavailableError,
+  UnsupportedProviderApprovalModeError,
+  UnsupportedProviderEffortError,
+} from "../session-adapter-errors.js";
 import { buildCursorInteractiveCommand } from "./commands.js";
 import { sessionLaunchEnvironment } from "../launch-environment.js";
 
@@ -10,6 +14,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
 
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec {
     if (session.effort !== undefined) throw new UnsupportedProviderEffortError(this.id);
+    if (session.approvalMode === "auto") throw new UnsupportedProviderApprovalModeError(this.id);
     const command = buildCursorInteractiveCommand(session, initialPrompt);
     return { ...command, env: sessionLaunchEnvironment(command.env, session) };
   }

@@ -26,7 +26,7 @@ Cyberdeck never selects, defaults, ranks, or substitutes a model, and never emit
 Interactive:
 
 ```
-claude --session-id <uuid> --name <name> --permission-mode <plan|manual> [--model <explicit>]
+claude --session-id <uuid> --name <name> --permission-mode <plan|manual|auto> [--model <explicit>]
 ```
 
 Headless:
@@ -48,7 +48,10 @@ Sandbox mapping, confirmed against the installed CLI's `--permission-mode` choic
 | `read-only` | `plan` |
 | `workspace-write` | `manual` |
 
-`bypassPermissions` and `dontAsk` are never emitted.
+The table is the unchanged default. Interactive semantic worker starts may explicitly request the
+provider-neutral `approvalMode: "auto"`, which maps to Claude's documented `auto` permission mode
+for Opus and the other explicitly selected Claude models. `bypassPermissions` and `dontAsk` are
+never emitted.
 
 ## Session persistence is not process lifetime
 

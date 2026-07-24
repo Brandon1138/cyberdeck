@@ -1,9 +1,10 @@
-import type { ProviderId, ReasoningEffort } from "../domain/session.js";
+import type { ApprovalMode, ProviderId, ReasoningEffort } from "../domain/session.js";
 
 export interface WorkerProviderCapability {
   provider: ProviderId;
   models: readonly string[];
   efforts: readonly ReasoningEffort[];
+  approvalModes: readonly ApprovalMode[];
   modelIdRule: string;
   notes: readonly string[];
 }
@@ -21,6 +22,7 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
     provider: "codex",
     models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
     efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    approvalModes: ["prompt", "auto"],
     modelIdRule: "Use the complete gpt-5.6-* identifier; luna, terra, and sol are labels, not launch IDs.",
     notes: ["Omitting model uses the provider-native default."],
   },
@@ -28,6 +30,7 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
     provider: "claude",
     models: ["haiku", "sonnet", "opus", "fable"],
     efforts: ["low", "medium", "high", "xhigh", "max"],
+    approvalModes: ["prompt", "auto"],
     modelIdRule: "haiku, sonnet, opus, and fable are provider-native Claude aliases.",
     notes: [
       "Fable requires the operator-controlled worker.start.fable grant for autonomous delegation.",
@@ -38,6 +41,7 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
     provider: "cursor",
     models: ["composer"],
     efforts: [],
+    approvalModes: ["prompt"],
     modelIdRule: "Use the provider-native model identifier; Composer exposes no separate effort flag.",
     notes: ["Read-only workers run in plan mode with Cursor sandboxing enabled."],
   },
@@ -45,6 +49,7 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
     provider: "antigravity",
     models: ["gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high"],
     efforts: ["low", "medium", "high"],
+    approvalModes: ["prompt"],
     modelIdRule: "Use the exact effort-suffixed provider ID and pass the matching effort value.",
     notes: [
       "Cyberdeck trusts only the exact authorized worker cwd before launch.",
@@ -59,12 +64,22 @@ export function workerProviderCapability(provider: string): WorkerProviderCapabi
 
 export type WorkerSelectionValidation =
   | { ok: true }
-  | { ok: false; code: "MODEL_ID_NOT_CANONICAL" | "MODEL_NOT_ADVERTISED" | "EFFORT_NOT_SUPPORTED" | "MODEL_EFFORT_MISMATCH"; message: string };
+  | {
+      ok: false;
+      code:
+        | "MODEL_ID_NOT_CANONICAL"
+        | "MODEL_NOT_ADVERTISED"
+        | "EFFORT_NOT_SUPPORTED"
+        | "MODEL_EFFORT_MISMATCH"
+        | "APPROVAL_MODE_NOT_SUPPORTED";
+      message: string;
+    };
 
 export function validateWorkerSelection(input: {
   provider: ProviderId;
   model?: string;
   effort?: ReasoningEffort;
+  approvalMode?: ApprovalMode;
 }): WorkerSelectionValidation {
   const capability = workerProviderCapability(input.provider);
   if (capability === undefined) {
@@ -112,6 +127,14 @@ export function validateWorkerSelection(input: {
       ok: false,
       code: "EFFORT_NOT_SUPPORTED",
       message: `${input.provider} does not support worker effort ${input.effort}; supported: ${supported}`,
+    };
+  }
+
+  if (input.approvalMode !== undefined && !capability.approvalModes.includes(input.approvalMode)) {
+    return {
+      ok: false,
+      code: "APPROVAL_MODE_NOT_SUPPORTED",
+      message: `${input.provider} does not support worker approval mode ${input.approvalMode}; supported: ${capability.approvalModes.join(", ")}`,
     };
   }
 

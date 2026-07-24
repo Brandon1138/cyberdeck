@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
-  EnsureOrchestratorRequest,
+  CreateOrchestratorRequest,
   FableWorkersRequest,
   FableWorkersResult,
 } from "../domain/orchestrator.js";
@@ -60,13 +60,13 @@ export interface QuitConfirmation {
   expiresAt: number;
 }
 
-export type OrchestratorPickerStep = "model" | "effort";
-
-export interface OrchestratorPickerState {
-  step: OrchestratorPickerStep;
-  choiceIndex: number;
-  effortIndex: number;
+export interface StopAcknowledgement {
+  sessionId: string;
 }
+
+export type OrchestratorPickerState =
+  | { step: "target"; choiceIndex: number }
+  | { step: "effort"; modelIndex: number; effortIndex: number };
 
 export interface LaunchProfile {
   provider: ProviderId;
@@ -92,7 +92,9 @@ export type FleetNoticeTone = "neutral" | "warning" | "error" | "confirmation";
 export interface FleetState {
   selectedSessionId?: string | undefined;
   fallbackCwd: string;
+  workingDirectory?: string | undefined;
   draft: string;
+  stopAcknowledgement?: StopAcknowledgement | undefined;
   deleteConfirmation?: DeleteConfirmation | undefined;
   quitConfirmation?: QuitConfirmation | undefined;
   orchestratorPicker?: OrchestratorPickerState | undefined;
@@ -111,13 +113,24 @@ export type FleetAction =
   | { type: "attach"; sessionId: string }
   | { type: "resume"; sessionId: string }
   | { type: "start"; request: StartSessionRequest & { initialPrompt: string } }
-  | { type: "orchestrator"; request: EnsureOrchestratorRequest }
+  | {
+    type: "open-orchestrator";
+    sessionId: string;
+    cockpitCwd: string;
+    requiresResume: boolean;
+  }
+  | {
+    type: "create-orchestrator";
+    request: CreateOrchestratorRequest;
+    cockpitCwd: string;
+  }
   | { type: "fable-workers"; request: FableWorkersRequest }
   | { type: "caveman-workers"; request: CavemanWorkersRequest }
   | { type: "rename"; sessionId: string; name: string }
   | { type: "pin"; sessionId: string }
   | { type: "reorder"; sessionId: string; direction: "up" | "down" }
   | { type: "profile"; cwd: string; profile: LaunchProfile }
+  | { type: "change-directory"; cwd: string }
   | { type: "quit" };
 
 export interface FleetTransition {
@@ -168,8 +181,23 @@ interface SessionTreeProgress {
 }
 
 export interface FleetRuntimeOptions {
-  openOrchestrator?: ((request: EnsureOrchestratorRequest) => Promise<void>) | undefined;
+  changeDirectory?: ((cwd: string) => Promise<string | undefined>) | undefined;
+  detachIdentity?: string | undefined;
+  openOrchestrator?: ((target: OrchestratorCockpitTarget) => Promise<SessionRecord>) | undefined;
 }
+
+export type OrchestratorCockpitTarget =
+  | {
+    type: "existing";
+    session: SessionRecord;
+    cockpitCwd: string;
+    requiresResume: boolean;
+  }
+  | {
+    type: "create";
+    request: CreateOrchestratorRequest;
+    cockpitCwd: string;
+  };
 
 const DELETE_CONFIRMATION_MS = 5_000;
 const QUIT_CONFIRMATION_MS = 5_000;
@@ -264,7 +292,7 @@ export function threadStatus(thread: FleetThread): ThreadStatus {
     case "active": {
       const activity = providerTerminalActivity(thread.record.provider, thread.replay);
       if (activity === "working") return "Working";
-      if (activity === "blocked") return "Needs input";
+      if (activity === "needs-input") return "Needs input";
       return "Done";
     }
   }
@@ -363,7 +391,47 @@ export function transitionFleet(
   }
 
   if (state.orchestratorPicker !== undefined) {
-    return transitionOrchestratorPicker(state, key);
+    return transitionOrchestratorPicker(state, snapshot, key);
+  }
+
+  if (key === "ctrl+g") {
+    return {
+      state: { ...state, helpOpen: false, notice: undefined },
+      action: { type: "change-directory", cwd: composerCwd(state, snapshot) },
+    };
+  }
+
+  if (key === "ctrl+]") {
+    if (selected?.record.kind !== "orchestrator") {
+      return {
+        state: {
+          ...state,
+          helpOpen: false,
+          notice: "Select a detached orchestrator to attach to the cockpit",
+          noticeTone: "neutral",
+        },
+      };
+    }
+    if (selected.record.attachmentState === "controlled") {
+      return {
+        state: {
+          ...state,
+          helpOpen: false,
+          notice: "Selected orchestrator is controlled elsewhere",
+          noticeTone: "warning",
+        },
+      };
+    }
+    return {
+      state: { ...state, helpOpen: false, notice: undefined },
+      action: {
+        type: "open-orchestrator",
+        sessionId: selected.record.id,
+        cockpitCwd: state.fallbackCwd,
+        requiresResume: selected.record.executionState !== "active"
+          && selected.record.executionState !== "starting",
+      },
+    };
   }
 
   if (key === "?" && state.draft === "") {
@@ -401,16 +469,26 @@ export function transitionFleet(
     const target = threads[index];
     return target === undefined
       ? { state }
-      : { state: { ...state, selectedSessionId: target.record.id }, action: openAction(target.record) };
+      : {
+          state: {
+            ...state,
+            selectedSessionId: target.record.id,
+            deleteConfirmation: undefined,
+            notice: undefined,
+          },
+          action: openAction(target.record),
+        };
   }
 
   if (key === "ctrl+x" && selected !== undefined) {
     const tree = sessionTree(snapshot, selected.record.id);
     const terminal = tree.filter(({ record }) => isTerminalSession(record)).length;
-    if (terminal !== tree.length) {
+    const stopAcknowledged = state.stopAcknowledgement?.sessionId === selected.record.id;
+    if (terminal !== tree.length || !stopAcknowledged) {
       return {
         state: {
           ...state,
+          stopAcknowledgement: { sessionId: selected.record.id },
           deleteConfirmation: undefined,
           notice: stoppingTreeNotice(selected.record, tree.length - 1, terminal, tree.length),
           noticeTone: "warning",
@@ -520,7 +598,7 @@ export function renderFleet(
     return renderWorkerPicker(state, { width, height, now, color, home });
   }
   if (state.orchestratorPicker !== undefined) {
-    return renderOrchestratorPicker(state, { width, height, now, color, home });
+    return renderOrchestratorPicker(snapshot, state, { width, height, now, color, home });
   }
   return renderFleetList(snapshot, state, { width, height, now, color, home });
 }
@@ -662,18 +740,21 @@ function renderFleetList(
   const selectedTree = selected === undefined ? [] : sessionTree(snapshot, selected.record.id);
   const terminal = selected !== undefined
     && selectedTree.every(({ record }) => isTerminalSession(record));
-  const destructiveHint = terminal ? "ctrl+x delete thread" : "ctrl+x stop agent";
+  const stopAcknowledged = selected !== undefined
+    && state.stopAcknowledgement?.sessionId === selected.record.id;
+  const destructiveHint = terminal && stopAcknowledged ? "ctrl+x delete thread" : "ctrl+x stop agent";
   const cwd = composerCwd(state, snapshot);
   const profile = state.launchProfiles[cwd];
-  const draftLines = (state.rename?.draft ?? state.draft).split("\n").slice(-3);
-  const composerLines = draftLines.length === 1 && draftLines[0] === ""
-    ? [`› ${paint(state.rename === undefined ? "Describe a task for a new session" : "Rename thread", "dim", options.color)}`]
-    : draftLines.map((line, index) => `${index === 0 ? state.rename === undefined ? "›" : "Rename ›" : "  "} ${fit(line ?? "", Math.max(1, options.width - 3))}`);
+  const composerLines = renderComposerLines(
+    state.rename?.draft ?? state.draft,
+    state.rename !== undefined,
+    options,
+  );
   const launchContext = profile === undefined
-    ? `▶ /model required · ${selected?.record.sandbox ?? "read-only"} · ${shortPath(cwd, options.home)}`
-    : `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"} · ${shortPath(cwd, options.home)}`;
+    ? `▶ /model required · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+g change`
+    : `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+g change`;
   const helpLines = state.helpOpen === true
-    ? shortcutHelp(options.width, terminal ? "delete" : "stop")
+    ? shortcutHelp(options.width, terminal && stopAcknowledged ? "delete" : "stop")
     : [];
   const footer = [
     ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
@@ -682,7 +763,7 @@ function renderFleetList(
     paint("─".repeat(options.width), "dim", options.color),
     ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
     paint(fit(launchContext, options.width), "dim", options.color),
-    paint(fit(`enter open/start · space reply · /model · /fable-workers · /caveman-workers · ? shortcuts · ${destructiveHint}`, options.width), "dim", options.color),
+    paint(fit(`enter open/start · ctrl+[ detach · ctrl+] reattach · ctrl+g cwd · space reply · /model · /fable-workers · /caveman-workers · ? shortcuts · ${destructiveHint}`, options.width), "dim", options.color),
   ];
   const bodyHeight = Math.max(0, options.height - footer.length);
   const body = lines.slice(0, bodyHeight);
@@ -730,20 +811,29 @@ function renderHeader(
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
     "shift+↑↓ reorder", "ctrl+s switch views", "@ mention", "alt+1–9 open", "esc back/clear",
-    "ctrl+r rename", "ctrl+j newline", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
+    "ctrl+r rename", "ctrl+j newline", "ctrl+[ detach · ctrl+] reattach", "ctrl+g cwd", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
   ];
   if (width >= 110) return [entries.slice(0, 5).join("   "), entries.slice(5).join("   ")];
   if (width >= 70) return [entries.slice(0, 3).join("   "), entries.slice(3, 6).join("   "), entries.slice(6).join("   ")];
   return entries;
 }
 
-function transitionOrchestratorPicker(state: FleetState, key: string): FleetTransition {
+function transitionOrchestratorPicker(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  key: string,
+): FleetTransition {
   const picker = state.orchestratorPicker!;
   if (key === "escape") {
     return {
       state: {
         ...state,
-        orchestratorPicker: picker.step === "effort" ? { ...picker, step: "model" } : undefined,
+        orchestratorPicker: picker.step === "effort"
+          ? {
+              step: "target",
+              choiceIndex: existingOrchestrators(snapshot).length + picker.modelIndex,
+            }
+          : undefined,
         notice: undefined,
       },
     };
@@ -751,19 +841,21 @@ function transitionOrchestratorPicker(state: FleetState, key: string): FleetTran
 
   if (key === "up" || key === "down") {
     const delta = key === "up" ? -1 : 1;
-    if (picker.step === "model") {
+    if (picker.step === "target") {
       return {
         state: {
           ...state,
           orchestratorPicker: {
             ...picker,
-            choiceIndex: boundedIndex(picker.choiceIndex + delta, ORCHESTRATOR_MODEL_CHOICES.length),
-            effortIndex: 0,
+            choiceIndex: boundedIndex(
+              picker.choiceIndex + delta,
+              existingOrchestrators(snapshot).length + ORCHESTRATOR_MODEL_CHOICES.length,
+            ),
           },
         },
       };
     }
-    const choice = ORCHESTRATOR_MODEL_CHOICES[picker.choiceIndex]!;
+    const choice = ORCHESTRATOR_MODEL_CHOICES[picker.modelIndex]!;
     return {
       state: {
         ...state,
@@ -776,15 +868,60 @@ function transitionOrchestratorPicker(state: FleetState, key: string): FleetTran
   }
 
   if (key !== "enter") return { state };
-  if (picker.step === "model") {
-    return { state: { ...state, orchestratorPicker: { ...picker, step: "effort" } } };
+  if (picker.step === "target") {
+    const existing = existingOrchestrators(snapshot);
+    const selectedExisting = existing[picker.choiceIndex];
+    if (selectedExisting !== undefined) {
+      if (selectedExisting.attachmentState === "controlled") {
+        return {
+          state: {
+            ...state,
+            notice: "Orchestrator is in use by another controller",
+            noticeTone: "warning",
+          },
+        };
+      }
+      return {
+        state: {
+          ...state,
+          selectedSessionId: selectedExisting.id,
+          orchestratorPicker: undefined,
+          notice: undefined,
+        },
+        action: {
+          type: "open-orchestrator",
+          sessionId: selectedExisting.id,
+          cockpitCwd: state.fallbackCwd,
+          requiresResume: selectedExisting.executionState !== "active",
+        },
+      };
+    }
+    const modelIndex = picker.choiceIndex - existing.length;
+    const choice = ORCHESTRATOR_MODEL_CHOICES[modelIndex];
+    if (choice === undefined) {
+      return {
+        state: {
+          ...state,
+          notice: "No orchestrator model is available",
+          noticeTone: "error",
+        },
+      };
+    }
+    return {
+      state: {
+        ...state,
+        orchestratorPicker: { step: "effort", modelIndex, effortIndex: 0 },
+        notice: undefined,
+      },
+    };
   }
 
   const selection = orchestratorSelection(picker);
   return {
     state: { ...state, orchestratorPicker: undefined, notice: undefined },
     action: {
-      type: "orchestrator",
+      type: "create-orchestrator",
+      cockpitCwd: state.fallbackCwd,
       request: {
         provider: selection.provider.provider,
         model: selection.model,
@@ -797,30 +934,52 @@ function transitionOrchestratorPicker(state: FleetState, key: string): FleetTran
 }
 
 function renderOrchestratorPicker(
+  snapshot: FleetSnapshot,
   state: FleetState,
   options: ResolvedFleetRenderOptions,
 ): string {
   const picker = state.orchestratorPicker!;
-  const selection = orchestratorSelection(picker);
-  const stepNumber = picker.step === "model" ? 1 : 2;
-  const lines = [...renderHeader([], state, options), "", paint(`Orchestrator  ${stepNumber} of 2`, "dim", options.color), ""];
+  const selection = picker.step === "effort" ? orchestratorSelection(picker) : undefined;
+  const stepNumber = picker.step === "target" ? 1 : 2;
+  const lines = [
+    ...renderHeader(orderedThreads(snapshot), state, options),
+    "",
+    paint(`Orchestrator  ${stepNumber} of 2`, "dim", options.color),
+    "",
+  ];
 
-  if (picker.step === "model") {
-    lines.push("Choose an orchestrator model", "");
+  if (picker.step === "target") {
+    const existing = existingOrchestrators(snapshot);
+    lines.push("Existing orchestrators", "");
+    if (existing.length === 0) {
+      lines.push(paint("  No interactive orchestrators", "dim", options.color));
+    } else {
+      lines.push(...existing.map((record, index) =>
+        pickerRow(existingOrchestratorLabel(record, options.color), index === picker.choiceIndex, options.color)));
+    }
+    lines.push("", "New orchestrator", "");
     lines.push(...ORCHESTRATOR_MODEL_CHOICES.map((choice, index) =>
-      pickerRow(`${choice.label}  ${paint(choice.provider.label, "dim", options.color)}`, index === picker.choiceIndex, options.color)));
+      pickerRow(
+        `${choice.label}  ${paint(choice.provider.label, "dim", options.color)}`,
+        existing.length + index === picker.choiceIndex,
+        options.color,
+      )));
   } else {
-    lines.push(`${selection.provider.label} effort`, "");
-    lines.push(...selection.provider.efforts.map((effort, index) =>
+    lines.push(`${selection!.provider.label} effort`, "");
+    lines.push(...selection!.provider.efforts.map((effort, index) =>
       pickerRow(effort === "native-default" ? "Provider managed" : effort, index === picker.effortIndex, options.color)));
   }
 
   const footer = [
     ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
     paint("─".repeat(options.width), "dim", options.color),
-    paint(fit(`${selection.provider.label} · ${selection.model} · ${selection.effort ?? "Provider managed"}`, options.width), "cyan", options.color),
+    ...(selection === undefined
+      ? []
+      : [paint(fit(`${selection.provider.label} · ${selection.model} · ${selection.effort ?? "Provider managed"}`, options.width), "cyan", options.color)]),
     paint(
-      fit(picker.step === "effort" ? "↑↓ select · enter open · esc back" : "↑↓ select · enter next · esc back", options.width),
+      fit(picker.step === "effort"
+        ? "↑↓ select · enter create in cockpit · esc back"
+        : "↑↓ select · enter focus/next · esc back", options.width),
       "dim",
       options.color,
     ),
@@ -830,8 +989,8 @@ function renderOrchestratorPicker(
   return [...body, ...footer].join("\n");
 }
 
-function orchestratorSelection(picker: OrchestratorPickerState) {
-  const choice = ORCHESTRATOR_MODEL_CHOICES[picker.choiceIndex]!;
+function orchestratorSelection(picker: Extract<OrchestratorPickerState, { step: "effort" }>) {
+  const choice = ORCHESTRATOR_MODEL_CHOICES[picker.modelIndex]!;
   const provider = choice.provider;
   const effort = provider.efforts[picker.effortIndex]!;
   return {
@@ -841,18 +1000,33 @@ function orchestratorSelection(picker: OrchestratorPickerState) {
   };
 }
 
-function initialOrchestratorPicker(snapshot: FleetSnapshot, cwd: string): OrchestratorPickerState {
-  const existing = orderedThreads(snapshot)
-    .find((thread) => thread.record.kind === "orchestrator" && thread.record.orchestratorScope === "fleet")?.record
-    ?? orderedThreads(snapshot)
-      .find((thread) => thread.record.kind === "orchestrator" && thread.record.cwd === cwd)?.record;
-  const choiceIndex = existing === undefined
-    ? 0
-    : Math.max(0, ORCHESTRATOR_MODEL_CHOICES.findIndex((choice) =>
-      choice.provider.provider === existing.provider && choice.model === existing.model));
-  const choice = ORCHESTRATOR_MODEL_CHOICES[choiceIndex]!;
-  const effortIndex = Math.max(0, choice.provider.efforts.indexOf(existing?.effort ?? "native-default"));
-  return { step: "model", choiceIndex, effortIndex };
+function initialOrchestratorPicker(_snapshot: FleetSnapshot, _cwd: string): OrchestratorPickerState {
+  return { step: "target", choiceIndex: 0 };
+}
+
+function existingOrchestrators(snapshot: FleetSnapshot): SessionRecord[] {
+  return orderedThreads(snapshot)
+    .map(({ record }) => record)
+    .filter((record) =>
+      record.kind === "orchestrator"
+      && record.role === "orchestrator"
+      && (
+        record.executionState === "active"
+        || (
+          record.executionState === "cancelled"
+          && record.attentionState === "interrupted"
+        )
+      ));
+}
+
+function existingOrchestratorLabel(record: SessionRecord, color: boolean): string {
+  const name = record.name ?? `${friendlyModel(record.provider, record.model)} orchestrator`;
+  const lifecycle = record.attachmentState === "controlled"
+    ? paint("in use", "yellow", color)
+    : record.executionState === "active"
+      ? paint("available", "green", color)
+      : paint("reconnect", "yellow", color);
+  return `${name}  ${paint(record.id.slice(0, 8), "dim", color)}  ${lifecycle}`;
 }
 
 function pickerRow(value: string, selected: boolean, color: boolean): string {
@@ -874,36 +1048,45 @@ function renderThreadRow(
   const title = `${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
   const identity = `${friendlyModel(thread.record.provider, thread.record.model)} · ${friendlyEffort(thread.record.effort ?? "provider-managed")}`;
   const status = threadStatus(thread);
-  const preview = thread.record.latestPreview ?? latestTerminalPreview(thread.replay);
+  const preview = latestTerminalPreview(thread.record.latestPreview ?? thread.replay)
+    .replace(/\s+/gu, " ")
+    .trim();
   const age = relativeTime(thread.record.meaningfulUpdatedAt ?? thread.record.updatedAt, options.now);
-
-  if (options.width < 100) {
-    const identityWidth = options.width < 60 ? 0 : Math.min(18, Math.max(10, Math.floor(options.width * 0.2)));
-    const statusWidth = Math.min(11, status.length);
-    const firstAvailable = Math.max(10, options.width - 4 - identityWidth - statusWidth - 7);
-    const first = [
-      `${paint(prefix, selected ? "bold" : "dim", options.color)} ${selected ? paint(fit(title, firstAvailable), "bold", options.color) : fit(title, firstAvailable)}`,
-      ...(identityWidth === 0 ? [] : [paint(pad(identity, identityWidth), "dim", options.color)]),
-      statusText(pad(status, statusWidth), false, options.color),
-      age,
-    ].join("  ");
-    const second = `  ${paint(fit(preview, Math.max(8, options.width - 2)), "dim", options.color)}`;
-    return `${first}\n${second}`;
-  }
-
-  const titleWidth = Math.min(38, Math.max(24, Math.floor(options.width * 0.28)));
-  const identityWidth = Math.min(20, Math.max(12, Math.floor(options.width * 0.15)));
-  const statusWidth = Math.min(11, Math.max(4, status.length));
-  const fixed = 2 + titleWidth + 2 + identityWidth + 2 + statusWidth + 2 + 5;
-  const previewWidth = Math.max(8, options.width - fixed);
+  const showIdentity = options.width >= 80;
+  const titleWidth = showIdentity
+    ? Math.min(38, Math.max(22, Math.floor(options.width * 0.28)))
+    : Math.min(28, Math.max(16, Math.floor(options.width * 0.38)));
+  const identityWidth = showIdentity
+    ? Math.min(20, Math.max(12, Math.floor(options.width * 0.15)))
+    : 0;
+  const statusWidth = 11;
+  const fixedWidth = 12 + titleWidth + statusWidth + (showIdentity ? identityWidth + 1 : 0);
+  const previewWidth = Math.max(1, options.width - fixedWidth);
   return [
-    paint(prefix, selected ? "bold" : "dim", options.color),
+    `  ${statusMarker(prefix, status, selected, options.color)}`,
     selected ? paint(pad(title, titleWidth), "bold", options.color) : pad(title, titleWidth),
-    paint(pad(identity, identityWidth), "dim", options.color),
+    ...(showIdentity ? [paint(pad(identity, identityWidth), "dim", options.color)] : []),
     statusText(pad(status, statusWidth), false, options.color),
-    paint(fit(preview, previewWidth), "dim", options.color),
+    paint(pad(preview, previewWidth), "dim", options.color),
     padStart(age, 5),
   ].join(" ");
+}
+
+function statusMarker(
+  marker: string,
+  status: ThreadStatus,
+  selected: boolean,
+  color: boolean,
+): string {
+  const tone = status === "Done"
+    ? "green"
+    : status === "Needs input"
+      ? "yellow"
+      : selected
+        ? "bold"
+        : "dim";
+  const painted = paint(marker, tone, color);
+  return selected && tone !== "bold" ? paint(painted, "bold", color) : painted;
 }
 
 export async function runFleet(
@@ -962,6 +1145,7 @@ export async function runFleet(
         output,
         signals,
         closeTransport: false,
+        ...(runtime.detachIdentity === undefined ? {} : { detachIdentity: runtime.detachIdentity }),
       });
       if (status !== 0) state = { ...state, notice: "Provider attachment closed unexpectedly", noticeTone: "error" };
     } catch (error) {
@@ -979,10 +1163,9 @@ export async function runFleet(
     }
   };
 
-  const openOrchestrator = async (request: EnsureOrchestratorRequest) => {
+  const openOrchestrator = async (target: OrchestratorCockpitTarget) => {
     if (runtime.openOrchestrator === undefined) {
-      state = { ...state, notice: "Orchestrator presentation is unavailable in this client", noticeTone: "error" };
-      return;
+      throw new Error("Orchestrator cockpit presentation is unavailable in this client");
     }
     attaching = true;
     notify();
@@ -993,7 +1176,8 @@ export async function runFleet(
     input.setRawMode?.(false);
     output.write(`${LEAVE_FLEET_SCREEN}\u001b[2J\u001b[H`);
     try {
-      await runtime.openOrchestrator(request);
+      const session = await runtime.openOrchestrator(target);
+      state = { ...state, selectedSessionId: session.id, notice: undefined };
     } finally {
       attaching = false;
       if (!stopped) {
@@ -1026,8 +1210,19 @@ export async function runFleet(
           noticeTone: progress.terminal === progress.total ? "neutral" : "warning",
         };
       } else if (action?.type === "delete-tree") {
+        const selectedIndex = Math.max(
+          0,
+          orderedThreads(snapshot).findIndex(({ record }) => record.id === action.sessionId),
+        );
         const progress = await client.request<SessionTreeProgress>("session.deleteTree", { sessionId: action.sessionId });
-        state = { ...state, notice: deletedTreeNotice(progress), noticeTone: "neutral" };
+        snapshot = await collectFleetSnapshot(client);
+        const remaining = orderedThreads(snapshot);
+        state = {
+          ...state,
+          selectedSessionId: remaining[selectedIndex]?.record.id ?? remaining[selectedIndex - 1]?.record.id,
+          notice: deletedTreeNotice(progress),
+          noticeTone: "neutral",
+        };
       } else if (action?.type === "attach") {
         await openNativeThread(action.sessionId);
       } else if (action?.type === "resume") {
@@ -1039,8 +1234,21 @@ export async function runFleet(
         state = { ...state, selectedSessionId: record.id };
         snapshot = await collectFleetSnapshot(client);
         await openNativeThread(record.id);
-      } else if (action?.type === "orchestrator") {
-        await openOrchestrator(action.request);
+      } else if (action?.type === "open-orchestrator") {
+        const session = snapshot.threads.find(({ record }) => record.id === action.sessionId)?.record;
+        if (session === undefined) throw new Error("Selected orchestrator is no longer available");
+        await openOrchestrator({
+          type: "existing",
+          session,
+          cockpitCwd: action.cockpitCwd,
+          requiresResume: action.requiresResume,
+        });
+      } else if (action?.type === "create-orchestrator") {
+        await openOrchestrator({
+          type: "create",
+          request: action.request,
+          cockpitCwd: action.cockpitCwd,
+        });
       } else if (action?.type === "fable-workers") {
         const result = await client.request<FableWorkersResult>(
           "orchestrator.fableWorkers",
@@ -1064,8 +1272,30 @@ export async function runFleet(
         });
       } else if (action?.type === "profile") {
         await client.request("fleet.preference.set", { cwd: action.cwd, profile: action.profile });
+      } else if (action?.type === "change-directory") {
+        if (runtime.changeDirectory === undefined) {
+          throw new Error("Working-directory navigation is unavailable in this client");
+        }
+        const cwd = await runtime.changeDirectory(action.cwd);
+        if (cwd !== undefined) {
+          state = {
+            ...state,
+            workingDirectory: cwd,
+            notice: `Working directory: ${cwd}`,
+            noticeTone: "neutral",
+          };
+        }
       }
-      if (action !== undefined && action.type !== "attach" && action.type !== "resume" && action.type !== "start" && action.type !== "orchestrator") {
+      if (
+        action !== undefined
+        && action.type !== "attach"
+        && action.type !== "resume"
+        && action.type !== "start"
+        && action.type !== "open-orchestrator"
+        && action.type !== "create-orchestrator"
+        && action.type !== "change-directory"
+        && action.type !== "delete-tree"
+      ) {
         snapshot = await collectFleetSnapshot(client);
       }
     } catch (error) {
@@ -1164,16 +1394,17 @@ function waitForRefresh(register: (wake: () => void) => void, clear: () => void)
 
 function composerCursor(rendered: string, state: FleetState, width: number): { row: number; column: number } {
   const lines = rendered.split("\n");
-  const rowIndex = lines.findIndex((line) => {
-    const plain = stripTerminalControl(line);
-    return plain.startsWith("› ") || plain.startsWith("Rename › ");
-  });
   const value = state.rename?.draft ?? state.draft;
-  const lastLine = value.split("\n").at(-1) ?? "";
-  const prefix = state.rename === undefined ? 2 : 9;
+  const divider = "─".repeat(width);
+  const lowerDividerIndex = lines.findLastIndex((line) => stripTerminalControl(line) === divider);
+  const rowIndex = Math.max(0, lowerDividerIndex - 1);
+  const visibleLine = stripTerminalControl(lines[rowIndex] ?? "");
+  const emptyColumn = state.rename === undefined ? 3 : 10;
   return {
     row: Math.max(1, rowIndex + 1),
-    column: Math.min(width, prefix + [...lastLine].length + 1),
+    column: value === ""
+      ? emptyColumn
+      : Math.min(width, [...visibleLine].length + 1),
   };
 }
 
@@ -1249,12 +1480,14 @@ export class FleetKeyDecoder {
     }
     const code = value.charCodeAt(index);
     if (code === 0x03) keys.push("ctrl+c");
+    else if (code === 0x07) keys.push("ctrl+g");
     else if (code === 0x0a) keys.push("ctrl+j");
     else if (code === 0x0f) keys.push("ctrl+o");
     else if (code === 0x12) keys.push("ctrl+r");
     else if (code === 0x13) keys.push("ctrl+s");
     else if (code === 0x14) keys.push("ctrl+t");
     else if (code === 0x18) keys.push("ctrl+x");
+    else if (code === 0x1d) keys.push("ctrl+]");
     else if (code === 0x1b) keys.push("escape");
     else if (code === 0x0d) keys.push("enter");
     else if (code === 0x7f || code === 0x08) keys.push("backspace");
@@ -1274,7 +1507,13 @@ function openAction(record: SessionRecord): FleetAction {
 function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number): FleetState {
   const threads = orderedThreads(snapshot);
   const selectedExists = threads.some(({ record }) => record.id === state.selectedSessionId);
-  const deleteConfirmation = state.deleteConfirmation !== undefined && state.deleteConfirmation.expiresAt > now
+  const selectedSessionId = selectedExists ? state.selectedSessionId : threads[0]?.record.id;
+  const stopAcknowledgement = state.stopAcknowledgement?.sessionId === selectedSessionId
+    ? state.stopAcknowledgement
+    : undefined;
+  const deleteConfirmation = state.deleteConfirmation !== undefined
+    && state.deleteConfirmation.sessionId === selectedSessionId
+    && state.deleteConfirmation.expiresAt > now
     ? state.deleteConfirmation
     : undefined;
   const quitConfirmation = state.quitConfirmation !== undefined && state.quitConfirmation.expiresAt > now
@@ -1284,7 +1523,8 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
     || (state.quitConfirmation !== undefined && quitConfirmation === undefined);
   return {
     ...state,
-    selectedSessionId: selectedExists ? state.selectedSessionId : threads[0]?.record.id,
+    selectedSessionId,
+    stopAcknowledgement,
     deleteConfirmation,
     quitConfirmation,
     ...(confirmationExpired
@@ -1373,15 +1613,23 @@ function groupThreads(threads: readonly FleetThread[]): Array<{ cwd: string; thr
         const leftOrder = left.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
         const rightOrder = right.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
         if (leftOrder !== rightOrder) return leftOrder - rightOrder;
-        const leftAt = left.record.meaningfulUpdatedAt ?? left.record.updatedAt;
-        const rightAt = right.record.meaningfulUpdatedAt ?? right.record.updatedAt;
-        return rightAt.localeCompare(leftAt);
+        return left.record.createdAt.localeCompare(right.record.createdAt);
       }),
     }))
     .sort((left, right) => {
-      const leftLatest = left.threads[0]?.record.meaningfulUpdatedAt ?? left.threads[0]?.record.updatedAt ?? "";
-      const rightLatest = right.threads[0]?.record.meaningfulUpdatedAt ?? right.threads[0]?.record.updatedAt ?? "";
-      return rightLatest.localeCompare(leftLatest);
+      const leftCreated = left.threads.reduce(
+        (earliest, thread) => earliest === "" || thread.record.createdAt < earliest
+          ? thread.record.createdAt
+          : earliest,
+        "",
+      );
+      const rightCreated = right.threads.reduce(
+        (earliest, thread) => earliest === "" || thread.record.createdAt < earliest
+          ? thread.record.createdAt
+          : earliest,
+        "",
+      );
+      return leftCreated.localeCompare(rightCreated);
     });
 }
 
@@ -1391,7 +1639,8 @@ function taskName(instruction: string): string {
 }
 
 function composerCwd(state: FleetState, snapshot: FleetSnapshot): string {
-  return snapshot.threads.find(({ record }) => record.id === state.selectedSessionId)?.record.cwd
+  return state.workingDirectory
+    ?? snapshot.threads.find(({ record }) => record.id === state.selectedSessionId)?.record.cwd
     ?? state.fallbackCwd;
 }
 
@@ -1430,7 +1679,7 @@ function startTransition(
   if (draft.startsWith("/")) {
     return { state: { ...state, notice: "Use /model to configure a new worker", noticeTone: "error" } };
   }
-  const cwd = selected?.cwd ?? state.fallbackCwd;
+  const cwd = state.workingDirectory ?? selected?.cwd ?? state.fallbackCwd;
   const profile = state.launchProfiles[cwd];
   if (profile === undefined) {
     return openWorkerPickerForCwd(state, cwd, draft);
@@ -1570,10 +1819,11 @@ function relativeTime(timestamp: string, now: number): string {
 }
 
 function statusText(status: string, pendingDelete: boolean, color: boolean): string {
-  if (pendingDelete || status === "Failed") return paint(status, "red", color);
-  if (status === "Done") return paint(status, "green", color);
-  if (status === "Needs input" || status === "Stopping") return paint(status, "yellow", color);
-  if (status === "Working") return paint(status, "cyan", color);
+  const label = status.trim();
+  if (pendingDelete || label === "Failed") return paint(status, "red", color);
+  if (label === "Done") return paint(status, "green", color);
+  if (label === "Needs input" || label === "Stopping") return paint(status, "yellow", color);
+  if (label === "Working") return paint(status, "cyan", color);
   return paint(status, "gray", color);
 }
 
@@ -1591,6 +1841,40 @@ function renderNotice(
   if (tone === "warning") return paint(value, "yellow", color);
   if (tone === "error" || tone === "confirmation") return paint(value, "red", color);
   return value;
+}
+
+function renderComposerLines(
+  value: string,
+  renaming: boolean,
+  options: ResolvedFleetRenderOptions,
+): string[] {
+  if (value === "") {
+    return [
+      `${renaming ? "Rename ›" : "›"} ${paint(renaming ? "Rename thread" : "Describe a task for a new session", "dim", options.color)}`,
+    ];
+  }
+
+  const rows: string[] = [];
+  const logicalLines = value.split("\n");
+  for (const logicalLine of logicalLines) {
+    const characters = [...logicalLine];
+    let offset = 0;
+    do {
+      const prefix = rows.length === 0
+        ? renaming ? "Rename › " : "› "
+        : "  ";
+      const capacity = Math.max(1, options.width - [...prefix].length - 1);
+      const segment = characters.slice(offset, offset + capacity).join("");
+      rows.push(`${prefix}${segment}`);
+      offset += capacity;
+    } while (offset < characters.length);
+  }
+
+  const maximumRows = Math.max(1, Math.min(12, Math.floor(options.height / 3)));
+  if (rows.length <= maximumRows) return rows;
+  const visibleRows = rows.slice(-maximumRows);
+  visibleRows[0] = `… ${(visibleRows[0] ?? "").slice(2)}`;
+  return visibleRows;
 }
 
 function fit(value: string, width: number): string {

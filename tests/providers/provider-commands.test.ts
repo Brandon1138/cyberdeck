@@ -53,6 +53,22 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args).toContain("model_reasoning_effort=\"xhigh\"");
   });
 
+  it("maps explicit auto approval mode to Codex never while preserving the sandbox", () => {
+    const spec = new CodexProviderAdapter().buildLaunchSpec(session({
+      sandbox: "workspace-write",
+      approvalMode: "auto",
+    }));
+    expect(spec.args).toEqual([
+      "--no-alt-screen",
+      "-C",
+      "/tmp/repo",
+      "-s",
+      "workspace-write",
+      "-a",
+      "never",
+    ]);
+  });
+
   it("marks worker mode without disturbing the inherited launch environment", () => {
     const spec = new CodexProviderAdapter().buildLaunchSpec(session({
       kind: "worker",
@@ -204,6 +220,19 @@ describe("ClaudeProviderAdapter", () => {
     expect(spec.args.slice(-2)).toEqual(["--model", "sonnet"]);
   });
 
+  it("maps explicit auto approval mode for Claude Opus without using a bypass mode", () => {
+    const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({
+      provider: "claude",
+      model: "opus",
+      sandbox: "workspace-write",
+      approvalMode: "auto",
+    }));
+    expect(spec.args).toContain("auto");
+    expect(spec.args).not.toContain("manual");
+    expect(spec.args).not.toContain("bypassPermissions");
+    expect(spec.args).not.toContain("dontAsk");
+  });
+
   it("forwards explicit Claude effort on launch and resume", () => {
     const record = session({
       provider: "claude",
@@ -263,6 +292,22 @@ describe("ClaudeProviderAdapter", () => {
 });
 
 describe("extended interactive provider adapters", () => {
+  it.each([
+    ["cursor", () => new CursorProviderAdapter().buildLaunchSpec(
+      session({ provider: "cursor", model: "composer", approvalMode: "auto" }),
+    )],
+    ["antigravity", () => new AntigravityProviderAdapter().buildLaunchSpec(
+      session({
+        provider: "antigravity",
+        model: "gemini-3.6-flash-low",
+        effort: "low",
+        approvalMode: "auto",
+      }),
+    )],
+  ] as const)("fails clearly when %s is asked for unsupported auto approval", (_provider, build) => {
+    expect(build).toThrow(expect.objectContaining({ code: "APPROVAL_MODE_NOT_SUPPORTED" }));
+  });
+
   it("starts Cursor Composer with the exact initial prompt and explicit model", () => {
     const adapter = new CursorProviderAdapter();
     const spec = adapter.buildLaunchSpec(

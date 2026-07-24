@@ -23,6 +23,7 @@ import { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js
 import { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import { SessionStore } from "../persistence/session-store.js";
 import { FleetPreferenceStore } from "../persistence/fleet-preference-store.js";
+import { FleetDetachStore } from "../persistence/fleet-detach-store.js";
 import { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import { ensurePrivateDirectory } from "../persistence/private-files.js";
 import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
@@ -75,6 +76,7 @@ export async function runBroker(
   const mcp = { nodePath: process.execPath, cliPath };
   const config = loadBrokerRuntimeConfig(resolve(stateDirectory, "config.json"));
   const sessionStore = new SessionStore(stateDirectory);
+  const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
   const workerPreferences = new WorkerPreferenceStore(stateDirectory);
   const recoveredSessions = await sessionStore.load();
@@ -139,6 +141,7 @@ export async function runBroker(
     workflows,
     controlPlane: runtime.controlPlane,
     controlPlaneRuntime: runtime,
+    fleetDetaches,
     fleetPreferences,
     workerPreferences,
     onShutdown: () => { void shutdown("request"); },

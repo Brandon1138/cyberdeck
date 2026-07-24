@@ -13,6 +13,8 @@ import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-s
 import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
 import { WorkerPreferenceStore } from "../../src/persistence/worker-preference-store.js";
+import { FleetDetachStore } from "../../src/persistence/fleet-detach-store.js";
+import { AgentControlService } from "../../src/orchestration/agent-control-service.js";
 
 class FakePty implements PtyHandle {
   readonly pid: number;
@@ -120,22 +122,27 @@ async function harness() {
     ptyFactory,
     journal: { append: async () => {} },
     transcripts,
+    validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({ maxConcurrentWorkers: 8 }),
   });
   const orchestratorStore = new OrchestratorStore(directory);
   const workerPreferences = new WorkerPreferenceStore(directory);
+  const fleetDetaches = new FleetDetachStore(directory);
   const orchestrators = new OrchestratorManager(registry, orchestratorStore, workerPreferences);
+  const agentControl = new AgentControlService(registry, orchestratorStore, transcripts, workerPreferences);
   let server: BrokerServer;
   server = new BrokerServer({
     socketPath,
     registry,
     transcripts,
     orchestrators,
+    agentControl,
+    fleetDetaches,
     workerPreferences,
     onShutdown: () => { void server.close(); },
   });
   await server.listen();
-  return { server, socketPath, ptyFactory, orchestratorStore, workerPreferences };
+  return { server, socketPath, ptyFactory, orchestratorStore, fleetDetaches, workerPreferences };
 }
 
 describe("BrokerServer", () => {
@@ -250,6 +257,118 @@ describe("BrokerServer", () => {
     } finally {
       watcher.socket.destroy();
       successor.socket.destroy();
+      await server.close();
+    }
+  });
+
+  it("reattaches only the latest explicit target, isolates identities, and clears stale targets", async () => {
+    const { server, socketPath, fleetDetaches } = await harness();
+    const client = await TestClient.open(socketPath);
+    try {
+      const first = await client.request<{ id: string }>("session.start", {
+        provider: "codex", cwd: "/tmp/repo", detached: true, sandbox: "read-only",
+      });
+      const second = await client.request<{ id: string }>("session.start", {
+        provider: "claude", cwd: "/tmp/repo", detached: true, sandbox: "read-only",
+      });
+
+      await client.request("session.attach", { sessionId: first.id, detachIdentity: "operator:one" });
+      await client.request("session.detach", { sessionId: first.id });
+      await expect(client.request("fleet.reattach", { detachIdentity: "operator:one" }))
+        .resolves.toMatchObject({ status: "ready", record: { id: first.id }, requiresResume: false });
+
+      await client.request("session.attach", { sessionId: second.id, detachIdentity: "operator:one" });
+      await client.request("session.detach", { sessionId: second.id });
+      await client.request("session.attach", { sessionId: first.id, detachIdentity: "orchestrator:other" });
+      await client.request("session.detach", { sessionId: first.id });
+      await client.request("session.submit", { sessionId: first.id, message: "background update" });
+      await expect(client.request("fleet.reattach", { detachIdentity: "operator:one" }))
+        .resolves.toMatchObject({ status: "ready", record: { id: second.id }, requiresResume: false });
+      await expect(client.request("fleet.reattach", { detachIdentity: "orchestrator:other" }))
+        .resolves.toMatchObject({ status: "ready", record: { id: first.id }, requiresResume: false });
+      await expect(client.request("fleet.reattach", { detachIdentity: "operator:missing" }))
+        .resolves.toEqual({ status: "none" });
+
+      const leaseHolder = await TestClient.open(socketPath);
+      try {
+        await leaseHolder.request("session.attach", { sessionId: second.id });
+        await expect(client.request("fleet.reattach", { detachIdentity: "operator:one" }))
+          .resolves.toMatchObject({ status: "unavailable", record: { id: second.id } });
+        await leaseHolder.request("session.detach", { sessionId: second.id });
+        await expect(client.request("fleet.reattach", { detachIdentity: "operator:one" }))
+          .resolves.toMatchObject({ status: "ready", record: { id: second.id } });
+      } finally {
+        leaseHolder.socket.destroy();
+      }
+
+      await client.request("session.stop", { sessionId: second.id });
+      await expect(client.request("fleet.reattach", { detachIdentity: "operator:one" }))
+        .resolves.toEqual({ status: "stale" });
+      await expect(client.request("fleet.reattach", { detachIdentity: "operator:one" }))
+        .resolves.toEqual({ status: "none" });
+
+      await client.request("session.attach", { sessionId: first.id, detachIdentity: "operator:one" });
+      await client.request("session.detach", { sessionId: first.id });
+      await client.request("session.stop", { sessionId: first.id });
+      await expect(client.request("fleet.reattach", { detachIdentity: "operator:one" }))
+        .resolves.toEqual({ status: "stale" });
+      await client.request("session.delete", { sessionId: first.id });
+      await fleetDetaches.record("operator:one", first.id);
+      await expect(client.request("fleet.reattach", { detachIdentity: "operator:one" }))
+        .resolves.toEqual({ status: "stale" });
+    } finally {
+      client.socket.destroy();
+      await server.close();
+    }
+  });
+
+  it("creates a unique peer orchestrator without replacing or stopping the current one", async () => {
+    const { server, socketPath, orchestratorStore } = await harness();
+    const client = await TestClient.open(socketPath);
+    try {
+      const request = {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        cwd: "/tmp/repo",
+        scope: "fleet",
+      };
+      const primary = await client.request<{ session: { id: string } }>("orchestrator.ensure", request);
+      const peer = await client.request<{
+        session: { id: string; executionState: string };
+        binding: { key: string; grant: { capabilities: string[] } };
+      }>("orchestrator.create", request);
+
+      expect(peer.session.id).not.toBe(primary.session.id);
+      expect(peer.binding.key).toBe(`fleet:peer:${peer.session.id}`);
+      expect(peer.binding.grant.capabilities).toContain("worker.start");
+      const worker = await client.request<{ sessionId: string }>("agent.worker.start", {
+        actorSessionId: peer.session.id,
+        provider: "codex",
+        model: "gpt-5.6-terra",
+        effort: "low",
+        cwd: "/tmp/repo",
+        sandbox: "read-only",
+        prompt: "Inspect the peer scope",
+      });
+      expect(worker.sessionId).not.toBe(peer.session.id);
+      expect(worker.sessionId).not.toBe(primary.session.id);
+      await expect(client.request<Array<{ id: string; kind?: string; executionState: string }>>(
+        "session.list",
+        {},
+      )).resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: primary.session.id, kind: "orchestrator", executionState: "active" }),
+        expect.objectContaining({ id: peer.session.id, kind: "orchestrator", executionState: "active" }),
+      ]));
+      await expect(orchestratorStore.get("fleet")).resolves.toMatchObject({
+        sessionId: primary.session.id,
+      });
+      await expect(orchestratorStore.findBySessionId(peer.session.id)).resolves.toMatchObject({
+        sessionId: peer.session.id,
+        key: `fleet:peer:${peer.session.id}`,
+      });
+    } finally {
+      client.socket.destroy();
       await server.close();
     }
   });

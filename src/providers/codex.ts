@@ -40,7 +40,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       "-s",
       session.sandbox,
       "-a",
-      "on-request",
+      session.approvalMode === "auto" ? "never" : "on-request",
     ];
     if (session.model !== undefined) {
       args.push("-m", session.model);
@@ -72,7 +72,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       "-s",
       session.sandbox,
       "-a",
-      "on-request",
+      session.approvalMode === "auto" ? "never" : "on-request",
     ];
     if (session.model !== undefined) args.push("-m", session.model);
     if (session.effort !== undefined) {

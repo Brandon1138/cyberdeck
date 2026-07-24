@@ -36,7 +36,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       "--name",
       session.name ?? session.id,
       "--permission-mode",
-      claudePermissionMode(session.sandbox),
+      claudePermissionMode(session.sandbox, session.approvalMode),
     ];
     // Forwarded only because the caller explicitly supplied it; Cyberdeck never chooses a model.
     if (session.model !== undefined) {
@@ -70,7 +70,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       "--name",
       session.name ?? session.id,
       "--permission-mode",
-      claudePermissionMode(session.sandbox),
+      claudePermissionMode(session.sandbox, session.approvalMode),
     ];
     if (session.model !== undefined) args.push("--model", session.model);
     if (session.effort !== undefined) {

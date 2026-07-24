@@ -108,6 +108,7 @@ function harness(options: { failAttachJournal?: boolean; maxConcurrentWorkers?: 
       transcripts.push(event);
       return {} as never;
     } } as never,
+    validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({
       ...(options.maxConcurrentWorkers === undefined
         ? {}
@@ -160,6 +161,7 @@ describe("SessionRegistry", () => {
         return pty;
       }),
       journal: { append: async () => {} },
+      validateCwd: async () => undefined,
       config: BrokerRuntimeConfigSchema.parse({}),
     });
 
@@ -184,6 +186,7 @@ describe("SessionRegistry", () => {
       adapters: { codex: { ...adapters.codex, prepareLaunch } },
       ptyFactory,
       journal: { append: async () => {} },
+      validateCwd: async () => undefined,
       config: BrokerRuntimeConfigSchema.parse({}),
     });
 
@@ -229,8 +232,47 @@ describe("SessionRegistry", () => {
       { sessionId: record.id, completionTarget: 1 },
     ], 5_000)).resolves.toMatchObject({
       timedOut: false,
-      results: [{ status: "blocked", completedTurns: 0 }],
+      results: [{ status: "needs-input", completedTurns: 0 }],
     });
+  });
+
+  it("persists provider approval waits as Needs Input while preserving attach, approve, and detach", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ provider: "claude", model: "opus" }), "Run the checks");
+    ptys[0]!.emitOutput([
+      "Claude needs your permission to use Bash",
+      "  pnpm test",
+      "Do you want to proceed?",
+      "❯ 1. Yes",
+      "  2. Yes, and don't ask again for pnpm test commands",
+      "  3. No",
+      "Esc to cancel · Tab to amend",
+    ].join("\r\n"));
+
+    await vi.waitFor(() => expect(registry.get(record.id).attentionState).toBe("needs-input"));
+    await registry.attach(record.id, "operator", "control", () => undefined);
+    await registry.write(record.id, "operator", Buffer.from("1\r"));
+    await registry.detach(record.id, "operator");
+    expect(ptys[0]!.writes.at(-1)?.toString()).toBe("1\r");
+    expect(registry.get(record.id).attachmentState).toBe("detached");
+
+    ptys[0]!.emitOutput("\r\nWorking\r\nesc to interrupt");
+    await vi.waitFor(() => expect(registry.get(record.id).attentionState).toBe("working"));
+  });
+
+  it("rejects an invalid cwd before constructing a provider process", async () => {
+    const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(1000));
+    const registry = new SessionRegistry({
+      adapters,
+      ptyFactory,
+      journal: { append: async () => {} },
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+
+    await expect(registry.start(request({
+      cwd: `/tmp/cyberdeck-missing-${crypto.randomUUID()}`,
+    }))).rejects.toMatchObject({ code: "INVALID_SESSION_CWD" });
+    expect(ptyFactory).not.toHaveBeenCalled();
   });
 
   it("limits workers independently from orchestrators and reports the active count", async () => {
@@ -330,6 +372,32 @@ describe("SessionRegistry", () => {
     await registry.stop(record.id);
     await registry.stop(record.id);
     expect(ptys[0]!.killCount).toBe(1);
+  });
+
+  it("durably marks a naturally completed session as stopped without rewriting its exit result", async () => {
+    const { registry, ptys, events, transcripts } = harness();
+    const record = await registry.start(request());
+    ptys[0]!.emitExit(0);
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "exited",
+      exitCode: 0,
+      attentionState: "done",
+    });
+
+    await registry.stop(record.id);
+    await registry.stop(record.id);
+
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "exited",
+      exitCode: 0,
+      attentionState: "stopped",
+    });
+    expect(events.filter((event) =>
+      event.type === "session.stopped" && event.sessionId === record.id)).toHaveLength(1);
+    expect(transcripts.filter((event) =>
+      event.kind === "lifecycle"
+      && event.sessionId === record.id
+      && event.text === "session stopped")).toHaveLength(1);
   });
 
   it("replaces a terminal PTY with the provider's exact resume command", async () => {

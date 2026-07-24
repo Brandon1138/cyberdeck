@@ -6,6 +6,7 @@ export { ProviderIdSchema } from "./provider-registration.js";
 
 export const ReasoningEffortSchema = z.enum(["low", "medium", "high", "xhigh", "max", "ultra"]);
 export const SandboxSchema = z.enum(["read-only", "workspace-write"]);
+export const ApprovalModeSchema = z.enum(["prompt", "auto"]);
 export const SessionExecutionStateSchema = z.enum([
   "starting",
   "active",
@@ -31,6 +32,7 @@ export const StartSessionRequestSchema = z.object({
   cwd: z.string().refine(isAbsolute, "cwd must be an absolute path"),
   detached: z.boolean(),
   sandbox: SandboxSchema,
+  approvalMode: ApprovalModeSchema.optional(),
   model: z.string().optional(),
   effort: ReasoningEffortSchema.optional(),
   role: z.string().optional(),
@@ -61,6 +63,7 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
 export type ReasoningEffort = z.infer<typeof ReasoningEffortSchema>;
 export type Sandbox = z.infer<typeof SandboxSchema>;
+export type ApprovalMode = z.infer<typeof ApprovalModeSchema>;
 export type SessionExecutionState = z.infer<typeof SessionExecutionStateSchema>;
 export type AttachmentState = z.infer<typeof AttachmentStateSchema>;
 export type SessionKind = z.infer<typeof SessionKindSchema>;

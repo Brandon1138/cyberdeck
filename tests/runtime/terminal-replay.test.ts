@@ -22,7 +22,37 @@ describe("terminal replay semantics", () => {
     expect(providerTerminalActivity(
       "antigravity",
       "Do you trust the contents of this project? > Yes, I trust this folder",
-    )).toBe("blocked");
+    )).toBe("needs-input");
+  });
+
+  it("recognizes current Codex and Claude provider approval surfaces", () => {
+    const codex = [
+      "Would you like to run the following command?",
+      "$ pnpm test",
+      "› 1. Yes, proceed (y)",
+      "  2. Yes, and don't ask again for commands that start with `pnpm test` (p)",
+      "  3. No, and tell Codex what to do differently (esc)",
+    ].join("\n");
+    const claude = [
+      "Claude needs your permission to use Bash",
+      "  pnpm test",
+      "Do you want to proceed?",
+      "❯ 1. Yes",
+      "  2. Yes, and don't ask again for pnpm test commands",
+      "  3. No",
+      "Esc to cancel · Tab to amend",
+    ].join("\n");
+    expect(providerTerminalActivity("codex", codex)).toBe("needs-input");
+    expect(providerTerminalActivity("claude", claude)).toBe("needs-input");
+  });
+
+  it("clears a stale approval surface when later provider output resumes work", () => {
+    const approval = [
+      "Would you like to run the following command?",
+      "$ pnpm test",
+      "› 1. Yes, proceed (y)",
+    ].join("\n");
+    expect(providerTerminalActivity("codex", `${approval}\nWorking\nesc to interrupt`)).toBe("working");
   });
 
   it("recognizes Antigravity's prompt footer after its spinner stops", () => {
@@ -40,9 +70,11 @@ describe("terminal replay semantics", () => {
     expect(result.length).toBeLessThanOrEqual(240);
   });
 
-  it("uses the first line of the final substantive paragraph instead of timing chrome", () => {
+  it("uses the beginning of the latest assistant reply instead of its final paragraph", () => {
     const replay = [
-      "Earlier paragraph.",
+      "› Summarize the result",
+      "",
+      "The reply begins here and should be previewed.",
       "",
       "The final result is ready.",
       "It is safe to resume later.",
@@ -50,6 +82,49 @@ describe("terminal replay semantics", () => {
       "Cogitated for 2m 14s",
       "Explain this codebase",
     ].join("\n");
-    expect(latestAssistantParagraphPreview(replay)).toBe("The final result is ready.");
+    expect(latestAssistantParagraphPreview(replay)).toBe("The reply begins here and should be previewed.");
+  });
+
+  it("uses the latest reply when terminal replay contains multiple user turns", () => {
+    const replay = [
+      "› First request",
+      "First reply.",
+      "› Second request",
+      "Second reply starts here.",
+      "",
+      "Second reply ending.",
+    ].join("\n");
+    expect(latestAssistantParagraphPreview(replay)).toBe("Second reply starts here.");
+  });
+
+  it("falls back to the latest substantive paragraph when a provider omits prompt markers", () => {
+    const replay = [
+      "Old terminal output.",
+      "",
+      "The only recoverable latest paragraph.",
+      "",
+      "Worked for 12s",
+    ].join("\n");
+    expect(latestAssistantParagraphPreview(replay)).toBe("The only recoverable latest paragraph.");
+  });
+
+  it("skips Codex startup tips and their wrapped landing-page URL", () => {
+    const replay = [
+      "Tip: Try the Desktop app. Run 'codex app' or visit",
+      "https://chatgpt.com/codex?app-landing-page=true",
+    ].join("\n");
+    expect(latestAssistantParagraphPreview(replay)).toBe("No response yet");
+  });
+
+  it("skips decorated timing rules while keeping the beginning of the reply", () => {
+    const replay = [
+      "› Implement the Fleet fixes",
+      "The Fleet fixes are implemented.",
+      "",
+      "Additional verification details.",
+      "",
+      "─ Worked for 12m 25s ────────────────────────────────────",
+    ].join("\n");
+    expect(latestAssistantParagraphPreview(replay)).toBe("The Fleet fixes are implemented.");
   });
 });

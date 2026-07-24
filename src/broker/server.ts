@@ -17,6 +17,10 @@ import {
   FleetLaunchProfileSchema,
   type FleetPreferenceStore,
 } from "../persistence/fleet-preference-store.js";
+import {
+  FleetDetachIdentitySchema,
+  type FleetDetachStore,
+} from "../persistence/fleet-detach-store.js";
 import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type RequestFrame } from "../protocol/frames.js";
 import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
 import { RegistryError, type AttachmentMode, type SessionRegistry } from "./session-registry.js";
@@ -25,6 +29,7 @@ import type { WorkerPreferenceStore } from "../persistence/worker-preference-sto
 import type { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import {
   CavemanWorkersRequestSchema,
+  CreateOrchestratorRequestSchema,
   EnsureOrchestratorRequestSchema,
   FableWorkersRequestSchema,
   ResetOrchestratorRequestSchema,
@@ -55,7 +60,12 @@ const ReorderSessionParamsSchema = SessionIdParamsSchema.extend({ direction: z.e
 const StartSessionWithPromptParamsSchema = StartSessionRequestSchema.extend({
   initialPrompt: z.string().trim().min(1),
 });
-const AttachParamsSchema = SessionIdParamsSchema;
+const AttachParamsSchema = SessionIdParamsSchema.extend({
+  detachIdentity: FleetDetachIdentitySchema.optional(),
+});
+const FleetReattachParamsSchema = z.object({
+  detachIdentity: FleetDetachIdentitySchema,
+});
 const ThreadReadParamsSchema = SessionIdParamsSchema.extend({
   afterCursor: z.number().int().nonnegative().default(0),
   limit: z.number().int().positive().max(1_000).default(200),
@@ -68,7 +78,10 @@ const ThreadChangesParamsSchema = z.object({
 interface ConnectionContext {
   id: string;
   socket: Socket;
-  attachments: Map<string, AttachmentMode>;
+  attachments: Map<string, {
+    mode: AttachmentMode;
+    detachIdentity?: string | undefined;
+  }>;
 }
 
 export interface BrokerServerOptions {
@@ -82,6 +95,7 @@ export interface BrokerServerOptions {
   controlPlane?: JobControlPlane;
   /** Supplies the reconciliation view; queue/budget queries work from the control plane alone. */
   controlPlaneRuntime?: Pick<ControlPlaneRuntime, "lastReconciliation">;
+  fleetDetaches?: FleetDetachStore;
   fleetPreferences?: FleetPreferenceStore;
   workerPreferences?: WorkerPreferenceStore;
   onShutdown?: () => void;
@@ -192,7 +206,8 @@ export class BrokerServer {
     }
 
     try {
-      const mode = context.attachments.get(frame.sessionId);
+      const attachment = context.attachments.get(frame.sessionId);
+      const mode = attachment?.mode;
       if (frame.type === "input") {
         if (mode !== "control") {
           this.sendReadOnlyError(context.socket);
@@ -241,6 +256,8 @@ export class BrokerServer {
       }
       case "orchestrator.ensure":
         return this.requireOrchestrators().ensure(EnsureOrchestratorRequestSchema.parse(frame.params));
+      case "orchestrator.create":
+        return this.requireOrchestrators().create(CreateOrchestratorRequestSchema.parse(frame.params));
       case "orchestrator.reset":
         return this.requireOrchestrators().reset(ResetOrchestratorRequestSchema.parse(frame.params));
       case "orchestrator.get": {
@@ -336,6 +353,17 @@ export class BrokerServer {
       }
       case "fleet.preferences":
         return this.requireFleetPreferences().list();
+      case "fleet.reattach": {
+        const { detachIdentity } = FleetReattachParamsSchema.parse(frame.params);
+        const detachStore = this.requireFleetDetaches();
+        const sessionId = await detachStore.latestSessionId(detachIdentity);
+        if (sessionId === undefined) return { status: "none" };
+        const target = this.options.registry.resolveReattachTarget(sessionId);
+        if (target.status === "stale") {
+          await detachStore.clear(detachIdentity, sessionId);
+        }
+        return target;
+      }
       case "fleet.preference.set": {
         const request = z.object({
           cwd: z.string().startsWith("/"),
@@ -346,30 +374,38 @@ export class BrokerServer {
       }
       case "session.submit": {
         const { sessionId, message } = SubmitParamsSchema.parse(frame.params);
-        if (context.attachments.get(sessionId) === "watch") {
+        if (context.attachments.get(sessionId)?.mode === "watch") {
           throw new RegistryError("NOT_SESSION_CONTROLLER", "Watch clients are read-only");
         }
-        const clientId = context.attachments.get(sessionId) === "control" ? context.id : undefined;
+        const clientId = context.attachments.get(sessionId)?.mode === "control" ? context.id : undefined;
         await this.options.registry.submit(sessionId, clientId, message);
         return { submitted: true };
       }
       case "session.send": {
         const { sessionId, data } = SendParamsSchema.parse(frame.params);
-        if (context.attachments.get(sessionId) === "watch") {
+        if (context.attachments.get(sessionId)?.mode === "watch") {
           throw new RegistryError("NOT_SESSION_CONTROLLER", "Watch clients are read-only");
         }
-        const clientId = context.attachments.get(sessionId) === "control" ? context.id : undefined;
+        const clientId = context.attachments.get(sessionId)?.mode === "control" ? context.id : undefined;
         await this.options.registry.write(sessionId, clientId, Buffer.from(data, "base64"));
         return { sent: true };
       }
-      case "session.attach":
-        return this.attach(context, AttachParamsSchema.parse(frame.params).sessionId, "control");
-      case "session.watch":
-        return this.attach(context, AttachParamsSchema.parse(frame.params).sessionId, "watch");
+      case "session.attach": {
+        const { sessionId, detachIdentity } = AttachParamsSchema.parse(frame.params);
+        return this.attach(context, sessionId, "control", detachIdentity);
+      }
+      case "session.watch": {
+        const { sessionId } = AttachParamsSchema.parse(frame.params);
+        return this.attach(context, sessionId, "watch");
+      }
       case "session.detach": {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
+        const attachment = context.attachments.get(sessionId);
         await this.options.registry.detach(sessionId, context.id);
         context.attachments.delete(sessionId);
+        if (attachment?.mode === "control" && attachment.detachIdentity !== undefined) {
+          await this.requireFleetDetaches().record(attachment.detachIdentity, sessionId);
+        }
         return { detached: true };
       }
       case "job.submit": {
@@ -504,12 +540,20 @@ export class BrokerServer {
     return this.options.fleetPreferences;
   }
 
+  private requireFleetDetaches(): FleetDetachStore {
+    if (this.options.fleetDetaches === undefined) {
+      throw Object.assign(new Error("Fleet detach history is not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.options.fleetDetaches;
+  }
+
   private async attach(
     context: ConnectionContext,
     sessionId: string,
     mode: AttachmentMode,
+    detachIdentity?: string,
   ): Promise<unknown> {
-    context.attachments.set(sessionId, mode);
+    context.attachments.set(sessionId, { mode, detachIdentity });
     try {
       const replay = await this.options.registry.attach(
         sessionId,

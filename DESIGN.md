@@ -185,26 +185,26 @@ The header occupies the upper-left of Fleet and establishes identity, current or
 
 Project headings are shortened canonical working-directory paths in Signal Blue. Groups are separated by one blank row, not rules or boxes. Pinned groups and rows come first; manual ordering is stable and persisted. Unpinned peers use most-recent meaningful activity as the tiebreaker.
 
-The wide row order is fixed:
+The row order is fixed at both full and multiplexed widths:
 
 ```text
-* Task title                 Codex Sol · high  Working      Latest assistant paragraph…       2m
+  * Task title                 Codex Sol · high  Working      Beginning of latest reply…         2m
 ```
 
-- `*` marks keyboard selection and is paired with a bold title so selection never relies on color.
+- Thread rows are indented two cells beneath their project heading.
+- `*` marks keyboard selection and is paired with a bold title so selection never relies on color. Both the marker and status label are green for `Done` and amber for `Needs input`.
 - The title receives roughly 28 percent of width, model and effort receive at most `20ch`, status receives only its content width up to `11ch`, age receives `5ch`, and preview consumes all remaining space.
 - Provider, worker role, sandbox, and raw session ID are not permanent columns. Show provider only as part of an unambiguous friendly model label. Put deeper metadata in thread detail or diagnostics.
 - Age is right-aligned and based on the latest meaningful prompt, assistant completion, or lifecycle transition. Selection, attachment, and Fleet refresh do not reset it.
 - A renamed title overrides the normalized initial task title and persists across restarts.
 
-At `60` to `99` columns, each thread becomes two dense lines. Model, effort, state, and age remain on the first line; preview begins immediately below the selection indent.
+At `80` to `99` columns, the same single-line structure is retained with narrower title, identity, and preview columns.
 
 ```text
-* Create iPhoneDoctor shader…  Opus · high  Done  2m
-  iPhone CRT shader background is ready with motion effects…
+  * Create iPhoneDoctor…  Opus · high  Done       Shader background is ready…  2m
 ```
 
-At `50` to `59` columns, model and effort yield before task, state, age, or preview. The second line remains dedicated to preview. Never place a fixed-width identity prefix before preview.
+Below `80` columns, model and effort yield before task, state, age, or preview. The row remains one line so multiplexing does not switch Fleet into a separate compact presentation.
 
 ### Attention States
 
@@ -225,7 +225,7 @@ An active TUI waiting for its next ordinary prompt is `Done`, not `Needs input`.
 ### Durable Preview and Persistence
 
 - Read previews from normalized assistant transcript events, not from the last visible PTY line.
-- Choose the latest assistant message, then its final nonempty substantive paragraph, then that paragraph's first rendered line.
+- Choose the latest assistant message, then continue from the beginning of its first nonempty substantive line.
 - Exclude reasoning timers, tool output, terminal chrome, status spinners, shortcut hints, and duplicated redraw frames.
 - Persist the normalized preview with the thread record so Fleet can render it before any provider runtime is resumed.
 - If no assistant message exists, render `No response yet` in Cool Ash. If persistence is unreadable, render `Preview unavailable` and surface the storage error without inventing content.
@@ -233,19 +233,23 @@ An active TUI waiting for its next ordinary prompt is `Done`, not `Needs input`.
 
 ### Bottom Composer
 
-The composer is a stable five-row footer at normal height:
+The composer is a stable five-row footer while empty and expands upward as the draft grows:
 
 ```text
 ────────────────────────────────────────────────────────────────
 › Describe a task for a new session
 ────────────────────────────────────────────────────────────────
-▶ Claude Opus · high · read-only · ~/code/personal/mikoshi
-enter open/start · space reply · /model configure · ? shortcuts
+▶ Claude Opus · high · read-only · cwd ~/code/personal/mikoshi · ctrl+g change
+enter open/start · ctrl+g cwd · space reply · /model configure · ? shortcuts
 ```
 
 - Empty composer plus `Enter` opens the selected thread. Nonempty composer plus `Enter` starts a new worker with the visible model, effort, sandbox, and project context.
+- Long logical lines soft-wrap at the pane width. The composer grows upward to one third of the terminal height, capped at twelve visible draft rows; beyond that limit it keeps the newest rows visible and marks hidden earlier content with `…`.
+- The full draft remains intact when earlier rows leave the visible composer, and the cursor stays on the final visible wrapped row.
 - `Space` from an empty composer enters reply mode for the selected thread. Reply mode names its target and does not change the new-worker configuration.
 - `Ctrl+J` inserts a newline. `Esc` leaves reply, rename, or picker mode before it can clear a draft; from the base view it does nothing and never exits Fleet.
+- `Ctrl+G` opens a tmux-native, zsh-first working-directory navigator at the draft cwd. Tab remains unbound in Fleet and retains its native shell-completion role inside the popup. Empty Enter confirms; Ctrl-C cancels.
+- The navigator accepts only `cd [directory]`, `cd ..`, `cd -`, and `z <terms>`. It loads the user's trusted zsh startup/completion code, but typed non-navigation commands, chains, pipes, redirects, backgrounding, and command/process substitution are never executed.
 - If no explicit new-worker model has been selected, the context line reads `▶ /model required · read-only · <project>`, and submission opens the picker instead of starting anything.
 - Persist the last explicit model and effort per project. Selecting a thread never silently rewrites this configuration.
 - Notices appear directly above the first separator. Errors are red; neutral confirmations use normal text. No toast or modal is used.
@@ -266,7 +270,7 @@ Pressing `?` with an empty composer expands a help panel in the footer. Pressing
 
 ```text
 shift+↑↓ reorder   ctrl+s switch views   @ mention          alt+1–9 open   esc back/clear
-ctrl+r rename      ctrl+j newline         ctrl+t pin to top  ctrl+x stop   ? close
+ctrl+r rename      ctrl+j newline         ctrl+g cwd          ctrl+t pin to top  ctrl+x stop   ? close
 ```
 
 - `Shift+Up/Down` reorders the selected row within its project and persists the order.
@@ -275,13 +279,13 @@ ctrl+r rename      ctrl+j newline         ctrl+t pin to top  ctrl+x stop   ? clo
 - `Alt+1` through `Alt+9` opens the corresponding visible thread.
 - `Ctrl+R` renames the selected thread inline and persists the title.
 - `Ctrl+T` toggles pinning at the top of the project group.
-- `Ctrl+X` is contextual. Help says `stop` while any selected-tree runtime is live and `delete` only when the full tree is terminal. The visible confirmation must repeat the exact destructive action and descendant count.
+- `Ctrl+X` is contextual but stop-first. Help says `stop` until the selected thread has received an explicit stop step, including when it is already `Done`; only then may it say `delete` when the full tree is terminal. The visible confirmation must repeat the exact destructive action and descendant count.
 - `Esc` backs out of help, an edit, a reply, a picker, or a nonempty draft and never exits Fleet. Two consecutive `Ctrl+C` presses within five seconds exit without stopping agents; the first press shows the only red inline exit confirmation near the footer, and any other key cancels it.
 - At narrow widths, wrap the panel into two columns or one column. Never truncate key names or cover thread rows.
 
 ### Destructive and Failure Feedback
 
-Stopping and deleting are separate controls. On a live worker, `Ctrl+X` sends stop and changes the row to `Stopping`. On an orchestrator, the same key drains the owned tree and reports literal progress such as `Stopping orchestrator + 3 workers · 2/4 stopped`; repeated presses retry unfinished stops without requiring row hunting. Once the full tree is terminal, the first `Ctrl+X` asks to delete the exact thread or orchestrator plus child-thread count, and the second press within the confirmation window deletes history leaf-first. The confirmation is red; stop progress remains amber.
+Stopping and deleting are separate controls. The first `Ctrl+X` always sends the stop action, even when the selected thread is already `Done`. On a live worker it changes the row to `Stopping`; on an orchestrator it drains the owned tree and reports literal progress such as `Stopping orchestrator + 3 workers · 2/4 stopped`. Repeated presses retry unfinished stops without requiring row hunting. After that explicit stop step and once the full tree is terminal, the next `Ctrl+X` asks to delete the exact thread or orchestrator plus child-thread count, and one more press within the confirmation window deletes history leaf-first. The confirmation is red; stop progress remains amber.
 
 Failure copy keeps the thread visible, preserves its last assistant preview, and places the exact recoverable next action near the composer. Never translate broker unavailability into an empty Fleet.
 
@@ -294,10 +298,10 @@ Failure copy keeps the thread visible, preserves its last assistant preview, and
 - **Do** show `Done` when an active provider has completed its turn and awaits an ordinary next prompt.
 - **Do** reserve `Needs input` for a concrete blocking intervention and preserve its literal text in reduced-color terminals.
 - **Do** rehydrate project groups and threads from durable state after broker restart, marking unverifiable runtime ownership as `Interrupted`.
-- **Do** derive previews from the first line of the final substantive paragraph in the latest assistant message.
+- **Do** derive previews from the beginning of the latest assistant message.
 - **Do** make model selection explicit, visible, and provider-neutral through `/model`, then effort, with no confirmation step.
 - **Do** preserve complete keyboard paths for every action and keep standard terminal and tmux behavior intact.
-- **Do** let narrow layouts become two-line rows before removing useful content.
+- **Do** preserve the same single-line row structure when Fleet is multiplexed.
 
 ### Don't:
 

@@ -82,6 +82,151 @@ describe("fleet presentation", () => {
     expect(rendered).not.toMatch(/recommend|preferred|fallback/i);
   });
 
+  it("keeps multiplexed rows single-line with indented markers, aligned previews, and right-aligned time", () => {
+    const done = session({
+      name: "Completed task",
+      attentionState: "done",
+      latestPreview: "The latest reply begins here.\nIts continuation stays inline.",
+      updatedAt: "2026-07-22T09:59:46.000Z",
+      displayOrder: 0,
+    });
+    const needsInput = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Approval task",
+      attentionState: "needs-input",
+      latestPreview: "Approval is required before continuing.",
+      updatedAt: "2026-07-22T09:58:00.000Z",
+      displayOrder: 1,
+    });
+    const snapshot = fleet({ record: done }, { record: needsInput });
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false,
+      width: 76,
+      height: 28,
+      now: NOW_MS,
+      home: "/Users/brandon",
+    });
+    const lines = rendered.split("\n");
+    const doneLine = lines.find((line) => line.includes("Completed task"))!;
+    const needsInputLine = lines.find((line) => line.includes("Approval task"))!;
+
+    expect(lines).toContain("~/code/personal/cyberdeck");
+    expect(doneLine).toMatch(/^  \*/u);
+    expect(needsInputLine).toMatch(/^  ·/u);
+    expect(doneLine).toContain("The latest reply begins");
+    expect(doneLine).not.toContain("\n");
+    expect(doneLine).toHaveLength(76);
+    expect(needsInputLine).toHaveLength(76);
+    expect(doneLine).toMatch(/14s$/u);
+    expect(needsInputLine).toMatch(/ 2m$/u);
+  });
+
+  it("colors both Done and Needs input markers and status labels", () => {
+    const done = session({ attentionState: "done", displayOrder: 0 });
+    const needsInput = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      attentionState: "needs-input",
+      displayOrder: 1,
+    });
+    const snapshot = fleet({ record: done }, { record: needsInput });
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: true,
+      width: 120,
+      height: 28,
+      now: NOW_MS,
+    });
+
+    expect(rendered).toContain("\u001b[1m\u001b[38;2;120;198;121m*\u001b[0m\u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;212;168;91m·\u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;120;198;121mDone       \u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;212;168;91mNeeds input\u001b[0m");
+  });
+
+  it("keeps thread and project positions stable when lifecycle timestamps change", () => {
+    const first = session({
+      kind: "orchestrator",
+      name: "First orchestrator",
+      cwd: "/repo/one",
+      createdAt: "2026-07-22T09:00:00.000Z",
+      updatedAt: "2026-07-22T09:59:00.000Z",
+    });
+    const second = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "orchestrator",
+      name: "Second orchestrator",
+      cwd: "/repo/one",
+      createdAt: "2026-07-22T09:01:00.000Z",
+      updatedAt: "2026-07-22T09:58:00.000Z",
+    });
+    const otherProject = session({
+      id: "33333333-3333-4333-8333-333333333333",
+      kind: "orchestrator",
+      name: "Other project",
+      cwd: "/repo/two",
+      createdAt: "2026-07-22T09:02:00.000Z",
+      updatedAt: "2026-07-22T09:57:00.000Z",
+    });
+    const before = renderFleet(
+      fleet({ record: first }, { record: second }, { record: otherProject }),
+      createFleetState(fleet({ record: first }, { record: second }, { record: otherProject })),
+      { color: false, width: 140, height: 30, now: NOW_MS },
+    );
+    const afterRecords = [
+      {
+        record: {
+          ...first,
+          executionState: "cancelled" as const,
+          attachmentState: "detached" as const,
+          attentionState: "stopped" as const,
+          exitCode: 0,
+          updatedAt: "2026-07-22T10:05:00.000Z",
+          meaningfulUpdatedAt: "2026-07-22T10:05:00.000Z",
+        },
+      },
+      { record: second },
+      {
+        record: {
+          ...otherProject,
+          attentionState: "needs-input" as const,
+          updatedAt: "2026-07-22T10:06:00.000Z",
+          meaningfulUpdatedAt: "2026-07-22T10:06:00.000Z",
+        },
+      },
+    ];
+    const afterSnapshot = fleet(...afterRecords);
+    const after = renderFleet(
+      afterSnapshot,
+      createFleetState(afterSnapshot),
+      { color: false, width: 140, height: 30, now: NOW_MS },
+    );
+    const positions = (rendered: string) => [
+      rendered.indexOf("First orchestrator"),
+      rendered.indexOf("Second orchestrator"),
+      rendered.indexOf("Other project"),
+    ];
+
+    expect(positions(before)).toEqual([...positions(before)].sort((left, right) => left - right));
+    expect(positions(after)).toEqual([...positions(after)].sort((left, right) => left - right));
+  });
+
+  it("rejects a persisted provider tip instead of repeating it as the thread preview", () => {
+    const snapshot = fleet({
+      record: session({
+        latestPreview: "Tip: Try the Desktop app. Run 'codex app' or visit",
+      }),
+      replay: "",
+    });
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false,
+      width: 120,
+      height: 28,
+      now: NOW_MS,
+    });
+
+    expect(rendered).toContain("No response yet");
+    expect(rendered).not.toContain("Tip: Try the Desktop app");
+  });
+
   it("uses provider activity for working but reserves Needs input for explicit blockers", () => {
     expect(threadStatus({
       record: session(),
@@ -95,6 +240,25 @@ describe("fleet presentation", () => {
       record: session(),
       replay: "Do you trust the contents of this project?",
     })).toBe("Needs input");
+    const approval = fleet({
+      record: session({ provider: "claude", model: "opus" }),
+      replay: [
+        "Claude needs your permission to use Bash",
+        "Do you want to proceed?",
+        "❯ 1. Yes",
+        "  2. No",
+        "Esc to cancel · Tab to amend",
+      ].join("\n"),
+    });
+    expect(threadStatus(approval.threads[0]!)).toBe("Needs input");
+    const rendered = renderFleet(approval, createFleetState(approval), {
+      color: false,
+      width: 120,
+      height: 28,
+      now: NOW_MS,
+    });
+    expect(rendered).toContain("1 needs input");
+    expect(rendered).toContain("Needs input");
     expect(threadStatus({
       record: session({ executionState: "failed" }),
       replay: "",
@@ -128,7 +292,45 @@ describe("fleet presentation", () => {
     const lines = rendered.split("\n");
     expect(lines.at(-4)).toBe("› Inspect the failure");
     expect(lines.at(-2)).toContain("▶ Claude Opus · high · read-only");
+    expect(lines.at(-2)).toContain("cwd ~/code/personal/cyberdeck · ctrl+g change");
     expect(lines.at(-1)).toContain("enter open/start");
+  });
+
+  it("soft-wraps long composer drafts and expands the footer upward", () => {
+    const snapshot = fleet({ record: session() });
+    const draft = `${"a".repeat(47)}${"b".repeat(47)}${"c".repeat(10)}`;
+    const rendered = renderFleet(snapshot, {
+      ...createFleetState(snapshot),
+      draft,
+    }, {
+      color: false,
+      width: 50,
+      height: 30,
+      now: NOW_MS,
+    });
+
+    const lines = rendered.split("\n");
+    expect(lines.at(-6)).toBe(`› ${"a".repeat(47)}`);
+    expect(lines.at(-5)).toBe(`  ${"b".repeat(47)}`);
+    expect(lines.at(-4)).toBe(`  ${"c".repeat(10)}`);
+  });
+
+  it("caps a large composer while keeping its newest wrapped rows visible", () => {
+    const snapshot = fleet({ record: session() });
+    const rendered = renderFleet(snapshot, {
+      ...createFleetState(snapshot),
+      draft: Array.from({ length: 15 }, (_, index) => `line ${index + 1}`).join("\n"),
+    }, {
+      color: false,
+      width: 50,
+      height: 30,
+      now: NOW_MS,
+    });
+
+    const lines = rendered.split("\n");
+    expect(lines.at(-13)).toBe("… line 6");
+    expect(lines.at(-4)).toBe("  line 15");
+    expect(rendered).not.toContain("line 5");
   });
 
   it("shows Ctrl+O as the first-class orchestrator command", () => {
@@ -141,6 +343,7 @@ describe("fleet presentation", () => {
     });
 
     expect(rendered).toContain("ctrl+o to choose");
+    expect(rendered).toContain("ctrl+[ detach · ctrl+] reattach");
   });
 
   it("preserves word boundaries from cursor-positioned provider output", () => {
@@ -162,17 +365,20 @@ describe("fleet presentation", () => {
 });
 
 describe("fleet controls", () => {
-  it("walks model and effort then opens an orchestrator without confirmation", () => {
+  it("walks a new model and effort then creates a distinct orchestrator", () => {
     const snapshot = fleet();
     const initial = createFleetState(snapshot, "/repo/one");
-    const model = transitionFleet(initial, snapshot, "ctrl+o", NOW_MS);
-    expect(model.state.orchestratorPicker).toMatchObject({ step: "model" });
-    const effort = transitionFleet(model.state, snapshot, "enter", NOW_MS);
+    const target = transitionFleet(initial, snapshot, "ctrl+o", NOW_MS);
+    expect(target.state.orchestratorPicker).toMatchObject({ step: "target" });
+    expect(renderFleet(snapshot, target.state, { color: false, width: 110, height: 30 }))
+      .toContain("No interactive orchestrators");
+    const effort = transitionFleet(target.state, snapshot, "enter", NOW_MS);
     expect(effort.state.orchestratorPicker).toMatchObject({ step: "effort" });
     const lowEffort = transitionFleet(effort.state, snapshot, "down", NOW_MS);
     const launched = transitionFleet(lowEffort.state, snapshot, "enter", NOW_MS);
     expect(launched.action).toEqual({
-      type: "orchestrator",
+      type: "create-orchestrator",
+      cockpitCwd: "/repo/one",
       request: {
         provider: "codex",
         model: "gpt-5.6-sol",
@@ -187,35 +393,112 @@ describe("fleet controls", () => {
   it("uses arrows in the picker and Escape moves back one step", () => {
     const snapshot = fleet();
     const initial = createFleetState(snapshot, "/repo/one");
-    const model = transitionFleet(initial, snapshot, "ctrl+o", NOW_MS);
-    const nextModel = transitionFleet(model.state, snapshot, "down", NOW_MS);
+    const target = transitionFleet(initial, snapshot, "ctrl+o", NOW_MS);
+    const nextModel = transitionFleet(target.state, snapshot, "down", NOW_MS);
     const effort = transitionFleet(nextModel.state, snapshot, "enter", NOW_MS);
     const highEffort = transitionFleet(effort.state, snapshot, "down", NOW_MS);
     const back = transitionFleet(highEffort.state, snapshot, "escape", NOW_MS);
 
     expect(back.state.orchestratorPicker).toMatchObject({
-      step: "model",
+      step: "target",
       choiceIndex: 1,
-      effortIndex: 1,
     });
   });
 
-  it("preselects the fleet orchestrator so quick Enter reopens it from any project", () => {
+  it("switches to the exact selected existing orchestrator", () => {
     const current = session({
+      id: "11111111-1111-4111-8111-111111111111",
       provider: "claude",
       model: "opus",
       effort: "high",
       kind: "orchestrator",
+      role: "orchestrator",
       cwd: "/repo/one",
       orchestratorScope: "fleet",
+      displayOrder: 0,
     });
-    const snapshot = fleet({ record: current });
-    const opened = transitionFleet(createFleetState(snapshot, "/repo/two"), snapshot, "ctrl+o", NOW_MS);
+    const peer = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      kind: "orchestrator",
+      role: "orchestrator",
+      cwd: "/repo/one",
+      orchestratorScope: "fleet",
+      displayOrder: 1,
+    });
+    const snapshot = fleet({ record: current }, { record: peer });
+    const opened = transitionFleet(createFleetState(snapshot, "/repo/one"), snapshot, "ctrl+o", NOW_MS);
+    const selectedPeer = transitionFleet(opened.state, snapshot, "down", NOW_MS);
+    const switched = transitionFleet(selectedPeer.state, snapshot, "enter", NOW_MS);
 
-    expect(opened.state.orchestratorPicker).toMatchObject({
-      choiceIndex: 3,
-      effortIndex: 3,
+    expect(switched.action).toEqual({
+      type: "open-orchestrator",
+      sessionId: peer.id,
+      cockpitCwd: "/repo/one",
+      requiresResume: false,
     });
+    expect(switched.state.selectedSessionId).toBe(peer.id);
+
+    const reopened = transitionFleet(switched.state, snapshot, "ctrl+o", NOW_MS);
+    const switchedBack = transitionFleet(reopened.state, snapshot, "enter", NOW_MS);
+    expect(switchedBack.action).toEqual({
+      type: "open-orchestrator",
+      sessionId: current.id,
+      cockpitCwd: "/repo/one",
+      requiresResume: false,
+    });
+  });
+
+  it("excludes workers and terminal orchestrators from the existing section", () => {
+    const available = session({
+      kind: "orchestrator",
+      role: "orchestrator",
+      name: "Available peer",
+    });
+    const worker = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "worker",
+      role: "worker",
+      name: "Must not appear",
+    });
+    const ended = session({
+      id: "33333333-3333-4333-8333-333333333333",
+      kind: "orchestrator",
+      role: "orchestrator",
+      name: "Ended peer",
+      executionState: "exited",
+      exitCode: 0,
+    });
+    const snapshot = fleet({ record: available }, { record: worker }, { record: ended });
+    const picker = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+    const rendered = renderFleet(snapshot, picker.state, { color: false, width: 110, height: 30 });
+
+    expect(rendered).toContain("Existing orchestrators");
+    expect(rendered).toContain("Available peer");
+    expect(rendered).toContain("New orchestrator");
+    expect(rendered).not.toContain("Must not appear");
+    expect(rendered).not.toContain("Ended peer");
+  });
+
+  it("labels a controller-held orchestrator and refuses to route somewhere else", () => {
+    const controlled = session({
+      kind: "orchestrator",
+      role: "orchestrator",
+      attachmentState: "controlled",
+      name: "Busy peer",
+    });
+    const snapshot = fleet({ record: controlled });
+    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+    const rendered = renderFleet(snapshot, opened.state, { color: false, width: 110, height: 30 });
+    const refused = transitionFleet(opened.state, snapshot, "enter", NOW_MS);
+
+    expect(rendered).toContain("Busy peer");
+    expect(rendered).toContain("in use");
+    expect(refused.action).toBeUndefined();
+    expect(refused.state.orchestratorPicker).toBeDefined();
+    expect(refused.state.notice).toContain("another controller");
   });
 
   it("renders a fleet orchestrator independently of its process cwd", () => {
@@ -238,6 +521,61 @@ describe("fleet controls", () => {
 
   it("decodes Ctrl+O without inserting it into the task composer", () => {
     expect(new FleetKeyDecoder().push(Buffer.from([0x0f]))).toEqual(["ctrl+o"]);
+  });
+
+  it("decodes Ctrl+] and attaches the exact selected orchestrator to the cockpit", () => {
+    const decoder = new FleetKeyDecoder();
+    expect(decoder.push(Buffer.from([0x1d]))).toEqual(["ctrl+]"]);
+    expect(decoder.push(Buffer.from([0x1b]))).toEqual([]);
+    expect(decoder.flush()).toEqual(["escape"]);
+
+    const first = session({ kind: "orchestrator" });
+    const second = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "orchestrator",
+    });
+    const snapshot = fleet({ record: first }, { record: second });
+    const selectedSecond = transitionFleet(createFleetState(snapshot), snapshot, "down", NOW_MS).state;
+
+    expect(transitionFleet(selectedSecond, snapshot, "ctrl+]", NOW_MS).action).toEqual({
+      type: "open-orchestrator",
+      sessionId: second.id,
+      cockpitCwd: process.cwd(),
+      requiresResume: false,
+    });
+  });
+
+  it("uses Ctrl+G for cwd navigation while leaving Tab unbound", () => {
+    const decoder = new FleetKeyDecoder();
+    expect(decoder.push(Buffer.from([0x07]))).toEqual(["ctrl+g"]);
+    expect(decoder.push(Buffer.from([0x09]))).toEqual([]);
+
+    const snapshot = fleet({ record: session({ cwd: "/repo/one" }) });
+    expect(transitionFleet(createFleetState(snapshot), snapshot, "ctrl+g", NOW_MS).action).toEqual({
+      type: "change-directory",
+      cwd: "/repo/one",
+    });
+  });
+
+  it("launches from the explicitly selected composer cwd rather than the selected thread cwd", () => {
+    const snapshot = fleet({ record: session({ cwd: "/repo/one", sandbox: "workspace-write" }) });
+    const state = {
+      ...createFleetState(snapshot),
+      workingDirectory: "/repo/two",
+      draft: "Inspect the failure",
+      launchProfiles: {
+        "/repo/two": { provider: "codex" as const, model: "gpt-5.6-sol" },
+      },
+    };
+
+    expect(transitionFleet(state, snapshot, "enter", NOW_MS).action).toEqual({
+      type: "start",
+      request: expect.objectContaining({
+        cwd: "/repo/two",
+        sandbox: "workspace-write",
+        initialPrompt: "Inspect the failure",
+      }),
+    });
   });
 
   it("decodes shortcut-panel keys without leaking escape sequences into the composer", () => {
@@ -323,6 +661,42 @@ describe("fleet controls", () => {
     expect(remove.action).toEqual({ type: "delete-tree", sessionId: session().id });
   });
 
+  it("stops an initially done thread before allowing the separate deletion sequence", () => {
+    const done = fleet({
+      record: session({
+        executionState: "exited",
+        attentionState: "done",
+        exitCode: 0,
+      }),
+    });
+    const initial = createFleetState(done);
+
+    const stop = transitionFleet(initial, done, "ctrl+x", NOW_MS);
+    expect(stop.action).toEqual({ type: "stop-tree", sessionId: session().id });
+    expect(stop.state.deleteConfirmation).toBeUndefined();
+    expect(stop.state.notice).toBe("Stopping agent · 1/1 stopped");
+    expect(renderFleet(done, stop.state, { color: false, width: 160, height: 28 }))
+      .toContain("ctrl+x delete thread");
+
+    const armed = transitionFleet(stop.state, done, "ctrl+x", NOW_MS + 1);
+    expect(armed.action).toBeUndefined();
+    expect(armed.state.deleteConfirmation?.sessionId).toBe(session().id);
+    expect(armed.state.notice).toBe("Delete thread? press ctrl+x again");
+
+    const stopped = fleet({
+      record: {
+        ...done.threads[0]!.record,
+        attentionState: "stopped",
+      },
+    });
+    expect(threadStatus(stopped.threads[0]!)).toBe("Stopped");
+
+    expect(transitionFleet(armed.state, done, "ctrl+x", NOW_MS + 2).action).toEqual({
+      type: "delete-tree",
+      sessionId: session().id,
+    });
+  });
+
   it("stops and deletes an orchestrator tree from the parent row without hunting children", () => {
     const root = session({ kind: "orchestrator", childIds: ["22222222-2222-4222-8222-222222222222"] });
     const child = session({
@@ -400,12 +774,39 @@ describe("fleet controls", () => {
       { record: session({ executionState: "cancelled", exitCode: 0 }) },
       { record: second },
     );
-    const armed = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+x", NOW_MS).state;
+    const stopped = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+x", NOW_MS).state;
+    const armed = transitionFleet(stopped, snapshot, "ctrl+x", NOW_MS + 1).state;
     expect(transitionFleet(armed, snapshot, "down", NOW_MS).state.deleteConfirmation).toBeUndefined();
 
     const expired = transitionFleet(armed, snapshot, "ctrl+x", NOW_MS + 6_000);
     expect(expired.action).toBeUndefined();
     expect(expired.state.deleteConfirmation?.expiresAt).toBe(NOW_MS + 11_000);
+  });
+
+  it("never carries a Ctrl+X deletion confirmation onto another session ID", () => {
+    const stopped = session({
+      executionState: "cancelled",
+      attentionState: "stopped",
+      exitCode: 0,
+      displayOrder: 0,
+    });
+    const active = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      displayOrder: 1,
+    });
+    const snapshot = fleet({ record: stopped }, { record: active });
+    const stop = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+x", NOW_MS);
+    expect(stop.action).toEqual({ type: "stop-tree", sessionId: stopped.id });
+    const armed = transitionFleet(stop.state, snapshot, "ctrl+x", NOW_MS + 1);
+    expect(armed.state.deleteConfirmation?.sessionId).toBe(stopped.id);
+
+    const switched = transitionFleet(armed.state, snapshot, "alt+2", NOW_MS + 2);
+    expect(switched.state.selectedSessionId).toBe(active.id);
+    expect(switched.state.deleteConfirmation).toBeUndefined();
+
+    const stopOther = transitionFleet(switched.state, snapshot, "ctrl+x", NOW_MS + 3);
+    expect(stopOther.action).toEqual({ type: "stop-tree", sessionId: active.id });
+    expect(stopOther.state.deleteConfirmation).toBeUndefined();
   });
 
   it("requires two consecutive Ctrl+C presses and never exits on Escape", () => {
@@ -583,7 +984,64 @@ describe("collectFleetSnapshot", () => {
 });
 
 describe("runFleet", () => {
-  it("opens the selected orchestrator from the Ctrl+O picker", async () => {
+  it("visibly applies a Ctrl+G cwd selection before launch", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [];
+        if (method === "fleet.preferences") return {};
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) { closeListeners.add(listener); return () => closeListeners.delete(listener); },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const changeDirectory = vi.fn(async () => "/repo/two");
+    const running = runFleet(
+      transport as never,
+      input,
+      output,
+      new EventEmitter(),
+      { changeDirectory, detachIdentity: "operator:one" },
+    );
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from([0x07]));
+    await vi.waitFor(() => expect(changeDirectory).toHaveBeenCalledWith(process.cwd()));
+    await vi.waitFor(() => expect(Buffer.concat(output.chunks).toString()).toContain(
+      "cwd /repo/two · ctrl+g change",
+    ));
+
+    input.emit("data", Buffer.from([0x1d]));
+    await vi.waitFor(() => expect(Buffer.concat(output.chunks).toString()).toContain(
+      "Select a detached orchestrator to attach to the cockpit",
+    ));
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("creates and presents a second independent orchestrator through the cockpit", async () => {
     class Input extends EventEmitter {
       isTTY = true;
       isRaw = false;
@@ -598,10 +1056,31 @@ describe("runFleet", () => {
       write(_chunk: string | Uint8Array): boolean { return true; }
     }
 
+    const current = session({
+      id: "11111111-1111-4111-8111-111111111111",
+      kind: "orchestrator",
+      role: "orchestrator",
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      attachmentState: "detached",
+    });
+    const created = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "orchestrator",
+      role: "orchestrator",
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      attachmentState: "detached",
+    });
+    const sessions = [current];
     const closeListeners = new Set<() => void>();
     const transport = {
       request: vi.fn(async (method: string) => {
-        if (method === "session.list") return [];
+        if (method === "session.list") return sessions;
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "fleet.preferences") return {};
         throw new Error(`unexpected ${method}`);
       }),
       sendFrame: vi.fn(),
@@ -612,31 +1091,44 @@ describe("runFleet", () => {
       },
       close: vi.fn(),
     };
-    const openOrchestrator = vi.fn(async () => undefined);
     const input = new Input();
+    const openOrchestrator = vi.fn(async () => {
+      sessions.push(created);
+      return created;
+    });
     const running = runFleet(
       transport as never,
       input,
       new Output(),
       new EventEmitter(),
-      { openOrchestrator },
+      { detachIdentity: "operator:one", openOrchestrator },
     );
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
 
     input.emit("data", Buffer.from([0x0f]));
-    input.emit("data", Buffer.from("\r\r"));
+    input.emit("data", Buffer.from("\u001b[B\r"));
+    input.emit("data", Buffer.from("\u001b[B\u001b[B\u001b[B\r"));
     await vi.waitFor(() => expect(openOrchestrator).toHaveBeenCalledWith({
-      provider: "codex",
-      model: "gpt-5.6-sol",
-      cwd: process.cwd(),
-      scope: "fleet",
+      type: "create",
+      cockpitCwd: process.cwd(),
+      request: {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        cwd: process.cwd(),
+        scope: "fleet",
+      },
     }));
+    expect(current.executionState).toBe("active");
+    expect(current.id).not.toBe(created.id);
+    expect(sessions).toEqual([current, created]);
 
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
   });
 
-  it("hands an opened thread to the native provider PTY and returns to the fleet on detach", async () => {
+  it("attaches the selected detached orchestrator to the cockpit", async () => {
     class Input extends EventEmitter {
       isTTY = true;
       isRaw = false;
@@ -655,44 +1147,109 @@ describe("runFleet", () => {
       }
     }
 
-    const record = session();
-    const frameListeners = new Set<(frame: never) => void>();
+    const first = session({
+      kind: "orchestrator",
+      name: "First orchestrator",
+      displayOrder: 0,
+    });
+    const second = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "orchestrator",
+      name: "Second orchestrator",
+      displayOrder: 1,
+    });
     const closeListeners = new Set<() => void>();
     const transport = {
       request: vi.fn(async (method: string) => {
-        if (method === "session.list") return [record];
-        if (method === "session.snapshot") return { data: Buffer.from("LIST PREVIEW").toString("base64") };
-        if (method === "session.attach") return { data: Buffer.from("NATIVE PROVIDER TUI").toString("base64") };
+        if (method === "session.list") return [first, second];
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "fleet.preferences") return {};
         throw new Error(`unexpected ${method}`);
       }),
       sendFrame: vi.fn(),
-      onFrame(listener: (frame: never) => void) { frameListeners.add(listener); return () => frameListeners.delete(listener); },
+      onFrame: vi.fn(() => () => undefined),
       onClose(listener: () => void) { closeListeners.add(listener); return () => closeListeners.delete(listener); },
       close: vi.fn(),
     };
     const input = new Input();
     const output = new Output();
-    const running = runFleet(transport as never, input, output, new EventEmitter());
+    const openOrchestrator = vi.fn(async () => second);
+    const running = runFleet(
+      transport as never,
+      input,
+      output,
+      new EventEmitter(),
+      { detachIdentity: "operator:one", openOrchestrator },
+    );
 
     await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.list", {}));
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
-    expect(Buffer.concat(output.chunks).toString()).toContain("\u001b[27;3H\u001b[?25h");
-    input.emit("data", Buffer.from("\r"));
-    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.attach", { sessionId: record.id }));
-    expect(Buffer.concat(output.chunks).toString()).toContain("NATIVE PROVIDER TUI");
-
+    input.emit("data", Buffer.from("\u001b[B"));
     input.emit("data", Buffer.from([0x1d]));
-    await vi.waitFor(() => expect(transport.sendFrame).toHaveBeenCalledWith({ type: "detach", sessionId: record.id }));
+    await vi.waitFor(() => expect(openOrchestrator).toHaveBeenCalledWith({
+      type: "existing",
+      session: second,
+      cockpitCwd: process.cwd(),
+      requiresResume: false,
+    }));
+    expect(transport.request).not.toHaveBeenCalledWith("fleet.reattach", expect.anything());
+
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
-    const renderedAfterDetach = Buffer.concat(output.chunks).toString();
-    expect(renderedAfterDetach).toContain("\u001b[?1003l");
-    expect(renderedAfterDetach).toContain("\u001b[?1006l");
-    input.emit("data", Buffer.from("\u001b[<35;103;24M"));
     input.emit("data", Buffer.from([0x03, 0x03]));
 
     await expect(running).resolves.toBeUndefined();
     expect(transport.close).toHaveBeenCalledOnce();
-    expect(Buffer.concat(output.chunks).toString()).not.toContain("› <35;103;24M");
+  });
+
+  it("places the cursor on the final soft-wrapped composer row", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 50;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    const record = session();
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [record];
+        if (method === "session.snapshot") return { data: "" };
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) {
+        closeListeners.add(listener);
+        return () => closeListeners.delete(listener);
+      },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from(`${"a".repeat(47)}${"b".repeat(13)}`));
+    await vi.waitFor(() => {
+      const screen = Buffer.concat(output.chunks).toString();
+      expect(screen).toContain(`› ${"a".repeat(47)}\n  ${"b".repeat(13)}`);
+      expect(screen).toContain("\u001b[27;16H\u001b[?25h");
+    });
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
   });
 
   it("stops a detached orchestrator on the first Ctrl+X without deleting it", async () => {
@@ -749,6 +1306,104 @@ describe("runFleet", () => {
       sessionId: orchestrator.id,
     }));
     expect(transport.request).not.toHaveBeenCalledWith("session.deleteTree", expect.anything());
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("keeps the selector at the deleted row position instead of resetting to the top", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 100;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    const first = session({
+      name: "First thread",
+      executionState: "cancelled",
+      attentionState: "stopped",
+      exitCode: 0,
+      displayOrder: 0,
+    });
+    const second = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Second thread",
+      executionState: "cancelled",
+      attentionState: "stopped",
+      exitCode: 0,
+      displayOrder: 1,
+    });
+    const third = session({
+      id: "33333333-3333-4333-8333-333333333333",
+      name: "Third thread",
+      executionState: "cancelled",
+      attentionState: "stopped",
+      exitCode: 0,
+      displayOrder: 2,
+    });
+    let records = [first, second, third];
+    const transport = {
+      request: vi.fn(async (method: string, params: { sessionId?: string }) => {
+        if (method === "session.list") return records;
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "session.stop") {
+          return {
+            rootSessionId: params.sessionId,
+            rootKind: "worker",
+            childCount: 0,
+            total: 1,
+            active: 0,
+            stopping: 0,
+            terminal: 1,
+          };
+        }
+        if (method === "session.deleteTree") {
+          records = records.filter((record) => record.id !== params.sessionId);
+          return {
+            rootSessionId: params.sessionId,
+            rootKind: "worker",
+            childCount: 0,
+            total: 1,
+            active: 0,
+            stopping: 0,
+            terminal: 1,
+          };
+        }
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose: vi.fn(() => () => undefined),
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("\u001b[B"));
+    input.emit("data", Buffer.from([0x18, 0x18, 0x18]));
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.deleteTree", {
+      sessionId: second.id,
+    }));
+    await vi.waitFor(() => {
+      const latestScreen = Buffer.concat(output.chunks).toString().split("\u001b[2J\u001b[H").at(-1) ?? "";
+      expect(latestScreen).toContain("Deleted thread");
+      expect(latestScreen).toContain("  * Third thread");
+      expect(latestScreen).not.toContain("  * First thread");
+    });
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();

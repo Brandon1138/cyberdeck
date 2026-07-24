@@ -15,3 +15,12 @@ export class UnsupportedProviderEffortError extends Error {
     this.name = "UnsupportedProviderEffortError";
   }
 }
+
+export class UnsupportedProviderApprovalModeError extends Error {
+  readonly code = "APPROVAL_MODE_NOT_SUPPORTED";
+
+  constructor(provider: string) {
+    super(`${provider} does not support Cyberdeck approval mode auto`);
+    this.name = "UnsupportedProviderApprovalModeError";
+  }
+}

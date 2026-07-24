@@ -40,6 +40,10 @@ export interface AttachSessionOptions {
   closeTransport?: boolean;
   /** Workers use Left Arrow as directional return. Orchestrators keep it for native TUI input. */
   detachOnLeftArrow?: boolean;
+  /** Durable identity whose explicit control detach should be eligible for Fleet reattachment. */
+  detachIdentity?: string;
+  /** Presentation callback invoked only after an explicit keyboard detach has released control. */
+  onExplicitDetach?: (() => void | Promise<void>) | undefined;
 }
 
 export async function attachSession(options: AttachSessionOptions): Promise<number> {
@@ -58,6 +62,8 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
     let attachmentClaimed = false;
     let finished = false;
     let detachOnLeftArrow = options.detachOnLeftArrow ?? true;
+    let pendingInput = Buffer.alloc(0);
+    let pendingEscapeTimer: ReturnType<typeof setTimeout> | undefined;
 
     const onFrame = (frame: ServerFrame) => {
       if (frame.type === "session-ended" && frame.sessionId === options.sessionId) {
@@ -80,36 +86,113 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
       signals.off("SIGWINCH", onResize);
       input.pause?.();
       if (rawModeChanged) input.setRawMode?.(previousRawMode);
+      if (pendingEscapeTimer !== undefined) clearTimeout(pendingEscapeTimer);
+      pendingEscapeTimer = undefined;
+      pendingInput = Buffer.alloc(0);
       if (options.closeTransport !== false) options.transport.close();
     };
 
     const finish = (code: number, sendDetach: boolean) => {
       if (finished) return;
+      const complete = () => {
+        if (!sendDetach || options.onExplicitDetach === undefined) {
+          resolve(code);
+          return;
+        }
+        void Promise.resolve(options.onExplicitDetach()).then(() => resolve(code)).catch(reject);
+      };
+      if (sendDetach && options.detachIdentity !== undefined) {
+        cleanup();
+        void options.transport.request("session.detach", { sessionId: options.sessionId })
+          .then(complete)
+          .catch(reject);
+        return;
+      }
       if (sendDetach) {
         options.transport.sendFrame({ type: "detach", sessionId: options.sessionId });
       }
       cleanup();
-      resolve(code);
+      complete();
+    };
+
+    const sendInput = (chunk: Buffer) => {
+      if (chunk.length === 0 || finished) return;
+      options.transport.sendFrame({
+        type: "input",
+        sessionId: options.sessionId,
+        data: chunk.toString("base64"),
+      });
+    };
+
+    const schedulePendingEscape = () => {
+      if (pendingEscapeTimer !== undefined) clearTimeout(pendingEscapeTimer);
+      pendingEscapeTimer = setTimeout(() => {
+        pendingEscapeTimer = undefined;
+        const pending = pendingInput;
+        pendingInput = Buffer.alloc(0);
+        if (pending.equals(Buffer.from([0x1b]))) {
+          finish(0, true);
+        } else {
+          sendInput(pending);
+        }
+      }, 25);
     };
 
     const onInput = (value: Buffer | string) => {
-      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
-      const controlDetachIndex = chunk.indexOf(0x1d);
-      const leftArrowIndex = detachOnLeftArrow ? chunk.indexOf(Buffer.from("\u001b[D")) : -1;
-      const detachIndex = controlDetachIndex === -1
-        ? leftArrowIndex
-        : leftArrowIndex === -1
-          ? controlDetachIndex
-          : Math.min(controlDetachIndex, leftArrowIndex);
-      const forwarded = detachIndex === -1 ? chunk : chunk.subarray(0, detachIndex);
-      if (forwarded.length > 0) {
-        options.transport.sendFrame({
-          type: "input",
-          sessionId: options.sessionId,
-          data: forwarded.toString("base64"),
-        });
+      if (finished) return;
+      if (pendingEscapeTimer !== undefined) clearTimeout(pendingEscapeTimer);
+      pendingEscapeTimer = undefined;
+      pendingInput = Buffer.concat([
+        pendingInput,
+        Buffer.isBuffer(value) ? value : Buffer.from(value),
+      ]);
+
+      while (pendingInput.length > 0 && !finished) {
+        const escapeIndex = pendingInput.indexOf(0x1b);
+        const reattachIndex = pendingInput.indexOf(0x1d);
+        const controlIndex = escapeIndex === -1
+          ? reattachIndex
+          : reattachIndex === -1
+            ? escapeIndex
+            : Math.min(escapeIndex, reattachIndex);
+        if (controlIndex === -1) {
+          sendInput(pendingInput);
+          pendingInput = Buffer.alloc(0);
+          return;
+        }
+        sendInput(pendingInput.subarray(0, controlIndex));
+        pendingInput = pendingInput.subarray(controlIndex);
+
+        // Ctrl+] belongs to Fleet reattachment. While attached it is consumed as a strict no-op.
+        if (pendingInput[0] === 0x1d) {
+          pendingInput = pendingInput.subarray(1);
+          continue;
+        }
+
+        // A following control byte cannot form an Alt/escape sequence. Honor the standalone Ctrl+[
+        // immediately and consume everything after it with the attachment teardown.
+        if (pendingInput.length > 1 && pendingInput[1]! < 0x20) {
+          finish(0, true);
+          return;
+        }
+
+        const escapeLength = completeEscapeSequenceLength(pendingInput);
+        if (escapeLength === undefined) {
+          schedulePendingEscape();
+          return;
+        }
+        const sequence = pendingInput.subarray(0, escapeLength);
+        pendingInput = pendingInput.subarray(escapeLength);
+        if (isControlLeftBracket(sequence)) {
+          finish(0, true);
+          return;
+        }
+        if (sequence.equals(Buffer.from("\u001b[D")) && detachOnLeftArrow) {
+          finish(0, true);
+          return;
+        }
+        sendInput(sequence);
       }
-      if (detachIndex !== -1) finish(0, true);
     };
 
     const onResize = () => {
@@ -129,7 +212,10 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
     void options.transport.request<{
       data: string;
       session?: { kind?: "worker" | "orchestrator" };
-    }>(method, { sessionId: options.sessionId })
+    }>(method, {
+      sessionId: options.sessionId,
+      ...(options.detachIdentity === undefined ? {} : { detachIdentity: options.detachIdentity }),
+    })
       .then(({ data, session }) => {
         if (finished) return;
         attachmentClaimed = true;
@@ -156,4 +242,22 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
         reject(error);
       });
   });
+}
+
+function completeEscapeSequenceLength(input: Buffer): number | undefined {
+  if (input.length < 2) return undefined;
+  if (input[1] === 0x5b) {
+    for (let index = 2; index < input.length; index += 1) {
+      const byte = input[index]!;
+      if (byte >= 0x40 && byte <= 0x7e) return index + 1;
+    }
+    return undefined;
+  }
+  if (input[1] === 0x4f) return input.length >= 3 ? 3 : undefined;
+  return 2;
+}
+
+function isControlLeftBracket(input: Buffer): boolean {
+  const sequence = input.toString("ascii");
+  return /^\u001b\[(?:91(?::[0-9:]*)?;5(?::[0-9]+)?(?:;[0-9:]+)?u|27;5;91~)$/u.test(sequence);
 }

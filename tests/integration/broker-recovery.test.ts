@@ -10,6 +10,7 @@ import type { JobSnapshot } from "../../src/control-plane/job-control-plane.js";
 import { JobStore } from "../../src/persistence/job-store.js";
 import { SessionStore } from "../../src/persistence/session-store.js";
 import type { SessionRecord } from "../../src/domain/session.js";
+import { FleetDetachStore } from "../../src/persistence/fleet-detach-store.js";
 
 const NOW = "2026-07-21T10:00:00.000Z";
 
@@ -78,6 +79,7 @@ describe("broker durable startup", () => {
       latestPreview: "The saved answer survives restart.",
     };
     await new SessionStore(directory).put(record);
+    await new FleetDetachStore(directory).record("operator:one", sessionId);
 
     const server = await runBroker(socketPath, directory);
     const client = await RpcClient.connect(socketPath);
@@ -91,6 +93,13 @@ describe("broker durable startup", () => {
         }),
       ]);
       await expect(client.request<{ data: string }>("session.snapshot", { sessionId })).resolves.toEqual({ data: "" });
+      await expect(client.request("fleet.reattach", { detachIdentity: "operator:one" })).resolves.toMatchObject({
+        status: "ready",
+        record: { id: sessionId, attentionState: "interrupted" },
+        requiresResume: true,
+      });
+      await expect(client.request("fleet.reattach", { detachIdentity: "operator:other" }))
+        .resolves.toEqual({ status: "none" });
     } finally {
       client.close();
       await server.close();

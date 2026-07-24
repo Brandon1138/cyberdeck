@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createProgram } from "../src/cli.js";
+import { createProgram, openFleetCockpit } from "../src/cli.js";
 import type { OrchestratorManagerResult } from "../src/orchestration/orchestrator-manager.js";
 
 function quietCommand(name: string) {
@@ -88,6 +88,7 @@ describe("Cyberdeck CLI", () => {
       const command = program.commands.find((candidate) => candidate.name() === commandName)!;
       expect(command.options.find(({ long }) => long === "--model")?.defaultValue).toBeUndefined();
       expect(command.options.find(({ long }) => long === "--role")?.defaultValue).toBeUndefined();
+      expect(command.options.find(({ long }) => long === "--approval-mode")?.defaultValue).toBeUndefined();
       expect(command.options.some(({ long }) => long === "--workflow")).toBe(false);
     }
   });
@@ -124,6 +125,94 @@ describe("Cyberdeck CLI", () => {
     expect(launchCockpit).toHaveBeenCalledWith(expect.objectContaining({
       preflight: { tmuxVersion: "tmux 3.5a", presentationCommand: "switch-client" },
     }));
+  });
+
+  it("creates and presents a Fleet-selected orchestrator through the cockpit transaction", async () => {
+    const order: string[] = [];
+    const result = orchestratorResult(true);
+    const create = vi.fn(async () => {
+      order.push("create");
+      return result;
+    });
+    const present = vi.fn(() => order.push("present"));
+
+    await expect(openFleetCockpit({
+      type: "create",
+      cockpitCwd: "/repo/cockpit",
+      request: {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        cwd: "/repo/provider",
+        scope: "fleet",
+      },
+    }, {
+      preflight: () => {
+        order.push("preflight");
+        return { tmuxVersion: "tmux 3.5a", presentationCommand: "switch-client" };
+      },
+      create,
+      resume: vi.fn(),
+      stop: vi.fn(),
+      present,
+    })).resolves.toBe(result.session);
+
+    expect(order).toEqual(["preflight", "create", "present"]);
+    expect(present).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: "/repo/cockpit",
+      orchestratorSessionId: result.session.id,
+    }));
+  });
+
+  it("rolls back only a newly created Fleet orchestrator when cockpit presentation fails", async () => {
+    const result = orchestratorResult(true);
+    const stop = vi.fn(async () => {});
+
+    await expect(openFleetCockpit({
+      type: "create",
+      cockpitCwd: "/repo/cockpit",
+      request: {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        cwd: "/repo/provider",
+        scope: "fleet",
+      },
+    }, {
+      preflight: () => ({ tmuxVersion: "tmux 3.5a", presentationCommand: "attach-session" }),
+      create: vi.fn(async () => result),
+      resume: vi.fn(),
+      stop,
+      present: () => { throw new Error("presentation failed"); },
+    })).rejects.toThrow("presentation failed");
+
+    expect(stop).toHaveBeenCalledWith(result.session.id);
+  });
+
+  it("resumes an interrupted selected orchestrator before focusing its cockpit pane", async () => {
+    const session = orchestratorResult(false).session;
+    const resumed = { ...session, executionState: "active" as const };
+    const order: string[] = [];
+
+    await expect(openFleetCockpit({
+      type: "existing",
+      session: { ...session, executionState: "cancelled", attentionState: "interrupted" },
+      cockpitCwd: "/repo/cockpit",
+      requiresResume: true,
+    }, {
+      preflight: () => {
+        order.push("preflight");
+        return { tmuxVersion: "tmux 3.5a", presentationCommand: "switch-client" };
+      },
+      create: vi.fn(),
+      resume: vi.fn(async () => {
+        order.push("resume");
+        return resumed;
+      }),
+      stop: vi.fn(),
+      present: () => { order.push("present"); },
+    })).resolves.toBe(resumed);
+
+    expect(order).toEqual(["preflight", "resume", "present"]);
   });
 
   it("keeps workspace orchestration as an explicit isolation option", async () => {

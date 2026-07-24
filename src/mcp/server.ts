@@ -49,7 +49,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_worker_start",
-    description: "Start one explicit worker and return a compact sessionId/completionTarget. Exact IDs: Codex gpt-5.6-luna|terra|sol; Claude haiku|sonnet|opus|fable; Cursor composer; Antigravity gemini-3.6-flash-low|medium|high with matching effort. Fable requires the operator-controlled worker.start.fable grant. Pass effort for Codex/Claude/Antigravity, omit it for Cursor. Prefer cyberdeck_workers_start for fan-out, then call cyberdeck_workers_wait once.",
+    description: "Start one explicit worker and return a compact sessionId/completionTarget. Exact IDs: Codex gpt-5.6-luna|terra|sol; Claude haiku|sonnet|opus|fable; Cursor composer; Antigravity gemini-3.6-flash-low|medium|high with matching effort. approvalMode defaults to provider prompts when omitted; auto is an explicit opt-in supported by Codex and Claude. Fable requires the operator-controlled worker.start.fable grant. Pass effort for Codex/Claude/Antigravity, omit it for Cursor. Prefer cyberdeck_workers_start for fan-out, then call cyberdeck_workers_wait once.",
     inputSchema: {
       type: "object",
       properties: {
@@ -58,6 +58,7 @@ const TOOLS = [
         effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
         cwd: { type: "string" },
         sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
+        approvalMode: { type: "string", enum: ["prompt", "auto"] },
         prompt: { type: "string" },
         name: { type: "string" },
       },
@@ -83,6 +84,7 @@ const TOOLS = [
               effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
               cwd: { type: "string" },
               sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
+              approvalMode: { type: "string", enum: ["prompt", "auto"] },
               prompt: { type: "string" },
               name: { type: "string" },
             },
@@ -97,7 +99,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_workers_wait",
-    description: "Idle inside Cyberdeck until all named workers complete, block, fail, or the timeout expires; returns only compact useful result tails and never raw PTY transcripts.",
+    description: "Idle inside Cyberdeck until all named workers complete, need input, fail, or the timeout expires; returns only compact useful result tails and never raw PTY transcripts.",
     inputSchema: {
       type: "object",
       properties: {

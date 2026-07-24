@@ -6,7 +6,7 @@
 
 Cyberdeck is a neutral local broker for durable Codex, Claude, Cursor, and Antigravity terminal sessions. Provider processes run in broker-owned PTYs, so they can move between attached/interactive and detached/headless presentation without being restarted. tmux is an optional cockpit view, not the session owner.
 
-> **Stop and detach are different.** `cyberdeck stop <session-id>` terminates the selected provider process and, for an orchestrator, its owned worker tree. Pressing `Ctrl-]`, closing an attached terminal, or closing a tmux pane only detaches that view; the session keeps running while the broker is alive.
+> **Stop and detach are different.** `cyberdeck stop <session-id>` terminates the selected provider process and, for an orchestrator, its owned worker tree. Pressing `Ctrl-[`, closing an attached terminal, or closing a tmux pane only detaches that view; the session keeps running while the broker is alive. In Fleet, `Ctrl-]` reattaches the exact most recently explicitly detached live session.
 
 > **Alpha software.** `0.1.0-alpha.1` is a macOS developer preview. Persisted schemas and provider compatibility may change before the first stable release.
 
@@ -77,14 +77,17 @@ meaningful activity time. It never ranks providers or chooses a model.
 
 Fleet controls:
 
-- `Ctrl+O`: open the fleet orchestrator picker. Choose provider, model, and provider-supported
-  effort in sequence. The effort choice applies immediately, with no confirmation screen.
+- `Ctrl+O`: open the orchestrator switcher. Its first section lists only live interactive
+  orchestrators and labels controller-held sessions as in use; selecting an available row focuses
+  that exact session in the multiplexed cockpit. Its second section creates a new peer from an
+  explicit model and provider-supported effort, then adds and focuses another cockpit pane without
+  replacing or stopping the current orchestrator.
 - `Up` / `Down`: select a thread.
 - `Right`, or `Enter` while the bottom composer is empty: open the selected provider TUI. A live
   thread attaches to its existing PTY; a terminal thread resumes that exact provider-native
   conversation first.
 - `Left` from a worker TUI: detach and return to the fleet. Orchestrators keep Left for native TUI
-  input and detach only with `Ctrl+]`.
+  input and detach only with `Ctrl+[`.
 - Enter `/model` to choose from the flat model catalog, then choose effort. The explicit selection
   applies immediately and is persisted per project.
 - Enter `/fable-workers status`, `/fable-workers on`, or `/fable-workers off` to inspect or change
@@ -99,10 +102,11 @@ Fleet controls:
 - `?`: toggle the shortcut panel. It documents reorder, view switch, rename, multiline, pin, numbered
   opening, and contextual stop/delete controls.
 - `Esc`: close an active picker/edit mode or clear a draft. It never exits Fleet.
-- `Ctrl+X` on a live worker: stop it through the broker. On an orchestrator, stop the orchestrator
-  and every owned worker while keeping all thread history visible.
-- `Ctrl+X` on a terminal thread or fully stopped orchestrator tree: show the exact red deletion
-  confirmation. Press `Ctrl+X` once more to delete the thread or tree leaf-first.
+- The first `Ctrl+X` on any selected thread is always the stop step, including a thread already
+  displayed as `Done`. On an orchestrator, it stops the orchestrator and every owned worker while
+  keeping all thread history visible.
+- After that stop step, `Ctrl+X` on a terminal thread or fully stopped orchestrator tree shows the
+  exact red deletion confirmation. Press `Ctrl+X` once more to delete the thread or tree leaf-first.
 - `Ctrl+C` twice consecutively: leave Fleet. The first press shows a red inline confirmation near the
   footer; any other key cancels it. Exiting does not stop an agent.
 
@@ -161,6 +165,11 @@ inside the broker for compact results. Normal result collection is one `workers_
 by one blocking `workers_wait` call; it does not poll or feed raw terminal transcripts back into the
 model. `thread_read` remains a bounded debugging escape hatch, requires an explicit cursor, and
 refuses to move an orchestrator backward behind a cursor it has already consumed.
+
+Worker starts may explicitly set provider-neutral `approvalMode` to `auto` for Codex or Claude.
+Omitting it preserves provider approval prompts (`on-request` for Codex and the sandbox-derived
+Claude mode); Cursor and Antigravity reject `auto` rather than ignoring it. The operator CLI exposes
+the same opt-in as `--approval-mode auto`.
 
 A human attachment always owns the only writer lease: orchestrator input remains queued until that
 controller detaches. Cyberdeck never steers a worker through tmux.
@@ -262,7 +271,7 @@ cyberdeck send SESSION_ID "Summarize the current state without changing files."
 cyberdeck logs SESSION_ID
 ```
 
-`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press Left or `Ctrl-]` to return from a worker. Orchestrators reserve Left for their native TUI and detach only with `Ctrl-]`. Terminal threads refuse attachment until they have been resumed, and provider exit automatically releases every controller and watcher.
+`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press Left or `Ctrl-[` to return from a worker. Orchestrators reserve Left for their native TUI and detach only with `Ctrl-[`; a cockpit attachment also leaves the cockpit and returns to Fleet after releasing its controller. `Ctrl-]` is consumed while attached and reattaches the exact last-detached target from Fleet. Terminal threads refuse attachment until they have been resumed, and provider exit automatically releases every controller and watcher.
 
 `send` submits one logical prompt without opening an interactive client. The selected provider
 adapter encodes its terminal's actual Enter key, so steering does not depend on a portable newline

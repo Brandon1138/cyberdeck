@@ -1,10 +1,12 @@
 import {
   CavemanWorkersRequestSchema,
+  CreateOrchestratorRequestSchema,
   EnsureOrchestratorRequestSchema,
   FableWorkersRequestSchema,
   orchestratorKey,
   type CavemanWorkersRequest,
   type CavemanWorkersResult,
+  type CreateOrchestratorRequest,
   type EnsureOrchestratorRequest,
   type FableWorkersRequest,
   type FableWorkersResult,
@@ -16,6 +18,7 @@ import type { SessionRecord } from "../domain/session.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
+import { ORCHESTRATOR_CATALOG } from "./orchestrator-catalog.js";
 
 export interface OrchestratorManagerResult {
   binding: OrchestratorBinding;
@@ -33,6 +36,10 @@ export interface OrchestratorSessionResetResult {
   reset: boolean;
   key?: string;
 }
+
+type BoundOrchestratorRequest = EnsureOrchestratorRequest & {
+  provider: CreateOrchestratorRequest["provider"];
+};
 
 export class OrchestratorManager {
   constructor(
@@ -81,6 +88,24 @@ export class OrchestratorManager {
       );
     }
 
+    return this.createBound(request as BoundOrchestratorRequest, scope, false);
+  }
+
+  /** Always creates a distinct bound peer; it never consults or replaces the scope's primary binding. */
+  async create(input: CreateOrchestratorRequest): Promise<OrchestratorManagerResult> {
+    const request = CreateOrchestratorRequestSchema.parse(input);
+    validateCreateSelection(request);
+    const scope: OrchestratorScope = request.scope === "fleet"
+      ? { kind: "fleet" }
+      : { kind: "workspace", cwd: request.cwd };
+    return this.createBound(request, scope, true);
+  }
+
+  private async createBound(
+    request: BoundOrchestratorRequest,
+    scope: OrchestratorScope,
+    peer: boolean,
+  ): Promise<OrchestratorManagerResult> {
     const session = await this.registry.start({
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
@@ -95,8 +120,9 @@ export class OrchestratorManager {
       providerInstructions: orchestratorPrompt(scope),
     });
     const now = new Date().toISOString();
+    const primaryKey = orchestratorKey(scope);
     const binding: OrchestratorBinding = {
-      key,
+      key: peer ? `${primaryKey}:peer:${session.id}` : primaryKey,
       sessionId: session.id,
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
@@ -248,6 +274,23 @@ export class OrchestratorManager {
 function isRecoverableResumeError(error: unknown): boolean {
   if (!(error instanceof Error) || !("code" in error)) return false;
   return error.code === "SESSION_NOT_FOUND" || error.code === "SESSION_RESUME_UNAVAILABLE";
+}
+
+function validateCreateSelection(request: CreateOrchestratorRequest): void {
+  const provider = ORCHESTRATOR_CATALOG.find((entry) => entry.provider === request.provider);
+  if (provider === undefined || !provider.models.includes(request.model)) {
+    throw Object.assign(
+      new Error(`Unsupported orchestrator selection: ${request.provider}:${request.model}`),
+      { code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" },
+    );
+  }
+  const effort = request.effort ?? "native-default";
+  if (!provider.efforts.includes(effort)) {
+    throw Object.assign(
+      new Error(`${request.provider}:${request.model} does not support ${effort} effort`),
+      { code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" },
+    );
+  }
 }
 
 function orchestratorPrompt(scope: OrchestratorScope): string {

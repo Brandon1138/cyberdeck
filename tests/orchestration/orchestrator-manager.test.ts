@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
-import { EnsureOrchestratorRequestSchema, type OrchestratorBinding } from "../../src/domain/orchestrator.js";
+import {
+  CreateOrchestratorRequestSchema,
+  EnsureOrchestratorRequestSchema,
+  type OrchestratorBinding,
+} from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
@@ -211,6 +215,71 @@ describe("OrchestratorManager", () => {
       cwd: "/repo/one",
       orchestratorScope: "fleet",
     }));
+  });
+
+  it("always creates a separately bound peer without consulting or replacing the primary binding", async () => {
+    const peer = {
+      ...record,
+      id: "22222222-2222-4222-8222-222222222222",
+    };
+    const get = vi.fn(async () => binding);
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const start = vi.fn(async () => peer);
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => undefined) } as never,
+      { get, put } as never,
+    );
+
+    await expect(manager.create({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    })).resolves.toMatchObject({
+      created: true,
+      session: { id: peer.id },
+      binding: {
+        key: `fleet:peer:${peer.id}`,
+        sessionId: peer.id,
+        grant: {
+          subjectSessionId: peer.id,
+          capabilities: expect.arrayContaining(["worker.start", "workflow.run"]),
+        },
+      },
+    });
+    expect(get).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledOnce();
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({
+      key: `fleet:peer:${peer.id}`,
+      sessionId: peer.id,
+    }));
+  });
+
+  it("requires an explicit supported provider, model, and effort for a new peer", async () => {
+    const start = vi.fn();
+    const manager = new OrchestratorManager({ start } as never, {} as never);
+
+    await expect(manager.create({
+      provider: "codex",
+      model: "sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
+    await expect(manager.create({
+      provider: "claude",
+      model: "opus",
+      effort: "ultra",
+      cwd: "/repo/one",
+      scope: "fleet",
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
+    expect(CreateOrchestratorRequestSchema.safeParse({
+      provider: "codex",
+      cwd: "/repo/one",
+      scope: "fleet",
+    }).success).toBe(false);
+    expect(start).not.toHaveBeenCalled();
   });
 
   it("defaults unscoped broker requests to the fleet binding", () => {

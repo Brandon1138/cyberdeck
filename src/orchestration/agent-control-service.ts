@@ -4,6 +4,7 @@ import { grantAllows, type CapabilityGrant, type CyberdeckCapability } from "../
 import { isFableModel } from "../domain/policy.js";
 import {
   ProviderIdSchema,
+  ApprovalModeSchema,
   ReasoningEffortSchema,
   SandboxSchema,
   type SessionRecord,
@@ -27,6 +28,7 @@ export const AgentStartWorkerParamsSchema = AgentActorParamsSchema.extend({
   effort: ReasoningEffortSchema.optional(),
   cwd: z.string().min(1),
   sandbox: SandboxSchema.default("read-only"),
+  approvalMode: ApprovalModeSchema.optional(),
   prompt: z.string().trim().min(1),
   name: z.string().optional(),
 });
@@ -60,7 +62,8 @@ export class AgentControlError extends Error {
       | "MODEL_ID_NOT_CANONICAL"
       | "MODEL_NOT_ADVERTISED"
       | "EFFORT_NOT_SUPPORTED"
-      | "MODEL_EFFORT_MISMATCH",
+      | "MODEL_EFFORT_MISMATCH"
+      | "APPROVAL_MODE_NOT_SUPPORTED",
     message: string,
   ) {
     super(message);
@@ -128,6 +131,7 @@ export class AgentControlService {
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
       ...(request.effort === undefined ? {} : { effort: request.effort }),
+      ...(request.approvalMode === undefined ? {} : { approvalMode: request.approvalMode }),
     });
     if (!selection.ok) throw new AgentControlError(selection.code, selection.message);
     const name = request.name ?? taskName(request.prompt);
@@ -136,6 +140,7 @@ export class AgentControlService {
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
       ...(request.effort === undefined ? {} : { effort: request.effort }),
+      ...(request.approvalMode === undefined ? {} : { approvalMode: request.approvalMode }),
       cwd: request.cwd,
       detached: true,
       sandbox: request.sandbox,

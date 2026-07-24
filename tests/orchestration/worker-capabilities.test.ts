@@ -11,15 +11,39 @@ describe("worker provider capabilities", () => {
         provider: "codex",
         models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
         efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        approvalModes: ["prompt", "auto"],
       }),
-      expect.objectContaining({ provider: "claude", models: ["haiku", "sonnet", "opus", "fable"] }),
-      expect.objectContaining({ provider: "cursor", models: ["composer"], efforts: [] }),
+      expect.objectContaining({
+        provider: "claude",
+        models: ["haiku", "sonnet", "opus", "fable"],
+        approvalModes: ["prompt", "auto"],
+      }),
+      expect.objectContaining({ provider: "cursor", models: ["composer"], efforts: [], approvalModes: ["prompt"] }),
       expect.objectContaining({
         provider: "antigravity",
         models: ["gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high"],
         efforts: ["low", "medium", "high"],
+        approvalModes: ["prompt"],
       }),
     ]);
+  });
+
+  it("accepts auto only for providers with a native mapped mode", () => {
+    expect(validateWorkerSelection({
+      provider: "claude",
+      model: "opus",
+      approvalMode: "auto",
+    })).toEqual({ ok: true });
+    expect(validateWorkerSelection({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      approvalMode: "auto",
+    })).toEqual({ ok: true });
+    expect(validateWorkerSelection({
+      provider: "cursor",
+      model: "composer",
+      approvalMode: "auto",
+    })).toEqual(expect.objectContaining({ ok: false, code: "APPROVAL_MODE_NOT_SUPPORTED" }));
   });
 
   it("rejects shorthand rather than translating it at launch", () => {

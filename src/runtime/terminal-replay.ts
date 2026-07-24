@@ -7,16 +7,18 @@ const CSI_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/gu;
 const OTHER_ESCAPE = /\u001b(?:[()][0-9A-Z]|[@-_])/gu;
 const BRAILLE_SPINNER = /^[\u2800-\u28ff]/u;
 
-export type ProviderTerminalActivity = "working" | "awaiting-input" | "blocked" | "unknown";
+export type ProviderTerminalActivity = "working" | "awaiting-input" | "needs-input" | "unknown";
 
 /**
  * Derive the same compact provider activity used by both the cockpit and semantic worker waits.
  * Last-occurrence comparisons matter because PTY replay contains old working and idle frames.
  */
 export function providerTerminalActivity(provider: ProviderId, replay: string): ProviderTerminalActivity {
-  if (isBlockedPrompt(replay)) return "blocked";
+  const plain = stripTerminalControl(replay);
+  const blockedAt = lastBlockedPromptIndex(provider, plain);
 
   if (provider === "cursor") {
+    if (blockedAt >= 0) return "needs-input";
     const workingAt = Math.max(replay.lastIndexOf("Composing"), replay.lastIndexOf("ctrl+c to stop"));
     const waitingAt = Math.max(
       replay.lastIndexOf("Cursor is waiting for you"),
@@ -27,18 +29,15 @@ export function providerTerminalActivity(provider: ProviderId, replay: string): 
 
 
   if (provider === "antigravity") {
-    const workingAt = lastBrailleIndex(replay);
+    const workingAt = lastBrailleIndex(plain);
     const waitingAt = Math.max(
-      replay.lastIndexOf("? for shortcuts"),
-      replay.lastIndexOf("> Plan mode:"),
+      plain.lastIndexOf("? for shortcuts"),
+      plain.lastIndexOf("> Plan mode:"),
     );
+    if (blockedAt > Math.max(workingAt, waitingAt)) return "needs-input";
     if (workingAt >= 0 || waitingAt >= 0) return waitingAt > workingAt ? "awaiting-input" : "working";
   }
 
-  const title = lastTerminalTitle(replay);
-  if (title !== undefined) return BRAILLE_SPINNER.test(title) ? "working" : "awaiting-input";
-
-  const plain = stripTerminalControl(replay);
   const workingAt = Math.max(
     plain.lastIndexOf("esc to interrupt"),
     plain.lastIndexOf("Composing"),
@@ -49,6 +48,11 @@ export function providerTerminalActivity(provider: ProviderId, replay: string): 
     plain.lastIndexOf("Add a follow-up"),
     plain.lastIndexOf("Write tests for"),
   );
+  if (blockedAt > Math.max(workingAt, waitingAt)) return "needs-input";
+
+  const title = lastTerminalTitle(replay);
+  if (title !== undefined) return BRAILLE_SPINNER.test(title) ? "working" : "awaiting-input";
+
   if (workingAt >= 0 || waitingAt >= 0) return waitingAt > workingAt ? "awaiting-input" : "working";
   return "unknown";
 }
@@ -80,7 +84,7 @@ export function latestTerminalPreview(replay: string): string {
 }
 
 /**
- * Best-effort interactive-TUI preview: the first rendered line of the last substantive paragraph.
+ * Best-effort interactive-TUI preview: the beginning of the latest assistant reply.
  * Provider-native structured transcripts are not available on every PTY path, so the durable
  * session catalog stores this normalized value at turn completion rather than re-scraping it in
  * every Fleet render.
@@ -90,22 +94,36 @@ export function latestAssistantParagraphPreview(replay: string): string {
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+  const lines = stripped.split("\n");
+  let replyStart: number | undefined;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.replace(/\s+/g, " ").trim() ?? "";
+    if (isUserPromptLine(line)) {
+      replyStart = index + 1;
+      break;
+    }
+  }
+  if (replyStart !== undefined) {
+    for (const raw of lines.slice(replyStart)) {
+      const line = raw.replace(/\s+/g, " ").trim();
+      if (line === "" || isTerminalChrome(line)) continue;
+      return line;
+    }
+    return "No response yet";
+  }
+
   const paragraphs: string[][] = [];
   let paragraph: string[] = [];
-  const flush = () => {
-    if (paragraph.length > 0) paragraphs.push(paragraph);
-    paragraph = [];
-  };
-  for (const raw of stripped.split("\n")) {
+  for (const raw of lines) {
     const line = raw.replace(/\s+/g, " ").trim();
     if (line === "") {
-      flush();
+      if (paragraph.length > 0) paragraphs.push(paragraph);
+      paragraph = [];
       continue;
     }
-    if (isTerminalChrome(line)) continue;
-    if (paragraph.at(-1) !== line) paragraph.push(line);
+    if (!isTerminalChrome(line) && paragraph.at(-1) !== line) paragraph.push(line);
   }
-  flush();
+  if (paragraph.length > 0) paragraphs.push(paragraph);
   return paragraphs.at(-1)?.[0] ?? "No response yet";
 }
 
@@ -134,9 +152,35 @@ function lastTerminalTitle(replay: string): string | undefined {
   return last;
 }
 
-function isBlockedPrompt(replay: string): boolean {
-  const tail = stripTerminalControl(replay.slice(-8_000));
-  return /Do you trust the contents of this project\?|workspace-trust|needs authentication|permission prompt/i.test(tail);
+function lastBlockedPromptIndex(provider: ProviderId, replay: string): number {
+  const tailStart = Math.max(0, replay.length - 8_000);
+  const tail = replay.slice(tailStart);
+  const common = lastRegexIndex(
+    tail,
+    /Do you trust the contents of this project\?|workspace-trust|needs authentication|permission prompt/giu,
+  );
+  const providerPrompt = provider === "codex"
+    ? Math.max(
+        lastRegexIndex(
+          tail,
+          /Would you like to (?:run the following command|apply the following changes)\?[\s\S]{0,2400}?Yes, proceed/giu,
+        ),
+        lastRegexIndex(tail, /Codex needs (?:your )?(?:approval|permission)[\s\S]{0,1600}?(?:Allow|Yes)/giu),
+      )
+    : provider === "claude"
+      ? Math.max(
+          lastRegexIndex(tail, /Claude needs your permission[\s\S]{0,2400}?(?:Do you want to proceed\?|Allow)/giu),
+          lastRegexIndex(tail, /Do you want to proceed\?[\s\S]{0,1600}?(?:Yes|Esc to cancel)/giu),
+        )
+      : -1;
+  const index = Math.max(common, providerPrompt);
+  return index < 0 ? -1 : tailStart + index;
+}
+
+function lastRegexIndex(value: string, pattern: RegExp): number {
+  let index = -1;
+  for (const match of value.matchAll(pattern)) index = match.index;
+  return index;
 }
 
 function lastBrailleIndex(value: string): number {
@@ -152,11 +196,22 @@ function lastBrailleIndex(value: string): number {
 }
 
 function isTerminalChrome(line: string): boolean {
-  return /^(CYBERDECK|Claude Code|OpenAI Codex|Tips for getting|Tip: Use|What's new|Use \/skills|Try "|← for agents|Starting MCP|Running .* hook|No output yet)/i.test(line)
-    || /^Working(?:…|\.\.\.)?$/i.test(line)
-    || /esc to interrupt|ctrl\+g to edit|ctrl\+c to stop|permission mode|plan mode on|shift\+tab to cycle|Add a follow-up|Composing(?: \d+ tokens)?$/i.test(line)
-    || /^(?:›\s*)?(?:Explain this codebase|Describe a task for a new session|Ask about this codebase)$/i.test(line)
-    || /Cursor is waiting for you|Composer \d|Gemini .* · (?:low|medium|high)$/i.test(line)
-    || /^(?:Worked|Cogitated|Reasoned) for \d/i.test(line)
-    || /^[-─━═╭╰│┌└┐┘▀▄ ]+$/u.test(line);
+  const content = line
+    .replace(/^[\s─━═╭╰│┌└┐┘▀▄]+/u, "")
+    .replace(/[\s─━═╭╰│┌└┐┘▀▄]+$/u, "");
+  return /^(CYBERDECK|Claude Code|OpenAI Codex|Tips for getting|Tip:\s*(?:Use|Try the Desktop app|Paste an image with Ctrl\+V)|What's new|Use \/skills|Try "|← for agents|Starting MCP|Running .* hook|No output yet)/i.test(content)
+    || /^https:\/\/chatgpt\.com\/codex\?app-landing-page=true$/i.test(content)
+    || /^(?:model|directory):\s+/i.test(content)
+    || /^(?:tab to queue message|\d+% context left)$/i.test(content)
+    || /^Working(?:…|\.\.\.)?$/i.test(content)
+    || /esc to interrupt|ctrl\+g to edit|ctrl\+c to stop|permission mode|plan mode on|shift\+tab to cycle|Add a follow-up|Composing(?: \d+ tokens)?$/i.test(content)
+    || /^(?:›\s*)?(?:Explain this codebase|Describe a task for a new session|Ask about this codebase)$/i.test(content)
+    || /Cursor is waiting for you|Composer \d|Gemini .* · (?:low|medium|high)$/i.test(content)
+    || /^(?:Worked|Cogitated|Reasoned) for \d/i.test(content)
+    || content === "";
+}
+
+function isUserPromptLine(line: string): boolean {
+  return /^(?:›|❯|>)\s+\S/u.test(line)
+    && !/^>\s*Plan mode:/iu.test(line);
 }

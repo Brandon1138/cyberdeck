@@ -144,6 +144,34 @@ describe("AgentControlService", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({ effort: "low" }), "Return 8 + 1000");
   });
 
+  it("forwards an explicit auto approval request without changing the omitted default", async () => {
+    const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    await service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "claude",
+      model: "opus",
+      cwd: "/repo/one",
+      approvalMode: "auto",
+      prompt: "Implement the focused fix",
+    });
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ approvalMode: "auto" }), expect.any(String));
+
+    await service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd: "/repo/one",
+      prompt: "Review the fix",
+    });
+    expect(start.mock.calls.at(-1)?.[0]).not.toHaveProperty("approvalMode");
+  });
+
   it("snapshots an enabled Caveman preference into newly started workers", async () => {
     const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
     const service = new AgentControlService(

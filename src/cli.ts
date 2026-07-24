@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 import { runBroker } from "./broker/main.js";
-import type { ReasoningEffort, SessionRecord } from "./domain/session.js";
+import type { ApprovalMode, ReasoningEffort, SessionRecord } from "./domain/session.js";
 import { CANONICAL_PROVIDER_IDS, type ProviderId } from "./domain/provider-registration.js";
 import type {
   OrchestratorManagerResult,
@@ -15,6 +15,7 @@ import type {
 import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
+  CreateOrchestratorRequest,
   EnsureOrchestratorRequest,
   FableWorkersRequest,
   FableWorkersResult,
@@ -24,8 +25,9 @@ import { appStateDirectory, brokerSocketPath } from "./paths.js";
 import { RpcClient, RpcError } from "./client/rpc-client.js";
 import { attachSession } from "./client/attach.js";
 import { runDashboard } from "./client/dashboard.js";
-import { runFleet } from "./client/fleet.js";
+import { runFleet, type OrchestratorCockpitTarget } from "./client/fleet.js";
 import {
+  detachCockpit,
   launchCockpit,
   preflightCockpit,
   type CockpitOptions,
@@ -33,6 +35,7 @@ import {
 } from "./tmux/cockpit.js";
 import { CYBERDECK_VERSION } from "./version.js";
 import { runMcpServer } from "./mcp/server.js";
+import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
 
 interface StartOptions {
   provider: ProviderId;
@@ -42,6 +45,7 @@ interface StartOptions {
   role?: string;
   name?: string;
   sandbox: "read-only" | "workspace-write";
+  approvalMode?: ApprovalMode;
   attach?: boolean;
 }
 
@@ -68,6 +72,8 @@ function addSessionOptions(command: Command, allowAttach: boolean): Command {
       .choices(["low", "medium", "high", "xhigh", "max", "ultra"]))
     .option("--role <role>", "optional opaque user-defined role label")
     .option("--name <name>", "session name")
+    .addOption(new Option("--approval-mode <mode>", "provider permission/approval behavior")
+      .choices(["prompt", "auto"]))
     .addOption(new Option("--sandbox <sandbox>").choices(["read-only", "workspace-write"]).default("read-only"));
   if (allowAttach) command.option("--attach", "attach a controlling client immediately");
   return command;
@@ -165,20 +171,38 @@ async function runCyberdeck(): Promise<void> {
     client = await RpcClient.connect(brokerSocketPath);
   }
   await runFleet(client, process.stdin, process.stdout, process, {
-    openOrchestrator: (request) => openCockpit(request, {
+    changeDirectory: chooseWorkingDirectory,
+    detachIdentity: `operator:${process.getuid?.() ?? "local"}`,
+    openOrchestrator: (target) => openFleetCockpit(target, {
       preflight: () => preflightCockpit(),
-      ensure: (next) => client.request<OrchestratorManagerResult>("orchestrator.ensure", next),
+      create: (request) => client.request<OrchestratorManagerResult>("orchestrator.create", request),
+      resume: (sessionId) => client.request<SessionRecord>("session.resume", { sessionId }),
       stop: (sessionId) => client.request<void>("session.stop", { sessionId }),
       present: launchCockpit,
     }),
   });
 }
 
-async function runAttachment(sessionId: string, mode: "control" | "watch"): Promise<void> {
-  process.stdout.write("Detach with Ctrl-]\n");
+async function runAttachment(
+  sessionId: string,
+  mode: "control" | "watch",
+  options: { cockpitReturn?: "detach" | "switch" } = {},
+): Promise<void> {
+  process.stdout.write("Detach with Ctrl-[ · reattach from Fleet with Ctrl-]\n");
   const client = await RpcClient.connect(brokerSocketPath);
+  const cockpitReturn = options.cockpitReturn;
   try {
-    const status = await attachSession({ sessionId, mode, transport: client });
+    const status = await attachSession({
+      sessionId,
+      mode,
+      transport: client,
+      ...(cockpitReturn !== undefined
+        ? {
+          detachIdentity: `operator:${process.getuid?.() ?? "local"}`,
+          onExplicitDetach: () => detachCockpit({ returnMode: cockpitReturn }),
+        }
+        : {}),
+    });
     if (status !== 0) process.exitCode = status;
   } catch (error) {
     client.close();
@@ -199,6 +223,7 @@ function sessionRequest(options: StartOptions, parentSessionId?: string) {
     ...(options.effort === undefined ? {} : { effort: options.effort }),
     ...(options.role === undefined ? {} : { role: options.role }),
     ...(options.name === undefined ? {} : { name: options.name }),
+    ...(options.approvalMode === undefined ? {} : { approvalMode: options.approvalMode }),
     ...(parentSessionId === undefined ? {} : { parentSessionId }),
   };
 }
@@ -223,6 +248,46 @@ async function openCockpit(
       orchestratorSessionId: result.session.id,
       preflight,
     });
+  } catch (error) {
+    if (!result.created) throw error;
+    try {
+      await services.stop(result.session.id);
+    } catch (cleanupError) {
+      throw addCleanupContext(error, cleanupError, "stop the newly created orchestrator");
+    }
+    throw error;
+  }
+}
+
+export interface FleetCockpitServices {
+  preflight: () => CockpitPreflight;
+  create: (request: CreateOrchestratorRequest) => Promise<OrchestratorManagerResult>;
+  resume: (sessionId: string) => Promise<SessionRecord>;
+  stop: (sessionId: string) => Promise<void>;
+  present: (options: CockpitOptions) => void;
+}
+
+export async function openFleetCockpit(
+  target: OrchestratorCockpitTarget,
+  services: FleetCockpitServices,
+): Promise<SessionRecord> {
+  const preflight = services.preflight();
+  const result = target.type === "create"
+    ? await services.create(target.request)
+    : {
+      session: target.requiresResume
+        ? await services.resume(target.session.id)
+        : target.session,
+      created: false,
+    };
+  try {
+    services.present({
+      cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
+      cwd: target.cockpitCwd,
+      orchestratorSessionId: result.session.id,
+      preflight,
+    });
+    return result.session;
   } catch (error) {
     if (!result.created) throw error;
     try {
@@ -343,7 +408,10 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
 
   program.command("attach")
     .argument("<id>", "session UUID")
-    .action((sessionId: string) => runAttachment(sessionId, "control"));
+    .addOption(new Option("--cockpit-return <mode>", "return the tmux client to Fleet on explicit detach")
+      .choices(["detach", "switch"]))
+    .action((sessionId: string, options: { cockpitReturn?: "detach" | "switch" }) =>
+      runAttachment(sessionId, "control", options));
 
   program.command("watch")
     .argument("<id>", "session UUID")

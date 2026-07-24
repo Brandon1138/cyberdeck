@@ -14,6 +14,8 @@ Each session records independent fields:
 - `model` is an optional provider-native model string. Omitting it leaves selection to the native runtime; Cyberdeck does not rank or route models.
 - `role` is an optional opaque, user-defined string. It grants no capabilities and implies no workflow.
 - `sandbox` is the requested permission boundary, independent of provider, model, and role.
+- `approvalMode` is an optional provider-neutral `prompt | auto` dispatch choice. Omission preserves
+  provider prompts; `auto` is never inferred.
 - execution state describes whether the provider process is active or exited.
 - attachment state describes presentation: attached/interactive or detached/headless.
 
@@ -132,6 +134,10 @@ Everything above describes process ownership and remains unchanged. The cockpit 
 interactive Fleet beside a controlling attachment to the selected broker-owned orchestrator. It does
 not move provider ownership into tmux.
 
+Fleet `Ctrl+O` always crosses this presentation boundary. Selecting an available orchestrator focuses
+its existing cockpit pane, while creating or selecting an orchestrator without a pane adds another
+attachment pane to the same cockpit. It never replaces the cockpit with a raw full-screen attachment.
+
 Cockpit preflight runs `tmux -V` and selects presentation mode before orchestrator ensure/create.
 Outside tmux it uses `attach-session`. When `$TMUX` is present, it uses `switch-client` in the
 inherited tmux server, never a separate Cyberdeck socket, so Ghostty and other named-server clients do
@@ -152,7 +158,7 @@ and meaningful recency. Enter on an empty composer or Right opens the selected n
 For an active thread this attaches directly to the existing broker-owned PTY. For a terminal thread,
 the broker first launches the provider's exact conversation-resume command, then attaches to the new
 PTY. Claude resumes the UUID Cyberdeck assigned at initial launch; Codex resolves its separately
-generated native UUID from local session metadata. Left (or `Ctrl+]`) detaches back to the fleet
+generated native UUID from local session metadata. Left (or `Ctrl+[`) detaches back to the fleet
 without closing the shared broker connection or stopping the provider.
 
 Control attachment is valid only while the provider PTY is active. Provider exit releases the
@@ -214,8 +220,9 @@ because the session contract carries none. It does not invent one.
 
 tmux owns no provider process. `src/tmux/cockpit.ts` emits no `kill-pane`, `kill-server`,
 `respawn-pane`, or `send-keys` verb. Its only `kill-session` path is rollback of the exact
-workspace-namespaced cockpit created by the current failed invocation. Detach uses only
-`detach-client`, and pane inspection uses only a read-only `list-panes -F` query.
+workspace-namespaced cockpit created by the current failed invocation. Leaving a cockpit switches
+back to the previous tmux session when one exists and otherwise detaches the current client; pane
+inspection uses only a read-only `list-panes -F` query.
 
 This was verified operationally on 2026-07-21: killing the entire tmux server left the broker healthy
 on the same pid with its state intact. Closing a pane is never a way to stop work. `cyberdeck stop

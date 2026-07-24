@@ -31,6 +31,7 @@ describe("Cyberdeck MCP server", () => {
       "antigravity",
     ]);
     expect(workerStart?.inputSchema.properties).toHaveProperty("effort");
+    expect(workerStart?.inputSchema.properties?.approvalMode?.enum).toEqual(["prompt", "auto"]);
     const threadRead = tools.find(({ name }) => name === "cyberdeck_thread_read") as {
       inputSchema: { required?: string[]; properties?: { limit?: { maximum?: number } } };
     } | undefined;

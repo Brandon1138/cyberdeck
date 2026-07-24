@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { realpath, stat } from "node:fs/promises";
 import type { BrokerRuntimeConfig } from "../config.js";
 import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
 import { evaluateStart, type SessionAncestryEntry, type StartPolicyCode } from "../domain/policy.js";
@@ -77,7 +78,7 @@ export interface WorkerResultSnapshot {
   provider: string;
   model?: string;
   effort?: string;
-  status: "completed" | "blocked" | "working" | "waiting" | "failed" | "stopped" | "exited";
+  status: "completed" | "needs-input" | "working" | "waiting" | "failed" | "stopped" | "exited";
   completedTurns: number;
   text: string;
 }
@@ -101,6 +102,11 @@ export interface SessionTreeDeleteResult extends SessionTreeProgress {
   deleted: number;
 }
 
+export type ReattachTarget =
+  | { status: "ready"; record: SessionRecord; requiresResume: boolean }
+  | { status: "unavailable"; record: SessionRecord }
+  | { status: "stale" };
+
 export interface SessionRegistryOptions {
   adapters: Record<string, ProviderAdapter>;
   ptyFactory: PtyFactory;
@@ -108,6 +114,7 @@ export interface SessionRegistryOptions {
   transcripts?: ThreadTranscriptStore;
   store?: SessionStoreLike;
   recoveredSessions?: readonly SessionRecord[];
+  validateCwd?: ((cwd: string) => Promise<void>) | undefined;
   config: BrokerRuntimeConfig;
 }
 
@@ -125,7 +132,8 @@ export class RegistryError extends Error {
       | "SESSION_STILL_ACTIVE"
       | "SESSION_HAS_CHILDREN"
       | "SESSION_TREE_STILL_ACTIVE"
-      | "PARENT_SESSION_NOT_ACTIVE",
+      | "PARENT_SESSION_NOT_ACTIVE"
+      | "INVALID_SESSION_CWD",
     message: string,
   ) {
     super(message);
@@ -168,7 +176,9 @@ export class SessionRegistry {
   }
 
   async start(request: StartSessionRequest, initialPrompt?: string): Promise<SessionRecord> {
-    const parsed = StartSessionRequestSchema.parse(request);
+    const validated = StartSessionRequestSchema.parse(request);
+    await (this.options.validateCwd ?? validateSessionCwd)(validated.cwd);
+    const parsed = validated;
     this.requireActiveParent(parsed.parentSessionId);
     const ancestry = this.resolveAncestry(parsed.parentSessionId);
     const decision = evaluateStart(parsed, ancestry, {
@@ -281,6 +291,28 @@ export class SessionRegistry {
 
   get(sessionId: string): SessionRecord {
     return this.cloneRecord(this.requireRuntime(sessionId).record);
+  }
+
+  resolveReattachTarget(sessionId: string): ReattachTarget {
+    const runtime = this.sessions.get(sessionId);
+    if (runtime === undefined) return { status: "stale" };
+    if (runtime.record.executionState === "active") {
+      const record = this.cloneRecord(runtime.record);
+      return runtime.controller === undefined
+        ? { status: "ready", record, requiresResume: false }
+        : { status: "unavailable", record };
+    }
+    if (
+      runtime.record.executionState === "cancelled"
+      && runtime.record.attentionState === "interrupted"
+    ) {
+      return {
+        status: "ready",
+        record: this.cloneRecord(runtime.record),
+        requiresResume: true,
+      };
+    }
+    return { status: "stale" };
   }
 
   async waitForWorkerResults(
@@ -439,7 +471,14 @@ export class SessionRegistry {
 
   async stop(sessionId: string): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
-    if (runtime.record.exitCode !== null) return;
+    if (runtime.record.exitCode !== null) {
+      if (runtime.record.attentionState === "stopped") return;
+      await this.setAttention(runtime, "stopped", true);
+      await this.appendEvent("session.stopped", sessionId, {});
+      await this.appendTranscript(sessionId, "lifecycle", "broker", "session stopped", {});
+      this.notifySessionUpdate(sessionId);
+      return;
+    }
     if (runtime.stopRequested) {
       this.requirePty(runtime).kill();
       return;
@@ -729,7 +768,7 @@ export class SessionRegistry {
         void this.setAttention(runtime, "done", true);
         this.notifySessionUpdate(runtime.record.id);
       }, 200);
-    } else if (activity === "blocked") {
+    } else if (activity === "needs-input") {
       runtime.latestResult = compactTerminalResult(replay);
       runtime.record.latestPreview = latestAssistantParagraphPreview(replay);
       if (runtime.record.attentionState !== "needs-input") {
@@ -799,7 +838,7 @@ export class SessionRegistry {
       text,
     };
     if (runtime.completedTurns >= target.completionTarget) return { ...base, status: "completed" };
-    if (runtime.activity === "blocked") return { ...base, status: "blocked" };
+    if (runtime.activity === "needs-input") return { ...base, status: "needs-input" };
     if (runtime.record.executionState === "failed") return { ...base, status: "failed" };
     if (runtime.record.executionState === "cancelled") return { ...base, status: "stopped" };
     if (runtime.record.executionState === "exited") return { ...base, status: "exited" };
@@ -881,5 +920,17 @@ export class SessionRegistry {
 
   private cloneRecord(record: SessionRecord): SessionRecord {
     return { ...record, childIds: [...record.childIds] };
+  }
+}
+
+async function validateSessionCwd(cwd: string): Promise<void> {
+  try {
+    const canonical = await realpath(cwd);
+    if (!(await stat(canonical)).isDirectory()) throw new Error("not a directory");
+  } catch {
+    throw new RegistryError(
+      "INVALID_SESSION_CWD",
+      `Session cwd is not an accessible directory: ${cwd}`,
+    );
   }
 }
