@@ -147,6 +147,8 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
    * ~150k after each compaction, which left two or three usable turns and made autocompaction
    * thrash. Both flags are orchestrator-only; workers keep the operator's environment, and dropping
    * user settings here is safe because Cyberdeck's own session-start hook is worker-scoped.
+   * `--strict-mcp-config` is the MCP half of the same bound and is emitted next to the config it
+   * constrains, in `addCyberdeckMcp`.
    */
   private addOrchestratorIsolation(args: string[], session: SessionRecord): void {
     if (session.kind !== "orchestrator") return;
@@ -154,6 +156,19 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     args.push("--setting-sources", "project,local");
   }
 
+  /**
+   * `--mcp-config` *adds* to whatever MCP servers the operator has configured in `~/.claude.json`
+   * rather than replacing them, so an orchestrator was being handed Cyberdeck's twelve tools plus
+   * the operator's entire ambient set (Linear alone contributes roughly fifty tool definitions).
+   * `--strict-mcp-config` is what makes the injected config exclusive, so an orchestrator's tool
+   * surface is exactly Cyberdeck's own.
+   *
+   * It is orchestrator-only and deliberately paired with the `--mcp-config` it constrains. Workers
+   * keep the operator's servers: a worker sent at a Linear or Obsidian task legitimately needs them,
+   * and workers are short-lived enough that the definitions are not what exhausts their context.
+   * Emitting the flag without a config would leave the process with no MCP servers at all, which is
+   * a different outcome than the isolation intended here.
+   */
   private addCyberdeckMcp(args: string[], session: SessionRecord): void {
     if (session.kind === undefined || this.options.mcp === undefined) return;
     args.push("--mcp-config", JSON.stringify({
@@ -165,6 +180,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
         },
       },
     }));
+    if (session.kind === "orchestrator") args.push("--strict-mcp-config");
   }
 
   private useMcpConfigFile(args: string[], session: SessionRecord): void {
