@@ -184,8 +184,8 @@ describe("ClaudeProviderAdapter", () => {
     const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
       .buildLaunchSpec(orchestrator);
 
-    expect(spec.args).toContain("--append-system-prompt");
-    expect(spec.args).toContain("Cyberdeck orchestrator guidance");
+    expect(spec.args).toContain("--append-system-prompt-file");
+    expect(spec.args).not.toContain("Cyberdeck orchestrator guidance");
     expect(spec.args).toContain("--mcp-config");
     expect(spec.args.join(" ")).toContain(orchestrator.id);
     expect(spec.args).not.toContain("--");
@@ -283,8 +283,8 @@ describe("ClaudeProviderAdapter", () => {
       "plan",
       "--model",
       "haiku",
-      "--append-system-prompt",
-      "Cyberdeck orchestrator guidance",
+      "--append-system-prompt-file",
+      expect.stringContaining(record.id),
       "--disable-slash-commands",
       "--setting-sources",
       "project,local",

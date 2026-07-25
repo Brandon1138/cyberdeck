@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -137,6 +137,46 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
   it("builds a launch spec for an explicitly selected Fable model", () => {
     const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ model: "claude-fable-5" }));
     expect(spec.args).toContain("claude-fable-5");
+  });
+
+  it("rejects ultra effort with the shared provider error code", () => {
+    expect(() => new ClaudeProviderAdapter().buildLaunchSpec(session({ effort: "ultra" })))
+      .toThrow(expect.objectContaining({ code: "PROVIDER_EFFORT_UNSUPPORTED" }));
+    expect(() => new ClaudeProviderAdapter().buildResumeSpec(session({ effort: "ultra" })))
+      .toThrow(expect.objectContaining({ code: "PROVIDER_EFFORT_UNSUPPORTED" }));
+  });
+
+  it("writes private per-session payload files before a Claude launch", async () => {
+    const directory = tempDir();
+    const record = session({ kind: "orchestrator", providerInstructions: "Cyberdeck guidance" });
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    });
+    const spec = adapter.buildLaunchSpec(record);
+
+    expect(spec.args).toContain("--append-system-prompt-file");
+    expect(spec.args).toContain("--mcp-config");
+    expect(spec.args).not.toContain("Cyberdeck guidance");
+    await adapter.prepareLaunch(record, spec);
+
+    const instructionsPath = spec.args[spec.args.indexOf("--append-system-prompt-file") + 1]!;
+    const mcpPath = spec.args[spec.args.indexOf("--mcp-config") + 1]!;
+    expect(readFileSync(instructionsPath, "utf8")).toBe("Cyberdeck guidance");
+    expect(JSON.parse(readFileSync(mcpPath, "utf8"))).toEqual({
+      mcpServers: {
+        cyberdeck: {
+          type: "stdio",
+          command: "/node",
+          args: ["/cyberdeck.js", "mcp", "--actor-session", record.id],
+        },
+      },
+    });
+    expect(statSync(instructionsPath).mode & 0o777).toBe(0o600);
+    expect(statSync(mcpPath).mode & 0o777).toBe(0o600);
+
+    await adapter.cleanupLaunch(record);
+    expect(() => readFileSync(mcpPath)).toThrow();
   });
 
   it("preserves the Phase 1 interactive argv for an explicit ordinary model", () => {

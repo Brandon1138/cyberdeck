@@ -36,6 +36,9 @@ import {
 import { CYBERDECK_VERSION } from "./version.js";
 import { runMcpServer } from "./mcp/server.js";
 import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
+import { ClaudeProviderAdapter } from "./providers/claude.js";
+import { CodexProviderAdapter } from "./providers/codex.js";
+import type { ProviderAdapter } from "./providers/provider.js";
 
 interface StartOptions {
   provider: ProviderId;
@@ -404,6 +407,25 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     .action(async (sessionId: string) => {
       const snapshot = await withClient((client) => client.request<{ data: string }>("session.snapshot", { sessionId }));
       process.stdout.write(Buffer.from(snapshot.data, "base64"));
+    });
+
+  program.command("launch-spec")
+    .description("print the current resolved provider launch spec for one session")
+    .argument("<id>", "session UUID")
+    .action(async (sessionId: string) => {
+      const sessions = await withClient((client) => client.request<SessionRecord[]>("session.list", {}));
+      const session = sessions.find((candidate) => candidate.id === sessionId);
+      if (session === undefined) throw new Error(`Session not found: ${sessionId}`);
+      const mcp = { nodePath: process.execPath, cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)) };
+      const adapter: ProviderAdapter | undefined = session.provider === "claude"
+        ? new ClaudeProviderAdapter({ mcp })
+        : session.provider === "codex"
+          ? new CodexProviderAdapter({ mcp })
+          : undefined;
+      if (adapter === undefined) throw new Error(`Launch spec is not available for provider: ${session.provider}`);
+      const spec = adapter.buildLaunchSpec(session);
+      if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(session, spec);
+      process.stdout.write(`${JSON.stringify(spec, null, 2)}\n`);
     });
 
   program.command("attach")

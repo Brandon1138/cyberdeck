@@ -13,6 +13,8 @@ export interface ProviderAdapter {
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec;
   /** Complete a provider-specific, non-model preflight after command validation and before spawn. */
   prepareLaunch?(session: SessionRecord, spec: ProviderLaunchSpec): Promise<void>;
+  /** Remove provider-owned launch artifacts after a session can no longer resume. */
+  cleanupLaunch?(session: SessionRecord): Promise<void>;
   /** Re-open the exact provider-native conversation represented by a terminal Cyberdeck thread. */
   buildResumeSpec(session: SessionRecord): ProviderLaunchSpec;
   /** Encode one logical prompt submission for the provider's negotiated interactive terminal. */
