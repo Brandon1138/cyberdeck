@@ -1,11 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
+import { appendFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { StartSessionRequest } from "../../src/domain/session.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import type { PtyHandle } from "../../src/broker/session-registry.js";
-import type { AppendThreadEvent } from "../../src/persistence/thread-transcript-store.js";
+import {
+  ThreadTranscriptStore,
+  type AppendThreadEvent,
+} from "../../src/persistence/thread-transcript-store.js";
 
 class FakePty implements PtyHandle {
   readonly pid: number;
@@ -223,6 +229,95 @@ describe("SessionRegistry", () => {
     expect((await waiting).results[0]!.text.length).toBeLessThanOrEqual(300);
   });
 
+  it("uses Claude native final responses for two gap-free semantic completion targets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-native-turns-"));
+    const claudeProjects = join(root, "claude-projects");
+    const project = join(claudeProjects, "-tmp-repo");
+    const fixture = await readFile(
+      join(process.cwd(), "tests", "fixtures", "claude-native-semantic-turns.jsonl"),
+      "utf8",
+    );
+    const lines = fixture.trimEnd().split("\n");
+    const firstTurn = `${lines.slice(0, 5).join("\n")}\n`;
+    const secondTurn = `${lines.slice(5).join("\n")}\n`;
+    const transcripts = new ThreadTranscriptStore(join(root, "state"), {
+      claudeProjectsDirectory: claudeProjects,
+    });
+    const ptys: FakePty[] = [];
+    const registry = new SessionRegistry({
+      adapters,
+      ptyFactory: () => {
+        const pty = new FakePty(2000 + ptys.length);
+        ptys.push(pty);
+        return pty;
+      },
+      journal: { append: async () => {} },
+      transcripts,
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+    const record = await registry.start(
+      request({ provider: "claude", model: "opus" }),
+      "Inspect semantic turns",
+    );
+    await mkdir(project, { recursive: true });
+    const nativePath = join(project, `${record.id}.jsonl`);
+    await writeFile(nativePath, firstTurn);
+
+    const firstWait = registry.waitForWorkerResults(
+      [{ sessionId: record.id, completionTarget: 1 }],
+      5_000,
+      4_000,
+    );
+    ptys[0]!.emitOutput("\u001b]0;⠹ worker\u0007Working\nesc to interrupt");
+    ptys[0]!.emitOutput("\n\u001b[2J⠹ spinner text\n❯ prompt text\nRunning stop hook output\n\u001b]0;worker\u0007");
+    const first = await firstWait;
+    expect(first.results[0]).toMatchObject({
+      status: "completed",
+      completedTurns: 1,
+    });
+    const firstText = first.results[0]!.text;
+    expect(firstText).toContain("BEGIN-DISTINCTIVE-FIRST-RESPONSE");
+    expect(firstText).toContain("[elided; original length: 5632 characters]");
+    expect(firstText).not.toContain("END-DISTINCTIVE-FIRST-RESPONSE");
+    expect(firstText).not.toMatch(/\u001b|⠹|Running stop hook|❯/u);
+
+    await appendFile(nativePath, secondTurn);
+    await registry.submitInstruction(record.id, "Second semantic turn");
+    const secondWait = registry.waitForWorkerResults(
+      [{ sessionId: record.id, completionTarget: 2 }],
+      5_000,
+      4_000,
+    );
+    ptys[0]!.emitOutput("\u001b]0;⠹ worker\u0007Working\nesc to interrupt");
+    ptys[0]!.emitOutput("\n\u001b]0;worker\u0007");
+    await expect(secondWait).resolves.toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "completed",
+        completedTurns: 2,
+        text: "BEGIN-DISTINCTIVE-SECOND-RESPONSE. Completion target two reached exactly once.",
+      }],
+    });
+
+    const semanticTurns: string[] = [];
+    let cursor = 0;
+    while (true) {
+      const page = await transcripts.read(record.id, cursor, 1);
+      if (page.events.length === 0) break;
+      expect(page.nextCursor).toBeGreaterThan(cursor);
+      cursor = page.nextCursor;
+      const event = page.events[0]!;
+      if (event.kind === "turn") semanticTurns.push(event.text!);
+    }
+    expect(semanticTurns).toHaveLength(2);
+    expect(semanticTurns.filter((text) =>
+      text.includes("BEGIN-DISTINCTIVE-FIRST-RESPONSE"))).toHaveLength(1);
+    expect(semanticTurns.filter((text) =>
+      text.includes("BEGIN-DISTINCTIVE-SECOND-RESPONSE"))).toHaveLength(1);
+    expect(semanticTurns.join("\n")).not.toMatch(/\u001b|⠹|Running stop hook|❯/u);
+  });
+
   it("returns a blocking provider prompt without waiting for the timeout", async () => {
     const { registry, ptys } = harness();
     const record = await registry.start(request());
@@ -311,7 +406,7 @@ describe("SessionRegistry", () => {
   });
 
   it("allows one controller and multiple watchers and broadcasts output", async () => {
-    const { registry, ptys } = harness();
+    const { registry, ptys, transcripts } = harness();
     const record = await registry.start(request());
     const controller = vi.fn();
     const watcherOne = vi.fn();
@@ -328,6 +423,7 @@ describe("SessionRegistry", () => {
     expect(watcherOne).toHaveBeenCalledOnce();
     expect(watcherTwo).toHaveBeenCalledOnce();
     expect(registry.get(record.id).attachmentState).toBe("controlled");
+    expect(transcripts.filter((event) => event.kind === "output")).toEqual([]);
   });
 
   it("detaches a controller without killing the PTY", async () => {

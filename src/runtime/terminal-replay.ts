@@ -127,23 +127,28 @@ export function latestAssistantParagraphPreview(replay: string): string {
   return paragraphs.at(-1)?.[0] ?? "No response yet";
 }
 
-/** Return only the useful tail of a terminal replay, never the full PTY transcript. */
+/**
+ * Explicit fallback for providers without native structured transcripts.
+ * Return normalized terminal content with deterministic, head-preserving truncation.
+ */
 export function compactTerminalResult(replay: string, maxChars = 1_200): string {
   const bounded = Math.max(200, Math.min(maxChars, 4_000));
-  const meaningful = terminalLines(replay).filter((line) => !isTerminalChrome(line));
-  const selected: string[] = [];
-  let length = 0;
-  for (let index = meaningful.length - 1; index >= 0; index -= 1) {
-    const line = meaningful[index];
-    if (line === undefined) continue;
-    const added = line.length + (selected.length === 0 ? 0 : 1);
-    if (length + added > bounded && selected.length > 0) break;
-    selected.unshift(line);
-    length += added;
-  }
-  const result = selected.join("\n");
-  if (result.length <= bounded) return result || "No useful provider output yet";
-  return result.slice(result.length - bounded);
+  return truncateResult(terminalFallbackResult(replay), bounded);
+}
+
+export function terminalFallbackResult(replay: string): string {
+  const lastClear = replay.lastIndexOf("\u001b[2J");
+  const frame = lastClear < 0 ? replay : replay.slice(lastClear);
+  const meaningful = terminalLines(frame).filter((line) => !isTerminalChrome(line));
+  const promptIndex = meaningful.findLastIndex(isUserPromptLine);
+  return meaningful.slice(promptIndex + 1).join("\n") || "No useful provider output yet";
+}
+
+export function truncateResult(result: string, maxChars = 1_200): string {
+  const bounded = Math.max(200, Math.min(maxChars, 4_000));
+  if (result.length <= bounded) return result;
+  const marker = `\n\n[elided; original length: ${result.length} characters]`;
+  return `${result.slice(0, bounded - marker.length)}${marker}`;
 }
 
 function lastTerminalTitle(replay: string): string | undefined {

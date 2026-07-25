@@ -33,10 +33,11 @@ describe("Cyberdeck MCP server", () => {
     expect(workerStart?.inputSchema.properties).toHaveProperty("effort");
     expect(workerStart?.inputSchema.properties?.approvalMode?.enum).toEqual(["prompt", "auto"]);
     const threadRead = tools.find(({ name }) => name === "cyberdeck_thread_read") as {
-      inputSchema: { required?: string[]; properties?: { limit?: { maximum?: number } } };
+      inputSchema: { required?: string[]; properties?: { limit?: { maximum?: number; default?: number } } };
     } | undefined;
     expect(threadRead?.inputSchema.required).toContain("afterCursor");
     expect(threadRead?.inputSchema.properties?.limit?.maximum).toBe(100);
+    expect(threadRead?.inputSchema.properties?.limit?.default).toBe(1);
     const workersStart = tools.find(({ name }) => name === "cyberdeck_workers_start");
     const workersWait = tools.find(({ name }) => name === "cyberdeck_workers_wait");
     expect(workersStart?.inputSchema.properties?.workers?.maxItems).toBe(64);
@@ -53,6 +54,26 @@ describe("Cyberdeck MCP server", () => {
     });
     expect(request).toHaveBeenCalledWith("agent.thread.list", { actorSessionId: ACTOR });
     expect(response).toMatchObject({ id: "call-1", result: { content: [{ type: "text" }] } });
+  });
+
+  it("reads one semantic thread event per page by default", async () => {
+    const request = vi.fn(async () => ({ events: [], nextCursor: 0 }));
+    const sessionId = "22222222-2222-4222-8222-222222222222";
+    await handleMcpRequest({ request: request as never }, ACTOR, {
+      jsonrpc: "2.0",
+      id: "thread-read",
+      method: "tools/call",
+      params: {
+        name: "cyberdeck_thread_read",
+        arguments: { sessionId, afterCursor: 0 },
+      },
+    });
+    expect(request).toHaveBeenCalledWith("agent.thread.read", {
+      actorSessionId: ACTOR,
+      sessionId,
+      afterCursor: 0,
+      limit: 1,
+    });
   });
 
   it("returns authoritative provider capabilities without a broker round trip", async () => {

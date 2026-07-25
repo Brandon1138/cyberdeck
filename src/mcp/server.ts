@@ -35,13 +35,13 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_thread_read",
-    description: "Incrementally read one worker transcript for debugging. afterCursor is mandatory; never reread from an older cursor. Prefer cyberdeck_workers_wait for normal result collection.",
+    description: "Incrementally read semantic worker turns, not PTY write chunks. afterCursor is mandatory; continue from returned nextCursor. Prefer cyberdeck_workers_wait for normal result collection.",
     inputSchema: {
       type: "object",
       properties: {
         sessionId: { type: "string" },
         afterCursor: { type: "integer", minimum: 0 },
-        limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+        limit: { type: "integer", minimum: 1, maximum: 100, default: 1 },
       },
       required: ["sessionId", "afterCursor"],
       additionalProperties: false,
@@ -99,7 +99,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_workers_wait",
-    description: "Idle inside Cyberdeck until all named workers complete, need input, fail, or the timeout expires; returns only compact useful result tails and never raw PTY transcripts.",
+    description: "Idle inside Cyberdeck until all named workers complete, need input, fail, or the timeout expires; returns deterministic head-preserving semantic results and never raw PTY transcripts.",
     inputSchema: {
       type: "object",
       properties: {
@@ -278,7 +278,11 @@ async function callTool(
     return transport.request("agent.thread.list", { actorSessionId });
   }
   if (name === "cyberdeck_thread_read") {
-    return transport.request("agent.thread.read", { actorSessionId, ...args });
+    return transport.request("agent.thread.read", {
+      actorSessionId,
+      ...args,
+      limit: args.limit ?? 1,
+    });
   }
   if (name === "cyberdeck_worker_start") {
     return transport.request("agent.worker.start", { actorSessionId, ...args });

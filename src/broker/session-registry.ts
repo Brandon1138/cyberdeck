@@ -10,12 +10,18 @@ import {
   type ThreadAttentionState,
 } from "../domain/session.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../providers/provider.js";
-import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
+import type {
+  AppendThreadEvent,
+  CaptureProviderTurns,
+  ThreadTranscriptStore,
+} from "../persistence/thread-transcript-store.js";
 import { applyWorkerMode } from "../providers/worker-mode.js";
 import {
   compactTerminalResult,
   latestAssistantParagraphPreview,
   providerTerminalActivity,
+  terminalFallbackResult,
+  truncateResult,
   type ProviderTerminalActivity,
 } from "../runtime/terminal-replay.js";
 
@@ -41,6 +47,11 @@ interface JournalLike {
 interface SessionStoreLike {
   put(record: SessionRecord): Promise<void>;
   delete(sessionId: string): Promise<void>;
+}
+
+interface TranscriptLike {
+  append(event: AppendThreadEvent): Promise<unknown>;
+  captureProviderTurns?(input: CaptureProviderTurns): Promise<Array<{ text?: string | undefined }>>;
 }
 
 interface Controller {
@@ -111,7 +122,7 @@ export interface SessionRegistryOptions {
   adapters: Record<string, ProviderAdapter>;
   ptyFactory: PtyFactory;
   journal: JournalLike;
-  transcripts?: ThreadTranscriptStore;
+  transcripts?: ThreadTranscriptStore | TranscriptLike;
   store?: SessionStoreLike;
   recoveredSessions?: readonly SessionRecord[];
   validateCwd?: ((cwd: string) => Promise<void>) | undefined;
@@ -763,10 +774,7 @@ export class SessionRegistry {
         runtime.completedTurns += 1;
         runtime.observedWorking = false;
         const completedReplay = runtime.pty?.snapshot().toString("utf8") ?? replay;
-        runtime.latestResult = compactTerminalResult(completedReplay);
-        runtime.record.latestPreview = latestAssistantParagraphPreview(completedReplay);
-        void this.setAttention(runtime, "done", true);
-        this.notifySessionUpdate(runtime.record.id);
+        void this.completeSemanticTurn(runtime, completedReplay);
       }, 200);
     } else if (activity === "needs-input") {
       runtime.latestResult = compactTerminalResult(replay);
@@ -775,9 +783,6 @@ export class SessionRegistry {
         void this.setAttention(runtime, "needs-input", true);
       }
     }
-    void this.appendTranscript(runtime.record.id, "output", "provider", chunk.toString("utf8"), {
-      byteLength: chunk.byteLength,
-    }).catch(() => undefined);
     runtime.controller?.output(chunk);
     for (const watcher of runtime.watchers.values()) {
       watcher.output(chunk);
@@ -823,11 +828,10 @@ export class SessionRegistry {
   private workerResultSnapshot(target: WorkerWaitTarget, maxResultChars: number): WorkerResultSnapshot {
     const runtime = this.requireRuntime(target.sessionId);
     const replay = runtime.pty?.snapshot().toString("utf8") ?? runtime.record.latestPreview ?? "";
-    const text = runtime.latestResult === undefined
+    const result = runtime.latestResult === undefined
       ? compactTerminalResult(replay, maxResultChars)
-      : runtime.latestResult.length <= maxResultChars
-        ? runtime.latestResult
-        : runtime.latestResult.slice(runtime.latestResult.length - maxResultChars);
+      : runtime.latestResult;
+    const text = truncateResult(result, maxResultChars);
     const base = {
       sessionId: runtime.record.id,
       ...(runtime.record.name === undefined ? {} : { name: runtime.record.name }),
@@ -848,6 +852,41 @@ export class SessionRegistry {
 
   private notifySessionUpdate(sessionId: string): void {
     for (const listener of this.sessionUpdateListeners) listener(sessionId);
+  }
+
+  private async completeSemanticTurn(runtime: RuntimeSession, replay: string): Promise<void> {
+    const fallback = terminalFallbackResult(replay);
+    let nativeTurns: Array<{ text?: string | undefined }> = [];
+    try {
+      const capture = this.options.transcripts?.captureProviderTurns;
+      const attempts = runtime.record.provider === "claude" || runtime.record.provider === "codex"
+        ? 4
+        : 1;
+      for (let attempt = 0; capture !== undefined && attempt < attempts; attempt += 1) {
+        nativeTurns = await capture.call(this.options.transcripts, {
+          sessionId: runtime.record.id,
+          provider: runtime.record.provider,
+          cwd: runtime.record.cwd,
+          createdAt: runtime.record.createdAt,
+          turnNumber: runtime.completedTurns,
+          fallbackText: fallback,
+        });
+        if (nativeTurns.length > 0) break;
+        if (attempt + 1 < attempts) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+    } catch {
+      // Native transcript can lag its TUI frame. Keep worker completion usable without persisting PTY bytes.
+    }
+    if (nativeTurns.length > 1) runtime.completedTurns += nativeTurns.length - 1;
+    const latest = nativeTurns.at(-1)?.text ?? fallback;
+    runtime.latestResult = latest;
+    runtime.record.latestPreview = nativeTurns.length > 0
+      ? firstSemanticLine(latest)
+      : latestAssistantParagraphPreview(replay);
+    await this.setAttention(runtime, "done", true);
+    this.notifySessionUpdate(runtime.record.id);
   }
 
   private requirePty(runtime: RuntimeSession): PtyHandle {
@@ -933,4 +972,9 @@ async function validateSessionCwd(cwd: string): Promise<void> {
       `Session cwd is not an accessible directory: ${cwd}`,
     );
   }
+}
+
+function firstSemanticLine(text: string): string {
+  return text.split(/\r?\n/u).map((line) => line.trim()).find((line) => line !== "")
+    ?? "No response yet";
 }

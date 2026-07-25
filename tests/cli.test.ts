@@ -67,6 +67,31 @@ describe("Cyberdeck CLI", () => {
     expect(restartBroker).toHaveBeenCalledOnce();
   });
 
+  it("requires explicit confirmation before pruning the legacy transcript", async () => {
+    const pruneLegacyTranscript = vi.fn(async () => ({
+      path: "/tmp/state/threads/transcript.jsonl",
+      removed: true,
+    }));
+    const program = createProgram({ pruneLegacyTranscript });
+    const transcript = program.commands.find((candidate) => candidate.name() === "transcript")!;
+    const prune = transcript.commands.find((candidate) => candidate.name() === "prune-legacy")!
+      .exitOverride()
+      .configureOutput({ writeOut: () => {}, writeErr: () => {} });
+
+    await expect(prune.parseAsync([], { from: "user" })).rejects.toMatchObject({
+      code: "commander.missingMandatoryOptionValue",
+    });
+    expect(pruneLegacyTranscript).not.toHaveBeenCalled();
+
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      await prune.parseAsync(["--confirm-delete-legacy-transcript"], { from: "user" });
+    } finally {
+      write.mockRestore();
+    }
+    expect(pruneLegacyTranscript).toHaveBeenCalledOnce();
+  });
+
   it("requires explicit provider and cwd for start", async () => {
     await expect(
       quietCommand("start").parseAsync(["--cwd", "/tmp/repo"], { from: "user" }),
