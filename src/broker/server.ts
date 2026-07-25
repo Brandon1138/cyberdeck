@@ -314,6 +314,17 @@ export class BrokerServer {
         const request = z.object({ runId: z.uuid(), reason: z.string().optional() }).parse(frame.params);
         return this.requireWorkflows().cancel(undefined, request.runId, request.reason);
       }
+      // Read-only inspection of what the broker actually spawned. The broker is the source of
+      // record: no client rebuilds a spec, so nothing here runs a provider preflight or writes.
+      case "session.launchRecord": {
+        const { sessionId } = SessionIdParamsSchema.parse(frame.params);
+        const session = this.options.registry.get(sessionId);
+        return {
+          sessionId,
+          provider: session.provider,
+          launchRecord: this.options.registry.launchRecord(sessionId) ?? null,
+        };
+      }
       case "session.snapshot": {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         return { data: this.options.registry.snapshot(sessionId).toString("base64") };

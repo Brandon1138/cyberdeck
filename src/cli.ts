@@ -6,7 +6,12 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 import { runBroker } from "./broker/main.js";
-import type { ApprovalMode, ReasoningEffort, SessionRecord } from "./domain/session.js";
+import type {
+  ApprovalMode,
+  ReasoningEffort,
+  ResolvedLaunchRecord,
+  SessionRecord,
+} from "./domain/session.js";
 import { CANONICAL_PROVIDER_IDS, type ProviderId } from "./domain/provider-registration.js";
 import type {
   OrchestratorManagerResult,
@@ -36,9 +41,12 @@ import {
 import { CYBERDECK_VERSION } from "./version.js";
 import { runMcpServer } from "./mcp/server.js";
 import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
-import { ClaudeProviderAdapter } from "./providers/claude.js";
-import { CodexProviderAdapter } from "./providers/codex.js";
-import type { ProviderAdapter } from "./providers/provider.js";
+
+interface SessionLaunchRecordResult {
+  sessionId: string;
+  provider: ProviderId;
+  launchRecord: ResolvedLaunchRecord | null;
+}
 
 interface StartOptions {
   provider: ProviderId;
@@ -409,23 +417,19 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
       process.stdout.write(Buffer.from(snapshot.data, "base64"));
     });
 
+  // Read-only. The broker records what it actually spawned; reconstructing a spec here would both
+  // run provider preflight (writing files as a side effect of an inspection) and report a spec the
+  // running process was never launched with. Environment values never leave the broker.
   program.command("launch-spec")
-    .description("print the current resolved provider launch spec for one session")
+    .description("print the sanitized launch record the broker resolved for one session")
     .argument("<id>", "session UUID")
     .action(async (sessionId: string) => {
-      const sessions = await withClient((client) => client.request<SessionRecord[]>("session.list", {}));
-      const session = sessions.find((candidate) => candidate.id === sessionId);
-      if (session === undefined) throw new Error(`Session not found: ${sessionId}`);
-      const mcp = { nodePath: process.execPath, cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)) };
-      const adapter: ProviderAdapter | undefined = session.provider === "claude"
-        ? new ClaudeProviderAdapter({ mcp })
-        : session.provider === "codex"
-          ? new CodexProviderAdapter({ mcp })
-          : undefined;
-      if (adapter === undefined) throw new Error(`Launch spec is not available for provider: ${session.provider}`);
-      const spec = adapter.buildLaunchSpec(session);
-      if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(session, spec);
-      process.stdout.write(`${JSON.stringify(spec, null, 2)}\n`);
+      const result = await withClient((client) =>
+        client.request<SessionLaunchRecordResult>("session.launchRecord", { sessionId }));
+      if (result.launchRecord === null) {
+        throw new Error(`No resolved launch record has been captured for session ${sessionId}`);
+      }
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     });
 
   program.command("attach")
