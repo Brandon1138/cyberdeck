@@ -6,7 +6,12 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 import { runBroker } from "./broker/main.js";
-import type { ApprovalMode, ReasoningEffort, SessionRecord } from "./domain/session.js";
+import type {
+  ApprovalMode,
+  ReasoningEffort,
+  ResolvedLaunchRecord,
+  SessionRecord,
+} from "./domain/session.js";
 import { CANONICAL_PROVIDER_IDS, type ProviderId } from "./domain/provider-registration.js";
 import type {
   OrchestratorManagerResult,
@@ -37,6 +42,12 @@ import { CYBERDECK_VERSION } from "./version.js";
 import { runMcpServer } from "./mcp/server.js";
 import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
 import { pruneLegacyTranscript as pruneLegacyTranscriptFile } from "./persistence/thread-transcript-store.js";
+
+interface SessionLaunchRecordResult {
+  sessionId: string;
+  provider: ProviderId;
+  launchRecord: ResolvedLaunchRecord | null;
+}
 
 interface StartOptions {
   provider: ProviderId;
@@ -422,6 +433,21 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     .action(async (sessionId: string) => {
       const snapshot = await withClient((client) => client.request<{ data: string }>("session.snapshot", { sessionId }));
       process.stdout.write(Buffer.from(snapshot.data, "base64"));
+    });
+
+  // Read-only. The broker records what it actually spawned; reconstructing a spec here would both
+  // run provider preflight (writing files as a side effect of an inspection) and report a spec the
+  // running process was never launched with. Environment values never leave the broker.
+  program.command("launch-spec")
+    .description("print the sanitized launch record the broker resolved for one session")
+    .argument("<id>", "session UUID")
+    .action(async (sessionId: string) => {
+      const result = await withClient((client) =>
+        client.request<SessionLaunchRecordResult>("session.launchRecord", { sessionId }));
+      if (result.launchRecord === null) {
+        throw new Error(`No resolved launch record has been captured for session ${sessionId}`);
+      }
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     });
 
   program.command("attach")

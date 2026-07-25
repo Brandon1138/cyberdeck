@@ -4,6 +4,17 @@ import { ClaudeLaunchSafetyError } from "./claude/headless-command.js";
 import { claudePermissionMode } from "./claude/permissions.js";
 import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
 import { sessionLaunchEnvironment } from "./launch-environment.js";
+import {
+  removeSessionLaunchFiles,
+  sessionLaunchFilePath,
+  writeSessionLaunchFile,
+  type SessionLaunchFilesOptions,
+} from "./session-launch-files.js";
+import { UnsupportedProviderEffortError } from "./session-adapter-errors.js";
+
+export interface ClaudeProviderAdapterOptions extends SessionLaunchFilesOptions {
+  mcp?: CyberdeckMcpLaunch;
+}
 
 /**
  * Claude's durable interactive (PTY) launch. The bounded/headless path lives in
@@ -13,7 +24,7 @@ import { sessionLaunchEnvironment } from "./launch-environment.js";
 export class ClaudeProviderAdapter implements ProviderAdapter {
   readonly id = "claude" as const;
 
-  constructor(private readonly options: { mcp?: CyberdeckMcpLaunch } = {}) {}
+  constructor(private readonly options: ClaudeProviderAdapterOptions = {}) {}
 
   submitInput(message: string): Buffer {
     // Claude enables Kitty keyboard disambiguation in its PTY (`CSI > 1 u`). A legacy carriage
@@ -43,12 +54,13 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       args.push("--model", session.model);
     }
     if (session.effort !== undefined) {
-      if (session.effort === "ultra") throw new Error("Claude does not support ultra effort");
+      if (session.effort === "ultra") throw new UnsupportedProviderEffortError(this.id);
       args.push("--effort", session.effort);
     }
     this.addProviderInstructions(args, session);
     this.addOrchestratorIsolation(args, session);
     this.addCyberdeckMcp(args, session);
+    this.useMcpConfigFile(args, session);
     if (initialPrompt !== undefined) {
       args.push("--", initialPrompt);
     }
@@ -75,12 +87,13 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     ];
     if (session.model !== undefined) args.push("--model", session.model);
     if (session.effort !== undefined) {
-      if (session.effort === "ultra") throw new Error("Claude does not support ultra effort");
+      if (session.effort === "ultra") throw new UnsupportedProviderEffortError(this.id);
       args.push("--effort", session.effort);
     }
     this.addProviderInstructions(args, session);
     this.addOrchestratorIsolation(args, session);
     this.addCyberdeckMcp(args, session);
+    this.useMcpConfigFile(args, session);
     return {
       executable: "claude",
       args,
@@ -91,7 +104,40 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
 
   private addProviderInstructions(args: string[], session: SessionRecord): void {
     if (session.providerInstructions === undefined) return;
-    args.push("--append-system-prompt", session.providerInstructions);
+    args.push("--append-system-prompt-file", this.instructionsPath(session));
+  }
+
+  async prepareLaunch(session: SessionRecord, _spec: ProviderLaunchSpec): Promise<void> {
+    const writes: Promise<unknown>[] = [];
+    if (session.providerInstructions !== undefined) {
+      writes.push(writeSessionLaunchFile(
+        session.id,
+        "provider-instructions.txt",
+        session.providerInstructions,
+        this.options,
+      ));
+    }
+    if (session.kind !== undefined && this.options.mcp !== undefined) {
+      writes.push(writeSessionLaunchFile(
+        session.id,
+        "mcp-config.json",
+        JSON.stringify({
+          mcpServers: {
+            cyberdeck: {
+              type: "stdio",
+              command: this.options.mcp.nodePath,
+              args: [this.options.mcp.cliPath, "mcp", "--actor-session", session.id],
+            },
+          },
+        }),
+        this.options,
+      ));
+    }
+    await Promise.all(writes);
+  }
+
+  async cleanupLaunch(session: SessionRecord): Promise<void> {
+    await removeSessionLaunchFiles(session.id, this.options);
   }
 
   /**
@@ -119,5 +165,19 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
         },
       },
     }));
+  }
+
+  private useMcpConfigFile(args: string[], session: SessionRecord): void {
+    if (session.kind === undefined || this.options.mcp === undefined) return;
+    const configIndex = args.lastIndexOf("--mcp-config") + 1;
+    args[configIndex] = this.mcpConfigPath(session);
+  }
+
+  private instructionsPath(session: SessionRecord): string {
+    return sessionLaunchFilePath(session.id, "provider-instructions.txt", this.options);
+  }
+
+  private mcpConfigPath(session: SessionRecord): string {
+    return sessionLaunchFilePath(session.id, "mcp-config.json", this.options);
   }
 }

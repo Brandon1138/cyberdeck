@@ -44,6 +44,36 @@ export const StartSessionRequestSchema = z.object({
   workerMode: WorkerModeSchema.optional(),
 });
 
+/**
+ * The only environment keys a resolved launch record may quote. A `ProviderLaunchSpec.env` is built
+ * from `process.env`, so it carries whatever API keys and tokens the operator's shell holds; those
+ * values must never be printed or persisted. Every key here is written by Cyberdeck itself with a
+ * constant, non-secret value, and everything else is reduced to a count.
+ */
+export const RESOLVED_LAUNCH_ENV_KEYS = [
+  "CYBERDECK_PROCESS_ROLE",
+  "CYBERDECK_WORKER_MODE",
+  "DISABLE_UPDATES",
+] as const;
+
+/**
+ * What the broker actually spawned, sanitized and bounded so it is safe to persist in the session
+ * catalog and to hand to an operator inspection command.
+ */
+export const ResolvedLaunchRecordSchema = z.object({
+  mode: z.enum(["launch", "resume"]),
+  resolvedAt: z.iso.datetime(),
+  executable: z.string().max(4_096),
+  args: z.array(z.string().max(4_096)).max(256),
+  cwd: z.string().max(4_096),
+  cyberdeckEnv: z.record(z.string().max(64), z.string().max(256))
+    .refine((value) => Object.keys(value).length <= RESOLVED_LAUNCH_ENV_KEYS.length,
+      "cyberdeckEnv may only describe Cyberdeck-owned overrides"),
+  /** How many inherited variables were passed through. Names and values are deliberately absent. */
+  inheritedEnvCount: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
+
 export const SessionRecordSchema = StartSessionRequestSchema.extend({
   id: z.uuid(),
   createdAt: z.iso.datetime(),
@@ -58,6 +88,7 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
   meaningfulUpdatedAt: z.iso.datetime().optional(),
   pinned: z.boolean().optional(),
   displayOrder: z.number().int().nonnegative().optional(),
+  launchRecord: ResolvedLaunchRecordSchema.optional(),
 });
 
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
@@ -69,5 +100,6 @@ export type AttachmentState = z.infer<typeof AttachmentStateSchema>;
 export type SessionKind = z.infer<typeof SessionKindSchema>;
 export type WorkerMode = z.infer<typeof WorkerModeSchema>;
 export type ThreadAttentionState = z.infer<typeof ThreadAttentionStateSchema>;
+export type ResolvedLaunchRecord = z.infer<typeof ResolvedLaunchRecordSchema>;
 export type StartSessionRequest = z.infer<typeof StartSessionRequestSchema>;
 export type SessionRecord = z.infer<typeof SessionRecordSchema>;

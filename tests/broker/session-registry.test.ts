@@ -1,11 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { appendFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
-import type { StartSessionRequest } from "../../src/domain/session.js";
+import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import type { PtyHandle } from "../../src/broker/session-registry.js";
 import {
@@ -627,5 +629,346 @@ describe("SessionRegistry", () => {
   it.each(["scout", "writer", "cheap-task"])("does not interpret role %s", async (role) => {
     const { registry } = harness();
     await expect(registry.start(request({ role }))).resolves.toMatchObject({ role });
+  });
+});
+
+const SENTINEL_SECRETS = {
+  ANTHROPIC_API_KEY: "sk-ant-SENTINEL-REGISTRY",
+  GITHUB_TOKEN: "ghp_SENTINELREGISTRY",
+};
+
+const temporaryDirectories: string[] = [];
+
+function launchFilesDirectory(): string {
+  const directory = mkdtempSync(join(tmpdir(), "cyberdeck-launch-"));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+afterAll(() => {
+  for (const directory of temporaryDirectories) rmSync(directory, { recursive: true, force: true });
+});
+
+async function until(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
+function claudeRequest(overrides: Partial<StartSessionRequest> = {}): StartSessionRequest {
+  return {
+    provider: "claude",
+    cwd: "/tmp/repo",
+    detached: true,
+    sandbox: "read-only",
+    model: "opus",
+    providerInstructions: "Cyberdeck guidance",
+    ...overrides,
+  };
+}
+
+interface SpawnObservation {
+  spec: ProviderLaunchSpec;
+  payloadFilesPresent: boolean[];
+}
+
+/** A registry wired to the real Claude adapter so launch artifacts are the actual private files. */
+function claudeHarness(options: { failSpawn?: boolean } = {}) {
+  const directory = launchFilesDirectory();
+  const adapter = new ClaudeProviderAdapter({
+    directory,
+    mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+  });
+  const ptys: FakePty[] = [];
+  const spawns: SpawnObservation[] = [];
+  const transcripts: AppendThreadEvent[] = [];
+  const ptyFactory = vi.fn((spec: ProviderLaunchSpec) => {
+    spawns.push({
+      spec,
+      payloadFilesPresent: payloadPaths(spec).map((path) => existsSync(path)),
+    });
+    if (options.failSpawn === true) throw new Error("pty construction failed");
+    const pty = new FakePty(3000 + ptys.length);
+    ptys.push(pty);
+    return pty;
+  });
+  const registry = new SessionRegistry({
+    adapters: { claude: adapter },
+    ptyFactory,
+    journal: { append: async () => {} },
+    transcripts: { append: async (event: AppendThreadEvent) => {
+      transcripts.push(event);
+      return {} as never;
+    } } as never,
+    validateCwd: async () => undefined,
+    config: BrokerRuntimeConfigSchema.parse({}),
+  });
+  return { registry, adapter, directory, ptys, spawns, ptyFactory, transcripts };
+}
+
+function payloadPaths(spec: ProviderLaunchSpec): string[] {
+  return ["--append-system-prompt-file", "--mcp-config"]
+    .map((flag) => spec.args[spec.args.indexOf(flag) + 1])
+    .filter((path): path is string => path !== undefined);
+}
+
+describe("SessionRegistry provider launch artifacts", () => {
+  it("recreates the payload files a resume spec references before the PTY is constructed", async () => {
+    const { registry, ptys, spawns, directory } = claudeHarness();
+    const record = await registry.start(claudeRequest());
+    expect(spawns[0]?.payloadFilesPresent).toEqual([true, true]);
+
+    ptys[0]!.emitExit(0);
+    await until(() => !existsSync(join(directory, record.id)), "launch artifacts to be removed on exit");
+
+    await registry.resume(record.id);
+
+    expect(spawns).toHaveLength(2);
+    expect(payloadPaths(spawns[1]!.spec)).toHaveLength(2);
+    expect(spawns[1]?.payloadFilesPresent).toEqual([true, true]);
+  });
+
+  it("removes launch artifacts when the durable thread is deleted, after an exit already removed them", async () => {
+    const { registry, ptys, directory } = claudeHarness();
+    const record = await registry.start(claudeRequest());
+    const sessionDirectory = join(directory, record.id);
+    expect(existsSync(sessionDirectory)).toBe(true);
+
+    ptys[0]!.emitExit(0);
+    await until(() => !existsSync(sessionDirectory), "launch artifacts to be removed on exit");
+
+    await expect(registry.delete(record.id)).resolves.toBeUndefined();
+    expect(existsSync(sessionDirectory)).toBe(false);
+  });
+
+  it("removes prepared artifacts when a launch fails before a live PTY takes ownership", async () => {
+    const { registry, directory, spawns } = claudeHarness({ failSpawn: true });
+
+    await expect(registry.start(claudeRequest())).rejects.toThrow("pty construction failed");
+
+    expect(spawns[0]?.payloadFilesPresent).toEqual([true, true]);
+    expect(existsSync(join(directory, spawns[0]!.spec.args[1]!))).toBe(false);
+    expect(registry.list()).toEqual([]);
+  });
+
+  it("leaves runtime state untouched when a resume preflight fails", async () => {
+    const { registry, adapter, ptys } = claudeHarness();
+    const record = await registry.start(claudeRequest());
+    ptys[0]!.emitExit(0);
+    await until(() => registry.get(record.id).executionState === "exited", "the session to exit");
+
+    const prepareLaunch = vi.spyOn(adapter, "prepareLaunch")
+      .mockRejectedValueOnce(new Error("preflight unavailable"));
+
+    await expect(registry.resume(record.id)).rejects.toThrow("preflight unavailable");
+    expect(registry.get(record.id)).toMatchObject({ executionState: "exited", exitCode: 0 });
+    prepareLaunch.mockRestore();
+
+    await expect(registry.resume(record.id)).resolves.toMatchObject({ executionState: "active" });
+  });
+
+  it("records a cleanup failure without masking the exit that triggered it", async () => {
+    const ptys: FakePty[] = [];
+    const transcripts: AppendThreadEvent[] = [];
+    const adapter: ProviderAdapter = {
+      id: "claude",
+      buildLaunchSpec: (session) => ({ executable: "fake", args: [], cwd: session.cwd, env: {} }),
+      buildResumeSpec: (session) => ({ executable: "fake", args: [], cwd: session.cwd, env: {} }),
+      prepareLaunch: async () => undefined,
+      cleanupLaunch: async () => { throw new Error("artifact directory is busy"); },
+    };
+    const registry = new SessionRegistry({
+      adapters: { claude: adapter },
+      ptyFactory: () => {
+        const pty = new FakePty(4000 + ptys.length);
+        ptys.push(pty);
+        return pty;
+      },
+      journal: { append: async () => {} },
+      transcripts: { append: async (event: AppendThreadEvent) => {
+        transcripts.push(event);
+        return {} as never;
+      } } as never,
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+
+    const record = await registry.start(claudeRequest());
+    ptys[0]!.emitExit(0);
+    await until(
+      () => transcripts.some((event) => event.text === "provider launch artifact cleanup failed"),
+      "the cleanup failure to be recorded",
+    );
+
+    expect(registry.get(record.id)).toMatchObject({ executionState: "exited", exitCode: 0 });
+    expect(transcripts.find((event) => event.text === "provider launch artifact cleanup failed"))
+      .toMatchObject({
+        sessionId: record.id,
+        kind: "lifecycle",
+        data: { reason: "session-exited", message: "artifact directory is busy" },
+      });
+  });
+});
+
+describe("SessionRegistry resolved launch records", () => {
+  function secretHarness() {
+    const puts: SessionRecord[] = [];
+    const specs: ProviderLaunchSpec[] = [];
+    const ptys: FakePty[] = [];
+    const adapter: ProviderAdapter = {
+      id: "claude",
+      buildLaunchSpec: (session) => ({
+        executable: "claude",
+        args: ["--session-id", session.id, "--model", session.model ?? "opus"],
+        cwd: session.cwd,
+        env: { ...SENTINEL_SECRETS, PATH: "/usr/bin", CYBERDECK_PROCESS_ROLE: "worker", DISABLE_UPDATES: "1" },
+      }),
+      buildResumeSpec: (session) => ({
+        executable: "claude",
+        args: ["--resume", session.id],
+        cwd: session.cwd,
+        env: { ...SENTINEL_SECRETS, CYBERDECK_PROCESS_ROLE: "worker" },
+      }),
+      prepareLaunch: vi.fn(async () => undefined),
+    };
+    const registry = new SessionRegistry({
+      adapters: { claude: adapter },
+      ptyFactory: (spec: ProviderLaunchSpec) => {
+        specs.push(spec);
+        const pty = new FakePty(5000 + ptys.length);
+        ptys.push(pty);
+        return pty;
+      },
+      journal: { append: async () => {} },
+      store: { put: async (value) => { puts.push(value); }, delete: async () => {} },
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+    return { registry, adapter, puts, specs, ptys };
+  }
+
+  it("captures the executable, argv, and cwd the PTY was actually spawned with", async () => {
+    const { registry, specs } = secretHarness();
+    const record = await registry.start(claudeRequest());
+
+    expect(registry.launchRecord(record.id)).toMatchObject({
+      mode: "launch",
+      executable: specs[0]!.executable,
+      args: specs[0]!.args,
+      cwd: specs[0]!.cwd,
+      truncated: false,
+    });
+  });
+
+  it("never exposes an inherited environment value through the record", async () => {
+    const { registry } = secretHarness();
+    const record = await registry.start(claudeRequest());
+    const serialized = JSON.stringify({
+      launchRecord: registry.launchRecord(record.id),
+      session: registry.get(record.id),
+      list: registry.list(),
+    });
+
+    for (const [key, value] of Object.entries(SENTINEL_SECRETS)) {
+      expect(serialized).not.toContain(value);
+      expect(serialized).not.toContain(key);
+    }
+    expect(registry.launchRecord(record.id)).toMatchObject({
+      cyberdeckEnv: { CYBERDECK_PROCESS_ROLE: "worker", DISABLE_UPDATES: "1" },
+      inheritedEnvCount: 3,
+    });
+  });
+
+  it("replaces the launch record with the resume it actually performed", async () => {
+    const { registry, ptys, specs } = secretHarness();
+    const record = await registry.start(claudeRequest());
+    ptys[0]!.emitExit(0);
+    await until(() => registry.get(record.id).executionState === "exited", "the session to exit");
+
+    await registry.resume(record.id);
+
+    expect(registry.launchRecord(record.id)).toMatchObject({
+      mode: "resume",
+      args: specs[1]!.args,
+      cwd: specs[1]!.cwd,
+    });
+  });
+
+  it("persists the record so inspection survives a broker restart", async () => {
+    const { registry, puts } = secretHarness();
+    const record = await registry.start(claudeRequest());
+    const persisted = puts.filter((value) => value.id === record.id).at(-1);
+
+    expect(persisted?.launchRecord).toMatchObject({ mode: "launch", executable: "claude" });
+    expect(JSON.stringify(persisted)).not.toContain("SENTINEL");
+  });
+
+  it("reads without writing or rebuilding a provider spec", async () => {
+    const { registry, adapter, puts } = secretHarness();
+    const record = await registry.start(claudeRequest());
+    const writesBefore = puts.length;
+    const preflights = (adapter.prepareLaunch as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    expect(registry.launchRecord(record.id)).toBeDefined();
+    expect(registry.launchRecord(record.id)).toBeDefined();
+
+    expect(puts).toHaveLength(writesBefore);
+    expect((adapter.prepareLaunch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(preflights);
+  });
+
+  it("hands back a copy so a caller cannot mutate broker state", async () => {
+    const { registry } = secretHarness();
+    const record = await registry.start(claudeRequest());
+    const first = registry.launchRecord(record.id)!;
+    first.args.push("--injected");
+
+    expect(registry.launchRecord(record.id)?.args).not.toContain("--injected");
+  });
+
+  it("refuses to answer for a session the broker does not hold", () => {
+    const { registry } = secretHarness();
+    expect(() => registry.launchRecord("22222222-2222-4222-8222-222222222222"))
+      .toThrow(expect.objectContaining({ code: "SESSION_NOT_FOUND" }));
+  });
+
+  it("captures a record for any registered provider, not only Claude and Codex", async () => {
+    const specs: ProviderLaunchSpec[] = [];
+    const adapter: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session) => ({
+        executable: "cursor-agent",
+        args: ["--cwd", session.cwd],
+        cwd: session.cwd,
+        env: { ...SENTINEL_SECRETS },
+      }),
+      buildResumeSpec: (session) => ({
+        executable: "cursor-agent",
+        args: ["resume"],
+        cwd: session.cwd,
+        env: {},
+      }),
+    };
+    const registry = new SessionRegistry({
+      adapters: { cursor: adapter },
+      ptyFactory: (spec: ProviderLaunchSpec) => {
+        specs.push(spec);
+        return new FakePty(6000);
+      },
+      journal: { append: async () => {} },
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+
+    const record = await registry.start(claudeRequest({ provider: "cursor" }));
+
+    expect(registry.launchRecord(record.id)).toMatchObject({
+      mode: "launch",
+      executable: "cursor-agent",
+      args: specs[0]!.args,
+      cyberdeckEnv: {},
+      inheritedEnvCount: 2,
+    });
   });
 });

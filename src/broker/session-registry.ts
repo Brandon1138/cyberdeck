@@ -5,10 +5,12 @@ import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
 import { evaluateStart, type SessionAncestryEntry, type StartPolicyCode } from "../domain/policy.js";
 import {
   StartSessionRequestSchema,
+  type ResolvedLaunchRecord,
   type SessionRecord,
   type StartSessionRequest,
   type ThreadAttentionState,
 } from "../domain/session.js";
+import { resolvedLaunchRecord } from "../providers/launch-record.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../providers/provider.js";
 import type {
   AppendThreadEvent,
@@ -76,6 +78,8 @@ interface RuntimeSession {
   completedTurns: number;
   latestResult?: string;
   idleTimer?: ReturnType<typeof setTimeout>;
+  /** Serializes provider launch-artifact work so a pending cleanup cannot delete a fresh resume. */
+  launchTail: Promise<void>;
 }
 
 export interface WorkerWaitTarget {
@@ -169,6 +173,7 @@ export class SessionRegistry {
         activity: "unknown",
         observedWorking: false,
         completedTurns: 0,
+        launchTail: Promise.resolve(),
       });
       if (record.attentionState === "interrupted") {
         writes.push(this.options.store?.put(this.cloneRecord(record)) ?? Promise.resolve());
@@ -225,27 +230,25 @@ export class SessionRegistry {
       provisional,
       initialPrompt === undefined ? undefined : applyWorkerMode(initialPrompt, provisional.workerMode),
     );
-    if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(provisional, launchSpec);
-    this.requireActiveParent(parsed.parentSessionId);
-    if (initialPrompt !== undefined) {
-      await this.options.transcripts?.append({
-        sessionId: id,
-        kind: "prompt",
-        source: "human",
-        text: initialPrompt,
-        data: { initial: true },
-      });
-    }
-    this.requireActiveParent(parsed.parentSessionId);
-    const pty = this.options.ptyFactory(
-      launchSpec,
-      this.options.config.replayBytes,
-    );
+    const pty = await this.spawnPreparedLaunch(adapter, provisional, launchSpec, async () => {
+      this.requireActiveParent(parsed.parentSessionId);
+      if (initialPrompt !== undefined) {
+        await this.options.transcripts?.append({
+          sessionId: id,
+          kind: "prompt",
+          source: "human",
+          text: initialPrompt,
+          data: { initial: true },
+        });
+      }
+      this.requireActiveParent(parsed.parentSessionId);
+    });
     const record: SessionRecord = {
       ...provisional,
       pid: pty.pid,
       executionState: "active",
       updatedAt: new Date().toISOString(),
+      launchRecord: resolvedLaunchRecord(launchSpec, "launch"),
     };
     const runtime: RuntimeSession = {
       record,
@@ -255,6 +258,7 @@ export class SessionRegistry {
       activity: "unknown",
       observedWorking: false,
       completedTurns: 0,
+      launchTail: Promise.resolve(),
     };
     this.sessions.set(id, runtime);
     pty.onOutput((chunk) => this.broadcast(runtime, chunk));
@@ -283,6 +287,7 @@ export class SessionRegistry {
     } catch (error) {
       pty.kill();
       this.sessions.delete(id);
+      await this.cleanupLaunchArtifacts(record, "launch-failed");
       throw error;
     }
 
@@ -302,6 +307,14 @@ export class SessionRegistry {
 
   get(sessionId: string): SessionRecord {
     return this.cloneRecord(this.requireRuntime(sessionId).record);
+  }
+
+  /**
+   * The sanitized record of the launch or resume the broker actually performed. Purely a read of
+   * state captured at spawn time: inspection never rebuilds a spec and never touches the filesystem.
+   */
+  launchRecord(sessionId: string): ResolvedLaunchRecord | undefined {
+    return cloneLaunchRecord(this.requireRuntime(sessionId).record.launchRecord);
   }
 
   resolveReattachTarget(sessionId: string): ReattachTarget {
@@ -523,10 +536,12 @@ export class SessionRegistry {
     }
 
     const adapter = this.requireAdapter(runtime.record.provider);
-    const pty = this.options.ptyFactory(
-      adapter.buildResumeSpec(this.cloneRecord(runtime.record)),
-      this.options.config.replayBytes,
-    );
+    const record = this.cloneRecord(runtime.record);
+    const resumeSpec = adapter.buildResumeSpec(record);
+    // A resume spec can name provider-owned artifacts (Claude's payload files) that the previous
+    // exit removed, so wait for any in-flight cleanup and then rebuild them before the spawn.
+    await runtime.launchTail;
+    const pty = await this.spawnPreparedLaunch(adapter, record, resumeSpec);
     runtime.pty = pty;
     runtime.stopRequested = false;
     delete runtime.controller;
@@ -537,6 +552,7 @@ export class SessionRegistry {
     runtime.record.exitCode = null;
     runtime.record.updatedAt = new Date().toISOString();
     runtime.record.attentionState = "done";
+    runtime.record.launchRecord = resolvedLaunchRecord(resumeSpec, "resume");
     runtime.activity = "unknown";
     runtime.observedWorking = false;
     if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
@@ -584,6 +600,8 @@ export class SessionRegistry {
         await this.persist(parent);
       }
     }
+    await runtime.launchTail;
+    await this.cleanupLaunchArtifacts(runtime.record, "session-deleted");
     await this.options.store?.delete(sessionId);
     this.sessions.delete(sessionId);
   }
@@ -822,7 +840,54 @@ export class SessionRegistry {
       signal: signal ?? null,
     }).catch(() => undefined);
     void this.persist(runtime);
+    // The provider process is gone, so its launch artifacts are no longer referenced by anything.
+    // A resume rebuilds them from the record; keeping them alive here would only widen the window
+    // in which a private payload file sits on disk.
+    runtime.launchTail = runtime.launchTail
+      .then(() => this.cleanupLaunchArtifacts(runtime.record, "session-exited"))
+      .catch(() => undefined);
     this.notifySessionUpdate(runtime.record.id);
+  }
+
+  /**
+   * Provider launch artifacts belong to the prepared launch until a live PTY takes them over, so
+   * any failure before that hand-off has to remove them itself — nothing downstream will.
+   */
+  private async spawnPreparedLaunch(
+    adapter: ProviderAdapter,
+    record: SessionRecord,
+    spec: ProviderLaunchSpec,
+    beforeSpawn?: () => Promise<void>,
+  ): Promise<PtyHandle> {
+    try {
+      if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
+      await beforeSpawn?.();
+      return this.options.ptyFactory(spec, this.options.config.replayBytes);
+    } catch (error) {
+      await this.cleanupLaunchArtifacts(record, "launch-failed");
+      throw error;
+    }
+  }
+
+  /**
+   * Cleanup is deliberately non-throwing: it runs on exit, delete, and failed-launch paths, and a
+   * failure to remove one artifact must be recorded rather than raised so it can never mask the
+   * primary outcome that triggered it.
+   */
+  private async cleanupLaunchArtifacts(record: SessionRecord, reason: string): Promise<void> {
+    const adapter = this.options.adapters[record.provider];
+    if (adapter?.cleanupLaunch === undefined) return;
+    try {
+      await adapter.cleanupLaunch(record);
+    } catch (error) {
+      await this.appendTranscript(
+        record.id,
+        "lifecycle",
+        "broker",
+        "provider launch artifact cleanup failed",
+        { reason, message: error instanceof Error ? error.message : String(error) },
+      ).catch(() => undefined);
+    }
   }
 
   private workerResultSnapshot(target: WorkerWaitTarget, maxResultChars: number): WorkerResultSnapshot {
@@ -958,8 +1023,18 @@ export class SessionRegistry {
   }
 
   private cloneRecord(record: SessionRecord): SessionRecord {
-    return { ...record, childIds: [...record.childIds] };
+    const launchRecord = cloneLaunchRecord(record.launchRecord);
+    return {
+      ...record,
+      childIds: [...record.childIds],
+      ...(launchRecord === undefined ? {} : { launchRecord }),
+    };
   }
+}
+
+function cloneLaunchRecord(record: ResolvedLaunchRecord | undefined): ResolvedLaunchRecord | undefined {
+  if (record === undefined) return undefined;
+  return { ...record, args: [...record.args], cyberdeckEnv: { ...record.cyberdeckEnv } };
 }
 
 async function validateSessionCwd(cwd: string): Promise<void> {

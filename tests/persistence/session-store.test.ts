@@ -49,4 +49,47 @@ describe("SessionStore", () => {
     await store.delete(record().id);
     expect(await store.load()).toEqual([]);
   });
+
+  it("round-trips the sanitized launch record so inspection survives a restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-session-store-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const launched = record({
+      launchRecord: {
+        mode: "launch",
+        resolvedAt: "2026-07-25T10:00:00.000Z",
+        executable: "codex",
+        args: ["--no-alt-screen", "-C", "/repo/one"],
+        cwd: "/repo/one",
+        cyberdeckEnv: { CYBERDECK_PROCESS_ROLE: "worker" },
+        inheritedEnvCount: 42,
+        truncated: false,
+      },
+    });
+
+    await store.put(launched);
+
+    expect(await store.load()).toEqual([launched]);
+  });
+
+  it("refuses to persist a launch record that is not bounded", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-session-store-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const unbounded = record({
+      launchRecord: {
+        mode: "launch",
+        resolvedAt: "2026-07-25T10:00:00.000Z",
+        executable: "codex",
+        args: Array.from({ length: 400 }, () => "-c"),
+        cwd: "/repo/one",
+        cyberdeckEnv: {},
+        inheritedEnvCount: 0,
+        truncated: false,
+      },
+    });
+
+    await expect(store.put(unbounded)).rejects.toThrow();
+    expect(await store.load()).toEqual([]);
+  });
 });

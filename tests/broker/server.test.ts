@@ -38,10 +38,16 @@ class FakePty implements PtyHandle {
   }
 }
 
+/** Stands in for the API keys and tokens a real adapter inherits from `process.env`. */
+const SENTINEL_SECRETS = {
+  ANTHROPIC_API_KEY: "sk-ant-SENTINEL-BROKER",
+  GITHUB_TOKEN: "ghp_SENTINELBROKER",
+};
+
 const adapters: Record<"codex" | "claude", ProviderAdapter> = {
   codex: {
     id: "codex",
-    buildLaunchSpec: (session, initialPrompt) => ({ executable: "fake", args: initialPrompt === undefined ? [] : [initialPrompt], cwd: session.cwd, env: {} }),
+    buildLaunchSpec: (session, initialPrompt) => ({ executable: "fake", args: initialPrompt === undefined ? [] : [initialPrompt], cwd: session.cwd, env: { ...SENTINEL_SECRETS } }),
     buildResumeSpec: (session) => ({ executable: "fake", args: ["resume", session.id], cwd: session.cwd, env: {} }),
   },
   claude: {
@@ -117,11 +123,16 @@ async function harness() {
   const socketPath = join(directory, "broker.sock");
   const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(2000 + ptyFactory.mock.calls.length));
   const transcripts = new ThreadTranscriptStore(directory);
+  const catalogWrites: string[] = [];
   const registry = new SessionRegistry({
     adapters,
     ptyFactory,
     journal: { append: async () => {} },
     transcripts,
+    store: {
+      put: async (record) => { catalogWrites.push(`put:${record.id}`); },
+      delete: async (sessionId) => { catalogWrites.push(`delete:${sessionId}`); },
+    },
     validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({ maxConcurrentWorkers: 8 }),
   });
@@ -142,7 +153,15 @@ async function harness() {
     onShutdown: () => { void server.close(); },
   });
   await server.listen();
-  return { server, socketPath, ptyFactory, orchestratorStore, fleetDetaches, workerPreferences };
+  return {
+    server,
+    socketPath,
+    ptyFactory,
+    orchestratorStore,
+    fleetDetaches,
+    workerPreferences,
+    catalogWrites,
+  };
 }
 
 describe("BrokerServer", () => {
@@ -424,6 +443,105 @@ describe("BrokerServer", () => {
       await expect(orchestratorStore.findBySessionId(ensured.session.id)).resolves.toBeUndefined();
       await expect(client.request("session.snapshot", { sessionId: child.id }))
         .rejects.toMatchObject({ code: "SESSION_NOT_FOUND" });
+    } finally {
+      client.socket.destroy();
+      await server.close();
+    }
+  });
+});
+
+describe("BrokerServer launch record inspection", () => {
+  it("answers with the spec the PTY was spawned with and never writes", async () => {
+    const { server, socketPath, ptyFactory, catalogWrites } = await harness();
+    const client = await TestClient.open(socketPath);
+    try {
+      const session = await client.request<{ id: string }>("session.start", {
+        provider: "codex", cwd: "/tmp/repo", detached: true, sandbox: "read-only",
+      });
+      const spawned = ptyFactory.mock.calls[0]![0];
+      const writesBefore = catalogWrites.length;
+
+      const first = await client.request<Record<string, unknown>>(
+        "session.launchRecord",
+        { sessionId: session.id },
+      );
+      const second = await client.request<Record<string, unknown>>(
+        "session.launchRecord",
+        { sessionId: session.id },
+      );
+
+      expect(first).toMatchObject({
+        sessionId: session.id,
+        provider: "codex",
+        launchRecord: {
+          mode: "launch",
+          executable: spawned.executable,
+          args: spawned.args,
+          cwd: spawned.cwd,
+          truncated: false,
+        },
+      });
+      expect(second).toEqual(first);
+      expect(catalogWrites).toHaveLength(writesBefore);
+    } finally {
+      client.socket.destroy();
+      await server.close();
+    }
+  });
+
+  it("omits inherited environment values from the operator-facing result", async () => {
+    const { server, socketPath } = await harness();
+    const client = await TestClient.open(socketPath);
+    try {
+      const session = await client.request<{ id: string }>("session.start", {
+        provider: "codex", cwd: "/tmp/repo", detached: true, sandbox: "read-only",
+      });
+
+      const result = await client.request<Record<string, unknown>>(
+        "session.launchRecord",
+        { sessionId: session.id },
+      );
+      const serialized = JSON.stringify(result);
+
+      for (const [key, value] of Object.entries(SENTINEL_SECRETS)) {
+        expect(serialized).not.toContain(value);
+        expect(serialized).not.toContain(key);
+      }
+      expect(result.launchRecord).toMatchObject({ cyberdeckEnv: {}, inheritedEnvCount: 2 });
+    } finally {
+      client.socket.destroy();
+      await server.close();
+    }
+  });
+
+  it("reports the resume it actually performed after a stopped session comes back", async () => {
+    const { server, socketPath, ptyFactory } = await harness();
+    const client = await TestClient.open(socketPath);
+    try {
+      const session = await client.request<{ id: string }>("session.start", {
+        provider: "codex", cwd: "/tmp/repo", detached: true, sandbox: "read-only",
+      });
+      await client.request("session.stop", { sessionId: session.id });
+      await client.request("session.resume", { sessionId: session.id });
+      const resumeSpec = ptyFactory.mock.calls[1]![0];
+
+      await expect(client.request("session.launchRecord", { sessionId: session.id }))
+        .resolves.toMatchObject({
+          launchRecord: { mode: "resume", args: resumeSpec.args, cwd: resumeSpec.cwd },
+        });
+    } finally {
+      client.socket.destroy();
+      await server.close();
+    }
+  });
+
+  it("rejects an unknown session instead of reconstructing a spec for it", async () => {
+    const { server, socketPath } = await harness();
+    const client = await TestClient.open(socketPath);
+    try {
+      await expect(client.request("session.launchRecord", {
+        sessionId: "33333333-3333-4333-8333-333333333333",
+      })).rejects.toMatchObject({ code: "SESSION_NOT_FOUND" });
     } finally {
       client.socket.destroy();
       await server.close();
