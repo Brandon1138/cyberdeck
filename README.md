@@ -6,7 +6,7 @@
 
 Cyberdeck is a neutral local broker for durable Codex, Claude, Cursor, and Antigravity terminal sessions. Provider processes run in broker-owned PTYs, so they can move between attached/interactive and detached/headless presentation without being restarted. tmux is an optional cockpit view, not the session owner.
 
-> **Stop and detach are different.** `cyberdeck stop <session-id>` terminates the selected provider process and, for an orchestrator, its owned worker tree. Pressing `Ctrl-[`, closing an attached terminal, or closing a tmux pane only detaches that view; the session keeps running while the broker is alive. In Fleet, `Ctrl-]` reattaches the exact most recently explicitly detached live session.
+> **Stop and detach are different.** `cyberdeck stop <session-id>` terminates the selected provider process and, for an orchestrator, its owned worker tree. Pressing `Ctrl-]`, closing an attached terminal, or closing a tmux pane only detaches that view; the session keeps running while the broker is alive. In Fleet, `Ctrl-]` reattaches the exact most recently explicitly detached live session.
 
 > **Alpha software.** `0.1.0-alpha.1` is a macOS developer preview. Persisted schemas and provider compatibility may change before the first stable release.
 
@@ -87,7 +87,7 @@ Fleet controls:
   thread attaches to its existing PTY; a terminal thread resumes that exact provider-native
   conversation first.
 - `Left` from a worker TUI: detach and return to the fleet. Orchestrators keep Left for native TUI
-  input and detach only with `Ctrl+[`.
+  input and detach only with `Ctrl+]`.
 - Enter `/model` to choose from the flat model catalog, then choose effort. The explicit selection
   applies immediately and is persisted per project.
 - Enter `/fable-workers status`, `/fable-workers on`, or `/fable-workers off` to inspect or change
@@ -276,7 +276,7 @@ cyberdeck send SESSION_ID "Summarize the current state without changing files."
 cyberdeck logs SESSION_ID
 ```
 
-`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press Left or `Ctrl-[` to return from a worker. Orchestrators reserve Left for their native TUI and detach only with `Ctrl-[`; a cockpit attachment also leaves the cockpit and returns to Fleet after releasing its controller. `Ctrl-]` is consumed while attached and reattaches the exact last-detached target from Fleet. Terminal threads refuse attachment until they have been resumed, and provider exit automatically releases every controller and watcher.
+`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press Left or `Ctrl-]` to return from a worker. Orchestrators reserve Left for their native TUI and detach only with `Ctrl-]`; a cockpit attachment also leaves the cockpit and returns to Fleet after releasing its controller. `Ctrl-]` detaches while attached and reattaches the exact last-detached target from Fleet. Every other byte is forwarded verbatim, including bare Esc and Option/Alt chords such as Option+Enter. Terminal threads refuse attachment until they have been resumed, and provider exit automatically releases every controller and watcher.
 
 `send` submits one logical prompt without opening an interactive client. The selected provider
 adapter encodes its terminal's actual Enter key, so steering does not depend on a portable newline

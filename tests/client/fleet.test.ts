@@ -344,7 +344,7 @@ describe("fleet presentation", () => {
     });
 
     expect(rendered).toContain("ctrl+o to choose");
-    expect(rendered).toContain("ctrl+[ detach · ctrl+] reattach");
+    expect(rendered).toContain("ctrl+] detach/reattach");
   });
 
   it("preserves word boundaries from cursor-positioned provider output", () => {

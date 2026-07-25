@@ -8,6 +8,19 @@ export interface AttachTransport {
   close(): void;
 }
 
+/**
+ * Ctrl+] is the single reserved chord while attached. Esc and every Alt/Meta chord that starts with
+ * Esc belong to the provider TUI, so no detach may ever be bound to byte 0x1b.
+ */
+const DETACH_BYTE = 0x1d;
+const ESCAPE_BYTE = 0x1b;
+const LEFT_ARROW = Buffer.from("\u001b[D");
+/**
+ * Only wide enough to reunite an escape sequence split across reads. Expiry now forwards the pending
+ * bytes verbatim, so a slow or remote link degrades to a real keystroke instead of a surprise detach.
+ */
+const ESCAPE_COALESCE_MS = 25;
+
 interface TerminalInput {
   isTTY?: boolean;
   isRaw?: boolean;
@@ -38,7 +51,10 @@ export interface AttachSessionOptions {
   signals?: SignalSource;
   /** Keep a shared transport alive when returning to an enclosing client such as the fleet. */
   closeTransport?: boolean;
-  /** Workers use Left Arrow as directional return. Orchestrators keep it for native TUI input. */
+  /**
+   * Workers use Left Arrow as directional return. Orchestrators keep it for native TUI input and
+   * detach with Ctrl+], which is reserved for both kinds.
+   */
   detachOnLeftArrow?: boolean;
   /** Durable identity whose explicit control detach should be eligible for Fleet reattachment. */
   detachIdentity?: string;
@@ -124,18 +140,15 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
       });
     };
 
+    /** Wait once for the rest of a split escape sequence, then hand whatever arrived to the provider. */
     const schedulePendingEscape = () => {
       if (pendingEscapeTimer !== undefined) clearTimeout(pendingEscapeTimer);
       pendingEscapeTimer = setTimeout(() => {
         pendingEscapeTimer = undefined;
         const pending = pendingInput;
         pendingInput = Buffer.alloc(0);
-        if (pending.equals(Buffer.from([0x1b]))) {
-          finish(0, true);
-        } else {
-          sendInput(pending);
-        }
-      }, 25);
+        sendInput(pending);
+      }, ESCAPE_COALESCE_MS);
     };
 
     const onInput = (value: Buffer | string) => {
@@ -148,50 +161,55 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
       ]);
 
       while (pendingInput.length > 0 && !finished) {
-        const escapeIndex = pendingInput.indexOf(0x1b);
-        const reattachIndex = pendingInput.indexOf(0x1d);
-        const controlIndex = escapeIndex === -1
-          ? reattachIndex
-          : reattachIndex === -1
-            ? escapeIndex
-            : Math.min(escapeIndex, reattachIndex);
-        if (controlIndex === -1) {
-          sendInput(pendingInput);
+        // Ctrl+] is the detach chord. Nothing after it survives the attachment teardown.
+        const detachIndex = pendingInput.indexOf(DETACH_BYTE);
+        if (detachIndex !== -1) {
+          sendInput(pendingInput.subarray(0, detachIndex));
           pendingInput = Buffer.alloc(0);
-          return;
-        }
-        sendInput(pendingInput.subarray(0, controlIndex));
-        pendingInput = pendingInput.subarray(controlIndex);
-
-        // Ctrl+] belongs to Fleet reattachment. While attached it is consumed as a strict no-op.
-        if (pendingInput[0] === 0x1d) {
-          pendingInput = pendingInput.subarray(1);
-          continue;
-        }
-
-        // A following control byte cannot form an Alt/escape sequence. Honor the standalone Ctrl+[
-        // immediately and consume everything after it with the attachment teardown.
-        if (pendingInput.length > 1 && pendingInput[1]! < 0x20) {
           finish(0, true);
           return;
         }
 
+        // An orchestrator reserves no escape sequence, so its bytes are never held back or parsed.
+        if (!detachOnLeftArrow) {
+          sendInput(pendingInput);
+          pendingInput = Buffer.alloc(0);
+          return;
+        }
+
+        const escapeIndex = pendingInput.indexOf(ESCAPE_BYTE);
+        if (escapeIndex === -1) {
+          sendInput(pendingInput);
+          pendingInput = Buffer.alloc(0);
+          return;
+        }
+        sendInput(pendingInput.subarray(0, escapeIndex));
+        pendingInput = pendingInput.subarray(escapeIndex);
+
+        // Left Arrow is the only reserved sequence, so only its own strict prefixes wait for more
+        // bytes. A bare Esc resolves after one coalescing window; every other chord resolves now.
+        if (
+          pendingInput.length < LEFT_ARROW.length
+          && LEFT_ARROW.subarray(0, pendingInput.length).equals(pendingInput)
+        ) {
+          schedulePendingEscape();
+          return;
+        }
+        if (pendingInput.subarray(0, LEFT_ARROW.length).equals(LEFT_ARROW)) {
+          pendingInput = Buffer.alloc(0);
+          finish(0, true);
+          return;
+        }
+
+        // Everything else belongs to the provider: Esc, Alt+<control byte> such as Option+Enter,
+        // Alt+<printable key>, and complete CSI/SS3 sequences are all forwarded verbatim.
         const escapeLength = completeEscapeSequenceLength(pendingInput);
         if (escapeLength === undefined) {
           schedulePendingEscape();
           return;
         }
-        const sequence = pendingInput.subarray(0, escapeLength);
+        sendInput(pendingInput.subarray(0, escapeLength));
         pendingInput = pendingInput.subarray(escapeLength);
-        if (isControlLeftBracket(sequence)) {
-          finish(0, true);
-          return;
-        }
-        if (sequence.equals(Buffer.from("\u001b[D")) && detachOnLeftArrow) {
-          finish(0, true);
-          return;
-        }
-        sendInput(sequence);
       }
     };
 
@@ -255,9 +273,4 @@ function completeEscapeSequenceLength(input: Buffer): number | undefined {
   }
   if (input[1] === 0x4f) return input.length >= 3 ? 3 : undefined;
   return 2;
-}
-
-function isControlLeftBracket(input: Buffer): boolean {
-  const sequence = input.toString("ascii");
-  return /^\u001b\[(?:91(?::[0-9:]*)?;5(?::[0-9]+)?(?:;[0-9:]+)?u|27;5;91~)$/u.test(sequence);
 }

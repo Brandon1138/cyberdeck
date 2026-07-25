@@ -1,5 +1,24 @@
 # Known bugs
 
+## Resolved: Esc and Option+Enter were stolen from the attached provider
+
+Observed on 2026-07-25 with Claude Code attached from Ghostty. Detach was bound to `Ctrl+[`, which a
+terminal transmits as byte `0x1b` — the exact byte Esc sends. The two keys are indistinguishable at
+the byte level, so every bare Esc ejected the operator to Fleet instead of interrupting the turn,
+steering mid-flight, or leaving a picker.
+
+The same handler also treated `ESC` followed by any byte below `0x20` as a standalone `Ctrl+[`. That
+is precisely how a terminal encodes Alt/Meta chords when Option-as-Meta is enabled, so Option+Enter
+(`0x1b 0x0d`), Alt+Ctrl+<letter>, Alt+Tab, and Alt+Backspace-as-`^H` all detached as well.
+
+Resolved by moving detach to `Ctrl+]` (`0x1d`) for every attachment kind. That byte was already
+consumed as a strict no-op while attached, so the provider loses nothing it could previously receive,
+and no new byte is taken from a TUI. `Ctrl+[` and every `ESC`-prefixed chord are now forwarded
+verbatim. Left Arrow remains the directional return from a worker; an orchestrator keeps Left Arrow
+for its native TUI and detaches with `Ctrl+]`. The 25ms escape-coalescing window survives only to
+reunite a Left Arrow split across reads, and its expiry now forwards the pending bytes to the
+provider, so a slow or remote link degrades to a real keystroke instead of a surprise detach.
+
 ## Resolved: cockpit startup leaked an invisible tmux session and a failed orchestrator
 
 Observed on 2026-07-22 from a Ghostty shell already running inside a named tmux server. Two
