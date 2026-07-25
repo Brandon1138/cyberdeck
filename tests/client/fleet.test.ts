@@ -7,6 +7,7 @@ import {
   FleetKeyDecoder,
   renderFleet,
   runFleet,
+  startFleetSession,
   threadStatus,
   transitionFleet,
   type FleetSnapshot,
@@ -878,6 +879,238 @@ describe("fleet controls", () => {
       },
     });
     expect(submitted.state.draft).toBe("");
+  });
+
+  it("opens slash palette only from an empty composer and filters commands", () => {
+    const snapshot = fleet({ record: session() });
+    const opened = transitionFleet(createFleetState(snapshot), snapshot, "/", NOW_MS);
+
+    expect(opened.state.commandPalette).toMatchObject({
+      level: "commands",
+      selectedIndex: 0,
+      scrollOffset: 0,
+    });
+    expect(renderFleet(snapshot, opened.state, {
+      color: false,
+      width: 100,
+      height: 24,
+    })).toContain("/permissions  Inspect or configure provider launch permissions");
+
+    const filtered = [..."permissions"].reduce(
+      (state, key) => transitionFleet(state, snapshot, key, NOW_MS).state,
+      opened.state,
+    );
+    const rendered = renderFleet(snapshot, filtered, {
+      color: false,
+      width: 100,
+      height: 24,
+    });
+    expect(rendered).toContain("/permissions");
+    expect(rendered).not.toContain("/model  ");
+
+    const existingDraft = { ...createFleetState(snapshot), draft: "task" };
+    const appended = transitionFleet(existingDraft, snapshot, "/", NOW_MS).state;
+    expect(appended.draft).toBe("task/");
+    expect(appended.commandPalette).toBeUndefined();
+  });
+
+  it("navigates and scrolls slash commands, then Escape closes and clears them", () => {
+    const snapshot = fleet({ record: session() });
+    const opened = transitionFleet(createFleetState(snapshot), snapshot, "/", NOW_MS);
+    const second = transitionFleet(opened.state, snapshot, "down", NOW_MS);
+    const third = transitionFleet(second.state, snapshot, "down", NOW_MS);
+    const fourth = transitionFleet(third.state, snapshot, "down", NOW_MS);
+
+    expect(fourth.state.commandPalette).toMatchObject({
+      selectedIndex: 3,
+      scrollOffset: 1,
+    });
+    const rendered = renderFleet(snapshot, fourth.state, {
+      color: false,
+      width: 100,
+      height: 24,
+    });
+    expect(rendered).toContain("2-4 of 4");
+    expect(rendered).not.toContain("/model  ");
+
+    expect(transitionFleet(fourth.state, snapshot, "escape", NOW_MS).state)
+      .toMatchObject({ draft: "", commandPalette: undefined });
+  });
+
+  it("exposes nested command values and completes the selected value", () => {
+    const orchestrator = session({
+      kind: "orchestrator",
+      cwd: "/repo/one",
+      orchestratorScope: "workspace",
+    });
+    const snapshot = fleet({ record: orchestrator });
+    const opened = transitionFleet(createFleetState(snapshot), snapshot, "/", NOW_MS);
+    const permissions = transitionFleet(opened.state, snapshot, "down", NOW_MS);
+    const fable = transitionFleet(permissions.state, snapshot, "down", NOW_MS);
+    const values = transitionFleet(fable.state, snapshot, "enter", NOW_MS);
+
+    expect(values.state).toMatchObject({
+      draft: "/fable-workers ",
+      commandPalette: { level: "values", command: "/fable-workers" },
+    });
+    expect(renderFleet(snapshot, values.state, {
+      color: false,
+      width: 100,
+      height: 24,
+    })).toContain("on  Enable Fable workers");
+
+    const on = transitionFleet(values.state, snapshot, "down", NOW_MS);
+    expect(transitionFleet(on.state, snapshot, "enter", NOW_MS)).toMatchObject({
+      state: { draft: "", commandPalette: undefined },
+      action: {
+        type: "fable-workers",
+        request: { cwd: "/repo/one", scope: "workspace", enabled: true },
+      },
+    });
+  });
+
+  it("inspects and persists explicit provider permission policies", () => {
+    const snapshot = fleet({ record: session() });
+    const command = { ...createFleetState(snapshot), draft: "/permissions" };
+    const providers = transitionFleet(command, snapshot, "enter", NOW_MS);
+    const claude = transitionFleet(providers.state, snapshot, "down", NOW_MS);
+    const policies = transitionFleet(claude.state, snapshot, "enter", NOW_MS);
+    const automatic = transitionFleet(policies.state, snapshot, "down", NOW_MS);
+    const applied = transitionFleet(automatic.state, snapshot, "enter", NOW_MS);
+
+    expect(renderFleet(snapshot, automatic.state, {
+      color: false,
+      width: 100,
+      height: 24,
+    })).toContain("automatic  auto mode · --permission-mode auto");
+    expect(applied.state.permissionPolicies.claude).toBe("automatic");
+    expect(applied.action).toEqual({
+      type: "permission-policy",
+      provider: "claude",
+      policy: "automatic",
+      previousPolicy: "permissioned",
+    });
+    expect(applied.state.notice).toBe("Claude permissions: auto mode");
+  });
+
+  it("fails visibly for an unsupported provider permission policy", () => {
+    const snapshot = fleet({ record: session() });
+    const command = { ...createFleetState(snapshot), draft: "/permissions" };
+    let state = transitionFleet(command, snapshot, "enter", NOW_MS).state;
+    state = transitionFleet(state, snapshot, "down", NOW_MS).state;
+    state = transitionFleet(state, snapshot, "down", NOW_MS).state;
+    state = transitionFleet(state, snapshot, "down", NOW_MS).state;
+    state = transitionFleet(state, snapshot, "enter", NOW_MS).state;
+    state = transitionFleet(state, snapshot, "down", NOW_MS).state;
+    const refused = transitionFleet(state, snapshot, "enter", NOW_MS);
+
+    expect(refused.action).toBeUndefined();
+    expect(refused.state.permissionPicker).toMatchObject({
+      step: "policy",
+      providerIndex: 3,
+      policyIndex: 1,
+    });
+    expect(refused.state.notice).toBe(
+      "Antigravity does not support automatic permission policy",
+    );
+    expect(renderFleet(snapshot, refused.state, {
+      color: false,
+      width: 100,
+      height: 24,
+    })).toContain("Antigravity does not support automatic permission policy");
+  });
+
+  it("applies Composer automatic mode before submitting the initial prompt", async () => {
+    const snapshot = fleet({ record: session({ provider: "cursor", model: "composer" }) });
+    const state = {
+      ...createFleetState(snapshot),
+      draft: "Fix the failing test",
+      permissionPolicies: {
+        ...createFleetState(snapshot).permissionPolicies,
+        cursor: "automatic" as const,
+      },
+      launchProfiles: {
+        "/Users/brandon/code/personal/cyberdeck": {
+          provider: "cursor",
+          model: "composer",
+        },
+      },
+    };
+    const transition = transitionFleet(state, snapshot, "enter", NOW_MS);
+    expect(transition.action).toMatchObject({
+      type: "start",
+      permissionLaunch: {
+        provider: "cursor",
+        policy: "automatic",
+        nativeMode: "/run-everything",
+        application: {
+          kind: "post-launch-command",
+          command: "/run-everything",
+        },
+      },
+    });
+
+    const started = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      provider: "cursor",
+      model: "composer",
+    });
+    const request = vi.fn(async (method: string, _params: unknown) => {
+      if (method === "session.start") return started;
+      if (method === "session.submit") return { submitted: true };
+      throw new Error(`unexpected ${method}`);
+    });
+    await expect(startFleetSession(
+      { request } as never,
+      transition.action as Extract<NonNullable<typeof transition.action>, { type: "start" }>,
+    )).resolves.toEqual(started);
+
+    expect(request.mock.calls.map(([method, params]) => [method, params])).toEqual([
+      [
+        "session.start",
+        expect.objectContaining({
+          provider: "cursor",
+          model: "composer",
+          cwd: "/Users/brandon/code/personal/cyberdeck",
+        }),
+      ],
+      [
+        "session.submit",
+        { sessionId: started.id, message: "/run-everything" },
+      ],
+      [
+        "session.submit",
+        { sessionId: started.id, message: "Fix the failing test" },
+      ],
+    ]);
+  });
+
+  it("applies persisted Codex automatic mode to newly spawned sessions", () => {
+    const snapshot = fleet({ record: session({ provider: "codex" }) });
+    const state = {
+      ...createFleetState(snapshot),
+      draft: "Run the checks",
+      permissionPolicies: {
+        ...createFleetState(snapshot).permissionPolicies,
+        codex: "automatic" as const,
+      },
+      launchProfiles: {
+        "/Users/brandon/code/personal/cyberdeck": {
+          provider: "codex",
+          model: "gpt-5.6-sol",
+        },
+      },
+    };
+
+    expect(transitionFleet(state, snapshot, "enter", NOW_MS).action).toMatchObject({
+      type: "start",
+      request: {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        approvalMode: "auto",
+        initialPrompt: "Run the checks",
+      },
+    });
   });
 
   it("opens /model instead of parsing provider syntax when no launch profile exists", () => {

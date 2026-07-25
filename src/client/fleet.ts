@@ -9,9 +9,23 @@ import type {
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
 import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
+import { appStateDirectory } from "../paths.js";
+import {
+  ProviderPermissionPreferenceStore,
+  type ProviderPermissionPreferencePort,
+  type ProviderPermissionPreferences,
+} from "../persistence/provider-permission-preference-store.js";
 import { latestTerminalPreview, providerTerminalActivity, stripTerminalControl } from "../runtime/terminal-replay.js";
 import { attachSession, type AttachTransport } from "./attach.js";
 import { collectDashboardSnapshot, renderDashboard } from "./dashboard.js";
+import {
+  CONFIGURABLE_PERMISSION_PROVIDERS,
+  permissionProviderLabel,
+  resolveProviderPermission,
+  type ConfigurablePermissionProvider,
+  type ProviderPermissionPolicy,
+  type ProviderPermissionResolution,
+} from "./permission-policy.js";
 import { RpcError } from "./rpc-client.js";
 
 export interface FleetTransport {
@@ -82,6 +96,19 @@ export interface WorkerPickerState {
   returnDraft: string;
 }
 
+export interface CommandPaletteState {
+  level: "commands" | "values";
+  command?: SlashCommandName | undefined;
+  selectedIndex: number;
+  scrollOffset: number;
+}
+
+export interface PermissionPickerState {
+  step: "provider" | "policy";
+  providerIndex: number;
+  policyIndex: number;
+}
+
 export interface RenameState {
   sessionId: string;
   draft: string;
@@ -99,7 +126,10 @@ export interface FleetState {
   quitConfirmation?: QuitConfirmation | undefined;
   orchestratorPicker?: OrchestratorPickerState | undefined;
   workerPicker?: WorkerPickerState | undefined;
+  commandPalette?: CommandPaletteState | undefined;
+  permissionPicker?: PermissionPickerState | undefined;
   launchProfiles: Record<string, LaunchProfile>;
+  permissionPolicies: ProviderPermissionPreferences;
   view: "fleet" | "diagnostics";
   helpOpen?: boolean | undefined;
   rename?: RenameState | undefined;
@@ -112,7 +142,11 @@ export type FleetAction =
   | { type: "delete-tree"; sessionId: string }
   | { type: "attach"; sessionId: string }
   | { type: "resume"; sessionId: string }
-  | { type: "start"; request: StartSessionRequest & { initialPrompt: string } }
+  | {
+    type: "start";
+    request: StartSessionRequest & { initialPrompt: string };
+    permissionLaunch?: ProviderPermissionResolution | undefined;
+  }
   | {
     type: "open-orchestrator";
     sessionId: string;
@@ -130,6 +164,12 @@ export type FleetAction =
   | { type: "pin"; sessionId: string }
   | { type: "reorder"; sessionId: string; direction: "up" | "down" }
   | { type: "profile"; cwd: string; profile: LaunchProfile }
+  | {
+    type: "permission-policy";
+    provider: ConfigurablePermissionProvider;
+    policy: ProviderPermissionPolicy;
+    previousPolicy: ProviderPermissionPolicy;
+  }
   | { type: "change-directory"; cwd: string }
   | { type: "quit" };
 
@@ -137,6 +177,8 @@ export interface FleetTransition {
   state: FleetState;
   action?: FleetAction;
 }
+
+export type StartFleetAction = Extract<FleetAction, { type: "start" }>;
 
 export type ThreadStatus = "Working" | "Needs input" | "Done" | "Stopping" | "Stopped" | "Interrupted" | "Failed";
 
@@ -180,10 +222,28 @@ interface SessionTreeProgress {
   deleted?: number;
 }
 
+type SlashCommandName =
+  | "/model"
+  | "/permissions"
+  | "/fable-workers"
+  | "/caveman-workers";
+
+interface SlashCommandDefinition {
+  name: SlashCommandName;
+  description: string;
+  values?: readonly SlashCommandValue[] | undefined;
+}
+
+interface SlashCommandValue {
+  value: string;
+  description: string;
+}
+
 export interface FleetRuntimeOptions {
   changeDirectory?: ((cwd: string) => Promise<string | undefined>) | undefined;
   detachIdentity?: string | undefined;
   openOrchestrator?: ((target: OrchestratorCockpitTarget) => Promise<SessionRecord>) | undefined;
+  permissionPreferences?: ProviderPermissionPreferencePort | undefined;
 }
 
 export type OrchestratorCockpitTarget =
@@ -202,6 +262,45 @@ export type OrchestratorCockpitTarget =
 const DELETE_CONFIRMATION_MS = 5_000;
 const QUIT_CONFIRMATION_MS = 5_000;
 const QUIT_CONFIRMATION_NOTICE = "Press ctrl+c again to exit";
+const COMMAND_PALETTE_VISIBLE_ROWS = 3;
+const DEFAULT_PERMISSION_POLICIES: Readonly<Record<ConfigurablePermissionProvider, ProviderPermissionPolicy>> = {
+  codex: "permissioned",
+  claude: "permissioned",
+  cursor: "permissioned",
+  antigravity: "permissioned",
+};
+const PERMISSION_POLICIES: readonly ProviderPermissionPolicy[] = [
+  "permissioned",
+  "automatic",
+];
+const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
+  {
+    name: "/model",
+    description: "Choose worker provider, model, and effort",
+  },
+  {
+    name: "/permissions",
+    description: "Inspect or configure provider launch permissions",
+  },
+  {
+    name: "/fable-workers",
+    description: "Inspect or toggle Fable workers",
+    values: [
+      { value: "status", description: "Show current Fable worker preference" },
+      { value: "on", description: "Enable Fable workers" },
+      { value: "off", description: "Disable Fable workers" },
+    ],
+  },
+  {
+    name: "/caveman-workers",
+    description: "Inspect or toggle Caveman workers",
+    values: [
+      { value: "status", description: "Show current Caveman worker preference" },
+      { value: "on", description: "Enable Caveman workers" },
+      { value: "off", description: "Disable Caveman workers" },
+    ],
+  },
+];
 const WORKER_MODEL_CHOICES: readonly WorkerModelChoice[] = WORKER_PROVIDER_CAPABILITIES.flatMap((capability) =>
   (capability.provider === "antigravity" ? ["gemini-3.6-flash"] : capability.models)
     .map((model): WorkerModelChoice => ({
@@ -267,6 +366,7 @@ export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.
     fallbackCwd,
     draft: "",
     launchProfiles: {},
+    permissionPolicies: { ...DEFAULT_PERMISSION_POLICIES },
     view: "fleet",
   };
 }
@@ -296,6 +396,26 @@ export function threadStatus(thread: FleetThread): ThreadStatus {
       return "Done";
     }
   }
+}
+
+export async function startFleetSession(
+  client: FleetTransport,
+  action: StartFleetAction,
+): Promise<SessionRecord> {
+  if (action.permissionLaunch?.application.kind !== "post-launch-command") {
+    return client.request<SessionRecord>("session.startWithPrompt", action.request);
+  }
+  const { initialPrompt, ...request } = action.request;
+  const record = await client.request<SessionRecord>("session.start", request);
+  await client.request("session.submit", {
+    sessionId: record.id,
+    message: action.permissionLaunch.application.command,
+  });
+  await client.request("session.submit", {
+    sessionId: record.id,
+    message: initialPrompt,
+  });
+  return record;
 }
 
 export function transitionFleet(
@@ -376,6 +496,14 @@ export function transitionFleet(
 
   if (state.workerPicker !== undefined) {
     return transitionWorkerPicker(state, key);
+  }
+
+  if (state.permissionPicker !== undefined) {
+    return transitionPermissionPicker(state, snapshot, key);
+  }
+
+  if (state.commandPalette !== undefined) {
+    return transitionCommandPalette(state, snapshot, key);
   }
 
   if (key === "ctrl+o") {
@@ -534,6 +662,9 @@ export function transitionFleet(
     if (initialPrompt === "/model") {
       return openWorkerPicker(state, snapshot, "");
     }
+    if (initialPrompt === "/permissions") {
+      return openPermissionPicker(state, snapshot);
+    }
     if (initialPrompt === "") {
       return {
         state: { ...state, deleteConfirmation: undefined, notice: undefined },
@@ -547,6 +678,7 @@ export function transitionFleet(
     const workerPolicy = workerPolicyTransition(state, snapshot, initialPrompt);
     if (workerPolicy !== undefined) return workerPolicy;
     if (initialPrompt === "/model") return openWorkerPicker(state, snapshot, "");
+    if (initialPrompt === "/permissions") return openPermissionPicker(state, snapshot);
     return startTransition(state, undefined, initialPrompt);
   }
   if (key === "up" || key === "down") {
@@ -577,6 +709,21 @@ export function transitionFleet(
     const reference = (selected.record.name ?? selected.record.id.slice(0, 8)).replace(/\s+/gu, "-");
     return { state: { ...state, draft: `@${reference} `, notice: undefined } };
   }
+  if (key === "/" && state.draft === "") {
+    return {
+      state: {
+        ...state,
+        draft: "/",
+        commandPalette: {
+          level: "commands",
+          selectedIndex: 0,
+          scrollOffset: 0,
+        },
+        helpOpen: false,
+        notice: undefined,
+      },
+    };
+  }
   if ([...key].length === 1 && key.charCodeAt(0) >= 0x20) {
     return { state: { ...state, draft: `${state.draft}${key}`, notice: undefined } };
   }
@@ -597,10 +744,432 @@ export function renderFleet(
   if (state.workerPicker !== undefined) {
     return renderWorkerPicker(state, { width, height, now, color, home });
   }
+  if (state.permissionPicker !== undefined) {
+    return renderPermissionPicker(snapshot, state, { width, height, now, color, home });
+  }
+  if (state.commandPalette !== undefined) {
+    return renderCommandPalette(state, { width, height, now, color, home });
+  }
   if (state.orchestratorPicker !== undefined) {
     return renderOrchestratorPicker(snapshot, state, { width, height, now, color, home });
   }
   return renderFleetList(snapshot, state, { width, height, now, color, home });
+}
+
+function transitionCommandPalette(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  key: string,
+): FleetTransition {
+  const palette = state.commandPalette!;
+  const candidates = commandPaletteCandidates(state);
+  if (key === "escape") {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        commandPalette: undefined,
+        notice: undefined,
+      },
+    };
+  }
+  if (key === "up" || key === "down") {
+    const delta = key === "up" ? -1 : 1;
+    const selectedIndex = boundedIndex(
+      palette.selectedIndex + delta,
+      candidates.length,
+    );
+    return {
+      state: {
+        ...state,
+        commandPalette: {
+          ...palette,
+          selectedIndex,
+          scrollOffset: paletteScrollOffset(selectedIndex, palette.scrollOffset),
+        },
+      },
+    };
+  }
+  if (key === "backspace") {
+    if (state.draft === "/") {
+      return {
+        state: {
+          ...state,
+          draft: "",
+          commandPalette: undefined,
+          notice: undefined,
+        },
+      };
+    }
+    const draft = [...state.draft].slice(0, -1).join("");
+    const command = palette.command;
+    const valuesOpen = command !== undefined && draft.startsWith(`${command} `);
+    return {
+      state: {
+        ...state,
+        draft,
+        commandPalette: {
+          level: valuesOpen ? "values" : "commands",
+          ...(valuesOpen ? { command } : {}),
+          selectedIndex: 0,
+          scrollOffset: 0,
+        },
+        notice: undefined,
+      },
+    };
+  }
+  if (key === "enter") {
+    const selected = candidates[palette.selectedIndex];
+    if (selected === undefined) {
+      return {
+        state: {
+          ...state,
+          notice: "No matching slash commands",
+          noticeTone: "error",
+        },
+      };
+    }
+    if (palette.level === "commands") {
+      const command = selected as SlashCommandDefinition;
+      if (command.values !== undefined) {
+        return {
+          state: {
+            ...state,
+            draft: `${command.name} `,
+            commandPalette: {
+              level: "values",
+              command: command.name,
+              selectedIndex: 0,
+              scrollOffset: 0,
+            },
+            notice: undefined,
+          },
+        };
+      }
+      const closed = {
+        ...state,
+        draft: "",
+        commandPalette: undefined,
+        notice: undefined,
+      };
+      return command.name === "/model"
+        ? openWorkerPicker(closed, snapshot, "")
+        : openPermissionPicker(closed, snapshot);
+    }
+    const command = palette.command!;
+    const value = (selected as SlashCommandValue).value;
+    const completed = {
+      ...state,
+      draft: `${command} ${value}`,
+      commandPalette: undefined,
+      notice: undefined,
+    };
+    return workerPolicyTransition(completed, snapshot, completed.draft)
+      ?? { state: completed };
+  }
+  if ([...key].length === 1 && key.charCodeAt(0) >= 0x20) {
+    if (palette.level === "commands" && key === " ") {
+      const command = SLASH_COMMANDS.find((candidate) => candidate.name === state.draft);
+      if (command?.values !== undefined) {
+        return {
+          state: {
+            ...state,
+            draft: `${state.draft} `,
+            commandPalette: {
+              level: "values",
+              command: command.name,
+              selectedIndex: 0,
+              scrollOffset: 0,
+            },
+            notice: undefined,
+          },
+        };
+      }
+    }
+    return {
+      state: {
+        ...state,
+        draft: `${state.draft}${key}`,
+        commandPalette: {
+          ...palette,
+          selectedIndex: 0,
+          scrollOffset: 0,
+        },
+        notice: undefined,
+      },
+    };
+  }
+  return { state };
+}
+
+function commandPaletteCandidates(
+  state: FleetState,
+): readonly (SlashCommandDefinition | SlashCommandValue)[] {
+  const palette = state.commandPalette!;
+  if (palette.level === "commands") {
+    const query = state.draft.slice(1).trim().toLowerCase();
+    if (query === "") return SLASH_COMMANDS;
+    return SLASH_COMMANDS.filter((command) =>
+      command.name.slice(1).includes(query)
+      || command.description.toLowerCase().includes(query));
+  }
+  const command = SLASH_COMMANDS.find((candidate) => candidate.name === palette.command);
+  if (command?.values === undefined) return [];
+  const prefix = `${command.name} `;
+  const query = state.draft.startsWith(prefix)
+    ? state.draft.slice(prefix.length).trim().toLowerCase()
+    : "";
+  if (query === "") return command.values;
+  return command.values.filter((value) =>
+    value.value.includes(query)
+    || value.description.toLowerCase().includes(query));
+}
+
+function paletteScrollOffset(selectedIndex: number, current: number): number {
+  if (selectedIndex < current) return selectedIndex;
+  if (selectedIndex >= current + COMMAND_PALETTE_VISIBLE_ROWS) {
+    return selectedIndex - COMMAND_PALETTE_VISIBLE_ROWS + 1;
+  }
+  return current;
+}
+
+function renderCommandPalette(
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): string {
+  const palette = state.commandPalette!;
+  const candidates = commandPaletteCandidates(state);
+  const visible = candidates.slice(
+    palette.scrollOffset,
+    palette.scrollOffset + COMMAND_PALETTE_VISIBLE_ROWS,
+  );
+  const lines = [
+    ...renderHeader([], state, options),
+    "",
+    palette.level === "commands" ? "Slash commands" : `${palette.command} values`,
+    "",
+  ];
+  if (visible.length === 0) {
+    lines.push("No matching commands");
+  } else {
+    lines.push(...visible.map((candidate, visibleIndex) => {
+      const absoluteIndex = palette.scrollOffset + visibleIndex;
+      const label = "name" in candidate ? candidate.name : candidate.value;
+      return pickerRow(
+        fit(`${label}  ${candidate.description}`, options.width - 2),
+        absoluteIndex === palette.selectedIndex,
+        options.color,
+      );
+    }));
+  }
+  const range = candidates.length === 0
+    ? "0 results"
+    : `${palette.scrollOffset + 1}-${Math.min(
+      candidates.length,
+      palette.scrollOffset + COMMAND_PALETTE_VISIBLE_ROWS,
+    )} of ${candidates.length}`;
+  const footer = [
+    paint("─".repeat(options.width), "dim", options.color),
+    ...renderComposerLines(state.draft, false, options),
+    paint("─".repeat(options.width), "dim", options.color),
+    paint(fit(`↑↓ select · enter complete · esc close · ${range}`, options.width), "dim", options.color),
+  ];
+  const body = lines.slice(0, Math.max(0, options.height - footer.length));
+  while (body.length < options.height - footer.length) body.push("");
+  return [...body, ...footer].join("\n");
+}
+
+function openPermissionPicker(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+): FleetTransition {
+  const provider = state.launchProfiles[composerCwd(state, snapshot)]?.provider;
+  const providerIndex = Math.max(
+    0,
+    CONFIGURABLE_PERMISSION_PROVIDERS.indexOf(
+      provider as ConfigurablePermissionProvider,
+    ),
+  );
+  return {
+    state: {
+      ...state,
+      draft: "",
+      commandPalette: undefined,
+      permissionPicker: {
+        step: "provider",
+        providerIndex,
+        policyIndex: 0,
+      },
+      helpOpen: false,
+      notice: undefined,
+    },
+  };
+}
+
+function transitionPermissionPicker(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  key: string,
+): FleetTransition {
+  const picker = state.permissionPicker!;
+  if (key === "escape") {
+    if (picker.step === "policy") {
+      return {
+        state: {
+          ...state,
+          permissionPicker: { ...picker, step: "provider" },
+          notice: undefined,
+        },
+      };
+    }
+    return {
+      state: {
+        ...state,
+        permissionPicker: undefined,
+        draft: "",
+        notice: undefined,
+      },
+    };
+  }
+  if (key === "up" || key === "down") {
+    const delta = key === "up" ? -1 : 1;
+    return {
+      state: {
+        ...state,
+        permissionPicker: picker.step === "provider"
+          ? {
+              ...picker,
+              providerIndex: boundedIndex(
+                picker.providerIndex + delta,
+                CONFIGURABLE_PERMISSION_PROVIDERS.length,
+              ),
+            }
+          : {
+              ...picker,
+              policyIndex: boundedIndex(
+                picker.policyIndex + delta,
+                PERMISSION_POLICIES.length,
+              ),
+            },
+        notice: undefined,
+      },
+    };
+  }
+  if (key !== "enter") return { state };
+  const provider = CONFIGURABLE_PERMISSION_PROVIDERS[picker.providerIndex]!;
+  if (picker.step === "provider") {
+    const currentPolicy = permissionPolicy(state, provider);
+    return {
+      state: {
+        ...state,
+        permissionPicker: {
+          ...picker,
+          step: "policy",
+          policyIndex: PERMISSION_POLICIES.indexOf(currentPolicy),
+        },
+        notice: undefined,
+      },
+    };
+  }
+  const policy = PERMISSION_POLICIES[picker.policyIndex]!;
+  const sandbox = permissionSandbox(state, snapshot);
+  const resolved = resolveProviderPermission(provider, policy, sandbox);
+  if (!resolved.ok) {
+    return {
+      state: {
+        ...state,
+        notice: resolved.message,
+        noticeTone: "error",
+      },
+    };
+  }
+  const previousPolicy = permissionPolicy(state, provider);
+  return {
+    state: {
+      ...state,
+      permissionPicker: undefined,
+      permissionPolicies: {
+        ...state.permissionPolicies,
+        [provider]: policy,
+      },
+      notice: `${permissionProviderLabel(provider)} permissions: ${resolved.value.nativeMode}`,
+      noticeTone: "neutral",
+    },
+    action: {
+      type: "permission-policy",
+      provider,
+      policy,
+      previousPolicy,
+    },
+  };
+}
+
+function renderPermissionPicker(
+  snapshot: FleetSnapshot,
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): string {
+  const picker = state.permissionPicker!;
+  const sandbox = permissionSandbox(state, snapshot);
+  const provider = CONFIGURABLE_PERMISSION_PROVIDERS[picker.providerIndex]!;
+  const lines = [...renderHeader([], state, options), ""];
+  if (picker.step === "provider") {
+    lines.push("Provider permissions", "");
+    lines.push(...CONFIGURABLE_PERMISSION_PROVIDERS.map((candidate, index) => {
+      const policy = permissionPolicy(state, candidate);
+      const resolved = resolveProviderPermission(candidate, policy, sandbox);
+      const nativeMode = resolved.ok ? resolved.value.nativeMode : "unsupported";
+      return pickerRow(
+        `${permissionProviderLabel(candidate)}  ${policy} · ${nativeMode}`,
+        index === picker.providerIndex,
+        options.color,
+      );
+    }));
+  } else {
+    lines.push(`${permissionProviderLabel(provider)} permission policy`, "");
+    lines.push(...PERMISSION_POLICIES.map((policy, index) => {
+      const resolved = resolveProviderPermission(provider, policy, sandbox);
+      const description = resolved.ok
+        ? `${resolved.value.nativeMode}${resolved.value.launchArguments.length === 0
+            ? ""
+            : ` · ${resolved.value.launchArguments.join(" ")}`}`
+        : `unsupported · ${resolved.message}`;
+      return pickerRow(
+        `${policy}  ${description}`,
+        index === picker.policyIndex,
+        options.color,
+      );
+    }));
+  }
+  const footer = [
+    ...(state.notice === undefined
+      ? []
+      : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
+    paint("─".repeat(options.width), "dim", options.color),
+    paint(
+      fit("↑↓ select · enter inspect/apply · esc back", options.width),
+      "dim",
+      options.color,
+    ),
+  ];
+  const body = lines.slice(0, Math.max(0, options.height - footer.length));
+  while (body.length < options.height - footer.length) body.push("");
+  return [...body, ...footer].join("\n");
+}
+
+function permissionPolicy(
+  state: FleetState,
+  provider: ConfigurablePermissionProvider,
+): ProviderPermissionPolicy {
+  return state.permissionPolicies[provider] ?? DEFAULT_PERMISSION_POLICIES[provider];
+}
+
+function permissionSandbox(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+): SessionRecord["sandbox"] {
+  return snapshot.threads.find(({ record }) =>
+    record.id === state.selectedSessionId)?.record.sandbox ?? "read-only";
 }
 
 function openWorkerPicker(state: FleetState, snapshot: FleetSnapshot, returnDraft: string): FleetTransition {
@@ -1098,6 +1667,8 @@ export async function runFleet(
 ): Promise<void> {
   let snapshot = await collectFleetSnapshot(client);
   let state = createFleetState(snapshot);
+  const permissionPreferences = runtime.permissionPreferences
+    ?? new ProviderPermissionPreferenceStore(appStateDirectory);
   try {
     state = {
       ...state,
@@ -1105,6 +1676,23 @@ export async function runFleet(
     };
   } catch {
     // Older brokers and isolated presentation tests have no persisted preference surface.
+  }
+  try {
+    state = {
+      ...state,
+      permissionPolicies: {
+        ...state.permissionPolicies,
+        ...await permissionPreferences.list(),
+      },
+    };
+  } catch (error) {
+    state = {
+      ...state,
+      notice: `Could not load permission preferences: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      noticeTone: "error",
+    };
   }
   if (input.isTTY !== true) {
     output.write(`${renderFleet(snapshot, state, { color: false, width: output.columns, height: output.rows })}\n`);
@@ -1230,7 +1818,7 @@ export async function runFleet(
         snapshot = await collectFleetSnapshot(client);
         await openNativeThread(action.sessionId);
       } else if (action?.type === "start") {
-        const record = await client.request<SessionRecord>("session.startWithPrompt", action.request);
+        const record = await startFleetSession(client, action);
         state = { ...state, selectedSessionId: record.id };
         snapshot = await collectFleetSnapshot(client);
         await openNativeThread(record.id);
@@ -1272,6 +1860,8 @@ export async function runFleet(
         });
       } else if (action?.type === "profile") {
         await client.request("fleet.preference.set", { cwd: action.cwd, profile: action.profile });
+      } else if (action?.type === "permission-policy") {
+        await permissionPreferences.set(action.provider, action.policy);
       } else if (action?.type === "change-directory") {
         if (runtime.changeDirectory === undefined) {
           throw new Error("Working-directory navigation is unavailable in this client");
@@ -1294,6 +1884,7 @@ export async function runFleet(
         && action.type !== "open-orchestrator"
         && action.type !== "create-orchestrator"
         && action.type !== "change-directory"
+        && action.type !== "permission-policy"
         && action.type !== "delete-tree"
       ) {
         snapshot = await collectFleetSnapshot(client);
@@ -1302,6 +1893,14 @@ export async function runFleet(
       state = {
         ...state,
         ...(action?.type === "start" ? { draft: action.request.initialPrompt } : {}),
+        ...(action?.type === "permission-policy"
+          ? {
+              permissionPolicies: {
+                ...state.permissionPolicies,
+                [action.provider]: action.previousPolicy,
+              },
+            }
+          : {}),
         notice: error instanceof RpcError && error.code === "METHOD_NOT_FOUND"
           ? "Restart the Cyberdeck broker to enable this fleet action"
           : error instanceof Error ? error.message : String(error),
@@ -1685,6 +2284,22 @@ function startTransition(
     return openWorkerPickerForCwd(state, cwd, draft);
   }
   const initialPrompt = draft;
+  const sandbox = selected?.sandbox ?? "read-only";
+  const policy = state.permissionPolicies[profile.provider] ?? "permissioned";
+  const permission = resolveProviderPermission(profile.provider, policy, sandbox);
+  if (!permission.ok) {
+    return {
+      state: {
+        ...state,
+        notice: permission.message,
+        noticeTone: "error",
+      },
+    };
+  }
+  const approvalMode = permission.value.application.kind === "approval-mode"
+    && permission.value.application.value === "auto"
+    ? { approvalMode: permission.value.application.value }
+    : {};
   return {
     state: { ...state, draft: "", deleteConfirmation: undefined, notice: undefined },
     action: {
@@ -1694,11 +2309,15 @@ function startTransition(
         model: profile.model,
         ...(profile.effort === undefined ? {} : { effort: profile.effort }),
         cwd,
-        sandbox: selected?.sandbox ?? "read-only",
+        sandbox,
+        ...approvalMode,
         detached: true,
         name: taskName(initialPrompt),
         initialPrompt,
       },
+      ...(permission.value.application.kind === "post-launch-command"
+        ? { permissionLaunch: permission.value }
+        : {}),
     },
   };
 }
