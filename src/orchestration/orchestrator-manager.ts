@@ -14,7 +14,7 @@ import {
   type OrchestratorScope,
   type ResetOrchestratorRequest,
 } from "../domain/orchestrator.js";
-import type { SessionRecord } from "../domain/session.js";
+import type { ProviderId, SessionRecord } from "../domain/session.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
@@ -55,6 +55,8 @@ export class OrchestratorManager {
       : { kind: "workspace", cwd: request.cwd };
     const key = orchestratorKey(scope);
     const existing = await this.store.get(key);
+    const effectiveProvider = request.provider ?? existing?.provider;
+    if (effectiveProvider !== undefined) assertMcpCapableProvider(effectiveProvider);
     if (existing !== undefined && request.provider === undefined) {
       const session = await this.resumeExisting(existing);
       if (session === undefined) {
@@ -69,14 +71,6 @@ export class OrchestratorManager {
       throw Object.assign(
         new Error("No orchestrator is configured for this scope; name an explicit provider"),
         { code: "ORCHESTRATOR_PROVIDER_REQUIRED" },
-      );
-    }
-    if (!ORCHESTRATOR_CATALOG.some((entry) => entry.provider === request.provider)) {
-      throw Object.assign(
-        new Error(
-          `Orchestrator provider ${request.provider} cannot receive the Cyberdeck MCP server; its adapter has no supported MCP surface`,
-        ),
-        { code: "ORCHESTRATOR_PROVIDER_UNSUPPORTED" },
       );
     }
     if (
@@ -252,6 +246,7 @@ export class OrchestratorManager {
   }
 
   private async resumeExisting(binding: OrchestratorBinding): Promise<SessionRecord | undefined> {
+    assertMcpCapableProvider(binding.provider);
     try {
       const session = this.registry.get(binding.sessionId);
       if (session.executionState === "active" || session.executionState === "starting") return session;
@@ -277,6 +272,22 @@ export class OrchestratorManager {
     }
     return this.workerPreferences;
   }
+}
+
+/** Single source of truth for which providers can host the Cyberdeck MCP server. */
+function supportsMcpOrchestration(provider: ProviderId): boolean {
+  return ORCHESTRATOR_CATALOG.some((entry) => entry.provider === provider);
+}
+
+/** Refuse inert orchestrators before any registry get, resume, or start. */
+function assertMcpCapableProvider(provider: ProviderId): void {
+  if (supportsMcpOrchestration(provider)) return;
+  throw Object.assign(
+    new Error(
+      `Orchestrator provider ${provider} cannot receive the Cyberdeck MCP server; its adapter has no supported MCP surface`,
+    ),
+    { code: "ORCHESTRATOR_PROVIDER_UNSUPPORTED" },
+  );
 }
 
 function isRecoverableResumeError(error: unknown): boolean {
