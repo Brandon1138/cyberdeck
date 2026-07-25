@@ -285,7 +285,6 @@ describe("ClaudeProviderAdapter", () => {
       "haiku",
       "--append-system-prompt-file",
       expect.stringContaining(record.id),
-      "--disable-slash-commands",
       "--setting-sources",
       "project,local",
       "--mcp-config",
