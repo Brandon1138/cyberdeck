@@ -142,17 +142,27 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
 
   /**
    * An orchestrator's authority is Cyberdeck's own tools, so it launches against a bounded context
-   * rather than whatever the operator happens to have installed. Measured on a fleet orchestrator:
-   * the ambient skill and plugin surface put ~86k tokens into the prompt before the first turn and
-   * ~150k after each compaction, which left two or three usable turns and made autocompaction
-   * thrash. Both flags are orchestrator-only; workers keep the operator's environment, and dropping
-   * user settings here is safe because Cyberdeck's own session-start hook is worker-scoped.
+   * rather than whatever the operator happens to have installed. `--setting-sources project,local`
+   * drops user scope, which is where the operator's skills, plugins and ambient MCP servers live —
+   * the whole surface that once put ~86k tokens into a fleet orchestrator's prompt before its first
+   * turn. It is orchestrator-only: workers keep the operator's environment, and dropping user
+   * settings here is safe because Cyberdeck's own session-start hook is worker-scoped.
    * `--strict-mcp-config` is the MCP half of the same bound and is emitted next to the config it
    * constrains, in `addCyberdeckMcp`.
+   *
+   * This deliberately does *not* pass `--disable-slash-commands`. `claude --help` describes that
+   * flag as "Disable all skills", but measured against Claude Code 2.1.220 it empties the entire
+   * command registry: the `init` event reports `slash_commands: []` and drops the `Skill` tool, so
+   * built-ins go too and `/mcp` renders `No commands match "/mcp"`. `/mcp` is the only way to finish
+   * a connector's OAuth flow, and `/context` and `/compact` are the operator's only manual levers
+   * over the pressure this bound exists to manage, so an orchestrator cockpit without them is not
+   * usable. Measured here (2.1.220, `-p`, prompt tokens for one trivial turn): ambient 13,003;
+   * `--setting-sources project,local` 7,703; adding `--disable-slash-commands` 5,837. User scope is
+   * worth 5,300 tokens and this code still excludes it; the flag's remaining 1,866 tokens are the
+   * built-in command surface itself, under 1% of a 200k window, and are the operator's cockpit.
    */
   private addOrchestratorIsolation(args: string[], session: SessionRecord): void {
     if (session.kind !== "orchestrator") return;
-    args.push("--disable-slash-commands");
     args.push("--setting-sources", "project,local");
   }
 

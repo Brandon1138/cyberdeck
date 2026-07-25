@@ -199,10 +199,20 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
 
   it("bounds an orchestrator's ambient context", () => {
     // The orchestrator's authority is Cyberdeck's tools, so the operator's skill and plugin surface
-    // is excluded rather than compacted away turn after turn.
+    // is excluded rather than compacted away turn after turn. Dropping user scope is what does it.
     const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ kind: "orchestrator" }));
-    expect(spec.args).toContain("--disable-slash-commands");
     expect(spec.args.slice(spec.args.indexOf("--setting-sources"))).toContain("project,local");
+  });
+
+  it("leaves an orchestrator's built-in slash commands working", () => {
+    // --disable-slash-commands is documented as "Disable all skills" but empties the whole command
+    // registry in 2.1.220, taking /mcp with it — and /mcp is the only way to finish a connector's
+    // OAuth flow from inside the cockpit.
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.args).not.toContain("--disable-slash-commands");
+    expect(spec.args).toContain("--setting-sources");
+    expect(spec.args).toContain("--strict-mcp-config");
   });
 
   it("makes an orchestrator's injected MCP config exclusive", () => {
@@ -235,7 +245,7 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
   it("keeps a resumed orchestrator bounded the same way", () => {
     const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
       .buildResumeSpec(session({ kind: "orchestrator" }));
-    expect(spec.args).toContain("--disable-slash-commands");
+    expect(spec.args).not.toContain("--disable-slash-commands");
     expect(spec.args).toContain("--setting-sources");
     expect(spec.args).toContain("--strict-mcp-config");
   });
