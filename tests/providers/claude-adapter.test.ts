@@ -157,27 +157,54 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(spec.env.DISABLE_UPDATES).toBe("1");
   });
 
-  it("bounds an orchestrator's ambient context without touching MCP", () => {
+  it("bounds an orchestrator's ambient context", () => {
     // The orchestrator's authority is Cyberdeck's tools, so the operator's skill and plugin surface
     // is excluded rather than compacted away turn after turn.
     const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ kind: "orchestrator" }));
     expect(spec.args).toContain("--disable-slash-commands");
     expect(spec.args.slice(spec.args.indexOf("--setting-sources"))).toContain("project,local");
+  });
+
+  it("makes an orchestrator's injected MCP config exclusive", () => {
+    // --mcp-config only *adds* to the operator's configured servers. Without --strict-mcp-config an
+    // orchestrator is handed Cyberdeck's twelve tools plus every ambient server's definitions.
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.args).toContain("--mcp-config");
+    expect(spec.args).toContain("--strict-mcp-config");
+  });
+
+  it("never emits strict MCP isolation without the config it constrains", () => {
+    // The flag alone means "no MCP servers at all", which is not the bound this establishes.
+    const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.args).not.toContain("--mcp-config");
     expect(spec.args).not.toContain("--strict-mcp-config");
   });
 
   it("leaves a worker's environment alone", () => {
-    // Workers legitimately use the operator's skills, and Cyberdeck's own session-start hook is
-    // installed in user settings, so neither flag may leak outside orchestrator launches.
-    const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ kind: "worker" }));
+    // Workers legitimately use the operator's skills and MCP servers, and Cyberdeck's own
+    // session-start hook is installed in user settings, so no bound may leak outside orchestrators.
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildLaunchSpec(session({ kind: "worker" }));
     expect(spec.args).not.toContain("--disable-slash-commands");
     expect(spec.args).not.toContain("--setting-sources");
+    expect(spec.args).toContain("--mcp-config");
+    expect(spec.args).not.toContain("--strict-mcp-config");
   });
 
   it("keeps a resumed orchestrator bounded the same way", () => {
-    const spec = new ClaudeProviderAdapter().buildResumeSpec(session({ kind: "orchestrator" }));
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildResumeSpec(session({ kind: "orchestrator" }));
     expect(spec.args).toContain("--disable-slash-commands");
     expect(spec.args).toContain("--setting-sources");
+    expect(spec.args).toContain("--strict-mcp-config");
+  });
+
+  it("keeps a resumed worker's MCP surface unchanged", () => {
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildResumeSpec(session({ kind: "worker" }));
+    expect(spec.args).toContain("--mcp-config");
+    expect(spec.args).not.toContain("--strict-mcp-config");
   });
 
   it("maps read-only to plan and never emits a bypass permission mode", () => {

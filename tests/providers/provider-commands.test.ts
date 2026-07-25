@@ -290,6 +290,7 @@ describe("ClaudeProviderAdapter", () => {
       "project,local",
       "--mcp-config",
       expect.stringContaining(record.id),
+      "--strict-mcp-config",
     ]);
   });
 });
