@@ -285,6 +285,9 @@ describe("ClaudeProviderAdapter", () => {
       "haiku",
       "--append-system-prompt",
       "Cyberdeck orchestrator guidance",
+      "--disable-slash-commands",
+      "--setting-sources",
+      "project,local",
       "--mcp-config",
       expect.stringContaining(record.id),
     ]);

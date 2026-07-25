@@ -157,6 +157,29 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(spec.env.DISABLE_UPDATES).toBe("1");
   });
 
+  it("bounds an orchestrator's ambient context without touching MCP", () => {
+    // The orchestrator's authority is Cyberdeck's tools, so the operator's skill and plugin surface
+    // is excluded rather than compacted away turn after turn.
+    const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.args).toContain("--disable-slash-commands");
+    expect(spec.args.slice(spec.args.indexOf("--setting-sources"))).toContain("project,local");
+    expect(spec.args).not.toContain("--strict-mcp-config");
+  });
+
+  it("leaves a worker's environment alone", () => {
+    // Workers legitimately use the operator's skills, and Cyberdeck's own session-start hook is
+    // installed in user settings, so neither flag may leak outside orchestrator launches.
+    const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ kind: "worker" }));
+    expect(spec.args).not.toContain("--disable-slash-commands");
+    expect(spec.args).not.toContain("--setting-sources");
+  });
+
+  it("keeps a resumed orchestrator bounded the same way", () => {
+    const spec = new ClaudeProviderAdapter().buildResumeSpec(session({ kind: "orchestrator" }));
+    expect(spec.args).toContain("--disable-slash-commands");
+    expect(spec.args).toContain("--setting-sources");
+  });
+
   it("maps read-only to plan and never emits a bypass permission mode", () => {
     const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ sandbox: "read-only" }));
     expect(spec.args).toContain("plan");

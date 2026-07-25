@@ -47,6 +47,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       args.push("--effort", session.effort);
     }
     this.addProviderInstructions(args, session);
+    this.addOrchestratorIsolation(args, session);
     this.addCyberdeckMcp(args, session);
     if (initialPrompt !== undefined) {
       args.push("--", initialPrompt);
@@ -78,6 +79,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       args.push("--effort", session.effort);
     }
     this.addProviderInstructions(args, session);
+    this.addOrchestratorIsolation(args, session);
     this.addCyberdeckMcp(args, session);
     return {
       executable: "claude",
@@ -90,6 +92,20 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
   private addProviderInstructions(args: string[], session: SessionRecord): void {
     if (session.providerInstructions === undefined) return;
     args.push("--append-system-prompt", session.providerInstructions);
+  }
+
+  /**
+   * An orchestrator's authority is Cyberdeck's own tools, so it launches against a bounded context
+   * rather than whatever the operator happens to have installed. Measured on a fleet orchestrator:
+   * the ambient skill and plugin surface put ~86k tokens into the prompt before the first turn and
+   * ~150k after each compaction, which left two or three usable turns and made autocompaction
+   * thrash. Both flags are orchestrator-only; workers keep the operator's environment, and dropping
+   * user settings here is safe because Cyberdeck's own session-start hook is worker-scoped.
+   */
+  private addOrchestratorIsolation(args: string[], session: SessionRecord): void {
+    if (session.kind !== "orchestrator") return;
+    args.push("--disable-slash-commands");
+    args.push("--setting-sources", "project,local");
   }
 
   private addCyberdeckMcp(args: string[], session: SessionRecord): void {
