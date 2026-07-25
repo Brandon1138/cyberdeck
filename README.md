@@ -128,7 +128,12 @@ invocation. Killing the entire tmux server still leaves the broker and its sessi
 An orchestrator is a durable, typed Cyberdeck binding, not a privileged role label. The binding pins
 an explicit provider, optional model and reasoning effort, workspace or fleet scope, read-only filesystem sandbox, and a
 capability grant. Cyberdeck injects its session-scoped stdio MCP server into broker-launched Codex
-and Claude sessions. Broker RPC remains the source of truth and rechecks every MCP call.
+and Claude sessions. Broker RPC remains the source of truth and rechecks every MCP call. Cursor and
+Antigravity sessions receive no MCP server: neither `agent` nor `agy` accepts a per-invocation MCP
+server definition, so those providers can be workers but not orchestrators or workflow
+participants. See [docs/architecture/provider-parity.md](docs/architecture/provider-parity.md) for
+the full per-provider matrix — permission mapping, MCP injection, effort support, and resume — with
+source citations.
 
 Opening an orchestrator cockpit starts the provider TUI without a positional user prompt, so startup
 does not automatically submit a model turn. Guidance is supplied through native provider
