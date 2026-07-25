@@ -133,7 +133,7 @@ describe("SessionRegistry", () => {
     expect(record).toMatchObject({ provider: "claude", model: "opus", role: "writer", pid: 1000 });
   });
 
-  it("rehydrates a broker-lost conversation as interrupted and resumes exact provider state", async () => {
+  it("rehydrates a conversation lost mid-turn as interrupted and resumes exact provider state", async () => {
     const persisted = {
       id: "11111111-1111-4111-8111-111111111111",
       provider: "codex" as const,
@@ -151,7 +151,7 @@ describe("SessionRegistry", () => {
       pid: 4321,
       exitCode: null,
       childIds: [],
-      attentionState: "done" as const,
+      attentionState: "working" as const,
       latestPreview: "Persisted answer",
     };
     const ptys: FakePty[] = [];

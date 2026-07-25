@@ -26,6 +26,8 @@ import {
   truncateResult,
   type ProviderTerminalActivity,
 } from "../runtime/terminal-replay.js";
+import { detectSessionFatalError } from "../runtime/session-liveness.js";
+import { selectExpiredThreads } from "../domain/thread-retention.js";
 
 export interface PtyHandle {
   readonly pid: number;
@@ -77,6 +79,10 @@ interface RuntimeSession {
   observedWorking: boolean;
   completedTurns: number;
   latestResult?: string;
+  /** Set once a fatal provider fault has been recorded, so replay never re-reports the same death. */
+  fatalReported: boolean;
+  /** The stop that killed this session was a broker shutdown of an already-finished thread. */
+  outcomePreserved?: boolean;
   idleTimer?: ReturnType<typeof setTimeout>;
   /** Serializes provider launch-artifact work so a pending cleanup cannot delete a fresh resume. */
   launchTail: Promise<void>;
@@ -161,6 +167,8 @@ export class SessionRegistry {
   private readonly controllerReleasedListeners = new Set<(sessionId: string) => void>();
   private readonly sessionUpdateListeners = new Set<(sessionId: string) => void>();
   private readonly recovery: Promise<void>;
+  /** Set by `stopAll` so the shutdown kill is distinguishable from an operator stop. */
+  private shuttingDown = false;
 
   constructor(private readonly options: SessionRegistryOptions) {
     const writes: Promise<void>[] = [];
@@ -173,9 +181,16 @@ export class SessionRegistry {
         activity: "unknown",
         observedWorking: false,
         completedTurns: 0,
+        fatalReported: false,
         launchTail: Promise.resolve(),
       });
-      if (record.attentionState === "interrupted") {
+      // Recovery rewrites lifecycle fields, so the catalog is only authoritative once the rewrite
+      // is written back. Persist whenever recovery actually changed the outcome, not just for the
+      // interrupted case — a thread recovered as finished has to survive the *next* restart too.
+      const rewritten = record.executionState !== stored.executionState
+        || record.attentionState !== stored.attentionState
+        || record.exitCode !== stored.exitCode;
+      if (rewritten) {
         writes.push(this.options.store?.put(this.cloneRecord(record)) ?? Promise.resolve());
       }
     }
@@ -258,6 +273,7 @@ export class SessionRegistry {
       activity: "unknown",
       observedWorking: false,
       completedTurns: 0,
+      fatalReported: false,
       launchTail: Promise.resolve(),
     };
     this.sessions.set(id, runtime);
@@ -326,9 +342,12 @@ export class SessionRegistry {
         ? { status: "ready", record, requiresResume: false }
         : { status: "unavailable", record };
     }
+    // A thread whose outcome survived a restart is still the operator's last thread, so it offers
+    // a resume rather than dropping them back to the list because their agent happened to finish.
+    // A stopped, failed, or errored thread stays stale: those are outcomes to look at, not resume.
     if (
-      runtime.record.executionState === "cancelled"
-      && runtime.record.attentionState === "interrupted"
+      runtime.record.exitCode !== null
+      && (runtime.record.attentionState === "interrupted" || runtime.record.attentionState === "done")
     ) {
       return {
         status: "ready",
@@ -507,10 +526,16 @@ export class SessionRegistry {
       this.requirePty(runtime).kill();
       return;
     }
-    if (runtime.record.executionState !== "active") return;
+    // An errored session still owns a running OS process, so stop must be able to reach it even
+    // though the broker no longer treats it as active.
+    if (runtime.record.executionState !== "active" && runtime.record.executionState !== "errored") return;
     runtime.stopRequested = true;
     runtime.record.executionState = "cancelled";
-    await this.setAttention(runtime, "stopping", true);
+    // Shutting the broker down does not undo what an agent already delivered. A thread that had
+    // finished its task keeps that outcome through the kill, so it rehydrates as Done rather than
+    // as Stopped. An operator-initiated stop still reads as Stopped — that is their action.
+    runtime.outcomePreserved = this.shuttingDown && runtime.record.attentionState === "done";
+    if (runtime.outcomePreserved !== true) await this.setAttention(runtime, "stopping", true);
     this.requirePty(runtime).kill();
     await this.appendEvent("session.stopped", sessionId, {});
     await this.appendTranscript(sessionId, "lifecycle", "broker", "session stopped", {});
@@ -523,8 +548,18 @@ export class SessionRegistry {
     return this.treeProgress(sessionId);
   }
 
+  /**
+   * Shutdown path: stop the sessions that still own a process.
+   *
+   * Threads whose process is already gone are skipped deliberately. `stop` on a finished thread is
+   * the operator's explicit "mark this stopped" action and rewrites its attention state, so running
+   * it across the whole fleet at shutdown rewrote every Done thread to Stopped — the finished state
+   * was lost on the way out, before recovery ever got a chance to restore it.
+   */
   async stopAll(): Promise<void> {
-    for (const sessionId of this.sessions.keys()) {
+    this.shuttingDown = true;
+    for (const [sessionId, runtime] of this.sessions) {
+      if (runtime.record.exitCode !== null) continue;
       await this.stop(sessionId);
     }
   }
@@ -534,6 +569,10 @@ export class SessionRegistry {
     if (runtime.record.executionState === "active" || runtime.record.executionState === "starting") {
       throw new RegistryError("SESSION_ALREADY_ACTIVE", "Session is already active");
     }
+
+    // An errored session's process outlived its provider session. Resuming would otherwise leave
+    // that orphan running alongside the replacement, so it is killed before the respawn.
+    if (runtime.record.executionState === "errored") runtime.pty?.kill();
 
     const adapter = this.requireAdapter(runtime.record.provider);
     const record = this.cloneRecord(runtime.record);
@@ -555,6 +594,7 @@ export class SessionRegistry {
     runtime.record.launchRecord = resolvedLaunchRecord(resumeSpec, "resume");
     runtime.activity = "unknown";
     runtime.observedWorking = false;
+    runtime.fatalReported = false;
     if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
     delete runtime.idleTimer;
     pty.onOutput((chunk) => this.broadcast(runtime, chunk));
@@ -661,6 +701,34 @@ export class SessionRegistry {
     return group.map(({ record }) => this.cloneRecord(record));
   }
 
+  /**
+   * Retire finished threads that have fallen outside the retention policy.
+   *
+   * Only threads whose process is gone are candidates, so this frees history, never capacity. A
+   * failure to retire one thread is not allowed to abort the sweep — retention is housekeeping, and
+   * the next sweep will retry.
+   */
+  async sweepRetention(now: number = Date.now()): Promise<string[]> {
+    const expired = selectExpiredThreads(this.list(), this.options.config.threadRetention, now);
+    const retired: string[] = [];
+    for (const sessionId of expired) {
+      if (!this.sessions.has(sessionId)) continue;
+      try {
+        await this.delete(sessionId);
+        retired.push(sessionId);
+      } catch {
+        // Left in place on purpose; a thread that cannot be retired now stays visible.
+      }
+    }
+    return retired;
+  }
+
+  /**
+   * Worker slots are held by *running* agents only. A finished thread is history: it owns no
+   * process, and an `errored` thread owns a process that can no longer do work, so neither may
+   * count against the ceiling. This is what lets the fleet view accumulate finished threads
+   * without the operator stopping and deleting them to reclaim capacity.
+   */
   private activeWorkerCount(): number {
     return [...this.sessions.values()].filter(({ record }) =>
       record.executionState === "active" && record.kind !== "orchestrator"
@@ -774,6 +842,14 @@ export class SessionRegistry {
     const pty = runtime.pty;
     if (pty === undefined) return;
     const replay = pty.snapshot().toString("utf8");
+    if (this.observeFatalError(runtime, replay)) {
+      // The bytes still reach anyone attached — the operator should be able to read the fault —
+      // but no activity is derived from them. A dead session has no activity to derive.
+      runtime.controller?.output(chunk);
+      for (const watcher of runtime.watchers.values()) watcher.output(chunk);
+      this.notifySessionUpdate(runtime.record.id);
+      return;
+    }
     const activity = providerTerminalActivity(runtime.record.provider, replay);
     if (activity === "working") {
       runtime.observedWorking = true;
@@ -808,6 +884,44 @@ export class SessionRegistry {
     this.notifySessionUpdate(runtime.record.id);
   }
 
+  /**
+   * Detect a session that has died inside a process that is still running, and move it to a
+   * terminal state.
+   *
+   * Liveness used to be inferred from the PTY being open, which is not evidence of anything: a
+   * worker killed by an unrecoverable API 4xx keeps its process, so it reported `active` with a
+   * null exit code, consumed a worker slot forever, and could even show `needs-input` — inviting
+   * the operator to type at a session that can never read it again. The verdict comes from the
+   * session's last result instead.
+   */
+  private observeFatalError(runtime: RuntimeSession, replay: string): boolean {
+    if (runtime.record.executionState === "errored") return true;
+    if (runtime.fatalReported || runtime.record.executionState !== "active") return false;
+    const fatal = detectSessionFatalError(replay);
+    if (fatal === undefined) return false;
+
+    runtime.fatalReported = true;
+    if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
+    delete runtime.idleTimer;
+    runtime.activity = "unknown";
+    runtime.observedWorking = false;
+    runtime.latestResult = fatal.detail;
+    // exitCode stays null on purpose: the process is still there, and deleting the thread must
+    // still require stopping it. Only the slot and the "can accept input" claim are released.
+    runtime.record.executionState = "errored";
+    void this.appendEvent("session.errored", runtime.record.id, {
+      reason: fatal.reason,
+      detail: fatal.detail,
+      pid: runtime.record.pid,
+    }).catch(() => undefined);
+    void this.appendTranscript(runtime.record.id, "lifecycle", "broker", "session errored", {
+      reason: fatal.reason,
+      detail: fatal.detail,
+    }).catch(() => undefined);
+    void this.setAttention(runtime, "failed", true).catch(() => undefined);
+    return true;
+  }
+
   private handleExit(runtime: RuntimeSession, exitCode: number, signal?: number): void {
     if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
     delete runtime.idleTimer;
@@ -824,7 +938,7 @@ export class SessionRegistry {
     runtime.record.attachmentState = "detached";
     runtime.record.updatedAt = new Date().toISOString();
     runtime.record.attentionState = runtime.stopRequested
-      ? "stopped"
+      ? (runtime.outcomePreserved === true ? "done" : "stopped")
       : exitCode === 0
         ? "done"
         : "failed";
@@ -839,7 +953,9 @@ export class SessionRegistry {
       exitCode,
       signal: signal ?? null,
     }).catch(() => undefined);
-    void this.persist(runtime);
+    // A thread reaching a terminal state is the moment the retained set can grow, so it is also
+    // the moment to check whether the oldest history has fallen out of the retention policy.
+    void this.persist(runtime).then(() => this.sweepRetention()).catch(() => undefined);
     // The provider process is gone, so its launch artifacts are no longer referenced by anything.
     // A resume rebuilds them from the record; keeping them alive here would only widen the window
     // in which a private payload file sits on disk.
@@ -977,13 +1093,29 @@ export class SessionRegistry {
     await this.options.store?.put(this.cloneRecord(runtime.record));
   }
 
+  /**
+   * Rebuild a durable record into a runtime one after a restart.
+   *
+   * The broker cannot inherit a PTY it did not spawn, so nothing that was live before the restart
+   * is live now. What survives is the *outcome*: a thread whose last observed state was `done` had
+   * already finished its task, and losing the process loses nothing of it — it rehydrates as a
+   * finished thread. Only a thread that was mid-turn (working, needs-input, stopping) actually had
+   * work cut off, and only that thread is `interrupted`. Previously every live record was recovered
+   * as interrupted, which is why finished threads came back as anything but Done.
+   */
   private recoverRecord(stored: SessionRecord): SessionRecord {
     const record = this.cloneRecord(stored);
     record.attachmentState = "detached";
-    if (record.executionState === "active" || record.executionState === "starting") {
-      record.executionState = "cancelled";
+    if (
+      record.executionState === "active"
+      || record.executionState === "starting"
+      || record.executionState === "errored"
+    ) {
+      const finished = record.executionState === "active" && record.attentionState === "done";
+      const errored = record.executionState === "errored";
+      record.executionState = finished ? "exited" : errored ? "failed" : "cancelled";
       record.exitCode = 0;
-      record.attentionState = "interrupted";
+      record.attentionState = finished ? "done" : errored ? "failed" : "interrupted";
       record.updatedAt = new Date().toISOString();
       return record;
     }

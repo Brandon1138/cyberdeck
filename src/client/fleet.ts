@@ -388,6 +388,9 @@ export function threadStatus(thread: FleetThread): ThreadStatus {
     case "starting": return "Working";
     case "exited": return "Done";
     case "failed": return "Failed";
+    // A session that died inside a live process. It reads as Failed rather than as whatever its
+    // last terminal frame happened to look like, so nobody is invited to type at it.
+    case "errored": return "Failed";
     case "cancelled": return thread.record.exitCode === null ? "Stopping" : "Stopped";
     case "active": {
       const activity = providerTerminalActivity(thread.record.provider, thread.replay);
@@ -1347,8 +1350,13 @@ function renderHeader(
 ): string[] {
   const statuses = threads.map(threadStatus);
   const count = (status: ThreadStatus) => statuses.filter((candidate) => candidate === status).length;
+  // "agents" counts agents that are actually running. Finished threads stay listed as history and
+  // that history is now durable across restarts, so counting them here would report a fleet far
+  // busier than it is — done means an agent finished a task, not that one is consuming resources.
+  const running = threads.filter(({ record }) =>
+    record.executionState === "active" || record.executionState === "starting").length;
   const counts = [
-    `${threads.length} agents`,
+    `${running} agents`,
     `${count("Needs input")} needs input`,
     `${count("Working")} working`,
     `${count("Done")} done`,
@@ -1583,7 +1591,9 @@ function existingOrchestrators(snapshot: FleetSnapshot): SessionRecord[] {
         record.executionState === "active"
         || (
           record.executionState === "cancelled"
-          && record.attentionState === "interrupted"
+          // `done` joins `interrupted` here because a broker shutdown now preserves the outcome of
+          // an orchestrator that had finished its turn; it is still reconnectable.
+          && (record.attentionState === "interrupted" || record.attentionState === "done")
         )
       ));
 }

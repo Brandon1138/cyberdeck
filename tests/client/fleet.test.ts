@@ -122,6 +122,64 @@ describe("fleet presentation", () => {
     expect(needsInputLine).toMatch(/ 2m$/u);
   });
 
+  it("counts only running agents in the header while finished threads stay listed", () => {
+    // The shape the fleet has right after a broker restart: durable history plus one live agent.
+    const snapshot = fleet(
+      { record: session({ name: "Still running", attentionState: "working", displayOrder: 0 }) },
+      {
+        record: session({
+          id: "22222222-2222-4222-8222-222222222222",
+          name: "Finished earlier",
+          executionState: "exited",
+          exitCode: 0,
+          attentionState: "done",
+          displayOrder: 1,
+        }),
+      },
+      {
+        record: session({
+          id: "33333333-3333-4333-8333-333333333333",
+          name: "Finished before that",
+          executionState: "exited",
+          exitCode: 0,
+          attentionState: "done",
+          displayOrder: 2,
+        }),
+      },
+      {
+        record: session({
+          id: "44444444-4444-4444-8444-444444444444",
+          name: "Died mid-task",
+          executionState: "errored",
+          attentionState: "failed",
+          displayOrder: 3,
+        }),
+      },
+    );
+
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false,
+      width: 150,
+      height: 40,
+      now: NOW_MS,
+      home: "/Users/brandon",
+    });
+
+    expect(rendered).toContain("1 agents · 0 needs input · 1 working · 2 done · 1 failed");
+    expect(rendered).toContain("Finished earlier");
+    expect(rendered).toContain("Finished before that");
+  });
+
+  it("reads a session that died inside a live process as failed, never as needs input", () => {
+    const errored = session({ executionState: "errored", attentionState: "failed" });
+    expect(threadStatus({ record: errored, replay: "Codex needs your approval\nAllow" })).toBe("Failed");
+    // Even with no persisted attention state, the execution state alone settles it.
+    expect(threadStatus({
+      record: session({ executionState: "errored" }),
+      replay: "Codex needs your approval\nAllow",
+    })).toBe("Failed");
+  });
+
   it("colors both Done and Needs input markers and status labels", () => {
     const done = session({ attentionState: "done", displayOrder: 0 });
     const needsInput = session({
