@@ -3,6 +3,7 @@ import {
   compactTerminalResult,
   latestAssistantParagraphPreview,
   providerTerminalActivity,
+  truncateResult,
 } from "../../src/runtime/terminal-replay.js";
 
 describe("terminal replay semantics", () => {
@@ -68,6 +69,14 @@ describe("terminal replay semantics", () => {
     expect(result).toContain("1042");
     expect(result).not.toContain("plan mode on");
     expect(result.length).toBeLessThanOrEqual(240);
+  });
+
+  it("truncates deterministically from the head with an original-length marker", () => {
+    const result = truncateResult(`DECISIVE-BEGINNING-${"x".repeat(500)}-DISTINCTIVE-END`, 240);
+    expect(result).toMatch(/^DECISIVE-BEGINNING-/u);
+    expect(result).toContain("[elided; original length: 535 characters]");
+    expect(result).not.toContain("DISTINCTIVE-END");
+    expect(result).toHaveLength(240);
   });
 
   it("uses the beginning of the latest assistant reply instead of its final paragraph", () => {

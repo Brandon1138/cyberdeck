@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { homedir } from "node:os";
+import { readdir, rename, stat, unlink } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { join } from "node:path";
 import {
   ThreadEventSchema,
@@ -10,6 +13,11 @@ import {
 } from "../domain/thread.js";
 import { openPrivateAppendFile } from "./private-files.js";
 
+const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
+const DEFAULT_RETAINED_FILES = 3;
+const MAX_REMEMBERED_TURN_IDS = 100_000;
+const CODEX_SESSION_MATCH_WINDOW_MS = 30_000;
+
 export interface AppendThreadEvent {
   sessionId: string;
   kind: ThreadEventKind;
@@ -18,94 +26,490 @@ export interface AppendThreadEvent {
   data?: Record<string, unknown>;
 }
 
+export interface CaptureProviderTurns {
+  sessionId: string;
+  provider: string;
+  cwd: string;
+  createdAt: string;
+  turnNumber: number;
+  fallbackText?: string;
+}
+
 export interface ThreadTranscriptStoreOptions {
   now?: () => string;
   idFactory?: () => string;
+  maxBytes?: number;
+  retainedFiles?: number;
+  claudeProjectsDirectory?: string;
+  codexSessionsDirectory?: string;
+}
+
+interface NativeTurn {
+  id: string;
+  occurredAt: string;
+  text: string;
 }
 
 /**
- * A local, append-only transcript shared by all interactive threads.
+ * Bounded semantic transcript.
  *
- * Cursors are global and monotonic, allowing an orchestrator to ask for every change since its last
- * observation without polling and diffing bounded PTY replay buffers. The file is user-readable
- * only and every append is fsynced before it resolves.
+ * New events use semantic-transcript.jsonl so broker startup never opens or parses legacy
+ * transcript.jsonl. Reads stream retained segments. Provider output is one native final response
+ * per turn; Cursor and Antigravity use explicitly marked terminal-replay fallback turns.
  */
 export class ThreadTranscriptStore {
   readonly path: string;
-  private readonly events: ThreadEvent[] = [];
+  readonly legacyPath: string;
   private initialized = false;
   private initialization: Promise<void> | undefined;
   private writeTail = Promise.resolve();
+  private nextCursor = 0;
+  private readonly semanticTurnIds = new Set<string>();
+  private readonly nativePaths = new Map<string, string>();
+  private readonly claimedCodexPaths = new Map<string, string>();
 
   constructor(
     stateDirectory: string,
     private readonly options: ThreadTranscriptStoreOptions = {},
   ) {
-    this.path = join(stateDirectory, "threads", "transcript.jsonl");
+    const threadsDirectory = join(stateDirectory, "threads");
+    this.path = join(threadsDirectory, "semantic-transcript.jsonl");
+    this.legacyPath = join(threadsDirectory, "transcript.jsonl");
   }
 
   async init(): Promise<void> {
     if (this.initialized) return;
     if (this.initialization !== undefined) return this.initialization;
-    this.initialization = this.load();
+    this.initialization = this.loadMetadata();
     await this.initialization;
     this.initialized = true;
   }
 
   async append(input: AppendThreadEvent): Promise<ThreadEvent> {
     await this.init();
+    const text = this.boundEventText(input.text);
     const event = ThreadEventSchema.parse({
       id: this.options.idFactory?.() ?? randomUUID(),
-      cursor: (this.events.at(-1)?.cursor ?? 0) + 1,
+      cursor: ++this.nextCursor,
       sessionId: input.sessionId,
       occurredAt: this.options.now?.() ?? new Date().toISOString(),
       kind: input.kind,
       source: input.source,
-      ...(input.text === undefined ? {} : { text: input.text }),
-      data: input.data ?? {},
+      ...(text === undefined ? {} : { text }),
+      data: text === input.text
+        ? input.data ?? {}
+        : { ...input.data, storageOriginalLength: input.text?.length },
     });
-    this.events.push(event);
-    this.writeTail = this.writeTail.then(() => this.persist(event));
+    this.writeTail = this.writeTail.then(
+      () => this.persist(event),
+      () => this.persist(event),
+    );
     await this.writeTail;
+    this.rememberSemanticTurn(event);
     return event;
+  }
+
+  async captureProviderTurns(input: CaptureProviderTurns): Promise<ThreadEvent[]> {
+    await this.init();
+    const nativeTurns = input.provider === "claude"
+      ? await this.readClaudeTurns(input)
+      : input.provider === "codex"
+        ? await this.readCodexTurns(input)
+        : [];
+    const turns = nativeTurns.length > 0
+      ? nativeTurns
+      : input.provider === "cursor" || input.provider === "antigravity"
+        ? [{
+            id: `fallback:${input.turnNumber}`,
+            occurredAt: this.options.now?.() ?? new Date().toISOString(),
+            text: input.fallbackText ?? "No useful provider output yet",
+          }]
+        : [];
+    const captured: ThreadEvent[] = [];
+    for (const turn of turns) {
+      const semanticTurnId = `${input.provider}:${turn.id}`;
+      if (this.semanticTurnIds.has(this.semanticKey(input.sessionId, semanticTurnId))) continue;
+      captured.push(await this.append({
+        sessionId: input.sessionId,
+        kind: "turn",
+        source: "provider",
+        text: turn.text,
+        data: {
+          semantic: true,
+          semanticTurnId,
+          provider: input.provider,
+          transport: nativeTurns.length > 0 ? "provider-native" : "terminal-replay-fallback",
+          originalLength: turn.text.length,
+          turnNumber: input.turnNumber + captured.length,
+          providerOccurredAt: turn.occurredAt,
+        },
+      }));
+    }
+    return captured;
   }
 
   async read(sessionId: string, afterCursor = 0, limit = 200): Promise<ThreadReadResult> {
     await this.init();
     const boundedLimit = Math.max(1, Math.min(limit, 1_000));
-    const events = this.events
-      .filter((event) => event.sessionId === sessionId && event.cursor > afterCursor)
-      .slice(0, boundedLimit);
-    return { events, nextCursor: events.at(-1)?.cursor ?? afterCursor };
+    return this.streamEvents(
+      (event) => event.sessionId === sessionId && event.cursor > afterCursor,
+      afterCursor,
+      boundedLimit,
+    );
   }
 
   async changes(afterCursor = 0, limit = 500): Promise<ThreadReadResult> {
     await this.init();
     const boundedLimit = Math.max(1, Math.min(limit, 2_000));
-    const events = this.events.filter((event) => event.cursor > afterCursor).slice(0, boundedLimit);
+    return this.streamEvents(
+      (event) => event.cursor > afterCursor,
+      afterCursor,
+      boundedLimit,
+    );
+  }
+
+  private async streamEvents(
+    include: (event: ThreadEvent) => boolean,
+    afterCursor: number,
+    limit: number,
+  ): Promise<ThreadReadResult> {
+    const events: ThreadEvent[] = [];
+    for (const path of this.segmentPathsOldestFirst()) {
+      await visitLines(path, (line) => {
+        const event = parseThreadEvent(line);
+        if (event !== undefined && include(event)) events.push(event);
+        return events.length < limit;
+      });
+      if (events.length >= limit) break;
+    }
     return { events, nextCursor: events.at(-1)?.cursor ?? afterCursor };
   }
 
-  private async load(): Promise<void> {
-    const content = await readFile(this.path, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    });
-    const lines = content.split("\n");
-    if (!content.endsWith("\n")) lines.pop();
-    for (const line of lines) {
-      if (line.trim() === "") continue;
-      this.events.push(ThreadEventSchema.parse(JSON.parse(line)));
+  private async loadMetadata(): Promise<void> {
+    for (const path of this.segmentPathsOldestFirst()) {
+      await visitLines(path, (line) => {
+        const event = parseThreadEvent(line);
+        if (event === undefined) return true;
+        this.nextCursor = Math.max(this.nextCursor, event.cursor);
+        this.rememberSemanticTurn(event);
+        return true;
+      });
     }
   }
 
+  private rememberSemanticTurn(event: ThreadEvent): void {
+    const semanticTurnId = event.data.semanticTurnId;
+    if (typeof semanticTurnId === "string") {
+      const key = this.semanticKey(event.sessionId, semanticTurnId);
+      this.semanticTurnIds.delete(key);
+      this.semanticTurnIds.add(key);
+      while (this.semanticTurnIds.size > MAX_REMEMBERED_TURN_IDS) {
+        const oldest = this.semanticTurnIds.values().next().value;
+        if (oldest === undefined) break;
+        this.semanticTurnIds.delete(oldest);
+      }
+    }
+  }
+
+  private semanticKey(sessionId: string, semanticTurnId: string): string {
+    return `${sessionId}:${semanticTurnId}`;
+  }
+
   private async persist(event: ThreadEvent): Promise<void> {
+    const serialized = `${JSON.stringify(event)}\n`;
+    await this.rotateIfNeeded(Buffer.byteLength(serialized));
     const handle = await openPrivateAppendFile(this.path);
     try {
-      await handle.write(`${JSON.stringify(event)}\n`, undefined, "utf8");
-      await handle.sync();
+      await handle.write(serialized, undefined, "utf8");
     } finally {
       await handle.close();
     }
   }
+
+  private boundEventText(text: string | undefined): string | undefined {
+    if (text === undefined) return undefined;
+    const maximumBytes = Math.max(256, this.maximumFileBytes() - 4_096);
+    if (Buffer.byteLength(text) <= maximumBytes) return text;
+    const marker = `\n\n[storage elision; original length: ${text.length} characters]`;
+    const prefixBytes = maximumBytes - Buffer.byteLength(marker);
+    const prefix = Buffer.from(text).subarray(0, prefixBytes).toString("utf8").replace(/\ufffd$/u, "");
+    return `${prefix}${marker}`;
+  }
+
+  private async rotateIfNeeded(nextBytes: number): Promise<void> {
+    const maximum = this.maximumFileBytes();
+    if (nextBytes > maximum) {
+      throw new Error(`Semantic transcript event exceeds ${maximum} byte segment limit`);
+    }
+    const current = await stat(this.path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (current === undefined || current.size === 0 || current.size + nextBytes <= maximum) return;
+    const retained = Math.max(1, this.options.retainedFiles ?? DEFAULT_RETAINED_FILES);
+    await unlink(this.rotatedPath(retained)).catch(ignoreMissing);
+    for (let index = retained - 1; index >= 1; index -= 1) {
+      await rename(this.rotatedPath(index), this.rotatedPath(index + 1)).catch(ignoreMissing);
+    }
+    await rename(this.path, this.rotatedPath(1));
+  }
+
+  private maximumFileBytes(): number {
+    return Math.max(1_024, this.options.maxBytes ?? DEFAULT_MAX_BYTES);
+  }
+
+  private segmentPathsOldestFirst(): string[] {
+    const retained = Math.max(1, this.options.retainedFiles ?? DEFAULT_RETAINED_FILES);
+    const paths: string[] = [];
+    for (let index = retained; index >= 1; index -= 1) paths.push(this.rotatedPath(index));
+    paths.push(this.path);
+    return paths;
+  }
+
+  private rotatedPath(index: number): string {
+    return join(this.path.replace(/\.jsonl$/u, `.${index}.jsonl`));
+  }
+
+  private async readClaudeTurns(input: CaptureProviderTurns): Promise<NativeTurn[]> {
+    const path = this.nativePaths.get(input.sessionId) ?? join(
+      this.options.claudeProjectsDirectory ?? join(homedir(), ".claude", "projects"),
+      claudeProjectSlug(input.cwd),
+      `${input.sessionId}.jsonl`,
+    );
+    const byId = new Map<string, NativeTurn>();
+    await visitLines(path, (line) => {
+      const turn = parseClaudeTurn(line, this.options.now);
+      if (turn !== undefined) byId.set(turn.id, turn);
+      return true;
+    });
+    if (byId.size > 0) this.nativePaths.set(input.sessionId, path);
+    return [...byId.values()].sort(compareNativeTurns);
+  }
+
+  private async readCodexTurns(input: CaptureProviderTurns): Promise<NativeTurn[]> {
+    const path = this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
+    if (path === undefined) return [];
+    this.nativePaths.set(input.sessionId, path);
+    this.claimedCodexPaths.set(path, input.sessionId);
+    const byId = new Map<string, NativeTurn>();
+    await visitLines(path, (line) => {
+      const turn = parseCodexTurn(line, this.options.now);
+      if (turn !== undefined) byId.set(turn.id, turn);
+      return true;
+    });
+    return [...byId.values()].sort(compareNativeTurns);
+  }
+
+  private async findCodexTranscript(input: CaptureProviderTurns): Promise<string | undefined> {
+    const root = this.options.codexSessionsDirectory
+      ?? join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "sessions");
+    const createdAt = Date.parse(input.createdAt);
+    const candidates: Array<{ path: string; distance: number; id: string }> = [];
+    for (const directory of candidateDayDirectories(root, createdAt)) {
+      const entries = await readdir(directory, { withFileTypes: true }).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return [];
+          throw error;
+        },
+      );
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+        const path = join(directory, entry.name);
+        const claimedBy = this.claimedCodexPaths.get(path);
+        if (claimedBy !== undefined && claimedBy !== input.sessionId) continue;
+        const metadata = await readCodexMetadata(path);
+        if (metadata === undefined || metadata.cwd !== input.cwd) continue;
+        const distance = Math.abs(Date.parse(metadata.timestamp) - createdAt);
+        if (distance <= CODEX_SESSION_MATCH_WINDOW_MS) {
+          candidates.push({ path, distance, id: metadata.id });
+        }
+      }
+    }
+    candidates.sort((left, right) =>
+      left.distance - right.distance || left.id.localeCompare(right.id)
+    );
+    return candidates[0]?.path;
+  }
+}
+
+export async function pruneLegacyTranscript(
+  stateDirectory: string,
+  confirmed: boolean,
+): Promise<{ path: string; removed: boolean }> {
+  const path = join(stateDirectory, "threads", "transcript.jsonl");
+  if (!confirmed) {
+    throw new Error("Legacy transcript prune requires --confirm-delete-legacy-transcript");
+  }
+  try {
+    await unlink(path);
+    return { path, removed: true };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { path, removed: false };
+    throw error;
+  }
+}
+
+function claudeProjectSlug(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9-]/gu, "-");
+}
+
+function candidateDayDirectories(root: string, timestamp: number): string[] {
+  const directories = new Set<string>();
+  for (const offset of [-86_400_000, 0, 86_400_000]) {
+    const date = new Date(timestamp + offset);
+    directories.add(join(
+      root,
+      String(date.getUTCFullYear()),
+      String(date.getUTCMonth() + 1).padStart(2, "0"),
+      String(date.getUTCDate()).padStart(2, "0"),
+    ));
+  }
+  return [...directories];
+}
+
+async function readCodexMetadata(
+  path: string,
+): Promise<{ id: string; timestamp: string; cwd: string } | undefined> {
+  let metadata: { id: string; timestamp: string; cwd: string } | undefined;
+  await visitLines(path, (line) => {
+    try {
+      const frame = JSON.parse(line) as {
+        type?: unknown;
+        payload?: {
+          id?: unknown;
+          timestamp?: unknown;
+          cwd?: unknown;
+          originator?: unknown;
+        };
+      };
+      const payload = frame.payload;
+      if (
+        frame.type === "session_meta"
+        && payload?.originator === "codex-tui"
+        && typeof payload.id === "string"
+        && typeof payload.timestamp === "string"
+        && typeof payload.cwd === "string"
+      ) {
+        metadata = { id: payload.id, timestamp: payload.timestamp, cwd: payload.cwd };
+      }
+    } catch {
+      // Ignore incomplete or unrelated provider frames.
+    }
+    return false;
+  });
+  return metadata;
+}
+
+function parseClaudeTurn(line: string, now: (() => string) | undefined): NativeTurn | undefined {
+  try {
+    const frame = JSON.parse(line) as {
+      type?: unknown;
+      timestamp?: unknown;
+      uuid?: unknown;
+      message?: {
+        id?: unknown;
+        role?: unknown;
+        stop_reason?: unknown;
+        content?: unknown;
+      };
+    };
+    const message = frame.message;
+    if (
+      frame.type !== "assistant"
+      || message?.role !== "assistant"
+      || message.stop_reason !== "end_turn"
+      || !Array.isArray(message.content)
+    ) return undefined;
+    const text = message.content
+      .filter((block): block is { type: "text"; text: string } =>
+        typeof block === "object"
+        && block !== null
+        && (block as { type?: unknown }).type === "text"
+        && typeof (block as { text?: unknown }).text === "string"
+      )
+      .map((block) => block.text)
+      .join("\n\n")
+      .trim();
+    const id = typeof message.id === "string"
+      ? message.id
+      : typeof frame.uuid === "string"
+        ? frame.uuid
+        : undefined;
+    if (id === undefined || text === "") return undefined;
+    return {
+      id,
+      occurredAt: typeof frame.timestamp === "string"
+        ? frame.timestamp
+        : now?.() ?? new Date().toISOString(),
+      text,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function parseCodexTurn(line: string, now: (() => string) | undefined): NativeTurn | undefined {
+  try {
+    const frame = JSON.parse(line) as {
+      type?: unknown;
+      timestamp?: unknown;
+      payload?: {
+        type?: unknown;
+        turn_id?: unknown;
+        last_agent_message?: unknown;
+      };
+    };
+    const payload = frame.payload;
+    if (
+      frame.type !== "event_msg"
+      || payload?.type !== "task_complete"
+      || typeof payload.turn_id !== "string"
+      || typeof payload.last_agent_message !== "string"
+      || payload.last_agent_message.trim() === ""
+    ) return undefined;
+    return {
+      id: payload.turn_id,
+      occurredAt: typeof frame.timestamp === "string"
+        ? frame.timestamp
+        : now?.() ?? new Date().toISOString(),
+      text: payload.last_agent_message,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function parseThreadEvent(line: string): ThreadEvent | undefined {
+  try {
+    const parsed = ThreadEventSchema.safeParse(JSON.parse(line));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function compareNativeTurns(left: NativeTurn, right: NativeTurn): number {
+  return left.occurredAt.localeCompare(right.occurredAt) || left.id.localeCompare(right.id);
+}
+
+async function visitLines(
+  path: string,
+  visitor: (line: string) => boolean,
+): Promise<void> {
+  const stream = createReadStream(path, { encoding: "utf8" });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (line.trim() !== "" && !visitor(line)) break;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+}
+
+function ignoreMissing(error: NodeJS.ErrnoException): void {
+  if (error.code !== "ENOENT") throw error;
 }

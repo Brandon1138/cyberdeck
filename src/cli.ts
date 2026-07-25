@@ -36,6 +36,7 @@ import {
 import { CYBERDECK_VERSION } from "./version.js";
 import { runMcpServer } from "./mcp/server.js";
 import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
+import { pruneLegacyTranscript as pruneLegacyTranscriptFile } from "./persistence/thread-transcript-store.js";
 
 interface StartOptions {
   provider: ProviderId;
@@ -309,6 +310,7 @@ interface CreateProgramOptions {
   resetOrchestrator?: (request: ResetOrchestratorRequest) => Promise<OrchestratorResetResult>;
   fableWorkers?: (request: FableWorkersRequest) => Promise<FableWorkersResult>;
   cavemanWorkers?: (request: CavemanWorkersRequest) => Promise<CavemanWorkersResult>;
+  pruneLegacyTranscript?: () => Promise<{ path: string; removed: boolean }>;
 }
 
 export function createProgram(options: CreateProgramOptions = {}): Command {
@@ -326,6 +328,8 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     withClient((client) => client.request<FableWorkersResult>("orchestrator.fableWorkers", request)));
   const cavemanWorkers = options.cavemanWorkers ?? ((request) =>
     withClient((client) => client.request<CavemanWorkersResult>("orchestrator.cavemanWorkers", request)));
+  const pruneLegacyTranscript = options.pruneLegacyTranscript
+    ?? (() => pruneLegacyTranscriptFile(appStateDirectory, true));
   const program = new Command()
     .name("cyberdeck")
     .version(CYBERDECK_VERSION)
@@ -350,6 +354,20 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     process.stdout.write("Cyberdeck broker shutdown requested\n");
   });
   broker.command("restart").description("gracefully replace the running broker").action(restartBroker);
+
+  const transcript = program.command("transcript").description("manage local transcript retention");
+  transcript.command("prune-legacy")
+    .description("permanently delete the pre-semantic raw PTY transcript")
+    .requiredOption(
+      "--confirm-delete-legacy-transcript",
+      "confirm permanent deletion of threads/transcript.jsonl",
+    )
+    .action(async () => {
+      const result = await pruneLegacyTranscript();
+      process.stdout.write(result.removed
+        ? `Deleted legacy transcript ${result.path}\n`
+        : `No legacy transcript exists at ${result.path}\n`);
+    });
 
   addSessionOptions(program.command("start").description("start a durable top-level session"), true)
     .action(async (options: StartOptions) => {
