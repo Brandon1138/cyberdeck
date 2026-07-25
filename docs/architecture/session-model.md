@@ -158,7 +158,7 @@ and meaningful recency. Enter on an empty composer or Right opens the selected n
 For an active thread this attaches directly to the existing broker-owned PTY. For a terminal thread,
 the broker first launches the provider's exact conversation-resume command, then attaches to the new
 PTY. Claude resumes the UUID Cyberdeck assigned at initial launch; Codex resolves its separately
-generated native UUID from local session metadata. Left (or `Ctrl+[`) detaches back to the fleet
+generated native UUID from local session metadata. Left (or `Ctrl+]`) detaches back to the fleet
 without closing the shared broker connection or stopping the provider.
 
 Control attachment is valid only while the provider PTY is active. Provider exit releases the

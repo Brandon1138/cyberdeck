@@ -1332,7 +1332,7 @@ function renderFleetList(
     paint("─".repeat(options.width), "dim", options.color),
     ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
     paint(fit(launchContext, options.width), "dim", options.color),
-    paint(fit(`enter open/start · ctrl+[ detach · ctrl+] reattach · ctrl+g cwd · space reply · /model · /fable-workers · /caveman-workers · ? shortcuts · ${destructiveHint}`, options.width), "dim", options.color),
+    paint(fit(`enter open/start · ctrl+] detach/reattach · ctrl+g cwd · space reply · /model · /fable-workers · /caveman-workers · ? shortcuts · ${destructiveHint}`, options.width), "dim", options.color),
   ];
   const bodyHeight = Math.max(0, options.height - footer.length);
   const body = lines.slice(0, bodyHeight);
@@ -1380,7 +1380,7 @@ function renderHeader(
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
     "shift+↑↓ reorder", "ctrl+s switch views", "@ mention", "alt+1–9 open", "esc back/clear",
-    "ctrl+r rename", "ctrl+j newline", "ctrl+[ detach · ctrl+] reattach", "ctrl+g cwd", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
+    "ctrl+r rename", "ctrl+j newline", "ctrl+] detach/reattach", "ctrl+g cwd", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
   ];
   if (width >= 110) return [entries.slice(0, 5).join("   "), entries.slice(5).join("   ")];
   if (width >= 70) return [entries.slice(0, 3).join("   "), entries.slice(3, 6).join("   "), entries.slice(6).join("   ")];

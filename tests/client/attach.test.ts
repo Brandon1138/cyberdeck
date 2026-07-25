@@ -59,8 +59,25 @@ class FakeTransport implements AttachTransport {
 
 const TEST_SESSION_ID = "11111111-1111-4111-8111-111111111111";
 
+/** Longer than the 25ms escape-coalescing window, so a held bare Esc has been flushed. */
+const settleEscape = () => new Promise((resolve) => setTimeout(resolve, 40));
+
+const controlAttachment = (transport: FakeTransport, input: FakeInput) => attachSession({
+  sessionId: TEST_SESSION_ID,
+  mode: "control",
+  transport,
+  input,
+  output: new FakeOutput(),
+  signals: new EventEmitter(),
+  closeTransport: false,
+});
+
+const inputFrames = (transport: FakeTransport) => transport.sent
+  .filter((frame) => frame.type === "input")
+  .map((frame) => Buffer.from((frame as { data: string }).data, "base64"));
+
 describe("attachSession", () => {
-  it("bridges control input, replay, resize, and Ctrl-[ with raw-mode cleanup", async () => {
+  it("bridges control input, replay, resize, and Ctrl-] with raw-mode cleanup", async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
     const signals = new EventEmitter();
@@ -77,7 +94,7 @@ describe("attachSession", () => {
 
     input.emit("data", Buffer.from("hello"));
     signals.emit("SIGWINCH");
-    input.emit("data", Buffer.from([0x1b]));
+    input.emit("data", Buffer.from([0x1d]));
 
     await expect(attached).resolves.toBe(0);
     expect(Buffer.concat(output.chunks).toString()).toBe("REPLAYLIVE");
@@ -93,7 +110,7 @@ describe("attachSession", () => {
     expect(input.setRawMode).toHaveBeenLastCalledWith(false);
   });
 
-  it("consumes Ctrl-] as a no-op and durably identifies Ctrl-[ Fleet detaches", async () => {
+  it("durably identifies a Ctrl-] Fleet detach and never forwards the chord", async () => {
     const input = new FakeInput();
     const transport = new FakeTransport();
     const attached = attachSession({
@@ -108,14 +125,14 @@ describe("attachSession", () => {
     });
     await new Promise((resolve) => setImmediate(resolve));
 
-    input.emit("data", Buffer.from([0x1d, 0x1d]));
+    input.emit("data", Buffer.from("keep"));
     await new Promise((resolve) => setImmediate(resolve));
-    expect(transport.sent.some((frame) => frame.type === "input")).toBe(false);
-    expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
     expect(transport.requests.some(({ method }) => method === "session.detach")).toBe(false);
 
-    input.emit("data", Buffer.from([0x1b]));
+    input.emit("data", Buffer.from([0x1d, 0x1d]));
     await expect(attached).resolves.toBe(0);
+    expect(transport.sent.some((frame) =>
+      frame.type === "input" && Buffer.from(frame.data, "base64").includes(0x1d))).toBe(false);
     expect(transport.requests).toContainEqual({
       method: "session.attach",
       params: { sessionId: TEST_SESSION_ID, detachIdentity: "operator:one" },
@@ -126,7 +143,7 @@ describe("attachSession", () => {
     });
   });
 
-  it("recognizes live CSI-u Ctrl-[ and leaves cockpit presentation after releasing control", async () => {
+  it("forwards CSI-u Ctrl-[ and leaves cockpit presentation after Ctrl-] releases control", async () => {
     const input = new FakeInput();
     const transport = new FakeTransport("orchestrator");
     const onExplicitDetach = vi.fn(async () => {
@@ -148,13 +165,18 @@ describe("attachSession", () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     input.emit("data", Buffer.from("\u001b[91;5u"));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(transport.sent).toContainEqual({
+      type: "input",
+      sessionId: TEST_SESSION_ID,
+      data: Buffer.from("\u001b[91;5u").toString("base64"),
+    });
+    expect(transport.requests.some(({ method }) => method === "session.detach")).toBe(false);
 
+    input.emit("data", Buffer.from([0x1d]));
     await expect(attached).resolves.toBe(0);
     expect(onExplicitDetach).toHaveBeenCalledOnce();
     expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
-    expect(transport.sent.some((frame) =>
-      frame.type === "input" && Buffer.from(frame.data, "base64").equals(Buffer.from("\u001b[91;5u"))))
-      .toBe(false);
   });
 
   it("keeps watch mode read-only and reports socket closure as non-zero", async () => {
@@ -202,7 +224,7 @@ describe("attachSession", () => {
       closeTransport: false,
     });
     await new Promise((resolve) => setImmediate(resolve));
-    input.emit("data", Buffer.from([0x1b]));
+    input.emit("data", Buffer.from([0x1d]));
 
     await expect(attached).resolves.toBe(0);
     expect(transport.close).not.toHaveBeenCalled();
@@ -228,7 +250,7 @@ describe("attachSession", () => {
     expect(transport.sent.some((frame) => frame.type === "input")).toBe(false);
   });
 
-  it("forwards Left Arrow inside an orchestrator, consumes Ctrl-], and keeps Ctrl-[ as detach", async () => {
+  it("forwards Left Arrow and bare Esc inside an orchestrator and detaches on Ctrl-]", async () => {
     const input = new FakeInput();
     const transport = new FakeTransport("orchestrator");
     const attached = attachSession({
@@ -251,11 +273,16 @@ describe("attachSession", () => {
     });
     expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
 
-    input.emit("data", Buffer.from([0x1d]));
+    input.emit("data", Buffer.from([0x1b]));
     await new Promise((resolve) => setImmediate(resolve));
+    expect(transport.sent).toContainEqual({
+      type: "input",
+      sessionId: TEST_SESSION_ID,
+      data: Buffer.from([0x1b]).toString("base64"),
+    });
     expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
 
-    input.emit("data", Buffer.from([0x1b]));
+    input.emit("data", Buffer.from([0x1d]));
     await expect(attached).resolves.toBe(0);
     expect(transport.sent).toContainEqual({ type: "detach", sessionId: TEST_SESSION_ID });
   });
@@ -293,6 +320,92 @@ describe("attachSession", () => {
     });
 
     await expect(attached).rejects.toThrow("terminal write failed");
+    expect(transport.sent).toContainEqual({ type: "detach", sessionId: TEST_SESSION_ID });
+  });
+
+  it("forwards a bare Esc to the provider instead of detaching", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = controlAttachment(transport, input);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    input.emit("data", Buffer.from([0x1b]));
+    await settleEscape();
+    expect(inputFrames(transport)).toContainEqual(Buffer.from([0x1b]));
+    expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
+
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+  });
+
+  it("forwards Alt chords whose second byte is a control byte, including Option+Enter", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = controlAttachment(transport, input);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const chords = [
+      Buffer.from([0x1b, 0x0d]),
+      Buffer.from([0x1b, 0x01]),
+      Buffer.from([0x1b, 0x1a]),
+      Buffer.from([0x1b, 0x09]),
+      Buffer.from([0x1b, 0x08]),
+    ];
+    for (const chord of chords) input.emit("data", chord);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    for (const chord of chords) expect(inputFrames(transport)).toContainEqual(chord);
+    expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
+
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+  });
+
+  it("forwards Option plus a printable key", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = controlAttachment(transport, input);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    input.emit("data", Buffer.from("\u001ba"));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(inputFrames(transport)).toContainEqual(Buffer.from("\u001ba"));
+    expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
+
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+  });
+
+  it("forwards a Left Arrow split across reads instead of detaching on its Esc", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = controlAttachment(transport, input);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    input.emit("data", Buffer.from([0x1b]));
+    await settleEscape();
+    input.emit("data", Buffer.from("[D"));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(Buffer.concat(inputFrames(transport)).equals(Buffer.from("\u001b[D"))).toBe(true);
+    expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
+
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+  });
+
+  it("detaches on Ctrl-] and forwards everything typed before it", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = controlAttachment(transport, input);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    input.emit("data", Buffer.concat([Buffer.from("ab"), Buffer.from([0x1d]), Buffer.from("cd")]));
+
+    await expect(attached).resolves.toBe(0);
+    expect(inputFrames(transport)).toContainEqual(Buffer.from("ab"));
+    expect(inputFrames(transport).some((chunk) => chunk.includes(0x1d) || chunk.includes(0x63)))
+      .toBe(false);
     expect(transport.sent).toContainEqual({ type: "detach", sessionId: TEST_SESSION_ID });
   });
 });

@@ -200,7 +200,7 @@ async function runAttachment(
   mode: "control" | "watch",
   options: { cockpitReturn?: "detach" | "switch" } = {},
 ): Promise<void> {
-  process.stdout.write("Detach with Ctrl-[ · reattach from Fleet with Ctrl-]\n");
+  process.stdout.write("Detach with Ctrl-] · Esc and Option chords reach the agent\n");
   const client = await RpcClient.connect(brokerSocketPath);
   const cockpitReturn = options.cockpitReturn;
   try {
