@@ -71,6 +71,14 @@ export class OrchestratorManager {
         { code: "ORCHESTRATOR_PROVIDER_REQUIRED" },
       );
     }
+    if (!ORCHESTRATOR_CATALOG.some((entry) => entry.provider === request.provider)) {
+      throw Object.assign(
+        new Error(
+          `Orchestrator provider ${request.provider} cannot receive the Cyberdeck MCP server; its adapter has no supported MCP surface`,
+        ),
+        { code: "ORCHESTRATOR_PROVIDER_UNSUPPORTED" },
+      );
+    }
     if (
       existing !== undefined
       && existing.provider === request.provider

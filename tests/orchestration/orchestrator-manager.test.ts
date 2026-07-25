@@ -293,6 +293,43 @@ describe("OrchestratorManager", () => {
     });
   });
 
+  it.each([
+    ["cursor", "its adapter has no supported MCP surface"],
+    ["antigravity", "its adapter has no supported MCP surface"],
+  ])("refuses %s when it cannot receive the Cyberdeck MCP server", async (provider, reason) => {
+    const start = vi.fn();
+    const manager = new OrchestratorManager(
+      { start } as never,
+      { get: vi.fn(async () => undefined) } as never,
+    );
+
+    await expect(manager.ensure({
+      provider: provider as "cursor" | "antigravity",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).rejects.toMatchObject({
+      code: "ORCHESTRATOR_PROVIDER_UNSUPPORTED",
+      message: `Orchestrator provider ${provider} cannot receive the Cyberdeck MCP server; ${reason}`,
+    });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("allows Claude orchestrator creation", async () => {
+    const start = vi.fn(async () => ({ ...record, provider: "claude" as const }));
+    const manager = new OrchestratorManager(
+      { start } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+    );
+
+    await expect(manager.ensure({
+      provider: "claude",
+      model: "opus",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).resolves.toMatchObject({ created: true, binding: { provider: "claude" } });
+    expect(start).toHaveBeenCalledOnce();
+  });
+
   it("resumes a stopped bound orchestrator and reports it as reused", async () => {
     const stopped = { ...record, executionState: "cancelled" as const };
     const resume = vi.fn(async () => record);
