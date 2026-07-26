@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -70,6 +70,35 @@ describe("SessionStore", () => {
     await store.put(launched);
 
     expect(await store.load()).toEqual([launched]);
+  });
+
+  it("compacts the catalog down to the retained threads", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-session-store-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    const retired = record({ id: "22222222-2222-4222-8222-222222222222", name: "Retired" });
+
+    await store.put(record());
+    await store.put(retired);
+    await store.put(record({ name: "Renamed" }));
+    await store.compact([record({ name: "Renamed" })]);
+
+    expect(await store.load()).toEqual([record({ name: "Renamed" })]);
+    // Retention would otherwise only append tombstones; compaction is what shrinks the file.
+    const lines = (await readFile(join(directory, "sessions", "catalog.jsonl"), "utf8"))
+      .split("\n")
+      .filter((line) => line !== "");
+    expect(lines).toHaveLength(1);
+  });
+
+  it("keeps the previous catalog when a compaction cannot be written", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-session-store-"));
+    directories.push(directory);
+    const store = new SessionStore(directory);
+    await store.put(record());
+
+    await expect(store.compact([record({ executionState: "bogus" as never })])).rejects.toThrow();
+    expect(await store.load()).toEqual([record()]);
   });
 
   it("refuses to persist a launch record that is not bounded", async () => {
