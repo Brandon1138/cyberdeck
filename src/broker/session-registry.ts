@@ -302,8 +302,7 @@ export class SessionRegistry {
       launchTail: Promise.resolve(),
     };
     this.sessions.set(id, runtime);
-    pty.onOutput((chunk) => this.broadcast(runtime, chunk));
-    pty.onExit((exitCode, signal) => this.handleExit(runtime, exitCode, signal));
+    this.adoptPty(runtime, pty);
 
     if (parsed.parentSessionId !== undefined) {
       const parent = this.requireRuntime(parsed.parentSessionId);
@@ -623,9 +622,16 @@ export class SessionRegistry {
       throw new RegistryError("SESSION_ALREADY_ACTIVE", "Session is already active");
     }
 
+    // The outgoing PTY stops speaking for this session here, before anything is awaited. A kill is
+    // acknowledged asynchronously, so its exit would otherwise land in the middle of the respawn
+    // and tear down the session it was replaced by — rewriting executionState, dropping the new
+    // controller and watchers, and queueing a launch-artifact cleanup onto the fresh resume.
+    const previousPty = runtime.pty;
+    delete runtime.pty;
+
     // An errored session's process outlived its provider session. Resuming would otherwise leave
     // that orphan running alongside the replacement, so it is killed before the respawn.
-    if (runtime.record.executionState === "errored") runtime.pty?.kill();
+    if (runtime.record.executionState === "errored") previousPty?.kill();
 
     const adapter = this.requireAdapter(runtime.record.provider);
     const record = this.cloneRecord(runtime.record);
@@ -633,8 +639,7 @@ export class SessionRegistry {
     // A resume spec can name provider-owned artifacts (Claude's payload files) that the previous
     // exit removed, so wait for any in-flight cleanup and then rebuild them before the spawn.
     await runtime.launchTail;
-    const pty = await this.spawnPreparedLaunch(adapter, record, resumeSpec);
-    runtime.pty = pty;
+    const pty = await this.resumePty(runtime, adapter, record, resumeSpec, previousPty);
     runtime.stopRequested = false;
     delete runtime.stopRequestedAt;
     delete runtime.controller;
@@ -652,8 +657,7 @@ export class SessionRegistry {
     runtime.fatalReported = false;
     if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
     delete runtime.idleTimer;
-    pty.onOutput((chunk) => this.broadcast(runtime, chunk));
-    pty.onExit((exitCode, signal) => this.handleExit(runtime, exitCode, signal));
+    this.adoptPty(runtime, pty);
     await this.appendEvent("session.resumed", sessionId, {
       provider: runtime.record.provider,
       model: runtime.record.model ?? null,
@@ -1018,6 +1022,48 @@ export class SessionRegistry {
       .then(() => this.cleanupLaunchArtifacts(runtime.record, "session-exited"))
       .catch(() => undefined);
     this.notifySessionUpdate(runtime.record.id);
+  }
+
+  /**
+   * Bind a PTY's callbacks to that PTY, not merely to the session it currently drives.
+   *
+   * A session outlives its processes: a resume replaces the handle, and the outgoing one keeps
+   * reporting output and its exit long after it has stopped representing the session. Every
+   * callback therefore checks that it is still the adopted handle before it is allowed to touch
+   * shared state.
+   */
+  private adoptPty(runtime: RuntimeSession, pty: PtyHandle): void {
+    runtime.pty = pty;
+    pty.onOutput((chunk) => {
+      if (runtime.pty !== pty) return;
+      this.broadcast(runtime, chunk);
+    });
+    pty.onExit((exitCode, signal) => {
+      if (runtime.pty !== pty) return;
+      this.handleExit(runtime, exitCode, signal);
+    });
+  }
+
+  /**
+   * Spawn the replacement PTY for a resume, restoring the outgoing handle if the spawn fails.
+   *
+   * `resume` releases the old handle up front so its exit cannot land on the new session. When no
+   * new handle arrives, the session is left exactly as the resume found it, so an operator can
+   * still stop the process the failed resume did not replace.
+   */
+  private async resumePty(
+    runtime: RuntimeSession,
+    adapter: ProviderAdapter,
+    record: SessionRecord,
+    spec: ProviderLaunchSpec,
+    previousPty: PtyHandle | undefined,
+  ): Promise<PtyHandle> {
+    try {
+      return await this.spawnPreparedLaunch(adapter, record, spec);
+    } catch (error) {
+      if (runtime.pty === undefined && previousPty !== undefined) runtime.pty = previousPty;
+      throw error;
+    }
   }
 
   /**

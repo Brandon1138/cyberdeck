@@ -591,6 +591,62 @@ describe("SessionRegistry", () => {
     expect(events.at(-1)).toMatchObject({ type: "session.resumed", sessionId: record.id });
   });
 
+  it("lets a replaced PTY's late exit fall on the floor rather than on the resumed session", async () => {
+    // A real PTY acknowledges a kill asynchronously, so the orphan's exit and any trailing output
+    // arrive after the replacement is already live.
+    const { registry, ptys } = harness({ exitOnKill: false });
+    const record = await registry.start(request());
+    ptys[0]!.emitOutput("API Error: 401 authentication_error\n");
+    await vi.waitFor(() => expect(registry.get(record.id).executionState).toBe("errored"));
+
+    await registry.resume(record.id);
+    const delivered: string[] = [];
+    const output = vi.fn((chunk: Buffer) => { delivered.push(chunk.toString("utf8")); });
+    const ended = vi.fn();
+    await registry.attach(record.id, "human", "control", output, ended);
+    expect(ptys[0]!.killCount).toBe(1);
+
+    ptys[0]!.emitOutput("orphan chatter\n");
+    ptys[0]!.emitExit(0);
+
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "active",
+      attachmentState: "controlled",
+      exitCode: null,
+      pid: 1001,
+    });
+    expect(ended).not.toHaveBeenCalled();
+    expect(delivered).not.toContain("orphan chatter\n");
+
+    ptys[1]!.emitOutput("resumed and working\n");
+    expect(delivered).toContain("resumed and working\n");
+  });
+
+  it("keeps the outgoing PTY when the resume spawn fails, so the process can still be stopped", async () => {
+    const ptys: FakePty[] = [];
+    const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => {
+      if (ptys.length === 1) throw new Error("provider binary vanished");
+      const pty = new FakePty(1000 + ptys.length, false);
+      ptys.push(pty);
+      return pty;
+    });
+    const registry = new SessionRegistry({
+      adapters,
+      ptyFactory,
+      journal: { append: async () => {} },
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+    const record = await registry.start(request());
+    ptys[0]!.emitOutput("API Error: 401 authentication_error\n");
+    await vi.waitFor(() => expect(registry.get(record.id).executionState).toBe("errored"));
+
+    await expect(registry.resume(record.id)).rejects.toThrow("provider binary vanished");
+
+    await registry.stop(record.id);
+    expect(ptys[0]!.killCount).toBe(2);
+  });
+
   it("submits a logical message through the selected provider adapter", async () => {
     const { registry, ptys, transcripts } = harness();
     const record = await registry.start(request());

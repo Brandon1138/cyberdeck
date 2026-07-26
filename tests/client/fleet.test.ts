@@ -44,6 +44,17 @@ function fleet(...records: Array<{ record: SessionRecord; replay?: string }>): F
   };
 }
 
+function threadFleet(count: number, cwd = "/repo/one"): FleetSnapshot {
+  return fleet(...Array.from({ length: count }, (_, index) => ({
+    record: session({
+      id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      cwd,
+      name: `Thread ${index + 1}`,
+      displayOrder: index,
+    }),
+  })));
+}
+
 describe("fleet presentation", () => {
   it("separates Orcs above workers inside each folder while keeping folder rows navigable", () => {
     const worker = session({
@@ -390,6 +401,154 @@ describe("fleet presentation", () => {
     expect(rendered).not.toContain("\u001b[38;2;158;182;255m");
   });
 
+  it("pins the summary while the thread body scrolls and shows a gutter scrollbar", () => {
+    const snapshot = threadFleet(10);
+    let last = createFleetState(snapshot);
+    for (let index = 1; index < 10; index += 1) {
+      last = transitionFleet(last, snapshot, "down", NOW_MS, 7).state;
+    }
+    const rendered = renderFleet(snapshot, last, {
+      color: false,
+      width: 100,
+      height: 16,
+      now: NOW_MS,
+    });
+
+    // Twelve rows: the folder header, its "Workers" heading, and ten threads.
+    expect(last.threadListScrollOffset).toBe(5);
+    expect(last.selectedSessionId).toBe(snapshot.threads.at(-1)?.record.id);
+    expect(rendered).toContain("Cyberdeck");
+    expect(rendered).toContain("Thread 10");
+    expect(rendered).not.toContain("Thread 1 ");
+    expect(rendered).toMatch(/[│┃]/u);
+  });
+
+  it("renders no scrollbar and resets the effective offset when every row fits", () => {
+    // Five threads plus the folder header and its "Workers" heading fill the viewport exactly.
+    const exact = threadFleet(5);
+    const exactState = {
+      ...createFleetState(exact),
+      threadListScrollOffset: 99,
+    };
+    const exactRendered = renderFleet(exact, exactState, {
+      color: false,
+      width: 100,
+      height: 16,
+      now: NOW_MS,
+    });
+
+    expect(exactRendered).toContain("Thread 1");
+    expect(exactRendered).toContain("Thread 5");
+    expect(exactRendered).not.toMatch(/[│┃]/u);
+    expect(transitionFleet(exactState, exact, "home", NOW_MS, 7).state.threadListScrollOffset).toBe(0);
+
+    const short = threadFleet(2);
+    const shortState = {
+      ...createFleetState(short),
+      threadListScrollOffset: -4,
+    };
+    const shortRendered = renderFleet(short, shortState, {
+      color: false,
+      width: 100,
+      height: 16,
+      now: NOW_MS,
+    });
+    expect(shortRendered).not.toMatch(/[│┃]/u);
+    expect(transitionFleet(shortState, short, "down", NOW_MS, 7).state.threadListScrollOffset)
+      .toBe(0);
+  });
+
+  it("re-clamps a scrolled list after the terminal grows", () => {
+    const snapshot = threadFleet(10);
+    const scrolled = transitionFleet(
+      createFleetState(snapshot),
+      snapshot,
+      "end",
+      NOW_MS,
+      7,
+    ).state;
+    const rendered = renderFleet(snapshot, scrolled, {
+      color: false,
+      width: 100,
+      height: 32,
+      now: NOW_MS,
+    });
+
+    expect(rendered).toContain("Thread 1");
+    expect(rendered).toContain("Thread 10");
+    expect(rendered).not.toMatch(/[│┃]/u);
+  });
+
+  it("does not leave an unfocused folder header orphaned at the viewport bottom", () => {
+    const firstGroup = threadFleet(4).threads;
+    const finalThread = session({
+      id: "99999999-9999-4999-8999-999999999999",
+      cwd: "/repo/two",
+      name: "Final thread",
+    });
+    const snapshot = {
+      threads: [...firstGroup, { record: finalThread, replay: "" }],
+    };
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false,
+      width: 100,
+      height: 16,
+      now: NOW_MS,
+    });
+
+    expect(rendered.split("\n").some((line) => line.includes("▾ /repo/two"))).toBe(false);
+    expect(rendered).not.toContain("Final thread");
+  });
+
+  it("scrolls a focused folder header into view so collapsing it changes the screen", () => {
+    const snapshot = fleet(...["/repo/one", "/repo/two", "/repo/three"].flatMap((cwd, group) =>
+      Array.from({ length: 3 }, (_, index) => ({
+        record: session({
+          id: `00000000-0000-4000-8000-${String(group * 3 + index + 1).padStart(12, "0")}`,
+          cwd,
+          role: "worker",
+          name: `${cwd.slice(6)} thread ${index + 1}`,
+          displayOrder: group * 3 + index,
+        }),
+      }))));
+    const view = { color: false, width: 100, height: 16, now: NOW_MS };
+
+    // Seven steps down: the first folder's three threads, then a folder header before each group.
+    let focused = createFleetState(snapshot);
+    for (let step = 0; step < 7; step += 1) {
+      focused = transitionFleet(focused, snapshot, "down", NOW_MS, 7).state;
+    }
+    expect(focused.focusedFolderCwd).toBe("/repo/three");
+
+    // That header is the thirteenth of seventeen rows. A list that only clipped would have left the
+    // focus off screen, and collapsing it would then have changed nothing an operator can see.
+    const expanded = renderFleet(snapshot, focused, view);
+    expect(expanded).toContain("▾ /repo/three");
+    expect(expanded).not.toContain("one thread 1");
+
+    const collapsed = renderFleet(
+      snapshot,
+      transitionFleet(focused, snapshot, "left", NOW_MS, 7).state,
+      view,
+    );
+    expect(collapsed).not.toBe(expanded);
+    expect(collapsed).toContain("▸ /repo/three · 3 threads");
+    expect(collapsed).not.toContain("▾ /repo/three");
+  });
+
+  it("handles an empty thread list without a scrollbar", () => {
+    const snapshot = fleet();
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false,
+      width: 100,
+      height: 16,
+      now: NOW_MS,
+    });
+
+    expect(rendered).toContain("No durable agent threads yet.");
+    expect(rendered).not.toMatch(/[│┃]/u);
+  });
+
   it("keeps thread and project positions stable when lifecycle timestamps change", () => {
     const first = session({
       kind: "orchestrator",
@@ -585,13 +744,15 @@ describe("fleet presentation", () => {
     const snapshot = fleet({ record: session() });
     const rendered = renderFleet(snapshot, createFleetState(snapshot), {
       color: false,
-      width: 110,
+      width: 120,
       height: 28,
       now: NOW_MS,
     });
 
     expect(rendered).toContain("ctrl+o to choose");
-    expect(rendered).toContain("ctrl+] detach/reattach");
+    expect(rendered.split("\n").at(-1)).toBe(
+      "↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ? more · ctrl+x stop agent",
+    );
   });
 
   it("preserves word boundaries from cursor-positioned provider output", () => {
@@ -832,6 +993,64 @@ describe("fleet controls", () => {
     expect(decoder.push(Buffer.from([0x0a, 0x12, 0x13, 0x14]))).toEqual([
       "ctrl+j", "ctrl+r", "ctrl+s", "ctrl+t",
     ]);
+  });
+
+  it("decodes page, half-page, Home, and End bindings", () => {
+    const decoder = new FleetKeyDecoder();
+
+    expect(decoder.push("\u001b[5~\u001b[6~\u001b[H\u001b[F")).toEqual([
+      "pageup",
+      "pagedown",
+      "home",
+      "end",
+    ]);
+    expect(decoder.push(Buffer.from([0x15, 0x04]))).toEqual(["ctrl+u", "ctrl+d"]);
+  });
+
+  it("pages through rendered rows including folder headers, role headings, and group spacing", () => {
+    const one = session({ cwd: "/repo/one", name: "One", displayOrder: 0 });
+    const two = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      cwd: "/repo/one",
+      name: "Two",
+      displayOrder: 1,
+    });
+    const three = session({
+      id: "33333333-3333-4333-8333-333333333333",
+      cwd: "/repo/two",
+      name: "Three",
+      displayOrder: 0,
+    });
+    const four = session({
+      id: "44444444-4444-4444-8444-444444444444",
+      cwd: "/repo/two",
+      name: "Four",
+      displayOrder: 1,
+    });
+    const snapshot = fleet(
+      { record: one },
+      { record: two },
+      { record: three },
+      { record: four },
+    );
+    const initial = createFleetState(snapshot);
+
+    // Rows: folder /repo/one, "Workers", One, Two, spacer, folder /repo/two, "Workers", Three, Four.
+    const pageDown = transitionFleet(initial, snapshot, "pagedown", NOW_MS, 4).state;
+    expect(pageDown.focusedFolderCwd).toBe("/repo/two");
+    expect(pageDown.threadListScrollOffset).toBe(2);
+
+    const halfDown = transitionFleet(pageDown, snapshot, "ctrl+d", NOW_MS, 4).state;
+    expect(halfDown.selectedSessionId).toBe(three.id);
+    expect(halfDown.threadListScrollOffset).toBe(4);
+
+    const pageUp = transitionFleet(halfDown, snapshot, "pageup", NOW_MS, 4).state;
+    expect(pageUp.selectedSessionId).toBe(two.id);
+
+    expect(transitionFleet(halfDown, snapshot, "home", NOW_MS, 4).state.focusedFolderCwd)
+      .toBe("/repo/one");
+    expect(transitionFleet(initial, snapshot, "end", NOW_MS, 4).state.selectedSessionId)
+      .toBe(four.id);
   });
 
   it("decodes Option+Enter as one chord instead of an Escape followed by a submit", () => {
