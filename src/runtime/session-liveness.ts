@@ -7,34 +7,49 @@ import { stripTerminalControl } from "./terminal-replay.js";
 const TAIL_BYTES = 4_000;
 
 /**
- * Unrecoverable provider faults. Every pattern here describes a condition the provider will not
- * retry out of: the request was rejected on its merits (4xx), the session context is gone, or the
- * agent loop itself reported a fatal stop. Transient 5xx and connection errors are deliberately
- * absent — providers retry those, and treating them as terminal would kill healthy sessions.
+ * Conversation chrome, in the first column.
+ *
+ * Every provider TUI marks the lines it does not own: the prompt echo carries `>`/`›`, an assistant
+ * turn carries a bullet, a tool result carries `⎿`, the composer and its pasted contents sit inside
+ * a box drawn with `│`/`╭`, and every wrapped continuation is indented. The provider's own fatal
+ * notice is the one thing printed flush left with no marker at all, so a line matching this is not
+ * evidence about the session and is never scanned.
+ */
+const CONVERSATION_CHROME =
+  /^[\s>›❯⏺●○∙•·◆◇⎿⏵⎯│┃┆┊║▌▏▕╭╮╰╯┌┐└┘├┤┬┴┼─═━┈#*+\-|/\\]/u;
+
+/**
+ * Unrecoverable provider faults, matched against a provider-owned line in its entirety.
+ *
+ * Every pattern here describes a condition the provider will not retry out of: the request was
+ * rejected on its merits (4xx), the session context is gone, or the agent loop itself reported a
+ * fatal stop. Transient 5xx and connection errors are deliberately absent — providers retry those,
+ * and treating them as terminal would kill healthy sessions. Each pattern is anchored to the start
+ * of the line: an error signal quoted mid-sentence is prose, not a fault.
  */
 const FATAL_PATTERNS: readonly { readonly pattern: RegExp; readonly reason: string }[] = [
   {
-    pattern: /(?:^|\n)[ \t]*API Error:?\s*4\d{2}\b[^\n]*\bauthentication_error\b/iu,
+    pattern: /^API Error:?\s*4\d{2}\b.*\bauthentication_error\b/iu,
     reason: "provider authentication failed",
   },
   {
-    pattern: /(?:^|\n)[ \t]*API Error:?\s*4\d{2}\b[^\n]*\bpermission_error\b/iu,
+    pattern: /^API Error:?\s*4\d{2}\b.*\bpermission_error\b/iu,
     reason: "provider denied the request",
   },
   {
-    pattern: /(?:^|\n)[ \t]*API Error:?\s*4\d{2}\b[^\n]*\binvalid_request_error\b/iu,
+    pattern: /^API Error:?\s*4\d{2}\b.*\binvalid_request_error\b/iu,
     reason: "provider API rejected the request",
   },
   {
-    pattern: /(?:^|\n)[ \t]*API Error:?\s*4\d{2}\b/iu,
+    pattern: /^API Error:?\s*4\d{2}\b/iu,
     reason: "provider API rejected the request",
   },
   {
-    pattern: /(?:^|\n)[ \t]*(?:stream|session) error:.*(?:fatal|unrecoverable)/iu,
+    pattern: /^(?:stream|session) error:.*(?:fatal|unrecoverable)/iu,
     reason: "provider stream failed",
   },
   {
-    pattern: /(?:^|\n)[ \t]*fatal(?: error)?: .*session/iu,
+    pattern: /^fatal(?: error)?: .*session/iu,
     reason: "provider session failed",
   },
 ];
@@ -63,17 +78,24 @@ export interface SessionFatalError {
  * whose provider died on an API 4xx keeps its process — and therefore its PTY — so it reported as
  * `active` with a null exit code, indistinguishable from a healthy worker, held a worker slot, and
  * could even present as `needs-input` at a session that can never accept input again.
+ *
+ * The verdict is drawn only from lines the provider itself owns. Scanning the rendered screen as
+ * one blob killed healthy sessions instead: a prompt, a pasted log, or an assistant paragraph that
+ * merely contained `API Error: 400` read exactly like the fault it was describing.
  */
 export function detectSessionFatalError(replay: string): SessionFatalError | undefined {
   const plain = stripTerminalControl(replay);
-  const tail = plain.slice(Math.max(0, plain.length - TAIL_BYTES));
+  const truncated = plain.length > TAIL_BYTES;
+  const tail = truncated ? plain.slice(plain.length - TAIL_BYTES) : plain;
 
   let best: { index: number; reason: string; detail: string } | undefined;
-  for (const { pattern, reason } of FATAL_PATTERNS) {
-    const match = matchLast(tail, pattern);
-    if (match === undefined) continue;
-    if (best === undefined || match.index > best.index) {
-      best = { index: match.index, reason, detail: match.text };
+  for (const { line, index } of providerOwnedLines(tail, truncated)) {
+    for (const { pattern, reason } of FATAL_PATTERNS) {
+      if (!pattern.test(line)) continue;
+      if (best === undefined || index > best.index) {
+        best = { index, reason, detail: boundedDetail(line) };
+      }
+      break;
     }
   }
   if (best === undefined) return undefined;
@@ -84,19 +106,29 @@ export function detectSessionFatalError(replay: string): SessionFatalError | und
   return { reason: best.reason, detail: best.detail };
 }
 
-function matchLast(value: string, pattern: RegExp): { index: number; text: string } | undefined {
-  const global = new RegExp(pattern.source, `${pattern.flags.replace(/[gy]/gu, "")}g`);
-  let last: { index: number; text: string } | undefined;
-  for (const match of value.matchAll(global)) {
-    last = { index: match.index, text: errorLine(value, match.index) };
+/**
+ * Walk the replay a line at a time, keeping only the lines the provider prints as its own.
+ *
+ * When the slice actually cut into the replay its first line is dropped, because a fragment whose
+ * left edge was severed cannot be told apart from a line that genuinely began at column 0.
+ */
+function* providerOwnedLines(
+  tail: string,
+  dropFirstLine: boolean,
+): Generator<{ line: string; index: number }> {
+  let index = 0;
+  let first = true;
+  for (const line of tail.split("\n")) {
+    const start = index;
+    index += line.length + 1;
+    const severed = first && dropFirstLine;
+    first = false;
+    if (severed || line.length === 0 || CONVERSATION_CHROME.test(line)) continue;
+    yield { line, index: start };
   }
-  return last;
 }
 
-function errorLine(value: string, index: number): string {
-  const contentIndex = value[index] === "\n" ? index + 1 : index;
-  const start = value.lastIndexOf("\n", contentIndex - 1) + 1;
-  const end = value.indexOf("\n", contentIndex);
-  const line = value.slice(start, end < 0 ? value.length : end).replace(/\s+/gu, " ").trim();
-  return line.length > 240 ? `${line.slice(0, 237)}...` : line;
+function boundedDetail(line: string): string {
+  const collapsed = line.replace(/\s+/gu, " ").trim();
+  return collapsed.length > 240 ? `${collapsed.slice(0, 237)}...` : collapsed;
 }
