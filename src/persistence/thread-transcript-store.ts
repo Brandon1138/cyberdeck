@@ -11,6 +11,12 @@ import {
   type ThreadEventSource,
   type ThreadReadResult,
 } from "../domain/thread.js";
+import {
+  parseClaudeTranscriptLine,
+  parseCodexRolloutLine,
+  PREVIEW_MESSAGE_WINDOW,
+  type TranscriptMessage,
+} from "../runtime/conversation-preview.js";
 import { openPrivateAppendFile } from "./private-files.js";
 
 const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
@@ -148,6 +154,40 @@ export class ThreadTranscriptStore {
     return captured;
   }
 
+  /**
+   * Provider-native conversation messages for preview extraction.
+   *
+   * Distinct from `captureProviderTurns`, which only recognises a *completed* turn and therefore
+   * has nothing to offer while a session is mid-turn, blocked on approval, or interrupted — exactly
+   * the states the fleet view spends most of its time showing. This read accepts any assistant
+   * message carrying text, so the preview never has to fall back to a pane scrape just because the
+   * turn has not ended. Only the trailing window is retained; these files reach tens of megabytes.
+   */
+  async readTranscriptMessages(input: CaptureProviderTurns): Promise<TranscriptMessage[]> {
+    await this.init();
+    const parse = input.provider === "claude"
+      ? parseClaudeTranscriptLine
+      : input.provider === "codex"
+        ? parseCodexRolloutLine
+        : undefined;
+    if (parse === undefined) return [];
+    const path = input.provider === "claude"
+      ? this.claudeTranscriptPath(input)
+      : this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
+    if (path === undefined) return [];
+    const messages: TranscriptMessage[] = [];
+    await visitLines(path, (line) => {
+      const message = parse(line);
+      if (message !== undefined) {
+        messages.push(message);
+        if (messages.length > PREVIEW_MESSAGE_WINDOW) messages.shift();
+      }
+      return true;
+    });
+    if (messages.length > 0) this.nativePaths.set(input.sessionId, path);
+    return messages;
+  }
+
   async read(sessionId: string, afterCursor = 0, limit = 200): Promise<ThreadReadResult> {
     await this.init();
     const boundedLimit = Math.max(1, Math.min(limit, 1_000));
@@ -270,12 +310,16 @@ export class ThreadTranscriptStore {
     return join(this.path.replace(/\.jsonl$/u, `.${index}.jsonl`));
   }
 
-  private async readClaudeTurns(input: CaptureProviderTurns): Promise<NativeTurn[]> {
-    const path = this.nativePaths.get(input.sessionId) ?? join(
+  private claudeTranscriptPath(input: CaptureProviderTurns): string {
+    return this.nativePaths.get(input.sessionId) ?? join(
       this.options.claudeProjectsDirectory ?? join(homedir(), ".claude", "projects"),
       claudeProjectSlug(input.cwd),
       `${input.sessionId}.jsonl`,
     );
+  }
+
+  private async readClaudeTurns(input: CaptureProviderTurns): Promise<NativeTurn[]> {
+    const path = this.claudeTranscriptPath(input);
     const byId = new Map<string, NativeTurn>();
     await visitLines(path, (line) => {
       const turn = parseClaudeTurn(line, this.options.now);

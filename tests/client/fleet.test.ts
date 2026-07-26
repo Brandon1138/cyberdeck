@@ -465,7 +465,7 @@ describe("fleet presentation", () => {
       home: "/Users/brandon",
     });
 
-    expect(rendered).toContain("- Cyberdeck is a local broker");
+    expect(rendered).toContain("Cyberdeck is a local broker");
     expect(rendered).not.toContain("Cyberdeckisalocalbroker");
   });
 });

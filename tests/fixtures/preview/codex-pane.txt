@@ -1,0 +1,19 @@
+>_ OpenAI Codex (v0.58.0)
+
+Tip: Try the Desktop app. Run 'codex app' or visit
+https://chatgpt.com/codex?app-landing-page=true
+
+model: gpt-5.6-terra   high
+directory: /Users/brandon/code/personal/cyberdeck
+
+› Split orchestrators from workers in the fleet view
+
+■ Conversation interrupted — tell the model what to do
+
+The grouping model stays untouched in this wave, so only the header row changes.
+
+Folder headers become focusable and collapsing one shows the count of threads it holds.
+
+* Cogitating for 11m 12s
+─ Worked for 12m 25s ──────────────────────────────────────
+↓ 47.3k tokens · 23% context left
