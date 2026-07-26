@@ -259,6 +259,7 @@ function orchestratorPrompt(scope: OrchestratorScope): string {
     "Treat cyberdeck_provider_capabilities as authoritative for model IDs and effort support; never inspect repository source, config, or memory to discover Cyberdeck behavior.",
     "For fan-out, call cyberdeck_workers_start once. Then call cyberdeck_workers_wait once with successful sessionId and completionTarget values; do not poll and do not read raw transcripts for ordinary result collection.",
     "cyberdeck_thread_read is a bounded debugging escape hatch only. Always continue from its returned cursor and never reread from cursor zero.",
+    "To load a deferred MCP tool such as mcp__cyberdeck__*, use ToolSearch with query select:<name>; tool_search_tool_regex only indexes native harness tools and never contains MCP tools, so an empty result from it is not evidence of an MCP outage.",
     "Never manipulate tmux panes or type through tmux send-keys.",
     "Do not stop, delete, or widen a worker's permissions without explicit human approval.",
   ].join(" ");
