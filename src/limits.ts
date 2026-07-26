@@ -19,6 +19,8 @@ export const MAX_WAIT_SECONDS = 600;
 export const DEFAULT_WAIT_SECONDS = 300;
 /** Comfortably below the tightest observed client deadline (120s) with room for broker latency. */
 export const MAX_WAIT_SEGMENT_SECONDS = 90;
+/** Frozen idle worker threshold before waits return a diagnosable stalled state. */
+export const DEFAULT_WORKER_STALL_SECONDS = 60;
 
 /** Thread listing must stay answerable inside a caller's token budget at 64 concurrent workers. */
 export const DEFAULT_THREAD_PAGE = 50;

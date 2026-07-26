@@ -2,13 +2,17 @@ import type { SessionRecord } from "../../domain/session.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../provider.js";
 import {
   SessionResumeUnavailableError,
-  UnsupportedProviderApprovalModeError,
   UnsupportedProviderEffortError,
 } from "../session-adapter-errors.js";
+import type { ProviderSessionTerminal } from "../provider.js";
 import { buildCursorInteractiveCommand } from "./commands.js";
 import { sessionLaunchEnvironment } from "../launch-environment.js";
+import {
+  enableCursorRunEverything,
+  type CursorRunEverythingOptions,
+} from "./run-everything.js";
 
-export interface CursorProviderAdapterOptions {
+export interface CursorProviderAdapterOptions extends CursorRunEverythingOptions {
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
 }
 
@@ -20,7 +24,6 @@ export class CursorProviderAdapter implements ProviderAdapter {
 
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec {
     if (session.effort !== undefined) throw new UnsupportedProviderEffortError(this.id);
-    if (session.approvalMode === "auto") throw new UnsupportedProviderApprovalModeError(this.id);
     const source = this.options.sourceEnvironment ?? process.env;
     const command = buildCursorInteractiveCommand(session, initialPrompt, source);
     return {
@@ -31,6 +34,23 @@ export class CursorProviderAdapter implements ProviderAdapter {
 
   buildResumeSpec(_session: SessionRecord): ProviderLaunchSpec {
     throw new SessionResumeUnavailableError(this.id);
+  }
+
+  deferInitialPrompt(session: SessionRecord): boolean {
+    return session.approvalMode === "auto";
+  }
+
+  async initializeSession(
+    session: SessionRecord,
+    terminal: ProviderSessionTerminal,
+  ): Promise<void> {
+    if (session.approvalMode !== "auto") return;
+    await enableCursorRunEverything(terminal, {
+      ...(this.options.timeoutMs === undefined ? {} : { timeoutMs: this.options.timeoutMs }),
+      ...(this.options.pollIntervalMs === undefined
+        ? {}
+        : { pollIntervalMs: this.options.pollIntervalMs }),
+    });
   }
 
   submitInput(message: string): Buffer {

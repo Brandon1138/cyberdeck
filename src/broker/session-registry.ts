@@ -27,6 +27,7 @@ import {
 import {
   compactTerminalResult,
   providerTerminalActivity,
+  terminalTokenCount,
   terminalFallbackResult,
   truncateResult,
   type ProviderTerminalActivity,
@@ -107,6 +108,13 @@ interface RuntimeSession {
   /** Per-turn results keyed by completion target, bounded by MAX_COMPLETION_LEDGER_ENTRIES. */
   completions: Map<number, CompletionLedgerEntry>;
   idleTimer?: ReturnType<typeof setTimeout>;
+  /** Provider-native setup output must never satisfy the worker task's first completion target. */
+  suppressSemanticTurns?: boolean;
+  stallObservation?: {
+    replay: string;
+    tokenCount: number;
+    unchangedSinceMs: number;
+  };
   /** Serializes provider launch-artifact work so a pending cleanup cannot delete a fresh resume. */
   launchTail: Promise<void>;
 }
@@ -124,12 +132,23 @@ export interface WorkerResultSnapshot {
   provider: string;
   model?: string;
   effort?: string;
-  status: "completed" | "needs-input" | "working" | "waiting" | "failed" | "stopped" | "exited";
+  status:
+    | "completed"
+    | "needs-input"
+    | "working"
+    | "waiting"
+    | "stalled"
+    | "failed"
+    | "stopped"
+    | "exited";
   completedTurns: number;
   text: string;
   /** Only on a completed target: whether this delivery is the first one for that completion. */
   retrieval?: "fresh" | "replay";
   completedAt?: string;
+  stalledForSeconds?: number;
+  stallReason?: "transcript-and-token-count-unchanged-while-idle";
+  tokenCount?: number;
 }
 
 export interface WorkerWaitResult {
@@ -161,6 +180,8 @@ export interface SessionRegistryOptions {
   recoveredSessions?: readonly SessionRecord[];
   validateCwd?: ((cwd: string) => Promise<void>) | undefined;
   config: BrokerRuntimeConfig;
+  /** Injected monotonic-enough wall clock for stalled-worker tests. */
+  now?: () => number;
 }
 
 export class RegistryError extends Error {
@@ -265,13 +286,20 @@ export class SessionRegistry {
       meaningfulUpdatedAt: now,
     };
     const adapter = this.requireAdapter(parsed.provider);
+    const preparedInitialPrompt = initialPrompt === undefined
+      ? undefined
+      : applyWorkerMode(initialPrompt, provisional.workerMode);
+    const deferredInitialPrompt = initialPrompt !== undefined
+      && adapter.deferInitialPrompt?.(provisional) === true;
     const launchSpec = adapter.buildLaunchSpec(
       provisional,
-      initialPrompt === undefined ? undefined : applyWorkerMode(initialPrompt, provisional.workerMode),
+      initialPrompt === undefined || deferredInitialPrompt
+        ? undefined
+        : preparedInitialPrompt,
     );
     const pty = await this.spawnPreparedLaunch(adapter, provisional, launchSpec, async () => {
       this.requireActiveParent(parsed.parentSessionId);
-      if (initialPrompt !== undefined) {
+      if (initialPrompt !== undefined && !deferredInitialPrompt) {
         await this.options.transcripts?.append({
           sessionId: id,
           kind: "prompt",
@@ -299,10 +327,54 @@ export class SessionRegistry {
       completedTurns: 0,
       fatalReported: false,
       completions: new Map(),
+      suppressSemanticTurns: true,
       launchTail: Promise.resolve(),
     };
     this.sessions.set(id, runtime);
     this.adoptPty(runtime, pty);
+
+    try {
+      await adapter.initializeSession?.(record, {
+        snapshot: () => pty.snapshot(),
+        write: (data) => pty.write(data),
+        wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+      });
+      if (runtime.record.executionState !== "active") {
+        throw new RegistryError(
+          "SESSION_NOT_ACTIVE",
+          runtime.latestResult ?? "Provider session exited during initialization",
+        );
+      }
+      runtime.activity = "unknown";
+      runtime.observedWorking = false;
+      delete runtime.stallObservation;
+      delete runtime.suppressSemanticTurns;
+      if (
+        deferredInitialPrompt
+        && initialPrompt !== undefined
+        && preparedInitialPrompt !== undefined
+      ) {
+        await this.options.transcripts?.append({
+          sessionId: id,
+          kind: "prompt",
+          source: "human",
+          text: initialPrompt,
+          data: { initial: true },
+        });
+        this.requireActiveParent(parsed.parentSessionId);
+        const data = adapter.submitInput?.(preparedInitialPrompt)
+          ?? Buffer.from(`${preparedInitialPrompt}\n`);
+        pty.write(data);
+      }
+    } catch (error) {
+      if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
+      delete runtime.idleTimer;
+      if (runtime.pty === pty) delete runtime.pty;
+      pty.kill();
+      this.sessions.delete(id);
+      await this.cleanupLaunchArtifacts(record, "initialization-failed");
+      throw error;
+    }
 
     if (parsed.parentSessionId !== undefined) {
       const parent = this.requireRuntime(parsed.parentSessionId);
@@ -407,7 +479,11 @@ export class SessionRegistry {
         settled = true;
         clearTimeout(timer);
         this.sessionUpdateListeners.delete(onUpdate);
-        resolve({ timedOut, results: this.deliver(targets, snapshot()) });
+        const results = snapshot();
+        resolve({
+          timedOut: timedOut && !results.every(isSettled),
+          results: this.deliver(targets, results),
+        });
       };
       const targetIds = new Set(targets.map(({ sessionId }) => sessionId));
       const onUpdate = (sessionId: string) => {
@@ -496,6 +572,7 @@ export class SessionRegistry {
     const runtime = this.requireRuntime(sessionId);
     const adapter = this.requireAdapter(runtime.record.provider);
     const data = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
+    delete runtime.stallObservation;
     await this.appendTranscript(sessionId, "prompt", "human", message, {});
     await this.setAttention(runtime, "working", true);
     await this.write(sessionId, clientId, data);
@@ -516,6 +593,7 @@ export class SessionRegistry {
     }
     const adapter = this.requireAdapter(runtime.record.provider);
     const encoded = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
+    delete runtime.stallObservation;
     await this.appendTranscript(sessionId, "instruction", source, message, metadata);
     if (runtime.controller !== undefined) {
       throw new RegistryError("SESSION_BUSY", "A human controller claimed this thread before delivery");
@@ -655,6 +733,7 @@ export class SessionRegistry {
     runtime.activity = "unknown";
     runtime.observedWorking = false;
     runtime.fatalReported = false;
+    delete runtime.stallObservation;
     if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
     delete runtime.idleTimer;
     this.adoptPty(runtime, pty);
@@ -917,6 +996,13 @@ export class SessionRegistry {
       }
     }
     runtime.activity = activity;
+    if (runtime.suppressSemanticTurns === true) {
+      runtime.controller?.output(chunk);
+      for (const watcher of runtime.watchers.values()) watcher.output(chunk);
+      this.notifySessionUpdate(runtime.record.id);
+      return;
+    }
+    this.updateStallObservation(runtime, replay);
     if (activity === "awaiting-input" && runtime.observedWorking) {
       if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
       runtime.idleTimer = setTimeout(() => {
@@ -1139,7 +1225,60 @@ export class SessionRegistry {
     if (runtime.record.executionState === "cancelled") return { ...base, status: "stopped" };
     if (runtime.record.executionState === "exited") return { ...base, status: "exited" };
     if (runtime.activity === "working") return { ...base, status: "working" };
+    const stalled = this.stalledWorker(runtime, replay);
+    if (stalled !== undefined) {
+      return {
+        ...base,
+        status: "stalled",
+        stalledForSeconds: stalled.stalledForSeconds,
+        stallReason: "transcript-and-token-count-unchanged-while-idle",
+        tokenCount: stalled.tokenCount,
+      };
+    }
     return { ...base, status: "waiting" };
+  }
+
+  private updateStallObservation(runtime: RuntimeSession, replay: string): void {
+    const tokenCount = terminalTokenCount(replay);
+    if (tokenCount === undefined) {
+      delete runtime.stallObservation;
+      return;
+    }
+    const previous = runtime.stallObservation;
+    if (
+      previous === undefined
+      || previous.replay !== replay
+      || previous.tokenCount !== tokenCount
+    ) {
+      runtime.stallObservation = {
+        replay,
+        tokenCount,
+        unchangedSinceMs: this.now(),
+      };
+    }
+  }
+
+  private stalledWorker(
+    runtime: RuntimeSession,
+    replay: string,
+  ): { stalledForSeconds: number; tokenCount: number } | undefined {
+    this.updateStallObservation(runtime, replay);
+    const observation = runtime.stallObservation;
+    if (
+      observation === undefined
+      || runtime.record.executionState !== "active"
+      || runtime.activity === "working"
+      || runtime.activity === "needs-input"
+    ) {
+      return undefined;
+    }
+    const stalledForSeconds = Math.floor((this.now() - observation.unchangedSinceMs) / 1_000);
+    if (stalledForSeconds < this.options.config.workerStallSeconds) return undefined;
+    return { stalledForSeconds, tokenCount: observation.tokenCount };
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
   }
 
   /**

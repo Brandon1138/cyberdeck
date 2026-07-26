@@ -474,17 +474,10 @@ export async function startFleetSession(
   if (action.permissionLaunch?.application.kind !== "post-launch-command") {
     return client.request<SessionRecord>("session.startWithPrompt", action.request);
   }
-  const { initialPrompt, ...request } = action.request;
-  const record = await client.request<SessionRecord>("session.start", request);
-  await client.request("session.submit", {
-    sessionId: record.id,
-    message: action.permissionLaunch.application.command,
+  return client.request<SessionRecord>("session.startWithPrompt", {
+    ...action.request,
+    approvalMode: "auto",
   });
-  await client.request("session.submit", {
-    sessionId: record.id,
-    message: initialPrompt,
-  });
-  return record;
 }
 
 export function transitionFleet(

@@ -1622,8 +1622,7 @@ describe("fleet controls", () => {
       model: "composer",
     });
     const request = vi.fn(async (method: string, _params: unknown) => {
-      if (method === "session.start") return started;
-      if (method === "session.submit") return { submitted: true };
+      if (method === "session.startWithPrompt") return started;
       throw new Error(`unexpected ${method}`);
     });
     await expect(startFleetSession(
@@ -1633,20 +1632,14 @@ describe("fleet controls", () => {
 
     expect(request.mock.calls.map(([method, params]) => [method, params])).toEqual([
       [
-        "session.start",
+        "session.startWithPrompt",
         expect.objectContaining({
           provider: "cursor",
           model: "composer",
           cwd: "/Users/brandon/code/personal/cyberdeck",
+          approvalMode: "auto",
+          initialPrompt: "Fix the failing test",
         }),
-      ],
-      [
-        "session.submit",
-        { sessionId: started.id, message: "/run-everything" },
-      ],
-      [
-        "session.submit",
-        { sessionId: started.id, message: "Fix the failing test" },
       ],
     ]);
   });

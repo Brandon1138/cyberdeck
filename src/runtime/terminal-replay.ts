@@ -23,6 +23,7 @@ export function providerTerminalActivity(provider: ProviderId, replay: string): 
     const waitingAt = Math.max(
       replay.lastIndexOf("Cursor is waiting for you"),
       replay.lastIndexOf("Add a follow-up"),
+      cursorModalOverlayIndex(replay),
     );
     if (workingAt >= 0 || waitingAt >= 0) return waitingAt > workingAt ? "awaiting-input" : "working";
   }
@@ -110,6 +111,24 @@ export function truncateResult(result: string, maxChars = 1_200): string {
   return `${result.slice(0, bounded - marker.length)}${marker}`;
 }
 
+/** Last provider token counter rendered in the replay, normalized to whole tokens. */
+export function terminalTokenCount(replay: string): number | undefined {
+  const plain = plainTerminalText(replay);
+  const pattern = /(\d[\d,]*(?:\.\d+)?)\s*([km]?)\s+tokens?\b/giu;
+  let count: number | undefined;
+  for (const match of plain.matchAll(pattern)) {
+    const value = Number(match[1]?.replaceAll(",", ""));
+    if (!Number.isFinite(value)) continue;
+    const multiplier = match[2]?.toLowerCase() === "m"
+      ? 1_000_000
+      : match[2]?.toLowerCase() === "k"
+        ? 1_000
+        : 1;
+    count = Math.round(value * multiplier);
+  }
+  return count;
+}
+
 function lastTerminalTitle(replay: string): string | undefined {
   let last: string | undefined;
   for (const match of replay.matchAll(OSC_TITLE)) last = match[1];
@@ -157,6 +176,14 @@ function lastBrailleIndex(value: string): number {
     }
   }
   return last;
+}
+
+function cursorModalOverlayIndex(replay: string): number {
+  return Math.max(
+    replay.lastIndexOf("No matches"),
+    replay.lastIndexOf("/run-everything"),
+    replay.lastIndexOf("/model [filter]"),
+  );
 }
 
 function isTerminalChrome(line: string): boolean {

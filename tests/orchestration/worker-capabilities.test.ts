@@ -18,7 +18,12 @@ describe("worker provider capabilities", () => {
         models: ["haiku", "sonnet", "opus", "fable"],
         approvalModes: ["prompt", "auto"],
       }),
-      expect.objectContaining({ provider: "cursor", models: ["composer"], efforts: [], approvalModes: ["prompt"] }),
+      expect.objectContaining({
+        provider: "cursor",
+        models: ["composer"],
+        efforts: [],
+        approvalModes: ["prompt", "auto"],
+      }),
       expect.objectContaining({
         provider: "antigravity",
         models: ["gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high"],
@@ -43,7 +48,7 @@ describe("worker provider capabilities", () => {
       provider: "cursor",
       model: "composer",
       approvalMode: "auto",
-    })).toEqual(expect.objectContaining({ ok: false, code: "APPROVAL_MODE_NOT_SUPPORTED" }));
+    })).toEqual({ ok: true });
   });
 
   it("rejects shorthand rather than translating it at launch", () => {

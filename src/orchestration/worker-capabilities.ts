@@ -41,9 +41,12 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
     provider: "cursor",
     models: ["composer"],
     efforts: [],
-    approvalModes: ["prompt"],
+    approvalModes: ["prompt", "auto"],
     modelIdRule: "Use the provider-native model identifier; Composer exposes no separate effort flag.",
-    notes: ["Read-only workers run in plan mode with Cursor sandboxing enabled."],
+    notes: [
+      "Read-only workers run in plan mode with Cursor sandboxing enabled.",
+      "Auto mode is verified post-launch through Composer /run-everything.",
+    ],
   },
   {
     provider: "antigravity",

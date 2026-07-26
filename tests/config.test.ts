@@ -7,6 +7,7 @@ describe("broker runtime config", () => {
     expect(config.maxConcurrentWorkers).toBe(64);
     expect(config.maxDelegationDepth).toBe(1);
     expect(config.replayBytes).toBe(128 * 1024);
+    expect(config.workerStallSeconds).toBe(60);
   });
 
   it("allows an explicit unlimited worker setting", () => {

@@ -24,3 +24,12 @@ export class UnsupportedProviderApprovalModeError extends Error {
     this.name = "UnsupportedProviderApprovalModeError";
   }
 }
+
+export class ProviderPermissionModeNotAppliedError extends Error {
+  readonly code = "PROVIDER_PERMISSION_MODE_NOT_APPLIED";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderPermissionModeNotAppliedError";
+  }
+}

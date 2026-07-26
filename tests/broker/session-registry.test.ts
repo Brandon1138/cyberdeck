@@ -8,7 +8,11 @@ import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
-import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
+import type {
+  ProviderAdapter,
+  ProviderLaunchSpec,
+  ProviderSessionTerminal,
+} from "../../src/providers/provider.js";
 import type { PtyHandle } from "../../src/broker/session-registry.js";
 import {
   ThreadTranscriptStore,
@@ -96,7 +100,14 @@ function request(overrides: Partial<StartSessionRequest> = {}): StartSessionRequ
   };
 }
 
-function harness(options: { failAttachJournal?: boolean; maxConcurrentWorkers?: number | null; exitOnKill?: boolean } = {}) {
+function harness(options: {
+  failAttachJournal?: boolean;
+  maxConcurrentWorkers?: number | null;
+  exitOnKill?: boolean;
+  workerStallSeconds?: number;
+  now?: () => number;
+  adapters?: Record<string, ProviderAdapter>;
+} = {}) {
   const ptys: FakePty[] = [];
   const events: BrokerEvent[] = [];
   const transcripts: AppendThreadEvent[] = [];
@@ -106,7 +117,7 @@ function harness(options: { failAttachJournal?: boolean; maxConcurrentWorkers?: 
     return pty;
   });
   const registry = new SessionRegistry({
-    adapters,
+    adapters: options.adapters ?? adapters,
     ptyFactory,
     journal: { append: async (event) => {
       if (options.failAttachJournal === true && event.type === "session.attached") {
@@ -123,7 +134,11 @@ function harness(options: { failAttachJournal?: boolean; maxConcurrentWorkers?: 
       ...(options.maxConcurrentWorkers === undefined
         ? {}
         : { maxConcurrentWorkers: options.maxConcurrentWorkers }),
+      ...(options.workerStallSeconds === undefined
+        ? {}
+        : { workerStallSeconds: options.workerStallSeconds }),
     }),
+    ...(options.now === undefined ? {} : { now: options.now }),
   });
   return { registry, ptys, events, transcripts, ptyFactory };
 }
@@ -221,6 +236,148 @@ describe("SessionRegistry", () => {
     expect(prepareLaunch.mock.invocationCallOrder[0]).toBeLessThan(ptyFactory.mock.invocationCallOrder[0]!);
   });
 
+  it("finishes provider setup before submitting a deferred initial prompt", async () => {
+    const initializeSession = vi.fn(async (
+      _session: SessionRecord,
+      terminal: ProviderSessionTerminal,
+    ) => {
+      terminal.write(Buffer.from("SETUP"));
+    });
+    const cursor: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session, initialPrompt) => ({
+        executable: "fake",
+        args: initialPrompt === undefined ? [] : [initialPrompt],
+        cwd: session.cwd,
+        env: {},
+      }),
+      deferInitialPrompt: () => true,
+      initializeSession,
+      buildResumeSpec: () => {
+        throw new Error("not used");
+      },
+      submitInput: (message) => Buffer.from(`${message}\r`),
+    };
+    const { registry, ptys, ptyFactory, transcripts } = harness({
+      adapters: { ...adapters, cursor },
+    });
+
+    await registry.start(
+      request({
+        provider: "cursor",
+        model: "composer",
+        approvalMode: "auto",
+        workerMode: "caveman",
+      }),
+      "Open the pull request",
+    );
+
+    expect(ptyFactory.mock.calls[0]?.[0]).toMatchObject({ args: [] });
+    expect(initializeSession).toHaveBeenCalledOnce();
+    expect(ptys[0]!.writes[0]!.toString()).toBe("SETUP");
+    expect(ptys[0]!.writes[1]!.toString()).toContain(
+      "CAVEMAN MODE ACTIVE — Cyberdeck worker output policy.",
+    );
+    expect(ptys[0]!.writes[1]!.toString()).toContain(
+      "WORKER TASK\nOpen the pull request",
+    );
+    expect(transcripts.filter(({ kind }) => kind === "prompt")).toEqual([
+      expect.objectContaining({ text: "Open the pull request" }),
+    ]);
+  });
+
+  it("does not count Composer permission setup as worker task completion", async () => {
+    let ptys: FakePty[] = [];
+    const cursor: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session) => ({
+        executable: "fake",
+        args: [],
+        cwd: session.cwd,
+        env: {},
+      }),
+      deferInitialPrompt: () => true,
+      initializeSession: async () => {
+        ptys[0]!.emitOutput("Composing 5.53k tokens\nctrl+c to stop");
+        ptys[0]!.emitOutput("\nRun Everything enabled\n→ \n");
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      },
+      buildResumeSpec: () => {
+        throw new Error("not used");
+      },
+      submitInput: (message) => Buffer.from(`${message}\r`),
+    };
+    const setup = harness({ adapters: { ...adapters, cursor } });
+    ptys = setup.ptys;
+
+    const record = await setup.registry.start(
+      request({ provider: "cursor", model: "composer", approvalMode: "auto" }),
+      "Open the pull request",
+    );
+
+    await expect(setup.registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 0, 500)).resolves.toMatchObject({
+      timedOut: true,
+      results: [{ status: "waiting", completedTurns: 0 }],
+    });
+
+    ptys[0]!.emitOutput("Composing 6k tokens\nctrl+c to stop");
+    ptys[0]!.emitOutput("\nOpened pull request #7\nCursor is waiting for you\n");
+    await expect(setup.registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 500)).resolves.toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "completed",
+        completedTurns: 1,
+        text: expect.stringContaining("Opened pull request #7"),
+      }],
+    });
+  });
+
+  it("fails closed and removes the session when provider permission setup cannot be verified", async () => {
+    const cursor: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session) => ({
+        executable: "fake",
+        args: [],
+        cwd: session.cwd,
+        env: {},
+      }),
+      deferInitialPrompt: () => true,
+      initializeSession: async () => {
+        throw Object.assign(
+          new Error("Composer /run-everything setup failed: provider still reports manual mode"),
+          { code: "PROVIDER_PERMISSION_MODE_NOT_APPLIED" },
+        );
+      },
+      buildResumeSpec: () => {
+        throw new Error("not used");
+      },
+    };
+    const { registry, ptys, events } = harness({ adapters: { ...adapters, cursor } });
+
+    await expect(registry.start(
+      request({ provider: "cursor", model: "composer", approvalMode: "auto" }),
+      "Open the pull request",
+    )).rejects.toMatchObject({
+      code: "PROVIDER_PERMISSION_MODE_NOT_APPLIED",
+      message: expect.stringContaining("still reports manual mode"),
+    });
+    expect(ptys[0]!.killCount).toBe(1);
+    expect(registry.list()).toEqual([]);
+    expect(events).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "session.exited" }),
+    ]));
+
+    ptys[0]!.emitExit(0);
+    ptys[0]!.emitOutput("late stale output");
+    expect(events).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "session.exited" }),
+    ]));
+  });
+
   it("idles until a worker returns to input and emits only a compact result", async () => {
     const { registry, ptys } = harness();
     const record = await registry.start(request({ name: "math-worker", model: "gpt-5.6-sol", effort: "low" }));
@@ -298,6 +455,74 @@ describe("SessionRegistry", () => {
     )).resolves.toMatchObject({
       timedOut: true,
       results: [{ status: "working" }],
+    });
+  });
+
+  it("completes a Composer turn when an idle slash-command overlay covers the prompt", async () => {
+    const cursor: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session, initialPrompt) => ({
+        executable: "fake",
+        args: initialPrompt === undefined ? [] : [initialPrompt],
+        cwd: session.cwd,
+        env: {},
+      }),
+      buildResumeSpec: () => {
+        throw new Error("not used");
+      },
+      submitInput: (message) => Buffer.from(`${message}\r`),
+    };
+    const { registry, ptys } = harness({ adapters: { ...adapters, cursor } });
+    const record = await registry.start(
+      request({ provider: "cursor", model: "composer" }),
+      "Open the pull request",
+    );
+    const waiting = registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 500);
+
+    ptys[0]!.emitOutput("Composing 5.53k tokens\nctrl+c to stop");
+    ptys[0]!.emitOutput([
+      "\nOpened pull request #4",
+      "→ /",
+      "No matches",
+      "/model [filter] Select model (Tab to edit)",
+      "/run-everything Toggle Run Everything (currently enabled)",
+    ].join("\n"));
+
+    await expect(waiting).resolves.toMatchObject({
+      timedOut: false,
+      results: [{ status: "completed", completedTurns: 1 }],
+    });
+  });
+
+  it("returns stalled when idle transcript and token count stay byte-identical past threshold", async () => {
+    let now = 0;
+    const { registry, ptys } = harness({
+      workerStallSeconds: 60,
+      now: () => now,
+    });
+    const record = await registry.start(request(), "Finish the task");
+    ptys[0]!.emitOutput("Result may be complete\n5.53k tokens");
+
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 0, 500)).resolves.toMatchObject({
+      timedOut: true,
+      results: [{ status: "waiting" }],
+    });
+
+    now = 61_000;
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 0, 500)).resolves.toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "stalled",
+        stalledForSeconds: 61,
+        stallReason: "transcript-and-token-count-unchanged-while-idle",
+        tokenCount: 5_530,
+      }],
     });
   });
 

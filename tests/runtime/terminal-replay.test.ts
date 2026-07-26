@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   compactTerminalResult,
   providerTerminalActivity,
+  terminalTokenCount,
   truncateResult,
 } from "../../src/runtime/terminal-replay.js";
 
@@ -16,6 +17,20 @@ describe("terminal replay semantics", () => {
     const complete = `${working}\n101 → 1101\n\u001b]777;notify;Cursor;Cursor is waiting for you\u0007`;
     expect(providerTerminalActivity("cursor", working)).toBe("working");
     expect(providerTerminalActivity("cursor", complete)).toBe("awaiting-input");
+  });
+
+  it("treats a Cursor slash-command overlay as idle after work instead of stranding completion", () => {
+    const replay = [
+      "Composing 5.53k tokens",
+      "ctrl+c to stop",
+      "Opened pull request #4",
+      "→ /",
+      "No matches",
+      "/model [filter] Select model (Tab to edit)",
+      "/run-everything Toggle Run Everything (currently enabled)",
+    ].join("\n");
+    expect(providerTerminalActivity("cursor", replay)).toBe("awaiting-input");
+    expect(terminalTokenCount(replay)).toBe(5_530);
   });
 
   it("surfaces trust gates as blocked rather than completed", () => {
