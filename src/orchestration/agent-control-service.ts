@@ -29,6 +29,8 @@ import type { SessionRegistry } from "../broker/session-registry.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
+import type { ProviderPermissionPreferencePort } from "../persistence/provider-permission-preference-store.js";
+import { resolveProviderPermission } from "../client/permission-policy.js";
 import { validateWorkerSelection } from "./worker-capabilities.js";
 
 export const AgentActorParamsSchema = z.object({ actorSessionId: z.uuid() });
@@ -230,6 +232,7 @@ export interface AgentControlOptions {
   audit?: { append(event: BrokerEvent): Promise<void> };
   /** Minimum elapsed time between graceful request and force escalation. */
   forceStopGraceMs?: number;
+  providerPermissions?: ProviderPermissionPreferencePort;
 }
 
 export class AgentControlService {
@@ -239,6 +242,7 @@ export class AgentControlService {
   private readonly segmentSeconds: number;
   private readonly audit: AgentControlOptions["audit"];
   private readonly forceStopGraceMs: number;
+  private readonly providerPermissions: ProviderPermissionPreferencePort | undefined;
 
   constructor(
     private readonly registry: SessionRegistry,
@@ -251,6 +255,7 @@ export class AgentControlService {
     this.segmentSeconds = Math.max(1, Math.min(options.segmentSeconds ?? MAX_WAIT_SEGMENT_SECONDS, MAX_WAIT_SECONDS));
     this.audit = options.audit;
     this.forceStopGraceMs = Math.max(1_000, options.forceStopGraceMs ?? 5_000);
+    this.providerPermissions = options.providerPermissions;
   }
 
   async listThreads(input: string | z.input<typeof AgentListThreadsParamsSchema>): Promise<ThreadListPage> {
@@ -532,11 +537,13 @@ export class AgentControlService {
         "Fable workers are disabled for this orchestrator; the operator can run /fable-workers on",
       );
     }
+    const approvalMode = request.approvalMode
+      ?? await this.configuredApprovalMode(request.provider, request.sandbox);
     const selection = validateWorkerSelection({
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
       ...(request.effort === undefined ? {} : { effort: request.effort }),
-      ...(request.approvalMode === undefined ? {} : { approvalMode: request.approvalMode }),
+      ...(approvalMode === undefined ? {} : { approvalMode }),
     });
     if (!selection.ok) throw new AgentControlError(selection.code, selection.message);
     const name = request.name ?? taskName(request.prompt);
@@ -545,7 +552,7 @@ export class AgentControlService {
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
       ...(request.effort === undefined ? {} : { effort: request.effort }),
-      ...(request.approvalMode === undefined ? {} : { approvalMode: request.approvalMode }),
+      ...(approvalMode === undefined ? {} : { approvalMode }),
       cwd: request.cwd,
       detached: true,
       sandbox: request.sandbox,
@@ -563,6 +570,21 @@ export class AgentControlService {
       ...(worker.effort === undefined ? {} : { effort: worker.effort }),
       completionTarget: 1,
     };
+  }
+
+  private async configuredApprovalMode(
+    provider: z.infer<typeof ProviderIdSchema>,
+    sandbox: z.infer<typeof SandboxSchema>,
+  ): Promise<z.infer<typeof ApprovalModeSchema> | undefined> {
+    const policy = (await this.providerPermissions?.list())?.[provider];
+    if (policy === undefined) return undefined;
+    const resolution = resolveProviderPermission(provider, policy, sandbox);
+    if (!resolution.ok) {
+      throw new AgentControlError("APPROVAL_MODE_NOT_SUPPORTED", resolution.message);
+    }
+    return resolution.value.application.kind === "post-launch-command"
+      ? "auto"
+      : resolution.value.application.value;
   }
 
   async startWorkers(input: z.input<typeof AgentStartWorkersParamsSchema>) {

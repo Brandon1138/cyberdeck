@@ -15,7 +15,9 @@ Each session records independent fields:
 - `role` is an optional opaque, user-defined string. It grants no capabilities and implies no workflow.
 - `sandbox` is the requested permission boundary, independent of provider, model, and role.
 - `approvalMode` is an optional provider-neutral `prompt | auto` dispatch choice. Omission preserves
-  provider prompts; `auto` is never inferred.
+  provider prompts for direct starts; orchestrated workers inherit an operator's persisted
+  `/permissions` policy. Cursor `auto` is applied and verified through post-launch
+  `/run-everything` before the initial task is submitted.
 - execution state describes whether the provider process is active or exited.
 - attachment state describes presentation: attached/interactive or detached/headless.
 

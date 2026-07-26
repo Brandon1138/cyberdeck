@@ -344,10 +344,14 @@ describe("extended interactive provider adapters", () => {
     expect(spec.env.TMUX_PANE).toBeUndefined();
   });
 
+  it("defers Cursor auto mode to verified post-launch setup", () => {
+    const adapter = new CursorProviderAdapter();
+    const record = session({ provider: "cursor", model: "composer", approvalMode: "auto" });
+    expect(adapter.buildLaunchSpec(record).args).not.toContain("/run-everything");
+    expect(adapter.deferInitialPrompt(record)).toBe(true);
+  });
+
   it.each([
-    ["cursor", () => new CursorProviderAdapter().buildLaunchSpec(
-      session({ provider: "cursor", model: "composer", approvalMode: "auto" }),
-    )],
     ["antigravity", () => new AntigravityProviderAdapter().buildLaunchSpec(
       session({
         provider: "antigravity",

@@ -8,6 +8,12 @@ export interface ProviderLaunchSpec {
   env: NodeJS.ProcessEnv;
 }
 
+export interface ProviderSessionTerminal {
+  snapshot(): Buffer;
+  write(data: Buffer): void;
+  wait(milliseconds: number): Promise<void>;
+}
+
 export interface ProviderAdapter {
   readonly id: ProviderId;
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec;
@@ -23,6 +29,16 @@ export interface ProviderAdapter {
    * ownership; `prepareLaunch` rebuilds them on the next resume. Must be idempotent.
    */
   cleanupLaunch?(session: SessionRecord): Promise<void>;
+  /**
+   * Whether the initial prompt must wait until provider-native post-launch setup finishes.
+   * Used for modes such as Composer `/run-everything`, which have no launch flag.
+   */
+  deferInitialPrompt?(session: SessionRecord): boolean;
+  /**
+   * Provider-native setup after PTY creation and before a deferred initial prompt.
+   * Implementations must verify resulting state and clean up any modal input on failure.
+   */
+  initializeSession?(session: SessionRecord, terminal: ProviderSessionTerminal): Promise<void>;
   /** Re-open the exact provider-native conversation represented by a terminal Cyberdeck thread. */
   buildResumeSpec(session: SessionRecord): ProviderLaunchSpec;
   /** Encode one logical prompt submission for the provider's negotiated interactive terminal. */

@@ -193,6 +193,41 @@ describe("AgentControlService", () => {
     expect(start.mock.calls.at(-1)?.[0]).not.toHaveProperty("approvalMode");
   });
 
+  it("applies persisted Composer automatic mode to MCP-started workers", async () => {
+    const start = vi.fn(async (request) => ({
+      ...worker,
+      ...request,
+      provider: "cursor",
+      id: WORKER,
+    }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+      undefined,
+      {
+        providerPermissions: {
+          list: vi.fn(async () => ({ cursor: "automatic" as const })),
+          set: vi.fn(),
+        },
+      },
+    );
+
+    await service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "cursor",
+      model: "composer",
+      cwd: "/repo/one",
+      sandbox: "workspace-write",
+      prompt: "Open the pull request",
+    });
+
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "cursor",
+      approvalMode: "auto",
+    }), "Open the pull request");
+  });
+
   it("snapshots an enabled Caveman preference into newly started workers", async () => {
     const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
     const service = new AgentControlService(

@@ -25,6 +25,7 @@ import { SessionStore } from "../persistence/session-store.js";
 import { FleetPreferenceStore } from "../persistence/fleet-preference-store.js";
 import { FleetDetachStore } from "../persistence/fleet-detach-store.js";
 import { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
+import { ProviderPermissionPreferenceStore } from "../persistence/provider-permission-preference-store.js";
 import { ensurePrivateDirectory } from "../persistence/private-files.js";
 import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import { AgentControlService } from "../orchestration/agent-control-service.js";
@@ -101,6 +102,7 @@ export async function runBroker(
   const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
   const workerPreferences = new WorkerPreferenceStore(stateDirectory);
+  const providerPermissions = new ProviderPermissionPreferenceStore(stateDirectory);
   const recoveredSessions = await retainThreads(sessionStore, config.threadRetention);
   const registry = new SessionRegistry({
     adapters: {
@@ -124,7 +126,7 @@ export async function runBroker(
     orchestratorStore,
     transcripts,
     workerPreferences,
-    { audit: journal },
+    { audit: journal, providerPermissions },
   );
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
   instructions.start();

@@ -179,14 +179,19 @@ means the caller's own budget elapsed, and `"settled"` means every target is ter
 `sessionId` and `completionTarget` stays retrievable afterwards: re-waiting replays the recorded
 result and marks it `retrieval: "replay"`, which is how an orchestrator proves a mutation already ran
 instead of launching a duplicate worker. A control-plane failure is reported as its own class and
-never as a worker outcome. `threads_list` defaults to a status projection (id, name, provider,
+never as a worker outcome. An idle worker whose transcript and rendered token count remain unchanged
+for `workerStallSeconds` (60 by default) settles as `status: "stalled"` with elapsed time, token
+count, and a machine-readable reason instead of reporting `working` forever. `threads_list` defaults
+to a status projection (id, name, provider,
 executionState, attentionState) and pages with `limit`/`cursor`, so a liveness check stays inside a
 caller's token budget at 64 concurrent workers; pass `view: "full"` for whole records.
 
-Worker starts may explicitly set provider-neutral `approvalMode` to `auto` for Codex or Claude.
-Omitting it preserves provider approval prompts (`on-request` for Codex and the sandbox-derived
-Claude mode); Cursor and Antigravity reject `auto` rather than ignoring it. The operator CLI exposes
-the same opt-in as `--approval-mode auto`.
+Worker starts may explicitly set provider-neutral `approvalMode` to `auto` for Codex, Claude, or
+Cursor. Cursor maps it to verified post-launch `/run-everything`: Cyberdeck waits for Composer input,
+commits the command, reads the enabled state back through the command menu, and always closes that
+menu before submitting the task. MCP-started workers inherit the persisted `/permissions` policy
+when `approvalMode` is omitted. Antigravity rejects `auto` rather than ignoring it. The operator CLI
+exposes the same explicit override as `--approval-mode auto`.
 
 A human attachment always owns the only writer lease: orchestrator input remains queued until that
 controller detaches. Cyberdeck never steers a worker through tmux.
