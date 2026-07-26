@@ -83,6 +83,7 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
     let rawModeChanged = false;
     let attachmentClaimed = false;
     let finished = false;
+    let transportClosed = false;
     let detachOnLeftArrow = options.detachOnLeftArrow ?? true;
     let pendingInput = Buffer.alloc(0);
     let pendingEscapeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -112,7 +113,11 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
     };
     const unsubscribeFrame = options.transport.onFrame(onFrame);
 
-    const cleanup = () => {
+    /**
+     * Hand the terminal back and stop speaking for this attachment. Kept apart from closing the
+     * transport, because a detach still has to travel over it.
+     */
+    const releaseTerminal = () => {
       if (finished) return;
       finished = true;
       unsubscribeFrame();
@@ -124,7 +129,17 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
       if (pendingEscapeTimer !== undefined) clearTimeout(pendingEscapeTimer);
       pendingEscapeTimer = undefined;
       pendingInput = Buffer.alloc(0);
-      if (options.closeTransport !== false) options.transport.close();
+    };
+
+    const closeTransport = () => {
+      if (transportClosed || options.closeTransport === false) return;
+      transportClosed = true;
+      options.transport.close();
+    };
+
+    const cleanup = () => {
+      releaseTerminal();
+      closeTransport();
     };
 
     const finish = (code: number, sendDetach: boolean) => {
@@ -137,10 +152,19 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
         void Promise.resolve(options.onExplicitDetach()).then(() => resolve(code)).catch(reject);
       };
       if (sendDetach && options.detachIdentity !== undefined) {
-        cleanup();
+        // Only the terminal is released up front. Closing the transport first ended the socket out
+        // from under this request, so the broker never heard the detach and went on holding control
+        // for an attachment that was already gone — the session could not be reattached.
+        releaseTerminal();
         void options.transport.request("session.detach", { sessionId: options.sessionId })
-          .then(complete)
-          .catch(reject);
+          .then(() => {
+            closeTransport();
+            complete();
+          })
+          .catch((error: unknown) => {
+            closeTransport();
+            reject(error);
+          });
         return;
       }
       if (sendDetach) {
