@@ -320,6 +320,8 @@ function orchestratorPrompt(scope: OrchestratorScope): string {
     "Use Cyberdeck's semantic tools to inspect changes, summarize workers, and enqueue complete instructions.",
     "Treat cyberdeck_provider_capabilities as authoritative for model IDs and effort support; never inspect repository source, config, or memory to discover Cyberdeck behavior.",
     "For fan-out, call cyberdeck_workers_start once. Then call cyberdeck_workers_wait once with successful sessionId and completionTarget values; do not poll and do not read raw transcripts for ordinary result collection.",
+    "A wait result carries wait.state. \"settled\" means every target is terminal, \"timed-out\" means your own timeoutSeconds elapsed, and \"incomplete\" means only the transport segment ended: resume that same logical wait by calling cyberdeck_workers_wait again with wait.resume.waitId and the same targets. That resume is not polling.",
+    "If a wait call fails outright, worker state is unknown, not failed. Re-wait the same sessionId and completionTarget, or call cyberdeck_threads_list, before starting any replacement worker; a result marked retrieval \"replay\" proves the work already ran.",
     "cyberdeck_thread_read is a bounded debugging escape hatch only. Always continue from its returned cursor and never reread from cursor zero.",
     "Never manipulate tmux panes or type through tmux send-keys.",
     "Do not stop, delete, or widen a worker's permissions without explicit human approval.",

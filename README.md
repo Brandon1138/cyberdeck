@@ -171,6 +171,18 @@ by one blocking `workers_wait` call; it does not poll or feed raw terminal trans
 model. `thread_read` remains a bounded debugging escape hatch, requires an explicit cursor, and
 refuses to move an orchestrator backward behind a cursor it has already consumed.
 
+`workers_wait` accepts a logical timeout of up to 600 seconds but never blocks a single tool call
+longer than 90 seconds, because MCP clients abandon a call well before that — Claude Code backgrounds
+one at 120 seconds and Codex kills one at 300. A call that reaches the segment boundary first returns
+a normal structured result with `wait.state: "incomplete"` and a `waitId` to resume; `"timed-out"`
+means the caller's own budget elapsed, and `"settled"` means every target is terminal. A completed
+`sessionId` and `completionTarget` stays retrievable afterwards: re-waiting replays the recorded
+result and marks it `retrieval: "replay"`, which is how an orchestrator proves a mutation already ran
+instead of launching a duplicate worker. A control-plane failure is reported as its own class and
+never as a worker outcome. `threads_list` defaults to a status projection (id, name, provider,
+executionState, attentionState) and pages with `limit`/`cursor`, so a liveness check stays inside a
+caller's token budget at 64 concurrent workers; pass `view: "full"` for whole records.
+
 Worker starts may explicitly set provider-neutral `approvalMode` to `auto` for Codex or Claude.
 Omitting it preserves provider approval prompts (`on-request` for Codex and the sandbox-derived
 Claude mode); Cursor and Antigravity reject `auto` rather than ignoring it. The operator CLI exposes

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import type { BrokerRuntimeConfig } from "../config.js";
+import { MAX_WAIT_SECONDS } from "../limits.js";
 import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
 import { evaluateStart, type SessionAncestryEntry, type StartPolicyCode } from "../domain/policy.js";
 import {
@@ -74,6 +75,17 @@ interface Watcher {
   ended: ExitSink;
 }
 
+/**
+ * One completed turn, kept so the same `completionTarget` stays retrievable after the caller's
+ * transport dies. `deliveries` makes a replay distinguishable from a first read, which is what lets
+ * an orchestrator prove a mutation already ran instead of relaunching a duplicate worker.
+ */
+interface CompletionLedgerEntry {
+  text: string;
+  completedAt: string;
+  deliveries: number;
+}
+
 interface RuntimeSession {
   record: SessionRecord;
   pty?: PtyHandle;
@@ -88,10 +100,14 @@ interface RuntimeSession {
   fatalReported: boolean;
   /** The stop that killed this session was a broker shutdown of an already-finished thread. */
   outcomePreserved?: boolean;
+  /** Per-turn results keyed by completion target, bounded by MAX_COMPLETION_LEDGER_ENTRIES. */
+  completions: Map<number, CompletionLedgerEntry>;
   idleTimer?: ReturnType<typeof setTimeout>;
   /** Serializes provider launch-artifact work so a pending cleanup cannot delete a fresh resume. */
   launchTail: Promise<void>;
 }
+
+const MAX_COMPLETION_LEDGER_ENTRIES = 64;
 
 export interface WorkerWaitTarget {
   sessionId: string;
@@ -107,6 +123,9 @@ export interface WorkerResultSnapshot {
   status: "completed" | "needs-input" | "working" | "waiting" | "failed" | "stopped" | "exited";
   completedTurns: number;
   text: string;
+  /** Only on a completed target: whether this delivery is the first one for that completion. */
+  retrieval?: "fresh" | "replay";
+  completedAt?: string;
 }
 
 export interface WorkerWaitResult {
@@ -187,6 +206,7 @@ export class SessionRegistry {
         observedWorking: false,
         completedTurns: 0,
         fatalReported: false,
+        completions: new Map(),
         launchTail: Promise.resolve(),
       });
       // Recovery rewrites lifecycle fields, so the catalog is only authoritative once the rewrite
@@ -279,6 +299,7 @@ export class SessionRegistry {
       observedWorking: false,
       completedTurns: 0,
       fatalReported: false,
+      completions: new Map(),
       launchTail: Promise.resolve(),
     };
     this.sessions.set(id, runtime);
@@ -368,7 +389,10 @@ export class SessionRegistry {
     timeoutMs: number,
     maxResultChars = 1_200,
   ): Promise<WorkerWaitResult> {
-    const boundedTimeout = Math.max(1_000, Math.min(timeoutMs, 600_000));
+    // The floor is zero: a caller that already spent its logical budget must get an immediate
+    // structured answer, not another second of blocking. The ceiling is the same constant the
+    // schemas validate against, so no layer can accept a value another layer would silently cut.
+    const boundedTimeout = Math.max(0, Math.min(timeoutMs, MAX_WAIT_SECONDS * 1_000));
     const snapshot = (): WorkerResultSnapshot[] => targets.map((target) =>
       this.workerResultSnapshot(target, maxResultChars)
     );
@@ -376,7 +400,7 @@ export class SessionRegistry {
       result.status !== "working" && result.status !== "waiting";
 
     const initial = snapshot();
-    if (initial.every(isSettled)) return { timedOut: false, results: initial };
+    if (initial.every(isSettled)) return { timedOut: false, results: this.deliver(targets, initial) };
 
     return new Promise<WorkerWaitResult>((resolve) => {
       let settled = false;
@@ -385,7 +409,7 @@ export class SessionRegistry {
         settled = true;
         clearTimeout(timer);
         this.sessionUpdateListeners.delete(onUpdate);
-        resolve({ timedOut, results: snapshot() });
+        resolve({ timedOut, results: this.deliver(targets, snapshot()) });
       };
       const targetIds = new Set(targets.map(({ sessionId }) => sessionId));
       const onUpdate = (sessionId: string) => {
@@ -1016,9 +1040,13 @@ export class SessionRegistry {
   private workerResultSnapshot(target: WorkerWaitTarget, maxResultChars: number): WorkerResultSnapshot {
     const runtime = this.requireRuntime(target.sessionId);
     const replay = runtime.pty?.snapshot().toString("utf8") ?? runtime.record.latestPreview ?? "";
-    const result = runtime.latestResult === undefined
-      ? compactTerminalResult(replay, maxResultChars)
-      : runtime.latestResult;
+    // A recorded completion wins over live runtime state: once the target turn is in the ledger its
+    // text is fixed, so a later turn cannot overwrite the answer this wait was asked for.
+    const recorded = runtime.completions.get(target.completionTarget);
+    const result = recorded?.text
+      ?? (runtime.latestResult === undefined
+        ? compactTerminalResult(replay, maxResultChars)
+        : runtime.latestResult);
     const text = truncateResult(result, maxResultChars);
     const base = {
       sessionId: runtime.record.id,
@@ -1029,13 +1057,66 @@ export class SessionRegistry {
       completedTurns: runtime.completedTurns,
       text,
     };
-    if (runtime.completedTurns >= target.completionTarget) return { ...base, status: "completed" };
+    if (runtime.completedTurns >= target.completionTarget) {
+      return {
+        ...base,
+        status: "completed",
+        ...(recorded === undefined ? {} : { completedAt: recorded.completedAt }),
+      };
+    }
     if (runtime.activity === "needs-input") return { ...base, status: "needs-input" };
     if (runtime.record.executionState === "failed") return { ...base, status: "failed" };
     if (runtime.record.executionState === "cancelled") return { ...base, status: "stopped" };
     if (runtime.record.executionState === "exited") return { ...base, status: "exited" };
     if (runtime.activity === "working") return { ...base, status: "working" };
     return { ...base, status: "waiting" };
+  }
+
+  /**
+   * Stamps the results a wait is about to hand back. Marking happens here rather than in the
+   * snapshot helper because a wait probes the snapshot on every session update; only the batch that
+   * actually reaches the caller counts as a delivery.
+   */
+  private deliver(
+    targets: readonly WorkerWaitTarget[],
+    results: WorkerResultSnapshot[],
+  ): WorkerResultSnapshot[] {
+    return results.map((result, index) => {
+      const target = targets[index];
+      if (result.status !== "completed" || target === undefined) return result;
+      const runtime = this.sessions.get(target.sessionId);
+      if (runtime === undefined) return result;
+      // A completion the semantic-turn path never recorded (an exit that raced the ledger, a
+      // recovered session) is admitted on first delivery so replays stay stable from here on.
+      const entry = runtime.completions.get(target.completionTarget)
+        ?? this.recordCompletion(runtime, target.completionTarget, result.text);
+      entry.deliveries += 1;
+      return {
+        ...result,
+        retrieval: entry.deliveries === 1 ? "fresh" : "replay",
+        completedAt: entry.completedAt,
+      };
+    });
+  }
+
+  private recordCompletion(
+    runtime: RuntimeSession,
+    completionTarget: number,
+    text: string,
+  ): CompletionLedgerEntry {
+    const existing = runtime.completions.get(completionTarget);
+    if (existing !== undefined) return existing;
+    const entry: CompletionLedgerEntry = {
+      text,
+      completedAt: new Date().toISOString(),
+      deliveries: 0,
+    };
+    runtime.completions.set(completionTarget, entry);
+    while (runtime.completions.size > MAX_COMPLETION_LEDGER_ENTRIES) {
+      const oldest = Math.min(...runtime.completions.keys());
+      runtime.completions.delete(oldest);
+    }
+    return entry;
   }
 
   private notifySessionUpdate(sessionId: string): void {
@@ -1067,8 +1148,16 @@ export class SessionRegistry {
     } catch {
       // Native transcript can lag its TUI frame. Keep worker completion usable without persisting PTY bytes.
     }
+    // `completedTurns` already counts the turn that just ended, so it names the last turn the
+    // native transcript describes. Ledger each captured turn under the completionTarget a waiter
+    // would ask for, oldest first.
+    const firstTurn = runtime.completedTurns;
     if (nativeTurns.length > 1) runtime.completedTurns += nativeTurns.length - 1;
     const latest = nativeTurns.at(-1)?.text ?? fallback;
+    const texts = nativeTurns.length > 0
+      ? nativeTurns.map((turn) => turn.text ?? fallback)
+      : [fallback];
+    texts.forEach((text, index) => this.recordCompletion(runtime, firstTurn + index, text));
     runtime.latestResult = latest;
     await this.refreshPreview(
       runtime,

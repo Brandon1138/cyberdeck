@@ -64,7 +64,12 @@ describe("AgentControlService", () => {
       { read: vi.fn(async () => ({ events: [], nextCursor: 0 })) } as never,
     );
 
-    await expect(service.listThreads(ACTOR)).resolves.toEqual([worker]);
+    await expect(service.listThreads({ actorSessionId: ACTOR, view: "full" })).resolves.toMatchObject({
+      view: "full",
+      threads: [worker],
+      total: 1,
+      returned: 1,
+    });
     await expect(service.readThread(ACTOR, WORKER)).resolves.toEqual({ events: [], nextCursor: 0 });
   });
 
@@ -313,12 +318,164 @@ describe("AgentControlService", () => {
       targets: [{ sessionId: WORKER, completionTarget: 1 }],
       timeoutSeconds: 30,
       maxResultChars: 800,
-    })).resolves.toEqual({ timedOut: false, results: [] });
+    })).resolves.toMatchObject({
+      timedOut: false,
+      results: [],
+      wait: { state: "settled", timeoutSeconds: 30, resumed: false },
+    });
     expect(waitForWorkerResults).toHaveBeenCalledWith(
       [{ sessionId: WORKER, completionTarget: 1 }],
       30_000,
       800,
     );
+  });
+
+  it("honors a 600-second wait across segments that each return before an MCP client deadline", async () => {
+    let clock = 0;
+    const waitForWorkerResults = vi.fn(async (_targets: unknown, timeoutMs: number) => {
+      clock += timeoutMs;
+      return { timedOut: true, results: [{ sessionId: WORKER, status: "working" }] };
+    });
+    const service = new AgentControlService(
+      { get: () => worker, waitForWorkerResults } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read: vi.fn() } as never,
+      undefined,
+      { now: () => clock, segmentSeconds: 90 },
+    );
+    const call = (waitId?: string) => service.waitForWorkers({
+      actorSessionId: ACTOR,
+      targets: [{ sessionId: WORKER, completionTarget: 1 }],
+      timeoutSeconds: 600,
+      ...(waitId === undefined ? {} : { waitId }),
+    });
+
+    const first = await call();
+    expect(first).toMatchObject({
+      timedOut: true,
+      wait: {
+        state: "incomplete",
+        resumed: false,
+        timeoutSeconds: 600,
+        elapsedSeconds: 90,
+        remainingSeconds: 510,
+        segmentSeconds: 90,
+        resume: { tool: "cyberdeck_workers_wait" },
+      },
+    });
+    expect(first.results[0]).toMatchObject({ status: "working" });
+
+    let latest = first;
+    while (latest.wait.state === "incomplete") {
+      latest = await call(latest.wait.waitId);
+      expect(latest.wait.waitId).toBe(first.wait.waitId);
+      expect(latest.wait.resumed).toBe(true);
+    }
+
+    expect(latest.wait).toMatchObject({ state: "timed-out", remainingSeconds: 0, elapsedSeconds: 600 });
+    expect(latest.timedOut).toBe(true);
+    // The whole logical budget was served without any single call outliving a client deadline.
+    expect(waitForWorkerResults.mock.calls.map(([, timeoutMs]) => timeoutMs)).toEqual([
+      90_000, 90_000, 90_000, 90_000, 90_000, 90_000, 60_000,
+    ]);
+  });
+
+  it("clamps a short wait to the caller's own timeout instead of the segment length", async () => {
+    const waitForWorkerResults = vi.fn(async () => ({ timedOut: false, results: [] }));
+    const service = new AgentControlService(
+      { get: () => worker, waitForWorkerResults } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read: vi.fn() } as never,
+    );
+
+    await expect(service.waitForWorkers({
+      actorSessionId: ACTOR,
+      targets: [{ sessionId: WORKER, completionTarget: 1 }],
+      timeoutSeconds: 5,
+    })).resolves.toMatchObject({ timedOut: false, wait: { state: "settled" } });
+    expect(waitForWorkerResults).toHaveBeenCalledWith(expect.anything(), 5_000, 1_200);
+  });
+
+  it("refuses to resume another orchestrator's wait ticket", async () => {
+    let clock = 0;
+    const service = new AgentControlService(
+      {
+        get: () => worker,
+        waitForWorkerResults: async () => {
+          clock += 90_000;
+          return { timedOut: true, results: [] };
+        },
+      } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read: vi.fn() } as never,
+      undefined,
+      { now: () => clock, segmentSeconds: 90 },
+    );
+
+    const first = await service.waitForWorkers({
+      actorSessionId: ACTOR,
+      targets: [{ sessionId: WORKER, completionTarget: 1 }],
+      timeoutSeconds: 600,
+    });
+    const otherActor = "33333333-3333-4333-8333-333333333333";
+    await expect(service.waitForWorkers({
+      actorSessionId: otherActor,
+      targets: [{ sessionId: WORKER, completionTarget: 1 }],
+      timeoutSeconds: 600,
+      waitId: first.wait.waitId,
+    })).rejects.toMatchObject({ code: "ACTOR_NOT_AUTHORIZED" });
+  });
+
+  it("starts a fresh logical wait when a ticket is unknown or already expired", async () => {
+    const service = new AgentControlService(
+      { get: () => worker, waitForWorkerResults: async () => ({ timedOut: false, results: [] }) } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read: vi.fn() } as never,
+    );
+
+    const result = await service.waitForWorkers({
+      actorSessionId: ACTOR,
+      targets: [{ sessionId: WORKER, completionTarget: 1 }],
+      waitId: "44444444-4444-4444-8444-444444444444",
+    });
+    expect(result.wait).toMatchObject({ resumed: false, state: "settled" });
+    expect(result.wait.waitId).not.toBe("44444444-4444-4444-8444-444444444444");
+  });
+
+  it("lists thread status by default and pages instead of returning every field", async () => {
+    const threads = Array.from({ length: 5 }, (_, index) => ({
+      ...worker,
+      id: crypto.randomUUID(),
+      name: `worker-${index}`,
+      attentionState: "working" as const,
+      latestPreview: "x".repeat(3_000),
+      launchRecord: { mode: "launch" } as never,
+    }));
+    const service = new AgentControlService(
+      { list: () => threads } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    const page = await service.listThreads({ actorSessionId: ACTOR, limit: 2 });
+    expect(page).toMatchObject({ view: "status", total: 5, cursor: 0, returned: 2, nextCursor: 2 });
+    expect(page.threads[0]).toEqual({
+      id: threads[0]!.id,
+      name: "worker-0",
+      provider: "codex",
+      executionState: "active",
+      attentionState: "working",
+    });
+
+    const last = await service.listThreads({ actorSessionId: ACTOR, limit: 2, cursor: 4 });
+    expect(last).toMatchObject({ returned: 1 });
+    expect(last).not.toHaveProperty("nextCursor");
+
+    const full = await service.listThreads({ actorSessionId: ACTOR, view: "full", limit: 1 });
+    const record = full.threads[0] as SessionRecord;
+    expect(record.latestPreview).toHaveLength(200);
+    expect(record).not.toHaveProperty("launchRecord");
+    expect(JSON.stringify(page).length).toBeLessThan(JSON.stringify(full).length);
   });
 
   it("batch-starts workers and preserves independent validation errors", async () => {
@@ -404,7 +561,13 @@ describe("AgentControlService actor description", () => {
     // session UUID the MCP server carries in --actor-session still resolves to its own binding.
     const findBySessionId = vi.fn(async (id: string) => id === ACTOR ? fleetBinding : undefined);
     const control = service(orchestrator, { findBySessionId });
-    await expect(control.listThreads(ACTOR)).resolves.toEqual([]);
+    // The listing is a projected page now, so the binding shows up as a page that resolves at all
+    // rather than as a bare array; the actor itself is never one of its own visible threads.
+    await expect(control.listThreads(ACTOR)).resolves.toMatchObject({
+      view: "status",
+      threads: [],
+      total: 0,
+    });
     await expect(control.describeActor(ACTOR)).resolves.toMatchObject({ status: "bound" });
   });
 
