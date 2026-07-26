@@ -48,6 +48,7 @@ export type PtyFactory = (spec: ProviderLaunchSpec, replayBytes: number) => PtyH
 export type AttachmentMode = "control" | "watch";
 export type OutputSink = (chunk: Buffer) => void;
 export type ExitSink = (exitCode: number) => void;
+export type FailureSink = (failure: { code: string; message: string }) => void;
 
 interface JournalLike {
   append(event: BrokerEvent): Promise<void>;
@@ -68,11 +69,13 @@ interface Controller {
   clientId: string;
   output: OutputSink;
   ended: ExitSink;
+  failed: FailureSink;
 }
 
 interface Watcher {
   output: OutputSink;
   ended: ExitSink;
+  failed: FailureSink;
 }
 
 /**
@@ -92,6 +95,7 @@ interface RuntimeSession {
   controller?: Controller;
   watchers: Map<string, Watcher>;
   stopRequested: boolean;
+  stopRequestedAt?: string;
   activity: ProviderTerminalActivity;
   observedWorking: boolean;
   completedTurns: number;
@@ -249,6 +253,7 @@ export class SessionRegistry {
       ...parsed,
       kind: parsed.kind ?? "worker",
       id,
+      generation: 1,
       createdAt: now,
       updatedAt: now,
       executionState: "starting",
@@ -422,6 +427,7 @@ export class SessionRegistry {
     mode: AttachmentMode,
     output: OutputSink,
     ended: ExitSink = () => {},
+    failed: FailureSink = () => {},
   ): Promise<Buffer> {
     const runtime = this.requireRuntime(sessionId);
     if (runtime.record.executionState !== "active") {
@@ -432,10 +438,10 @@ export class SessionRegistry {
       if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
         throw new RegistryError("SESSION_ALREADY_CONTROLLED", "Session already has a controller");
       }
-      runtime.controller = { clientId, output, ended };
+      runtime.controller = { clientId, output, ended, failed };
       runtime.watchers.delete(clientId);
     } else {
-      runtime.watchers.set(clientId, { output, ended });
+      runtime.watchers.set(clientId, { output, ended, failed });
     }
     this.updateAttachmentState(runtime);
     try {
@@ -535,6 +541,18 @@ export class SessionRegistry {
     return this.requireRuntime(sessionId).pty?.snapshot() ?? Buffer.alloc(0);
   }
 
+  ownsProcess(sessionId: string): boolean {
+    return this.requireRuntime(sessionId).pty !== undefined;
+  }
+
+  isStopRequested(sessionId: string): boolean {
+    return this.requireRuntime(sessionId).stopRequested;
+  }
+
+  stopRequestedAt(sessionId: string): string | undefined {
+    return this.requireRuntime(sessionId).stopRequestedAt;
+  }
+
   async stop(sessionId: string): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
     if (runtime.record.exitCode !== null) {
@@ -546,22 +564,34 @@ export class SessionRegistry {
       return;
     }
     if (runtime.stopRequested) {
-      this.requirePty(runtime).kill();
+      // A repeated graceful request is idempotent. Force escalation is deliberately available
+      // only through `forceStop`, where broker policy can require a grace period and audit it.
       return;
     }
     // An errored session still owns a running OS process, so stop must be able to reach it even
     // though the broker no longer treats it as active.
     if (runtime.record.executionState !== "active" && runtime.record.executionState !== "errored") return;
     runtime.stopRequested = true;
+    runtime.stopRequestedAt = new Date().toISOString();
     runtime.record.executionState = "cancelled";
     // Shutting the broker down does not undo what an agent already delivered. A thread that had
     // finished its task keeps that outcome through the kill, so it rehydrates as Done rather than
     // as Stopped. An operator-initiated stop still reads as Stopped — that is their action.
     runtime.outcomePreserved = this.shuttingDown && runtime.record.attentionState === "done";
     if (runtime.outcomePreserved !== true) await this.setAttention(runtime, "stopping", true);
-    this.requirePty(runtime).kill();
+    this.requirePty(runtime).kill("SIGTERM");
     await this.appendEvent("session.stopped", sessionId, {});
     await this.appendTranscript(sessionId, "lifecycle", "broker", "session stopped", {});
+  }
+
+  /** Force only one already-stopping session. Child sessions are deliberately untouched. */
+  forceStop(sessionId: string): void {
+    const runtime = this.requireRuntime(sessionId);
+    if (runtime.record.exitCode !== null) return;
+    if (!runtime.stopRequested) {
+      throw new RegistryError("SESSION_NOT_ACTIVE", "Graceful stop must be requested before force");
+    }
+    this.requirePty(runtime).kill("SIGKILL");
   }
 
   async stopTree(sessionId: string): Promise<SessionTreeProgress> {
@@ -606,9 +636,11 @@ export class SessionRegistry {
     const pty = await this.spawnPreparedLaunch(adapter, record, resumeSpec);
     runtime.pty = pty;
     runtime.stopRequested = false;
+    delete runtime.stopRequestedAt;
     delete runtime.controller;
     runtime.watchers.clear();
     runtime.record.pid = pty.pid;
+    runtime.record.generation = (runtime.record.generation ?? 1) + 1;
     runtime.record.executionState = "active";
     runtime.record.attachmentState = "detached";
     runtime.record.exitCode = null;
@@ -854,8 +886,20 @@ export class SessionRegistry {
     if (this.observeFatalError(runtime, replay)) {
       // The bytes still reach anyone attached — the operator should be able to read the fault —
       // but no activity is derived from them. A dead session has no activity to derive.
-      runtime.controller?.output(chunk);
-      for (const watcher of runtime.watchers.values()) watcher.output(chunk);
+      const controller = runtime.controller;
+      const watchers = [...runtime.watchers.values()];
+      controller?.output(chunk);
+      for (const watcher of watchers) watcher.output(chunk);
+      delete runtime.controller;
+      runtime.watchers.clear();
+      this.updateAttachmentState(runtime);
+      const failure = {
+        code: "SESSION_ERRORED",
+        message: runtime.latestResult ?? "Provider session failed",
+      };
+      controller?.failed(failure);
+      for (const watcher of watchers) watcher.failed(failure);
+      void this.persist(runtime).catch(() => undefined);
       this.notifySessionUpdate(runtime.record.id);
       return;
     }

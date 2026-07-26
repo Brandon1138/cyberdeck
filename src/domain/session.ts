@@ -84,6 +84,8 @@ export const ResolvedLaunchRecordSchema = z.object({
 
 export const SessionRecordSchema = StartSessionRequestSchema.extend({
   id: z.uuid(),
+  /** Monotonic provider-process generation. Incremented every time this durable session resumes. */
+  generation: z.number().int().positive().optional(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
   executionState: SessionExecutionStateSchema,

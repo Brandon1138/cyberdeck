@@ -307,6 +307,64 @@ describe("attachSession", () => {
     expect(transport.close).not.toHaveBeenCalled();
   });
 
+  it("returns visibly instead of freezing when the broker marks the provider session failed", async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const transport = new FakeTransport("orchestrator");
+    const attached = attachSession({
+      sessionId: TEST_SESSION_ID,
+      mode: "control",
+      transport,
+      input,
+      output,
+      signals: new EventEmitter(),
+      closeTransport: false,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    transport.emitFrame({
+      type: "session-failed",
+      sessionId: TEST_SESSION_ID,
+      code: "SESSION_ERRORED",
+      message: "provider API rejected the request",
+    });
+
+    await expect(attached).resolves.toBe(1);
+    expect(Buffer.concat(output.chunks).toString()).toContain(
+      "Cyberdeck SESSION_ERRORED: provider API rejected the request",
+    );
+    expect(input.setRawMode).toHaveBeenLastCalledWith(false);
+    expect(transport.close).not.toHaveBeenCalled();
+  });
+
+  it("surfaces asynchronous input rejection instead of silently discarding keystrokes", async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const transport = new FakeTransport("orchestrator");
+    const attached = attachSession({
+      sessionId: TEST_SESSION_ID,
+      mode: "control",
+      transport,
+      input,
+      output,
+      signals: new EventEmitter(),
+      closeTransport: false,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    transport.emitFrame({
+      type: "protocol-error",
+      code: "SESSION_NOT_ACTIVE",
+      message: "Session is not active",
+    });
+
+    await expect(attached).resolves.toBe(1);
+    expect(Buffer.concat(output.chunks).toString()).toContain(
+      "Cyberdeck SESSION_NOT_ACTIVE: Session is not active",
+    );
+    expect(input.setRawMode).toHaveBeenLastCalledWith(false);
+  });
+
   it("detaches a claimed controller if rendering the replay fails", async () => {
     const transport = new FakeTransport();
     const attached = attachSession({

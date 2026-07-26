@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import { BrokerServer } from "../../src/broker/server.js";
 import { SessionRegistry, type PtyHandle } from "../../src/broker/session-registry.js";
+import type { BrokerEvent } from "../../src/domain/events.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import { ServerFrameSchema, type ServerFrame, type WireFrame } from "../../src/protocol/frames.js";
 import { JsonlDecoder, encodeFrame } from "../../src/protocol/jsonl.js";
@@ -124,10 +125,12 @@ async function harness() {
   const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(2000 + ptyFactory.mock.calls.length));
   const transcripts = new ThreadTranscriptStore(directory);
   const catalogWrites: string[] = [];
+  const brokerEvents: BrokerEvent[] = [];
+  const journal = { append: async (event: BrokerEvent) => { brokerEvents.push(event); } };
   const registry = new SessionRegistry({
     adapters,
     ptyFactory,
-    journal: { append: async () => {} },
+    journal,
     transcripts,
     store: {
       put: async (record) => { catalogWrites.push(`put:${record.id}`); },
@@ -140,7 +143,13 @@ async function harness() {
   const workerPreferences = new WorkerPreferenceStore(directory);
   const fleetDetaches = new FleetDetachStore(directory);
   const orchestrators = new OrchestratorManager(registry, orchestratorStore, workerPreferences);
-  const agentControl = new AgentControlService(registry, orchestratorStore, transcripts, workerPreferences);
+  const agentControl = new AgentControlService(
+    registry,
+    orchestratorStore,
+    transcripts,
+    workerPreferences,
+    { audit: journal },
+  );
   let server: BrokerServer;
   server = new BrokerServer({
     socketPath,
@@ -162,6 +171,7 @@ async function harness() {
     orchestrators,
     workerPreferences,
     catalogWrites,
+    brokerEvents,
   };
 }
 
@@ -362,6 +372,10 @@ describe("BrokerServer", () => {
       expect(peer.session.id).not.toBe(primary.session.id);
       expect(peer.binding.key).toBe(`fleet:peer:${peer.session.id}`);
       expect(peer.binding.grant.capabilities).toContain("worker.start");
+      expect(peer.binding.grant.capabilities).toEqual(expect.arrayContaining([
+        "orchestrator.inspect",
+        "orchestrator.stop",
+      ]));
       const worker = await client.request<{ sessionId: string }>("agent.worker.start", {
         actorSessionId: peer.session.id,
         provider: "codex",
@@ -387,6 +401,54 @@ describe("BrokerServer", () => {
         sessionId: peer.session.id,
         key: `fleet:peer:${peer.session.id}`,
       });
+    } finally {
+      client.socket.destroy();
+      await server.close();
+    }
+  });
+
+  it("routes scoped Orc inspection and refuses an unapproved healthy peer stop", async () => {
+    const { server, socketPath, brokerEvents } = await harness();
+    const client = await TestClient.open(socketPath);
+    try {
+      const request = {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        cwd: "/tmp/repo",
+        scope: "fleet",
+      };
+      const caller = await client.request<{ session: { id: string } }>("orchestrator.create", request);
+      const target = await client.request<{ session: { id: string; generation: number } }>(
+        "orchestrator.create",
+        request,
+      );
+
+      await expect(client.request("agent.orchestrator.inspect", {
+        actorSessionId: caller.session.id,
+        targetSessionId: target.session.id,
+      })).resolves.toMatchObject({
+        outcome: "INSPECTED",
+        target: {
+          sessionId: target.session.id,
+          generation: target.session.generation,
+          processOwnedByBroker: true,
+        },
+      });
+      await expect(client.request("agent.orchestrator.stop", {
+        actorSessionId: caller.session.id,
+        targetSessionId: target.session.id,
+        expectedGeneration: target.session.generation,
+        reason: "replace live peer",
+      })).resolves.toMatchObject({
+        outcome: "APPROVAL_REQUIRED",
+        mode: "graceful",
+      });
+      expect(brokerEvents).toContainEqual(expect.objectContaining({
+        type: "orchestrator.stop.result",
+        sessionId: target.session.id,
+        data: expect.objectContaining({ outcome: "APPROVAL_REQUIRED" }),
+      }));
     } finally {
       client.socket.destroy();
       await server.close();

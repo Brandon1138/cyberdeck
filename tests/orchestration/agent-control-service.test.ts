@@ -6,6 +6,7 @@ import {
   AgentWaitWorkersParamsSchema,
 } from "../../src/orchestration/agent-control-service.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
+import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 
 const ACTOR = "11111111-1111-4111-8111-111111111111";
@@ -623,6 +624,264 @@ describe("AgentControlService actor description", () => {
     await expect(service(undefined, {}).listThreads(ACTOR)).rejects.toMatchObject({
       code: "ACTOR_NOT_AUTHORIZED",
       message: expect.stringContaining("unknown-session"),
+    });
+  });
+});
+
+describe("AgentControlService Orc peer control", () => {
+  const TARGET = "66666666-6666-4666-8666-666666666666";
+  const CHILD = "77777777-7777-4777-8777-777777777777";
+  const actor: SessionRecord = {
+    ...worker,
+    id: ACTOR,
+    kind: "orchestrator",
+    role: "orchestrator",
+    orchestratorScope: "fleet",
+  };
+  const target: SessionRecord = {
+    ...worker,
+    id: TARGET,
+    kind: "orchestrator",
+    role: "orchestrator",
+    orchestratorScope: "fleet",
+    generation: 3,
+    executionState: "errored",
+    attentionState: "failed",
+    exitCode: null,
+    childIds: [],
+  };
+  const controlBinding: OrchestratorBinding = {
+    ...binding,
+    key: "fleet",
+    scope: { kind: "fleet" },
+    grant: {
+      ...binding.grant,
+      capabilities: [
+        ...binding.grant.capabilities,
+        "orchestrator.inspect",
+        "orchestrator.stop",
+      ],
+      scope: { kind: "fleet" },
+    },
+  };
+  const targetBinding: OrchestratorBinding = {
+    ...controlBinding,
+    key: `fleet:peer:${TARGET}`,
+    sessionId: TARGET,
+    grant: { ...controlBinding.grant, subjectSessionId: TARGET },
+  };
+
+  function control(overrides: {
+    actor?: SessionRecord;
+    target?: SessionRecord;
+    child?: SessionRecord;
+    stopRequested?: boolean;
+    onAudit?: (event: BrokerEvent, records: Map<string, SessionRecord>) => void;
+  } = {}) {
+    const records = new Map<string, SessionRecord>([
+      [ACTOR, overrides.actor ?? actor],
+      [TARGET, overrides.target ?? target],
+      ...(overrides.child === undefined ? [] : [[CHILD, overrides.child] as const]),
+    ]);
+    let stopRequested = overrides.stopRequested ?? false;
+    const stop = vi.fn(async (sessionId: string) => {
+      stopRequested = true;
+      records.set(sessionId, {
+        ...records.get(sessionId)!,
+        executionState: "cancelled",
+        attentionState: "stopping",
+      });
+    });
+    const forceStop = vi.fn((sessionId: string) => {
+      records.set(sessionId, {
+        ...records.get(sessionId)!,
+        executionState: "cancelled",
+        attentionState: "stopped",
+        exitCode: 0,
+      });
+    });
+    const append = vi.fn(async (event: BrokerEvent) => {
+      overrides.onAudit?.(event, records);
+    });
+    const service = new AgentControlService(
+      {
+        get: (sessionId: string) => {
+          const record = records.get(sessionId);
+          if (record === undefined) throw Object.assign(new Error("missing"), { code: "SESSION_NOT_FOUND" });
+          return record;
+        },
+        ownsProcess: (sessionId: string) => records.get(sessionId)?.exitCode === null,
+        isStopRequested: () => stopRequested,
+        stopRequestedAt: () => stopRequested ? "2026-07-22T11:59:00.000Z" : undefined,
+        stop,
+        forceStop,
+      } as never,
+      {
+        findBySessionId: vi.fn(async (sessionId: string) =>
+          sessionId === ACTOR ? controlBinding : sessionId === TARGET ? targetBinding : undefined),
+      } as never,
+      {} as never,
+      undefined,
+      {
+        audit: { append },
+        now: () => Date.parse(now),
+      },
+    );
+    return { service, stop, forceStop, append };
+  }
+
+  it("inspects durable identity, generation, binding, and child impact without inventing a heartbeat", async () => {
+    const child = { ...worker, id: CHILD, parentSessionId: TARGET };
+    const { service } = control({
+      target: { ...target, childIds: [CHILD] },
+      child,
+    });
+
+    await expect(service.inspectOrchestrator({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+    })).resolves.toMatchObject({
+      outcome: "INSPECTED",
+      target: {
+        sessionId: TARGET,
+        generation: 3,
+        executionState: "errored",
+        processOwnedByBroker: true,
+        lastHeartbeatAt: null,
+      },
+      binding: { bound: true, key: `fleet:peer:${TARGET}` },
+      impact: { childCount: 1, nonTerminalChildIds: [CHILD] },
+    });
+  });
+
+  it("fails closed on generation races and healthy live targets", async () => {
+    const stale = control();
+    await expect(stale.service.stopOrchestrator({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      expectedGeneration: 2,
+      reason: "stale controller",
+    })).resolves.toMatchObject({ outcome: "TARGET_CHANGED", mode: "graceful" });
+    expect(stale.stop).not.toHaveBeenCalled();
+
+    const healthy = control({ target: { ...target, executionState: "active", attentionState: "done" } });
+    await expect(healthy.service.stopOrchestrator({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      expectedGeneration: 3,
+      reason: "replace controller",
+    })).resolves.toMatchObject({ outcome: "APPROVAL_REQUIRED" });
+    expect(healthy.stop).not.toHaveBeenCalled();
+  });
+
+  it("rechecks generation after the durable audit write before signaling the target", async () => {
+    const raced = control({
+      onAudit: (event, records) => {
+        if (event.type !== "orchestrator.stop.requested") return;
+        records.set(TARGET, {
+          ...records.get(TARGET)!,
+          generation: 4,
+          executionState: "active",
+          attentionState: "done",
+        });
+      },
+    });
+
+    await expect(raced.service.stopOrchestrator({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      expectedGeneration: 3,
+      reason: "failed provider loop",
+    })).resolves.toMatchObject({
+      outcome: "TARGET_CHANGED",
+      target: { generation: 4 },
+    });
+    expect(raced.stop).not.toHaveBeenCalled();
+    expect(raced.forceStop).not.toHaveBeenCalled();
+  });
+
+  it("requires worker handoff and never stops children implicitly", async () => {
+    const child = { ...worker, id: CHILD, parentSessionId: TARGET };
+    const { service, stop } = control({
+      target: { ...target, childIds: [CHILD] },
+      child,
+    });
+
+    await expect(service.stopOrchestrator({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      expectedGeneration: 3,
+      reason: "recover stale controller",
+    })).resolves.toMatchObject({
+      outcome: "REQUIRES_HANDOFF",
+      impact: { nonTerminalChildIds: [CHILD] },
+    });
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("gracefully stops only a failed Orc and audits both request and result", async () => {
+    const { service, stop, forceStop, append } = control();
+    const result = await service.stopOrchestrator({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      expectedGeneration: 3,
+      reason: "failed provider loop",
+    });
+
+    expect(result).toMatchObject({ outcome: "STOP_REQUESTED", mode: "graceful" });
+    expect(stop).toHaveBeenCalledExactlyOnceWith(TARGET);
+    expect(forceStop).not.toHaveBeenCalled();
+    expect(append.mock.calls.map(([event]) => event.type)).toEqual([
+      "orchestrator.stop.requested",
+      "orchestrator.stop.result",
+    ]);
+    expect(append.mock.calls[0]?.[0]).toMatchObject({
+      sessionId: TARGET,
+      data: {
+        actorSessionId: ACTOR,
+        targetSessionId: TARGET,
+        observedGeneration: 3,
+        mode: "graceful",
+        authorityPath: "scoped-capability-grant",
+      },
+    });
+  });
+
+  it("allows force only after graceful stop is pending", async () => {
+    const denied = control();
+    await expect(denied.service.stopOrchestrator({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      expectedGeneration: 3,
+      reason: "graceful stop timed out",
+    }, "force")).resolves.toMatchObject({ outcome: "DENIED", mode: "force" });
+    expect(denied.forceStop).not.toHaveBeenCalled();
+
+    const allowed = control({
+      target: { ...target, executionState: "cancelled", attentionState: "stopping" },
+      stopRequested: true,
+    });
+    await expect(allowed.service.stopOrchestrator({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      expectedGeneration: 3,
+      reason: "graceful stop timed out",
+    }, "force")).resolves.toMatchObject({ outcome: "STOPPED", mode: "force" });
+    expect(allowed.forceStop).toHaveBeenCalledExactlyOnceWith(TARGET);
+  });
+
+  it("denies peer control when the caller itself is no longer active", async () => {
+    const { service } = control({
+      actor: { ...actor, executionState: "errored", attentionState: "failed" },
+    });
+    await expect(service.stopOrchestrator({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      expectedGeneration: 3,
+      reason: "replace stale controller",
+    })).resolves.toMatchObject({
+      outcome: "DENIED",
+      reason: expect.stringContaining("not an active Cyberdeck orchestrator"),
     });
   });
 });

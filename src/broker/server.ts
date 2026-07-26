@@ -36,10 +36,12 @@ import {
 } from "../domain/orchestrator.js";
 import {
   AgentActorParamsSchema,
+  AgentInspectOrchestratorParamsSchema,
   AgentListThreadsParamsSchema,
   AgentReadParamsSchema,
   AgentStartWorkerParamsSchema,
   AgentStartWorkersParamsSchema,
+  AgentStopOrchestratorParamsSchema,
   AgentWaitWorkersParamsSchema,
   type AgentControlService,
 } from "../orchestration/agent-control-service.js";
@@ -275,6 +277,20 @@ export class BrokerServer {
         const { actorSessionId } = AgentActorParamsSchema.parse(frame.params);
         return this.requireAgentControl().describeActor(actorSessionId);
       }
+      case "agent.orchestrator.inspect":
+        return this.requireAgentControl().inspectOrchestrator(
+          AgentInspectOrchestratorParamsSchema.parse(frame.params),
+        );
+      case "agent.orchestrator.stop":
+        return this.requireAgentControl().stopOrchestrator(
+          AgentStopOrchestratorParamsSchema.parse(frame.params),
+          "graceful",
+        );
+      case "agent.orchestrator.forceStop":
+        return this.requireAgentControl().stopOrchestrator(
+          AgentStopOrchestratorParamsSchema.parse(frame.params),
+          "force",
+        );
       case "agent.thread.list":
         return this.requireAgentControl().listThreads(AgentListThreadsParamsSchema.parse(frame.params));
       case "agent.thread.read": {
@@ -588,6 +604,15 @@ export class BrokerServer {
           context.attachments.delete(sessionId);
           this.send(context.socket, { type: "session-ended", sessionId, exitCode });
         },
+        (failure) => {
+          context.attachments.delete(sessionId);
+          this.send(context.socket, {
+            type: "session-failed",
+            sessionId,
+            code: failure.code,
+            message: failure.message,
+          });
+        },
       );
       return { session: this.options.registry.get(sessionId), data: replay.toString("base64") };
     } catch (error) {
@@ -611,7 +636,7 @@ export class BrokerServer {
   private sendProtocolFailure(socket: Socket, error: unknown): void {
     this.send(socket, {
       type: "protocol-error",
-      code: "INVALID_FRAME",
+      code: this.errorCode(error),
       message: error instanceof Error ? error.message : "Protocol operation failed",
     } satisfies ProtocolErrorFrame);
   }

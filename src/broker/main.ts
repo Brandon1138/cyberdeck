@@ -119,7 +119,13 @@ export async function runBroker(
   await registry.ready();
   const orchestratorStore = new OrchestratorStore(stateDirectory);
   const orchestrators = new OrchestratorManager(registry, orchestratorStore, workerPreferences);
-  const agentControl = new AgentControlService(registry, orchestratorStore, transcripts, workerPreferences);
+  const agentControl = new AgentControlService(
+    registry,
+    orchestratorStore,
+    transcripts,
+    workerPreferences,
+    { audit: journal },
+  );
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
   instructions.start();
   const workflows = new WorkflowService(
