@@ -52,7 +52,7 @@ describe("tmux cwd navigator", () => {
     expect(shellCommand).not.toContain("eval");
   });
 
-  it("uses only direct cd or zoxide navigation and rejects typed commands and control operators", async () => {
+  it("allows constrained navigation and read-only inspection, while rejecting shell syntax", async () => {
     const root = await temporaryDirectory();
     const child = join(root, "child");
     const bin = join(root, "bin");
@@ -101,6 +101,12 @@ describe("tmux cwd navigator", () => {
     const zoxideResult = await invoke("z cyb", root);
     expect(await realpath(zoxideResult.stdout.trim())).toBe(await realpath(child));
     expect((await readFile(zoxideArgs, "utf8")).split("\n").filter(Boolean)).toEqual(["query", "--", "cyb"]);
+    for (const command of ["ls", "ls -a", "ls -l", "ls -la", "ls -al", "pwd"]) {
+      await expect(invoke(command, root)).resolves.toBeDefined();
+    }
+    for (const command of ["ls -A", "ls file", "pwd .", "echo nope"]) {
+      await expect(invoke(command, root)).rejects.toMatchObject({ code: 1 });
+    }
     await expect(invoke("rm -rf .")).rejects.toMatchObject({ code: 1 });
     await expect(invoke("cd .. && rm -rf .")).rejects.toMatchObject({ code: 1 });
     await expect(invoke("cd $(pwd)")).rejects.toMatchObject({ code: 1 });
