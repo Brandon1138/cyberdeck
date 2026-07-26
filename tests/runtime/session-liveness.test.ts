@@ -43,6 +43,17 @@ describe("detectSessionFatalError", () => {
     expect(detectSessionFatalError("esc to interrupt · 42% context left\n")).toBeUndefined();
   });
 
+  it("does not poison a resumed conversation that discusses provider error signatures", () => {
+    const replay = [
+      "The detector now requires structurally framed error signals so prompts, pasted logs,",
+      "and responses containing strings such as `API Error: 400` or `invalid_request_error`",
+      "cannot mark a healthy resumed conversation as dead.",
+      "› Tell the model what to do differently",
+    ].join("\n");
+
+    expect(detectSessionFatalError(replay)).toBeUndefined();
+  });
+
   it("only reads the tail, so an old fault the session recovered from is not fatal now", () => {
     const replay = `API Error: 400 stale failure\n${"healthy output\n".repeat(600)}`;
     expect(detectSessionFatalError(replay)).toBeUndefined();

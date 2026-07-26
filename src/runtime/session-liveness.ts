@@ -13,12 +13,30 @@ const TAIL_BYTES = 4_000;
  * absent — providers retry those, and treating them as terminal would kill healthy sessions.
  */
 const FATAL_PATTERNS: readonly { readonly pattern: RegExp; readonly reason: string }[] = [
-  { pattern: /API Error:?\s*4\d{2}\b/iu, reason: "provider API rejected the request" },
-  { pattern: /\binvalid_request_error\b/u, reason: "provider API rejected the request" },
-  { pattern: /\bauthentication_error\b/u, reason: "provider authentication failed" },
-  { pattern: /\bpermission_error\b/u, reason: "provider denied the request" },
-  { pattern: /\b(?:stream|session) error:.*(?:fatal|unrecoverable)/iu, reason: "provider stream failed" },
-  { pattern: /\bfatal(?: error)?: .*session/iu, reason: "provider session failed" },
+  {
+    pattern: /(?:^|\n)[ \t]*API Error:?\s*4\d{2}\b[^\n]*\bauthentication_error\b/iu,
+    reason: "provider authentication failed",
+  },
+  {
+    pattern: /(?:^|\n)[ \t]*API Error:?\s*4\d{2}\b[^\n]*\bpermission_error\b/iu,
+    reason: "provider denied the request",
+  },
+  {
+    pattern: /(?:^|\n)[ \t]*API Error:?\s*4\d{2}\b[^\n]*\binvalid_request_error\b/iu,
+    reason: "provider API rejected the request",
+  },
+  {
+    pattern: /(?:^|\n)[ \t]*API Error:?\s*4\d{2}\b/iu,
+    reason: "provider API rejected the request",
+  },
+  {
+    pattern: /(?:^|\n)[ \t]*(?:stream|session) error:.*(?:fatal|unrecoverable)/iu,
+    reason: "provider stream failed",
+  },
+  {
+    pattern: /(?:^|\n)[ \t]*fatal(?: error)?: .*session/iu,
+    reason: "provider session failed",
+  },
 ];
 
 /**
@@ -76,8 +94,9 @@ function matchLast(value: string, pattern: RegExp): { index: number; text: strin
 }
 
 function errorLine(value: string, index: number): string {
-  const start = value.lastIndexOf("\n", index) + 1;
-  const end = value.indexOf("\n", index);
+  const contentIndex = value[index] === "\n" ? index + 1 : index;
+  const start = value.lastIndexOf("\n", contentIndex - 1) + 1;
+  const end = value.indexOf("\n", contentIndex);
   const line = value.slice(start, end < 0 ? value.length : end).replace(/\s+/gu, " ").trim();
   return line.length > 240 ? `${line.slice(0, 237)}...` : line;
 }

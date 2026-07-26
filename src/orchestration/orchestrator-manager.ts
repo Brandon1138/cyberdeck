@@ -134,7 +134,15 @@ export class OrchestratorManager {
       scope,
       grant: {
         subjectSessionId: session.id,
-        capabilities: ["thread.list", "thread.read", "thread.enqueue", "worker.start", "workflow.run"],
+        capabilities: [
+          "thread.list",
+          "thread.read",
+          "thread.enqueue",
+          "worker.start",
+          "orchestrator.inspect",
+          "orchestrator.stop",
+          "workflow.run",
+        ],
         scope,
       },
       createdAt: now,

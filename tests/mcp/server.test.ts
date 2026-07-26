@@ -45,6 +45,9 @@ describe("Cyberdeck MCP server", () => {
           expect.objectContaining({ name: "cyberdeck_workers_start" }),
           expect.objectContaining({ name: "cyberdeck_workers_wait" }),
           expect.objectContaining({ name: "cyberdeck_provider_capabilities" }),
+          expect.objectContaining({ name: "cyberdeck_orchestrator_inspect" }),
+          expect.objectContaining({ name: "cyberdeck_orchestrator_stop" }),
+          expect.objectContaining({ name: "cyberdeck_orchestrator_force_stop" }),
         ]),
       },
     });
@@ -80,6 +83,40 @@ describe("Cyberdeck MCP server", () => {
     });
     expect(request).toHaveBeenCalledWith("agent.thread.list", { actorSessionId: ACTOR });
     expect(response).toMatchObject({ id: "call-1", result: { content: [{ type: "text" }] } });
+  });
+
+  it("routes generation-checked Orc inspection and stop requests through the broker", async () => {
+    const request = vi.fn(async () => ({ outcome: "STOP_REQUESTED" }));
+    const targetSessionId = "22222222-2222-4222-8222-222222222222";
+    await handleMcpRequest(context({ request: request as never }), {
+      jsonrpc: "2.0",
+      id: "inspect-orc",
+      method: "tools/call",
+      params: {
+        name: "cyberdeck_orchestrator_inspect",
+        arguments: { targetSessionId },
+      },
+    });
+    await handleMcpRequest(context({ request: request as never }), {
+      jsonrpc: "2.0",
+      id: "stop-orc",
+      method: "tools/call",
+      params: {
+        name: "cyberdeck_orchestrator_stop",
+        arguments: { targetSessionId, expectedGeneration: 4, reason: "stale controller" },
+      },
+    });
+
+    expect(request).toHaveBeenNthCalledWith(1, "agent.orchestrator.inspect", {
+      actorSessionId: ACTOR,
+      targetSessionId,
+    });
+    expect(request).toHaveBeenNthCalledWith(2, "agent.orchestrator.stop", {
+      actorSessionId: ACTOR,
+      targetSessionId,
+      expectedGeneration: 4,
+      reason: "stale controller",
+    });
   });
 
   it("reads one semantic thread event per page by default", async () => {
@@ -305,7 +342,7 @@ describe("Cyberdeck MCP server", () => {
     });
     const tools = (response?.result as { tools: Array<{ name: string }> }).tools;
     expect(tools.map(({ name }) => name)).toContain("cyberdeck_diagnose");
-    expect(tools).toHaveLength(13);
+    expect(tools).toHaveLength(16);
   });
 
   it("distinguishes an orphaned scope from an unbound actor by code and remedy", async () => {

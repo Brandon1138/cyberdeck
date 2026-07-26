@@ -18,6 +18,7 @@ import {
 class FakePty implements PtyHandle {
   readonly pid: number;
   killCount = 0;
+  readonly killSignals: Array<string | undefined> = [];
   readonly writes: Buffer[] = [];
   private readonly outputListeners = new Set<(chunk: Buffer) => void>();
   private readonly exitListeners = new Set<(exitCode: number, signal?: number) => void>();
@@ -30,8 +31,9 @@ class FakePty implements PtyHandle {
   write(data: Buffer): void { this.writes.push(Buffer.from(data)); }
   resize(): void {}
   snapshot(): Buffer { return Buffer.from(this.replay); }
-  kill(): void {
+  kill(signal?: string): void {
     this.killCount += 1;
+    this.killSignals.push(signal);
     if (this.exitOnKill) this.emitExit(0);
   }
   onOutput(listener: (chunk: Buffer) => void): () => void {
@@ -130,7 +132,21 @@ describe("SessionRegistry", () => {
   it("records provider, optional model, opaque role, and PID", async () => {
     const { registry } = harness();
     const record = await registry.start(request({ provider: "claude", model: "opus", role: "writer" }));
-    expect(record).toMatchObject({ provider: "claude", model: "opus", role: "writer", pid: 1000 });
+    expect(record).toMatchObject({
+      provider: "claude",
+      model: "opus",
+      role: "writer",
+      pid: 1000,
+      generation: 1,
+    });
+  });
+
+  it("increments the durable process generation on resume", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request());
+    ptys[0]!.emitExit(0);
+
+    await expect(registry.resume(record.id)).resolves.toMatchObject({ generation: 2 });
   });
 
   it("rehydrates a conversation lost mid-turn as interrupted and resumes exact provider state", async () => {
@@ -518,12 +534,16 @@ describe("SessionRegistry", () => {
     expect(registry.get(record.id).attachmentState).toBe("detached");
   });
 
-  it("stops a session by killing its PTY exactly once", async () => {
-    const { registry, ptys } = harness();
+  it("keeps repeated graceful stops idempotent and reserves SIGKILL for explicit force", async () => {
+    const { registry, ptys } = harness({ exitOnKill: false });
     const record = await registry.start(request());
     await registry.stop(record.id);
     await registry.stop(record.id);
     expect(ptys[0]!.killCount).toBe(1);
+    expect(ptys[0]!.killSignals).toEqual(["SIGTERM"]);
+
+    registry.forceStop(record.id);
+    expect(ptys[0]!.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 
   it("durably marks a naturally completed session as stopped without rewriting its exit result", async () => {

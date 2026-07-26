@@ -95,6 +95,16 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
         finish(0, false);
         return;
       }
+      if (frame.type === "session-failed" && frame.sessionId === options.sessionId) {
+        output.write(`\r\nCyberdeck ${frame.code}: ${frame.message}\r\n`);
+        finish(1, false);
+        return;
+      }
+      if (frame.type === "protocol-error") {
+        output.write(`\r\nCyberdeck ${frame.code}: ${frame.message}\r\n`);
+        finish(1, false);
+        return;
+      }
       if (frame.type !== "output" || frame.sessionId !== options.sessionId) return;
       const chunk = Buffer.from(frame.data, "base64");
       if (!replayWritten) liveBeforeReplay.push(chunk);

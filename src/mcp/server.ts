@@ -98,6 +98,46 @@ const TOOLS = [
     },
   },
   {
+    name: "cyberdeck_orchestrator_inspect",
+    description: "Inspect another Cyberdeck Orc by durable session identity before any stop request. Returns provider/lifecycle state, process generation, binding, broker ownership, and child-worker impact. A null heartbeat is unknown, never evidence that a live target is stale.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetSessionId: { type: "string" },
+      },
+      required: ["targetSessionId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_orchestrator_stop",
+    description: "Request a broker-mediated graceful stop of an inspected stale or failed Orc. Requires the exact generation returned by inspect and never stops child workers. Healthy live Orcs return APPROVAL_REQUIRED; non-terminal children return REQUIRES_HANDOFF.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetSessionId: { type: "string" },
+        expectedGeneration: { type: "integer", minimum: 1 },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+      },
+      required: ["targetSessionId", "expectedGeneration", "reason"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_orchestrator_force_stop",
+    description: "Explicitly escalate a previously requested graceful Orc stop. Requires the same durable identity and observed generation; it is denied unless graceful stop is already pending. Child workers remain untouched.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetSessionId: { type: "string" },
+        expectedGeneration: { type: "integer", minimum: 1 },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+      },
+      required: ["targetSessionId", "expectedGeneration", "reason"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "cyberdeck_threads_list",
     description: `List worker threads visible to this Cyberdeck orchestrator, newest page first. Defaults to the status view (id, name, provider, executionState, attentionState), which is the cheap duplicate-safe liveness check; pass view "full" only when you need the whole record. Returns {threads, total, cursor, returned, nextCursor?}; page with cursor/limit (default ${DEFAULT_THREAD_PAGE}, max ${MAX_THREAD_PAGE}). Stays answerable while a wait is in flight.`,
     inputSchema: {
@@ -513,6 +553,15 @@ async function callTool(
     return provider === undefined
       ? WORKER_PROVIDER_CAPABILITIES
       : WORKER_PROVIDER_CAPABILITIES.filter((entry) => entry.provider === provider);
+  }
+  if (name === "cyberdeck_orchestrator_inspect") {
+    return transport.request("agent.orchestrator.inspect", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_orchestrator_stop") {
+    return transport.request("agent.orchestrator.stop", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_orchestrator_force_stop") {
+    return transport.request("agent.orchestrator.forceStop", { actorSessionId, ...args });
   }
   if (name === "cyberdeck_threads_list") {
     return transport.request("agent.thread.list", { actorSessionId, ...args });
