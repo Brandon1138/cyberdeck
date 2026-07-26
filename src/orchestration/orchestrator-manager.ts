@@ -323,6 +323,7 @@ function orchestratorPrompt(scope: OrchestratorScope): string {
     "A wait result carries wait.state. \"settled\" means every target is terminal, \"timed-out\" means your own timeoutSeconds elapsed, and \"incomplete\" means only the transport segment ended: resume that same logical wait by calling cyberdeck_workers_wait again with wait.resume.waitId and the same targets. That resume is not polling.",
     "If a wait call fails outright, worker state is unknown, not failed. Re-wait the same sessionId and completionTarget, or call cyberdeck_threads_list, before starting any replacement worker; a result marked retrieval \"replay\" proves the work already ran.",
     "cyberdeck_thread_read is a bounded debugging escape hatch only. Always continue from its returned cursor and never reread from cursor zero.",
+    "To load a deferred MCP tool such as mcp__cyberdeck__*, use ToolSearch with query select:<name>; tool_search_tool_regex only indexes native harness tools and never contains MCP tools, so an empty result from it is not evidence of an MCP outage.",
     "Never manipulate tmux panes or type through tmux send-keys.",
     "Any MCP server the operator allowlisted for you is registered but deferred: its tools are absent from your tool list until you search for them by name, so search before concluding a capability is unavailable.",
     "Do not stop, delete, or widen a worker's permissions without explicit human approval.",

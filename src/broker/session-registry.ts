@@ -143,10 +143,6 @@ export interface SessionTreeProgress {
   terminal: number;
 }
 
-export interface SessionTreeDeleteResult extends SessionTreeProgress {
-  deleted: number;
-}
-
 export type ReattachTarget =
   | { status: "ready"; record: SessionRecord; requiresResume: boolean }
   | { status: "unavailable"; record: SessionRecord }
@@ -175,8 +171,6 @@ export class RegistryError extends Error {
       | "NOT_SESSION_CONTROLLER"
       | "SESSION_BUSY"
       | "SESSION_STILL_ACTIVE"
-      | "SESSION_HAS_CHILDREN"
-      | "SESSION_TREE_STILL_ACTIVE"
       | "PARENT_SESSION_NOT_ACTIVE"
       | "INVALID_SESSION_CWD",
     message: string,
@@ -640,7 +634,7 @@ export class SessionRegistry {
     return this.cloneRecord(runtime.record);
   }
 
-  async delete(sessionId: string): Promise<void> {
+  async delete(sessionId: string, beforeDelete?: () => Promise<void>): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
     if (
       runtime.record.executionState === "active"
@@ -649,13 +643,19 @@ export class SessionRegistry {
     ) {
       throw new RegistryError("SESSION_STILL_ACTIVE", "Stop the agent before deleting its thread");
     }
-    const existingChildren = runtime.record.childIds.filter((childId) => this.sessions.has(childId));
-    if (existingChildren.length > 0) {
-      throw new RegistryError(
-        "SESSION_HAS_CHILDREN",
-        "Delete this thread's child agents before deleting the parent thread",
-      );
-    }
+    await beforeDelete?.();
+
+    // Workers outlive an orchestrator. Detach their live parent reference before
+    // removing the parent record, leaving each worker's own durable state intact.
+    const children = runtime.record.childIds
+      .map((childId) => this.sessions.get(childId))
+      .filter((child): child is RuntimeSession => child !== undefined);
+    await Promise.all(children.map(async (child) => {
+      if (child.record.parentSessionId !== sessionId) return;
+      delete child.record.parentSessionId;
+      child.record.updatedAt = new Date().toISOString();
+      await this.persist(child);
+    }));
 
     await this.appendEvent("session.deleted", sessionId, {
       executionState: runtime.record.executionState,
@@ -673,26 +673,6 @@ export class SessionRegistry {
     await this.cleanupLaunchArtifacts(runtime.record, "session-deleted");
     await this.options.store?.delete(sessionId);
     this.sessions.delete(sessionId);
-  }
-
-  async deleteTree(
-    sessionId: string,
-    beforeRootDelete?: () => Promise<void>,
-  ): Promise<SessionTreeDeleteResult> {
-    const tree = this.sessionTree(sessionId);
-    const progress = this.progressForTree(tree);
-    if (progress.terminal !== progress.total) {
-      throw new RegistryError(
-        "SESSION_TREE_STILL_ACTIVE",
-        `Stop the full agent tree before deleting it (${progress.terminal}/${progress.total} stopped)`,
-      );
-    }
-
-    const descendantsLeafFirst = tree.slice(1).reverse();
-    for (const runtime of descendantsLeafFirst) await this.delete(runtime.record.id);
-    await beforeRootDelete?.();
-    await this.delete(sessionId);
-    return { ...progress, deleted: progress.total };
   }
 
   async rename(sessionId: string, name: string): Promise<SessionRecord> {
@@ -716,7 +696,7 @@ export class SessionRegistry {
   async reorder(sessionId: string, direction: "up" | "down"): Promise<SessionRecord[]> {
     const runtime = this.requireRuntime(sessionId);
     const group = [...this.sessions.values()]
-      .filter((candidate) => candidate.record.cwd === runtime.record.cwd)
+      .filter((candidate) => candidate.record.cwd === runtime.record.cwd && candidate.record.kind === runtime.record.kind)
       .sort((left, right) => this.compareDisplayOrder(left.record, right.record));
     const index = group.findIndex((candidate) => candidate.record.id === sessionId);
     const target = direction === "up" ? index - 1 : index + 1;

@@ -45,6 +45,50 @@ function fleet(...records: Array<{ record: SessionRecord; replay?: string }>): F
 }
 
 describe("fleet presentation", () => {
+  it("separates Orcs above workers inside each folder while keeping folder rows navigable", () => {
+    const worker = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "worker",
+      role: "worker",
+      name: "Worker first by time",
+      updatedAt: "2026-07-22T09:59:59.000Z",
+    });
+    const orc = session({
+      id: "33333333-3333-4333-8333-333333333333",
+      kind: "orchestrator",
+      role: "orchestrator",
+      name: "Orc second by time",
+      updatedAt: "2026-07-22T09:58:00.000Z",
+    });
+    const onlyWorker = session({
+      id: "44444444-4444-4444-8444-444444444444",
+      kind: "worker",
+      role: "worker",
+      name: "Other folder worker",
+      cwd: "/repo/other",
+      updatedAt: "2026-07-22T09:57:00.000Z",
+    });
+    const snapshot = fleet({ record: worker }, { record: orc }, { record: onlyWorker });
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width: 150, height: 40, now: NOW_MS, home: "/Users/brandon",
+    });
+
+    const orcIndex = rendered.indexOf("Orc second by time");
+    const workerSectionIndex = rendered.indexOf("Workers", orcIndex);
+    expect(rendered.indexOf("Orcs")).toBeLessThan(orcIndex);
+    expect(orcIndex).toBeLessThan(workerSectionIndex);
+    expect(workerSectionIndex).toBeLessThan(rendered.indexOf("Worker first by time", workerSectionIndex));
+    expect(rendered.match(/Orcs/g)).toHaveLength(1);
+    const initial = createFleetState(snapshot);
+    expect(initial.selectedSessionId).toBe(orc.id);
+    const workerFocused = transitionFleet(initial, snapshot, "down", NOW_MS).state;
+    expect(workerFocused.selectedSessionId).toBe(worker.id);
+    const otherFolderFocused = transitionFleet(workerFocused, snapshot, "down", NOW_MS).state;
+    expect(otherFolderFocused.focusedFolderCwd).toBe("/repo/other");
+    expect(transitionFleet(otherFolderFocused, snapshot, "down", NOW_MS).state.selectedSessionId)
+      .toBe(onlyWorker.id);
+  });
+
   it("groups threads by project and shows provider, model, status, preview, and recency", () => {
     const snapshot = fleet(
       {
@@ -943,7 +987,7 @@ describe("fleet controls", () => {
     const active = fleet({ record: session() });
     const initial = createFleetState(active);
     const stop = transitionFleet(initial, active, "ctrl+x", NOW_MS);
-    expect(stop.action).toEqual({ type: "stop-tree", sessionId: session().id });
+    expect(stop.action).toEqual({ type: "stop", sessionId: session().id });
     expect(stop.state.deleteConfirmation).toBeUndefined();
 
     const stopped = fleet({ record: session({ executionState: "cancelled", exitCode: 0 }) });
@@ -962,7 +1006,7 @@ describe("fleet controls", () => {
     expect(rendered.match(/Delete thread\?/gu)).toHaveLength(1);
 
     const remove = transitionFleet(armed.state, stopped, "ctrl+x", NOW_MS + 1);
-    expect(remove.action).toEqual({ type: "delete-tree", sessionId: session().id });
+    expect(remove.action).toEqual({ type: "delete", sessionId: session().id });
   });
 
   it("stops an initially done thread before allowing the separate deletion sequence", () => {
@@ -976,9 +1020,9 @@ describe("fleet controls", () => {
     const initial = createFleetState(done);
 
     const stop = transitionFleet(initial, done, "ctrl+x", NOW_MS);
-    expect(stop.action).toEqual({ type: "stop-tree", sessionId: session().id });
+    expect(stop.action).toEqual({ type: "stop", sessionId: session().id });
     expect(stop.state.deleteConfirmation).toBeUndefined();
-    expect(stop.state.notice).toBe("Stopping agent · 1/1 stopped");
+    expect(stop.state.notice).toBe("Stopping thread");
     expect(renderFleet(done, stop.state, { color: false, width: 160, height: 28 }))
       .toContain("ctrl+x delete thread");
 
@@ -996,12 +1040,12 @@ describe("fleet controls", () => {
     expect(threadStatus(stopped.threads[0]!)).toBe("Stopped");
 
     expect(transitionFleet(armed.state, done, "ctrl+x", NOW_MS + 2).action).toEqual({
-      type: "delete-tree",
+      type: "delete",
       sessionId: session().id,
     });
   });
 
-  it("stops and deletes an orchestrator tree from the parent row without hunting children", () => {
+  it("stops and deletes only selected orchestrator, preserving its worker row", () => {
     const root = session({ kind: "orchestrator", childIds: ["22222222-2222-4222-8222-222222222222"] });
     const child = session({
       id: "22222222-2222-4222-8222-222222222222",
@@ -1012,8 +1056,8 @@ describe("fleet controls", () => {
     const active = fleet({ record: root }, { record: child });
     const stop = transitionFleet(createFleetState(active), active, "ctrl+x", NOW_MS);
 
-    expect(stop.action).toEqual({ type: "stop-tree", sessionId: root.id });
-    expect(stop.state.notice).toBe("Stopping orchestrator + 1 worker · 0/2 stopped");
+    expect(stop.action).toEqual({ type: "stop", sessionId: root.id });
+    expect(stop.state.notice).toBe("Stopping orchestrator");
     const stopping = renderFleet(active, stop.state, {
       color: true,
       width: 140,
@@ -1021,15 +1065,14 @@ describe("fleet controls", () => {
       now: NOW_MS,
       home: "/Users/brandon",
     });
-    expect(stopping).toContain("\u001b[38;2;212;168;91mStopping orchestrator + 1 worker · 0/2 stopped");
-    expect(stopping).not.toContain("\u001b[38;2;217;108;117mStopping orchestrator");
+    expect(stopping).toContain("\u001b[38;2;212;168;91mStopping orchestrator");
 
     const terminal = fleet(
       { record: { ...root, executionState: "cancelled", attentionState: "stopped", exitCode: 0 } },
-      { record: { ...child, executionState: "cancelled", attentionState: "stopped", exitCode: 0 } },
+      { record: { ...child, attentionState: "working" } },
     );
     const armed = transitionFleet(stop.state, terminal, "ctrl+x", NOW_MS);
-    expect(armed.state.notice).toBe("Delete orchestrator + 1 child thread? press ctrl+x again");
+    expect(armed.state.notice).toBe("Delete orchestrator? press ctrl+x again");
     const rendered = renderFleet(terminal, armed.state, {
       color: true,
       width: 140,
@@ -1037,15 +1080,15 @@ describe("fleet controls", () => {
       now: NOW_MS,
       home: "/Users/brandon",
     });
-    expect(rendered).toContain("\u001b[38;2;217;108;117mDelete orchestrator + 1 child thread? press ctrl+x again");
-    expect(rendered).not.toContain("Delete tree?");
+    expect(rendered).toContain("\u001b[38;2;217;108;117mDelete orchestrator? press ctrl+x again");
+    expect(threadStatus(terminal.threads[1]!)).toBe("Working");
     expect(transitionFleet(armed.state, terminal, "ctrl+x", NOW_MS + 1).action).toEqual({
-      type: "delete-tree",
+      type: "delete",
       sessionId: root.id,
     });
   });
 
-  it("retries tree cleanup with progress instead of reporting only that the agent is stopping", () => {
+  it("stops only selected orchestrator while worker remains independently selectable", () => {
     const root = session({
       kind: "orchestrator",
       executionState: "cancelled",
@@ -1064,8 +1107,9 @@ describe("fleet controls", () => {
     const snapshot = fleet({ record: root }, { record: child });
     const retry = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+x", NOW_MS);
 
-    expect(retry.action).toEqual({ type: "stop-tree", sessionId: root.id });
-    expect(retry.state.notice).toBe("Stopping orchestrator + 1 worker · 1/2 stopped");
+    expect(retry.action).toEqual({ type: "stop", sessionId: root.id });
+    expect(retry.state.notice).toBe("Stopping orchestrator");
+    expect(transitionFleet(retry.state, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(child.id);
   });
 
   it("cancels pending deletion when selection moves or confirmation expires", () => {
@@ -1100,7 +1144,7 @@ describe("fleet controls", () => {
     });
     const snapshot = fleet({ record: stopped }, { record: active });
     const stop = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+x", NOW_MS);
-    expect(stop.action).toEqual({ type: "stop-tree", sessionId: stopped.id });
+    expect(stop.action).toEqual({ type: "stop", sessionId: stopped.id });
     const armed = transitionFleet(stop.state, snapshot, "ctrl+x", NOW_MS + 1);
     expect(armed.state.deleteConfirmation?.sessionId).toBe(stopped.id);
 
@@ -1109,7 +1153,7 @@ describe("fleet controls", () => {
     expect(switched.state.deleteConfirmation).toBeUndefined();
 
     const stopOther = transitionFleet(switched.state, snapshot, "ctrl+x", NOW_MS + 3);
-    expect(stopOther.action).toEqual({ type: "stop-tree", sessionId: active.id });
+    expect(stopOther.action).toEqual({ type: "stop", sessionId: active.id });
     expect(stopOther.state.deleteConfirmation).toBeUndefined();
   });
 
@@ -1815,17 +1859,7 @@ describe("runFleet", () => {
       request: vi.fn(async (method: string) => {
         if (method === "session.list") return [orchestrator];
         if (method === "session.snapshot") return { data: "" };
-        if (method === "session.stop") {
-          return {
-            rootSessionId: orchestrator.id,
-            rootKind: "orchestrator",
-            childCount: 0,
-            total: 1,
-            active: 0,
-            stopping: 1,
-            terminal: 0,
-          };
-        }
+        if (method === "session.stopOne") return { stopped: true };
         throw new Error(`unexpected ${method}`);
       }),
       sendFrame: vi.fn(),
@@ -1838,7 +1872,7 @@ describe("runFleet", () => {
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
 
     input.emit("data", Buffer.from([0x18]));
-    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.stop", {
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.stopOne", {
       sessionId: orchestrator.id,
     }));
     expect(transport.request).not.toHaveBeenCalledWith("session.deleteTree", expect.anything());
@@ -1894,28 +1928,10 @@ describe("runFleet", () => {
       request: vi.fn(async (method: string, params: { sessionId?: string }) => {
         if (method === "session.list") return records;
         if (method === "session.snapshot") return { data: "" };
-        if (method === "session.stop") {
-          return {
-            rootSessionId: params.sessionId,
-            rootKind: "worker",
-            childCount: 0,
-            total: 1,
-            active: 0,
-            stopping: 0,
-            terminal: 1,
-          };
-        }
-        if (method === "session.deleteTree") {
+        if (method === "session.stopOne") return { stopped: true };
+        if (method === "session.delete") {
           records = records.filter((record) => record.id !== params.sessionId);
-          return {
-            rootSessionId: params.sessionId,
-            rootKind: "worker",
-            childCount: 0,
-            total: 1,
-            active: 0,
-            stopping: 0,
-            terminal: 1,
-          };
+          return { deleted: true };
         }
         throw new Error(`unexpected ${method}`);
       }),
@@ -1931,7 +1947,7 @@ describe("runFleet", () => {
 
     input.emit("data", Buffer.from("\u001b[B"));
     input.emit("data", Buffer.from([0x18, 0x18, 0x18]));
-    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.deleteTree", {
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.delete", {
       sessionId: second.id,
     }));
     await vi.waitFor(() => {

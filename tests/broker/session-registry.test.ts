@@ -607,18 +607,41 @@ describe("SessionRegistry", () => {
     expect(events.at(-1)).toMatchObject({ type: "session.deleted", sessionId: record.id });
   });
 
-  it("does not delete a parent while child thread records still exist", async () => {
-    const { registry } = harness();
-    const parent = await registry.start(request());
-    const child = await registry.start(request({ parentSessionId: parent.id }));
+  it("deletes an orchestrator without deleting or corrupting its worker threads", async () => {
+    const { registry, ptys, transcripts } = harness();
+    const parent = await registry.start(request({ kind: "orchestrator", role: "orchestrator" }));
+    const child = await registry.start(request({
+      provider: "claude",
+      cwd: "/tmp/worker-repo",
+      model: "opus",
+      parentSessionId: parent.id,
+      kind: "worker",
+      role: "worker",
+    }), "Preserve this worker transcript");
+    ptys[1]!.emitOutput("Worker result remains available");
     await registry.stop(parent.id);
     await registry.stop(child.id);
-    await expect(registry.delete(parent.id)).rejects.toMatchObject({ code: "SESSION_HAS_CHILDREN" });
-    await registry.delete(child.id);
     await expect(registry.delete(parent.id)).resolves.toBeUndefined();
+
+    expect(() => registry.get(parent.id)).toThrow();
+    const survivingWorker = registry.get(child.id);
+    expect(survivingWorker).toMatchObject({
+      id: child.id,
+      provider: "claude",
+      model: "opus",
+      cwd: "/tmp/worker-repo",
+      executionState: "cancelled",
+    });
+    expect(survivingWorker).not.toHaveProperty("parentSessionId");
+    expect(registry.snapshot(child.id).toString()).toContain("Worker result remains available");
+    expect(transcripts).toContainEqual(expect.objectContaining({
+      sessionId: child.id,
+      kind: "prompt",
+      text: "Preserve this worker transcript",
+    }));
   });
 
-  it("stops an owned tree from the root and deletes terminal records leaf-first", async () => {
+  it("stops an owned tree from the root without deleting its terminal records", async () => {
     const { registry, ptys } = harness();
     const parent = await registry.start(request({ kind: "orchestrator", role: "orchestrator" }));
     const first = await registry.start(request({ parentSessionId: parent.id, kind: "worker" }));
@@ -633,13 +656,10 @@ describe("SessionRegistry", () => {
     });
     expect(ptys.map((pty) => pty.killCount)).toEqual([1, 1, 1]);
 
-    await expect(registry.deleteTree(parent.id)).resolves.toMatchObject({ deleted: 3 });
-    expect(registry.list()).toEqual([]);
-    expect(() => registry.get(first.id)).toThrow();
-    expect(() => registry.get(second.id)).toThrow();
+    expect(registry.list().map(({ id }) => id)).toEqual(expect.arrayContaining([parent.id, first.id, second.id]));
   });
 
-  it("keeps a tree visible when any process has not confirmed exit and allows cleanup retry", async () => {
+  it("keeps a tree visible when any process has not confirmed exit", async () => {
     const { registry, ptys } = harness({ exitOnKill: false });
     const parent = await registry.start(request({ kind: "orchestrator" }));
     await registry.start(request({ parentSessionId: parent.id, kind: "worker" }));
@@ -649,10 +669,8 @@ describe("SessionRegistry", () => {
       terminal: 0,
       stopping: 2,
     });
-    await expect(registry.deleteTree(parent.id)).rejects.toMatchObject({ code: "SESSION_TREE_STILL_ACTIVE" });
-
     ptys.forEach((pty) => pty.emitExit(0));
-    await expect(registry.deleteTree(parent.id)).resolves.toMatchObject({ deleted: 2 });
+    expect(registry.list()).toHaveLength(2);
   });
 
   it("refuses new children as soon as their parent begins stopping", async () => {
