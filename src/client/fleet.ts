@@ -15,7 +15,8 @@ import {
   type ProviderPermissionPreferencePort,
   type ProviderPermissionPreferences,
 } from "../persistence/provider-permission-preference-store.js";
-import { latestTerminalPreview, providerTerminalActivity, stripTerminalControl } from "../runtime/terminal-replay.js";
+import { conversationPreview } from "../runtime/conversation-preview.js";
+import { providerTerminalActivity, stripTerminalControl } from "../runtime/terminal-replay.js";
 import { attachSession, type AttachTransport } from "./attach.js";
 import { collectDashboardSnapshot, renderDashboard } from "./dashboard.js";
 import {
@@ -1617,9 +1618,6 @@ function renderThreadRow(
   const title = `${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
   const identity = `${friendlyModel(thread.record.provider, thread.record.model)} · ${friendlyEffort(thread.record.effort ?? "provider-managed")}`;
   const status = threadStatus(thread);
-  const preview = latestTerminalPreview(thread.record.latestPreview ?? thread.replay)
-    .replace(/\s+/gu, " ")
-    .trim();
   const age = relativeTime(thread.record.meaningfulUpdatedAt ?? thread.record.updatedAt, options.now);
   const showIdentity = options.width >= 80;
   const titleWidth = showIdentity
@@ -1631,6 +1629,7 @@ function renderThreadRow(
   const statusWidth = 11;
   const fixedWidth = 12 + titleWidth + statusWidth + (showIdentity ? identityWidth + 1 : 0);
   const previewWidth = Math.max(1, options.width - fixedWidth);
+  const preview = threadPreview(thread, previewWidth);
   return [
     `  ${statusMarker(prefix, status, selected, options.color)}`,
     selected ? paint(pad(title, titleWidth), "bold", options.color) : pad(title, titleWidth),
@@ -1639,6 +1638,28 @@ function renderThreadRow(
     paint(pad(preview, previewWidth), "dim", options.color),
     padStart(age, 5),
   ].join(" ");
+}
+
+/**
+ * The preview cell for one row.
+ *
+ * `record.latestPreview` is the broker's transcript-derived extraction and is re-classified here
+ * because records persisted by earlier versions hold raw TUI chrome. The PTY replay is only
+ * consulted when nothing better exists, and a session with no reply yet shows its task prompt under
+ * an explicit label so it can never be mistaken for something the agent said.
+ */
+function threadPreview(thread: FleetThread, width: number): string {
+  const preview = conversationPreview({
+    storedPreview: thread.record.latestPreview,
+    replay: thread.replay,
+    maxLength: width,
+  });
+  if (preview.kind !== "prompt") return preview.text;
+  const label = "Task: ";
+  return `${label}${conversationPreview({
+    prompt: preview.text,
+    maxLength: Math.max(1, width - label.length),
+  }).text}`;
 }
 
 function statusMarker(

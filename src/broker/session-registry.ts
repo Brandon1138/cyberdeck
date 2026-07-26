@@ -19,8 +19,12 @@ import type {
 } from "../persistence/thread-transcript-store.js";
 import { applyWorkerMode } from "../providers/worker-mode.js";
 import {
+  conversationPreview,
+  PREVIEW_STORAGE_LIMIT,
+  type TranscriptMessage,
+} from "../runtime/conversation-preview.js";
+import {
   compactTerminalResult,
-  latestAssistantParagraphPreview,
   providerTerminalActivity,
   terminalFallbackResult,
   truncateResult,
@@ -54,6 +58,7 @@ interface SessionStoreLike {
 interface TranscriptLike {
   append(event: AppendThreadEvent): Promise<unknown>;
   captureProviderTurns?(input: CaptureProviderTurns): Promise<Array<{ text?: string | undefined }>>;
+  readTranscriptMessages?(input: CaptureProviderTurns): Promise<TranscriptMessage[]>;
 }
 
 interface Controller {
@@ -796,9 +801,11 @@ export class SessionRegistry {
       }, 200);
     } else if (activity === "needs-input") {
       runtime.latestResult = compactTerminalResult(replay);
-      runtime.record.latestPreview = latestAssistantParagraphPreview(replay);
       if (runtime.record.attentionState !== "needs-input") {
         void this.setAttention(runtime, "needs-input", true);
+        // A blocked session has no completed turn, so the transcript is the only place the last
+        // real reply exists. Read it off the broadcast path, once per transition into the state.
+        void this.refreshPreview(runtime, replay, []).catch(() => undefined);
       }
     }
     runtime.controller?.output(chunk);
@@ -947,11 +954,54 @@ export class SessionRegistry {
     if (nativeTurns.length > 1) runtime.completedTurns += nativeTurns.length - 1;
     const latest = nativeTurns.at(-1)?.text ?? fallback;
     runtime.latestResult = latest;
-    runtime.record.latestPreview = nativeTurns.length > 0
-      ? firstSemanticLine(latest)
-      : latestAssistantParagraphPreview(replay);
+    await this.refreshPreview(
+      runtime,
+      replay,
+      nativeTurns.map((turn): TranscriptMessage => ({ role: "assistant", text: turn.text ?? "" })),
+    );
     await this.setAttention(runtime, "done", true);
     this.notifySessionUpdate(runtime.record.id);
+  }
+
+  /**
+   * Store the preview the fleet renders.
+   *
+   * The turns just captured are the cheapest source, so they are tried first; only when they yield
+   * nothing usable does this re-read the provider transcript, and only when that is also empty does
+   * a pane scrape get a say. A pass that recovers nothing leaves the previous preview in place,
+   * because a stale-but-real reply beats spinner debris.
+   */
+  private async refreshPreview(
+    runtime: RuntimeSession,
+    replay: string,
+    captured: readonly TranscriptMessage[],
+  ): Promise<void> {
+    let preview = conversationPreview({ transcript: captured, maxLength: PREVIEW_STORAGE_LIMIT });
+    if (preview.kind === "none") {
+      const transcript = await this.readTranscriptMessages(runtime).catch(() => []);
+      preview = conversationPreview({
+        transcript,
+        storedPreview: runtime.record.latestPreview,
+        replay,
+        maxLength: PREVIEW_STORAGE_LIMIT,
+      });
+    }
+    if (preview.kind === "none" || preview.text === runtime.record.latestPreview) return;
+    runtime.record.latestPreview = preview.text;
+    await this.persist(runtime);
+  }
+
+  private async readTranscriptMessages(runtime: RuntimeSession): Promise<TranscriptMessage[]> {
+    const transcripts = this.options.transcripts;
+    const read = transcripts?.readTranscriptMessages;
+    if (transcripts === undefined || read === undefined) return [];
+    return read.call(transcripts, {
+      sessionId: runtime.record.id,
+      provider: runtime.record.provider,
+      cwd: runtime.record.cwd,
+      createdAt: runtime.record.createdAt,
+      turnNumber: runtime.completedTurns,
+    });
   }
 
   private requirePty(runtime: RuntimeSession): PtyHandle {
@@ -1047,9 +1097,4 @@ async function validateSessionCwd(cwd: string): Promise<void> {
       `Session cwd is not an accessible directory: ${cwd}`,
     );
   }
-}
-
-function firstSemanticLine(text: string): string {
-  return text.split(/\r?\n/u).map((line) => line.trim()).find((line) => line !== "")
-    ?? "No response yet";
 }
