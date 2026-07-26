@@ -1,11 +1,35 @@
 import { describe, expect, it, vi } from "vitest";
-import { handleMcpRequest } from "../../src/mcp/server.js";
+import {
+  handleMcpRequest,
+  resolveLaunchConversationId,
+  type McpBrokerTransport,
+  type McpServerContext,
+} from "../../src/mcp/server.js";
 
 const ACTOR = "11111111-1111-4111-8111-111111111111";
+const CONVERSATION = "33333333-3333-4333-8333-333333333333";
+const SOCKET = "/tmp/cyberdeck-test.sock";
+
+function context(
+  transport?: McpBrokerTransport,
+  identity: Partial<McpServerContext["identity"]> = {},
+  brokerUnavailable?: string,
+): McpServerContext {
+  return {
+    identity: { actorSessionId: ACTOR, brokerSocketPath: SOCKET, ...identity },
+    ...(transport === undefined ? {} : { transport }),
+    ...(brokerUnavailable === undefined ? {} : { brokerUnavailable }),
+  };
+}
+
+function payload(response: Record<string, unknown> | undefined, index = 0): Record<string, unknown> {
+  const content = (response?.result as { content: Array<{ text: string }> }).content;
+  return JSON.parse(content[index]!.text) as Record<string, unknown>;
+}
 
 describe("Cyberdeck MCP server", () => {
   it("advertises semantic Cyberdeck tools", async () => {
-    const response = await handleMcpRequest({ request: vi.fn() }, ACTOR, {
+    const response = await handleMcpRequest(context({ request: vi.fn() }), {
       jsonrpc: "2.0",
       id: 1,
       method: "tools/list",
@@ -46,7 +70,7 @@ describe("Cyberdeck MCP server", () => {
 
   it("adds the bound actor identity to every broker operation", async () => {
     const request = vi.fn(async () => [{ id: "worker" }]);
-    const response = await handleMcpRequest({ request: request as never }, ACTOR, {
+    const response = await handleMcpRequest(context({ request: request as never }), {
       jsonrpc: "2.0",
       id: "call-1",
       method: "tools/call",
@@ -59,7 +83,7 @@ describe("Cyberdeck MCP server", () => {
   it("reads one semantic thread event per page by default", async () => {
     const request = vi.fn(async () => ({ events: [], nextCursor: 0 }));
     const sessionId = "22222222-2222-4222-8222-222222222222";
-    await handleMcpRequest({ request: request as never }, ACTOR, {
+    await handleMcpRequest(context({ request: request as never }), {
       jsonrpc: "2.0",
       id: "thread-read",
       method: "tools/call",
@@ -78,7 +102,7 @@ describe("Cyberdeck MCP server", () => {
 
   it("returns authoritative provider capabilities without a broker round trip", async () => {
     const request = vi.fn();
-    const response = await handleMcpRequest({ request }, ACTOR, {
+    const response = await handleMcpRequest(context({ request }), {
       jsonrpc: "2.0",
       id: 2,
       method: "tools/call",
@@ -94,7 +118,7 @@ describe("Cyberdeck MCP server", () => {
 
   it("routes one blocking wait request for multiple workers", async () => {
     const request = vi.fn(async () => ({ timedOut: false, results: [] }));
-    await handleMcpRequest({ request: request as never }, ACTOR, {
+    await handleMcpRequest(context({ request: request as never }), {
       jsonrpc: "2.0",
       id: 3,
       method: "tools/call",
@@ -121,12 +145,214 @@ describe("Cyberdeck MCP server", () => {
       prompt: "Ping",
       name: "sol-ping",
     }];
-    await handleMcpRequest({ request: request as never }, ACTOR, {
+    await handleMcpRequest(context({ request: request as never }), {
       jsonrpc: "2.0",
       id: 4,
       method: "tools/call",
       params: { name: "cyberdeck_workers_start", arguments: { workers } },
     });
     expect(request).toHaveBeenCalledWith("agent.worker.startMany", { actorSessionId: ACTOR, workers });
+  });
+
+  it("reads the live conversation identity Claude Code exports to the subprocess", () => {
+    expect(resolveLaunchConversationId({ CLAUDE_CODE_SESSION_ID: CONVERSATION })).toBe(CONVERSATION);
+    expect(resolveLaunchConversationId({ CLAUDE_CODE_SESSION_ID: "  " })).toBeUndefined();
+    expect(resolveLaunchConversationId({})).toBeUndefined();
+  });
+
+  it("names the unreachable broker on every tool call instead of vanishing", async () => {
+    const response = await handleMcpRequest(
+      context(undefined, {}, `Cyberdeck broker is unreachable at ${SOCKET}: connect ENOENT`),
+      {
+        jsonrpc: "2.0",
+        id: "unreachable",
+        method: "tools/call",
+        params: { name: "cyberdeck_threads_list", arguments: {} },
+      },
+    );
+    expect(response).toMatchObject({ result: { isError: true } });
+    expect(payload(response)).toMatchObject({
+      error: {
+        code: "CYBERDECK_BROKER_UNREACHABLE",
+        message: expect.stringContaining("connect ENOENT"),
+        remedy: expect.stringContaining("cyberdeck up"),
+        actorSessionId: ACTOR,
+        brokerSocketPath: SOCKET,
+      },
+    });
+  });
+
+  it("still advertises every tool while the broker is unreachable", async () => {
+    const response = await handleMcpRequest(context(undefined, {}, "broker down"), {
+      jsonrpc: "2.0",
+      id: "list",
+      method: "tools/list",
+    });
+    const tools = (response?.result as { tools: Array<{ name: string }> }).tools;
+    expect(tools.map(({ name }) => name)).toContain("cyberdeck_diagnose");
+    expect(tools).toHaveLength(13);
+  });
+
+  it("distinguishes an orphaned scope from an unbound actor by code and remedy", async () => {
+    const request = vi.fn(async () => {
+      throw Object.assign(new Error("Scope fleet is now bound to session other"), {
+        code: "ACTOR_BINDING_ORPHANED",
+      });
+    });
+    const response = await handleMcpRequest(context({ request: request as never }), {
+      jsonrpc: "2.0",
+      id: "orphaned",
+      method: "tools/call",
+      params: { name: "cyberdeck_threads_list", arguments: {} },
+    });
+    expect(response).toMatchObject({ result: { isError: true } });
+    expect(payload(response)).toMatchObject({
+      error: {
+        code: "ACTOR_BINDING_ORPHANED",
+        remedy: expect.stringContaining("widen this session's authority"),
+      },
+    });
+  });
+
+  it("maps a dropped broker connection to a named unreachable-broker failure", async () => {
+    const request = vi.fn(async () => {
+      throw Object.assign(new Error("Broker connection closed"), { code: "BROKER_DISCONNECTED" });
+    });
+    const response = await handleMcpRequest(context({ request: request as never }), {
+      jsonrpc: "2.0",
+      id: "dropped",
+      method: "tools/call",
+      params: { name: "cyberdeck_threads_list", arguments: {} },
+    });
+    expect(payload(response)).toMatchObject({
+      error: { code: "CYBERDECK_BROKER_UNREACHABLE" },
+    });
+  });
+
+  it("reports conversation drift beside a successful result rather than swallowing it", async () => {
+    const request = vi.fn(async () => []);
+    const response = await handleMcpRequest(
+      context({ request: request as never }, { launchConversationId: CONVERSATION }),
+      {
+        jsonrpc: "2.0",
+        id: "drift",
+        method: "tools/call",
+        params: { name: "cyberdeck_threads_list", arguments: {} },
+      },
+    );
+    // The grant is session-bound, so the call still runs; the drift is reported, not enforced.
+    expect(request).toHaveBeenCalledWith("agent.thread.list", { actorSessionId: ACTOR });
+    expect(response).not.toMatchObject({ result: { isError: true } });
+    expect(payload(response, 1)).toMatchObject({
+      cyberdeckWarning: {
+        code: "CYBERDECK_CONVERSATION_DRIFTED",
+        actorSessionId: ACTOR,
+        liveConversationId: CONVERSATION,
+      },
+    });
+  });
+
+  it("omits the drift warning when the conversation still matches the bound session", async () => {
+    const request = vi.fn(async () => []);
+    const response = await handleMcpRequest(
+      context({ request: request as never }, { launchConversationId: ACTOR }),
+      {
+        jsonrpc: "2.0",
+        id: "no-drift",
+        method: "tools/call",
+        params: { name: "cyberdeck_threads_list", arguments: {} },
+      },
+    );
+    expect((response?.result as { content: unknown[] }).content).toHaveLength(1);
+  });
+
+  it("diagnoses a healthy server against the live binding", async () => {
+    const request = vi.fn(async () => ({
+      actorSessionId: ACTOR,
+      status: "bound",
+      bound: true,
+      familyKey: "fleet",
+      familyHolderSessionId: ACTOR,
+      capabilities: ["thread.list"],
+      remedy: "No action required; this actor holds a live Cyberdeck orchestrator binding.",
+    }));
+    const response = await handleMcpRequest(context({ request: request as never }), {
+      jsonrpc: "2.0",
+      id: "diagnose",
+      method: "tools/call",
+      params: { name: "cyberdeck_diagnose", arguments: {} },
+    });
+    expect(request).toHaveBeenCalledWith("agent.actor.describe", { actorSessionId: ACTOR });
+    expect(payload(response)).toMatchObject({
+      status: "healthy",
+      actorSessionId: ACTOR,
+      broker: { socketPath: SOCKET, reachable: true },
+      actor: { status: "bound", familyKey: "fleet" },
+      conversation: { matchesActorSession: true },
+    });
+  });
+
+  it("diagnoses an orphaned scope and names the session that now holds it", async () => {
+    const request = vi.fn(async () => ({
+      actorSessionId: ACTOR,
+      status: "orphaned",
+      bound: false,
+      familyKey: "fleet",
+      familyHolderSessionId: "44444444-4444-4444-8444-444444444444",
+      remedy: "Scope fleet is now bound to session 44444444-4444-4444-8444-444444444444",
+    }));
+    const response = await handleMcpRequest(
+      context({ request: request as never }, { launchConversationId: CONVERSATION }),
+      {
+        jsonrpc: "2.0",
+        id: "diagnose-orphaned",
+        method: "tools/call",
+        params: { name: "cyberdeck_diagnose", arguments: {} },
+      },
+    );
+    expect(payload(response)).toMatchObject({
+      status: "orphaned",
+      conversation: { matchesActorSession: false, launchConversationId: CONVERSATION },
+      actor: { familyHolderSessionId: "44444444-4444-4444-8444-444444444444" },
+      remedy: expect.stringContaining("44444444-4444-4444-8444-444444444444"),
+    });
+  });
+
+  it("tells a broker running an older build apart from a broker that is down", async () => {
+    const request = vi.fn(async () => {
+      throw Object.assign(new Error("Unknown method agent.actor.describe"), {
+        code: "METHOD_NOT_FOUND",
+      });
+    });
+    const response = await handleMcpRequest(context({ request: request as never }), {
+      jsonrpc: "2.0",
+      id: "diagnose-outdated",
+      method: "tools/call",
+      params: { name: "cyberdeck_diagnose", arguments: {} },
+    });
+    expect(payload(response)).toMatchObject({
+      status: "broker-outdated",
+      broker: { reachable: true, outdated: true },
+      remedy: expect.stringContaining("restart without a rebuild"),
+    });
+  });
+
+  it("answers cyberdeck_diagnose even when the broker cannot be reached", async () => {
+    const response = await handleMcpRequest(
+      context(undefined, {}, `Cyberdeck broker is unreachable at ${SOCKET}: connect ENOENT`),
+      {
+        jsonrpc: "2.0",
+        id: "diagnose-down",
+        method: "tools/call",
+        params: { name: "cyberdeck_diagnose", arguments: {} },
+      },
+    );
+    expect(response).not.toMatchObject({ result: { isError: true } });
+    expect(payload(response)).toMatchObject({
+      status: "broker-unreachable",
+      broker: { reachable: false, error: expect.stringContaining("connect ENOENT") },
+      actor: null,
+      remedy: expect.stringContaining("cyberdeck up"),
+    });
   });
 });

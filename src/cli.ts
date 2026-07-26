@@ -39,7 +39,7 @@ import {
   type CockpitPreflight,
 } from "./tmux/cockpit.js";
 import { CYBERDECK_VERSION } from "./version.js";
-import { runMcpServer } from "./mcp/server.js";
+import { resolveLaunchConversationId, runMcpServer } from "./mcp/server.js";
 import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
 import { pruneLegacyTranscript as pruneLegacyTranscriptFile } from "./persistence/thread-transcript-store.js";
 
@@ -465,9 +465,28 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     .description("serve capability-scoped Cyberdeck tools over stdio MCP")
     .requiredOption("--actor-session <id>", "bound orchestrator session UUID")
     .action(async (options: { actorSession: string }) => {
-      const client = await RpcClient.connect(brokerSocketPath);
+      const conversationId = resolveLaunchConversationId();
+      const identity = {
+        actorSessionId: options.actorSession,
+        ...(conversationId === undefined ? {} : { launchConversationId: conversationId }),
+        brokerSocketPath,
+      };
+      let client: RpcClient;
       try {
-        await runMcpServer(client, options.actorSession);
+        client = await RpcClient.connect(brokerSocketPath);
+      } catch (error) {
+        // Exiting here is what made the failure silent: the harness drops the whole server and the
+        // conversation simply stops having cyberdeck_* tools, with nothing to read. Serve instead,
+        // so tools/list still advertises the surface and every call names the missing broker.
+        await runMcpServer({
+          identity,
+          brokerUnavailable:
+            `Cyberdeck broker is unreachable at ${brokerSocketPath}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        return;
+      }
+      try {
+        await runMcpServer({ transport: client, identity });
       } finally {
         client.close();
       }

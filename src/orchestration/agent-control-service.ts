@@ -2,6 +2,7 @@ import { z } from "zod";
 import { MAX_FANOUT_BATCH } from "../limits.js";
 import { grantAllows, type CapabilityGrant, type CyberdeckCapability } from "../domain/capability.js";
 import { isFableModel } from "../domain/policy.js";
+import { orchestratorKey, type OrchestratorScope } from "../domain/orchestrator.js";
 import {
   ProviderIdSchema,
   ApprovalModeSchema,
@@ -53,10 +54,32 @@ export interface WorkerStartResult {
   completionTarget: number;
 }
 
+/**
+ * Everything an orphaned or mis-scoped MCP server needs to name its own failure.
+ *
+ * `familyKey` is the orchestrator scope key (`fleet`, `workspace:<cwd>`) the actor session belongs
+ * to. It is reported so an operator can see *who currently holds the scope*; it is deliberately not
+ * a fallback authority. Re-granting a stale session the family's live grant would hand a dead
+ * conversation whatever capabilities its successor was given, which widens authority rather than
+ * restoring it.
+ */
+export interface ActorDescription {
+  actorSessionId: string;
+  status: "bound" | "orphaned" | "unbound" | "unknown-session";
+  bound: boolean;
+  familyKey?: string;
+  familyHolderSessionId?: string;
+  scope?: OrchestratorScope;
+  capabilities?: CyberdeckCapability[];
+  executionState?: string;
+  remedy: string;
+}
+
 export class AgentControlError extends Error {
   constructor(
     readonly code:
       | "ACTOR_NOT_AUTHORIZED"
+      | "ACTOR_BINDING_ORPHANED"
       | "CAPABILITY_DENIED"
       | "STALE_THREAD_CURSOR"
       | "MODEL_ID_NOT_CANONICAL"
@@ -199,12 +222,83 @@ export class AgentControlService {
     );
   }
 
+  /**
+   * Late-bound answer to "who am I and may I still act", resolved per request against the live
+   * binding registry rather than anything the caller captured at spawn. The MCP server cannot
+   * observe its own conversation identity — Claude Code 2.1.220 sends no session identifier in any
+   * MCP request — so the authoritative half of that question has to be answered here.
+   */
+  async describeActor(actorSessionId: string): Promise<ActorDescription> {
+    const binding = await this.orchestrators.findBySessionId(actorSessionId);
+    const record = this.sessionRecord(actorSessionId);
+    if (binding !== undefined) {
+      return {
+        actorSessionId,
+        status: "bound",
+        bound: true,
+        familyKey: binding.key,
+        familyHolderSessionId: binding.sessionId,
+        scope: binding.scope,
+        capabilities: binding.grant.capabilities,
+        ...(record === undefined ? {} : { executionState: record.executionState }),
+        remedy: "No action required; this actor holds a live Cyberdeck orchestrator binding.",
+      };
+    }
+    if (record === undefined) {
+      return {
+        actorSessionId,
+        status: "unknown-session",
+        bound: false,
+        remedy:
+          `No Cyberdeck session ${actorSessionId} exists in this broker. The MCP server was spawned for a session this broker does not own — relaunch the orchestrator through Cyberdeck.`,
+      };
+    }
+    const familyKey = actorFamilyKey(record);
+    if (familyKey !== undefined) {
+      const family = await this.orchestrators.get(familyKey);
+      if (family !== undefined && family.sessionId !== actorSessionId) {
+        return {
+          actorSessionId,
+          status: "orphaned",
+          bound: false,
+          familyKey,
+          familyHolderSessionId: family.sessionId,
+          executionState: record.executionState,
+          remedy:
+            `Scope ${familyKey} is now bound to session ${family.sessionId}, not ${actorSessionId}. This server's grant was not transferred, because inheriting a successor's capabilities would widen this session's authority. Relaunch this orchestrator through Cyberdeck.`,
+        };
+      }
+    }
+    return {
+      actorSessionId,
+      status: "unbound",
+      bound: false,
+      ...(familyKey === undefined ? {} : { familyKey }),
+      executionState: record.executionState,
+      remedy:
+        `Session ${actorSessionId} exists but holds no orchestrator binding. Bind it with \`cyberdeck cockpit\`, or run Cyberdeck tools from a session Cyberdeck launched as an orchestrator.`,
+    };
+  }
+
   private async requireBinding(actorSessionId: string) {
     const binding = await this.orchestrators.findBySessionId(actorSessionId);
-    if (binding === undefined) {
-      throw new AgentControlError("ACTOR_NOT_AUTHORIZED", "Session is not a bound Cyberdeck orchestrator");
+    if (binding !== undefined) return binding;
+    // A bare "not authorized" cannot be told apart from "server not registered" or "wrong tool
+    // index" by the agent reading it, which is what turned two separate incidents into whole
+    // sessions of blind debugging. Name the actual state and the way out.
+    const description = await this.describeActor(actorSessionId);
+    throw new AgentControlError(
+      description.status === "orphaned" ? "ACTOR_BINDING_ORPHANED" : "ACTOR_NOT_AUTHORIZED",
+      `${actorSessionId} is not a bound Cyberdeck orchestrator (${description.status}). ${description.remedy}`,
+    );
+  }
+
+  private sessionRecord(sessionId: string): SessionRecord | undefined {
+    try {
+      return this.registry.get(sessionId);
+    } catch {
+      return undefined;
     }
-    return binding;
   }
 
   private requireCapability(
@@ -216,6 +310,19 @@ export class AgentControlService {
       throw new AgentControlError("CAPABILITY_DENIED", `${capability} is outside this orchestrator's grant`);
     }
   }
+}
+
+/**
+ * The scope key an orchestrator session belongs to, derived live from its own record rather than
+ * from anything baked into the MCP server's argv. A family key carried in argv is a second copy of
+ * authority state that goes stale exactly the way the session UUID does.
+ */
+function actorFamilyKey(record: SessionRecord): string | undefined {
+  if (record.orchestratorScope === "fleet") return orchestratorKey({ kind: "fleet" });
+  if (record.orchestratorScope === "workspace") {
+    return orchestratorKey({ kind: "workspace", cwd: record.cwd });
+  }
+  return undefined;
 }
 
 function inScope(scope: { kind: string; cwd?: string }, record: SessionRecord): boolean {

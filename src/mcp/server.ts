@@ -9,6 +9,63 @@ export interface McpBrokerTransport {
   request<T = unknown>(method: string, params: unknown): Promise<T>;
 }
 
+/**
+ * Claude Code exports the live conversation UUID into every MCP subprocess it spawns (measured
+ * against 2.1.220). It is the only conversation identity the harness exposes: `initialize` carries
+ * `clientInfo` alone, `tools/call` carries no session `_meta`, and MCP has no "conversation
+ * changed" notification, so a server cannot re-read this value later in its own lifetime.
+ */
+const CONVERSATION_ENV_VAR = "CLAUDE_CODE_SESSION_ID";
+
+const DRIFT_NOTE =
+  "This MCP server was spawned for a different conversation than the one now calling it, which is what /clear produces. Cyberdeck binds the session, not the conversation, so the capability grant is unaffected — but a stale conversation is worth knowing about when results look wrong.";
+
+export interface McpActorIdentity {
+  /** The Cyberdeck session this server acts for, fixed at spawn by `--actor-session`. */
+  actorSessionId: string;
+  /** The provider conversation the server was spawned into, when the harness exposes one. */
+  launchConversationId?: string;
+  /** Reported verbatim in every failure so an operator can check the broker directly. */
+  brokerSocketPath?: string;
+}
+
+export interface McpServerContext {
+  identity: McpActorIdentity;
+  /** Absent when the broker socket could not be reached; every tool then fails by name. */
+  transport?: McpBrokerTransport;
+  brokerUnavailable?: string;
+}
+
+/** Raised for a failure the server itself diagnosed, before or instead of a broker round trip. */
+export class McpToolError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = "McpToolError";
+  }
+}
+
+const REMEDIES: Record<string, string> = {
+  CYBERDECK_BROKER_UNREACHABLE:
+    "The Cyberdeck broker is not accepting connections. Start it with `cyberdeck up`, then reconnect this server with /mcp.",
+  CYBERDECK_BROKER_OUTDATED:
+    "The running broker is older than this MCP server and does not implement the method it called. Rebuild, then `cyberdeck restart` — the broker runs compiled output, so a restart without a rebuild silently keeps the old build.",
+  ACTOR_NOT_AUTHORIZED:
+    "This session holds no Cyberdeck orchestrator binding. Call cyberdeck_diagnose for the exact state, or relaunch the orchestrator through Cyberdeck.",
+  ACTOR_BINDING_ORPHANED:
+    "This server's scope has been rebound to a different session. Cyberdeck will not transfer the grant, because inheriting a successor's capabilities would widen this session's authority. Relaunch this orchestrator through Cyberdeck.",
+  CAPABILITY_DENIED:
+    "The bound grant does not cover this call. Call cyberdeck_diagnose to see the scope and capabilities actually held.",
+  STALE_THREAD_CURSOR:
+    "Continue from the cursor the previous read returned instead of rereading from zero.",
+};
+
+export function resolveLaunchConversationId(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const value = env[CONVERSATION_ENV_VAR];
+  return value === undefined || value.trim() === "" ? undefined : value;
+}
+
 interface JsonRpcRequest {
   jsonrpc: "2.0";
   id?: string | number;
@@ -17,6 +74,11 @@ interface JsonRpcRequest {
 }
 
 const TOOLS = [
+  {
+    name: "cyberdeck_diagnose",
+    description: "Report this Cyberdeck MCP server's live identity, broker reachability, and capability binding. Call this first whenever a cyberdeck_* tool appears missing or returns nothing: it distinguishes an unreachable broker, an unbound or orphaned actor session, and a stale conversation. It never fails and needs no grant.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
   {
     name: "cyberdeck_provider_capabilities",
     description: "Return Cyberdeck's authoritative worker model IDs, effort values, and launch notes. Use this instead of inspecting repository source or guessing aliases.",
@@ -205,8 +267,7 @@ const TOOLS = [
 ] as const;
 
 export async function runMcpServer(
-  transport: McpBrokerTransport,
-  actorSessionId: string,
+  context: McpServerContext,
   input: Readable = process.stdin,
   output: Writable = process.stdout,
 ): Promise<void> {
@@ -222,7 +283,7 @@ export async function runMcpServer(
         output.write(`${JSON.stringify(errorResponse(null, -32700, "Parse error"))}\n`);
         return;
       }
-      const response = await handleMcpRequest(transport, actorSessionId, request);
+      const response = await handleMcpRequest(context, request);
       if (response !== undefined) output.write(`${JSON.stringify(response)}\n`);
     });
   }
@@ -230,8 +291,7 @@ export async function runMcpServer(
 }
 
 export async function handleMcpRequest(
-  transport: McpBrokerTransport,
-  actorSessionId: string,
+  context: McpServerContext,
   request: JsonRpcRequest,
 ): Promise<Record<string, unknown> | undefined> {
   if (request.id === undefined) return undefined;
@@ -248,26 +308,150 @@ export async function handleMcpRequest(
     if (request.method === "tools/call") {
       const name = request.params?.name;
       const args = isRecord(request.params?.arguments) ? request.params.arguments : {};
-      const result = await callTool(transport, actorSessionId, name, args);
-      return success(request.id, {
-        content: [{ type: "text", text: JSON.stringify(result) }],
-      });
+      const result = await callTool(context, name, args);
+      const content: Array<Record<string, unknown>> = [
+        { type: "text", text: JSON.stringify(result) },
+      ];
+      // A drifted conversation does not invalidate the grant, so the call still runs; it is
+      // reported alongside the result rather than swallowed, because a silent ambiguous negative
+      // is the failure this whole path exists to remove.
+      const drift = conversationDrift(context.identity);
+      if (drift !== undefined && name !== "cyberdeck_diagnose") {
+        content.push({ type: "text", text: JSON.stringify({ cyberdeckWarning: drift }) });
+      }
+      return success(request.id, { content });
     }
     return errorResponse(request.id, -32601, `Method not found: ${request.method}`);
   } catch (error) {
-    return success(request.id, {
-      content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-      isError: true,
-    });
+    return success(request.id, toolFailure(context, error));
   }
 }
 
+/**
+ * Every failure leaves through here with a machine-readable code, the identity the server is
+ * acting under, and a remedy. An agent must be able to tell "broker down" from "orphaned scope"
+ * from "wrong tool index" out of the response alone.
+ */
+function toolFailure(context: McpServerContext, error: unknown): Record<string, unknown> {
+  const code = failureCode(error);
+  const drift = conversationDrift(context.identity);
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        error: {
+          code,
+          message: error instanceof Error ? error.message : String(error),
+          remedy: REMEDIES[code]
+            ?? "Call cyberdeck_diagnose for this server's live identity, broker state, and binding.",
+          actorSessionId: context.identity.actorSessionId,
+          ...(context.identity.brokerSocketPath === undefined
+            ? {}
+            : { brokerSocketPath: context.identity.brokerSocketPath }),
+          ...(drift === undefined ? {} : { conversationDrift: drift }),
+        },
+      }),
+    }],
+    isError: true,
+  };
+}
+
+function failureCode(error: unknown): string {
+  if (
+    typeof error === "object" && error !== null && "code" in error
+    && typeof (error as { code?: unknown }).code === "string"
+  ) {
+    const code = (error as { code: string }).code;
+    return code === "BROKER_DISCONNECTED" ? "CYBERDECK_BROKER_UNREACHABLE" : code;
+  }
+  return "CYBERDECK_TOOL_FAILED";
+}
+
+function conversationDrift(
+  identity: McpActorIdentity,
+): { code: string; actorSessionId: string; liveConversationId: string; note: string } | undefined {
+  const live = identity.launchConversationId;
+  // Cyberdeck launches Claude with `--session-id <session.id>`, so at spawn these are equal by
+  // construction. Inequality means this server is serving a conversation Cyberdeck never bound.
+  if (live === undefined || live === identity.actorSessionId) return undefined;
+  return {
+    code: "CYBERDECK_CONVERSATION_DRIFTED",
+    actorSessionId: identity.actorSessionId,
+    liveConversationId: live,
+    note: DRIFT_NOTE,
+  };
+}
+
+async function diagnose(context: McpServerContext): Promise<Record<string, unknown>> {
+  const { identity } = context;
+  const drift = conversationDrift(identity);
+  let actor: unknown;
+  let brokerError = context.brokerUnavailable;
+  // A broker that answers but does not know this method is a version skew, not an outage. They
+  // need different remedies, so the diagnosis has to keep them apart.
+  let brokerStatus = context.brokerUnavailable === undefined ? "reachable" : "unreachable";
+  if (context.transport !== undefined) {
+    try {
+      actor = await context.transport.request("agent.actor.describe", {
+        actorSessionId: identity.actorSessionId,
+      });
+    } catch (error) {
+      brokerError = error instanceof Error ? error.message : String(error);
+      brokerStatus = failureCode(error) === "METHOD_NOT_FOUND" ? "outdated" : "unreachable";
+    }
+  }
+  const actorStatus = isRecord(actor) && typeof actor.status === "string" ? actor.status : undefined;
+  const status = brokerStatus === "unreachable" && brokerError !== undefined
+    ? "broker-unreachable"
+    : brokerStatus === "outdated"
+      ? "broker-outdated"
+      : actorStatus === undefined
+        ? "unknown"
+        : actorStatus === "bound"
+          ? (drift === undefined ? "healthy" : "conversation-drifted")
+          : actorStatus;
+  return {
+    server: { name: "cyberdeck", version: CYBERDECK_VERSION, pid: process.pid },
+    status,
+    actorSessionId: identity.actorSessionId,
+    conversation: {
+      launchConversationId: identity.launchConversationId ?? null,
+      matchesActorSession: drift === undefined,
+      ...(drift === undefined ? {} : { note: DRIFT_NOTE }),
+    },
+    broker: {
+      socketPath: identity.brokerSocketPath ?? null,
+      reachable: brokerStatus !== "unreachable",
+      ...(brokerStatus === "outdated" ? { outdated: true } : {}),
+      ...(brokerError === undefined ? {} : { error: brokerError }),
+    },
+    actor: actor ?? null,
+    remedy: brokerStatus === "outdated"
+      ? REMEDIES.CYBERDECK_BROKER_OUTDATED
+      : brokerError !== undefined
+        ? REMEDIES.CYBERDECK_BROKER_UNREACHABLE
+        : isRecord(actor) && typeof actor.remedy === "string"
+          ? actor.remedy
+          : "Cyberdeck tools are resolvable. If a cyberdeck_* tool still looks missing, the harness tool index is at fault, not this server.",
+  };
+}
+
 async function callTool(
-  transport: McpBrokerTransport,
-  actorSessionId: string,
+  context: McpServerContext,
   name: unknown,
   args: Record<string, unknown>,
 ): Promise<unknown> {
+  // Answered before any gate: the one tool whose job is to explain why the others cannot run.
+  if (name === "cyberdeck_diagnose") return diagnose(context);
+  const transport = context.transport;
+  if (transport === undefined) {
+    throw new McpToolError(
+      "CYBERDECK_BROKER_UNREACHABLE",
+      context.brokerUnavailable
+        ?? `Cyberdeck broker is unreachable${context.identity.brokerSocketPath === undefined ? "" : ` at ${context.identity.brokerSocketPath}`}`,
+    );
+  }
+  const actorSessionId = context.identity.actorSessionId;
   if (name === "cyberdeck_provider_capabilities") {
     const provider = typeof args.provider === "string" ? args.provider : undefined;
     return provider === undefined

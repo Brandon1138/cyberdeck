@@ -349,3 +349,102 @@ describe("AgentControlService", () => {
     expect(start).toHaveBeenCalledOnce();
   });
 });
+
+describe("AgentControlService actor description", () => {
+  const SUCCESSOR = "55555555-5555-4555-8555-555555555555";
+  const orchestrator: SessionRecord = {
+    ...worker,
+    id: ACTOR,
+    kind: "orchestrator",
+    role: "orchestrator",
+    orchestratorScope: "fleet",
+  };
+  const fleetBinding: OrchestratorBinding = {
+    ...binding,
+    key: "fleet",
+    scope: { kind: "fleet" },
+    grant: { ...binding.grant, scope: { kind: "fleet" } },
+  };
+
+  function service(
+    record: SessionRecord | undefined,
+    store: { findBySessionId?: unknown; get?: unknown },
+  ) {
+    return new AgentControlService(
+      {
+        list: () => (record === undefined ? [] : [record]),
+        get: (id: string) => {
+          if (record === undefined || record.id !== id) throw new Error("SESSION_NOT_FOUND");
+          return record;
+        },
+      } as never,
+      {
+        findBySessionId: vi.fn(async () => undefined),
+        get: vi.fn(async () => undefined),
+        ...store,
+      } as never,
+      {} as never,
+    );
+  }
+
+  it("reports a live binding, its scope key, and the capabilities actually held", async () => {
+    const control = service(orchestrator, { findBySessionId: vi.fn(async () => fleetBinding) });
+    await expect(control.describeActor(ACTOR)).resolves.toMatchObject({
+      status: "bound",
+      bound: true,
+      familyKey: "fleet",
+      familyHolderSessionId: ACTOR,
+      capabilities: ["thread.list", "thread.read", "worker.start"],
+      executionState: "active",
+    });
+  });
+
+  it("keeps resolving the same actor across /clear, because the grant binds the session", async () => {
+    // /clear replaces the provider conversation but not the Cyberdeck session record, so the
+    // session UUID the MCP server carries in --actor-session still resolves to its own binding.
+    const findBySessionId = vi.fn(async (id: string) => id === ACTOR ? fleetBinding : undefined);
+    const control = service(orchestrator, { findBySessionId });
+    await expect(control.listThreads(ACTOR)).resolves.toEqual([]);
+    await expect(control.describeActor(ACTOR)).resolves.toMatchObject({ status: "bound" });
+  });
+
+  it("names the successor holding the scope without lending it the successor's grant", async () => {
+    const rebound = { ...fleetBinding, sessionId: SUCCESSOR };
+    const control = service(orchestrator, { get: vi.fn(async () => rebound) });
+    const description = await control.describeActor(ACTOR);
+    expect(description).toMatchObject({
+      status: "orphaned",
+      bound: false,
+      familyKey: "fleet",
+      familyHolderSessionId: SUCCESSOR,
+    });
+    expect(description.capabilities).toBeUndefined();
+    expect(description.remedy).toContain(SUCCESSOR);
+  });
+
+  it("separates an unknown session from a known session that holds no binding", async () => {
+    await expect(service(undefined, {}).describeActor(ACTOR)).resolves.toMatchObject({
+      status: "unknown-session",
+      bound: false,
+    });
+    await expect(service(orchestrator, {}).describeActor(ACTOR)).resolves.toMatchObject({
+      status: "unbound",
+      bound: false,
+      familyKey: "fleet",
+    });
+  });
+
+  it("fails an orphaned tool call with a distinct code instead of a bare denial", async () => {
+    const control = service(orchestrator, {
+      get: vi.fn(async () => ({ ...fleetBinding, sessionId: SUCCESSOR })),
+    });
+    await expect(control.listThreads(ACTOR)).rejects.toMatchObject({
+      code: "ACTOR_BINDING_ORPHANED",
+      message: expect.stringContaining(SUCCESSOR),
+    });
+    await expect(service(undefined, {}).listThreads(ACTOR)).rejects.toMatchObject({
+      code: "ACTOR_NOT_AUTHORIZED",
+      message: expect.stringContaining("unknown-session"),
+    });
+  });
+});
