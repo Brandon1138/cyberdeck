@@ -500,6 +500,42 @@ describe("fleet presentation", () => {
     expect(rendered).not.toContain("Final thread");
   });
 
+  it("scrolls a focused folder header into view so collapsing it changes the screen", () => {
+    const snapshot = fleet(...["/repo/one", "/repo/two", "/repo/three"].flatMap((cwd, group) =>
+      Array.from({ length: 3 }, (_, index) => ({
+        record: session({
+          id: `00000000-0000-4000-8000-${String(group * 3 + index + 1).padStart(12, "0")}`,
+          cwd,
+          role: "worker",
+          name: `${cwd.slice(6)} thread ${index + 1}`,
+          displayOrder: group * 3 + index,
+        }),
+      }))));
+    const view = { color: false, width: 100, height: 16, now: NOW_MS };
+
+    // Seven steps down: the first folder's three threads, then a folder header before each group.
+    let focused = createFleetState(snapshot);
+    for (let step = 0; step < 7; step += 1) {
+      focused = transitionFleet(focused, snapshot, "down", NOW_MS, 7).state;
+    }
+    expect(focused.focusedFolderCwd).toBe("/repo/three");
+
+    // That header is the thirteenth of seventeen rows. A list that only clipped would have left the
+    // focus off screen, and collapsing it would then have changed nothing an operator can see.
+    const expanded = renderFleet(snapshot, focused, view);
+    expect(expanded).toContain("▾ /repo/three");
+    expect(expanded).not.toContain("one thread 1");
+
+    const collapsed = renderFleet(
+      snapshot,
+      transitionFleet(focused, snapshot, "left", NOW_MS, 7).state,
+      view,
+    );
+    expect(collapsed).not.toBe(expanded);
+    expect(collapsed).toContain("▸ /repo/three · 3 threads");
+    expect(collapsed).not.toContain("▾ /repo/three");
+  });
+
   it("handles an empty thread list without a scrollbar", () => {
     const snapshot = fleet();
     const rendered = renderFleet(snapshot, createFleetState(snapshot), {
