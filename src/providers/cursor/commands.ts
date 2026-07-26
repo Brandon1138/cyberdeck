@@ -1,5 +1,8 @@
 import type { JobRequest } from "../../domain/job.js";
-import { jobLaunchEnvironment } from "../launch-environment.js";
+import {
+  buildProviderChildEnvironment,
+  jobLaunchEnvironment,
+} from "../launch-environment.js";
 import { applyWorkerMode } from "../worker-mode.js";
 
 type CursorInteractiveRequest = Pick<JobRequest, "cwd" | "sandbox" | "model">;
@@ -13,6 +16,7 @@ export interface CursorCommand {
 
 export interface CursorHeadlessOptions {
   streamPartialOutput?: boolean;
+  sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
 }
 
 /**
@@ -23,6 +27,7 @@ export interface CursorHeadlessOptions {
 export function buildCursorInteractiveCommand(
   request: CursorInteractiveRequest,
   initialPrompt?: string,
+  sourceEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): CursorCommand {
   const args = cursorSafetyArgs(request);
   if (request.model !== undefined) args.push("--model", request.model);
@@ -31,7 +36,13 @@ export function buildCursorInteractiveCommand(
     executable: "agent",
     args,
     cwd: request.cwd,
-    env: { ...process.env },
+    env: buildProviderChildEnvironment({
+      source: sourceEnvironment,
+      provider: "cursor",
+      cwd: request.cwd,
+      terminal: "pty",
+      identity: { role: "session" },
+    }),
   };
 }
 
@@ -52,7 +63,7 @@ export function buildCursorHeadlessCommand(
     executable: "agent",
     args,
     cwd: request.cwd,
-    env: jobLaunchEnvironment({ ...process.env }, request),
+    env: jobLaunchEnvironment(options.sourceEnvironment ?? process.env, "cursor", request),
   };
 }
 

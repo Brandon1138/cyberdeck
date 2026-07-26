@@ -62,7 +62,7 @@ export interface AntigravityJobDispatchAdapterOptions {
   interpreter?: AntigravityResultInterpreter;
   timeoutMs?: number;
   maxOutputBytes?: number;
-  env?: NodeJS.ProcessEnv;
+  sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
   now?: () => string;
 }
 
@@ -105,7 +105,9 @@ export class AntigravityJobDispatchAdapter implements JobDispatchAdapter {
     // Unsupported sandboxes and unsafe explicit models fail before process construction.
     const command = buildAntigravityHeadlessCommand(
       request.request,
-      this.options.env === undefined ? {} : { env: this.options.env },
+      this.options.sourceEnvironment === undefined
+        ? {}
+        : { sourceEnvironment: this.options.sourceEnvironment },
     );
     this.seen.add(request.jobId);
     const handle = this.spawn(command);

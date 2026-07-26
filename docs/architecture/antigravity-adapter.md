@@ -23,11 +23,13 @@ Bounded/headless command construction:
 agy --print <instruction> --mode plan --sandbox [--model <explicit>]
 ```
 
-For both forms, process `cwd` is the explicit request `cwd` and environment is inherited unchanged
-unless a test injects a controlled environment. The interactive initial prompt uses the documented
-`--prompt-interactive` flag. The headless instruction is the value of `--print`; stdin is empty and closed immediately because
-`agy` documents no stdin prompt format. The headless process owns piped stdout/stderr. An
-interactive provider process would remain broker-PTY-owned; tmux must never own it.
+For both forms, process `cwd` is the explicit request `cwd` and child environment is rebuilt from
+Cyberdeck's finite compatibility and integration allowlists; Antigravity currently has no
+provider-specific environment entries. The interactive initial prompt uses the documented
+`--prompt-interactive` flag. The headless instruction is the value of `--print`; stdin is empty and
+closed immediately because `agy` documents no stdin prompt format. The headless process owns piped
+stdout/stderr. An interactive provider process would remain broker-PTY-owned; tmux must never own
+it.
 
 The interactive session contract now consumes the open provider identity and registers
 `AntigravityProviderAdapter` in the broker. `session.start`, Fleet slash launches, and orchestrator

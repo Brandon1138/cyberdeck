@@ -52,15 +52,16 @@ export const StartSessionRequestSchema = z.object({
 });
 
 /**
- * The only environment keys a resolved launch record may quote. A `ProviderLaunchSpec.env` is built
- * from `process.env`, so it carries whatever API keys and tokens the operator's shell holds; those
- * values must never be printed or persisted. Every key here is written by Cyberdeck itself with a
+ * The only environment keys a resolved launch record may quote. Provider launch environments are
+ * allowlisted, but configuration, routing, proxy, trust, and explicit-grant values remain sensitive
+ * and must never be printed or persisted. Every key here is written by Cyberdeck itself with a
  * constant, non-secret value, and everything else is reduced to a count.
  */
 export const RESOLVED_LAUNCH_ENV_KEYS = [
   "CYBERDECK_PROCESS_ROLE",
   "CYBERDECK_WORKER_MODE",
   "DISABLE_UPDATES",
+  "ENABLE_TOOL_SEARCH",
 ] as const;
 
 /**
@@ -76,7 +77,7 @@ export const ResolvedLaunchRecordSchema = z.object({
   cyberdeckEnv: z.record(z.string().max(64), z.string().max(256))
     .refine((value) => Object.keys(value).length <= RESOLVED_LAUNCH_ENV_KEYS.length,
       "cyberdeckEnv may only describe Cyberdeck-owned overrides"),
-  /** How many inherited variables were passed through. Names and values are deliberately absent. */
+  /** How many non-Cyberdeck variables were passed through. Names and values are deliberately absent. */
   inheritedEnvCount: z.number().int().nonnegative(),
   truncated: z.boolean(),
 });

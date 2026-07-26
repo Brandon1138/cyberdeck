@@ -324,6 +324,7 @@ function orchestratorPrompt(scope: OrchestratorScope): string {
     "If a wait call fails outright, worker state is unknown, not failed. Re-wait the same sessionId and completionTarget, or call cyberdeck_threads_list, before starting any replacement worker; a result marked retrieval \"replay\" proves the work already ran.",
     "cyberdeck_thread_read is a bounded debugging escape hatch only. Always continue from its returned cursor and never reread from cursor zero.",
     "Never manipulate tmux panes or type through tmux send-keys.",
+    "Any MCP server the operator allowlisted for you is registered but deferred: its tools are absent from your tool list until you search for them by name, so search before concluding a capability is unavailable.",
     "Do not stop, delete, or widen a worker's permissions without explicit human approval.",
   ].join(" ");
 }

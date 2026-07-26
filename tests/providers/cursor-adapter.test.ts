@@ -150,7 +150,15 @@ describe("Cursor command construction", () => {
   });
 
   it("builds headless stream-json argv with the documented positional prompt", () => {
-    const command = buildCursorHeadlessCommand(request().request, { streamPartialOutput: true });
+    const command = buildCursorHeadlessCommand(request().request, {
+      streamPartialOutput: true,
+      sourceEnvironment: {
+        PATH: "/source/cursor-bin",
+        UNRELATED_SENTINEL: "drop-this",
+        TMUX: "drop-this",
+        TMUX_PANE: "drop-this",
+      },
+    });
     expect(command.executable).toBe("agent");
     expect(command.args).toEqual([
       "--print",
@@ -167,9 +175,14 @@ describe("Cursor command construction", () => {
     ]);
     expect(command.cwd).toBe("/tmp/repo");
     expect(command.env).toMatchObject({
+      PATH: "/source/cursor-bin",
+      PWD: "/tmp/repo",
       CYBERDECK_PROCESS_ROLE: "worker",
       CYBERDECK_WORKER_MODE: "normal",
     });
+    expect(command.env.UNRELATED_SENTINEL).toBeUndefined();
+    expect(command.env.TMUX).toBeUndefined();
+    expect(command.env.TMUX_PANE).toBeUndefined();
   });
 
   it("injects Caveman policy into the actual Cursor worker prompt", () => {

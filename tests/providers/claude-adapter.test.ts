@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -152,6 +152,8 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     const adapter = new ClaudeProviderAdapter({
       directory,
       mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      // Absent allowlist: asserting a cyberdeck-only config must not depend on operator state.
+      orchestratorMcp: { allowlistPath: join(directory, "no-allowlist.json") },
     });
     const spec = adapter.buildLaunchSpec(record);
 
@@ -179,6 +181,68 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(() => readFileSync(mcpPath)).toThrow();
   });
 
+  it("merges allowlisted operator servers into an orchestrator's exclusive config", async () => {
+    const directory = tempDir();
+    const allowlistPath = join(directory, "orchestrator-mcp.json");
+    const operatorConfigPath = join(directory, "claude.json");
+    // `absent` is allowlisted but undefined, and `cyberdeck` is allowlisted to try to displace the
+    // control plane. Neither may change what the orchestrator launches against.
+    writeFileSync(
+      allowlistPath,
+      JSON.stringify({ servers: ["linear-server", "absent", "cyberdeck"] }),
+    );
+    writeFileSync(operatorConfigPath, JSON.stringify({
+      mcpServers: {
+        "linear-server": { type: "http", url: "https://mcp.linear.app/mcp" },
+        "obsidian-vault": { type: "stdio", command: "uvx" },
+        cyberdeck: { type: "stdio", command: "/impostor" },
+      },
+    }));
+    const record = session({ kind: "orchestrator" });
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      orchestratorMcp: { allowlistPath, operatorConfigPath },
+    });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+
+    const mcpPath = spec.args[spec.args.indexOf("--mcp-config") + 1]!;
+    expect(JSON.parse(readFileSync(mcpPath, "utf8"))).toEqual({
+      mcpServers: {
+        "linear-server": { type: "http", url: "https://mcp.linear.app/mcp" },
+        cyberdeck: {
+          type: "stdio",
+          command: "/node",
+          args: ["/cyberdeck.js", "mcp", "--actor-session", record.id],
+        },
+      },
+    });
+    await adapter.cleanupLaunch(record);
+  });
+
+  it("leaves a worker's config cyberdeck-only, since workers inherit the operator's servers", async () => {
+    const directory = tempDir();
+    const allowlistPath = join(directory, "orchestrator-mcp.json");
+    const operatorConfigPath = join(directory, "claude.json");
+    writeFileSync(allowlistPath, JSON.stringify({ servers: ["linear-server"] }));
+    writeFileSync(operatorConfigPath, JSON.stringify({
+      mcpServers: { "linear-server": { type: "http", url: "https://mcp.linear.app/mcp" } },
+    }));
+    const record = session({ kind: "worker" });
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      orchestratorMcp: { allowlistPath, operatorConfigPath },
+    });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+
+    const mcpPath = spec.args[spec.args.indexOf("--mcp-config") + 1]!;
+    expect(Object.keys(JSON.parse(readFileSync(mcpPath, "utf8")).mcpServers)).toEqual(["cyberdeck"]);
+    await adapter.cleanupLaunch(record);
+  });
+
   it("preserves the Phase 1 interactive argv for an explicit ordinary model", () => {
     const record = session({ name: "proof", sandbox: "workspace-write", model: "opus" });
     const spec = new ClaudeProviderAdapter().buildLaunchSpec(record);
@@ -190,11 +254,65 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
       "proof",
       "--permission-mode",
       "manual",
+      "--disallowedTools",
+      "Agent,Task",
       "--model",
       "opus",
     ]);
     expect(spec.cwd).toBe("/tmp/repo");
     expect(spec.env.DISABLE_UPDATES).toBe("1");
+    expect(spec.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS).toBe("0");
+    expect(spec.env.CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION).toBe("0");
+  });
+
+  it("keeps Claude-native subagents disabled across launch and resume", () => {
+    const adapter = new ClaudeProviderAdapter({
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    });
+    for (const spec of [
+      adapter.buildLaunchSpec(session({ kind: "orchestrator" })),
+      adapter.buildResumeSpec(session({ kind: "orchestrator" })),
+      adapter.buildLaunchSpec(session({ kind: "worker" })),
+      adapter.buildResumeSpec(session({ kind: "worker" })),
+    ]) {
+      expect(spec.args).toContain("--disallowedTools");
+      const denials = spec.args[spec.args.indexOf("--disallowedTools") + 1]!.split(",");
+      expect(denials).toEqual(expect.arrayContaining(["Agent", "Task"]));
+      expect(spec.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS).toBe("0");
+      expect(spec.env.CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION).toBe("0");
+      expect(spec.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH).toBe("0");
+    }
+  });
+
+  it("re-asserts user-scope denials on argv for orchestrators, which never receive them", () => {
+    // `--setting-sources project,local` drops the operator's `permissions.deny`, so an orchestrator
+    // would otherwise be the one session able to invoke a tool the operator denied globally.
+    // Workers keep user settings and must not have argv policy imposed on top of them.
+    const adapter = new ClaudeProviderAdapter({
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    });
+    const denialsFor = (spec: { args: string[] }): string[] =>
+      spec.args[spec.args.indexOf("--disallowedTools") + 1]!.split(",");
+
+    for (const spec of [
+      adapter.buildLaunchSpec(session({ kind: "orchestrator" })),
+      adapter.buildResumeSpec(session({ kind: "orchestrator" })),
+    ]) {
+      expect(denialsFor(spec)).toContain("Skill(update-config)");
+    }
+    for (const spec of [
+      adapter.buildLaunchSpec(session({ kind: "worker" })),
+      adapter.buildResumeSpec(session({ kind: "worker" })),
+    ]) {
+      expect(denialsFor(spec)).toEqual(["Agent", "Task"]);
+    }
+  });
+
+  it("emits exactly one --disallowedTools, since a second occurrence would replace the first", () => {
+    const spec = new ClaudeProviderAdapter({
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    }).buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.args.filter((arg) => arg === "--disallowedTools")).toHaveLength(1);
   });
 
   it("bounds an orchestrator's ambient context", () => {
@@ -257,6 +375,30 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(spec.args).not.toContain("--strict-mcp-config");
   });
 
+  it("forces tool-schema deferral on rather than leaving it to the optimistic default", () => {
+    // Left unset, tool search is decided off the base URL and disabled for a non-first-party host,
+    // so an operator behind a proxy would get every schema resident. Forced on, MCP schemas cost
+    // their names until searched — which is what keeps an ambient set affordable.
+    const adapter = new ClaudeProviderAdapter({
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      sourceEnvironment: { ENABLE_TOOL_SEARCH: "false" },
+    });
+    expect(adapter.buildLaunchSpec(session({ kind: "orchestrator" })).env.ENABLE_TOOL_SEARCH)
+      .toBe("true");
+    expect(adapter.buildResumeSpec(session({ kind: "orchestrator" })).env.ENABLE_TOOL_SEARCH)
+      .toBe("true");
+    // Workers inherit the operator's whole ambient set, so deferral matters more for them, not less.
+    expect(adapter.buildLaunchSpec(session({ kind: "worker" })).env.ENABLE_TOOL_SEARCH)
+      .toBe("true");
+  });
+
+  it("does not let source state spoof Cyberdeck's tool-search override", () => {
+    const spec = new ClaudeProviderAdapter({
+      sourceEnvironment: { ENABLE_TOOL_SEARCH: "true" },
+    }).buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.env.ENABLE_TOOL_SEARCH).toBeUndefined();
+  });
+
   it("maps read-only to plan and never emits a bypass permission mode", () => {
     const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ sandbox: "read-only" }));
     expect(spec.args).toContain("plan");
@@ -267,7 +409,16 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
 
 describe("buildClaudeHeadlessCommand", () => {
   it("uses only flags the installed CLI documents for print mode", () => {
-    const command = buildClaudeHeadlessCommand(dispatchRequest().request);
+    const command = buildClaudeHeadlessCommand(dispatchRequest().request, {
+      sourceEnvironment: {
+        PATH: "/source/claude-bin",
+        ANTHROPIC_BASE_URL: "https://claude-routing.invalid",
+        OPENAI_BASE_URL: "https://wrong-provider.invalid",
+        UNRELATED_SENTINEL: "drop-this",
+        TMUX: "drop-this",
+        TMUX_PANE: "drop-this",
+      },
+    });
     expect(command.executable).toBe("claude");
     expect(command.args).toEqual([
       "--print",
@@ -277,15 +428,26 @@ describe("buildClaudeHeadlessCommand", () => {
       "stream-json",
       "--permission-mode",
       "plan",
+      "--disallowedTools",
+      "Agent,Task",
       "--model",
       "opus",
     ]);
     expect(command.cwd).toBe("/tmp/repo");
     expect(command.env.DISABLE_UPDATES).toBe("1");
+    expect(command.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS).toBe("0");
+    expect(command.env.CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION).toBe("0");
     expect(command.env).toMatchObject({
+      PATH: "/source/claude-bin",
+      PWD: "/tmp/repo",
+      ANTHROPIC_BASE_URL: "https://claude-routing.invalid",
       CYBERDECK_PROCESS_ROLE: "worker",
       CYBERDECK_WORKER_MODE: "normal",
     });
+    expect(command.env.OPENAI_BASE_URL).toBeUndefined();
+    expect(command.env.UNRELATED_SENTINEL).toBeUndefined();
+    expect(command.env.TMUX).toBeUndefined();
+    expect(command.env.TMUX_PANE).toBeUndefined();
     expect(command.stdin).toBe("summarise the repository");
   });
 
