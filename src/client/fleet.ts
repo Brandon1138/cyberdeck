@@ -106,8 +106,8 @@ export interface FleetState {
 }
 
 export type FleetAction =
-  | { type: "stop-tree"; sessionId: string }
-  | { type: "delete-tree"; sessionId: string }
+  | { type: "stop"; sessionId: string }
+  | { type: "delete"; sessionId: string }
   | { type: "attach"; sessionId: string }
   | { type: "resume"; sessionId: string }
   | { type: "start"; request: StartSessionRequest & { initialPrompt: string } }
@@ -154,17 +154,6 @@ interface OrchestratorModelChoice {
   provider: (typeof ORCHESTRATOR_CATALOG)[number];
   model: string;
   label: string;
-}
-
-interface SessionTreeProgress {
-  rootSessionId: string;
-  rootKind: "worker" | "orchestrator";
-  childCount: number;
-  total: number;
-  active: number;
-  stopping: number;
-  terminal: number;
-  deleted?: number;
 }
 
 export interface FleetRuntimeOptions {
@@ -405,23 +394,21 @@ export function transitionFleet(
   }
 
   if (key === "ctrl+x" && selected !== undefined) {
-    const tree = sessionTree(snapshot, selected.record.id);
-    const terminal = tree.filter(({ record }) => isTerminalSession(record)).length;
-    if (terminal !== tree.length) {
+    if (!isTerminalSession(selected.record)) {
       return {
         state: {
           ...state,
           deleteConfirmation: undefined,
-          notice: stoppingTreeNotice(selected.record, tree.length - 1, terminal, tree.length),
+          notice: `Stopping ${threadSubject(selected.record)}`,
           noticeTone: "warning",
         },
-        action: { type: "stop-tree", sessionId: selected.record.id },
+        action: { type: "stop", sessionId: selected.record.id },
       };
     }
     if (state.deleteConfirmation?.sessionId === selected.record.id) {
       return {
         state: { ...state, deleteConfirmation: undefined, notice: undefined },
-        action: { type: "delete-tree", sessionId: selected.record.id },
+        action: { type: "delete", sessionId: selected.record.id },
       };
     }
     return {
@@ -431,7 +418,7 @@ export function transitionFleet(
           sessionId: selected.record.id,
           expiresAt: now + DELETE_CONFIRMATION_MS,
         },
-        notice: deleteTreeConfirmation(selected.record, tree.length - 1),
+        notice: `Delete ${threadSubject(selected.record)}? press ctrl+x again`,
         noticeTone: "confirmation",
       },
     };
@@ -651,17 +638,19 @@ function renderFleetList(
   } else {
     for (const group of groups) {
       lines.push(paint(shortPath(group.cwd, options.home), "blue", options.color));
-      for (const thread of group.threads) {
+      const sections = roleSections(group.threads);
+      for (const section of sections) {
+        lines.push(paint(section.label, "dim", options.color));
+        for (const thread of section.threads) {
         lines.push(renderThreadRow(thread, state, options));
+        }
       }
       lines.push("");
     }
   }
 
   const selected = threads.find(({ record }) => record.id === state.selectedSessionId);
-  const selectedTree = selected === undefined ? [] : sessionTree(snapshot, selected.record.id);
-  const terminal = selected !== undefined
-    && selectedTree.every(({ record }) => isTerminalSession(record));
+  const terminal = selected !== undefined && isTerminalSession(selected.record);
   const destructiveHint = terminal ? "ctrl+x delete thread" : "ctrl+x stop agent";
   const cwd = composerCwd(state, snapshot);
   const profile = state.launchProfiles[cwd];
@@ -1016,18 +1005,16 @@ export async function runFleet(
       return;
     }
     try {
-      if (action?.type === "stop-tree") {
-        const progress = await client.request<SessionTreeProgress>("session.stop", { sessionId: action.sessionId });
+      if (action?.type === "stop") {
+        await client.request("session.stopOne", { sessionId: action.sessionId });
         state = {
           ...state,
-          notice: progress.terminal === progress.total
-            ? stoppedTreeNotice(progress)
-            : stoppingProgressNotice(progress),
-          noticeTone: progress.terminal === progress.total ? "neutral" : "warning",
+          notice: "Stopping thread",
+          noticeTone: "warning",
         };
-      } else if (action?.type === "delete-tree") {
-        const progress = await client.request<SessionTreeProgress>("session.deleteTree", { sessionId: action.sessionId });
-        state = { ...state, notice: deletedTreeNotice(progress), noticeTone: "neutral" };
+      } else if (action?.type === "delete") {
+        await client.request("session.delete", { sessionId: action.sessionId });
+        state = { ...state, notice: "Deleted thread", noticeTone: "neutral" };
       } else if (action?.type === "attach") {
         await openNativeThread(action.sessionId);
       } else if (action?.type === "resume") {
@@ -1303,59 +1290,17 @@ function orderedThreads(snapshot: FleetSnapshot): FleetThread[] {
     .flatMap(({ threads }) => threads);
 }
 
-function sessionTree(snapshot: FleetSnapshot, rootSessionId: string): FleetThread[] {
-  const byId = new Map(snapshot.threads.map((thread) => [thread.record.id, thread]));
-  const tree: FleetThread[] = [];
-  const visited = new Set<string>();
-  const visit = (sessionId: string) => {
-    if (visited.has(sessionId)) return;
-    visited.add(sessionId);
-    const thread = byId.get(sessionId);
-    if (thread === undefined) return;
-    tree.push(thread);
-    for (const childId of thread.record.childIds) visit(childId);
-  };
-  visit(rootSessionId);
-  return tree;
+function roleSections(threads: readonly FleetThread[]): Array<{ label: string; threads: FleetThread[] }> {
+  const orcs = threads.filter(({ record }) => record.kind === "orchestrator");
+  const workers = threads.filter(({ record }) => record.kind !== "orchestrator");
+  return [
+    ...(orcs.length === 0 ? [] : [{ label: "Orcs", threads: orcs }]),
+    ...(workers.length === 0 ? [] : [{ label: "Workers", threads: workers }]),
+  ];
 }
 
-function stoppingTreeNotice(
-  root: SessionRecord,
-  childCount: number,
-  terminal: number,
-  total: number,
-): string {
-  return `Stopping ${treeSubject(root.kind ?? "worker", childCount, "worker")} · ${terminal}/${total} stopped`;
-}
-
-function deleteTreeConfirmation(root: SessionRecord, childCount: number): string {
-  if (root.kind !== "orchestrator") return "Delete thread? press ctrl+x again";
-  if (childCount === 0) return "Delete orchestrator? press ctrl+x again";
-  return `Delete ${treeSubject("orchestrator", childCount, "child thread")}? press ctrl+x again`;
-}
-
-function stoppingProgressNotice(progress: SessionTreeProgress): string {
-  return `Stopping ${treeSubject(progress.rootKind, progress.childCount, "worker")} · ${progress.terminal}/${progress.total} stopped`;
-}
-
-function stoppedTreeNotice(progress: SessionTreeProgress): string {
-  return `Stopped ${treeSubject(progress.rootKind, progress.childCount, "worker")}`;
-}
-
-function deletedTreeNotice(progress: SessionTreeProgress): string {
-  if (progress.rootKind !== "orchestrator") return "Deleted thread";
-  if (progress.childCount === 0) return "Deleted orchestrator";
-  return `Deleted ${treeSubject(progress.rootKind, progress.childCount, "child thread")}`;
-}
-
-function treeSubject(
-  rootKind: "worker" | "orchestrator",
-  childCount: number,
-  childLabel: "worker" | "child thread",
-): string {
-  const root = rootKind === "orchestrator" ? "orchestrator" : "agent";
-  if (childCount === 0) return root;
-  return `${root} + ${childCount} ${childLabel}${childCount === 1 ? "" : "s"}`;
+function threadSubject(record: SessionRecord): string {
+  return record.kind === "orchestrator" ? "orchestrator" : "thread";
 }
 
 function groupThreads(threads: readonly FleetThread[]): Array<{ cwd: string; threads: FleetThread[] }> {
@@ -1369,6 +1314,9 @@ function groupThreads(threads: readonly FleetThread[]): Array<{ cwd: string; thr
     .map(([cwd, entries]) => ({
       cwd,
       threads: entries.sort((left, right) => {
+        const leftRole = left.record.kind === "orchestrator" ? 0 : 1;
+        const rightRole = right.record.kind === "orchestrator" ? 0 : 1;
+        if (leftRole !== rightRole) return leftRole - rightRole;
         if (left.record.pinned !== right.record.pinned) return left.record.pinned === true ? -1 : 1;
         const leftOrder = left.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
         const rightOrder = right.record.displayOrder ?? Number.MAX_SAFE_INTEGER;

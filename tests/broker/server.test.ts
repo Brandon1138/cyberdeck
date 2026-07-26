@@ -135,7 +135,7 @@ async function harness() {
     onShutdown: () => { void server.close(); },
   });
   await server.listen();
-  return { server, socketPath, ptyFactory, orchestratorStore, workerPreferences };
+  return { server, socketPath, ptyFactory, orchestratorStore, orchestrators, workerPreferences };
 }
 
 describe("BrokerServer", () => {
@@ -254,8 +254,8 @@ describe("BrokerServer", () => {
     }
   });
 
-  it("stops and deletes an orchestrator tree while clearing its durable binding", async () => {
-    const { server, socketPath, orchestratorStore, workerPreferences } = await harness();
+  it("deletes only an orchestrator while preserving its workers and clearing its durable binding", async () => {
+    const { server, socketPath, orchestratorStore, orchestrators, workerPreferences } = await harness();
     const client = await TestClient.open(socketPath);
     try {
       const ensured = await client.request<{ session: { id: string } }>("orchestrator.ensure", {
@@ -294,17 +294,32 @@ describe("BrokerServer", () => {
         parentSessionId: ensured.session.id,
       });
 
-      await expect(client.request("session.stop", { sessionId: ensured.session.id })).resolves.toMatchObject({
-        total: 2,
-        terminal: 2,
-      });
-      await expect(client.request("session.deleteTree", { sessionId: ensured.session.id })).resolves.toMatchObject({
-        deleted: 2,
-      });
-      await expect(client.request("session.list", {})).resolves.toEqual([]);
+      await expect(client.request("session.stopOne", { sessionId: ensured.session.id }))
+        .resolves.toEqual({ stopped: true });
+      await expect(client.request<Array<Record<string, unknown>>>("session.list", {}))
+        .resolves.toContainEqual(expect.objectContaining({
+          id: child.id,
+          executionState: "active",
+        }));
+
+      vi.spyOn(orchestrators, "resetSessionBinding")
+        .mockRejectedValueOnce(new Error("binding store unavailable"));
+      await expect(client.request("session.delete", { sessionId: ensured.session.id }))
+        .rejects.toThrow("binding store unavailable");
+      await expect(client.request<Array<Record<string, unknown>>>("session.list", {}))
+        .resolves.toContainEqual(expect.objectContaining({
+          id: ensured.session.id,
+          kind: "orchestrator",
+        }));
+      await expect(orchestratorStore.findBySessionId(ensured.session.id))
+        .resolves.toMatchObject({ sessionId: ensured.session.id });
+
+      await expect(client.request("session.delete", { sessionId: ensured.session.id })).resolves.toEqual({ deleted: true });
+      const remaining = await client.request<Array<Record<string, unknown>>>("session.list", {});
+      expect(remaining).toEqual([expect.objectContaining({ id: child.id, cwd: "/tmp/repo", kind: "worker" })]);
+      expect(remaining[0]).not.toHaveProperty("parentSessionId");
       await expect(orchestratorStore.findBySessionId(ensured.session.id)).resolves.toBeUndefined();
-      await expect(client.request("session.snapshot", { sessionId: child.id }))
-        .rejects.toMatchObject({ code: "SESSION_NOT_FOUND" });
+      await expect(client.request("session.snapshot", { sessionId: child.id })).resolves.toMatchObject({ data: expect.any(String) });
     } finally {
       client.socket.destroy();
       await server.close();
