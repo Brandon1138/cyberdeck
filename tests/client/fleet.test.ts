@@ -750,6 +750,73 @@ describe("fleet controls", () => {
     ]);
   });
 
+  it("decodes Option+Enter as one chord instead of an Escape followed by a submit", () => {
+    const decoder = new FleetKeyDecoder();
+
+    // Meta-sends-Escape encoding, whole read.
+    expect(decoder.push("\u001b\r")).toEqual(["alt+enter"]);
+    expect(decoder.push("\u001b\n")).toEqual(["alt+enter"]);
+    // Keyboard-protocol encoding, which a provider TUI can leave switched on.
+    expect(decoder.push("\u001b[13;3u")).toEqual(["alt+enter"]);
+    expect(decoder.push("\u001b[13;2u")).toEqual(["shift+enter"]);
+    expect(decoder.push("\u001b[13u")).toEqual(["enter"]);
+    expect(decoder.push(Buffer.from([0x0d]))).toEqual(["enter"]);
+  });
+
+  it("names keyboard-protocol reports instead of swallowing them as anonymous sequences", () => {
+    const decoder = new FleetKeyDecoder();
+
+    expect(decoder.push("\u001b[27u")).toEqual(["escape"]);
+    expect(decoder.push("\u001b[97u")).toEqual(["a"]);
+    expect(decoder.push("\u001b[97;3u")).toEqual(["alt+a"]);
+    expect(decoder.push("\u001b[50;3u")).toEqual(["alt+2"]);
+    expect(decoder.push("\u001b[127u")).toEqual(["backspace"]);
+  });
+
+  it("keeps Option chords out of the composer and reads composed Option characters as text", () => {
+    const decoder = new FleetKeyDecoder();
+
+    // An unbound Meta chord does nothing at all: neither half may reach a binding or the draft.
+    expect(decoder.push("\u001bb")).toEqual(["alt+b"]);
+    expect(decoder.push("\u001b\u007f")).toEqual(["alt+backspace"]);
+    // Option delivered as a composed character is ordinary text.
+    expect(decoder.push("å")).toEqual(["å"]);
+  });
+
+  it("keeps Esc, arrow keys and function keys distinct at the same first byte", () => {
+    const decoder = new FleetKeyDecoder();
+
+    expect(decoder.push("\u001b[A")).toEqual(["up"]);
+    expect(decoder.push("\u001b[1;2B")).toEqual(["shift+down"]);
+    // SS3 function keys are consumed whole rather than typing their final byte into the draft.
+    expect(decoder.push("\u001bOP")).toEqual([]);
+    expect(decoder.hasPendingInput).toBe(false);
+    // A repeated Esc stays an Esc rather than collapsing into a chord.
+    expect(decoder.push("\u001b\u001b")).toEqual(["escape"]);
+    expect(decoder.flush()).toEqual(["escape"]);
+  });
+
+  it("inserts a newline for Option+Enter and Shift+Enter without launching the draft", () => {
+    const snapshot = fleet({ record: session({ cwd: "/repo/one", sandbox: "workspace-write" }) });
+    const state = {
+      ...createFleetState(snapshot),
+      draft: "first",
+      workingDirectory: "/repo/two",
+      launchProfiles: { "/repo/two": { provider: "codex" as const, model: "gpt-5.6-sol" } },
+    };
+
+    const option = transitionFleet(state, snapshot, "alt+enter", NOW_MS);
+    expect(option.state.draft).toBe("first\n");
+    expect(option.action).toBeUndefined();
+
+    const shift = transitionFleet(option.state, snapshot, "shift+enter", NOW_MS);
+    expect(shift.state.draft).toBe("first\n\n");
+    expect(shift.action).toBeUndefined();
+
+    // Plain Enter still submits the composed draft.
+    expect(transitionFleet(shift.state, snapshot, "enter", NOW_MS).action).toBeDefined();
+  });
+
   it("consumes complete and fragmented terminal mouse reports instead of typing coordinates", () => {
     const decoder = new FleetKeyDecoder();
 

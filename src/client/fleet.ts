@@ -347,6 +347,8 @@ const DISABLE_INHERITED_TERMINAL_INPUT_MODES = [
   "\u001b[?1006l", // SGR mouse encoding
   "\u001b[?1015l", // urxvt mouse encoding
   "\u001b[?1016l", // SGR pixel mouse encoding
+  "\u001b[?2004l", // bracketed paste
+  "\u001b[<u", // pop any keyboard protocol a provider TUI pushed
 ].join("");
 const ENTER_FLEET_SCREEN = `${DISABLE_INHERITED_TERMINAL_INPUT_MODES}\u001b[?1049h\u001b[?25l`;
 const LEAVE_FLEET_SCREEN = `${DISABLE_INHERITED_TERMINAL_INPUT_MODES}\u001b[?25h\u001b[?1049l`;
@@ -789,7 +791,9 @@ export function transitionFleet(
   if (key === "backspace") {
     return { state: { ...state, draft: [...state.draft].slice(0, -1).join(""), notice: undefined } };
   }
-  if (key === "ctrl+j") {
+  // Newline in the composer. Option+Enter is the convention operators arrive with, so it is bound
+  // here and nowhere else: no fleet action may ever answer it, or a half-written task would launch.
+  if (key === "ctrl+j" || key === "alt+enter" || key === "shift+enter") {
     return { state: { ...state, draft: `${state.draft}\n`, notice: undefined } };
   }
   if (key === "escape") {
@@ -1485,7 +1489,7 @@ function renderHeader(
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
     "shift+↑↓ reorder", "←→ fold project", "ctrl+s switch views", "@ mention", "alt+1–9 open", "esc back/clear",
-    "ctrl+r rename", "ctrl+j newline", "ctrl+] detach/reattach", "ctrl+g cwd", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
+    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+] detach/reattach", "ctrl+g cwd", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
   ];
   if (width >= 110) return [entries.slice(0, 5).join("   "), entries.slice(5).join("   ")];
   if (width >= 70) return [entries.slice(0, 3).join("   "), entries.slice(3, 6).join("   "), entries.slice(6).join("   ")];
@@ -2224,7 +2228,6 @@ export class FleetKeyDecoder {
       ["\u001b[C", "right"],
       ["\u001b[1;2A", "shift+up"],
       ["\u001b[1;2B", "shift+down"],
-      ["\u001b[13u", "enter"],
     ] as const;
     const match = special.find(([sequence]) => rest.startsWith(sequence));
     if (match !== undefined) {
@@ -2238,17 +2241,35 @@ export class FleetKeyDecoder {
         this.pending = rest;
         break;
       }
+      const csiKey = decodeCsiUKey(csi[0]);
+      if (csiKey !== undefined) keys.push(csiKey);
       index += csi[0].length;
+      continue;
+    }
+    // SS3 has its own three-byte shape. Consuming it whole keeps its final byte out of the draft.
+    if (rest.startsWith("\u001bO")) {
+      if (rest.length < 3) {
+        this.pending = rest;
+        break;
+      }
+      index += 3;
       continue;
     }
     if (rest === "\u001b") {
       this.pending = rest;
       break;
     }
-    const altDigit = /^\u001b([1-9])/u.exec(rest);
-    if (altDigit !== null) {
-      keys.push(`alt+${altDigit[1]}`);
-      index += altDigit[0].length;
+    // An Esc that already has a byte behind it is the Meta prefix of a single chord, never Esc plus
+    // that key. Resolving it here is what stops Option+Enter from clearing the draft and submitting.
+    if (rest.startsWith("\u001b")) {
+      if (rest.charCodeAt(1) === 0x1b) {
+        keys.push("escape");
+        index += 1;
+        continue;
+      }
+      const chord = altChordKey(rest.charCodeAt(1), rest[1]!);
+      if (chord !== undefined) keys.push(chord);
+      index += 2;
       continue;
     }
     const code = value.charCodeAt(index);
@@ -2261,7 +2282,6 @@ export class FleetKeyDecoder {
     else if (code === 0x14) keys.push("ctrl+t");
     else if (code === 0x18) keys.push("ctrl+x");
     else if (code === 0x1d) keys.push("ctrl+]");
-    else if (code === 0x1b) keys.push("escape");
     else if (code === 0x0d) keys.push("enter");
     else if (code === 0x7f || code === 0x08) keys.push("backspace");
     else if (code >= 0x20) keys.push(value[index]!);
@@ -2269,6 +2289,50 @@ export class FleetKeyDecoder {
   }
   return keys;
   }
+}
+
+/**
+ * Decode a CSI-u key report into a fleet key name.
+ *
+ * A provider TUI can leave the terminal in a keyboard protocol that reports ordinary keys as
+ * `CSI <code> ; <modifiers> u` rather than as bytes, and that mode outlives the attachment. Without
+ * this the fleet swallowed every such report as an anonymous control sequence, so Esc did nothing
+ * and Option+Enter did nothing — the same gesture behaving differently depending on which provider
+ * the operator had visited last. Sequences that are not key reports stay consumed and unnamed.
+ */
+function decodeCsiUKey(sequence: string): string | undefined {
+  const report = /^\u001b\[(\d+)(?:;(\d+)(?::\d+)?)?u$/u.exec(sequence);
+  if (report === null) return undefined;
+  const code = Number(report[1]);
+  const modifiers = report[2] === undefined ? 0 : Number(report[2]) - 1;
+  const shift = (modifiers & 1) !== 0;
+  const alt = (modifiers & 2) !== 0;
+  const ctrl = (modifiers & 4) !== 0;
+  if (code === 27) return "escape";
+  if (code === 13 || code === 10) {
+    if (alt) return "alt+enter";
+    if (shift) return "shift+enter";
+    return ctrl ? "ctrl+enter" : "enter";
+  }
+  if (code === 127 || code === 8) return "backspace";
+  if (ctrl || code < 0x20) return undefined;
+  const character = String.fromCodePoint(code);
+  return alt ? `alt+${character}` : character;
+}
+
+/**
+ * Name the single chord an Esc prefix forms with the byte behind it.
+ *
+ * Option is delivered either as this prefix or as a composed character; a composed character needs
+ * no decoding, so this is the whole of Meta handling. Chords the fleet does not bind resolve to
+ * `undefined` and are dropped, which is the point: an unbound chord must do nothing rather than
+ * decay into its two halves and fire two bindings.
+ */
+function altChordKey(code: number, character: string): string | undefined {
+  if (code === 0x0d || code === 0x0a) return "alt+enter";
+  if (code === 0x7f || code === 0x08) return "alt+backspace";
+  if (code < 0x20) return undefined;
+  return `alt+${character}`;
 }
 
 function openAction(record: SessionRecord): FleetAction {

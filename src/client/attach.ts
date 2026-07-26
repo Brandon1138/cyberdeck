@@ -14,6 +14,12 @@ export interface AttachTransport {
  */
 const DETACH_BYTE = 0x1d;
 const ESCAPE_BYTE = 0x1b;
+/**
+ * A bracketed paste carries data, not keystrokes. Its payload is forwarded opaquely so that a pasted
+ * `0x1d` or a pasted Left Arrow cannot be mistaken for the detach chord or the directional return.
+ */
+const PASTE_START = Buffer.from("\u001b[200~");
+const PASTE_END = Buffer.from("\u001b[201~");
 const LEFT_ARROW = Buffer.from("\u001b[D");
 /**
  * Only wide enough to reunite an escape sequence split across reads. Expiry now forwards the pending
@@ -80,6 +86,9 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
     let detachOnLeftArrow = options.detachOnLeftArrow ?? true;
     let pendingInput = Buffer.alloc(0);
     let pendingEscapeTimer: ReturnType<typeof setTimeout> | undefined;
+    /** Bytes of the paste terminator matched so far, carried across reads while a paste is open. */
+    let insidePaste = false;
+    let pasteEndMatched = 0;
 
     const onFrame = (frame: ServerFrame) => {
       if (frame.type === "session-ended" && frame.sessionId === options.sessionId) {
@@ -161,9 +170,36 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
       ]);
 
       while (pendingInput.length > 0 && !finished) {
-        // Ctrl+] is the detach chord. Nothing after it survives the attachment teardown.
+        // A paste is opaque. Its payload is forwarded as fast as it arrives and no chord inside it
+        // is recognized, so pasted text that happens to contain 0x1d or a cursor sequence is data.
+        if (insidePaste) {
+          const terminator = pasteTerminatorEnd(pendingInput, pasteEndMatched);
+          if (terminator.endIndex === undefined) {
+            pasteEndMatched = terminator.matched;
+            sendInput(pendingInput);
+            pendingInput = Buffer.alloc(0);
+            return;
+          }
+          sendInput(pendingInput.subarray(0, terminator.endIndex));
+          pendingInput = pendingInput.subarray(terminator.endIndex);
+          insidePaste = false;
+          pasteEndMatched = 0;
+          continue;
+        }
+
+        if (pendingInput.subarray(0, PASTE_START.length).equals(PASTE_START)) {
+          sendInput(pendingInput.subarray(0, PASTE_START.length));
+          pendingInput = pendingInput.subarray(PASTE_START.length);
+          insidePaste = true;
+          pasteEndMatched = 0;
+          continue;
+        }
+
+        // Ctrl+] is the detach chord. Nothing after it survives the attachment teardown, and a copy
+        // of the byte that sits inside a paste later in this read is payload rather than a chord.
+        const pasteIndex = pendingInput.indexOf(PASTE_START);
         const detachIndex = pendingInput.indexOf(DETACH_BYTE);
-        if (detachIndex !== -1) {
+        if (detachIndex !== -1 && (pasteIndex === -1 || detachIndex < pasteIndex)) {
           sendInput(pendingInput.subarray(0, detachIndex));
           pendingInput = Buffer.alloc(0);
           finish(0, true);
@@ -208,8 +244,13 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
           schedulePendingEscape();
           return;
         }
-        sendInput(pendingInput.subarray(0, escapeLength));
+        const sequence = pendingInput.subarray(0, escapeLength);
+        sendInput(sequence);
         pendingInput = pendingInput.subarray(escapeLength);
+        if (sequence.equals(PASTE_START)) {
+          insidePaste = true;
+          pasteEndMatched = 0;
+        }
       }
     };
 
@@ -260,6 +301,26 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
         reject(error);
       });
   });
+}
+
+/**
+ * Locate the end of a bracketed paste without ever holding a byte back.
+ *
+ * The terminator can be split across reads, so the count of bytes matched so far is carried between
+ * calls. Every byte is forwarded the moment it arrives; only the bookkeeping crosses a read boundary.
+ */
+function pasteTerminatorEnd(
+  input: Buffer,
+  matchedSoFar: number,
+): { matched: number; endIndex: number | undefined } {
+  let matched = matchedSoFar;
+  for (let index = 0; index < input.length; index += 1) {
+    const byte = input[index]!;
+    if (byte === PASTE_END[matched]) matched += 1;
+    else matched = byte === PASTE_END[0] ? 1 : 0;
+    if (matched === PASTE_END.length) return { matched: 0, endIndex: index + 1 };
+  }
+  return { matched, endIndex: undefined };
 }
 
 function completeEscapeSequenceLength(input: Buffer): number | undefined {

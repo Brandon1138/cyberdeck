@@ -71,6 +71,12 @@ export function launchCockpit(options: CockpitOptions): void {
         "dashboard",
       ], { stdio: "ignore" }), "create cyberdeck tmux session");
       created = true;
+      // tmux holds a bare Esc for `escape-time` before passing it to the pane, and its 500ms default
+      // is felt as a swallowed Esc by every agent TUI in the cockpit. It also decides whether an
+      // Option chord arrives as one Meta chord or as Esc followed by a separate key, which is what
+      // made Option+Enter submit sometimes and not others. 10ms still reunites a split sequence.
+      // This is a server option, so it is best-effort and never fails a cockpit launch.
+      spawnSync("tmux", ["set-option", "-s", "escape-time", "10"], { stdio: "ignore" });
     } else {
       const panes = spawnSync(
         "tmux",
