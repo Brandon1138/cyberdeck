@@ -1,0 +1,10 @@
+{"type":"session_meta","timestamp":"2026-07-26T11:00:00.000Z","payload":{"id":"019f0000-0000-7000-8000-000000terra1","timestamp":"2026-07-26T11:00:00.000Z","cwd":"/tmp/repo","originator":"codex-tui","cli_version":"0.58.0"}}
+{"type":"turn_context","timestamp":"2026-07-26T11:00:00.100Z","payload":{"model":"gpt-5.6-terra","effort":"medium","sandbox_policy":{"mode":"read-only"}}}
+{"type":"response_item","timestamp":"2026-07-26T11:00:00.200Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<user_instructions>\nAlways run the suite before reporting.\n</user_instructions>"}]}}
+{"type":"event_msg","timestamp":"2026-07-26T11:00:01.000Z","payload":{"type":"user_message","message":"Raise the neutral grey one contrast step and add a selection bar for the focused row."}}
+{"type":"event_msg","timestamp":"2026-07-26T11:00:09.000Z","payload":{"type":"agent_message","message":"The palette keeps color for actionable state only. Needs-input and done stay yellow; stopped, idle and model metadata are greyscale."}}
+{"type":"event_msg","timestamp":"2026-07-26T11:00:09.100Z","payload":{"type":"task_complete","turn_id":"019f0000-0000-7000-8000-000000terra2","last_agent_message":"The palette keeps color for actionable state only. Needs-input and done stay yellow; stopped, idle and model metadata are greyscale."}}
+{"type":"event_msg","timestamp":"2026-07-26T11:00:20.000Z","payload":{"type":"user_message","message":"Now make the folder header rows focusable."}}
+{"type":"response_item","timestamp":"2026-07-26T11:00:24.000Z","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"**Reviewing the navigation model**"}],"content":[]}}
+{"type":"event_msg","timestamp":"2026-07-26T11:00:26.000Z","payload":{"type":"agent_message","message":"* Ruminating… (4m 02s · ↓ 18.7k tokens)\n■ Conversation interrupted — tell the model what to do"}}
+{"type":"event_msg","timestamp":"2026-07-26T11:00:26.100Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":48211,"output_tokens":1544}}}}

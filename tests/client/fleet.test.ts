@@ -12,6 +12,7 @@ import {
   transitionFleet,
   type FleetSnapshot,
 } from "../../src/client/fleet.js";
+import type { PullRequestState } from "../../src/client/pr-status.js";
 
 const NOW = "2026-07-22T10:00:00.000Z";
 const NOW_MS = Date.parse(NOW);
@@ -111,8 +112,8 @@ describe("fleet presentation", () => {
     const doneLine = lines.find((line) => line.includes("Completed task"))!;
     const needsInputLine = lines.find((line) => line.includes("Approval task"))!;
 
-    expect(lines).toContain("~/code/personal/cyberdeck");
-    expect(doneLine).toMatch(/^  \*/u);
+    expect(lines).toContain("  ▾ ~/code/personal/cyberdeck");
+    expect(doneLine).toMatch(/^▌ ·/u);
     expect(needsInputLine).toMatch(/^  ·/u);
     expect(doneLine).toContain("The latest reply begins");
     expect(doneLine).not.toContain("\n");
@@ -122,7 +123,151 @@ describe("fleet presentation", () => {
     expect(needsInputLine).toMatch(/ 2m$/u);
   });
 
-  it("colors both Done and Needs input markers and status labels", () => {
+  describe("pull request column", () => {
+    const first = session({ name: "Ship indicator", cwd: "/repo/one", displayOrder: 0 });
+    const second = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "No branch yet",
+      cwd: "/repo/two",
+      displayOrder: 1,
+    });
+    const snapshot = fleet({ record: first }, { record: second });
+
+    const render = (pullRequests: Map<string, PullRequestState>, width = 120): string =>
+      renderFleet(snapshot, createFleetState(snapshot), {
+        color: false,
+        width,
+        height: 28,
+        now: NOW_MS,
+        home: "/Users/brandon",
+        pullRequests,
+      });
+
+    const rowFor = (rendered: string, name: string): string =>
+      rendered.split("\n").find((line) => line.includes(name))!;
+
+    it("omits the column entirely when nothing in the fleet has a pull request", () => {
+      const rendered = render(new Map());
+      const row = rowFor(rendered, "Ship indicator");
+
+      expect(row).not.toMatch(/[●○◆⊘✗]/u);
+      expect(row).toHaveLength(120);
+    });
+
+    it("shows a glyph for the thread with a pull request and nothing for the one without", () => {
+      const rendered = render(new Map([["/repo/one", "open" as PullRequestState]]));
+      const withPr = rowFor(rendered, "Ship indicator");
+      const withoutPr = rowFor(rendered, "No branch yet");
+
+      expect(withPr).toContain("●");
+      expect(withoutPr).not.toMatch(/[●○◆⊘✗]/u);
+      // The empty cell still holds the column open so rows stay aligned.
+      expect(withoutPr).toHaveLength(120);
+      expect(withPr).toHaveLength(120);
+      expect(withPr.indexOf("●")).toBe(withoutPr.indexOf("Claude") - 2);
+    });
+
+    it("renders a distinct glyph per state", () => {
+      const glyphs: Array<[PullRequestState, string]> = [
+        ["open", "●"],
+        ["draft", "○"],
+        ["merged", "◆"],
+        ["closed", "⊘"],
+        ["checks-failing", "✗"],
+      ];
+      for (const [state, glyph] of glyphs) {
+        const row = rowFor(render(new Map([["/repo/one", state]])), "Ship indicator");
+        expect(row).toContain(glyph);
+      }
+    });
+
+    it("paints each glyph with an existing palette tone", () => {
+      const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+        color: true,
+        width: 120,
+        height: 28,
+        now: NOW_MS,
+        pullRequests: new Map([["/repo/one", "checks-failing" as PullRequestState]]),
+      });
+
+      expect(rendered).toContain("[38;2;217;108;117m✗[0m");
+    });
+
+    it("keeps the column at narrow widths where the identity column is dropped", () => {
+      const rendered = render(new Map([["/repo/one", "merged" as PullRequestState]]), 60);
+      const row = rowFor(rendered, "Ship indicator");
+
+      expect(row).toContain("◆");
+      expect(row).toHaveLength(60);
+      expect(rowFor(rendered, "No branch yet")).toHaveLength(60);
+    });
+
+    it("ignores pull request state for worktrees not on screen", () => {
+      const rendered = render(new Map([["/repo/elsewhere", "open" as PullRequestState]]));
+
+      expect(rowFor(rendered, "Ship indicator")).not.toMatch(/[●○◆⊘✗]/u);
+    });
+  });
+
+  it("counts only running agents in the header while finished threads stay listed", () => {
+    // The shape the fleet has right after a broker restart: durable history plus one live agent.
+    const snapshot = fleet(
+      { record: session({ name: "Still running", attentionState: "working", displayOrder: 0 }) },
+      {
+        record: session({
+          id: "22222222-2222-4222-8222-222222222222",
+          name: "Finished earlier",
+          executionState: "exited",
+          exitCode: 0,
+          attentionState: "done",
+          displayOrder: 1,
+        }),
+      },
+      {
+        record: session({
+          id: "33333333-3333-4333-8333-333333333333",
+          name: "Finished before that",
+          executionState: "exited",
+          exitCode: 0,
+          attentionState: "done",
+          displayOrder: 2,
+        }),
+      },
+      {
+        record: session({
+          id: "44444444-4444-4444-8444-444444444444",
+          name: "Died mid-task",
+          executionState: "errored",
+          attentionState: "failed",
+          displayOrder: 3,
+        }),
+      },
+    );
+
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false,
+      width: 150,
+      height: 40,
+      now: NOW_MS,
+      home: "/Users/brandon",
+    });
+
+    expect(rendered).toContain("1 agents · 0 needs input · 1 working · 2 done · 1 failed");
+    expect(rendered).toContain("Finished earlier");
+    expect(rendered).toContain("Finished before that");
+  });
+
+  it("reads a session that died inside a live process as failed, never as needs input", () => {
+    const errored = session({ executionState: "errored", attentionState: "failed" });
+    expect(threadStatus({ record: errored, replay: "Codex needs your approval\nAllow" })).toBe("Failed");
+    // Even with no persisted attention state, the execution state alone settles it.
+    expect(threadStatus({
+      record: session({ executionState: "errored" }),
+      replay: "Codex needs your approval\nAllow",
+    })).toBe("Failed");
+  });
+
+  it("paints only the states that want the operator, and marks focus with a rule", () => {
     const done = session({ attentionState: "done", displayOrder: 0 });
     const needsInput = session({
       id: "22222222-2222-4222-8222-222222222222",
@@ -137,10 +282,28 @@ describe("fleet presentation", () => {
       now: NOW_MS,
     });
 
-    expect(rendered).toContain("\u001b[1m\u001b[38;2;120;198;121m*\u001b[0m\u001b[0m");
+    // Done and Needs input share the one attention hue. The focused row adds
+    // weight to the dot plus a selection rule in the gutter, never a colour.
+    expect(rendered).toContain("\u001b[1m\u001b[38;2;212;168;91m·\u001b[0m\u001b[0m");
     expect(rendered).toContain("\u001b[38;2;212;168;91m·\u001b[0m");
-    expect(rendered).toContain("\u001b[38;2;120;198;121mDone       \u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;212;168;91mDone       \u001b[0m");
     expect(rendered).toContain("\u001b[38;2;212;168;91mNeeds input\u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;154;163;175m▌\u001b[0m");
+    expect(rendered).not.toContain("\u001b[38;2;120;198;121m");
+  });
+
+  it("renders folder headers plainly, with no accent reserved for paths", () => {
+    const snapshot = fleet({ record: session() });
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: true,
+      width: 120,
+      height: 28,
+      now: NOW_MS,
+      home: "/Users/brandon",
+    });
+
+    expect(rendered).toContain("  ▾ ~/code/personal/cyberdeck");
+    expect(rendered).not.toContain("\u001b[38;2;158;182;255m");
   });
 
   it("keeps thread and project positions stable when lifecycle timestamps change", () => {
@@ -360,7 +523,7 @@ describe("fleet presentation", () => {
       home: "/Users/brandon",
     });
 
-    expect(rendered).toContain("- Cyberdeck is a local broker");
+    expect(rendered).toContain("Cyberdeck is a local broker");
     expect(rendered).not.toContain("Cyberdeckisalocalbroker");
   });
 });
@@ -587,6 +750,73 @@ describe("fleet controls", () => {
     ]);
   });
 
+  it("decodes Option+Enter as one chord instead of an Escape followed by a submit", () => {
+    const decoder = new FleetKeyDecoder();
+
+    // Meta-sends-Escape encoding, whole read.
+    expect(decoder.push("\u001b\r")).toEqual(["alt+enter"]);
+    expect(decoder.push("\u001b\n")).toEqual(["alt+enter"]);
+    // Keyboard-protocol encoding, which a provider TUI can leave switched on.
+    expect(decoder.push("\u001b[13;3u")).toEqual(["alt+enter"]);
+    expect(decoder.push("\u001b[13;2u")).toEqual(["shift+enter"]);
+    expect(decoder.push("\u001b[13u")).toEqual(["enter"]);
+    expect(decoder.push(Buffer.from([0x0d]))).toEqual(["enter"]);
+  });
+
+  it("names keyboard-protocol reports instead of swallowing them as anonymous sequences", () => {
+    const decoder = new FleetKeyDecoder();
+
+    expect(decoder.push("\u001b[27u")).toEqual(["escape"]);
+    expect(decoder.push("\u001b[97u")).toEqual(["a"]);
+    expect(decoder.push("\u001b[97;3u")).toEqual(["alt+a"]);
+    expect(decoder.push("\u001b[50;3u")).toEqual(["alt+2"]);
+    expect(decoder.push("\u001b[127u")).toEqual(["backspace"]);
+  });
+
+  it("keeps Option chords out of the composer and reads composed Option characters as text", () => {
+    const decoder = new FleetKeyDecoder();
+
+    // An unbound Meta chord does nothing at all: neither half may reach a binding or the draft.
+    expect(decoder.push("\u001bb")).toEqual(["alt+b"]);
+    expect(decoder.push("\u001b\u007f")).toEqual(["alt+backspace"]);
+    // Option delivered as a composed character is ordinary text.
+    expect(decoder.push("å")).toEqual(["å"]);
+  });
+
+  it("keeps Esc, arrow keys and function keys distinct at the same first byte", () => {
+    const decoder = new FleetKeyDecoder();
+
+    expect(decoder.push("\u001b[A")).toEqual(["up"]);
+    expect(decoder.push("\u001b[1;2B")).toEqual(["shift+down"]);
+    // SS3 function keys are consumed whole rather than typing their final byte into the draft.
+    expect(decoder.push("\u001bOP")).toEqual([]);
+    expect(decoder.hasPendingInput).toBe(false);
+    // A repeated Esc stays an Esc rather than collapsing into a chord.
+    expect(decoder.push("\u001b\u001b")).toEqual(["escape"]);
+    expect(decoder.flush()).toEqual(["escape"]);
+  });
+
+  it("inserts a newline for Option+Enter and Shift+Enter without launching the draft", () => {
+    const snapshot = fleet({ record: session({ cwd: "/repo/one", sandbox: "workspace-write" }) });
+    const state = {
+      ...createFleetState(snapshot),
+      draft: "first",
+      workingDirectory: "/repo/two",
+      launchProfiles: { "/repo/two": { provider: "codex" as const, model: "gpt-5.6-sol" } },
+    };
+
+    const option = transitionFleet(state, snapshot, "alt+enter", NOW_MS);
+    expect(option.state.draft).toBe("first\n");
+    expect(option.action).toBeUndefined();
+
+    const shift = transitionFleet(option.state, snapshot, "shift+enter", NOW_MS);
+    expect(shift.state.draft).toBe("first\n\n");
+    expect(shift.action).toBeUndefined();
+
+    // Plain Enter still submits the composed draft.
+    expect(transitionFleet(shift.state, snapshot, "enter", NOW_MS).action).toBeDefined();
+  });
+
   it("consumes complete and fragmented terminal mouse reports instead of typing coordinates", () => {
     const decoder = new FleetKeyDecoder();
 
@@ -618,7 +848,40 @@ describe("fleet controls", () => {
       sessionId: session().id,
     });
     expect(transitionFleet(initial, snapshot, "left", NOW_MS).action).toBeUndefined();
-    expect(transitionFleet(initial, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(second.id);
+
+    // Folder headers are navigable rows, so crossing projects steps onto the
+    // header before reaching the next project's first thread.
+    const onFolder = transitionFleet(initial, snapshot, "down", NOW_MS).state;
+    expect(onFolder.focusedFolderCwd).toBe("/repo/two");
+    expect(transitionFleet(onFolder, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(second.id);
+  });
+
+  it("collapses and expands a focused folder with Enter and reports the hidden thread count", () => {
+    const second = session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" });
+    const snapshot = fleet({ record: session() }, { record: second });
+    const onFolder = transitionFleet(createFleetState(snapshot), snapshot, "down", NOW_MS).state;
+
+    const collapsed = transitionFleet(onFolder, snapshot, "enter", NOW_MS).state;
+    expect(collapsed.collapsedCwds).toEqual(["/repo/two"]);
+    expect(renderFleet(snapshot, collapsed, { color: false, width: 100, height: 28, now: NOW_MS }))
+      .toContain("▌ ▸ /repo/two · 1 thread");
+
+    // The hidden threads are gone from the navigation model, not merely unpainted.
+    expect(transitionFleet(collapsed, snapshot, "down", NOW_MS).state.focusedFolderCwd).toBe("/repo/two");
+
+    const expanded = transitionFleet(collapsed, snapshot, "enter", NOW_MS).state;
+    expect(expanded.collapsedCwds).toEqual([]);
+    expect(transitionFleet(expanded, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(second.id);
+  });
+
+  it("keeps thread keys inert while a folder header holds focus", () => {
+    const second = session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" });
+    const snapshot = fleet({ record: session() }, { record: second });
+    const onFolder = transitionFleet(createFleetState(snapshot), snapshot, "down", NOW_MS).state;
+
+    expect(transitionFleet(onFolder, snapshot, " ", NOW_MS).action).toBeUndefined();
+    expect(transitionFleet(onFolder, snapshot, "ctrl+x", NOW_MS).action).toBeUndefined();
+    expect(transitionFleet(onFolder, snapshot, "ctrl+t", NOW_MS).action).toBeUndefined();
   });
 
   it("resumes the exact provider conversation when a terminal thread is opened", () => {
@@ -1634,8 +1897,8 @@ describe("runFleet", () => {
     await vi.waitFor(() => {
       const latestScreen = Buffer.concat(output.chunks).toString().split("\u001b[2J\u001b[H").at(-1) ?? "";
       expect(latestScreen).toContain("Deleted thread");
-      expect(latestScreen).toContain("  * Third thread");
-      expect(latestScreen).not.toContain("  * First thread");
+      expect(latestScreen).toContain("▌ · Third thread");
+      expect(latestScreen).not.toContain("▌ · First thread");
     });
 
     input.emit("data", Buffer.from([0x03, 0x03]));

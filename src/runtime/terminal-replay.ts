@@ -57,13 +57,20 @@ export function providerTerminalActivity(provider: ProviderId, replay: string): 
   return "unknown";
 }
 
-export function terminalLines(replay: string): string[] {
-  const stripped = stripTerminalControl(replay.replace(HORIZONTAL_CURSOR_SEQUENCE, " "))
+/**
+ * PTY replay reduced to plain text with its line structure intact. Blank lines are preserved
+ * because downstream block classification treats them as boundaries.
+ */
+export function plainTerminalText(replay: string): string {
+  return stripTerminalControl(replay.replace(HORIZONTAL_CURSOR_SEQUENCE, " "))
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+}
+
+export function terminalLines(replay: string): string[] {
   const lines: string[] = [];
-  for (const raw of stripped.split("\n")) {
+  for (const raw of plainTerminalText(replay).split("\n")) {
     const line = raw.replace(/\s+/g, " ").trim();
     if (line === "" || lines.at(-1) === line) continue;
     lines.push(line);
@@ -77,54 +84,6 @@ export function stripTerminalControl(value: string): string {
     .replace(CSI_SEQUENCE, "")
     .replace(OTHER_ESCAPE, "")
     .replace(/[\u000f]/g, "");
-}
-
-export function latestTerminalPreview(replay: string): string {
-  return latestAssistantParagraphPreview(replay);
-}
-
-/**
- * Best-effort interactive-TUI preview: the beginning of the latest assistant reply.
- * Provider-native structured transcripts are not available on every PTY path, so the durable
- * session catalog stores this normalized value at turn completion rather than re-scraping it in
- * every Fleet render.
- */
-export function latestAssistantParagraphPreview(replay: string): string {
-  const stripped = stripTerminalControl(replay.replace(HORIZONTAL_CURSOR_SEQUENCE, " "))
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
-  const lines = stripped.split("\n");
-  let replyStart: number | undefined;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index]?.replace(/\s+/g, " ").trim() ?? "";
-    if (isUserPromptLine(line)) {
-      replyStart = index + 1;
-      break;
-    }
-  }
-  if (replyStart !== undefined) {
-    for (const raw of lines.slice(replyStart)) {
-      const line = raw.replace(/\s+/g, " ").trim();
-      if (line === "" || isTerminalChrome(line)) continue;
-      return line;
-    }
-    return "No response yet";
-  }
-
-  const paragraphs: string[][] = [];
-  let paragraph: string[] = [];
-  for (const raw of lines) {
-    const line = raw.replace(/\s+/g, " ").trim();
-    if (line === "") {
-      if (paragraph.length > 0) paragraphs.push(paragraph);
-      paragraph = [];
-      continue;
-    }
-    if (!isTerminalChrome(line) && paragraph.at(-1) !== line) paragraph.push(line);
-  }
-  if (paragraph.length > 0) paragraphs.push(paragraph);
-  return paragraphs.at(-1)?.[0] ?? "No response yet";
 }
 
 /**

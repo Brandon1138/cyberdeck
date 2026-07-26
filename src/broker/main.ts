@@ -33,6 +33,8 @@ import { InstructionStore } from "../persistence/instruction-store.js";
 import { WorkflowStore } from "../persistence/workflow-store.js";
 import { WorkflowService } from "../orchestration/workflow-service.js";
 import { loadBrokerRuntimeConfig } from "../runtime-config.js";
+import { selectExpiredThreads, type ThreadRetentionPolicy } from "../domain/thread-retention.js";
+import type { SessionRecord } from "../domain/session.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -64,6 +66,26 @@ export function composeJobDispatchAdapters(context: {
   ];
 }
 
+/**
+ * Load the durable thread catalog and apply the retention policy before anything else reads it.
+ *
+ * Doing this at startup rather than only while running means an operator who left the broker down
+ * for a week does not come back to an unbounded catalog. Compaction is what makes retention real
+ * on disk: deletions are tombstones, so the file only shrinks when it is rewritten.
+ */
+export async function retainThreads(
+  store: SessionStore,
+  policy: ThreadRetentionPolicy,
+  now: number = Date.now(),
+): Promise<SessionRecord[]> {
+  const loaded = await store.load();
+  const expired = new Set(selectExpiredThreads(loaded, policy, now));
+  if (expired.size === 0) return loaded;
+  const retained = loaded.filter((record) => !expired.has(record.id));
+  await store.compact(retained);
+  return retained;
+}
+
 export async function runBroker(
   socketPath = brokerSocketPath,
   stateDirectory = appStateDirectory,
@@ -79,7 +101,7 @@ export async function runBroker(
   const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
   const workerPreferences = new WorkerPreferenceStore(stateDirectory);
-  const recoveredSessions = await sessionStore.load();
+  const recoveredSessions = await retainThreads(sessionStore, config.threadRetention);
   const registry = new SessionRegistry({
     adapters: {
       codex: new CodexProviderAdapter({ mcp }),

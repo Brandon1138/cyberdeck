@@ -36,6 +36,7 @@ import {
 } from "../domain/orchestrator.js";
 import {
   AgentActorParamsSchema,
+  AgentListThreadsParamsSchema,
   AgentReadParamsSchema,
   AgentStartWorkerParamsSchema,
   AgentStartWorkersParamsSchema,
@@ -268,10 +269,14 @@ export class BrokerServer {
         return this.requireOrchestrators().fableWorkers(FableWorkersRequestSchema.parse(frame.params));
       case "orchestrator.cavemanWorkers":
         return this.requireOrchestrators().cavemanWorkers(CavemanWorkersRequestSchema.parse(frame.params));
-      case "agent.thread.list": {
+      // Read-only self-description for a Cyberdeck MCP server that needs to say precisely why it
+      // cannot act. It grants nothing and is deliberately answerable for an unbound actor.
+      case "agent.actor.describe": {
         const { actorSessionId } = AgentActorParamsSchema.parse(frame.params);
-        return this.requireAgentControl().listThreads(actorSessionId);
+        return this.requireAgentControl().describeActor(actorSessionId);
       }
+      case "agent.thread.list":
+        return this.requireAgentControl().listThreads(AgentListThreadsParamsSchema.parse(frame.params));
       case "agent.thread.read": {
         const { actorSessionId, sessionId, afterCursor, limit } = AgentReadParamsSchema.parse(frame.params);
         return this.requireAgentControl().readThread(actorSessionId, sessionId, afterCursor, limit);

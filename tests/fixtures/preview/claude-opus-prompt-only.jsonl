@@ -1,0 +1,4 @@
+{"type":"session","timestamp":"2026-07-26T09:20:00.000Z","version":"2.4.1"}
+{"type":"user","uuid":"10000000-0000-4000-8000-000000000001","timestamp":"2026-07-26T09:20:01.000Z","isMeta":true,"message":{"role":"user","content":"<system-reminder>Session started.</system-reminder>"}}
+{"type":"user","uuid":"10000000-0000-4000-8000-000000000002","timestamp":"2026-07-26T09:20:02.000Z","message":{"role":"user","content":"Add a per-thread PR indicator derived from the branch, cached and non-blocking."}}
+{"type":"assistant","uuid":"20000000-0000-4000-8000-000000000001","timestamp":"2026-07-26T09:20:05.000Z","message":{"id":"msg_tool_only","role":"assistant","stop_reason":"tool_use","content":[{"type":"thinking","thinking":"Start by finding the row-cell API."},{"type":"tool_use","id":"toolu_01","name":"Glob","input":{"pattern":"src/client/*.ts"}}]}}

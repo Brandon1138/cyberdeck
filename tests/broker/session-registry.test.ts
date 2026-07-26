@@ -133,7 +133,7 @@ describe("SessionRegistry", () => {
     expect(record).toMatchObject({ provider: "claude", model: "opus", role: "writer", pid: 1000 });
   });
 
-  it("rehydrates a broker-lost conversation as interrupted and resumes exact provider state", async () => {
+  it("rehydrates a conversation lost mid-turn as interrupted and resumes exact provider state", async () => {
     const persisted = {
       id: "11111111-1111-4111-8111-111111111111",
       provider: "codex" as const,
@@ -151,7 +151,7 @@ describe("SessionRegistry", () => {
       pid: 4321,
       exitCode: null,
       childIds: [],
-      attentionState: "done" as const,
+      attentionState: "working" as const,
       latestPreview: "Persisted answer",
     };
     const ptys: FakePty[] = [];
@@ -226,9 +226,63 @@ describe("SessionRegistry", () => {
         status: "completed",
         completedTurns: 1,
         text: expect.stringContaining("1042"),
+        retrieval: "fresh",
+        completedAt: expect.any(String),
       }],
     });
     expect((await waiting).results[0]!.text.length).toBeLessThanOrEqual(300);
+  });
+
+  it("replays a completed target idempotently after the first delivery is lost in transport", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ name: "install-worker" }));
+    const target = [{ sessionId: record.id, completionTarget: 1 }];
+    // The orchestrator's transport dies while this wait is outstanding; the broker still resolves it.
+    const abandoned = registry.waitForWorkerResults(target, 5_000, 300);
+
+    ptys[0]!.emitOutput("\u001b]0;⠹ install-worker\u0007\u001b[2JWorking");
+    ptys[0]!.emitOutput("\u001b[2Jdevice install applied once\r\n\u001b]0;install-worker\u0007");
+    const lost = await abandoned;
+    expect(lost.results[0]).toMatchObject({ status: "completed", retrieval: "fresh" });
+
+    const retry = await registry.waitForWorkerResults(target, 5_000, 300);
+    expect(retry).toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "completed",
+        retrieval: "replay",
+        completedAt: lost.results[0]!.completedAt,
+        text: lost.results[0]!.text,
+      }],
+    });
+
+    // A later turn must not rewrite the answer target 1 already recorded.
+    ptys[0]!.emitOutput("\u001b]0;⠹ install-worker\u0007\u001b[2JWorking");
+    ptys[0]!.emitOutput("\u001b[2Jsecond turn output\r\n\u001b]0;install-worker\u0007");
+    const second = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 2 },
+    ], 5_000, 300);
+    expect(second.results[0]!.text).toContain("second turn output");
+    const replayed = await registry.waitForWorkerResults(target, 5_000, 300);
+    expect(replayed.results[0]).toMatchObject({
+      retrieval: "replay",
+      text: lost.results[0]!.text,
+    });
+  });
+
+  it("returns a structured timeout instead of throwing when a worker is still working", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ name: "slow-worker" }));
+    ptys[0]!.emitOutput("\u001b]0;⠹ slow-worker\u0007\u001b[2JWorking");
+
+    await expect(registry.waitForWorkerResults(
+      [{ sessionId: record.id, completionTarget: 1 }],
+      50,
+      300,
+    )).resolves.toMatchObject({
+      timedOut: true,
+      results: [{ status: "working" }],
+    });
   });
 
   it("uses Claude native final responses for two gap-free semantic completion targets", async () => {

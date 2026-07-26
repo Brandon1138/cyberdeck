@@ -51,6 +51,27 @@ describe("launchCockpit", () => {
     expect(JSON.stringify(calls)).not.toMatch(/send-keys/);
   });
 
+  it("shortens the tmux escape window so Esc and Option chords are not held by tmux", () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
+      calls.push({ command, args });
+      return { status: args[0] === "has-session" ? 1 : 0 };
+    });
+    launchCockpit({
+      cliPath: "/absolute/dist/src/cli.js",
+      nodePath: "/absolute/node",
+      cwd,
+      orchestratorSessionId,
+      spawnSync,
+      preflight: outsideTmux,
+    });
+
+    expect(calls).toContainEqual({
+      command: "tmux",
+      args: ["set-option", "-s", "escape-time", "10"],
+    });
+  });
+
   it("reuses an existing cyberdeck tmux session", () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {

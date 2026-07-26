@@ -9,6 +9,8 @@ export const BrokerEventTypeSchema = z.enum([
   "session.detached",
   "session.input",
   "session.exited",
+  /** The provider session took an unrecoverable fault while its OS process kept running. */
+  "session.errored",
   "session.stopped",
   "session.deleted",
   // Control-plane job/delegation/result/report events. Event `data` carries neutral identifiers and

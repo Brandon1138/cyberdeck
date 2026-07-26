@@ -2,6 +2,7 @@ import { z } from "zod";
 import { BudgetDeclarationSchema, ConcurrencyDeclarationSchema } from "./domain/budget.js";
 import { CONTROL_PLANE_SCHEMA_VERSION } from "./domain/control-plane.js";
 import { DEFAULT_MAX_CONCURRENT_WORKERS } from "./limits.js";
+import { ThreadRetentionPolicySchema } from "./domain/thread-retention.js";
 
 /**
  * Broker-wide runtime configuration.
@@ -16,6 +17,8 @@ export const BrokerRuntimeConfigSchema = z.object({
   maxConcurrentWorkers: z.number().int().positive().nullable().default(DEFAULT_MAX_CONCURRENT_WORKERS),
   maxDelegationDepth: z.literal(1).default(1),
   replayBytes: z.number().int().positive().default(128 * 1024),
+  /** How long finished threads stay in the durable catalog before the broker retires them. */
+  threadRetention: ThreadRetentionPolicySchema.prefault({}),
   concurrency: ConcurrencyDeclarationSchema.default({ schemaVersion: CONTROL_PLANE_SCHEMA_VERSION }),
   budget: BudgetDeclarationSchema.default({ schemaVersion: CONTROL_PLANE_SCHEMA_VERSION }),
 });

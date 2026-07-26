@@ -1,0 +1,28 @@
+╭───────────────────────────────────────────────────────────────╮
+│ ✻ Welcome to Claude Code                                      │
+│                                                               │
+│   /help for help, /status for your current setup              │
+│                                                               │
+│   cwd: /Users/brandon/code/personal/cyberdeck                 │
+╰───────────────────────────────────────────────────────────────╯
+
+▲ 3 MCP servers need authentication · run /mcp
+
+Tips for getting started
+Use /skills to see what is available
+
+› Merge the two preview branches and tell me what changed
+
+⏺ The merge is clean and the preview column now reads from the transcript.
+
+  Both branches touched different files, so nothing had to be resolved by hand.
+
+⏺ Bash(pnpm test)
+  ⎿  Test Files  38 passed (38)
+     Tests  412 passed (412)
+
+Ran 1 shell command
+Read 4 files
+
+* Levitating… (14m 25s · ↓ 47.3k tokens)
+esc to interrupt · 12% context left

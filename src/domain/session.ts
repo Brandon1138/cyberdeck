@@ -7,9 +7,16 @@ export { ProviderIdSchema } from "./provider-registration.js";
 export const ReasoningEffortSchema = z.enum(["low", "medium", "high", "xhigh", "max", "ultra"]);
 export const SandboxSchema = z.enum(["read-only", "workspace-write"]);
 export const ApprovalModeSchema = z.enum(["prompt", "auto"]);
+/**
+ * `errored` is the one state that is not a statement about the OS process. A provider session can
+ * take an unrecoverable error (an API 4xx, a fatal stream fault) and leave its process running, so
+ * process existence is not evidence of liveness. Such a session is terminal for every purpose the
+ * broker cares about: it can no longer accept input, and it must not hold a worker slot.
+ */
 export const SessionExecutionStateSchema = z.enum([
   "starting",
   "active",
+  "errored",
   "exited",
   "failed",
   "cancelled",

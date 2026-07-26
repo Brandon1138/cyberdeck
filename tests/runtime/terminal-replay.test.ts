@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   compactTerminalResult,
-  latestAssistantParagraphPreview,
   providerTerminalActivity,
   truncateResult,
 } from "../../src/runtime/terminal-replay.js";
@@ -77,63 +76,5 @@ describe("terminal replay semantics", () => {
     expect(result).toContain("[elided; original length: 535 characters]");
     expect(result).not.toContain("DISTINCTIVE-END");
     expect(result).toHaveLength(240);
-  });
-
-  it("uses the beginning of the latest assistant reply instead of its final paragraph", () => {
-    const replay = [
-      "› Summarize the result",
-      "",
-      "The reply begins here and should be previewed.",
-      "",
-      "The final result is ready.",
-      "It is safe to resume later.",
-      "",
-      "Cogitated for 2m 14s",
-      "Explain this codebase",
-    ].join("\n");
-    expect(latestAssistantParagraphPreview(replay)).toBe("The reply begins here and should be previewed.");
-  });
-
-  it("uses the latest reply when terminal replay contains multiple user turns", () => {
-    const replay = [
-      "› First request",
-      "First reply.",
-      "› Second request",
-      "Second reply starts here.",
-      "",
-      "Second reply ending.",
-    ].join("\n");
-    expect(latestAssistantParagraphPreview(replay)).toBe("Second reply starts here.");
-  });
-
-  it("falls back to the latest substantive paragraph when a provider omits prompt markers", () => {
-    const replay = [
-      "Old terminal output.",
-      "",
-      "The only recoverable latest paragraph.",
-      "",
-      "Worked for 12s",
-    ].join("\n");
-    expect(latestAssistantParagraphPreview(replay)).toBe("The only recoverable latest paragraph.");
-  });
-
-  it("skips Codex startup tips and their wrapped landing-page URL", () => {
-    const replay = [
-      "Tip: Try the Desktop app. Run 'codex app' or visit",
-      "https://chatgpt.com/codex?app-landing-page=true",
-    ].join("\n");
-    expect(latestAssistantParagraphPreview(replay)).toBe("No response yet");
-  });
-
-  it("skips decorated timing rules while keeping the beginning of the reply", () => {
-    const replay = [
-      "› Implement the Fleet fixes",
-      "The Fleet fixes are implemented.",
-      "",
-      "Additional verification details.",
-      "",
-      "─ Worked for 12m 25s ────────────────────────────────────",
-    ].join("\n");
-    expect(latestAssistantParagraphPreview(replay)).toBe("The Fleet fixes are implemented.");
   });
 });

@@ -171,6 +171,18 @@ by one blocking `workers_wait` call; it does not poll or feed raw terminal trans
 model. `thread_read` remains a bounded debugging escape hatch, requires an explicit cursor, and
 refuses to move an orchestrator backward behind a cursor it has already consumed.
 
+`workers_wait` accepts a logical timeout of up to 600 seconds but never blocks a single tool call
+longer than 90 seconds, because MCP clients abandon a call well before that — Claude Code backgrounds
+one at 120 seconds and Codex kills one at 300. A call that reaches the segment boundary first returns
+a normal structured result with `wait.state: "incomplete"` and a `waitId` to resume; `"timed-out"`
+means the caller's own budget elapsed, and `"settled"` means every target is terminal. A completed
+`sessionId` and `completionTarget` stays retrievable afterwards: re-waiting replays the recorded
+result and marks it `retrieval: "replay"`, which is how an orchestrator proves a mutation already ran
+instead of launching a duplicate worker. A control-plane failure is reported as its own class and
+never as a worker outcome. `threads_list` defaults to a status projection (id, name, provider,
+executionState, attentionState) and pages with `limit`/`cursor`, so a liveness check stays inside a
+caller's token budget at 64 concurrent workers; pass `view: "full"` for whole records.
+
 Worker starts may explicitly set provider-neutral `approvalMode` to `auto` for Codex or Claude.
 Omitting it preserves provider approval prompts (`on-request` for Codex and the sandbox-derived
 Claude mode); Cursor and Antigravity reject `auto` rather than ignoring it. The operator CLI exposes
@@ -228,11 +240,33 @@ broker:
 
 Set `maxConcurrentWorkers` to `null` for explicitly unlimited workers. A reached ceiling is rejected
 with the active and allowed worker counts; durable interactive sessions are not silently queued.
+The ceiling applies to running agents only: a finished thread holds no slot, so the fleet view
+accumulates history without anyone stopping and deleting threads to reclaim capacity.
 
 Broker shutdown still ends active PTYs, but the durable session catalog, project grouping, model
 metadata, normalized preview, and native conversation identity survive broker death or restart.
-Threads whose live ownership cannot be proven are rehydrated as `Interrupted`; opening one uses the
-provider's exact resume path rather than inventing a replacement conversation.
+A thread that had finished its task is rehydrated as `Done` — the process is gone, the outcome is
+not. Only a thread that was genuinely mid-turn is rehydrated as `Interrupted`; opening either one
+uses the provider's exact resume path rather than inventing a replacement conversation.
+
+Finished threads are retired automatically after 7 days, or once 200 of them have accumulated,
+whichever comes first. Pinned threads are never retired. Both bounds are configurable, and `null`
+disables either one:
+
+```json
+{
+  "threadRetention": {
+    "maxAgeDays": 30,
+    "maxThreads": 500,
+    "keepPinned": true
+  }
+}
+```
+
+Retention only ever removes threads whose process is gone. A session that took an unrecoverable
+provider fault — an API 4xx, say — while its OS process kept running is reported as `Failed` rather
+than as an active worker, releases its slot immediately, and still has to be stopped before it can
+be deleted.
 Bounded control-plane jobs are different: their records and terminal results are rebuilt on restart,
 while unverifiable nonterminal jobs become `interrupted` and are never automatically redispatched.
 
@@ -276,7 +310,7 @@ cyberdeck send SESSION_ID "Summarize the current state without changing files."
 cyberdeck logs SESSION_ID
 ```
 
-`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press Left or `Ctrl-]` to return from a worker. Orchestrators reserve Left for their native TUI and detach only with `Ctrl-]`; a cockpit attachment also leaves the cockpit and returns to Fleet after releasing its controller. `Ctrl-]` detaches while attached and reattaches the exact last-detached target from Fleet. Every other byte is forwarded verbatim, including bare Esc and Option/Alt chords such as Option+Enter. Terminal threads refuse attachment until they have been resumed, and provider exit automatically releases every controller and watcher.
+`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press Left or `Ctrl-]` to return from a worker. Orchestrators reserve Left for their native TUI and detach only with `Ctrl-]`; a cockpit attachment also leaves the cockpit and returns to Fleet after releasing its controller. `Ctrl-]` detaches while attached and reattaches the exact last-detached target from Fleet. Every other byte is forwarded verbatim, including bare Esc and Option/Alt chords such as Option+Enter, and a bracketed paste is forwarded as opaque data so pasted bytes can never be read as a chord. In Fleet's composer, Option+Enter and Shift+Enter insert a newline alongside `Ctrl-J`, and Esc remains Fleet's own back/clear. Terminal threads refuse attachment until they have been resumed, and provider exit automatically releases every controller and watcher.
 
 `send` submits one logical prompt without opening an interactive client. The selected provider
 adapter encodes its terminal's actual Enter key, so steering does not depend on a portable newline

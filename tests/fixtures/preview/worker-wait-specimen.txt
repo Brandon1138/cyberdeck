@@ -1,0 +1,20 @@
+...NOT rebase onto anything. When done, report a concise summary: files changed,
+✳ Puttering…
+❯
+· …
+✢ g
+✳ n
+✻ i …
+✽ r g
+e n
+✻ t i
+ontificating…
+(2s · thinking with high effort)
+✢ n f thinking with high effort
+↓ 25 tokens · thinking with high effort)
+... in WAVE 2 and is deliberately out of scope. Leave grouping alone. Just make
+the head r row focusable and col apsibl .
+- You are the trunk for render conflicts: thr e sibling workers merge on top
+of you, so keep yo r changes herent and well-factored.
+Running 1 shell command…
+⏺ I'll start by exploring the codebase to understand the current thread state
