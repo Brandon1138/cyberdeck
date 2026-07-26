@@ -408,4 +408,125 @@ describe("attachSession", () => {
       .toBe(false);
     expect(transport.sent).toContainEqual({ type: "detach", sessionId: TEST_SESSION_ID });
   });
+
+  it("forwards plain Enter unchanged so submission still belongs to the provider", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = controlAttachment(transport, input);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    input.emit("data", Buffer.from([0x0d]));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(inputFrames(transport)).toContainEqual(Buffer.from([0x0d]));
+
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+  });
+
+  it("forwards Option delivered as a composed character rather than an Esc prefix", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = controlAttachment(transport, input);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Option+r on a terminal that composes instead of sending Meta. No Esc, so nothing to decode.
+    input.emit("data", Buffer.from("®", "utf8"));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(inputFrames(transport)).toContainEqual(Buffer.from("®", "utf8"));
+    expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
+
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+  });
+
+  it("forwards Esc-prefixed sequences in the same turn they arrive, without a coalescing wait", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = controlAttachment(transport, input);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const sequences = [
+      Buffer.from("\u001b[A"),
+      Buffer.from("\u001b[B"),
+      Buffer.from("\u001b[C"),
+      Buffer.from("\u001b[1;5A"),
+      Buffer.from("\u001bOP"),
+      Buffer.from("\u001b[15~"),
+      Buffer.from("\u001b[13;3u"),
+      Buffer.from("\u001b[27u"),
+    ];
+    for (const sequence of sequences) input.emit("data", sequence);
+    // No settle: every one of these resolves on the read that carried it.
+    await new Promise((resolve) => setImmediate(resolve));
+    for (const sequence of sequences) expect(inputFrames(transport)).toContainEqual(sequence);
+    expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
+
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+  });
+
+  it("treats a bracketed paste as data, including a pasted detach byte and cursor sequence", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = controlAttachment(transport, input);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const paste = Buffer.concat([
+      Buffer.from("\u001b[200~first line"),
+      Buffer.from([0x0d]),
+      Buffer.from("\u001b[D"),
+      Buffer.from([0x1d]),
+      Buffer.from("second\u001b[201~"),
+    ]);
+    input.emit("data", paste);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(Buffer.concat(inputFrames(transport)).equals(paste)).toBe(true);
+    expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
+
+    // The chord is live again the moment the paste closes.
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+  });
+
+  it("keeps a paste opaque when its payload and terminator are split across reads", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = controlAttachment(transport, input);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const reads = [
+      Buffer.from("\u001b[200~alpha"),
+      Buffer.concat([Buffer.from([0x1d]), Buffer.from("beta\u001b[20")]),
+      Buffer.from("1~"),
+    ];
+    for (const read of reads) {
+      input.emit("data", read);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    expect(Buffer.concat(inputFrames(transport)).equals(Buffer.concat(reads))).toBe(true);
+    expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
+
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+  });
+
+  it("forwards a bare Esc typed immediately before another key as a single Meta chord", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport();
+    const attached = controlAttachment(transport, input);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Option+Enter split by a slow link is reunited rather than degraded into Esc and a submit.
+    input.emit("data", Buffer.from([0x1b]));
+    input.emit("data", Buffer.from([0x0d]));
+    await settleEscape();
+
+    expect(Buffer.concat(inputFrames(transport)).equals(Buffer.from([0x1b, 0x0d]))).toBe(true);
+    expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
+
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+  });
 });
