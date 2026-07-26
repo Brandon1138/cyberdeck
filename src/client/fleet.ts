@@ -358,9 +358,9 @@ const LEAVE_FLEET_SCREEN = `${DISABLE_INHERITED_TERMINAL_INPUT_MODES}\u001b[?25h
  *
  * Two layers. The hue block is the raw ink; the semantic block below names what
  * a hue *means*, and rows paint with those names so a hue can move without a
- * render rewrite. The governing rule is that color marks state demanding
- * action — needs input, done, failing — so most of the view is greyscale and
- * leans on weight and the selection rule for hierarchy.
+ * render rewrite. Four states earn a hue: blocked, finished, failing, and the
+ * one live thread. Everything else is greyscale and leans on weight and the
+ * selection rule for hierarchy.
  *
  * `gray` sits one contrast step above its former 123;132;144: legible as body
  * text, still clearly recessed from the terminal foreground.
@@ -379,13 +379,18 @@ const ANSI = {
   green: "\u001b[38;2;120;198;121m",
   red: "\u001b[38;2;217;108;117m",
   gray: "\u001b[38;2;154;163;175m",
+  ice: "\u001b[38;2;169;198;214m",
 
   // Semantic tokens.
 
   /** Cyberdeck logo and wordmark. Reserved: no state may borrow the brand hue. */
   brand: "\u001b[38;2;182;158;255m",
-  /** A thread wants the operator: needs input, or finished and unread. */
+  /** A thread is blocked and wants the operator: needs input, or a prompt awaiting an answer. */
   attention: "\u001b[38;2;212;168;91m",
+  /** A thread finished successfully and is waiting to be read. */
+  done: "\u001b[38;2;120;198;121m",
+  /** The provider is generating right now: the one live state in the fleet. */
+  working: "\u001b[38;2;169;198;214m",
   /** Something is wrong right now — a failed thread, a destructive confirmation. */
   alert: "\u001b[38;2;217;108;117m",
   /** Body text at rest: titles, paths, metadata. Subdued, never foreground. */
@@ -1816,16 +1821,24 @@ function threadPreview(thread: FleetThread, width: number): string {
 }
 
 /**
- * The status dot. Only states that want the operator take a hue; the focused
- * row is already marked by the selection rule, so focus adds weight alone.
+ * The status dot. Finished, blocked, failing and live threads each take their own
+ * hue, and `Working` also takes the filled glyph so the live thread stays findable
+ * with color off. The focused row is already marked by the selection rule, so
+ * focus adds weight alone.
  */
 function statusMarker(status: ThreadStatus, selected: boolean, color: boolean): string {
-  const tone = status === "Done" || status === "Needs input"
-    ? "attention"
-    : status === "Failed"
-      ? "alert"
-      : "muted";
-  const painted = paint("·", tone, color);
+  const tone = status === "Done"
+    ? "done"
+    : status === "Needs input"
+      ? "attention"
+      : status === "Failed"
+        ? "alert"
+        : status === "Working"
+          ? "working"
+          : "muted";
+  // Both glyphs are one display column, so the marker never shifts the row.
+  const glyph = status === "Working" ? "•" : "·";
+  const painted = paint(glyph, tone, color);
   return selected ? paint(painted, "bold", color) : painted;
 }
 
@@ -2734,9 +2747,11 @@ function relativeTime(timestamp: string, now: number): string {
 function statusText(status: string, pendingDelete: boolean, color: boolean): string {
   const label = status.trim();
   if (pendingDelete || label === "Failed") return paint(status, "alert", color);
-  // Only the two states that want the operator carry a hue. Working, Stopping,
-  // Stopped and Interrupted are progress, not a request, and stay greyscale.
-  if (label === "Done" || label === "Needs input") return paint(status, "attention", color);
+  // Four states carry a hue: finished, blocked, failing, and the one live thread.
+  // Stopping, Stopped and Interrupted are inert, not a request, and stay greyscale.
+  if (label === "Done") return paint(status, "done", color);
+  if (label === "Needs input") return paint(status, "attention", color);
+  if (label === "Working") return paint(status, "working", color);
   return paint(status, "muted", color);
 }
 

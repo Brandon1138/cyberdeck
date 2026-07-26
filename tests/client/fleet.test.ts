@@ -267,7 +267,7 @@ describe("fleet presentation", () => {
     })).toBe("Failed");
   });
 
-  it("paints only the states that want the operator, and marks focus with a rule", () => {
+  it("gives finished and blocked threads separate hues, and marks focus with a rule", () => {
     const done = session({ attentionState: "done", displayOrder: 0 });
     const needsInput = session({
       id: "22222222-2222-4222-8222-222222222222",
@@ -282,14 +282,54 @@ describe("fleet presentation", () => {
       now: NOW_MS,
     });
 
-    // Done and Needs input share the one attention hue. The focused row adds
-    // weight to the dot plus a selection rule in the gutter, never a colour.
-    expect(rendered).toContain("\u001b[1m\u001b[38;2;212;168;91m·\u001b[0m\u001b[0m");
+    // Done is Completion Green and Needs input is Attention Amber. The focused
+    // row adds weight to the dot plus a selection rule in the gutter, never a colour.
+    expect(rendered).toContain("\u001b[1m\u001b[38;2;120;198;121m·\u001b[0m\u001b[0m");
     expect(rendered).toContain("\u001b[38;2;212;168;91m·\u001b[0m");
-    expect(rendered).toContain("\u001b[38;2;212;168;91mDone       \u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;120;198;121mDone       \u001b[0m");
     expect(rendered).toContain("\u001b[38;2;212;168;91mNeeds input\u001b[0m");
     expect(rendered).toContain("\u001b[38;2;154;163;175m▌\u001b[0m");
-    expect(rendered).not.toContain("\u001b[38;2;120;198;121m");
+
+    // The regression this pins: "finished, go read it" and "blocked, go unblock it"
+    // are different errands, so their rows must never resolve to the same hue.
+    const rows = rendered.split("\n");
+    const doneRow = rows.find((row) => row.includes("Done       ")) ?? "";
+    const blockedRow = rows.find((row) => row.includes("Needs input")) ?? "";
+    expect(doneRow).toContain("\u001b[38;2;120;198;121m");
+    expect(doneRow).not.toContain("\u001b[38;2;212;168;91m");
+    expect(blockedRow).toContain("\u001b[38;2;212;168;91m");
+    expect(blockedRow).not.toContain("\u001b[38;2;120;198;121m");
+  });
+
+  it("marks the one live thread with its own hue and a filled glyph", () => {
+    const working = session({ attentionState: "working", displayOrder: 0 });
+    const stopped = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      attentionState: "stopped",
+      displayOrder: 1,
+    });
+    const snapshot = fleet({ record: working }, { record: stopped });
+    const options = { color: true, width: 120, height: 28, now: NOW_MS };
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), options);
+
+    // Working demands no action but is the one row an operator must find at a
+    // glance, so it takes Live Ice rather than sitting in Cool Ash with Stopped.
+    expect(rendered).toContain("\u001b[1m\u001b[38;2;169;198;214m•\u001b[0m\u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;169;198;214mWorking    \u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;154;163;175m·\u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;154;163;175mStopped    \u001b[0m");
+
+    const rows = rendered.split("\n");
+    const liveRow = rows.find((row) => row.includes("Working    ")) ?? "";
+    const inertRow = rows.find((row) => row.includes("Stopped    ")) ?? "";
+    expect(liveRow).toContain("\u001b[38;2;169;198;214m");
+    expect(inertRow).not.toContain("\u001b[38;2;169;198;214m");
+
+    // The glyph carries the same distinction with colour off, and both glyphs
+    // are one cell wide so the columns do not shift.
+    const plain = renderFleet(snapshot, createFleetState(snapshot), { ...options, color: false });
+    expect(plain).toContain("▌ • ");
+    expect(plain).toContain("  · ");
   });
 
   it("renders folder headers plainly, with no accent reserved for paths", () => {
