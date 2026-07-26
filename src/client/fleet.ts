@@ -1006,7 +1006,7 @@ export async function runFleet(
     }
     try {
       if (action?.type === "stop") {
-        await client.request("session.stop", { sessionId: action.sessionId });
+        await client.request("session.stopOne", { sessionId: action.sessionId });
         state = {
           ...state,
           notice: "Stopping thread",

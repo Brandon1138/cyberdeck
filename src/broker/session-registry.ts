@@ -499,7 +499,7 @@ export class SessionRegistry {
     return this.cloneRecord(runtime.record);
   }
 
-  async delete(sessionId: string): Promise<void> {
+  async delete(sessionId: string, beforeDelete?: () => Promise<void>): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
     if (
       runtime.record.executionState === "active"
@@ -508,6 +508,8 @@ export class SessionRegistry {
     ) {
       throw new RegistryError("SESSION_STILL_ACTIVE", "Stop the agent before deleting its thread");
     }
+    await beforeDelete?.();
+
     // Workers outlive an orchestrator. Detach their live parent reference before
     // removing the parent record, leaving each worker's own durable state intact.
     const children = runtime.record.childIds

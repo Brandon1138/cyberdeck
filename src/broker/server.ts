@@ -305,6 +305,11 @@ export class BrokerServer {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         return this.options.registry.stopTree(sessionId);
       }
+      case "session.stopOne": {
+        const { sessionId } = SessionIdParamsSchema.parse(frame.params);
+        await this.options.registry.stop(sessionId);
+        return { stopped: true };
+      }
       case "session.resume": {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         return this.options.registry.resume(sessionId);
@@ -312,10 +317,11 @@ export class BrokerServer {
       case "session.delete": {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         const record = this.options.registry.get(sessionId);
-        await this.options.registry.delete(sessionId);
-        if (record.kind === "orchestrator") {
-          await this.options.orchestrators?.resetSessionBinding(sessionId);
-        }
+        await this.options.registry.delete(sessionId, async () => {
+          if (record.kind === "orchestrator") {
+            await this.options.orchestrators?.resetSessionBinding(sessionId);
+          }
+        });
         return { deleted: true };
       }
       case "session.rename": {

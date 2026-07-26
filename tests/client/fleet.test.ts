@@ -762,17 +762,7 @@ describe("runFleet", () => {
       request: vi.fn(async (method: string) => {
         if (method === "session.list") return [orchestrator];
         if (method === "session.snapshot") return { data: "" };
-        if (method === "session.stop") {
-          return {
-            rootSessionId: orchestrator.id,
-            rootKind: "orchestrator",
-            childCount: 0,
-            total: 1,
-            active: 0,
-            stopping: 1,
-            terminal: 0,
-          };
-        }
+        if (method === "session.stopOne") return { stopped: true };
         throw new Error(`unexpected ${method}`);
       }),
       sendFrame: vi.fn(),
@@ -785,7 +775,7 @@ describe("runFleet", () => {
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
 
     input.emit("data", Buffer.from([0x18]));
-    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.stop", {
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.stopOne", {
       sessionId: orchestrator.id,
     }));
     expect(transport.request).not.toHaveBeenCalledWith("session.deleteTree", expect.anything());
