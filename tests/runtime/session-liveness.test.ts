@@ -43,8 +43,69 @@ describe("detectSessionFatalError", () => {
     expect(detectSessionFatalError("esc to interrupt · 42% context left\n")).toBeUndefined();
   });
 
+  it("does not poison a resumed conversation that discusses provider error signatures", () => {
+    const replay = [
+      "The detector now requires structurally framed error signals so prompts, pasted logs,",
+      "and responses containing strings such as `API Error: 400` or `invalid_request_error`",
+      "cannot mark a healthy resumed conversation as dead.",
+      "› Tell the model what to do differently",
+    ].join("\n");
+
+    expect(detectSessionFatalError(replay)).toBeUndefined();
+  });
+
   it("only reads the tail, so an old fault the session recovered from is not fatal now", () => {
     const replay = `API Error: 400 stale failure\n${"healthy output\n".repeat(600)}`;
+    expect(detectSessionFatalError(replay)).toBeUndefined();
+  });
+
+  it("leaves a composer holding the error text alone, box-framed or not", () => {
+    const boxed = [
+      "╭──────────────────────────────────────────────╮",
+      "│ > why did API Error: 400 invalid_request_error │",
+      "│   show up in yesterday's log?                  │",
+      "╰──────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(detectSessionFatalError(boxed)).toBeUndefined();
+
+    const plainPrompt = "> paste this and explain:\n> API Error: 400 invalid_request_error\n";
+    expect(detectSessionFatalError(plainPrompt)).toBeUndefined();
+  });
+
+  it("leaves a pasted log alone even where it renders flush against a tool result", () => {
+    const replay = [
+      "⏺ Read(worker.log)",
+      "  ⎿  Read 3 lines",
+      "     API Error: 401 authentication_error",
+      "     API Error: 403 permission_error",
+      "⏺ The log shows the worker died on an expired key; rotating it fixes the run.",
+      "  API Error: 400 invalid_request_error was the very first symptom.",
+    ].join("\n");
+
+    expect(detectSessionFatalError(replay)).toBeUndefined();
+  });
+
+  it("still names the provider's own notice when it sits under that same conversation", () => {
+    const replay = [
+      "⏺ The log shows the worker died on an expired key.",
+      "  API Error: 400 invalid_request_error was the very first symptom.",
+      "",
+      "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\"}}",
+      "",
+    ].join("\n");
+
+    expect(detectSessionFatalError(replay)).toMatchObject({
+      reason: "provider authentication failed",
+    });
+  });
+
+  it("does not read a severed line as one that began at the left margin", () => {
+    // The 4 KiB tail is cut by bytes, so it can land mid-line. Line this replay up so the cut falls
+    // exactly where an assistant paragraph happens to say `API Error`, which is not a fault at all.
+    const notice = "API Error: 400 invalid_request_error\n";
+    const tail = `${notice}${"x".repeat(4_000 - notice.length)}`;
+    const replay = `⏺ the run failed earlier today with ${tail}`;
+
     expect(detectSessionFatalError(replay)).toBeUndefined();
   });
 });

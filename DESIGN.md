@@ -10,9 +10,9 @@ colors:
   text-muted: "#9AA3AF"
   divider: "#343B46"
   selection: "#9AA3AF"
-  state-working: "#9AA3AF"
+  state-working: "#A9C6D6"
   state-needs-input: "#D4A85B"
-  state-done: "#D4A85B"
+  state-done: "#78C679"
   state-failed: "#D96C75"
   state-stopped: "#9AA3AF"
   pr-open: "#78C679"
@@ -108,7 +108,7 @@ The interface is keyboard-first and structurally simple: one header, project gro
 
 ## Colors
 
-The palette is cool graphite. Color is reserved for state that demands action; everything else is greyscale, and hierarchy is carried by weight and the selection rule.
+The palette is cool graphite. Color is reserved for state that demands action, plus the single live state; everything else is greyscale, and hierarchy is carried by weight and the selection rule.
 
 ### Primary
 
@@ -120,21 +120,22 @@ The palette is cool graphite. Color is reserved for state that demands action; e
 - **Ink Slate** (`#0E1116`): intended canvas for renderers that own their background. Terminal clients may preserve the user's equivalent dark background.
 - **Deep Slate** (`#151922`): optional footer or inline-picker surface. It is never used to create nested cards.
 - **Frosted Gray** (`#D7DCE4`): the selected thread title, `Cyberdeck`, prompts, and important values.
-- **Cool Ash** (`#9AA3AF`): unselected titles, project paths, previews, ages, inactive markers, and every non-actionable state. One contrast step above the former `#7B8490`, which was too faint to read as body text. It is subdued, never foreground-bright.
+- **Cool Ash** (`#9AA3AF`): unselected titles, project paths, previews, ages, inactive markers, and every state that is neither live nor actionable — `Stopping`, `Stopped`, `Interrupted`. One contrast step above the former `#7B8490`, which was too faint to read as body text. It is subdued, never foreground-bright.
 - **Steel Hairline** (`#343B46`): footer separators and the tmux pane boundary.
 
 ### Semantic
 
-- **Attention Amber** (`#D4A85B`): the only state hue in a thread row. It marks `Needs input` and `Done` — a blocking question, or finished work waiting to be read. Approval, permission, authentication, trust, and computer-use prompts all resolve to it.
+- **Attention Amber** (`#D4A85B`): a thread is blocked and wants the operator. It marks `Needs input` alone; approval, permission, authentication, trust, and computer-use prompts all resolve to it. It no longer marks `Done`, because "go read this" and "go unblock this" are different errands and must not share a hue.
 - **Failure Red** (`#D96C75`): something is wrong right now — failed runtimes, failed turns, failing checks, destructive confirmation, and error notices. Nothing merely terminal or inert may use it.
 - **Merge Violet** (`#C678DD`): a merged pull request. Distinct from Octo Violet so state never borrows the brand.
-- **Completion Green** (`#78C679`): an open pull request. It no longer marks `Done`, which is amber.
+- **Completion Green** (`#78C679`): `Done` — a thread that finished successfully and is waiting to be read — and an open pull request. Green carries both meanings, in two different columns, and the columns keep them apart.
+- **Live Ice** (`#A9C6D6`): `Working`. Brighter than Cool Ash so the one generating thread is findable in a fleet of twenty rows, and cool rather than neutral so it never reads as Frosted Gray.
 
-`Working`, `Stopping`, `Stopped`, `Interrupted`, a draft or closed pull request, and all model and effort metadata are greyscale. Progress is not a request for attention, and an inert terminal state is not a fault.
+`Stopping`, `Stopped`, `Interrupted`, a draft or closed pull request, and all model and effort metadata are greyscale. An inert terminal state is not a fault, and metadata is not state. `Working` is the deliberate exception: it demands nothing of the operator, but a live thread is the one thing you need to locate at a glance, and a row that looks exactly like `Stopped` gives you no way to find it.
 
-**The Sparse Signal Rule.** Color marks state that demands action, and nothing else. Selection is carried by the rule and bold weight, not hue. Color never decorates inactive text, paints full project groups, or replaces a written label.
+**The Sparse Signal Rule.** Color marks state that demands action, plus the one live state, and nothing else — four hues in a thread row, everything else greyscale. Selection is carried by the rule and bold weight, not hue. Color never decorates inactive text, paints full project groups, or replaces a written label.
 
-**The Reduced-Color Rule.** Truecolor renderers use the palette above. Sixteen-color terminals map needs input and done to yellow, failed to red, merged to magenta, open to green, and muted content to bright black. The selection rule is a plain glyph, so the focused row stays visible with color disabled entirely.
+**The Reduced-Color Rule.** Truecolor renderers use the palette above. Sixteen-color terminals map needs input to yellow, done to green, working to cyan, failed to red, merged to magenta, an open pull request to green, and muted content to bright black. The selection rule is a plain glyph and the live marker is a filled `•` against a hollow `·`, so both the focused row and the live thread stay visible with color disabled entirely.
 
 ## Typography
 
@@ -196,7 +197,7 @@ A project heading is a navigable row of its own. `Up`/`Down` step onto it, `Ente
 
 ```text
   ▾ ~/code/personal/cyberdeck
-▌ · Task title                 Codex Sol · high  Working      Beginning of latest reply…         2m
+▌ • Task title                 Codex Sol · high  Working      Beginning of latest reply…         2m
   ▸ ~/code/other · 3 threads
 ```
 
@@ -204,7 +205,7 @@ The row order is fixed at both full and multiplexed widths:
 
 - Every navigable row opens with a two-cell gutter: `▌ ` when focused, two spaces otherwise. Thread titles therefore sit two cells inside their project heading.
 - The left rule is the only selection signal that depends on rendering rather than content, and it is a plain glyph, so focus survives `--no-color`. The focused title also goes bold and brighter; unselected titles are Cool Ash.
-- `·` marks every thread. It takes Attention Amber for `Done` and `Needs input`, Failure Red for `Failed`, and Cool Ash otherwise. The status label follows the same rule.
+- `·` marks every thread except a live one, which takes the filled `•`. The marker takes Completion Green for `Done`, Attention Amber for `Needs input`, Failure Red for `Failed`, Live Ice for `Working`, and Cool Ash otherwise. Both glyphs are one cell wide, so the shape change never shifts a column. The status label follows the same color rule, without the glyph.
 - The title receives roughly 28 percent of width, model and effort receive at most `20ch`, status receives only its content width up to `11ch`, age receives `5ch`, and preview consumes all remaining space.
 - Provider, worker role, sandbox, and raw session ID are not permanent columns. Show provider only as part of an unambiguous friendly model label. Put deeper metadata in thread detail or diagnostics.
 - Age is right-aligned and based on the latest meaningful prompt, assistant completion, or lifecycle transition. Selection, attachment, and Fleet refresh do not reset it.
@@ -224,9 +225,9 @@ Fleet status is a user-attention state derived from durable conversation state p
 
 | Label | Meaning | Treatment |
 | --- | --- | --- |
-| `Working` | The provider is generating, executing a tool, or starting a turn. | Cool Ash |
+| `Working` | The provider is generating, executing a tool, or starting a turn. | Live Ice plus the filled `•` marker |
 | `Needs input` | Progress is blocked on explicit approval, permission, authentication, trust, computer-use enablement, or a blocking question. | Attention Amber |
-| `Done` | No work is active and no intervention is required. The last turn completed successfully, or a new zero-turn session is ready. | Attention Amber |
+| `Done` | No work is active and no intervention is required. The last turn completed successfully, or a new zero-turn session is ready. | Completion Green |
 | `Stopping` | A stop was requested and provider exit is not yet confirmed. | Cool Ash plus literal label |
 | `Stopped` | The user intentionally stopped the runtime; the conversation remains resumable. | Cool Ash |
 | `Interrupted` | Broker or runtime ownership was lost without a confirmed user stop. The row remains and may be resumed. | Cool Ash plus literal label |

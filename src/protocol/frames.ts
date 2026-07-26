@@ -67,6 +67,13 @@ export const SessionEndedFrameSchema = z.object({
   exitCode: z.number().int(),
 });
 
+export const SessionFailedFrameSchema = z.object({
+  type: z.literal("session-failed"),
+  sessionId: z.uuid(),
+  code: z.string().min(1),
+  message: z.string().min(1),
+});
+
 export const EventFrameSchema = z.object({
   type: z.literal("event"),
   event: BrokerEventSchema,
@@ -74,7 +81,7 @@ export const EventFrameSchema = z.object({
 
 export const ProtocolErrorFrameSchema = z.object({
   type: z.literal("protocol-error"),
-  code: z.literal("INVALID_FRAME"),
+  code: z.string().min(1),
   message: z.string(),
 });
 
@@ -82,6 +89,7 @@ export const ServerFrameSchema = z.union([
   ResponseFrameSchema,
   OutputFrameSchema,
   SessionEndedFrameSchema,
+  SessionFailedFrameSchema,
   EventFrameSchema,
   ProtocolErrorFrameSchema,
 ]);
@@ -93,6 +101,7 @@ export type ClientFrame = z.infer<typeof ClientFrameSchema>;
 export type ResponseFrame = z.infer<typeof ResponseFrameSchema>;
 export type OutputFrame = z.infer<typeof OutputFrameSchema>;
 export type SessionEndedFrame = z.infer<typeof SessionEndedFrameSchema>;
+export type SessionFailedFrame = z.infer<typeof SessionFailedFrameSchema>;
 export type ProtocolErrorFrame = z.infer<typeof ProtocolErrorFrameSchema>;
 export type ServerFrame = z.infer<typeof ServerFrameSchema>;
 export type WireFrame = z.infer<typeof WireFrameSchema>;

@@ -10,8 +10,13 @@ import {
   THREAD_PREVIEW_CHARS,
 } from "../limits.js";
 import { grantAllows, type CapabilityGrant, type CyberdeckCapability } from "../domain/capability.js";
+import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
 import { isFableModel } from "../domain/policy.js";
-import { orchestratorKey, type OrchestratorScope } from "../domain/orchestrator.js";
+import {
+  orchestratorKey,
+  type OrchestratorBinding,
+  type OrchestratorScope,
+} from "../domain/orchestrator.js";
 import {
   ProviderIdSchema,
   ApprovalModeSchema,
@@ -60,6 +65,13 @@ export const AgentListThreadsParamsSchema = AgentActorParamsSchema.extend({
   limit: z.number().int().min(1).max(MAX_THREAD_PAGE).default(DEFAULT_THREAD_PAGE),
   cursor: z.number().int().nonnegative().default(0),
 });
+export const AgentInspectOrchestratorParamsSchema = AgentActorParamsSchema.extend({
+  targetSessionId: z.uuid(),
+});
+export const AgentStopOrchestratorParamsSchema = AgentInspectOrchestratorParamsSchema.extend({
+  expectedGeneration: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(500),
+});
 
 export interface ThreadStatusRecord {
   id: string;
@@ -76,6 +88,52 @@ export interface ThreadListPage {
   cursor: number;
   returned: number;
   nextCursor?: number;
+}
+
+export type OrchestratorControlOutcome =
+  | "INSPECTED"
+  | "STOPPED"
+  | "STOP_REQUESTED"
+  | "ALREADY_TERMINAL"
+  | "TARGET_CHANGED"
+  | "REQUIRES_HANDOFF"
+  | "APPROVAL_REQUIRED"
+  | "DENIED"
+  | "NOT_ORCHESTRATOR";
+
+export interface OrchestratorInspection {
+  outcome: OrchestratorControlOutcome;
+  targetSessionId: string;
+  reason?: string;
+  target?: {
+    sessionId: string;
+    generation: number;
+    provider: string;
+    executionState: SessionRecord["executionState"];
+    attentionState?: SessionRecord["attentionState"];
+    attachmentState: SessionRecord["attachmentState"];
+    cwd: string;
+    processOwnedByBroker: boolean;
+    lastObservedAt: string;
+    lastMeaningfulActivityAt?: string;
+    stopRequestedAt?: string;
+    /** MIK-55 will supply a real renewable heartbeat/lease. Null must never be treated as stale. */
+    lastHeartbeatAt: null;
+  };
+  binding?: {
+    bound: boolean;
+    key?: string;
+    /** Worker-control leases arrive with MIK-55; null is explicit rather than inferred. */
+    controlLease: null;
+  };
+  impact?: {
+    childCount: number;
+    nonTerminalChildIds: string[];
+  };
+}
+
+export interface OrchestratorStopResult extends OrchestratorInspection {
+  mode: "graceful" | "force";
 }
 
 /** Why one wait call came back, independent of whether any worker is still running. */
@@ -148,6 +206,7 @@ export class AgentControlError extends Error {
     readonly code:
       | "ACTOR_NOT_AUTHORIZED"
       | "ACTOR_BINDING_ORPHANED"
+      | "ACTOR_NOT_ACTIVE"
       | "CAPABILITY_DENIED"
       | "STALE_THREAD_CURSOR"
       | "MODEL_ID_NOT_CANONICAL"
@@ -167,6 +226,10 @@ export interface AgentControlOptions {
   now?: () => number;
   /** Longest single transport segment. Must stay under the tightest MCP client call deadline. */
   segmentSeconds?: number;
+  /** Durable broker journal used for all Orc stop decisions, including denials. */
+  audit?: { append(event: BrokerEvent): Promise<void> };
+  /** Minimum elapsed time between graceful request and force escalation. */
+  forceStopGraceMs?: number;
 }
 
 export class AgentControlService {
@@ -174,6 +237,8 @@ export class AgentControlService {
   private readonly pendingWaits = new Map<string, PendingWait>();
   private readonly now: () => number;
   private readonly segmentSeconds: number;
+  private readonly audit: AgentControlOptions["audit"];
+  private readonly forceStopGraceMs: number;
 
   constructor(
     private readonly registry: SessionRegistry,
@@ -184,6 +249,8 @@ export class AgentControlService {
   ) {
     this.now = options.now ?? (() => Date.now());
     this.segmentSeconds = Math.max(1, Math.min(options.segmentSeconds ?? MAX_WAIT_SEGMENT_SECONDS, MAX_WAIT_SECONDS));
+    this.audit = options.audit;
+    this.forceStopGraceMs = Math.max(1_000, options.forceStopGraceMs ?? 5_000);
   }
 
   async listThreads(input: string | z.input<typeof AgentListThreadsParamsSchema>): Promise<ThreadListPage> {
@@ -209,6 +276,224 @@ export class AgentControlService {
       returned: page.length,
       ...(nextCursor < visible.length ? { nextCursor } : {}),
     };
+  }
+
+  async inspectOrchestrator(
+    input: z.input<typeof AgentInspectOrchestratorParamsSchema>,
+  ): Promise<OrchestratorInspection> {
+    const request = AgentInspectOrchestratorParamsSchema.parse(input);
+    const binding = await this.requireActiveBinding(request.actorSessionId);
+    const target = this.sessionRecord(request.targetSessionId);
+    if (target === undefined) {
+      return {
+        outcome: "DENIED",
+        targetSessionId: request.targetSessionId,
+        reason: "Target session does not exist in this broker",
+      };
+    }
+    if (target.kind !== "orchestrator") {
+      return {
+        outcome: "NOT_ORCHESTRATOR",
+        targetSessionId: request.targetSessionId,
+        reason: "Target is not an orchestrator session",
+      };
+    }
+    if (!grantAllows(binding.grant, "orchestrator.inspect", target)) {
+      return {
+        outcome: "DENIED",
+        targetSessionId: request.targetSessionId,
+        reason: "Target is outside this orchestrator's inspect scope",
+      };
+    }
+    return this.orchestratorInspection(target);
+  }
+
+  async stopOrchestrator(
+    input: z.input<typeof AgentStopOrchestratorParamsSchema>,
+    mode: "graceful" | "force" = "graceful",
+  ): Promise<OrchestratorStopResult> {
+    const request = AgentStopOrchestratorParamsSchema.parse(input);
+    let authorityPath:
+      | "none"
+      | "active-orchestrator-binding"
+      | "scoped-capability-grant" = "none";
+    const finish = async (
+      result: Omit<OrchestratorStopResult, "mode">,
+    ): Promise<OrchestratorStopResult> => {
+      const completed = { ...result, mode };
+      await this.appendOrchestratorAudit("orchestrator.stop.result", request.targetSessionId, {
+        actorSessionId: request.actorSessionId,
+        targetSessionId: request.targetSessionId,
+        observedGeneration: request.expectedGeneration,
+        reason: request.reason,
+        mode,
+        authorityPath,
+        outcome: completed.outcome,
+        detail: completed.reason ?? null,
+      });
+      return completed;
+    };
+    let binding: OrchestratorBinding;
+    try {
+      binding = await this.requireActiveBinding(request.actorSessionId);
+      authorityPath = "active-orchestrator-binding";
+    } catch (error) {
+      return finish({
+        outcome: "DENIED",
+        targetSessionId: request.targetSessionId,
+        reason: error instanceof Error ? error.message : "Caller is not an active orchestrator",
+      });
+    }
+    const target = this.sessionRecord(request.targetSessionId);
+
+    if (target === undefined) {
+      return finish({
+        outcome: "DENIED",
+        targetSessionId: request.targetSessionId,
+        reason: "Target session does not exist in this broker",
+      });
+    }
+    if (target.kind !== "orchestrator") {
+      return finish({
+        outcome: "NOT_ORCHESTRATOR",
+        targetSessionId: request.targetSessionId,
+        reason: "Target is not an orchestrator session",
+      });
+    }
+    if (request.actorSessionId === target.id) {
+      return finish({
+        outcome: "DENIED",
+        targetSessionId: target.id,
+        reason: "An orchestrator cannot stop itself through the peer-control tool",
+      });
+    }
+    if (!grantAllows(binding.grant, "orchestrator.stop", target)) {
+      return finish({
+        outcome: "DENIED",
+        targetSessionId: target.id,
+        reason: "Target is outside this orchestrator's stop scope",
+      });
+    }
+    authorityPath = "scoped-capability-grant";
+
+    const inspection = await this.orchestratorInspection(target);
+    const generation = target.generation ?? 1;
+    if (request.expectedGeneration !== generation) {
+      return finish({
+        ...inspection,
+        outcome: "TARGET_CHANGED",
+        reason: `Target generation is ${generation}, not ${request.expectedGeneration}`,
+      });
+    }
+    if ((inspection.impact?.nonTerminalChildIds.length ?? 0) > 0) {
+      return finish({
+        ...inspection,
+        outcome: "REQUIRES_HANDOFF",
+        reason: "Target still owns non-terminal workers; MIK-55 handoff is required before stopping it",
+      });
+    }
+    if (target.exitCode !== null) {
+      return finish({
+        ...inspection,
+        outcome: "ALREADY_TERMINAL",
+        reason: "Target provider process is already terminal",
+      });
+    }
+    if (target.executionState === "active" || target.executionState === "starting") {
+      return finish({
+        ...inspection,
+        outcome: "APPROVAL_REQUIRED",
+        reason: "Healthy live orchestrators require explicit operator authority",
+      });
+    }
+    if (!this.registry.ownsProcess(target.id)) {
+      return finish({
+        ...inspection,
+        outcome: "DENIED",
+        reason: "Target process is not owned by this broker instance",
+      });
+    }
+    if (mode === "force" && !this.registry.isStopRequested(target.id)) {
+      return finish({
+        ...inspection,
+        outcome: "DENIED",
+        reason: "Graceful stop must be requested before force escalation",
+      });
+    }
+    if (mode === "force") {
+      const requestedAt = this.registry.stopRequestedAt(target.id);
+      const elapsed = requestedAt === undefined ? 0 : this.now() - Date.parse(requestedAt);
+      if (requestedAt === undefined || !Number.isFinite(elapsed) || elapsed < this.forceStopGraceMs) {
+        return finish({
+          ...inspection,
+          outcome: "DENIED",
+          reason: `Graceful stop must remain pending for ${this.forceStopGraceMs}ms before force escalation`,
+        });
+      }
+    }
+
+    await this.appendOrchestratorAudit("orchestrator.stop.requested", target.id, {
+      actorSessionId: request.actorSessionId,
+      targetSessionId: target.id,
+      observedGeneration: request.expectedGeneration,
+      reason: request.reason,
+      mode,
+      authorityPath,
+    });
+    // The durable audit write above yields. Re-read every mutation-sensitive field so a stale
+    // preflight cannot stop a provider process that resumed while the intent was being recorded.
+    const current = this.registry.get(target.id);
+    const currentInspection = await this.orchestratorInspection(current);
+    if ((current.generation ?? 1) !== request.expectedGeneration) {
+      return finish({
+        ...currentInspection,
+        outcome: "TARGET_CHANGED",
+        reason: `Target changed to generation ${current.generation ?? 1} before stop execution`,
+      });
+    }
+    if ((currentInspection.impact?.nonTerminalChildIds.length ?? 0) > 0) {
+      return finish({
+        ...currentInspection,
+        outcome: "REQUIRES_HANDOFF",
+        reason: "Target acquired non-terminal workers before stop execution",
+      });
+    }
+    if (current.exitCode !== null) {
+      return finish({
+        ...currentInspection,
+        outcome: "ALREADY_TERMINAL",
+        reason: "Target became terminal before stop execution",
+      });
+    }
+    if (current.executionState === "active" || current.executionState === "starting") {
+      return finish({
+        ...currentInspection,
+        outcome: "APPROVAL_REQUIRED",
+        reason: "Target became active before stop execution",
+      });
+    }
+    if (!this.registry.ownsProcess(current.id)) {
+      return finish({
+        ...currentInspection,
+        outcome: "DENIED",
+        reason: "Target process ownership changed before stop execution",
+      });
+    }
+    if (mode === "force" && !this.registry.isStopRequested(current.id)) {
+      return finish({
+        ...currentInspection,
+        outcome: "TARGET_CHANGED",
+        reason: "Graceful stop is no longer pending",
+      });
+    }
+
+    if (mode === "force") this.registry.forceStop(current.id);
+    else await this.registry.stop(current.id);
+    const stopped = this.registry.get(target.id);
+    return finish({
+      ...await this.orchestratorInspection(stopped),
+      outcome: stopped.exitCode === null ? "STOP_REQUESTED" : "STOPPED",
+    });
   }
 
   async readThread(
@@ -471,6 +756,73 @@ export class AgentControlService {
       description.status === "orphaned" ? "ACTOR_BINDING_ORPHANED" : "ACTOR_NOT_AUTHORIZED",
       `${actorSessionId} is not a bound Cyberdeck orchestrator (${description.status}). ${description.remedy}`,
     );
+  }
+
+  private async requireActiveBinding(actorSessionId: string) {
+    const binding = await this.requireBinding(actorSessionId);
+    const actor = this.sessionRecord(actorSessionId);
+    if (
+      actor?.kind !== "orchestrator"
+      || actor.executionState !== "active"
+      || actor.exitCode !== null
+    ) {
+      throw new AgentControlError(
+        "ACTOR_NOT_ACTIVE",
+        `${actorSessionId} is not an active Cyberdeck orchestrator`,
+      );
+    }
+    return binding;
+  }
+
+  private async orchestratorInspection(target: SessionRecord): Promise<OrchestratorInspection> {
+    const targetBinding = await this.orchestrators.findBySessionId(target.id);
+    const stopRequestedAt = this.registry.stopRequestedAt(target.id);
+    const children = target.childIds
+      .map((sessionId) => this.sessionRecord(sessionId))
+      .filter((record): record is SessionRecord => record !== undefined);
+    return {
+      outcome: "INSPECTED",
+      targetSessionId: target.id,
+      target: {
+        sessionId: target.id,
+        generation: target.generation ?? 1,
+        provider: target.provider,
+        executionState: target.executionState,
+        ...(target.attentionState === undefined ? {} : { attentionState: target.attentionState }),
+        attachmentState: target.attachmentState,
+        cwd: target.cwd,
+        processOwnedByBroker: this.registry.ownsProcess(target.id),
+        lastObservedAt: target.updatedAt,
+        ...(target.meaningfulUpdatedAt === undefined
+          ? {}
+          : { lastMeaningfulActivityAt: target.meaningfulUpdatedAt }),
+        ...(stopRequestedAt === undefined ? {} : { stopRequestedAt }),
+        lastHeartbeatAt: null,
+      },
+      binding: {
+        bound: targetBinding !== undefined,
+        ...(targetBinding === undefined ? {} : { key: targetBinding.key }),
+        controlLease: null,
+      },
+      impact: {
+        childCount: children.length,
+        nonTerminalChildIds: children.filter(({ exitCode }) => exitCode === null).map(({ id }) => id),
+      },
+    };
+  }
+
+  private async appendOrchestratorAudit(
+    type: Extract<BrokerEventType, "orchestrator.stop.requested" | "orchestrator.stop.result">,
+    sessionId: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    await this.audit?.append({
+      id: randomUUID(),
+      type,
+      sessionId,
+      occurredAt: new Date(this.now()).toISOString(),
+      data,
+    });
   }
 
   private sessionRecord(sessionId: string): SessionRecord | undefined {

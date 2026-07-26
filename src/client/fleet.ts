@@ -126,6 +126,8 @@ export type FleetNoticeTone = "neutral" | "warning" | "error" | "confirmation";
 
 export interface FleetState {
   selectedSessionId?: string | undefined;
+  /** First rendered row in the independently scrolling thread-list body. */
+  threadListScrollOffset: number;
   /**
    * Set while a folder header row holds focus. Thread-scoped keys are inert in
    * that case; `selectedSessionId` is retained so focus returns to the thread
@@ -154,8 +156,8 @@ export interface FleetState {
 }
 
 export type FleetAction =
-  | { type: "stop-tree"; sessionId: string }
-  | { type: "delete-tree"; sessionId: string }
+  | { type: "stop"; sessionId: string }
+  | { type: "delete"; sessionId: string }
   | { type: "attach"; sessionId: string }
   | { type: "resume"; sessionId: string }
   | {
@@ -228,17 +230,6 @@ interface OrchestratorModelChoice {
   provider: (typeof ORCHESTRATOR_CATALOG)[number];
   model: string;
   label: string;
-}
-
-interface SessionTreeProgress {
-  rootSessionId: string;
-  rootKind: "worker" | "orchestrator";
-  childCount: number;
-  total: number;
-  active: number;
-  stopping: number;
-  terminal: number;
-  deleted?: number;
 }
 
 type SlashCommandName =
@@ -358,9 +349,9 @@ const LEAVE_FLEET_SCREEN = `${DISABLE_INHERITED_TERMINAL_INPUT_MODES}\u001b[?25h
  *
  * Two layers. The hue block is the raw ink; the semantic block below names what
  * a hue *means*, and rows paint with those names so a hue can move without a
- * render rewrite. The governing rule is that color marks state demanding
- * action — needs input, done, failing — so most of the view is greyscale and
- * leans on weight and the selection rule for hierarchy.
+ * render rewrite. Four states earn a hue: blocked, finished, failing, and the
+ * one live thread. Everything else is greyscale and leans on weight and the
+ * selection rule for hierarchy.
  *
  * `gray` sits one contrast step above its former 123;132;144: legible as body
  * text, still clearly recessed from the terminal foreground.
@@ -379,13 +370,18 @@ const ANSI = {
   green: "\u001b[38;2;120;198;121m",
   red: "\u001b[38;2;217;108;117m",
   gray: "\u001b[38;2;154;163;175m",
+  ice: "\u001b[38;2;169;198;214m",
 
   // Semantic tokens.
 
   /** Cyberdeck logo and wordmark. Reserved: no state may borrow the brand hue. */
   brand: "\u001b[38;2;182;158;255m",
-  /** A thread wants the operator: needs input, or finished and unread. */
+  /** A thread is blocked and wants the operator: needs input, or a prompt awaiting an answer. */
   attention: "\u001b[38;2;212;168;91m",
+  /** A thread finished successfully and is waiting to be read. */
+  done: "\u001b[38;2;120;198;121m",
+  /** The provider is generating right now: the one live state in the fleet. */
+  working: "\u001b[38;2;169;198;214m",
   /** Something is wrong right now — a failed thread, a destructive confirmation. */
   alert: "\u001b[38;2;217;108;117m",
   /** Body text at rest: titles, paths, metadata. Subdued, never foreground. */
@@ -432,6 +428,7 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
 export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.cwd()): FleetState {
   return {
     selectedSessionId: orderedThreads(snapshot)[0]?.record.id,
+    threadListScrollOffset: 0,
     fallbackCwd,
     draft: "",
     launchProfiles: {},
@@ -495,6 +492,7 @@ export function transitionFleet(
   snapshot: FleetSnapshot,
   key: string,
   now = Date.now(),
+  threadListViewportHeight = Number.MAX_SAFE_INTEGER,
 ): FleetTransition {
   const normalized = normalizeState(current, snapshot, now);
   const threads = orderedThreads(snapshot);
@@ -687,25 +685,24 @@ export function transitionFleet(
   }
 
   if (key === "ctrl+x" && selected !== undefined) {
-    const tree = sessionTree(snapshot, selected.record.id);
-    const terminal = tree.filter(({ record }) => isTerminalSession(record)).length;
+    const terminal = isTerminalSession(selected.record);
     const stopAcknowledged = state.stopAcknowledgement?.sessionId === selected.record.id;
-    if (terminal !== tree.length || !stopAcknowledged) {
+    if (!terminal || !stopAcknowledged) {
       return {
         state: {
           ...state,
           stopAcknowledgement: { sessionId: selected.record.id },
           deleteConfirmation: undefined,
-          notice: stoppingTreeNotice(selected.record, tree.length - 1, terminal, tree.length),
+          notice: `Stopping ${threadSubject(selected.record)}`,
           noticeTone: "warning",
         },
-        action: { type: "stop-tree", sessionId: selected.record.id },
+        action: { type: "stop", sessionId: selected.record.id },
       };
     }
     if (state.deleteConfirmation?.sessionId === selected.record.id) {
       return {
         state: { ...state, deleteConfirmation: undefined, notice: undefined },
-        action: { type: "delete-tree", sessionId: selected.record.id },
+        action: { type: "delete", sessionId: selected.record.id },
       };
     }
     return {
@@ -715,7 +712,7 @@ export function transitionFleet(
           sessionId: selected.record.id,
           expiresAt: now + DELETE_CONFIRMATION_MS,
         },
-        notice: deleteTreeConfirmation(selected.record, tree.length - 1),
+        notice: `Delete ${threadSubject(selected.record)}? press ctrl+x again`,
         noticeTone: "confirmation",
       },
     };
@@ -777,12 +774,50 @@ export function transitionFleet(
     if (initialPrompt === "/permissions") return openPermissionPicker(state, snapshot);
     return startTransition(state, undefined, initialPrompt);
   }
-  if (key === "up" || key === "down") {
-    const rows = fleetRows(snapshot, state);
-    const nextIndex = boundedIndex(focusedRowIndex(rows, state) + (key === "up" ? -1 : 1), rows.length);
+  if (
+    key === "up"
+    || key === "down"
+    || key === "pageup"
+    || key === "pagedown"
+    || key === "ctrl+u"
+    || key === "ctrl+d"
+    || key === "home"
+    || key === "end"
+  ) {
+    const rows = fleetListRows(snapshot, state);
+    const currentIndex = focusedListRowIndex(rows, state);
+    const pageDistance = Math.max(1, threadListViewportHeight - 1);
+    const halfPageDistance = Math.max(1, Math.floor(threadListViewportHeight / 2));
+    const targetIndex = key === "home"
+      ? 0
+      : key === "end"
+        ? rows.length - 1
+        : currentIndex + (
+            key === "up"
+              ? -1
+              : key === "down"
+                ? 1
+                : key === "pageup"
+                  ? -pageDistance
+                  : key === "pagedown"
+                    ? pageDistance
+                    : key === "ctrl+u"
+                      ? -halfPageDistance
+                      : halfPageDistance
+          );
+    const nextIndex = navigableListRowIndex(
+      rows,
+      targetIndex,
+      targetIndex < currentIndex ? -1 : 1,
+    );
+    const focused = focusRow(state, rows[nextIndex]);
     return {
       state: {
-        ...focusRow(state, rows[nextIndex]),
+        ...scrollFocusedRowIntoView(
+          focused,
+          rows,
+          threadListViewportHeight,
+        ),
         deleteConfirmation: undefined,
         notice: undefined,
       },
@@ -852,6 +887,33 @@ export function renderFleet(
     return renderOrchestratorPicker(snapshot, state, resolved);
   }
   return renderFleetList(snapshot, state, resolved);
+}
+
+function threadListViewportHeight(
+  snapshot: FleetSnapshot,
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): number {
+  const bodyHeight = Math.max(
+    0,
+    options.height - renderFleetFooter(snapshot, state, options).length,
+  );
+  return Math.max(
+    0,
+    bodyHeight - renderHeader(orderedThreads(snapshot), state, options).length - 1,
+  );
+}
+
+function normalizeThreadListViewport(
+  snapshot: FleetSnapshot,
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): FleetState {
+  return scrollFocusedRowIntoView(
+    state,
+    fleetListRows(snapshot, state),
+    threadListViewportHeight(snapshot, state, options),
+  );
 }
 
 function transitionCommandPalette(
@@ -1388,31 +1450,85 @@ function renderFleetList(
   options: ResolvedFleetRenderOptions,
 ): string {
   const threads = orderedThreads(snapshot);
-  const lines = [...renderHeader(threads, state, options), ""];
+  const header = [...renderHeader(threads, state, options), ""];
 
   // The column only exists once some thread actually has a pull request, so a
   // fleet without `gh` — or without PRs — never pays for it.
   const pullRequestColumn = threads.some(({ record }) =>
     options.pullRequests.get(record.cwd) !== undefined);
-  const groups = groupThreads(threads);
-  if (groups.length === 0) {
-    lines.push("No durable agent threads yet.");
-  } else {
-    for (const group of groups) {
-      lines.push(renderFolderRow(group.cwd, group.threads.length, state, options));
-      if (!isCollapsed(state, group.cwd)) {
-        for (const thread of group.threads) {
-          lines.push(renderThreadRow(thread, state, options, pullRequestColumn));
+  const footer = renderFleetFooter(snapshot, state, options);
+  const bodyHeight = Math.max(0, options.height - footer.length);
+  const threadListViewportHeight = Math.max(0, bodyHeight - header.length);
+  const rows = fleetListRows(snapshot, state);
+  const viewportState = scrollFocusedRowIntoView(
+    state,
+    rows,
+    threadListViewportHeight,
+  );
+  const offset = viewportState.threadListScrollOffset;
+  const truncated = rows.length > threadListViewportHeight;
+  const visibleRows = rows.slice(offset, offset + threadListViewportHeight);
+  const lastVisibleRow = visibleRows.at(-1);
+  // A folder header on the last visible line whose contents start below the fold reads as an empty
+  // project. Its role heading is part of those contents, so it counts as spilled content too.
+  const nextRowKind = rows[offset + visibleRows.length]?.kind;
+  const hideOrphanedFolder = lastVisibleRow?.kind === "folder"
+    && (nextRowKind === "thread" || nextRowKind === "section")
+    && viewportState.focusedFolderCwd !== lastVisibleRow.cwd;
+  const listLines = rows.length === 0
+    ? ["No durable agent threads yet."].slice(0, threadListViewportHeight)
+    : visibleRows.map((row, visibleIndex) => {
+        const indicator = truncated
+          ? threadListScrollbar(
+              visibleIndex,
+              offset,
+              rows.length,
+              threadListViewportHeight,
+            )
+          : undefined;
+        if (hideOrphanedFolder && visibleIndex === visibleRows.length - 1) {
+          return indicator === undefined
+            ? ""
+            : rowGutter(false, options.color, indicator).trimEnd();
         }
-      }
-      lines.push("");
-    }
-  }
+        if (row.kind === "folder") {
+          return renderFolderRow(
+            row.cwd,
+            row.threadCount,
+            viewportState,
+            options,
+            indicator,
+          );
+        }
+        if (row.kind === "thread") {
+          return renderThreadRow(
+            row.thread,
+            viewportState,
+            options,
+            pullRequestColumn,
+            indicator,
+          );
+        }
+        if (row.kind === "section") {
+          return `${rowGutter(false, options.color, indicator)}${paint(row.label, "dim", options.color)}`;
+        }
+        return indicator === undefined
+          ? ""
+          : rowGutter(false, options.color, indicator).trimEnd();
+      });
+  const body = [...header.slice(0, bodyHeight), ...listLines];
+  while (body.length < bodyHeight) body.push("");
+  return [...body, ...footer].join("\n");
+}
 
+function renderFleetFooter(
+  snapshot: FleetSnapshot,
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): string[] {
+  const threads = orderedThreads(snapshot);
   const selected = threads.find(({ record }) => record.id === state.selectedSessionId);
-  const selectedTree = selected === undefined ? [] : sessionTree(snapshot, selected.record.id);
-  const terminal = selected !== undefined
-    && selectedTree.every(({ record }) => isTerminalSession(record));
+  const terminal = selected !== undefined && isTerminalSession(selected.record);
   const stopAcknowledged = selected !== undefined
     && state.stopAcknowledgement?.sessionId === selected.record.id;
   const destructiveHint = terminal && stopAcknowledged ? "ctrl+x delete thread" : "ctrl+x stop agent";
@@ -1436,12 +1552,9 @@ function renderFleetList(
     paint("─".repeat(options.width), "dim", options.color),
     ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
     paint(fit(launchContext, options.width), "dim", options.color),
-    paint(fit(`enter open/start · ctrl+] detach/reattach · ctrl+g cwd · space reply · /model · /fable-workers · /caveman-workers · ? shortcuts · ${destructiveHint}`, options.width), "dim", options.color),
+    paint(fit(`↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ? more · ${destructiveHint}`, options.width), "dim", options.color),
   ];
-  const bodyHeight = Math.max(0, options.height - footer.length);
-  const body = lines.slice(0, bodyHeight);
-  while (body.length < bodyHeight) body.push("");
-  return [...body, ...footer].join("\n");
+  return footer;
 }
 
 function renderHeader(
@@ -1488,11 +1601,25 @@ function renderHeader(
 
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
-    "shift+↑↓ reorder", "←→ fold project", "ctrl+s switch views", "@ mention", "alt+1–9 open", "esc back/clear",
+    "pgup/dn page", "ctrl+u/d half", "home/end", "shift+↑↓ reorder", "←→ fold project", "ctrl+s switch views",
+    "@ mention", "alt+1–9 open", "esc back/clear",
     "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+] detach/reattach", "ctrl+g cwd", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
   ];
-  if (width >= 110) return [entries.slice(0, 5).join("   "), entries.slice(5).join("   ")];
-  if (width >= 70) return [entries.slice(0, 3).join("   "), entries.slice(3, 6).join("   "), entries.slice(6).join("   ")];
+  if (width >= 110) {
+    return [
+      entries.slice(0, 5).join("   "),
+      entries.slice(5, 10).join("   "),
+      entries.slice(10).join("   "),
+    ];
+  }
+  if (width >= 70) {
+    return [
+      entries.slice(0, 4).join("   "),
+      entries.slice(4, 8).join("   "),
+      entries.slice(8, 12).join("   "),
+      entries.slice(12).join("   "),
+    ];
+  }
   return entries;
 }
 
@@ -1721,8 +1848,32 @@ function boundedIndex(value: number, length: number): number {
  * Left gutter shared by folder and thread rows. The focused row carries a rule
  * rather than a color change, so the bar reads the same with color disabled.
  */
-function rowGutter(focused: boolean, color: boolean): string {
-  return focused ? `${paint(SELECTION_RULE, "selection", color)} ` : ROW_GUTTER;
+function rowGutter(
+  focused: boolean,
+  color: boolean,
+  scrollbar?: "track" | "thumb" | undefined,
+): string {
+  if (focused) return `${paint(SELECTION_RULE, "selection", color)} `;
+  if (scrollbar === "thumb") return `${paint("┃", "subtle", color)} `;
+  if (scrollbar === "track") return `${paint("│", "dim", color)} `;
+  return ROW_GUTTER;
+}
+
+function threadListScrollbar(
+  visibleIndex: number,
+  offset: number,
+  contentHeight: number,
+  viewportHeight: number,
+): "track" | "thumb" {
+  const thumbHeight = Math.max(1, Math.floor(viewportHeight * viewportHeight / contentHeight));
+  const scrollRange = contentHeight - viewportHeight;
+  const thumbRange = viewportHeight - thumbHeight;
+  const thumbStart = scrollRange === 0
+    ? 0
+    : Math.round(offset * thumbRange / scrollRange);
+  return visibleIndex >= thumbStart && visibleIndex < thumbStart + thumbHeight
+    ? "thumb"
+    : "track";
 }
 
 /**
@@ -1734,6 +1885,7 @@ function renderFolderRow(
   threadCount: number,
   state: FleetState,
   options: ResolvedFleetRenderOptions,
+  scrollbar?: "track" | "thumb" | undefined,
 ): string {
   const focused = state.focusedFolderCwd === cwd;
   const collapsed = isCollapsed(state, cwd);
@@ -1744,7 +1896,7 @@ function renderFolderRow(
     `${collapsed ? "▸" : "▾"} ${shortPath(cwd, options.home)}${summary}`,
     Math.max(1, options.width - ROW_GUTTER.length),
   );
-  return `${rowGutter(focused, options.color)}${focused ? paint(label, "bold", options.color) : label}`;
+  return `${rowGutter(focused, options.color, scrollbar)}${focused ? paint(label, "bold", options.color) : label}`;
 }
 
 function renderThreadRow(
@@ -1752,6 +1904,7 @@ function renderThreadRow(
   state: FleetState,
   options: ResolvedFleetRenderOptions,
   pullRequestColumn = false,
+  scrollbar?: "track" | "thumb" | undefined,
 ): string {
   const selected = state.focusedFolderCwd === undefined
     && thread.record.id === state.selectedSessionId;
@@ -1774,7 +1927,7 @@ function renderThreadRow(
   const previewWidth = Math.max(1, options.width - fixedWidth);
   const preview = threadPreview(thread, previewWidth);
   return [
-    `${rowGutter(selected, options.color)}${statusMarker(status, selected, options.color)}`,
+    `${rowGutter(selected, options.color, scrollbar)}${statusMarker(status, selected, options.color)}`,
     paint(pad(title, titleWidth), selected ? "bold" : "muted", options.color),
     ...(pullRequestColumn
       ? [pullRequestCell(options.pullRequests.get(thread.record.cwd), options.color)]
@@ -1816,16 +1969,24 @@ function threadPreview(thread: FleetThread, width: number): string {
 }
 
 /**
- * The status dot. Only states that want the operator take a hue; the focused
- * row is already marked by the selection rule, so focus adds weight alone.
+ * The status dot. Finished, blocked, failing and live threads each take their own
+ * hue, and `Working` also takes the filled glyph so the live thread stays findable
+ * with color off. The focused row is already marked by the selection rule, so
+ * focus adds weight alone.
  */
 function statusMarker(status: ThreadStatus, selected: boolean, color: boolean): string {
-  const tone = status === "Done" || status === "Needs input"
-    ? "attention"
-    : status === "Failed"
-      ? "alert"
-      : "muted";
-  const painted = paint("·", tone, color);
+  const tone = status === "Done"
+    ? "done"
+    : status === "Needs input"
+      ? "attention"
+      : status === "Failed"
+        ? "alert"
+        : status === "Working"
+          ? "working"
+          : "muted";
+  // Both glyphs are one display column, so the marker never shifts the row.
+  const glyph = status === "Working" ? "•" : "·";
+  const painted = paint(glyph, tone, color);
   return selected ? paint(painted, "bold", color) : painted;
 }
 
@@ -1956,7 +2117,24 @@ export async function runFleet(
   };
 
   const perform = async (key: string) => {
-    const transition = transitionFleet(state, snapshot, key);
+    const width = Math.max(50, output.columns ?? 120);
+    const height = Math.max(16, output.rows ?? 32);
+    const renderOptions: ResolvedFleetRenderOptions = {
+      color: output.isTTY === true,
+      width,
+      height,
+      now: Date.now(),
+      home: homedir(),
+      pullRequests: pullRequestStatus.states(),
+    };
+    state = normalizeThreadListViewport(snapshot, state, renderOptions);
+    const transition = transitionFleet(
+      state,
+      snapshot,
+      key,
+      renderOptions.now,
+      threadListViewportHeight(snapshot, state, renderOptions),
+    );
     state = transition.state;
     const action = transition.action;
     if (action?.type === "quit") {
@@ -1964,27 +2142,25 @@ export async function runFleet(
       return;
     }
     try {
-      if (action?.type === "stop-tree") {
-        const progress = await client.request<SessionTreeProgress>("session.stop", { sessionId: action.sessionId });
+      if (action?.type === "stop") {
+        await client.request("session.stopOne", { sessionId: action.sessionId });
         state = {
           ...state,
-          notice: progress.terminal === progress.total
-            ? stoppedTreeNotice(progress)
-            : stoppingProgressNotice(progress),
-          noticeTone: progress.terminal === progress.total ? "neutral" : "warning",
+          notice: "Stopping thread",
+          noticeTone: "warning",
         };
-      } else if (action?.type === "delete-tree") {
+      } else if (action?.type === "delete") {
         const selectedIndex = Math.max(
           0,
           orderedThreads(snapshot).findIndex(({ record }) => record.id === action.sessionId),
         );
-        const progress = await client.request<SessionTreeProgress>("session.deleteTree", { sessionId: action.sessionId });
+        await client.request("session.delete", { sessionId: action.sessionId });
         snapshot = await collectFleetSnapshot(client);
         const remaining = orderedThreads(snapshot);
         state = {
           ...state,
           selectedSessionId: remaining[selectedIndex]?.record.id ?? remaining[selectedIndex - 1]?.record.id,
-          notice: deletedTreeNotice(progress),
+          notice: "Deleted thread",
           noticeTone: "neutral",
         };
       } else if (action?.type === "attach") {
@@ -2061,7 +2237,7 @@ export async function runFleet(
         && action.type !== "create-orchestrator"
         && action.type !== "change-directory"
         && action.type !== "permission-policy"
-        && action.type !== "delete-tree"
+        && action.type !== "delete"
       ) {
         snapshot = await collectFleetSnapshot(client);
       }
@@ -2104,8 +2280,10 @@ export async function runFleet(
   input.on("data", onInput);
   input.resume?.();
   const onSigint = () => { queueKeys(["ctrl+c"]); };
+  const onResize = () => { notify(); };
   signals.on("SIGINT", onSigint);
   signals.on("SIGTERM", stop);
+  signals.on("SIGWINCH", onResize);
   output.write(ENTER_FLEET_SCREEN);
 
   try {
@@ -2130,12 +2308,18 @@ export async function runFleet(
         while (body.length < height - footer.length) body.push("");
         output.write(`\u001b[2J\u001b[H${[...body, ...footer].join("\n")}\u001b[?25l`);
       } else {
-        const rendered = renderFleet(snapshot, state, {
+        const renderOptions = {
           color: output.isTTY === true,
           width,
           height,
           pullRequests: pullRequestStatus.states(),
+        };
+        state = normalizeThreadListViewport(snapshot, state, {
+          ...renderOptions,
+          now: Date.now(),
+          home: homedir(),
         });
+        const rendered = renderFleet(snapshot, state, renderOptions);
         const cursor = composerCursor(rendered, state, width);
         output.write(`\u001b[2J\u001b[H${rendered}\u001b[${cursor.row};${cursor.column}H\u001b[?25h`);
       }
@@ -2146,6 +2330,7 @@ export async function runFleet(
     unsubscribeClose();
     signals.off("SIGINT", onSigint);
     signals.off("SIGTERM", stop);
+    signals.off("SIGWINCH", onResize);
     input.off("data", onInput);
     input.pause?.();
     input.setRawMode?.(previousRawMode);
@@ -2228,6 +2413,14 @@ export class FleetKeyDecoder {
       ["\u001b[C", "right"],
       ["\u001b[1;2A", "shift+up"],
       ["\u001b[1;2B", "shift+down"],
+      ["\u001b[5~", "pageup"],
+      ["\u001b[6~", "pagedown"],
+      ["\u001b[H", "home"],
+      ["\u001b[1~", "home"],
+      ["\u001b[7~", "home"],
+      ["\u001b[F", "end"],
+      ["\u001b[4~", "end"],
+      ["\u001b[8~", "end"],
     ] as const;
     const match = special.find(([sequence]) => rest.startsWith(sequence));
     if (match !== undefined) {
@@ -2274,12 +2467,14 @@ export class FleetKeyDecoder {
     }
     const code = value.charCodeAt(index);
     if (code === 0x03) keys.push("ctrl+c");
+    else if (code === 0x04) keys.push("ctrl+d");
     else if (code === 0x07) keys.push("ctrl+g");
     else if (code === 0x0a) keys.push("ctrl+j");
     else if (code === 0x0f) keys.push("ctrl+o");
     else if (code === 0x12) keys.push("ctrl+r");
     else if (code === 0x13) keys.push("ctrl+s");
     else if (code === 0x14) keys.push("ctrl+t");
+    else if (code === 0x15) keys.push("ctrl+u");
     else if (code === 0x18) keys.push("ctrl+x");
     else if (code === 0x1d) keys.push("ctrl+]");
     else if (code === 0x0d) keys.push("enter");
@@ -2399,30 +2594,102 @@ type FleetRow =
   | { kind: "folder"; cwd: string; threadCount: number }
   | { kind: "thread"; cwd: string; thread: FleetThread };
 
+/**
+ * Role headings and blank separators occupy a line each, so the viewport has to count them, but
+ * neither is a focus target. Keeping them in the same list is what stops the scroll offset and the
+ * rendered lines from disagreeing about how tall the list is.
+ */
+type FleetListRow = FleetRow | { kind: "spacer" } | { kind: "section"; label: string };
+
 function isCollapsed(state: FleetState, cwd: string): boolean {
   return state.collapsedCwds?.includes(cwd) === true;
 }
 
-function fleetRows(snapshot: FleetSnapshot, state: FleetState): FleetRow[] {
-  return groupThreads(snapshot.threads).flatMap(({ cwd, threads }): FleetRow[] => {
+function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow[] {
+  return groupThreads(snapshot.threads).flatMap(({ cwd, threads }, groupIndex): FleetListRow[] => {
     const header: FleetRow = { kind: "folder", cwd, threadCount: threads.length };
-    if (isCollapsed(state, cwd)) return [header];
-    return [header, ...threads.map((thread): FleetRow => ({ kind: "thread", cwd, thread }))];
+    const spacer: FleetListRow[] = groupIndex === 0 ? [] : [{ kind: "spacer" }];
+    if (isCollapsed(state, cwd)) return [...spacer, header];
+    return [
+      ...spacer,
+      header,
+      ...roleSections(threads).flatMap((section): FleetListRow[] => [
+        { kind: "section", label: section.label },
+        ...section.threads.map((thread): FleetRow => ({ kind: "thread", cwd, thread })),
+      ]),
+    ];
   });
 }
 
-function focusedRowIndex(rows: readonly FleetRow[], state: FleetState): number {
+function focusedListRowIndex(rows: readonly FleetListRow[], state: FleetState): number {
   const index = state.focusedFolderCwd === undefined
     ? rows.findIndex((row) => row.kind === "thread" && row.thread.record.id === state.selectedSessionId)
     : rows.findIndex((row) => row.kind === "folder" && row.cwd === state.focusedFolderCwd);
   return Math.max(0, index);
 }
 
-function focusRow(state: FleetState, row: FleetRow | undefined): FleetState {
-  if (row === undefined) return state;
+function navigableListRowIndex(
+  rows: readonly FleetListRow[],
+  targetIndex: number,
+  direction: -1 | 1,
+): number {
+  if (rows.length === 0) return -1;
+  const target = Math.max(0, Math.min(rows.length - 1, targetIndex));
+  for (
+    let index = target;
+    index >= 0 && index < rows.length;
+    index += direction
+  ) {
+    if (isFocusableListRow(rows[index])) return index;
+  }
+  for (
+    let index = target - direction;
+    index >= 0 && index < rows.length;
+    index -= direction
+  ) {
+    if (isFocusableListRow(rows[index])) return index;
+  }
+  return -1;
+}
+
+function isFocusableListRow(row: FleetListRow | undefined): row is FleetRow {
+  return row !== undefined && row.kind !== "spacer" && row.kind !== "section";
+}
+
+function focusRow(state: FleetState, row: FleetListRow | undefined): FleetState {
+  if (!isFocusableListRow(row)) return state;
   return row.kind === "folder"
     ? { ...state, focusedFolderCwd: row.cwd }
     : { ...state, focusedFolderCwd: undefined, selectedSessionId: row.thread.record.id };
+}
+
+function clampThreadListScrollOffset(
+  offset: number,
+  contentHeight: number,
+  viewportHeight: number,
+): number {
+  if (viewportHeight <= 0 || contentHeight <= viewportHeight) return 0;
+  return Math.max(0, Math.min(contentHeight - viewportHeight, offset));
+}
+
+function scrollFocusedRowIntoView(
+  state: FleetState,
+  rows: readonly FleetListRow[],
+  viewportHeight: number,
+): FleetState {
+  const focusedIndex = focusedListRowIndex(rows, state);
+  let offset = clampThreadListScrollOffset(
+    state.threadListScrollOffset,
+    rows.length,
+    viewportHeight,
+  );
+  if (focusedIndex < offset) {
+    offset = focusedIndex;
+  } else if (focusedIndex >= offset + viewportHeight) {
+    offset = focusedIndex - viewportHeight + 1;
+  }
+  offset = clampThreadListScrollOffset(offset, rows.length, viewportHeight);
+  return { ...state, threadListScrollOffset: offset };
 }
 
 function setCollapsed(state: FleetState, cwd: string, collapsed: boolean): FleetState {
@@ -2436,59 +2703,17 @@ function setCollapsed(state: FleetState, cwd: string, collapsed: boolean): Fleet
   };
 }
 
-function sessionTree(snapshot: FleetSnapshot, rootSessionId: string): FleetThread[] {
-  const byId = new Map(snapshot.threads.map((thread) => [thread.record.id, thread]));
-  const tree: FleetThread[] = [];
-  const visited = new Set<string>();
-  const visit = (sessionId: string) => {
-    if (visited.has(sessionId)) return;
-    visited.add(sessionId);
-    const thread = byId.get(sessionId);
-    if (thread === undefined) return;
-    tree.push(thread);
-    for (const childId of thread.record.childIds) visit(childId);
-  };
-  visit(rootSessionId);
-  return tree;
+function threadSubject(record: SessionRecord): string {
+  return record.kind === "orchestrator" ? "orchestrator" : "thread";
 }
 
-function stoppingTreeNotice(
-  root: SessionRecord,
-  childCount: number,
-  terminal: number,
-  total: number,
-): string {
-  return `Stopping ${treeSubject(root.kind ?? "worker", childCount, "worker")} · ${terminal}/${total} stopped`;
-}
-
-function deleteTreeConfirmation(root: SessionRecord, childCount: number): string {
-  if (root.kind !== "orchestrator") return "Delete thread? press ctrl+x again";
-  if (childCount === 0) return "Delete orchestrator? press ctrl+x again";
-  return `Delete ${treeSubject("orchestrator", childCount, "child thread")}? press ctrl+x again`;
-}
-
-function stoppingProgressNotice(progress: SessionTreeProgress): string {
-  return `Stopping ${treeSubject(progress.rootKind, progress.childCount, "worker")} · ${progress.terminal}/${progress.total} stopped`;
-}
-
-function stoppedTreeNotice(progress: SessionTreeProgress): string {
-  return `Stopped ${treeSubject(progress.rootKind, progress.childCount, "worker")}`;
-}
-
-function deletedTreeNotice(progress: SessionTreeProgress): string {
-  if (progress.rootKind !== "orchestrator") return "Deleted thread";
-  if (progress.childCount === 0) return "Deleted orchestrator";
-  return `Deleted ${treeSubject(progress.rootKind, progress.childCount, "child thread")}`;
-}
-
-function treeSubject(
-  rootKind: "worker" | "orchestrator",
-  childCount: number,
-  childLabel: "worker" | "child thread",
-): string {
-  const root = rootKind === "orchestrator" ? "orchestrator" : "agent";
-  if (childCount === 0) return root;
-  return `${root} + ${childCount} ${childLabel}${childCount === 1 ? "" : "s"}`;
+function roleSections(threads: readonly FleetThread[]): Array<{ label: string; threads: FleetThread[] }> {
+  const orcs = threads.filter(({ record }) => record.kind === "orchestrator");
+  const workers = threads.filter(({ record }) => record.kind !== "orchestrator");
+  return [
+    ...(orcs.length === 0 ? [] : [{ label: "Orcs", threads: orcs }]),
+    ...(workers.length === 0 ? [] : [{ label: "Workers", threads: workers }]),
+  ];
 }
 
 function groupThreads(threads: readonly FleetThread[]): Array<{ cwd: string; threads: FleetThread[] }> {
@@ -2502,6 +2727,9 @@ function groupThreads(threads: readonly FleetThread[]): Array<{ cwd: string; thr
     .map(([cwd, entries]) => ({
       cwd,
       threads: entries.sort((left, right) => {
+        const leftRole = left.record.kind === "orchestrator" ? 0 : 1;
+        const rightRole = right.record.kind === "orchestrator" ? 0 : 1;
+        if (leftRole !== rightRole) return leftRole - rightRole;
         if (left.record.pinned !== right.record.pinned) return left.record.pinned === true ? -1 : 1;
         const leftOrder = left.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
         const rightOrder = right.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
@@ -2734,9 +2962,11 @@ function relativeTime(timestamp: string, now: number): string {
 function statusText(status: string, pendingDelete: boolean, color: boolean): string {
   const label = status.trim();
   if (pendingDelete || label === "Failed") return paint(status, "alert", color);
-  // Only the two states that want the operator carry a hue. Working, Stopping,
-  // Stopped and Interrupted are progress, not a request, and stay greyscale.
-  if (label === "Done" || label === "Needs input") return paint(status, "attention", color);
+  // Four states carry a hue: finished, blocked, failing, and the one live thread.
+  // Stopping, Stopped and Interrupted are inert, not a request, and stay greyscale.
+  if (label === "Done") return paint(status, "done", color);
+  if (label === "Needs input") return paint(status, "attention", color);
+  if (label === "Working") return paint(status, "working", color);
   return paint(status, "muted", color);
 }
 

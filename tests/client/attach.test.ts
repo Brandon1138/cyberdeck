@@ -25,15 +25,31 @@ class FakeOutput {
 class FakeTransport implements AttachTransport {
   readonly sent: ClientFrame[] = [];
   readonly requests: Array<{ method: string; params: unknown }> = [];
-  readonly close = vi.fn();
+  /** Requests and the close, in the order they happened. */
+  readonly events: string[] = [];
+  /** Held open to observe what the attachment does while a detach is still in flight. */
+  detachGate: Promise<unknown> | undefined;
+  detachFailure: Error | undefined;
+  readonly close = vi.fn(() => {
+    this.events.push("close");
+    this.closed = true;
+  });
+  private closed = false;
   private readonly frameListeners = new Set<(frame: ServerFrame) => void>();
   private readonly closeListeners = new Set<() => void>();
 
   constructor(private readonly sessionKind?: "worker" | "orchestrator") {}
 
   async request<T>(method: string, params: unknown): Promise<T> {
+    // The real client ends its socket on close, so anything sent afterwards never reaches the broker.
+    if (this.closed) throw new Error("Broker connection is closed");
     this.requests.push({ method, params });
-    if (method === "session.detach") return { detached: true } as T;
+    this.events.push(`request:${method}`);
+    if (method === "session.detach") {
+      if (this.detachGate !== undefined) await this.detachGate;
+      if (this.detachFailure !== undefined) throw this.detachFailure;
+      return { detached: true } as T;
+    }
     this.emitFrame({
       type: "output",
       sessionId: TEST_SESSION_ID,
@@ -179,6 +195,60 @@ describe("attachSession", () => {
     expect(transport.sent.some((frame) => frame.type === "detach")).toBe(false);
   });
 
+  it("finishes the detach RPC before it closes the transport it travelled over", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport("orchestrator");
+    let releaseDetach = () => {};
+    transport.detachGate = new Promise<void>((resolve) => { releaseDetach = resolve; });
+    const attached = attachSession({
+      sessionId: TEST_SESSION_ID,
+      mode: "control",
+      transport,
+      input,
+      output: new FakeOutput(),
+      signals: new EventEmitter(),
+      detachIdentity: "operator:one",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    input.emit("data", Buffer.from([0x1d]));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The terminal is already back, but the broker has not answered yet, so the socket has to live.
+    expect(input.setRawMode).toHaveBeenLastCalledWith(false);
+    expect(transport.close).not.toHaveBeenCalled();
+
+    releaseDetach();
+    await expect(attached).resolves.toBe(0);
+    expect(transport.events).toEqual(["request:session.attach", "request:session.detach", "close"]);
+    expect(transport.close).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces a refused detach instead of reporting a release that never happened", async () => {
+    const input = new FakeInput();
+    const transport = new FakeTransport("orchestrator");
+    transport.detachFailure = new Error("SESSION_NOT_FOUND");
+    const onExplicitDetach = vi.fn();
+    const attached = attachSession({
+      sessionId: TEST_SESSION_ID,
+      mode: "control",
+      transport,
+      input,
+      output: new FakeOutput(),
+      signals: new EventEmitter(),
+      detachIdentity: "operator:one",
+      onExplicitDetach,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).rejects.toThrow("SESSION_NOT_FOUND");
+    expect(onExplicitDetach).not.toHaveBeenCalled();
+    // A failed detach still ends the attachment, so the socket is not left behind.
+    expect(transport.close).toHaveBeenCalledOnce();
+    expect(input.setRawMode).toHaveBeenLastCalledWith(false);
+  });
+
   it("keeps watch mode read-only and reports socket closure as non-zero", async () => {
     const input = new FakeInput();
     const transport = new FakeTransport();
@@ -305,6 +375,64 @@ describe("attachSession", () => {
     await expect(attached).resolves.toBe(0);
     expect(input.setRawMode).toHaveBeenLastCalledWith(false);
     expect(transport.close).not.toHaveBeenCalled();
+  });
+
+  it("returns visibly instead of freezing when the broker marks the provider session failed", async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const transport = new FakeTransport("orchestrator");
+    const attached = attachSession({
+      sessionId: TEST_SESSION_ID,
+      mode: "control",
+      transport,
+      input,
+      output,
+      signals: new EventEmitter(),
+      closeTransport: false,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    transport.emitFrame({
+      type: "session-failed",
+      sessionId: TEST_SESSION_ID,
+      code: "SESSION_ERRORED",
+      message: "provider API rejected the request",
+    });
+
+    await expect(attached).resolves.toBe(1);
+    expect(Buffer.concat(output.chunks).toString()).toContain(
+      "Cyberdeck SESSION_ERRORED: provider API rejected the request",
+    );
+    expect(input.setRawMode).toHaveBeenLastCalledWith(false);
+    expect(transport.close).not.toHaveBeenCalled();
+  });
+
+  it("surfaces asynchronous input rejection instead of silently discarding keystrokes", async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const transport = new FakeTransport("orchestrator");
+    const attached = attachSession({
+      sessionId: TEST_SESSION_ID,
+      mode: "control",
+      transport,
+      input,
+      output,
+      signals: new EventEmitter(),
+      closeTransport: false,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    transport.emitFrame({
+      type: "protocol-error",
+      code: "SESSION_NOT_ACTIVE",
+      message: "Session is not active",
+    });
+
+    await expect(attached).resolves.toBe(1);
+    expect(Buffer.concat(output.chunks).toString()).toContain(
+      "Cyberdeck SESSION_NOT_ACTIVE: Session is not active",
+    );
+    expect(input.setRawMode).toHaveBeenLastCalledWith(false);
   });
 
   it("detaches a claimed controller if rendering the replay fails", async () => {

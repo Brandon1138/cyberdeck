@@ -18,6 +18,7 @@ import {
 class FakePty implements PtyHandle {
   readonly pid: number;
   killCount = 0;
+  readonly killSignals: Array<string | undefined> = [];
   readonly writes: Buffer[] = [];
   private readonly outputListeners = new Set<(chunk: Buffer) => void>();
   private readonly exitListeners = new Set<(exitCode: number, signal?: number) => void>();
@@ -30,8 +31,9 @@ class FakePty implements PtyHandle {
   write(data: Buffer): void { this.writes.push(Buffer.from(data)); }
   resize(): void {}
   snapshot(): Buffer { return Buffer.from(this.replay); }
-  kill(): void {
+  kill(signal?: string): void {
     this.killCount += 1;
+    this.killSignals.push(signal);
     if (this.exitOnKill) this.emitExit(0);
   }
   onOutput(listener: (chunk: Buffer) => void): () => void {
@@ -130,7 +132,21 @@ describe("SessionRegistry", () => {
   it("records provider, optional model, opaque role, and PID", async () => {
     const { registry } = harness();
     const record = await registry.start(request({ provider: "claude", model: "opus", role: "writer" }));
-    expect(record).toMatchObject({ provider: "claude", model: "opus", role: "writer", pid: 1000 });
+    expect(record).toMatchObject({
+      provider: "claude",
+      model: "opus",
+      role: "writer",
+      pid: 1000,
+      generation: 1,
+    });
+  });
+
+  it("increments the durable process generation on resume", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request());
+    ptys[0]!.emitExit(0);
+
+    await expect(registry.resume(record.id)).resolves.toMatchObject({ generation: 2 });
   });
 
   it("rehydrates a conversation lost mid-turn as interrupted and resumes exact provider state", async () => {
@@ -518,12 +534,16 @@ describe("SessionRegistry", () => {
     expect(registry.get(record.id).attachmentState).toBe("detached");
   });
 
-  it("stops a session by killing its PTY exactly once", async () => {
-    const { registry, ptys } = harness();
+  it("keeps repeated graceful stops idempotent and reserves SIGKILL for explicit force", async () => {
+    const { registry, ptys } = harness({ exitOnKill: false });
     const record = await registry.start(request());
     await registry.stop(record.id);
     await registry.stop(record.id);
     expect(ptys[0]!.killCount).toBe(1);
+    expect(ptys[0]!.killSignals).toEqual(["SIGTERM"]);
+
+    registry.forceStop(record.id);
+    expect(ptys[0]!.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 
   it("durably marks a naturally completed session as stopped without rewriting its exit result", async () => {
@@ -571,6 +591,62 @@ describe("SessionRegistry", () => {
     expect(events.at(-1)).toMatchObject({ type: "session.resumed", sessionId: record.id });
   });
 
+  it("lets a replaced PTY's late exit fall on the floor rather than on the resumed session", async () => {
+    // A real PTY acknowledges a kill asynchronously, so the orphan's exit and any trailing output
+    // arrive after the replacement is already live.
+    const { registry, ptys } = harness({ exitOnKill: false });
+    const record = await registry.start(request());
+    ptys[0]!.emitOutput("API Error: 401 authentication_error\n");
+    await vi.waitFor(() => expect(registry.get(record.id).executionState).toBe("errored"));
+
+    await registry.resume(record.id);
+    const delivered: string[] = [];
+    const output = vi.fn((chunk: Buffer) => { delivered.push(chunk.toString("utf8")); });
+    const ended = vi.fn();
+    await registry.attach(record.id, "human", "control", output, ended);
+    expect(ptys[0]!.killCount).toBe(1);
+
+    ptys[0]!.emitOutput("orphan chatter\n");
+    ptys[0]!.emitExit(0);
+
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "active",
+      attachmentState: "controlled",
+      exitCode: null,
+      pid: 1001,
+    });
+    expect(ended).not.toHaveBeenCalled();
+    expect(delivered).not.toContain("orphan chatter\n");
+
+    ptys[1]!.emitOutput("resumed and working\n");
+    expect(delivered).toContain("resumed and working\n");
+  });
+
+  it("keeps the outgoing PTY when the resume spawn fails, so the process can still be stopped", async () => {
+    const ptys: FakePty[] = [];
+    const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => {
+      if (ptys.length === 1) throw new Error("provider binary vanished");
+      const pty = new FakePty(1000 + ptys.length, false);
+      ptys.push(pty);
+      return pty;
+    });
+    const registry = new SessionRegistry({
+      adapters,
+      ptyFactory,
+      journal: { append: async () => {} },
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+    const record = await registry.start(request());
+    ptys[0]!.emitOutput("API Error: 401 authentication_error\n");
+    await vi.waitFor(() => expect(registry.get(record.id).executionState).toBe("errored"));
+
+    await expect(registry.resume(record.id)).rejects.toThrow("provider binary vanished");
+
+    await registry.stop(record.id);
+    expect(ptys[0]!.killCount).toBe(2);
+  });
+
   it("submits a logical message through the selected provider adapter", async () => {
     const { registry, ptys, transcripts } = harness();
     const record = await registry.start(request());
@@ -607,18 +683,41 @@ describe("SessionRegistry", () => {
     expect(events.at(-1)).toMatchObject({ type: "session.deleted", sessionId: record.id });
   });
 
-  it("does not delete a parent while child thread records still exist", async () => {
-    const { registry } = harness();
-    const parent = await registry.start(request());
-    const child = await registry.start(request({ parentSessionId: parent.id }));
+  it("deletes an orchestrator without deleting or corrupting its worker threads", async () => {
+    const { registry, ptys, transcripts } = harness();
+    const parent = await registry.start(request({ kind: "orchestrator", role: "orchestrator" }));
+    const child = await registry.start(request({
+      provider: "claude",
+      cwd: "/tmp/worker-repo",
+      model: "opus",
+      parentSessionId: parent.id,
+      kind: "worker",
+      role: "worker",
+    }), "Preserve this worker transcript");
+    ptys[1]!.emitOutput("Worker result remains available");
     await registry.stop(parent.id);
     await registry.stop(child.id);
-    await expect(registry.delete(parent.id)).rejects.toMatchObject({ code: "SESSION_HAS_CHILDREN" });
-    await registry.delete(child.id);
     await expect(registry.delete(parent.id)).resolves.toBeUndefined();
+
+    expect(() => registry.get(parent.id)).toThrow();
+    const survivingWorker = registry.get(child.id);
+    expect(survivingWorker).toMatchObject({
+      id: child.id,
+      provider: "claude",
+      model: "opus",
+      cwd: "/tmp/worker-repo",
+      executionState: "cancelled",
+    });
+    expect(survivingWorker).not.toHaveProperty("parentSessionId");
+    expect(registry.snapshot(child.id).toString()).toContain("Worker result remains available");
+    expect(transcripts).toContainEqual(expect.objectContaining({
+      sessionId: child.id,
+      kind: "prompt",
+      text: "Preserve this worker transcript",
+    }));
   });
 
-  it("stops an owned tree from the root and deletes terminal records leaf-first", async () => {
+  it("stops an owned tree from the root without deleting its terminal records", async () => {
     const { registry, ptys } = harness();
     const parent = await registry.start(request({ kind: "orchestrator", role: "orchestrator" }));
     const first = await registry.start(request({ parentSessionId: parent.id, kind: "worker" }));
@@ -633,13 +732,10 @@ describe("SessionRegistry", () => {
     });
     expect(ptys.map((pty) => pty.killCount)).toEqual([1, 1, 1]);
 
-    await expect(registry.deleteTree(parent.id)).resolves.toMatchObject({ deleted: 3 });
-    expect(registry.list()).toEqual([]);
-    expect(() => registry.get(first.id)).toThrow();
-    expect(() => registry.get(second.id)).toThrow();
+    expect(registry.list().map(({ id }) => id)).toEqual(expect.arrayContaining([parent.id, first.id, second.id]));
   });
 
-  it("keeps a tree visible when any process has not confirmed exit and allows cleanup retry", async () => {
+  it("keeps a tree visible when any process has not confirmed exit", async () => {
     const { registry, ptys } = harness({ exitOnKill: false });
     const parent = await registry.start(request({ kind: "orchestrator" }));
     await registry.start(request({ parentSessionId: parent.id, kind: "worker" }));
@@ -649,10 +745,8 @@ describe("SessionRegistry", () => {
       terminal: 0,
       stopping: 2,
     });
-    await expect(registry.deleteTree(parent.id)).rejects.toMatchObject({ code: "SESSION_TREE_STILL_ACTIVE" });
-
     ptys.forEach((pty) => pty.emitExit(0));
-    await expect(registry.deleteTree(parent.id)).resolves.toMatchObject({ deleted: 2 });
+    expect(registry.list()).toHaveLength(2);
   });
 
   it("refuses new children as soon as their parent begins stopping", async () => {

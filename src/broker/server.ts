@@ -36,10 +36,12 @@ import {
 } from "../domain/orchestrator.js";
 import {
   AgentActorParamsSchema,
+  AgentInspectOrchestratorParamsSchema,
   AgentListThreadsParamsSchema,
   AgentReadParamsSchema,
   AgentStartWorkerParamsSchema,
   AgentStartWorkersParamsSchema,
+  AgentStopOrchestratorParamsSchema,
   AgentWaitWorkersParamsSchema,
   type AgentControlService,
 } from "../orchestration/agent-control-service.js";
@@ -275,6 +277,20 @@ export class BrokerServer {
         const { actorSessionId } = AgentActorParamsSchema.parse(frame.params);
         return this.requireAgentControl().describeActor(actorSessionId);
       }
+      case "agent.orchestrator.inspect":
+        return this.requireAgentControl().inspectOrchestrator(
+          AgentInspectOrchestratorParamsSchema.parse(frame.params),
+        );
+      case "agent.orchestrator.stop":
+        return this.requireAgentControl().stopOrchestrator(
+          AgentStopOrchestratorParamsSchema.parse(frame.params),
+          "graceful",
+        );
+      case "agent.orchestrator.forceStop":
+        return this.requireAgentControl().stopOrchestrator(
+          AgentStopOrchestratorParamsSchema.parse(frame.params),
+          "force",
+        );
       case "agent.thread.list":
         return this.requireAgentControl().listThreads(AgentListThreadsParamsSchema.parse(frame.params));
       case "agent.thread.read": {
@@ -338,22 +354,24 @@ export class BrokerServer {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         return this.options.registry.stopTree(sessionId);
       }
+      case "session.stopOne": {
+        const { sessionId } = SessionIdParamsSchema.parse(frame.params);
+        await this.options.registry.stop(sessionId);
+        return { stopped: true };
+      }
       case "session.resume": {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         return this.options.registry.resume(sessionId);
       }
       case "session.delete": {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
-        await this.options.registry.delete(sessionId);
-        return { deleted: true };
-      }
-      case "session.deleteTree": {
-        const { sessionId } = SessionIdParamsSchema.parse(frame.params);
-        return this.options.registry.deleteTree(sessionId, async () => {
-          if (this.options.registry.get(sessionId).kind === "orchestrator") {
+        const record = this.options.registry.get(sessionId);
+        await this.options.registry.delete(sessionId, async () => {
+          if (record.kind === "orchestrator") {
             await this.options.orchestrators?.resetSessionBinding(sessionId);
           }
         });
+        return { deleted: true };
       }
       case "session.rename": {
         const { sessionId, name } = RenameSessionParamsSchema.parse(frame.params);
@@ -586,6 +604,15 @@ export class BrokerServer {
           context.attachments.delete(sessionId);
           this.send(context.socket, { type: "session-ended", sessionId, exitCode });
         },
+        (failure) => {
+          context.attachments.delete(sessionId);
+          this.send(context.socket, {
+            type: "session-failed",
+            sessionId,
+            code: failure.code,
+            message: failure.message,
+          });
+        },
       );
       return { session: this.options.registry.get(sessionId), data: replay.toString("base64") };
     } catch (error) {
@@ -609,7 +636,7 @@ export class BrokerServer {
   private sendProtocolFailure(socket: Socket, error: unknown): void {
     this.send(socket, {
       type: "protocol-error",
-      code: "INVALID_FRAME",
+      code: this.errorCode(error),
       message: error instanceof Error ? error.message : "Protocol operation failed",
     } satisfies ProtocolErrorFrame);
   }

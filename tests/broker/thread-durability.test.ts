@@ -299,6 +299,22 @@ describe("a session that dies inside a live process", () => {
     await registry.stop(record.id);
     expect(ptys[0]!.killCount).toBe(1);
   });
+
+  it("releases an attached controller with a structured failure instead of leaving a frozen pane", async () => {
+    const { registry, ptys } = harness({ exitOnKill: false });
+    const record = await registry.start(request(), "do the work");
+    const failed = vi.fn();
+    await registry.attach(record.id, "controller", "control", () => {}, () => {}, failed);
+
+    ptys[0]!.emitOutput(fatal);
+    await settle();
+
+    expect(failed).toHaveBeenCalledWith({
+      code: "SESSION_ERRORED",
+      message: expect.stringContaining("API Error: 400"),
+    });
+    expect(registry.get(record.id).attachmentState).toBe("detached");
+  });
 });
 
 describe("thread retention", () => {

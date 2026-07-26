@@ -48,6 +48,7 @@ export type PtyFactory = (spec: ProviderLaunchSpec, replayBytes: number) => PtyH
 export type AttachmentMode = "control" | "watch";
 export type OutputSink = (chunk: Buffer) => void;
 export type ExitSink = (exitCode: number) => void;
+export type FailureSink = (failure: { code: string; message: string }) => void;
 
 interface JournalLike {
   append(event: BrokerEvent): Promise<void>;
@@ -68,11 +69,13 @@ interface Controller {
   clientId: string;
   output: OutputSink;
   ended: ExitSink;
+  failed: FailureSink;
 }
 
 interface Watcher {
   output: OutputSink;
   ended: ExitSink;
+  failed: FailureSink;
 }
 
 /**
@@ -92,6 +95,7 @@ interface RuntimeSession {
   controller?: Controller;
   watchers: Map<string, Watcher>;
   stopRequested: boolean;
+  stopRequestedAt?: string;
   activity: ProviderTerminalActivity;
   observedWorking: boolean;
   completedTurns: number;
@@ -143,10 +147,6 @@ export interface SessionTreeProgress {
   terminal: number;
 }
 
-export interface SessionTreeDeleteResult extends SessionTreeProgress {
-  deleted: number;
-}
-
 export type ReattachTarget =
   | { status: "ready"; record: SessionRecord; requiresResume: boolean }
   | { status: "unavailable"; record: SessionRecord }
@@ -175,8 +175,6 @@ export class RegistryError extends Error {
       | "NOT_SESSION_CONTROLLER"
       | "SESSION_BUSY"
       | "SESSION_STILL_ACTIVE"
-      | "SESSION_HAS_CHILDREN"
-      | "SESSION_TREE_STILL_ACTIVE"
       | "PARENT_SESSION_NOT_ACTIVE"
       | "INVALID_SESSION_CWD",
     message: string,
@@ -255,6 +253,7 @@ export class SessionRegistry {
       ...parsed,
       kind: parsed.kind ?? "worker",
       id,
+      generation: 1,
       createdAt: now,
       updatedAt: now,
       executionState: "starting",
@@ -303,8 +302,7 @@ export class SessionRegistry {
       launchTail: Promise.resolve(),
     };
     this.sessions.set(id, runtime);
-    pty.onOutput((chunk) => this.broadcast(runtime, chunk));
-    pty.onExit((exitCode, signal) => this.handleExit(runtime, exitCode, signal));
+    this.adoptPty(runtime, pty);
 
     if (parsed.parentSessionId !== undefined) {
       const parent = this.requireRuntime(parsed.parentSessionId);
@@ -428,6 +426,7 @@ export class SessionRegistry {
     mode: AttachmentMode,
     output: OutputSink,
     ended: ExitSink = () => {},
+    failed: FailureSink = () => {},
   ): Promise<Buffer> {
     const runtime = this.requireRuntime(sessionId);
     if (runtime.record.executionState !== "active") {
@@ -438,10 +437,10 @@ export class SessionRegistry {
       if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
         throw new RegistryError("SESSION_ALREADY_CONTROLLED", "Session already has a controller");
       }
-      runtime.controller = { clientId, output, ended };
+      runtime.controller = { clientId, output, ended, failed };
       runtime.watchers.delete(clientId);
     } else {
-      runtime.watchers.set(clientId, { output, ended });
+      runtime.watchers.set(clientId, { output, ended, failed });
     }
     this.updateAttachmentState(runtime);
     try {
@@ -541,6 +540,18 @@ export class SessionRegistry {
     return this.requireRuntime(sessionId).pty?.snapshot() ?? Buffer.alloc(0);
   }
 
+  ownsProcess(sessionId: string): boolean {
+    return this.requireRuntime(sessionId).pty !== undefined;
+  }
+
+  isStopRequested(sessionId: string): boolean {
+    return this.requireRuntime(sessionId).stopRequested;
+  }
+
+  stopRequestedAt(sessionId: string): string | undefined {
+    return this.requireRuntime(sessionId).stopRequestedAt;
+  }
+
   async stop(sessionId: string): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
     if (runtime.record.exitCode !== null) {
@@ -552,22 +563,34 @@ export class SessionRegistry {
       return;
     }
     if (runtime.stopRequested) {
-      this.requirePty(runtime).kill();
+      // A repeated graceful request is idempotent. Force escalation is deliberately available
+      // only through `forceStop`, where broker policy can require a grace period and audit it.
       return;
     }
     // An errored session still owns a running OS process, so stop must be able to reach it even
     // though the broker no longer treats it as active.
     if (runtime.record.executionState !== "active" && runtime.record.executionState !== "errored") return;
     runtime.stopRequested = true;
+    runtime.stopRequestedAt = new Date().toISOString();
     runtime.record.executionState = "cancelled";
     // Shutting the broker down does not undo what an agent already delivered. A thread that had
     // finished its task keeps that outcome through the kill, so it rehydrates as Done rather than
     // as Stopped. An operator-initiated stop still reads as Stopped — that is their action.
     runtime.outcomePreserved = this.shuttingDown && runtime.record.attentionState === "done";
     if (runtime.outcomePreserved !== true) await this.setAttention(runtime, "stopping", true);
-    this.requirePty(runtime).kill();
+    this.requirePty(runtime).kill("SIGTERM");
     await this.appendEvent("session.stopped", sessionId, {});
     await this.appendTranscript(sessionId, "lifecycle", "broker", "session stopped", {});
+  }
+
+  /** Force only one already-stopping session. Child sessions are deliberately untouched. */
+  forceStop(sessionId: string): void {
+    const runtime = this.requireRuntime(sessionId);
+    if (runtime.record.exitCode !== null) return;
+    if (!runtime.stopRequested) {
+      throw new RegistryError("SESSION_NOT_ACTIVE", "Graceful stop must be requested before force");
+    }
+    this.requirePty(runtime).kill("SIGKILL");
   }
 
   async stopTree(sessionId: string): Promise<SessionTreeProgress> {
@@ -599,9 +622,16 @@ export class SessionRegistry {
       throw new RegistryError("SESSION_ALREADY_ACTIVE", "Session is already active");
     }
 
+    // The outgoing PTY stops speaking for this session here, before anything is awaited. A kill is
+    // acknowledged asynchronously, so its exit would otherwise land in the middle of the respawn
+    // and tear down the session it was replaced by — rewriting executionState, dropping the new
+    // controller and watchers, and queueing a launch-artifact cleanup onto the fresh resume.
+    const previousPty = runtime.pty;
+    delete runtime.pty;
+
     // An errored session's process outlived its provider session. Resuming would otherwise leave
     // that orphan running alongside the replacement, so it is killed before the respawn.
-    if (runtime.record.executionState === "errored") runtime.pty?.kill();
+    if (runtime.record.executionState === "errored") previousPty?.kill();
 
     const adapter = this.requireAdapter(runtime.record.provider);
     const record = this.cloneRecord(runtime.record);
@@ -609,12 +639,13 @@ export class SessionRegistry {
     // A resume spec can name provider-owned artifacts (Claude's payload files) that the previous
     // exit removed, so wait for any in-flight cleanup and then rebuild them before the spawn.
     await runtime.launchTail;
-    const pty = await this.spawnPreparedLaunch(adapter, record, resumeSpec);
-    runtime.pty = pty;
+    const pty = await this.resumePty(runtime, adapter, record, resumeSpec, previousPty);
     runtime.stopRequested = false;
+    delete runtime.stopRequestedAt;
     delete runtime.controller;
     runtime.watchers.clear();
     runtime.record.pid = pty.pid;
+    runtime.record.generation = (runtime.record.generation ?? 1) + 1;
     runtime.record.executionState = "active";
     runtime.record.attachmentState = "detached";
     runtime.record.exitCode = null;
@@ -626,8 +657,7 @@ export class SessionRegistry {
     runtime.fatalReported = false;
     if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
     delete runtime.idleTimer;
-    pty.onOutput((chunk) => this.broadcast(runtime, chunk));
-    pty.onExit((exitCode, signal) => this.handleExit(runtime, exitCode, signal));
+    this.adoptPty(runtime, pty);
     await this.appendEvent("session.resumed", sessionId, {
       provider: runtime.record.provider,
       model: runtime.record.model ?? null,
@@ -640,7 +670,7 @@ export class SessionRegistry {
     return this.cloneRecord(runtime.record);
   }
 
-  async delete(sessionId: string): Promise<void> {
+  async delete(sessionId: string, beforeDelete?: () => Promise<void>): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
     if (
       runtime.record.executionState === "active"
@@ -649,13 +679,19 @@ export class SessionRegistry {
     ) {
       throw new RegistryError("SESSION_STILL_ACTIVE", "Stop the agent before deleting its thread");
     }
-    const existingChildren = runtime.record.childIds.filter((childId) => this.sessions.has(childId));
-    if (existingChildren.length > 0) {
-      throw new RegistryError(
-        "SESSION_HAS_CHILDREN",
-        "Delete this thread's child agents before deleting the parent thread",
-      );
-    }
+    await beforeDelete?.();
+
+    // Workers outlive an orchestrator. Detach their live parent reference before
+    // removing the parent record, leaving each worker's own durable state intact.
+    const children = runtime.record.childIds
+      .map((childId) => this.sessions.get(childId))
+      .filter((child): child is RuntimeSession => child !== undefined);
+    await Promise.all(children.map(async (child) => {
+      if (child.record.parentSessionId !== sessionId) return;
+      delete child.record.parentSessionId;
+      child.record.updatedAt = new Date().toISOString();
+      await this.persist(child);
+    }));
 
     await this.appendEvent("session.deleted", sessionId, {
       executionState: runtime.record.executionState,
@@ -673,26 +709,6 @@ export class SessionRegistry {
     await this.cleanupLaunchArtifacts(runtime.record, "session-deleted");
     await this.options.store?.delete(sessionId);
     this.sessions.delete(sessionId);
-  }
-
-  async deleteTree(
-    sessionId: string,
-    beforeRootDelete?: () => Promise<void>,
-  ): Promise<SessionTreeDeleteResult> {
-    const tree = this.sessionTree(sessionId);
-    const progress = this.progressForTree(tree);
-    if (progress.terminal !== progress.total) {
-      throw new RegistryError(
-        "SESSION_TREE_STILL_ACTIVE",
-        `Stop the full agent tree before deleting it (${progress.terminal}/${progress.total} stopped)`,
-      );
-    }
-
-    const descendantsLeafFirst = tree.slice(1).reverse();
-    for (const runtime of descendantsLeafFirst) await this.delete(runtime.record.id);
-    await beforeRootDelete?.();
-    await this.delete(sessionId);
-    return { ...progress, deleted: progress.total };
   }
 
   async rename(sessionId: string, name: string): Promise<SessionRecord> {
@@ -716,7 +732,7 @@ export class SessionRegistry {
   async reorder(sessionId: string, direction: "up" | "down"): Promise<SessionRecord[]> {
     const runtime = this.requireRuntime(sessionId);
     const group = [...this.sessions.values()]
-      .filter((candidate) => candidate.record.cwd === runtime.record.cwd)
+      .filter((candidate) => candidate.record.cwd === runtime.record.cwd && candidate.record.kind === runtime.record.kind)
       .sort((left, right) => this.compareDisplayOrder(left.record, right.record));
     const index = group.findIndex((candidate) => candidate.record.id === sessionId);
     const target = direction === "up" ? index - 1 : index + 1;
@@ -874,8 +890,20 @@ export class SessionRegistry {
     if (this.observeFatalError(runtime, replay)) {
       // The bytes still reach anyone attached — the operator should be able to read the fault —
       // but no activity is derived from them. A dead session has no activity to derive.
-      runtime.controller?.output(chunk);
-      for (const watcher of runtime.watchers.values()) watcher.output(chunk);
+      const controller = runtime.controller;
+      const watchers = [...runtime.watchers.values()];
+      controller?.output(chunk);
+      for (const watcher of watchers) watcher.output(chunk);
+      delete runtime.controller;
+      runtime.watchers.clear();
+      this.updateAttachmentState(runtime);
+      const failure = {
+        code: "SESSION_ERRORED",
+        message: runtime.latestResult ?? "Provider session failed",
+      };
+      controller?.failed(failure);
+      for (const watcher of watchers) watcher.failed(failure);
+      void this.persist(runtime).catch(() => undefined);
       this.notifySessionUpdate(runtime.record.id);
       return;
     }
@@ -994,6 +1022,48 @@ export class SessionRegistry {
       .then(() => this.cleanupLaunchArtifacts(runtime.record, "session-exited"))
       .catch(() => undefined);
     this.notifySessionUpdate(runtime.record.id);
+  }
+
+  /**
+   * Bind a PTY's callbacks to that PTY, not merely to the session it currently drives.
+   *
+   * A session outlives its processes: a resume replaces the handle, and the outgoing one keeps
+   * reporting output and its exit long after it has stopped representing the session. Every
+   * callback therefore checks that it is still the adopted handle before it is allowed to touch
+   * shared state.
+   */
+  private adoptPty(runtime: RuntimeSession, pty: PtyHandle): void {
+    runtime.pty = pty;
+    pty.onOutput((chunk) => {
+      if (runtime.pty !== pty) return;
+      this.broadcast(runtime, chunk);
+    });
+    pty.onExit((exitCode, signal) => {
+      if (runtime.pty !== pty) return;
+      this.handleExit(runtime, exitCode, signal);
+    });
+  }
+
+  /**
+   * Spawn the replacement PTY for a resume, restoring the outgoing handle if the spawn fails.
+   *
+   * `resume` releases the old handle up front so its exit cannot land on the new session. When no
+   * new handle arrives, the session is left exactly as the resume found it, so an operator can
+   * still stop the process the failed resume did not replace.
+   */
+  private async resumePty(
+    runtime: RuntimeSession,
+    adapter: ProviderAdapter,
+    record: SessionRecord,
+    spec: ProviderLaunchSpec,
+    previousPty: PtyHandle | undefined,
+  ): Promise<PtyHandle> {
+    try {
+      return await this.spawnPreparedLaunch(adapter, record, spec);
+    } catch (error) {
+      if (runtime.pty === undefined && previousPty !== undefined) runtime.pty = previousPty;
+      throw error;
+    }
   }
 
   /**
