@@ -111,8 +111,8 @@ describe("fleet presentation", () => {
     const doneLine = lines.find((line) => line.includes("Completed task"))!;
     const needsInputLine = lines.find((line) => line.includes("Approval task"))!;
 
-    expect(lines).toContain("~/code/personal/cyberdeck");
-    expect(doneLine).toMatch(/^  \*/u);
+    expect(lines).toContain("  ▾ ~/code/personal/cyberdeck");
+    expect(doneLine).toMatch(/^▌ ·/u);
     expect(needsInputLine).toMatch(/^  ·/u);
     expect(doneLine).toContain("The latest reply begins");
     expect(doneLine).not.toContain("\n");
@@ -122,7 +122,7 @@ describe("fleet presentation", () => {
     expect(needsInputLine).toMatch(/ 2m$/u);
   });
 
-  it("colors both Done and Needs input markers and status labels", () => {
+  it("paints only the states that want the operator, and marks focus with a rule", () => {
     const done = session({ attentionState: "done", displayOrder: 0 });
     const needsInput = session({
       id: "22222222-2222-4222-8222-222222222222",
@@ -137,10 +137,28 @@ describe("fleet presentation", () => {
       now: NOW_MS,
     });
 
-    expect(rendered).toContain("\u001b[1m\u001b[38;2;120;198;121m*\u001b[0m\u001b[0m");
+    // Done and Needs input share the one attention hue. The focused row adds
+    // weight to the dot plus a selection rule in the gutter, never a colour.
+    expect(rendered).toContain("\u001b[1m\u001b[38;2;212;168;91m·\u001b[0m\u001b[0m");
     expect(rendered).toContain("\u001b[38;2;212;168;91m·\u001b[0m");
-    expect(rendered).toContain("\u001b[38;2;120;198;121mDone       \u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;212;168;91mDone       \u001b[0m");
     expect(rendered).toContain("\u001b[38;2;212;168;91mNeeds input\u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;154;163;175m▌\u001b[0m");
+    expect(rendered).not.toContain("\u001b[38;2;120;198;121m");
+  });
+
+  it("renders folder headers plainly, with no accent reserved for paths", () => {
+    const snapshot = fleet({ record: session() });
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: true,
+      width: 120,
+      height: 28,
+      now: NOW_MS,
+      home: "/Users/brandon",
+    });
+
+    expect(rendered).toContain("  ▾ ~/code/personal/cyberdeck");
+    expect(rendered).not.toContain("\u001b[38;2;158;182;255m");
   });
 
   it("keeps thread and project positions stable when lifecycle timestamps change", () => {
@@ -618,7 +636,40 @@ describe("fleet controls", () => {
       sessionId: session().id,
     });
     expect(transitionFleet(initial, snapshot, "left", NOW_MS).action).toBeUndefined();
-    expect(transitionFleet(initial, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(second.id);
+
+    // Folder headers are navigable rows, so crossing projects steps onto the
+    // header before reaching the next project's first thread.
+    const onFolder = transitionFleet(initial, snapshot, "down", NOW_MS).state;
+    expect(onFolder.focusedFolderCwd).toBe("/repo/two");
+    expect(transitionFleet(onFolder, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(second.id);
+  });
+
+  it("collapses and expands a focused folder with Enter and reports the hidden thread count", () => {
+    const second = session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" });
+    const snapshot = fleet({ record: session() }, { record: second });
+    const onFolder = transitionFleet(createFleetState(snapshot), snapshot, "down", NOW_MS).state;
+
+    const collapsed = transitionFleet(onFolder, snapshot, "enter", NOW_MS).state;
+    expect(collapsed.collapsedCwds).toEqual(["/repo/two"]);
+    expect(renderFleet(snapshot, collapsed, { color: false, width: 100, height: 28, now: NOW_MS }))
+      .toContain("▌ ▸ /repo/two · 1 thread");
+
+    // The hidden threads are gone from the navigation model, not merely unpainted.
+    expect(transitionFleet(collapsed, snapshot, "down", NOW_MS).state.focusedFolderCwd).toBe("/repo/two");
+
+    const expanded = transitionFleet(collapsed, snapshot, "enter", NOW_MS).state;
+    expect(expanded.collapsedCwds).toEqual([]);
+    expect(transitionFleet(expanded, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(second.id);
+  });
+
+  it("keeps thread keys inert while a folder header holds focus", () => {
+    const second = session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" });
+    const snapshot = fleet({ record: session() }, { record: second });
+    const onFolder = transitionFleet(createFleetState(snapshot), snapshot, "down", NOW_MS).state;
+
+    expect(transitionFleet(onFolder, snapshot, " ", NOW_MS).action).toBeUndefined();
+    expect(transitionFleet(onFolder, snapshot, "ctrl+x", NOW_MS).action).toBeUndefined();
+    expect(transitionFleet(onFolder, snapshot, "ctrl+t", NOW_MS).action).toBeUndefined();
   });
 
   it("resumes the exact provider conversation when a terminal thread is opened", () => {
@@ -1634,8 +1685,8 @@ describe("runFleet", () => {
     await vi.waitFor(() => {
       const latestScreen = Buffer.concat(output.chunks).toString().split("\u001b[2J\u001b[H").at(-1) ?? "";
       expect(latestScreen).toContain("Deleted thread");
-      expect(latestScreen).toContain("  * Third thread");
-      expect(latestScreen).not.toContain("  * First thread");
+      expect(latestScreen).toContain("▌ · Third thread");
+      expect(latestScreen).not.toContain("▌ · First thread");
     });
 
     input.emit("data", Buffer.from([0x03, 0x03]));

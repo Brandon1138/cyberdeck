@@ -118,6 +118,14 @@ export type FleetNoticeTone = "neutral" | "warning" | "error" | "confirmation";
 
 export interface FleetState {
   selectedSessionId?: string | undefined;
+  /**
+   * Set while a folder header row holds focus. Thread-scoped keys are inert in
+   * that case; `selectedSessionId` is retained so focus returns to the thread
+   * the operator left when they move off the header.
+   */
+  focusedFolderCwd?: string | undefined;
+  /** Folders whose threads are hidden. Membership survives snapshot churn. */
+  collapsedCwds?: readonly string[] | undefined;
   fallbackCwd: string;
   workingDirectory?: string | undefined;
   draft: string;
@@ -331,18 +339,65 @@ const DISABLE_INHERITED_TERMINAL_INPUT_MODES = [
 const ENTER_FLEET_SCREEN = `${DISABLE_INHERITED_TERMINAL_INPUT_MODES}\u001b[?1049h\u001b[?25l`;
 const LEAVE_FLEET_SCREEN = `${DISABLE_INHERITED_TERMINAL_INPUT_MODES}\u001b[?25h\u001b[?1049l`;
 
+/**
+ * Tone table for `paint`.
+ *
+ * Two layers. The hue block is the raw ink; the semantic block below names what
+ * a hue *means*, and rows paint with those names so a hue can move without a
+ * render rewrite. The governing rule is that color marks state demanding
+ * action — needs input, done, failing — so most of the view is greyscale and
+ * leans on weight and the selection rule for hierarchy.
+ *
+ * `gray` sits one contrast step above its former 123;132;144: legible as body
+ * text, still clearly recessed from the terminal foreground.
+ */
 const ANSI = {
   reset: "\u001b[0m",
   bold: "\u001b[1m",
   dim: "\u001b[2m",
+
+  // Hues.
   blue: "\u001b[38;2;158;182;255m",
   purple: "\u001b[38;2;182;158;255m",
+  violet: "\u001b[38;2;198;120;221m",
   cyan: "\u001b[38;2;102;194;208m",
   yellow: "\u001b[38;2;212;168;91m",
   green: "\u001b[38;2;120;198;121m",
   red: "\u001b[38;2;217;108;117m",
-  gray: "\u001b[38;2;123;132;144m",
+  gray: "\u001b[38;2;154;163;175m",
+
+  // Semantic tokens.
+
+  /** Cyberdeck logo and wordmark. Reserved: no state may borrow the brand hue. */
+  brand: "\u001b[38;2;182;158;255m",
+  /** A thread wants the operator: needs input, or finished and unread. */
+  attention: "\u001b[38;2;212;168;91m",
+  /** Something is wrong right now — a failed thread, a destructive confirmation. */
+  alert: "\u001b[38;2;217;108;117m",
+  /** Body text at rest: titles, paths, metadata. Subdued, never foreground. */
+  muted: "\u001b[38;2;154;163;175m",
+  /** Chrome that should recede entirely: rules, footers, shortcut hints. */
+  subtle: "\u001b[2m",
+  /** The left rule marking the focused row. */
+  selection: "\u001b[38;2;154;163;175m",
+
+  // Pull request states, for the per-thread indicator column.
+
+  /** Open: live, reviewable work. */
+  prOpen: "\u001b[38;2;120;198;121m",
+  /** Draft: opened, not yet offered for review. */
+  prDraft: "\u001b[2m",
+  /** Merged. Deliberately not the brand purple, which the logo alone owns. */
+  prMerged: "\u001b[38;2;198;120;221m",
+  /** Closed unmerged: inert and terminal, but not a fault — so not red. */
+  prClosed: "\u001b[38;2;154;163;175m",
+  /** Checks failing: the one pull request state that demands action. */
+  prFailing: "\u001b[38;2;217;108;117m",
 } as const;
+
+/** Gutter cell that prefixes every navigable row; carries the selection rule. */
+const SELECTION_RULE = "▌";
+const ROW_GUTTER = "  ";
 
 export async function collectFleetSnapshot(client: FleetTransport): Promise<FleetSnapshot> {
   const sessions = await client.request<SessionRecord[]>("session.list", {});
@@ -452,7 +507,12 @@ export function transitionFleet(
         quitConfirmation: undefined,
         ...(normalized.notice === QUIT_CONFIRMATION_NOTICE ? { notice: undefined } : {}),
       };
-  const selected = threads.find(({ record }) => record.id === state.selectedSessionId);
+  // A focused folder header owns the row, so every thread-scoped key is inert
+  // until focus moves back onto a thread.
+  const focusedFolderCwd = state.focusedFolderCwd;
+  const selected = focusedFolderCwd === undefined
+    ? threads.find(({ record }) => record.id === state.selectedSessionId)
+    : undefined;
 
   if (key === "ctrl+s") {
     return {
@@ -601,6 +661,7 @@ export function transitionFleet(
           state: {
             ...state,
             selectedSessionId: target.record.id,
+            focusedFolderCwd: undefined,
             deleteConfirmation: undefined,
             notice: undefined,
           },
@@ -643,6 +704,24 @@ export function transitionFleet(
     };
   }
 
+  if (focusedFolderCwd !== undefined && (key === "left" || key === "right")) {
+    return {
+      state: {
+        ...setCollapsed(state, focusedFolderCwd, key === "left"),
+        deleteConfirmation: undefined,
+        notice: undefined,
+      },
+    };
+  }
+  if (key === "enter" && focusedFolderCwd !== undefined && state.draft.trim() === "") {
+    return {
+      state: {
+        ...setCollapsed(state, focusedFolderCwd, !isCollapsed(state, focusedFolderCwd)),
+        deleteConfirmation: undefined,
+        notice: undefined,
+      },
+    };
+  }
   if (key === "right" && selected !== undefined) {
     return {
       state: { ...state, draft: "", deleteConfirmation: undefined, notice: undefined },
@@ -682,13 +761,11 @@ export function transitionFleet(
     return startTransition(state, undefined, initialPrompt);
   }
   if (key === "up" || key === "down") {
-    const currentIndex = Math.max(0, threads.findIndex(({ record }) => record.id === state.selectedSessionId));
-    const delta = key === "up" ? -1 : 1;
-    const nextIndex = Math.max(0, Math.min(threads.length - 1, currentIndex + delta));
+    const rows = fleetRows(snapshot, state);
+    const nextIndex = boundedIndex(focusedRowIndex(rows, state) + (key === "up" ? -1 : 1), rows.length);
     return {
       state: {
-        ...state,
-        selectedSessionId: threads[nextIndex]?.record.id,
+        ...focusRow(state, rows[nextIndex]),
         deleteConfirmation: undefined,
         notice: undefined,
       },
@@ -1276,7 +1353,7 @@ function renderWorkerPicker(state: FleetState, options: ResolvedFleetRenderOptio
   }
   const footer = [
     paint("─".repeat(options.width), "dim", options.color),
-    paint(fit(`${choice.label} · ${shortPath(picker.cwd, options.home)}`, options.width), "cyan", options.color),
+    paint(fit(`${choice.label} · ${shortPath(picker.cwd, options.home)}`, options.width), "muted", options.color),
     paint(fit("↑↓ select · enter apply/next · esc back", options.width), "dim", options.color),
   ];
   const body = lines.slice(0, Math.max(0, options.height - footer.length));
@@ -1297,9 +1374,11 @@ function renderFleetList(
     lines.push("No durable agent threads yet.");
   } else {
     for (const group of groups) {
-      lines.push(paint(shortPath(group.cwd, options.home), "blue", options.color));
-      for (const thread of group.threads) {
-        lines.push(renderThreadRow(thread, state, options));
+      lines.push(renderFolderRow(group.cwd, group.threads.length, state, options));
+      if (!isCollapsed(state, group.cwd)) {
+        for (const thread of group.threads) {
+          lines.push(renderThreadRow(thread, state, options));
+        }
       }
       lines.push("");
     }
@@ -1374,12 +1453,12 @@ function renderHeader(
   if (options.width < 64) return textLines;
   const logo = [" ▄████▄", "▟█▄██▄█▙", "▌▌▌▌▐▐▐▐"];
   return textLines.map((line, index) =>
-    `${paint(pad(logo[index] ?? "", 8), "purple", options.color)}  ${line}`);
+    `${paint(pad(logo[index] ?? "", 8), "brand", options.color)}  ${line}`);
 }
 
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
-    "shift+↑↓ reorder", "ctrl+s switch views", "@ mention", "alt+1–9 open", "esc back/clear",
+    "shift+↑↓ reorder", "←→ fold project", "ctrl+s switch views", "@ mention", "alt+1–9 open", "esc back/clear",
     "ctrl+r rename", "ctrl+j newline", "ctrl+] detach/reattach", "ctrl+g cwd", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
   ];
   if (width >= 110) return [entries.slice(0, 5).join("   "), entries.slice(5).join("   ")];
@@ -1544,7 +1623,7 @@ function renderOrchestratorPicker(
     paint("─".repeat(options.width), "dim", options.color),
     ...(selection === undefined
       ? []
-      : [paint(fit(`${selection.provider.label} · ${selection.model} · ${selection.effort ?? "Provider managed"}`, options.width), "cyan", options.color)]),
+      : [paint(fit(`${selection.provider.label} · ${selection.model} · ${selection.effort ?? "Provider managed"}`, options.width), "muted", options.color)]),
     paint(
       fit(picker.step === "effort"
         ? "↑↓ select · enter create in cockpit · esc back"
@@ -1606,13 +1685,43 @@ function boundedIndex(value: number, length: number): number {
   return Math.max(0, Math.min(length - 1, value));
 }
 
+/**
+ * Left gutter shared by folder and thread rows. The focused row carries a rule
+ * rather than a color change, so the bar reads the same with color disabled.
+ */
+function rowGutter(focused: boolean, color: boolean): string {
+  return focused ? `${paint(SELECTION_RULE, "selection", color)} ` : ROW_GUTTER;
+}
+
+/**
+ * A folder header. Plain by default — paths are structure, not state — and bold
+ * when focused. Collapsed folders report how many threads they are hiding.
+ */
+function renderFolderRow(
+  cwd: string,
+  threadCount: number,
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): string {
+  const focused = state.focusedFolderCwd === cwd;
+  const collapsed = isCollapsed(state, cwd);
+  const summary = collapsed
+    ? ` · ${threadCount} thread${threadCount === 1 ? "" : "s"}`
+    : "";
+  const label = fit(
+    `${collapsed ? "▸" : "▾"} ${shortPath(cwd, options.home)}${summary}`,
+    Math.max(1, options.width - ROW_GUTTER.length),
+  );
+  return `${rowGutter(focused, options.color)}${focused ? paint(label, "bold", options.color) : label}`;
+}
+
 function renderThreadRow(
   thread: FleetThread,
   state: FleetState,
   options: ResolvedFleetRenderOptions,
 ): string {
-  const selected = thread.record.id === state.selectedSessionId;
-  const prefix = selected ? "*" : "·";
+  const selected = state.focusedFolderCwd === undefined
+    && thread.record.id === state.selectedSessionId;
   const baseTitle = thread.record.name ?? thread.record.role ?? `Untitled ${thread.record.id.slice(0, 8)}`;
   const title = `${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
   const identity = `${friendlyModel(thread.record.provider, thread.record.model)} · ${friendlyEffort(thread.record.effort ?? "provider-managed")}`;
@@ -1632,30 +1741,27 @@ function renderThreadRow(
   const fixedWidth = 12 + titleWidth + statusWidth + (showIdentity ? identityWidth + 1 : 0);
   const previewWidth = Math.max(1, options.width - fixedWidth);
   return [
-    `  ${statusMarker(prefix, status, selected, options.color)}`,
-    selected ? paint(pad(title, titleWidth), "bold", options.color) : pad(title, titleWidth),
-    ...(showIdentity ? [paint(pad(identity, identityWidth), "dim", options.color)] : []),
+    `${rowGutter(selected, options.color)}${statusMarker(status, selected, options.color)}`,
+    paint(pad(title, titleWidth), selected ? "bold" : "muted", options.color),
+    ...(showIdentity ? [paint(pad(identity, identityWidth), "subtle", options.color)] : []),
     statusText(pad(status, statusWidth), false, options.color),
-    paint(pad(preview, previewWidth), "dim", options.color),
+    paint(pad(preview, previewWidth), "muted", options.color),
     padStart(age, 5),
   ].join(" ");
 }
 
-function statusMarker(
-  marker: string,
-  status: ThreadStatus,
-  selected: boolean,
-  color: boolean,
-): string {
-  const tone = status === "Done"
-    ? "green"
-    : status === "Needs input"
-      ? "yellow"
-      : selected
-        ? "bold"
-        : "dim";
-  const painted = paint(marker, tone, color);
-  return selected && tone !== "bold" ? paint(painted, "bold", color) : painted;
+/**
+ * The status dot. Only states that want the operator take a hue; the focused
+ * row is already marked by the selection rule, so focus adds weight alone.
+ */
+function statusMarker(status: ThreadStatus, selected: boolean, color: boolean): string {
+  const tone = status === "Done" || status === "Needs input"
+    ? "attention"
+    : status === "Failed"
+      ? "alert"
+      : "muted";
+  const painted = paint("·", tone, color);
+  return selected ? paint(painted, "bold", color) : painted;
 }
 
 export async function runFleet(
@@ -2107,6 +2213,16 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
   const threads = orderedThreads(snapshot);
   const selectedExists = threads.some(({ record }) => record.id === state.selectedSessionId);
   const selectedSessionId = selectedExists ? state.selectedSessionId : threads[0]?.record.id;
+  const selectedCwd = threads.find(({ record }) => record.id === selectedSessionId)?.record.cwd;
+  const folderExists = state.focusedFolderCwd !== undefined
+    && threads.some(({ record }) => record.cwd === state.focusedFolderCwd);
+  // A collapsed folder hides its threads, so focus rises to the header rather
+  // than resting on a row nobody can see.
+  const focusedFolderCwd = folderExists
+    ? state.focusedFolderCwd
+    : selectedCwd !== undefined && isCollapsed(state, selectedCwd)
+      ? selectedCwd
+      : undefined;
   const stopAcknowledgement = state.stopAcknowledgement?.sessionId === selectedSessionId
     ? state.stopAcknowledgement
     : undefined;
@@ -2123,6 +2239,7 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
   return {
     ...state,
     selectedSessionId,
+    focusedFolderCwd,
     stopAcknowledgement,
     deleteConfirmation,
     quitConfirmation,
@@ -2140,6 +2257,51 @@ function isTerminalSession(record: SessionRecord): boolean {
 function orderedThreads(snapshot: FleetSnapshot): FleetThread[] {
   return groupThreads(snapshot.threads)
     .flatMap(({ threads }) => threads);
+}
+
+/**
+ * One navigable line of the fleet list. Folder headers are rows in their own
+ * right: focus lands on them, and Enter there collapses the folder.
+ */
+type FleetRow =
+  | { kind: "folder"; cwd: string; threadCount: number }
+  | { kind: "thread"; cwd: string; thread: FleetThread };
+
+function isCollapsed(state: FleetState, cwd: string): boolean {
+  return state.collapsedCwds?.includes(cwd) === true;
+}
+
+function fleetRows(snapshot: FleetSnapshot, state: FleetState): FleetRow[] {
+  return groupThreads(snapshot.threads).flatMap(({ cwd, threads }): FleetRow[] => {
+    const header: FleetRow = { kind: "folder", cwd, threadCount: threads.length };
+    if (isCollapsed(state, cwd)) return [header];
+    return [header, ...threads.map((thread): FleetRow => ({ kind: "thread", cwd, thread }))];
+  });
+}
+
+function focusedRowIndex(rows: readonly FleetRow[], state: FleetState): number {
+  const index = state.focusedFolderCwd === undefined
+    ? rows.findIndex((row) => row.kind === "thread" && row.thread.record.id === state.selectedSessionId)
+    : rows.findIndex((row) => row.kind === "folder" && row.cwd === state.focusedFolderCwd);
+  return Math.max(0, index);
+}
+
+function focusRow(state: FleetState, row: FleetRow | undefined): FleetState {
+  if (row === undefined) return state;
+  return row.kind === "folder"
+    ? { ...state, focusedFolderCwd: row.cwd }
+    : { ...state, focusedFolderCwd: undefined, selectedSessionId: row.thread.record.id };
+}
+
+function setCollapsed(state: FleetState, cwd: string, collapsed: boolean): FleetState {
+  const current = state.collapsedCwds ?? [];
+  if (current.includes(cwd) === collapsed) return state;
+  return {
+    ...state,
+    collapsedCwds: collapsed
+      ? [...current, cwd]
+      : current.filter((candidate) => candidate !== cwd),
+  };
 }
 
 function sessionTree(snapshot: FleetSnapshot, rootSessionId: string): FleetThread[] {
@@ -2439,11 +2601,11 @@ function relativeTime(timestamp: string, now: number): string {
 
 function statusText(status: string, pendingDelete: boolean, color: boolean): string {
   const label = status.trim();
-  if (pendingDelete || label === "Failed") return paint(status, "red", color);
-  if (label === "Done") return paint(status, "green", color);
-  if (label === "Needs input" || label === "Stopping") return paint(status, "yellow", color);
-  if (label === "Working") return paint(status, "cyan", color);
-  return paint(status, "gray", color);
+  if (pendingDelete || label === "Failed") return paint(status, "alert", color);
+  // Only the two states that want the operator carry a hue. Working, Stopping,
+  // Stopped and Interrupted are progress, not a request, and stay greyscale.
+  if (label === "Done" || label === "Needs input") return paint(status, "attention", color);
+  return paint(status, "muted", color);
 }
 
 function paint(value: string, tone: keyof typeof ANSI, enabled: boolean): string {
@@ -2457,8 +2619,8 @@ function renderNotice(
   color: boolean,
 ): string {
   const value = fit(notice, width);
-  if (tone === "warning") return paint(value, "yellow", color);
-  if (tone === "error" || tone === "confirmation") return paint(value, "red", color);
+  if (tone === "warning") return paint(value, "attention", color);
+  if (tone === "error" || tone === "confirmation") return paint(value, "alert", color);
   return value;
 }
 

@@ -7,13 +7,18 @@ colors:
   canvas: "#0E1116"
   surface: "#151922"
   text-strong: "#D7DCE4"
-  text-muted: "#7B8490"
+  text-muted: "#9AA3AF"
   divider: "#343B46"
-  state-working: "#66C2D0"
+  selection: "#9AA3AF"
+  state-working: "#9AA3AF"
   state-needs-input: "#D4A85B"
-  state-done: "#78C679"
+  state-done: "#D4A85B"
   state-failed: "#D96C75"
-  state-stopped: "#7B8490"
+  state-stopped: "#9AA3AF"
+  pr-open: "#78C679"
+  pr-merged: "#C678DD"
+  pr-closed: "#9AA3AF"
+  pr-failing: "#D96C75"
 typography:
   title:
     fontFamily: "terminal monospace"
@@ -103,31 +108,33 @@ The interface is keyboard-first and structurally simple: one header, project gro
 
 ## Colors
 
-The palette is cool graphite with one pale signal-blue accent. Semantic cyan, amber, green, and red appear only where state requires them.
+The palette is cool graphite. Color is reserved for state that demands action; everything else is greyscale, and hierarchy is carried by weight and the selection rule.
 
 ### Primary
 
-- **Signal Blue** (`#9EB6FF`): selected markers, project paths, active picker rows, and the composer mode indicator. It occupies less than ten percent of the screen and never fills an entire thread row.
-- **Octo Violet** (`#B69EFF`): the 8-bit octopus logo mark in the header bay, and nothing else. It carries no state meaning and never appears in rows, pickers, or copy.
+- **Signal Blue** (`#9EB6FF`): held in reserve. It no longer paints project paths or selected markers, and nothing in Fleet may claim it without a written decision here first.
+- **Octo Violet** (`#B69EFF`): the 8-bit octopus logo mark in the header bay, and nothing else. It carries no state meaning and never appears in rows, pickers, or copy. No state may borrow the brand hue — a merged pull request uses Merge Violet instead.
 
 ### Neutral
 
 - **Ink Slate** (`#0E1116`): intended canvas for renderers that own their background. Terminal clients may preserve the user's equivalent dark background.
 - **Deep Slate** (`#151922`): optional footer or inline-picker surface. It is never used to create nested cards.
-- **Frosted Gray** (`#D7DCE4`): primary titles, selected thread names, prompts, and important values.
-- **Cool Ash** (`#7B8490`): previews, ages, inactive markers, and stopped states.
+- **Frosted Gray** (`#D7DCE4`): the selected thread title, `Cyberdeck`, prompts, and important values.
+- **Cool Ash** (`#9AA3AF`): unselected titles, project paths, previews, ages, inactive markers, and every non-actionable state. One contrast step above the former `#7B8490`, which was too faint to read as body text. It is subdued, never foreground-bright.
 - **Steel Hairline** (`#343B46`): footer separators and the tmux pane boundary.
 
 ### Semantic
 
-- **Working Cyan** (`#66C2D0`): active generation and tool execution.
-- **Attention Amber** (`#D4A85B`): explicit approval, permission, authentication, trust, computer-use enablement, or another blocking question.
-- **Completion Green** (`#78C679`): successful completion with no required intervention.
-- **Failure Red** (`#D96C75`): failed runtimes, failed turns, destructive confirmation, and error notices only.
+- **Attention Amber** (`#D4A85B`): the only state hue in a thread row. It marks `Needs input` and `Done` — a blocking question, or finished work waiting to be read. Approval, permission, authentication, trust, and computer-use prompts all resolve to it.
+- **Failure Red** (`#D96C75`): something is wrong right now — failed runtimes, failed turns, failing checks, destructive confirmation, and error notices. Nothing merely terminal or inert may use it.
+- **Merge Violet** (`#C678DD`): a merged pull request. Distinct from Octo Violet so state never borrows the brand.
+- **Completion Green** (`#78C679`): an open pull request. It no longer marks `Done`, which is amber.
 
-**The Sparse Signal Rule.** Color marks selection and state. It never decorates inactive text, paints full project groups, or replaces a written label.
+`Working`, `Stopping`, `Stopped`, `Interrupted`, a draft or closed pull request, and all model and effort metadata are greyscale. Progress is not a request for attention, and an inert terminal state is not a fault.
 
-**The Reduced-Color Rule.** Truecolor renderers use the palette above. Sixteen-color terminals map primary to blue, working to cyan, needs input to yellow, done to green, failed to red, and muted content to bright black. Every state remains readable without color.
+**The Sparse Signal Rule.** Color marks state that demands action, and nothing else. Selection is carried by the rule and bold weight, not hue. Color never decorates inactive text, paints full project groups, or replaces a written label.
+
+**The Reduced-Color Rule.** Truecolor renderers use the palette above. Sixteen-color terminals map needs input and done to yellow, failed to red, merged to magenta, open to green, and muted content to bright black. The selection rule is a plain glyph, so the focused row stays visible with color disabled entirely.
 
 ## Typography
 
@@ -156,7 +163,7 @@ Title case is the default. `Cyberdeck`, `Needs input`, and friendly model labels
 
 Cyberdeck is flat. It uses no shadows, blur, glass effects, raised cards, or simulated bevels. Depth comes from one-cell separators, blank rows between project groups, strong versus muted text, and the stable tmux split. The `/model` picker and shortcut panel occupy normal document flow and never appear as floating modal boxes.
 
-The footer uses one dim horizontal separator above the composer and a second separator below it when configuration or help is visible. Project groups use whitespace rather than boxes. The selected row uses an explicit `*` marker and bold task title, not a background slab.
+The footer uses one dim horizontal separator above the composer and a second separator below it when configuration or help is visible. Project groups use whitespace rather than boxes. The focused row uses a one-cell left rule (`▌`) in the gutter plus a bold title, not a background slab.
 
 **The Flat Register Rule.** If a section looks like a card, remove the container and restore alignment, whitespace, and a single hairline where separation is necessary.
 
@@ -183,16 +190,21 @@ The header occupies the upper-left of Fleet and establishes identity, current or
 
 ### Project Groups and Thread Rows
 
-Project headings are shortened canonical working-directory paths in Signal Blue. Groups are separated by one blank row, not rules or boxes. Pinned groups and rows come first; manual ordering is stable and persisted. Unpinned peers use most-recent meaningful activity as the tiebreaker.
+Project headings are shortened canonical working-directory paths rendered plainly — a path is structure, not state, so it takes no accent. Groups are separated by one blank row, not rules or boxes. Pinned groups and rows come first; manual ordering is stable and persisted. Unpinned peers use most-recent meaningful activity as the tiebreaker.
+
+A project heading is a navigable row of its own. `Up`/`Down` step onto it, `Enter` toggles collapse, and `Left`/`Right` collapse and expand explicitly. A collapsed heading reports how many threads it is hiding and removes them from the navigation model, not merely from the paint. Collapse is view state, held per path for the life of the session.
+
+```text
+  ▾ ~/code/personal/cyberdeck
+▌ · Task title                 Codex Sol · high  Working      Beginning of latest reply…         2m
+  ▸ ~/code/other · 3 threads
+```
 
 The row order is fixed at both full and multiplexed widths:
 
-```text
-  * Task title                 Codex Sol · high  Working      Beginning of latest reply…         2m
-```
-
-- Thread rows are indented two cells beneath their project heading.
-- `*` marks keyboard selection and is paired with a bold title so selection never relies on color. Both the marker and status label are green for `Done` and amber for `Needs input`.
+- Every navigable row opens with a two-cell gutter: `▌ ` when focused, two spaces otherwise. Thread titles therefore sit two cells inside their project heading.
+- The left rule is the only selection signal that depends on rendering rather than content, and it is a plain glyph, so focus survives `--no-color`. The focused title also goes bold and brighter; unselected titles are Cool Ash.
+- `·` marks every thread. It takes Attention Amber for `Done` and `Needs input`, Failure Red for `Failed`, and Cool Ash otherwise. The status label follows the same rule.
 - The title receives roughly 28 percent of width, model and effort receive at most `20ch`, status receives only its content width up to `11ch`, age receives `5ch`, and preview consumes all remaining space.
 - Provider, worker role, sandbox, and raw session ID are not permanent columns. Show provider only as part of an unambiguous friendly model label. Put deeper metadata in thread detail or diagnostics.
 - Age is right-aligned and based on the latest meaningful prompt, assistant completion, or lifecycle transition. Selection, attachment, and Fleet refresh do not reset it.
@@ -201,7 +213,7 @@ The row order is fixed at both full and multiplexed widths:
 At `80` to `99` columns, the same single-line structure is retained with narrower title, identity, and preview columns.
 
 ```text
-  * Create iPhoneDoctor…  Opus · high  Done       Shader background is ready…  2m
+▌ · Create iPhoneDoctor…  Opus · high  Done       Shader background is ready…  2m
 ```
 
 Below `80` columns, model and effort yield before task, state, age, or preview. The row remains one line so multiplexing does not switch Fleet into a separate compact presentation.
@@ -212,10 +224,10 @@ Fleet status is a user-attention state derived from durable conversation state p
 
 | Label | Meaning | Treatment |
 | --- | --- | --- |
-| `Working` | The provider is generating, executing a tool, or starting a turn. | Working Cyan |
+| `Working` | The provider is generating, executing a tool, or starting a turn. | Cool Ash |
 | `Needs input` | Progress is blocked on explicit approval, permission, authentication, trust, computer-use enablement, or a blocking question. | Attention Amber |
-| `Done` | No work is active and no intervention is required. The last turn completed successfully, or a new zero-turn session is ready. | Completion Green |
-| `Stopping` | A stop was requested and provider exit is not yet confirmed. | Attention Amber plus literal label |
+| `Done` | No work is active and no intervention is required. The last turn completed successfully, or a new zero-turn session is ready. | Attention Amber |
+| `Stopping` | A stop was requested and provider exit is not yet confirmed. | Cool Ash plus literal label |
 | `Stopped` | The user intentionally stopped the runtime; the conversation remains resumable. | Cool Ash |
 | `Interrupted` | Broker or runtime ownership was lost without a confirmed user stop. The row remains and may be resumed. | Cool Ash plus literal label |
 | `Failed` | The provider or turn ended unexpectedly. | Failure Red |
@@ -269,11 +281,12 @@ If a provider exposes no effort control, show a single `Provider managed` choice
 Pressing `?` with an empty composer expands a help panel in the footer. Pressing `?` again closes it. Within a nonempty draft, `?` remains literal input.
 
 ```text
-shift+↑↓ reorder   ctrl+s switch views   @ mention          alt+1–9 open   esc back/clear
-ctrl+r rename      ctrl+j newline         ctrl+g cwd          ctrl+t pin to top  ctrl+x stop   ? close
+shift+↑↓ reorder   ←→ fold project   ctrl+s switch views   @ mention   alt+1–9 open
+esc back/clear     ctrl+r rename     ctrl+j newline        ctrl+g cwd  ctrl+t pin to top   ctrl+x stop   ? close
 ```
 
 - `Shift+Up/Down` reorders the selected row within its project and persists the order.
+- `Left`/`Right` collapse and expand a focused project heading; `Enter` there toggles it. On a thread row `Right` opens the thread and `Left` does nothing.
 - `Ctrl+S` switches between Fleet and Diagnostics without changing provider state.
 - `@` inserts a passive thread reference. Mentioning never wakes another agent.
 - `Alt+1` through `Alt+9` opens the corresponding visible thread.
