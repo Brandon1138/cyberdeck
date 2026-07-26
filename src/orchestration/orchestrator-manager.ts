@@ -322,6 +322,7 @@ function orchestratorPrompt(scope: OrchestratorScope): string {
     "For fan-out, call cyberdeck_workers_start once. Then call cyberdeck_workers_wait once with successful sessionId and completionTarget values; do not poll and do not read raw transcripts for ordinary result collection.",
     "cyberdeck_thread_read is a bounded debugging escape hatch only. Always continue from its returned cursor and never reread from cursor zero.",
     "Never manipulate tmux panes or type through tmux send-keys.",
+    "Any MCP server the operator allowlisted for you is registered but deferred: its tools are absent from your tool list until you search for them by name, so search before concluding a capability is unavailable.",
     "Do not stop, delete, or widen a worker's permissions without explicit human approval.",
   ].join(" ");
 }

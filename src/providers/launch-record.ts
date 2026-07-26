@@ -11,10 +11,10 @@ const CYBERDECK_ENV_KEYS: ReadonlySet<string> = new Set(RESOLVED_LAUNCH_ENV_KEYS
  * Reduce a spec the broker is about to spawn to the sanitized, bounded record it keeps as the
  * source of record for that launch.
  *
- * The whole point of the sanitizer is `env`: adapters build it by spreading `process.env`, so it
- * holds the operator's API keys and tokens. Nothing outside the Cyberdeck-owned allowlist survives
- * — not the value, not even the key name — and what remains is capped so a catalog entry stays
- * bounded no matter how long an argument or instruction payload was.
+ * Environment construction already drops unknown source entries. This second boundary still treats
+ * every compatibility, provider-routing, proxy/TLS, and explicit-grant entry as sensitive: nothing
+ * outside the Cyberdeck-owned record allowlist survives — not the value, not even the key name.
+ * Retained data stays capped so a catalog entry remains bounded.
  */
 export function resolvedLaunchRecord(
   spec: ProviderLaunchSpec,

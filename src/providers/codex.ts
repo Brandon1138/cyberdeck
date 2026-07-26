@@ -19,6 +19,7 @@ export class CodexResumeError extends Error {
 export interface CodexProviderAdapterOptions {
   sessionsDirectory?: string;
   mcp?: CyberdeckMcpLaunch;
+  sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
 }
 
 export class CodexProviderAdapter implements ProviderAdapter {
@@ -58,7 +59,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
       executable: "codex",
       args,
       cwd: session.cwd,
-      env: sessionLaunchEnvironment({ ...process.env }, session),
+      env: sessionLaunchEnvironment(
+        this.options.sourceEnvironment ?? process.env,
+        this.id,
+        session.cwd,
+        session,
+      ),
     };
   }
 
@@ -85,7 +91,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
       executable: "codex",
       args,
       cwd: session.cwd,
-      env: sessionLaunchEnvironment({ ...process.env }, session),
+      env: sessionLaunchEnvironment(
+        this.options.sourceEnvironment ?? process.env,
+        this.id,
+        session.cwd,
+        session,
+      ),
     };
   }
 
@@ -111,7 +122,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
   private findNativeSessionId(session: SessionRecord): string {
     const sessionsDirectory = this.options.sessionsDirectory
-      ?? join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "sessions");
+      ?? join(
+        (this.options.sourceEnvironment ?? process.env).CODEX_HOME ?? join(homedir(), ".codex"),
+        "sessions",
+      );
     const createdAt = Date.parse(session.createdAt);
     const candidates: Array<{ id: string; distance: number }> = [];
 

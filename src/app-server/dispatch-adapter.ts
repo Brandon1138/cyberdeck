@@ -67,6 +67,7 @@ export interface AppServerJobDispatchAdapterOptions {
   /** Persist the validated terminal agent message as a job artifact when the runtime supplies one. */
   artifactStore?: ArtifactStore;
   leaseTtlMs?: number;
+  sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
 }
 
 interface PendingRequest {
@@ -148,7 +149,10 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
       });
     }
 
-    const command = buildAppServerCommand(request);
+    const command = buildAppServerCommand(
+      request,
+      this.options.sourceEnvironment ?? globalThis.process.env,
+    );
     let process: AppServerProcessHandle;
     try {
       process = this.spawn(command);
@@ -559,12 +563,15 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
   private now(): string { return this.options.now?.() ?? new Date().toISOString(); }
 }
 
-export function buildAppServerCommand(request: DispatchRequest): AppServerCommand {
+export function buildAppServerCommand(
+  request: DispatchRequest,
+  sourceEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
+): AppServerCommand {
   return {
     executable: "codex",
     args: ["app-server", "--stdio", "--strict-config"],
     cwd: request.request.cwd,
-    env: jobLaunchEnvironment({ ...process.env }, request.request),
+    env: jobLaunchEnvironment(sourceEnvironment, "codex", request.request),
   };
 }
 

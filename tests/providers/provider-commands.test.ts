@@ -8,6 +8,13 @@ import { CodexProviderAdapter } from "../../src/providers/codex.js";
 import { CursorProviderAdapter } from "../../src/providers/cursor/session-adapter.js";
 import { AntigravityProviderAdapter } from "../../src/providers/antigravity/session-adapter.js";
 
+const CHILD_SOURCE: NodeJS.ProcessEnv = {
+  PATH: "/source/provider-bin",
+  UNRELATED_SENTINEL: "drop-this",
+  TMUX: "drop-this",
+  TMUX_PANE: "drop-this",
+};
+
 function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
   const now = new Date().toISOString();
   return {
@@ -69,15 +76,23 @@ describe("CodexProviderAdapter", () => {
     ]);
   });
 
-  it("marks worker mode without disturbing the inherited launch environment", () => {
-    const spec = new CodexProviderAdapter().buildLaunchSpec(session({
+  it("marks worker mode after sanitizing the source environment", () => {
+    const spec = new CodexProviderAdapter({
+      sourceEnvironment: CHILD_SOURCE,
+    }).buildLaunchSpec(session({
       kind: "worker",
       workerMode: "caveman",
     }));
     expect(spec.env).toMatchObject({
+      PATH: CHILD_SOURCE.PATH,
+      PWD: "/tmp/repo",
+      TERM: "xterm-256color",
       CYBERDECK_PROCESS_ROLE: "worker",
       CYBERDECK_WORKER_MODE: "caveman",
     });
+    expect(spec.env.UNRELATED_SENTINEL).toBeUndefined();
+    expect(spec.env.TMUX).toBeUndefined();
+    expect(spec.env.TMUX_PANE).toBeUndefined();
   });
 
   it("starts an orchestrator with native developer instructions and MCP but no positional user prompt", () => {
@@ -126,6 +141,7 @@ describe("CodexProviderAdapter", () => {
     const spec = new CodexProviderAdapter({
       sessionsDirectory: root,
       mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      sourceEnvironment: CHILD_SOURCE,
     }).buildResumeSpec(session({
       createdAt,
       executionState: "exited",
@@ -155,6 +171,10 @@ describe("CodexProviderAdapter", () => {
       expect.stringContaining("mcp_servers.cyberdeck.args="),
       nativeId,
     ]);
+    expect(spec.env.PATH).toBe(CHILD_SOURCE.PATH);
+    expect(spec.env.PWD).toBe("/tmp/repo");
+    expect(spec.env.TERM).toBe("xterm-256color");
+    expect(spec.env.UNRELATED_SENTINEL).toBeUndefined();
   });
 });
 
@@ -207,6 +227,8 @@ describe("ClaudeProviderAdapter", () => {
       "proof",
       "--permission-mode",
       permissionMode,
+      "--disallowedTools",
+      "Agent,Task",
       "--model",
       "sonnet",
     ]);
@@ -281,6 +303,9 @@ describe("ClaudeProviderAdapter", () => {
       "claude-haiku-ping",
       "--permission-mode",
       "plan",
+      "--disallowedTools",
+      // Orchestrators drop user scope, so the operator's denials are re-asserted here instead.
+      "Agent,Task,Skill(update-config)",
       "--model",
       "haiku",
       "--append-system-prompt-file",
@@ -295,6 +320,30 @@ describe("ClaudeProviderAdapter", () => {
 });
 
 describe("extended interactive provider adapters", () => {
+  it.each([
+    ["claude", new ClaudeProviderAdapter({ sourceEnvironment: CHILD_SOURCE }), "sonnet"],
+    ["cursor", new CursorProviderAdapter({ sourceEnvironment: CHILD_SOURCE }), "composer"],
+    [
+      "antigravity",
+      new AntigravityProviderAdapter({ sourceEnvironment: CHILD_SOURCE }),
+      "gemini-3.6-flash-low",
+    ],
+  ] as const)("sanitizes %s interactive child environment", (provider, adapter, model) => {
+    const spec = adapter.buildLaunchSpec(session({
+      provider,
+      model,
+      ...(provider === "antigravity" ? { effort: "low" as const } : {}),
+    }));
+    expect(spec.env).toMatchObject({
+      PATH: CHILD_SOURCE.PATH,
+      PWD: "/tmp/repo",
+      TERM: "xterm-256color",
+    });
+    expect(spec.env.UNRELATED_SENTINEL).toBeUndefined();
+    expect(spec.env.TMUX).toBeUndefined();
+    expect(spec.env.TMUX_PANE).toBeUndefined();
+  });
+
   it.each([
     ["cursor", () => new CursorProviderAdapter().buildLaunchSpec(
       session({ provider: "cursor", model: "composer", approvalMode: "auto" }),

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AgentControlService,
+  AgentStartWorkerParamsSchema,
   AgentStartWorkersParamsSchema,
   AgentWaitWorkersParamsSchema,
 } from "../../src/orchestration/agent-control-service.js";
@@ -41,6 +42,20 @@ const binding: OrchestratorBinding = {
 };
 
 describe("AgentControlService", () => {
+  it("cannot request child-environment grants through worker-start input", () => {
+    const parsed = AgentStartWorkerParamsSchema.parse({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      cwd: "/repo/one",
+      prompt: "Inspect repository",
+      sshAuthSock: ["synthetic", "grant"].join("-"),
+      environment: { SSH_AUTH_SOCK: ["synthetic", "grant"].join("-") },
+    });
+
+    expect(parsed).not.toHaveProperty("sshAuthSock");
+    expect(parsed).not.toHaveProperty("environment");
+  });
+
   it("accepts 64-worker start and wait batches from one orchestrator turn", () => {
     const workers = Array.from({ length: 64 }, (_, index) => ({
       provider: "codex" as const,

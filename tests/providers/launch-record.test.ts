@@ -22,6 +22,7 @@ function spec(overrides: Partial<ProviderLaunchSpec> = {}): ProviderLaunchSpec {
       CYBERDECK_PROCESS_ROLE: "orchestrator",
       CYBERDECK_WORKER_MODE: "normal",
       DISABLE_UPDATES: "1",
+      ENABLE_TOOL_SEARCH: "false",
     },
     ...overrides,
   };
@@ -42,6 +43,7 @@ describe("resolvedLaunchRecord", () => {
       CYBERDECK_PROCESS_ROLE: "orchestrator",
       CYBERDECK_WORKER_MODE: "normal",
       DISABLE_UPDATES: "1",
+      ENABLE_TOOL_SEARCH: "false",
     });
     expect(record.inheritedEnvCount).toBe(6);
   });
@@ -79,5 +81,23 @@ describe("resolvedLaunchRecord", () => {
 
     expect(record.inheritedEnvCount).toBe(1);
     expect(record.cyberdeckEnv).toEqual({ CYBERDECK_PROCESS_ROLE: "worker" });
+  });
+
+  it("records unknown and granted entries only as a count", () => {
+    const grantValue = ["synthetic", "operator", "grant"].join("-");
+    const record = resolvedLaunchRecord(spec({
+      env: {
+        SSH_AUTH_SOCK: grantValue,
+        UNKNOWN_INTEGRATION_STATE: "synthetic-state",
+      },
+    }), "launch");
+    const serialized = JSON.stringify(record);
+
+    expect(record.inheritedEnvCount).toBe(2);
+    expect(record.cyberdeckEnv).toEqual({});
+    expect(serialized).not.toContain("SSH_AUTH_SOCK");
+    expect(serialized).not.toContain(grantValue);
+    expect(serialized).not.toContain("UNKNOWN_INTEGRATION_STATE");
+    expect(serialized).not.toContain("synthetic-state");
   });
 });

@@ -113,11 +113,14 @@ manage a box-level worker preference independent of every orchestrator binding. 
 persists across broker and Orc replacement, and is snapshotted when a worker session or bounded job
 starts; changing it does not rewrite already-running conversations.
 Provider child processes receive `CYBERDECK_PROCESS_ROLE=worker|orchestrator|session` and
-`CYBERDECK_WORKER_MODE=normal|caveman` after their inherited environment is copied. These values are
-integration hints, not authorization boundaries. Caveman policy is also added to each worker's
-actual task input, which makes the behavior provider-neutral rather than dependent on SessionStart
-hooks. An installed box skill supplies the full policy; a compact built-in fallback keeps an enabled
-setting functional without making Caveman installation a Cyberdeck prerequisite.
+`CYBERDECK_WORKER_MODE=normal|caveman` after a deterministic exact-name child environment is built.
+Compatibility, locale, matching-provider routing, and reviewed proxy/TLS trust entries may pass;
+unknown, tmux/mise, unrelated integration, and ambient SSH-agent state do not. This reduces
+accidental authority but is not a same-UID security sandbox. The Cyberdeck values are integration
+hints, not authorization boundaries. Caveman policy is also added to each worker's actual task
+input, which makes the behavior provider-neutral rather than dependent on SessionStart hooks. An
+installed box skill supplies the full policy; a compact built-in fallback keeps an enabled setting
+functional without making Caveman installation a Cyberdeck prerequisite.
 
 Worker steering passes through a durable instruction queue. A human control attachment has absolute
 writer priority. If a controller exists, the message remains queued; controller release causes the

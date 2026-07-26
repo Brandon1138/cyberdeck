@@ -6,12 +6,16 @@ import { AntigravityWorkspaceTrust, type AntigravityWorkspaceTrustOptions } from
 import { sessionLaunchEnvironment } from "../launch-environment.js";
 import { UnsupportedProviderApprovalModeError } from "../session-adapter-errors.js";
 
+export interface AntigravityProviderAdapterOptions extends AntigravityWorkspaceTrustOptions {
+  sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
+}
+
 /** Broker-owned interactive Antigravity session using agy's documented prompt-interactive mode. */
 export class AntigravityProviderAdapter implements ProviderAdapter {
   readonly id = "antigravity" as const;
   private readonly workspaceTrust: AntigravityWorkspaceTrust;
 
-  constructor(options: AntigravityWorkspaceTrustOptions = {}) {
+  constructor(private readonly options: AntigravityProviderAdapterOptions = {}) {
     this.workspaceTrust = new AntigravityWorkspaceTrust(options);
   }
 
@@ -25,8 +29,17 @@ export class AntigravityProviderAdapter implements ProviderAdapter {
       ...(session.effort === undefined ? {} : { effort: session.effort }),
     }, {
       ...(initialPrompt === undefined ? {} : { initialPrompt }),
+      sourceEnvironment: this.options.sourceEnvironment ?? process.env,
     });
-    return { ...command, env: sessionLaunchEnvironment(command.env, session) };
+    return {
+      ...command,
+      env: sessionLaunchEnvironment(
+        this.options.sourceEnvironment ?? process.env,
+        this.id,
+        session.cwd,
+        session,
+      ),
+    };
   }
 
   async prepareLaunch(session: SessionRecord): Promise<void> {
