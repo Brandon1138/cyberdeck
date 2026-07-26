@@ -48,7 +48,7 @@ function cyberdeck_apply_navigation() {
   # Reject every shell control surface before lexical splitting. Quoting does not turn commands,
   # substitutions, chains, pipes, redirects, or background jobs into allowed navigation.
   if [[ "$line" == *$'\n'* || "$line" == *[\;\|\&\<\>\`\$]* ]]; then
-    cyberdeck_navigation_error "Only cd <directory> and z <terms> are allowed"
+    cyberdeck_navigation_error "Only cd, z, ls, and pwd are allowed"
     return 1
   fi
 
@@ -111,8 +111,25 @@ function cyberdeck_apply_navigation() {
         return 1
       }
       ;;
+    ls)
+      if (( \${#words} == 1 )); then
+        command ls
+      elif (( \${#words} == 2 )) && [[ "$words[2]" == "-a" || "$words[2]" == "-l" || "$words[2]" == "-la" || "$words[2]" == "-al" ]]; then
+        command ls "$words[2]"
+      else
+        cyberdeck_navigation_error "Usage: ls, ls -a, ls -l, ls -la, or ls -al"
+        return 1
+      fi
+      ;;
+    pwd)
+      if (( \${#words} != 1 )); then
+        cyberdeck_navigation_error "Usage: pwd"
+        return 1
+      fi
+      builtin pwd
+      ;;
     *)
-      cyberdeck_navigation_error "Only cd <directory> and z <terms> are allowed"
+      cyberdeck_navigation_error "Only cd, z, ls, and pwd are allowed"
       return 1
       ;;
   esac
@@ -125,7 +142,7 @@ function cyberdeck_cwd_navigator() {
   local line
 
   print -P "%BChange working directory%b"
-  print "Navigation only: cd <dir>, cd .., cd -, z <terms>"
+  print "Navigation: cd <dir>, cd .., cd -, z <terms> · inspect: ls [-a|-l|-la|-al], pwd"
   print "Tab uses your zsh completion · empty Enter confirms · Ctrl-C cancels"
   print
 
