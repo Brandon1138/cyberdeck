@@ -12,6 +12,7 @@ import {
   transitionFleet,
   type FleetSnapshot,
 } from "../../src/client/fleet.js";
+import type { PullRequestState } from "../../src/client/pr-status.js";
 
 const NOW = "2026-07-22T10:00:00.000Z";
 const NOW_MS = Date.parse(NOW);
@@ -120,6 +121,92 @@ describe("fleet presentation", () => {
     expect(needsInputLine).toHaveLength(76);
     expect(doneLine).toMatch(/14s$/u);
     expect(needsInputLine).toMatch(/ 2m$/u);
+  });
+
+  describe("pull request column", () => {
+    const first = session({ name: "Ship indicator", cwd: "/repo/one", displayOrder: 0 });
+    const second = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "No branch yet",
+      cwd: "/repo/two",
+      displayOrder: 1,
+    });
+    const snapshot = fleet({ record: first }, { record: second });
+
+    const render = (pullRequests: Map<string, PullRequestState>, width = 120): string =>
+      renderFleet(snapshot, createFleetState(snapshot), {
+        color: false,
+        width,
+        height: 28,
+        now: NOW_MS,
+        home: "/Users/brandon",
+        pullRequests,
+      });
+
+    const rowFor = (rendered: string, name: string): string =>
+      rendered.split("\n").find((line) => line.includes(name))!;
+
+    it("omits the column entirely when nothing in the fleet has a pull request", () => {
+      const rendered = render(new Map());
+      const row = rowFor(rendered, "Ship indicator");
+
+      expect(row).not.toMatch(/[●○◆⊘✗]/u);
+      expect(row).toHaveLength(120);
+    });
+
+    it("shows a glyph for the thread with a pull request and nothing for the one without", () => {
+      const rendered = render(new Map([["/repo/one", "open" as PullRequestState]]));
+      const withPr = rowFor(rendered, "Ship indicator");
+      const withoutPr = rowFor(rendered, "No branch yet");
+
+      expect(withPr).toContain("●");
+      expect(withoutPr).not.toMatch(/[●○◆⊘✗]/u);
+      // The empty cell still holds the column open so rows stay aligned.
+      expect(withoutPr).toHaveLength(120);
+      expect(withPr).toHaveLength(120);
+      expect(withPr.indexOf("●")).toBe(withoutPr.indexOf("Claude") - 2);
+    });
+
+    it("renders a distinct glyph per state", () => {
+      const glyphs: Array<[PullRequestState, string]> = [
+        ["open", "●"],
+        ["draft", "○"],
+        ["merged", "◆"],
+        ["closed", "⊘"],
+        ["checks-failing", "✗"],
+      ];
+      for (const [state, glyph] of glyphs) {
+        const row = rowFor(render(new Map([["/repo/one", state]])), "Ship indicator");
+        expect(row).toContain(glyph);
+      }
+    });
+
+    it("paints each glyph with an existing palette tone", () => {
+      const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+        color: true,
+        width: 120,
+        height: 28,
+        now: NOW_MS,
+        pullRequests: new Map([["/repo/one", "checks-failing" as PullRequestState]]),
+      });
+
+      expect(rendered).toContain("[38;2;217;108;117m✗[0m");
+    });
+
+    it("keeps the column at narrow widths where the identity column is dropped", () => {
+      const rendered = render(new Map([["/repo/one", "merged" as PullRequestState]]), 60);
+      const row = rowFor(rendered, "Ship indicator");
+
+      expect(row).toContain("◆");
+      expect(row).toHaveLength(60);
+      expect(rowFor(rendered, "No branch yet")).toHaveLength(60);
+    });
+
+    it("ignores pull request state for worktrees not on screen", () => {
+      const rendered = render(new Map([["/repo/elsewhere", "open" as PullRequestState]]));
+
+      expect(rowFor(rendered, "Ship indicator")).not.toMatch(/[●○◆⊘✗]/u);
+    });
   });
 
   it("paints only the states that want the operator, and marks focus with a rule", () => {

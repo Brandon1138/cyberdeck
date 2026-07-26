@@ -26,6 +26,13 @@ import {
   type ProviderPermissionPolicy,
   type ProviderPermissionResolution,
 } from "./permission-policy.js";
+import {
+  NO_PULL_REQUEST_STATUS,
+  PullRequestStatusCache,
+  pullRequestGlyph,
+  type PullRequestState,
+  type PullRequestStatusPort,
+} from "./pr-status.js";
 import { RpcError } from "./rpc-client.js";
 
 export interface FleetTransport {
@@ -196,6 +203,8 @@ export interface FleetRenderOptions {
   height?: number | undefined;
   now?: number | undefined;
   home?: string | undefined;
+  /** Pull-request state per worktree, read synchronously from an async cache. */
+  pullRequests?: ReadonlyMap<string, PullRequestState> | undefined;
 }
 
 interface ResolvedFleetRenderOptions {
@@ -204,6 +213,7 @@ interface ResolvedFleetRenderOptions {
   height: number;
   now: number;
   home: string;
+  pullRequests: ReadonlyMap<string, PullRequestState>;
 }
 
 interface WorkerModelChoice {
@@ -252,6 +262,7 @@ export interface FleetRuntimeOptions {
   detachIdentity?: string | undefined;
   openOrchestrator?: ((target: OrchestratorCockpitTarget) => Promise<SessionRecord>) | undefined;
   permissionPreferences?: ProviderPermissionPreferencePort | undefined;
+  pullRequestStatus?: PullRequestStatusPort | undefined;
 }
 
 export type OrchestratorCockpitTarget =
@@ -817,20 +828,22 @@ export function renderFleet(
   const now = options.now ?? Date.now();
   const color = options.color ?? true;
   const home = options.home ?? homedir();
+  const pullRequests = options.pullRequests ?? new Map();
+  const resolved = { width, height, now, color, home, pullRequests };
   const state = normalizeState(current, snapshot, now);
   if (state.workerPicker !== undefined) {
-    return renderWorkerPicker(state, { width, height, now, color, home });
+    return renderWorkerPicker(state, resolved);
   }
   if (state.permissionPicker !== undefined) {
-    return renderPermissionPicker(snapshot, state, { width, height, now, color, home });
+    return renderPermissionPicker(snapshot, state, resolved);
   }
   if (state.commandPalette !== undefined) {
-    return renderCommandPalette(state, { width, height, now, color, home });
+    return renderCommandPalette(state, resolved);
   }
   if (state.orchestratorPicker !== undefined) {
-    return renderOrchestratorPicker(snapshot, state, { width, height, now, color, home });
+    return renderOrchestratorPicker(snapshot, state, resolved);
   }
-  return renderFleetList(snapshot, state, { width, height, now, color, home });
+  return renderFleetList(snapshot, state, resolved);
 }
 
 function transitionCommandPalette(
@@ -1369,6 +1382,10 @@ function renderFleetList(
   const threads = orderedThreads(snapshot);
   const lines = [...renderHeader(threads, state, options), ""];
 
+  // The column only exists once some thread actually has a pull request, so a
+  // fleet without `gh` — or without PRs — never pays for it.
+  const pullRequestColumn = threads.some(({ record }) =>
+    options.pullRequests.get(record.cwd) !== undefined);
   const groups = groupThreads(threads);
   if (groups.length === 0) {
     lines.push("No durable agent threads yet.");
@@ -1377,7 +1394,7 @@ function renderFleetList(
       lines.push(renderFolderRow(group.cwd, group.threads.length, state, options));
       if (!isCollapsed(state, group.cwd)) {
         for (const thread of group.threads) {
-          lines.push(renderThreadRow(thread, state, options));
+          lines.push(renderThreadRow(thread, state, options, pullRequestColumn));
         }
       }
       lines.push("");
@@ -1719,6 +1736,7 @@ function renderThreadRow(
   thread: FleetThread,
   state: FleetState,
   options: ResolvedFleetRenderOptions,
+  pullRequestColumn = false,
 ): string {
   const selected = state.focusedFolderCwd === undefined
     && thread.record.id === state.selectedSessionId;
@@ -1738,16 +1756,28 @@ function renderThreadRow(
     ? Math.min(20, Math.max(12, Math.floor(options.width * 0.15)))
     : 0;
   const statusWidth = 11;
-  const fixedWidth = 12 + titleWidth + statusWidth + (showIdentity ? identityWidth + 1 : 0);
+  const fixedWidth = 12 + titleWidth + statusWidth
+    + (showIdentity ? identityWidth + 1 : 0)
+    + (pullRequestColumn ? 2 : 0);
   const previewWidth = Math.max(1, options.width - fixedWidth);
   return [
     `${rowGutter(selected, options.color)}${statusMarker(status, selected, options.color)}`,
     paint(pad(title, titleWidth), selected ? "bold" : "muted", options.color),
+    ...(pullRequestColumn
+      ? [pullRequestCell(options.pullRequests.get(thread.record.cwd), options.color)]
+      : []),
     ...(showIdentity ? [paint(pad(identity, identityWidth), "subtle", options.color)] : []),
     statusText(pad(status, statusWidth), false, options.color),
     paint(pad(preview, previewWidth), "muted", options.color),
     padStart(age, 5),
   ].join(" ");
+}
+
+/** A thread with no known pull request holds the column open and shows nothing. */
+function pullRequestCell(state: PullRequestState | undefined, color: boolean): string {
+  if (state === undefined) return " ";
+  const { glyph, tone } = pullRequestGlyph(state);
+  return paint(glyph, tone, color);
 }
 
 /**
@@ -1805,6 +1835,11 @@ export async function runFleet(
     client.close();
     return;
   }
+
+  // Probing is an interactive affordance: a piped fleet renders once, before
+  // any out-of-band probe could land, so it never pays the subprocess cost.
+  const pullRequestStatus = runtime.pullRequestStatus
+    ?? (output.isTTY === true ? new PullRequestStatusCache() : NO_PULL_REQUEST_STATUS);
 
   const previousRawMode = input.isRaw === true;
   let stopped = false;
@@ -2046,6 +2081,7 @@ export async function runFleet(
       }
       snapshot = await collectFleetSnapshot(client);
       state = normalizeState(state, snapshot, Date.now());
+      pullRequestStatus.refresh(snapshot.threads.map(({ record }) => record.cwd));
       const height = Math.max(16, output.rows ?? 32);
       const width = Math.max(50, output.columns ?? 120);
       if (state.view === "diagnostics") {
@@ -2063,6 +2099,7 @@ export async function runFleet(
           color: output.isTTY === true,
           width,
           height,
+          pullRequests: pullRequestStatus.states(),
         });
         const cursor = composerCursor(rendered, state, width);
         output.write(`\u001b[2J\u001b[H${rendered}\u001b[${cursor.row};${cursor.column}H\u001b[?25h`);
