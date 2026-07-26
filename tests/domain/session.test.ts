@@ -54,6 +54,18 @@ describe("StartSessionRequestSchema", () => {
     })).toThrow();
   });
 
+  it("keeps provider prompts as the implicit approval behavior and accepts explicit auto", () => {
+    const base = {
+      provider: "codex",
+      cwd: "/tmp/repo",
+      detached: true,
+      sandbox: "workspace-write",
+    };
+    expect(StartSessionRequestSchema.parse(base).approvalMode).toBeUndefined();
+    expect(StartSessionRequestSchema.parse({ ...base, approvalMode: "auto" }).approvalMode).toBe("auto");
+    expect(() => StartSessionRequestSchema.parse({ ...base, approvalMode: "bypass" })).toThrow();
+  });
+
   it("persists the authority scope on orchestrator session projections", () => {
     const parsed = StartSessionRequestSchema.parse({
       provider: "codex",

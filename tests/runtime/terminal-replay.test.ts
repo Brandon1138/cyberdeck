@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   compactTerminalResult,
-  latestAssistantParagraphPreview,
   providerTerminalActivity,
+  truncateResult,
 } from "../../src/runtime/terminal-replay.js";
 
 describe("terminal replay semantics", () => {
@@ -22,7 +22,37 @@ describe("terminal replay semantics", () => {
     expect(providerTerminalActivity(
       "antigravity",
       "Do you trust the contents of this project? > Yes, I trust this folder",
-    )).toBe("blocked");
+    )).toBe("needs-input");
+  });
+
+  it("recognizes current Codex and Claude provider approval surfaces", () => {
+    const codex = [
+      "Would you like to run the following command?",
+      "$ pnpm test",
+      "› 1. Yes, proceed (y)",
+      "  2. Yes, and don't ask again for commands that start with `pnpm test` (p)",
+      "  3. No, and tell Codex what to do differently (esc)",
+    ].join("\n");
+    const claude = [
+      "Claude needs your permission to use Bash",
+      "  pnpm test",
+      "Do you want to proceed?",
+      "❯ 1. Yes",
+      "  2. Yes, and don't ask again for pnpm test commands",
+      "  3. No",
+      "Esc to cancel · Tab to amend",
+    ].join("\n");
+    expect(providerTerminalActivity("codex", codex)).toBe("needs-input");
+    expect(providerTerminalActivity("claude", claude)).toBe("needs-input");
+  });
+
+  it("clears a stale approval surface when later provider output resumes work", () => {
+    const approval = [
+      "Would you like to run the following command?",
+      "$ pnpm test",
+      "› 1. Yes, proceed (y)",
+    ].join("\n");
+    expect(providerTerminalActivity("codex", `${approval}\nWorking\nesc to interrupt`)).toBe("working");
   });
 
   it("recognizes Antigravity's prompt footer after its spinner stops", () => {
@@ -40,16 +70,11 @@ describe("terminal replay semantics", () => {
     expect(result.length).toBeLessThanOrEqual(240);
   });
 
-  it("uses the first line of the final substantive paragraph instead of timing chrome", () => {
-    const replay = [
-      "Earlier paragraph.",
-      "",
-      "The final result is ready.",
-      "It is safe to resume later.",
-      "",
-      "Cogitated for 2m 14s",
-      "Explain this codebase",
-    ].join("\n");
-    expect(latestAssistantParagraphPreview(replay)).toBe("The final result is ready.");
+  it("truncates deterministically from the head with an original-length marker", () => {
+    const result = truncateResult(`DECISIVE-BEGINNING-${"x".repeat(500)}-DISTINCTIVE-END`, 240);
+    expect(result).toMatch(/^DECISIVE-BEGINNING-/u);
+    expect(result).toContain("[elided; original length: 535 characters]");
+    expect(result).not.toContain("DISTINCTIVE-END");
+    expect(result).toHaveLength(240);
   });
 });

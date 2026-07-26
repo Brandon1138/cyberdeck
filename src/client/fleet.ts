@@ -2,16 +2,38 @@ import { homedir } from "node:os";
 import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
-  EnsureOrchestratorRequest,
+  CreateOrchestratorRequest,
   FableWorkersRequest,
   FableWorkersResult,
 } from "../domain/orchestrator.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
 import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
-import { latestTerminalPreview, providerTerminalActivity, stripTerminalControl } from "../runtime/terminal-replay.js";
+import { appStateDirectory } from "../paths.js";
+import {
+  ProviderPermissionPreferenceStore,
+  type ProviderPermissionPreferencePort,
+  type ProviderPermissionPreferences,
+} from "../persistence/provider-permission-preference-store.js";
+import { conversationPreview } from "../runtime/conversation-preview.js";
+import { providerTerminalActivity, stripTerminalControl } from "../runtime/terminal-replay.js";
 import { attachSession, type AttachTransport } from "./attach.js";
 import { collectDashboardSnapshot, renderDashboard } from "./dashboard.js";
+import {
+  CONFIGURABLE_PERMISSION_PROVIDERS,
+  permissionProviderLabel,
+  resolveProviderPermission,
+  type ConfigurablePermissionProvider,
+  type ProviderPermissionPolicy,
+  type ProviderPermissionResolution,
+} from "./permission-policy.js";
+import {
+  NO_PULL_REQUEST_STATUS,
+  PullRequestStatusCache,
+  pullRequestGlyph,
+  type PullRequestState,
+  type PullRequestStatusPort,
+} from "./pr-status.js";
 import { RpcError } from "./rpc-client.js";
 
 export interface FleetTransport {
@@ -60,13 +82,13 @@ export interface QuitConfirmation {
   expiresAt: number;
 }
 
-export type OrchestratorPickerStep = "model" | "effort";
-
-export interface OrchestratorPickerState {
-  step: OrchestratorPickerStep;
-  choiceIndex: number;
-  effortIndex: number;
+export interface StopAcknowledgement {
+  sessionId: string;
 }
+
+export type OrchestratorPickerState =
+  | { step: "target"; choiceIndex: number }
+  | { step: "effort"; modelIndex: number; effortIndex: number };
 
 export interface LaunchProfile {
   provider: ProviderId;
@@ -82,6 +104,19 @@ export interface WorkerPickerState {
   returnDraft: string;
 }
 
+export interface CommandPaletteState {
+  level: "commands" | "values";
+  command?: SlashCommandName | undefined;
+  selectedIndex: number;
+  scrollOffset: number;
+}
+
+export interface PermissionPickerState {
+  step: "provider" | "policy";
+  providerIndex: number;
+  policyIndex: number;
+}
+
 export interface RenameState {
   sessionId: string;
   draft: string;
@@ -91,13 +126,26 @@ export type FleetNoticeTone = "neutral" | "warning" | "error" | "confirmation";
 
 export interface FleetState {
   selectedSessionId?: string | undefined;
+  /**
+   * Set while a folder header row holds focus. Thread-scoped keys are inert in
+   * that case; `selectedSessionId` is retained so focus returns to the thread
+   * the operator left when they move off the header.
+   */
+  focusedFolderCwd?: string | undefined;
+  /** Folders whose threads are hidden. Membership survives snapshot churn. */
+  collapsedCwds?: readonly string[] | undefined;
   fallbackCwd: string;
+  workingDirectory?: string | undefined;
   draft: string;
+  stopAcknowledgement?: StopAcknowledgement | undefined;
   deleteConfirmation?: DeleteConfirmation | undefined;
   quitConfirmation?: QuitConfirmation | undefined;
   orchestratorPicker?: OrchestratorPickerState | undefined;
   workerPicker?: WorkerPickerState | undefined;
+  commandPalette?: CommandPaletteState | undefined;
+  permissionPicker?: PermissionPickerState | undefined;
   launchProfiles: Record<string, LaunchProfile>;
+  permissionPolicies: ProviderPermissionPreferences;
   view: "fleet" | "diagnostics";
   helpOpen?: boolean | undefined;
   rename?: RenameState | undefined;
@@ -110,20 +158,43 @@ export type FleetAction =
   | { type: "delete"; sessionId: string }
   | { type: "attach"; sessionId: string }
   | { type: "resume"; sessionId: string }
-  | { type: "start"; request: StartSessionRequest & { initialPrompt: string } }
-  | { type: "orchestrator"; request: EnsureOrchestratorRequest }
+  | {
+    type: "start";
+    request: StartSessionRequest & { initialPrompt: string };
+    permissionLaunch?: ProviderPermissionResolution | undefined;
+  }
+  | {
+    type: "open-orchestrator";
+    sessionId: string;
+    cockpitCwd: string;
+    requiresResume: boolean;
+  }
+  | {
+    type: "create-orchestrator";
+    request: CreateOrchestratorRequest;
+    cockpitCwd: string;
+  }
   | { type: "fable-workers"; request: FableWorkersRequest }
   | { type: "caveman-workers"; request: CavemanWorkersRequest }
   | { type: "rename"; sessionId: string; name: string }
   | { type: "pin"; sessionId: string }
   | { type: "reorder"; sessionId: string; direction: "up" | "down" }
   | { type: "profile"; cwd: string; profile: LaunchProfile }
+  | {
+    type: "permission-policy";
+    provider: ConfigurablePermissionProvider;
+    policy: ProviderPermissionPolicy;
+    previousPolicy: ProviderPermissionPolicy;
+  }
+  | { type: "change-directory"; cwd: string }
   | { type: "quit" };
 
 export interface FleetTransition {
   state: FleetState;
   action?: FleetAction;
 }
+
+export type StartFleetAction = Extract<FleetAction, { type: "start" }>;
 
 export type ThreadStatus = "Working" | "Needs input" | "Done" | "Stopping" | "Stopped" | "Interrupted" | "Failed";
 
@@ -133,6 +204,8 @@ export interface FleetRenderOptions {
   height?: number | undefined;
   now?: number | undefined;
   home?: string | undefined;
+  /** Pull-request state per worktree, read synchronously from an async cache. */
+  pullRequests?: ReadonlyMap<string, PullRequestState> | undefined;
 }
 
 interface ResolvedFleetRenderOptions {
@@ -141,6 +214,7 @@ interface ResolvedFleetRenderOptions {
   height: number;
   now: number;
   home: string;
+  pullRequests: ReadonlyMap<string, PullRequestState>;
 }
 
 interface WorkerModelChoice {
@@ -156,13 +230,86 @@ interface OrchestratorModelChoice {
   label: string;
 }
 
-export interface FleetRuntimeOptions {
-  openOrchestrator?: ((request: EnsureOrchestratorRequest) => Promise<void>) | undefined;
+type SlashCommandName =
+  | "/model"
+  | "/permissions"
+  | "/fable-workers"
+  | "/caveman-workers";
+
+interface SlashCommandDefinition {
+  name: SlashCommandName;
+  description: string;
+  values?: readonly SlashCommandValue[] | undefined;
 }
+
+interface SlashCommandValue {
+  value: string;
+  description: string;
+}
+
+export interface FleetRuntimeOptions {
+  changeDirectory?: ((cwd: string) => Promise<string | undefined>) | undefined;
+  detachIdentity?: string | undefined;
+  openOrchestrator?: ((target: OrchestratorCockpitTarget) => Promise<SessionRecord>) | undefined;
+  permissionPreferences?: ProviderPermissionPreferencePort | undefined;
+  pullRequestStatus?: PullRequestStatusPort | undefined;
+}
+
+export type OrchestratorCockpitTarget =
+  | {
+    type: "existing";
+    session: SessionRecord;
+    cockpitCwd: string;
+    requiresResume: boolean;
+  }
+  | {
+    type: "create";
+    request: CreateOrchestratorRequest;
+    cockpitCwd: string;
+  };
 
 const DELETE_CONFIRMATION_MS = 5_000;
 const QUIT_CONFIRMATION_MS = 5_000;
 const QUIT_CONFIRMATION_NOTICE = "Press ctrl+c again to exit";
+const COMMAND_PALETTE_VISIBLE_ROWS = 3;
+const DEFAULT_PERMISSION_POLICIES: Readonly<Record<ConfigurablePermissionProvider, ProviderPermissionPolicy>> = {
+  codex: "permissioned",
+  claude: "permissioned",
+  cursor: "permissioned",
+  antigravity: "permissioned",
+};
+const PERMISSION_POLICIES: readonly ProviderPermissionPolicy[] = [
+  "permissioned",
+  "automatic",
+];
+const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
+  {
+    name: "/model",
+    description: "Choose worker provider, model, and effort",
+  },
+  {
+    name: "/permissions",
+    description: "Inspect or configure provider launch permissions",
+  },
+  {
+    name: "/fable-workers",
+    description: "Inspect or toggle Fable workers",
+    values: [
+      { value: "status", description: "Show current Fable worker preference" },
+      { value: "on", description: "Enable Fable workers" },
+      { value: "off", description: "Disable Fable workers" },
+    ],
+  },
+  {
+    name: "/caveman-workers",
+    description: "Inspect or toggle Caveman workers",
+    values: [
+      { value: "status", description: "Show current Caveman worker preference" },
+      { value: "on", description: "Enable Caveman workers" },
+      { value: "off", description: "Disable Caveman workers" },
+    ],
+  },
+];
 const WORKER_MODEL_CHOICES: readonly WorkerModelChoice[] = WORKER_PROVIDER_CAPABILITIES.flatMap((capability) =>
   (capability.provider === "antigravity" ? ["gemini-3.6-flash"] : capability.models)
     .map((model): WorkerModelChoice => ({
@@ -189,22 +336,76 @@ const DISABLE_INHERITED_TERMINAL_INPUT_MODES = [
   "\u001b[?1006l", // SGR mouse encoding
   "\u001b[?1015l", // urxvt mouse encoding
   "\u001b[?1016l", // SGR pixel mouse encoding
+  "\u001b[?2004l", // bracketed paste
+  "\u001b[<u", // pop any keyboard protocol a provider TUI pushed
 ].join("");
 const ENTER_FLEET_SCREEN = `${DISABLE_INHERITED_TERMINAL_INPUT_MODES}\u001b[?1049h\u001b[?25l`;
 const LEAVE_FLEET_SCREEN = `${DISABLE_INHERITED_TERMINAL_INPUT_MODES}\u001b[?25h\u001b[?1049l`;
 
+/**
+ * Tone table for `paint`.
+ *
+ * Two layers. The hue block is the raw ink; the semantic block below names what
+ * a hue *means*, and rows paint with those names so a hue can move without a
+ * render rewrite. Four states earn a hue: blocked, finished, failing, and the
+ * one live thread. Everything else is greyscale and leans on weight and the
+ * selection rule for hierarchy.
+ *
+ * `gray` sits one contrast step above its former 123;132;144: legible as body
+ * text, still clearly recessed from the terminal foreground.
+ */
 const ANSI = {
   reset: "\u001b[0m",
   bold: "\u001b[1m",
   dim: "\u001b[2m",
+
+  // Hues.
   blue: "\u001b[38;2;158;182;255m",
   purple: "\u001b[38;2;182;158;255m",
+  violet: "\u001b[38;2;198;120;221m",
   cyan: "\u001b[38;2;102;194;208m",
   yellow: "\u001b[38;2;212;168;91m",
   green: "\u001b[38;2;120;198;121m",
   red: "\u001b[38;2;217;108;117m",
-  gray: "\u001b[38;2;123;132;144m",
+  gray: "\u001b[38;2;154;163;175m",
+  ice: "\u001b[38;2;169;198;214m",
+
+  // Semantic tokens.
+
+  /** Cyberdeck logo and wordmark. Reserved: no state may borrow the brand hue. */
+  brand: "\u001b[38;2;182;158;255m",
+  /** A thread is blocked and wants the operator: needs input, or a prompt awaiting an answer. */
+  attention: "\u001b[38;2;212;168;91m",
+  /** A thread finished successfully and is waiting to be read. */
+  done: "\u001b[38;2;120;198;121m",
+  /** The provider is generating right now: the one live state in the fleet. */
+  working: "\u001b[38;2;169;198;214m",
+  /** Something is wrong right now — a failed thread, a destructive confirmation. */
+  alert: "\u001b[38;2;217;108;117m",
+  /** Body text at rest: titles, paths, metadata. Subdued, never foreground. */
+  muted: "\u001b[38;2;154;163;175m",
+  /** Chrome that should recede entirely: rules, footers, shortcut hints. */
+  subtle: "\u001b[2m",
+  /** The left rule marking the focused row. */
+  selection: "\u001b[38;2;154;163;175m",
+
+  // Pull request states, for the per-thread indicator column.
+
+  /** Open: live, reviewable work. */
+  prOpen: "\u001b[38;2;120;198;121m",
+  /** Draft: opened, not yet offered for review. */
+  prDraft: "\u001b[2m",
+  /** Merged. Deliberately not the brand purple, which the logo alone owns. */
+  prMerged: "\u001b[38;2;198;120;221m",
+  /** Closed unmerged: inert and terminal, but not a fault — so not red. */
+  prClosed: "\u001b[38;2;154;163;175m",
+  /** Checks failing: the one pull request state that demands action. */
+  prFailing: "\u001b[38;2;217;108;117m",
 } as const;
+
+/** Gutter cell that prefixes every navigable row; carries the selection rule. */
+const SELECTION_RULE = "▌";
+const ROW_GUTTER = "  ";
 
 export async function collectFleetSnapshot(client: FleetTransport): Promise<FleetSnapshot> {
   const sessions = await client.request<SessionRecord[]>("session.list", {});
@@ -228,6 +429,7 @@ export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.
     fallbackCwd,
     draft: "",
     launchProfiles: {},
+    permissionPolicies: { ...DEFAULT_PERMISSION_POLICIES },
     view: "fleet",
   };
 }
@@ -249,14 +451,37 @@ export function threadStatus(thread: FleetThread): ThreadStatus {
     case "starting": return "Working";
     case "exited": return "Done";
     case "failed": return "Failed";
+    // A session that died inside a live process. It reads as Failed rather than as whatever its
+    // last terminal frame happened to look like, so nobody is invited to type at it.
+    case "errored": return "Failed";
     case "cancelled": return thread.record.exitCode === null ? "Stopping" : "Stopped";
     case "active": {
       const activity = providerTerminalActivity(thread.record.provider, thread.replay);
       if (activity === "working") return "Working";
-      if (activity === "blocked") return "Needs input";
+      if (activity === "needs-input") return "Needs input";
       return "Done";
     }
   }
+}
+
+export async function startFleetSession(
+  client: FleetTransport,
+  action: StartFleetAction,
+): Promise<SessionRecord> {
+  if (action.permissionLaunch?.application.kind !== "post-launch-command") {
+    return client.request<SessionRecord>("session.startWithPrompt", action.request);
+  }
+  const { initialPrompt, ...request } = action.request;
+  const record = await client.request<SessionRecord>("session.start", request);
+  await client.request("session.submit", {
+    sessionId: record.id,
+    message: action.permissionLaunch.application.command,
+  });
+  await client.request("session.submit", {
+    sessionId: record.id,
+    message: initialPrompt,
+  });
+  return record;
 }
 
 export function transitionFleet(
@@ -293,7 +518,12 @@ export function transitionFleet(
         quitConfirmation: undefined,
         ...(normalized.notice === QUIT_CONFIRMATION_NOTICE ? { notice: undefined } : {}),
       };
-  const selected = threads.find(({ record }) => record.id === state.selectedSessionId);
+  // A focused folder header owns the row, so every thread-scoped key is inert
+  // until focus moves back onto a thread.
+  const focusedFolderCwd = state.focusedFolderCwd;
+  const selected = focusedFolderCwd === undefined
+    ? threads.find(({ record }) => record.id === state.selectedSessionId)
+    : undefined;
 
   if (key === "ctrl+s") {
     return {
@@ -339,6 +569,14 @@ export function transitionFleet(
     return transitionWorkerPicker(state, key);
   }
 
+  if (state.permissionPicker !== undefined) {
+    return transitionPermissionPicker(state, snapshot, key);
+  }
+
+  if (state.commandPalette !== undefined) {
+    return transitionCommandPalette(state, snapshot, key);
+  }
+
   if (key === "ctrl+o") {
     return {
       state: {
@@ -352,7 +590,47 @@ export function transitionFleet(
   }
 
   if (state.orchestratorPicker !== undefined) {
-    return transitionOrchestratorPicker(state, key);
+    return transitionOrchestratorPicker(state, snapshot, key);
+  }
+
+  if (key === "ctrl+g") {
+    return {
+      state: { ...state, helpOpen: false, notice: undefined },
+      action: { type: "change-directory", cwd: composerCwd(state, snapshot) },
+    };
+  }
+
+  if (key === "ctrl+]") {
+    if (selected?.record.kind !== "orchestrator") {
+      return {
+        state: {
+          ...state,
+          helpOpen: false,
+          notice: "Select a detached orchestrator to attach to the cockpit",
+          noticeTone: "neutral",
+        },
+      };
+    }
+    if (selected.record.attachmentState === "controlled") {
+      return {
+        state: {
+          ...state,
+          helpOpen: false,
+          notice: "Selected orchestrator is controlled elsewhere",
+          noticeTone: "warning",
+        },
+      };
+    }
+    return {
+      state: { ...state, helpOpen: false, notice: undefined },
+      action: {
+        type: "open-orchestrator",
+        sessionId: selected.record.id,
+        cockpitCwd: state.fallbackCwd,
+        requiresResume: selected.record.executionState !== "active"
+          && selected.record.executionState !== "starting",
+      },
+    };
   }
 
   if (key === "?" && state.draft === "") {
@@ -390,14 +668,26 @@ export function transitionFleet(
     const target = threads[index];
     return target === undefined
       ? { state }
-      : { state: { ...state, selectedSessionId: target.record.id }, action: openAction(target.record) };
+      : {
+          state: {
+            ...state,
+            selectedSessionId: target.record.id,
+            focusedFolderCwd: undefined,
+            deleteConfirmation: undefined,
+            notice: undefined,
+          },
+          action: openAction(target.record),
+        };
   }
 
   if (key === "ctrl+x" && selected !== undefined) {
-    if (!isTerminalSession(selected.record)) {
+    const terminal = isTerminalSession(selected.record);
+    const stopAcknowledged = state.stopAcknowledgement?.sessionId === selected.record.id;
+    if (!terminal || !stopAcknowledged) {
       return {
         state: {
           ...state,
+          stopAcknowledgement: { sessionId: selected.record.id },
           deleteConfirmation: undefined,
           notice: `Stopping ${threadSubject(selected.record)}`,
           noticeTone: "warning",
@@ -424,6 +714,24 @@ export function transitionFleet(
     };
   }
 
+  if (focusedFolderCwd !== undefined && (key === "left" || key === "right")) {
+    return {
+      state: {
+        ...setCollapsed(state, focusedFolderCwd, key === "left"),
+        deleteConfirmation: undefined,
+        notice: undefined,
+      },
+    };
+  }
+  if (key === "enter" && focusedFolderCwd !== undefined && state.draft.trim() === "") {
+    return {
+      state: {
+        ...setCollapsed(state, focusedFolderCwd, !isCollapsed(state, focusedFolderCwd)),
+        deleteConfirmation: undefined,
+        notice: undefined,
+      },
+    };
+  }
   if (key === "right" && selected !== undefined) {
     return {
       state: { ...state, draft: "", deleteConfirmation: undefined, notice: undefined },
@@ -443,6 +751,9 @@ export function transitionFleet(
     if (initialPrompt === "/model") {
       return openWorkerPicker(state, snapshot, "");
     }
+    if (initialPrompt === "/permissions") {
+      return openPermissionPicker(state, snapshot);
+    }
     if (initialPrompt === "") {
       return {
         state: { ...state, deleteConfirmation: undefined, notice: undefined },
@@ -456,16 +767,15 @@ export function transitionFleet(
     const workerPolicy = workerPolicyTransition(state, snapshot, initialPrompt);
     if (workerPolicy !== undefined) return workerPolicy;
     if (initialPrompt === "/model") return openWorkerPicker(state, snapshot, "");
+    if (initialPrompt === "/permissions") return openPermissionPicker(state, snapshot);
     return startTransition(state, undefined, initialPrompt);
   }
   if (key === "up" || key === "down") {
-    const currentIndex = Math.max(0, threads.findIndex(({ record }) => record.id === state.selectedSessionId));
-    const delta = key === "up" ? -1 : 1;
-    const nextIndex = Math.max(0, Math.min(threads.length - 1, currentIndex + delta));
+    const rows = fleetRows(snapshot, state);
+    const nextIndex = boundedIndex(focusedRowIndex(rows, state) + (key === "up" ? -1 : 1), rows.length);
     return {
       state: {
-        ...state,
-        selectedSessionId: threads[nextIndex]?.record.id,
+        ...focusRow(state, rows[nextIndex]),
         deleteConfirmation: undefined,
         notice: undefined,
       },
@@ -474,7 +784,9 @@ export function transitionFleet(
   if (key === "backspace") {
     return { state: { ...state, draft: [...state.draft].slice(0, -1).join(""), notice: undefined } };
   }
-  if (key === "ctrl+j") {
+  // Newline in the composer. Option+Enter is the convention operators arrive with, so it is bound
+  // here and nowhere else: no fleet action may ever answer it, or a half-written task would launch.
+  if (key === "ctrl+j" || key === "alt+enter" || key === "shift+enter") {
     return { state: { ...state, draft: `${state.draft}\n`, notice: undefined } };
   }
   if (key === "escape") {
@@ -485,6 +797,21 @@ export function transitionFleet(
   if (key === "@" && state.draft === "" && selected !== undefined) {
     const reference = (selected.record.name ?? selected.record.id.slice(0, 8)).replace(/\s+/gu, "-");
     return { state: { ...state, draft: `@${reference} `, notice: undefined } };
+  }
+  if (key === "/" && state.draft === "") {
+    return {
+      state: {
+        ...state,
+        draft: "/",
+        commandPalette: {
+          level: "commands",
+          selectedIndex: 0,
+          scrollOffset: 0,
+        },
+        helpOpen: false,
+        notice: undefined,
+      },
+    };
   }
   if ([...key].length === 1 && key.charCodeAt(0) >= 0x20) {
     return { state: { ...state, draft: `${state.draft}${key}`, notice: undefined } };
@@ -502,14 +829,438 @@ export function renderFleet(
   const now = options.now ?? Date.now();
   const color = options.color ?? true;
   const home = options.home ?? homedir();
+  const pullRequests = options.pullRequests ?? new Map();
+  const resolved = { width, height, now, color, home, pullRequests };
   const state = normalizeState(current, snapshot, now);
   if (state.workerPicker !== undefined) {
-    return renderWorkerPicker(state, { width, height, now, color, home });
+    return renderWorkerPicker(state, resolved);
+  }
+  if (state.permissionPicker !== undefined) {
+    return renderPermissionPicker(snapshot, state, resolved);
+  }
+  if (state.commandPalette !== undefined) {
+    return renderCommandPalette(state, resolved);
   }
   if (state.orchestratorPicker !== undefined) {
-    return renderOrchestratorPicker(state, { width, height, now, color, home });
+    return renderOrchestratorPicker(snapshot, state, resolved);
   }
-  return renderFleetList(snapshot, state, { width, height, now, color, home });
+  return renderFleetList(snapshot, state, resolved);
+}
+
+function transitionCommandPalette(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  key: string,
+): FleetTransition {
+  const palette = state.commandPalette!;
+  const candidates = commandPaletteCandidates(state);
+  if (key === "escape") {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        commandPalette: undefined,
+        notice: undefined,
+      },
+    };
+  }
+  if (key === "up" || key === "down") {
+    const delta = key === "up" ? -1 : 1;
+    const selectedIndex = boundedIndex(
+      palette.selectedIndex + delta,
+      candidates.length,
+    );
+    return {
+      state: {
+        ...state,
+        commandPalette: {
+          ...palette,
+          selectedIndex,
+          scrollOffset: paletteScrollOffset(selectedIndex, palette.scrollOffset),
+        },
+      },
+    };
+  }
+  if (key === "backspace") {
+    if (state.draft === "/") {
+      return {
+        state: {
+          ...state,
+          draft: "",
+          commandPalette: undefined,
+          notice: undefined,
+        },
+      };
+    }
+    const draft = [...state.draft].slice(0, -1).join("");
+    const command = palette.command;
+    const valuesOpen = command !== undefined && draft.startsWith(`${command} `);
+    return {
+      state: {
+        ...state,
+        draft,
+        commandPalette: {
+          level: valuesOpen ? "values" : "commands",
+          ...(valuesOpen ? { command } : {}),
+          selectedIndex: 0,
+          scrollOffset: 0,
+        },
+        notice: undefined,
+      },
+    };
+  }
+  if (key === "enter") {
+    const selected = candidates[palette.selectedIndex];
+    if (selected === undefined) {
+      return {
+        state: {
+          ...state,
+          notice: "No matching slash commands",
+          noticeTone: "error",
+        },
+      };
+    }
+    if (palette.level === "commands") {
+      const command = selected as SlashCommandDefinition;
+      if (command.values !== undefined) {
+        return {
+          state: {
+            ...state,
+            draft: `${command.name} `,
+            commandPalette: {
+              level: "values",
+              command: command.name,
+              selectedIndex: 0,
+              scrollOffset: 0,
+            },
+            notice: undefined,
+          },
+        };
+      }
+      const closed = {
+        ...state,
+        draft: "",
+        commandPalette: undefined,
+        notice: undefined,
+      };
+      return command.name === "/model"
+        ? openWorkerPicker(closed, snapshot, "")
+        : openPermissionPicker(closed, snapshot);
+    }
+    const command = palette.command!;
+    const value = (selected as SlashCommandValue).value;
+    const completed = {
+      ...state,
+      draft: `${command} ${value}`,
+      commandPalette: undefined,
+      notice: undefined,
+    };
+    return workerPolicyTransition(completed, snapshot, completed.draft)
+      ?? { state: completed };
+  }
+  if ([...key].length === 1 && key.charCodeAt(0) >= 0x20) {
+    if (palette.level === "commands" && key === " ") {
+      const command = SLASH_COMMANDS.find((candidate) => candidate.name === state.draft);
+      if (command?.values !== undefined) {
+        return {
+          state: {
+            ...state,
+            draft: `${state.draft} `,
+            commandPalette: {
+              level: "values",
+              command: command.name,
+              selectedIndex: 0,
+              scrollOffset: 0,
+            },
+            notice: undefined,
+          },
+        };
+      }
+    }
+    return {
+      state: {
+        ...state,
+        draft: `${state.draft}${key}`,
+        commandPalette: {
+          ...palette,
+          selectedIndex: 0,
+          scrollOffset: 0,
+        },
+        notice: undefined,
+      },
+    };
+  }
+  return { state };
+}
+
+function commandPaletteCandidates(
+  state: FleetState,
+): readonly (SlashCommandDefinition | SlashCommandValue)[] {
+  const palette = state.commandPalette!;
+  if (palette.level === "commands") {
+    const query = state.draft.slice(1).trim().toLowerCase();
+    if (query === "") return SLASH_COMMANDS;
+    return SLASH_COMMANDS.filter((command) =>
+      command.name.slice(1).includes(query)
+      || command.description.toLowerCase().includes(query));
+  }
+  const command = SLASH_COMMANDS.find((candidate) => candidate.name === palette.command);
+  if (command?.values === undefined) return [];
+  const prefix = `${command.name} `;
+  const query = state.draft.startsWith(prefix)
+    ? state.draft.slice(prefix.length).trim().toLowerCase()
+    : "";
+  if (query === "") return command.values;
+  return command.values.filter((value) =>
+    value.value.includes(query)
+    || value.description.toLowerCase().includes(query));
+}
+
+function paletteScrollOffset(selectedIndex: number, current: number): number {
+  if (selectedIndex < current) return selectedIndex;
+  if (selectedIndex >= current + COMMAND_PALETTE_VISIBLE_ROWS) {
+    return selectedIndex - COMMAND_PALETTE_VISIBLE_ROWS + 1;
+  }
+  return current;
+}
+
+function renderCommandPalette(
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): string {
+  const palette = state.commandPalette!;
+  const candidates = commandPaletteCandidates(state);
+  const visible = candidates.slice(
+    palette.scrollOffset,
+    palette.scrollOffset + COMMAND_PALETTE_VISIBLE_ROWS,
+  );
+  const lines = [
+    ...renderHeader([], state, options),
+    "",
+    palette.level === "commands" ? "Slash commands" : `${palette.command} values`,
+    "",
+  ];
+  if (visible.length === 0) {
+    lines.push("No matching commands");
+  } else {
+    lines.push(...visible.map((candidate, visibleIndex) => {
+      const absoluteIndex = palette.scrollOffset + visibleIndex;
+      const label = "name" in candidate ? candidate.name : candidate.value;
+      return pickerRow(
+        fit(`${label}  ${candidate.description}`, options.width - 2),
+        absoluteIndex === palette.selectedIndex,
+        options.color,
+      );
+    }));
+  }
+  const range = candidates.length === 0
+    ? "0 results"
+    : `${palette.scrollOffset + 1}-${Math.min(
+      candidates.length,
+      palette.scrollOffset + COMMAND_PALETTE_VISIBLE_ROWS,
+    )} of ${candidates.length}`;
+  const footer = [
+    paint("─".repeat(options.width), "dim", options.color),
+    ...renderComposerLines(state.draft, false, options),
+    paint("─".repeat(options.width), "dim", options.color),
+    paint(fit(`↑↓ select · enter complete · esc close · ${range}`, options.width), "dim", options.color),
+  ];
+  const body = lines.slice(0, Math.max(0, options.height - footer.length));
+  while (body.length < options.height - footer.length) body.push("");
+  return [...body, ...footer].join("\n");
+}
+
+function openPermissionPicker(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+): FleetTransition {
+  const provider = state.launchProfiles[composerCwd(state, snapshot)]?.provider;
+  const providerIndex = Math.max(
+    0,
+    CONFIGURABLE_PERMISSION_PROVIDERS.indexOf(
+      provider as ConfigurablePermissionProvider,
+    ),
+  );
+  return {
+    state: {
+      ...state,
+      draft: "",
+      commandPalette: undefined,
+      permissionPicker: {
+        step: "provider",
+        providerIndex,
+        policyIndex: 0,
+      },
+      helpOpen: false,
+      notice: undefined,
+    },
+  };
+}
+
+function transitionPermissionPicker(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  key: string,
+): FleetTransition {
+  const picker = state.permissionPicker!;
+  if (key === "escape") {
+    if (picker.step === "policy") {
+      return {
+        state: {
+          ...state,
+          permissionPicker: { ...picker, step: "provider" },
+          notice: undefined,
+        },
+      };
+    }
+    return {
+      state: {
+        ...state,
+        permissionPicker: undefined,
+        draft: "",
+        notice: undefined,
+      },
+    };
+  }
+  if (key === "up" || key === "down") {
+    const delta = key === "up" ? -1 : 1;
+    return {
+      state: {
+        ...state,
+        permissionPicker: picker.step === "provider"
+          ? {
+              ...picker,
+              providerIndex: boundedIndex(
+                picker.providerIndex + delta,
+                CONFIGURABLE_PERMISSION_PROVIDERS.length,
+              ),
+            }
+          : {
+              ...picker,
+              policyIndex: boundedIndex(
+                picker.policyIndex + delta,
+                PERMISSION_POLICIES.length,
+              ),
+            },
+        notice: undefined,
+      },
+    };
+  }
+  if (key !== "enter") return { state };
+  const provider = CONFIGURABLE_PERMISSION_PROVIDERS[picker.providerIndex]!;
+  if (picker.step === "provider") {
+    const currentPolicy = permissionPolicy(state, provider);
+    return {
+      state: {
+        ...state,
+        permissionPicker: {
+          ...picker,
+          step: "policy",
+          policyIndex: PERMISSION_POLICIES.indexOf(currentPolicy),
+        },
+        notice: undefined,
+      },
+    };
+  }
+  const policy = PERMISSION_POLICIES[picker.policyIndex]!;
+  const sandbox = permissionSandbox(state, snapshot);
+  const resolved = resolveProviderPermission(provider, policy, sandbox);
+  if (!resolved.ok) {
+    return {
+      state: {
+        ...state,
+        notice: resolved.message,
+        noticeTone: "error",
+      },
+    };
+  }
+  const previousPolicy = permissionPolicy(state, provider);
+  return {
+    state: {
+      ...state,
+      permissionPicker: undefined,
+      permissionPolicies: {
+        ...state.permissionPolicies,
+        [provider]: policy,
+      },
+      notice: `${permissionProviderLabel(provider)} permissions: ${resolved.value.nativeMode}`,
+      noticeTone: "neutral",
+    },
+    action: {
+      type: "permission-policy",
+      provider,
+      policy,
+      previousPolicy,
+    },
+  };
+}
+
+function renderPermissionPicker(
+  snapshot: FleetSnapshot,
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): string {
+  const picker = state.permissionPicker!;
+  const sandbox = permissionSandbox(state, snapshot);
+  const provider = CONFIGURABLE_PERMISSION_PROVIDERS[picker.providerIndex]!;
+  const lines = [...renderHeader([], state, options), ""];
+  if (picker.step === "provider") {
+    lines.push("Provider permissions", "");
+    lines.push(...CONFIGURABLE_PERMISSION_PROVIDERS.map((candidate, index) => {
+      const policy = permissionPolicy(state, candidate);
+      const resolved = resolveProviderPermission(candidate, policy, sandbox);
+      const nativeMode = resolved.ok ? resolved.value.nativeMode : "unsupported";
+      return pickerRow(
+        `${permissionProviderLabel(candidate)}  ${policy} · ${nativeMode}`,
+        index === picker.providerIndex,
+        options.color,
+      );
+    }));
+  } else {
+    lines.push(`${permissionProviderLabel(provider)} permission policy`, "");
+    lines.push(...PERMISSION_POLICIES.map((policy, index) => {
+      const resolved = resolveProviderPermission(provider, policy, sandbox);
+      const description = resolved.ok
+        ? `${resolved.value.nativeMode}${resolved.value.launchArguments.length === 0
+            ? ""
+            : ` · ${resolved.value.launchArguments.join(" ")}`}`
+        : `unsupported · ${resolved.message}`;
+      return pickerRow(
+        `${policy}  ${description}`,
+        index === picker.policyIndex,
+        options.color,
+      );
+    }));
+  }
+  const footer = [
+    ...(state.notice === undefined
+      ? []
+      : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
+    paint("─".repeat(options.width), "dim", options.color),
+    paint(
+      fit("↑↓ select · enter inspect/apply · esc back", options.width),
+      "dim",
+      options.color,
+    ),
+  ];
+  const body = lines.slice(0, Math.max(0, options.height - footer.length));
+  while (body.length < options.height - footer.length) body.push("");
+  return [...body, ...footer].join("\n");
+}
+
+function permissionPolicy(
+  state: FleetState,
+  provider: ConfigurablePermissionProvider,
+): ProviderPermissionPolicy {
+  return state.permissionPolicies[provider] ?? DEFAULT_PERMISSION_POLICIES[provider];
+}
+
+function permissionSandbox(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+): SessionRecord["sandbox"] {
+  return snapshot.threads.find(({ record }) =>
+    record.id === state.selectedSessionId)?.record.sandbox ?? "read-only";
 }
 
 function openWorkerPicker(state: FleetState, snapshot: FleetSnapshot, returnDraft: string): FleetTransition {
@@ -616,7 +1367,7 @@ function renderWorkerPicker(state: FleetState, options: ResolvedFleetRenderOptio
   }
   const footer = [
     paint("─".repeat(options.width), "dim", options.color),
-    paint(fit(`${choice.label} · ${shortPath(picker.cwd, options.home)}`, options.width), "cyan", options.color),
+    paint(fit(`${choice.label} · ${shortPath(picker.cwd, options.home)}`, options.width), "muted", options.color),
     paint(fit("↑↓ select · enter apply/next · esc back", options.width), "dim", options.color),
   ];
   const body = lines.slice(0, Math.max(0, options.height - footer.length));
@@ -632,17 +1383,22 @@ function renderFleetList(
   const threads = orderedThreads(snapshot);
   const lines = [...renderHeader(threads, state, options), ""];
 
+  // The column only exists once some thread actually has a pull request, so a
+  // fleet without `gh` — or without PRs — never pays for it.
+  const pullRequestColumn = threads.some(({ record }) =>
+    options.pullRequests.get(record.cwd) !== undefined);
   const groups = groupThreads(threads);
   if (groups.length === 0) {
     lines.push("No durable agent threads yet.");
   } else {
     for (const group of groups) {
-      lines.push(paint(shortPath(group.cwd, options.home), "blue", options.color));
-      const sections = roleSections(group.threads);
-      for (const section of sections) {
-        lines.push(paint(section.label, "dim", options.color));
-        for (const thread of section.threads) {
-        lines.push(renderThreadRow(thread, state, options));
+      lines.push(renderFolderRow(group.cwd, group.threads.length, state, options));
+      if (!isCollapsed(state, group.cwd)) {
+        for (const section of roleSections(group.threads)) {
+          lines.push(paint(section.label, "dim", options.color));
+          for (const thread of section.threads) {
+            lines.push(renderThreadRow(thread, state, options, pullRequestColumn));
+          }
         }
       }
       lines.push("");
@@ -651,18 +1407,21 @@ function renderFleetList(
 
   const selected = threads.find(({ record }) => record.id === state.selectedSessionId);
   const terminal = selected !== undefined && isTerminalSession(selected.record);
-  const destructiveHint = terminal ? "ctrl+x delete thread" : "ctrl+x stop agent";
+  const stopAcknowledged = selected !== undefined
+    && state.stopAcknowledgement?.sessionId === selected.record.id;
+  const destructiveHint = terminal && stopAcknowledged ? "ctrl+x delete thread" : "ctrl+x stop agent";
   const cwd = composerCwd(state, snapshot);
   const profile = state.launchProfiles[cwd];
-  const draftLines = (state.rename?.draft ?? state.draft).split("\n").slice(-3);
-  const composerLines = draftLines.length === 1 && draftLines[0] === ""
-    ? [`› ${paint(state.rename === undefined ? "Describe a task for a new session" : "Rename thread", "dim", options.color)}`]
-    : draftLines.map((line, index) => `${index === 0 ? state.rename === undefined ? "›" : "Rename ›" : "  "} ${fit(line ?? "", Math.max(1, options.width - 3))}`);
+  const composerLines = renderComposerLines(
+    state.rename?.draft ?? state.draft,
+    state.rename !== undefined,
+    options,
+  );
   const launchContext = profile === undefined
-    ? `▶ /model required · ${selected?.record.sandbox ?? "read-only"} · ${shortPath(cwd, options.home)}`
-    : `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"} · ${shortPath(cwd, options.home)}`;
+    ? `▶ /model required · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+g change`
+    : `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+g change`;
   const helpLines = state.helpOpen === true
-    ? shortcutHelp(options.width, terminal ? "delete" : "stop")
+    ? shortcutHelp(options.width, terminal && stopAcknowledged ? "delete" : "stop")
     : [];
   const footer = [
     ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
@@ -671,7 +1430,7 @@ function renderFleetList(
     paint("─".repeat(options.width), "dim", options.color),
     ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
     paint(fit(launchContext, options.width), "dim", options.color),
-    paint(fit(`enter open/start · space reply · /model · /fable-workers · /caveman-workers · ? shortcuts · ${destructiveHint}`, options.width), "dim", options.color),
+    paint(fit(`enter open/start · ctrl+] detach/reattach · ctrl+g cwd · space reply · /model · /fable-workers · /caveman-workers · ? shortcuts · ${destructiveHint}`, options.width), "dim", options.color),
   ];
   const bodyHeight = Math.max(0, options.height - footer.length);
   const body = lines.slice(0, bodyHeight);
@@ -686,8 +1445,13 @@ function renderHeader(
 ): string[] {
   const statuses = threads.map(threadStatus);
   const count = (status: ThreadStatus) => statuses.filter((candidate) => candidate === status).length;
+  // "agents" counts agents that are actually running. Finished threads stay listed as history and
+  // that history is now durable across restarts, so counting them here would report a fleet far
+  // busier than it is — done means an agent finished a task, not that one is consuming resources.
+  const running = threads.filter(({ record }) =>
+    record.executionState === "active" || record.executionState === "starting").length;
   const counts = [
-    `${threads.length} agents`,
+    `${running} agents`,
     `${count("Needs input")} needs input`,
     `${count("Working")} working`,
     `${count("Done")} done`,
@@ -713,26 +1477,35 @@ function renderHeader(
   if (options.width < 64) return textLines;
   const logo = [" ▄████▄", "▟█▄██▄█▙", "▌▌▌▌▐▐▐▐"];
   return textLines.map((line, index) =>
-    `${paint(pad(logo[index] ?? "", 8), "purple", options.color)}  ${line}`);
+    `${paint(pad(logo[index] ?? "", 8), "brand", options.color)}  ${line}`);
 }
 
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
-    "shift+↑↓ reorder", "ctrl+s switch views", "@ mention", "alt+1–9 open", "esc back/clear",
-    "ctrl+r rename", "ctrl+j newline", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
+    "shift+↑↓ reorder", "←→ fold project", "ctrl+s switch views", "@ mention", "alt+1–9 open", "esc back/clear",
+    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+] detach/reattach", "ctrl+g cwd", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
   ];
   if (width >= 110) return [entries.slice(0, 5).join("   "), entries.slice(5).join("   ")];
   if (width >= 70) return [entries.slice(0, 3).join("   "), entries.slice(3, 6).join("   "), entries.slice(6).join("   ")];
   return entries;
 }
 
-function transitionOrchestratorPicker(state: FleetState, key: string): FleetTransition {
+function transitionOrchestratorPicker(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  key: string,
+): FleetTransition {
   const picker = state.orchestratorPicker!;
   if (key === "escape") {
     return {
       state: {
         ...state,
-        orchestratorPicker: picker.step === "effort" ? { ...picker, step: "model" } : undefined,
+        orchestratorPicker: picker.step === "effort"
+          ? {
+              step: "target",
+              choiceIndex: existingOrchestrators(snapshot).length + picker.modelIndex,
+            }
+          : undefined,
         notice: undefined,
       },
     };
@@ -740,19 +1513,21 @@ function transitionOrchestratorPicker(state: FleetState, key: string): FleetTran
 
   if (key === "up" || key === "down") {
     const delta = key === "up" ? -1 : 1;
-    if (picker.step === "model") {
+    if (picker.step === "target") {
       return {
         state: {
           ...state,
           orchestratorPicker: {
             ...picker,
-            choiceIndex: boundedIndex(picker.choiceIndex + delta, ORCHESTRATOR_MODEL_CHOICES.length),
-            effortIndex: 0,
+            choiceIndex: boundedIndex(
+              picker.choiceIndex + delta,
+              existingOrchestrators(snapshot).length + ORCHESTRATOR_MODEL_CHOICES.length,
+            ),
           },
         },
       };
     }
-    const choice = ORCHESTRATOR_MODEL_CHOICES[picker.choiceIndex]!;
+    const choice = ORCHESTRATOR_MODEL_CHOICES[picker.modelIndex]!;
     return {
       state: {
         ...state,
@@ -765,15 +1540,60 @@ function transitionOrchestratorPicker(state: FleetState, key: string): FleetTran
   }
 
   if (key !== "enter") return { state };
-  if (picker.step === "model") {
-    return { state: { ...state, orchestratorPicker: { ...picker, step: "effort" } } };
+  if (picker.step === "target") {
+    const existing = existingOrchestrators(snapshot);
+    const selectedExisting = existing[picker.choiceIndex];
+    if (selectedExisting !== undefined) {
+      if (selectedExisting.attachmentState === "controlled") {
+        return {
+          state: {
+            ...state,
+            notice: "Orchestrator is in use by another controller",
+            noticeTone: "warning",
+          },
+        };
+      }
+      return {
+        state: {
+          ...state,
+          selectedSessionId: selectedExisting.id,
+          orchestratorPicker: undefined,
+          notice: undefined,
+        },
+        action: {
+          type: "open-orchestrator",
+          sessionId: selectedExisting.id,
+          cockpitCwd: state.fallbackCwd,
+          requiresResume: selectedExisting.executionState !== "active",
+        },
+      };
+    }
+    const modelIndex = picker.choiceIndex - existing.length;
+    const choice = ORCHESTRATOR_MODEL_CHOICES[modelIndex];
+    if (choice === undefined) {
+      return {
+        state: {
+          ...state,
+          notice: "No orchestrator model is available",
+          noticeTone: "error",
+        },
+      };
+    }
+    return {
+      state: {
+        ...state,
+        orchestratorPicker: { step: "effort", modelIndex, effortIndex: 0 },
+        notice: undefined,
+      },
+    };
   }
 
   const selection = orchestratorSelection(picker);
   return {
     state: { ...state, orchestratorPicker: undefined, notice: undefined },
     action: {
-      type: "orchestrator",
+      type: "create-orchestrator",
+      cockpitCwd: state.fallbackCwd,
       request: {
         provider: selection.provider.provider,
         model: selection.model,
@@ -786,30 +1606,52 @@ function transitionOrchestratorPicker(state: FleetState, key: string): FleetTran
 }
 
 function renderOrchestratorPicker(
+  snapshot: FleetSnapshot,
   state: FleetState,
   options: ResolvedFleetRenderOptions,
 ): string {
   const picker = state.orchestratorPicker!;
-  const selection = orchestratorSelection(picker);
-  const stepNumber = picker.step === "model" ? 1 : 2;
-  const lines = [...renderHeader([], state, options), "", paint(`Orchestrator  ${stepNumber} of 2`, "dim", options.color), ""];
+  const selection = picker.step === "effort" ? orchestratorSelection(picker) : undefined;
+  const stepNumber = picker.step === "target" ? 1 : 2;
+  const lines = [
+    ...renderHeader(orderedThreads(snapshot), state, options),
+    "",
+    paint(`Orchestrator  ${stepNumber} of 2`, "dim", options.color),
+    "",
+  ];
 
-  if (picker.step === "model") {
-    lines.push("Choose an orchestrator model", "");
+  if (picker.step === "target") {
+    const existing = existingOrchestrators(snapshot);
+    lines.push("Existing orchestrators", "");
+    if (existing.length === 0) {
+      lines.push(paint("  No interactive orchestrators", "dim", options.color));
+    } else {
+      lines.push(...existing.map((record, index) =>
+        pickerRow(existingOrchestratorLabel(record, options.color), index === picker.choiceIndex, options.color)));
+    }
+    lines.push("", "New orchestrator", "");
     lines.push(...ORCHESTRATOR_MODEL_CHOICES.map((choice, index) =>
-      pickerRow(`${choice.label}  ${paint(choice.provider.label, "dim", options.color)}`, index === picker.choiceIndex, options.color)));
+      pickerRow(
+        `${choice.label}  ${paint(choice.provider.label, "dim", options.color)}`,
+        existing.length + index === picker.choiceIndex,
+        options.color,
+      )));
   } else {
-    lines.push(`${selection.provider.label} effort`, "");
-    lines.push(...selection.provider.efforts.map((effort, index) =>
+    lines.push(`${selection!.provider.label} effort`, "");
+    lines.push(...selection!.provider.efforts.map((effort, index) =>
       pickerRow(effort === "native-default" ? "Provider managed" : effort, index === picker.effortIndex, options.color)));
   }
 
   const footer = [
     ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
     paint("─".repeat(options.width), "dim", options.color),
-    paint(fit(`${selection.provider.label} · ${selection.model} · ${selection.effort ?? "Provider managed"}`, options.width), "cyan", options.color),
+    ...(selection === undefined
+      ? []
+      : [paint(fit(`${selection.provider.label} · ${selection.model} · ${selection.effort ?? "Provider managed"}`, options.width), "muted", options.color)]),
     paint(
-      fit(picker.step === "effort" ? "↑↓ select · enter open · esc back" : "↑↓ select · enter next · esc back", options.width),
+      fit(picker.step === "effort"
+        ? "↑↓ select · enter create in cockpit · esc back"
+        : "↑↓ select · enter focus/next · esc back", options.width),
       "dim",
       options.color,
     ),
@@ -819,8 +1661,8 @@ function renderOrchestratorPicker(
   return [...body, ...footer].join("\n");
 }
 
-function orchestratorSelection(picker: OrchestratorPickerState) {
-  const choice = ORCHESTRATOR_MODEL_CHOICES[picker.choiceIndex]!;
+function orchestratorSelection(picker: Extract<OrchestratorPickerState, { step: "effort" }>) {
+  const choice = ORCHESTRATOR_MODEL_CHOICES[picker.modelIndex]!;
   const provider = choice.provider;
   const effort = provider.efforts[picker.effortIndex]!;
   return {
@@ -830,18 +1672,35 @@ function orchestratorSelection(picker: OrchestratorPickerState) {
   };
 }
 
-function initialOrchestratorPicker(snapshot: FleetSnapshot, cwd: string): OrchestratorPickerState {
-  const existing = orderedThreads(snapshot)
-    .find((thread) => thread.record.kind === "orchestrator" && thread.record.orchestratorScope === "fleet")?.record
-    ?? orderedThreads(snapshot)
-      .find((thread) => thread.record.kind === "orchestrator" && thread.record.cwd === cwd)?.record;
-  const choiceIndex = existing === undefined
-    ? 0
-    : Math.max(0, ORCHESTRATOR_MODEL_CHOICES.findIndex((choice) =>
-      choice.provider.provider === existing.provider && choice.model === existing.model));
-  const choice = ORCHESTRATOR_MODEL_CHOICES[choiceIndex]!;
-  const effortIndex = Math.max(0, choice.provider.efforts.indexOf(existing?.effort ?? "native-default"));
-  return { step: "model", choiceIndex, effortIndex };
+function initialOrchestratorPicker(_snapshot: FleetSnapshot, _cwd: string): OrchestratorPickerState {
+  return { step: "target", choiceIndex: 0 };
+}
+
+function existingOrchestrators(snapshot: FleetSnapshot): SessionRecord[] {
+  return orderedThreads(snapshot)
+    .map(({ record }) => record)
+    .filter((record) =>
+      record.kind === "orchestrator"
+      && record.role === "orchestrator"
+      && (
+        record.executionState === "active"
+        || (
+          record.executionState === "cancelled"
+          // `done` joins `interrupted` here because a broker shutdown now preserves the outcome of
+          // an orchestrator that had finished its turn; it is still reconnectable.
+          && (record.attentionState === "interrupted" || record.attentionState === "done")
+        )
+      ));
+}
+
+function existingOrchestratorLabel(record: SessionRecord, color: boolean): string {
+  const name = record.name ?? `${friendlyModel(record.provider, record.model)} orchestrator`;
+  const lifecycle = record.attachmentState === "controlled"
+    ? paint("in use", "yellow", color)
+    : record.executionState === "active"
+      ? paint("available", "green", color)
+      : paint("reconnect", "yellow", color);
+  return `${name}  ${paint(record.id.slice(0, 8), "dim", color)}  ${lifecycle}`;
 }
 
 function pickerRow(value: string, selected: boolean, color: boolean): string {
@@ -852,47 +1711,124 @@ function boundedIndex(value: number, length: number): number {
   return Math.max(0, Math.min(length - 1, value));
 }
 
+/**
+ * Left gutter shared by folder and thread rows. The focused row carries a rule
+ * rather than a color change, so the bar reads the same with color disabled.
+ */
+function rowGutter(focused: boolean, color: boolean): string {
+  return focused ? `${paint(SELECTION_RULE, "selection", color)} ` : ROW_GUTTER;
+}
+
+/**
+ * A folder header. Plain by default — paths are structure, not state — and bold
+ * when focused. Collapsed folders report how many threads they are hiding.
+ */
+function renderFolderRow(
+  cwd: string,
+  threadCount: number,
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): string {
+  const focused = state.focusedFolderCwd === cwd;
+  const collapsed = isCollapsed(state, cwd);
+  const summary = collapsed
+    ? ` · ${threadCount} thread${threadCount === 1 ? "" : "s"}`
+    : "";
+  const label = fit(
+    `${collapsed ? "▸" : "▾"} ${shortPath(cwd, options.home)}${summary}`,
+    Math.max(1, options.width - ROW_GUTTER.length),
+  );
+  return `${rowGutter(focused, options.color)}${focused ? paint(label, "bold", options.color) : label}`;
+}
+
 function renderThreadRow(
   thread: FleetThread,
   state: FleetState,
   options: ResolvedFleetRenderOptions,
+  pullRequestColumn = false,
 ): string {
-  const selected = thread.record.id === state.selectedSessionId;
-  const prefix = selected ? "*" : "·";
+  const selected = state.focusedFolderCwd === undefined
+    && thread.record.id === state.selectedSessionId;
   const baseTitle = thread.record.name ?? thread.record.role ?? `Untitled ${thread.record.id.slice(0, 8)}`;
   const title = `${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
   const identity = `${friendlyModel(thread.record.provider, thread.record.model)} · ${friendlyEffort(thread.record.effort ?? "provider-managed")}`;
   const status = threadStatus(thread);
-  const preview = thread.record.latestPreview ?? latestTerminalPreview(thread.replay);
   const age = relativeTime(thread.record.meaningfulUpdatedAt ?? thread.record.updatedAt, options.now);
-
-  if (options.width < 100) {
-    const identityWidth = options.width < 60 ? 0 : Math.min(18, Math.max(10, Math.floor(options.width * 0.2)));
-    const statusWidth = Math.min(11, status.length);
-    const firstAvailable = Math.max(10, options.width - 4 - identityWidth - statusWidth - 7);
-    const first = [
-      `${paint(prefix, selected ? "bold" : "dim", options.color)} ${selected ? paint(fit(title, firstAvailable), "bold", options.color) : fit(title, firstAvailable)}`,
-      ...(identityWidth === 0 ? [] : [paint(pad(identity, identityWidth), "dim", options.color)]),
-      statusText(pad(status, statusWidth), false, options.color),
-      age,
-    ].join("  ");
-    const second = `  ${paint(fit(preview, Math.max(8, options.width - 2)), "dim", options.color)}`;
-    return `${first}\n${second}`;
-  }
-
-  const titleWidth = Math.min(38, Math.max(24, Math.floor(options.width * 0.28)));
-  const identityWidth = Math.min(20, Math.max(12, Math.floor(options.width * 0.15)));
-  const statusWidth = Math.min(11, Math.max(4, status.length));
-  const fixed = 2 + titleWidth + 2 + identityWidth + 2 + statusWidth + 2 + 5;
-  const previewWidth = Math.max(8, options.width - fixed);
+  const showIdentity = options.width >= 80;
+  const titleWidth = showIdentity
+    ? Math.min(38, Math.max(22, Math.floor(options.width * 0.28)))
+    : Math.min(28, Math.max(16, Math.floor(options.width * 0.38)));
+  const identityWidth = showIdentity
+    ? Math.min(20, Math.max(12, Math.floor(options.width * 0.15)))
+    : 0;
+  const statusWidth = 11;
+  const fixedWidth = 12 + titleWidth + statusWidth
+    + (showIdentity ? identityWidth + 1 : 0)
+    + (pullRequestColumn ? 2 : 0);
+  const previewWidth = Math.max(1, options.width - fixedWidth);
+  const preview = threadPreview(thread, previewWidth);
   return [
-    paint(prefix, selected ? "bold" : "dim", options.color),
-    selected ? paint(pad(title, titleWidth), "bold", options.color) : pad(title, titleWidth),
-    paint(pad(identity, identityWidth), "dim", options.color),
+    `${rowGutter(selected, options.color)}${statusMarker(status, selected, options.color)}`,
+    paint(pad(title, titleWidth), selected ? "bold" : "muted", options.color),
+    ...(pullRequestColumn
+      ? [pullRequestCell(options.pullRequests.get(thread.record.cwd), options.color)]
+      : []),
+    ...(showIdentity ? [paint(pad(identity, identityWidth), "subtle", options.color)] : []),
     statusText(pad(status, statusWidth), false, options.color),
-    paint(fit(preview, previewWidth), "dim", options.color),
+    paint(pad(preview, previewWidth), "muted", options.color),
     padStart(age, 5),
   ].join(" ");
+}
+
+/** A thread with no known pull request holds the column open and shows nothing. */
+function pullRequestCell(state: PullRequestState | undefined, color: boolean): string {
+  if (state === undefined) return " ";
+  const { glyph, tone } = pullRequestGlyph(state);
+  return paint(glyph, tone, color);
+}
+
+/**
+ * The preview cell for one row.
+ *
+ * `record.latestPreview` is the broker's transcript-derived extraction and is re-classified here
+ * because records persisted by earlier versions hold raw TUI chrome. The PTY replay is only
+ * consulted when nothing better exists, and a session with no reply yet shows its task prompt under
+ * an explicit label so it can never be mistaken for something the agent said.
+ */
+function threadPreview(thread: FleetThread, width: number): string {
+  const preview = conversationPreview({
+    storedPreview: thread.record.latestPreview,
+    replay: thread.replay,
+    maxLength: width,
+  });
+  if (preview.kind !== "prompt") return preview.text;
+  const label = "Task: ";
+  return `${label}${conversationPreview({
+    prompt: preview.text,
+    maxLength: Math.max(1, width - label.length),
+  }).text}`;
+}
+
+/**
+ * The status dot. Finished, blocked, failing and live threads each take their own
+ * hue, and `Working` also takes the filled glyph so the live thread stays findable
+ * with color off. The focused row is already marked by the selection rule, so
+ * focus adds weight alone.
+ */
+function statusMarker(status: ThreadStatus, selected: boolean, color: boolean): string {
+  const tone = status === "Done"
+    ? "done"
+    : status === "Needs input"
+      ? "attention"
+      : status === "Failed"
+        ? "alert"
+        : status === "Working"
+          ? "working"
+          : "muted";
+  // Both glyphs are one display column, so the marker never shifts the row.
+  const glyph = status === "Working" ? "•" : "·";
+  const painted = paint(glyph, tone, color);
+  return selected ? paint(painted, "bold", color) : painted;
 }
 
 export async function runFleet(
@@ -904,6 +1840,8 @@ export async function runFleet(
 ): Promise<void> {
   let snapshot = await collectFleetSnapshot(client);
   let state = createFleetState(snapshot);
+  const permissionPreferences = runtime.permissionPreferences
+    ?? new ProviderPermissionPreferenceStore(appStateDirectory);
   try {
     state = {
       ...state,
@@ -912,11 +1850,33 @@ export async function runFleet(
   } catch {
     // Older brokers and isolated presentation tests have no persisted preference surface.
   }
+  try {
+    state = {
+      ...state,
+      permissionPolicies: {
+        ...state.permissionPolicies,
+        ...await permissionPreferences.list(),
+      },
+    };
+  } catch (error) {
+    state = {
+      ...state,
+      notice: `Could not load permission preferences: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      noticeTone: "error",
+    };
+  }
   if (input.isTTY !== true) {
     output.write(`${renderFleet(snapshot, state, { color: false, width: output.columns, height: output.rows })}\n`);
     client.close();
     return;
   }
+
+  // Probing is an interactive affordance: a piped fleet renders once, before
+  // any out-of-band probe could land, so it never pays the subprocess cost.
+  const pullRequestStatus = runtime.pullRequestStatus
+    ?? (output.isTTY === true ? new PullRequestStatusCache() : NO_PULL_REQUEST_STATUS);
 
   const previousRawMode = input.isRaw === true;
   let stopped = false;
@@ -951,6 +1911,7 @@ export async function runFleet(
         output,
         signals,
         closeTransport: false,
+        ...(runtime.detachIdentity === undefined ? {} : { detachIdentity: runtime.detachIdentity }),
       });
       if (status !== 0) state = { ...state, notice: "Provider attachment closed unexpectedly", noticeTone: "error" };
     } catch (error) {
@@ -968,10 +1929,9 @@ export async function runFleet(
     }
   };
 
-  const openOrchestrator = async (request: EnsureOrchestratorRequest) => {
+  const openOrchestrator = async (target: OrchestratorCockpitTarget) => {
     if (runtime.openOrchestrator === undefined) {
-      state = { ...state, notice: "Orchestrator presentation is unavailable in this client", noticeTone: "error" };
-      return;
+      throw new Error("Orchestrator cockpit presentation is unavailable in this client");
     }
     attaching = true;
     notify();
@@ -982,7 +1942,8 @@ export async function runFleet(
     input.setRawMode?.(false);
     output.write(`${LEAVE_FLEET_SCREEN}\u001b[2J\u001b[H`);
     try {
-      await runtime.openOrchestrator(request);
+      const session = await runtime.openOrchestrator(target);
+      state = { ...state, selectedSessionId: session.id, notice: undefined };
     } finally {
       attaching = false;
       if (!stopped) {
@@ -1013,8 +1974,19 @@ export async function runFleet(
           noticeTone: "warning",
         };
       } else if (action?.type === "delete") {
+        const selectedIndex = Math.max(
+          0,
+          orderedThreads(snapshot).findIndex(({ record }) => record.id === action.sessionId),
+        );
         await client.request("session.delete", { sessionId: action.sessionId });
-        state = { ...state, notice: "Deleted thread", noticeTone: "neutral" };
+        snapshot = await collectFleetSnapshot(client);
+        const remaining = orderedThreads(snapshot);
+        state = {
+          ...state,
+          selectedSessionId: remaining[selectedIndex]?.record.id ?? remaining[selectedIndex - 1]?.record.id,
+          notice: "Deleted thread",
+          noticeTone: "neutral",
+        };
       } else if (action?.type === "attach") {
         await openNativeThread(action.sessionId);
       } else if (action?.type === "resume") {
@@ -1022,12 +1994,25 @@ export async function runFleet(
         snapshot = await collectFleetSnapshot(client);
         await openNativeThread(action.sessionId);
       } else if (action?.type === "start") {
-        const record = await client.request<SessionRecord>("session.startWithPrompt", action.request);
+        const record = await startFleetSession(client, action);
         state = { ...state, selectedSessionId: record.id };
         snapshot = await collectFleetSnapshot(client);
         await openNativeThread(record.id);
-      } else if (action?.type === "orchestrator") {
-        await openOrchestrator(action.request);
+      } else if (action?.type === "open-orchestrator") {
+        const session = snapshot.threads.find(({ record }) => record.id === action.sessionId)?.record;
+        if (session === undefined) throw new Error("Selected orchestrator is no longer available");
+        await openOrchestrator({
+          type: "existing",
+          session,
+          cockpitCwd: action.cockpitCwd,
+          requiresResume: action.requiresResume,
+        });
+      } else if (action?.type === "create-orchestrator") {
+        await openOrchestrator({
+          type: "create",
+          request: action.request,
+          cockpitCwd: action.cockpitCwd,
+        });
       } else if (action?.type === "fable-workers") {
         const result = await client.request<FableWorkersResult>(
           "orchestrator.fableWorkers",
@@ -1051,14 +2036,47 @@ export async function runFleet(
         });
       } else if (action?.type === "profile") {
         await client.request("fleet.preference.set", { cwd: action.cwd, profile: action.profile });
+      } else if (action?.type === "permission-policy") {
+        await permissionPreferences.set(action.provider, action.policy);
+      } else if (action?.type === "change-directory") {
+        if (runtime.changeDirectory === undefined) {
+          throw new Error("Working-directory navigation is unavailable in this client");
+        }
+        const cwd = await runtime.changeDirectory(action.cwd);
+        if (cwd !== undefined) {
+          state = {
+            ...state,
+            workingDirectory: cwd,
+            notice: `Working directory: ${cwd}`,
+            noticeTone: "neutral",
+          };
+        }
       }
-      if (action !== undefined && action.type !== "attach" && action.type !== "resume" && action.type !== "start" && action.type !== "orchestrator") {
+      if (
+        action !== undefined
+        && action.type !== "attach"
+        && action.type !== "resume"
+        && action.type !== "start"
+        && action.type !== "open-orchestrator"
+        && action.type !== "create-orchestrator"
+        && action.type !== "change-directory"
+        && action.type !== "permission-policy"
+        && action.type !== "delete"
+      ) {
         snapshot = await collectFleetSnapshot(client);
       }
     } catch (error) {
       state = {
         ...state,
         ...(action?.type === "start" ? { draft: action.request.initialPrompt } : {}),
+        ...(action?.type === "permission-policy"
+          ? {
+              permissionPolicies: {
+                ...state.permissionPolicies,
+                [action.provider]: action.previousPolicy,
+              },
+            }
+          : {}),
         notice: error instanceof RpcError && error.code === "METHOD_NOT_FOUND"
           ? "Restart the Cyberdeck broker to enable this fleet action"
           : error instanceof Error ? error.message : String(error),
@@ -1098,6 +2116,7 @@ export async function runFleet(
       }
       snapshot = await collectFleetSnapshot(client);
       state = normalizeState(state, snapshot, Date.now());
+      pullRequestStatus.refresh(snapshot.threads.map(({ record }) => record.cwd));
       const height = Math.max(16, output.rows ?? 32);
       const width = Math.max(50, output.columns ?? 120);
       if (state.view === "diagnostics") {
@@ -1115,6 +2134,7 @@ export async function runFleet(
           color: output.isTTY === true,
           width,
           height,
+          pullRequests: pullRequestStatus.states(),
         });
         const cursor = composerCursor(rendered, state, width);
         output.write(`\u001b[2J\u001b[H${rendered}\u001b[${cursor.row};${cursor.column}H\u001b[?25h`);
@@ -1151,16 +2171,17 @@ function waitForRefresh(register: (wake: () => void) => void, clear: () => void)
 
 function composerCursor(rendered: string, state: FleetState, width: number): { row: number; column: number } {
   const lines = rendered.split("\n");
-  const rowIndex = lines.findIndex((line) => {
-    const plain = stripTerminalControl(line);
-    return plain.startsWith("› ") || plain.startsWith("Rename › ");
-  });
   const value = state.rename?.draft ?? state.draft;
-  const lastLine = value.split("\n").at(-1) ?? "";
-  const prefix = state.rename === undefined ? 2 : 9;
+  const divider = "─".repeat(width);
+  const lowerDividerIndex = lines.findLastIndex((line) => stripTerminalControl(line) === divider);
+  const rowIndex = Math.max(0, lowerDividerIndex - 1);
+  const visibleLine = stripTerminalControl(lines[rowIndex] ?? "");
+  const emptyColumn = state.rename === undefined ? 3 : 10;
   return {
     row: Math.max(1, rowIndex + 1),
-    column: Math.min(width, prefix + [...lastLine].length + 1),
+    column: value === ""
+      ? emptyColumn
+      : Math.min(width, [...visibleLine].length + 1),
   };
 }
 
@@ -1207,7 +2228,6 @@ export class FleetKeyDecoder {
       ["\u001b[C", "right"],
       ["\u001b[1;2A", "shift+up"],
       ["\u001b[1;2B", "shift+down"],
-      ["\u001b[13u", "enter"],
     ] as const;
     const match = special.find(([sequence]) => rest.startsWith(sequence));
     if (match !== undefined) {
@@ -1221,28 +2241,47 @@ export class FleetKeyDecoder {
         this.pending = rest;
         break;
       }
+      const csiKey = decodeCsiUKey(csi[0]);
+      if (csiKey !== undefined) keys.push(csiKey);
       index += csi[0].length;
+      continue;
+    }
+    // SS3 has its own three-byte shape. Consuming it whole keeps its final byte out of the draft.
+    if (rest.startsWith("\u001bO")) {
+      if (rest.length < 3) {
+        this.pending = rest;
+        break;
+      }
+      index += 3;
       continue;
     }
     if (rest === "\u001b") {
       this.pending = rest;
       break;
     }
-    const altDigit = /^\u001b([1-9])/u.exec(rest);
-    if (altDigit !== null) {
-      keys.push(`alt+${altDigit[1]}`);
-      index += altDigit[0].length;
+    // An Esc that already has a byte behind it is the Meta prefix of a single chord, never Esc plus
+    // that key. Resolving it here is what stops Option+Enter from clearing the draft and submitting.
+    if (rest.startsWith("\u001b")) {
+      if (rest.charCodeAt(1) === 0x1b) {
+        keys.push("escape");
+        index += 1;
+        continue;
+      }
+      const chord = altChordKey(rest.charCodeAt(1), rest[1]!);
+      if (chord !== undefined) keys.push(chord);
+      index += 2;
       continue;
     }
     const code = value.charCodeAt(index);
     if (code === 0x03) keys.push("ctrl+c");
+    else if (code === 0x07) keys.push("ctrl+g");
     else if (code === 0x0a) keys.push("ctrl+j");
     else if (code === 0x0f) keys.push("ctrl+o");
     else if (code === 0x12) keys.push("ctrl+r");
     else if (code === 0x13) keys.push("ctrl+s");
     else if (code === 0x14) keys.push("ctrl+t");
     else if (code === 0x18) keys.push("ctrl+x");
-    else if (code === 0x1b) keys.push("escape");
+    else if (code === 0x1d) keys.push("ctrl+]");
     else if (code === 0x0d) keys.push("enter");
     else if (code === 0x7f || code === 0x08) keys.push("backspace");
     else if (code >= 0x20) keys.push(value[index]!);
@@ -1250,6 +2289,50 @@ export class FleetKeyDecoder {
   }
   return keys;
   }
+}
+
+/**
+ * Decode a CSI-u key report into a fleet key name.
+ *
+ * A provider TUI can leave the terminal in a keyboard protocol that reports ordinary keys as
+ * `CSI <code> ; <modifiers> u` rather than as bytes, and that mode outlives the attachment. Without
+ * this the fleet swallowed every such report as an anonymous control sequence, so Esc did nothing
+ * and Option+Enter did nothing — the same gesture behaving differently depending on which provider
+ * the operator had visited last. Sequences that are not key reports stay consumed and unnamed.
+ */
+function decodeCsiUKey(sequence: string): string | undefined {
+  const report = /^\u001b\[(\d+)(?:;(\d+)(?::\d+)?)?u$/u.exec(sequence);
+  if (report === null) return undefined;
+  const code = Number(report[1]);
+  const modifiers = report[2] === undefined ? 0 : Number(report[2]) - 1;
+  const shift = (modifiers & 1) !== 0;
+  const alt = (modifiers & 2) !== 0;
+  const ctrl = (modifiers & 4) !== 0;
+  if (code === 27) return "escape";
+  if (code === 13 || code === 10) {
+    if (alt) return "alt+enter";
+    if (shift) return "shift+enter";
+    return ctrl ? "ctrl+enter" : "enter";
+  }
+  if (code === 127 || code === 8) return "backspace";
+  if (ctrl || code < 0x20) return undefined;
+  const character = String.fromCodePoint(code);
+  return alt ? `alt+${character}` : character;
+}
+
+/**
+ * Name the single chord an Esc prefix forms with the byte behind it.
+ *
+ * Option is delivered either as this prefix or as a composed character; a composed character needs
+ * no decoding, so this is the whole of Meta handling. Chords the fleet does not bind resolve to
+ * `undefined` and are dropped, which is the point: an unbound chord must do nothing rather than
+ * decay into its two halves and fire two bindings.
+ */
+function altChordKey(code: number, character: string): string | undefined {
+  if (code === 0x0d || code === 0x0a) return "alt+enter";
+  if (code === 0x7f || code === 0x08) return "alt+backspace";
+  if (code < 0x20) return undefined;
+  return `alt+${character}`;
 }
 
 function openAction(record: SessionRecord): FleetAction {
@@ -1261,7 +2344,23 @@ function openAction(record: SessionRecord): FleetAction {
 function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number): FleetState {
   const threads = orderedThreads(snapshot);
   const selectedExists = threads.some(({ record }) => record.id === state.selectedSessionId);
-  const deleteConfirmation = state.deleteConfirmation !== undefined && state.deleteConfirmation.expiresAt > now
+  const selectedSessionId = selectedExists ? state.selectedSessionId : threads[0]?.record.id;
+  const selectedCwd = threads.find(({ record }) => record.id === selectedSessionId)?.record.cwd;
+  const folderExists = state.focusedFolderCwd !== undefined
+    && threads.some(({ record }) => record.cwd === state.focusedFolderCwd);
+  // A collapsed folder hides its threads, so focus rises to the header rather
+  // than resting on a row nobody can see.
+  const focusedFolderCwd = folderExists
+    ? state.focusedFolderCwd
+    : selectedCwd !== undefined && isCollapsed(state, selectedCwd)
+      ? selectedCwd
+      : undefined;
+  const stopAcknowledgement = state.stopAcknowledgement?.sessionId === selectedSessionId
+    ? state.stopAcknowledgement
+    : undefined;
+  const deleteConfirmation = state.deleteConfirmation !== undefined
+    && state.deleteConfirmation.sessionId === selectedSessionId
+    && state.deleteConfirmation.expiresAt > now
     ? state.deleteConfirmation
     : undefined;
   const quitConfirmation = state.quitConfirmation !== undefined && state.quitConfirmation.expiresAt > now
@@ -1271,7 +2370,9 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
     || (state.quitConfirmation !== undefined && quitConfirmation === undefined);
   return {
     ...state,
-    selectedSessionId: selectedExists ? state.selectedSessionId : threads[0]?.record.id,
+    selectedSessionId,
+    focusedFolderCwd,
+    stopAcknowledgement,
     deleteConfirmation,
     quitConfirmation,
     ...(confirmationExpired
@@ -1290,6 +2391,55 @@ function orderedThreads(snapshot: FleetSnapshot): FleetThread[] {
     .flatMap(({ threads }) => threads);
 }
 
+/**
+ * One navigable line of the fleet list. Folder headers are rows in their own
+ * right: focus lands on them, and Enter there collapses the folder.
+ */
+type FleetRow =
+  | { kind: "folder"; cwd: string; threadCount: number }
+  | { kind: "thread"; cwd: string; thread: FleetThread };
+
+function isCollapsed(state: FleetState, cwd: string): boolean {
+  return state.collapsedCwds?.includes(cwd) === true;
+}
+
+function fleetRows(snapshot: FleetSnapshot, state: FleetState): FleetRow[] {
+  return groupThreads(snapshot.threads).flatMap(({ cwd, threads }): FleetRow[] => {
+    const header: FleetRow = { kind: "folder", cwd, threadCount: threads.length };
+    if (isCollapsed(state, cwd)) return [header];
+    return [header, ...threads.map((thread): FleetRow => ({ kind: "thread", cwd, thread }))];
+  });
+}
+
+function focusedRowIndex(rows: readonly FleetRow[], state: FleetState): number {
+  const index = state.focusedFolderCwd === undefined
+    ? rows.findIndex((row) => row.kind === "thread" && row.thread.record.id === state.selectedSessionId)
+    : rows.findIndex((row) => row.kind === "folder" && row.cwd === state.focusedFolderCwd);
+  return Math.max(0, index);
+}
+
+function focusRow(state: FleetState, row: FleetRow | undefined): FleetState {
+  if (row === undefined) return state;
+  return row.kind === "folder"
+    ? { ...state, focusedFolderCwd: row.cwd }
+    : { ...state, focusedFolderCwd: undefined, selectedSessionId: row.thread.record.id };
+}
+
+function setCollapsed(state: FleetState, cwd: string, collapsed: boolean): FleetState {
+  const current = state.collapsedCwds ?? [];
+  if (current.includes(cwd) === collapsed) return state;
+  return {
+    ...state,
+    collapsedCwds: collapsed
+      ? [...current, cwd]
+      : current.filter((candidate) => candidate !== cwd),
+  };
+}
+
+function threadSubject(record: SessionRecord): string {
+  return record.kind === "orchestrator" ? "orchestrator" : "thread";
+}
+
 function roleSections(threads: readonly FleetThread[]): Array<{ label: string; threads: FleetThread[] }> {
   const orcs = threads.filter(({ record }) => record.kind === "orchestrator");
   const workers = threads.filter(({ record }) => record.kind !== "orchestrator");
@@ -1297,10 +2447,6 @@ function roleSections(threads: readonly FleetThread[]): Array<{ label: string; t
     ...(orcs.length === 0 ? [] : [{ label: "Orcs", threads: orcs }]),
     ...(workers.length === 0 ? [] : [{ label: "Workers", threads: workers }]),
   ];
-}
-
-function threadSubject(record: SessionRecord): string {
-  return record.kind === "orchestrator" ? "orchestrator" : "thread";
 }
 
 function groupThreads(threads: readonly FleetThread[]): Array<{ cwd: string; threads: FleetThread[] }> {
@@ -1321,15 +2467,23 @@ function groupThreads(threads: readonly FleetThread[]): Array<{ cwd: string; thr
         const leftOrder = left.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
         const rightOrder = right.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
         if (leftOrder !== rightOrder) return leftOrder - rightOrder;
-        const leftAt = left.record.meaningfulUpdatedAt ?? left.record.updatedAt;
-        const rightAt = right.record.meaningfulUpdatedAt ?? right.record.updatedAt;
-        return rightAt.localeCompare(leftAt);
+        return left.record.createdAt.localeCompare(right.record.createdAt);
       }),
     }))
     .sort((left, right) => {
-      const leftLatest = left.threads[0]?.record.meaningfulUpdatedAt ?? left.threads[0]?.record.updatedAt ?? "";
-      const rightLatest = right.threads[0]?.record.meaningfulUpdatedAt ?? right.threads[0]?.record.updatedAt ?? "";
-      return rightLatest.localeCompare(leftLatest);
+      const leftCreated = left.threads.reduce(
+        (earliest, thread) => earliest === "" || thread.record.createdAt < earliest
+          ? thread.record.createdAt
+          : earliest,
+        "",
+      );
+      const rightCreated = right.threads.reduce(
+        (earliest, thread) => earliest === "" || thread.record.createdAt < earliest
+          ? thread.record.createdAt
+          : earliest,
+        "",
+      );
+      return leftCreated.localeCompare(rightCreated);
     });
 }
 
@@ -1339,7 +2493,8 @@ function taskName(instruction: string): string {
 }
 
 function composerCwd(state: FleetState, snapshot: FleetSnapshot): string {
-  return snapshot.threads.find(({ record }) => record.id === state.selectedSessionId)?.record.cwd
+  return state.workingDirectory
+    ?? snapshot.threads.find(({ record }) => record.id === state.selectedSessionId)?.record.cwd
     ?? state.fallbackCwd;
 }
 
@@ -1378,12 +2533,28 @@ function startTransition(
   if (draft.startsWith("/")) {
     return { state: { ...state, notice: "Use /model to configure a new worker", noticeTone: "error" } };
   }
-  const cwd = selected?.cwd ?? state.fallbackCwd;
+  const cwd = state.workingDirectory ?? selected?.cwd ?? state.fallbackCwd;
   const profile = state.launchProfiles[cwd];
   if (profile === undefined) {
     return openWorkerPickerForCwd(state, cwd, draft);
   }
   const initialPrompt = draft;
+  const sandbox = selected?.sandbox ?? "read-only";
+  const policy = state.permissionPolicies[profile.provider] ?? "permissioned";
+  const permission = resolveProviderPermission(profile.provider, policy, sandbox);
+  if (!permission.ok) {
+    return {
+      state: {
+        ...state,
+        notice: permission.message,
+        noticeTone: "error",
+      },
+    };
+  }
+  const approvalMode = permission.value.application.kind === "approval-mode"
+    && permission.value.application.value === "auto"
+    ? { approvalMode: permission.value.application.value }
+    : {};
   return {
     state: { ...state, draft: "", deleteConfirmation: undefined, notice: undefined },
     action: {
@@ -1393,11 +2564,15 @@ function startTransition(
         model: profile.model,
         ...(profile.effort === undefined ? {} : { effort: profile.effort }),
         cwd,
-        sandbox: selected?.sandbox ?? "read-only",
+        sandbox,
+        ...approvalMode,
         detached: true,
         name: taskName(initialPrompt),
         initialPrompt,
       },
+      ...(permission.value.application.kind === "post-launch-command"
+        ? { permissionLaunch: permission.value }
+        : {}),
     },
   };
 }
@@ -1518,11 +2693,14 @@ function relativeTime(timestamp: string, now: number): string {
 }
 
 function statusText(status: string, pendingDelete: boolean, color: boolean): string {
-  if (pendingDelete || status === "Failed") return paint(status, "red", color);
-  if (status === "Done") return paint(status, "green", color);
-  if (status === "Needs input" || status === "Stopping") return paint(status, "yellow", color);
-  if (status === "Working") return paint(status, "cyan", color);
-  return paint(status, "gray", color);
+  const label = status.trim();
+  if (pendingDelete || label === "Failed") return paint(status, "alert", color);
+  // Four states carry a hue: finished, blocked, failing, and the one live thread.
+  // Stopping, Stopped and Interrupted are inert, not a request, and stay greyscale.
+  if (label === "Done") return paint(status, "done", color);
+  if (label === "Needs input") return paint(status, "attention", color);
+  if (label === "Working") return paint(status, "working", color);
+  return paint(status, "muted", color);
 }
 
 function paint(value: string, tone: keyof typeof ANSI, enabled: boolean): string {
@@ -1536,9 +2714,43 @@ function renderNotice(
   color: boolean,
 ): string {
   const value = fit(notice, width);
-  if (tone === "warning") return paint(value, "yellow", color);
-  if (tone === "error" || tone === "confirmation") return paint(value, "red", color);
+  if (tone === "warning") return paint(value, "attention", color);
+  if (tone === "error" || tone === "confirmation") return paint(value, "alert", color);
   return value;
+}
+
+function renderComposerLines(
+  value: string,
+  renaming: boolean,
+  options: ResolvedFleetRenderOptions,
+): string[] {
+  if (value === "") {
+    return [
+      `${renaming ? "Rename ›" : "›"} ${paint(renaming ? "Rename thread" : "Describe a task for a new session", "dim", options.color)}`,
+    ];
+  }
+
+  const rows: string[] = [];
+  const logicalLines = value.split("\n");
+  for (const logicalLine of logicalLines) {
+    const characters = [...logicalLine];
+    let offset = 0;
+    do {
+      const prefix = rows.length === 0
+        ? renaming ? "Rename › " : "› "
+        : "  ";
+      const capacity = Math.max(1, options.width - [...prefix].length - 1);
+      const segment = characters.slice(offset, offset + capacity).join("");
+      rows.push(`${prefix}${segment}`);
+      offset += capacity;
+    } while (offset < characters.length);
+  }
+
+  const maximumRows = Math.max(1, Math.min(12, Math.floor(options.height / 3)));
+  if (rows.length <= maximumRows) return rows;
+  const visibleRows = rows.slice(-maximumRows);
+  visibleRows[0] = `… ${(visibleRows[0] ?? "").slice(2)}`;
+  return visibleRows;
 }
 
 function fit(value: string, width: number): string {

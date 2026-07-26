@@ -41,6 +41,7 @@ describe("launchCockpit", () => {
       args: [
         "split-window", "-h", "-t", target,
         "/absolute/node", "/absolute/dist/src/cli.js", "attach", orchestratorSessionId,
+        "--cockpit-return", "detach",
       ],
     });
     expect(calls.at(-1)).toEqual({
@@ -50,12 +51,36 @@ describe("launchCockpit", () => {
     expect(JSON.stringify(calls)).not.toMatch(/send-keys/);
   });
 
+  it("shortens the tmux escape window so Esc and Option chords are not held by tmux", () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
+      calls.push({ command, args });
+      return { status: args[0] === "has-session" ? 1 : 0 };
+    });
+    launchCockpit({
+      cliPath: "/absolute/dist/src/cli.js",
+      nodePath: "/absolute/node",
+      cwd,
+      orchestratorSessionId,
+      spawnSync,
+      preflight: outsideTmux,
+    });
+
+    expect(calls).toContainEqual({
+      command: "tmux",
+      args: ["set-option", "-s", "escape-time", "10"],
+    });
+  });
+
   it("reuses an existing cyberdeck tmux session", () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
       calls.push({ command, args });
       if (args[0] === "list-panes") {
-        return { status: 0, stdout: `/absolute/node /absolute/cli.js attach ${orchestratorSessionId}\n` };
+        return {
+          status: 0,
+          stdout: `%7\t/absolute/node /absolute/cli.js attach ${orchestratorSessionId} --cockpit-return detach\n`,
+        };
       }
       return { status: 0 };
     });
@@ -69,7 +94,8 @@ describe("launchCockpit", () => {
     });
     expect(calls).toEqual([
       { command: "tmux", args: ["has-session", "-t", target] },
-      { command: "tmux", args: ["list-panes", "-t", target, "-F", "#{pane_start_command}"] },
+      { command: "tmux", args: ["list-panes", "-t", target, "-F", "#{pane_id}\t#{pane_start_command}"] },
+      { command: "tmux", args: ["select-pane", "-t", "%7"] },
       { command: "tmux", args: ["attach-session", "-t", target] },
     ]);
   });
@@ -79,7 +105,7 @@ describe("launchCockpit", () => {
     const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
       calls.push({ command, args });
       if (args[0] === "list-panes") {
-        return { status: 0, stdout: "/absolute/node /absolute/cli.js dashboard\n" };
+        return { status: 0, stdout: "%0\t/absolute/node /absolute/cli.js dashboard\n" };
       }
       return { status: 0 };
     });
@@ -98,8 +124,46 @@ describe("launchCockpit", () => {
       args: [
         "split-window", "-h", "-t", target,
         "/absolute/node", "/absolute/cli.js", "attach", orchestratorSessionId,
+        "--cockpit-return", "detach",
       ],
     });
+  });
+
+  it("multiplexes another orchestrator without replacing the existing cockpit panes", () => {
+    const otherSessionId = "22222222-2222-4222-8222-222222222222";
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
+      calls.push({ command, args });
+      if (args[0] === "list-panes") {
+        return {
+          status: 0,
+          stdout: [
+            "%0\t/absolute/node /absolute/cli.js dashboard",
+            `%1\t/absolute/node /absolute/cli.js attach ${otherSessionId} --cockpit-return detach`,
+          ].join("\n"),
+        };
+      }
+      return { status: 0 };
+    });
+
+    launchCockpit({
+      cliPath: "/absolute/cli.js",
+      nodePath: "/absolute/node",
+      cwd,
+      orchestratorSessionId,
+      spawnSync,
+      preflight: outsideTmux,
+    });
+
+    expect(calls).toContainEqual({
+      command: "tmux",
+      args: [
+        "split-window", "-h", "-t", target,
+        "/absolute/node", "/absolute/cli.js", "attach", orchestratorSessionId,
+        "--cockpit-return", "detach",
+      ],
+    });
+    expect(calls.some(({ args }) => args[0] === "kill-pane" || args[0] === "respawn-pane")).toBe(false);
   });
 
   it("never terminates presentation state on a successful launch", () => {
@@ -146,6 +210,14 @@ describe("launchCockpit", () => {
     launchCockpit({ cliPath: "/absolute/cli.js", cwd, orchestratorSessionId, spawnSync, preflight });
 
     expect(preflight).toEqual({ tmuxVersion: "tmux 3.5a", presentationCommand: "switch-client" });
+    expect(calls).toContainEqual({
+      command: "tmux",
+      args: [
+        "split-window", "-h", "-t", target,
+        process.execPath, "/absolute/cli.js", "attach", orchestratorSessionId,
+        "--cockpit-return", "switch",
+      ],
+    });
     expect(calls.at(-1)).toEqual({ command: "tmux", args: ["switch-client", "-t", target] });
     expect(calls.some(({ args }) => args[0] === "attach-session")).toBe(false);
   });
@@ -222,24 +294,37 @@ describe("launchCockpit", () => {
 });
 
 describe("detachCockpit", () => {
-  it("detaches presentation only and never kills the broker-owned session", () => {
+  it("switches a tmux client back to its previous Fleet session", () => {
     const calls: Array<{ command: string; args: string[] }> = [];
     const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
       calls.push({ command, args });
       return { status: 0 };
     });
 
-    detachCockpit({ spawnSync });
+    detachCockpit({ spawnSync, returnMode: "switch" });
 
     expect(calls).toEqual([
-      { command: "tmux", args: ["detach-client", "-s", "cyberdeck"] },
+      { command: "tmux", args: ["switch-client", "-l"] },
     ]);
     expect(JSON.stringify(calls)).not.toMatch(/kill|terminate|stop|signal/);
   });
 
-  it("treats a missing cockpit session as already detached rather than an error", () => {
+  it("detaches a client that entered the cockpit from outside tmux", () => {
+    const calls: string[][] = [];
+    const spawnSync = vi.fn<SpawnSyncLike>((_command, args) => {
+      calls.push(args);
+      return { status: args[0] === "switch-client" ? 1 : 0 };
+    });
+
+    detachCockpit({ spawnSync, returnMode: "detach" });
+
+    expect(calls).toEqual([["detach-client"]]);
+    expect(calls.flat()).not.toContain("kill-session");
+  });
+
+  it("treats a missing cockpit client as already detached rather than an error", () => {
     const spawnSync = vi.fn<SpawnSyncLike>(() => ({ status: 1 }));
-    expect(() => detachCockpit({ spawnSync })).not.toThrow();
+    expect(() => detachCockpit({ spawnSync, returnMode: "switch" })).not.toThrow();
   });
 });
 

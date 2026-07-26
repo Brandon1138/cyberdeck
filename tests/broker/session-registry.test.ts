@@ -1,11 +1,19 @@
-import { describe, expect, it, vi } from "vitest";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
-import type { StartSessionRequest } from "../../src/domain/session.js";
+import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import type { PtyHandle } from "../../src/broker/session-registry.js";
-import type { AppendThreadEvent } from "../../src/persistence/thread-transcript-store.js";
+import {
+  ThreadTranscriptStore,
+  type AppendThreadEvent,
+} from "../../src/persistence/thread-transcript-store.js";
 
 class FakePty implements PtyHandle {
   readonly pid: number;
@@ -108,6 +116,7 @@ function harness(options: { failAttachJournal?: boolean; maxConcurrentWorkers?: 
       transcripts.push(event);
       return {} as never;
     } } as never,
+    validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({
       ...(options.maxConcurrentWorkers === undefined
         ? {}
@@ -124,7 +133,7 @@ describe("SessionRegistry", () => {
     expect(record).toMatchObject({ provider: "claude", model: "opus", role: "writer", pid: 1000 });
   });
 
-  it("rehydrates a broker-lost conversation as interrupted and resumes exact provider state", async () => {
+  it("rehydrates a conversation lost mid-turn as interrupted and resumes exact provider state", async () => {
     const persisted = {
       id: "11111111-1111-4111-8111-111111111111",
       provider: "codex" as const,
@@ -142,7 +151,7 @@ describe("SessionRegistry", () => {
       pid: 4321,
       exitCode: null,
       childIds: [],
-      attentionState: "done" as const,
+      attentionState: "working" as const,
       latestPreview: "Persisted answer",
     };
     const ptys: FakePty[] = [];
@@ -160,6 +169,7 @@ describe("SessionRegistry", () => {
         return pty;
       }),
       journal: { append: async () => {} },
+      validateCwd: async () => undefined,
       config: BrokerRuntimeConfigSchema.parse({}),
     });
 
@@ -184,6 +194,7 @@ describe("SessionRegistry", () => {
       adapters: { codex: { ...adapters.codex, prepareLaunch } },
       ptyFactory,
       journal: { append: async () => {} },
+      validateCwd: async () => undefined,
       config: BrokerRuntimeConfigSchema.parse({}),
     });
 
@@ -215,9 +226,152 @@ describe("SessionRegistry", () => {
         status: "completed",
         completedTurns: 1,
         text: expect.stringContaining("1042"),
+        retrieval: "fresh",
+        completedAt: expect.any(String),
       }],
     });
     expect((await waiting).results[0]!.text.length).toBeLessThanOrEqual(300);
+  });
+
+  it("replays a completed target idempotently after the first delivery is lost in transport", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ name: "install-worker" }));
+    const target = [{ sessionId: record.id, completionTarget: 1 }];
+    // The orchestrator's transport dies while this wait is outstanding; the broker still resolves it.
+    const abandoned = registry.waitForWorkerResults(target, 5_000, 300);
+
+    ptys[0]!.emitOutput("\u001b]0;⠹ install-worker\u0007\u001b[2JWorking");
+    ptys[0]!.emitOutput("\u001b[2Jdevice install applied once\r\n\u001b]0;install-worker\u0007");
+    const lost = await abandoned;
+    expect(lost.results[0]).toMatchObject({ status: "completed", retrieval: "fresh" });
+
+    const retry = await registry.waitForWorkerResults(target, 5_000, 300);
+    expect(retry).toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "completed",
+        retrieval: "replay",
+        completedAt: lost.results[0]!.completedAt,
+        text: lost.results[0]!.text,
+      }],
+    });
+
+    // A later turn must not rewrite the answer target 1 already recorded.
+    ptys[0]!.emitOutput("\u001b]0;⠹ install-worker\u0007\u001b[2JWorking");
+    ptys[0]!.emitOutput("\u001b[2Jsecond turn output\r\n\u001b]0;install-worker\u0007");
+    const second = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 2 },
+    ], 5_000, 300);
+    expect(second.results[0]!.text).toContain("second turn output");
+    const replayed = await registry.waitForWorkerResults(target, 5_000, 300);
+    expect(replayed.results[0]).toMatchObject({
+      retrieval: "replay",
+      text: lost.results[0]!.text,
+    });
+  });
+
+  it("returns a structured timeout instead of throwing when a worker is still working", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ name: "slow-worker" }));
+    ptys[0]!.emitOutput("\u001b]0;⠹ slow-worker\u0007\u001b[2JWorking");
+
+    await expect(registry.waitForWorkerResults(
+      [{ sessionId: record.id, completionTarget: 1 }],
+      50,
+      300,
+    )).resolves.toMatchObject({
+      timedOut: true,
+      results: [{ status: "working" }],
+    });
+  });
+
+  it("uses Claude native final responses for two gap-free semantic completion targets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-native-turns-"));
+    const claudeProjects = join(root, "claude-projects");
+    const project = join(claudeProjects, "-tmp-repo");
+    const fixture = await readFile(
+      join(process.cwd(), "tests", "fixtures", "claude-native-semantic-turns.jsonl"),
+      "utf8",
+    );
+    const lines = fixture.trimEnd().split("\n");
+    const firstTurn = `${lines.slice(0, 5).join("\n")}\n`;
+    const secondTurn = `${lines.slice(5).join("\n")}\n`;
+    const transcripts = new ThreadTranscriptStore(join(root, "state"), {
+      claudeProjectsDirectory: claudeProjects,
+    });
+    const ptys: FakePty[] = [];
+    const registry = new SessionRegistry({
+      adapters,
+      ptyFactory: () => {
+        const pty = new FakePty(2000 + ptys.length);
+        ptys.push(pty);
+        return pty;
+      },
+      journal: { append: async () => {} },
+      transcripts,
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+    const record = await registry.start(
+      request({ provider: "claude", model: "opus" }),
+      "Inspect semantic turns",
+    );
+    await mkdir(project, { recursive: true });
+    const nativePath = join(project, `${record.id}.jsonl`);
+    await writeFile(nativePath, firstTurn);
+
+    const firstWait = registry.waitForWorkerResults(
+      [{ sessionId: record.id, completionTarget: 1 }],
+      5_000,
+      4_000,
+    );
+    ptys[0]!.emitOutput("\u001b]0;⠹ worker\u0007Working\nesc to interrupt");
+    ptys[0]!.emitOutput("\n\u001b[2J⠹ spinner text\n❯ prompt text\nRunning stop hook output\n\u001b]0;worker\u0007");
+    const first = await firstWait;
+    expect(first.results[0]).toMatchObject({
+      status: "completed",
+      completedTurns: 1,
+    });
+    const firstText = first.results[0]!.text;
+    expect(firstText).toContain("BEGIN-DISTINCTIVE-FIRST-RESPONSE");
+    expect(firstText).toContain("[elided; original length: 5632 characters]");
+    expect(firstText).not.toContain("END-DISTINCTIVE-FIRST-RESPONSE");
+    expect(firstText).not.toMatch(/\u001b|⠹|Running stop hook|❯/u);
+
+    await appendFile(nativePath, secondTurn);
+    await registry.submitInstruction(record.id, "Second semantic turn");
+    const secondWait = registry.waitForWorkerResults(
+      [{ sessionId: record.id, completionTarget: 2 }],
+      5_000,
+      4_000,
+    );
+    ptys[0]!.emitOutput("\u001b]0;⠹ worker\u0007Working\nesc to interrupt");
+    ptys[0]!.emitOutput("\n\u001b]0;worker\u0007");
+    await expect(secondWait).resolves.toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "completed",
+        completedTurns: 2,
+        text: "BEGIN-DISTINCTIVE-SECOND-RESPONSE. Completion target two reached exactly once.",
+      }],
+    });
+
+    const semanticTurns: string[] = [];
+    let cursor = 0;
+    while (true) {
+      const page = await transcripts.read(record.id, cursor, 1);
+      if (page.events.length === 0) break;
+      expect(page.nextCursor).toBeGreaterThan(cursor);
+      cursor = page.nextCursor;
+      const event = page.events[0]!;
+      if (event.kind === "turn") semanticTurns.push(event.text!);
+    }
+    expect(semanticTurns).toHaveLength(2);
+    expect(semanticTurns.filter((text) =>
+      text.includes("BEGIN-DISTINCTIVE-FIRST-RESPONSE"))).toHaveLength(1);
+    expect(semanticTurns.filter((text) =>
+      text.includes("BEGIN-DISTINCTIVE-SECOND-RESPONSE"))).toHaveLength(1);
+    expect(semanticTurns.join("\n")).not.toMatch(/\u001b|⠹|Running stop hook|❯/u);
   });
 
   it("returns a blocking provider prompt without waiting for the timeout", async () => {
@@ -229,8 +383,47 @@ describe("SessionRegistry", () => {
       { sessionId: record.id, completionTarget: 1 },
     ], 5_000)).resolves.toMatchObject({
       timedOut: false,
-      results: [{ status: "blocked", completedTurns: 0 }],
+      results: [{ status: "needs-input", completedTurns: 0 }],
     });
+  });
+
+  it("persists provider approval waits as Needs Input while preserving attach, approve, and detach", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ provider: "claude", model: "opus" }), "Run the checks");
+    ptys[0]!.emitOutput([
+      "Claude needs your permission to use Bash",
+      "  pnpm test",
+      "Do you want to proceed?",
+      "❯ 1. Yes",
+      "  2. Yes, and don't ask again for pnpm test commands",
+      "  3. No",
+      "Esc to cancel · Tab to amend",
+    ].join("\r\n"));
+
+    await vi.waitFor(() => expect(registry.get(record.id).attentionState).toBe("needs-input"));
+    await registry.attach(record.id, "operator", "control", () => undefined);
+    await registry.write(record.id, "operator", Buffer.from("1\r"));
+    await registry.detach(record.id, "operator");
+    expect(ptys[0]!.writes.at(-1)?.toString()).toBe("1\r");
+    expect(registry.get(record.id).attachmentState).toBe("detached");
+
+    ptys[0]!.emitOutput("\r\nWorking\r\nesc to interrupt");
+    await vi.waitFor(() => expect(registry.get(record.id).attentionState).toBe("working"));
+  });
+
+  it("rejects an invalid cwd before constructing a provider process", async () => {
+    const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(1000));
+    const registry = new SessionRegistry({
+      adapters,
+      ptyFactory,
+      journal: { append: async () => {} },
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+
+    await expect(registry.start(request({
+      cwd: `/tmp/cyberdeck-missing-${crypto.randomUUID()}`,
+    }))).rejects.toMatchObject({ code: "INVALID_SESSION_CWD" });
+    expect(ptyFactory).not.toHaveBeenCalled();
   });
 
   it("limits workers independently from orchestrators and reports the active count", async () => {
@@ -269,7 +462,7 @@ describe("SessionRegistry", () => {
   });
 
   it("allows one controller and multiple watchers and broadcasts output", async () => {
-    const { registry, ptys } = harness();
+    const { registry, ptys, transcripts } = harness();
     const record = await registry.start(request());
     const controller = vi.fn();
     const watcherOne = vi.fn();
@@ -286,6 +479,7 @@ describe("SessionRegistry", () => {
     expect(watcherOne).toHaveBeenCalledOnce();
     expect(watcherTwo).toHaveBeenCalledOnce();
     expect(registry.get(record.id).attachmentState).toBe("controlled");
+    expect(transcripts.filter((event) => event.kind === "output")).toEqual([]);
   });
 
   it("detaches a controller without killing the PTY", async () => {
@@ -330,6 +524,32 @@ describe("SessionRegistry", () => {
     await registry.stop(record.id);
     await registry.stop(record.id);
     expect(ptys[0]!.killCount).toBe(1);
+  });
+
+  it("durably marks a naturally completed session as stopped without rewriting its exit result", async () => {
+    const { registry, ptys, events, transcripts } = harness();
+    const record = await registry.start(request());
+    ptys[0]!.emitExit(0);
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "exited",
+      exitCode: 0,
+      attentionState: "done",
+    });
+
+    await registry.stop(record.id);
+    await registry.stop(record.id);
+
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "exited",
+      exitCode: 0,
+      attentionState: "stopped",
+    });
+    expect(events.filter((event) =>
+      event.type === "session.stopped" && event.sessionId === record.id)).toHaveLength(1);
+    expect(transcripts.filter((event) =>
+      event.kind === "lifecycle"
+      && event.sessionId === record.id
+      && event.text === "session stopped")).toHaveLength(1);
   });
 
   it("replaces a terminal PTY with the provider's exact resume command", async () => {
@@ -481,5 +701,346 @@ describe("SessionRegistry", () => {
   it.each(["scout", "writer", "cheap-task"])("does not interpret role %s", async (role) => {
     const { registry } = harness();
     await expect(registry.start(request({ role }))).resolves.toMatchObject({ role });
+  });
+});
+
+const SENTINEL_SECRETS = {
+  ANTHROPIC_API_KEY: "sk-ant-SENTINEL-REGISTRY",
+  GITHUB_TOKEN: "ghp_SENTINELREGISTRY",
+};
+
+const temporaryDirectories: string[] = [];
+
+function launchFilesDirectory(): string {
+  const directory = mkdtempSync(join(tmpdir(), "cyberdeck-launch-"));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+afterAll(() => {
+  for (const directory of temporaryDirectories) rmSync(directory, { recursive: true, force: true });
+});
+
+async function until(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
+function claudeRequest(overrides: Partial<StartSessionRequest> = {}): StartSessionRequest {
+  return {
+    provider: "claude",
+    cwd: "/tmp/repo",
+    detached: true,
+    sandbox: "read-only",
+    model: "opus",
+    providerInstructions: "Cyberdeck guidance",
+    ...overrides,
+  };
+}
+
+interface SpawnObservation {
+  spec: ProviderLaunchSpec;
+  payloadFilesPresent: boolean[];
+}
+
+/** A registry wired to the real Claude adapter so launch artifacts are the actual private files. */
+function claudeHarness(options: { failSpawn?: boolean } = {}) {
+  const directory = launchFilesDirectory();
+  const adapter = new ClaudeProviderAdapter({
+    directory,
+    mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+  });
+  const ptys: FakePty[] = [];
+  const spawns: SpawnObservation[] = [];
+  const transcripts: AppendThreadEvent[] = [];
+  const ptyFactory = vi.fn((spec: ProviderLaunchSpec) => {
+    spawns.push({
+      spec,
+      payloadFilesPresent: payloadPaths(spec).map((path) => existsSync(path)),
+    });
+    if (options.failSpawn === true) throw new Error("pty construction failed");
+    const pty = new FakePty(3000 + ptys.length);
+    ptys.push(pty);
+    return pty;
+  });
+  const registry = new SessionRegistry({
+    adapters: { claude: adapter },
+    ptyFactory,
+    journal: { append: async () => {} },
+    transcripts: { append: async (event: AppendThreadEvent) => {
+      transcripts.push(event);
+      return {} as never;
+    } } as never,
+    validateCwd: async () => undefined,
+    config: BrokerRuntimeConfigSchema.parse({}),
+  });
+  return { registry, adapter, directory, ptys, spawns, ptyFactory, transcripts };
+}
+
+function payloadPaths(spec: ProviderLaunchSpec): string[] {
+  return ["--append-system-prompt-file", "--mcp-config"]
+    .map((flag) => spec.args[spec.args.indexOf(flag) + 1])
+    .filter((path): path is string => path !== undefined);
+}
+
+describe("SessionRegistry provider launch artifacts", () => {
+  it("recreates the payload files a resume spec references before the PTY is constructed", async () => {
+    const { registry, ptys, spawns, directory } = claudeHarness();
+    const record = await registry.start(claudeRequest());
+    expect(spawns[0]?.payloadFilesPresent).toEqual([true, true]);
+
+    ptys[0]!.emitExit(0);
+    await until(() => !existsSync(join(directory, record.id)), "launch artifacts to be removed on exit");
+
+    await registry.resume(record.id);
+
+    expect(spawns).toHaveLength(2);
+    expect(payloadPaths(spawns[1]!.spec)).toHaveLength(2);
+    expect(spawns[1]?.payloadFilesPresent).toEqual([true, true]);
+  });
+
+  it("removes launch artifacts when the durable thread is deleted, after an exit already removed them", async () => {
+    const { registry, ptys, directory } = claudeHarness();
+    const record = await registry.start(claudeRequest());
+    const sessionDirectory = join(directory, record.id);
+    expect(existsSync(sessionDirectory)).toBe(true);
+
+    ptys[0]!.emitExit(0);
+    await until(() => !existsSync(sessionDirectory), "launch artifacts to be removed on exit");
+
+    await expect(registry.delete(record.id)).resolves.toBeUndefined();
+    expect(existsSync(sessionDirectory)).toBe(false);
+  });
+
+  it("removes prepared artifacts when a launch fails before a live PTY takes ownership", async () => {
+    const { registry, directory, spawns } = claudeHarness({ failSpawn: true });
+
+    await expect(registry.start(claudeRequest())).rejects.toThrow("pty construction failed");
+
+    expect(spawns[0]?.payloadFilesPresent).toEqual([true, true]);
+    expect(existsSync(join(directory, spawns[0]!.spec.args[1]!))).toBe(false);
+    expect(registry.list()).toEqual([]);
+  });
+
+  it("leaves runtime state untouched when a resume preflight fails", async () => {
+    const { registry, adapter, ptys } = claudeHarness();
+    const record = await registry.start(claudeRequest());
+    ptys[0]!.emitExit(0);
+    await until(() => registry.get(record.id).executionState === "exited", "the session to exit");
+
+    const prepareLaunch = vi.spyOn(adapter, "prepareLaunch")
+      .mockRejectedValueOnce(new Error("preflight unavailable"));
+
+    await expect(registry.resume(record.id)).rejects.toThrow("preflight unavailable");
+    expect(registry.get(record.id)).toMatchObject({ executionState: "exited", exitCode: 0 });
+    prepareLaunch.mockRestore();
+
+    await expect(registry.resume(record.id)).resolves.toMatchObject({ executionState: "active" });
+  });
+
+  it("records a cleanup failure without masking the exit that triggered it", async () => {
+    const ptys: FakePty[] = [];
+    const transcripts: AppendThreadEvent[] = [];
+    const adapter: ProviderAdapter = {
+      id: "claude",
+      buildLaunchSpec: (session) => ({ executable: "fake", args: [], cwd: session.cwd, env: {} }),
+      buildResumeSpec: (session) => ({ executable: "fake", args: [], cwd: session.cwd, env: {} }),
+      prepareLaunch: async () => undefined,
+      cleanupLaunch: async () => { throw new Error("artifact directory is busy"); },
+    };
+    const registry = new SessionRegistry({
+      adapters: { claude: adapter },
+      ptyFactory: () => {
+        const pty = new FakePty(4000 + ptys.length);
+        ptys.push(pty);
+        return pty;
+      },
+      journal: { append: async () => {} },
+      transcripts: { append: async (event: AppendThreadEvent) => {
+        transcripts.push(event);
+        return {} as never;
+      } } as never,
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+
+    const record = await registry.start(claudeRequest());
+    ptys[0]!.emitExit(0);
+    await until(
+      () => transcripts.some((event) => event.text === "provider launch artifact cleanup failed"),
+      "the cleanup failure to be recorded",
+    );
+
+    expect(registry.get(record.id)).toMatchObject({ executionState: "exited", exitCode: 0 });
+    expect(transcripts.find((event) => event.text === "provider launch artifact cleanup failed"))
+      .toMatchObject({
+        sessionId: record.id,
+        kind: "lifecycle",
+        data: { reason: "session-exited", message: "artifact directory is busy" },
+      });
+  });
+});
+
+describe("SessionRegistry resolved launch records", () => {
+  function secretHarness() {
+    const puts: SessionRecord[] = [];
+    const specs: ProviderLaunchSpec[] = [];
+    const ptys: FakePty[] = [];
+    const adapter: ProviderAdapter = {
+      id: "claude",
+      buildLaunchSpec: (session) => ({
+        executable: "claude",
+        args: ["--session-id", session.id, "--model", session.model ?? "opus"],
+        cwd: session.cwd,
+        env: { ...SENTINEL_SECRETS, PATH: "/usr/bin", CYBERDECK_PROCESS_ROLE: "worker", DISABLE_UPDATES: "1" },
+      }),
+      buildResumeSpec: (session) => ({
+        executable: "claude",
+        args: ["--resume", session.id],
+        cwd: session.cwd,
+        env: { ...SENTINEL_SECRETS, CYBERDECK_PROCESS_ROLE: "worker" },
+      }),
+      prepareLaunch: vi.fn(async () => undefined),
+    };
+    const registry = new SessionRegistry({
+      adapters: { claude: adapter },
+      ptyFactory: (spec: ProviderLaunchSpec) => {
+        specs.push(spec);
+        const pty = new FakePty(5000 + ptys.length);
+        ptys.push(pty);
+        return pty;
+      },
+      journal: { append: async () => {} },
+      store: { put: async (value) => { puts.push(value); }, delete: async () => {} },
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+    return { registry, adapter, puts, specs, ptys };
+  }
+
+  it("captures the executable, argv, and cwd the PTY was actually spawned with", async () => {
+    const { registry, specs } = secretHarness();
+    const record = await registry.start(claudeRequest());
+
+    expect(registry.launchRecord(record.id)).toMatchObject({
+      mode: "launch",
+      executable: specs[0]!.executable,
+      args: specs[0]!.args,
+      cwd: specs[0]!.cwd,
+      truncated: false,
+    });
+  });
+
+  it("never exposes an inherited environment value through the record", async () => {
+    const { registry } = secretHarness();
+    const record = await registry.start(claudeRequest());
+    const serialized = JSON.stringify({
+      launchRecord: registry.launchRecord(record.id),
+      session: registry.get(record.id),
+      list: registry.list(),
+    });
+
+    for (const [key, value] of Object.entries(SENTINEL_SECRETS)) {
+      expect(serialized).not.toContain(value);
+      expect(serialized).not.toContain(key);
+    }
+    expect(registry.launchRecord(record.id)).toMatchObject({
+      cyberdeckEnv: { CYBERDECK_PROCESS_ROLE: "worker", DISABLE_UPDATES: "1" },
+      inheritedEnvCount: 3,
+    });
+  });
+
+  it("replaces the launch record with the resume it actually performed", async () => {
+    const { registry, ptys, specs } = secretHarness();
+    const record = await registry.start(claudeRequest());
+    ptys[0]!.emitExit(0);
+    await until(() => registry.get(record.id).executionState === "exited", "the session to exit");
+
+    await registry.resume(record.id);
+
+    expect(registry.launchRecord(record.id)).toMatchObject({
+      mode: "resume",
+      args: specs[1]!.args,
+      cwd: specs[1]!.cwd,
+    });
+  });
+
+  it("persists the record so inspection survives a broker restart", async () => {
+    const { registry, puts } = secretHarness();
+    const record = await registry.start(claudeRequest());
+    const persisted = puts.filter((value) => value.id === record.id).at(-1);
+
+    expect(persisted?.launchRecord).toMatchObject({ mode: "launch", executable: "claude" });
+    expect(JSON.stringify(persisted)).not.toContain("SENTINEL");
+  });
+
+  it("reads without writing or rebuilding a provider spec", async () => {
+    const { registry, adapter, puts } = secretHarness();
+    const record = await registry.start(claudeRequest());
+    const writesBefore = puts.length;
+    const preflights = (adapter.prepareLaunch as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    expect(registry.launchRecord(record.id)).toBeDefined();
+    expect(registry.launchRecord(record.id)).toBeDefined();
+
+    expect(puts).toHaveLength(writesBefore);
+    expect((adapter.prepareLaunch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(preflights);
+  });
+
+  it("hands back a copy so a caller cannot mutate broker state", async () => {
+    const { registry } = secretHarness();
+    const record = await registry.start(claudeRequest());
+    const first = registry.launchRecord(record.id)!;
+    first.args.push("--injected");
+
+    expect(registry.launchRecord(record.id)?.args).not.toContain("--injected");
+  });
+
+  it("refuses to answer for a session the broker does not hold", () => {
+    const { registry } = secretHarness();
+    expect(() => registry.launchRecord("22222222-2222-4222-8222-222222222222"))
+      .toThrow(expect.objectContaining({ code: "SESSION_NOT_FOUND" }));
+  });
+
+  it("captures a record for any registered provider, not only Claude and Codex", async () => {
+    const specs: ProviderLaunchSpec[] = [];
+    const adapter: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session) => ({
+        executable: "cursor-agent",
+        args: ["--cwd", session.cwd],
+        cwd: session.cwd,
+        env: { ...SENTINEL_SECRETS },
+      }),
+      buildResumeSpec: (session) => ({
+        executable: "cursor-agent",
+        args: ["resume"],
+        cwd: session.cwd,
+        env: {},
+      }),
+    };
+    const registry = new SessionRegistry({
+      adapters: { cursor: adapter },
+      ptyFactory: (spec: ProviderLaunchSpec) => {
+        specs.push(spec);
+        return new FakePty(6000);
+      },
+      journal: { append: async () => {} },
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+
+    const record = await registry.start(claudeRequest({ provider: "cursor" }));
+
+    expect(registry.launchRecord(record.id)).toMatchObject({
+      mode: "launch",
+      executable: "cursor-agent",
+      args: specs[0]!.args,
+      cyberdeckEnv: {},
+      inheritedEnvCount: 2,
+    });
   });
 });

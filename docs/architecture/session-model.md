@@ -14,6 +14,8 @@ Each session records independent fields:
 - `model` is an optional provider-native model string. Omitting it leaves selection to the native runtime; Cyberdeck does not rank or route models.
 - `role` is an optional opaque, user-defined string. It grants no capabilities and implies no workflow.
 - `sandbox` is the requested permission boundary, independent of provider, model, and role.
+- `approvalMode` is an optional provider-neutral `prompt | auto` dispatch choice. Omission preserves
+  provider prompts; `auto` is never inferred.
 - execution state describes whether the provider process is active or exited.
 - attachment state describes presentation: attached/interactive or detached/headless.
 
@@ -111,11 +113,14 @@ manage a box-level worker preference independent of every orchestrator binding. 
 persists across broker and Orc replacement, and is snapshotted when a worker session or bounded job
 starts; changing it does not rewrite already-running conversations.
 Provider child processes receive `CYBERDECK_PROCESS_ROLE=worker|orchestrator|session` and
-`CYBERDECK_WORKER_MODE=normal|caveman` after their inherited environment is copied. These values are
-integration hints, not authorization boundaries. Caveman policy is also added to each worker's
-actual task input, which makes the behavior provider-neutral rather than dependent on SessionStart
-hooks. An installed box skill supplies the full policy; a compact built-in fallback keeps an enabled
-setting functional without making Caveman installation a Cyberdeck prerequisite.
+`CYBERDECK_WORKER_MODE=normal|caveman` after a deterministic exact-name child environment is built.
+Compatibility, locale, matching-provider routing, and reviewed proxy/TLS trust entries may pass;
+unknown, tmux/mise, unrelated integration, and ambient SSH-agent state do not. This reduces
+accidental authority but is not a same-UID security sandbox. The Cyberdeck values are integration
+hints, not authorization boundaries. Caveman policy is also added to each worker's actual task
+input, which makes the behavior provider-neutral rather than dependent on SessionStart hooks. An
+installed box skill supplies the full policy; a compact built-in fallback keeps an enabled setting
+functional without making Caveman installation a Cyberdeck prerequisite.
 
 Worker steering passes through a durable instruction queue. A human control attachment has absolute
 writer priority. If a controller exists, the message remains queued; controller release causes the
@@ -131,6 +136,10 @@ persisted and broker-enforced. Cancelling a workflow does not stop its participa
 Everything above describes process ownership and remains unchanged. The cockpit projects the
 interactive Fleet beside a controlling attachment to the selected broker-owned orchestrator. It does
 not move provider ownership into tmux.
+
+Fleet `Ctrl+O` always crosses this presentation boundary. Selecting an available orchestrator focuses
+its existing cockpit pane, while creating or selecting an orchestrator without a pane adds another
+attachment pane to the same cockpit. It never replaces the cockpit with a raw full-screen attachment.
 
 Cockpit preflight runs `tmux -V` and selects presentation mode before orchestrator ensure/create.
 Outside tmux it uses `attach-session`. When `$TMUX` is present, it uses `switch-client` in the
@@ -214,8 +223,9 @@ because the session contract carries none. It does not invent one.
 
 tmux owns no provider process. `src/tmux/cockpit.ts` emits no `kill-pane`, `kill-server`,
 `respawn-pane`, or `send-keys` verb. Its only `kill-session` path is rollback of the exact
-workspace-namespaced cockpit created by the current failed invocation. Detach uses only
-`detach-client`, and pane inspection uses only a read-only `list-panes -F` query.
+workspace-namespaced cockpit created by the current failed invocation. Leaving a cockpit switches
+back to the previous tmux session when one exists and otherwise detaches the current client; pane
+inspection uses only a read-only `list-panes -F` query.
 
 This was verified operationally on 2026-07-21: killing the entire tmux server left the broker healthy
 on the same pid with its state intact. Closing a pane is never a way to stop work. `cyberdeck stop

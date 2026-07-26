@@ -3,6 +3,10 @@ import { evaluateClaudeLaunchSafety } from "../../domain/policy.js";
 import { claudePermissionMode } from "./permissions.js";
 import { jobLaunchEnvironment } from "../launch-environment.js";
 import { applyWorkerMode } from "../worker-mode.js";
+import {
+  addClaudeNoSubagentArgs,
+  CLAUDE_NO_SUBAGENT_ENV,
+} from "./no-subagents.js";
 
 /** A fully-resolved headless invocation. `stdin` is written to the process and then closed. */
 export interface ClaudeHeadlessCommand {
@@ -20,6 +24,7 @@ export interface ClaudeHeadlessOptions {
    * `--output-format=stream-json`, which is the only combination this builder emits.
    */
   includePartialMessages?: boolean;
+  sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
 }
 
 /**
@@ -59,6 +64,7 @@ export function buildClaudeHeadlessCommand(
     "--permission-mode",
     claudePermissionMode(request.sandbox),
   ];
+  addClaudeNoSubagentArgs(args);
   if (options.includePartialMessages === true) {
     args.push("--include-partial-messages");
   }
@@ -71,7 +77,15 @@ export function buildClaudeHeadlessCommand(
     executable: "claude",
     args,
     cwd: request.cwd,
-    env: jobLaunchEnvironment({ ...process.env, DISABLE_UPDATES: "1" }, request),
+    env: {
+      ...jobLaunchEnvironment(
+        options.sourceEnvironment ?? process.env,
+        "claude",
+        request,
+        { disableUpdates: true },
+      ),
+      ...CLAUDE_NO_SUBAGENT_ENV,
+    },
     stdin: applyWorkerMode(request.instruction, request.workerMode),
   };
 }

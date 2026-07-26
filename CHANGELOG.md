@@ -6,6 +6,26 @@ and persisted schemas remain under active alpha development.
 
 ## [Unreleased]
 
+### Fixed
+
+- `workers_wait` no longer accepts a timeout it cannot honor. One logical wait is
+  served in transport segments that always return before an MCP client abandons
+  the call, carrying an explicit `wait.state` of `settled`, `timed-out`, or
+  `incomplete` plus a `waitId` to resume.
+- A completed `sessionId` and `completionTarget` is retrievable idempotently after
+  a transport failure and is marked `retrieval: "replay"`, so an orchestrator can
+  rule out a duplicate mutation without reading a raw transcript.
+- MCP requests are dispatched concurrently, so `threads_list` stays answerable
+  while a worker wait is in flight instead of queueing behind it.
+- A control-plane failure is reported as its own structured class rather than as
+  an ambiguous worker outcome.
+
+### Changed
+
+- `threads_list` takes `view`, `limit`, and `cursor`, defaults to a status-only
+  projection, and returns a paged envelope. The full view drops `launchRecord` and
+  bounds `latestPreview`.
+
 ## [0.1.0-alpha.1] - 2026-07-23
 
 ### Added
