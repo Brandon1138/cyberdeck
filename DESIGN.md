@@ -7,13 +7,18 @@ colors:
   canvas: "#0E1116"
   surface: "#151922"
   text-strong: "#D7DCE4"
-  text-muted: "#7B8490"
+  text-muted: "#9AA3AF"
   divider: "#343B46"
-  state-working: "#66C2D0"
+  selection: "#9AA3AF"
+  state-working: "#A9C6D6"
   state-needs-input: "#D4A85B"
   state-done: "#78C679"
   state-failed: "#D96C75"
-  state-stopped: "#7B8490"
+  state-stopped: "#9AA3AF"
+  pr-open: "#78C679"
+  pr-merged: "#C678DD"
+  pr-closed: "#9AA3AF"
+  pr-failing: "#D96C75"
 typography:
   title:
     fontFamily: "terminal monospace"
@@ -103,31 +108,34 @@ The interface is keyboard-first and structurally simple: one header, project gro
 
 ## Colors
 
-The palette is cool graphite with one pale signal-blue accent. Semantic cyan, amber, green, and red appear only where state requires them.
+The palette is cool graphite. Color is reserved for state that demands action, plus the single live state; everything else is greyscale, and hierarchy is carried by weight and the selection rule.
 
 ### Primary
 
-- **Signal Blue** (`#9EB6FF`): selected markers, project paths, active picker rows, and the composer mode indicator. It occupies less than ten percent of the screen and never fills an entire thread row.
-- **Octo Violet** (`#B69EFF`): the 8-bit octopus logo mark in the header bay, and nothing else. It carries no state meaning and never appears in rows, pickers, or copy.
+- **Signal Blue** (`#9EB6FF`): held in reserve. It no longer paints project paths or selected markers, and nothing in Fleet may claim it without a written decision here first.
+- **Octo Violet** (`#B69EFF`): the 8-bit octopus logo mark in the header bay, and nothing else. It carries no state meaning and never appears in rows, pickers, or copy. No state may borrow the brand hue — a merged pull request uses Merge Violet instead.
 
 ### Neutral
 
 - **Ink Slate** (`#0E1116`): intended canvas for renderers that own their background. Terminal clients may preserve the user's equivalent dark background.
 - **Deep Slate** (`#151922`): optional footer or inline-picker surface. It is never used to create nested cards.
-- **Frosted Gray** (`#D7DCE4`): primary titles, selected thread names, prompts, and important values.
-- **Cool Ash** (`#7B8490`): previews, ages, inactive markers, and stopped states.
+- **Frosted Gray** (`#D7DCE4`): the selected thread title, `Cyberdeck`, prompts, and important values.
+- **Cool Ash** (`#9AA3AF`): unselected titles, project paths, previews, ages, inactive markers, and every state that is neither live nor actionable — `Stopping`, `Stopped`, `Interrupted`. One contrast step above the former `#7B8490`, which was too faint to read as body text. It is subdued, never foreground-bright.
 - **Steel Hairline** (`#343B46`): footer separators and the tmux pane boundary.
 
 ### Semantic
 
-- **Working Cyan** (`#66C2D0`): active generation and tool execution.
-- **Attention Amber** (`#D4A85B`): explicit approval, permission, authentication, trust, computer-use enablement, or another blocking question.
-- **Completion Green** (`#78C679`): successful completion with no required intervention.
-- **Failure Red** (`#D96C75`): failed runtimes, failed turns, destructive confirmation, and error notices only.
+- **Attention Amber** (`#D4A85B`): a thread is blocked and wants the operator. It marks `Needs input` alone; approval, permission, authentication, trust, and computer-use prompts all resolve to it. It no longer marks `Done`, because "go read this" and "go unblock this" are different errands and must not share a hue.
+- **Failure Red** (`#D96C75`): something is wrong right now — failed runtimes, failed turns, failing checks, destructive confirmation, and error notices. Nothing merely terminal or inert may use it.
+- **Merge Violet** (`#C678DD`): a merged pull request. Distinct from Octo Violet so state never borrows the brand.
+- **Completion Green** (`#78C679`): `Done` — a thread that finished successfully and is waiting to be read — and an open pull request. Green carries both meanings, in two different columns, and the columns keep them apart.
+- **Live Ice** (`#A9C6D6`): `Working`. Brighter than Cool Ash so the one generating thread is findable in a fleet of twenty rows, and cool rather than neutral so it never reads as Frosted Gray.
 
-**The Sparse Signal Rule.** Color marks selection and state. It never decorates inactive text, paints full project groups, or replaces a written label.
+`Stopping`, `Stopped`, `Interrupted`, a draft or closed pull request, and all model and effort metadata are greyscale. An inert terminal state is not a fault, and metadata is not state. `Working` is the deliberate exception: it demands nothing of the operator, but a live thread is the one thing you need to locate at a glance, and a row that looks exactly like `Stopped` gives you no way to find it.
 
-**The Reduced-Color Rule.** Truecolor renderers use the palette above. Sixteen-color terminals map primary to blue, working to cyan, needs input to yellow, done to green, failed to red, and muted content to bright black. Every state remains readable without color.
+**The Sparse Signal Rule.** Color marks state that demands action, plus the one live state, and nothing else — four hues in a thread row, everything else greyscale. Selection is carried by the rule and bold weight, not hue. Color never decorates inactive text, paints full project groups, or replaces a written label.
+
+**The Reduced-Color Rule.** Truecolor renderers use the palette above. Sixteen-color terminals map needs input to yellow, done to green, working to cyan, failed to red, merged to magenta, an open pull request to green, and muted content to bright black. The selection rule is a plain glyph and the live marker is a filled `•` against a hollow `·`, so both the focused row and the live thread stay visible with color disabled entirely.
 
 ## Typography
 
@@ -156,7 +164,7 @@ Title case is the default. `Cyberdeck`, `Needs input`, and friendly model labels
 
 Cyberdeck is flat. It uses no shadows, blur, glass effects, raised cards, or simulated bevels. Depth comes from one-cell separators, blank rows between project groups, strong versus muted text, and the stable tmux split. The `/model` picker and shortcut panel occupy normal document flow and never appear as floating modal boxes.
 
-The footer uses one dim horizontal separator above the composer and a second separator below it when configuration or help is visible. Project groups use whitespace rather than boxes. The selected row uses an explicit `*` marker and bold task title, not a background slab.
+The footer uses one dim horizontal separator above the composer and a second separator below it when configuration or help is visible. Project groups use whitespace rather than boxes. The focused row uses a one-cell left rule (`▌`) in the gutter plus a bold title, not a background slab.
 
 **The Flat Register Rule.** If a section looks like a card, remove the container and restore alignment, whitespace, and a single hairline where separation is necessary.
 
@@ -183,28 +191,33 @@ The header occupies the upper-left of Fleet and establishes identity, current or
 
 ### Project Groups and Thread Rows
 
-Project headings are shortened canonical working-directory paths in Signal Blue. Groups are separated by one blank row, not rules or boxes. Pinned groups and rows come first; manual ordering is stable and persisted. Unpinned peers use most-recent meaningful activity as the tiebreaker.
+Project headings are shortened canonical working-directory paths rendered plainly — a path is structure, not state, so it takes no accent. Groups are separated by one blank row, not rules or boxes. Pinned groups and rows come first; manual ordering is stable and persisted. Unpinned peers use most-recent meaningful activity as the tiebreaker.
 
-The wide row order is fixed:
+A project heading is a navigable row of its own. `Up`/`Down` step onto it, `Enter` toggles collapse, and `Left`/`Right` collapse and expand explicitly. A collapsed heading reports how many threads it is hiding and removes them from the navigation model, not merely from the paint. Collapse is view state, held per path for the life of the session.
 
 ```text
-* Task title                 Codex Sol · high  Working      Latest assistant paragraph…       2m
+  ▾ ~/code/personal/cyberdeck
+▌ • Task title                 Codex Sol · high  Working      Beginning of latest reply…         2m
+  ▸ ~/code/other · 3 threads
 ```
 
-- `*` marks keyboard selection and is paired with a bold title so selection never relies on color.
+The row order is fixed at both full and multiplexed widths:
+
+- Every navigable row opens with a two-cell gutter: `▌ ` when focused, two spaces otherwise. Thread titles therefore sit two cells inside their project heading.
+- The left rule is the only selection signal that depends on rendering rather than content, and it is a plain glyph, so focus survives `--no-color`. The focused title also goes bold and brighter; unselected titles are Cool Ash.
+- `·` marks every thread except a live one, which takes the filled `•`. The marker takes Completion Green for `Done`, Attention Amber for `Needs input`, Failure Red for `Failed`, Live Ice for `Working`, and Cool Ash otherwise. Both glyphs are one cell wide, so the shape change never shifts a column. The status label follows the same color rule, without the glyph.
 - The title receives roughly 28 percent of width, model and effort receive at most `20ch`, status receives only its content width up to `11ch`, age receives `5ch`, and preview consumes all remaining space.
 - Provider, worker role, sandbox, and raw session ID are not permanent columns. Show provider only as part of an unambiguous friendly model label. Put deeper metadata in thread detail or diagnostics.
 - Age is right-aligned and based on the latest meaningful prompt, assistant completion, or lifecycle transition. Selection, attachment, and Fleet refresh do not reset it.
 - A renamed title overrides the normalized initial task title and persists across restarts.
 
-At `60` to `99` columns, each thread becomes two dense lines. Model, effort, state, and age remain on the first line; preview begins immediately below the selection indent.
+At `80` to `99` columns, the same single-line structure is retained with narrower title, identity, and preview columns.
 
 ```text
-* Create iPhoneDoctor shader…  Opus · high  Done  2m
-  iPhone CRT shader background is ready with motion effects…
+▌ · Create iPhoneDoctor…  Opus · high  Done       Shader background is ready…  2m
 ```
 
-At `50` to `59` columns, model and effort yield before task, state, age, or preview. The second line remains dedicated to preview. Never place a fixed-width identity prefix before preview.
+Below `80` columns, model and effort yield before task, state, age, or preview. The row remains one line so multiplexing does not switch Fleet into a separate compact presentation.
 
 ### Attention States
 
@@ -212,10 +225,10 @@ Fleet status is a user-attention state derived from durable conversation state p
 
 | Label | Meaning | Treatment |
 | --- | --- | --- |
-| `Working` | The provider is generating, executing a tool, or starting a turn. | Working Cyan |
+| `Working` | The provider is generating, executing a tool, or starting a turn. | Live Ice plus the filled `•` marker |
 | `Needs input` | Progress is blocked on explicit approval, permission, authentication, trust, computer-use enablement, or a blocking question. | Attention Amber |
 | `Done` | No work is active and no intervention is required. The last turn completed successfully, or a new zero-turn session is ready. | Completion Green |
-| `Stopping` | A stop was requested and provider exit is not yet confirmed. | Attention Amber plus literal label |
+| `Stopping` | A stop was requested and provider exit is not yet confirmed. | Cool Ash plus literal label |
 | `Stopped` | The user intentionally stopped the runtime; the conversation remains resumable. | Cool Ash |
 | `Interrupted` | Broker or runtime ownership was lost without a confirmed user stop. The row remains and may be resumed. | Cool Ash plus literal label |
 | `Failed` | The provider or turn ended unexpectedly. | Failure Red |
@@ -225,7 +238,7 @@ An active TUI waiting for its next ordinary prompt is `Done`, not `Needs input`.
 ### Durable Preview and Persistence
 
 - Read previews from normalized assistant transcript events, not from the last visible PTY line.
-- Choose the latest assistant message, then its final nonempty substantive paragraph, then that paragraph's first rendered line.
+- Choose the latest assistant message, then continue from the beginning of its first nonempty substantive line.
 - Exclude reasoning timers, tool output, terminal chrome, status spinners, shortcut hints, and duplicated redraw frames.
 - Persist the normalized preview with the thread record so Fleet can render it before any provider runtime is resumed.
 - If no assistant message exists, render `No response yet` in Cool Ash. If persistence is unreadable, render `Preview unavailable` and surface the storage error without inventing content.
@@ -233,19 +246,23 @@ An active TUI waiting for its next ordinary prompt is `Done`, not `Needs input`.
 
 ### Bottom Composer
 
-The composer is a stable five-row footer at normal height:
+The composer is a stable five-row footer while empty and expands upward as the draft grows:
 
 ```text
 ────────────────────────────────────────────────────────────────
 › Describe a task for a new session
 ────────────────────────────────────────────────────────────────
-▶ Claude Opus · high · read-only · ~/code/personal/mikoshi
-enter open/start · space reply · /model configure · ? shortcuts
+▶ Claude Opus · high · read-only · cwd ~/code/personal/mikoshi · ctrl+g change
+enter open/start · ctrl+g cwd · space reply · /model configure · ? shortcuts
 ```
 
 - Empty composer plus `Enter` opens the selected thread. Nonempty composer plus `Enter` starts a new worker with the visible model, effort, sandbox, and project context.
+- Long logical lines soft-wrap at the pane width. The composer grows upward to one third of the terminal height, capped at twelve visible draft rows; beyond that limit it keeps the newest rows visible and marks hidden earlier content with `…`.
+- The full draft remains intact when earlier rows leave the visible composer, and the cursor stays on the final visible wrapped row.
 - `Space` from an empty composer enters reply mode for the selected thread. Reply mode names its target and does not change the new-worker configuration.
 - `Ctrl+J` inserts a newline. `Esc` leaves reply, rename, or picker mode before it can clear a draft; from the base view it does nothing and never exits Fleet.
+- `Ctrl+G` opens a tmux-native, zsh-first working-directory navigator at the draft cwd. Tab remains unbound in Fleet and retains its native shell-completion role inside the popup. Empty Enter confirms; Ctrl-C cancels.
+- The navigator accepts only `cd [directory]`, `cd ..`, `cd -`, and `z <terms>`. It loads the user's trusted zsh startup/completion code, but typed non-navigation commands, chains, pipes, redirects, backgrounding, and command/process substitution are never executed.
 - If no explicit new-worker model has been selected, the context line reads `▶ /model required · read-only · <project>`, and submission opens the picker instead of starting anything.
 - Persist the last explicit model and effort per project. Selecting a thread never silently rewrites this configuration.
 - Notices appear directly above the first separator. Errors are red; neutral confirmations use normal text. No toast or modal is used.
@@ -265,23 +282,24 @@ If a provider exposes no effort control, show a single `Provider managed` choice
 Pressing `?` with an empty composer expands a help panel in the footer. Pressing `?` again closes it. Within a nonempty draft, `?` remains literal input.
 
 ```text
-shift+↑↓ reorder   ctrl+s switch views   @ mention          alt+1–9 open   esc back/clear
-ctrl+r rename      ctrl+j newline         ctrl+t pin to top  ctrl+x stop   ? close
+shift+↑↓ reorder   ←→ fold project   ctrl+s switch views   @ mention   alt+1–9 open
+esc back/clear     ctrl+r rename     ctrl+j newline        ctrl+g cwd  ctrl+t pin to top   ctrl+x stop   ? close
 ```
 
 - `Shift+Up/Down` reorders the selected row within its project and persists the order.
+- `Left`/`Right` collapse and expand a focused project heading; `Enter` there toggles it. On a thread row `Right` opens the thread and `Left` does nothing.
 - `Ctrl+S` switches between Fleet and Diagnostics without changing provider state.
 - `@` inserts a passive thread reference. Mentioning never wakes another agent.
 - `Alt+1` through `Alt+9` opens the corresponding visible thread.
 - `Ctrl+R` renames the selected thread inline and persists the title.
 - `Ctrl+T` toggles pinning at the top of the project group.
-- `Ctrl+X` is contextual. Help says `stop` while any selected-tree runtime is live and `delete` only when the full tree is terminal. The visible confirmation must repeat the exact destructive action and descendant count.
+- `Ctrl+X` is contextual but stop-first. Help says `stop` until the selected thread has received an explicit stop step, including when it is already `Done`; only then may it say `delete` when the full tree is terminal. The visible confirmation must repeat the exact destructive action and descendant count.
 - `Esc` backs out of help, an edit, a reply, a picker, or a nonempty draft and never exits Fleet. Two consecutive `Ctrl+C` presses within five seconds exit without stopping agents; the first press shows the only red inline exit confirmation near the footer, and any other key cancels it.
 - At narrow widths, wrap the panel into two columns or one column. Never truncate key names or cover thread rows.
 
 ### Destructive and Failure Feedback
 
-Stopping and deleting are separate controls. On a live worker, `Ctrl+X` sends stop and changes the row to `Stopping`. On an orchestrator, the same key drains the owned tree and reports literal progress such as `Stopping orchestrator + 3 workers · 2/4 stopped`; repeated presses retry unfinished stops without requiring row hunting. Once the full tree is terminal, the first `Ctrl+X` asks to delete the exact thread or orchestrator plus child-thread count, and the second press within the confirmation window deletes history leaf-first. The confirmation is red; stop progress remains amber.
+Stopping and deleting are separate controls. The first `Ctrl+X` always sends the stop action, even when the selected thread is already `Done`. On a live worker it changes the row to `Stopping`; on an orchestrator it drains the owned tree and reports literal progress such as `Stopping orchestrator + 3 workers · 2/4 stopped`. Repeated presses retry unfinished stops without requiring row hunting. After that explicit stop step and once the full tree is terminal, the next `Ctrl+X` asks to delete the exact thread or orchestrator plus child-thread count, and one more press within the confirmation window deletes history leaf-first. The confirmation is red; stop progress remains amber.
 
 Failure copy keeps the thread visible, preserves its last assistant preview, and places the exact recoverable next action near the composer. Never translate broker unavailability into an empty Fleet.
 
@@ -294,10 +312,10 @@ Failure copy keeps the thread visible, preserves its last assistant preview, and
 - **Do** show `Done` when an active provider has completed its turn and awaits an ordinary next prompt.
 - **Do** reserve `Needs input` for a concrete blocking intervention and preserve its literal text in reduced-color terminals.
 - **Do** rehydrate project groups and threads from durable state after broker restart, marking unverifiable runtime ownership as `Interrupted`.
-- **Do** derive previews from the first line of the final substantive paragraph in the latest assistant message.
+- **Do** derive previews from the beginning of the latest assistant message.
 - **Do** make model selection explicit, visible, and provider-neutral through `/model`, then effort, with no confirmation step.
 - **Do** preserve complete keyboard paths for every action and keep standard terminal and tmux behavior intact.
-- **Do** let narrow layouts become two-line rows before removing useful content.
+- **Do** preserve the same single-line row structure when Fleet is multiplexed.
 
 ### Don't:
 

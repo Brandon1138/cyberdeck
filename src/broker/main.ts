@@ -23,6 +23,7 @@ import { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js
 import { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import { SessionStore } from "../persistence/session-store.js";
 import { FleetPreferenceStore } from "../persistence/fleet-preference-store.js";
+import { FleetDetachStore } from "../persistence/fleet-detach-store.js";
 import { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import { ensurePrivateDirectory } from "../persistence/private-files.js";
 import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
@@ -32,6 +33,8 @@ import { InstructionStore } from "../persistence/instruction-store.js";
 import { WorkflowStore } from "../persistence/workflow-store.js";
 import { WorkflowService } from "../orchestration/workflow-service.js";
 import { loadBrokerRuntimeConfig } from "../runtime-config.js";
+import { selectExpiredThreads, type ThreadRetentionPolicy } from "../domain/thread-retention.js";
+import type { SessionRecord } from "../domain/session.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -63,6 +66,26 @@ export function composeJobDispatchAdapters(context: {
   ];
 }
 
+/**
+ * Load the durable thread catalog and apply the retention policy before anything else reads it.
+ *
+ * Doing this at startup rather than only while running means an operator who left the broker down
+ * for a week does not come back to an unbounded catalog. Compaction is what makes retention real
+ * on disk: deletions are tombstones, so the file only shrinks when it is rewritten.
+ */
+export async function retainThreads(
+  store: SessionStore,
+  policy: ThreadRetentionPolicy,
+  now: number = Date.now(),
+): Promise<SessionRecord[]> {
+  const loaded = await store.load();
+  const expired = new Set(selectExpiredThreads(loaded, policy, now));
+  if (expired.size === 0) return loaded;
+  const retained = loaded.filter((record) => !expired.has(record.id));
+  await store.compact(retained);
+  return retained;
+}
+
 export async function runBroker(
   socketPath = brokerSocketPath,
   stateDirectory = appStateDirectory,
@@ -75,9 +98,10 @@ export async function runBroker(
   const mcp = { nodePath: process.execPath, cliPath };
   const config = loadBrokerRuntimeConfig(resolve(stateDirectory, "config.json"));
   const sessionStore = new SessionStore(stateDirectory);
+  const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
   const workerPreferences = new WorkerPreferenceStore(stateDirectory);
-  const recoveredSessions = await sessionStore.load();
+  const recoveredSessions = await retainThreads(sessionStore, config.threadRetention);
   const registry = new SessionRegistry({
     adapters: {
       codex: new CodexProviderAdapter({ mcp }),
@@ -95,7 +119,13 @@ export async function runBroker(
   await registry.ready();
   const orchestratorStore = new OrchestratorStore(stateDirectory);
   const orchestrators = new OrchestratorManager(registry, orchestratorStore, workerPreferences);
-  const agentControl = new AgentControlService(registry, orchestratorStore, transcripts, workerPreferences);
+  const agentControl = new AgentControlService(
+    registry,
+    orchestratorStore,
+    transcripts,
+    workerPreferences,
+    { audit: journal },
+  );
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
   instructions.start();
   const workflows = new WorkflowService(
@@ -139,6 +169,7 @@ export async function runBroker(
     workflows,
     controlPlane: runtime.controlPlane,
     controlPlaneRuntime: runtime,
+    fleetDetaches,
     fleetPreferences,
     workerPreferences,
     onShutdown: () => { void shutdown("request"); },

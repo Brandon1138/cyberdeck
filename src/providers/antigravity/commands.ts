@@ -1,7 +1,10 @@
 import type { JobRequest } from "../../domain/job.js";
 import { isFableModel } from "../../domain/policy.js";
 import type { ReasoningEffort, Sandbox } from "../../domain/session.js";
-import { jobLaunchEnvironment } from "../launch-environment.js";
+import {
+  buildProviderChildEnvironment,
+  jobLaunchEnvironment,
+} from "../launch-environment.js";
 import { applyWorkerMode } from "../worker-mode.js";
 
 type AntigravityInteractiveRequest = Pick<JobRequest, "provider" | "cwd" | "sandbox" | "model"> & {
@@ -18,8 +21,8 @@ export interface AntigravityCommand {
 }
 
 export interface AntigravityCommandOptions {
-  /** Injectable only so deterministic tests can use an empty PATH. Production inherits `process.env`. */
-  env?: NodeJS.ProcessEnv;
+  /** Source-injectable so deterministic tests never depend on ambient process state. */
+  sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
   /** Provider-documented interactive prompt mode; omitted for a promptless TUI launch. */
   initialPrompt?: string;
 }
@@ -62,7 +65,14 @@ export function buildAntigravityHeadlessCommand(
   ];
   appendExplicitModel(args, request.model);
   const built = command(request, args, options);
-  return { ...built, env: jobLaunchEnvironment(built.env, request) };
+  return {
+    ...built,
+    env: jobLaunchEnvironment(
+      options.sourceEnvironment ?? process.env,
+      "antigravity",
+      request,
+    ),
+  };
 }
 
 function command(
@@ -74,7 +84,13 @@ function command(
     executable: "agy",
     args,
     cwd: request.cwd,
-    env: { ...(options.env ?? process.env) },
+    env: buildProviderChildEnvironment({
+      source: options.sourceEnvironment ?? process.env,
+      provider: "antigravity",
+      cwd: request.cwd,
+      terminal: "pty",
+      identity: { role: "session" },
+    }),
     stdin: "",
   };
 }

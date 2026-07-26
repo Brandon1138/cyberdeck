@@ -3,6 +3,7 @@ import { z } from "zod";
 export const ThreadEventKindSchema = z.enum([
   "prompt",
   "output",
+  "turn",
   "instruction",
   "lifecycle",
 ]);
@@ -35,4 +36,3 @@ export type ThreadEvent = z.infer<typeof ThreadEventSchema>;
 export type ThreadEventKind = z.infer<typeof ThreadEventKindSchema>;
 export type ThreadEventSource = z.infer<typeof ThreadEventSourceSchema>;
 export type ThreadReadResult = z.infer<typeof ThreadReadResultSchema>;
-

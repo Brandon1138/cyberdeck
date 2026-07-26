@@ -6,7 +6,12 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 import { runBroker } from "./broker/main.js";
-import type { ReasoningEffort, SessionRecord } from "./domain/session.js";
+import type {
+  ApprovalMode,
+  ReasoningEffort,
+  ResolvedLaunchRecord,
+  SessionRecord,
+} from "./domain/session.js";
 import { CANONICAL_PROVIDER_IDS, type ProviderId } from "./domain/provider-registration.js";
 import type {
   OrchestratorManagerResult,
@@ -15,6 +20,7 @@ import type {
 import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
+  CreateOrchestratorRequest,
   EnsureOrchestratorRequest,
   FableWorkersRequest,
   FableWorkersResult,
@@ -24,15 +30,24 @@ import { appStateDirectory, brokerSocketPath } from "./paths.js";
 import { RpcClient, RpcError } from "./client/rpc-client.js";
 import { attachSession } from "./client/attach.js";
 import { runDashboard } from "./client/dashboard.js";
-import { runFleet } from "./client/fleet.js";
+import { runFleet, type OrchestratorCockpitTarget } from "./client/fleet.js";
 import {
+  detachCockpit,
   launchCockpit,
   preflightCockpit,
   type CockpitOptions,
   type CockpitPreflight,
 } from "./tmux/cockpit.js";
 import { CYBERDECK_VERSION } from "./version.js";
-import { runMcpServer } from "./mcp/server.js";
+import { resolveLaunchConversationId, runMcpServer } from "./mcp/server.js";
+import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
+import { pruneLegacyTranscript as pruneLegacyTranscriptFile } from "./persistence/thread-transcript-store.js";
+
+interface SessionLaunchRecordResult {
+  sessionId: string;
+  provider: ProviderId;
+  launchRecord: ResolvedLaunchRecord | null;
+}
 
 interface StartOptions {
   provider: ProviderId;
@@ -42,6 +57,7 @@ interface StartOptions {
   role?: string;
   name?: string;
   sandbox: "read-only" | "workspace-write";
+  approvalMode?: ApprovalMode;
   attach?: boolean;
 }
 
@@ -68,6 +84,8 @@ function addSessionOptions(command: Command, allowAttach: boolean): Command {
       .choices(["low", "medium", "high", "xhigh", "max", "ultra"]))
     .option("--role <role>", "optional opaque user-defined role label")
     .option("--name <name>", "session name")
+    .addOption(new Option("--approval-mode <mode>", "provider permission/approval behavior")
+      .choices(["prompt", "auto"]))
     .addOption(new Option("--sandbox <sandbox>").choices(["read-only", "workspace-write"]).default("read-only"));
   if (allowAttach) command.option("--attach", "attach a controlling client immediately");
   return command;
@@ -165,20 +183,38 @@ async function runCyberdeck(): Promise<void> {
     client = await RpcClient.connect(brokerSocketPath);
   }
   await runFleet(client, process.stdin, process.stdout, process, {
-    openOrchestrator: (request) => openCockpit(request, {
+    changeDirectory: chooseWorkingDirectory,
+    detachIdentity: `operator:${process.getuid?.() ?? "local"}`,
+    openOrchestrator: (target) => openFleetCockpit(target, {
       preflight: () => preflightCockpit(),
-      ensure: (next) => client.request<OrchestratorManagerResult>("orchestrator.ensure", next),
+      create: (request) => client.request<OrchestratorManagerResult>("orchestrator.create", request),
+      resume: (sessionId) => client.request<SessionRecord>("session.resume", { sessionId }),
       stop: (sessionId) => client.request<void>("session.stop", { sessionId }),
       present: launchCockpit,
     }),
   });
 }
 
-async function runAttachment(sessionId: string, mode: "control" | "watch"): Promise<void> {
-  process.stdout.write("Detach with Ctrl-]\n");
+async function runAttachment(
+  sessionId: string,
+  mode: "control" | "watch",
+  options: { cockpitReturn?: "detach" | "switch" } = {},
+): Promise<void> {
+  process.stdout.write("Detach with Ctrl-] · Esc and Option chords reach the agent\n");
   const client = await RpcClient.connect(brokerSocketPath);
+  const cockpitReturn = options.cockpitReturn;
   try {
-    const status = await attachSession({ sessionId, mode, transport: client });
+    const status = await attachSession({
+      sessionId,
+      mode,
+      transport: client,
+      ...(cockpitReturn !== undefined
+        ? {
+          detachIdentity: `operator:${process.getuid?.() ?? "local"}`,
+          onExplicitDetach: () => detachCockpit({ returnMode: cockpitReturn }),
+        }
+        : {}),
+    });
     if (status !== 0) process.exitCode = status;
   } catch (error) {
     client.close();
@@ -199,6 +235,7 @@ function sessionRequest(options: StartOptions, parentSessionId?: string) {
     ...(options.effort === undefined ? {} : { effort: options.effort }),
     ...(options.role === undefined ? {} : { role: options.role }),
     ...(options.name === undefined ? {} : { name: options.name }),
+    ...(options.approvalMode === undefined ? {} : { approvalMode: options.approvalMode }),
     ...(parentSessionId === undefined ? {} : { parentSessionId }),
   };
 }
@@ -234,6 +271,46 @@ async function openCockpit(
   }
 }
 
+export interface FleetCockpitServices {
+  preflight: () => CockpitPreflight;
+  create: (request: CreateOrchestratorRequest) => Promise<OrchestratorManagerResult>;
+  resume: (sessionId: string) => Promise<SessionRecord>;
+  stop: (sessionId: string) => Promise<void>;
+  present: (options: CockpitOptions) => void;
+}
+
+export async function openFleetCockpit(
+  target: OrchestratorCockpitTarget,
+  services: FleetCockpitServices,
+): Promise<SessionRecord> {
+  const preflight = services.preflight();
+  const result = target.type === "create"
+    ? await services.create(target.request)
+    : {
+      session: target.requiresResume
+        ? await services.resume(target.session.id)
+        : target.session,
+      created: false,
+    };
+  try {
+    services.present({
+      cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
+      cwd: target.cockpitCwd,
+      orchestratorSessionId: result.session.id,
+      preflight,
+    });
+    return result.session;
+  } catch (error) {
+    if (!result.created) throw error;
+    try {
+      await services.stop(result.session.id);
+    } catch (cleanupError) {
+      throw addCleanupContext(error, cleanupError, "stop the newly created orchestrator");
+    }
+    throw error;
+  }
+}
+
 interface CreateProgramOptions {
   runDefault?: () => Promise<void>;
   restartBroker?: () => Promise<void>;
@@ -244,6 +321,7 @@ interface CreateProgramOptions {
   resetOrchestrator?: (request: ResetOrchestratorRequest) => Promise<OrchestratorResetResult>;
   fableWorkers?: (request: FableWorkersRequest) => Promise<FableWorkersResult>;
   cavemanWorkers?: (request: CavemanWorkersRequest) => Promise<CavemanWorkersResult>;
+  pruneLegacyTranscript?: () => Promise<{ path: string; removed: boolean }>;
 }
 
 export function createProgram(options: CreateProgramOptions = {}): Command {
@@ -261,6 +339,8 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     withClient((client) => client.request<FableWorkersResult>("orchestrator.fableWorkers", request)));
   const cavemanWorkers = options.cavemanWorkers ?? ((request) =>
     withClient((client) => client.request<CavemanWorkersResult>("orchestrator.cavemanWorkers", request)));
+  const pruneLegacyTranscript = options.pruneLegacyTranscript
+    ?? (() => pruneLegacyTranscriptFile(appStateDirectory, true));
   const program = new Command()
     .name("cyberdeck")
     .version(CYBERDECK_VERSION)
@@ -285,6 +365,20 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     process.stdout.write("Cyberdeck broker shutdown requested\n");
   });
   broker.command("restart").description("gracefully replace the running broker").action(restartBroker);
+
+  const transcript = program.command("transcript").description("manage local transcript retention");
+  transcript.command("prune-legacy")
+    .description("permanently delete the pre-semantic raw PTY transcript")
+    .requiredOption(
+      "--confirm-delete-legacy-transcript",
+      "confirm permanent deletion of threads/transcript.jsonl",
+    )
+    .action(async () => {
+      const result = await pruneLegacyTranscript();
+      process.stdout.write(result.removed
+        ? `Deleted legacy transcript ${result.path}\n`
+        : `No legacy transcript exists at ${result.path}\n`);
+    });
 
   addSessionOptions(program.command("start").description("start a durable top-level session"), true)
     .action(async (options: StartOptions) => {
@@ -341,9 +435,27 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
       process.stdout.write(Buffer.from(snapshot.data, "base64"));
     });
 
+  // Read-only. The broker records what it actually spawned; reconstructing a spec here would both
+  // run provider preflight (writing files as a side effect of an inspection) and report a spec the
+  // running process was never launched with. Environment values never leave the broker.
+  program.command("launch-spec")
+    .description("print the sanitized launch record the broker resolved for one session")
+    .argument("<id>", "session UUID")
+    .action(async (sessionId: string) => {
+      const result = await withClient((client) =>
+        client.request<SessionLaunchRecordResult>("session.launchRecord", { sessionId }));
+      if (result.launchRecord === null) {
+        throw new Error(`No resolved launch record has been captured for session ${sessionId}`);
+      }
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    });
+
   program.command("attach")
     .argument("<id>", "session UUID")
-    .action((sessionId: string) => runAttachment(sessionId, "control"));
+    .addOption(new Option("--cockpit-return <mode>", "return the tmux client to Fleet on explicit detach")
+      .choices(["detach", "switch"]))
+    .action((sessionId: string, options: { cockpitReturn?: "detach" | "switch" }) =>
+      runAttachment(sessionId, "control", options));
 
   program.command("watch")
     .argument("<id>", "session UUID")
@@ -353,9 +465,28 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     .description("serve capability-scoped Cyberdeck tools over stdio MCP")
     .requiredOption("--actor-session <id>", "bound orchestrator session UUID")
     .action(async (options: { actorSession: string }) => {
-      const client = await RpcClient.connect(brokerSocketPath);
+      const conversationId = resolveLaunchConversationId();
+      const identity = {
+        actorSessionId: options.actorSession,
+        ...(conversationId === undefined ? {} : { launchConversationId: conversationId }),
+        brokerSocketPath,
+      };
+      let client: RpcClient;
       try {
-        await runMcpServer(client, options.actorSession);
+        client = await RpcClient.connect(brokerSocketPath);
+      } catch (error) {
+        // Exiting here is what made the failure silent: the harness drops the whole server and the
+        // conversation simply stops having cyberdeck_* tools, with nothing to read. Serve instead,
+        // so tools/list still advertises the surface and every call names the missing broker.
+        await runMcpServer({
+          identity,
+          brokerUnavailable:
+            `Cyberdeck broker is unreachable at ${brokerSocketPath}: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        return;
+      }
+      try {
+        await runMcpServer({ transport: client, identity });
       } finally {
         client.close();
       }

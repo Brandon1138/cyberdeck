@@ -20,6 +20,7 @@ export interface CockpitOptions {
 /** Options for the presentation-only cockpit helpers that never touch a provider process. */
 export interface CockpitPresentationOptions {
   spawnSync?: SpawnSyncLike;
+  returnMode?: "detach" | "switch";
 }
 
 export interface CockpitPreflightOptions extends CockpitPresentationOptions {
@@ -58,6 +59,7 @@ export function launchCockpit(options: CockpitOptions): void {
 
   try {
     let needsOrchestratorPane = true;
+    let existingOrchestratorPane: string | undefined;
     if (hasSession.status !== 0) {
       requireSuccess(spawnSync("tmux", [
         "new-session",
@@ -69,14 +71,24 @@ export function launchCockpit(options: CockpitOptions): void {
         "dashboard",
       ], { stdio: "ignore" }), "create cyberdeck tmux session");
       created = true;
+      // tmux holds a bare Esc for `escape-time` before passing it to the pane, and its 500ms default
+      // is felt as a swallowed Esc by every agent TUI in the cockpit. It also decides whether an
+      // Option chord arrives as one Meta chord or as Esc followed by a separate key, which is what
+      // made Option+Enter submit sometimes and not others. 10ms still reunites a split sequence.
+      // This is a server option, so it is best-effort and never fails a cockpit launch.
+      spawnSync("tmux", ["set-option", "-s", "escape-time", "10"], { stdio: "ignore" });
     } else {
       const panes = spawnSync(
         "tmux",
-        ["list-panes", "-t", sessionName, "-F", "#{pane_start_command}"],
+        ["list-panes", "-t", sessionName, "-F", "#{pane_id}\t#{pane_start_command}"],
         { encoding: "utf8" },
       );
       requireSuccess(panes, "inspect cyberdeck tmux panes");
-      needsOrchestratorPane = !(panes.stdout ?? "").includes(options.orchestratorSessionId);
+      existingOrchestratorPane = findOrchestratorPane(
+        panes.stdout ?? "",
+        options.orchestratorSessionId,
+      );
+      needsOrchestratorPane = existingOrchestratorPane === undefined;
     }
 
     if (needsOrchestratorPane) {
@@ -90,8 +102,15 @@ export function launchCockpit(options: CockpitOptions): void {
           cliPath,
           "attach",
           options.orchestratorSessionId,
+          "--cockpit-return",
+          preflight.presentationCommand === "switch-client" ? "switch" : "detach",
         ], { stdio: "ignore" }),
         "create orchestrator attachment pane",
+      );
+    } else {
+      requireSuccess(
+        spawnSync("tmux", ["select-pane", "-t", existingOrchestratorPane!], { stdio: "ignore" }),
+        "focus orchestrator attachment pane",
       );
     }
 
@@ -131,15 +150,21 @@ export function cockpitSessionName(cwd: string): string {
 }
 
 /**
- * Detach every client from the cockpit session without ending it.
+ * Leave the cockpit without ending it.
  *
- * `detach-client` is the only verb used, so this is observably a presentation change: the tmux
- * session, its panes, and every broker-owned runtime keep running. A missing cockpit session is
- * already the desired end state, so it is not an error.
+ * A client switched into the cockpit returns to its previous tmux session. A client attached from
+ * outside tmux detaches and returns to the Fleet process whose `attach-session` call is waiting.
+ * Both verbs change presentation only; neither touches a broker-owned provider runtime.
  */
 export function detachCockpit(options: CockpitPresentationOptions = {}): void {
   const spawnSync = options.spawnSync ?? (nodeSpawnSync as SpawnSyncLike);
-  spawnSync("tmux", ["detach-client", "-s", "cyberdeck"], { stdio: "ignore" });
+  if (options.returnMode === "detach") {
+    spawnSync("tmux", ["detach-client"], { stdio: "ignore" });
+    return;
+  }
+  const switched = spawnSync("tmux", ["switch-client", "-l"], { stdio: "ignore" });
+  if (switched.status === 0) return;
+  spawnSync("tmux", ["detach-client"], { stdio: "ignore" });
 }
 
 /**
@@ -167,6 +192,17 @@ export function inspectCockpitPanes(options: CockpitPresentationOptions = {}): C
 
 function requireSuccess(result: { status: number | null }, action: string): void {
   if (result.status !== 0) throw new Error(`tmux failed to ${action}`);
+}
+
+function findOrchestratorPane(output: string, sessionId: string): string | undefined {
+  for (const line of output.split("\n")) {
+    const separator = line.indexOf("\t");
+    if (separator === -1) continue;
+    const paneId = line.slice(0, separator);
+    const command = line.slice(separator + 1);
+    if (command.includes(sessionId)) return paneId;
+  }
+  return undefined;
 }
 
 function addCleanupContext(primary: unknown, cleanupMessage: string): Error {

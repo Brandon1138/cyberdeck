@@ -8,6 +8,13 @@ import { CodexProviderAdapter } from "../../src/providers/codex.js";
 import { CursorProviderAdapter } from "../../src/providers/cursor/session-adapter.js";
 import { AntigravityProviderAdapter } from "../../src/providers/antigravity/session-adapter.js";
 
+const CHILD_SOURCE: NodeJS.ProcessEnv = {
+  PATH: "/source/provider-bin",
+  UNRELATED_SENTINEL: "drop-this",
+  TMUX: "drop-this",
+  TMUX_PANE: "drop-this",
+};
+
 function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
   const now = new Date().toISOString();
   return {
@@ -53,15 +60,39 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args).toContain("model_reasoning_effort=\"xhigh\"");
   });
 
-  it("marks worker mode without disturbing the inherited launch environment", () => {
+  it("maps explicit auto approval mode to Codex never while preserving the sandbox", () => {
     const spec = new CodexProviderAdapter().buildLaunchSpec(session({
+      sandbox: "workspace-write",
+      approvalMode: "auto",
+    }));
+    expect(spec.args).toEqual([
+      "--no-alt-screen",
+      "-C",
+      "/tmp/repo",
+      "-s",
+      "workspace-write",
+      "-a",
+      "never",
+    ]);
+  });
+
+  it("marks worker mode after sanitizing the source environment", () => {
+    const spec = new CodexProviderAdapter({
+      sourceEnvironment: CHILD_SOURCE,
+    }).buildLaunchSpec(session({
       kind: "worker",
       workerMode: "caveman",
     }));
     expect(spec.env).toMatchObject({
+      PATH: CHILD_SOURCE.PATH,
+      PWD: "/tmp/repo",
+      TERM: "xterm-256color",
       CYBERDECK_PROCESS_ROLE: "worker",
       CYBERDECK_WORKER_MODE: "caveman",
     });
+    expect(spec.env.UNRELATED_SENTINEL).toBeUndefined();
+    expect(spec.env.TMUX).toBeUndefined();
+    expect(spec.env.TMUX_PANE).toBeUndefined();
   });
 
   it("starts an orchestrator with native developer instructions and MCP but no positional user prompt", () => {
@@ -110,6 +141,7 @@ describe("CodexProviderAdapter", () => {
     const spec = new CodexProviderAdapter({
       sessionsDirectory: root,
       mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      sourceEnvironment: CHILD_SOURCE,
     }).buildResumeSpec(session({
       createdAt,
       executionState: "exited",
@@ -139,6 +171,10 @@ describe("CodexProviderAdapter", () => {
       expect.stringContaining("mcp_servers.cyberdeck.args="),
       nativeId,
     ]);
+    expect(spec.env.PATH).toBe(CHILD_SOURCE.PATH);
+    expect(spec.env.PWD).toBe("/tmp/repo");
+    expect(spec.env.TERM).toBe("xterm-256color");
+    expect(spec.env.UNRELATED_SENTINEL).toBeUndefined();
   });
 });
 
@@ -168,8 +204,8 @@ describe("ClaudeProviderAdapter", () => {
     const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
       .buildLaunchSpec(orchestrator);
 
-    expect(spec.args).toContain("--append-system-prompt");
-    expect(spec.args).toContain("Cyberdeck orchestrator guidance");
+    expect(spec.args).toContain("--append-system-prompt-file");
+    expect(spec.args).not.toContain("Cyberdeck orchestrator guidance");
     expect(spec.args).toContain("--mcp-config");
     expect(spec.args.join(" ")).toContain(orchestrator.id);
     expect(spec.args).not.toContain("--");
@@ -191,6 +227,8 @@ describe("ClaudeProviderAdapter", () => {
       "proof",
       "--permission-mode",
       permissionMode,
+      "--disallowedTools",
+      "Agent,Task",
       "--model",
       "sonnet",
     ]);
@@ -202,6 +240,19 @@ describe("ClaudeProviderAdapter", () => {
       session({ provider: "claude", name: "proof", model: "sonnet" }),
     );
     expect(spec.args.slice(-2)).toEqual(["--model", "sonnet"]);
+  });
+
+  it("maps explicit auto approval mode for Claude Opus without using a bypass mode", () => {
+    const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({
+      provider: "claude",
+      model: "opus",
+      sandbox: "workspace-write",
+      approvalMode: "auto",
+    }));
+    expect(spec.args).toContain("auto");
+    expect(spec.args).not.toContain("manual");
+    expect(spec.args).not.toContain("bypassPermissions");
+    expect(spec.args).not.toContain("dontAsk");
   });
 
   it("forwards explicit Claude effort on launch and resume", () => {
@@ -252,17 +303,63 @@ describe("ClaudeProviderAdapter", () => {
       "claude-haiku-ping",
       "--permission-mode",
       "plan",
+      "--disallowedTools",
+      // Orchestrators drop user scope, so the operator's denials are re-asserted here instead.
+      "Agent,Task,Skill(update-config)",
       "--model",
       "haiku",
-      "--append-system-prompt",
-      "Cyberdeck orchestrator guidance",
+      "--append-system-prompt-file",
+      expect.stringContaining(record.id),
+      "--setting-sources",
+      "project,local",
       "--mcp-config",
       expect.stringContaining(record.id),
+      "--strict-mcp-config",
     ]);
   });
 });
 
 describe("extended interactive provider adapters", () => {
+  it.each([
+    ["claude", new ClaudeProviderAdapter({ sourceEnvironment: CHILD_SOURCE }), "sonnet"],
+    ["cursor", new CursorProviderAdapter({ sourceEnvironment: CHILD_SOURCE }), "composer"],
+    [
+      "antigravity",
+      new AntigravityProviderAdapter({ sourceEnvironment: CHILD_SOURCE }),
+      "gemini-3.6-flash-low",
+    ],
+  ] as const)("sanitizes %s interactive child environment", (provider, adapter, model) => {
+    const spec = adapter.buildLaunchSpec(session({
+      provider,
+      model,
+      ...(provider === "antigravity" ? { effort: "low" as const } : {}),
+    }));
+    expect(spec.env).toMatchObject({
+      PATH: CHILD_SOURCE.PATH,
+      PWD: "/tmp/repo",
+      TERM: "xterm-256color",
+    });
+    expect(spec.env.UNRELATED_SENTINEL).toBeUndefined();
+    expect(spec.env.TMUX).toBeUndefined();
+    expect(spec.env.TMUX_PANE).toBeUndefined();
+  });
+
+  it.each([
+    ["cursor", () => new CursorProviderAdapter().buildLaunchSpec(
+      session({ provider: "cursor", model: "composer", approvalMode: "auto" }),
+    )],
+    ["antigravity", () => new AntigravityProviderAdapter().buildLaunchSpec(
+      session({
+        provider: "antigravity",
+        model: "gemini-3.6-flash-low",
+        effort: "low",
+        approvalMode: "auto",
+      }),
+    )],
+  ] as const)("fails clearly when %s is asked for unsupported auto approval", (_provider, build) => {
+    expect(build).toThrow(expect.objectContaining({ code: "APPROVAL_MODE_NOT_SUPPORTED" }));
+  });
+
   it("starts Cursor Composer with the exact initial prompt and explicit model", () => {
     const adapter = new CursorProviderAdapter();
     const spec = adapter.buildLaunchSpec(

@@ -33,7 +33,7 @@ import {
 
 const RECORDING_AGENT = fileURLToPath(new URL("../fixtures/recording-agent.mjs", import.meta.url));
 const NOW = "2026-07-21T12:00:00.000Z";
-const CONTROLLED_ENV: NodeJS.ProcessEnv = { PATH: "", CYBERDECK_TEST_MARKER: "agy-fixture" };
+const CONTROLLED_ENV: NodeJS.ProcessEnv = { PATH: "", CYBERDECK_TEST_MARKER: "drop-this" };
 const tempDirs: string[] = [];
 const children = new Set<ReturnType<typeof nodeSpawn>>();
 
@@ -92,7 +92,7 @@ function fixtureSpawn(options: {
         ...command.env,
         CYBERDECK_FIXTURE_RECORD: options.recordPath,
         CYBERDECK_FIXTURE_MODE: "headless",
-        CYBERDECK_FIXTURE_ENV_KEYS: "PATH,CYBERDECK_TEST_MARKER",
+        CYBERDECK_FIXTURE_ENV_KEYS: "PATH,PWD,CYBERDECK_TEST_MARKER",
         ...(options.stdout !== undefined ? { CYBERDECK_FIXTURE_STDOUT: options.stdout } : {}),
         ...(options.stderr !== undefined ? { CYBERDECK_FIXTURE_STDERR: options.stderr } : {}),
         CYBERDECK_FIXTURE_EXIT_CODE: String(options.exitCode ?? 0),
@@ -181,13 +181,19 @@ describe("Antigravity command construction", () => {
       displayName: "Antigravity",
     });
     const command = buildAntigravityInteractiveCommand(request().request, {
-      env: CONTROLLED_ENV,
+      sourceEnvironment: CONTROLLED_ENV,
     });
     expect(command).toEqual({
       executable: "agy",
       args: ["--mode", "plan", "--sandbox"],
       cwd: "/tmp/repo",
-      env: CONTROLLED_ENV,
+      env: {
+        PATH: "",
+        PWD: "/tmp/repo",
+        TERM: "xterm-256color",
+        CYBERDECK_PROCESS_ROLE: "session",
+        CYBERDECK_WORKER_MODE: "normal",
+      },
       stdin: "",
     });
   });
@@ -197,7 +203,7 @@ describe("Antigravity command construction", () => {
       ...request().request,
       effort: "low",
     }, {
-      env: CONTROLLED_ENV,
+      sourceEnvironment: CONTROLLED_ENV,
       initialPrompt: "Ping back",
     });
     expect(command.args).toEqual([
@@ -220,14 +226,15 @@ describe("Antigravity command construction", () => {
 
   it("maps the documented headless prompt to argv and closes empty stdin", () => {
     const command = buildAntigravityHeadlessCommand(request().request, {
-      env: CONTROLLED_ENV,
+      sourceEnvironment: CONTROLLED_ENV,
     });
     expect(command).toEqual({
       executable: "agy",
       args: ["--print", "inspect the fixture repository", "--mode", "plan", "--sandbox"],
       cwd: "/tmp/repo",
       env: {
-        ...CONTROLLED_ENV,
+        PATH: "",
+        PWD: "/tmp/repo",
         CYBERDECK_PROCESS_ROLE: "worker",
         CYBERDECK_WORKER_MODE: "normal",
       },
@@ -237,7 +244,7 @@ describe("Antigravity command construction", () => {
 
   it("injects Caveman policy into the actual Antigravity worker prompt", () => {
     const command = buildAntigravityHeadlessCommand(request({ workerMode: "caveman" }).request, {
-      env: CONTROLLED_ENV,
+      sourceEnvironment: CONTROLLED_ENV,
     });
     expect(command.args[1]).toContain("CAVEMAN MODE ACTIVE");
     expect(command.args[1]).toContain("WORKER TASK\ninspect the fixture repository");
@@ -345,7 +352,7 @@ describe("AntigravityJobDispatchAdapter", () => {
         },
       }),
       interpreter,
-      env: CONTROLLED_ENV,
+      sourceEnvironment: CONTROLLED_ENV,
       now: () => NOW,
     });
     const dispatch = request({ cwd: workspace });
@@ -365,7 +372,8 @@ describe("AntigravityJobDispatchAdapter", () => {
       args: ["--print", "inspect the fixture repository", "--mode", "plan", "--sandbox"],
       cwd: workspace,
       env: {
-        ...CONTROLLED_ENV,
+        PATH: "",
+        PWD: workspace,
         CYBERDECK_PROCESS_ROLE: "worker",
         CYBERDECK_WORKER_MODE: "normal",
       },
@@ -374,7 +382,11 @@ describe("AntigravityJobDispatchAdapter", () => {
     expect(recording).toMatchObject({
       argv: observed?.args,
       cwd: workspace,
-      env: CONTROLLED_ENV,
+      env: {
+        PATH: "",
+        PWD: workspace,
+        CYBERDECK_TEST_MARKER: null,
+      },
       stdin: "",
     });
     expect(settled.result).toEqual({

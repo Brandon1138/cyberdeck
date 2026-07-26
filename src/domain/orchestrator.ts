@@ -33,6 +33,11 @@ export const EnsureOrchestratorRequestSchema = z.object({
   scope: z.enum(["workspace", "fleet"]).default("fleet"),
 });
 
+export const CreateOrchestratorRequestSchema = EnsureOrchestratorRequestSchema.extend({
+  provider: ProviderIdSchema,
+  model: z.string().trim().min(1),
+});
+
 export const ResetOrchestratorRequestSchema = EnsureOrchestratorRequestSchema.pick({
   cwd: true,
   scope: true,
@@ -55,6 +60,7 @@ export const OrchestratorBindingResetSchema = z.object({
 export type OrchestratorScope = z.infer<typeof OrchestratorScopeSchema>;
 export type OrchestratorBinding = z.infer<typeof OrchestratorBindingSchema>;
 export type EnsureOrchestratorRequest = z.infer<typeof EnsureOrchestratorRequestSchema>;
+export type CreateOrchestratorRequest = z.infer<typeof CreateOrchestratorRequestSchema>;
 export type ResetOrchestratorRequest = z.infer<typeof ResetOrchestratorRequestSchema>;
 export type FableWorkersRequest = z.infer<typeof FableWorkersRequestSchema>;
 export type CavemanWorkersRequest = z.infer<typeof CavemanWorkersRequestSchema>;

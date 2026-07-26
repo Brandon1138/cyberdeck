@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
-import { EnsureOrchestratorRequestSchema, type OrchestratorBinding } from "../../src/domain/orchestrator.js";
+import {
+  CreateOrchestratorRequestSchema,
+  EnsureOrchestratorRequestSchema,
+  type OrchestratorBinding,
+} from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
@@ -213,6 +217,71 @@ describe("OrchestratorManager", () => {
     }));
   });
 
+  it("always creates a separately bound peer without consulting or replacing the primary binding", async () => {
+    const peer = {
+      ...record,
+      id: "22222222-2222-4222-8222-222222222222",
+    };
+    const get = vi.fn(async () => binding);
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const start = vi.fn(async () => peer);
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => undefined) } as never,
+      { get, put } as never,
+    );
+
+    await expect(manager.create({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    })).resolves.toMatchObject({
+      created: true,
+      session: { id: peer.id },
+      binding: {
+        key: `fleet:peer:${peer.id}`,
+        sessionId: peer.id,
+        grant: {
+          subjectSessionId: peer.id,
+          capabilities: expect.arrayContaining(["worker.start", "workflow.run"]),
+        },
+      },
+    });
+    expect(get).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledOnce();
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({
+      key: `fleet:peer:${peer.id}`,
+      sessionId: peer.id,
+    }));
+  });
+
+  it("requires an explicit supported provider, model, and effort for a new peer", async () => {
+    const start = vi.fn();
+    const manager = new OrchestratorManager({ start } as never, {} as never);
+
+    await expect(manager.create({
+      provider: "codex",
+      model: "sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
+    await expect(manager.create({
+      provider: "claude",
+      model: "opus",
+      effort: "ultra",
+      cwd: "/repo/one",
+      scope: "fleet",
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
+    expect(CreateOrchestratorRequestSchema.safeParse({
+      provider: "codex",
+      cwd: "/repo/one",
+      scope: "fleet",
+    }).success).toBe(false);
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it("defaults unscoped broker requests to the fleet binding", () => {
     expect(EnsureOrchestratorRequestSchema.parse({ cwd: "/repo/one" }).scope).toBe("fleet");
   });
@@ -222,6 +291,98 @@ describe("OrchestratorManager", () => {
     await expect(manager.ensure({ cwd: "/repo/one", scope: "workspace" })).rejects.toMatchObject({
       code: "ORCHESTRATOR_PROVIDER_REQUIRED",
     });
+  });
+
+  it.each([
+    ["cursor", "its adapter has no supported MCP surface"],
+    ["antigravity", "its adapter has no supported MCP surface"],
+  ])("refuses %s when it cannot receive the Cyberdeck MCP server", async (provider, reason) => {
+    const start = vi.fn();
+    const manager = new OrchestratorManager(
+      { start } as never,
+      { get: vi.fn(async () => undefined) } as never,
+    );
+
+    await expect(manager.ensure({
+      provider: provider as "cursor" | "antigravity",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).rejects.toMatchObject({
+      code: "ORCHESTRATOR_PROVIDER_UNSUPPORTED",
+      message: `Orchestrator provider ${provider} cannot receive the Cyberdeck MCP server; ${reason}`,
+    });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["cursor"],
+    ["antigravity"],
+  ])("refuses a durable %s binding before resuming it", async (provider) => {
+    const inert: OrchestratorBinding = { ...binding, provider: provider as "cursor" | "antigravity" };
+    const get = vi.fn(() => record);
+    const resume = vi.fn(async () => record);
+    const start = vi.fn();
+    const manager = new OrchestratorManager(
+      { get, resume, start } as never,
+      { get: vi.fn(async () => inert) } as never,
+    );
+
+    await expect(manager.ensure({ cwd: "/repo/one", scope: "workspace" })).rejects.toMatchObject({
+      code: "ORCHESTRATOR_PROVIDER_UNSUPPORTED",
+      message:
+        `Orchestrator provider ${provider} cannot receive the Cyberdeck MCP server; its adapter has no supported MCP surface`,
+    });
+    expect(get).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("refuses a durable unsupported binding through the direct get entry point", async () => {
+    const get = vi.fn(() => record);
+    const resume = vi.fn(async () => record);
+    const manager = new OrchestratorManager(
+      { get, resume } as never,
+      { get: vi.fn(async () => ({ ...binding, provider: "cursor" as const })) } as never,
+    );
+
+    await expect(manager.get("/repo/one", "workspace")).rejects.toMatchObject({
+      code: "ORCHESTRATOR_PROVIDER_UNSUPPORTED",
+    });
+    expect(get).not.toHaveBeenCalled();
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it("still resumes a supported existing binding when the request omits a provider", async () => {
+    for (const provider of ["codex", "claude"] as const) {
+      const existing: OrchestratorBinding = { ...binding, provider };
+      const resume = vi.fn(async () => ({ ...record, provider }));
+      const manager = new OrchestratorManager(
+        { get: vi.fn(() => ({ ...record, executionState: "cancelled" })), resume } as never,
+        { get: vi.fn(async () => existing) } as never,
+      );
+
+      await expect(manager.ensure({ cwd: "/repo/one", scope: "workspace" })).resolves.toMatchObject({
+        created: false,
+        binding: { provider },
+      });
+      expect(resume).toHaveBeenCalledWith(SESSION_ID);
+    }
+  });
+
+  it("allows Claude orchestrator creation", async () => {
+    const start = vi.fn(async () => ({ ...record, provider: "claude" as const }));
+    const manager = new OrchestratorManager(
+      { start } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+    );
+
+    await expect(manager.ensure({
+      provider: "claude",
+      model: "opus",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).resolves.toMatchObject({ created: true, binding: { provider: "claude" } });
+    expect(start).toHaveBeenCalledOnce();
   });
 
   it("resumes a stopped bound orchestrator and reports it as reused", async () => {

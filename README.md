@@ -6,7 +6,7 @@
 
 Cyberdeck is a neutral local broker for durable Codex, Claude, Cursor, and Antigravity terminal sessions. Provider processes run in broker-owned PTYs, so they can move between attached/interactive and detached/headless presentation without being restarted. tmux is an optional cockpit view, not the session owner.
 
-> **Stop and detach are different.** `cyberdeck stop <session-id>` terminates the selected provider process and, for an orchestrator, its owned worker tree. Pressing `Ctrl-]`, closing an attached terminal, or closing a tmux pane only detaches that view; the session keeps running while the broker is alive.
+> **Stop and detach are different.** `cyberdeck stop <session-id>` terminates the selected provider process and, for an orchestrator, its owned worker tree. Pressing `Ctrl-]`, closing an attached terminal, or closing a tmux pane only detaches that view; the session keeps running while the broker is alive. In Fleet, `Ctrl-]` reattaches the exact most recently explicitly detached live session.
 
 > **Alpha software.** `0.1.0-alpha.1` is a macOS developer preview. Persisted schemas and provider compatibility may change before the first stable release.
 
@@ -77,8 +77,11 @@ meaningful activity time. It never ranks providers or chooses a model.
 
 Fleet controls:
 
-- `Ctrl+O`: open the fleet orchestrator picker. Choose provider, model, and provider-supported
-  effort in sequence. The effort choice applies immediately, with no confirmation screen.
+- `Ctrl+O`: open the orchestrator switcher. Its first section lists only live interactive
+  orchestrators and labels controller-held sessions as in use; selecting an available row focuses
+  that exact session in the multiplexed cockpit. Its second section creates a new peer from an
+  explicit model and provider-supported effort, then adds and focuses another cockpit pane without
+  replacing or stopping the current orchestrator.
 - `Up` / `Down`: select a thread.
 - `Right`, or `Enter` while the bottom composer is empty: open the selected provider TUI. A live
   thread attaches to its existing PTY; a terminal thread resumes that exact provider-native
@@ -99,10 +102,11 @@ Fleet controls:
 - `?`: toggle the shortcut panel. It documents reorder, view switch, rename, multiline, pin, numbered
   opening, and contextual stop/delete controls.
 - `Esc`: close an active picker/edit mode or clear a draft. It never exits Fleet.
-- `Ctrl+X` on a live worker: stop it through the broker. On an orchestrator, stop the orchestrator
-  and every owned worker while keeping all thread history visible.
-- `Ctrl+X` on a terminal thread or fully stopped orchestrator tree: show the exact red deletion
-  confirmation. Press `Ctrl+X` once more to delete the thread or tree leaf-first.
+- The first `Ctrl+X` on any selected thread is always the stop step, including a thread already
+  displayed as `Done`. On an orchestrator, it stops the orchestrator and every owned worker while
+  keeping all thread history visible.
+- After that stop step, `Ctrl+X` on a terminal thread or fully stopped orchestrator tree shows the
+  exact red deletion confirmation. Press `Ctrl+X` once more to delete the thread or tree leaf-first.
 - `Ctrl+C` twice consecutively: leave Fleet. The first press shows a red inline confirmation near the
   footer; any other key cancels it. Exiting does not stop an agent.
 
@@ -124,7 +128,12 @@ invocation. Killing the entire tmux server still leaves the broker and its sessi
 An orchestrator is a durable, typed Cyberdeck binding, not a privileged role label. The binding pins
 an explicit provider, optional model and reasoning effort, workspace or fleet scope, read-only filesystem sandbox, and a
 capability grant. Cyberdeck injects its session-scoped stdio MCP server into broker-launched Codex
-and Claude sessions. Broker RPC remains the source of truth and rechecks every MCP call.
+and Claude sessions. Broker RPC remains the source of truth and rechecks every MCP call. Cursor and
+Antigravity sessions receive no MCP server: neither `agent` nor `agy` accepts a per-invocation MCP
+server definition, so those providers can be workers but not orchestrators or workflow
+participants. See [docs/architecture/provider-parity.md](docs/architecture/provider-parity.md) for
+the full per-provider matrix — permission mapping, MCP injection, effort support, and resume — with
+source citations.
 
 Opening an orchestrator cockpit starts the provider TUI without a positional user prompt, so startup
 does not automatically submit a model turn. Guidance is supplied through native provider
@@ -161,6 +170,23 @@ inside the broker for compact results. Normal result collection is one `workers_
 by one blocking `workers_wait` call; it does not poll or feed raw terminal transcripts back into the
 model. `thread_read` remains a bounded debugging escape hatch, requires an explicit cursor, and
 refuses to move an orchestrator backward behind a cursor it has already consumed.
+
+`workers_wait` accepts a logical timeout of up to 600 seconds but never blocks a single tool call
+longer than 90 seconds, because MCP clients abandon a call well before that — Claude Code backgrounds
+one at 120 seconds and Codex kills one at 300. A call that reaches the segment boundary first returns
+a normal structured result with `wait.state: "incomplete"` and a `waitId` to resume; `"timed-out"`
+means the caller's own budget elapsed, and `"settled"` means every target is terminal. A completed
+`sessionId` and `completionTarget` stays retrievable afterwards: re-waiting replays the recorded
+result and marks it `retrieval: "replay"`, which is how an orchestrator proves a mutation already ran
+instead of launching a duplicate worker. A control-plane failure is reported as its own class and
+never as a worker outcome. `threads_list` defaults to a status projection (id, name, provider,
+executionState, attentionState) and pages with `limit`/`cursor`, so a liveness check stays inside a
+caller's token budget at 64 concurrent workers; pass `view: "full"` for whole records.
+
+Worker starts may explicitly set provider-neutral `approvalMode` to `auto` for Codex or Claude.
+Omitting it preserves provider approval prompts (`on-request` for Codex and the sandbox-derived
+Claude mode); Cursor and Antigravity reject `auto` rather than ignoring it. The operator CLI exposes
+the same opt-in as `--approval-mode auto`.
 
 A human attachment always owns the only writer lease: orchestrator input remains queued until that
 controller detaches. Cyberdeck never steers a worker through tmux.
@@ -214,11 +240,33 @@ broker:
 
 Set `maxConcurrentWorkers` to `null` for explicitly unlimited workers. A reached ceiling is rejected
 with the active and allowed worker counts; durable interactive sessions are not silently queued.
+The ceiling applies to running agents only: a finished thread holds no slot, so the fleet view
+accumulates history without anyone stopping and deleting threads to reclaim capacity.
 
 Broker shutdown still ends active PTYs, but the durable session catalog, project grouping, model
 metadata, normalized preview, and native conversation identity survive broker death or restart.
-Threads whose live ownership cannot be proven are rehydrated as `Interrupted`; opening one uses the
-provider's exact resume path rather than inventing a replacement conversation.
+A thread that had finished its task is rehydrated as `Done` — the process is gone, the outcome is
+not. Only a thread that was genuinely mid-turn is rehydrated as `Interrupted`; opening either one
+uses the provider's exact resume path rather than inventing a replacement conversation.
+
+Finished threads are retired automatically after 7 days, or once 200 of them have accumulated,
+whichever comes first. Pinned threads are never retired. Both bounds are configurable, and `null`
+disables either one:
+
+```json
+{
+  "threadRetention": {
+    "maxAgeDays": 30,
+    "maxThreads": 500,
+    "keepPinned": true
+  }
+}
+```
+
+Retention only ever removes threads whose process is gone. A session that took an unrecoverable
+provider fault — an API 4xx, say — while its OS process kept running is reported as `Failed` rather
+than as an active worker, releases its slot immediately, and still has to be stopped before it can
+be deleted.
 Bounded control-plane jobs are different: their records and terminal results are rebuilt on restart,
 while unverifiable nonterminal jobs become `interrupted` and are never automatically redispatched.
 
@@ -262,7 +310,7 @@ cyberdeck send SESSION_ID "Summarize the current state without changing files."
 cyberdeck logs SESSION_ID
 ```
 
-`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press Left or `Ctrl-]` to return from a worker. Orchestrators reserve Left for their native TUI and detach only with `Ctrl-]`. Terminal threads refuse attachment until they have been resumed, and provider exit automatically releases every controller and watcher.
+`attach` is the single controlling client. `watch` is a read-only observer and multiple watchers are allowed. Both replay buffered output before following live output. Press Left or `Ctrl-]` to return from a worker. Orchestrators reserve Left for their native TUI and detach only with `Ctrl-]`; a cockpit attachment also leaves the cockpit and returns to Fleet after releasing its controller. `Ctrl-]` detaches while attached and reattaches the exact last-detached target from Fleet. Every other byte is forwarded verbatim, including bare Esc and Option/Alt chords such as Option+Enter, and a bracketed paste is forwarded as opaque data so pasted bytes can never be read as a chord. In Fleet's composer, Option+Enter and Shift+Enter insert a newline alongside `Ctrl-J`, and Esc remains Fleet's own back/clear. Terminal threads refuse attachment until they have been resumed, and provider exit automatically releases every controller and watcher.
 
 `send` submits one logical prompt without opening an interactive client. The selected provider
 adapter encodes its terminal's actual Enter key, so steering does not depend on a portable newline

@@ -26,10 +26,13 @@ days.
 
 - Cyberdeck's broker accepts RPC over a local Unix socket. Any process running
   as the same operating-system user is inside the trusted local boundary.
-- Provider processes inherit the launching user's environment because provider
-  authentication and configuration commonly depend on it. Do not launch an
-  untrusted provider executable or run Cyberdeck from an environment containing
-  secrets that the selected provider must not receive.
+- Provider and App Server child environments are rebuilt from finite exact-name
+  lists: basic process/locale/terminal compatibility, matching-provider
+  configuration and routing, and reviewed proxy/TLS trust settings. Unknown
+  entries, tmux/mise state, and ambient `SSH_AUTH_SOCK` are dropped. This is
+  deterministic environment hygiene that reduces accidental authority; it is
+  not a security sandbox. Provider processes still run as the same user and can
+  access anything permitted by provider-native and operating-system controls.
 - `read-only` and `workspace-write` are mapped to each provider's native safety
   controls. Cyberdeck does not replace the provider sandbox or the operating
   system's access controls.

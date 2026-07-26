@@ -1,5 +1,12 @@
 import { createInterface } from "node:readline";
-import { MAX_FANOUT_BATCH } from "../limits.js";
+import {
+  DEFAULT_THREAD_PAGE,
+  DEFAULT_WAIT_SECONDS,
+  MAX_FANOUT_BATCH,
+  MAX_THREAD_PAGE,
+  MAX_WAIT_SECONDS,
+  MAX_WAIT_SEGMENT_SECONDS,
+} from "../limits.js";
 import type { Readable, Writable } from "node:stream";
 import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
 import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
@@ -7,6 +14,63 @@ import { CYBERDECK_VERSION } from "../version.js";
 
 export interface McpBrokerTransport {
   request<T = unknown>(method: string, params: unknown): Promise<T>;
+}
+
+/**
+ * Claude Code exports the live conversation UUID into every MCP subprocess it spawns (measured
+ * against 2.1.220). It is the only conversation identity the harness exposes: `initialize` carries
+ * `clientInfo` alone, `tools/call` carries no session `_meta`, and MCP has no "conversation
+ * changed" notification, so a server cannot re-read this value later in its own lifetime.
+ */
+const CONVERSATION_ENV_VAR = "CLAUDE_CODE_SESSION_ID";
+
+const DRIFT_NOTE =
+  "This MCP server was spawned for a different conversation than the one now calling it, which is what /clear produces. Cyberdeck binds the session, not the conversation, so the capability grant is unaffected — but a stale conversation is worth knowing about when results look wrong.";
+
+export interface McpActorIdentity {
+  /** The Cyberdeck session this server acts for, fixed at spawn by `--actor-session`. */
+  actorSessionId: string;
+  /** The provider conversation the server was spawned into, when the harness exposes one. */
+  launchConversationId?: string;
+  /** Reported verbatim in every failure so an operator can check the broker directly. */
+  brokerSocketPath?: string;
+}
+
+export interface McpServerContext {
+  identity: McpActorIdentity;
+  /** Absent when the broker socket could not be reached; every tool then fails by name. */
+  transport?: McpBrokerTransport;
+  brokerUnavailable?: string;
+}
+
+/** Raised for a failure the server itself diagnosed, before or instead of a broker round trip. */
+export class McpToolError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = "McpToolError";
+  }
+}
+
+const REMEDIES: Record<string, string> = {
+  CYBERDECK_BROKER_UNREACHABLE:
+    "The Cyberdeck broker is not accepting connections. Start it with `cyberdeck up`, then reconnect this server with /mcp.",
+  CYBERDECK_BROKER_OUTDATED:
+    "The running broker is older than this MCP server and does not implement the method it called. Rebuild, then `cyberdeck restart` — the broker runs compiled output, so a restart without a rebuild silently keeps the old build.",
+  ACTOR_NOT_AUTHORIZED:
+    "This session holds no Cyberdeck orchestrator binding. Call cyberdeck_diagnose for the exact state, or relaunch the orchestrator through Cyberdeck.",
+  ACTOR_BINDING_ORPHANED:
+    "This server's scope has been rebound to a different session. Cyberdeck will not transfer the grant, because inheriting a successor's capabilities would widen this session's authority. Relaunch this orchestrator through Cyberdeck.",
+  CAPABILITY_DENIED:
+    "The bound grant does not cover this call. Call cyberdeck_diagnose to see the scope and capabilities actually held.",
+  STALE_THREAD_CURSOR:
+    "Continue from the cursor the previous read returned instead of rereading from zero.",
+};
+
+export function resolveLaunchConversationId(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const value = env[CONVERSATION_ENV_VAR];
+  return value === undefined || value.trim() === "" ? undefined : value;
 }
 
 interface JsonRpcRequest {
@@ -17,6 +81,11 @@ interface JsonRpcRequest {
 }
 
 const TOOLS = [
+  {
+    name: "cyberdeck_diagnose",
+    description: "Report this Cyberdeck MCP server's live identity, broker reachability, and capability binding. Call this first whenever a cyberdeck_* tool appears missing or returns nothing: it distinguishes an unreachable broker, an unbound or orphaned actor session, and a stale conversation. It never fails and needs no grant.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
   {
     name: "cyberdeck_provider_capabilities",
     description: "Return Cyberdeck's authoritative worker model IDs, effort values, and launch notes. Use this instead of inspecting repository source or guessing aliases.",
@@ -29,19 +98,67 @@ const TOOLS = [
     },
   },
   {
+    name: "cyberdeck_orchestrator_inspect",
+    description: "Inspect another Cyberdeck Orc by durable session identity before any stop request. Returns provider/lifecycle state, process generation, binding, broker ownership, and child-worker impact. A null heartbeat is unknown, never evidence that a live target is stale.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetSessionId: { type: "string" },
+      },
+      required: ["targetSessionId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_orchestrator_stop",
+    description: "Request a broker-mediated graceful stop of an inspected stale or failed Orc. Requires the exact generation returned by inspect and never stops child workers. Healthy live Orcs return APPROVAL_REQUIRED; non-terminal children return REQUIRES_HANDOFF.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetSessionId: { type: "string" },
+        expectedGeneration: { type: "integer", minimum: 1 },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+      },
+      required: ["targetSessionId", "expectedGeneration", "reason"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_orchestrator_force_stop",
+    description: "Explicitly escalate a previously requested graceful Orc stop. Requires the same durable identity and observed generation; it is denied unless graceful stop is already pending. Child workers remain untouched.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetSessionId: { type: "string" },
+        expectedGeneration: { type: "integer", minimum: 1 },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+      },
+      required: ["targetSessionId", "expectedGeneration", "reason"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "cyberdeck_threads_list",
-    description: "List worker threads visible to this Cyberdeck orchestrator.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    description: `List worker threads visible to this Cyberdeck orchestrator, newest page first. Defaults to the status view (id, name, provider, executionState, attentionState), which is the cheap duplicate-safe liveness check; pass view "full" only when you need the whole record. Returns {threads, total, cursor, returned, nextCursor?}; page with cursor/limit (default ${DEFAULT_THREAD_PAGE}, max ${MAX_THREAD_PAGE}). Stays answerable while a wait is in flight.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        view: { type: "string", enum: ["status", "full"], default: "status" },
+        limit: { type: "integer", minimum: 1, maximum: MAX_THREAD_PAGE, default: DEFAULT_THREAD_PAGE },
+        cursor: { type: "integer", minimum: 0, default: 0 },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: "cyberdeck_thread_read",
-    description: "Incrementally read one worker transcript for debugging. afterCursor is mandatory; never reread from an older cursor. Prefer cyberdeck_workers_wait for normal result collection.",
+    description: "Incrementally read semantic worker turns, not PTY write chunks. afterCursor is mandatory; continue from returned nextCursor. Prefer cyberdeck_workers_wait for normal result collection.",
     inputSchema: {
       type: "object",
       properties: {
         sessionId: { type: "string" },
         afterCursor: { type: "integer", minimum: 0 },
-        limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+        limit: { type: "integer", minimum: 1, maximum: 100, default: 1 },
       },
       required: ["sessionId", "afterCursor"],
       additionalProperties: false,
@@ -49,7 +166,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_worker_start",
-    description: "Start one explicit worker and return a compact sessionId/completionTarget. Exact IDs: Codex gpt-5.6-luna|terra|sol; Claude haiku|sonnet|opus|fable; Cursor composer; Antigravity gemini-3.6-flash-low|medium|high with matching effort. Fable requires the operator-controlled worker.start.fable grant. Pass effort for Codex/Claude/Antigravity, omit it for Cursor. Prefer cyberdeck_workers_start for fan-out, then call cyberdeck_workers_wait once.",
+    description: "Start one explicit worker and return a compact sessionId/completionTarget. Exact IDs: Codex gpt-5.6-luna|terra|sol; Claude haiku|sonnet|opus|fable; Cursor composer; Antigravity gemini-3.6-flash-low|medium|high with matching effort. approvalMode defaults to provider prompts when omitted; auto is an explicit opt-in supported by Codex and Claude. Fable requires the operator-controlled worker.start.fable grant. Pass effort for Codex/Claude/Antigravity, omit it for Cursor. Prefer cyberdeck_workers_start for fan-out, then call cyberdeck_workers_wait once.",
     inputSchema: {
       type: "object",
       properties: {
@@ -58,6 +175,7 @@ const TOOLS = [
         effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
         cwd: { type: "string" },
         sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
+        approvalMode: { type: "string", enum: ["prompt", "auto"] },
         prompt: { type: "string" },
         name: { type: "string" },
       },
@@ -83,6 +201,7 @@ const TOOLS = [
               effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
               cwd: { type: "string" },
               sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
+              approvalMode: { type: "string", enum: ["prompt", "auto"] },
               prompt: { type: "string" },
               name: { type: "string" },
             },
@@ -97,10 +216,11 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_workers_wait",
-    description: "Idle inside Cyberdeck until all named workers complete, block, fail, or the timeout expires; returns only compact useful result tails and never raw PTY transcripts.",
+    description: `Idle inside Cyberdeck until all named workers complete, need input, fail, or the timeout expires; returns deterministic head-preserving semantic results and never raw PTY transcripts. One call blocks at most ${MAX_WAIT_SEGMENT_SECONDS}s so it always returns before an MCP client abandons it; a longer timeoutSeconds is honored across segments. Read wait.state: "settled" (every target terminal), "timed-out" (your whole timeoutSeconds elapsed), or "incomplete" (segment boundary — call again with wait.resume.waitId and the same targets). Completed results are idempotent: re-waiting the same sessionId and completionTarget replays the recorded result with retrieval "replay", which proves the work already ran and no duplicate worker is needed.`,
     inputSchema: {
       type: "object",
       properties: {
+        waitId: { type: "string" },
         targets: {
           type: "array",
           minItems: 1,
@@ -115,7 +235,12 @@ const TOOLS = [
             additionalProperties: false,
           },
         },
-        timeoutSeconds: { type: "integer", minimum: 1, maximum: 600, default: 300 },
+        timeoutSeconds: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_WAIT_SECONDS,
+          default: DEFAULT_WAIT_SECONDS,
+        },
         maxResultChars: { type: "integer", minimum: 200, maximum: 4000, default: 1200 },
       },
       required: ["targets"],
@@ -203,33 +328,35 @@ const TOOLS = [
 ] as const;
 
 export async function runMcpServer(
-  transport: McpBrokerTransport,
-  actorSessionId: string,
+  context: McpServerContext,
   input: Readable = process.stdin,
   output: Writable = process.stdout,
 ): Promise<void> {
   const lines = createInterface({ input, crlfDelay: Infinity });
-  let tail = Promise.resolve();
+  // Requests are dispatched concurrently and answered by id. Serializing them made a long
+  // cyberdeck_workers_wait block every later call on the same stdio pipe, so the documented status
+  // fallback stalled for exactly as long as the wait it was supposed to explain.
+  const inFlight = new Set<Promise<void>>();
   for await (const line of lines) {
     if (line.trim() === "") continue;
-    tail = tail.then(async () => {
-      let request: JsonRpcRequest;
-      try {
-        request = JSON.parse(line) as JsonRpcRequest;
-      } catch {
-        output.write(`${JSON.stringify(errorResponse(null, -32700, "Parse error"))}\n`);
-        return;
-      }
-      const response = await handleMcpRequest(transport, actorSessionId, request);
+    let request: JsonRpcRequest;
+    try {
+      request = JSON.parse(line) as JsonRpcRequest;
+    } catch {
+      output.write(`${JSON.stringify(errorResponse(null, -32700, "Parse error"))}\n`);
+      continue;
+    }
+    const pending = handleMcpRequest(context, request).then((response) => {
       if (response !== undefined) output.write(`${JSON.stringify(response)}\n`);
     });
+    inFlight.add(pending);
+    void pending.finally(() => inFlight.delete(pending));
   }
-  await tail;
+  await Promise.allSettled([...inFlight]);
 }
 
 export async function handleMcpRequest(
-  transport: McpBrokerTransport,
-  actorSessionId: string,
+  context: McpServerContext,
   request: JsonRpcRequest,
 ): Promise<Record<string, unknown> | undefined> {
   if (request.id === undefined) return undefined;
@@ -246,37 +373,205 @@ export async function handleMcpRequest(
     if (request.method === "tools/call") {
       const name = request.params?.name;
       const args = isRecord(request.params?.arguments) ? request.params.arguments : {};
-      const result = await callTool(transport, actorSessionId, name, args);
-      return success(request.id, {
-        content: [{ type: "text", text: JSON.stringify(result) }],
-      });
+      const result = await callTool(context, name, args);
+      const content: Array<Record<string, unknown>> = [
+        { type: "text", text: JSON.stringify(result) },
+      ];
+      // A drifted conversation does not invalidate the grant, so the call still runs; it is
+      // reported alongside the result rather than swallowed, because a silent ambiguous negative
+      // is the failure this whole path exists to remove.
+      const drift = conversationDrift(context.identity);
+      if (drift !== undefined && name !== "cyberdeck_diagnose") {
+        content.push({ type: "text", text: JSON.stringify({ cyberdeckWarning: drift }) });
+      }
+      return success(request.id, { content });
     }
     return errorResponse(request.id, -32601, `Method not found: ${request.method}`);
   } catch (error) {
-    return success(request.id, {
-      content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-      isError: true,
-    });
+    return success(request.id, toolFailure(context, error));
   }
 }
 
+/**
+ * Every failure leaves through here with a machine-readable code, the identity the server is
+ * acting under, and a remedy. An agent must be able to tell "broker down" from "orphaned scope"
+ * from "wrong tool index" out of the response alone.
+ *
+ * The payload carries two independent contracts and neither subsumes the other. `error` answers
+ * "who am I and what do I do about it" with the mapped Cyberdeck code and remedy. The
+ * control-plane block below answers "what do I now know about my workers", and the answer is
+ * nothing — so it reports the raw upstream code and holds `workerStateKnown` false.
+ */
+function toolFailure(context: McpServerContext, error: unknown): Record<string, unknown> {
+  const code = failureCode(error);
+  const drift = conversationDrift(context.identity);
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        error: {
+          code,
+          message: error instanceof Error ? error.message : String(error),
+          remedy: REMEDIES[code]
+            ?? "Call cyberdeck_diagnose for this server's live identity, broker state, and binding.",
+          actorSessionId: context.identity.actorSessionId,
+          ...(context.identity.brokerSocketPath === undefined
+            ? {}
+            : { brokerSocketPath: context.identity.brokerSocketPath }),
+          ...(drift === undefined ? {} : { conversationDrift: drift }),
+        },
+        ...controlPlaneFailure(error),
+      }),
+    }],
+    isError: true,
+  };
+}
+
+function failureCode(error: unknown): string {
+  if (
+    typeof error === "object" && error !== null && "code" in error
+    && typeof (error as { code?: unknown }).code === "string"
+  ) {
+    const code = (error as { code: string }).code;
+    return code === "BROKER_DISCONNECTED" ? "CYBERDECK_BROKER_UNREACHABLE" : code;
+  }
+  return "CYBERDECK_TOOL_FAILED";
+}
+
+function conversationDrift(
+  identity: McpActorIdentity,
+): { code: string; actorSessionId: string; liveConversationId: string; note: string } | undefined {
+  const live = identity.launchConversationId;
+  // Cyberdeck launches Claude with `--session-id <session.id>`, so at spawn these are equal by
+  // construction. Inequality means this server is serving a conversation Cyberdeck never bound.
+  if (live === undefined || live === identity.actorSessionId) return undefined;
+  return {
+    code: "CYBERDECK_CONVERSATION_DRIFTED",
+    actorSessionId: identity.actorSessionId,
+    liveConversationId: live,
+    note: DRIFT_NOTE,
+  };
+}
+
+async function diagnose(context: McpServerContext): Promise<Record<string, unknown>> {
+  const { identity } = context;
+  const drift = conversationDrift(identity);
+  let actor: unknown;
+  let brokerError = context.brokerUnavailable;
+  // A broker that answers but does not know this method is a version skew, not an outage. They
+  // need different remedies, so the diagnosis has to keep them apart.
+  let brokerStatus = context.brokerUnavailable === undefined ? "reachable" : "unreachable";
+  if (context.transport !== undefined) {
+    try {
+      actor = await context.transport.request("agent.actor.describe", {
+        actorSessionId: identity.actorSessionId,
+      });
+    } catch (error) {
+      brokerError = error instanceof Error ? error.message : String(error);
+      brokerStatus = failureCode(error) === "METHOD_NOT_FOUND" ? "outdated" : "unreachable";
+    }
+  }
+  const actorStatus = isRecord(actor) && typeof actor.status === "string" ? actor.status : undefined;
+  const status = brokerStatus === "unreachable" && brokerError !== undefined
+    ? "broker-unreachable"
+    : brokerStatus === "outdated"
+      ? "broker-outdated"
+      : actorStatus === undefined
+        ? "unknown"
+        : actorStatus === "bound"
+          ? (drift === undefined ? "healthy" : "conversation-drifted")
+          : actorStatus;
+  return {
+    server: { name: "cyberdeck", version: CYBERDECK_VERSION, pid: process.pid },
+    status,
+    actorSessionId: identity.actorSessionId,
+    conversation: {
+      launchConversationId: identity.launchConversationId ?? null,
+      matchesActorSession: drift === undefined,
+      ...(drift === undefined ? {} : { note: DRIFT_NOTE }),
+    },
+    broker: {
+      socketPath: identity.brokerSocketPath ?? null,
+      reachable: brokerStatus !== "unreachable",
+      ...(brokerStatus === "outdated" ? { outdated: true } : {}),
+      ...(brokerError === undefined ? {} : { error: brokerError }),
+    },
+    actor: actor ?? null,
+    remedy: brokerStatus === "outdated"
+      ? REMEDIES.CYBERDECK_BROKER_OUTDATED
+      : brokerError !== undefined
+        ? REMEDIES.CYBERDECK_BROKER_UNREACHABLE
+        : isRecord(actor) && typeof actor.remedy === "string"
+          ? actor.remedy
+          : "Cyberdeck tools are resolvable. If a cyberdeck_* tool still looks missing, the harness tool index is at fault, not this server.",
+  };
+}
+
+/**
+ * A failed call says nothing about the workers themselves, so it is reported as its own class.
+ * `worker still active` and `normal wait timeout` are ordinary results carrying wait.state; only a
+ * control-plane failure arrives here, and it must never be mistaken for either.
+ *
+ * The code here is the raw upstream one, deliberately unmapped: `error.code` alongside it already
+ * carries the Cyberdeck-facing translation, and flattening the two loses the distinction between
+ * what the broker said and what the agent should do about it.
+ */
+function controlPlaneFailure(error: unknown): Record<string, unknown> {
+  const code = typeof error === "object" && error !== null && "code" in error
+    && typeof (error as { code: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : "CONTROL_PLANE_FAILURE";
+  return {
+    failure: {
+      kind: "control-plane",
+      code,
+      message: error instanceof Error ? error.message : String(error),
+    },
+    workerStateKnown: false,
+    guidance: "Worker state is unknown. Call cyberdeck_threads_list, or re-wait the same sessionId and completionTarget, before starting any replacement worker.",
+  };
+}
+
 async function callTool(
-  transport: McpBrokerTransport,
-  actorSessionId: string,
+  context: McpServerContext,
   name: unknown,
   args: Record<string, unknown>,
 ): Promise<unknown> {
+  // Answered before any gate: the one tool whose job is to explain why the others cannot run.
+  if (name === "cyberdeck_diagnose") return diagnose(context);
+  const transport = context.transport;
+  if (transport === undefined) {
+    throw new McpToolError(
+      "CYBERDECK_BROKER_UNREACHABLE",
+      context.brokerUnavailable
+        ?? `Cyberdeck broker is unreachable${context.identity.brokerSocketPath === undefined ? "" : ` at ${context.identity.brokerSocketPath}`}`,
+    );
+  }
+  const actorSessionId = context.identity.actorSessionId;
   if (name === "cyberdeck_provider_capabilities") {
     const provider = typeof args.provider === "string" ? args.provider : undefined;
     return provider === undefined
       ? WORKER_PROVIDER_CAPABILITIES
       : WORKER_PROVIDER_CAPABILITIES.filter((entry) => entry.provider === provider);
   }
+  if (name === "cyberdeck_orchestrator_inspect") {
+    return transport.request("agent.orchestrator.inspect", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_orchestrator_stop") {
+    return transport.request("agent.orchestrator.stop", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_orchestrator_force_stop") {
+    return transport.request("agent.orchestrator.forceStop", { actorSessionId, ...args });
+  }
   if (name === "cyberdeck_threads_list") {
-    return transport.request("agent.thread.list", { actorSessionId });
+    return transport.request("agent.thread.list", { actorSessionId, ...args });
   }
   if (name === "cyberdeck_thread_read") {
-    return transport.request("agent.thread.read", { actorSessionId, ...args });
+    return transport.request("agent.thread.read", {
+      actorSessionId,
+      ...args,
+      limit: args.limit ?? 1,
+    });
   }
   if (name === "cyberdeck_worker_start") {
     return transport.request("agent.worker.start", { actorSessionId, ...args });

@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { open, readFile, rename, rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 import { SessionRecordSchema, type SessionRecord } from "../domain/session.js";
-import { openPrivateAppendFile } from "./private-files.js";
+import { ensurePrivateDirectory, openPrivateAppendFile } from "./private-files.js";
 
 const SessionSnapshotSchema = z.object({
   recordType: z.literal("session.snapshot"),
@@ -78,6 +78,44 @@ export class SessionStore {
       else latest.set(parsed.record.id, parsed.record);
     }
     return [...latest.values()];
+  }
+
+  /**
+   * Rewrite the catalog so it holds exactly `records`, one snapshot each.
+   *
+   * Retention retires threads by appending tombstones, so without compaction the file grows even
+   * as the retained set shrinks. The rewrite goes through a private temporary file and an atomic
+   * rename: an interrupted compaction leaves the previous catalog intact rather than a partial one.
+   */
+  async compact(records: readonly SessionRecord[]): Promise<void> {
+    const body = records
+      .map((record) => `${JSON.stringify(SessionSnapshotSchema.parse({
+        recordType: "session.snapshot",
+        eventId: this.options.idFactory?.() ?? randomUUID(),
+        persistedAt: this.options.now?.() ?? new Date().toISOString(),
+        record,
+      }))}\n`)
+      .join("");
+
+    this.writeTail = this.writeTail.then(async () => {
+      await ensurePrivateDirectory(dirname(this.path));
+      const temporary = `${this.path}.compact-${process.pid}`;
+      const handle = await open(temporary, "w", 0o600);
+      try {
+        await handle.chmod(0o600);
+        await handle.write(body, undefined, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      try {
+        await rename(temporary, this.path);
+      } catch (error) {
+        await rm(temporary, { force: true });
+        throw error;
+      }
+    });
+    await this.writeTail;
   }
 
   private async enqueue(record: z.infer<typeof SessionStoreEnvelopeSchema>): Promise<void> {

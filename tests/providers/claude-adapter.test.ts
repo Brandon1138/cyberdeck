@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -139,6 +139,110 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(spec.args).toContain("claude-fable-5");
   });
 
+  it("rejects ultra effort with the shared provider error code", () => {
+    expect(() => new ClaudeProviderAdapter().buildLaunchSpec(session({ effort: "ultra" })))
+      .toThrow(expect.objectContaining({ code: "PROVIDER_EFFORT_UNSUPPORTED" }));
+    expect(() => new ClaudeProviderAdapter().buildResumeSpec(session({ effort: "ultra" })))
+      .toThrow(expect.objectContaining({ code: "PROVIDER_EFFORT_UNSUPPORTED" }));
+  });
+
+  it("writes private per-session payload files before a Claude launch", async () => {
+    const directory = tempDir();
+    const record = session({ kind: "orchestrator", providerInstructions: "Cyberdeck guidance" });
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      // Absent allowlist: asserting a cyberdeck-only config must not depend on operator state.
+      orchestratorMcp: { allowlistPath: join(directory, "no-allowlist.json") },
+    });
+    const spec = adapter.buildLaunchSpec(record);
+
+    expect(spec.args).toContain("--append-system-prompt-file");
+    expect(spec.args).toContain("--mcp-config");
+    expect(spec.args).not.toContain("Cyberdeck guidance");
+    await adapter.prepareLaunch(record, spec);
+
+    const instructionsPath = spec.args[spec.args.indexOf("--append-system-prompt-file") + 1]!;
+    const mcpPath = spec.args[spec.args.indexOf("--mcp-config") + 1]!;
+    expect(readFileSync(instructionsPath, "utf8")).toBe("Cyberdeck guidance");
+    expect(JSON.parse(readFileSync(mcpPath, "utf8"))).toEqual({
+      mcpServers: {
+        cyberdeck: {
+          type: "stdio",
+          command: "/node",
+          args: ["/cyberdeck.js", "mcp", "--actor-session", record.id],
+        },
+      },
+    });
+    expect(statSync(instructionsPath).mode & 0o777).toBe(0o600);
+    expect(statSync(mcpPath).mode & 0o777).toBe(0o600);
+
+    await adapter.cleanupLaunch(record);
+    expect(() => readFileSync(mcpPath)).toThrow();
+  });
+
+  it("merges allowlisted operator servers into an orchestrator's exclusive config", async () => {
+    const directory = tempDir();
+    const allowlistPath = join(directory, "orchestrator-mcp.json");
+    const operatorConfigPath = join(directory, "claude.json");
+    // `absent` is allowlisted but undefined, and `cyberdeck` is allowlisted to try to displace the
+    // control plane. Neither may change what the orchestrator launches against.
+    writeFileSync(
+      allowlistPath,
+      JSON.stringify({ servers: ["linear-server", "absent", "cyberdeck"] }),
+    );
+    writeFileSync(operatorConfigPath, JSON.stringify({
+      mcpServers: {
+        "linear-server": { type: "http", url: "https://mcp.linear.app/mcp" },
+        "obsidian-vault": { type: "stdio", command: "uvx" },
+        cyberdeck: { type: "stdio", command: "/impostor" },
+      },
+    }));
+    const record = session({ kind: "orchestrator" });
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      orchestratorMcp: { allowlistPath, operatorConfigPath },
+    });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+
+    const mcpPath = spec.args[spec.args.indexOf("--mcp-config") + 1]!;
+    expect(JSON.parse(readFileSync(mcpPath, "utf8"))).toEqual({
+      mcpServers: {
+        "linear-server": { type: "http", url: "https://mcp.linear.app/mcp" },
+        cyberdeck: {
+          type: "stdio",
+          command: "/node",
+          args: ["/cyberdeck.js", "mcp", "--actor-session", record.id],
+        },
+      },
+    });
+    await adapter.cleanupLaunch(record);
+  });
+
+  it("leaves a worker's config cyberdeck-only, since workers inherit the operator's servers", async () => {
+    const directory = tempDir();
+    const allowlistPath = join(directory, "orchestrator-mcp.json");
+    const operatorConfigPath = join(directory, "claude.json");
+    writeFileSync(allowlistPath, JSON.stringify({ servers: ["linear-server"] }));
+    writeFileSync(operatorConfigPath, JSON.stringify({
+      mcpServers: { "linear-server": { type: "http", url: "https://mcp.linear.app/mcp" } },
+    }));
+    const record = session({ kind: "worker" });
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      orchestratorMcp: { allowlistPath, operatorConfigPath },
+    });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+
+    const mcpPath = spec.args[spec.args.indexOf("--mcp-config") + 1]!;
+    expect(Object.keys(JSON.parse(readFileSync(mcpPath, "utf8")).mcpServers)).toEqual(["cyberdeck"]);
+    await adapter.cleanupLaunch(record);
+  });
+
   it("preserves the Phase 1 interactive argv for an explicit ordinary model", () => {
     const record = session({ name: "proof", sandbox: "workspace-write", model: "opus" });
     const spec = new ClaudeProviderAdapter().buildLaunchSpec(record);
@@ -150,11 +254,149 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
       "proof",
       "--permission-mode",
       "manual",
+      "--disallowedTools",
+      "Agent,Task",
       "--model",
       "opus",
     ]);
     expect(spec.cwd).toBe("/tmp/repo");
     expect(spec.env.DISABLE_UPDATES).toBe("1");
+    expect(spec.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS).toBe("0");
+    expect(spec.env.CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION).toBe("0");
+  });
+
+  it("keeps Claude-native subagents disabled across launch and resume", () => {
+    const adapter = new ClaudeProviderAdapter({
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    });
+    for (const spec of [
+      adapter.buildLaunchSpec(session({ kind: "orchestrator" })),
+      adapter.buildResumeSpec(session({ kind: "orchestrator" })),
+      adapter.buildLaunchSpec(session({ kind: "worker" })),
+      adapter.buildResumeSpec(session({ kind: "worker" })),
+    ]) {
+      expect(spec.args).toContain("--disallowedTools");
+      const denials = spec.args[spec.args.indexOf("--disallowedTools") + 1]!.split(",");
+      expect(denials).toEqual(expect.arrayContaining(["Agent", "Task"]));
+      expect(spec.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS).toBe("0");
+      expect(spec.env.CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION).toBe("0");
+      expect(spec.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH).toBe("0");
+    }
+  });
+
+  it("re-asserts user-scope denials on argv for orchestrators, which never receive them", () => {
+    // `--setting-sources project,local` drops the operator's `permissions.deny`, so an orchestrator
+    // would otherwise be the one session able to invoke a tool the operator denied globally.
+    // Workers keep user settings and must not have argv policy imposed on top of them.
+    const adapter = new ClaudeProviderAdapter({
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    });
+    const denialsFor = (spec: { args: string[] }): string[] =>
+      spec.args[spec.args.indexOf("--disallowedTools") + 1]!.split(",");
+
+    for (const spec of [
+      adapter.buildLaunchSpec(session({ kind: "orchestrator" })),
+      adapter.buildResumeSpec(session({ kind: "orchestrator" })),
+    ]) {
+      expect(denialsFor(spec)).toContain("Skill(update-config)");
+    }
+    for (const spec of [
+      adapter.buildLaunchSpec(session({ kind: "worker" })),
+      adapter.buildResumeSpec(session({ kind: "worker" })),
+    ]) {
+      expect(denialsFor(spec)).toEqual(["Agent", "Task"]);
+    }
+  });
+
+  it("emits exactly one --disallowedTools, since a second occurrence would replace the first", () => {
+    const spec = new ClaudeProviderAdapter({
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    }).buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.args.filter((arg) => arg === "--disallowedTools")).toHaveLength(1);
+  });
+
+  it("bounds an orchestrator's ambient context", () => {
+    // The orchestrator's authority is Cyberdeck's tools, so the operator's skill and plugin surface
+    // is excluded rather than compacted away turn after turn. Dropping user scope is what does it.
+    const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.args.slice(spec.args.indexOf("--setting-sources"))).toContain("project,local");
+  });
+
+  it("leaves an orchestrator's built-in slash commands working", () => {
+    // --disable-slash-commands is documented as "Disable all skills" but empties the whole command
+    // registry in 2.1.220, taking /mcp with it — and /mcp is the only way to finish a connector's
+    // OAuth flow from inside the cockpit.
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.args).not.toContain("--disable-slash-commands");
+    expect(spec.args).toContain("--setting-sources");
+    expect(spec.args).toContain("--strict-mcp-config");
+  });
+
+  it("makes an orchestrator's injected MCP config exclusive", () => {
+    // --mcp-config only *adds* to the operator's configured servers. Without --strict-mcp-config an
+    // orchestrator is handed Cyberdeck's twelve tools plus every ambient server's definitions.
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.args).toContain("--mcp-config");
+    expect(spec.args).toContain("--strict-mcp-config");
+  });
+
+  it("never emits strict MCP isolation without the config it constrains", () => {
+    // The flag alone means "no MCP servers at all", which is not the bound this establishes.
+    const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.args).not.toContain("--mcp-config");
+    expect(spec.args).not.toContain("--strict-mcp-config");
+  });
+
+  it("leaves a worker's environment alone", () => {
+    // Workers legitimately use the operator's skills and MCP servers, and Cyberdeck's own
+    // session-start hook is installed in user settings, so no bound may leak outside orchestrators.
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildLaunchSpec(session({ kind: "worker" }));
+    expect(spec.args).not.toContain("--disable-slash-commands");
+    expect(spec.args).not.toContain("--setting-sources");
+    expect(spec.args).toContain("--mcp-config");
+    expect(spec.args).not.toContain("--strict-mcp-config");
+  });
+
+  it("keeps a resumed orchestrator bounded the same way", () => {
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildResumeSpec(session({ kind: "orchestrator" }));
+    expect(spec.args).not.toContain("--disable-slash-commands");
+    expect(spec.args).toContain("--setting-sources");
+    expect(spec.args).toContain("--strict-mcp-config");
+  });
+
+  it("keeps a resumed worker's MCP surface unchanged", () => {
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildResumeSpec(session({ kind: "worker" }));
+    expect(spec.args).toContain("--mcp-config");
+    expect(spec.args).not.toContain("--strict-mcp-config");
+  });
+
+  it("forces tool-schema deferral on rather than leaving it to the optimistic default", () => {
+    // Left unset, tool search is decided off the base URL and disabled for a non-first-party host,
+    // so an operator behind a proxy would get every schema resident. Forced on, MCP schemas cost
+    // their names until searched — which is what keeps an ambient set affordable.
+    const adapter = new ClaudeProviderAdapter({
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      sourceEnvironment: { ENABLE_TOOL_SEARCH: "false" },
+    });
+    expect(adapter.buildLaunchSpec(session({ kind: "orchestrator" })).env.ENABLE_TOOL_SEARCH)
+      .toBe("true");
+    expect(adapter.buildResumeSpec(session({ kind: "orchestrator" })).env.ENABLE_TOOL_SEARCH)
+      .toBe("true");
+    // Workers inherit the operator's whole ambient set, so deferral matters more for them, not less.
+    expect(adapter.buildLaunchSpec(session({ kind: "worker" })).env.ENABLE_TOOL_SEARCH)
+      .toBe("true");
+  });
+
+  it("does not let source state spoof Cyberdeck's tool-search override", () => {
+    const spec = new ClaudeProviderAdapter({
+      sourceEnvironment: { ENABLE_TOOL_SEARCH: "true" },
+    }).buildLaunchSpec(session({ kind: "orchestrator" }));
+    expect(spec.env.ENABLE_TOOL_SEARCH).toBeUndefined();
   });
 
   it("maps read-only to plan and never emits a bypass permission mode", () => {
@@ -167,7 +409,16 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
 
 describe("buildClaudeHeadlessCommand", () => {
   it("uses only flags the installed CLI documents for print mode", () => {
-    const command = buildClaudeHeadlessCommand(dispatchRequest().request);
+    const command = buildClaudeHeadlessCommand(dispatchRequest().request, {
+      sourceEnvironment: {
+        PATH: "/source/claude-bin",
+        ANTHROPIC_BASE_URL: "https://claude-routing.invalid",
+        OPENAI_BASE_URL: "https://wrong-provider.invalid",
+        UNRELATED_SENTINEL: "drop-this",
+        TMUX: "drop-this",
+        TMUX_PANE: "drop-this",
+      },
+    });
     expect(command.executable).toBe("claude");
     expect(command.args).toEqual([
       "--print",
@@ -177,15 +428,26 @@ describe("buildClaudeHeadlessCommand", () => {
       "stream-json",
       "--permission-mode",
       "plan",
+      "--disallowedTools",
+      "Agent,Task",
       "--model",
       "opus",
     ]);
     expect(command.cwd).toBe("/tmp/repo");
     expect(command.env.DISABLE_UPDATES).toBe("1");
+    expect(command.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS).toBe("0");
+    expect(command.env.CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION).toBe("0");
     expect(command.env).toMatchObject({
+      PATH: "/source/claude-bin",
+      PWD: "/tmp/repo",
+      ANTHROPIC_BASE_URL: "https://claude-routing.invalid",
       CYBERDECK_PROCESS_ROLE: "worker",
       CYBERDECK_WORKER_MODE: "normal",
     });
+    expect(command.env.OPENAI_BASE_URL).toBeUndefined();
+    expect(command.env.UNRELATED_SENTINEL).toBeUndefined();
+    expect(command.env.TMUX).toBeUndefined();
+    expect(command.env.TMUX_PANE).toBeUndefined();
     expect(command.stdin).toBe("summarise the repository");
   });
 

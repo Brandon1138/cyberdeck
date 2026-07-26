@@ -1,4 +1,59 @@
+## Resolved: Esc and Option+Enter were still wrong after the attach-layer fix
+
+Observed on 2026-07-26, after `4cb2b93` had already made `src/client/attach.ts` forward Esc and every
+Alt chord to the provider. That commit was correct and remains correct — it was simply not the whole
+input path. Two other layers consume the same bytes before or after an attachment.
+
+**Fleet's own decoder.** `FleetKeyDecoder` resolved `ESC` plus a following byte as two keys: an
+`escape` and then whatever the second byte named. In the fleet composer, Option+Enter (`0x1b 0x0d`)
+therefore cleared the draft and then acted on Enter, which opens the selected thread — the reported
+"minimizes my conversation or enters my conversation", both from one keypress. Whether both halves or
+only the first arrived depended on whether the two bytes landed in the same read, which is what made
+the same gesture behave differently on different attempts. An Esc prefix is now resolved into the one
+chord it names, and a chord the fleet does not bind does nothing rather than decaying into its halves.
+
+**A keyboard protocol left switched on.** A provider TUI can enable a mode that reports ordinary keys
+as `CSI <code> ; <modifiers> u`, and that mode outlived the attachment because `ENTER_FLEET_SCREEN`
+reset mouse and focus reporting but not the keyboard protocol. Every such report then fell through
+the decoder's anonymous-CSI branch and was dropped, so after visiting one provider Esc did nothing at
+all in the fleet, while after visiting another it worked. The lone `\u001b[13u` special case in the
+decoder was the visible scar of this. The fleet now pops the keyboard protocol and bracketed paste on
+entering its screen, and decodes CSI-u reports by name for the case where a terminal keeps them on.
+
+**tmux held the bytes first.** The cockpit's tmux session ran with the default `escape-time` of
+500ms. tmux waits that long before deciding a bare Esc is not the start of a sequence, so inside the
+cockpit Esc reached the agent half a second late — indistinguishable from being swallowed — and the
+same window decided whether Option+Enter arrived as one Meta chord or as an Esc followed by a
+separate Enter that submitted. The cockpit now sets `escape-time` to 10ms, which still reunites a
+sequence split across reads.
+
+Disambiguating a bare Esc from the first byte of a sequence is unavoidable, and both remaining
+decoders resolve it the same way: bytes are consumed as they arrive, and a wait happens only when a
+read *ends* on a strict prefix of something longer. Arrow keys, function keys, CSI-u reports and
+pastes all complete within their own read and are forwarded with no delay. Only a bare Esc that is
+the last byte of a read waits, for one 25ms window. Pastes are now opaque in `attach.ts`: a `0x1d` or
+a Left Arrow inside pasted text is data, not a detach chord.
+
 # Known bugs
+
+## Resolved: Esc and Option+Enter were stolen from the attached provider
+
+Observed on 2026-07-25 with Claude Code attached from Ghostty. Detach was bound to `Ctrl+[`, which a
+terminal transmits as byte `0x1b` — the exact byte Esc sends. The two keys are indistinguishable at
+the byte level, so every bare Esc ejected the operator to Fleet instead of interrupting the turn,
+steering mid-flight, or leaving a picker.
+
+The same handler also treated `ESC` followed by any byte below `0x20` as a standalone `Ctrl+[`. That
+is precisely how a terminal encodes Alt/Meta chords when Option-as-Meta is enabled, so Option+Enter
+(`0x1b 0x0d`), Alt+Ctrl+<letter>, Alt+Tab, and Alt+Backspace-as-`^H` all detached as well.
+
+Resolved by moving detach to `Ctrl+]` (`0x1d`) for every attachment kind. That byte was already
+consumed as a strict no-op while attached, so the provider loses nothing it could previously receive,
+and no new byte is taken from a TUI. `Ctrl+[` and every `ESC`-prefixed chord are now forwarded
+verbatim. Left Arrow remains the directional return from a worker; an orchestrator keeps Left Arrow
+for its native TUI and detaches with `Ctrl+]`. The 25ms escape-coalescing window survives only to
+reunite a Left Arrow split across reads, and its expiry now forwards the pending bytes to the
+provider, so a slow or remote link degrades to a real keystroke instead of a surprise detach.
 
 ## Resolved: cockpit startup leaked an invisible tmux session and a failed orchestrator
 

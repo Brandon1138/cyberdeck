@@ -134,7 +134,19 @@ describe("AppServerJobDispatchAdapter", () => {
   it("handshakes, validates settings, correlates responses, maps notifications and usage", async () => {
     const process = new FakeProcess();
     const spawn = vi.fn<AppServerSpawn>(() => process);
-    const adapter = new AppServerJobDispatchAdapter({ spawn, now: () => NOW });
+    const adapter = new AppServerJobDispatchAdapter({
+      spawn,
+      now: () => NOW,
+      sourceEnvironment: {
+        PATH: "/source/codex-bin",
+        CODEX_HOME: "/source/codex-home",
+        OPENAI_BASE_URL: "https://codex-routing.invalid",
+        ANTHROPIC_BASE_URL: "https://wrong-provider.invalid",
+        UNRELATED_SENTINEL: "drop-this",
+        TMUX: "drop-this",
+        TMUX_PANE: "drop-this",
+      },
+    });
     const progress: unknown[] = [];
     adapter.onProgress((event) => progress.push(event));
     const report = nextReport(adapter);
@@ -145,10 +157,19 @@ describe("AppServerJobDispatchAdapter", () => {
       args: ["app-server", "--stdio", "--strict-config"],
       cwd: "/tmp/repo",
       env: expect.objectContaining({
+        PATH: "/source/codex-bin",
+        PWD: "/tmp/repo",
+        CODEX_HOME: "/source/codex-home",
+        OPENAI_BASE_URL: "https://codex-routing.invalid",
         CYBERDECK_PROCESS_ROLE: "worker",
         CYBERDECK_WORKER_MODE: "normal",
       }),
     });
+    const command = spawn.mock.calls[0]?.[0];
+    expect(command?.env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(command?.env.UNRELATED_SENTINEL).toBeUndefined();
+    expect(command?.env.TMUX).toBeUndefined();
+    expect(command?.env.TMUX_PANE).toBeUndefined();
     expect(process.writes[1]).toMatchObject({ method: "initialized" });
     expect(process.take("thread/start")).toMatchObject({
       params: {
