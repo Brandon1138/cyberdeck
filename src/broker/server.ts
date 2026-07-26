@@ -36,6 +36,7 @@ import {
 } from "../domain/orchestrator.js";
 import {
   AgentActorParamsSchema,
+  AgentListThreadsParamsSchema,
   AgentReadParamsSchema,
   AgentStartWorkerParamsSchema,
   AgentStartWorkersParamsSchema,
@@ -268,10 +269,8 @@ export class BrokerServer {
         return this.requireOrchestrators().fableWorkers(FableWorkersRequestSchema.parse(frame.params));
       case "orchestrator.cavemanWorkers":
         return this.requireOrchestrators().cavemanWorkers(CavemanWorkersRequestSchema.parse(frame.params));
-      case "agent.thread.list": {
-        const { actorSessionId } = AgentActorParamsSchema.parse(frame.params);
-        return this.requireAgentControl().listThreads(actorSessionId);
-      }
+      case "agent.thread.list":
+        return this.requireAgentControl().listThreads(AgentListThreadsParamsSchema.parse(frame.params));
       case "agent.thread.read": {
         const { actorSessionId, sessionId, afterCursor, limit } = AgentReadParamsSchema.parse(frame.params);
         return this.requireAgentControl().readThread(actorSessionId, sessionId, afterCursor, limit);

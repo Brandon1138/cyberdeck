@@ -1,5 +1,12 @@
 import { createInterface } from "node:readline";
-import { MAX_FANOUT_BATCH } from "../limits.js";
+import {
+  DEFAULT_THREAD_PAGE,
+  DEFAULT_WAIT_SECONDS,
+  MAX_FANOUT_BATCH,
+  MAX_THREAD_PAGE,
+  MAX_WAIT_SECONDS,
+  MAX_WAIT_SEGMENT_SECONDS,
+} from "../limits.js";
 import type { Readable, Writable } from "node:stream";
 import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
 import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
@@ -30,8 +37,16 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_threads_list",
-    description: "List worker threads visible to this Cyberdeck orchestrator.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    description: `List worker threads visible to this Cyberdeck orchestrator, newest page first. Defaults to the status view (id, name, provider, executionState, attentionState), which is the cheap duplicate-safe liveness check; pass view "full" only when you need the whole record. Returns {threads, total, cursor, returned, nextCursor?}; page with cursor/limit (default ${DEFAULT_THREAD_PAGE}, max ${MAX_THREAD_PAGE}). Stays answerable while a wait is in flight.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        view: { type: "string", enum: ["status", "full"], default: "status" },
+        limit: { type: "integer", minimum: 1, maximum: MAX_THREAD_PAGE, default: DEFAULT_THREAD_PAGE },
+        cursor: { type: "integer", minimum: 0, default: 0 },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: "cyberdeck_thread_read",
@@ -99,10 +114,11 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_workers_wait",
-    description: "Idle inside Cyberdeck until all named workers complete, need input, fail, or the timeout expires; returns deterministic head-preserving semantic results and never raw PTY transcripts.",
+    description: `Idle inside Cyberdeck until all named workers complete, need input, fail, or the timeout expires; returns deterministic head-preserving semantic results and never raw PTY transcripts. One call blocks at most ${MAX_WAIT_SEGMENT_SECONDS}s so it always returns before an MCP client abandons it; a longer timeoutSeconds is honored across segments. Read wait.state: "settled" (every target terminal), "timed-out" (your whole timeoutSeconds elapsed), or "incomplete" (segment boundary — call again with wait.resume.waitId and the same targets). Completed results are idempotent: re-waiting the same sessionId and completionTarget replays the recorded result with retrieval "replay", which proves the work already ran and no duplicate worker is needed.`,
     inputSchema: {
       type: "object",
       properties: {
+        waitId: { type: "string" },
         targets: {
           type: "array",
           minItems: 1,
@@ -117,7 +133,12 @@ const TOOLS = [
             additionalProperties: false,
           },
         },
-        timeoutSeconds: { type: "integer", minimum: 1, maximum: 600, default: 300 },
+        timeoutSeconds: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_WAIT_SECONDS,
+          default: DEFAULT_WAIT_SECONDS,
+        },
         maxResultChars: { type: "integer", minimum: 200, maximum: 4000, default: 1200 },
       },
       required: ["targets"],
@@ -211,22 +232,26 @@ export async function runMcpServer(
   output: Writable = process.stdout,
 ): Promise<void> {
   const lines = createInterface({ input, crlfDelay: Infinity });
-  let tail = Promise.resolve();
+  // Requests are dispatched concurrently and answered by id. Serializing them made a long
+  // cyberdeck_workers_wait block every later call on the same stdio pipe, so the documented status
+  // fallback stalled for exactly as long as the wait it was supposed to explain.
+  const inFlight = new Set<Promise<void>>();
   for await (const line of lines) {
     if (line.trim() === "") continue;
-    tail = tail.then(async () => {
-      let request: JsonRpcRequest;
-      try {
-        request = JSON.parse(line) as JsonRpcRequest;
-      } catch {
-        output.write(`${JSON.stringify(errorResponse(null, -32700, "Parse error"))}\n`);
-        return;
-      }
-      const response = await handleMcpRequest(transport, actorSessionId, request);
+    let request: JsonRpcRequest;
+    try {
+      request = JSON.parse(line) as JsonRpcRequest;
+    } catch {
+      output.write(`${JSON.stringify(errorResponse(null, -32700, "Parse error"))}\n`);
+      continue;
+    }
+    const pending = handleMcpRequest(transport, actorSessionId, request).then((response) => {
       if (response !== undefined) output.write(`${JSON.stringify(response)}\n`);
     });
+    inFlight.add(pending);
+    void pending.finally(() => inFlight.delete(pending));
   }
-  await tail;
+  await Promise.allSettled([...inFlight]);
 }
 
 export async function handleMcpRequest(
@@ -256,10 +281,31 @@ export async function handleMcpRequest(
     return errorResponse(request.id, -32601, `Method not found: ${request.method}`);
   } catch (error) {
     return success(request.id, {
-      content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      content: [{ type: "text", text: JSON.stringify(controlPlaneFailure(error)) }],
       isError: true,
     });
   }
+}
+
+/**
+ * A failed call says nothing about the workers themselves, so it is reported as its own class.
+ * `worker still active` and `normal wait timeout` are ordinary results carrying wait.state; only a
+ * control-plane failure arrives here, and it must never be mistaken for either.
+ */
+function controlPlaneFailure(error: unknown): Record<string, unknown> {
+  const code = typeof error === "object" && error !== null && "code" in error
+    && typeof (error as { code: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : "CONTROL_PLANE_FAILURE";
+  return {
+    failure: {
+      kind: "control-plane",
+      code,
+      message: error instanceof Error ? error.message : String(error),
+    },
+    workerStateKnown: false,
+    guidance: "Worker state is unknown. Call cyberdeck_threads_list, or re-wait the same sessionId and completionTarget, before starting any replacement worker.",
+  };
 }
 
 async function callTool(
@@ -275,7 +321,7 @@ async function callTool(
       : WORKER_PROVIDER_CAPABILITIES.filter((entry) => entry.provider === provider);
   }
   if (name === "cyberdeck_threads_list") {
-    return transport.request("agent.thread.list", { actorSessionId });
+    return transport.request("agent.thread.list", { actorSessionId, ...args });
   }
   if (name === "cyberdeck_thread_read") {
     return transport.request("agent.thread.read", {

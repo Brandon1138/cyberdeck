@@ -1,5 +1,14 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { MAX_FANOUT_BATCH } from "../limits.js";
+import {
+  DEFAULT_THREAD_PAGE,
+  DEFAULT_WAIT_SECONDS,
+  MAX_FANOUT_BATCH,
+  MAX_THREAD_PAGE,
+  MAX_WAIT_SECONDS,
+  MAX_WAIT_SEGMENT_SECONDS,
+  THREAD_PREVIEW_CHARS,
+} from "../limits.js";
 import { grantAllows, type CapabilityGrant, type CyberdeckCapability } from "../domain/capability.js";
 import { isFableModel } from "../domain/policy.js";
 import {
@@ -40,9 +49,68 @@ export const AgentWaitWorkersParamsSchema = AgentActorParamsSchema.extend({
     sessionId: z.uuid(),
     completionTarget: z.number().int().positive().default(1),
   })).min(1).max(MAX_FANOUT_BATCH),
-  timeoutSeconds: z.number().int().min(1).max(600).default(300),
+  timeoutSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(DEFAULT_WAIT_SECONDS),
   maxResultChars: z.number().int().min(200).max(4_000).default(1_200),
+  /** Ticket from a previous segment of the same logical wait; omit to start a new one. */
+  waitId: z.uuid().optional(),
 });
+export const AgentListThreadsParamsSchema = AgentActorParamsSchema.extend({
+  view: z.enum(["status", "full"]).default("status"),
+  limit: z.number().int().min(1).max(MAX_THREAD_PAGE).default(DEFAULT_THREAD_PAGE),
+  cursor: z.number().int().nonnegative().default(0),
+});
+
+export interface ThreadStatusRecord {
+  id: string;
+  name?: string;
+  provider: string;
+  executionState: SessionRecord["executionState"];
+  attentionState?: SessionRecord["attentionState"];
+}
+
+export interface ThreadListPage {
+  view: "status" | "full";
+  threads: Array<ThreadStatusRecord | SessionRecord>;
+  total: number;
+  cursor: number;
+  returned: number;
+  nextCursor?: number;
+}
+
+/** Why one wait call came back, independent of whether any worker is still running. */
+export type WaitState =
+  /** Every target reached a terminal state. Nothing is outstanding. */
+  | "settled"
+  /** The caller's whole `timeoutSeconds` budget elapsed. A normal timeout, not a failure. */
+  | "timed-out"
+  /** This transport segment ended first; the logical wait is still open and resumable. */
+  | "incomplete";
+
+export interface WaitEnvelope {
+  waitId: string;
+  state: WaitState;
+  resumed: boolean;
+  timeoutSeconds: number;
+  elapsedSeconds: number;
+  remainingSeconds: number;
+  segmentSeconds: number;
+  resume?: {
+    tool: "cyberdeck_workers_wait";
+    waitId: string;
+    reason: string;
+  };
+}
+
+interface PendingWait {
+  waitId: string;
+  actorSessionId: string;
+  startedAtMs: number;
+  deadlineMs: number;
+  timeoutSeconds: number;
+}
+
+/** How long a finished ticket stays resolvable so a late resume gets a truthful answer. */
+const WAIT_TICKET_GRACE_MS = 60_000;
 
 export interface WorkerStartResult {
   sessionId: string;
@@ -71,24 +139,53 @@ export class AgentControlError extends Error {
   }
 }
 
+export interface AgentControlOptions {
+  /** Injected for tests; production reads the wall clock. */
+  now?: () => number;
+  /** Longest single transport segment. Must stay under the tightest MCP client call deadline. */
+  segmentSeconds?: number;
+}
+
 export class AgentControlService {
   private readonly threadCursors = new Map<string, number>();
+  private readonly pendingWaits = new Map<string, PendingWait>();
+  private readonly now: () => number;
+  private readonly segmentSeconds: number;
 
   constructor(
     private readonly registry: SessionRegistry,
     private readonly orchestrators: OrchestratorStore,
     private readonly transcripts: ThreadTranscriptStore,
     private readonly workerPreferences?: WorkerPreferenceStore,
-  ) {}
+    options: AgentControlOptions = {},
+  ) {
+    this.now = options.now ?? (() => Date.now());
+    this.segmentSeconds = Math.max(1, Math.min(options.segmentSeconds ?? MAX_WAIT_SEGMENT_SECONDS, MAX_WAIT_SECONDS));
+  }
 
-  async listThreads(actorSessionId: string): Promise<SessionRecord[]> {
-    const binding = await this.requireBinding(actorSessionId);
+  async listThreads(input: string | z.input<typeof AgentListThreadsParamsSchema>): Promise<ThreadListPage> {
+    const request = AgentListThreadsParamsSchema.parse(
+      typeof input === "string" ? { actorSessionId: input } : input,
+    );
+    const binding = await this.requireBinding(request.actorSessionId);
     this.requireCapability(
       binding.grant,
       "thread.list",
       binding.scope.kind === "workspace" ? { cwd: binding.scope.cwd } : {},
     );
-    return this.registry.list().filter((record) => record.id !== actorSessionId && inScope(binding.grant.scope, record));
+    const visible = this.registry.list().filter((record) =>
+      record.id !== request.actorSessionId && inScope(binding.grant.scope, record)
+    );
+    const page = visible.slice(request.cursor, request.cursor + request.limit);
+    const nextCursor = request.cursor + page.length;
+    return {
+      view: request.view,
+      threads: page.map((record) => request.view === "status" ? statusRecord(record) : boundedRecord(record)),
+      total: visible.length,
+      cursor: request.cursor,
+      returned: page.length,
+      ...(nextCursor < visible.length ? { nextCursor } : {}),
+    };
   }
 
   async readThread(
@@ -185,18 +282,101 @@ export class AgentControlService {
     return results;
   }
 
-  async waitForWorkers(input: z.input<typeof AgentWaitWorkersParamsSchema>) {
+  /**
+   * Waits for one logical `timeoutSeconds` budget, but never blocks a single transport call longer
+   * than `segmentSeconds`. When the segment ends first the caller gets a normal structured result
+   * plus a ticket, so an accepted 600-second wait is honored across calls instead of being killed
+   * by an MCP client deadline the caller cannot see or configure.
+   */
+  async waitForWorkers(input: z.input<typeof AgentWaitWorkersParamsSchema>): Promise<{
+    timedOut: boolean;
+    results: Awaited<ReturnType<SessionRegistry["waitForWorkerResults"]>>["results"];
+    wait: WaitEnvelope;
+  }> {
     const request = AgentWaitWorkersParamsSchema.parse(input);
     const binding = await this.requireBinding(request.actorSessionId);
     for (const target of request.targets) {
       const worker = this.registry.get(target.sessionId);
       this.requireCapability(binding.grant, "thread.read", worker);
     }
-    return this.registry.waitForWorkerResults(
+
+    const pending = this.openWait(request);
+    const startMs = this.now();
+    const remainingMs = Math.max(0, pending.wait.deadlineMs - startMs);
+    const segmentMs = Math.min(remainingMs, this.segmentSeconds * 1_000);
+    const outcome = await this.registry.waitForWorkerResults(
       request.targets,
-      request.timeoutSeconds * 1_000,
+      segmentMs,
       request.maxResultChars,
     );
+
+    const endMs = this.now();
+    const remainingAfterMs = Math.max(0, pending.wait.deadlineMs - endMs);
+    const state: WaitState = outcome.timedOut === false
+      ? "settled"
+      : remainingAfterMs === 0
+        ? "timed-out"
+        : "incomplete";
+    if (state === "incomplete") {
+      this.pendingWaits.set(pending.wait.waitId, pending.wait);
+    } else {
+      this.pendingWaits.delete(pending.wait.waitId);
+    }
+    return {
+      // A caller that reads only this flag must never mistake a segment boundary for completion,
+      // so anything short of "every target settled" reports as a timeout.
+      timedOut: state !== "settled",
+      results: outcome.results,
+      wait: {
+        waitId: pending.wait.waitId,
+        state,
+        resumed: pending.resumed,
+        timeoutSeconds: pending.wait.timeoutSeconds,
+        elapsedSeconds: Math.round((endMs - pending.wait.startedAtMs) / 1_000),
+        remainingSeconds: Math.round(remainingAfterMs / 1_000),
+        segmentSeconds: Math.round(segmentMs / 1_000),
+        ...(state === "incomplete"
+          ? {
+            resume: {
+              tool: "cyberdeck_workers_wait" as const,
+              waitId: pending.wait.waitId,
+              reason: "transport segment ended; the logical wait is still open. Call again with this waitId and the same targets.",
+            },
+          }
+          : {}),
+      },
+    };
+  }
+
+  /** Resolves the ticket for this call, expiring stale ones so a resume cannot inherit a dead clock. */
+  private openWait(request: z.infer<typeof AgentWaitWorkersParamsSchema>): {
+    wait: PendingWait;
+    resumed: boolean;
+  } {
+    const now = this.now();
+    for (const [waitId, wait] of this.pendingWaits) {
+      if (wait.deadlineMs + WAIT_TICKET_GRACE_MS < now) this.pendingWaits.delete(waitId);
+    }
+    if (request.waitId !== undefined) {
+      const existing = this.pendingWaits.get(request.waitId);
+      if (existing !== undefined) {
+        if (existing.actorSessionId !== request.actorSessionId) {
+          throw new AgentControlError(
+            "ACTOR_NOT_AUTHORIZED",
+            `Wait ${request.waitId} belongs to another orchestrator`,
+          );
+        }
+        return { wait: existing, resumed: true };
+      }
+    }
+    const wait: PendingWait = {
+      waitId: randomUUID(),
+      actorSessionId: request.actorSessionId,
+      startedAtMs: now,
+      deadlineMs: now + request.timeoutSeconds * 1_000,
+      timeoutSeconds: request.timeoutSeconds,
+    };
+    return { wait, resumed: false };
   }
 
   private async requireBinding(actorSessionId: string) {
@@ -216,6 +396,37 @@ export class AgentControlService {
       throw new AgentControlError("CAPABILITY_DENIED", `${capability} is outside this orchestrator's grant`);
     }
   }
+}
+
+/** Everything a liveness or duplicate-safety check needs, and nothing that grows with transcript size. */
+function statusRecord(record: SessionRecord): ThreadStatusRecord {
+  return {
+    id: record.id,
+    ...(record.name === undefined ? {} : { name: record.name }),
+    provider: record.provider,
+    executionState: record.executionState,
+    ...(record.attentionState === undefined ? {} : { attentionState: record.attentionState }),
+  };
+}
+
+/**
+ * The full view still has to fit a caller's token budget. `latestPreview` is the field that made a
+ * 19-thread listing 55k characters, and `launchRecord` is spawn forensics no lister asked for.
+ */
+function boundedRecord(record: SessionRecord): SessionRecord {
+  const { launchRecord: _launchRecord, ...rest } = record;
+  return {
+    ...rest,
+    ...(record.latestPreview === undefined
+      ? {}
+      : { latestPreview: truncatePreview(record.latestPreview) }),
+  };
+}
+
+function truncatePreview(preview: string): string {
+  return preview.length <= THREAD_PREVIEW_CHARS
+    ? preview
+    : `${preview.slice(0, THREAD_PREVIEW_CHARS - 1)}…`;
 }
 
 function inScope(scope: { kind: string; cwd?: string }, record: SessionRecord): boolean {
