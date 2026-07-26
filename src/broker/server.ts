@@ -268,6 +268,12 @@ export class BrokerServer {
         return this.requireOrchestrators().fableWorkers(FableWorkersRequestSchema.parse(frame.params));
       case "orchestrator.cavemanWorkers":
         return this.requireOrchestrators().cavemanWorkers(CavemanWorkersRequestSchema.parse(frame.params));
+      // Read-only self-description for a Cyberdeck MCP server that needs to say precisely why it
+      // cannot act. It grants nothing and is deliberately answerable for an unbound actor.
+      case "agent.actor.describe": {
+        const { actorSessionId } = AgentActorParamsSchema.parse(frame.params);
+        return this.requireAgentControl().describeActor(actorSessionId);
+      }
       case "agent.thread.list": {
         const { actorSessionId } = AgentActorParamsSchema.parse(frame.params);
         return this.requireAgentControl().listThreads(actorSessionId);

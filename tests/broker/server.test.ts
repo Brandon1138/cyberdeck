@@ -392,6 +392,38 @@ describe("BrokerServer", () => {
     }
   });
 
+  it("describes an actor over the wire so an MCP server can name its own scope", async () => {
+    const { server, socketPath } = await harness();
+    const client = await TestClient.open(socketPath);
+    try {
+      const primary = await client.request<{ session: { id: string } }>("orchestrator.ensure", {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        cwd: "/tmp/repo",
+        scope: "fleet",
+      });
+
+      await expect(client.request("agent.actor.describe", {
+        actorSessionId: primary.session.id,
+      })).resolves.toMatchObject({
+        status: "bound",
+        bound: true,
+        familyKey: "fleet",
+        familyHolderSessionId: primary.session.id,
+        executionState: "active",
+      });
+      // Answerable for an actor the broker has never heard of: an MCP server has to be able to
+      // tell "wrong broker" from "no tools registered" without guessing.
+      await expect(client.request("agent.actor.describe", {
+        actorSessionId: "66666666-6666-4666-8666-666666666666",
+      })).resolves.toMatchObject({ status: "unknown-session", bound: false });
+    } finally {
+      client.socket.destroy();
+      await server.close();
+    }
+  });
+
   it("stops and deletes an orchestrator tree while clearing its durable binding", async () => {
     const { server, socketPath, orchestratorStore, workerPreferences } = await harness();
     const client = await TestClient.open(socketPath);
