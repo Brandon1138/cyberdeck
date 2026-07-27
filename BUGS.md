@@ -1,3 +1,47 @@
+## Open: a decision gate is cleared by an answer to any checkpoint, not the matching one
+
+Found on 2026-07-27 by the worker-coordination integration matrix (MIK-55 Wave 2d). An
+`OwnershipSubject` carries a single `decisionGate`, and `WorkerCoordinationService.requestCheckpoint`
+overwrites it whenever a `decision-gate` checkpoint is opened. The answer path in `submitEvent`
+clears the gate on any answered `decision-gate` checkpoint without comparing the answered
+`correlationId` against `decisionGate.correlationId`.
+
+Repro: open two `decision-gate` checkpoints (`gate:a`, then `gate:b`) on one worker, then submit a
+CHECKPOINT event carrying `checkpointCorrelationId: "gate:a"`. Expected `decisionGate` to stay
+`{ state: "decision-gate", correlationId: "gate:b" }`; actual is `{ state: "none" }` while `gate:b`
+is still pending. A worker that is still blocked therefore reads as resumed. The current behaviour is
+pinned by `tests/integration/worker-coordination-events.test.ts` so the fix has a failing assertion
+to flip. Not fixed here: correcting it means deciding whether a subject may hold several gates at
+once, which is a substrate design change rather than a minimal diff.
+
+## Open: `inactive-controller` adoption is unreachable for a controller that died silently
+
+Found on 2026-07-27 by the same matrix. The `inactive-controller` selector only returns subjects when
+a `disconnected` liveness observation exists for that controller and the grace period has elapsed
+since `observedAt`. A controller whose lease simply timed out — no observed disconnect — is swept to
+`orphaned` by `expireLeases`, yet the selector still resolves to an empty set, so an adopter that
+knows only the dead controller's id gets zero outcomes and no explanation.
+
+Repro: register a worker under a controller, never report liveness, advance past the lease TTL, run
+`expireLeases` (the worker becomes `orphaned`), then `adopt` with
+`{ scope: "inactive-controller", controllerId }`. Expected the orphan to be selected; actual is
+`outcomes: []`. The `group`/`single` selectors do recover the same worker, so this is a reachability
+gap rather than data loss. Not fixed here: the selector's grace check exists to stop a live
+controller being adopted out from under itself, and relaxing it correctly is a substrate decision.
+
+## Resolved: one failed append poisoned every later write to the coordination log
+
+Found on 2026-07-27 by the same matrix. `WorkerCoordinationStore` serialises appends through a
+`writeTail` promise chained with `.then(write)`. A single transient failure — a full disk, a state
+directory replaced out from under the broker — left `writeTail` rejected forever, so every subsequent
+`append` re-threw the original error without ever attempting a write, and the broker could never
+recover without a restart even after the underlying fault was repaired.
+
+Resolved by chaining on settle rather than on success (`this.writeTail.then(write, write)`), matching
+the error-tolerant serialisation the service already uses for its own mutation queue. A failed
+mutation still rejects to its caller and still leaves no in-memory or on-disk trace; the next
+mutation now runs.
+
 ## Resolved: Esc and Option+Enter were still wrong after the attach-layer fix
 
 Observed on 2026-07-26, after `4cb2b93` had already made `src/client/attach.ts` forward Esc and every
