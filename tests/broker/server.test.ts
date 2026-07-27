@@ -224,7 +224,9 @@ describe("BrokerServer", () => {
       });
       const listed = await client.request<Array<{ id: string }>>("session.list", {});
       expect(listed.map(({ id }) => id)).toEqual([parent.id, second.id]);
-      expect(ptyFactory.mock.calls[0]?.[0]).toMatchObject({ args: ["Inspect the failure"] });
+      const launchPrompt = (ptyFactory.mock.calls[0]?.[0] as { args: string[] }).args[0];
+      expect(launchPrompt).toMatch(/^Inspect the failure\n/);
+      expect(launchPrompt).toContain("CYBERDECK WORKER REPORTING");
       const thread = await client.request<{ events: Array<{ text?: string }>; nextCursor: number }>(
         "thread.read",
         { sessionId: parent.id },
