@@ -98,7 +98,7 @@ export class WorkerCoordinationStore {
       receipts: transaction.receipts ?? [],
     });
     assertSupportedVersions(envelope);
-    this.writeTail = this.writeTail.then(async () => {
+    const write = async (): Promise<void> => {
       const handle = await openPrivateAppendFile(this.path);
       try {
         await handle.write(`${JSON.stringify(envelope)}\n`, undefined, "utf8");
@@ -106,7 +106,9 @@ export class WorkerCoordinationStore {
       } finally {
         await handle.close();
       }
-    });
+    };
+    // Chain on settle, not on success: one failed append must not poison every later append.
+    this.writeTail = this.writeTail.then(write, write);
     await this.writeTail;
   }
 
