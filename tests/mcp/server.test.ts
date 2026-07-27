@@ -54,7 +54,14 @@ describe("Cyberdeck MCP server", () => {
         ]),
       },
     });
-    const tools = (response?.result as { tools: Array<{ name: string; inputSchema: { properties?: Record<string, { enum?: string[]; maxItems?: number }> } }> }).tools;
+    const tools = (response?.result as {
+      tools: Array<{
+        name: string;
+        inputSchema: {
+          properties?: Record<string, { enum?: string[]; maxItems?: number; default?: unknown }>;
+        };
+      }>;
+    }).tools;
     const workerStart = tools.find(({ name }) => name === "cyberdeck_worker_start");
     expect(workerStart?.inputSchema.properties?.provider?.enum).toEqual([
       "codex",
@@ -78,6 +85,7 @@ describe("Cyberdeck MCP server", () => {
     const workersWait = tools.find(({ name }) => name === "cyberdeck_workers_wait");
     expect(workersStart?.inputSchema.properties?.workers?.maxItems).toBe(64);
     expect(workersWait?.inputSchema.properties?.targets?.maxItems).toBe(64);
+    expect(workersWait?.inputSchema.properties?.settleOnIntervention?.default).toBe(false);
   });
 
   it("routes worker reporting wrappers through one compact submission method", async () => {
@@ -249,6 +257,7 @@ describe("Cyberdeck MCP server", () => {
     expect(wait?.inputSchema.properties).toHaveProperty("waitId");
     expect(wait?.description).toContain("90s");
     expect(wait?.description).toContain("incomplete");
+    expect(wait?.description).toContain("intervention-required");
   });
 
   it("forwards paging and projection arguments to the broker listing", async () => {

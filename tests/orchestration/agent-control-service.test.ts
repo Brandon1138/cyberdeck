@@ -565,6 +565,254 @@ describe("AgentControlService", () => {
     );
   });
 
+  it.each(["EXCEPTION", "DECISION_REQUEST"] as const)(
+    "settles early with bounded %s event summaries",
+    async (kind) => {
+      const result = {
+        timedOut: true,
+        results: [{ sessionId: WORKER, status: "working" as const }],
+      };
+      const waitForWorkerResults = vi.fn(async () => result);
+      let projectionCount = 0;
+      const projectEvents = vi.fn(() => ({
+        events: projectionCount++ === 0 ? [] : [{
+          eventId: `event-${kind}`,
+          workerId: WORKER,
+          taskId: "task-55",
+          waveId: "wave-2c",
+          sequence: 3,
+          kind,
+          severity: kind === "EXCEPTION" ? "error" : "warning",
+          summary: `${kind} needs Orc input`,
+          continuation: "awaiting-response",
+          recommendedAction: "Review bounded facts",
+          timestamp: now,
+          // Persistence-only and raw-ish fields must never cross the wait contract.
+          submissionHash: "a".repeat(64),
+          evidenceRefs: ["transcript:private"],
+        }],
+        nextCursor: 1,
+        hasMore: false,
+      }));
+      const coordination = {
+        listSubjects: () => [{
+          subjectId: WORKER,
+          subjectKind: "worker",
+          resources: { sessionId: WORKER },
+        }],
+        projectEvents,
+      };
+      const service = new AgentControlService(
+        { get: () => worker, waitForWorkerResults } as never,
+        { findBySessionId: vi.fn(async () => binding) } as never,
+        { read: vi.fn() } as never,
+        undefined,
+        { workerCoordination: coordination as never },
+      );
+
+      const outcome = await service.waitForWorkers({
+        actorSessionId: ACTOR,
+        targets: [{ sessionId: WORKER, completionTarget: 1 }],
+        timeoutSeconds: 30,
+        settleOnIntervention: true,
+      });
+
+      expect(outcome).toMatchObject({
+        timedOut: false,
+        results: result.results,
+        wait: { state: "intervention-required", segmentSeconds: 0 },
+        intervention: {
+          truncated: false,
+          events: [{
+            eventId: `event-${kind}`,
+            workerId: WORKER,
+            kind,
+            summary: `${kind} needs Orc input`,
+            recommendedAction: "Review bounded facts",
+          }],
+        },
+      });
+      expect(outcome.intervention?.events[0]).not.toHaveProperty("submissionHash");
+      expect(outcome.intervention?.events[0]).not.toHaveProperty("evidenceRefs");
+      expect(projectEvents).toHaveBeenCalledWith(expect.objectContaining({
+        limit: 16,
+        filter: expect.objectContaining({
+          kinds: ["EXCEPTION", "DECISION_REQUEST"],
+          intervention: "unresolved",
+        }),
+      }));
+    },
+  );
+
+  it("keeps no-flag wait output and registry behavior byte-compatible", async () => {
+    const waitForWorkerResults = vi.fn(async () => ({
+      timedOut: false,
+      results: [{ sessionId: WORKER, status: "completed", text: "done" }],
+    }));
+    const projectEvents = vi.fn(() => {
+      throw new Error("no-flag wait must not inspect coordination events");
+    });
+    const service = new AgentControlService(
+      { get: () => worker, waitForWorkerResults } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read: vi.fn() } as never,
+      undefined,
+      {
+        workerCoordination: {
+          listSubjects: vi.fn(),
+          projectEvents,
+        } as never,
+      },
+    );
+
+    const outcome = await service.waitForWorkers({
+      actorSessionId: ACTOR,
+      targets: [{ sessionId: WORKER, completionTarget: 1 }],
+      timeoutSeconds: 30,
+      maxResultChars: 800,
+    });
+    const normalized = {
+      ...outcome,
+      wait: { ...outcome.wait, waitId: "<wait-id>" },
+    };
+
+    expect(JSON.stringify(normalized)).toBe(JSON.stringify({
+      timedOut: false,
+      results: [{ sessionId: WORKER, status: "completed", text: "done" }],
+      wait: {
+        waitId: "<wait-id>",
+        state: "settled",
+        resumed: false,
+        timeoutSeconds: 30,
+        elapsedSeconds: 0,
+        remainingSeconds: 30,
+        segmentSeconds: 30,
+      },
+    }));
+    expect(waitForWorkerResults).toHaveBeenCalledOnce();
+    expect(waitForWorkerResults).toHaveBeenCalledWith(
+      [{ sessionId: WORKER, completionTarget: 1 }],
+      30_000,
+      800,
+    );
+    expect(projectEvents).not.toHaveBeenCalled();
+  });
+
+  it("preserves completed-result replay idempotency before intervention projection", async () => {
+    const replay = {
+      timedOut: false,
+      results: [{
+        sessionId: WORKER,
+        status: "completed" as const,
+        retrieval: "replay" as const,
+        text: "already completed",
+      }],
+    };
+    const waitForWorkerResults = vi.fn(async () => replay);
+    const projectEvents = vi.fn(() => {
+      throw new Error("settled replay must win");
+    });
+    const service = new AgentControlService(
+      { get: () => worker, waitForWorkerResults } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read: vi.fn() } as never,
+      undefined,
+      {
+        workerCoordination: {
+          listSubjects: vi.fn(),
+          projectEvents,
+        } as never,
+      },
+    );
+
+    await expect(service.waitForWorkers({
+      actorSessionId: ACTOR,
+      targets: [{ sessionId: WORKER, completionTarget: 1 }],
+      settleOnIntervention: true,
+    })).resolves.toMatchObject({
+      timedOut: false,
+      wait: { state: "settled" },
+      results: [{ retrieval: "replay", text: "already completed" }],
+    });
+    expect(waitForWorkerResults).toHaveBeenCalledOnce();
+    expect(projectEvents).not.toHaveBeenCalled();
+  });
+
+  it("preserves intervention opt-in when resuming across transport segments", async () => {
+    let clock = 0;
+    let pendingIntervention = false;
+    const waitForWorkerResults = vi.fn(async (_targets: unknown, timeoutMs: number) => {
+      clock += timeoutMs;
+      return {
+        timedOut: true,
+        results: [{ sessionId: WORKER, status: "working" as const }],
+      };
+    });
+    const coordination = {
+      listSubjects: () => [{
+        subjectId: WORKER,
+        subjectKind: "worker",
+        resources: { sessionId: WORKER },
+      }],
+      projectEvents: () => ({
+        events: pendingIntervention
+          ? [{
+            eventId: "pending-decision",
+            workerId: WORKER,
+            taskId: "task-55",
+            sequence: 4,
+            kind: "DECISION_REQUEST",
+            severity: "warning",
+            summary: "Choose rollout path",
+            continuation: "awaiting-response",
+            timestamp: now,
+          }]
+          : [],
+        nextCursor: 0,
+        hasMore: false,
+      }),
+    };
+    const service = new AgentControlService(
+      { get: () => worker, waitForWorkerResults } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read: vi.fn() } as never,
+      undefined,
+      {
+        now: () => clock,
+        segmentSeconds: 90,
+        interventionPollMs: 90_000,
+        workerCoordination: coordination as never,
+      },
+    );
+
+    const first = await service.waitForWorkers({
+      actorSessionId: ACTOR,
+      targets: [{ sessionId: WORKER, completionTarget: 1 }],
+      timeoutSeconds: 600,
+      settleOnIntervention: true,
+    });
+    expect(first.wait).toMatchObject({ state: "incomplete", resumed: false });
+
+    pendingIntervention = true;
+    const resumed = await service.waitForWorkers({
+      actorSessionId: ACTOR,
+      targets: [{ sessionId: WORKER, completionTarget: 1 }],
+      timeoutSeconds: 600,
+      waitId: first.wait.waitId,
+    });
+    expect(resumed).toMatchObject({
+      timedOut: false,
+      wait: {
+        waitId: first.wait.waitId,
+        state: "intervention-required",
+        resumed: true,
+      },
+      intervention: {
+        events: [{ eventId: "pending-decision", kind: "DECISION_REQUEST" }],
+      },
+    });
+  });
+
   it("honors a 600-second wait across segments that each return before an MCP client deadline", async () => {
     let clock = 0;
     const waitForWorkerResults = vi.fn(async (_targets: unknown, timeoutMs: number) => {

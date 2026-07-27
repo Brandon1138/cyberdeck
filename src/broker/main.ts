@@ -151,7 +151,7 @@ export async function runBroker(
     orchestratorStore,
     transcripts,
     workerPreferences,
-    { audit: journal, providerPermissions },
+    { audit: journal, providerPermissions, workerCoordination: workerCoordination.service },
   );
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
   instructions.start();
