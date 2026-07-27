@@ -165,6 +165,190 @@ describe("AgentControlService", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({ effort: "low" }), "Return 8 + 1000");
   });
 
+  it("resolves Scout profile into fixed Tier 1 Composer state and structured prompt", async () => {
+    const start = vi.fn(async (request) => ({
+      ...worker,
+      ...request,
+      provider: "cursor",
+      model: "composer",
+      id: WORKER,
+      effectiveState: {
+        lifecycle: "worker",
+        profile: "scout",
+        tier: 1,
+        provider: "cursor",
+        model: "composer",
+        permissions: "read-only",
+        approvalMode: "auto",
+        leasePolicy: request.leasePolicy,
+      },
+    }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      profile: "scout",
+      cwd: "/repo/one",
+      brief: {
+        objective: "Locate launch validation",
+        scope: ["src/providers/cursor/**"],
+        questions: ["How is /run-everything verified?"],
+        stopCondition: "Return source-backed answer",
+        budget: { maxWallClockMs: 30_000, maxTokens: 4_000 },
+      },
+    })).resolves.toMatchObject({
+      sessionId: WORKER,
+      provider: "cursor",
+      model: "composer",
+      profile: "scout",
+      effectiveState: {
+        lifecycle: "worker",
+        profile: "scout",
+        tier: 1,
+        permissions: "read-only",
+        approvalMode: "auto",
+        leasePolicy: "expire-and-discard",
+      },
+    });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "cursor",
+      model: "composer",
+      sandbox: "read-only",
+      approvalMode: "auto",
+      kind: "worker",
+      profile: "scout",
+      leasePolicy: "expire-and-discard",
+    }), expect.stringContaining("CYBERDECK_SCOUT_REPORT_BEGIN"));
+  });
+
+  it("rejects incomplete Scout briefs before launch", () => {
+    expect(() => AgentStartWorkerParamsSchema.parse({
+      actorSessionId: ACTOR,
+      profile: "scout",
+      cwd: "/repo/one",
+      brief: {
+        objective: "Inspect",
+        scope: ["src/**"],
+        questions: [],
+        stopCondition: "Answer",
+        budget: { maxWallClockMs: 30_000, maxTokens: 4_000 },
+      },
+    })).toThrow();
+  });
+
+  it("rejects provider overrides on fixed Scout profile", () => {
+    expect(() => AgentStartWorkerParamsSchema.parse({
+      actorSessionId: ACTOR,
+      profile: "scout",
+      provider: "claude",
+      cwd: "/repo/one",
+      brief: {
+        objective: "Inspect",
+        scope: ["src/**"],
+        questions: ["Where is launch policy?"],
+        stopCondition: "Answer",
+        budget: { maxWallClockMs: 30_000, maxTokens: 4_000 },
+      },
+    })).toThrow();
+  });
+
+  it("rejects Scout-only fields on a standard worker instead of stripping them", () => {
+    expect(() => AgentStartWorkerParamsSchema.parse({
+      actorSessionId: ACTOR,
+      provider: "cursor",
+      model: "composer",
+      cwd: "/repo/one",
+      sandbox: "read-only",
+      prompt: "Inspect",
+      brief: {
+        objective: "Inspect",
+        scope: ["src/**"],
+        questions: ["Where is launch policy?"],
+        stopCondition: "Answer",
+        budget: { maxWallClockMs: 30_000, maxTokens: 4_000 },
+      },
+      leasePolicy: "orphan-for-adoption",
+    })).toThrow();
+    expect(() => AgentStartWorkersParamsSchema.parse({
+      actorSessionId: ACTOR,
+      workers: [{
+        provider: "cursor",
+        cwd: "/repo/one",
+        sandbox: "read-only",
+        prompt: "Inspect",
+        leasePolicy: "expire-and-discard",
+      }],
+    })).toThrow();
+  });
+
+  it("rejects Scout scope entries that escape cwd", async () => {
+    const start = vi.fn();
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      profile: "scout",
+      cwd: "/repo/one",
+      brief: {
+        objective: "Inspect sibling",
+        scope: ["../two/**"],
+        questions: ["What is there?"],
+        stopCondition: "Answer",
+        budget: { maxWallClockMs: 30_000, maxTokens: 4_000 },
+      },
+    })).rejects.toMatchObject({ code: "CAPABILITY_DENIED" });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("starts a dozen Scout profiles concurrently without pane interaction", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const start = vi.fn(async (request) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return {
+        ...worker,
+        ...request,
+        id: crypto.randomUUID(),
+        provider: "cursor",
+        model: "composer",
+      };
+    });
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+    const results = await service.startWorkers({
+      actorSessionId: ACTOR,
+      workers: Array.from({ length: 12 }, (_, index) => ({
+        profile: "scout" as const,
+        cwd: "/repo/one",
+        name: `scout-${index}`,
+        brief: {
+          objective: `Probe ${index}`,
+          scope: ["src/**"],
+          questions: [`Question ${index}`],
+          stopCondition: "Return report",
+          budget: { maxWallClockMs: 30_000, maxTokens: 4_000 },
+        },
+      })),
+    });
+
+    expect(results).toHaveLength(12);
+    expect(results.every((result) => result.ok === true)).toBe(true);
+    expect(maximumActive).toBe(12);
+  });
+
   it("forwards an explicit auto approval request without changing the omitted default", async () => {
     const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
     const service = new AgentControlService(

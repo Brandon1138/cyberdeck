@@ -14,6 +14,12 @@ export interface ProviderSessionTerminal {
   wait(milliseconds: number): Promise<void>;
 }
 
+export interface ProviderSessionInitialization {
+  scoutReadOnlyCanary?: {
+    verifiedAt: string;
+  };
+}
+
 export interface ProviderAdapter {
   readonly id: ProviderId;
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec;
@@ -38,7 +44,10 @@ export interface ProviderAdapter {
    * Provider-native setup after PTY creation and before a deferred initial prompt.
    * Implementations must verify resulting state and clean up any modal input on failure.
    */
-  initializeSession?(session: SessionRecord, terminal: ProviderSessionTerminal): Promise<void>;
+  initializeSession?(
+    session: SessionRecord,
+    terminal: ProviderSessionTerminal,
+  ): Promise<ProviderSessionInitialization | void>;
   /** Re-open the exact provider-native conversation represented by a terminal Cyberdeck thread. */
   buildResumeSpec(session: SessionRecord): ProviderLaunchSpec;
   /** Encode one logical prompt submission for the provider's negotiated interactive terminal. */

@@ -33,3 +33,21 @@ export class ProviderPermissionModeNotAppliedError extends Error {
     this.name = "ProviderPermissionModeNotAppliedError";
   }
 }
+
+export class ProviderReadOnlyCanaryError extends Error {
+  readonly code = "PROVIDER_READ_ONLY_CANARY_FAILED";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderReadOnlyCanaryError";
+  }
+}
+
+export class ProviderMcpIsolationError extends Error {
+  readonly code = "PROVIDER_MCP_ISOLATION_FAILED";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderMcpIsolationError";
+  }
+}

@@ -61,6 +61,10 @@ describe("Cyberdeck MCP server", () => {
     ]);
     expect(workerStart?.inputSchema.properties).toHaveProperty("effort");
     expect(workerStart?.inputSchema.properties?.approvalMode?.enum).toEqual(["prompt", "auto"]);
+    expect(workerStart?.inputSchema.properties?.profile?.enum).toEqual(["scout"]);
+    expect(workerStart?.inputSchema.properties).toHaveProperty("brief");
+    expect((workerStart?.inputSchema.properties?.leasePolicy as { default?: string } | undefined)?.default)
+      .toBeUndefined();
     const threadRead = tools.find(({ name }) => name === "cyberdeck_thread_read") as {
       inputSchema: { required?: string[]; properties?: { limit?: { maximum?: number; default?: number } } };
     } | undefined;

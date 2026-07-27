@@ -6,6 +6,12 @@ and persisted schemas remain under active alpha development.
 
 ## [Unreleased]
 
+### Added
+
+- Tier 1 Scout workers resolve to Cursor Composer with a verified read-only
+  boundary, isolated MCP state, structured briefs, bounded execution, and
+  broker-owned canonical reports outside the inspected worktree.
+
 ### Fixed
 
 - `workers_wait` no longer accepts a timeout it cannot honor. One logical wait is
@@ -25,6 +31,8 @@ and persisted schemas remain under active alpha development.
 - `threads_list` takes `view`, `limit`, and `cursor`, defaults to a status-only
   projection, and returns a paged envelope. The full view drops `launchRecord` and
   bounds `latestPreview`.
+- Batch worker starts now prepare independent standard and Scout workers
+  concurrently while reserving capacity before provider launch.
 
 ## [0.1.0-alpha.1] - 2026-07-23
 

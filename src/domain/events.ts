@@ -13,6 +13,10 @@ export const BrokerEventTypeSchema = z.enum([
   "session.errored",
   "session.stopped",
   "session.deleted",
+  "scout.report.captured",
+  "scout.budget.exhausted",
+  "scout.canary.verified",
+  "scout.canary.failed",
   "orchestrator.stop.requested",
   "orchestrator.stop.result",
   // Control-plane job/delegation/result/report events. Event `data` carries neutral identifiers and

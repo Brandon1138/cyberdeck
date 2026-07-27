@@ -36,6 +36,7 @@ import { WorkflowService } from "../orchestration/workflow-service.js";
 import { loadBrokerRuntimeConfig } from "../runtime-config.js";
 import { selectExpiredThreads, type ThreadRetentionPolicy } from "../domain/thread-retention.js";
 import type { SessionRecord } from "../domain/session.js";
+import { ScoutReportStore } from "../persistence/scout-report-store.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -78,10 +79,16 @@ export async function retainThreads(
   store: SessionStore,
   policy: ThreadRetentionPolicy,
   now: number = Date.now(),
+  onExpired?: (record: SessionRecord) => Promise<void>,
 ): Promise<SessionRecord[]> {
   const loaded = await store.load();
   const expired = new Set(selectExpiredThreads(loaded, policy, now));
   if (expired.size === 0) return loaded;
+  if (onExpired !== undefined) {
+    await Promise.allSettled(
+      loaded.filter((record) => expired.has(record.id)).map((record) => onExpired(record)),
+    );
+  }
   const retained = loaded.filter((record) => !expired.has(record.id));
   await store.compact(retained);
   return retained;
@@ -103,7 +110,15 @@ export async function runBroker(
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
   const workerPreferences = new WorkerPreferenceStore(stateDirectory);
   const providerPermissions = new ProviderPermissionPreferenceStore(stateDirectory);
-  const recoveredSessions = await retainThreads(sessionStore, config.threadRetention);
+  const scoutReports = new ScoutReportStore(stateDirectory);
+  const recoveredSessions = await retainThreads(
+    sessionStore,
+    config.threadRetention,
+    Date.now(),
+    async (record) => {
+      if (record.profile === "scout") await scoutReports.remove(record.id);
+    },
+  );
   const registry = new SessionRegistry({
     adapters: {
       codex: new CodexProviderAdapter({ mcp }),
@@ -116,6 +131,7 @@ export async function runBroker(
     transcripts,
     store: sessionStore,
     recoveredSessions,
+    scoutReports,
     config,
   });
   await registry.ready();

@@ -166,10 +166,11 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_worker_start",
-    description: "Start one explicit worker and return a compact sessionId/completionTarget. Exact IDs: Codex gpt-5.6-luna|terra|sol; Claude haiku|sonnet|opus|fable; Cursor composer; Antigravity gemini-3.6-flash-low|medium|high with matching effort. approvalMode supports auto for Codex, Claude, and Cursor; omission inherits the operator's persisted provider permission policy when configured. Cursor auto is verified through /run-everything before task submission. Fable requires the operator-controlled worker.start.fable grant. Pass effort for Codex/Claude/Antigravity, omit it for Cursor. Prefer cyberdeck_workers_start for fan-out, then call cyberdeck_workers_wait once.",
+    description: "Start one explicit worker and return sessionId/completionTarget. Set profile scout with cwd plus structured brief for enforced Tier 1 Cursor Composer read-only inspection; provider/model/sandbox/approval are then resolved by Cyberdeck. Otherwise use exact IDs: Codex gpt-5.6-luna|terra|sol; Claude haiku|sonnet|opus|fable; Cursor composer; Antigravity gemini-3.6-flash-low|medium|high with matching effort. Prefer cyberdeck_workers_start for fan-out, then cyberdeck_workers_wait.",
     inputSchema: {
       type: "object",
       properties: {
+        profile: { type: "string", enum: ["scout"] },
         provider: { type: "string", enum: [...CANONICAL_PROVIDER_IDS] },
         model: { type: "string" },
         effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
@@ -177,9 +178,28 @@ const TOOLS = [
         sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
         approvalMode: { type: "string", enum: ["prompt", "auto"] },
         prompt: { type: "string" },
+        brief: scoutBriefInputSchema(),
+        leasePolicy: {
+          type: "string",
+          enum: ["expire-and-discard", "orphan-for-adoption"],
+        },
         name: { type: "string" },
       },
-      required: ["provider", "cwd", "prompt"],
+      required: ["cwd"],
+      oneOf: [
+        {
+          required: ["provider", "prompt"],
+          not: { anyOf: [{ required: ["profile"] }, { required: ["brief"] }, { required: ["leasePolicy"] }] },
+        },
+        {
+          required: ["profile", "brief"],
+          properties: { profile: { const: "scout" } },
+          not: {
+            anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt"]
+              .map((field) => ({ required: [field] })),
+          },
+        },
+      ],
       additionalProperties: false,
     },
   },
@@ -196,6 +216,7 @@ const TOOLS = [
           items: {
             type: "object",
             properties: {
+              profile: { type: "string", enum: ["scout"] },
               provider: { type: "string", enum: [...CANONICAL_PROVIDER_IDS] },
               model: { type: "string" },
               effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
@@ -203,9 +224,28 @@ const TOOLS = [
               sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
               approvalMode: { type: "string", enum: ["prompt", "auto"] },
               prompt: { type: "string" },
+              brief: scoutBriefInputSchema(),
+              leasePolicy: {
+                type: "string",
+                enum: ["expire-and-discard", "orphan-for-adoption"],
+              },
               name: { type: "string" },
             },
-            required: ["provider", "cwd", "prompt"],
+            required: ["cwd"],
+            oneOf: [
+              {
+                required: ["provider", "prompt"],
+                not: { anyOf: [{ required: ["profile"] }, { required: ["brief"] }, { required: ["leasePolicy"] }] },
+              },
+              {
+                required: ["profile", "brief"],
+                properties: { profile: { const: "scout" } },
+                not: {
+                  anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt"]
+                    .map((field) => ({ required: [field] })),
+                },
+              },
+            ],
             additionalProperties: false,
           },
         },
@@ -326,6 +366,39 @@ const TOOLS = [
     },
   },
 ] as const;
+
+function scoutBriefInputSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      objective: { type: "string", minLength: 1, maxLength: 4_096 },
+      scope: {
+        type: "array",
+        minItems: 1,
+        maxItems: 256,
+        items: { type: "string", minLength: 1, maxLength: 4_096 },
+      },
+      questions: {
+        type: "array",
+        minItems: 1,
+        maxItems: 64,
+        items: { type: "string", minLength: 1, maxLength: 4_096 },
+      },
+      stopCondition: { type: "string", minLength: 1, maxLength: 4_096 },
+      budget: {
+        type: "object",
+        properties: {
+          maxWallClockMs: { type: "integer", minimum: 1, maximum: 86_400_000 },
+          maxTokens: { type: "integer", minimum: 1, maximum: 10_000_000 },
+        },
+        required: ["maxWallClockMs", "maxTokens"],
+        additionalProperties: false,
+      },
+    },
+    required: ["objective", "scope", "questions", "stopCondition", "budget"],
+    additionalProperties: false,
+  };
+}
 
 export async function runMcpServer(
   context: McpServerContext,

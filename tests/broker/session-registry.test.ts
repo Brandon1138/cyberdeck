@@ -679,6 +679,38 @@ describe("SessionRegistry", () => {
     });
   });
 
+  it("reserves worker capacity while concurrent provider launches prepare", async () => {
+    let releaseFirstPrepare!: () => void;
+    const firstPrepare = new Promise<void>((resolve) => {
+      releaseFirstPrepare = resolve;
+    });
+    let preparing = 0;
+    const slowAdapter: ProviderAdapter = {
+      ...adapters.codex,
+      prepareLaunch: async () => {
+        preparing += 1;
+        if (preparing === 1) await firstPrepare;
+      },
+    };
+    const { registry } = harness({
+      maxConcurrentWorkers: 1,
+      adapters: { codex: slowAdapter },
+    });
+    const first = registry.start(request({ kind: "worker" }));
+    await vi.waitFor(() => expect(preparing).toBe(1));
+
+    try {
+      await expect(registry.start(request({ kind: "worker" }))).rejects.toMatchObject({
+        code: "MAX_CONCURRENT_WORKERS",
+        message: "Worker limit reached: 1 active / 1 allowed",
+      });
+    } finally {
+      releaseFirstPrepare();
+    }
+    await expect(first).resolves.toMatchObject({ executionState: "active" });
+    expect(preparing).toBe(1);
+  });
+
   it("rejects a syntactically valid provider without an interactive adapter", async () => {
     const { registry } = harness();
     await expect(registry.start(request({ provider: "cursor" }))).rejects.toMatchObject({
