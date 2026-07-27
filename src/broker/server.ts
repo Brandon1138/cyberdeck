@@ -61,6 +61,11 @@ import {
   type WorkerControlService,
 } from "../orchestration/worker-control-service.js";
 import type { WorkerCoordinationService } from "./worker-coordination.js";
+import {
+  WorkerCheckpointRequestParamsSchema,
+  WorkerEventSubmitParamsSchema,
+  type WorkerEventChannel,
+} from "./worker-event-channel.js";
 
 const SessionIdParamsSchema = z.object({ sessionId: z.uuid() });
 const SendParamsSchema = SessionIdParamsSchema.extend({ data: z.string() });
@@ -111,6 +116,7 @@ export interface BrokerServerOptions {
   /** Internal domain substrate. Orchestrator access goes through workerControl, never directly. */
   workerCoordination?: WorkerCoordinationService;
   workerControl?: WorkerControlService;
+  workerEvents?: WorkerEventChannel;
   onShutdown?: () => void;
 }
 
@@ -329,6 +335,12 @@ export class BrokerServer {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         return this.requireInstructions().flush(sessionId);
       }
+      case "worker.event.submit":
+        return this.requireWorkerEvents().submit(WorkerEventSubmitParamsSchema.parse(frame.params));
+      case "worker.checkpoint.request":
+        return this.requireWorkerEvents().requestCheckpoint(
+          WorkerCheckpointRequestParamsSchema.parse(frame.params),
+        );
       case "agent.workflow.create":
         return this.requireWorkflows().create(CreateWorkflowParamsSchema.parse(frame.params));
       case "agent.workflow.list": {
@@ -588,6 +600,15 @@ export class BrokerServer {
       throw Object.assign(new Error("Workflow service is not available"), { code: "METHOD_NOT_FOUND" });
     }
     return this.options.workflows;
+  }
+
+  private requireWorkerEvents(): WorkerEventChannel {
+    if (this.options.workerEvents === undefined) {
+      throw Object.assign(new Error("Worker event channel is not available"), {
+        code: "METHOD_NOT_FOUND",
+      });
+    }
+    return this.options.workerEvents;
   }
 
   private requireFleetPreferences(): FleetPreferenceStore {

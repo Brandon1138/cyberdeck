@@ -722,7 +722,9 @@ describe("SessionRegistry", () => {
     const { registry, ptyFactory, transcripts } = harness();
     const record = await registry.start(request(), "Inspect the failure");
     expect(ptyFactory).toHaveBeenCalledWith(
-      expect.objectContaining({ args: ["codex", "Inspect the failure"] }),
+      expect.objectContaining({
+        args: ["codex", expect.stringContaining("Inspect the failure\n\nCYBERDECK WORKER REPORTING")],
+      }),
       expect.any(Number),
     );
     expect(record).not.toHaveProperty("initialPrompt");

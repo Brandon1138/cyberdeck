@@ -39,6 +39,7 @@ import { selectExpiredThreads, type ThreadRetentionPolicy } from "../domain/thre
 import type { SessionRecord } from "../domain/session.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
 import { WorkerCoordinationRuntime } from "./worker-coordination-runtime.js";
+import { WorkerEventChannel } from "./worker-event-channel.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -160,6 +161,12 @@ export async function runBroker(
     orchestrators: orchestratorStore,
     instructions,
   });
+  const workerEvents = new WorkerEventChannel(
+    workerCoordination.service,
+    registry,
+    orchestratorStore,
+    instructions,
+  );
   const workflows = new WorkflowService(
     registry,
     orchestratorStore,
@@ -206,6 +213,7 @@ export async function runBroker(
     workerPreferences,
     workerCoordination: workerCoordination.service,
     workerControl,
+    workerEvents,
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();

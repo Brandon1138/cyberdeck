@@ -98,3 +98,29 @@ no longer knows — and mutates nothing. Executing adopts each eligible subject 
 planned subject fails, the already-adopted ones are released by compensating mutation and the result
 reports `ADOPTION_ABORTED` with zero net ownership change. Ambiguous subjects are never touched, so
 a recovery sweep cannot contest a live worker owned by someone else.
+
+## Worker reporting channel
+
+All interactive workers receive one short CLI example in their launch prompt. The provider-neutral
+surface is `cyberdeck event submit`; the worker supplies its session ID, kind, summary, continuation,
+and stable event ID, plus optional severity, intervention flag, facts, evidence references, changed
+assumptions, recommendation, and checkpoint correlation. The broker supplies immutable task/wave
+identity, current lease version, sequence, timestamp, and schema version. It returns only compact
+`EventAck` JSON. It never returns the Orc projection or another worker's reports. Payload and field
+limits are enforced by the shared event service; rejected acks name the exact violated limit and no
+field is truncated.
+
+Codex and Claude already receive Cyberdeck MCP injection during worker launch. They additionally see
+thin wrappers named `cyberdeck_signal_exception`, `cyberdeck_report_progress`,
+`cyberdeck_signal_risk`, `cyberdeck_request_decision`, and
+`cyberdeck_respond_checkpoint`. Every wrapper calls the same broker method and event service as the
+CLI. `DECISION_REQUEST` requires `interventionRequired: true` and
+`continuation: "awaiting-response"`; this is structured state, not prose.
+
+Checkpoint delivery reuses `InstructionQueue`. Broker records the checkpoint first, then enqueues a
+compact instruction containing correlation ID, optional focus/question, and both response
+affordances. `SessionRegistry.submitInstruction` writes provider input without cancelling the active
+turn, so providers consume it at their next input/turn boundary. Human-controlled threads remain
+queued until controller release. Non-blocking checkpoints do not change worker lifecycle;
+decision-gate checkpoints change only structured `decisionGate`. A correlated `CHECKPOINT` event
+answers the durable request through the normal submission path.
