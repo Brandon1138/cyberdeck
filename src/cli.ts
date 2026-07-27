@@ -42,6 +42,10 @@ import { CYBERDECK_VERSION } from "./version.js";
 import { resolveLaunchConversationId, runMcpServer } from "./mcp/server.js";
 import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
 import { pruneLegacyTranscript as pruneLegacyTranscriptFile } from "./persistence/thread-transcript-store.js";
+import type {
+  WorkerEventSubmitParams,
+} from "./broker/worker-event-channel.js";
+import type { EventAck } from "./domain/worker-coordination.js";
 
 interface SessionLaunchRecordResult {
   sessionId: string;
@@ -65,6 +69,21 @@ interface DelegateOptions extends StartOptions {
   parent: string;
 }
 
+interface EventSubmitOptions {
+  worker: string;
+  eventId?: string;
+  kind: "EXCEPTION" | "PROGRESS" | "CHECKPOINT" | "RISK" | "DECISION_REQUEST";
+  severity: "info" | "warning" | "error" | "critical";
+  intervention?: boolean;
+  summary: string;
+  facts?: string;
+  evidence: string[];
+  changedAssumption: string[];
+  recommendedAction?: string;
+  continuation: "continuing" | "blocked" | "paused" | "awaiting-response";
+  checkpointCorrelationId?: string;
+}
+
 function providerOption(): Option {
   return new Option("--provider <provider>", "explicit provider")
     .choices([...CANONICAL_PROVIDER_IDS])
@@ -73,6 +92,18 @@ function providerOption(): Option {
 
 function cwdOption(): Option {
   return new Option("--cwd <absolute-path>", "absolute working directory").makeOptionMandatory();
+}
+
+function collectValue(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+function parseFacts(value: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(value);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("--facts must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function addSessionOptions(command: Command, allowAttach: boolean): Command {
@@ -322,6 +353,7 @@ interface CreateProgramOptions {
   fableWorkers?: (request: FableWorkersRequest) => Promise<FableWorkersResult>;
   cavemanWorkers?: (request: CavemanWorkersRequest) => Promise<CavemanWorkersResult>;
   pruneLegacyTranscript?: () => Promise<{ path: string; removed: boolean }>;
+  submitWorkerEvent?: (request: WorkerEventSubmitParams) => Promise<EventAck>;
 }
 
 export function createProgram(options: CreateProgramOptions = {}): Command {
@@ -341,6 +373,9 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     withClient((client) => client.request<CavemanWorkersResult>("orchestrator.cavemanWorkers", request)));
   const pruneLegacyTranscript = options.pruneLegacyTranscript
     ?? (() => pruneLegacyTranscriptFile(appStateDirectory, true));
+  const submitWorkerEvent = options.submitWorkerEvent
+    ?? ((request) => withClient((client) =>
+      client.request<EventAck>("worker.event.submit", request)));
   const program = new Command()
     .name("cyberdeck")
     .version(CYBERDECK_VERSION)
@@ -365,6 +400,57 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     process.stdout.write("Cyberdeck broker shutdown requested\n");
   });
   broker.command("restart").description("gracefully replace the running broker").action(restartBroker);
+
+  const event = program.command("event").description("submit bounded worker events");
+  event.command("submit")
+    .description("submit one idempotent worker event")
+    .requiredOption("--worker <session-id>", "worker session UUID")
+    .requiredOption(
+      "--kind <kind>",
+      "EXCEPTION, PROGRESS, CHECKPOINT, RISK, or DECISION_REQUEST",
+    )
+    .requiredOption("--summary <text>", "bounded event summary")
+    .option("--event-id <id>", "stable event ID for idempotent retry")
+    .addOption(new Option("--severity <severity>")
+      .choices(["info", "warning", "error", "critical"])
+      .default("info"))
+    .option("--intervention", "mark intervention required")
+    .option("--facts <json>", "structured facts JSON object")
+    .option("--evidence <ref>", "evidence reference; repeatable", collectValue, [])
+    .option(
+      "--changed-assumption <text>",
+      "changed assumption; repeatable",
+      collectValue,
+      [],
+    )
+    .option("--recommended-action <text>", "recommended next action")
+    .addOption(new Option("--continuation <state>")
+      .choices(["continuing", "blocked", "paused", "awaiting-response"])
+      .default("continuing"))
+    .option("--checkpoint-correlation-id <id>", "pending checkpoint correlation ID")
+    .action(async (options: EventSubmitOptions) => {
+      const ack = await submitWorkerEvent({
+        workerId: options.worker,
+        ...(options.eventId === undefined ? {} : { eventId: options.eventId }),
+        kind: options.kind,
+        severity: options.severity,
+        interventionRequired: options.intervention === true,
+        summary: options.summary,
+        ...(options.facts === undefined
+          ? {}
+          : { structuredFacts: parseFacts(options.facts) }),
+        evidenceRefs: options.evidence,
+        changedAssumptions: options.changedAssumption,
+        ...(options.recommendedAction === undefined
+          ? {}
+          : { recommendedAction: options.recommendedAction }),
+        continuation: options.continuation,
+        ...(options.checkpointCorrelationId === undefined
+          ? {}
+          : { checkpointCorrelationId: options.checkpointCorrelationId }),
+      });
+      process.stdout.write(`${JSON.stringify(ack)}\n`);
+    });
 
   const transcript = program.command("transcript").description("manage local transcript retention");
   transcript.command("prune-legacy")

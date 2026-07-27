@@ -48,6 +48,9 @@ describe("Cyberdeck MCP server", () => {
           expect.objectContaining({ name: "cyberdeck_orchestrator_inspect" }),
           expect.objectContaining({ name: "cyberdeck_orchestrator_stop" }),
           expect.objectContaining({ name: "cyberdeck_orchestrator_force_stop" }),
+          expect.objectContaining({ name: "cyberdeck_signal_exception" }),
+          expect.objectContaining({ name: "cyberdeck_report_progress" }),
+          expect.objectContaining({ name: "cyberdeck_respond_checkpoint" }),
         ]),
       },
     });
@@ -75,6 +78,51 @@ describe("Cyberdeck MCP server", () => {
     const workersWait = tools.find(({ name }) => name === "cyberdeck_workers_wait");
     expect(workersStart?.inputSchema.properties?.workers?.maxItems).toBe(64);
     expect(workersWait?.inputSchema.properties?.targets?.maxItems).toBe(64);
+  });
+
+  it("routes worker reporting wrappers through one compact submission method", async () => {
+    const request = vi.fn(async () => ({ code: "accepted", eventId: "event-1" }));
+    await handleMcpRequest(context({ request: request as never }), {
+      jsonrpc: "2.0",
+      id: "progress",
+      method: "tools/call",
+      params: {
+        name: "cyberdeck_report_progress",
+        arguments: { eventId: "event-1", summary: "tests pass" },
+      },
+    });
+    await handleMcpRequest(context({ request: request as never }), {
+      jsonrpc: "2.0",
+      id: "checkpoint",
+      method: "tools/call",
+      params: {
+        name: "cyberdeck_respond_checkpoint",
+        arguments: {
+          eventId: "event-2",
+          correlationId: "checkpoint-2",
+          summary: "still green",
+        },
+      },
+    });
+    expect(request).toHaveBeenNthCalledWith(1, "worker.event.submit", {
+      workerId: ACTOR,
+      kind: "PROGRESS",
+      severity: "info",
+      interventionRequired: false,
+      continuation: "continuing",
+      eventId: "event-1",
+      summary: "tests pass",
+    });
+    expect(request).toHaveBeenNthCalledWith(2, "worker.event.submit", {
+      workerId: ACTOR,
+      kind: "CHECKPOINT",
+      severity: "info",
+      interventionRequired: false,
+      continuation: "continuing",
+      eventId: "event-2",
+      summary: "still green",
+      checkpointCorrelationId: "checkpoint-2",
+    });
   });
 
   it("adds the bound actor identity to every broker operation", async () => {
@@ -346,7 +394,7 @@ describe("Cyberdeck MCP server", () => {
     });
     const tools = (response?.result as { tools: Array<{ name: string }> }).tools;
     expect(tools.map(({ name }) => name)).toContain("cyberdeck_diagnose");
-    expect(tools).toHaveLength(16);
+    expect(tools).toHaveLength(21);
   });
 
   it("distinguishes an orphaned scope from an unbound actor by code and remedy", async () => {

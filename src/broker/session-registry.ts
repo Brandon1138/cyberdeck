@@ -19,6 +19,7 @@ import type {
   ThreadTranscriptStore,
 } from "../persistence/thread-transcript-store.js";
 import { applyWorkerMode } from "../providers/worker-mode.js";
+import { addWorkerReportingGuidance } from "../providers/worker-reporting.js";
 import {
   conversationPreview,
   PREVIEW_STORAGE_LIMIT,
@@ -374,7 +375,12 @@ export class SessionRegistry {
       adapter = this.requireAdapter(parsed.provider);
       preparedInitialPrompt = initialPrompt === undefined
         ? undefined
-        : applyWorkerMode(initialPrompt, provisional.workerMode);
+        : (provisional.kind ?? "worker") === "worker"
+          ? addWorkerReportingGuidance(
+              applyWorkerMode(initialPrompt, provisional.workerMode),
+              provisional.id,
+            )
+          : applyWorkerMode(initialPrompt, provisional.workerMode);
       deferredInitialPrompt = initialPrompt !== undefined
         && adapter.deferInitialPrompt?.(provisional) === true;
       launchSpec = adapter.buildLaunchSpec(

@@ -43,6 +43,23 @@ export interface McpServerContext {
   brokerUnavailable?: string;
 }
 
+function workerEventProperties(): Record<string, unknown> {
+  return {
+    eventId: { type: "string", minLength: 1, maxLength: 256 },
+    summary: { type: "string", minLength: 1 },
+    severity: { type: "string", enum: ["info", "warning", "error", "critical"] },
+    interventionRequired: { type: "boolean" },
+    structuredFacts: { type: "object", additionalProperties: true },
+    evidenceRefs: { type: "array", items: { type: "string" } },
+    changedAssumptions: { type: "array", items: { type: "string" } },
+    recommendedAction: { type: "string" },
+    continuation: {
+      type: "string",
+      enum: ["continuing", "blocked", "paused", "awaiting-response"],
+    },
+  };
+}
+
 /** Raised for a failure the server itself diagnosed, before or instead of a broker round trip. */
 export class McpToolError extends Error {
   constructor(readonly code: string, message: string) {
@@ -85,6 +102,63 @@ const TOOLS = [
     name: "cyberdeck_diagnose",
     description: "Report this Cyberdeck MCP server's live identity, broker reachability, and capability binding. Call this first whenever a cyberdeck_* tool appears missing or returns nothing: it distinguishes an unreachable broker, an unbound or orphaned actor session, and a stale conversation. It never fails and needs no grant.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "cyberdeck_signal_exception",
+    description: "Submit an idempotent EXCEPTION event. Returns compact ack only; worker continues unless continuation says otherwise.",
+    inputSchema: {
+      type: "object",
+      properties: workerEventProperties(),
+      required: ["summary"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_report_progress",
+    description: "Submit coalescible worker progress. Reuse eventId only for exact retries.",
+    inputSchema: {
+      type: "object",
+      properties: workerEventProperties(),
+      required: ["summary"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_signal_risk",
+    description: "Submit a bounded RISK event and receive compact ack only.",
+    inputSchema: {
+      type: "object",
+      properties: workerEventProperties(),
+      required: ["summary"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_request_decision",
+    description: "Submit blocking DECISION_REQUEST with structured awaiting-response state.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...workerEventProperties(),
+        interventionRequired: { type: "boolean", const: true, default: true },
+        continuation: { type: "string", const: "awaiting-response", default: "awaiting-response" },
+      },
+      required: ["summary"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_respond_checkpoint",
+    description: "Answer one delivered checkpoint through worker event channel using its correlationId.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...workerEventProperties(),
+        correlationId: { type: "string", minLength: 1, maxLength: 256 },
+      },
+      required: ["summary", "correlationId"],
+      additionalProperties: false,
+    },
   },
   {
     name: "cyberdeck_provider_capabilities",
@@ -621,6 +695,58 @@ async function callTool(
     );
   }
   const actorSessionId = context.identity.actorSessionId;
+  if (name === "cyberdeck_signal_exception") {
+    return transport.request("worker.event.submit", {
+      workerId: actorSessionId,
+      kind: "EXCEPTION",
+      severity: "error",
+      interventionRequired: false,
+      continuation: "continuing",
+      ...args,
+    });
+  }
+  if (name === "cyberdeck_report_progress") {
+    return transport.request("worker.event.submit", {
+      workerId: actorSessionId,
+      kind: "PROGRESS",
+      severity: "info",
+      interventionRequired: false,
+      continuation: "continuing",
+      ...args,
+    });
+  }
+  if (name === "cyberdeck_signal_risk") {
+    return transport.request("worker.event.submit", {
+      workerId: actorSessionId,
+      kind: "RISK",
+      severity: "warning",
+      interventionRequired: false,
+      continuation: "continuing",
+      ...args,
+    });
+  }
+  if (name === "cyberdeck_request_decision") {
+    return transport.request("worker.event.submit", {
+      workerId: actorSessionId,
+      kind: "DECISION_REQUEST",
+      severity: "warning",
+      ...args,
+      interventionRequired: true,
+      continuation: "awaiting-response",
+    });
+  }
+  if (name === "cyberdeck_respond_checkpoint") {
+    const { correlationId, ...event } = args;
+    return transport.request("worker.event.submit", {
+      workerId: actorSessionId,
+      kind: "CHECKPOINT",
+      severity: "info",
+      interventionRequired: false,
+      continuation: "continuing",
+      ...event,
+      checkpointCorrelationId: correlationId,
+    });
+  }
   if (name === "cyberdeck_provider_capabilities") {
     const provider = typeof args.provider === "string" ? args.provider : undefined;
     return provider === undefined
