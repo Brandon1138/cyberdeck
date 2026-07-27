@@ -346,7 +346,7 @@ describe("Cyberdeck MCP server", () => {
     });
     const tools = (response?.result as { tools: Array<{ name: string }> }).tools;
     expect(tools.map(({ name }) => name)).toContain("cyberdeck_diagnose");
-    expect(tools).toHaveLength(16);
+    expect(tools).toHaveLength(19);
   });
 
   it("distinguishes an orphaned scope from an unbound actor by code and remedy", async () => {

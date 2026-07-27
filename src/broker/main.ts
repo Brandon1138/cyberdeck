@@ -30,6 +30,7 @@ import { ensurePrivateDirectory } from "../persistence/private-files.js";
 import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import { AgentControlService } from "../orchestration/agent-control-service.js";
 import { InstructionQueue } from "../orchestration/instruction-queue.js";
+import { WorkerControlService } from "../orchestration/worker-control-service.js";
 import { InstructionStore } from "../persistence/instruction-store.js";
 import { WorkflowStore } from "../persistence/workflow-store.js";
 import { WorkflowService } from "../orchestration/workflow-service.js";
@@ -153,6 +154,12 @@ export async function runBroker(
   );
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
   instructions.start();
+  const workerControl = new WorkerControlService({
+    coordination: workerCoordination.service,
+    registry,
+    orchestrators: orchestratorStore,
+    instructions,
+  });
   const workflows = new WorkflowService(
     registry,
     orchestratorStore,
@@ -198,6 +205,7 @@ export async function runBroker(
     fleetPreferences,
     workerPreferences,
     workerCoordination: workerCoordination.service,
+    workerControl,
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();

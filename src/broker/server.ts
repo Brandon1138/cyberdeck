@@ -54,6 +54,12 @@ import {
   WorkflowRunActorParamsSchema,
   type WorkflowService,
 } from "../orchestration/workflow-service.js";
+import {
+  AgentLeaseParamsSchema,
+  AgentWorkerControlParamsSchema,
+  AgentWorkerEventsParamsSchema,
+  type WorkerControlService,
+} from "../orchestration/worker-control-service.js";
 import type { WorkerCoordinationService } from "./worker-coordination.js";
 
 const SessionIdParamsSchema = z.object({ sessionId: z.uuid() });
@@ -102,8 +108,9 @@ export interface BrokerServerOptions {
   fleetDetaches?: FleetDetachStore;
   fleetPreferences?: FleetPreferenceStore;
   workerPreferences?: WorkerPreferenceStore;
-  /** Internal domain substrate. No transport methods expose it in Wave 1. */
+  /** Internal domain substrate. Orchestrator access goes through workerControl, never directly. */
   workerCoordination?: WorkerCoordinationService;
+  workerControl?: WorkerControlService;
   onShutdown?: () => void;
 }
 
@@ -308,6 +315,12 @@ export class BrokerServer {
         return this.requireAgentControl().waitForWorkers(AgentWaitWorkersParamsSchema.parse(frame.params));
       case "agent.thread.enqueue":
         return this.requireInstructions().enqueue(EnqueueInstructionParamsSchema.parse(frame.params));
+      case "agent.lease.control":
+        return this.requireWorkerControl().lease(AgentLeaseParamsSchema.parse(frame.params));
+      case "agent.worker.control":
+        return this.requireWorkerControl().control(AgentWorkerControlParamsSchema.parse(frame.params));
+      case "agent.worker.events":
+        return this.requireWorkerControl().events(AgentWorkerEventsParamsSchema.parse(frame.params));
       case "agent.instruction.list": {
         const params = z.object({ targetSessionId: z.uuid().optional() }).parse(frame.params);
         return this.requireInstructions().list(params.targetSessionId);
@@ -561,6 +574,13 @@ export class BrokerServer {
       throw Object.assign(new Error("Instruction queue is not available"), { code: "METHOD_NOT_FOUND" });
     }
     return this.options.instructions;
+  }
+
+  private requireWorkerControl(): WorkerControlService {
+    if (this.options.workerControl === undefined) {
+      throw Object.assign(new Error("Worker control service is not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.options.workerControl;
   }
 
   private requireWorkflows(): WorkflowService {
