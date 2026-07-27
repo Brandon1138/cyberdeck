@@ -34,6 +34,19 @@ import {
 } from "../runtime/terminal-replay.js";
 import { detectSessionFatalError } from "../runtime/session-liveness.js";
 import { selectExpiredThreads } from "../domain/thread-retention.js";
+import {
+  MIN_SCOUT_REPLAY_BYTES,
+  resolveScoutEffectiveState,
+  scoutScopeViolation,
+} from "../domain/worker-profile.js";
+import type {
+  ScoutReport,
+  ScoutRuntimeState,
+} from "../domain/worker-profile.js";
+import type {
+  ScoutReportCapture,
+  ScoutReportStore,
+} from "../persistence/scout-report-store.js";
 
 export interface PtyHandle {
   readonly pid: number;
@@ -117,6 +130,13 @@ interface RuntimeSession {
   };
   /** Serializes provider launch-artifact work so a pending cleanup cannot delete a fresh resume. */
   launchTail: Promise<void>;
+  /** Serializes framed drop-box capture so older PTY snapshots cannot overwrite newer ones. */
+  scoutCaptureTail?: Promise<void>;
+  scoutBudgetTimer?: ReturnType<typeof setTimeout>;
+  scoutBudgetActive?: boolean;
+  scoutTokenBaseline?: number;
+  scoutBudgetExhausting?: boolean;
+  scoutReport?: ScoutReport;
 }
 
 const MAX_COMPLETION_LEDGER_ENTRIES = 64;
@@ -140,7 +160,8 @@ export interface WorkerResultSnapshot {
     | "stalled"
     | "failed"
     | "stopped"
-    | "exited";
+    | "exited"
+    | "budget_exhausted";
   completedTurns: number;
   text: string;
   /** Only on a completed target: whether this delivery is the first one for that completion. */
@@ -149,6 +170,11 @@ export interface WorkerResultSnapshot {
   stalledForSeconds?: number;
   stallReason?: "transcript-and-token-count-unchanged-while-idle";
   tokenCount?: number;
+  profile?: "scout";
+  effectiveState?: SessionRecord["effectiveState"];
+  reportPath?: string;
+  reportState?: ScoutRuntimeState["reportState"];
+  terminalState?: ScoutRuntimeState["terminalState"];
 }
 
 export interface WorkerWaitResult {
@@ -182,6 +208,7 @@ export interface SessionRegistryOptions {
   config: BrokerRuntimeConfig;
   /** Injected monotonic-enough wall clock for stalled-worker tests. */
   now?: () => number;
+  scoutReports?: Pick<ScoutReportStore, "initialize" | "capture" | "collect" | "remove">;
 }
 
 export class RegistryError extends Error {
@@ -197,7 +224,9 @@ export class RegistryError extends Error {
       | "SESSION_BUSY"
       | "SESSION_STILL_ACTIVE"
       | "PARENT_SESSION_NOT_ACTIVE"
-      | "INVALID_SESSION_CWD",
+      | "INVALID_SESSION_CWD"
+      | "INVALID_WORKER_PROFILE"
+      | "SCOUT_REPORT_STORE_UNAVAILABLE",
     message: string,
   ) {
     super(message);
@@ -210,6 +239,8 @@ export class SessionRegistry {
   private readonly controllerReleasedListeners = new Set<(sessionId: string) => void>();
   private readonly sessionUpdateListeners = new Set<(sessionId: string) => void>();
   private readonly recovery: Promise<void>;
+  /** Starts admitted by policy but not yet represented in `sessions`. */
+  private pendingWorkerStarts = 0;
   /** Set by `stopAll` so the shutdown kill is distinguishable from an operator stop. */
   private shuttingDown = false;
 
@@ -238,7 +269,9 @@ export class SessionRegistry {
         writes.push(this.options.store?.put(this.cloneRecord(record)) ?? Promise.resolve());
       }
     }
-    this.recovery = Promise.all(writes).then(() => undefined);
+    this.recovery = Promise.all(writes)
+      .then(() => this.recoverScoutReports())
+      .then(() => undefined);
   }
 
   async ready(): Promise<void> {
@@ -252,12 +285,35 @@ export class SessionRegistry {
 
   async start(request: StartSessionRequest, initialPrompt?: string): Promise<SessionRecord> {
     const validated = StartSessionRequestSchema.parse(request);
+    if (validated.profile === "scout") {
+      if (validated.brief === undefined) {
+        throw new RegistryError("INVALID_WORKER_PROFILE", "Scout profile requires a structured brief");
+      }
+      if ((validated.kind ?? "worker") !== "worker") {
+        throw new RegistryError("INVALID_WORKER_PROFILE", "Scout profile can only use worker lifecycle");
+      }
+      if (
+        validated.provider !== "cursor"
+        || validated.model !== "composer"
+        || validated.sandbox !== "read-only"
+        || validated.approvalMode !== "auto"
+      ) {
+        throw new RegistryError(
+          "INVALID_WORKER_PROFILE",
+          "Scout profile requires Cursor Composer, read-only sandbox, and auto approval",
+        );
+      }
+      const scopeViolation = scoutScopeViolation(validated.cwd, validated.brief.scope);
+      if (scopeViolation !== undefined) {
+        throw new RegistryError("INVALID_WORKER_PROFILE", scopeViolation);
+      }
+    }
     await (this.options.validateCwd ?? validateSessionCwd)(validated.cwd);
     const parsed = validated;
     this.requireActiveParent(parsed.parentSessionId);
     const ancestry = this.resolveAncestry(parsed.parentSessionId);
     const decision = evaluateStart(parsed, ancestry, {
-      activeWorkerCount: this.activeWorkerCount(),
+      activeWorkerCount: this.activeWorkerCount() + this.pendingWorkerStarts,
       maxConcurrentWorkers: this.options.config.maxConcurrentWorkers,
       maxDelegationDepth: this.options.config.maxDelegationDepth,
     });
@@ -268,8 +324,26 @@ export class SessionRegistry {
       throw new RegistryError(decision.code, message);
     }
 
+    const reservesWorker = (parsed.kind ?? "worker") === "worker";
+    if (reservesWorker) this.pendingWorkerStarts += 1;
+    let reservationHeld = reservesWorker;
+    const releaseReservation = () => {
+      if (!reservationHeld) return;
+      this.pendingWorkerStarts -= 1;
+      reservationHeld = false;
+    };
+
     const id = randomUUID();
     const now = new Date().toISOString();
+    let scout: ScoutRuntimeState | undefined;
+    try {
+      scout = parsed.profile === "scout"
+        ? await this.requireScoutReports().initialize(id, parsed.cwd)
+        : undefined;
+    } catch (error) {
+      releaseReservation();
+      throw error;
+    }
     const provisional: SessionRecord = {
       ...parsed,
       kind: parsed.kind ?? "worker",
@@ -284,32 +358,48 @@ export class SessionRegistry {
       childIds: [],
       attentionState: initialPrompt === undefined ? "done" : "working",
       meaningfulUpdatedAt: now,
+      ...(parsed.profile === "scout"
+        ? {
+            effectiveState: resolveScoutEffectiveState(parsed.leasePolicy),
+            scout,
+          }
+        : {}),
     };
-    const adapter = this.requireAdapter(parsed.provider);
-    const preparedInitialPrompt = initialPrompt === undefined
-      ? undefined
-      : applyWorkerMode(initialPrompt, provisional.workerMode);
-    const deferredInitialPrompt = initialPrompt !== undefined
-      && adapter.deferInitialPrompt?.(provisional) === true;
-    const launchSpec = adapter.buildLaunchSpec(
-      provisional,
-      initialPrompt === undefined || deferredInitialPrompt
+    let adapter: ProviderAdapter;
+    let preparedInitialPrompt: string | undefined;
+    let deferredInitialPrompt: boolean;
+    let launchSpec: ProviderLaunchSpec;
+    let pty: PtyHandle;
+    try {
+      adapter = this.requireAdapter(parsed.provider);
+      preparedInitialPrompt = initialPrompt === undefined
         ? undefined
-        : preparedInitialPrompt,
-    );
-    const pty = await this.spawnPreparedLaunch(adapter, provisional, launchSpec, async () => {
-      this.requireActiveParent(parsed.parentSessionId);
-      if (initialPrompt !== undefined && !deferredInitialPrompt) {
-        await this.options.transcripts?.append({
-          sessionId: id,
-          kind: "prompt",
-          source: "human",
-          text: initialPrompt,
-          data: { initial: true },
-        });
-      }
-      this.requireActiveParent(parsed.parentSessionId);
-    });
+        : applyWorkerMode(initialPrompt, provisional.workerMode);
+      deferredInitialPrompt = initialPrompt !== undefined
+        && adapter.deferInitialPrompt?.(provisional) === true;
+      launchSpec = adapter.buildLaunchSpec(
+        provisional,
+        initialPrompt === undefined || deferredInitialPrompt
+          ? undefined
+          : preparedInitialPrompt,
+      );
+      pty = await this.spawnPreparedLaunch(adapter, provisional, launchSpec, async () => {
+        this.requireActiveParent(parsed.parentSessionId);
+        if (initialPrompt !== undefined && !deferredInitialPrompt) {
+          await this.options.transcripts?.append({
+            sessionId: id,
+            kind: "prompt",
+            source: "human",
+            text: initialPrompt,
+            data: { initial: true },
+          });
+        }
+        this.requireActiveParent(parsed.parentSessionId);
+      });
+    } catch (error) {
+      releaseReservation();
+      throw error;
+    }
     const record: SessionRecord = {
       ...provisional,
       pid: pty.pid,
@@ -331,14 +421,32 @@ export class SessionRegistry {
       launchTail: Promise.resolve(),
     };
     this.sessions.set(id, runtime);
+    releaseReservation();
     this.adoptPty(runtime, pty);
 
     try {
-      await adapter.initializeSession?.(record, {
+      const initialization = await adapter.initializeSession?.(record, {
         snapshot: () => pty.snapshot(),
         write: (data) => pty.write(data),
         wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
       });
+      if (record.profile === "scout") {
+        const verified = initialization?.scoutReadOnlyCanary;
+        if (record.scout === undefined || verified === undefined) {
+          throw new RegistryError(
+            "INVALID_WORKER_PROFILE",
+            "Scout launch did not verify read-only enforcement",
+          );
+        }
+        record.scout.canary = {
+          status: "verified",
+          verifiedAt: verified.verifiedAt,
+        };
+        await this.persist(runtime);
+        await this.appendEvent("scout.canary.verified", record.id, {
+          verifiedAt: verified.verifiedAt,
+        });
+      }
       if (runtime.record.executionState !== "active") {
         throw new RegistryError(
           "SESSION_NOT_ACTIVE",
@@ -364,9 +472,17 @@ export class SessionRegistry {
         this.requireActiveParent(parsed.parentSessionId);
         const data = adapter.submitInput?.(preparedInitialPrompt)
           ?? Buffer.from(`${preparedInitialPrompt}\n`);
+        this.armScoutBudget(runtime);
         pty.write(data);
+      } else {
+        this.armScoutBudget(runtime);
       }
     } catch (error) {
+      if (record.profile === "scout") {
+        await this.appendEvent("scout.canary.failed", record.id, {
+          message: error instanceof Error ? error.message : String(error),
+        }).catch(() => undefined);
+      }
       if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
       delete runtime.idleTimer;
       if (runtime.pty === pty) delete runtime.pty;
@@ -966,6 +1082,8 @@ export class SessionRegistry {
     const pty = runtime.pty;
     if (pty === undefined) return;
     const replay = pty.snapshot().toString("utf8");
+    this.captureScoutReport(runtime, replay);
+    this.enforceScoutTokenBudget(runtime, replay);
     if (this.observeFatalError(runtime, replay)) {
       // The bytes still reach anyone attached — the operator should be able to read the fault —
       // but no activity is derived from them. A dead session has no activity to derive.
@@ -1070,7 +1188,15 @@ export class SessionRegistry {
   private handleExit(runtime: RuntimeSession, exitCode: number, signal?: number): void {
     if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
     delete runtime.idleTimer;
-    runtime.record.executionState = runtime.stopRequested
+    if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
+    delete runtime.scoutBudgetTimer;
+    runtime.scoutBudgetActive = false;
+    const scoutTerminal = runtime.record.scout?.terminalState;
+    runtime.record.executionState = scoutTerminal === "complete"
+      ? "exited"
+      : scoutTerminal === "budget_exhausted"
+        ? "cancelled"
+        : runtime.stopRequested
       ? "cancelled"
       : exitCode === 0
         ? "exited"
@@ -1082,7 +1208,11 @@ export class SessionRegistry {
     runtime.watchers.clear();
     runtime.record.attachmentState = "detached";
     runtime.record.updatedAt = new Date().toISOString();
-    runtime.record.attentionState = runtime.stopRequested
+    runtime.record.attentionState = scoutTerminal === "complete"
+      ? "done"
+      : scoutTerminal === "budget_exhausted"
+        ? "stopped"
+        : runtime.stopRequested
       ? (runtime.outcomePreserved === true ? "done" : "stopped")
       : exitCode === 0
         ? "done"
@@ -1165,7 +1295,10 @@ export class SessionRegistry {
     try {
       if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
       await beforeSpawn?.();
-      return this.options.ptyFactory(spec, this.options.config.replayBytes);
+      const replayBytes = record.profile === "scout"
+        ? Math.max(this.options.config.replayBytes, MIN_SCOUT_REPLAY_BYTES)
+        : this.options.config.replayBytes;
+      return this.options.ptyFactory(spec, replayBytes);
     } catch (error) {
       await this.cleanupLaunchArtifacts(record, "launch-failed");
       throw error;
@@ -1178,17 +1311,33 @@ export class SessionRegistry {
    * primary outcome that triggered it.
    */
   private async cleanupLaunchArtifacts(record: SessionRecord, reason: string): Promise<void> {
+    const cleanupFailures: string[] = [];
     const adapter = this.options.adapters[record.provider];
-    if (adapter?.cleanupLaunch === undefined) return;
-    try {
-      await adapter.cleanupLaunch(record);
-    } catch (error) {
+    if (adapter?.cleanupLaunch !== undefined) {
+      try {
+        await adapter.cleanupLaunch(record);
+      } catch (error) {
+        cleanupFailures.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    if (
+      record.profile === "scout"
+      && reason !== "session-exited"
+      && this.options.scoutReports !== undefined
+    ) {
+      try {
+        await this.options.scoutReports.remove(record.id);
+      } catch (error) {
+        cleanupFailures.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    for (const message of cleanupFailures) {
       await this.appendTranscript(
         record.id,
         "lifecycle",
         "broker",
         "provider launch artifact cleanup failed",
-        { reason, message: error instanceof Error ? error.message : String(error) },
+        { reason, message },
       ).catch(() => undefined);
     }
   }
@@ -1210,9 +1359,28 @@ export class SessionRegistry {
       provider: runtime.record.provider,
       ...(runtime.record.model === undefined ? {} : { model: runtime.record.model }),
       ...(runtime.record.effort === undefined ? {} : { effort: runtime.record.effort }),
+      ...(runtime.record.profile === undefined ? {} : { profile: runtime.record.profile }),
+      ...(runtime.record.effectiveState === undefined
+        ? {}
+        : { effectiveState: { ...runtime.record.effectiveState } }),
+      ...(runtime.record.scout === undefined
+        ? {}
+        : {
+            reportPath: runtime.record.scout.reportPath,
+            reportState: runtime.record.scout.reportState,
+            ...(runtime.record.scout.terminalState === undefined
+              ? {}
+              : { terminalState: runtime.record.scout.terminalState }),
+          }),
       completedTurns: runtime.completedTurns,
       text,
     };
+    if (runtime.scoutBudgetExhausting === true) {
+      return { ...base, status: "working" };
+    }
+    if (runtime.record.scout?.terminalState === "budget_exhausted") {
+      return { ...base, status: "budget_exhausted" };
+    }
     if (runtime.completedTurns >= target.completionTarget) {
       return {
         ...base,
@@ -1333,6 +1501,16 @@ export class SessionRegistry {
   }
 
   private async completeSemanticTurn(runtime: RuntimeSession, replay: string): Promise<void> {
+    // Scout completion comes only from a validated canonical drop-box report. Cursor returning to
+    // input corroborates that event but cannot replace it.
+    if (runtime.record.profile === "scout" && runtime.record.scout?.terminalState !== "complete") {
+      runtime.completedTurns = Math.max(0, runtime.completedTurns - 1);
+      runtime.latestResult = terminalFallbackResult(replay);
+      await this.refreshPreview(runtime, replay, []);
+      await this.setAttention(runtime, "done", true);
+      this.notifySessionUpdate(runtime.record.id);
+      return;
+    }
     const fallback = terminalFallbackResult(replay);
     let nativeTurns: Array<{ text?: string | undefined }> = [];
     try {
@@ -1425,6 +1603,192 @@ export class SessionRegistry {
     return runtime.pty;
   }
 
+  private requireScoutReports(): NonNullable<SessionRegistryOptions["scoutReports"]> {
+    if (this.options.scoutReports === undefined) {
+      throw new RegistryError(
+        "SCOUT_REPORT_STORE_UNAVAILABLE",
+        "Scout profile requires broker-owned drop-box storage",
+      );
+    }
+    return this.options.scoutReports;
+  }
+
+  private captureScoutReport(runtime: RuntimeSession, replay: string): void {
+    if (
+      runtime.record.profile !== "scout"
+      || runtime.record.scout === undefined
+      || runtime.record.scout.terminalState !== undefined
+      || this.options.scoutReports === undefined
+    ) return;
+    const scout = { ...runtime.record.scout, canary: { ...runtime.record.scout.canary } };
+    const capture = this.options.scoutReports.capture.bind(this.options.scoutReports);
+    runtime.scoutCaptureTail = (runtime.scoutCaptureTail ?? Promise.resolve())
+      .then(async () => {
+        const result = await capture(scout, replay);
+        await this.applyScoutCapture(runtime, result);
+      })
+      .catch(async (error) => {
+        if (runtime.record.scout === undefined) return;
+        runtime.record.scout.reportState = "invalid";
+        runtime.latestResult = error instanceof Error ? error.message : String(error);
+        await this.persist(runtime).catch(() => undefined);
+        this.notifySessionUpdate(runtime.record.id);
+      });
+  }
+
+  private async applyScoutCapture(runtime: RuntimeSession, result: ScoutReportCapture): Promise<void> {
+    const scout = runtime.record.scout;
+    if (scout === undefined || scout.terminalState === "complete" || result.state === "missing") return;
+    const changed = scout.reportState !== result.state;
+    scout.reportState = result.state;
+    if ("text" in result && result.text !== "") runtime.latestResult = result.text;
+    if (result.state === "complete") runtime.scoutReport = result.report;
+    if (scout.terminalState === "budget_exhausted") {
+      if (changed) await this.persist(runtime);
+      this.notifySessionUpdate(runtime.record.id);
+      return;
+    }
+    if (result.state === "complete") {
+      if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
+      delete runtime.scoutBudgetTimer;
+      runtime.scoutBudgetActive = false;
+      scout.terminalState = "complete";
+      runtime.completedTurns = Math.max(runtime.completedTurns, 1);
+      this.recordCompletion(runtime, 1, result.text);
+      runtime.record.attentionState = "done";
+      runtime.record.updatedAt = new Date().toISOString();
+      runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
+      await this.appendEvent("scout.report.captured", runtime.record.id, {
+        reportPath: scout.reportPath,
+        findingCount: result.report.findings.length,
+      });
+      await this.persist(runtime);
+      this.notifySessionUpdate(runtime.record.id);
+      runtime.pty?.kill("SIGTERM");
+      return;
+    }
+    if (changed) await this.persist(runtime);
+    this.notifySessionUpdate(runtime.record.id);
+  }
+
+  private armScoutBudget(runtime: RuntimeSession): void {
+    const budget = runtime.record.brief?.budget;
+    if (
+      runtime.record.profile !== "scout"
+      || budget === undefined
+      || runtime.scoutBudgetActive === true
+    ) return;
+    runtime.scoutBudgetActive = true;
+    const tokenBaseline = terminalTokenCount(
+      runtime.pty?.snapshot().toString("utf8") ?? "",
+    );
+    if (tokenBaseline === undefined) delete runtime.scoutTokenBaseline;
+    else runtime.scoutTokenBaseline = tokenBaseline;
+    runtime.scoutBudgetTimer = setTimeout(() => {
+      void this.exhaustScoutBudget(runtime, "time", budget.maxWallClockMs);
+    }, budget.maxWallClockMs);
+    runtime.scoutBudgetTimer.unref?.();
+  }
+
+  private enforceScoutTokenBudget(runtime: RuntimeSession, replay: string): void {
+    const budget = runtime.record.brief?.budget;
+    if (
+      runtime.record.profile !== "scout"
+      || budget === undefined
+      || runtime.scoutBudgetActive !== true
+      || runtime.record.scout?.terminalState !== undefined
+    ) return;
+    const tokens = terminalTokenCount(replay);
+    if (tokens !== undefined) {
+      const baseline = runtime.scoutTokenBaseline;
+      const consumed = baseline === undefined
+        ? tokens
+        : tokens >= baseline
+          ? tokens - baseline
+          : tokens;
+      if (consumed >= budget.maxTokens) {
+        void this.exhaustScoutBudget(runtime, "tokens", consumed);
+      }
+    }
+  }
+
+  private async exhaustScoutBudget(
+    runtime: RuntimeSession,
+    dimension: "time" | "tokens",
+    observed: number,
+  ): Promise<void> {
+    const scout = runtime.record.scout;
+    if (
+      scout === undefined
+      || scout.terminalState !== undefined
+      || runtime.scoutBudgetExhausting === true
+    ) return;
+    runtime.scoutBudgetExhausting = true;
+    runtime.scoutBudgetActive = false;
+    if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
+    delete runtime.scoutBudgetTimer;
+    scout.terminalState = "budget_exhausted";
+    runtime.record.executionState = "cancelled";
+    runtime.record.attentionState = "stopped";
+    runtime.record.updatedAt = new Date().toISOString();
+    runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
+    // Kill at threshold before durable I/O. Report capture already queued from the triggering PTY
+    // frame and remains allowed to update reportState/content after this terminal verdict.
+    runtime.pty?.kill("SIGTERM");
+    await runtime.scoutCaptureTail?.catch(() => undefined);
+    try {
+      await this.appendEvent("scout.budget.exhausted", runtime.record.id, {
+        dimension,
+        observed,
+        reportState: scout.reportState,
+        reportPath: scout.reportPath,
+      });
+      await this.appendTranscript(
+        runtime.record.id,
+        "lifecycle",
+        "broker",
+        "Scout budget exhausted",
+        { dimension, observed, reportState: scout.reportState },
+      );
+      await this.persist(runtime);
+    } finally {
+      runtime.scoutBudgetExhausting = false;
+      this.notifySessionUpdate(runtime.record.id);
+    }
+  }
+
+  private async recoverScoutReports(): Promise<void> {
+    if (this.options.scoutReports === undefined) return;
+    for (const runtime of this.sessions.values()) {
+      const scout = runtime.record.scout;
+      if (runtime.record.profile !== "scout" || scout === undefined) continue;
+      const captured = await this.options.scoutReports.collect(scout).catch(() => undefined);
+      if (captured === undefined || captured.state === "missing") continue;
+      let changed = scout.reportState !== captured.state;
+      scout.reportState = captured.state;
+      if ("text" in captured) runtime.latestResult = captured.text;
+      if (captured.state === "complete") {
+        runtime.scoutReport = captured.report;
+        if (scout.terminalState !== "budget_exhausted") {
+          changed ||= scout.terminalState !== "complete"
+            || runtime.record.executionState !== "exited"
+            || runtime.record.attentionState !== "done";
+          scout.terminalState = "complete";
+          runtime.completedTurns = 1;
+          this.recordCompletion(runtime, 1, captured.text);
+          runtime.record.executionState = "exited";
+          runtime.record.attentionState = "done";
+          runtime.record.exitCode ??= 0;
+        }
+      }
+      if (changed) {
+        runtime.record.updatedAt = new Date().toISOString();
+        runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
+        await this.persist(runtime);
+      }
+    }
+  }
+
   private async setAttention(
     runtime: RuntimeSession,
     attentionState: ThreadAttentionState,
@@ -1507,6 +1871,22 @@ export class SessionRegistry {
     return {
       ...record,
       childIds: [...record.childIds],
+      ...(record.brief === undefined
+        ? {}
+        : {
+            brief: {
+              ...record.brief,
+              scope: [...record.brief.scope],
+              questions: [...record.brief.questions],
+              budget: { ...record.brief.budget },
+            },
+          }),
+      ...(record.effectiveState === undefined
+        ? {}
+        : { effectiveState: { ...record.effectiveState } }),
+      ...(record.scout === undefined
+        ? {}
+        : { scout: { ...record.scout, canary: { ...record.scout.canary } } }),
       ...(launchRecord === undefined ? {} : { launchRecord }),
     };
   }

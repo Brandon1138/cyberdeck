@@ -1,6 +1,13 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { ProviderIdSchema } from "./provider-registration.js";
+import {
+  ScoutBriefSchema,
+  ScoutRuntimeStateSchema,
+  WorkerEffectiveStateSchema,
+  WorkerLeasePolicySchema,
+  WorkerProfileSchema,
+} from "./worker-profile.js";
 
 export { ProviderIdSchema } from "./provider-registration.js";
 
@@ -49,6 +56,9 @@ export const StartSessionRequestSchema = z.object({
   orchestratorScope: z.enum(["workspace", "fleet"]).optional(),
   providerInstructions: z.string().trim().min(1).optional(),
   workerMode: WorkerModeSchema.optional(),
+  profile: WorkerProfileSchema.optional(),
+  brief: ScoutBriefSchema.optional(),
+  leasePolicy: WorkerLeasePolicySchema.optional(),
 });
 
 /**
@@ -62,6 +72,8 @@ export const RESOLVED_LAUNCH_ENV_KEYS = [
   "CYBERDECK_WORKER_MODE",
   "DISABLE_UPDATES",
   "ENABLE_TOOL_SEARCH",
+  "CYBERDECK_SCOUT_DROP_BOX",
+  "CYBERDECK_SCOUT_REPORT_PATH",
 ] as const;
 
 /**
@@ -99,6 +111,8 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
   pinned: z.boolean().optional(),
   displayOrder: z.number().int().nonnegative().optional(),
   launchRecord: ResolvedLaunchRecordSchema.optional(),
+  effectiveState: WorkerEffectiveStateSchema.optional(),
+  scout: ScoutRuntimeStateSchema.optional(),
 });
 
 export type ProviderId = z.infer<typeof ProviderIdSchema>;

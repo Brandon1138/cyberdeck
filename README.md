@@ -193,6 +193,23 @@ menu before submitting the task. MCP-started workers inherit the persisted `/per
 when `approvalMode` is omitted. Antigravity rejects `auto` rather than ignoring it. The operator CLI
 exposes the same explicit override as `--approval-mode auto`.
 
+An Orc may instead set `profile: "scout"` and pass a structured brief (`objective`, relative
+path/glob `scope`, lookup-shaped `questions`, `stopCondition`, and wall-clock/token `budget`).
+Cyberdeck resolves that profile to the existing worker lifecycle with fixed Tier 1 state: Cursor
+Composer, read-only sandbox, verified `/run-everything`, and lease policy `expire-and-discard`
+(`orphan-for-adoption` is recorded only for forward compatibility). Before task submission,
+Cyberdeck disables configured MCP servers in session-local Cursor state and runs a real denied-write
+canary while comparing repository/git state. No prompt claim can substitute for that check.
+The Scout cwd must therefore be a Git working tree.
+
+Scout output is one schema-validated report containing referenced findings, search coverage,
+uncertainties, and follow-up probes. Cyberdeck captures the framed provider output into one private
+drop box outside the worktree; that file is canonical, while transcript completion only
+corroborates it. A valid report settles even when Composer completion capture stalls. Reaching
+either brief cap kills the worker as `budget_exhausted`, preserves any partial report, and remains
+distinct from `complete`. Batch starts launch independent Scouts concurrently; no pane interaction
+or approval prompt participates.
+
 A human attachment always owns the only writer lease: orchestrator input remains queued until that
 controller detaches. Cyberdeck never steers a worker through tmux.
 

@@ -32,6 +32,14 @@ import type { WorkerPreferenceStore } from "../persistence/worker-preference-sto
 import type { ProviderPermissionPreferencePort } from "../persistence/provider-permission-preference-store.js";
 import { resolveProviderPermission } from "../client/permission-policy.js";
 import { validateWorkerSelection } from "./worker-capabilities.js";
+import {
+  ScoutBriefSchema,
+  WorkerLeasePolicySchema,
+  scoutScopeViolation,
+  type ScoutBrief,
+  type WorkerLeasePolicy,
+} from "../domain/worker-profile.js";
+import { scoutDispatchPrompt } from "./worker-profiles.js";
 
 export const AgentActorParamsSchema = z.object({ actorSessionId: z.uuid() });
 export const AgentReadParamsSchema = AgentActorParamsSchema.extend({
@@ -39,7 +47,10 @@ export const AgentReadParamsSchema = AgentActorParamsSchema.extend({
   afterCursor: z.number().int().nonnegative().default(0),
   limit: z.number().int().positive().max(100).default(50),
 });
-export const AgentStartWorkerParamsSchema = AgentActorParamsSchema.extend({
+const AgentStandardWorkerInputSchema = z.object({
+  profile: z.undefined().optional(),
+  brief: z.undefined().optional(),
+  leasePolicy: z.undefined().optional(),
   provider: ProviderIdSchema,
   model: z.string().optional(),
   effort: ReasoningEffortSchema.optional(),
@@ -49,8 +60,22 @@ export const AgentStartWorkerParamsSchema = AgentActorParamsSchema.extend({
   prompt: z.string().trim().min(1),
   name: z.string().optional(),
 });
+const AgentScoutWorkerInputSchema = z.object({
+  profile: z.literal("scout"),
+  cwd: z.string().min(1),
+  brief: ScoutBriefSchema,
+  leasePolicy: WorkerLeasePolicySchema.optional(),
+  name: z.string().optional(),
+}).strict();
+export const AgentStartWorkerParamsSchema = z.union([
+  AgentActorParamsSchema.extend(AgentScoutWorkerInputSchema.shape).strict(),
+  AgentActorParamsSchema.extend(AgentStandardWorkerInputSchema.shape),
+]);
 export const AgentStartWorkersParamsSchema = AgentActorParamsSchema.extend({
-  workers: z.array(AgentStartWorkerParamsSchema.omit({ actorSessionId: true })).min(1).max(MAX_FANOUT_BATCH),
+  workers: z.array(z.union([
+    AgentScoutWorkerInputSchema,
+    AgentStandardWorkerInputSchema,
+  ])).min(1).max(MAX_FANOUT_BATCH),
 });
 export const AgentWaitWorkersParamsSchema = AgentActorParamsSchema.extend({
   targets: z.array(z.object({
@@ -179,7 +204,10 @@ export interface WorkerStartResult {
   provider: string;
   model?: string;
   effort?: string;
+  profile?: "scout";
   completionTarget: number;
+  effectiveState?: SessionRecord["effectiveState"];
+  reportPath?: string;
 }
 
 /**
@@ -527,6 +555,9 @@ export class AgentControlService {
     const request = AgentStartWorkerParamsSchema.parse(input);
     const binding = await this.requireBinding(request.actorSessionId);
     this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
+    if (request.profile === "scout") {
+      return this.startScout(request);
+    }
     if (isFableModel(request.model) && !grantAllows(
       binding.grant,
       "worker.start.fable",
@@ -572,6 +603,46 @@ export class AgentControlService {
     };
   }
 
+  private async startScout(request: {
+    actorSessionId: string;
+    profile: "scout";
+    cwd: string;
+    brief: ScoutBrief;
+    leasePolicy?: WorkerLeasePolicy | undefined;
+    name?: string | undefined;
+  }): Promise<WorkerStartResult> {
+    validateScoutScope(request.cwd, request.brief.scope);
+    const name = request.name ?? taskName(request.brief.objective);
+    const leasePolicy = request.leasePolicy ?? "expire-and-discard";
+    const workerMode = (await this.workerPreferences?.get())?.caveman === true ? "caveman" : "normal";
+    const worker = await this.registry.start({
+      provider: "cursor",
+      model: "composer",
+      approvalMode: "auto",
+      cwd: request.cwd,
+      detached: true,
+      sandbox: "read-only",
+      parentSessionId: request.actorSessionId,
+      kind: "worker",
+      role: "worker",
+      workerMode,
+      profile: "scout",
+      brief: request.brief,
+      leasePolicy,
+      name,
+    }, scoutDispatchPrompt(request.brief));
+    return {
+      sessionId: worker.id,
+      name,
+      provider: worker.provider,
+      ...(worker.model === undefined ? {} : { model: worker.model }),
+      profile: "scout",
+      completionTarget: 1,
+      ...(worker.effectiveState === undefined ? {} : { effectiveState: worker.effectiveState }),
+      ...(worker.scout === undefined ? {} : { reportPath: worker.scout.reportPath }),
+    };
+  }
+
   private async configuredApprovalMode(
     provider: z.infer<typeof ProviderIdSchema>,
     sandbox: z.infer<typeof SandboxSchema>,
@@ -589,27 +660,30 @@ export class AgentControlService {
 
   async startWorkers(input: z.input<typeof AgentStartWorkersParamsSchema>) {
     const request = AgentStartWorkersParamsSchema.parse(input);
-    const results: Array<Record<string, unknown>> = [];
-    for (const worker of request.workers) {
+    return Promise.all(request.workers.map(async (worker): Promise<Record<string, unknown>> => {
       try {
-        results.push({
+        return {
           ok: true as const,
           ...await this.startWorker({ actorSessionId: request.actorSessionId, ...worker }),
-        });
+        };
       } catch (error) {
-        results.push({
+        const profile = worker.profile === "scout";
+        return {
           ok: false as const,
-          name: worker.name ?? taskName(worker.prompt),
-          provider: worker.provider,
-          ...(worker.model === undefined ? {} : { model: worker.model }),
+          name: worker.name ?? taskName(profile ? worker.brief.objective : worker.prompt),
+          provider: profile ? "cursor" : worker.provider,
+          ...(profile
+            ? { model: "composer", profile: "scout" }
+            : worker.model === undefined
+              ? {}
+              : { model: worker.model }),
           error: {
             code: errorCode(error),
             message: error instanceof Error ? error.message : String(error),
           },
-        });
+        };
       }
-    }
-    return results;
+    }));
   }
 
   /**
@@ -923,4 +997,9 @@ function errorCode(error: unknown): string {
   return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
     ? error.code
     : "WORKER_START_FAILED";
+}
+
+function validateScoutScope(cwd: string, scope: readonly string[]): void {
+  const violation = scoutScopeViolation(cwd, scope);
+  if (violation !== undefined) throw new AgentControlError("CAPABILITY_DENIED", violation);
 }
