@@ -69,3 +69,32 @@ Migration `0001-worker-coordination` reads existing worker `SessionRecord.parent
 provenance. It resolves primary orchestrator bindings to stable scope keys. Missing or peer bindings
 cannot prove stable family identity, so their workers migrate as orphaned and adoptable rather than
 granting authority to a conversation UUID.
+
+## Orchestrator control plane
+
+Three MCP tools project the substrate to a bound orchestrator: `cyberdeck_lease`,
+`cyberdeck_worker_ctl`, and `cyberdeck_worker_events`. They reach `WorkerControlService` through
+broker methods `agent.lease.control`, `agent.worker.control`, and `agent.worker.events`. The
+substrate itself gains no transport surface.
+
+Authority is proved by the caller's durable orchestrator binding, never by a conversation. The
+service derives the same `orchestrator:<binding key>` controller identity the migration uses, and
+peer bindings are refused with `NO_STABLE_CONTROLLER_IDENTITY`. Lease tokens stay inside the broker
+and are stripped from every response. A broker restart therefore loses tokens, leases age out, and
+the workers become adoptable — the intended recovery path. A controller whose token is gone gets
+`OWNERSHIP_LOST` and must re-acquire explicitly; nothing is ever reacquired silently.
+
+Every `cyberdeck_worker_ctl` action first authenticates through one lease renew, which validates
+token, identity, and lease version and writes the audit record carrying actor, time, controller, and
+reason. Stop escalates graceful before forceful: force requires an already-requested graceful stop
+plus a grace period, acts only on the broker-owned process, and writes lifecycle `stopped` so no
+bookkeeping lingers active. Redirect and checkpoint prompts ride the instruction queue, so a busy
+worker keeps its turn and answers at its next turn boundary.
+
+Recovery is a survey then an atomic take. `{action: adopt, scope: all-eligible, preview: true}`
+returns the eligible set with its recoverable state alongside blocked cases —
+`LEASE_CONFLICT`, `WORKER_TERMINAL`, `ALREADY_CONTROLLED`, contested leases, and subjects the broker
+no longer knows — and mutates nothing. Executing adopts each eligible subject under one plan; if any
+planned subject fails, the already-adopted ones are released by compensating mutation and the result
+reports `ADOPTION_ABORTED` with zero net ownership change. Ambiguous subjects are never touched, so
+a recovery sweep cannot contest a live worker owned by someone else.
