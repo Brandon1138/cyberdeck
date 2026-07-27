@@ -256,7 +256,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_workers_wait",
-    description: `Idle inside Cyberdeck until all named workers complete, need input, fail, or the timeout expires; returns deterministic head-preserving semantic results and never raw PTY transcripts. One call blocks at most ${MAX_WAIT_SEGMENT_SECONDS}s so it always returns before an MCP client abandons it; a longer timeoutSeconds is honored across segments. Read wait.state: "settled" (every target terminal), "timed-out" (your whole timeoutSeconds elapsed), or "incomplete" (segment boundary — call again with wait.resume.waitId and the same targets). Completed results are idempotent: re-waiting the same sessionId and completionTarget replays the recorded result with retrieval "replay", which proves the work already ran and no duplicate worker is needed.`,
+    description: `Idle inside Cyberdeck until all named workers complete, need input, fail, or the timeout expires; returns deterministic head-preserving semantic results and never raw PTY transcripts. Set settleOnIntervention to return early with wait.state "intervention-required" and bounded summaries when an awaited worker emits EXCEPTION or DECISION_REQUEST. One call blocks at most ${MAX_WAIT_SEGMENT_SECONDS}s so it always returns before an MCP client abandons it; a longer timeoutSeconds is honored across segments. Read wait.state: "settled" (every target terminal), "intervention-required" (opt-in bounded event settlement), "timed-out" (your whole timeoutSeconds elapsed), or "incomplete" (segment boundary — call again with wait.resume.waitId and the same targets). Completed results are idempotent: re-waiting the same sessionId and completionTarget replays the recorded result with retrieval "replay", which proves the work already ran and no duplicate worker is needed.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -282,6 +282,7 @@ const TOOLS = [
           default: DEFAULT_WAIT_SECONDS,
         },
         maxResultChars: { type: "integer", minimum: 200, maximum: 4000, default: 1200 },
+        settleOnIntervention: { type: "boolean", default: false },
       },
       required: ["targets"],
       additionalProperties: false,

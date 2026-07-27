@@ -55,6 +55,7 @@ import {
   type WorkflowService,
 } from "../orchestration/workflow-service.js";
 import type { WorkerCoordinationService } from "./worker-coordination.js";
+import { fleetWorkerCoordinationView } from "./worker-coordination-view.js";
 
 const SessionIdParamsSchema = z.object({ sessionId: z.uuid() });
 const SendParamsSchema = SessionIdParamsSchema.extend({ data: z.string() });
@@ -390,6 +391,8 @@ export class BrokerServer {
       }
       case "fleet.preferences":
         return this.requireFleetPreferences().list();
+      case "fleet.workerCoordination":
+        return fleetWorkerCoordinationView(this.options.workerCoordination?.listSubjects() ?? []);
       case "fleet.reattach": {
         const { detachIdentity } = FleetReattachParamsSchema.parse(frame.params);
         const detachStore = this.requireFleetDetaches();

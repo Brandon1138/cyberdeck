@@ -13,6 +13,7 @@ import {
   type FleetSnapshot,
 } from "../../src/client/fleet.js";
 import type { PullRequestState } from "../../src/client/pr-status.js";
+import type { FleetWorkerCoordinationView } from "../../src/broker/worker-coordination-view.js";
 
 const NOW = "2026-07-22T10:00:00.000Z";
 const NOW_MS = Date.parse(NOW);
@@ -38,9 +39,46 @@ function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
   } as SessionRecord;
 }
 
-function fleet(...records: Array<{ record: SessionRecord; replay?: string }>): FleetSnapshot {
+function fleet(...records: Array<{
+  record: SessionRecord;
+  replay?: string;
+  coordination?: FleetWorkerCoordinationView;
+}>): FleetSnapshot {
   return {
-    threads: records.map(({ record, replay = "" }) => ({ record, replay })),
+    threads: records.map(({ record, replay = "", coordination }) => ({
+      record,
+      replay,
+      ...(coordination === undefined ? {} : { coordination }),
+    })),
+  };
+}
+
+function coordination(
+  sessionId: string,
+  leaseHealth: FleetWorkerCoordinationView["leaseHealth"],
+): FleetWorkerCoordinationView {
+  const controlled = leaseHealth === "active" || leaseHealth === "contested";
+  return {
+    sessionId,
+    subjectId: sessionId,
+    origin: {
+      creatorControllerId: `creator-${leaseHealth}`,
+      taskId: `task-${leaseHealth}`,
+      threadId: sessionId,
+      createdAt: NOW,
+    },
+    ...(controlled
+      ? {
+        currentController: {
+          controllerId: `controller-${leaseHealth}`,
+          familyId: `family-${leaseHealth}`,
+          scope: "fleet:local",
+        },
+      }
+      : {}),
+    leaseHealth,
+    orphaned: leaseHealth === "orphaned",
+    adoptable: leaseHealth === "orphaned" || leaseHealth === "expired",
   };
 }
 
@@ -98,6 +136,93 @@ describe("fleet presentation", () => {
     expect(otherFolderFocused.focusedFolderCwd).toBe("/repo/other");
     expect(transitionFleet(otherFolderFocused, snapshot, "down", NOW_MS).state.selectedSessionId)
       .toBe(onlyWorker.id);
+  });
+
+  it("renders origin, current controller, every lease health, and adoptable state per worker", () => {
+    const states = ["active", "expired", "released", "orphaned", "contested"] as const;
+    const entries = states.map((leaseHealth, index) => {
+      const id = `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
+      return {
+        record: session({
+          id,
+          kind: "worker",
+          role: "worker",
+          name: `Lease ${leaseHealth}`,
+          displayOrder: index,
+        }),
+        coordination: coordination(id, leaseHealth),
+      };
+    });
+    const snapshot = fleet(...entries);
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false,
+      width: 220,
+      height: 50,
+      now: NOW_MS,
+      home: "/Users/brandon",
+    });
+    const lines = rendered.split("\n");
+
+    for (const leaseHealth of states) {
+      const workerIndex = lines.findIndex((line) => line.includes(`Lease ${leaseHealth}`));
+      const ownershipLine = lines[workerIndex + 1]!;
+      expect(ownershipLine).toContain(`origin creator-${leaseHealth}`);
+      expect(ownershipLine).toContain(`lease ${leaseHealth}`);
+      expect(ownershipLine).toContain(
+        `orphaned ${leaseHealth === "orphaned" ? "yes" : "no"}`,
+      );
+      expect(ownershipLine).toContain(
+        `adoptable ${leaseHealth === "orphaned" || leaseHealth === "expired" ? "yes" : "no"}`,
+      );
+      if (leaseHealth === "active" || leaseHealth === "contested") {
+        expect(ownershipLine).toContain(`controller controller-${leaseHealth}`);
+      } else {
+        expect(ownershipLine).toContain("controller none");
+      }
+    }
+  });
+
+  it("skips section headings and lease detail rows during keyboard navigation", () => {
+    const orc = session({
+      id: "11111111-1111-4111-8111-111111111111",
+      kind: "orchestrator",
+      role: "orchestrator",
+      name: "Section Orc",
+      displayOrder: 0,
+    });
+    const firstId = "22222222-2222-4222-8222-222222222222";
+    const secondId = "33333333-3333-4333-8333-333333333333";
+    const snapshot = fleet(
+      { record: orc },
+      {
+        record: session({
+          id: firstId,
+          kind: "worker",
+          role: "worker",
+          name: "First controlled worker",
+          displayOrder: 1,
+        }),
+        coordination: coordination(firstId, "active"),
+      },
+      {
+        record: session({
+          id: secondId,
+          kind: "worker",
+          role: "worker",
+          name: "Second orphaned worker",
+          displayOrder: 2,
+        }),
+        coordination: coordination(secondId, "orphaned"),
+      },
+    );
+
+    const initial = createFleetState(snapshot);
+    expect(initial.selectedSessionId).toBe(orc.id);
+    const first = transitionFleet(initial, snapshot, "down", NOW_MS).state;
+    expect(first.selectedSessionId).toBe(firstId);
+    const second = transitionFleet(first, snapshot, "down", NOW_MS).state;
+    expect(second.selectedSessionId).toBe(secondId);
+    expect(transitionFleet(second, snapshot, "up", NOW_MS).state.selectedSessionId).toBe(firstId);
   });
 
   it("groups threads by project and shows provider, model, status, preview, and recency", () => {
@@ -1772,6 +1897,25 @@ describe("collectFleetSnapshot", () => {
       threads: [{ record, replay: "latest" }],
     });
     expect(request).toHaveBeenCalledWith("session.snapshot", { sessionId: record.id });
+  });
+
+  it("joins broker lease projection onto matching worker sessions", async () => {
+    const record = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "worker",
+      role: "worker",
+    });
+    const ownership = coordination(record.id, "contested");
+    const request = vi.fn(async (method: string) => {
+      if (method === "session.list") return [record];
+      if (method === "fleet.workerCoordination") return [ownership];
+      if (method === "session.snapshot") return { data: Buffer.from("latest").toString("base64") };
+      throw new Error(`unexpected ${method}`);
+    });
+
+    await expect(collectFleetSnapshot({ request } as never)).resolves.toEqual({
+      threads: [{ record, replay: "latest", coordination: ownership }],
+    });
   });
 });
 
