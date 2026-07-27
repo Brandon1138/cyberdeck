@@ -54,6 +54,7 @@ import {
   WorkflowRunActorParamsSchema,
   type WorkflowService,
 } from "../orchestration/workflow-service.js";
+import type { WorkerCoordinationService } from "./worker-coordination.js";
 
 const SessionIdParamsSchema = z.object({ sessionId: z.uuid() });
 const SendParamsSchema = SessionIdParamsSchema.extend({ data: z.string() });
@@ -101,6 +102,8 @@ export interface BrokerServerOptions {
   fleetDetaches?: FleetDetachStore;
   fleetPreferences?: FleetPreferenceStore;
   workerPreferences?: WorkerPreferenceStore;
+  /** Internal domain substrate. No transport methods expose it in Wave 1. */
+  workerCoordination?: WorkerCoordinationService;
   onShutdown?: () => void;
 }
 

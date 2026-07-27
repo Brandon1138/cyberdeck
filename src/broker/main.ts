@@ -37,6 +37,7 @@ import { loadBrokerRuntimeConfig } from "../runtime-config.js";
 import { selectExpiredThreads, type ThreadRetentionPolicy } from "../domain/thread-retention.js";
 import type { SessionRecord } from "../domain/session.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
+import { WorkerCoordinationRuntime } from "./worker-coordination-runtime.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -136,6 +137,12 @@ export async function runBroker(
   });
   await registry.ready();
   const orchestratorStore = new OrchestratorStore(stateDirectory);
+  const workerCoordination = new WorkerCoordinationRuntime({
+    stateDirectory,
+    recoveredSessions,
+    orchestrators: orchestratorStore,
+  });
+  await workerCoordination.start();
   const orchestrators = new OrchestratorManager(registry, orchestratorStore, workerPreferences);
   const agentControl = new AgentControlService(
     registry,
@@ -190,6 +197,7 @@ export async function runBroker(
     fleetDetaches,
     fleetPreferences,
     workerPreferences,
+    workerCoordination: workerCoordination.service,
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();
