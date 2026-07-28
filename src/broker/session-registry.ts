@@ -12,7 +12,11 @@ import {
   type ThreadAttentionState,
 } from "../domain/session.js";
 import { resolvedLaunchRecord } from "../providers/launch-record.js";
-import type { ProviderAdapter, ProviderLaunchSpec } from "../providers/provider.js";
+import type {
+  ProviderAdapter,
+  ProviderLaunchSpec,
+  ProviderSessionTerminal,
+} from "../providers/provider.js";
 import type {
   AppendThreadEvent,
   CaptureProviderTurns,
@@ -431,11 +435,12 @@ export class SessionRegistry {
     this.adoptPty(runtime, pty);
 
     try {
-      const initialization = await adapter.initializeSession?.(record, {
+      const sessionTerminal: ProviderSessionTerminal = {
         snapshot: () => pty.snapshot(),
         write: (data) => pty.write(data),
         wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-      });
+      };
+      const initialization = await adapter.initializeSession?.(record, sessionTerminal);
       if (record.profile === "scout") {
         const verified = initialization?.scoutReadOnlyCanary;
         if (record.scout === undefined || verified === undefined) {
@@ -476,10 +481,14 @@ export class SessionRegistry {
           data: { initial: true },
         });
         this.requireActiveParent(parsed.parentSessionId);
-        const data = adapter.submitInput?.(preparedInitialPrompt)
-          ?? Buffer.from(`${preparedInitialPrompt}\n`);
         this.armScoutBudget(runtime);
-        pty.write(data);
+        if (adapter.submitInputToTerminal !== undefined) {
+          await adapter.submitInputToTerminal(preparedInitialPrompt, sessionTerminal);
+        } else {
+          const data = adapter.submitInput?.(preparedInitialPrompt)
+            ?? Buffer.from(`${preparedInitialPrompt}\n`);
+          pty.write(data);
+        }
       } else {
         this.armScoutBudget(runtime);
       }

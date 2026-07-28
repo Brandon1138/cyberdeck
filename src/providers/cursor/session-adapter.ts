@@ -16,6 +16,7 @@ import {
   type CursorReadOnlyCanaryOptions,
   type CursorReadOnlyCanaryResult,
 } from "./read-only-canary.js";
+import { submitCursorPastedInput } from "./input.js";
 import { isolateCursorScoutMcp } from "./mcp-isolation.js";
 import { join } from "node:path";
 
@@ -28,6 +29,7 @@ export interface CursorProviderAdapterOptions extends CursorRunEverythingOptions
   ) => Promise<CursorReadOnlyCanaryResult>;
   isolateMcp?: (session: SessionRecord, spec: ProviderLaunchSpec) => Promise<void>;
   now?: () => string;
+  inputCommitDelayMs?: number;
 }
 
 /** Broker-owned interactive Cursor Composer/Agent session. */
@@ -90,15 +92,22 @@ export class CursorProviderAdapter implements ProviderAdapter {
           ? {}
           : { pollIntervalMs: this.options.pollIntervalMs }),
         ...(this.options.now === undefined ? {} : { now: this.options.now }),
+        ...(this.options.inputCommitDelayMs === undefined
+          ? {}
+          : { inputCommitDelayMs: this.options.inputCommitDelayMs }),
       },
     );
     return { scoutReadOnlyCanary: canary };
   }
 
-  submitInput(message: string): Buffer {
-    // Current Cursor treats programmatically injected text as a paste: the first Enter accepts the
-    // paste into the composer and the second submits it. Older builds harmlessly consume the second
-    // Enter at the fresh input prompt.
-    return Buffer.from(`${message}\r\r`);
+  async submitInputToTerminal(
+    message: string,
+    terminal: ProviderSessionTerminal,
+  ): Promise<void> {
+    await submitCursorPastedInput(terminal, message, {
+      ...(this.options.inputCommitDelayMs === undefined
+        ? {}
+        : { commitDelayMs: this.options.inputCommitDelayMs }),
+    });
   }
 }

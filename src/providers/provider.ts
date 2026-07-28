@@ -52,6 +52,14 @@ export interface ProviderAdapter {
   buildResumeSpec(session: SessionRecord): ProviderLaunchSpec;
   /** Encode one logical prompt submission for the provider's negotiated interactive terminal. */
   submitInput?(message: string): Buffer;
+  /**
+   * Submit one logical prompt when the provider requires paced terminal interaction rather than a
+   * single encoded buffer. Takes precedence over `submitInput` for deferred initial prompts.
+   */
+  submitInputToTerminal?(
+    message: string,
+    terminal: ProviderSessionTerminal,
+  ): Promise<void>;
 }
 
 export interface CyberdeckMcpLaunch {

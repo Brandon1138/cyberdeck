@@ -109,6 +109,7 @@ describe("Cursor Scout denied-write canary", () => {
     await expect(verifyCursorReadOnlyCanary(session, terminal, {
       timeoutMs: 100,
       pollIntervalMs: 1,
+      inputCommitDelayMs: 0,
       now: () => "2026-07-27T01:00:00.000Z",
       repositoryState,
       pathExists,
@@ -128,6 +129,7 @@ describe("Cursor Scout denied-write canary", () => {
     await expect(verifyCursorReadOnlyCanary(session, terminal, {
       timeoutMs: 100,
       pollIntervalMs: 1,
+      inputCommitDelayMs: 0,
       repositoryState: async () => "",
       pathExists,
       cleanupCanary,
@@ -145,6 +147,7 @@ describe("Cursor Scout denied-write canary", () => {
 
     await expect(verifyCursorReadOnlyCanary(session, new ScriptedTerminal([]), {
       timeoutMs: 0,
+      inputCommitDelayMs: 0,
       repositoryState: async () => "",
       pathExists,
       cleanupCanary,

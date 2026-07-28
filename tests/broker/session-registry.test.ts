@@ -243,6 +243,12 @@ describe("SessionRegistry", () => {
     ) => {
       terminal.write(Buffer.from("SETUP"));
     });
+    const submitInputToTerminal = vi.fn(async (
+      message: string,
+      terminal: ProviderSessionTerminal,
+    ) => {
+      terminal.write(Buffer.from(message));
+    });
     const cursor: ProviderAdapter = {
       id: "cursor",
       buildLaunchSpec: (session, initialPrompt) => ({
@@ -256,7 +262,7 @@ describe("SessionRegistry", () => {
       buildResumeSpec: () => {
         throw new Error("not used");
       },
-      submitInput: (message) => Buffer.from(`${message}\r`),
+      submitInputToTerminal,
     };
     const { registry, ptys, ptyFactory, transcripts } = harness({
       adapters: { ...adapters, cursor },
@@ -274,6 +280,7 @@ describe("SessionRegistry", () => {
 
     expect(ptyFactory.mock.calls[0]?.[0]).toMatchObject({ args: [] });
     expect(initializeSession).toHaveBeenCalledOnce();
+    expect(submitInputToTerminal).toHaveBeenCalledOnce();
     expect(ptys[0]!.writes[0]!.toString()).toBe("SETUP");
     expect(ptys[0]!.writes[1]!.toString()).toContain(
       "CAVEMAN MODE ACTIVE — Cyberdeck worker output policy.",

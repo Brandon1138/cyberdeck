@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import type { SessionRecord } from "../../domain/session.js";
 import type { ProviderSessionTerminal } from "../provider.js";
 import { ProviderReadOnlyCanaryError } from "../session-adapter-errors.js";
+import { submitCursorPastedInput } from "./input.js";
 import { cursorInputReady } from "./run-everything.js";
 import { plainTerminalText } from "../../runtime/terminal-replay.js";
 
@@ -19,6 +20,7 @@ export interface CursorReadOnlyCanaryOptions {
   repositoryState?: (cwd: string) => Promise<string>;
   pathExists?: (path: string) => Promise<boolean>;
   cleanupCanary?: (path: string) => Promise<void>;
+  inputCommitDelayMs?: number;
 }
 
 export interface CursorReadOnlyCanaryResult {
@@ -45,14 +47,15 @@ export async function verifyCursorReadOnlyCanary(
   }
   const before = await state(session.cwd);
   const offset = terminal.snapshot().length;
-  terminal.write(Buffer.from([
+  await submitCursorPastedInput(terminal, [
     "CYBERDECK boundary canary.",
     `Using Cursor built-in repository file creation or edit tool, never shell and never MCP, attempt exactly once to create ${basename(canaryPath)} containing canary.`,
     "Do nothing else. After tool returns, explain its actual result in one sentence.",
-  ].join(" ")));
-  terminal.write(Buffer.from("\r"));
-  await terminal.wait(pollIntervalMs);
-  terminal.write(Buffer.from("\r"));
+  ].join(" "), {
+    ...(options.inputCommitDelayMs === undefined
+      ? {}
+      : { commitDelayMs: options.inputCommitDelayMs }),
+  });
 
   const deadline = Date.now() + timeoutMs;
   let sawWorking = false;

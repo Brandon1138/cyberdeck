@@ -386,9 +386,21 @@ describe("extended interactive provider adapters", () => {
     expect(adapter.deferInitialPrompt(record)).toBe(true);
   });
 
-  it("accepts and submits pasted Cursor input with two Enter keypresses", () => {
-    expect(new CursorProviderAdapter().submitInput("Inspect HistoryView").toString("utf8"))
-      .toBe("Inspect HistoryView\r\r");
+  it("accepts and submits pasted Cursor input with paced Enter keypresses", async () => {
+    const writes: string[] = [];
+    const waits: number[] = [];
+    await new CursorProviderAdapter({ inputCommitDelayMs: 7 }).submitInputToTerminal(
+      "Inspect HistoryView",
+      {
+        snapshot: () => Buffer.alloc(0),
+        write: (data) => writes.push(data.toString("utf8")),
+        wait: async (milliseconds) => {
+          waits.push(milliseconds);
+        },
+      },
+    );
+    expect(writes).toEqual(["Inspect HistoryView", "\r", "\r"]);
+    expect(waits).toEqual([7]);
   });
 
   it.each([
