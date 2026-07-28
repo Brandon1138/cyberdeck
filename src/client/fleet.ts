@@ -21,6 +21,14 @@ import { providerTerminalActivity, stripTerminalControl } from "../runtime/termi
 import { attachSession, type AttachTransport } from "./attach.js";
 import { collectDashboardSnapshot, renderDashboard } from "./dashboard.js";
 import {
+  leaseCustody,
+  leaseCustodyBadge,
+  leaseCustodySummary,
+  uniformLeaseCustody,
+  type LeaseCustody,
+  type LeaseCustodyBadge,
+} from "./lease-custody.js";
+import {
   CONFIGURABLE_PERMISSION_PROVIDERS,
   permissionProviderLabel,
   resolveProviderPermission,
@@ -152,6 +160,11 @@ export interface FleetState {
   permissionPolicies: ProviderPermissionPreferences;
   view: "fleet" | "diagnostics";
   helpOpen?: boolean | undefined;
+  /**
+   * Set while the operator is debugging lease custody. Worker rows then carry the full
+   * broker projection on a second line; at rest a single badge says the same thing.
+   */
+  leaseDetail?: boolean | undefined;
   rename?: RenameState | undefined;
   notice?: string | undefined;
   noticeTone?: FleetNoticeTone | undefined;
@@ -646,6 +659,17 @@ export function transitionFleet(
 
   if (key === "?" && state.draft === "") {
     return { state: { ...state, helpOpen: state.helpOpen !== true, notice: undefined } };
+  }
+
+  if (key === "ctrl+l") {
+    return {
+      state: {
+        ...state,
+        leaseDetail: state.leaseDetail !== true,
+        helpOpen: false,
+        notice: undefined,
+      },
+    };
   }
 
   if (key === "ctrl+r" && selected !== undefined) {
@@ -1467,6 +1491,14 @@ function renderFleetList(
   const bodyHeight = Math.max(0, options.height - footer.length);
   const threadListViewportHeight = Math.max(0, bodyHeight - header.length);
   const rows = fleetListRows(snapshot, state);
+  // Same bargain as the pull-request column: a fleet whose leases are all healthy — or whose
+  // groups all rolled up — never pays for the column, and it is only as wide as it must be.
+  const leaseBadgeWidth = rows.reduce(
+    (widest, row) => row.kind === "thread" && row.leaseBadge !== undefined
+      ? Math.max(widest, row.leaseBadge.label.length)
+      : widest,
+    0,
+  );
   const viewportState = scrollFocusedRowIntoView(
     state,
     rows,
@@ -1513,6 +1545,8 @@ function renderFleetList(
             viewportState,
             options,
             pullRequestColumn,
+            leaseBadgeWidth,
+            row.leaseBadge,
             indicator,
           );
         }
@@ -1613,7 +1647,7 @@ function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
     "pgup/dn page", "ctrl+u/d half", "home/end", "shift+↑↓ reorder", "←→ fold project", "ctrl+s switch views",
     "@ mention", "alt+1–9 open", "esc back/clear",
-    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+] detach/reattach", "ctrl+g cwd", "ctrl+t pin to top", `ctrl+x ${destructive}`, "? close",
+    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+] detach/reattach", "ctrl+g cwd", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
   ];
   if (width >= 110) {
     return [
@@ -1914,6 +1948,8 @@ function renderThreadRow(
   state: FleetState,
   options: ResolvedFleetRenderOptions,
   pullRequestColumn = false,
+  leaseBadgeWidth = 0,
+  leaseBadge?: LeaseCustodyBadge | undefined,
   scrollbar?: "track" | "thumb" | undefined,
 ): string {
   const selected = state.focusedFolderCwd === undefined
@@ -1933,12 +1969,16 @@ function renderThreadRow(
   const statusWidth = 11;
   const fixedWidth = 12 + titleWidth + statusWidth
     + (showIdentity ? identityWidth + 1 : 0)
-    + (pullRequestColumn ? 2 : 0);
+    + (pullRequestColumn ? 2 : 0)
+    + (leaseBadgeWidth === 0 ? 0 : leaseBadgeWidth + 1);
   const previewWidth = Math.max(1, options.width - fixedWidth);
   const preview = threadPreview(thread, previewWidth);
   return [
     `${rowGutter(selected, options.color, scrollbar)}${statusMarker(status, selected, options.color)}`,
     paint(pad(title, titleWidth), selected ? "bold" : "muted", options.color),
+    ...(leaseBadgeWidth === 0
+      ? []
+      : [leaseBadgeCell(leaseBadge, leaseBadgeWidth, options.color)]),
     ...(pullRequestColumn
       ? [pullRequestCell(options.pullRequests.get(thread.record.cwd), options.color)]
       : []),
@@ -1949,6 +1989,25 @@ function renderThreadRow(
   ].join(" ");
 }
 
+/**
+ * A worker's lease custody, at the width of the longest badge on screen. A thread with
+ * nothing to report holds the column open and shows nothing, exactly as the pull-request
+ * column does.
+ */
+function leaseBadgeCell(
+  badge: LeaseCustodyBadge | undefined,
+  width: number,
+  color: boolean,
+): string {
+  if (badge === undefined) return " ".repeat(width);
+  return paint(pad(badge.label, width), badge.tone, color);
+}
+
+/**
+ * The unabridged broker projection, shown only while lease-custody detail is toggled on.
+ * The five fields are redundant by design here: this is the line an operator reads when
+ * they distrust the badge and want to see which field disagrees with which.
+ */
 function renderWorkerCoordinationRow(
   coordination: FleetWorkerCoordinationView,
   options: ResolvedFleetRenderOptions,
@@ -1959,14 +2018,8 @@ function renderWorkerCoordinationRow(
     `  origin ${coordination.origin.creatorControllerId} · controller ${controller} · lease ${coordination.leaseHealth} · orphaned ${coordination.orphaned ? "yes" : "no"} · adoptable ${coordination.adoptable ? "yes" : "no"}`,
     Math.max(1, options.width - ROW_GUTTER.length),
   );
-  const tone = coordination.leaseHealth === "active"
-    ? "working"
-    : coordination.leaseHealth === "contested"
-      ? "alert"
-      : coordination.leaseHealth === "released"
-        ? "muted"
-        : "attention";
-  return `${rowGutter(false, options.color, scrollbar)}${paint(label, tone, options.color)}`;
+  const badge = leaseCustodyBadge(leaseCustody(coordination));
+  return `${rowGutter(false, options.color, scrollbar)}${paint(label, badge?.tone ?? "subtle", options.color)}`;
 }
 
 /** A thread with no known pull request holds the column open and shows nothing. */
@@ -2500,6 +2553,7 @@ export class FleetKeyDecoder {
     else if (code === 0x04) keys.push("ctrl+d");
     else if (code === 0x07) keys.push("ctrl+g");
     else if (code === 0x0a) keys.push("ctrl+j");
+    else if (code === 0x0c) keys.push("ctrl+l");
     else if (code === 0x0f) keys.push("ctrl+o");
     else if (code === 0x12) keys.push("ctrl+r");
     else if (code === 0x13) keys.push("ctrl+s");
@@ -2622,7 +2676,13 @@ function orderedThreads(snapshot: FleetSnapshot): FleetThread[] {
  */
 type FleetRow =
   | { kind: "folder"; cwd: string; threadCount: number }
-  | { kind: "thread"; cwd: string; thread: FleetThread };
+  | {
+    kind: "thread";
+    cwd: string;
+    thread: FleetThread;
+    /** Absent when custody is healthy, unknown, or already stated by the group rollup. */
+    leaseBadge?: LeaseCustodyBadge;
+  };
 
 /**
  * Role headings and blank separators occupy a line each, so the viewport has to count them, but
@@ -2647,17 +2707,46 @@ function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow
     return [
       ...spacer,
       header,
-      ...roleSections(threads).flatMap((section): FleetListRow[] => [
-        { kind: "section", label: section.label },
-        ...section.threads.flatMap((thread): FleetListRow[] => [
-          { kind: "thread", cwd, thread },
-          ...(thread.record.kind === "orchestrator" || thread.coordination === undefined
-            ? []
-            : [{ kind: "ownership" as const, coordination: thread.coordination }]),
-        ]),
-      ]),
+      ...roleSections(threads).flatMap((section): FleetListRow[] => {
+        // A section whose workers all share one custody says it once on the heading, and
+        // its rows go bare: a badge repeated down the whole group is a column of noise.
+        const custodies = section.threads.map((thread) =>
+          thread.record.kind === "orchestrator" || thread.coordination === undefined
+            ? undefined
+            : leaseCustody(thread.coordination));
+        const rollup = uniformLeaseCustody(custodies);
+        return [
+          { kind: "section", label: sectionLabel(section.label, section.threads.length, rollup) },
+          ...section.threads.flatMap((thread, index): FleetListRow[] => {
+            const custody = custodies[index];
+            const badge = rollup !== undefined || custody === undefined
+              ? undefined
+              : leaseCustodyBadge(custody);
+            return [
+              { kind: "thread", cwd, thread, ...(badge === undefined ? {} : { leaseBadge: badge }) },
+              ...(state.leaseDetail === true && thread.coordination !== undefined
+                && thread.record.kind !== "orchestrator"
+                ? [{ kind: "ownership" as const, coordination: thread.coordination }]
+                : []),
+            ];
+          }),
+        ];
+      }),
     ];
   });
+}
+
+/**
+ * A role heading, plus the group's shared lease custody when it has one. Attached is the
+ * healthy state and stays unsaid, so the heading only grows when there is something to say.
+ */
+function sectionLabel(
+  label: string,
+  threadCount: number,
+  rollup: LeaseCustody | undefined,
+): string {
+  if (rollup === undefined || rollup.kind === "attached") return label;
+  return `${label} (${threadCount} · all ${leaseCustodySummary(rollup)})`;
 }
 
 function focusedListRowIndex(rows: readonly FleetListRow[], state: FleetState): number {
