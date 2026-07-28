@@ -45,13 +45,19 @@ import {
   scoutScopeViolation,
 } from "../domain/worker-profile.js";
 import type {
-  ScoutReport,
+  ScoutArtifactKind,
   ScoutRuntimeState,
 } from "../domain/worker-profile.js";
+import {
+  scoutTokenCountFromCursorStream,
+  type ScoutDecisionCard,
+} from "../domain/scout-output.js";
 import type {
+  ScoutArtifactRead,
   ScoutReportCapture,
   ScoutReportStore,
 } from "../persistence/scout-report-store.js";
+import { captureScoutWorkspaceStateHash } from "../providers/cursor/workspace-state.js";
 
 export interface PtyHandle {
   readonly pid: number;
@@ -137,11 +143,16 @@ interface RuntimeSession {
   launchTail: Promise<void>;
   /** Serializes framed drop-box capture so older PTY snapshots cannot overwrite newer ones. */
   scoutCaptureTail?: Promise<void>;
+  /** Serializes the full provider stream into the durable trace artifact. */
+  scoutTraceTail?: Promise<void>;
+  scoutTraceFailure?: string;
+  /** Prevents duplicate async finalization when a child process reports more than one close path. */
+  scoutFinalizing?: boolean;
   scoutBudgetTimer?: ReturnType<typeof setTimeout>;
   scoutBudgetActive?: boolean;
   scoutTokenBaseline?: number;
   scoutBudgetExhausting?: boolean;
-  scoutReport?: ScoutReport;
+  scoutCard?: ScoutDecisionCard;
 }
 
 const MAX_COMPLETION_LEDGER_ENTRIES = 64;
@@ -213,7 +224,11 @@ export interface SessionRegistryOptions {
   config: BrokerRuntimeConfig;
   /** Injected monotonic-enough wall clock for stalled-worker tests. */
   now?: () => number;
-  scoutReports?: Pick<ScoutReportStore, "initialize" | "capture" | "collect" | "remove">;
+  scoutReports?: Pick<
+    ScoutReportStore,
+    "initialize" | "capture" | "collect" | "appendTrace" | "readArtifact" | "remove"
+  >;
+  scoutWorkspaceState?: (cwd: string) => Promise<string>;
 }
 
 export class RegistryError extends Error {
@@ -231,8 +246,10 @@ export class RegistryError extends Error {
       | "PARENT_SESSION_NOT_ACTIVE"
       | "INVALID_SESSION_CWD"
       | "INVALID_WORKER_PROFILE"
-      | "SCOUT_REPORT_STORE_UNAVAILABLE",
+      | "SCOUT_REPORT_STORE_UNAVAILABLE"
+      | "SCOUT_LAUNCH_FAILED",
     message: string,
+    readonly sessionId?: string,
   ) {
     super(message);
     this.name = "RegistryError";
@@ -243,6 +260,7 @@ export class SessionRegistry {
   private readonly sessions = new Map<string, RuntimeSession>();
   private readonly controllerReleasedListeners = new Set<(sessionId: string) => void>();
   private readonly sessionUpdateListeners = new Set<(sessionId: string) => void>();
+  private readonly scoutWorkspaceStateInflight = new Map<string, Promise<string>>();
   private readonly recovery: Promise<void>;
   /** Starts admitted by policy but not yet represented in `sessions`. */
   private pendingWorkerStarts = 0;
@@ -302,10 +320,11 @@ export class SessionRegistry {
         || validated.model !== "composer"
         || validated.sandbox !== "read-only"
         || validated.approvalMode !== "auto"
+        || validated.workerMode === "caveman"
       ) {
         throw new RegistryError(
           "INVALID_WORKER_PROFILE",
-          "Scout profile requires Cursor Composer, read-only sandbox, and auto approval",
+          "Scout profile requires Cursor Composer, read-only sandbox, auto approval, and normal worker mode",
         );
       }
       const scopeViolation = scoutScopeViolation(validated.cwd, validated.brief.scope);
@@ -358,7 +377,7 @@ export class SessionRegistry {
       updatedAt: now,
       executionState: "starting",
       attachmentState: "detached",
-      pid: 1,
+      pid: 0,
       exitCode: null,
       childIds: [],
       attentionState: initialPrompt === undefined ? "done" : "working",
@@ -373,13 +392,21 @@ export class SessionRegistry {
     let adapter: ProviderAdapter;
     let preparedInitialPrompt: string | undefined;
     let deferredInitialPrompt: boolean;
-    let launchSpec: ProviderLaunchSpec;
+    let launchSpec: ProviderLaunchSpec | undefined;
     let pty: PtyHandle;
+    let scoutLaunchPhase: NonNullable<ScoutRuntimeState["launchFailure"]>["phase"] = "prepare";
     try {
+      if (provisional.profile === "scout" && provisional.scout !== undefined) {
+        scoutLaunchPhase = "verify";
+        provisional.scout.workspaceStateHash = await this.scoutWorkspaceState(provisional.cwd);
+      }
+      scoutLaunchPhase = "prepare";
       adapter = this.requireAdapter(parsed.provider);
       preparedInitialPrompt = initialPrompt === undefined
         ? undefined
-        : (provisional.kind ?? "worker") === "worker"
+        : provisional.profile === "scout"
+          ? initialPrompt
+          : (provisional.kind ?? "worker") === "worker"
           ? addWorkerReportingGuidance(
               applyWorkerMode(initialPrompt, provisional.workerMode),
               provisional.id,
@@ -393,21 +420,36 @@ export class SessionRegistry {
           ? undefined
           : preparedInitialPrompt,
       );
-      pty = await this.spawnPreparedLaunch(adapter, provisional, launchSpec, async () => {
-        this.requireActiveParent(parsed.parentSessionId);
-        if (initialPrompt !== undefined && !deferredInitialPrompt) {
-          await this.options.transcripts?.append({
-            sessionId: id,
-            kind: "prompt",
-            source: "human",
-            text: initialPrompt,
-            data: { initial: true },
-          });
-        }
-        this.requireActiveParent(parsed.parentSessionId);
-      });
+      pty = await this.spawnPreparedLaunch(
+        adapter,
+        provisional,
+        launchSpec,
+        async () => {
+          this.requireActiveParent(parsed.parentSessionId);
+          if (initialPrompt !== undefined && !deferredInitialPrompt) {
+            await this.options.transcripts?.append({
+              sessionId: id,
+              kind: "prompt",
+              source: "human",
+              text: initialPrompt,
+              data: { initial: true },
+            });
+          }
+          this.requireActiveParent(parsed.parentSessionId);
+        },
+        (phase) => { scoutLaunchPhase = phase; },
+      );
     } catch (error) {
       releaseReservation();
+      if (provisional.profile === "scout" && provisional.scout !== undefined) {
+        await this.preserveFailedScoutLaunch(
+          provisional,
+          scoutLaunchPhase,
+          error,
+          launchSpec,
+        );
+        throw this.scoutLaunchError(provisional.id, error);
+      }
       throw error;
     }
     const record: SessionRecord = {
@@ -434,31 +476,26 @@ export class SessionRegistry {
     releaseReservation();
     this.adoptPty(runtime, pty);
 
+    if (record.profile === "scout") {
+      try {
+        await this.registerSession(runtime);
+      } catch (error) {
+        await this.failLiveScout(runtime, "initialize", error);
+        throw this.scoutLaunchError(record.id, error);
+      }
+    }
+
     try {
       const sessionTerminal: ProviderSessionTerminal = {
         snapshot: () => pty.snapshot(),
         write: (data) => pty.write(data),
         wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
       };
-      const initialization = await adapter.initializeSession?.(record, sessionTerminal);
-      if (record.profile === "scout") {
-        const verified = initialization?.scoutReadOnlyCanary;
-        if (record.scout === undefined || verified === undefined) {
-          throw new RegistryError(
-            "INVALID_WORKER_PROFILE",
-            "Scout launch did not verify read-only enforcement",
-          );
-        }
-        record.scout.canary = {
-          status: "verified",
-          verifiedAt: verified.verifiedAt,
-        };
-        await this.persist(runtime);
-        await this.appendEvent("scout.canary.verified", record.id, {
-          verifiedAt: verified.verifiedAt,
-        });
-      }
-      if (runtime.record.executionState !== "active") {
+      await adapter.initializeSession?.(record, sessionTerminal);
+      if (
+        runtime.record.profile !== "scout"
+        && runtime.record.executionState !== "active"
+      ) {
         throw new RegistryError(
           "SESSION_NOT_ACTIVE",
           runtime.latestResult ?? "Provider session exited during initialization",
@@ -494,9 +531,8 @@ export class SessionRegistry {
       }
     } catch (error) {
       if (record.profile === "scout") {
-        await this.appendEvent("scout.canary.failed", record.id, {
-          message: error instanceof Error ? error.message : String(error),
-        }).catch(() => undefined);
+        await this.failLiveScout(runtime, "initialize", error);
+        throw this.scoutLaunchError(record.id, error);
       }
       if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
       delete runtime.idleTimer;
@@ -507,34 +543,18 @@ export class SessionRegistry {
       throw error;
     }
 
-    if (parsed.parentSessionId !== undefined) {
-      const parent = this.requireRuntime(parsed.parentSessionId);
-      parent.record.childIds.push(id);
-      parent.record.updatedAt = new Date().toISOString();
-      await this.persist(parent);
+    if (record.profile !== "scout") {
+      try {
+        await this.registerSession(runtime);
+      } catch (error) {
+        pty.kill();
+        this.sessions.delete(id);
+        await this.cleanupLaunchArtifacts(record, "launch-failed");
+        throw error;
+      }
     }
 
-    try {
-      await this.appendEvent("session.created", id, {
-        provider: record.provider,
-        model: record.model ?? null,
-        role: record.role ?? null,
-        parentSessionId: record.parentSessionId ?? null,
-        pid: record.pid,
-      });
-      await this.appendTranscript(id, "lifecycle", "broker", "session created", {
-        provider: record.provider,
-        model: record.model ?? null,
-      });
-      await this.persist(runtime);
-    } catch (error) {
-      pty.kill();
-      this.sessions.delete(id);
-      await this.cleanupLaunchArtifacts(record, "launch-failed");
-      throw error;
-    }
-
-    return this.cloneRecord(record);
+    return this.cloneRecord(runtime.record);
   }
 
   list(): SessionRecord[] {
@@ -550,6 +570,34 @@ export class SessionRegistry {
 
   get(sessionId: string): SessionRecord {
     return this.cloneRecord(this.requireRuntime(sessionId).record);
+  }
+
+  async readScoutArtifact(
+    sessionId: string,
+    artifact: ScoutArtifactKind,
+    afterByte = 0,
+    maxBytes = 16 * 1024,
+  ): Promise<ScoutArtifactRead> {
+    const record = this.requireRuntime(sessionId).record;
+    if (record.profile !== "scout" || record.scout === undefined) {
+      throw new RegistryError(
+        "INVALID_WORKER_PROFILE",
+        `Session ${sessionId} is not a Scout`,
+      );
+    }
+    return this.requireScoutReports().readArtifact(
+      record.scout,
+      artifact,
+      afterByte,
+      maxBytes,
+    );
+  }
+
+  scoutDecisionCard(sessionId: string): ScoutDecisionCard | undefined {
+    const card = this.requireRuntime(sessionId).scoutCard;
+    return card === undefined
+      ? undefined
+      : { ...card, evidence: [...card.evidence] };
   }
 
   /**
@@ -698,6 +746,7 @@ export class SessionRegistry {
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
     }
+    this.requireInteractiveInput(runtime);
     if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
       throw new RegistryError("NOT_SESSION_CONTROLLER", "Another client controls this session");
     }
@@ -707,6 +756,7 @@ export class SessionRegistry {
 
   async submit(sessionId: string, clientId: string | undefined, message: string): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
+    this.requireInteractiveInput(runtime);
     const adapter = this.requireAdapter(runtime.record.provider);
     const data = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
     delete runtime.stallObservation;
@@ -728,6 +778,7 @@ export class SessionRegistry {
     if (runtime.controller !== undefined) {
       throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
     }
+    this.requireInteractiveInput(runtime);
     const adapter = this.requireAdapter(runtime.record.provider);
     const encoded = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
     delete runtime.stallObservation;
@@ -782,9 +833,13 @@ export class SessionRegistry {
       // only through `forceStop`, where broker policy can require a grace period and audit it.
       return;
     }
-    // An errored session still owns a running OS process, so stop must be able to reach it even
-    // though the broker no longer treats it as active.
-    if (runtime.record.executionState !== "active" && runtime.record.executionState !== "errored") return;
+    // An errored or failed session may still own a running OS process, so stop must be able to reach
+    // it even though the broker no longer counts it as active.
+    if (
+      runtime.record.executionState !== "active"
+      && runtime.record.executionState !== "errored"
+      && runtime.record.executionState !== "failed"
+    ) return;
     runtime.stopRequested = true;
     runtime.stopRequestedAt = new Date().toISOString();
     runtime.record.executionState = "cancelled";
@@ -1103,6 +1158,15 @@ export class SessionRegistry {
     const pty = runtime.pty;
     if (pty === undefined) return;
     const replay = pty.snapshot().toString("utf8");
+    if (runtime.record.scout?.transport === "headless-stream-json") {
+      this.appendScoutTrace(runtime, chunk);
+      this.captureScoutReport(runtime, replay);
+      this.enforceScoutTokenBudget(runtime, replay);
+      runtime.controller?.output(chunk);
+      for (const watcher of runtime.watchers.values()) watcher.output(chunk);
+      this.notifySessionUpdate(runtime.record.id);
+      return;
+    }
     this.captureScoutReport(runtime, replay);
     this.enforceScoutTokenBudget(runtime, replay);
     if (this.observeFatalError(runtime, replay)) {
@@ -1218,10 +1282,12 @@ export class SessionRegistry {
       : scoutTerminal === "budget_exhausted"
         ? "cancelled"
         : runtime.stopRequested
-      ? "cancelled"
-      : exitCode === 0
-        ? "exited"
-        : "failed";
+          ? "cancelled"
+          : scoutTerminal === "failed"
+            ? "failed"
+            : exitCode === 0
+              ? "exited"
+              : "failed";
     runtime.record.exitCode = exitCode;
     const controller = runtime.controller;
     const watchers = [...runtime.watchers.values()];
@@ -1234,10 +1300,12 @@ export class SessionRegistry {
       : scoutTerminal === "budget_exhausted"
         ? "stopped"
         : runtime.stopRequested
-      ? (runtime.outcomePreserved === true ? "done" : "stopped")
-      : exitCode === 0
-        ? "done"
-        : "failed";
+          ? (runtime.outcomePreserved === true ? "done" : "stopped")
+          : scoutTerminal === "failed"
+            ? "failed"
+            : exitCode === 0
+              ? "done"
+              : "failed";
     runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
     controller?.ended(exitCode);
     for (const watcher of watchers) watcher.ended(exitCode);
@@ -1261,6 +1329,190 @@ export class SessionRegistry {
     this.notifySessionUpdate(runtime.record.id);
   }
 
+  private async finalizeHeadlessScout(
+    runtime: RuntimeSession,
+    exitCode: number,
+    signal?: number,
+  ): Promise<void> {
+    if (runtime.scoutFinalizing === true) return;
+    runtime.scoutFinalizing = true;
+    if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
+    delete runtime.scoutBudgetTimer;
+    runtime.scoutBudgetActive = false;
+
+    const scout = runtime.record.scout;
+    if (scout === undefined) {
+      this.handleExit(runtime, exitCode, signal);
+      return;
+    }
+
+    const replay = runtime.pty?.snapshot().toString("utf8") ?? "";
+    this.captureScoutReport(runtime, replay);
+    await runtime.scoutCaptureTail?.catch(() => undefined);
+    await runtime.scoutTraceTail?.catch(() => undefined);
+
+    if (runtime.scoutTraceFailure !== undefined) {
+      await this.markFinalScoutFailure(
+        runtime,
+        "verify",
+        `Durable Scout trace could not be persisted: ${runtime.scoutTraceFailure}`,
+        true,
+      );
+      this.handleExit(runtime, exitCode, signal);
+      return;
+    }
+
+    const baseline = scout.workspaceStateHash;
+    if (baseline === undefined) {
+      await this.markFinalScoutFailure(
+        runtime,
+        "verify",
+        "Scout has no pre-launch workspace state baseline",
+        true,
+      );
+      this.handleExit(runtime, exitCode, signal);
+      return;
+    }
+    let after: string;
+    try {
+      after = await this.scoutWorkspaceState(runtime.record.cwd);
+    } catch (error) {
+      await this.markFinalScoutFailure(
+        runtime,
+        "verify",
+        `Post-run workspace verification failed: ${errorMessage(error)}`,
+        true,
+      );
+      this.handleExit(runtime, exitCode, signal);
+      return;
+    }
+    if (after !== baseline) {
+      await this.markFinalScoutFailure(
+        runtime,
+        "verify",
+        "Scout changed observable repository state despite its read-only profile",
+        true,
+      );
+      this.handleExit(runtime, exitCode, signal);
+      return;
+    }
+
+    // A launch/setup failure already carries its more precise reason. Workspace immutability still
+    // ran above, but it must not rewrite that failure into a successful canary.
+    if (scout.terminalState === "failed") {
+      this.handleExit(runtime, exitCode, signal);
+      return;
+    }
+
+    const verifiedAt = new Date().toISOString();
+    scout.canary = { status: "verified", verifiedAt };
+    await this.appendEvent("scout.canary.verified", runtime.record.id, {
+      verifiedAt,
+      workspaceStateHash: baseline,
+    }).catch(() => undefined);
+
+    if (runtime.stopRequested) {
+      scout.terminalState = "failed";
+      await this.persist(runtime).catch(() => undefined);
+      this.handleExit(runtime, exitCode, signal);
+      return;
+    }
+    if (scout.terminalState === "budget_exhausted") {
+      await this.persist(runtime).catch(() => undefined);
+      this.handleExit(runtime, exitCode, signal);
+      return;
+    }
+    if (exitCode !== 0) {
+      await this.markFinalScoutFailure(
+        runtime,
+        "execute",
+        `Cursor Scout exited with code ${exitCode}`,
+        false,
+      );
+      this.handleExit(runtime, exitCode, signal);
+      return;
+    }
+
+    const captured = await this.requireScoutReports().collect(scout).catch((error) => ({
+      state: "invalid" as const,
+      text: "",
+      reason: errorMessage(error),
+    }));
+    await this.applyScoutCapture(runtime, captured);
+    if (captured.state !== "complete" || !("card" in captured)) {
+      const detail = captured.state === "invalid"
+        ? captured.reason
+        : `result state is ${captured.state}`;
+      await this.markFinalScoutFailure(
+        runtime,
+        "execute",
+        `Cursor Scout did not produce a valid decision card: ${detail}`,
+        false,
+      );
+      this.handleExit(runtime, exitCode, signal);
+      return;
+    }
+
+    scout.terminalState = "complete";
+    runtime.scoutCard = captured.card;
+    runtime.latestResult = captured.text;
+    runtime.record.latestPreview = captured.card.finding.slice(0, PREVIEW_STORAGE_LIMIT);
+    runtime.completedTurns = Math.max(runtime.completedTurns, 1);
+    this.recordCompletion(runtime, 1, captured.text);
+    runtime.record.attentionState = "done";
+    runtime.record.updatedAt = new Date().toISOString();
+    runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
+    await this.appendEvent("scout.report.captured", runtime.record.id, {
+      reportPath: scout.reportPath,
+      evidencePath: scout.evidencePath ?? null,
+      tracePath: scout.tracePath ?? null,
+      verdict: captured.card.verdict,
+      basis: captured.card.basis,
+    }).catch(() => undefined);
+    await this.persist(runtime).catch(() => undefined);
+    this.handleExit(runtime, exitCode, signal);
+  }
+
+  private async markFinalScoutFailure(
+    runtime: RuntimeSession,
+    phase: "execute" | "verify",
+    message: string,
+    canaryFailed: boolean,
+  ): Promise<void> {
+    const scout = runtime.record.scout;
+    if (scout === undefined) return;
+    const failedAt = new Date().toISOString();
+    scout.terminalState = "failed";
+    scout.launchFailure = { phase, failedAt, message };
+    if (canaryFailed) {
+      scout.canary = { status: "failed", failedAt, reason: message };
+      await this.appendEvent("scout.canary.failed", runtime.record.id, {
+        phase,
+        message,
+      }).catch(() => undefined);
+    }
+    runtime.latestResult = `Scout failed during ${phase}: ${message}`;
+    runtime.record.latestPreview = runtime.latestResult.slice(0, PREVIEW_STORAGE_LIMIT);
+    runtime.record.executionState = "failed";
+    runtime.record.attentionState = "failed";
+    runtime.record.updatedAt = failedAt;
+    runtime.record.meaningfulUpdatedAt = failedAt;
+    await this.appendEvent("scout.run.failed", runtime.record.id, {
+      phase,
+      message,
+      reportPath: scout.reportPath,
+    }).catch(() => undefined);
+    await this.appendTranscript(
+      runtime.record.id,
+      "lifecycle",
+      "broker",
+      "Scout failed",
+      { phase, message },
+    ).catch(() => undefined);
+    await this.persist(runtime).catch(() => undefined);
+    this.notifySessionUpdate(runtime.record.id);
+  }
+
   /**
    * Bind a PTY's callbacks to that PTY, not merely to the session it currently drives.
    *
@@ -1277,7 +1529,11 @@ export class SessionRegistry {
     });
     pty.onExit((exitCode, signal) => {
       if (runtime.pty !== pty) return;
-      this.handleExit(runtime, exitCode, signal);
+      if (runtime.record.scout?.transport === "headless-stream-json") {
+        void this.finalizeHeadlessScout(runtime, exitCode, signal);
+      } else {
+        this.handleExit(runtime, exitCode, signal);
+      }
     });
   }
 
@@ -1312,13 +1568,16 @@ export class SessionRegistry {
     record: SessionRecord,
     spec: ProviderLaunchSpec,
     beforeSpawn?: () => Promise<void>,
+    onPhase?: (phase: "prepare" | "spawn") => void,
   ): Promise<PtyHandle> {
     try {
+      onPhase?.("prepare");
       if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
       await beforeSpawn?.();
       const replayBytes = record.profile === "scout"
         ? Math.max(this.options.config.replayBytes, MIN_SCOUT_REPLAY_BYTES)
         : this.options.config.replayBytes;
+      onPhase?.("spawn");
       return this.options.ptyFactory(spec, replayBytes);
     } catch (error) {
       await this.cleanupLaunchArtifacts(record, "launch-failed");
@@ -1343,7 +1602,7 @@ export class SessionRegistry {
     }
     if (
       record.profile === "scout"
-      && reason !== "session-exited"
+      && reason === "session-deleted"
       && this.options.scoutReports !== undefined
     ) {
       try {
@@ -1363,16 +1622,161 @@ export class SessionRegistry {
     }
   }
 
+  private async registerSession(runtime: RuntimeSession): Promise<void> {
+    const record = runtime.record;
+    await this.persist(runtime);
+    if (record.parentSessionId !== undefined) {
+      const parent = this.requireRuntime(record.parentSessionId);
+      if (!parent.record.childIds.includes(record.id)) {
+        parent.record.childIds.push(record.id);
+        parent.record.updatedAt = new Date().toISOString();
+        await this.persist(parent);
+      }
+    }
+    await this.appendEvent("session.created", record.id, {
+      provider: record.provider,
+      model: record.model ?? null,
+      role: record.role ?? null,
+      parentSessionId: record.parentSessionId ?? null,
+      pid: record.pid,
+      executionState: record.executionState,
+    });
+    await this.appendTranscript(record.id, "lifecycle", "broker", "session created", {
+      provider: record.provider,
+      model: record.model ?? null,
+      executionState: record.executionState,
+    });
+  }
+
+  private async preserveFailedScoutLaunch(
+    record: SessionRecord,
+    phase: NonNullable<ScoutRuntimeState["launchFailure"]>["phase"],
+    error: unknown,
+    launchSpec?: ProviderLaunchSpec,
+  ): Promise<void> {
+    const scout = record.scout;
+    if (scout === undefined) return;
+    const failedAt = new Date().toISOString();
+    const message = errorMessage(error);
+    scout.canary = { status: "failed", failedAt, reason: message };
+    scout.terminalState = "failed";
+    scout.launchFailure = { phase, failedAt, message };
+    record.executionState = "failed";
+    record.attentionState = "failed";
+    record.pid = 0;
+    record.exitCode = 1;
+    record.updatedAt = failedAt;
+    record.meaningfulUpdatedAt = failedAt;
+    record.latestPreview = `Scout launch failed during ${phase}: ${message}`.slice(
+      0,
+      PREVIEW_STORAGE_LIMIT,
+    );
+    if (launchSpec !== undefined) {
+      record.launchRecord = resolvedLaunchRecord(launchSpec, "launch");
+    }
+    const runtime: RuntimeSession = {
+      record,
+      watchers: new Map(),
+      stopRequested: false,
+      activity: "unknown",
+      observedWorking: false,
+      completedTurns: 0,
+      latestResult: record.latestPreview,
+      fatalReported: false,
+      completions: new Map(),
+      launchTail: Promise.resolve(),
+    };
+    this.sessions.set(record.id, runtime);
+    await this.registerSession(runtime).catch(() => this.persist(runtime).catch(() => undefined));
+    await this.appendEvent("scout.launch.failed", record.id, {
+      phase,
+      message,
+      reportPath: scout.reportPath,
+    }).catch(() => undefined);
+    await this.appendEvent("scout.canary.failed", record.id, {
+      phase,
+      message,
+    }).catch(() => undefined);
+    await this.appendTranscript(
+      record.id,
+      "lifecycle",
+      "broker",
+      "Scout launch failed",
+      { phase, message },
+    ).catch(() => undefined);
+    this.notifySessionUpdate(record.id);
+  }
+
+  private async failLiveScout(
+    runtime: RuntimeSession,
+    phase: NonNullable<ScoutRuntimeState["launchFailure"]>["phase"],
+    error: unknown,
+  ): Promise<void> {
+    const scout = runtime.record.scout;
+    if (scout === undefined) return;
+    if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
+    delete runtime.scoutBudgetTimer;
+    runtime.scoutBudgetActive = false;
+    const failedAt = new Date().toISOString();
+    const message = errorMessage(error);
+    scout.canary = { status: "failed", failedAt, reason: message };
+    scout.terminalState = "failed";
+    scout.launchFailure = { phase, failedAt, message };
+    runtime.latestResult = `Scout failed during ${phase}: ${message}`;
+    runtime.record.latestPreview = runtime.latestResult.slice(0, PREVIEW_STORAGE_LIMIT);
+    runtime.record.executionState = "failed";
+    runtime.record.attentionState = "failed";
+    runtime.record.updatedAt = failedAt;
+    runtime.record.meaningfulUpdatedAt = failedAt;
+    await this.appendEvent("scout.launch.failed", runtime.record.id, {
+      phase,
+      message,
+      reportPath: scout.reportPath,
+    }).catch(() => undefined);
+    await this.appendEvent("scout.canary.failed", runtime.record.id, {
+      phase,
+      message,
+    }).catch(() => undefined);
+    await this.appendTranscript(
+      runtime.record.id,
+      "lifecycle",
+      "broker",
+      "Scout failed",
+      { phase, message },
+    ).catch(() => undefined);
+    await this.persist(runtime).catch(() => undefined);
+    this.notifySessionUpdate(runtime.record.id);
+    runtime.pty?.kill("SIGTERM");
+  }
+
+  private scoutLaunchError(sessionId: string, error: unknown): RegistryError {
+    return new RegistryError(
+      "SCOUT_LAUNCH_FAILED",
+      `Scout ${sessionId} failed to launch: ${errorMessage(error)}`,
+      sessionId,
+    );
+  }
+
   private workerResultSnapshot(target: WorkerWaitTarget, maxResultChars: number): WorkerResultSnapshot {
     const runtime = this.requireRuntime(target.sessionId);
     const replay = runtime.pty?.snapshot().toString("utf8") ?? runtime.record.latestPreview ?? "";
     // A recorded completion wins over live runtime state: once the target turn is in the ledger its
     // text is fixed, so a later turn cannot overwrite the answer this wait was asked for.
     const recorded = runtime.completions.get(target.completionTarget);
+    const scoutTerminal = runtime.record.scout?.terminalState;
     const result = recorded?.text
-      ?? (runtime.latestResult === undefined
-        ? compactTerminalResult(replay, maxResultChars)
-        : runtime.latestResult);
+      ?? (runtime.record.profile === "scout"
+        ? scoutTerminal === "failed" || scoutTerminal === "budget_exhausted"
+          ? runtime.latestResult
+            ?? runtime.record.latestPreview
+            ?? `Scout ${scoutTerminal}`
+          : runtime.record.executionState === "active"
+              || runtime.record.executionState === "starting"
+            ? `Scout running · result ${runtime.record.scout?.reportState ?? "missing"} · raw provider stream retained in trace artifact`
+            : `Scout ${runtime.record.executionState} without a verified decision card`
+        : runtime.latestResult === undefined
+          ? compactTerminalResult(replay, maxResultChars)
+          : runtime.latestResult);
     const text = truncateResult(result, maxResultChars);
     const base = {
       sessionId: runtime.record.id,
@@ -1397,6 +1801,12 @@ export class SessionRegistry {
       text,
     };
     if (runtime.scoutBudgetExhausting === true) {
+      return { ...base, status: "working" };
+    }
+    if (
+      runtime.record.scout?.terminalState === "budget_exhausted"
+      && runtime.record.exitCode === null
+    ) {
       return { ...base, status: "working" };
     }
     if (runtime.record.scout?.terminalState === "budget_exhausted") {
@@ -1468,6 +1878,19 @@ export class SessionRegistry {
 
   private now(): number {
     return this.options.now?.() ?? Date.now();
+  }
+
+  private scoutWorkspaceState(cwd: string): Promise<string> {
+    const existing = this.scoutWorkspaceStateInflight.get(cwd);
+    if (existing !== undefined) return existing;
+    const capture = this.options.scoutWorkspaceState ?? captureScoutWorkspaceStateHash;
+    const pending = capture(cwd).finally(() => {
+      if (this.scoutWorkspaceStateInflight.get(cwd) === pending) {
+        this.scoutWorkspaceStateInflight.delete(cwd);
+      }
+    });
+    this.scoutWorkspaceStateInflight.set(cwd, pending);
+    return pending;
   }
 
   /**
@@ -1624,6 +2047,15 @@ export class SessionRegistry {
     return runtime.pty;
   }
 
+  private requireInteractiveInput(runtime: RuntimeSession): void {
+    if (runtime.record.scout?.transport === "headless-stream-json") {
+      throw new RegistryError(
+        "SESSION_BUSY",
+        "A headless Scout is one-shot and accepts no follow-up input; launch a new Scout probe",
+      );
+    }
+  }
+
   private requireScoutReports(): NonNullable<SessionRegistryOptions["scoutReports"]> {
     if (this.options.scoutReports === undefined) {
       throw new RegistryError(
@@ -1634,11 +2066,25 @@ export class SessionRegistry {
     return this.options.scoutReports;
   }
 
+  private appendScoutTrace(runtime: RuntimeSession, chunk: Buffer): void {
+    const scout = runtime.record.scout;
+    const reports = this.options.scoutReports;
+    if (scout === undefined || reports === undefined || chunk.length === 0) return;
+    runtime.scoutTraceTail = (runtime.scoutTraceTail ?? Promise.resolve())
+      .then(() => reports.appendTrace(scout, chunk))
+      .catch(async (error) => {
+        runtime.scoutTraceFailure = errorMessage(error);
+        runtime.latestResult ??= `Scout trace persistence failed: ${runtime.scoutTraceFailure}`;
+        await this.persist(runtime).catch(() => undefined);
+      });
+  }
+
   private captureScoutReport(runtime: RuntimeSession, replay: string): void {
     if (
       runtime.record.profile !== "scout"
       || runtime.record.scout === undefined
-      || runtime.record.scout.terminalState !== undefined
+      || runtime.record.scout.terminalState === "complete"
+      || runtime.record.scout.terminalState === "failed"
       || this.options.scoutReports === undefined
     ) return;
     const scout = { ...runtime.record.scout, canary: { ...runtime.record.scout.canary } };
@@ -1663,32 +2109,13 @@ export class SessionRegistry {
     const changed = scout.reportState !== result.state;
     scout.reportState = result.state;
     if ("text" in result && result.text !== "") runtime.latestResult = result.text;
-    if (result.state === "complete") runtime.scoutReport = result.report;
+    if (result.state === "complete" && "card" in result) runtime.scoutCard = result.card;
     if (scout.terminalState === "budget_exhausted") {
       if (changed) await this.persist(runtime);
       this.notifySessionUpdate(runtime.record.id);
       return;
     }
-    if (result.state === "complete") {
-      if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
-      delete runtime.scoutBudgetTimer;
-      runtime.scoutBudgetActive = false;
-      scout.terminalState = "complete";
-      runtime.completedTurns = Math.max(runtime.completedTurns, 1);
-      this.recordCompletion(runtime, 1, result.text);
-      runtime.record.attentionState = "done";
-      runtime.record.updatedAt = new Date().toISOString();
-      runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
-      await this.appendEvent("scout.report.captured", runtime.record.id, {
-        reportPath: scout.reportPath,
-        findingCount: result.report.findings.length,
-      });
-      await this.persist(runtime);
-      this.notifySessionUpdate(runtime.record.id);
-      runtime.pty?.kill("SIGTERM");
-      return;
-    }
-    if (changed) await this.persist(runtime);
+    if (changed || result.state === "complete") await this.persist(runtime);
     this.notifySessionUpdate(runtime.record.id);
   }
 
@@ -1700,9 +2127,10 @@ export class SessionRegistry {
       || runtime.scoutBudgetActive === true
     ) return;
     runtime.scoutBudgetActive = true;
-    const tokenBaseline = terminalTokenCount(
-      runtime.pty?.snapshot().toString("utf8") ?? "",
-    );
+    const replay = runtime.pty?.snapshot().toString("utf8") ?? "";
+    const tokenBaseline = runtime.record.scout?.transport === "headless-stream-json"
+      ? scoutTokenCountFromCursorStream(replay)
+      : terminalTokenCount(replay);
     if (tokenBaseline === undefined) delete runtime.scoutTokenBaseline;
     else runtime.scoutTokenBaseline = tokenBaseline;
     runtime.scoutBudgetTimer = setTimeout(() => {
@@ -1716,10 +2144,13 @@ export class SessionRegistry {
     if (
       runtime.record.profile !== "scout"
       || budget === undefined
+      || budget.maxTokens === undefined
       || runtime.scoutBudgetActive !== true
       || runtime.record.scout?.terminalState !== undefined
     ) return;
-    const tokens = terminalTokenCount(replay);
+    const tokens = runtime.record.scout?.transport === "headless-stream-json"
+      ? scoutTokenCountFromCursorStream(replay)
+      : terminalTokenCount(replay);
     if (tokens !== undefined) {
       const baseline = runtime.scoutTokenBaseline;
       const consumed = baseline === undefined
@@ -1789,8 +2220,13 @@ export class SessionRegistry {
       scout.reportState = captured.state;
       if ("text" in captured) runtime.latestResult = captured.text;
       if (captured.state === "complete") {
-        runtime.scoutReport = captured.report;
-        if (scout.terminalState !== "budget_exhausted") {
+        if ("card" in captured) runtime.scoutCard = captured.card;
+        const verifiedHeadlessResult = scout.transport === "headless-stream-json"
+          && scout.terminalState === "complete";
+        const recoverableLegacyResult = scout.transport !== "headless-stream-json"
+          && scout.terminalState !== "budget_exhausted"
+          && scout.terminalState !== "failed";
+        if (verifiedHeadlessResult || recoverableLegacyResult) {
           changed ||= scout.terminalState !== "complete"
             || runtime.record.executionState !== "exited"
             || runtime.record.attentionState !== "done";
@@ -1907,7 +2343,15 @@ export class SessionRegistry {
         : { effectiveState: { ...record.effectiveState } }),
       ...(record.scout === undefined
         ? {}
-        : { scout: { ...record.scout, canary: { ...record.scout.canary } } }),
+        : {
+            scout: {
+              ...record.scout,
+              canary: { ...record.scout.canary },
+              ...(record.scout.launchFailure === undefined
+                ? {}
+                : { launchFailure: { ...record.scout.launchFailure } }),
+            },
+          }),
       ...(launchRecord === undefined ? {} : { launchRecord }),
     };
   }
@@ -1916,6 +2360,10 @@ export class SessionRegistry {
 function cloneLaunchRecord(record: ResolvedLaunchRecord | undefined): ResolvedLaunchRecord | undefined {
   if (record === undefined) return undefined;
   return { ...record, args: [...record.args], cyberdeckEnv: { ...record.cyberdeckEnv } };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function validateSessionCwd(cwd: string): Promise<void> {

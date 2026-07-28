@@ -33,9 +33,11 @@ import type { ProviderPermissionPreferencePort } from "../persistence/provider-p
 import { resolveProviderPermission } from "../client/permission-policy.js";
 import { validateWorkerSelection } from "./worker-capabilities.js";
 import {
+  ScoutArtifactKindSchema,
   ScoutBriefSchema,
   WorkerLeasePolicySchema,
   scoutScopeViolation,
+  type ScoutArtifactKind,
   type ScoutBrief,
   type WorkerLeasePolicy,
 } from "../domain/worker-profile.js";
@@ -45,12 +47,23 @@ import {
   type WaitInterventionSummary,
   type WorkerInterventionProjection,
 } from "./worker-intervention-wait.js";
+import {
+  projectScoutWave,
+  type ScoutArtifactHandles,
+  type ScoutWaveDigest,
+} from "./scout-wave-digest.js";
 
 export const AgentActorParamsSchema = z.object({ actorSessionId: z.uuid() });
 export const AgentReadParamsSchema = AgentActorParamsSchema.extend({
   sessionId: z.uuid(),
   afterCursor: z.number().int().nonnegative().default(0),
   limit: z.number().int().positive().max(100).default(50),
+});
+export const AgentReadScoutArtifactParamsSchema = AgentActorParamsSchema.extend({
+  sessionId: z.uuid(),
+  artifact: ScoutArtifactKindSchema,
+  afterByte: z.number().int().nonnegative().default(0),
+  maxBytes: z.number().int().min(256).max(64 * 1024).default(16 * 1024),
 });
 const AgentStandardWorkerInputSchema = z.object({
   profile: z.undefined().optional(),
@@ -217,6 +230,7 @@ export interface WorkerStartResult {
   completionTarget: number;
   effectiveState?: SessionRecord["effectiveState"];
   reportPath?: string;
+  artifacts?: ScoutArtifactHandles;
 }
 
 /**
@@ -248,6 +262,8 @@ export class AgentControlError extends Error {
       | "ACTOR_NOT_ACTIVE"
       | "CAPABILITY_DENIED"
       | "STALE_THREAD_CURSOR"
+      | "STALE_SCOUT_ARTIFACT_CURSOR"
+      | "SCOUT_EGRESS_NOT_GRANTED"
       | "MODEL_ID_NOT_CANONICAL"
       | "MODEL_NOT_ADVERTISED"
       | "EFFORT_NOT_SUPPORTED"
@@ -274,10 +290,13 @@ export interface AgentControlOptions {
   workerCoordination?: WorkerInterventionProjection;
   /** Poll cadence for intervention events while a registry wait remains open. */
   interventionPollMs?: number;
+  /** Durable operator-owned grant. Absence fails Scout source egress closed. */
+  scoutEgress?: { allows(root: string): Promise<boolean> };
 }
 
 export class AgentControlService {
   private readonly threadCursors = new Map<string, number>();
+  private readonly scoutArtifactCursors = new Map<string, number>();
   private readonly pendingWaits = new Map<string, PendingWait>();
   private readonly now: () => number;
   private readonly segmentSeconds: number;
@@ -286,6 +305,7 @@ export class AgentControlService {
   private readonly providerPermissions: ProviderPermissionPreferencePort | undefined;
   private readonly workerCoordination: WorkerInterventionProjection | undefined;
   private readonly interventionPollMs: number;
+  private readonly scoutEgress: AgentControlOptions["scoutEgress"];
 
   constructor(
     private readonly registry: SessionRegistry,
@@ -301,6 +321,7 @@ export class AgentControlService {
     this.providerPermissions = options.providerPermissions;
     this.workerCoordination = options.workerCoordination;
     this.interventionPollMs = Math.max(10, options.interventionPollMs ?? 100);
+    this.scoutEgress = options.scoutEgress;
   }
 
   async listThreads(input: string | z.input<typeof AgentListThreadsParamsSchema>): Promise<ThreadListPage> {
@@ -568,6 +589,42 @@ export class AgentControlService {
     return result;
   }
 
+  async readScoutArtifact(
+    input: z.input<typeof AgentReadScoutArtifactParamsSchema>,
+  ) {
+    const request = AgentReadScoutArtifactParamsSchema.parse(input);
+    const binding = await this.requireBinding(request.actorSessionId);
+    const target = this.registry.get(request.sessionId);
+    this.requireCapability(binding.grant, "thread.read", target);
+    const cursorKey = [
+      request.actorSessionId,
+      request.sessionId,
+      request.artifact,
+    ].join("\u0000");
+    const previous = this.scoutArtifactCursors.get(cursorKey);
+    if (previous !== undefined && request.afterByte < previous) {
+      throw new AgentControlError(
+        "STALE_SCOUT_ARTIFACT_CURSOR",
+        `Scout ${request.sessionId} ${request.artifact} artifact was already read through byte ${previous}; continue from that byte cursor`,
+      );
+    }
+    const result = await this.registry.readScoutArtifact(
+      request.sessionId,
+      request.artifact,
+      request.afterByte,
+      request.maxBytes,
+    );
+    this.scoutArtifactCursors.set(cursorKey, Math.max(previous ?? 0, result.nextByte));
+    return {
+      ...result,
+      handle: scoutArtifactHandle(request.sessionId, request.artifact),
+      stable: target.exitCode !== null,
+      ...(target.scout?.terminalState === undefined
+        ? {}
+        : { terminalState: target.scout.terminalState }),
+    };
+  }
+
   async startWorker(input: z.input<typeof AgentStartWorkerParamsSchema>): Promise<WorkerStartResult> {
     const request = AgentStartWorkerParamsSchema.parse(input);
     const binding = await this.requireBinding(request.actorSessionId);
@@ -629,9 +686,25 @@ export class AgentControlService {
     name?: string | undefined;
   }): Promise<WorkerStartResult> {
     validateScoutScope(request.cwd, request.brief.scope);
+    let egressAllowed = false;
+    let grantDetail: string | undefined;
+    try {
+      egressAllowed = await this.scoutEgress?.allows(request.cwd) ?? false;
+    } catch (error) {
+      grantDetail = error instanceof Error ? error.message : String(error);
+    }
+    if (!egressAllowed) {
+      throw new AgentControlError(
+        "SCOUT_EGRESS_NOT_GRANTED",
+        [
+          `Cursor Composer Scout source egress is not operator-granted for exact repository root ${request.cwd}.`,
+          ...(grantDetail === undefined ? [] : [`Grant check: ${grantDetail}.`]),
+          `Operator remedy: cyberdeck scout-egress on --root ${shellSingleQuote(request.cwd)}`,
+        ].join(" "),
+      );
+    }
     const name = request.name ?? taskName(request.brief.objective);
     const leasePolicy = request.leasePolicy ?? "expire-and-discard";
-    const workerMode = (await this.workerPreferences?.get())?.caveman === true ? "caveman" : "normal";
     const worker = await this.registry.start({
       provider: "cursor",
       model: "composer",
@@ -642,7 +715,7 @@ export class AgentControlService {
       parentSessionId: request.actorSessionId,
       kind: "worker",
       role: "worker",
-      workerMode,
+      workerMode: "normal",
       profile: "scout",
       brief: request.brief,
       leasePolicy,
@@ -657,6 +730,7 @@ export class AgentControlService {
       completionTarget: 1,
       ...(worker.effectiveState === undefined ? {} : { effectiveState: worker.effectiveState }),
       ...(worker.scout === undefined ? {} : { reportPath: worker.scout.reportPath }),
+      artifacts: scoutArtifactHandles(worker.id),
     };
   }
 
@@ -697,6 +771,9 @@ export class AgentControlService {
           error: {
             code: errorCode(error),
             message: error instanceof Error ? error.message : String(error),
+            ...(errorSessionId(error) === undefined
+              ? {}
+              : { sessionId: errorSessionId(error) }),
           },
         };
       }
@@ -714,6 +791,7 @@ export class AgentControlService {
     results: Awaited<ReturnType<SessionRegistry["waitForWorkerResults"]>>["results"];
     wait: WaitEnvelope;
     intervention?: WaitInterventionSummary;
+    scoutWave?: ScoutWaveDigest;
   }> {
     const request = AgentWaitWorkersParamsSchema.parse(input);
     const binding = await this.requireBinding(request.actorSessionId);
@@ -791,12 +869,30 @@ export class AgentControlService {
     } else {
       this.pendingWaits.delete(pending.wait.waitId);
     }
+    const scoutEntries = outcome.results.flatMap((result) => {
+      if (result.profile !== "scout") return [];
+      const record = this.registry.get(result.sessionId);
+      const card = this.registry.scoutDecisionCard(result.sessionId);
+      return [{
+        sessionId: result.sessionId,
+        ...(result.name === undefined ? {} : { name: result.name }),
+        ...(record.brief?.hypothesisId === undefined
+          ? {}
+          : { hypothesisId: record.brief.hypothesisId }),
+        ...(card === undefined ? {} : { card }),
+        result,
+      }];
+    });
+    const scoutWave = scoutEntries.length === outcome.results.length
+      ? projectScoutWave(scoutEntries)
+      : undefined;
     return {
       // A caller that reads only this flag must never mistake a segment boundary for completion,
       // while an explicit intervention settlement is neither completion nor timeout.
       timedOut: state === "timed-out" || state === "incomplete",
-      results: outcome.results,
+      results: scoutWave?.results ?? outcome.results,
       ...(intervention === undefined ? {} : { intervention }),
+      ...(scoutWave === undefined ? {} : { scoutWave: scoutWave.digest }),
       wait: {
         waitId: pending.wait.waitId,
         state,
@@ -1060,10 +1156,39 @@ function taskName(prompt: string): string {
   return [...normalized].slice(0, 72).join("");
 }
 
+export function scoutArtifactHandle(
+  sessionId: string,
+  artifact: ScoutArtifactKind,
+): string {
+  return `scout://${sessionId}/${artifact}`;
+}
+
+function scoutArtifactHandles(sessionId: string): ScoutArtifactHandles {
+  return {
+    sessionId,
+    card: scoutArtifactHandle(sessionId, "card"),
+    evidence: scoutArtifactHandle(sessionId, "evidence"),
+    trace: scoutArtifactHandle(sessionId, "trace"),
+  };
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/gu, "'\\''")}'`;
+}
+
 function errorCode(error: unknown): string {
   return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
     ? error.code
     : "WORKER_START_FAILED";
+}
+
+function errorSessionId(error: unknown): string | undefined {
+  return typeof error === "object"
+    && error !== null
+    && "sessionId" in error
+    && typeof error.sessionId === "string"
+    ? error.sessionId
+    : undefined;
 }
 
 function validateScoutScope(cwd: string, scope: readonly string[]): void {

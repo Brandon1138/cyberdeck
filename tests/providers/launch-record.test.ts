@@ -53,6 +53,7 @@ describe("resolvedLaunchRecord", () => {
 
     expect(record).toMatchObject({
       mode: "resume",
+      transport: "pty",
       resolvedAt: "2026-07-25T12:00:00.000Z",
       executable: "claude",
       args: ["--session-id", "11111111-1111-4111-8111-111111111111"],
@@ -99,5 +100,21 @@ describe("resolvedLaunchRecord", () => {
     expect(serialized).not.toContain(grantValue);
     expect(serialized).not.toContain("UNKNOWN_INTEGRATION_STATE");
     expect(serialized).not.toContain("synthetic-state");
+  });
+
+  it("records pipe transport while redacting a positional provider prompt", () => {
+    const record = resolvedLaunchRecord(spec({
+      transport: "pipe",
+      args: ["--print", "--output-format", "stream-json", "private Scout prompt"],
+      sensitiveArgIndexes: [3],
+    }), "launch");
+
+    expect(record.transport).toBe("pipe");
+    expect(record.args).toEqual([
+      "--print",
+      "--output-format",
+      "stream-json",
+      "[REDACTED_PROVIDER_PROMPT]",
+    ]);
   });
 });

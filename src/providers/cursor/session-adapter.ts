@@ -5,30 +5,22 @@ import {
   UnsupportedProviderEffortError,
 } from "../session-adapter-errors.js";
 import type { ProviderSessionTerminal } from "../provider.js";
-import { buildCursorInteractiveCommand } from "./commands.js";
+import {
+  buildCursorInteractiveCommand,
+  buildCursorScoutCommand,
+} from "./commands.js";
 import { sessionLaunchEnvironment } from "../launch-environment.js";
 import {
   enableCursorRunEverything,
   type CursorRunEverythingOptions,
 } from "./run-everything.js";
-import {
-  verifyCursorReadOnlyCanary,
-  type CursorReadOnlyCanaryOptions,
-  type CursorReadOnlyCanaryResult,
-} from "./read-only-canary.js";
 import { submitCursorPastedInput } from "./input.js";
 import { isolateCursorScoutMcp } from "./mcp-isolation.js";
 import { join } from "node:path";
 
 export interface CursorProviderAdapterOptions extends CursorRunEverythingOptions {
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
-  readOnlyCanary?: (
-    session: SessionRecord,
-    terminal: ProviderSessionTerminal,
-    options: CursorReadOnlyCanaryOptions,
-  ) => Promise<CursorReadOnlyCanaryResult>;
   isolateMcp?: (session: SessionRecord, spec: ProviderLaunchSpec) => Promise<void>;
-  now?: () => string;
   inputCommitDelayMs?: number;
 }
 
@@ -41,8 +33,15 @@ export class CursorProviderAdapter implements ProviderAdapter {
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec {
     if (session.effort !== undefined) throw new UnsupportedProviderEffortError(this.id);
     const source = this.options.sourceEnvironment ?? process.env;
-    const command = buildCursorInteractiveCommand(session, initialPrompt, source);
-    const env = sessionLaunchEnvironment(source, this.id, session.cwd, session);
+    if (session.profile === "scout" && initialPrompt === undefined) {
+      throw new Error("Headless Cursor Scout launch requires its complete initial prompt");
+    }
+    const command = session.profile === "scout"
+      ? buildCursorScoutCommand(session, initialPrompt!, source)
+      : buildCursorInteractiveCommand(session, initialPrompt, source);
+    const env = session.profile === "scout"
+      ? { ...command.env }
+      : sessionLaunchEnvironment(source, this.id, session.cwd, session);
     if (session.profile === "scout" && session.scout !== undefined) {
       const dropBoxPath = session.scout.dropBoxPath;
       env.CURSOR_CONFIG_DIR = join(dropBoxPath, "cursor-config");
@@ -68,13 +67,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
   }
 
   deferInitialPrompt(session: SessionRecord): boolean {
-    return session.approvalMode === "auto";
+    return session.profile !== "scout" && session.approvalMode === "auto";
   }
 
   async initializeSession(
     session: SessionRecord,
     terminal: ProviderSessionTerminal,
   ) {
+    if (session.profile === "scout") return;
     if (session.approvalMode !== "auto") return;
     await enableCursorRunEverything(terminal, {
       ...(this.options.timeoutMs === undefined ? {} : { timeoutMs: this.options.timeoutMs }),
@@ -82,22 +82,6 @@ export class CursorProviderAdapter implements ProviderAdapter {
         ? {}
         : { pollIntervalMs: this.options.pollIntervalMs }),
     });
-    if (session.profile !== "scout") return;
-    const canary = await (this.options.readOnlyCanary ?? verifyCursorReadOnlyCanary)(
-      session,
-      terminal,
-      {
-        ...(this.options.timeoutMs === undefined ? {} : { timeoutMs: this.options.timeoutMs }),
-        ...(this.options.pollIntervalMs === undefined
-          ? {}
-          : { pollIntervalMs: this.options.pollIntervalMs }),
-        ...(this.options.now === undefined ? {} : { now: this.options.now }),
-        ...(this.options.inputCommitDelayMs === undefined
-          ? {}
-          : { inputCommitDelayMs: this.options.inputCommitDelayMs }),
-      },
-    );
-    return { scoutReadOnlyCanary: canary };
   }
 
   async submitInputToTerminal(

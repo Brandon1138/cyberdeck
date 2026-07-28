@@ -15,6 +15,8 @@ export const BrokerEventTypeSchema = z.enum([
   "session.deleted",
   "scout.report.captured",
   "scout.budget.exhausted",
+  "scout.launch.failed",
+  "scout.run.failed",
   "scout.canary.verified",
   "scout.canary.failed",
   "orchestrator.stop.requested",

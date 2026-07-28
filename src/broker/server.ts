@@ -12,6 +12,7 @@ import {
 } from "../control-plane/job-control-plane.js";
 import type { ControlPlaneRuntime } from "../control-plane/runtime.js";
 import { StartSessionRequestSchema } from "../domain/session.js";
+import { ScoutEgressRequestSchema } from "../domain/worker-profile.js";
 import { DelegationIntentSchema } from "../domain/delegation.js";
 import {
   FleetLaunchProfileSchema,
@@ -26,6 +27,7 @@ import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
 import { RegistryError, type AttachmentMode, type SessionRegistry } from "./session-registry.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
+import type { ScoutEgressGrantStore } from "../persistence/scout-egress-grant-store.js";
 import type { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import {
@@ -40,6 +42,7 @@ import {
   AgentInspectOrchestratorParamsSchema,
   AgentListThreadsParamsSchema,
   AgentReadParamsSchema,
+  AgentReadScoutArtifactParamsSchema,
   AgentStartWorkerParamsSchema,
   AgentStartWorkersParamsSchema,
   AgentStopOrchestratorParamsSchema,
@@ -119,6 +122,7 @@ export interface BrokerServerOptions {
   fleetDetaches?: FleetDetachStore;
   fleetPreferences?: FleetPreferenceStore;
   workerPreferences?: WorkerPreferenceStore;
+  scoutEgress?: Pick<ScoutEgressGrantStore, "set" | "status">;
   /** Custody hues, and the bindings that say which orchestrator session wears each one. */
   custodyColors?: CustodyColorService;
   orchestratorBindings?: OrchestratorStore;
@@ -296,6 +300,13 @@ export class BrokerServer {
         return this.requireOrchestrators().fableWorkers(FableWorkersRequestSchema.parse(frame.params));
       case "orchestrator.cavemanWorkers":
         return this.requireOrchestrators().cavemanWorkers(CavemanWorkersRequestSchema.parse(frame.params));
+      case "scout.egress": {
+        const request = ScoutEgressRequestSchema.parse(frame.params);
+        if (request.enabled !== undefined) {
+          await this.requireScoutEgress().set(request.root, request.enabled);
+        }
+        return this.requireScoutEgress().status(request.root);
+      }
       // Read-only self-description for a Cyberdeck MCP server that needs to say precisely why it
       // cannot act. It grants nothing and is deliberately answerable for an unbound actor.
       case "agent.actor.describe": {
@@ -322,6 +333,10 @@ export class BrokerServer {
         const { actorSessionId, sessionId, afterCursor, limit } = AgentReadParamsSchema.parse(frame.params);
         return this.requireAgentControl().readThread(actorSessionId, sessionId, afterCursor, limit);
       }
+      case "agent.scout.read":
+        return this.requireAgentControl().readScoutArtifact(
+          AgentReadScoutArtifactParamsSchema.parse(frame.params),
+        );
       case "agent.worker.start":
         return this.requireAgentControl().startWorker(AgentStartWorkerParamsSchema.parse(frame.params));
       case "agent.worker.startMany":
@@ -599,6 +614,15 @@ export class BrokerServer {
       throw Object.assign(new Error("Agent control service is not available"), { code: "METHOD_NOT_FOUND" });
     }
     return this.options.agentControl;
+  }
+
+  private requireScoutEgress(): Pick<ScoutEgressGrantStore, "set" | "status"> {
+    if (this.options.scoutEgress === undefined) {
+      throw Object.assign(new Error("Scout egress grant store is not available"), {
+        code: "METHOD_NOT_FOUND",
+      });
+    }
+    return this.options.scoutEgress;
   }
 
   private requireInstructions(): InstructionQueue {

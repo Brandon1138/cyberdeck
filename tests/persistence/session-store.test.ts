@@ -57,6 +57,7 @@ describe("SessionStore", () => {
     const launched = record({
       launchRecord: {
         mode: "launch",
+        transport: "pty",
         resolvedAt: "2026-07-25T10:00:00.000Z",
         executable: "codex",
         args: ["--no-alt-screen", "-C", "/repo/one"],
@@ -108,6 +109,7 @@ describe("SessionStore", () => {
     const unbounded = record({
       launchRecord: {
         mode: "launch",
+        transport: "pty",
         resolvedAt: "2026-07-25T10:00:00.000Z",
         executable: "codex",
         args: Array.from({ length: 400 }, () => "-c"),

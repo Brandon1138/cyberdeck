@@ -392,4 +392,28 @@ describe("Cyberdeck CLI", () => {
 
     expect(cavemanWorkers).toHaveBeenCalledWith({ enabled: true });
   });
+
+  it("grants exact-root Scout egress through an operator-only CLI command", async () => {
+    const scoutEgress = vi.fn(async (request: { root: string; enabled?: boolean }) => ({
+      root: request.root,
+      enabled: request.enabled === true,
+    }));
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const program = createProgram({ scoutEgress });
+    const command = program.commands.find((candidate) => candidate.name() === "scout-egress")!;
+    const on = command.commands.find((candidate) => candidate.name() === "on")!;
+
+    try {
+      await on.parseAsync(["--root", "/Users/brandon/code/personal/cyberdeck"], {
+        from: "user",
+      });
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(scoutEgress).toHaveBeenCalledWith({
+      root: "/Users/brandon/code/personal/cyberdeck",
+      enabled: true,
+    });
+  });
 });

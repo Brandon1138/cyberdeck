@@ -3,6 +3,7 @@ import {
   MAX_SCOUT_REPORT_BYTES,
   ScoutBriefSchema,
   ScoutReportSchema,
+  WorkerEffectiveStateSchema,
   resolveScoutEffectiveState,
 } from "../../src/domain/worker-profile.js";
 
@@ -24,19 +25,37 @@ describe("Scout worker profile contracts", () => {
       model: "composer",
       permissions: "read-only",
       approvalMode: "auto",
+      transport: "headless-stream-json",
       leasePolicy: "expire-and-discard",
     });
     expect(resolveScoutEffectiveState("orphan-for-adoption").leasePolicy)
       .toBe("orphan-for-adoption");
   });
 
-  it("requires narrow objective, scope, questions, stop condition, and both budgets", () => {
+  it("decodes pre-headless durable Scout state as the legacy interactive transport", () => {
+    expect(WorkerEffectiveStateSchema.parse({
+      lifecycle: "worker",
+      profile: "scout",
+      tier: 1,
+      provider: "cursor",
+      model: "composer",
+      permissions: "read-only",
+      approvalMode: "auto",
+      leasePolicy: "expire-and-discard",
+    }).transport).toBe("interactive-pty");
+  });
+
+  it("requires a narrow brief while defaulting a generous wall clock and optional token cap", () => {
     expect(ScoutBriefSchema.parse(brief)).toEqual(brief);
     expect(() => ScoutBriefSchema.parse({ ...brief, scope: [] })).toThrow();
-    expect(() => ScoutBriefSchema.parse({
+    expect(ScoutBriefSchema.parse({
       ...brief,
       budget: { maxWallClockMs: 60_000 },
-    })).toThrow();
+    }).budget).toEqual({ maxWallClockMs: 60_000 });
+    const { budget: _budget, ...withoutBudget } = brief;
+    expect(ScoutBriefSchema.parse(withoutBudget).budget).toEqual({
+      maxWallClockMs: 15 * 60 * 1_000,
+    });
   });
 
   it("rejects unreferenced findings and accepts path plus symbol or line-range evidence", () => {

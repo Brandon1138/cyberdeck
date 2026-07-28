@@ -142,13 +142,22 @@ async function harness() {
   const orchestratorStore = new OrchestratorStore(directory);
   const workerPreferences = new WorkerPreferenceStore(directory);
   const fleetDetaches = new FleetDetachStore(directory);
+  const scoutEgress = {
+    enabled: false,
+    set: vi.fn(async (_root: string, enabled: boolean) => {
+      scoutEgress.enabled = enabled;
+      return undefined;
+    }),
+    status: vi.fn(async (root: string) => ({ root, enabled: scoutEgress.enabled })),
+    allows: vi.fn(async () => scoutEgress.enabled),
+  };
   const orchestrators = new OrchestratorManager(registry, orchestratorStore, workerPreferences);
   const agentControl = new AgentControlService(
     registry,
     orchestratorStore,
     transcripts,
     workerPreferences,
-    { audit: journal },
+    { audit: journal, scoutEgress },
   );
   let server: BrokerServer;
   server = new BrokerServer({
@@ -159,6 +168,7 @@ async function harness() {
     agentControl,
     fleetDetaches,
     workerPreferences,
+    scoutEgress,
     onShutdown: () => { void server.close(); },
   });
   await server.listen();
@@ -170,12 +180,28 @@ async function harness() {
     fleetDetaches,
     orchestrators,
     workerPreferences,
+    scoutEgress,
     catalogWrites,
     brokerEvents,
   };
 }
 
 describe("BrokerServer", () => {
+  it("exposes durable Scout egress mutation only on the operator broker route", async () => {
+    const { server, socketPath, scoutEgress } = await harness();
+    const client = await TestClient.open(socketPath);
+    try {
+      await expect(client.request("scout.egress", {
+        root: "/repo/one",
+        enabled: true,
+      })).resolves.toEqual({ root: "/repo/one", enabled: true });
+      expect(scoutEgress.set).toHaveBeenCalledWith("/repo/one", true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("restricts the broker socket to the current user", async () => {
     const { server, socketPath } = await harness();
     try {

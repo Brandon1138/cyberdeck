@@ -21,13 +21,19 @@ Each session records independent fields:
 - execution state describes whether the provider process is active or exited.
 - attachment state describes presentation: attached/interactive or detached/headless.
 
-Headless is not a provider category. It is the detached presentation state of the same durable session:
+For ordinary interactive sessions, headless is not a provider category. It is the detached
+presentation state of the same durable session:
 
 ```text
 attached/interactive <-> detached/headless
 ```
 
 Detaching does not stop, suspend, or restart the provider process.
+
+The fixed Tier 1 Scout profile is a bounded transport exception on the same durable lifecycle: its
+Cursor process is a one-shot pipe (`--print --output-format stream-json`) with no input channel,
+rather than an interactive PTY. This transport fact is recorded independently from attachment
+state.
 
 ## Controllers and watchers
 
@@ -53,7 +59,10 @@ not rank providers, infer models, or route to fallbacks.
 
 ## Process ownership and tmux
 
-The broker process owns each provider child process and PTY. The Unix-socket protocol exposes session control, replay, and observation. tmux owns no provider process: the cockpit is only a dashboard pane plus an ordinary shell pane, and any agent pane a user opens is merely a Cyberdeck client attached to the broker.
+The broker process owns each provider child process and its PTY or bounded pipe. The Unix-socket
+protocol exposes session control, replay, and observation. tmux owns no provider process: the
+cockpit is only a dashboard pane plus an ordinary shell pane, and any agent pane a user opens is
+merely a Cyberdeck client attached to the broker.
 
 Consequently, closing a tmux pane or the whole cockpit detaches presentation but leaves the provider running. Stopping the Cyberdeck session terminates the provider even if a tmux view is still open.
 

@@ -45,7 +45,8 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
     modelIdRule: "Use the provider-native model identifier; Composer exposes no separate effort flag.",
     notes: [
       "Read-only workers run in plan mode with Cursor sandboxing enabled.",
-      "Auto mode is verified post-launch through Composer /run-everything.",
+      "Standard interactive auto mode is verified post-launch through Composer /run-everything.",
+      "Scout profile uses operator-granted one-shot --print stream-json transport; no effort flag.",
     ],
   },
   {

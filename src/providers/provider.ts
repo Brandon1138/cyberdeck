@@ -6,18 +6,16 @@ export interface ProviderLaunchSpec {
   args: string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
+  /** PTY is the default. Pipe is reserved for bounded provider-native noninteractive transports. */
+  transport?: "pty" | "pipe";
+  /** Argument positions replaced before launch metadata is persisted. */
+  sensitiveArgIndexes?: number[];
 }
 
 export interface ProviderSessionTerminal {
   snapshot(): Buffer;
   write(data: Buffer): void;
   wait(milliseconds: number): Promise<void>;
-}
-
-export interface ProviderSessionInitialization {
-  scoutReadOnlyCanary?: {
-    verifiedAt: string;
-  };
 }
 
 export interface ProviderAdapter {
@@ -47,7 +45,7 @@ export interface ProviderAdapter {
   initializeSession?(
     session: SessionRecord,
     terminal: ProviderSessionTerminal,
-  ): Promise<ProviderSessionInitialization | void>;
+  ): Promise<void>;
   /** Re-open the exact provider-native conversation represented by a terminal Cyberdeck thread. */
   buildResumeSpec(session: SessionRecord): ProviderLaunchSpec;
   /** Encode one logical prompt submission for the provider's negotiated interactive terminal. */

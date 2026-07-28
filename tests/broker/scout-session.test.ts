@@ -12,9 +12,9 @@ import type {
   ProviderLaunchSpec,
 } from "../../src/providers/provider.js";
 import {
-  SCOUT_REPORT_BEGIN,
-  SCOUT_REPORT_END,
-} from "../../src/orchestration/worker-profiles.js";
+  SCOUT_CARD_BEGIN,
+  SCOUT_CARD_END,
+} from "../../src/domain/scout-output.js";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -26,6 +26,7 @@ class FakePty implements PtyHandle {
   readonly writes: Buffer[] = [];
   readonly kills: Array<string | undefined> = [];
   private replay = "";
+  private exited = false;
   private readonly outputs = new Set<(chunk: Buffer) => void>();
   private readonly exits = new Set<(code: number, signal?: number) => void>();
 
@@ -34,7 +35,7 @@ class FakePty implements PtyHandle {
   snapshot(): Buffer { return Buffer.from(this.replay); }
   kill(signal?: string): void {
     this.kills.push(signal);
-    for (const listener of this.exits) listener(0);
+    this.exit(0);
   }
   onOutput(listener: (chunk: Buffer) => void): () => void {
     this.outputs.add(listener);
@@ -48,52 +49,75 @@ class FakePty implements PtyHandle {
     this.replay += text;
     for (const listener of this.outputs) listener(Buffer.from(text));
   }
+  exit(code = 0): void {
+    if (this.exited) return;
+    this.exited = true;
+    for (const listener of this.exits) listener(code);
+  }
 }
 
-const report = {
-  findings: [{
-    finding: "Read-only launch uses plan mode",
-    evidence: [{
-      path: "src/providers/cursor/commands.ts",
-      symbol: "cursorSafetyArgs",
-    }],
-  }],
-  coverage: {
-    searched: ["src/providers/cursor/**"],
-    methods: ["rg and file reads"],
-  },
-  uncertainties: [],
-  suggestedFollowUpProbes: [],
-};
+const card = [
+  SCOUT_CARD_BEGIN,
+  "QUESTION",
+  "Where is plan mode selected?",
+  "",
+  "VERDICT",
+  "SUPPORTED",
+  "",
+  "BASIS",
+  "direct-source",
+  "",
+  "FINDING",
+  "Read-only launch uses plan mode.",
+  "",
+  "EVIDENCE",
+  "- src/providers/cursor/commands.ts:cursorSafetyArgs selects plan.",
+  "",
+  "COVERAGE",
+  "Inspected the Cursor command builder.",
+  "",
+  "CAVEAT",
+  "None",
+  "",
+  "NEXT PROBE",
+  "None",
+  SCOUT_CARD_END,
+].join("\n");
+
+function streamText(text: string, usage?: { input_tokens: number; output_tokens: number }): string {
+  return `${JSON.stringify({
+    type: "result",
+    result: text,
+    ...(usage === undefined ? {} : { usage }),
+  })}\n`;
+}
 
 async function harness(options: {
-  initializationReplay?: string;
-  verifiedCanary?: boolean;
+  spawnError?: Error;
+  workspaceStates?: string[];
 } = {}) {
   const repo = await mkdtemp(join(tmpdir(), "cyberdeck-scout-repo-"));
   const state = await mkdtemp(join(tmpdir(), "cyberdeck-scout-state-"));
   directories.push(repo, state);
   const pty = new FakePty();
-  const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => pty);
+  const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => {
+    if (options.spawnError !== undefined) throw options.spawnError;
+    return pty;
+  });
   const cursor: ProviderAdapter = {
     id: "cursor",
-    buildLaunchSpec: (session) => ({
+    buildLaunchSpec: (session, prompt) => ({
       executable: "fake",
-      args: ["--mode", "plan", "--sandbox", "enabled"],
+      args: ["--print", "--output-format", "stream-json", prompt ?? ""],
       cwd: session.cwd,
       env: {},
+      transport: "pipe",
+      sensitiveArgIndexes: [3],
     }),
-    deferInitialPrompt: () => true,
-    initializeSession: async () => {
-      if (options.initializationReplay !== undefined) pty.emit(options.initializationReplay);
-      if (options.verifiedCanary === false) return;
-      return {
-        scoutReadOnlyCanary: { verifiedAt: "2026-07-27T01:00:00.000Z" },
-      };
-    },
+    initializeSession: async () => undefined,
     buildResumeSpec: () => { throw new Error("not used"); },
-    submitInput: (message) => Buffer.from(`${message}\r`),
   };
+  const states = [...(options.workspaceStates ?? ["a".repeat(64), "a".repeat(64)])];
   const registry = new SessionRegistry({
     adapters: { cursor },
     ptyFactory,
@@ -101,6 +125,7 @@ async function harness(options: {
     validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({}),
     scoutReports: new ScoutReportStore(state),
+    scoutWorkspaceState: async () => states.shift() ?? states.at(-1) ?? "a".repeat(64),
   });
   return { registry, pty, ptyFactory, repo, state, cursor };
 }
@@ -129,18 +154,33 @@ function request(
 }
 
 describe("Scout session lifecycle", () => {
-  it("fails launch closed when provider does not return behavioral canary proof", async () => {
-    const { registry, pty, repo } = await harness({ verifiedCanary: false });
+  it("preserves a failed headless launch as a durable Fleet record", async () => {
+    const { registry, repo } = await harness({ spawnError: new Error("spawn refused") });
 
-    await expect(registry.start(
+    const failure = await registry.start(
       request(repo, { maxWallClockMs: 10_000, maxTokens: 10_000 }),
       "Scout prompt",
-    )).rejects.toMatchObject({
-      code: "INVALID_WORKER_PROFILE",
-      message: "Scout launch did not verify read-only enforcement",
+    ).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: "SCOUT_LAUNCH_FAILED",
+      sessionId: expect.any(String),
     });
-    expect(pty.kills).toHaveLength(1);
-    expect(pty.writes).toEqual([]);
+    const failed = registry.list()[0]!;
+    expect(failed).toMatchObject({
+      id: (failure as { sessionId: string }).sessionId,
+      pid: 0,
+      executionState: "failed",
+      attentionState: "failed",
+      scout: {
+        terminalState: "failed",
+        launchFailure: { phase: "spawn", message: "spawn refused" },
+      },
+      launchRecord: {
+        transport: "pipe",
+        args: ["--print", "--output-format", "stream-json", "[REDACTED_PROVIDER_PROMPT]"],
+      },
+    });
+    await expect(lstat(failed.scout!.dropBoxPath)).resolves.toBeDefined();
   });
 
   it("rejects escaping scope at broker dispatch boundary", async () => {
@@ -154,7 +194,7 @@ describe("Scout session lifecycle", () => {
     });
   });
 
-  it("collects canonical drop-box report even when completion capture stalls", async () => {
+  it("completes only after headless exit, durable card capture, and workspace verification", async () => {
     const { registry, pty, ptyFactory, repo } = await harness();
     const record = await registry.start(
       request(repo, { maxWallClockMs: 10_000, maxTokens: 10_000 }),
@@ -169,14 +209,25 @@ describe("Scout session lifecycle", () => {
         model: "composer",
         permissions: "read-only",
         approvalMode: "auto",
+        transport: "headless-stream-json",
         leasePolicy: "expire-and-discard",
       },
-      scout: { canary: { status: "verified" }, reportState: "missing" },
+      scout: {
+        canary: { status: "pending" },
+        reportState: "missing",
+        transport: "headless-stream-json",
+      },
     });
     expect(ptyFactory).toHaveBeenCalledWith(expect.any(Object), MIN_SCOUT_REPLAY_BYTES);
 
-    // No Cursor idle/completion frame. Framed report alone is canonical and settles the wait.
-    pty.emit(`${SCOUT_REPORT_BEGIN}\n${JSON.stringify(report)}\n${SCOUT_REPORT_END}\n`);
+    pty.emit(streamText(card));
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 0, 4_000)).resolves.toMatchObject({
+      timedOut: true,
+      results: [{ status: "waiting" }],
+    });
+    pty.exit(0);
     const result = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
     ], 2_000, 4_000);
@@ -191,9 +242,11 @@ describe("Scout session lifecycle", () => {
         reportPath: record.scout?.reportPath,
       }],
     });
-    expect(JSON.parse(result.results[0]!.text)).toEqual(report);
+    expect(result.results[0]!.text).toContain("VERDICT\nSUPPORTED");
     expect(result.results[0]).not.toHaveProperty("report");
-    expect(ptysKilledWithTerm(pty)).toBe(true);
+    expect(registry.get(record.id).scout?.canary.status).toBe("verified");
+    expect(await readFile(record.scout!.tracePath!, "utf8")).toContain(SCOUT_CARD_BEGIN);
+    expect(pty.writes).toEqual([]);
     await registry.delete(record.id);
     await expect(lstat(record.scout!.dropBoxPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -204,7 +257,10 @@ describe("Scout session lifecycle", () => {
       request(repo, { maxWallClockMs: 10_000, maxTokens: 4_000 }),
       "Scout prompt",
     );
-    pty.emit(`${SCOUT_REPORT_BEGIN}\n{"findings":[\nComposing 4.1k tokens\n`);
+    pty.emit(streamText(
+      `${SCOUT_CARD_BEGIN}\nQUESTION\nWhere?\n`,
+      { input_tokens: 3_000, output_tokens: 1_100 },
+    ));
     const result = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
     ], 2_000, 4_000);
@@ -217,23 +273,21 @@ describe("Scout session lifecycle", () => {
         reportState: "partial",
       }],
     });
-    expect(await readFile(record.scout!.reportPath, "utf8")).toContain('{"findings":[');
+    expect(await readFile(record.scout!.reportPath, "utf8")).toContain("QUESTION");
   });
 
-  it("starts token accounting after launch verification and enforces dispatch consumption", async () => {
-    const { registry, pty, repo } = await harness({
-      initializationReplay: "Composing 4.1k tokens\nAdd a follow-up\n",
-    });
+  it("uses cumulative stream-json usage for an optional token ceiling", async () => {
+    const { registry, pty, repo } = await harness();
     const record = await registry.start(
       request(repo, { maxWallClockMs: 10_000, maxTokens: 1_000 }),
       "Scout prompt",
     );
 
-    pty.emit(`${SCOUT_REPORT_BEGIN}\n{"findings":[\nComposing 4.5k tokens\n`);
+    pty.emit(streamText("working", { input_tokens: 400, output_tokens: 500 }));
     expect(registry.get(record.id).scout?.terminalState).toBeUndefined();
     expect(pty.kills).toEqual([]);
 
-    pty.emit("Composing 5.2k tokens\n");
+    pty.emit(streamText("working", { input_tokens: 500, output_tokens: 600 }));
     await expect(registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
     ], 2_000, 4_000)).resolves.toMatchObject({
@@ -262,17 +316,17 @@ describe("Scout session lifecycle", () => {
   });
 
   it("rehydrates canonical report from drop box after broker restart", async () => {
-    const { registry, repo, state, cursor } = await harness();
+    const { registry, pty, repo, state, cursor } = await harness();
     const started = await registry.start(
       request(repo, { maxWallClockMs: 10_000, maxTokens: 10_000 }),
       "Scout prompt",
     );
+    pty.emit(streamText(card));
+    pty.exit(0);
+    await registry.waitForWorkerResults([
+      { sessionId: started.id, completionTarget: 1 },
+    ], 2_000, 4_000);
     const storedBeforeCapture = registry.get(started.id);
-    await new ScoutReportStore(state).capture(
-      storedBeforeCapture.scout!,
-      `${SCOUT_REPORT_BEGIN}\n${JSON.stringify(report)}\n${SCOUT_REPORT_END}\n`,
-    );
-    await registry.stop(started.id);
 
     const recovered = new SessionRegistry({
       adapters: { cursor },
@@ -282,6 +336,7 @@ describe("Scout session lifecycle", () => {
       validateCwd: async () => undefined,
       config: BrokerRuntimeConfigSchema.parse({}),
       scoutReports: new ScoutReportStore(state),
+      scoutWorkspaceState: async () => "a".repeat(64),
     });
     await recovered.ready();
     expect(recovered.get(started.id)).toMatchObject({
@@ -305,10 +360,30 @@ describe("Scout session lifecycle", () => {
       { sessionId: started.id, completionTarget: 1 },
     ], 0, 4_000);
     expect(recoveredResult.results[0]).not.toHaveProperty("report");
-    expect(JSON.parse(recoveredResult.results[0]!.text)).toEqual(report);
+    expect(recoveredResult.results[0]!.text).toContain("VERDICT\nSUPPORTED");
+  });
+
+  it("fails a card-bearing Scout when observable repository state changes", async () => {
+    const { registry, pty, repo } = await harness({
+      workspaceStates: ["a".repeat(64), "b".repeat(64)],
+    });
+    const record = await registry.start(
+      request(repo, { maxWallClockMs: 10_000, maxTokens: 10_000 }),
+      "Scout prompt",
+    );
+    pty.emit(streamText(card));
+    pty.exit(0);
+
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 2_000, 4_000)).resolves.toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "failed",
+        terminalState: "failed",
+        text: expect.stringContaining("changed observable repository state"),
+      }],
+    });
+    expect(registry.get(record.id).scout?.canary.status).toBe("failed");
   });
 });
-
-function ptysKilledWithTerm(pty: FakePty): boolean {
-  return pty.kills.includes("SIGTERM");
-}

@@ -30,6 +30,7 @@ export function resolvedLaunchRecord(
 
   const retained = spec.args.slice(0, MAX_ARGS);
   if (retained.length < spec.args.length) truncated = true;
+  const sensitive = new Set(spec.sensitiveArgIndexes ?? []);
 
   const cyberdeckEnv: Record<string, string> = {};
   let inheritedEnvCount = 0;
@@ -44,9 +45,12 @@ export function resolvedLaunchRecord(
 
   return {
     mode,
+    transport: spec.transport ?? "pty",
     resolvedAt,
     executable: bound(spec.executable),
-    args: retained.map(bound),
+    args: retained.map((value, index) =>
+      sensitive.has(index) ? "[REDACTED_PROVIDER_PROMPT]" : bound(value)
+    ),
     cwd: bound(spec.cwd),
     cyberdeckEnv,
     inheritedEnvCount,

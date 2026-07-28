@@ -16,6 +16,7 @@ import { CodexProviderAdapter } from "../providers/codex.js";
 import { CursorJobDispatchAdapter } from "../providers/cursor/dispatch-adapter.js";
 import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
 import { PtyProcess } from "../runtime/pty-process.js";
+import { PipeProcess } from "../runtime/pipe-process.js";
 import { Journal } from "./journal.js";
 import { BrokerServer } from "./server.js";
 import { SessionRegistry } from "./session-registry.js";
@@ -38,6 +39,7 @@ import { loadBrokerRuntimeConfig } from "../runtime-config.js";
 import { selectExpiredThreads, type ThreadRetentionPolicy } from "../domain/thread-retention.js";
 import type { SessionRecord } from "../domain/session.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
+import { ScoutEgressGrantStore } from "../persistence/scout-egress-grant-store.js";
 import { CustodyColorStore } from "../persistence/custody-color-store.js";
 import { CustodyColorService } from "./custody-color-service.js";
 import { WorkerCoordinationRuntime } from "./worker-coordination-runtime.js";
@@ -117,6 +119,7 @@ export async function runBroker(
   const workerPreferences = new WorkerPreferenceStore(stateDirectory);
   const providerPermissions = new ProviderPermissionPreferenceStore(stateDirectory);
   const scoutReports = new ScoutReportStore(stateDirectory);
+  const scoutEgress = new ScoutEgressGrantStore(stateDirectory);
   const recoveredSessions = await retainThreads(
     sessionStore,
     config.threadRetention,
@@ -132,7 +135,9 @@ export async function runBroker(
       cursor: new CursorProviderAdapter(),
       antigravity: new AntigravityProviderAdapter(),
     },
-    ptyFactory: (spec, replayBytes) => new PtyProcess(spec, replayBytes),
+    ptyFactory: (spec, replayBytes) => spec.transport === "pipe"
+      ? new PipeProcess(spec, replayBytes)
+      : new PtyProcess(spec, replayBytes),
     journal,
     transcripts,
     store: sessionStore,
@@ -165,7 +170,12 @@ export async function runBroker(
     orchestratorStore,
     transcripts,
     workerPreferences,
-    { audit: journal, providerPermissions, workerCoordination: workerCoordination.service },
+    {
+      audit: journal,
+      providerPermissions,
+      workerCoordination: workerCoordination.service,
+      scoutEgress,
+    },
   );
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
   instructions.start();
@@ -229,6 +239,7 @@ export async function runBroker(
     fleetDetaches,
     fleetPreferences,
     workerPreferences,
+    scoutEgress,
     custodyColors,
     orchestratorBindings: orchestratorStore,
     workerCoordination: workerCoordination.service,

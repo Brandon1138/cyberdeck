@@ -41,6 +41,7 @@ describe("Cyberdeck MCP server", () => {
         tools: expect.arrayContaining([
           expect.objectContaining({ name: "cyberdeck_threads_list" }),
           expect.objectContaining({ name: "cyberdeck_thread_read" }),
+          expect.objectContaining({ name: "cyberdeck_scout_read" }),
           expect.objectContaining({ name: "cyberdeck_worker_start" }),
           expect.objectContaining({ name: "cyberdeck_workers_start" }),
           expect.objectContaining({ name: "cyberdeck_workers_wait" }),
@@ -196,6 +197,26 @@ describe("Cyberdeck MCP server", () => {
       sessionId,
       afterCursor: 0,
       limit: 1,
+    });
+  });
+
+  it("routes bounded Scout artifact reads with an explicit byte cursor", async () => {
+    const request = vi.fn(async () => ({ text: "card", nextByte: 4, complete: true }));
+    const sessionId = "22222222-2222-4222-8222-222222222222";
+    await handleMcpRequest(context({ request: request as never }), {
+      jsonrpc: "2.0",
+      id: "scout-read",
+      method: "tools/call",
+      params: {
+        name: "cyberdeck_scout_read",
+        arguments: { sessionId, artifact: "card", afterByte: 0 },
+      },
+    });
+    expect(request).toHaveBeenCalledWith("agent.scout.read", {
+      actorSessionId: ACTOR,
+      sessionId,
+      artifact: "card",
+      afterByte: 0,
     });
   });
 
@@ -403,7 +424,8 @@ describe("Cyberdeck MCP server", () => {
     });
     const tools = (response?.result as { tools: Array<{ name: string }> }).tools;
     expect(tools.map(({ name }) => name)).toContain("cyberdeck_diagnose");
-    expect(tools).toHaveLength(24);
+    expect(tools.map(({ name }) => name)).toContain("cyberdeck_scout_read");
+    expect(tools).toHaveLength(25);
   });
 
   it("distinguishes an orphaned scope from an unbound actor by code and remedy", async () => {

@@ -19,6 +19,7 @@ import {
 import {
   buildCursorHeadlessCommand,
   buildCursorInteractiveCommand,
+  buildCursorScoutCommand,
 } from "../../src/providers/cursor/commands.js";
 import { CursorStreamDecoder } from "../../src/providers/cursor/stream-codec.js";
 
@@ -149,12 +150,15 @@ describe("Cursor command construction", () => {
       .toEqual(["Ping back"]);
   });
 
-  it("trusts only interactive Scout workspaces so fresh private state cannot block launch", () => {
-    const scout = buildCursorInteractiveCommand({
+  it("builds a noninteractive Scout command and marks its prompt sensitive", () => {
+    const scout = buildCursorScoutCommand({
       ...request().request,
       profile: "scout",
-    });
+    }, "Probe command construction");
     expect(scout.args).toEqual([
+      "--print",
+      "--output-format",
+      "stream-json",
       "--workspace",
       "/tmp/repo",
       "--sandbox",
@@ -162,8 +166,16 @@ describe("Cursor command construction", () => {
       "--mode",
       "plan",
       "--trust",
+      "Probe command construction",
     ]);
-    expect(buildCursorInteractiveCommand(request().request).args).not.toContain("--trust");
+    expect(scout.transport).toBe("pipe");
+    expect(scout.sensitiveArgIndexes).toEqual([scout.args.length - 1]);
+    expect(scout.env).toMatchObject({
+      CYBERDECK_PROCESS_ROLE: "worker",
+      CYBERDECK_WORKER_MODE: "normal",
+    });
+    expect(scout.args).not.toContain("--stream-partial-output");
+    expect(scout.args).not.toContain("/run-everything");
   });
 
   it("builds headless stream-json argv with the documented positional prompt", () => {

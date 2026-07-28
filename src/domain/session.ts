@@ -82,6 +82,7 @@ export const RESOLVED_LAUNCH_ENV_KEYS = [
  */
 export const ResolvedLaunchRecordSchema = z.object({
   mode: z.enum(["launch", "resume"]),
+  transport: z.enum(["pty", "pipe"]).default("pty"),
   resolvedAt: z.iso.datetime(),
   executable: z.string().max(4_096),
   args: z.array(z.string().max(4_096)).max(256),
@@ -102,7 +103,8 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
   updatedAt: z.iso.datetime(),
   executionState: SessionExecutionStateSchema,
   attachmentState: AttachmentStateSchema,
-  pid: z.number().int().positive(),
+  /** Zero means a durable launch attempt failed before a provider process existed. */
+  pid: z.number().int().nonnegative(),
   exitCode: z.number().int().nullable(),
   childIds: z.array(z.uuid()),
   attentionState: ThreadAttentionStateSchema.optional(),

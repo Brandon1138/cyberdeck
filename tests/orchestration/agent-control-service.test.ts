@@ -8,6 +8,7 @@ import {
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord } from "../../src/domain/session.js";
+import { renderScoutDecisionCard } from "../../src/domain/scout-output.js";
 
 const ACTOR = "11111111-1111-4111-8111-111111111111";
 const WORKER = "22222222-2222-4222-8222-222222222222";
@@ -87,6 +88,43 @@ describe("AgentControlService", () => {
       returned: 1,
     });
     await expect(service.readThread(ACTOR, WORKER)).resolves.toEqual({ events: [], nextCursor: 0 });
+  });
+
+  it("reads Scout artifacts through monotonic byte cursors under thread.read authority", async () => {
+    const readScoutArtifact = vi.fn(async (
+      _sessionId: string,
+      artifact: "card" | "evidence" | "trace",
+      afterByte: number,
+    ) => ({
+      artifact,
+      text: "chunk",
+      afterByte,
+      nextByte: 5,
+      totalBytes: 5,
+      complete: true,
+    }));
+    const service = new AgentControlService(
+      { get: () => worker, readScoutArtifact } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    await expect(service.readScoutArtifact({
+      actorSessionId: ACTOR,
+      sessionId: WORKER,
+      artifact: "card",
+      afterByte: 0,
+    })).resolves.toMatchObject({
+      text: "chunk",
+      nextByte: 5,
+      handle: `scout://${WORKER}/card`,
+    });
+    await expect(service.readScoutArtifact({
+      actorSessionId: ACTOR,
+      sessionId: WORKER,
+      artifact: "card",
+      afterByte: 0,
+    })).rejects.toMatchObject({ code: "STALE_SCOUT_ARTIFACT_CURSOR" });
   });
 
   it("refuses a worker start outside the capability scope", async () => {
@@ -180,6 +218,7 @@ describe("AgentControlService", () => {
         model: "composer",
         permissions: "read-only",
         approvalMode: "auto",
+        transport: "headless-stream-json",
         leasePolicy: request.leasePolicy,
       },
     }));
@@ -187,6 +226,8 @@ describe("AgentControlService", () => {
       { start } as never,
       { findBySessionId: vi.fn(async () => binding) } as never,
       {} as never,
+      undefined,
+      { scoutEgress: { allows: vi.fn(async () => true) } },
     );
 
     await expect(service.startWorker({
@@ -222,7 +263,8 @@ describe("AgentControlService", () => {
       kind: "worker",
       profile: "scout",
       leasePolicy: "expire-and-discard",
-    }), expect.stringContaining("CYBERDECK_SCOUT_REPORT_BEGIN"));
+      workerMode: "normal",
+    }), expect.stringContaining("CYBERDECK_SCOUT_CARD_BEGIN"));
   });
 
   it("rejects incomplete Scout briefs before launch", () => {
@@ -307,6 +349,32 @@ describe("AgentControlService", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
+  it("fails Scout source egress closed without an exact operator grant", async () => {
+    const start = vi.fn();
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+      undefined,
+      { scoutEgress: { allows: vi.fn(async () => false) } },
+    );
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      profile: "scout",
+      cwd: "/repo/one",
+      brief: {
+        objective: "Inspect",
+        scope: ["src/**"],
+        questions: ["Where is launch policy?"],
+        stopCondition: "Answer",
+      },
+    })).rejects.toMatchObject({
+      code: "SCOUT_EGRESS_NOT_GRANTED",
+      message: expect.stringContaining("cyberdeck scout-egress on --root '/repo/one'"),
+    });
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it("starts a dozen Scout profiles concurrently without pane interaction", async () => {
     let active = 0;
     let maximumActive = 0;
@@ -327,6 +395,8 @@ describe("AgentControlService", () => {
       { start } as never,
       { findBySessionId: vi.fn(async () => binding) } as never,
       {} as never,
+      undefined,
+      { scoutEgress: { allows: vi.fn(async () => true) } },
     );
     const results = await service.startWorkers({
       actorSessionId: ACTOR,
@@ -563,6 +633,101 @@ describe("AgentControlService", () => {
       30_000,
       800,
     );
+  });
+
+  it("returns a contradiction-first Scout wave digest instead of full cards per result", async () => {
+    const second = "33333333-3333-4333-8333-333333333333";
+    const card = (verdict: "SUPPORTED" | "REFUTED", finding: string) => ({
+        question: "Does trust explain launch failure?",
+        verdict,
+        basis: "direct-source" as const,
+        finding,
+        evidence: ["src/providers/cursor/commands.ts:buildCursorScoutCommand"],
+        coverage: "Inspected command construction.",
+      });
+    const cards = new Map([
+      [WORKER, card("SUPPORTED", "Trust is required for fresh state.")],
+      [second, card("REFUTED", "The failure happens after trust.")],
+    ]);
+    const records = new Map([
+      [WORKER, {
+        ...worker,
+        profile: "scout" as const,
+        provider: "cursor" as const,
+        model: "composer",
+        brief: {
+          objective: "Probe trust",
+          hypothesisId: "trust-gate",
+          scope: ["src/**"],
+          questions: ["Does trust explain launch failure?"],
+          stopCondition: "Answer",
+          budget: { maxWallClockMs: 30_000 },
+        },
+      }],
+      [second, {
+        ...worker,
+        id: second,
+        profile: "scout" as const,
+        provider: "cursor" as const,
+        model: "composer",
+        brief: {
+          objective: "Probe trust",
+          hypothesisId: "trust-gate",
+          scope: ["src/**"],
+          questions: ["Does trust explain launch failure?"],
+          stopCondition: "Answer",
+          budget: { maxWallClockMs: 30_000 },
+        },
+      }],
+    ]);
+    const waitForWorkerResults = vi.fn(async () => ({
+      timedOut: false,
+      results: [
+        {
+          sessionId: WORKER,
+          provider: "cursor",
+          model: "composer",
+          profile: "scout" as const,
+          status: "completed" as const,
+          completedTurns: 1,
+          text: renderScoutDecisionCard(cards.get(WORKER)!),
+        },
+        {
+          sessionId: second,
+          provider: "cursor",
+          model: "composer",
+          profile: "scout" as const,
+          status: "completed" as const,
+          completedTurns: 1,
+          text: renderScoutDecisionCard(cards.get(second)!),
+        },
+      ],
+    }));
+    const service = new AgentControlService(
+      {
+        get: (sessionId: string) => records.get(sessionId),
+        scoutDecisionCard: (sessionId: string) => cards.get(sessionId),
+        waitForWorkerResults,
+      } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    const outcome = await service.waitForWorkers({
+      actorSessionId: ACTOR,
+      targets: [
+        { sessionId: WORKER, completionTarget: 1 },
+        { sessionId: second, completionTarget: 1 },
+      ],
+    });
+    expect(outcome.scoutWave).toMatchObject({
+      contradictionCount: 1,
+      text: expect.stringContaining("CONFLICT"),
+    });
+    expect(outcome.results[0]!.text).toBe(
+      "SUPPORTED · direct-source · Trust is required for fresh state.",
+    );
+    expect(outcome.results[0]!.text).not.toContain("EVIDENCE");
   });
 
   it.each(["EXCEPTION", "DECISION_REQUEST"] as const)(

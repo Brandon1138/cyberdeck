@@ -81,6 +81,10 @@ const REMEDIES: Record<string, string> = {
     "The bound grant does not cover this call. Call cyberdeck_diagnose to see the scope and capabilities actually held.",
   STALE_THREAD_CURSOR:
     "Continue from the cursor the previous read returned instead of rereading from zero.",
+  STALE_SCOUT_ARTIFACT_CURSOR:
+    "Continue from the nextByte cursor returned by the previous Scout artifact read.",
+  SCOUT_EGRESS_NOT_GRANTED:
+    "An operator must grant this exact Git repository root with `cyberdeck scout-egress on --root <repo>`; an Orc cannot grant itself source egress.",
   NO_STABLE_CONTROLLER_IDENTITY:
     "Worker leases are held by a durable orchestrator identity, never by a conversation. This session's binding is a peer binding, so it cannot hold or inherit a lease. Act through the orchestrator bound to this workspace or fleet.",
   TRANSFER_TARGET_UNBOUND:
@@ -239,6 +243,27 @@ const TOOLS = [
         limit: { type: "integer", minimum: 1, maximum: 100, default: 1 },
       },
       required: ["sessionId", "afterCursor"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_scout_read",
+    description:
+      "Read a bounded durable Scout artifact by byte cursor. Prefer card, then evidence; use trace only for provider/transport debugging. Continue from nextByte and never reread zero. complete means current EOF; stable says the Scout can no longer append.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        artifact: { type: "string", enum: ["card", "evidence", "trace"] },
+        afterByte: { type: "integer", minimum: 0 },
+        maxBytes: {
+          type: "integer",
+          minimum: 256,
+          maximum: 64 * 1024,
+          default: 16 * 1024,
+        },
+      },
+      required: ["sessionId", "artifact", "afterByte"],
       additionalProperties: false,
     },
   },
@@ -514,6 +539,7 @@ function scoutBriefInputSchema(): Record<string, unknown> {
     type: "object",
     properties: {
       objective: { type: "string", minLength: 1, maxLength: 4_096 },
+      hypothesisId: { type: "string", minLength: 1, maxLength: 120 },
       scope: {
         type: "array",
         minItems: 1,
@@ -533,11 +559,11 @@ function scoutBriefInputSchema(): Record<string, unknown> {
           maxWallClockMs: { type: "integer", minimum: 1, maximum: 86_400_000 },
           maxTokens: { type: "integer", minimum: 1, maximum: 10_000_000 },
         },
-        required: ["maxWallClockMs", "maxTokens"],
+        required: ["maxWallClockMs"],
         additionalProperties: false,
       },
     },
-    required: ["objective", "scope", "questions", "stopCondition", "budget"],
+    required: ["objective", "scope", "questions", "stopCondition"],
     additionalProperties: false,
   };
 }
@@ -839,6 +865,9 @@ async function callTool(
       ...args,
       limit: args.limit ?? 1,
     });
+  }
+  if (name === "cyberdeck_scout_read") {
+    return transport.request("agent.scout.read", { actorSessionId, ...args });
   }
   if (name === "cyberdeck_worker_start") {
     return transport.request("agent.worker.start", { actorSessionId, ...args });

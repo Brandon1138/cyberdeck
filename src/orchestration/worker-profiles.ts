@@ -1,5 +1,12 @@
 import type { ScoutBrief } from "../domain/worker-profile.js";
+import {
+  SCOUT_CARD_BEGIN,
+  SCOUT_CARD_END,
+  SCOUT_EVIDENCE_BEGIN,
+  SCOUT_EVIDENCE_END,
+} from "../domain/scout-output.js";
 
+/** Legacy framing retained only for recovery of Scouts created before the headless transport. */
 export const SCOUT_REPORT_BEGIN = "CYBERDECK_SCOUT_REPORT_BEGIN";
 export const SCOUT_REPORT_END = "CYBERDECK_SCOUT_REPORT_END";
 
@@ -8,21 +15,56 @@ export const SCOUT_REPORT_END = "CYBERDECK_SCOUT_REPORT_END";
  * resolved and enforced outside this prompt.
  */
 export function scoutDispatchPrompt(brief: ScoutBrief): string {
+  const budget = [
+    `wall-clock cap ${brief.budget.maxWallClockMs}ms`,
+    ...(brief.budget.maxTokens === undefined
+      ? []
+      : [`provider token guard ${brief.budget.maxTokens}`]),
+  ].join("; ");
   return [
     "CYBERDECK SCOUT PROFILE — TIER 1",
     "",
     `Objective: ${brief.objective}`,
+    ...(brief.hypothesisId === undefined ? [] : [`Hypothesis ID: ${brief.hypothesisId}`]),
     `Scope allowlist: ${brief.scope.join(", ")}`,
     "Questions:",
     ...brief.questions.map((question) => `- ${question}`),
     `Stop condition: ${brief.stopCondition}`,
-    `Budget: wall-clock cap ${brief.budget.maxWallClockMs}ms; token cap ${brief.budget.maxTokens}`,
+    `Budget: ${budget}`,
     "",
     "Inspect only listed scope. Do not mutate repository, git state, dependencies, or environment.",
-    "Return exactly one structured report between markers below. Every finding needs at least one evidence reference with path plus symbol or line range. Coverage must say what was searched and how. Include uncertainties and suggested follow-up probes.",
-    SCOUT_REPORT_BEGIN,
-    "<JSON matching ScoutReportSchema: findings with evidence; coverage searched/methods; uncertainties; suggestedFollowUpProbes>",
-    SCOUT_REPORT_END,
-    "Cyberdeck captures framed output into canonical drop-box report. Do not write report through shell, file-edit, or MCP tools.",
+    "Do not narrate your chronological process. Untaken or rejected branches belong only in evidence when ruling them out changes the parent Orc's decision.",
+    "Finish with one compact natural-language decision card using the exact headings and framing below. VERDICT must be SUPPORTED, REFUTED, MIXED, INCONCLUSIVE, BLOCKED, or NEW_FINDING. BASIS must be direct-test, direct-source, history, corroborated, inference, speculation, or none.",
+    SCOUT_CARD_BEGIN,
+    "QUESTION",
+    "<the question or hypothesis answered>",
+    "",
+    "VERDICT",
+    "<one allowed verdict>",
+    "",
+    "BASIS",
+    "<one allowed evidence class>",
+    "",
+    "FINDING",
+    "<the decision-relevant belief update in concise prose>",
+    "",
+    "EVIDENCE",
+    "- <path:symbol or command/test plus the observed fact>",
+    "",
+    "COVERAGE",
+    "<what you inspected and the meaningful boundary of the search>",
+    "",
+    "CAVEAT",
+    "<material uncertainty, or None>",
+    "",
+    "NEXT PROBE",
+    "<highest-information continuation, or None>",
+    SCOUT_CARD_END,
+    "",
+    "If useful, place deeper supporting material after the card. This evidence is durable but is not injected into the Orc's context unless requested.",
+    SCOUT_EVIDENCE_BEGIN,
+    "<supporting observations, ruled-out theories, commands, and references; concise but not card-limited>",
+    SCOUT_EVIDENCE_END,
+    "Cyberdeck captures these sections outside the worktree. Do not write a report through shell, file-edit, or MCP tools.",
   ].join("\n");
 }

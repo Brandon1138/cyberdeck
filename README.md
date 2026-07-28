@@ -153,6 +153,9 @@ cyberdeck orchestrator fable-workers off
 cyberdeck orchestrator caveman-workers status
 cyberdeck orchestrator caveman-workers on
 cyberdeck orchestrator caveman-workers off
+cyberdeck scout-egress status --root /absolute/repository
+cyberdeck scout-egress on --root /absolute/repository
+cyberdeck scout-egress off --root /absolute/repository
 ```
 
 An explicit different provider/model can then replace an inactive latest binding cleanly. Pass
@@ -194,21 +197,25 @@ when `approvalMode` is omitted. Antigravity rejects `auto` rather than ignoring 
 exposes the same explicit override as `--approval-mode auto`.
 
 An Orc may instead set `profile: "scout"` and pass a structured brief (`objective`, relative
-path/glob `scope`, lookup-shaped `questions`, `stopCondition`, and wall-clock/token `budget`).
+path/glob `scope`, lookup-shaped `questions`, `stopCondition`, optional `hypothesisId`, and optional
+wall-clock/token `budget`).
 Cyberdeck resolves that profile to the existing worker lifecycle with fixed Tier 1 state: Cursor
-Composer, read-only sandbox, verified `/run-everything`, and lease policy `expire-and-discard`
-(`orphan-for-adoption` is recorded only for forward compatibility). Before task submission,
-Cyberdeck disables configured MCP servers in session-local Cursor state and runs a real denied-write
-canary while comparing repository/git state. No prompt claim can substitute for that check.
-The Scout cwd must therefore be a Git working tree.
+Composer, read-only plan+sandbox, provider-native `--print --output-format stream-json`, and lease
+policy `expire-and-discard` (`orphan-for-adoption` is recorded only for forward compatibility).
+Source egress fails closed until the operator grants the exact canonical Git root with
+`cyberdeck scout-egress on --root <repo>`. That append-only grant survives broker and Orc
+replacement; MCP exposes no mutation path.
 
-Scout output is one schema-validated report containing referenced findings, search coverage,
-uncertainties, and follow-up probes. Cyberdeck captures the framed provider output into one private
-drop box outside the worktree; that file is canonical, while transcript completion only
-corroborates it. A valid report settles even when Composer completion capture stalls. Reaching
-either brief cap kills the worker as `budget_exhausted`, preserves any partial report, and remains
-distinct from `complete`. Batch starts launch independent Scouts concurrently; no pane interaction
-or approval prompt participates.
+Cyberdeck redirects Cursor state outside the repository, disables MCPs in that isolated state, and
+compares a pre/post fingerprint of HEAD, tracked diffs, and nonignored untracked content. A successful Scout needs exit
+code zero, an unchanged repository, and a compact natural-language decision card. The complete raw
+stream (8 MiB), deeper evidence (512 KiB), and card (96 KiB) remain durable private artifacts; only
+the card or a multi-Scout digest enters normal wait results. Digests promote contradictions and
+new findings and carry `scout://<session>/<card|evidence|trace>` handles for explicit
+`cyberdeck_scout_read` drill-down. Failed launches remain visible with their session ID and phase.
+The default wall-clock ceiling is 15 minutes and the token ceiling is optional. Batch starts launch
+independent Scouts concurrently; no pane interaction, prompt scraping, or approval keypress
+participates.
 
 A human attachment always owns the only writer lease: orchestrator input remains queued until that
 controller detaches. Cyberdeck never steers a worker through tmux.

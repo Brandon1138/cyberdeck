@@ -1,5 +1,6 @@
 import type { JobRequest } from "../../domain/job.js";
 import type { StartSessionRequest } from "../../domain/session.js";
+import type { ProviderLaunchSpec } from "../provider.js";
 import {
   buildProviderChildEnvironment,
   jobLaunchEnvironment,
@@ -7,6 +8,10 @@ import {
 import { applyWorkerMode } from "../worker-mode.js";
 
 type CursorInteractiveRequest = Pick<
+  StartSessionRequest,
+  "cwd" | "sandbox" | "model"
+>;
+type CursorScoutRequest = Pick<
   StartSessionRequest,
   "cwd" | "sandbox" | "model" | "profile"
 >;
@@ -26,8 +31,7 @@ export interface CursorHeadlessOptions {
 /**
  * Interactive Cursor Agent command suitable for a broker-owned PTY. An explicit initial prompt is
  * the documented positional operand; no resume, worktree, or approval flag is emitted.
- * Scout sessions add Cursor's documented `--trust` flag because their private per-session config
- * has no persisted workspace decision. `--workspace` and `cwd` deliberately name the same root.
+ * `--workspace` and `cwd` deliberately name the same root. Scouts never use this path.
  */
 export function buildCursorInteractiveCommand(
   request: CursorInteractiveRequest,
@@ -35,7 +39,6 @@ export function buildCursorInteractiveCommand(
   sourceEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): CursorCommand {
   const args = cursorSafetyArgs(request);
-  if (request.profile === "scout") args.push("--trust");
   if (request.model !== undefined) args.push("--model", request.model);
   if (initialPrompt !== undefined) args.push(initialPrompt);
   return {
@@ -70,6 +73,49 @@ export function buildCursorHeadlessCommand(
     args,
     cwd: request.cwd,
     env: jobLaunchEnvironment(options.sourceEnvironment ?? process.env, "cursor", request),
+  };
+}
+
+/**
+ * One-shot Scout command. The brief is a positional prompt documented by Cursor; `--print` and
+ * stream-json eliminate terminal menus, readiness glyphs, pasted-input timing, and completion
+ * scraping. Plan mode plus Cursor sandboxing remains the read-only execution boundary. `--trust`
+ * acknowledges only the exact operator-granted workspace and does not grant write access.
+ */
+export function buildCursorScoutCommand(
+  request: CursorScoutRequest,
+  prompt: string,
+  sourceEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
+): CursorCommand & Pick<ProviderLaunchSpec, "transport" | "sensitiveArgIndexes"> {
+  if (request.profile !== "scout") {
+    throw new Error("Cursor Scout command requires profile scout");
+  }
+  if (request.sandbox !== "read-only") {
+    throw new Error("Cursor Scout command requires read-only sandbox");
+  }
+  const args = [
+    "--print",
+    "--output-format",
+    "stream-json",
+    ...cursorSafetyArgs(request),
+    "--trust",
+  ];
+  if (request.model !== undefined) args.push("--model", request.model);
+  const promptIndex = args.length;
+  args.push(prompt);
+  return {
+    executable: "agent",
+    args,
+    cwd: request.cwd,
+    env: buildProviderChildEnvironment({
+      source: sourceEnvironment,
+      provider: "cursor",
+      cwd: request.cwd,
+      terminal: "pipe",
+      identity: { role: "worker", workerMode: "normal" },
+    }),
+    transport: "pipe",
+    sensitiveArgIndexes: [promptIndex],
   };
 }
 

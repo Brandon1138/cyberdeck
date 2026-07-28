@@ -42,6 +42,7 @@ import { CYBERDECK_VERSION } from "./version.js";
 import { resolveLaunchConversationId, runMcpServer } from "./mcp/server.js";
 import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
 import { pruneLegacyTranscript as pruneLegacyTranscriptFile } from "./persistence/thread-transcript-store.js";
+import type { ScoutEgressStatus } from "./persistence/scout-egress-grant-store.js";
 import type {
   WorkerEventSubmitParams,
 } from "./broker/worker-event-channel.js";
@@ -354,6 +355,7 @@ interface CreateProgramOptions {
   cavemanWorkers?: (request: CavemanWorkersRequest) => Promise<CavemanWorkersResult>;
   pruneLegacyTranscript?: () => Promise<{ path: string; removed: boolean }>;
   submitWorkerEvent?: (request: WorkerEventSubmitParams) => Promise<EventAck>;
+  scoutEgress?: (request: { root: string; enabled?: boolean }) => Promise<ScoutEgressStatus>;
 }
 
 export function createProgram(options: CreateProgramOptions = {}): Command {
@@ -376,6 +378,9 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   const submitWorkerEvent = options.submitWorkerEvent
     ?? ((request) => withClient((client) =>
       client.request<EventAck>("worker.event.submit", request)));
+  const scoutEgress = options.scoutEgress
+    ?? ((request: { root: string; enabled?: boolean }) =>
+      withClient((client) => client.request<ScoutEgressStatus>("scout.egress", request)));
   const program = new Command()
     .name("cyberdeck")
     .version(CYBERDECK_VERSION)
@@ -400,6 +405,30 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     process.stdout.write("Cyberdeck broker shutdown requested\n");
   });
   broker.command("restart").description("gracefully replace the running broker").action(restartBroker);
+
+  const scoutEgressCommand = program.command("scout-egress")
+    .description("manage durable exact-repository Cursor Scout source egress");
+  scoutEgressCommand.command("status")
+    .option("--root <absolute-path>", "exact Git repository root (defaults to current directory)")
+    .action(async (options: { root?: string }) => {
+      const result = await scoutEgress({ root: resolve(options.root ?? process.cwd()) });
+      process.stdout.write(
+        `Scout egress: ${result.enabled ? "ON" : "OFF"} · Cursor Composer · read-only · ${result.root}\n`,
+      );
+    });
+  for (const enabled of [true, false] as const) {
+    scoutEgressCommand.command(enabled ? "on" : "off")
+      .requiredOption("--root <absolute-path>", "exact Git repository root")
+      .action(async (options: { root: string }) => {
+        const result = await scoutEgress({
+          root: resolve(options.root),
+          enabled,
+        });
+        process.stdout.write(
+          `Scout egress: ${result.enabled ? "ON" : "OFF"} · Cursor Composer · read-only · ${result.root}\n`,
+        );
+      });
+  }
 
   const event = program.command("event").description("submit bounded worker events");
   event.command("submit")
