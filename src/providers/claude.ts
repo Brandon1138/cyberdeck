@@ -5,9 +5,9 @@ import { claudePermissionMode } from "./claude/permissions.js";
 import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
 import { sessionLaunchEnvironment } from "./launch-environment.js";
 import {
-  resolveOrchestratorMcpServers,
-  type OrchestratorMcpPaths,
-} from "./claude/orchestrator-mcp-servers.js";
+  resolveAllowlistedMcpServers,
+  type McpAllowlistPaths,
+} from "./claude/mcp-allowlist.js";
 import {
   removeSessionLaunchFiles,
   sessionLaunchFilePath,
@@ -24,8 +24,8 @@ import {
 export interface ClaudeProviderAdapterOptions extends SessionLaunchFilesOptions {
   mcp?: CyberdeckMcpLaunch;
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
-  /** Overrides the operator state `resolveOrchestratorMcpServers` reads; for tests. */
-  orchestratorMcp?: OrchestratorMcpPaths;
+  /** Overrides the operator state `resolveAllowlistedMcpServers` reads; for tests. */
+  mcpAllowlist?: McpAllowlistPaths;
 }
 
 /**
@@ -174,12 +174,13 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       ));
     }
     if (session.kind !== undefined && this.options.mcp !== undefined) {
-      // Workers already inherit the operator's servers, so the allowlist only has work to do for an
-      // orchestrator, whose config is exclusive. Cyberdeck is spread last: an allowlist entry named
-      // `cyberdeck` must never displace the control plane the orchestrator's authority rests on.
-      const allowlisted = session.kind === "orchestrator"
-        ? await resolveOrchestratorMcpServers(this.options.orchestratorMcp ?? {})
-        : {};
+      // Both kinds launch against an exclusive config, so both read their own allowlist. Cyberdeck
+      // is spread last: an allowlist entry named `cyberdeck` must never displace the control plane
+      // the session's reporting and authority rest on.
+      const allowlisted = await resolveAllowlistedMcpServers(
+        session.kind,
+        this.options.mcpAllowlist ?? {},
+      );
       writes.push(writeSessionLaunchFile(
         session.id,
         "mcp-config.json",
@@ -208,10 +209,10 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
    * rather than whatever the operator happens to have installed. `--setting-sources project,local`
    * drops user scope, which is where the operator's skills, plugins and ambient MCP servers live —
    * the whole surface that once put ~86k tokens into a fleet orchestrator's prompt before its first
-   * turn. It is orchestrator-only: workers keep the operator's environment, and dropping user
+   * turn. It is orchestrator-only: workers keep the operator's skills and plugins, and dropping user
    * settings here is safe because Cyberdeck's own session-start hook is worker-scoped.
-   * `--strict-mcp-config` is the MCP half of the same bound and is emitted next to the config it
-   * constrains, in `addCyberdeckMcp`.
+   * `--strict-mcp-config` is emitted next to the config it constrains, in `addCyberdeckMcp`, and is
+   * not scoped this way — MCP servers are bounded for workers too.
    *
    * This deliberately does *not* pass `--disable-slash-commands`. `claude --help` describes that
    * flag as "Disable all skills", but measured against Claude Code 2.1.220 it empties the entire
@@ -232,8 +233,8 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
   /**
    * `--mcp-config` *adds* to whatever MCP servers the operator has configured in `~/.claude.json`
    * rather than replacing them. `--strict-mcp-config` is what makes the injected config exclusive,
-   * so an orchestrator's default tool surface is exactly Cyberdeck's own plus whatever the operator
-   * allowlisted in `resolveOrchestratorMcpServers`.
+   * so a session's default tool surface is exactly Cyberdeck's own plus whatever the operator
+   * allowlisted for that session kind in `resolveAllowlistedMcpServers`.
    *
    * The original rationale was token cost — the operator's entire ambient set arriving unbidden,
    * Linear alone contributing roughly fifty tool definitions. That is not what deferral does with
@@ -243,10 +244,15 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
    * on the machine — which is why reopening it is an explicit per-server allowlist and not a
    * dropped flag.
    *
-   * It is orchestrator-only and deliberately paired with the `--mcp-config` it constrains. Workers
-   * keep the operator's servers: a worker sent at a Linear or Obsidian task legitimately needs them.
-   * Emitting the flag without a config would leave the process with no MCP servers at all, which is
-   * a different outcome than the isolation intended here.
+   * Workers are held to the same bound, and for a second reason: a worker used to inherit every
+   * ambient server, so one stuck in `needs authentication` failed the session's every API call with
+   * `Tool reference 'WaitForMcpServers' not found` (400). The whole fleet went down for servers no
+   * worker was sent to use. What a worker does need — the `cyberdeck` server it reports through — is
+   * injected here, and anything further is named in that kind's allowlist rather than inherited.
+   *
+   * Deliberately paired with the `--mcp-config` it constrains. Emitting the flag without a config
+   * would leave the process with no MCP servers at all, which is a different outcome than the
+   * isolation intended here.
    */
   private addCyberdeckMcp(args: string[], session: SessionRecord): void {
     if (session.kind === undefined || this.options.mcp === undefined) return;
@@ -259,7 +265,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
         },
       },
     }));
-    if (session.kind === "orchestrator") args.push("--strict-mcp-config");
+    args.push("--strict-mcp-config");
   }
 
   private useMcpConfigFile(args: string[], session: SessionRecord): void {
