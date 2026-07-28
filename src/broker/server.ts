@@ -27,6 +27,7 @@ import { RegistryError, type AttachmentMode, type SessionRegistry } from "./sess
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import type { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
+import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import {
   CavemanWorkersRequestSchema,
   CreateOrchestratorRequestSchema,
@@ -66,7 +67,11 @@ import {
   WorkerEventSubmitParamsSchema,
   type WorkerEventChannel,
 } from "./worker-event-channel.js";
-import { fleetWorkerCoordinationView } from "./worker-coordination-view.js";
+import {
+  fleetOrchestratorCustodyColors,
+  fleetWorkerCoordinationView,
+} from "./worker-coordination-view.js";
+import type { CustodyColorService } from "./custody-color-service.js";
 
 const SessionIdParamsSchema = z.object({ sessionId: z.uuid() });
 const SendParamsSchema = SessionIdParamsSchema.extend({ data: z.string() });
@@ -114,6 +119,9 @@ export interface BrokerServerOptions {
   fleetDetaches?: FleetDetachStore;
   fleetPreferences?: FleetPreferenceStore;
   workerPreferences?: WorkerPreferenceStore;
+  /** Custody hues, and the bindings that say which orchestrator session wears each one. */
+  custodyColors?: CustodyColorService;
+  orchestratorBindings?: OrchestratorStore;
   /** Internal domain substrate. Orchestrator access goes through workerControl, never directly. */
   workerCoordination?: WorkerCoordinationService;
   workerControl?: WorkerControlService;
@@ -417,7 +425,16 @@ export class BrokerServer {
       case "fleet.preferences":
         return this.requireFleetPreferences().list();
       case "fleet.workerCoordination":
-        return fleetWorkerCoordinationView(this.options.workerCoordination?.listSubjects() ?? []);
+        return fleetWorkerCoordinationView(this.options.workerCoordination?.listSubjects() ?? [], {
+          custodyColors: await this.options.custodyColors?.table() ?? [],
+        });
+      case "fleet.custodyColors":
+        return this.options.custodyColors === undefined || this.options.orchestratorBindings === undefined
+          ? []
+          : fleetOrchestratorCustodyColors(
+            await this.options.orchestratorBindings.list(),
+            await this.options.custodyColors.table(),
+          );
       case "fleet.reattach": {
         const { detachIdentity } = FleetReattachParamsSchema.parse(frame.params);
         const detachStore = this.requireFleetDetaches();

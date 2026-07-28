@@ -38,6 +38,8 @@ import { loadBrokerRuntimeConfig } from "../runtime-config.js";
 import { selectExpiredThreads, type ThreadRetentionPolicy } from "../domain/thread-retention.js";
 import type { SessionRecord } from "../domain/session.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
+import { CustodyColorStore } from "../persistence/custody-color-store.js";
+import { CustodyColorService } from "./custody-color-service.js";
 import { WorkerCoordinationRuntime } from "./worker-coordination-runtime.js";
 import { WorkerEventChannel } from "./worker-event-channel.js";
 import { BrokerWorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
@@ -146,7 +148,18 @@ export async function runBroker(
     orchestrators: orchestratorStore,
   });
   await workerCoordination.start();
-  const orchestrators = new OrchestratorManager(registry, orchestratorStore, workerPreferences);
+  // Custody hues read live subjects to decide which slots are still fading, so they are
+  // composed after coordination has replayed its durable state.
+  const custodyColors = new CustodyColorService({
+    store: new CustodyColorStore(stateDirectory),
+    subjects: workerCoordination.service,
+  });
+  const orchestrators = new OrchestratorManager(
+    registry,
+    orchestratorStore,
+    workerPreferences,
+    custodyColors,
+  );
   const agentControl = new AgentControlService(
     registry,
     orchestratorStore,
@@ -216,6 +229,8 @@ export async function runBroker(
     fleetDetaches,
     fleetPreferences,
     workerPreferences,
+    custodyColors,
+    orchestratorBindings: orchestratorStore,
     workerCoordination: workerCoordination.service,
     workerControl,
     workerEvents,

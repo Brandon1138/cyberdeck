@@ -20,6 +20,10 @@ export class OrchestratorStore {
     return bindings.get(key);
   }
 
+  async list(): Promise<OrchestratorBinding[]> {
+    return [...(await this.load()).values()];
+  }
+
   async findBySessionId(sessionId: string): Promise<OrchestratorBinding | undefined> {
     const bindings = await this.load();
     return [...bindings.values()].find((binding) => binding.sessionId === sessionId);

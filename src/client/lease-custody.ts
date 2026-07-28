@@ -1,4 +1,5 @@
 import type { FleetWorkerCoordinationView } from "../broker/worker-coordination-view.js";
+import { CUSTODY_COLOR_SLOT_COUNT, type CustodyColor } from "../domain/custody-color.js";
 
 /**
  * The creator recorded for workers that predate lease custody. Those workers can never
@@ -37,6 +38,28 @@ export type LeaseCustodyTone = "subtle" | "attention" | "alert";
 export interface LeaseCustodyBadge {
   label: string;
   tone: LeaseCustodyTone;
+}
+
+/**
+ * Custody hues, as fleet palette keys. Six slots, each with a dimmer variant of the same hue for
+ * workers whose lease has ended — one hue family per orchestrator, two weights of belonging.
+ */
+export type CustodyColorTone =
+  | "custody1" | "custody2" | "custody3" | "custody4" | "custody5" | "custody6"
+  | "custody1Faded" | "custody2Faded" | "custody3Faded" | "custody4Faded"
+  | "custody5Faded" | "custody6Faded";
+
+/**
+ * The palette key for a custody color, or `undefined` for a slot outside the six this client
+ * knows. A newer broker naming a seventh slot renders neutral rather than borrowing a hue that
+ * already means something else here.
+ */
+export function custodyColorTone(color: CustodyColor): CustodyColorTone | undefined {
+  if (!Number.isInteger(color.slot) || color.slot < 0 || color.slot >= CUSTODY_COLOR_SLOT_COUNT) {
+    return undefined;
+  }
+  const hue = `custody${color.slot + 1}`;
+  return (color.intensity === "faded" ? `${hue}Faded` : hue) as CustodyColorTone;
 }
 
 /**
