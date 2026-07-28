@@ -107,6 +107,7 @@ async function harness(options: {
       ownsProcess: () => true,
       isStopRequested: () => false,
       stopRequestedAt: () => undefined,
+      onSessionUpdate: () => () => undefined,
       stop: async () => undefined,
       forceStop: () => undefined,
     } as never,

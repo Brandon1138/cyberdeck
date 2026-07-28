@@ -73,6 +73,7 @@ async function harness(options: { leaseDurationMs?: number; enqueueStatus?: "que
   const stopped: string[] = [];
   const forced: string[] = [];
   const stopRequests = new Map<string, string>();
+  const sessionUpdateListeners = new Set<(sessionId: string) => void>();
   const enqueued: Array<{ targetSessionId: string; message: string }> = [];
 
   const registry = {
@@ -86,16 +87,19 @@ async function harness(options: { leaseDurationMs?: number; enqueueStatus?: "que
     ownsProcess: () => true,
     isStopRequested: (sessionId: string) => stopRequests.has(sessionId),
     stopRequestedAt: (sessionId: string) => stopRequests.get(sessionId),
+    onSessionUpdate(listener: (sessionId: string) => void) {
+      sessionUpdateListeners.add(listener);
+      return () => sessionUpdateListeners.delete(listener);
+    },
     async stop(sessionId: string) {
       stopped.push(sessionId);
       stopRequests.set(sessionId, new Date(nowMs).toISOString());
       const record = sessions.get(sessionId);
       if (record !== undefined) record.executionState = "cancelled";
+      for (const listener of sessionUpdateListeners) listener(sessionId);
     },
     forceStop(sessionId: string) {
       forced.push(sessionId);
-      const record = sessions.get(sessionId);
-      if (record !== undefined) record.exitCode = 137;
     },
   };
 
@@ -128,6 +132,14 @@ async function harness(options: { leaseDurationMs?: number; enqueueStatus?: "que
     instructions,
     advance: (ms: number) => { nowMs += ms; },
     now: () => nowMs,
+    exit(sessionId: string, exitCode: number) {
+      const record = sessions.get(sessionId);
+      if (record === undefined) throw new Error(`No session ${sessionId}`);
+      record.exitCode = exitCode;
+      record.executionState = exitCode === 0 ? "exited" : "cancelled";
+      record.attentionState = exitCode === 0 ? "done" : "stopped";
+      for (const listener of sessionUpdateListeners) listener(sessionId);
+    },
     addSession(input: Partial<FakeSession> = {}): string {
       const id = input.id ?? randomUUID();
       sessions.set(id, {
@@ -234,7 +246,11 @@ describe("WorkerControlService leases", () => {
 
   it("returns WORKER_TERMINAL for a worker that already finished", async () => {
     const bench = await harness();
-    const workerId = bench.addSession();
+    const workerId = bench.addSession({
+      executionState: "exited",
+      attentionState: "done",
+      exitCode: 0,
+    });
     await bench.register({ workerId, lifecycle: "done" });
 
     const result = await bench.control.lease({
@@ -342,7 +358,11 @@ describe("WorkerControlService recovery", () => {
     const bench = await harness();
     const recoverable = bench.addSession();
     const live = bench.addSession();
-    const finished = bench.addSession();
+    const finished = bench.addSession({
+      executionState: "failed",
+      attentionState: "failed",
+      exitCode: 1,
+    });
     await bench.register({ workerId: recoverable, waveId: "wave-1" });
     await bench.register({ workerId: live, controllerId: "orchestrator:workspace:/other" });
     await bench.register({ workerId: finished, lifecycle: "failed" });
@@ -490,7 +510,7 @@ describe("WorkerControlService worker control", () => {
     expect(result.code).toBe("LEASE_EXPIRED");
   });
 
-  it("stops a worker gracefully and drives the lease subject to a terminal lifecycle", async () => {
+  it("keeps an ignored graceful stop live, recoverable, and force-stoppable until exit", async () => {
     const { bench, workerId } = await controlled();
 
     const result = await bench.control.control({
@@ -499,8 +519,36 @@ describe("WorkerControlService worker control", () => {
 
     expect(bench.stopped).toEqual([workerId]);
     expect(bench.forced).toEqual([]);
-    expect(result).toMatchObject({ code: "STOP_REQUESTED", lifecycle: "stopped", mode: "graceful" });
-    expect(bench.coordination.getSubject(workerId)?.lifecycle).toBe("stopped");
+    expect(result).toMatchObject({ code: "STOP_REQUESTED", lifecycle: "working", mode: "graceful" });
+    expect(bench.coordination.getSubject(workerId)?.lifecycle).toBe("working");
+
+    bench.advance(60_000);
+    const replacement = bench.rebuild();
+    const recovered = await replacement.lease({
+      actorSessionId: ORC,
+      action: "adopt",
+      scope: "worker",
+      workerId,
+      reason: "replace controller after ignored SIGTERM",
+    });
+    expect(recovered.results[0]).toMatchObject({ workerId, code: "ACQUIRED" });
+
+    const forced = await replacement.control({
+      actorSessionId: ORC, action: "stop", workerId, mode: "force", reason: "grace expired",
+    });
+    expect(bench.forced).toEqual([workerId]);
+    expect(forced).toMatchObject({
+      code: "STOP_REQUESTED",
+      exitCode: null,
+      lifecycle: "working",
+      mode: "force",
+    });
+    expect(bench.coordination.getSubject(workerId)?.lifecycle).toBe("working");
+
+    bench.exit(workerId, 137);
+    await vi.waitFor(() => {
+      expect(bench.coordination.getSubject(workerId)?.lifecycle).toBe("stopped");
+    });
   });
 
   it("requires an observed graceful stop plus a grace period before force", async () => {
@@ -523,7 +571,12 @@ describe("WorkerControlService worker control", () => {
       actorSessionId: ORC, action: "stop", workerId, mode: "force", reason: "kill it",
     });
     expect(bench.forced).toEqual([workerId]);
-    expect(forced).toMatchObject({ code: "STOPPED", exitCode: 137, lifecycle: "stopped" });
+    expect(forced).toMatchObject({ code: "STOP_REQUESTED", exitCode: null, lifecycle: "working" });
+
+    bench.exit(workerId, 137);
+    await vi.waitFor(() => {
+      expect(bench.coordination.getSubject(workerId)?.lifecycle).toBe("stopped");
+    });
   });
 
   it("enqueues a redirect instruction for a controlled worker", async () => {
@@ -544,6 +597,10 @@ describe("WorkerControlService worker control", () => {
   it("refuses to redirect a terminal worker", async () => {
     const { bench, workerId } = await controlled();
     await bench.control.control({ actorSessionId: ORC, action: "stop", workerId, reason: "done" });
+    bench.exit(workerId, 137);
+    await vi.waitFor(() => {
+      expect(bench.coordination.getSubject(workerId)?.lifecycle).toBe("stopped");
+    });
 
     const result = await bench.control.control({
       actorSessionId: ORC, action: "redirect", workerId, instruction: "more work", reason: "retry",

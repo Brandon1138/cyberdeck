@@ -390,10 +390,7 @@ describe("worker coordination: checkpoints and decision gates", () => {
       .toHaveLength(0);
   });
 
-  it("clears the decision gate when any open gate is answered, not the matching one", async () => {
-    // Documented defect, not desired behaviour: the subject holds a single decision gate and the
-    // answer path clears it without comparing correlation ids, so answering the first gate resumes
-    // a worker that is still blocked on the second.
+  it("keeps the active decision gate when an older gate is answered", async () => {
     const broker = await IntegrationBroker.open(NOISY);
     const owner = controller("two-gates");
     const worker = await registerWorker(broker.service, { controller: owner });
@@ -424,7 +421,10 @@ describe("worker coordination: checkpoints and decision gates", () => {
       checkpointCorrelationId: "gate:a",
     }));
 
-    expect(broker.service.getSubject(worker.workerId)?.decisionGate).toEqual({ state: "none" });
+    expect(broker.service.getSubject(worker.workerId)?.decisionGate).toMatchObject({
+      state: "decision-gate",
+      correlationId: "gate:b",
+    });
     expect(broker.service.listCheckpoints(worker.workerId, "pending")
       .map(({ correlationId }) => correlationId)).toEqual(["gate:b"]);
   });

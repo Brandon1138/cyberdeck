@@ -618,6 +618,12 @@ export class SessionRegistry {
     });
   }
 
+  /** Observe material session changes without taking attachment ownership. */
+  onSessionUpdate(listener: (sessionId: string) => void): () => void {
+    this.sessionUpdateListeners.add(listener);
+    return () => this.sessionUpdateListeners.delete(listener);
+  }
+
   async attach(
     sessionId: string,
     clientId: string,

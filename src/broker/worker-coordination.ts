@@ -586,6 +586,46 @@ export class WorkerCoordinationService {
     );
   }
 
+  /**
+   * Reconcile durable bookkeeping with broker-observed process state.
+   *
+   * This internal broker boundary repairs stale terminal bookkeeping for a process the registry
+   * still owns and records terminal state only after the registry has observed exit.
+   */
+  async reconcileLifecycle(input: {
+    mutationId: string;
+    subjectId: string;
+    lifecycle: WorkerLifecycle;
+    reason: string;
+  }): Promise<OwnershipSubject> {
+    return this.exclusive(async () => {
+      this.assertReady();
+      const subject = this.requireSubject(input.subjectId);
+      if (subject.lifecycle === input.lifecycle) return subject;
+      const updated = OwnershipSubjectSchema.parse({
+        ...subject,
+        lifecycle: input.lifecycle,
+        updatedAt: this.now(),
+      });
+      await this.commit({
+        subjects: [updated],
+        audits: [this.audit(
+          input.mutationId,
+          "lifecycle",
+          updated,
+          BROKER_ACTOR,
+          input.reason,
+          subject.lease.controller,
+          subject.lease.controller,
+          subject.lease.state,
+          subject.lease.state,
+          "RECONCILED",
+        )],
+      });
+      return updated;
+    });
+  }
+
   async submitEvent(input: EventSubmissionInput): Promise<EventAck> {
     return this.exclusive(async () => {
       this.assertReady();
@@ -778,7 +818,11 @@ export class WorkerCoordinationService {
           answeredByEventId: event.eventId,
           answeredAt: now,
         });
-        if (checkpoint.mode === "decision-gate") {
+        if (
+          checkpoint.mode === "decision-gate"
+          && subjectUpdate.decisionGate.state === "decision-gate"
+          && subjectUpdate.decisionGate.correlationId === checkpoint.correlationId
+        ) {
           subjectUpdate = {
             ...subjectUpdate,
             decisionGate: { state: "none" },

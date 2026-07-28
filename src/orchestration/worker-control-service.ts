@@ -272,6 +272,9 @@ export class WorkerControlService {
     this.credentials = options.credentials ?? new BrokerWorkerLeaseCredentialCustodian();
     this.now = options.now ?? (() => Date.now());
     this.forceStopGraceMs = Math.max(0, options.forceStopGraceMs ?? 5_000);
+    options.registry.onSessionUpdate((sessionId) => {
+      void this.exclusive(() => this.reconcileSessionLifecycle(sessionId)).catch(() => undefined);
+    });
   }
 
   async lease(input: z.input<typeof AgentLeaseParamsSchema>): Promise<LeaseControlResult> {
@@ -290,7 +293,7 @@ export class WorkerControlService {
     const request = AgentWorkerControlParamsSchema.parse(input);
     const { binding, controller } = await this.requireController(request.actorSessionId);
     return this.exclusive(async () => {
-      const subject = this.options.coordination.getSubject(request.workerId);
+      const subject = await this.reconcileSessionLifecycle(request.workerId);
       if (subject === undefined) {
         return {
           action: request.action,
@@ -461,7 +464,7 @@ export class WorkerControlService {
     mutationId: string,
   ): Promise<LeaseControlResult | undefined> {
     const workerId = request.workerId!;
-    let subject = this.options.coordination.getSubject(workerId);
+    let subject = await this.reconcileSessionLifecycle(workerId);
     if (subject === undefined) {
       const registered = await this.registerFromSession(workerId, controller, request.reason);
       if (registered === undefined) {
@@ -615,7 +618,8 @@ export class WorkerControlService {
     const nowMs = this.now();
     const eligible: RecoveryCandidate[] = [];
     const blocked: RecoveryBlocker[] = [];
-    for (const subject of this.options.coordination.listSubjects()) {
+    for (const storedSubject of this.options.coordination.listSubjects()) {
+      const subject = await this.reconcileSessionLifecycle(storedSubject.subjectId) ?? storedSubject;
       if (subject.subjectKind !== "worker") continue;
       if (request.scope === "wave" && subject.origin.waveId !== request.waveId) continue;
       if (request.scope === "worker" && subject.subjectId !== request.workerId) continue;
@@ -764,17 +768,17 @@ export class WorkerControlService {
     } else {
       await this.options.registry.stop(request.workerId);
     }
-    // Broker bookkeeping and the lease subject are written before this call returns, so no path
-    // leaves a stopped worker reading as active anywhere an operator or a successor Orc can see.
-    await this.markStopped(subject, controller, request.reason);
     const current = this.sessionRecord(request.workerId);
     const terminal = current?.exitCode !== null && current?.exitCode !== undefined;
+    const lifecycle = terminal
+      ? (await this.reconcileSessionLifecycle(request.workerId))?.lifecycle ?? "stopped"
+      : subject.lifecycle;
     return {
       action: "stop",
       workerId: request.workerId,
       code: terminal ? "STOPPED" : "STOP_REQUESTED",
       mode: request.mode,
-      lifecycle: "stopped",
+      lifecycle,
       ...(current === undefined ? {} : { executionState: current.executionState, exitCode: current.exitCode }),
       ...(terminal
         ? {}
@@ -966,6 +970,25 @@ export class WorkerControlService {
       subjectId: subject.subjectId,
       lifecycle: "stopped",
       reason: `stop: ${reason}`,
+    });
+  }
+
+  private async reconcileSessionLifecycle(workerId: string): Promise<OwnershipSubject | undefined> {
+    const subject = this.options.coordination.getSubject(workerId);
+    if (subject === undefined) return undefined;
+    const record = this.sessionRecord(workerId);
+    if (record === undefined) return subject;
+    const observed = lifecycleOf(record);
+    const staleTerminal = record.exitCode === null && TERMINAL_WORKER_LIFECYCLES.has(subject.lifecycle);
+    const observedExit = record.exitCode !== null && subject.lifecycle !== observed;
+    if (!staleTerminal && !observedExit) return subject;
+    return this.options.coordination.reconcileLifecycle({
+      mutationId: `broker:lifecycle:${workerId}:${randomUUID()}`,
+      subjectId: workerId,
+      lifecycle: observed,
+      reason: record.exitCode === null
+        ? "broker registry still owns a live process"
+        : `broker registry observed process exit ${record.exitCode}`,
     });
   }
 
@@ -1196,17 +1219,18 @@ function enqueueFailureCode(error: unknown): WorkerControlCode {
 }
 
 function lifecycleOf(record: SessionRecord): OwnershipSubject["lifecycle"] {
-  if (record.executionState === "starting") return "launching";
-  if (record.executionState === "errored" || record.executionState === "failed") return "failed";
-  if (record.executionState === "cancelled" || record.executionState === "exited") {
-    return record.exitCode === 0 ? "done" : "stopped";
+  if (record.exitCode !== null) {
+    if (record.executionState === "cancelled") return "stopped";
+    if (record.executionState === "errored" || record.executionState === "failed") return "failed";
+    return record.exitCode === 0 ? "done" : "failed";
   }
+  if (record.executionState === "starting") return "launching";
   if (record.attentionState === "working") return "working";
   if (record.attentionState === "needs-input") return "waiting";
-  if (record.attentionState === "done") return "done";
-  if (record.attentionState === "failed") return "failed";
-  if (record.attentionState === "stopped") return "stopped";
-  return "queued";
+  if (record.executionState === "active") return "working";
+  // Cancelled, errored, and failed bookkeeping can still own a live process. Keep coordination
+  // recoverable until registry exit observation supplies a non-null exitCode.
+  return "working";
 }
 
 /** Material state and deltas only. Transcript-shaped output is never produced by this projection. */

@@ -721,6 +721,43 @@ describe("WorkerCoordinationService events and checkpoints", () => {
     expect(service.getSubject(workerId)?.lifecycle).toBe("working");
   });
 
+  it("clears only the decision gate matching the answered checkpoint", async () => {
+    const { service, owner, workerId, token, version } = await ownedHarness();
+    await service.requestCheckpoint({
+      mutationId: "checkpoint:gate:a",
+      controller: owner,
+      leaseToken: token!,
+      correlationId: "correlation:gate:a",
+      workerId,
+      mode: "decision-gate",
+    });
+    await service.requestCheckpoint({
+      mutationId: "checkpoint:gate:b",
+      controller: owner,
+      leaseToken: token!,
+      correlationId: "correlation:gate:b",
+      workerId,
+      mode: "decision-gate",
+    });
+
+    await submit(service, owner, token!, event(workerId, version!, 1, {
+      kind: "CHECKPOINT",
+      checkpointCorrelationId: "correlation:gate:a",
+      summary: "answer A",
+    }));
+    expect(service.getSubject(workerId)?.decisionGate).toMatchObject({
+      state: "decision-gate",
+      correlationId: "correlation:gate:b",
+    });
+
+    await submit(service, owner, token!, event(workerId, version!, 2, {
+      kind: "CHECKPOINT",
+      checkpointCorrelationId: "correlation:gate:b",
+      summary: "answer B",
+    }));
+    expect(service.getSubject(workerId)?.decisionGate.state).toBe("none");
+  });
+
   it("survives broker restart with leases, events, interventions, checkpoints, and receipts", async () => {
     const first = await ownedHarness();
     const intervention = event(first.workerId, first.version!, 1, {
