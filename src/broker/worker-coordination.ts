@@ -104,6 +104,21 @@ export interface AdoptInput extends LeaseMutationInput {
   newController: ControllerIdentity;
 }
 
+export interface AdoptBatchInput {
+  mutationId: string;
+  actor: ControllerIdentity;
+  newController: ControllerIdentity;
+  members: ReadonlyArray<{
+    subjectId: string;
+    mode: "acquire" | "adopt";
+  }>;
+  reason: string;
+}
+
+export interface AdoptBatchResult extends OwnershipMutationResult {
+  committed: boolean;
+}
+
 export interface EventSubmissionInput {
   mutationId: string;
   controller: ControllerIdentity;
@@ -368,6 +383,98 @@ export class WorkerCoordinationService {
         return { subject, outcome: this.outcome(subject, "NOT_ELIGIBLE") };
       }
       return this.withNewController(subject, input.newController, now, "ACQUIRED");
+    });
+  }
+
+  /**
+   * Atomically acquires every named recovery candidate or changes none of them.
+   *
+   * Eligibility is rechecked inside the substrate's exclusive section. Successful subjects,
+   * audits, controller liveness, and the idempotency receipt share one append transaction, and
+   * in-memory visibility changes only after that append succeeds.
+   */
+  async adoptBatch(input: AdoptBatchInput): Promise<AdoptBatchResult> {
+    return this.exclusive(async () => {
+      this.assertReady();
+      const replay = this.replayAdoptBatch(input.mutationId);
+      if (replay !== undefined) return replay;
+      const actor = ControllerIdentitySchema.parse(input.actor);
+      const newController = ControllerIdentitySchema.parse(input.newController);
+      const now = this.now();
+      const seen = new Set<string>();
+      const candidates: Array<{
+        original: OwnershipSubject;
+        current: OwnershipSubject;
+      }> = [];
+      const failures = new Map<string, OwnershipOutcome>();
+
+      for (const member of input.members) {
+        if (seen.has(member.subjectId)) {
+          throw new Error(`Atomic adoption batch contains duplicate subject ${member.subjectId}`);
+        }
+        seen.add(member.subjectId);
+        const original = this.requireSubject(member.subjectId);
+        const current = this.expiredCopy(original, now);
+        candidates.push({ original, current });
+        if (TERMINAL_WORKER_LIFECYCLES.has(current.lifecycle)) {
+          failures.set(member.subjectId, this.outcome(current, "WORKER_TERMINAL"));
+          continue;
+        }
+        if (isControlled(current)) {
+          failures.set(member.subjectId, this.outcome(
+            current,
+            "LEASE_CONFLICT",
+            `controlled by ${current.lease.controller?.controllerId ?? "unknown"} until ${current.lease.expiresAt}`,
+          ));
+          continue;
+        }
+        const eligible = member.mode === "adopt"
+          ? current.lease.state === "orphaned" || current.lease.state === "expired"
+          : current.lease.state === "released";
+        if (!eligible) failures.set(member.subjectId, this.outcome(current, "NOT_ELIGIBLE"));
+      }
+
+      if (failures.size > 0) {
+        const outcomes = candidates.map(({ current }) =>
+          failures.get(current.subjectId) ?? this.outcome(
+            current,
+            "NOT_ELIGIBLE",
+            "atomic adoption aborted because another batch member was ineligible",
+          ));
+        const result = this.adoptBatchResult(input.mutationId, false, outcomes);
+        await this.persistReceipt(input.mutationId, "adopt", result, {});
+        return result;
+      }
+
+      const changed: OwnershipSubject[] = [];
+      const outcomes: OwnershipOutcome[] = [];
+      const audits: OwnershipAuditRecord[] = [];
+      for (const { original, current } of candidates) {
+        const next = this.withNewController(current, newController, now, "ACQUIRED");
+        changed.push(next.subject);
+        outcomes.push(next.outcome);
+        audits.push(this.audit(
+          input.mutationId,
+          "adopt",
+          next.subject,
+          actor,
+          input.reason,
+          original.lease.controller,
+          next.subject.lease.controller,
+          original.lease.state,
+          next.subject.lease.state,
+          next.outcome.code,
+        ));
+      }
+      const result = this.adoptBatchResult(input.mutationId, true, outcomes);
+      await this.persistReceipt(input.mutationId, "adopt", result, {
+        subjects: changed,
+        audits,
+        ...(changed.length === 0
+          ? {}
+          : { liveness: [this.connectedObservation(newController, now, "atomic adopt call")] }),
+      });
+      return result;
     });
   }
 
@@ -1028,14 +1135,14 @@ export class WorkerCoordinationService {
       );
     }
     const observed = this.liveness.get(selector.controllerId);
-    if (
-      observed === undefined
-      || observed.state !== "disconnected"
-      || Date.parse(now) < Date.parse(observed.observedAt) + this.gracePeriodMs
-    ) {
-      return [];
-    }
-    return all.filter((subject) => subject.lease.controller?.controllerId === selector.controllerId);
+    const disconnectedPastGrace = observed?.state === "disconnected"
+      && Date.parse(now) >= Date.parse(observed.observedAt) + this.gracePeriodMs;
+    return all.filter((subject) => {
+      if (subject.lease.controller?.controllerId !== selector.controllerId) return false;
+      if (disconnectedPastGrace) return true;
+      return (subject.lease.state === "orphaned" || subject.lease.state === "expired")
+        && Date.parse(now) >= Date.parse(subject.lease.expiresAt);
+    });
   }
 
   private expiredCopy(subject: OwnershipSubject, now: string): OwnershipSubject {
@@ -1188,6 +1295,17 @@ export class WorkerCoordinationService {
     });
   }
 
+  private adoptBatchResult(
+    mutationId: string,
+    committed: boolean,
+    outcomes: OwnershipOutcome[],
+  ): AdoptBatchResult {
+    return {
+      ...this.result(mutationId, "adopt", outcomes),
+      committed,
+    };
+  }
+
   private audit(
     mutationId: string,
     operation: OwnershipOperation,
@@ -1311,6 +1429,28 @@ export class WorkerCoordinationService {
     this.assertReceiptOperation(receipt, operation);
     const prior = OwnershipMutationResultSchema.parse(receipt.result);
     return { ...prior, idempotentReplay: true };
+  }
+
+  private replayAdoptBatch(mutationId: string): AdoptBatchResult | undefined {
+    const receipt = this.receipts.get(mutationId);
+    if (receipt === undefined) return undefined;
+    this.assertReceiptOperation(receipt, "adopt");
+    if (
+      typeof receipt.result !== "object"
+      || receipt.result === null
+      || !("committed" in receipt.result)
+      || typeof receipt.result.committed !== "boolean"
+    ) {
+      throw new WorkerCoordinationError(
+        "MUTATION_ID_COLLISION",
+        `mutation ${mutationId} already used for non-batch adopt`,
+      );
+    }
+    return {
+      ...OwnershipMutationResultSchema.parse(receipt.result),
+      committed: receipt.result.committed,
+      idempotentReplay: true,
+    };
   }
 
   private replayAck(mutationId: string, operation: "event-submit" | "event-resolve"): EventAck | undefined {

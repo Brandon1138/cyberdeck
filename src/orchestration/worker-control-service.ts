@@ -163,8 +163,8 @@ export interface LeaseControlResult {
   results: LeaseSubjectResult[];
   summary: Record<string, number>;
   plan?: RecoveryPlan;
-  /** Present when an all-or-nothing take was rolled back; the released set is named explicitly. */
-  aborted?: { code: "ADOPTION_ABORTED"; rolledBack: string[]; cause: LeaseSubjectResult[] };
+  /** Present when substrate eligibility rejected the whole batch before ownership changed. */
+  aborted?: { code: "ADOPTION_ABORTED"; cause: LeaseSubjectResult[] };
 }
 
 export type WorkerControlCode =
@@ -395,24 +395,21 @@ export class WorkerControlService {
         plan,
       };
     }
-    const results: LeaseSubjectResult[] = [];
-    const taken: string[] = [];
-    let replay = true;
-    for (const candidate of plan.eligible) {
-      const outcome = await this.takeOne(candidate, controller, request.reason, `${mutationId}:${candidate.workerId}`);
-      replay = replay && outcome.idempotentReplay;
-      results.push(outcome.result);
-      if (outcome.result.code === "ACQUIRED" || outcome.result.code === "ALREADY_CONTROLLED") {
-        taken.push(candidate.workerId);
-      }
-    }
-    const failures = results.filter(
-      (result) => result.code !== "ACQUIRED" && result.code !== "ALREADY_CONTROLLED",
-    );
-    // All-or-nothing: a partially adopted wave is exactly the ambiguous ownership state a
-    // replacement Orc is trying to escape, so the taken half is compensated back out.
-    if (failures.length > 0 && taken.length > 0) {
-      const rolledBack = await this.rollback(taken, controller, request.reason, mutationId);
+    const batch = plan.eligible.length === 0
+      ? undefined
+      : await this.options.coordination.adoptBatch({
+          mutationId,
+          actor: controller,
+          newController: controller,
+          members: plan.eligible.map((candidate) => ({
+            subjectId: candidate.workerId,
+            mode: candidate.via,
+          })),
+          reason: request.reason,
+        });
+    if (batch?.committed) this.captureTokens(controller, batch.outcomes);
+    const results = batch?.outcomes.map(publicOutcome) ?? [];
+    if (batch !== undefined && !batch.committed) {
       return {
         action: request.action,
         scope: request.scope,
@@ -422,7 +419,7 @@ export class WorkerControlService {
         results,
         summary: summarize(results),
         plan,
-        aborted: { code: "ADOPTION_ABORTED", rolledBack, cause: failures },
+        aborted: { code: "ADOPTION_ABORTED", cause: results },
       };
     }
     for (const blocker of plan.blocked) {
@@ -439,7 +436,7 @@ export class WorkerControlService {
       scope: request.scope,
       mutationId,
       controllerId: controller.controllerId,
-      idempotentReplay: plan.eligible.length > 0 && replay,
+      idempotentReplay: batch?.idempotentReplay ?? false,
       results,
       summary: summarize(results),
       ...(request.scope === "worker" ? {} : { plan }),
@@ -512,62 +509,6 @@ export class WorkerControlService {
       results: result.outcomes.map(publicOutcome),
       summary: summarize(result.outcomes.map(publicOutcome)),
     };
-  }
-
-  private async takeOne(
-    candidate: RecoveryCandidate,
-    controller: ControllerIdentity,
-    reason: string,
-    mutationId: string,
-  ): Promise<{ result: LeaseSubjectResult; idempotentReplay: boolean }> {
-    const selector = { scope: "single" as const, subjectId: candidate.workerId };
-    const result = candidate.via === "adopt"
-      ? await this.options.coordination.adopt({
-        mutationId,
-        actor: controller,
-        newController: controller,
-        selector,
-        reason,
-      })
-      : await this.options.coordination.acquire({
-        mutationId,
-        actor: controller,
-        controller,
-        selector,
-        reason,
-      });
-    this.captureTokens(controller, result.outcomes);
-    const outcome = result.outcomes[0];
-    return {
-      result: outcome === undefined
-        ? { workerId: candidate.workerId, code: "NOT_ELIGIBLE", message: "Subject vanished before adoption" }
-        : publicOutcome(outcome),
-      idempotentReplay: result.idempotentReplay,
-    };
-  }
-
-  private async rollback(
-    workerIds: readonly string[],
-    controller: ControllerIdentity,
-    reason: string,
-    mutationId: string,
-  ): Promise<string[]> {
-    const released: string[] = [];
-    for (const workerId of workerIds) {
-      const token = this.tokens.get(tokenKey(controller, workerId));
-      if (token === undefined) continue;
-      await this.options.coordination.release({
-        mutationId: `${mutationId}:rollback:${workerId}`,
-        actor: controller,
-        controller,
-        selector: { scope: "single", subjectId: workerId },
-        leaseToken: token,
-        reason: `${reason} (adoption aborted; compensating release)`,
-      });
-      this.tokens.delete(tokenKey(controller, workerId));
-      released.push(workerId);
-    }
-    return released;
   }
 
   private async authenticatedLease(

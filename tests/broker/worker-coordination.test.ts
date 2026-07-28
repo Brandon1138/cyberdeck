@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   WorkerCoordinationService,
   type EventSubmissionInput,
@@ -43,8 +43,9 @@ async function harness(options: {
   const directory = options.directory ?? await mkdtemp(join(tmpdir(), "cyberdeck-coordination-"));
   if (options.directory === undefined) directories.push(directory);
   let nowMs = options.nowMs ?? baseMs;
+  const store = new WorkerCoordinationStore(directory);
   const service = new WorkerCoordinationService({
-    store: new WorkerCoordinationStore(directory),
+    store,
     now: () => new Date(nowMs).toISOString(),
     leaseDurationMs: options.leaseDurationMs ?? 30_000,
     gracePeriodMs: options.gracePeriodMs ?? 5_000,
@@ -59,6 +60,7 @@ async function harness(options: {
   await service.initialize();
   return {
     directory,
+    store,
     service,
     advance: (milliseconds: number) => { nowMs += milliseconds; },
     now: () => new Date(nowMs).toISOString(),
@@ -306,6 +308,96 @@ describe("WorkerCoordinationService ownership", () => {
       [orphan.workerId, "ACQUIRED"],
       [terminal.workerId, "WORKER_TERMINAL"],
     ]));
+  });
+
+  it("rejects an atomic adoption batch when one member is ineligible", async () => {
+    const { service } = await harness();
+    const adopter = controller("atomic-member-failure");
+    const eligible = await register(service, { waveId: "wave-atomic-failure" });
+    const terminal = await register(service, {
+      waveId: "wave-atomic-failure",
+      lifecycle: "done",
+    });
+
+    const result = await service.adoptBatch({
+      mutationId: "atomic-member-failure",
+      actor: adopter,
+      newController: adopter,
+      members: [
+        { subjectId: eligible.workerId, mode: "adopt" },
+        { subjectId: terminal.workerId, mode: "adopt" },
+      ],
+      reason: "batch must reject every member",
+    });
+
+    expect(result.committed).toBe(false);
+    expect(new Map(result.outcomes.map((outcome) => [outcome.subjectId, outcome.code])))
+      .toEqual(new Map([
+        [eligible.workerId, "NOT_ELIGIBLE"],
+        [terminal.workerId, "WORKER_TERMINAL"],
+      ]));
+    expect(service.getSubject(eligible.workerId)?.lease.state).toBe("orphaned");
+    expect(service.getSubject(terminal.workerId)?.lease.state).toBe("orphaned");
+  });
+
+  it("changes no ownership when an atomic adoption append fails", async () => {
+    const { service, store } = await harness();
+    const adopter = controller("atomic-append-failure");
+    const first = await register(service, { waveId: "wave-append-failure" });
+    const second = await register(service, { waveId: "wave-append-failure" });
+    vi.spyOn(store, "append").mockRejectedValueOnce(new Error("injected append failure"));
+
+    await expect(service.adoptBatch({
+      mutationId: "atomic-append-failure",
+      actor: adopter,
+      newController: adopter,
+      members: [
+        { subjectId: first.workerId, mode: "adopt" },
+        { subjectId: second.workerId, mode: "adopt" },
+      ],
+      reason: "append must succeed before visibility",
+    })).rejects.toThrow("injected append failure");
+
+    expect(service.getSubject(first.workerId)?.lease.state).toBe("orphaned");
+    expect(service.getSubject(second.workerId)?.lease.state).toBe("orphaned");
+  });
+
+  it("exposes either old or new ownership while an atomic adoption append is pending", async () => {
+    const { service, store } = await harness();
+    const adopter = controller("atomic-visibility");
+    const first = await register(service, { waveId: "wave-visibility" });
+    const second = await register(service, { waveId: "wave-visibility" });
+    const append = store.append.bind(store);
+    let markStarted!: () => void;
+    let releaseAppend!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseAppend = resolve; });
+    vi.spyOn(store, "append").mockImplementationOnce(async (transaction) => {
+      markStarted();
+      await gate;
+      await append(transaction);
+    });
+
+    const pending = service.adoptBatch({
+      mutationId: "atomic-visibility",
+      actor: adopter,
+      newController: adopter,
+      members: [
+        { subjectId: first.workerId, mode: "adopt" },
+        { subjectId: second.workerId, mode: "adopt" },
+      ],
+      reason: "visibility gate",
+    });
+    await started;
+
+    expect(service.getSubject(first.workerId)?.lease.controller).toBeUndefined();
+    expect(service.getSubject(second.workerId)?.lease.controller).toBeUndefined();
+
+    releaseAppend();
+    await pending;
+
+    expect(service.getSubject(first.workerId)?.lease.controller).toEqual(adopter);
+    expect(service.getSubject(second.workerId)?.lease.controller).toEqual(adopter);
   });
 
   it("transfers a wave with per-worker lease tokens", async () => {

@@ -389,28 +389,28 @@ describe("WorkerControlService recovery", () => {
       .toBe("orchestrator:workspace:/other");
   });
 
-  it("rolls the whole adoption back when one planned worker cannot be taken", async () => {
+  it("aborts the whole adoption before mutation when one planned worker becomes unavailable", async () => {
     const bench = await harness();
     const first = bench.addSession();
     const second = bench.addSession();
     await bench.register({ workerId: first, waveId: "wave-1" });
     await bench.register({ workerId: second, waveId: "wave-1" });
 
-    const original = bench.coordination.adopt.bind(bench.coordination);
-    let calls = 0;
-    vi.spyOn(bench.coordination, "adopt").mockImplementation(async (input) => {
-      calls += 1;
-      if (calls === 1) return original(input);
-      return {
-        mutationId: input.mutationId,
-        operation: "adopt" as const,
-        idempotentReplay: false,
-        outcomes: [{
-          subjectId: input.selector.scope === "single" ? input.selector.subjectId : second,
-          code: "NOT_ELIGIBLE",
-          message: "injected failure",
-        }],
-      };
+    const rival = {
+      controllerId: "orchestrator:rival",
+      familyId: "orchestrator:rival",
+      scope: { kind: "fleet" as const, scopeId: "rival" },
+    };
+    const original = bench.coordination.adoptBatch.bind(bench.coordination);
+    vi.spyOn(bench.coordination, "adoptBatch").mockImplementation(async (input) => {
+      await bench.coordination.adopt({
+        mutationId: "rival-won-before-batch",
+        actor: rival,
+        newController: rival,
+        selector: { scope: "single", subjectId: second },
+        reason: "concurrent takeover",
+      });
+      return original(input);
     });
 
     const result = await bench.control.lease({
@@ -422,11 +422,10 @@ describe("WorkerControlService recovery", () => {
     });
 
     expect(result.aborted?.code).toBe("ADOPTION_ABORTED");
-    expect(result.aborted?.rolledBack).toEqual([first]);
-    // Net ownership is unchanged: the compensated worker holds no live lease and no valid token.
-    expect(bench.coordination.getSubject(first)?.lease.state).toBe("released");
+    expect(result.aborted).not.toHaveProperty("rolledBack");
+    expect(bench.coordination.getSubject(first)?.lease.state).toBe("orphaned");
     expect(bench.coordination.getSubject(first)?.lease.tokenHash).toBeUndefined();
-    expect(bench.coordination.getSubject(second)?.lease.state).toBe("orphaned");
+    expect(bench.coordination.getSubject(second)?.lease.controller).toEqual(rival);
     vi.restoreAllMocks();
   });
 

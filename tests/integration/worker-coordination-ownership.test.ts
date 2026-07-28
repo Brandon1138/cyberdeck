@@ -19,6 +19,60 @@ import {
 afterEach(cleanupBrokers);
 
 describe("worker coordination: controller handoff and death", () => {
+  it("persists a successful adoption batch as one transaction", async () => {
+    const broker = await IntegrationBroker.open();
+    const adopter = controller("batch-success");
+    const first = await registerWorker(broker.service, { waveId: "wave-batch-success" });
+    const second = await registerWorker(broker.service, { waveId: "wave-batch-success" });
+    const before = (await readFile(broker.store.path, "utf8")).trim().split("\n").length;
+
+    const result = await broker.service.adoptBatch({
+      mutationId: "batch-success",
+      actor: adopter,
+      newController: adopter,
+      members: [
+        { subjectId: first.workerId, mode: "adopt" },
+        { subjectId: second.workerId, mode: "adopt" },
+      ],
+      reason: "recover whole wave",
+    });
+
+    expect(result.committed).toBe(true);
+    expect(result.outcomes.map((outcome) => outcome.code)).toEqual(["ACQUIRED", "ACQUIRED"]);
+    const lines = (await readFile(broker.store.path, "utf8")).trim().split("\n");
+    expect(lines).toHaveLength(before + 1);
+    expect(JSON.parse(lines.at(-1)!).subjects.map((subject: { subjectId: string }) => subject.subjectId))
+      .toEqual([first.workerId, second.workerId]);
+  });
+
+  it("replays a committed adoption batch after restart without another append", async () => {
+    const broker = await IntegrationBroker.open();
+    const adopter = controller("batch-restart");
+    const first = await registerWorker(broker.service, { waveId: "wave-batch-restart" });
+    const second = await registerWorker(broker.service, { waveId: "wave-batch-restart" });
+    const input = {
+      mutationId: "batch-restart",
+      actor: adopter,
+      newController: adopter,
+      members: [
+        { subjectId: first.workerId, mode: "adopt" as const },
+        { subjectId: second.workerId, mode: "adopt" as const },
+      ],
+      reason: "durable batch",
+    };
+    const committed = await broker.service.adoptBatch(input);
+    const persisted = await readFile(broker.store.path, "utf8");
+
+    await broker.restart();
+    expect(broker.service.getSubject(first.workerId)?.lease.controller).toEqual(adopter);
+    expect(broker.service.getSubject(second.workerId)?.lease.controller).toEqual(adopter);
+    await expect(broker.service.adoptBatch(input)).resolves.toEqual({
+      ...committed,
+      idempotentReplay: true,
+    });
+    expect(await readFile(broker.store.path, "utf8")).toBe(persisted);
+  });
+
   it("hands a live wave to a successor and fences the retiring controller across a restart", async () => {
     const broker = await IntegrationBroker.open({ leaseDurationMs: 120_000 });
     const retiring = controller("wave-retiring");
@@ -238,12 +292,10 @@ describe("worker coordination: controller handoff and death", () => {
       .toBe(worker.result.outcomes[0]?.currentController?.controllerId);
   });
 
-  it("leaves the inactive-controller selector empty when only the lease TTL elapsed", async () => {
-    // Documented gap, not an assertion of desired behaviour: `inactive-controller` selection needs
-    // a broker-observed disconnect, so a controller that vanishes without one is only reachable
-    // through the group/single selectors even after its lease has been swept to orphaned.
+  it("adopts a silently expired controller by inactive-controller without taking a live one", async () => {
     const broker = await IntegrationBroker.open({ leaseDurationMs: 10_000, gracePeriodMs: 5_000 });
     const vanished = controller("vanished");
+    const live = controller("live");
     const rescuer = controller("ttl-rescuer");
     const worker = await registerWorker(broker.service, { controller: vanished });
 
@@ -253,6 +305,7 @@ describe("worker coordination: controller handoff and death", () => {
       reason: "lease ttl elapsed with no liveness signal",
     });
     expect(outcomeFor(swept, worker.workerId).code).toBe("ORPHANED");
+    const liveWorker = await registerWorker(broker.service, { controller: live });
 
     const byController = await broker.service.adopt({
       mutationId: "adopt-by-inactive-controller",
@@ -261,19 +314,20 @@ describe("worker coordination: controller handoff and death", () => {
       newController: rescuer,
       reason: "recover ttl-expired worker",
     });
-    expect(byController.outcomes).toEqual([]);
-
-    const byGroup = await broker.service.adopt({
-      mutationId: "adopt-by-group",
-      actor: rescuer,
-      selector: { scope: "group", taskId: worker.taskId },
-      newController: rescuer,
-      reason: "recover ttl-expired worker by task",
-    });
-    expect(outcomeFor(byGroup, worker.workerId)).toMatchObject({
+    expect(outcomeFor(byController, worker.workerId)).toMatchObject({
       code: "ACQUIRED",
       currentController: rescuer,
     });
+
+    const liveAttempt = await broker.service.adopt({
+      mutationId: "adopt-live-by-inactive-controller",
+      actor: rescuer,
+      selector: { scope: "inactive-controller", controllerId: live.controllerId },
+      newController: rescuer,
+      reason: "must not take controller observed live",
+    });
+    expect(liveAttempt.outcomes).toEqual([]);
+    expect(broker.service.getSubject(liveWorker.workerId)?.lease.controller).toEqual(live);
   });
 });
 
