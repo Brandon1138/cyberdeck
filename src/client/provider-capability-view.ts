@@ -178,7 +178,7 @@ const CURSOR_ROWS: readonly ProviderCapabilityRow[] = [
     capability: "workspace-write-permission-mapping",
     evidence: "unsupported",
     reason:
-      "cursor advertises only plan and ask as read-only modes, so workspace-write omits --mode and no force, yolo, trust, or Smart Auto flag is ever emitted",
+      "cursor advertises only plan and ask as read-only modes, so workspace-write omits --mode and no force, yolo, or Smart Auto flag is emitted; trust is reserved for isolated read-only Scouts",
   },
   {
     provider: "cursor",

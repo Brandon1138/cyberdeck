@@ -74,6 +74,7 @@ describe("Cursor Scout denied-write canary", () => {
       "enabled",
       "--mode",
       "plan",
+      "--trust",
       "--model",
       "composer",
     ]);

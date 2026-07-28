@@ -1,11 +1,15 @@
 import type { JobRequest } from "../../domain/job.js";
+import type { StartSessionRequest } from "../../domain/session.js";
 import {
   buildProviderChildEnvironment,
   jobLaunchEnvironment,
 } from "../launch-environment.js";
 import { applyWorkerMode } from "../worker-mode.js";
 
-type CursorInteractiveRequest = Pick<JobRequest, "cwd" | "sandbox" | "model">;
+type CursorInteractiveRequest = Pick<
+  StartSessionRequest,
+  "cwd" | "sandbox" | "model" | "profile"
+>;
 
 export interface CursorCommand {
   executable: "agent";
@@ -21,8 +25,9 @@ export interface CursorHeadlessOptions {
 
 /**
  * Interactive Cursor Agent command suitable for a broker-owned PTY. An explicit initial prompt is
- * the documented positional operand; no resume, trust, worktree, or approval flag is emitted.
- * `--workspace` and `cwd` deliberately name the same root.
+ * the documented positional operand; no resume, worktree, or approval flag is emitted.
+ * Scout sessions add Cursor's documented `--trust` flag because their private per-session config
+ * has no persisted workspace decision. `--workspace` and `cwd` deliberately name the same root.
  */
 export function buildCursorInteractiveCommand(
   request: CursorInteractiveRequest,
@@ -30,6 +35,7 @@ export function buildCursorInteractiveCommand(
   sourceEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): CursorCommand {
   const args = cursorSafetyArgs(request);
+  if (request.profile === "scout") args.push("--trust");
   if (request.model !== undefined) args.push("--model", request.model);
   if (initialPrompt !== undefined) args.push(initialPrompt);
   return {

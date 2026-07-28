@@ -149,6 +149,23 @@ describe("Cursor command construction", () => {
       .toEqual(["Ping back"]);
   });
 
+  it("trusts only interactive Scout workspaces so fresh private state cannot block launch", () => {
+    const scout = buildCursorInteractiveCommand({
+      ...request().request,
+      profile: "scout",
+    });
+    expect(scout.args).toEqual([
+      "--workspace",
+      "/tmp/repo",
+      "--sandbox",
+      "enabled",
+      "--mode",
+      "plan",
+      "--trust",
+    ]);
+    expect(buildCursorInteractiveCommand(request().request).args).not.toContain("--trust");
+  });
+
   it("builds headless stream-json argv with the documented positional prompt", () => {
     const command = buildCursorHeadlessCommand(request().request, {
       streamPartialOutput: true,
@@ -216,7 +233,7 @@ describe("Cursor command construction", () => {
     expect(explicit.args).not.toContain("reviewer");
   });
 
-  it("never emits trust, force, auto-routing, fallback, continuation, or MCP bypass flags", () => {
+  it("never emits elevated or continuity flags for normal launches", () => {
     const commands = [
       buildCursorInteractiveCommand(request().request),
       buildCursorHeadlessCommand(request().request),
