@@ -30,13 +30,30 @@ export async function enableCursorRunEverything(
     const commandOffset = terminal.snapshot().length;
     terminal.write(Buffer.from("/run-everything\r"));
     touchedInput = true;
-    await waitForTerminal(
+    const submission = await waitForTerminal(
       terminal,
-      (replay) => cursorInputReady(replay.subarray(commandOffset)),
+      (replay) => {
+        const commandReplay = replay.subarray(commandOffset);
+        if (cursorInputReady(commandReplay)) return "committed" as const;
+        const menuState = cursorRunEverythingState(commandReplay);
+        if (menuState === "disabled") return "select" as const;
+        if (menuState === "enabled") return "already-enabled" as const;
+        return undefined;
+      },
       timeoutMs,
       pollIntervalMs,
       "Composer did not return to input after committing /run-everything",
     );
+    if (submission !== "committed") {
+      terminal.write(Buffer.from(submission === "select" ? "\r" : "\u001b"));
+      await waitForTerminal(
+        terminal,
+        (replay) => cursorInputReady(replay.subarray(commandOffset)),
+        timeoutMs,
+        pollIntervalMs,
+        "Composer did not return to input after selecting /run-everything",
+      );
+    }
 
     const readbackOffset = terminal.snapshot().length;
     terminal.write(Buffer.from("/"));

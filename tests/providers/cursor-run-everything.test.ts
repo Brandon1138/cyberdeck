@@ -47,6 +47,36 @@ describe("Cursor /run-everything setup", () => {
     expect(terminal.writes).toEqual(["/run-everything\r", "/", "\u001b"]);
   });
 
+  it("selects the current Composer command-palette entry before readback", async () => {
+    const terminal = new ScriptedTerminal([
+      "→ Plan, search, build anything",
+      "\n/run-everything Toggle Run Everything (currently disabled)",
+      "\nRun Everything: ON\n→ Plan, search, build anything",
+      "\n/run-everything Toggle Run Everything (currently enabled)",
+    ]);
+
+    await expect(enableCursorRunEverything(terminal, {
+      timeoutMs: 50,
+      pollIntervalMs: 1,
+    })).resolves.toBeUndefined();
+    expect(terminal.writes).toEqual(["/run-everything\r", "\r", "/", "\u001b"]);
+  });
+
+  it("leaves an already-enabled current Composer mode on", async () => {
+    const terminal = new ScriptedTerminal([
+      "→ Plan, search, build anything",
+      "\n/run-everything Toggle Run Everything (currently enabled)",
+      "\n→ Plan, search, build anything",
+      "\n/run-everything Toggle Run Everything (currently enabled)",
+    ]);
+
+    await expect(enableCursorRunEverything(terminal, {
+      timeoutMs: 50,
+      pollIntervalMs: 1,
+    })).resolves.toBeUndefined();
+    expect(terminal.writes).toEqual(["/run-everything\r", "\u001b", "/", "\u001b"]);
+  });
+
   it("fails clearly when readback remains disabled and still closes menu", async () => {
     const terminal = new ScriptedTerminal([
       "→ \n",
