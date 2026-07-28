@@ -56,13 +56,15 @@ function fleet(...records: Array<{
 function coordination(
   sessionId: string,
   leaseHealth: FleetWorkerCoordinationView["leaseHealth"],
+  overrides: { creatorControllerId?: string; adoptable?: boolean } = {},
 ): FleetWorkerCoordinationView {
+  const creatorControllerId = overrides.creatorControllerId ?? `creator-${leaseHealth}`;
   const controlled = leaseHealth === "active" || leaseHealth === "contested";
   return {
     sessionId,
     subjectId: sessionId,
     origin: {
-      creatorControllerId: `creator-${leaseHealth}`,
+      creatorControllerId,
       taskId: `task-${leaseHealth}`,
       threadId: sessionId,
       createdAt: NOW,
@@ -78,7 +80,8 @@ function coordination(
       : {}),
     leaseHealth,
     orphaned: leaseHealth === "orphaned",
-    adoptable: leaseHealth === "orphaned" || leaseHealth === "expired",
+    adoptable: overrides.adoptable
+      ?? (leaseHealth === "orphaned" || leaseHealth === "expired"),
   };
 }
 
@@ -138,9 +141,10 @@ describe("fleet presentation", () => {
       .toBe(onlyWorker.id);
   });
 
-  it("renders origin, current controller, every lease health, and adoptable state per worker", () => {
-    const states = ["active", "expired", "released", "orphaned", "contested"] as const;
-    const entries = states.map((leaseHealth, index) => {
+  const LEASE_STATES = ["active", "expired", "released", "orphaned", "contested"] as const;
+
+  function leaseFleet(): FleetSnapshot {
+    return fleet(...LEASE_STATES.map((leaseHealth, index) => {
       const id = `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
       return {
         record: session({
@@ -152,8 +156,11 @@ describe("fleet presentation", () => {
         }),
         coordination: coordination(id, leaseHealth),
       };
-    });
-    const snapshot = fleet(...entries);
+    }));
+  }
+
+  it("reduces each worker's lease custody to one badge on its own row", () => {
+    const snapshot = leaseFleet();
     const rendered = renderFleet(snapshot, createFleetState(snapshot), {
       color: false,
       width: 220,
@@ -162,24 +169,140 @@ describe("fleet presentation", () => {
       home: "/Users/brandon",
     });
     const lines = rendered.split("\n");
+    const badges: Record<(typeof LEASE_STATES)[number], string | undefined> = {
+      active: undefined,
+      expired: "adoptable",
+      released: "unowned",
+      orphaned: "adoptable",
+      contested: "conflict",
+    };
 
-    for (const leaseHealth of states) {
-      const workerIndex = lines.findIndex((line) => line.includes(`Lease ${leaseHealth}`));
-      const ownershipLine = lines[workerIndex + 1]!;
-      expect(ownershipLine).toContain(`origin creator-${leaseHealth}`);
-      expect(ownershipLine).toContain(`lease ${leaseHealth}`);
-      expect(ownershipLine).toContain(
-        `orphaned ${leaseHealth === "orphaned" ? "yes" : "no"}`,
-      );
-      expect(ownershipLine).toContain(
-        `adoptable ${leaseHealth === "orphaned" || leaseHealth === "expired" ? "yes" : "no"}`,
-      );
-      if (leaseHealth === "active" || leaseHealth === "contested") {
-        expect(ownershipLine).toContain(`controller controller-${leaseHealth}`);
-      } else {
-        expect(ownershipLine).toContain("controller none");
+    // The five-field breakdown no longer doubles the list height.
+    expect(rendered).not.toContain("origin creator-");
+    for (const leaseHealth of LEASE_STATES) {
+      const row = lines.find((line) => line.includes(`Lease ${leaseHealth}`))!;
+      const badge = badges[leaseHealth];
+      for (const candidate of ["adoptable", "unowned", "conflict", "anomaly", "legacy"]) {
+        expect(row.includes(candidate)).toBe(candidate === badge);
       }
     }
+  });
+
+  it("paints the badge by severity: dim for expected orphans, alert for conflicts", () => {
+    const snapshot = leaseFleet();
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: true,
+      width: 220,
+      height: 50,
+      now: NOW_MS,
+      home: "/Users/brandon",
+    });
+    const lines = rendered.split("\n");
+    const row = (leaseHealth: string) =>
+      lines.find((line) => line.includes(`Lease ${leaseHealth}`))!;
+
+    // subtle is bare dim; attention and alert carry the fleet's warning and error hues.
+    expect(row("released")).toContain("[2munowned");
+    expect(row("orphaned")).toContain("[38;2;212;168;91madoptable");
+    expect(row("contested")).toContain("[38;2;217;108;117mconflict");
+  });
+
+  it("keeps the five-field custody breakdown behind ctrl+l", () => {
+    const id = "22222222-2222-4222-8222-222222222222";
+    const snapshot = fleet({
+      record: session({ id, kind: "worker", role: "worker", name: "Lease orphaned" }),
+      coordination: coordination(id, "orphaned"),
+    });
+    const options = {
+      color: false,
+      width: 220,
+      height: 50,
+      now: NOW_MS,
+      home: "/Users/brandon",
+    } as const;
+    const initial = createFleetState(snapshot);
+    expect(renderFleet(snapshot, initial, options)).not.toContain("origin creator-orphaned");
+
+    const opened = transitionFleet(initial, snapshot, "ctrl+l", NOW_MS).state;
+    expect(opened.leaseDetail).toBe(true);
+    const detailed = renderFleet(snapshot, opened, options);
+    const detailLine = detailed.split("\n")
+      .find((line) => line.includes("origin creator-orphaned"))!;
+    expect(detailLine).toContain("controller none");
+    expect(detailLine).toContain("lease orphaned");
+    expect(detailLine).toContain("orphaned yes");
+    expect(detailLine).toContain("adoptable yes");
+
+    const closed = transitionFleet(opened, snapshot, "ctrl+l", NOW_MS).state;
+    expect(closed.leaseDetail).toBe(false);
+    expect(renderFleet(snapshot, closed, options)).not.toContain("origin creator-orphaned");
+  });
+
+  it("documents the lease-detail toggle in the shortcut help", () => {
+    const snapshot = threadFleet(1);
+    const helped = transitionFleet(createFleetState(snapshot), snapshot, "?", NOW_MS).state;
+    expect(renderFleet(snapshot, helped, {
+      color: false, width: 220, height: 50, now: NOW_MS, home: "/Users/brandon",
+    })).toContain("ctrl+l lease detail");
+  });
+
+  it("summarises a uniformly orphaned group on its heading instead of on every row", () => {
+    const entries = [1, 2, 3].map((index) => {
+      const id = `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+      return {
+        record: session({
+          id,
+          kind: "worker" as const,
+          role: "worker",
+          name: `Legacy worker ${index}`,
+          displayOrder: index,
+        }),
+        coordination: coordination(id, "orphaned", {
+          creatorControllerId: "legacy-unresolved",
+          adoptable: false,
+        }),
+      };
+    });
+    const snapshot = fleet(...entries);
+    const lines = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width: 220, height: 50, now: NOW_MS, home: "/Users/brandon",
+    }).split("\n");
+
+    expect(lines.some((line) =>
+      line.includes("Workers (3 · all orphaned, legacy — not adoptable)"))).toBe(true);
+    for (const index of [1, 2, 3]) {
+      expect(lines.find((line) => line.includes(`Legacy worker ${index}`))!)
+        .not.toContain("legacy");
+    }
+  });
+
+  it("keeps per-row badges when a group's workers disagree", () => {
+    const first = "00000000-0000-4000-8000-000000000001";
+    const second = "00000000-0000-4000-8000-000000000002";
+    const snapshot = fleet(
+      {
+        record: session({
+          id: first, kind: "worker", role: "worker", name: "Legacy worker", displayOrder: 0,
+        }),
+        coordination: coordination(first, "orphaned", {
+          creatorControllerId: "legacy-unresolved",
+          adoptable: false,
+        }),
+      },
+      {
+        record: session({
+          id: second, kind: "worker", role: "worker", name: "Claimable worker", displayOrder: 1,
+        }),
+        coordination: coordination(second, "orphaned"),
+      },
+    );
+    const lines = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width: 220, height: 50, now: NOW_MS, home: "/Users/brandon",
+    }).split("\n");
+
+    expect(lines.some((line) => line.includes("Workers ("))).toBe(false);
+    expect(lines.find((line) => line.includes("Legacy worker"))!).toContain("legacy");
+    expect(lines.find((line) => line.includes("Claimable worker"))!).toContain("adoptable");
   });
 
   it("skips section headings and lease detail rows during keyboard navigation", () => {
@@ -216,7 +339,9 @@ describe("fleet presentation", () => {
       },
     );
 
-    const initial = createFleetState(snapshot);
+    // Detail rows only exist while the toggle is on, which is exactly when they could
+    // swallow a keypress, so navigation is checked in that state.
+    const initial = { ...createFleetState(snapshot), leaseDetail: true };
     expect(initial.selectedSessionId).toBe(orc.id);
     const first = transitionFleet(initial, snapshot, "down", NOW_MS).state;
     expect(first.selectedSessionId).toBe(firstId);
