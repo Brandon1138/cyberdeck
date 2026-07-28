@@ -54,6 +54,19 @@ import {
   WorkflowRunActorParamsSchema,
   type WorkflowService,
 } from "../orchestration/workflow-service.js";
+import {
+  AgentLeaseParamsSchema,
+  AgentWorkerControlParamsSchema,
+  AgentWorkerEventsParamsSchema,
+  type WorkerControlService,
+} from "../orchestration/worker-control-service.js";
+import type { WorkerCoordinationService } from "./worker-coordination.js";
+import {
+  WorkerCheckpointRequestParamsSchema,
+  WorkerEventSubmitParamsSchema,
+  type WorkerEventChannel,
+} from "./worker-event-channel.js";
+import { fleetWorkerCoordinationView } from "./worker-coordination-view.js";
 
 const SessionIdParamsSchema = z.object({ sessionId: z.uuid() });
 const SendParamsSchema = SessionIdParamsSchema.extend({ data: z.string() });
@@ -101,6 +114,10 @@ export interface BrokerServerOptions {
   fleetDetaches?: FleetDetachStore;
   fleetPreferences?: FleetPreferenceStore;
   workerPreferences?: WorkerPreferenceStore;
+  /** Internal domain substrate. Orchestrator access goes through workerControl, never directly. */
+  workerCoordination?: WorkerCoordinationService;
+  workerControl?: WorkerControlService;
+  workerEvents?: WorkerEventChannel;
   onShutdown?: () => void;
 }
 
@@ -305,6 +322,12 @@ export class BrokerServer {
         return this.requireAgentControl().waitForWorkers(AgentWaitWorkersParamsSchema.parse(frame.params));
       case "agent.thread.enqueue":
         return this.requireInstructions().enqueue(EnqueueInstructionParamsSchema.parse(frame.params));
+      case "agent.lease.control":
+        return this.requireWorkerControl().lease(AgentLeaseParamsSchema.parse(frame.params));
+      case "agent.worker.control":
+        return this.requireWorkerControl().control(AgentWorkerControlParamsSchema.parse(frame.params));
+      case "agent.worker.events":
+        return this.requireWorkerControl().events(AgentWorkerEventsParamsSchema.parse(frame.params));
       case "agent.instruction.list": {
         const params = z.object({ targetSessionId: z.uuid().optional() }).parse(frame.params);
         return this.requireInstructions().list(params.targetSessionId);
@@ -313,6 +336,12 @@ export class BrokerServer {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
         return this.requireInstructions().flush(sessionId);
       }
+      case "worker.event.submit":
+        return this.requireWorkerEvents().submit(WorkerEventSubmitParamsSchema.parse(frame.params));
+      case "worker.checkpoint.request":
+        return this.requireWorkerEvents().requestCheckpoint(
+          WorkerCheckpointRequestParamsSchema.parse(frame.params),
+        );
       case "agent.workflow.create":
         return this.requireWorkflows().create(CreateWorkflowParamsSchema.parse(frame.params));
       case "agent.workflow.list": {
@@ -387,6 +416,8 @@ export class BrokerServer {
       }
       case "fleet.preferences":
         return this.requireFleetPreferences().list();
+      case "fleet.workerCoordination":
+        return fleetWorkerCoordinationView(this.options.workerCoordination?.listSubjects() ?? []);
       case "fleet.reattach": {
         const { detachIdentity } = FleetReattachParamsSchema.parse(frame.params);
         const detachStore = this.requireFleetDetaches();
@@ -560,11 +591,27 @@ export class BrokerServer {
     return this.options.instructions;
   }
 
+  private requireWorkerControl(): WorkerControlService {
+    if (this.options.workerControl === undefined) {
+      throw Object.assign(new Error("Worker control service is not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.options.workerControl;
+  }
+
   private requireWorkflows(): WorkflowService {
     if (this.options.workflows === undefined) {
       throw Object.assign(new Error("Workflow service is not available"), { code: "METHOD_NOT_FOUND" });
     }
     return this.options.workflows;
+  }
+
+  private requireWorkerEvents(): WorkerEventChannel {
+    if (this.options.workerEvents === undefined) {
+      throw Object.assign(new Error("Worker event channel is not available"), {
+        code: "METHOD_NOT_FOUND",
+      });
+    }
+    return this.options.workerEvents;
   }
 
   private requireFleetPreferences(): FleetPreferenceStore {

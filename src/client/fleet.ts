@@ -6,6 +6,7 @@ import type {
   FableWorkersRequest,
   FableWorkersResult,
 } from "../domain/orchestrator.js";
+import type { FleetWorkerCoordinationView } from "../broker/worker-coordination-view.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
 import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
@@ -67,6 +68,7 @@ interface FleetSignals {
 export interface FleetThread {
   record: SessionRecord;
   replay: string;
+  coordination?: FleetWorkerCoordinationView;
 }
 
 export interface FleetSnapshot {
@@ -411,12 +413,24 @@ const ROW_GUTTER = "  ";
 
 export async function collectFleetSnapshot(client: FleetTransport): Promise<FleetSnapshot> {
   const sessions = await client.request<SessionRecord[]>("session.list", {});
+  const coordination = await client.request<FleetWorkerCoordinationView[]>(
+    "fleet.workerCoordination",
+    {},
+  ).catch(() => []);
+  const coordinationBySession = new Map(
+    coordination.map((entry) => [entry.sessionId, entry] as const),
+  );
   const threads = await Promise.all(sessions.map(async (record): Promise<FleetThread | null> => {
     try {
       const snapshot = await client.request<{ data: string }>("session.snapshot", {
         sessionId: record.id,
       });
-      return { record, replay: Buffer.from(snapshot.data, "base64").toString("utf8") };
+      const workerCoordination = coordinationBySession.get(record.id);
+      return {
+        record,
+        replay: Buffer.from(snapshot.data, "base64").toString("utf8"),
+        ...(workerCoordination === undefined ? {} : { coordination: workerCoordination }),
+      };
     } catch (error) {
       if (error instanceof RpcError && error.code === "SESSION_NOT_FOUND") return null;
       throw error;
@@ -1505,6 +1519,9 @@ function renderFleetList(
         if (row.kind === "section") {
           return `${rowGutter(false, options.color, indicator)}${paint(row.label, "dim", options.color)}`;
         }
+        if (row.kind === "ownership") {
+          return renderWorkerCoordinationRow(row.coordination, options, indicator);
+        }
         return indicator === undefined
           ? ""
           : rowGutter(false, options.color, indicator).trimEnd();
@@ -1930,6 +1947,26 @@ function renderThreadRow(
     paint(pad(preview, previewWidth), "muted", options.color),
     padStart(age, 5),
   ].join(" ");
+}
+
+function renderWorkerCoordinationRow(
+  coordination: FleetWorkerCoordinationView,
+  options: ResolvedFleetRenderOptions,
+  scrollbar?: "track" | "thumb" | undefined,
+): string {
+  const controller = coordination.currentController?.controllerId ?? "none";
+  const label = fit(
+    `  origin ${coordination.origin.creatorControllerId} · controller ${controller} · lease ${coordination.leaseHealth} · orphaned ${coordination.orphaned ? "yes" : "no"} · adoptable ${coordination.adoptable ? "yes" : "no"}`,
+    Math.max(1, options.width - ROW_GUTTER.length),
+  );
+  const tone = coordination.leaseHealth === "active"
+    ? "working"
+    : coordination.leaseHealth === "contested"
+      ? "alert"
+      : coordination.leaseHealth === "released"
+        ? "muted"
+        : "attention";
+  return `${rowGutter(false, options.color, scrollbar)}${paint(label, tone, options.color)}`;
 }
 
 /** A thread with no known pull request holds the column open and shows nothing. */
@@ -2592,7 +2629,11 @@ type FleetRow =
  * neither is a focus target. Keeping them in the same list is what stops the scroll offset and the
  * rendered lines from disagreeing about how tall the list is.
  */
-type FleetListRow = FleetRow | { kind: "spacer" } | { kind: "section"; label: string };
+type FleetListRow =
+  | FleetRow
+  | { kind: "spacer" }
+  | { kind: "section"; label: string }
+  | { kind: "ownership"; coordination: FleetWorkerCoordinationView };
 
 function isCollapsed(state: FleetState, cwd: string): boolean {
   return state.collapsedCwds?.includes(cwd) === true;
@@ -2608,7 +2649,12 @@ function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow
       header,
       ...roleSections(threads).flatMap((section): FleetListRow[] => [
         { kind: "section", label: section.label },
-        ...section.threads.map((thread): FleetRow => ({ kind: "thread", cwd, thread })),
+        ...section.threads.flatMap((thread): FleetListRow[] => [
+          { kind: "thread", cwd, thread },
+          ...(thread.record.kind === "orchestrator" || thread.coordination === undefined
+            ? []
+            : [{ kind: "ownership" as const, coordination: thread.coordination }]),
+        ]),
       ]),
     ];
   });
@@ -2646,7 +2692,7 @@ function navigableListRowIndex(
 }
 
 function isFocusableListRow(row: FleetListRow | undefined): row is FleetRow {
-  return row !== undefined && row.kind !== "spacer" && row.kind !== "section";
+  return row?.kind === "folder" || row?.kind === "thread";
 }
 
 function focusRow(state: FleetState, row: FleetListRow | undefined): FleetState {

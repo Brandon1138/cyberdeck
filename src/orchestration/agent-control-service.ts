@@ -40,6 +40,11 @@ import {
   type WorkerLeasePolicy,
 } from "../domain/worker-profile.js";
 import { scoutDispatchPrompt } from "./worker-profiles.js";
+import {
+  projectWaitInterventions,
+  type WaitInterventionSummary,
+  type WorkerInterventionProjection,
+} from "./worker-intervention-wait.js";
 
 export const AgentActorParamsSchema = z.object({ actorSessionId: z.uuid() });
 export const AgentReadParamsSchema = AgentActorParamsSchema.extend({
@@ -84,6 +89,7 @@ export const AgentWaitWorkersParamsSchema = AgentActorParamsSchema.extend({
   })).min(1).max(MAX_FANOUT_BATCH),
   timeoutSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(DEFAULT_WAIT_SECONDS),
   maxResultChars: z.number().int().min(200).max(4_000).default(1_200),
+  settleOnIntervention: z.boolean().optional(),
   /** Ticket from a previous segment of the same logical wait; omit to start a new one. */
   waitId: z.uuid().optional(),
 });
@@ -170,7 +176,9 @@ export type WaitState =
   /** The caller's whole `timeoutSeconds` budget elapsed. A normal timeout, not a failure. */
   | "timed-out"
   /** This transport segment ended first; the logical wait is still open and resumable. */
-  | "incomplete";
+  | "incomplete"
+  /** An awaited worker emitted an unresolved exception or decision request. */
+  | "intervention-required";
 
 export interface WaitEnvelope {
   waitId: string;
@@ -193,6 +201,7 @@ interface PendingWait {
   startedAtMs: number;
   deadlineMs: number;
   timeoutSeconds: number;
+  settleOnIntervention: boolean;
 }
 
 /** How long a finished ticket stays resolvable so a late resume gets a truthful answer. */
@@ -261,6 +270,10 @@ export interface AgentControlOptions {
   /** Minimum elapsed time between graceful request and force escalation. */
   forceStopGraceMs?: number;
   providerPermissions?: ProviderPermissionPreferencePort;
+  /** Wave 1 lease/event substrate used for opt-in intervention-aware waits. */
+  workerCoordination?: WorkerInterventionProjection;
+  /** Poll cadence for intervention events while a registry wait remains open. */
+  interventionPollMs?: number;
 }
 
 export class AgentControlService {
@@ -271,6 +284,8 @@ export class AgentControlService {
   private readonly audit: AgentControlOptions["audit"];
   private readonly forceStopGraceMs: number;
   private readonly providerPermissions: ProviderPermissionPreferencePort | undefined;
+  private readonly workerCoordination: WorkerInterventionProjection | undefined;
+  private readonly interventionPollMs: number;
 
   constructor(
     private readonly registry: SessionRegistry,
@@ -284,6 +299,8 @@ export class AgentControlService {
     this.audit = options.audit;
     this.forceStopGraceMs = Math.max(1_000, options.forceStopGraceMs ?? 5_000);
     this.providerPermissions = options.providerPermissions;
+    this.workerCoordination = options.workerCoordination;
+    this.interventionPollMs = Math.max(10, options.interventionPollMs ?? 100);
   }
 
   async listThreads(input: string | z.input<typeof AgentListThreadsParamsSchema>): Promise<ThreadListPage> {
@@ -696,6 +713,7 @@ export class AgentControlService {
     timedOut: boolean;
     results: Awaited<ReturnType<SessionRegistry["waitForWorkerResults"]>>["results"];
     wait: WaitEnvelope;
+    intervention?: WaitInterventionSummary;
   }> {
     const request = AgentWaitWorkersParamsSchema.parse(input);
     const binding = await this.requireBinding(request.actorSessionId);
@@ -707,16 +725,63 @@ export class AgentControlService {
     const pending = this.openWait(request);
     const startMs = this.now();
     const remainingMs = Math.max(0, pending.wait.deadlineMs - startMs);
-    const segmentMs = Math.min(remainingMs, this.segmentSeconds * 1_000);
-    const outcome = await this.registry.waitForWorkerResults(
-      request.targets,
-      segmentMs,
-      request.maxResultChars,
-    );
+    let segmentMs = Math.min(remainingMs, this.segmentSeconds * 1_000);
+    let outcome: Awaited<ReturnType<SessionRegistry["waitForWorkerResults"]>>;
+    let intervention: WaitInterventionSummary | undefined;
+    if (
+      pending.wait.settleOnIntervention
+      && this.workerCoordination !== undefined
+      && remainingMs > 0
+    ) {
+      const current = await this.registry.waitForWorkerResults(
+        request.targets,
+        0,
+        request.maxResultChars,
+      );
+      if (!current.timedOut) {
+        outcome = current;
+        segmentMs = 0;
+      } else {
+        intervention = projectWaitInterventions(
+          this.workerCoordination,
+          request.targets.map((target) => target.sessionId),
+        );
+        if (intervention !== undefined) {
+          outcome = current;
+          segmentMs = 0;
+        } else {
+          let servedMs = 0;
+          outcome = current;
+          while (servedMs < segmentMs && outcome.timedOut && intervention === undefined) {
+            const sliceMs = Math.min(this.interventionPollMs, segmentMs - servedMs);
+            outcome = await this.registry.waitForWorkerResults(
+              request.targets,
+              sliceMs,
+              request.maxResultChars,
+            );
+            servedMs += sliceMs;
+            if (!outcome.timedOut) break;
+            intervention = projectWaitInterventions(
+              this.workerCoordination,
+              request.targets.map((target) => target.sessionId),
+            );
+          }
+          segmentMs = servedMs;
+        }
+      }
+    } else {
+      outcome = await this.registry.waitForWorkerResults(
+        request.targets,
+        segmentMs,
+        request.maxResultChars,
+      );
+    }
 
     const endMs = this.now();
     const remainingAfterMs = Math.max(0, pending.wait.deadlineMs - endMs);
-    const state: WaitState = outcome.timedOut === false
+    const state: WaitState = intervention !== undefined
+      ? "intervention-required"
+      : outcome.timedOut === false
       ? "settled"
       : remainingAfterMs === 0
         ? "timed-out"
@@ -728,9 +793,10 @@ export class AgentControlService {
     }
     return {
       // A caller that reads only this flag must never mistake a segment boundary for completion,
-      // so anything short of "every target settled" reports as a timeout.
-      timedOut: state !== "settled",
+      // while an explicit intervention settlement is neither completion nor timeout.
+      timedOut: state === "timed-out" || state === "incomplete",
       results: outcome.results,
+      ...(intervention === undefined ? {} : { intervention }),
       wait: {
         waitId: pending.wait.waitId,
         state,
@@ -779,6 +845,7 @@ export class AgentControlService {
       startedAtMs: now,
       deadlineMs: now + request.timeoutSeconds * 1_000,
       timeoutSeconds: request.timeoutSeconds,
+      settleOnIntervention: request.settleOnIntervention === true,
     };
     return { wait, resumed: false };
   }

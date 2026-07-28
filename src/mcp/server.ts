@@ -43,6 +43,23 @@ export interface McpServerContext {
   brokerUnavailable?: string;
 }
 
+function workerEventProperties(): Record<string, unknown> {
+  return {
+    eventId: { type: "string", minLength: 1, maxLength: 256 },
+    summary: { type: "string", minLength: 1 },
+    severity: { type: "string", enum: ["info", "warning", "error", "critical"] },
+    interventionRequired: { type: "boolean" },
+    structuredFacts: { type: "object", additionalProperties: true },
+    evidenceRefs: { type: "array", items: { type: "string" } },
+    changedAssumptions: { type: "array", items: { type: "string" } },
+    recommendedAction: { type: "string" },
+    continuation: {
+      type: "string",
+      enum: ["continuing", "blocked", "paused", "awaiting-response"],
+    },
+  };
+}
+
 /** Raised for a failure the server itself diagnosed, before or instead of a broker round trip. */
 export class McpToolError extends Error {
   constructor(readonly code: string, message: string) {
@@ -64,6 +81,10 @@ const REMEDIES: Record<string, string> = {
     "The bound grant does not cover this call. Call cyberdeck_diagnose to see the scope and capabilities actually held.",
   STALE_THREAD_CURSOR:
     "Continue from the cursor the previous read returned instead of rereading from zero.",
+  NO_STABLE_CONTROLLER_IDENTITY:
+    "Worker leases are held by a durable orchestrator identity, never by a conversation. This session's binding is a peer binding, so it cannot hold or inherit a lease. Act through the orchestrator bound to this workspace or fleet.",
+  TRANSFER_TARGET_UNBOUND:
+    "The transfer target holds no stable orchestrator binding, so it cannot receive the lease. Bind it through Cyberdeck first, then retry the transfer.",
 };
 
 export function resolveLaunchConversationId(
@@ -85,6 +106,63 @@ const TOOLS = [
     name: "cyberdeck_diagnose",
     description: "Report this Cyberdeck MCP server's live identity, broker reachability, and capability binding. Call this first whenever a cyberdeck_* tool appears missing or returns nothing: it distinguishes an unreachable broker, an unbound or orphaned actor session, and a stale conversation. It never fails and needs no grant.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "cyberdeck_signal_exception",
+    description: "Submit an idempotent EXCEPTION event. Returns compact ack only; worker continues unless continuation says otherwise.",
+    inputSchema: {
+      type: "object",
+      properties: workerEventProperties(),
+      required: ["summary"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_report_progress",
+    description: "Submit coalescible worker progress. Reuse eventId only for exact retries.",
+    inputSchema: {
+      type: "object",
+      properties: workerEventProperties(),
+      required: ["summary"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_signal_risk",
+    description: "Submit a bounded RISK event and receive compact ack only.",
+    inputSchema: {
+      type: "object",
+      properties: workerEventProperties(),
+      required: ["summary"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_request_decision",
+    description: "Submit blocking DECISION_REQUEST with structured awaiting-response state.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...workerEventProperties(),
+        interventionRequired: { type: "boolean", const: true, default: true },
+        continuation: { type: "string", const: "awaiting-response", default: "awaiting-response" },
+      },
+      required: ["summary"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_respond_checkpoint",
+    description: "Answer one delivered checkpoint through worker event channel using its correlationId.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...workerEventProperties(),
+        correlationId: { type: "string", minLength: 1, maxLength: 256 },
+      },
+      required: ["summary", "correlationId"],
+      additionalProperties: false,
+    },
   },
   {
     name: "cyberdeck_provider_capabilities",
@@ -256,7 +334,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_workers_wait",
-    description: `Idle inside Cyberdeck until all named workers complete, need input, fail, or the timeout expires; returns deterministic head-preserving semantic results and never raw PTY transcripts. One call blocks at most ${MAX_WAIT_SEGMENT_SECONDS}s so it always returns before an MCP client abandons it; a longer timeoutSeconds is honored across segments. Read wait.state: "settled" (every target terminal), "timed-out" (your whole timeoutSeconds elapsed), or "incomplete" (segment boundary — call again with wait.resume.waitId and the same targets). Completed results are idempotent: re-waiting the same sessionId and completionTarget replays the recorded result with retrieval "replay", which proves the work already ran and no duplicate worker is needed.`,
+    description: `Idle inside Cyberdeck until all named workers complete, need input, fail, or the timeout expires; returns deterministic head-preserving semantic results and never raw PTY transcripts. Set settleOnIntervention to return early with wait.state "intervention-required" and bounded summaries when an awaited worker emits EXCEPTION or DECISION_REQUEST. One call blocks at most ${MAX_WAIT_SEGMENT_SECONDS}s so it always returns before an MCP client abandons it; a longer timeoutSeconds is honored across segments. Read wait.state: "settled" (every target terminal), "intervention-required" (opt-in bounded event settlement), "timed-out" (your whole timeoutSeconds elapsed), or "incomplete" (segment boundary — call again with wait.resume.waitId and the same targets). Completed results are idempotent: re-waiting the same sessionId and completionTarget replays the recorded result with retrieval "replay", which proves the work already ran and no duplicate worker is needed.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -282,6 +360,7 @@ const TOOLS = [
           default: DEFAULT_WAIT_SECONDS,
         },
         maxResultChars: { type: "integer", minimum: 200, maximum: 4000, default: 1200 },
+        settleOnIntervention: { type: "boolean", default: false },
       },
       required: ["targets"],
       additionalProperties: false,
@@ -298,6 +377,69 @@ const TOOLS = [
         messageId: { type: "string" },
       },
       required: ["targetSessionId", "message"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_lease",
+    description: "Control worker leases. Outcome codes per worker: ACQUIRED, ALREADY_CONTROLLED, LEASE_CONFLICT (carries currentController and leaseExpiresAt), ORPHANED, NOT_ELIGIBLE, WORKER_TERMINAL, OWNERSHIP_LOST, RELEASED, TRANSFERRED. Retries with the same mutationId are idempotent. Recovery: {action:adopt, scope:all-eligible, preview:true} lists what is adoptable and what is blocked and changes nothing; preview:false adopts the eligible set all-or-nothing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["acquire", "renew", "release", "transfer", "adopt"] },
+        scope: { type: "string", enum: ["worker", "wave", "all-eligible"] },
+        workerId: { type: "string", description: "Required for scope worker." },
+        waveId: { type: "string", description: "Required for scope wave." },
+        newControllerSessionId: { type: "string", description: "Required for transfer." },
+        reason: { type: "string", minLength: 1, maxLength: 500, description: "Audited verbatim." },
+        mutationId: { type: "string", description: "Reuse to retry a call idempotently." },
+        preview: { type: "boolean", default: false, description: "Plan only; acquire and adopt." },
+      },
+      required: ["action", "scope", "reason"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_worker_ctl",
+    description: "Act on a worker you hold the lease for. stop: graceful then force (force requires a prior graceful stop plus a grace period), sets a terminal state, never kills a PID. redirect: queue one complete new instruction. request_checkpoint: ask for a correlated answer at the worker's next turn boundary without cancelling its task; decisionGate:true also makes it pause before the next irreversible step. Authority failures return codes NOT_CONTROLLER, OWNERSHIP_LOST, LEASE_EXPIRED, WORKER_TERMINAL, SUBJECT_NOT_FOUND, DENIED.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["stop", "redirect", "request_checkpoint"] },
+        workerId: { type: "string" },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+        mode: { type: "string", enum: ["graceful", "force"], default: "graceful" },
+        instruction: { type: "string", description: "Required for redirect." },
+        messageId: { type: "string" },
+        correlationId: { type: "string", description: "Required for request_checkpoint." },
+        focus: { type: "string" },
+        question: { type: "string" },
+        decisionGate: { type: "boolean", default: false },
+      },
+      required: ["action", "workerId", "reason"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_worker_events",
+    description: "Read bounded worker events after a cursor, plus current per-worker state. Kinds: EXCEPTION, PROGRESS, CHECKPOINT, RISK, DECISION_REQUEST. view active (default) shows live events, unresolved shows only events still needing intervention. Continue from nextCursor; never re-read from zero. Returns state and deltas, not transcripts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cursor: { type: "integer", minimum: 0, default: 0 },
+        limit: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+        workerId: { type: "string" },
+        waveId: { type: "string" },
+        kinds: {
+          type: "array",
+          items: { type: "string", enum: ["EXCEPTION", "PROGRESS", "CHECKPOINT", "RISK", "DECISION_REQUEST"] },
+        },
+        severities: {
+          type: "array",
+          items: { type: "string", enum: ["info", "warning", "error", "critical"] },
+        },
+        view: { type: "string", enum: ["active", "unresolved", "resolved", "all"], default: "active" },
+      },
       additionalProperties: false,
     },
   },
@@ -621,6 +763,58 @@ async function callTool(
     );
   }
   const actorSessionId = context.identity.actorSessionId;
+  if (name === "cyberdeck_signal_exception") {
+    return transport.request("worker.event.submit", {
+      workerId: actorSessionId,
+      kind: "EXCEPTION",
+      severity: "error",
+      interventionRequired: false,
+      continuation: "continuing",
+      ...args,
+    });
+  }
+  if (name === "cyberdeck_report_progress") {
+    return transport.request("worker.event.submit", {
+      workerId: actorSessionId,
+      kind: "PROGRESS",
+      severity: "info",
+      interventionRequired: false,
+      continuation: "continuing",
+      ...args,
+    });
+  }
+  if (name === "cyberdeck_signal_risk") {
+    return transport.request("worker.event.submit", {
+      workerId: actorSessionId,
+      kind: "RISK",
+      severity: "warning",
+      interventionRequired: false,
+      continuation: "continuing",
+      ...args,
+    });
+  }
+  if (name === "cyberdeck_request_decision") {
+    return transport.request("worker.event.submit", {
+      workerId: actorSessionId,
+      kind: "DECISION_REQUEST",
+      severity: "warning",
+      ...args,
+      interventionRequired: true,
+      continuation: "awaiting-response",
+    });
+  }
+  if (name === "cyberdeck_respond_checkpoint") {
+    const { correlationId, ...event } = args;
+    return transport.request("worker.event.submit", {
+      workerId: actorSessionId,
+      kind: "CHECKPOINT",
+      severity: "info",
+      interventionRequired: false,
+      continuation: "continuing",
+      ...event,
+      checkpointCorrelationId: correlationId,
+    });
+  }
   if (name === "cyberdeck_provider_capabilities") {
     const provider = typeof args.provider === "string" ? args.provider : undefined;
     return provider === undefined
@@ -657,6 +851,15 @@ async function callTool(
   }
   if (name === "cyberdeck_thread_message") {
     return transport.request("agent.thread.enqueue", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_lease") {
+    return transport.request("agent.lease.control", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_worker_ctl") {
+    return transport.request("agent.worker.control", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_worker_events") {
+    return transport.request("agent.worker.events", { actorSessionId, ...args });
   }
   if (name === "cyberdeck_workflow_create") {
     return transport.request("agent.workflow.create", { actorSessionId, ...args });

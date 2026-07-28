@@ -30,6 +30,7 @@ import { ensurePrivateDirectory } from "../persistence/private-files.js";
 import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import { AgentControlService } from "../orchestration/agent-control-service.js";
 import { InstructionQueue } from "../orchestration/instruction-queue.js";
+import { WorkerControlService } from "../orchestration/worker-control-service.js";
 import { InstructionStore } from "../persistence/instruction-store.js";
 import { WorkflowStore } from "../persistence/workflow-store.js";
 import { WorkflowService } from "../orchestration/workflow-service.js";
@@ -37,6 +38,9 @@ import { loadBrokerRuntimeConfig } from "../runtime-config.js";
 import { selectExpiredThreads, type ThreadRetentionPolicy } from "../domain/thread-retention.js";
 import type { SessionRecord } from "../domain/session.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
+import { WorkerCoordinationRuntime } from "./worker-coordination-runtime.js";
+import { WorkerEventChannel } from "./worker-event-channel.js";
+import { BrokerWorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -136,16 +140,38 @@ export async function runBroker(
   });
   await registry.ready();
   const orchestratorStore = new OrchestratorStore(stateDirectory);
+  const workerCoordination = new WorkerCoordinationRuntime({
+    stateDirectory,
+    recoveredSessions,
+    orchestrators: orchestratorStore,
+  });
+  await workerCoordination.start();
   const orchestrators = new OrchestratorManager(registry, orchestratorStore, workerPreferences);
   const agentControl = new AgentControlService(
     registry,
     orchestratorStore,
     transcripts,
     workerPreferences,
-    { audit: journal, providerPermissions },
+    { audit: journal, providerPermissions, workerCoordination: workerCoordination.service },
   );
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
   instructions.start();
+  const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
+  const workerControl = new WorkerControlService({
+    coordination: workerCoordination.service,
+    credentials: workerLeaseCredentials,
+    registry,
+    orchestrators: orchestratorStore,
+    instructions,
+  });
+  const workerEvents = new WorkerEventChannel(
+    workerCoordination.service,
+    registry,
+    orchestratorStore,
+    instructions,
+    undefined,
+    workerLeaseCredentials,
+  );
   const workflows = new WorkflowService(
     registry,
     orchestratorStore,
@@ -190,6 +216,9 @@ export async function runBroker(
     fleetDetaches,
     fleetPreferences,
     workerPreferences,
+    workerCoordination: workerCoordination.service,
+    workerControl,
+    workerEvents,
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();

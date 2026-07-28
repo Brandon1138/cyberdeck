@@ -171,7 +171,13 @@ describe("broker durable startup", () => {
   it("keeps a rehydrated finished thread Done across a second restart", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-thread-durability-"));
     const socketPath = join(directory, "broker.sock");
-    const finished = durableRecord({ name: "Finished the task", attentionState: "done" });
+    const current = new Date().toISOString();
+    const finished = durableRecord({
+      name: "Finished the task",
+      attentionState: "done",
+      updatedAt: current,
+      meaningfulUpdatedAt: current,
+    });
     await new SessionStore(directory).put(finished);
 
     const first = await runBroker(socketPath, directory);
