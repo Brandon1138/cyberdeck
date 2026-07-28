@@ -144,8 +144,15 @@ export interface FleetState {
    * the operator left when they move off the header.
    */
   focusedFolderCwd?: string | undefined;
+  /**
+   * Set while a folder's show-more row holds focus. Inert for thread keys exactly as a
+   * focused folder header is, and cleared the moment the row itself stops existing.
+   */
+  focusedShowMoreCwd?: string | undefined;
   /** Folders whose threads are hidden. Membership survives snapshot churn. */
   collapsedCwds?: readonly string[] | undefined;
+  /** Folders showing every worker rather than the first {@link FOLDER_THREAD_CAP}. */
+  expandedCwds?: readonly string[] | undefined;
   fallbackCwd: string;
   workingDirectory?: string | undefined;
   draft: string;
@@ -289,6 +296,12 @@ const DELETE_CONFIRMATION_MS = 5_000;
 const QUIT_CONFIRMATION_MS = 5_000;
 const QUIT_CONFIRMATION_NOTICE = "Press ctrl+c again to exit";
 const COMMAND_PALETTE_VISIBLE_ROWS = 3;
+const ORCS_SECTION_LABEL = "Orcs";
+const WORKERS_SECTION_LABEL = "Workers";
+/** Workers shown per folder before the rest go behind a show-more row. */
+const FOLDER_THREAD_CAP = 5;
+/** Widest the Orcs section's inline folder column is allowed to grow. */
+const ORC_FOLDER_COLUMN_MAX = 32;
 const DEFAULT_PERMISSION_POLICIES: Readonly<Record<ConfigurablePermissionProvider, ProviderPermissionPolicy>> = {
   codex: "permissioned",
   claude: "permissioned",
@@ -542,12 +555,13 @@ export function transitionFleet(
         quitConfirmation: undefined,
         ...(normalized.notice === QUIT_CONFIRMATION_NOTICE ? { notice: undefined } : {}),
       };
-  // A focused folder header owns the row, so every thread-scoped key is inert
-  // until focus moves back onto a thread.
+  // A focused folder header or show-more row owns the row, so every thread-scoped key is
+  // inert until focus moves back onto a thread.
   const focusedFolderCwd = state.focusedFolderCwd;
-  const selected = focusedFolderCwd === undefined
-    ? threads.find(({ record }) => record.id === state.selectedSessionId)
-    : undefined;
+  const focusedShowMoreCwd = state.focusedShowMoreCwd;
+  const selected = threadFocusInert(state)
+    ? undefined
+    : threads.find(({ record }) => record.id === state.selectedSessionId);
 
   if (key === "ctrl+s") {
     return {
@@ -708,6 +722,7 @@ export function transitionFleet(
             ...state,
             selectedSessionId: target.record.id,
             focusedFolderCwd: undefined,
+            focusedShowMoreCwd: undefined,
             deleteConfirmation: undefined,
             notice: undefined,
           },
@@ -762,6 +777,25 @@ export function transitionFleet(
     return {
       state: {
         ...setCollapsed(state, focusedFolderCwd, !isCollapsed(state, focusedFolderCwd)),
+        deleteConfirmation: undefined,
+        notice: undefined,
+      },
+    };
+  }
+  // The show-more row is the folder's cap in reverse: right opens it, left puts it back.
+  if (focusedShowMoreCwd !== undefined && (key === "left" || key === "right")) {
+    return {
+      state: {
+        ...setExpanded(state, focusedShowMoreCwd, key === "right"),
+        deleteConfirmation: undefined,
+        notice: undefined,
+      },
+    };
+  }
+  if (key === "enter" && focusedShowMoreCwd !== undefined && state.draft.trim() === "") {
+    return {
+      state: {
+        ...setExpanded(state, focusedShowMoreCwd, !isExpanded(state, focusedShowMoreCwd)),
         deleteConfirmation: undefined,
         notice: undefined,
       },
@@ -1499,6 +1533,17 @@ function renderFleetList(
       : widest,
     0,
   );
+  // Orc rows are the only ones whose folder is not already stated by a header above them,
+  // so the column exists only for them and only as wide as the longest path it holds.
+  const folderColumnWidth = Math.min(
+    ORC_FOLDER_COLUMN_MAX,
+    rows.reduce(
+      (widest, row) => row.kind === "thread" && row.showFolder === true
+        ? Math.max(widest, [...shortPath(row.thread.record.cwd, options.home)].length)
+        : widest,
+      0,
+    ),
+  );
   const viewportState = scrollFocusedRowIntoView(
     state,
     rows,
@@ -1548,7 +1593,11 @@ function renderFleetList(
             leaseBadgeWidth,
             row.leaseBadge,
             indicator,
+            row.showFolder === true ? folderColumnWidth : 0,
           );
+        }
+        if (row.kind === "show-more") {
+          return renderShowMoreRow(row.cwd, row.hiddenCount, viewportState, options, indicator);
         }
         if (row.kind === "section") {
           return `${rowGutter(false, options.color, indicator)}${paint(row.label, "dim", options.color)}`;
@@ -1943,6 +1992,27 @@ function renderFolderRow(
   return `${rowGutter(focused, options.color, scrollbar)}${focused ? paint(label, "bold", options.color) : label}`;
 }
 
+/**
+ * The folder's hidden remainder, or — once opened — the way back to the capped view. It is
+ * a navigable row like the folder header above it, and bolds the same way when focused.
+ */
+function renderShowMoreRow(
+  cwd: string,
+  hiddenCount: number,
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+  scrollbar?: "track" | "thumb" | undefined,
+): string {
+  const focused = state.focusedShowMoreCwd === cwd;
+  const label = fit(
+    hiddenCount === 0 ? "  − show less" : `  + ${hiddenCount} more`,
+    Math.max(1, options.width - ROW_GUTTER.length),
+  );
+  return `${rowGutter(focused, options.color, scrollbar)}${
+    focused ? paint(label, "bold", options.color) : paint(label, "dim", options.color)
+  }`;
+}
+
 function renderThreadRow(
   thread: FleetThread,
   state: FleetState,
@@ -1951,8 +2021,9 @@ function renderThreadRow(
   leaseBadgeWidth = 0,
   leaseBadge?: LeaseCustodyBadge | undefined,
   scrollbar?: "track" | "thumb" | undefined,
+  folderColumnWidth = 0,
 ): string {
-  const selected = state.focusedFolderCwd === undefined
+  const selected = !threadFocusInert(state)
     && thread.record.id === state.selectedSessionId;
   const baseTitle = thread.record.name ?? thread.record.role ?? `Untitled ${thread.record.id.slice(0, 8)}`;
   const title = `${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
@@ -1970,12 +2041,16 @@ function renderThreadRow(
   const fixedWidth = 12 + titleWidth + statusWidth
     + (showIdentity ? identityWidth + 1 : 0)
     + (pullRequestColumn ? 2 : 0)
-    + (leaseBadgeWidth === 0 ? 0 : leaseBadgeWidth + 1);
+    + (leaseBadgeWidth === 0 ? 0 : leaseBadgeWidth + 1)
+    + (folderColumnWidth === 0 ? 0 : folderColumnWidth + 1);
   const previewWidth = Math.max(1, options.width - fixedWidth);
   const preview = threadPreview(thread, previewWidth);
   return [
     `${rowGutter(selected, options.color, scrollbar)}${statusMarker(status, selected, options.color)}`,
     paint(pad(title, titleWidth), selected ? "bold" : "muted", options.color),
+    ...(folderColumnWidth === 0
+      ? []
+      : [paint(pad(shortPath(thread.record.cwd, options.home), folderColumnWidth), "subtle", options.color)]),
     ...(leaseBadgeWidth === 0
       ? []
       : [leaseBadgeCell(leaseBadge, leaseBadgeWidth, options.color)]),
@@ -2624,16 +2699,38 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
   const threads = orderedThreads(snapshot);
   const selectedExists = threads.some(({ record }) => record.id === state.selectedSessionId);
   const selectedSessionId = selectedExists ? state.selectedSessionId : threads[0]?.record.id;
-  const selectedCwd = threads.find(({ record }) => record.id === selectedSessionId)?.record.cwd;
+  // Only a worker's row can be hidden by its folder. Orcs sit in the global section
+  // and stay visible however their folder is folded, so they have no folder to rise to.
+  const selectedRecord = threads.find(({ record }) => record.id === selectedSessionId)?.record;
+  const selectedCwd = selectedRecord?.kind === "orchestrator" ? undefined : selectedRecord?.cwd;
+  const folders = groupThreads(snapshot.threads);
   const folderExists = state.focusedFolderCwd !== undefined
-    && threads.some(({ record }) => record.cwd === state.focusedFolderCwd);
+    && folders.some(({ cwd }) => cwd === state.focusedFolderCwd);
+  // A capped folder only offers a show-more row once it has more workers than it shows,
+  // and a collapsed folder offers none at all.
+  const showMoreExists = state.focusedShowMoreCwd !== undefined
+    && !isCollapsed(state, state.focusedShowMoreCwd)
+    && folders.some(({ cwd, threads: workers }) =>
+      cwd === state.focusedShowMoreCwd && workers.length > FOLDER_THREAD_CAP);
   // A collapsed folder hides its threads, so focus rises to the header rather
-  // than resting on a row nobody can see.
+  // than resting on a row nobody can see; the cap does the same onto its show-more row.
+  const selectedCollapsed = selectedCwd !== undefined && isCollapsed(state, selectedCwd);
+  const selectedCapped = !selectedCollapsed
+    && selectedCwd !== undefined
+    && selectedSessionId !== undefined
+    && cappedOut(folders, state, selectedCwd, selectedSessionId);
   const focusedFolderCwd = folderExists
     ? state.focusedFolderCwd
-    : selectedCwd !== undefined && isCollapsed(state, selectedCwd)
+    : !showMoreExists && selectedCollapsed
       ? selectedCwd
       : undefined;
+  const focusedShowMoreCwd = focusedFolderCwd !== undefined
+    ? undefined
+    : showMoreExists
+      ? state.focusedShowMoreCwd
+      : selectedCapped
+        ? selectedCwd
+        : undefined;
   const stopAcknowledgement = state.stopAcknowledgement?.sessionId === selectedSessionId
     ? state.stopAcknowledgement
     : undefined;
@@ -2651,6 +2748,7 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
     ...state,
     selectedSessionId,
     focusedFolderCwd,
+    focusedShowMoreCwd,
     stopAcknowledgement,
     deleteConfirmation,
     quitConfirmation,
@@ -2660,19 +2758,34 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
   };
 }
 
+/** True when the folder's cap would hide this worker, leaving its selection without a row. */
+function cappedOut(
+  folders: ReadonlyArray<{ cwd: string; threads: readonly FleetThread[] }>,
+  state: FleetState,
+  cwd: string,
+  sessionId: string,
+): boolean {
+  if (isExpanded(state, cwd)) return false;
+  const folder = folders.find((candidate) => candidate.cwd === cwd);
+  if (folder === undefined) return false;
+  return folder.threads.findIndex(({ record }) => record.id === sessionId) >= FOLDER_THREAD_CAP;
+}
+
 function isTerminalSession(record: SessionRecord): boolean {
   if (record.executionState === "active" || record.executionState === "starting") return false;
   return record.exitCode !== null;
 }
 
 function orderedThreads(snapshot: FleetSnapshot): FleetThread[] {
-  return groupThreads(snapshot.threads)
-    .flatMap(({ threads }) => threads);
+  return [
+    ...orchestratorThreads(snapshot.threads),
+    ...groupThreads(snapshot.threads).flatMap(({ threads }) => threads),
+  ];
 }
 
 /**
- * One navigable line of the fleet list. Folder headers are rows in their own
- * right: focus lands on them, and Enter there collapses the folder.
+ * One navigable line of the fleet list. Folder headers and show-more rows are rows in
+ * their own right: focus lands on them, and Enter there collapses or expands the folder.
  */
 type FleetRow =
   | { kind: "folder"; cwd: string; threadCount: number }
@@ -2680,8 +2793,16 @@ type FleetRow =
     kind: "thread";
     cwd: string;
     thread: FleetThread;
+    /** Set on the global Orcs section, whose rows name the folder they belong to. */
+    showFolder?: true;
     /** Absent when custody is healthy, unknown, or already stated by the group rollup. */
     leaseBadge?: LeaseCustodyBadge;
+  }
+  | {
+    kind: "show-more";
+    cwd: string;
+    /** Zero once the folder is expanded, when the row reads as the way back. */
+    hiddenCount: number;
   };
 
 /**
@@ -2699,41 +2820,82 @@ function isCollapsed(state: FleetState, cwd: string): boolean {
   return state.collapsedCwds?.includes(cwd) === true;
 }
 
+function isExpanded(state: FleetState, cwd: string): boolean {
+  return state.expandedCwds?.includes(cwd) === true;
+}
+
+/**
+ * The fleet reads top-down as one Orcs roster over the folders its workers live in.
+ * Orchestrators are fleet-wide, so they are listed once, flat, ahead of every folder;
+ * folders below hold workers only.
+ */
 function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow[] {
-  return groupThreads(snapshot.threads).flatMap(({ cwd, threads }, groupIndex): FleetListRow[] => {
+  const orcs = orchestratorThreads(snapshot.threads);
+  const orcRows: FleetListRow[] = orcs.length === 0
+    ? []
+    : sectionRows(ORCS_SECTION_LABEL, orcs, orcs, state, true);
+  const folderRows = groupThreads(snapshot.threads).flatMap(({ cwd, threads }, groupIndex): FleetListRow[] => {
     const header: FleetRow = { kind: "folder", cwd, threadCount: threads.length };
-    const spacer: FleetListRow[] = groupIndex === 0 ? [] : [{ kind: "spacer" }];
+    const spacer: FleetListRow[] = groupIndex === 0 && orcRows.length === 0
+      ? []
+      : [{ kind: "spacer" }];
     if (isCollapsed(state, cwd)) return [...spacer, header];
+    const visible = isExpanded(state, cwd) ? threads : threads.slice(0, FOLDER_THREAD_CAP);
     return [
       ...spacer,
       header,
-      ...roleSections(threads).flatMap((section): FleetListRow[] => {
-        // A section whose workers all share one custody says it once on the heading, and
-        // its rows go bare: a badge repeated down the whole group is a column of noise.
-        const custodies = section.threads.map((thread) =>
-          thread.record.kind === "orchestrator" || thread.coordination === undefined
-            ? undefined
-            : leaseCustody(thread.coordination));
-        const rollup = uniformLeaseCustody(custodies);
-        return [
-          { kind: "section", label: sectionLabel(section.label, section.threads.length, rollup) },
-          ...section.threads.flatMap((thread, index): FleetListRow[] => {
-            const custody = custodies[index];
-            const badge = rollup !== undefined || custody === undefined
-              ? undefined
-              : leaseCustodyBadge(custody);
-            return [
-              { kind: "thread", cwd, thread, ...(badge === undefined ? {} : { leaseBadge: badge }) },
-              ...(state.leaseDetail === true && thread.coordination !== undefined
-                && thread.record.kind !== "orchestrator"
-                ? [{ kind: "ownership" as const, coordination: thread.coordination }]
-                : []),
-            ];
-          }),
-        ];
-      }),
+      ...sectionRows(WORKERS_SECTION_LABEL, visible, threads, state, false),
+      // The row survives expansion so the folder can be rolled back up from the same place.
+      ...(threads.length > FOLDER_THREAD_CAP
+        ? [{ kind: "show-more" as const, cwd, hiddenCount: threads.length - visible.length }]
+        : []),
     ];
   });
+  return [...orcRows, ...folderRows];
+}
+
+/**
+ * A role heading and the thread rows under it. `all` carries the whole group even when the
+ * cap trims what is shown, so the heading keeps describing the folder rather than the slice.
+ */
+function sectionRows(
+  label: string,
+  visible: readonly FleetThread[],
+  all: readonly FleetThread[],
+  state: FleetState,
+  showFolder: boolean,
+): FleetListRow[] {
+  // A section whose workers all share one custody says it once on the heading, and
+  // its rows go bare: a badge repeated down the whole group is a column of noise.
+  const rollup = uniformLeaseCustody(all.map(threadLeaseCustody));
+  return [
+    { kind: "section", label: sectionLabel(label, all.length, rollup) },
+    ...visible.flatMap((thread): FleetListRow[] => {
+      const custody = threadLeaseCustody(thread);
+      const badge = rollup !== undefined || custody === undefined
+        ? undefined
+        : leaseCustodyBadge(custody);
+      return [
+        {
+          kind: "thread",
+          cwd: thread.record.cwd,
+          thread,
+          ...(showFolder ? { showFolder: true as const } : {}),
+          ...(badge === undefined ? {} : { leaseBadge: badge }),
+        },
+        ...(state.leaseDetail === true && thread.coordination !== undefined
+          && thread.record.kind !== "orchestrator"
+          ? [{ kind: "ownership" as const, coordination: thread.coordination }]
+          : []),
+      ];
+    }),
+  ];
+}
+
+function threadLeaseCustody(thread: FleetThread): LeaseCustody | undefined {
+  return thread.record.kind === "orchestrator" || thread.coordination === undefined
+    ? undefined
+    : leaseCustody(thread.coordination);
 }
 
 /**
@@ -2750,10 +2912,17 @@ function sectionLabel(
 }
 
 function focusedListRowIndex(rows: readonly FleetListRow[], state: FleetState): number {
-  const index = state.focusedFolderCwd === undefined
-    ? rows.findIndex((row) => row.kind === "thread" && row.thread.record.id === state.selectedSessionId)
-    : rows.findIndex((row) => row.kind === "folder" && row.cwd === state.focusedFolderCwd);
+  const index = state.focusedFolderCwd !== undefined
+    ? rows.findIndex((row) => row.kind === "folder" && row.cwd === state.focusedFolderCwd)
+    : state.focusedShowMoreCwd !== undefined
+      ? rows.findIndex((row) => row.kind === "show-more" && row.cwd === state.focusedShowMoreCwd)
+      : rows.findIndex((row) => row.kind === "thread" && row.thread.record.id === state.selectedSessionId);
   return Math.max(0, index);
+}
+
+/** True while a folder header or show-more row owns the row, leaving thread keys inert. */
+function threadFocusInert(state: FleetState): boolean {
+  return state.focusedFolderCwd !== undefined || state.focusedShowMoreCwd !== undefined;
 }
 
 function navigableListRowIndex(
@@ -2781,14 +2950,23 @@ function navigableListRowIndex(
 }
 
 function isFocusableListRow(row: FleetListRow | undefined): row is FleetRow {
-  return row?.kind === "folder" || row?.kind === "thread";
+  return row?.kind === "folder" || row?.kind === "thread" || row?.kind === "show-more";
 }
 
 function focusRow(state: FleetState, row: FleetListRow | undefined): FleetState {
   if (!isFocusableListRow(row)) return state;
-  return row.kind === "folder"
-    ? { ...state, focusedFolderCwd: row.cwd }
-    : { ...state, focusedFolderCwd: undefined, selectedSessionId: row.thread.record.id };
+  if (row.kind === "folder") {
+    return { ...state, focusedFolderCwd: row.cwd, focusedShowMoreCwd: undefined };
+  }
+  if (row.kind === "show-more") {
+    return { ...state, focusedFolderCwd: undefined, focusedShowMoreCwd: row.cwd };
+  }
+  return {
+    ...state,
+    focusedFolderCwd: undefined,
+    focusedShowMoreCwd: undefined,
+    selectedSessionId: row.thread.record.id,
+  };
 }
 
 function clampThreadListScrollOffset(
@@ -2831,55 +3009,62 @@ function setCollapsed(state: FleetState, cwd: string, collapsed: boolean): Fleet
   };
 }
 
+function setExpanded(state: FleetState, cwd: string, expanded: boolean): FleetState {
+  const current = state.expandedCwds ?? [];
+  if (current.includes(cwd) === expanded) return state;
+  return {
+    ...state,
+    expandedCwds: expanded
+      ? [...current, cwd]
+      : current.filter((candidate) => candidate !== cwd),
+  };
+}
+
 function threadSubject(record: SessionRecord): string {
   return record.kind === "orchestrator" ? "orchestrator" : "thread";
 }
 
-function roleSections(threads: readonly FleetThread[]): Array<{ label: string; threads: FleetThread[] }> {
-  const orcs = threads.filter(({ record }) => record.kind === "orchestrator");
-  const workers = threads.filter(({ record }) => record.kind !== "orchestrator");
-  return [
-    ...(orcs.length === 0 ? [] : [{ label: "Orcs", threads: orcs }]),
-    ...(workers.length === 0 ? [] : [{ label: "Workers", threads: workers }]),
-  ];
+/** Last activity, the fleet's ordering key. Falls back for records that never reported one. */
+function lastActivity(record: SessionRecord): string {
+  return record.meaningfulUpdatedAt ?? record.updatedAt;
 }
 
+/**
+ * Most recent first. Ties fall back to the operator's own ordering — pinned, then explicit
+ * reorder, then age — so threads that share a timestamp still hold a stable position.
+ */
+function byRecency(left: FleetThread, right: FleetThread): number {
+  const recency = lastActivity(right.record).localeCompare(lastActivity(left.record));
+  if (recency !== 0) return recency;
+  if (left.record.pinned !== right.record.pinned) return left.record.pinned === true ? -1 : 1;
+  const leftOrder = left.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
+  const rightOrder = right.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
+  if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+  return left.record.createdAt.localeCompare(right.record.createdAt);
+}
+
+/** Every orchestrator in the fleet as one flat roster, whatever folder each was launched in. */
+function orchestratorThreads(threads: readonly FleetThread[]): FleetThread[] {
+  return threads
+    .filter(({ record }) => record.kind === "orchestrator")
+    .sort(byRecency);
+}
+
+/**
+ * Workers by folder. Folders are alphabetical by absolute path so the fleet reads in the
+ * same order as `ls`, and stays put while activity reshuffles the rows inside each one.
+ */
 function groupThreads(threads: readonly FleetThread[]): Array<{ cwd: string; threads: FleetThread[] }> {
   const groups = new Map<string, FleetThread[]>();
   for (const thread of threads) {
+    if (thread.record.kind === "orchestrator") continue;
     const group = groups.get(thread.record.cwd) ?? [];
     group.push(thread);
     groups.set(thread.record.cwd, group);
   }
   return [...groups.entries()]
-    .map(([cwd, entries]) => ({
-      cwd,
-      threads: entries.sort((left, right) => {
-        const leftRole = left.record.kind === "orchestrator" ? 0 : 1;
-        const rightRole = right.record.kind === "orchestrator" ? 0 : 1;
-        if (leftRole !== rightRole) return leftRole - rightRole;
-        if (left.record.pinned !== right.record.pinned) return left.record.pinned === true ? -1 : 1;
-        const leftOrder = left.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
-        const rightOrder = right.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
-        if (leftOrder !== rightOrder) return leftOrder - rightOrder;
-        return left.record.createdAt.localeCompare(right.record.createdAt);
-      }),
-    }))
-    .sort((left, right) => {
-      const leftCreated = left.threads.reduce(
-        (earliest, thread) => earliest === "" || thread.record.createdAt < earliest
-          ? thread.record.createdAt
-          : earliest,
-        "",
-      );
-      const rightCreated = right.threads.reduce(
-        (earliest, thread) => earliest === "" || thread.record.createdAt < earliest
-          ? thread.record.createdAt
-          : earliest,
-        "",
-      );
-      return leftCreated.localeCompare(rightCreated);
-    });
+    .map(([cwd, entries]) => ({ cwd, threads: entries.sort(byRecency) }))
+    .sort((left, right) => left.cwd.localeCompare(right.cwd));
 }
 
 function taskName(instruction: string): string {
