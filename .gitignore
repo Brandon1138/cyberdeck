@@ -1,4 +1,6 @@
-node_modules/
+# No trailing slash: worktrees symlink node_modules at the shared install, and a trailing
+# slash matches only a real directory, which leaves the link showing as untracked.
+node_modules
 .pnpm-store/
 dist/
 coverage/

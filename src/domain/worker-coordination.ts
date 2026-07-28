@@ -301,6 +301,7 @@ export type ControllerIdentity = z.infer<typeof ControllerIdentitySchema>;
 export type ControllerLiveness = z.infer<typeof ControllerLivenessSchema>;
 export type WorkerLifecycle = z.infer<typeof WorkerLifecycleSchema>;
 export type LeaseState = z.infer<typeof LeaseStateSchema>;
+export type ControllerLease = z.infer<typeof ControllerLeaseSchema>;
 export type OwnershipSubject = z.infer<typeof OwnershipSubjectSchema>;
 export type OwnershipSelector = z.infer<typeof OwnershipSelectorSchema>;
 export type OwnershipOutcome = z.infer<typeof OwnershipOutcomeSchema>;

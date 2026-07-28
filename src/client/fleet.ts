@@ -6,7 +6,11 @@ import type {
   FableWorkersRequest,
   FableWorkersResult,
 } from "../domain/orchestrator.js";
-import type { FleetWorkerCoordinationView } from "../broker/worker-coordination-view.js";
+import type {
+  FleetOrchestratorCustodyColorView,
+  FleetWorkerCoordinationView,
+} from "../broker/worker-coordination-view.js";
+import type { CustodyColor } from "../domain/custody-color.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
 import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
@@ -21,6 +25,7 @@ import { providerTerminalActivity, stripTerminalControl } from "../runtime/termi
 import { attachSession, type AttachTransport } from "./attach.js";
 import { collectDashboardSnapshot, renderDashboard } from "./dashboard.js";
 import {
+  custodyColorTone,
   leaseCustody,
   leaseCustodyBadge,
   leaseCustodySummary,
@@ -77,6 +82,11 @@ export interface FleetThread {
   record: SessionRecord;
   replay: string;
   coordination?: FleetWorkerCoordinationView;
+  /**
+   * Which orchestrator this row belongs to, in hue. A worker takes it from the broker's custody
+   * projection; an orchestrator wears its own slot, always at full intensity while it is bound.
+   */
+  custodyColor?: CustodyColor;
 }
 
 export interface FleetSnapshot {
@@ -431,6 +441,25 @@ const ANSI = {
   prClosed: "\u001b[38;2;154;163;175m",
   /** Checks failing: the one pull request state that demands action. */
   prFailing: "\u001b[38;2;217;108;117m",
+
+  // Custody. Six hues, one per orchestrator, worn by the leading glyph alone.
+  //
+  // They sit away from every status hue above — no amber, no green, no ice, no red — so a
+  // custody hue can never be misread as a state. Each has a dimmed twin at the same hue angle
+  // for workers whose lease has ended: legibly the same orchestrator, visibly no longer live.
+
+  custody1: "\u001b[38;2;104;178;168m",
+  custody2: "\u001b[38;2;112;156;204m",
+  custody3: "\u001b[38;2;140;142;216m",
+  custody4: "\u001b[38;2;198;138;186m",
+  custody5: "\u001b[38;2;154;178;108m",
+  custody6: "\u001b[38;2;200;142;110m",
+  custody1Faded: "\u001b[38;2;62;107;101m",
+  custody2Faded: "\u001b[38;2;67;94;122m",
+  custody3Faded: "\u001b[38;2;84;85;130m",
+  custody4Faded: "\u001b[38;2;119;83;112m",
+  custody5Faded: "\u001b[38;2;92;107;65m",
+  custody6Faded: "\u001b[38;2;120;85;66m",
 } as const;
 
 /** Gutter cell that prefixes every navigable row; carries the selection rule. */
@@ -446,16 +475,28 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
   const coordinationBySession = new Map(
     coordination.map((entry) => [entry.sessionId, entry] as const),
   );
+  // Orchestrator hues come from the bindings, which the coordination projection does not carry.
+  // A broker too old to answer leaves every orc neutral rather than failing the snapshot.
+  const orchestratorColors = new Map(
+    (await client.request<FleetOrchestratorCustodyColorView[]>("fleet.custodyColors", {})
+      .catch(() => []))
+      .map((entry) => [entry.sessionId, entry.slot] as const),
+  );
   const threads = await Promise.all(sessions.map(async (record): Promise<FleetThread | null> => {
     try {
       const snapshot = await client.request<{ data: string }>("session.snapshot", {
         sessionId: record.id,
       });
       const workerCoordination = coordinationBySession.get(record.id);
+      const orchestratorSlot = orchestratorColors.get(record.id);
+      const color: CustodyColor | undefined = orchestratorSlot === undefined
+        ? workerCoordination?.custodyColor
+        : { slot: orchestratorSlot, intensity: "active" };
       return {
         record,
         replay: Buffer.from(snapshot.data, "base64").toString("utf8"),
         ...(workerCoordination === undefined ? {} : { coordination: workerCoordination }),
+        ...(color === undefined ? {} : { custodyColor: color }),
       };
     } catch (error) {
       if (error instanceof RpcError && error.code === "SESSION_NOT_FOUND") return null;
@@ -2046,8 +2087,8 @@ function renderThreadRow(
   const previewWidth = Math.max(1, options.width - fixedWidth);
   const preview = threadPreview(thread, previewWidth);
   return [
-    `${rowGutter(selected, options.color, scrollbar)}${statusMarker(status, selected, options.color)}`,
-    paint(pad(title, titleWidth), selected ? "bold" : "muted", options.color),
+    `${rowGutter(selected, options.color, scrollbar)}${statusMarker(status, selected, options.color, thread.custodyColor)}`,
+    titleCell(thread, pad(title, titleWidth), selected, options.color),
     ...(folderColumnWidth === 0
       ? []
       : [paint(pad(shortPath(thread.record.cwd, options.home), folderColumnWidth), "subtle", options.color)]),
@@ -2062,6 +2103,27 @@ function renderThreadRow(
     paint(pad(preview, previewWidth), "muted", options.color),
     padStart(age, 5),
   ].join(" ");
+}
+
+/**
+ * The title cell.
+ *
+ * An orchestrator wears its custody hue on its name as well as its glyph, because the name is
+ * what its workers' glyphs have to be matched against. Workers keep the neutral title: hue on
+ * both would read as a colored row, which is what the glyph-only rule exists to prevent.
+ */
+function titleCell(
+  thread: FleetThread,
+  title: string,
+  selected: boolean,
+  color: boolean,
+): string {
+  const custody = thread.record.kind === "orchestrator" && thread.custodyColor !== undefined
+    ? custodyColorTone(thread.custodyColor)
+    : undefined;
+  if (custody === undefined) return paint(title, selected ? "bold" : "muted", color);
+  const painted = paint(title, custody, color);
+  return selected ? paint(painted, "bold", color) : painted;
 }
 
 /**
@@ -2132,8 +2194,13 @@ function threadPreview(thread: FleetThread, width: number): string {
  * with color off. The focused row is already marked by the selection rule, so
  * focus adds weight alone.
  */
-function statusMarker(status: ThreadStatus, selected: boolean, color: boolean): string {
-  const tone = status === "Done"
+function statusMarker(
+  status: ThreadStatus,
+  selected: boolean,
+  color: boolean,
+  custody?: CustodyColor | undefined,
+): string {
+  const statusTone = status === "Done"
     ? "done"
     : status === "Needs input"
       ? "attention"
@@ -2142,6 +2209,9 @@ function statusMarker(status: ThreadStatus, selected: boolean, color: boolean): 
         : status === "Working"
           ? "working"
           : "muted";
+  // Custody outranks status on the glyph alone: the status hue survives in the status-text
+  // column, so nothing is lost, and the glyph is the one cell every row already has.
+  const tone = (custody === undefined ? undefined : custodyColorTone(custody)) ?? statusTone;
   // Both glyphs are one display column, so the marker never shifts the row.
   const glyph = status === "Working" ? "•" : "·";
   const painted = paint(glyph, tone, color);

@@ -2216,6 +2216,53 @@ describe("collectFleetSnapshot", () => {
       threads: [{ record, replay: "latest", coordination: ownership }],
     });
   });
+
+  it("takes a worker's custody hue from the projection and an orc's from its binding", async () => {
+    const orc = session();
+    const workerRecord = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "worker",
+      role: "worker",
+    });
+    const ownership = {
+      ...coordination(workerRecord.id, "released"),
+      custodyColor: { slot: 3, intensity: "faded" as const },
+    };
+    const request = vi.fn(async (method: string) => {
+      if (method === "session.list") return [orc, workerRecord];
+      if (method === "fleet.workerCoordination") return [ownership];
+      if (method === "fleet.custodyColors") return [{ sessionId: orc.id, slot: 1 }];
+      if (method === "session.snapshot") return { data: Buffer.from("latest").toString("base64") };
+      throw new Error(`unexpected ${method}`);
+    });
+
+    await expect(collectFleetSnapshot({ request } as never)).resolves.toEqual({
+      threads: [
+        // An orchestrator wears its own slot, and is always live on it.
+        { record: orc, replay: "latest", custodyColor: { slot: 1, intensity: "active" } },
+        {
+          record: workerRecord,
+          replay: "latest",
+          coordination: ownership,
+          custodyColor: { slot: 3, intensity: "faded" },
+        },
+      ],
+    });
+  });
+
+  it("leaves every row neutral when the broker cannot answer for custody colors", async () => {
+    const record = session();
+    const request = vi.fn(async (method: string) => {
+      if (method === "session.list") return [record];
+      if (method === "fleet.custodyColors") throw new Error("unknown method");
+      if (method === "session.snapshot") return { data: Buffer.from("latest").toString("base64") };
+      throw new Error(`unexpected ${method}`);
+    });
+
+    await expect(collectFleetSnapshot({ request } as never)).resolves.toEqual({
+      threads: [{ record, replay: "latest" }],
+    });
+  });
 });
 
 describe("runFleet", () => {

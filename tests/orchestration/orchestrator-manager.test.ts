@@ -543,4 +543,101 @@ describe("OrchestratorManager", () => {
     });
     expect(reset).toHaveBeenCalledWith("workspace:/repo/one");
   });
+
+  describe("custody colors", () => {
+    const custodyColors = () => ({
+      assign: vi.fn(async () => 0),
+      release: vi.fn(async () => undefined),
+    });
+    const spawning = () => ({
+      start: vi.fn(async () => record),
+      get: vi.fn(() => record),
+      stop: vi.fn(async () => {}),
+    });
+    const unbound = () => ({ get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) });
+
+    it("assigns the spawning orchestrator's durable controller a slot", async () => {
+      const colors = custodyColors();
+      const manager = new OrchestratorManager(
+        spawning() as never,
+        unbound() as never,
+        undefined,
+        colors,
+      );
+
+      await manager.ensure({
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        cwd: "/repo/one",
+        scope: "workspace",
+      });
+
+      expect(colors.assign).toHaveBeenCalledWith("orchestrator:workspace:/repo/one");
+    });
+
+    it("gives a peer no slot, because a peer owns no workers", async () => {
+      const colors = custodyColors();
+      const manager = new OrchestratorManager(
+        spawning() as never,
+        unbound() as never,
+        undefined,
+        colors,
+      );
+
+      await manager.create({
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        cwd: "/repo/one",
+        scope: "workspace",
+      });
+
+      expect(colors.assign).not.toHaveBeenCalled();
+    });
+
+    it("releases the slot on both reset paths", async () => {
+      const colors = custodyColors();
+      const store = {
+        get: vi.fn(async () => binding),
+        findBySessionId: vi.fn(async () => binding),
+        reset: vi.fn(async () => undefined),
+      };
+      const manager = new OrchestratorManager(
+        { get: vi.fn(() => ({ ...record, executionState: "cancelled" })) } as never,
+        store as never,
+        undefined,
+        colors,
+      );
+
+      await manager.reset({ cwd: "/repo/one", scope: "workspace" });
+      await manager.resetSessionBinding(SESSION_ID);
+
+      expect(colors.release.mock.calls).toEqual([
+        ["orchestrator:workspace:/repo/one"],
+        ["orchestrator:workspace:/repo/one"],
+      ]);
+    });
+
+    it("spawns the orchestrator anyway when the color ledger fails", async () => {
+      const colors = {
+        assign: vi.fn(async () => { throw new Error("ledger unavailable"); }),
+        release: vi.fn(async () => { throw new Error("ledger unavailable"); }),
+      };
+      const manager = new OrchestratorManager(
+        spawning() as never,
+        unbound() as never,
+        undefined,
+        colors,
+      );
+
+      await expect(manager.ensure({
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        cwd: "/repo/one",
+        scope: "workspace",
+      })).resolves.toMatchObject({ created: true });
+    });
+  });
 });

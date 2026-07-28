@@ -81,3 +81,11 @@ export interface CavemanWorkersResult {
 export function orchestratorKey(scope: OrchestratorScope): string {
   return scope.kind === "fleet" ? "fleet" : `workspace:${scope.cwd}`;
 }
+
+/**
+ * The durable controller identity a binding proves. Peer bindings are named here too, but
+ * they hold no stable controller family, so nothing keyed by this ever exists for them.
+ */
+export function orchestratorControllerId(key: string): string {
+  return `orchestrator:${key}`;
+}
