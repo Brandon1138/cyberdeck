@@ -11,6 +11,7 @@ import {
   threadStatus,
   transitionFleet,
   type FleetSnapshot,
+  type FleetState,
 } from "../../src/client/fleet.js";
 import type { PullRequestState } from "../../src/client/pr-status.js";
 import type { FleetWorkerCoordinationView } from "../../src/broker/worker-coordination-view.js";
@@ -85,6 +86,11 @@ function coordination(
   };
 }
 
+/** A fleet state with one folder already opened past the show-more cap. */
+function expandedState(snapshot: FleetSnapshot, cwd: string): FleetState {
+  return { ...createFleetState(snapshot), expandedCwds: [cwd] };
+}
+
 function threadFleet(count: number, cwd = "/repo/one"): FleetSnapshot {
   return fleet(...Array.from({ length: count }, (_, index) => ({
     record: session({
@@ -97,48 +103,188 @@ function threadFleet(count: number, cwd = "/repo/one"): FleetSnapshot {
 }
 
 describe("fleet presentation", () => {
-  it("separates Orcs above workers inside each folder while keeping folder rows navigable", () => {
+  it("lists every orchestrator once, at the top, above the folders its workers live in", () => {
     const worker = session({
       id: "22222222-2222-4222-8222-222222222222",
       kind: "worker",
       role: "worker",
-      name: "Worker first by time",
+      cwd: "/repo/zulu",
+      name: "Zulu worker",
       updatedAt: "2026-07-22T09:59:59.000Z",
     });
-    const orc = session({
+    const staleOrc = session({
       id: "33333333-3333-4333-8333-333333333333",
       kind: "orchestrator",
       role: "orchestrator",
-      name: "Orc second by time",
+      cwd: "/repo/zulu",
+      name: "Older orc",
       updatedAt: "2026-07-22T09:58:00.000Z",
+    });
+    const freshOrc = session({
+      id: "55555555-5555-4555-8555-555555555555",
+      kind: "orchestrator",
+      role: "orchestrator",
+      cwd: "/repo/alpha",
+      name: "Newer orc",
+      updatedAt: "2026-07-22T09:59:00.000Z",
     });
     const onlyWorker = session({
       id: "44444444-4444-4444-8444-444444444444",
       kind: "worker",
       role: "worker",
-      name: "Other folder worker",
-      cwd: "/repo/other",
+      name: "Alpha worker",
+      cwd: "/repo/alpha",
       updatedAt: "2026-07-22T09:57:00.000Z",
     });
-    const snapshot = fleet({ record: worker }, { record: orc }, { record: onlyWorker });
+    const snapshot = fleet(
+      { record: worker },
+      { record: staleOrc },
+      { record: freshOrc },
+      { record: onlyWorker },
+    );
     const rendered = renderFleet(snapshot, createFleetState(snapshot), {
       color: false, width: 150, height: 40, now: NOW_MS, home: "/Users/brandon",
     });
+    const lines = rendered.split("\n");
+    const lineOf = (needle: string) => lines.findIndex((line) => line.includes(needle));
 
-    const orcIndex = rendered.indexOf("Orc second by time");
-    const workerSectionIndex = rendered.indexOf("Workers", orcIndex);
-    expect(rendered.indexOf("Orcs")).toBeLessThan(orcIndex);
-    expect(orcIndex).toBeLessThan(workerSectionIndex);
-    expect(workerSectionIndex).toBeLessThan(rendered.indexOf("Worker first by time", workerSectionIndex));
+    // One Orcs section for the whole fleet, most recent first, each row naming its folder.
     expect(rendered.match(/Orcs/g)).toHaveLength(1);
+    expect(lineOf("Orcs")).toBeLessThan(lineOf("Newer orc"));
+    expect(lineOf("Newer orc")).toBeLessThan(lineOf("Older orc"));
+    expect(lines[lineOf("Newer orc")]).toContain("/repo/alpha");
+    expect(lines[lineOf("Older orc")]).toContain("/repo/zulu");
+
+    // Both orcs sit above the first folder header, and no folder repeats them.
+    expect(lineOf("Older orc")).toBeLessThan(lineOf("▾ /repo/alpha"));
+    expect(lineOf("▾ /repo/alpha")).toBeLessThan(lineOf("▾ /repo/zulu"));
+    expect(rendered.match(/Newer orc/g)).toHaveLength(1);
+    expect(rendered.match(/Older orc/g)).toHaveLength(1);
+
+    // Navigation walks the same shape: orcs, then folder header, worker, folder header, worker.
     const initial = createFleetState(snapshot);
-    expect(initial.selectedSessionId).toBe(orc.id);
-    const workerFocused = transitionFleet(initial, snapshot, "down", NOW_MS).state;
-    expect(workerFocused.selectedSessionId).toBe(worker.id);
-    const otherFolderFocused = transitionFleet(workerFocused, snapshot, "down", NOW_MS).state;
-    expect(otherFolderFocused.focusedFolderCwd).toBe("/repo/other");
-    expect(transitionFleet(otherFolderFocused, snapshot, "down", NOW_MS).state.selectedSessionId)
-      .toBe(onlyWorker.id);
+    expect(initial.selectedSessionId).toBe(freshOrc.id);
+    const older = transitionFleet(initial, snapshot, "down", NOW_MS).state;
+    expect(older.selectedSessionId).toBe(staleOrc.id);
+    const alphaFolder = transitionFleet(older, snapshot, "down", NOW_MS).state;
+    expect(alphaFolder.focusedFolderCwd).toBe("/repo/alpha");
+    const alphaWorker = transitionFleet(alphaFolder, snapshot, "down", NOW_MS).state;
+    expect(alphaWorker.selectedSessionId).toBe(onlyWorker.id);
+    const zuluFolder = transitionFleet(alphaWorker, snapshot, "down", NOW_MS).state;
+    expect(zuluFolder.focusedFolderCwd).toBe("/repo/zulu");
+    expect(transitionFleet(zuluFolder, snapshot, "down", NOW_MS).state.selectedSessionId)
+      .toBe(worker.id);
+  });
+
+  it("orders workers inside a folder by last activity, most recent first", () => {
+    const workerAt = (index: number, name: string, updatedAt: string, extra = {}) => session({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      kind: "worker",
+      role: "worker",
+      cwd: "/repo/one",
+      name,
+      createdAt: "2026-07-22T09:00:00.000Z",
+      updatedAt,
+      ...extra,
+    });
+    const snapshot = fleet(
+      { record: workerAt(1, "Oldest", "2026-07-22T09:30:00.000Z") },
+      { record: workerAt(2, "Newest", "2026-07-22T09:50:00.000Z") },
+      // meaningfulUpdatedAt wins over raw updatedAt, exactly as the age column reads it.
+      {
+        record: workerAt(3, "Middle", "2026-07-22T09:59:00.000Z", {
+          meaningfulUpdatedAt: "2026-07-22T09:40:00.000Z",
+        }),
+      },
+    );
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width: 140, height: 30, now: NOW_MS,
+    });
+
+    expect(rendered.indexOf("Newest")).toBeLessThan(rendered.indexOf("Middle"));
+    expect(rendered.indexOf("Middle")).toBeLessThan(rendered.indexOf("Oldest"));
+  });
+
+  it("caps a folder at five workers behind a navigable show-more row that expands and closes", () => {
+    const snapshot = threadFleet(8);
+    const view = { color: false, width: 100, height: 30, now: NOW_MS };
+    const initial = createFleetState(snapshot);
+    const capped = renderFleet(snapshot, initial, view);
+
+    expect(capped).toContain("Thread 5");
+    expect(capped).not.toContain("Thread 6");
+    expect(capped).toContain("+ 3 more");
+
+    // The show-more row is a first-class stop: five threads down lands on it, not past it.
+    let onShowMore = initial;
+    for (let step = 0; step < 5; step += 1) {
+      onShowMore = transitionFleet(onShowMore, snapshot, "down", NOW_MS).state;
+    }
+    expect(onShowMore.focusedShowMoreCwd).toBe("/repo/one");
+    expect(onShowMore.selectedSessionId).toBe(snapshot.threads[4]?.record.id);
+    // Thread keys are inert there, exactly as they are on a folder header.
+    expect(transitionFleet(onShowMore, snapshot, "ctrl+x", NOW_MS).action).toBeUndefined();
+
+    const expanded = transitionFleet(onShowMore, snapshot, "enter", NOW_MS).state;
+    expect(expanded.expandedCwds).toEqual(["/repo/one"]);
+    const expandedRender = renderFleet(snapshot, expanded, view);
+    expect(expandedRender).toContain("Thread 8");
+    expect(expandedRender).toContain("− show less");
+    expect(expandedRender).not.toMatch(/\+ \d+ more/u);
+
+    // Focus stays on the row, so the same key rolls the folder back up.
+    expect(expanded.focusedShowMoreCwd).toBe("/repo/one");
+    const recapped = transitionFleet(expanded, snapshot, "enter", NOW_MS).state;
+    expect(recapped.expandedCwds).toEqual([]);
+    expect(renderFleet(snapshot, recapped, view)).not.toContain("Thread 6");
+
+    // Right opens it and Left puts it back, matching the folder header's arrows.
+    expect(transitionFleet(recapped, snapshot, "right", NOW_MS).state.expandedCwds)
+      .toEqual(["/repo/one"]);
+    expect(transitionFleet(expanded, snapshot, "left", NOW_MS).state.expandedCwds)
+      .toEqual([]);
+  });
+
+  it("leaves a folder of exactly five workers with no show-more row", () => {
+    const snapshot = threadFleet(5);
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width: 100, height: 30, now: NOW_MS,
+    });
+
+    expect(rendered).toContain("Thread 5");
+    expect(rendered).not.toMatch(/\+ \d+ more/u);
+    expect(rendered).not.toContain("show less");
+  });
+
+  it("raises focus onto the show-more row when churn pushes the selected worker under the cap", () => {
+    const snapshot = threadFleet(8);
+    const hidden = {
+      ...createFleetState(snapshot),
+      selectedSessionId: snapshot.threads[7]?.record.id,
+    };
+    const normalized = transitionFleet(hidden, snapshot, "ctrl+x", NOW_MS);
+
+    expect(normalized.state.focusedShowMoreCwd).toBe("/repo/one");
+    expect(normalized.action).toBeUndefined();
+  });
+
+  it("keeps a selected orc selected when the folder it was launched in is collapsed", () => {
+    const orc = session({ kind: "orchestrator", cwd: "/repo/one" });
+    const snapshot = fleet(
+      { record: orc },
+      { record: session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/one" }) },
+    );
+    // Collapsing a folder hides its workers, but an orc's row lives in the global
+    // Orcs section and stays visible, so it has no header to be pushed up onto.
+    const folded = {
+      ...createFleetState(snapshot),
+      collapsedCwds: ["/repo/one"],
+      selectedSessionId: orc.id,
+    };
+    const normalized = transitionFleet(folded, snapshot, "ctrl+x", NOW_MS);
+
+    expect(normalized.state.selectedSessionId).toBe(orc.id);
+    expect(normalized.state.focusedFolderCwd).toBeUndefined();
   });
 
   const LEASE_STATES = ["active", "expired", "released", "orphaned", "contested"] as const;
@@ -343,7 +489,10 @@ describe("fleet presentation", () => {
     // swallow a keypress, so navigation is checked in that state.
     const initial = { ...createFleetState(snapshot), leaseDetail: true };
     expect(initial.selectedSessionId).toBe(orc.id);
-    const first = transitionFleet(initial, snapshot, "down", NOW_MS).state;
+    // Below the Orcs section the next navigable row is the folder header, not a heading.
+    const folder = transitionFleet(initial, snapshot, "down", NOW_MS).state;
+    expect(folder.focusedFolderCwd).toBe(orc.cwd);
+    const first = transitionFleet(folder, snapshot, "down", NOW_MS).state;
     expect(first.selectedSessionId).toBe(firstId);
     const second = transitionFleet(first, snapshot, "down", NOW_MS).state;
     expect(second.selectedSessionId).toBe(secondId);
@@ -653,7 +802,7 @@ describe("fleet presentation", () => {
 
   it("pins the summary while the thread body scrolls and shows a gutter scrollbar", () => {
     const snapshot = threadFleet(10);
-    let last = createFleetState(snapshot);
+    let last = expandedState(snapshot, "/repo/one");
     for (let index = 1; index < 10; index += 1) {
       last = transitionFleet(last, snapshot, "down", NOW_MS, 7).state;
     }
@@ -664,7 +813,8 @@ describe("fleet presentation", () => {
       now: NOW_MS,
     });
 
-    // Twelve rows: the folder header, its "Workers" heading, and ten threads.
+    // Thirteen rows: the folder header, its "Workers" heading, ten threads, and the
+    // show-more row the folder keeps once expanded.
     expect(last.threadListScrollOffset).toBe(5);
     expect(last.selectedSessionId).toBe(snapshot.threads.at(-1)?.record.id);
     expect(rendered).toContain("Cyberdeck");
@@ -711,7 +861,7 @@ describe("fleet presentation", () => {
   it("re-clamps a scrolled list after the terminal grows", () => {
     const snapshot = threadFleet(10);
     const scrolled = transitionFleet(
-      createFleetState(snapshot),
+      expandedState(snapshot, "/repo/one"),
       snapshot,
       "end",
       NOW_MS,
@@ -763,17 +913,18 @@ describe("fleet presentation", () => {
       }))));
     const view = { color: false, width: 100, height: 16, now: NOW_MS };
 
-    // Seven steps down: the first folder's three threads, then a folder header before each group.
+    // Folders read alphabetically — one, three, two. Seven steps down: the first folder's
+    // three threads, the second folder's header and three threads, then the last header.
     let focused = createFleetState(snapshot);
     for (let step = 0; step < 7; step += 1) {
       focused = transitionFleet(focused, snapshot, "down", NOW_MS, 7).state;
     }
-    expect(focused.focusedFolderCwd).toBe("/repo/three");
+    expect(focused.focusedFolderCwd).toBe("/repo/two");
 
     // That header is the thirteenth of seventeen rows. A list that only clipped would have left the
     // focus off screen, and collapsing it would then have changed nothing an operator can see.
     const expanded = renderFleet(snapshot, focused, view);
-    expect(expanded).toContain("▾ /repo/three");
+    expect(expanded).toContain("▾ /repo/two");
     expect(expanded).not.toContain("one thread 1");
 
     const collapsed = renderFleet(
@@ -782,8 +933,28 @@ describe("fleet presentation", () => {
       view,
     );
     expect(collapsed).not.toBe(expanded);
-    expect(collapsed).toContain("▸ /repo/three · 3 threads");
-    expect(collapsed).not.toContain("▾ /repo/three");
+    expect(collapsed).toContain("▸ /repo/two · 3 threads");
+    expect(collapsed).not.toContain("▾ /repo/two");
+  });
+
+  it("orders folder groups alphabetically by absolute path", () => {
+    const snapshot = fleet(...["/repo/zulu", "/repo/alpha", "/repo/mid"].map((cwd, index) => ({
+      record: session({
+        id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+        kind: "worker" as const,
+        role: "worker",
+        cwd,
+        name: `${cwd.slice(6)} thread`,
+        // Newest folder last alphabetically, so recency cannot be what orders the groups.
+        updatedAt: `2026-07-22T09:5${index}:00.000Z`,
+      }),
+    })));
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width: 100, height: 30, now: NOW_MS,
+    });
+
+    expect(rendered.indexOf("▾ /repo/alpha")).toBeLessThan(rendered.indexOf("▾ /repo/mid"));
+    expect(rendered.indexOf("▾ /repo/mid")).toBeLessThan(rendered.indexOf("▾ /repo/zulu"));
   });
 
   it("handles an empty thread list without a scrollbar", () => {
@@ -799,7 +970,7 @@ describe("fleet presentation", () => {
     expect(rendered).not.toMatch(/[│┃]/u);
   });
 
-  it("keeps thread and project positions stable when lifecycle timestamps change", () => {
+  it("reorders orcs as their activity changes while folder groups stay put", () => {
     const first = session({
       kind: "orchestrator",
       name: "First orchestrator",
@@ -856,14 +1027,12 @@ describe("fleet presentation", () => {
       createFleetState(afterSnapshot),
       { color: false, width: 140, height: 30, now: NOW_MS },
     );
-    const positions = (rendered: string) => [
-      rendered.indexOf("First orchestrator"),
-      rendered.indexOf("Second orchestrator"),
-      rendered.indexOf("Other project"),
-    ];
-
-    expect(positions(before)).toEqual([...positions(before)].sort((left, right) => left - right));
-    expect(positions(after)).toEqual([...positions(after)].sort((left, right) => left - right));
+    // Before: 09:59, 09:58, 09:57 — the roster reads exactly in that order.
+    expect(before.indexOf("First orchestrator")).toBeLessThan(before.indexOf("Second orchestrator"));
+    expect(before.indexOf("Second orchestrator")).toBeLessThan(before.indexOf("Other project"));
+    // After: the two that reported activity move to the front, newest first.
+    expect(after.indexOf("Other project")).toBeLessThan(after.indexOf("First orchestrator"));
+    expect(after.indexOf("First orchestrator")).toBeLessThan(after.indexOf("Second orchestrator"));
   });
 
   it("rejects a persisted provider tip instead of repeating it as the thread preview", () => {
@@ -1388,17 +1557,18 @@ describe("fleet controls", () => {
   });
 
   it("opens a live provider TUI with Enter or Right Arrow and moves between project threads", () => {
+    const first = session({ cwd: "/repo/one" });
     const second = session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" });
-    const snapshot = fleet({ record: session() }, { record: second });
+    const snapshot = fleet({ record: first }, { record: second });
     const initial = createFleetState(snapshot);
 
     expect(transitionFleet(initial, snapshot, "enter", NOW_MS).action).toEqual({
       type: "attach",
-      sessionId: session().id,
+      sessionId: first.id,
     });
     expect(transitionFleet(initial, snapshot, "right", NOW_MS).action).toEqual({
       type: "attach",
-      sessionId: session().id,
+      sessionId: first.id,
     });
     expect(transitionFleet(initial, snapshot, "left", NOW_MS).action).toBeUndefined();
 
@@ -1410,8 +1580,9 @@ describe("fleet controls", () => {
   });
 
   it("collapses and expands a focused folder with Enter and reports the hidden thread count", () => {
+    const first = session({ cwd: "/repo/one" });
     const second = session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" });
-    const snapshot = fleet({ record: session() }, { record: second });
+    const snapshot = fleet({ record: first }, { record: second });
     const onFolder = transitionFleet(createFleetState(snapshot), snapshot, "down", NOW_MS).state;
 
     const collapsed = transitionFleet(onFolder, snapshot, "enter", NOW_MS).state;
@@ -1578,7 +1749,10 @@ describe("fleet controls", () => {
 
     expect(retry.action).toEqual({ type: "stop", sessionId: root.id });
     expect(retry.state.notice).toBe("Stopping orchestrator");
-    expect(transitionFleet(retry.state, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(child.id);
+    // The worker lives under its folder now, one header below the Orcs section.
+    const onFolder = transitionFleet(retry.state, snapshot, "down", NOW_MS).state;
+    expect(onFolder.focusedFolderCwd).toBe(child.cwd);
+    expect(transitionFleet(onFolder, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(child.id);
   });
 
   it("cancels pending deletion when selection moves or confirmation expires", () => {
