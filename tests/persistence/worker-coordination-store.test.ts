@@ -110,6 +110,54 @@ describe("WorkerCoordinationStore and migration", () => {
     await expect(restarted.start()).resolves.toEqual({ migrated: 0, alreadyMigrated: 2, orphaned: 1 });
   });
 
+  it("does not overwrite immutable origin for a worker already registered by the coordination path", async () => {
+    const stateDirectory = await directory();
+    const worker = session({ parentSessionId: crypto.randomUUID() });
+    const initial = new WorkerCoordinationRuntime({
+      stateDirectory,
+      service: { now: () => NOW },
+    });
+    await initial.start();
+    const controller = {
+      controllerId: "orchestrator:fleet:peer",
+      familyId: "orchestrator:fleet:peer",
+      scope: { kind: "fleet" as const, scopeId: "fleet:peer" },
+    };
+    await initial.service.registerSubject({
+      mutationId: `worker-reporting:register:${worker.id}`,
+      actor: controller,
+      subjectId: worker.id,
+      origin: {
+        creatorControllerId: "orchestrator:fleet:peer",
+        creatorSessionId: worker.parentSessionId,
+        taskId: worker.id,
+        threadId: worker.id,
+        createdAt: worker.createdAt,
+      },
+      lifecycle: "working",
+      resources: {
+        sessionId: worker.id,
+        worktreePath: worker.cwd,
+        eventStreamId: `worker:${worker.id}`,
+      },
+      controller,
+      reason: "register worker reporting channel",
+    });
+
+    const restarted = new WorkerCoordinationRuntime({
+      stateDirectory,
+      recoveredSessions: [worker],
+      service: { now: () => NOW },
+    });
+    await expect(restarted.start()).resolves.toEqual({
+      migrated: 0,
+      alreadyMigrated: 1,
+      orphaned: 0,
+    });
+    expect(restarted.service.getSubject(worker.id)?.origin.creatorControllerId)
+      .toBe("orchestrator:fleet:peer");
+  });
+
   it("ignores only an unterminated crash tail", async () => {
     const stateDirectory = await directory();
     const runtime = new WorkerCoordinationRuntime({ stateDirectory, service: { now: () => NOW } });

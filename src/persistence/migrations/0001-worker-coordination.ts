@@ -36,6 +36,12 @@ export async function migrateLegacyWorkerSessions(input: {
   let orphaned = 0;
   for (const session of input.sessions) {
     if ((session.kind ?? "worker") !== "worker") continue;
+    const existing = input.coordination.getSubject(session.id);
+    if (existing !== undefined) {
+      alreadyMigrated += 1;
+      if (existing.lease.state === "orphaned") orphaned += 1;
+      continue;
+    }
     const controller = session.parentSessionId === undefined
       ? undefined
       : await input.resolveStableController(session.parentSessionId, session);
