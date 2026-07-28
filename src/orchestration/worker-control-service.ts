@@ -836,8 +836,7 @@ export class WorkerControlService {
     const token = this.credentials.get(controller.controllerId, request.workerId)!.leaseToken;
     const mode = request.decisionGate ? "decision-gate" as const : "non-blocking" as const;
     const existing = this.options.coordination
-      .listCheckpoints(request.workerId)
-      .find((entry) => entry.correlationId === request.correlationId);
+      .getCheckpoint(request.workerId, request.correlationId!);
     const checkpoint = await this.options.coordination.requestCheckpoint({
       mutationId: `checkpoint:${request.workerId}:${request.correlationId!}`,
       controller,
@@ -1050,18 +1049,11 @@ export class WorkerControlService {
   }
 
   private unresolvedCount(workerId: string): number {
-    return this.options.coordination.projectEvents({
-      limit: 50,
-      filter: { workerIds: [workerId], intervention: "unresolved" },
-    }).events.length;
+    return this.options.coordination.workerEventSummary(workerId).unresolvedCount;
   }
 
   private lastOrdinal(workerId: string): number {
-    const page = this.options.coordination.projectEvents({
-      limit: 50,
-      filter: { workerIds: [workerId], intervention: "any" },
-    });
-    return page.events.reduce((highest, event) => Math.max(highest, event.ordinal), 0);
+    return this.options.coordination.workerEventSummary(workerId).lastOrdinal;
   }
 
   private leaseIsLive(subject: OwnershipSubject, nowMs: number): boolean {

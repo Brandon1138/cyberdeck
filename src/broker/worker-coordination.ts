@@ -43,6 +43,7 @@ export class WorkerCoordinationError extends Error {
       | "OWNERSHIP_LOST"
       | "LEASE_EXPIRED"
       | "CHECKPOINT_NOT_FOUND"
+      | "CHECKPOINT_IDENTITY_COLLISION"
       | "EVENT_NOT_FOUND"
       | "INVALID_EVENT",
     message: string,
@@ -150,6 +151,11 @@ export interface EventProjection {
   hasMore: boolean;
 }
 
+export interface WorkerEventSummary {
+  unresolvedCount: number;
+  lastOrdinal: number;
+}
+
 export interface CheckpointRequestInput {
   mutationId: string;
   controller: ControllerIdentity;
@@ -175,6 +181,7 @@ export class WorkerCoordinationService {
   private readonly subjects = new Map<string, OwnershipSubject>();
   private readonly events = new Map<string, StoredWorkerEvent>();
   private readonly checkpoints = new Map<string, CheckpointRequest>();
+  private readonly eventSummaries = new Map<string, WorkerEventSummary>();
   private readonly audits: OwnershipAuditRecord[] = [];
   private readonly liveness = new Map<string, ControllerLiveness>();
   private readonly receipts = new Map<string, MutationReceipt>();
@@ -202,11 +209,11 @@ export class WorkerCoordinationService {
     const state = await this.options.store.load();
     for (const subject of state.subjects) this.subjects.set(subject.subjectId, subject);
     for (const event of state.events) {
-      this.events.set(event.eventId, event);
+      this.recordEvent(event);
       this.nextOrdinal = Math.max(this.nextOrdinal, event.ordinal + 1);
     }
     for (const checkpoint of state.checkpoints) {
-      this.checkpoints.set(checkpoint.correlationId, checkpoint);
+      this.checkpoints.set(checkpointKey(checkpoint.workerId, checkpoint.correlationId), checkpoint);
     }
     for (const audit of state.audits) this.audits.push(audit);
     for (const entry of state.liveness) this.liveness.set(entry.controller.controllerId, entry);
@@ -232,6 +239,14 @@ export class WorkerCoordinationService {
         (workerId === undefined || entry.workerId === workerId)
         && (state === undefined || entry.state === state),
     );
+  }
+
+  getCheckpoint(workerId: string, correlationId: string): CheckpointRequest | undefined {
+    return this.checkpoints.get(checkpointKey(workerId, correlationId));
+  }
+
+  workerEventSummary(workerId: string): WorkerEventSummary {
+    return this.eventSummaries.get(workerId) ?? { unresolvedCount: 0, lastOrdinal: 0 };
   }
 
   async registerSubject(input: RegisterSubjectInput): Promise<OwnershipMutationResult> {
@@ -798,7 +813,7 @@ export class WorkerCoordinationService {
       const checkpoints: CheckpointRequest[] = [];
       let subjectUpdate = this.renewed(currentSubject, now);
       if (event.checkpointCorrelationId !== undefined) {
-        const checkpoint = this.checkpoints.get(event.checkpointCorrelationId);
+        const checkpoint = this.getCheckpoint(event.workerId, event.checkpointCorrelationId);
         if (
           event.kind !== "CHECKPOINT"
           || checkpoint === undefined
@@ -953,10 +968,22 @@ export class WorkerCoordinationService {
   async requestCheckpoint(input: CheckpointRequestInput): Promise<CheckpointRequest> {
     return this.exclusive(async () => {
       this.assertReady();
+      const controller = ControllerIdentitySchema.parse(input.controller);
+      const mode = input.mode ?? "non-blocking";
+      const requestHash = hashCheckpointRequest({
+        correlationId: input.correlationId,
+        workerId: input.workerId,
+        requestedBy: controller,
+        focus: input.focus,
+        question: input.question,
+        mode,
+      });
       const receipt = this.receipts.get(input.mutationId);
       if (receipt !== undefined) {
         this.assertReceiptOperation(receipt, "checkpoint-request");
-        return CheckpointRequestSchema.parse(receipt.result);
+        const replay = CheckpointRequestSchema.parse(receipt.result);
+        this.assertCheckpointReplay(replay, input.workerId, input.correlationId, requestHash);
+        return replay;
       }
       const subject = this.requireSubject(input.workerId);
       const now = this.now();
@@ -979,21 +1006,22 @@ export class WorkerCoordinationService {
           authMessage(auth, currentSubject),
         );
       }
-      const prior = this.checkpoints.get(input.correlationId);
+      const prior = this.getCheckpoint(input.workerId, input.correlationId);
       if (prior !== undefined) {
+        this.assertCheckpointReplay(prior, input.workerId, input.correlationId, requestHash);
         await this.persistReceipt(input.mutationId, "checkpoint-request", prior, {
           subjects: [this.renewed(currentSubject, now)],
-          liveness: [this.connectedObservation(input.controller, now, "idempotent checkpoint request")],
+          liveness: [this.connectedObservation(controller, now, "idempotent checkpoint request")],
         });
         return prior;
       }
-      const mode = input.mode ?? "non-blocking";
       const checkpoint = CheckpointRequestSchema.parse({
         schemaVersion: WORKER_COORDINATION_SCHEMA_VERSION,
         correlationId: input.correlationId,
         workerId: input.workerId,
+        requestHash,
         controllerLeaseVersion: subject.lease.version,
-        requestedBy: input.controller,
+        requestedBy: controller,
         ...(input.focus === undefined ? {} : { focus: input.focus }),
         ...(input.question === undefined ? {} : { question: input.question }),
         mode,
@@ -1014,12 +1042,12 @@ export class WorkerCoordinationService {
       await this.persistReceipt(input.mutationId, "checkpoint-request", checkpoint, {
         subjects: [subjectUpdate],
         checkpoints: [checkpoint],
-        liveness: [this.connectedObservation(input.controller, now, "authenticated checkpoint request")],
+        liveness: [this.connectedObservation(controller, now, "authenticated checkpoint request")],
         audits: [this.audit(
           input.mutationId,
           "checkpoint-request",
           subject,
-          input.controller,
+          controller,
           mode,
           subject.lease.controller,
           subject.lease.controller,
@@ -1030,6 +1058,25 @@ export class WorkerCoordinationService {
       });
       return checkpoint;
     });
+  }
+
+  private assertCheckpointReplay(
+    prior: CheckpointRequest,
+    workerId: string,
+    correlationId: string,
+    requestHash: string,
+  ): void {
+    const priorHash = prior.requestHash ?? hashCheckpointRequest(prior);
+    if (
+      prior.workerId !== workerId
+      || prior.correlationId !== correlationId
+      || priorHash !== requestHash
+    ) {
+      throw new WorkerCoordinationError(
+        "CHECKPOINT_IDENTITY_COLLISION",
+        `checkpoint (${workerId}, ${correlationId}) collides with a different request`,
+      );
+    }
   }
 
   private async ownershipMutation(
@@ -1426,15 +1473,44 @@ export class WorkerCoordinationService {
   private async commit(transaction: CoordinationTransaction): Promise<void> {
     await this.options.store.append(transaction);
     for (const subject of transaction.subjects ?? []) this.subjects.set(subject.subjectId, subject);
-    for (const event of transaction.events ?? []) this.events.set(event.eventId, event);
+    for (const event of transaction.events ?? []) this.recordEvent(event);
     for (const checkpoint of transaction.checkpoints ?? []) {
-      this.checkpoints.set(checkpoint.correlationId, checkpoint);
+      this.checkpoints.set(checkpointKey(checkpoint.workerId, checkpoint.correlationId), checkpoint);
     }
     for (const audit of transaction.audits ?? []) this.audits.push(audit);
     for (const entry of transaction.liveness ?? []) {
       this.liveness.set(entry.controller.controllerId, entry);
     }
     for (const receipt of transaction.receipts ?? []) this.receipts.set(receipt.mutationId, receipt);
+  }
+
+  private recordEvent(event: StoredWorkerEvent): void {
+    const previous = this.events.get(event.eventId);
+    this.events.set(event.eventId, event);
+    if (previous !== undefined && previous.workerId !== event.workerId) {
+      this.rebuildEventSummary(previous.workerId);
+    }
+    const summary = this.eventSummaries.get(event.workerId) ?? {
+      unresolvedCount: 0,
+      lastOrdinal: 0,
+    };
+    this.eventSummaries.set(event.workerId, {
+      unresolvedCount: summary.unresolvedCount
+        - (previous !== undefined && previous.workerId === event.workerId && isUnresolved(previous) ? 1 : 0)
+        + (isUnresolved(event) ? 1 : 0),
+      lastOrdinal: Math.max(summary.lastOrdinal, event.ordinal),
+    });
+  }
+
+  private rebuildEventSummary(workerId: string): void {
+    let unresolvedCount = 0;
+    let lastOrdinal = 0;
+    for (const event of this.events.values()) {
+      if (event.workerId !== workerId) continue;
+      if (isUnresolved(event)) unresolvedCount += 1;
+      lastOrdinal = Math.max(lastOrdinal, event.ordinal);
+    }
+    this.eventSummaries.set(workerId, { unresolvedCount, lastOrdinal });
   }
 
   private async rejectEvent(
@@ -1572,6 +1648,33 @@ function hashEvent(event: WorkerEvent): string {
   return createHash("sha256").update(JSON.stringify(event)).digest("hex");
 }
 
+function hashCheckpointRequest(input: {
+  correlationId: string;
+  workerId: string;
+  requestedBy: ControllerIdentity;
+  focus?: string | undefined;
+  question?: string | undefined;
+  mode: "non-blocking" | "decision-gate";
+}): string {
+  const controller = ControllerIdentitySchema.parse(input.requestedBy);
+  return createHash("sha256").update(JSON.stringify({
+    correlationId: input.correlationId,
+    workerId: input.workerId,
+    requestedBy: {
+      controllerId: controller.controllerId,
+      familyId: controller.familyId,
+      scope: controller.scope,
+    },
+    focus: input.focus ?? null,
+    question: input.question ?? null,
+    mode: input.mode,
+  })).digest("hex");
+}
+
+function checkpointKey(workerId: string, correlationId: string): string {
+  return `${workerId}\0${correlationId}`;
+}
+
 function isControlled(subject: OwnershipSubject): boolean {
   return (subject.lease.state === "active" || subject.lease.state === "contested")
     && subject.lease.controller !== undefined;
@@ -1581,6 +1684,10 @@ function isPinned(event: StoredWorkerEvent): boolean {
   return event.kind === "EXCEPTION"
     || event.kind === "DECISION_REQUEST"
     || event.interventionRequired;
+}
+
+function isUnresolved(event: StoredWorkerEvent): boolean {
+  return isPinned(event) && event.state === "active";
 }
 
 function eventIdOf(value: unknown): string {

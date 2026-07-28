@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -758,6 +758,156 @@ describe("WorkerCoordinationService events and checkpoints", () => {
     expect(service.getSubject(workerId)?.decisionGate.state).toBe("none");
   });
 
+  it("keeps duplicate checkpoint correlation IDs isolated by worker", async () => {
+    const {
+      service,
+      owner,
+      workerId: firstWorkerId,
+      token: firstToken,
+      version: firstVersion,
+    } = await ownedHarness();
+    const second = await register(service, { owner });
+
+    await service.requestCheckpoint({
+      mutationId: "duplicate-correlation:first",
+      controller: owner,
+      leaseToken: firstToken!,
+      correlationId: "shared-correlation",
+      workerId: firstWorkerId,
+      question: "first worker status?",
+    });
+    await service.requestCheckpoint({
+      mutationId: "duplicate-correlation:second",
+      controller: owner,
+      leaseToken: second.token!,
+      correlationId: "shared-correlation",
+      workerId: second.workerId,
+      question: "second worker status?",
+    });
+    const firstAnswer = event(firstWorkerId, firstVersion!, 1, {
+      kind: "CHECKPOINT",
+      checkpointCorrelationId: "shared-correlation",
+      summary: "first answer",
+    });
+    const secondAnswer = event(second.workerId, second.version!, 1, {
+      kind: "CHECKPOINT",
+      checkpointCorrelationId: "shared-correlation",
+      summary: "second answer",
+    });
+    await expect(submit(service, owner, firstToken!, firstAnswer))
+      .resolves.toMatchObject({ code: "accepted" });
+    await expect(submit(service, owner, second.token!, secondAnswer))
+      .resolves.toMatchObject({ code: "accepted" });
+
+    expect(service.listCheckpoints(firstWorkerId)).toEqual([
+      expect.objectContaining({
+        workerId: firstWorkerId,
+        question: "first worker status?",
+        answeredByEventId: firstAnswer.eventId,
+      }),
+    ]);
+    expect(service.listCheckpoints(second.workerId)).toEqual([
+      expect.objectContaining({
+        workerId: second.workerId,
+        question: "second worker status?",
+        answeredByEventId: secondAnswer.eventId,
+      }),
+    ]);
+    expect(service.getCheckpoint(firstWorkerId, "shared-correlation")?.answeredByEventId)
+      .toBe(firstAnswer.eventId);
+    expect(service.getCheckpoint(second.workerId, "shared-correlation")?.answeredByEventId)
+      .toBe(secondAnswer.eventId);
+  });
+
+  it.each([
+    ["focus", { focus: "changed focus" }],
+    ["question", { question: "changed question" }],
+    ["mode", { mode: "decision-gate" as const }],
+  ])("rejects checkpoint identity collision when %s changes", async (_field, change) => {
+    const { service, owner, workerId, token } = await ownedHarness();
+    await service.requestCheckpoint({
+      mutationId: "checkpoint-original",
+      controller: owner,
+      leaseToken: token!,
+      correlationId: "collision-correlation",
+      workerId,
+      focus: "original focus",
+      question: "original question",
+      mode: "non-blocking",
+    });
+
+    await expect(service.requestCheckpoint({
+      mutationId: `checkpoint-changed:${_field}`,
+      controller: owner,
+      leaseToken: token!,
+      correlationId: "collision-correlation",
+      workerId,
+      focus: "original focus",
+      question: "original question",
+      mode: "non-blocking",
+      ...change,
+    })).rejects.toMatchObject({ code: "CHECKPOINT_IDENTITY_COLLISION" });
+  });
+
+  it("rejects mutation replay when checkpoint request or worker changes", async () => {
+    const { service, owner, workerId, token } = await ownedHarness();
+    const second = await register(service, { owner });
+    await service.requestCheckpoint({
+      mutationId: "checkpoint-mutation-identity",
+      controller: owner,
+      leaseToken: token!,
+      correlationId: "mutation-correlation",
+      workerId,
+      question: "original question",
+    });
+
+    await expect(service.requestCheckpoint({
+      mutationId: "checkpoint-mutation-identity",
+      controller: owner,
+      leaseToken: token!,
+      correlationId: "mutation-correlation",
+      workerId,
+      question: "changed question",
+    })).rejects.toMatchObject({ code: "CHECKPOINT_IDENTITY_COLLISION" });
+    await expect(service.requestCheckpoint({
+      mutationId: "checkpoint-mutation-identity",
+      controller: owner,
+      leaseToken: second.token!,
+      correlationId: "mutation-correlation",
+      workerId: second.workerId,
+      question: "original question",
+    })).rejects.toMatchObject({ code: "CHECKPOINT_IDENTITY_COLLISION" });
+  });
+
+  it("rejects checkpoint replay by a different controller", async () => {
+    const { service, owner, workerId, token } = await ownedHarness();
+    await service.requestCheckpoint({
+      mutationId: "controller-collision:original",
+      controller: owner,
+      leaseToken: token!,
+      correlationId: "controller-collision",
+      workerId,
+    });
+    const next = controller("checkpoint-next");
+    const transferred = await service.transfer({
+      mutationId: "controller-collision:transfer",
+      actor: owner,
+      selector: { scope: "single", subjectId: workerId },
+      controller: owner,
+      leaseToken: token!,
+      newController: next,
+      reason: "checkpoint controller collision test",
+    });
+
+    await expect(service.requestCheckpoint({
+      mutationId: "controller-collision:changed",
+      controller: next,
+      leaseToken: transferred.outcomes[0]!.leaseToken!,
+      correlationId: "controller-collision",
+      workerId,
+    })).rejects.toMatchObject({ code: "CHECKPOINT_IDENTITY_COLLISION" });
+  });
+
   it("survives broker restart with leases, events, interventions, checkpoints, and receipts", async () => {
     const first = await ownedHarness();
     const intervention = event(first.workerId, first.version!, 1, {
@@ -767,13 +917,14 @@ describe("WorkerCoordinationService events and checkpoints", () => {
       continuation: "awaiting-response",
     });
     await submit(first.service, first.owner, first.token!, intervention);
-    await first.service.requestCheckpoint({
+    const checkpoint = await first.service.requestCheckpoint({
       mutationId: "durable-checkpoint",
       controller: first.owner,
       leaseToken: first.token!,
       correlationId: "durable-correlation",
       workerId: first.workerId,
     });
+    expect(checkpoint.requestHash).toMatch(/^[a-f0-9]{64}$/);
 
     const restarted = await harness({ directory: first.directory });
     expect(restarted.service.getSubject(first.workerId)).toMatchObject({
@@ -790,6 +941,72 @@ describe("WorkerCoordinationService events and checkpoints", () => {
       correlationId: "durable-correlation",
       workerId: first.workerId,
     })).resolves.toEqual(expect.objectContaining({ correlationId: "durable-correlation" }));
+    await expect(restarted.service.requestCheckpoint({
+      mutationId: "durable-checkpoint-changed",
+      controller: first.owner,
+      leaseToken: first.token!,
+      correlationId: "durable-correlation",
+      workerId: first.workerId,
+      question: "changed after restart",
+    })).rejects.toMatchObject({ code: "CHECKPOINT_IDENTITY_COLLISION" });
+  });
+
+  it("replays duplicate correlation IDs for both workers after restart", async () => {
+    const first = await ownedHarness();
+    const second = await register(first.service, { owner: first.owner });
+    for (const [workerId, token, mutationId] of [
+      [first.workerId, first.token!, "restart-duplicate:first"],
+      [second.workerId, second.token!, "restart-duplicate:second"],
+    ] as const) {
+      await first.service.requestCheckpoint({
+        mutationId,
+        controller: first.owner,
+        leaseToken: token,
+        correlationId: "restart-shared-correlation",
+        workerId,
+      });
+    }
+
+    const restarted = await harness({ directory: first.directory });
+    expect(restarted.service.listCheckpoints(first.workerId)).toHaveLength(1);
+    expect(restarted.service.listCheckpoints(second.workerId)).toHaveLength(1);
+  });
+
+  it("detects changed replay requests from compatible v1 records without request hashes", async () => {
+    const first = await ownedHarness();
+    await first.service.requestCheckpoint({
+      mutationId: "legacy-v1:original",
+      controller: first.owner,
+      leaseToken: first.token!,
+      correlationId: "legacy-v1-correlation",
+      workerId: first.workerId,
+      focus: "original focus",
+    });
+    const content = await readFile(first.store.path, "utf8");
+    const legacy = content
+      .split("\n")
+      .map((line) => {
+        if (line === "") return line;
+        const record = JSON.parse(line) as {
+          checkpoints?: Array<Record<string, unknown>>;
+          receipts?: Array<{ result?: Record<string, unknown> }>;
+        };
+        for (const checkpoint of record.checkpoints ?? []) delete checkpoint.requestHash;
+        for (const receipt of record.receipts ?? []) delete receipt.result?.requestHash;
+        return JSON.stringify(record);
+      })
+      .join("\n");
+    await writeFile(first.store.path, legacy, "utf8");
+
+    const restarted = await harness({ directory: first.directory });
+    await expect(restarted.service.requestCheckpoint({
+      mutationId: "legacy-v1:changed",
+      controller: first.owner,
+      leaseToken: first.token!,
+      correlationId: "legacy-v1-correlation",
+      workerId: first.workerId,
+      focus: "changed focus",
+    })).rejects.toMatchObject({ code: "CHECKPOINT_IDENTITY_COLLISION" });
   });
 
   it("rejects stale-controller event submission with explicit authority code", async () => {

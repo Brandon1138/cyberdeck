@@ -277,6 +277,8 @@ export const CheckpointRequestSchema = z.object({
   schemaVersion: schemaVersionField,
   correlationId: z.string().min(1).max(256),
   workerId: z.uuid(),
+  /** Optional only so existing v1 log records remain readable. New records always persist it. */
+  requestHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   controllerLeaseVersion: z.number().int().positive(),
   requestedBy: ControllerIdentitySchema,
   focus: z.string().min(1).max(1_024).optional(),

@@ -51,7 +51,11 @@ interface FakeSession {
   parentSessionId?: string;
 }
 
-async function harness(options: { leaseDurationMs?: number; enqueueStatus?: "queued" | "delivered" } = {}) {
+async function harness(options: {
+  leaseDurationMs?: number;
+  enqueueStatus?: "queued" | "delivered";
+  eventRateLimit?: number;
+} = {}) {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-worker-control-"));
   directories.push(directory);
   let nowMs = baseMs;
@@ -60,6 +64,7 @@ async function harness(options: { leaseDurationMs?: number; enqueueStatus?: "que
     now: () => new Date(nowMs).toISOString(),
     leaseDurationMs: options.leaseDurationMs ?? 30_000,
     gracePeriodMs: 5_000,
+    ...(options.eventRateLimit === undefined ? {} : { eventRateLimit: options.eventRateLimit }),
   });
   await coordination.initialize();
 
@@ -637,6 +642,8 @@ describe("WorkerControlService worker control", () => {
       action: "request_checkpoint",
       workerId,
       correlationId,
+      focus: "migration risk",
+      question: "Is the rollback path still valid?",
       reason: "pre-merge review",
     });
     expect(retry).toMatchObject({ code: "CHECKPOINT_REPLAY", correlationId });
@@ -757,6 +764,30 @@ describe("WorkerControlService events", () => {
     const scoped = await bench.control.events({ actorSessionId: ELSEWHERE });
     expect(scoped.events).toEqual([]);
     expect(scoped.state).toEqual([]);
+  });
+
+  it("reports exact unresolved count and last ordinal beyond 50 matching events", async () => {
+    const bench = await harness({ eventRateLimit: 100 });
+    const workerId = bench.addSession();
+    await bench.register({ workerId, waveId: "wave-1" });
+    await bench.control.lease({
+      actorSessionId: ORC, action: "adopt", scope: "worker", workerId, reason: "adopt",
+    });
+    const token = await leaseToken(bench, workerId);
+    const version = bench.coordination.getSubject(workerId)!.lease.version;
+    for (let sequence = 1; sequence <= 60; sequence += 1) {
+      await submit(bench, workerId, version, token, sequence, {
+        kind: "RISK",
+        interventionRequired: true,
+        summary: `risk ${sequence}`,
+      });
+    }
+
+    const result = await bench.control.events({ actorSessionId: ORC, workerId, limit: 1 });
+    expect(result.state[0]).toMatchObject({
+      unresolvedEvents: 60,
+      lastOrdinal: 60,
+    });
   });
 });
 

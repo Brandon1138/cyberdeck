@@ -183,7 +183,7 @@ export class WorkerCoordinationStore {
       for (const subject of parsed.data.subjects) subjects.set(subject.subjectId, subject);
       for (const event of parsed.data.events) events.set(event.eventId, event);
       for (const checkpoint of parsed.data.checkpoints) {
-        checkpoints.set(checkpoint.correlationId, checkpoint);
+        checkpoints.set(checkpointKey(checkpoint.workerId, checkpoint.correlationId), checkpoint);
       }
       for (const entry of parsed.data.liveness) {
         liveness.set(entry.controller.controllerId, entry);
@@ -201,6 +201,10 @@ export class WorkerCoordinationStore {
       receipts: [...receipts.values()],
     };
   }
+}
+
+function checkpointKey(workerId: string, correlationId: string): string {
+  return `${workerId}\0${correlationId}`;
 }
 
 function assertSupportedVersions(value: unknown, line?: number): void {
