@@ -66,6 +66,7 @@ describe("Cursor /run-everything setup", () => {
 
   it("recognizes readiness and explicit readback states from rendered Composer text", () => {
     expect(cursorInputReady(Buffer.from("Add a follow-up"))).toBe(true);
+    expect(cursorInputReady(Buffer.from("→ Plan, search, build anything"))).toBe(true);
     expect(cursorRunEverythingState(Buffer.from(
       "/run-everything Toggle Run Everything (currently enabled)",
     ))).toBe("enabled");

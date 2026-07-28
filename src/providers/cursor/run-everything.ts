@@ -64,6 +64,7 @@ export async function enableCursorRunEverything(
 export function cursorInputReady(replay: Uint8Array): boolean {
   const plain = plainTerminalText(Buffer.from(replay).toString("utf8"));
   return /Cursor is waiting for you|Add a follow-up/iu.test(plain)
+    || /(?:^|\n)\s*[→›❯]\s+Plan,\s+search,\s+build\s+anything\s*(?:\n|$)/iu.test(plain)
     || /(?:^|\n)\s*[→›❯]\s*(?:\n|$)/u.test(plain);
 }
 
