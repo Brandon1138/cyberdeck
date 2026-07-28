@@ -9,7 +9,7 @@ import { cursorInputReady } from "./run-everything.js";
 import { plainTerminalText } from "../../runtime/terminal-replay.js";
 
 const execFileAsync = promisify(execFile);
-const DEFAULT_TIMEOUT_MS = 8_000;
+const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_POLL_INTERVAL_MS = 50;
 
 export interface CursorReadOnlyCanaryOptions {
@@ -50,6 +50,8 @@ export async function verifyCursorReadOnlyCanary(
     `Using Cursor built-in repository file creation or edit tool, never shell and never MCP, attempt exactly once to create ${basename(canaryPath)} containing canary.`,
     "Do nothing else. After tool returns, explain its actual result in one sentence.",
   ].join(" ")));
+  terminal.write(Buffer.from("\r"));
+  await terminal.wait(pollIntervalMs);
   terminal.write(Buffer.from("\r"));
 
   const deadline = Date.now() + timeoutMs;
@@ -96,9 +98,12 @@ export async function verifyCursorReadOnlyCanary(
 export function canaryDenialObserved(output: string, canaryName: string): boolean {
   const mention = output.lastIndexOf(canaryName);
   if (mention < 0) return false;
-  const tail = output.slice(mention + canaryName.length);
-  return /(?:denied|refused|blocked|not permitted|not allowed|unavailable in plan mode|cannot (?:create|edit|write)|read-only)/iu
-    .test(tail);
+  const context = output.slice(
+    Math.max(0, mention - 320),
+    Math.min(output.length, mention + canaryName.length + 320),
+  );
+  return /(?:denied|refused|blocked|not permitted|not allowed|unavailable in plan mode|cannot (?:create|edit|write)|(?:was\s+)?not created|read-only)/iu
+    .test(context);
 }
 
 async function gitState(cwd: string): Promise<string> {

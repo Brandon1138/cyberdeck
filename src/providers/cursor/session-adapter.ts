@@ -96,6 +96,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
   }
 
   submitInput(message: string): Buffer {
-    return Buffer.from(`${message}\r`);
+    // Current Cursor treats programmatically injected text as a paste: the first Enter accepts the
+    // paste into the composer and the second submits it. Older builds harmlessly consume the second
+    // Enter at the fresh input prompt.
+    return Buffer.from(`${message}\r\r`);
   }
 }

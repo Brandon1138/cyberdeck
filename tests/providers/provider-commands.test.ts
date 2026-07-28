@@ -386,6 +386,11 @@ describe("extended interactive provider adapters", () => {
     expect(adapter.deferInitialPrompt(record)).toBe(true);
   });
 
+  it("accepts and submits pasted Cursor input with two Enter keypresses", () => {
+    expect(new CursorProviderAdapter().submitInput("Inspect HistoryView").toString("utf8"))
+      .toBe("Inspect HistoryView\r\r");
+  });
+
   it.each([
     ["antigravity", () => new AntigravityProviderAdapter().buildLaunchSpec(
       session({

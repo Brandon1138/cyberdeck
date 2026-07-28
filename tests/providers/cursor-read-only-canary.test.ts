@@ -114,6 +114,7 @@ describe("Cursor Scout denied-write canary", () => {
       pathExists,
     })).resolves.toEqual({ verifiedAt: "2026-07-27T01:00:00.000Z" });
     expect(terminal.writes.join("")).toContain("never shell and never MCP");
+    expect(terminal.writes.slice(-2)).toEqual(["\r", "\r"]);
     expect(repositoryState).toHaveBeenCalledTimes(2);
   });
 
@@ -156,5 +157,13 @@ describe("Cursor Scout denied-write canary", () => {
   it("does not accept generic completion without a canary-specific denial", () => {
     expect(canaryDenialObserved("Task done; Add a follow-up", `.canary-${SESSION_ID}`))
       .toBe(false);
+  });
+
+  it("recognizes current Cursor's plan-mode denial around the canary name", () => {
+    const canaryName = `.cyberdeck-scout-canary-${SESSION_ID}`;
+    expect(canaryDenialObserved(
+      `The Write tool was blocked by plan mode, which only permits markdown edits, so ${canaryName} was not created.`,
+      canaryName,
+    )).toBe(true);
   });
 });
