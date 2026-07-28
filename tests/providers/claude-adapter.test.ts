@@ -153,7 +153,7 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
       directory,
       mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
       // Absent allowlist: asserting a cyberdeck-only config must not depend on operator state.
-      orchestratorMcp: { allowlistPath: join(directory, "no-allowlist.json") },
+      mcpAllowlist: { allowlistPath: join(directory, "no-allowlist.json") },
     });
     const spec = adapter.buildLaunchSpec(record);
 
@@ -202,7 +202,7 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     const adapter = new ClaudeProviderAdapter({
       directory,
       mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
-      orchestratorMcp: { allowlistPath, operatorConfigPath },
+      mcpAllowlist: { allowlistPath, operatorConfigPath },
     });
     const spec = adapter.buildLaunchSpec(record);
     await adapter.prepareLaunch(record, spec);
@@ -221,25 +221,58 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     await adapter.cleanupLaunch(record);
   });
 
-  it("leaves a worker's config cyberdeck-only, since workers inherit the operator's servers", async () => {
+  it("leaves a worker's config cyberdeck-only when nothing is allowlisted for workers", async () => {
+    // The whole point of the worker bound: an operator's ambient servers are not inherited, so one
+    // of them stuck in `needs authentication` cannot take the fleet's API calls down with it.
     const directory = tempDir();
-    const allowlistPath = join(directory, "orchestrator-mcp.json");
-    const operatorConfigPath = join(directory, "claude.json");
-    writeFileSync(allowlistPath, JSON.stringify({ servers: ["linear-server"] }));
-    writeFileSync(operatorConfigPath, JSON.stringify({
-      mcpServers: { "linear-server": { type: "http", url: "https://mcp.linear.app/mcp" } },
-    }));
     const record = session({ kind: "worker" });
     const adapter = new ClaudeProviderAdapter({
       directory,
       mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
-      orchestratorMcp: { allowlistPath, operatorConfigPath },
+      mcpAllowlist: { allowlistPath: join(directory, "no-allowlist.json") },
     });
     const spec = adapter.buildLaunchSpec(record);
     await adapter.prepareLaunch(record, spec);
 
     const mcpPath = spec.args[spec.args.indexOf("--mcp-config") + 1]!;
     expect(Object.keys(JSON.parse(readFileSync(mcpPath, "utf8")).mcpServers)).toEqual(["cyberdeck"]);
+    await adapter.cleanupLaunch(record);
+  });
+
+  it("merges allowlisted operator servers into a worker's exclusive config", async () => {
+    // A worker sent at a Linear task still needs Linear; it just has to be named rather than
+    // inherited, in the same one place an orchestrator's servers are named.
+    const directory = tempDir();
+    const allowlistPath = join(directory, "worker-mcp.json");
+    const operatorConfigPath = join(directory, "claude.json");
+    writeFileSync(allowlistPath, JSON.stringify({ servers: ["linear-server", "cyberdeck"] }));
+    writeFileSync(operatorConfigPath, JSON.stringify({
+      mcpServers: {
+        "linear-server": { type: "http", url: "https://mcp.linear.app/mcp" },
+        "obsidian-vault": { type: "stdio", command: "uvx" },
+        cyberdeck: { type: "stdio", command: "/impostor" },
+      },
+    }));
+    const record = session({ kind: "worker" });
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      mcpAllowlist: { allowlistPath, operatorConfigPath },
+    });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+
+    const mcpPath = spec.args[spec.args.indexOf("--mcp-config") + 1]!;
+    expect(JSON.parse(readFileSync(mcpPath, "utf8"))).toEqual({
+      mcpServers: {
+        "linear-server": { type: "http", url: "https://mcp.linear.app/mcp" },
+        cyberdeck: {
+          type: "stdio",
+          command: "/node",
+          args: ["/cyberdeck.js", "mcp", "--actor-session", record.id],
+        },
+      },
+    });
     await adapter.cleanupLaunch(record);
   });
 
@@ -349,14 +382,37 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(spec.args).not.toContain("--strict-mcp-config");
   });
 
-  it("leaves a worker's environment alone", () => {
-    // Workers legitimately use the operator's skills and MCP servers, and Cyberdeck's own
-    // session-start hook is installed in user settings, so no bound may leak outside orchestrators.
+  it("leaves a worker's settings scope alone", () => {
+    // Workers legitimately use the operator's skills, and Cyberdeck's own session-start hook is
+    // installed in user settings, so the settings bound stays orchestrator-only. MCP is separate.
     const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
       .buildLaunchSpec(session({ kind: "worker" }));
     expect(spec.args).not.toContain("--disable-slash-commands");
     expect(spec.args).not.toContain("--setting-sources");
-    expect(spec.args).toContain("--mcp-config");
+  });
+
+  it("makes a worker's injected MCP config exclusive too", () => {
+    // Inheriting the operator's servers is what bricked the fleet: one server in `needs
+    // authentication` made every worker API call fail with `Tool reference 'WaitForMcpServers' not
+    // found`. Both flags must be present, and the config must be the private file, not inline JSON.
+    const adapter = new ClaudeProviderAdapter({
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    });
+    for (const spec of [
+      adapter.buildLaunchSpec(session({ kind: "worker" })),
+      adapter.buildResumeSpec(session({ kind: "worker" })),
+    ]) {
+      expect(spec.args).toContain("--mcp-config");
+      expect(spec.args).toContain("--strict-mcp-config");
+      expect(spec.args[spec.args.indexOf("--mcp-config") + 1]).toContain("mcp-config.json");
+    }
+  });
+
+  it("never bounds MCP for a plain session, which is handed no config to be exclusive about", () => {
+    // A session with no kind gets no injected config; the flag alone would mean no servers at all.
+    const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
+      .buildLaunchSpec(session());
+    expect(spec.args).not.toContain("--mcp-config");
     expect(spec.args).not.toContain("--strict-mcp-config");
   });
 
@@ -368,11 +424,10 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(spec.args).toContain("--strict-mcp-config");
   });
 
-  it("keeps a resumed worker's MCP surface unchanged", () => {
+  it("keeps a resumed worker's settings scope unchanged", () => {
     const spec = new ClaudeProviderAdapter({ mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" } })
       .buildResumeSpec(session({ kind: "worker" }));
-    expect(spec.args).toContain("--mcp-config");
-    expect(spec.args).not.toContain("--strict-mcp-config");
+    expect(spec.args).not.toContain("--setting-sources");
   });
 
   it("forces tool-schema deferral on rather than leaving it to the optimistic default", () => {

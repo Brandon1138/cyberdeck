@@ -319,6 +319,41 @@ describe("ClaudeProviderAdapter", () => {
   });
 });
 
+describe("strict MCP isolation", () => {
+  it("bounds every Claude worker launch and no other provider's", () => {
+    // The flags are Claude CLI surface. Codex configures MCP through `-c mcp_servers.*` and the
+    // other two have their own isolation, so borrowing Claude's argv onto them would be invented.
+    const mcp = { nodePath: "/node", cliPath: "/cyberdeck.js" };
+    const claude = new ClaudeProviderAdapter({ mcp });
+    for (const spec of [
+      claude.buildLaunchSpec(session({ provider: "claude", model: "sonnet", kind: "worker" })),
+      claude.buildResumeSpec(session({ provider: "claude", model: "sonnet", kind: "worker" })),
+    ]) {
+      expect(spec.args).toContain("--mcp-config");
+      expect(spec.args).toContain("--strict-mcp-config");
+    }
+
+    const others = [
+      new CodexProviderAdapter({ mcp }).buildLaunchSpec(session({ kind: "worker" })),
+      new CursorProviderAdapter().buildLaunchSpec(
+        session({ provider: "cursor", model: "composer", kind: "worker" }),
+      ),
+      new AntigravityProviderAdapter().buildLaunchSpec(
+        session({
+          provider: "antigravity",
+          model: "gemini-3.6-flash-low",
+          effort: "low",
+          kind: "worker",
+        }),
+      ),
+    ];
+    for (const spec of others) {
+      expect(spec.args).not.toContain("--strict-mcp-config");
+      expect(spec.args).not.toContain("--mcp-config");
+    }
+  });
+});
+
 describe("extended interactive provider adapters", () => {
   it.each([
     ["claude", new ClaudeProviderAdapter({ sourceEnvironment: CHILD_SOURCE }), "sonnet"],

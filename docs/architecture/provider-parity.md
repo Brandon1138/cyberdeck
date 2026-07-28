@@ -83,10 +83,13 @@ Injection shape:
   (`src/providers/codex.ts:99-109`).
 - Claude: one `--mcp-config` with an inline stdio server JSON (`src/providers/claude.ts:97-105`).
 
-Both carry `mcp --actor-session <session id>`, which is what scopes the grant. Neither emits
-`--strict-mcp-config`, so a Claude worker also loads the operator's own configured MCP servers; the
-same is true of Codex config-file servers. That is existing behaviour, recorded here rather than
-changed.
+Both carry `mcp --actor-session <session id>`, which is what scopes the grant. Claude now emits
+`--strict-mcp-config` alongside the config for orchestrators *and* workers, so a Claude session
+loads exactly the injected `cyberdeck` server plus whatever the operator named in that kind's
+allowlist (`~/Library/Application Support/Cyberdeck/{orchestrator,worker}-mcp.json`). Inheriting the
+operator's servers took the fleet down once: one server stuck in `needs authentication` failed every
+worker API call with `Tool reference 'WaitForMcpServers' not found` (400). Codex has no equivalent
+flag, so a Codex session still loads the operator's config-file servers.
 
 The tools exposed are orchestration-and-workflow shaped — `cyberdeck_threads_list`,
 `cyberdeck_thread_read`, `cyberdeck_worker_start`, `cyberdeck_workers_wait`,

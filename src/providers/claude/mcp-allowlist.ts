@@ -2,27 +2,34 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import type { SessionKind } from "../../domain/session.js";
 import { appStateDirectory } from "../../paths.js";
 
 /**
- * `--strict-mcp-config` makes an orchestrator's injected config exclusive, which also excluded the
- * operator's own servers: an orchestrator asked to reach Linear could see that its tools were
- * absent but not why. The allowlist is the narrow reopening — the operator names servers one at a
- * time, so a server installed later never joins an orchestrator by default.
+ * `--strict-mcp-config` makes a session's injected config exclusive, which also excludes the
+ * operator's own servers: a session asked to reach Linear could see that its tools were absent but
+ * not why. The allowlist is the narrow reopening — the operator names servers one at a time, so a
+ * server installed later never joins a Cyberdeck session by default.
+ *
+ * One file per session kind, because the two have different appetites. An orchestrator's authority
+ * is Cyberdeck's own tools; a worker sent at a Linear or Obsidian task legitimately needs that
+ * server, but only the ones the operator named. Either list is edited in exactly this one place.
  *
  * Names only. Definitions are resolved from the operator's `~/.claude.json` user scope so there is
  * one source of truth and no second copy of a server's credentials to drift or leak. A name with no
  * user-scope definition is skipped rather than failing the launch: a project-scoped server is not
- * reachable this way, and an orchestrator that cannot start is worse than one missing a connector.
+ * reachable this way, and a session that cannot start is worse than one missing a connector.
  *
  * Belongs in `brokerConfigPath` eventually. It is a separate file today because threading broker
  * config into the provider adapter is a wider change than reopening this hole warranted.
  */
-const defaultAllowlistPath = join(appStateDirectory, "orchestrator-mcp.json");
+function defaultAllowlistPath(kind: SessionKind): string {
+  return join(appStateDirectory, `${kind}-mcp.json`);
+}
 const defaultOperatorConfigPath = join(homedir(), ".claude.json");
 
 /** Both paths are absolute operator state, so tests must be able to point them somewhere else. */
-export interface OrchestratorMcpPaths {
+export interface McpAllowlistPaths {
   allowlistPath?: string;
   operatorConfigPath?: string;
 }
@@ -36,15 +43,16 @@ const OperatorConfigSchema = z.object({
 });
 
 /**
- * Resolved ambient servers for an orchestrator, keyed by server name. Cyberdeck's own server is
+ * Resolved ambient servers for one session kind, keyed by server name. Cyberdeck's own server is
  * never resolvable here: callers spread it last, and `cyberdeck` is dropped so an allowlist entry
- * cannot redirect the orchestrator's own control plane at another process.
+ * cannot redirect a session's own control plane at another process.
  */
-export async function resolveOrchestratorMcpServers(
-  paths: OrchestratorMcpPaths = {},
+export async function resolveAllowlistedMcpServers(
+  kind: SessionKind,
+  paths: McpAllowlistPaths = {},
 ): Promise<Record<string, unknown>> {
   const allowlist = await readJsonFile(
-    paths.allowlistPath ?? defaultAllowlistPath,
+    paths.allowlistPath ?? defaultAllowlistPath(kind),
     AllowlistSchema,
   );
   const names = allowlist?.servers.filter((name) => name !== "cyberdeck") ?? [];
