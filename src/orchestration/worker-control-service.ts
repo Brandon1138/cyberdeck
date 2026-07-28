@@ -14,6 +14,10 @@ import {
 } from "../domain/worker-coordination.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
 import type { WorkerCoordinationService } from "../broker/worker-coordination.js";
+import {
+  BrokerWorkerLeaseCredentialCustodian,
+  type WorkerLeaseCredentialCustodian,
+} from "../broker/worker-lease-credential-custodian.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { InstructionQueue } from "./instruction-queue.js";
 
@@ -241,6 +245,7 @@ export class WorkerControlError extends Error {
 
 export interface WorkerControlOptions {
   coordination: WorkerCoordinationService;
+  credentials?: WorkerLeaseCredentialCustodian;
   registry: SessionRegistry;
   orchestrators: OrchestratorStore;
   instructions?: InstructionQueue;
@@ -258,12 +263,13 @@ export class WorkerControlService {
    * this feature exists to serve. What must never happen is a stale controller silently regaining
    * authority, so a missing token reports OWNERSHIP_LOST and points at explicit re-acquisition.
    */
-  private readonly tokens = new Map<string, string>();
+  private readonly credentials: WorkerLeaseCredentialCustodian;
   private readonly now: () => number;
   private readonly forceStopGraceMs: number;
   private tail = Promise.resolve();
 
   constructor(private readonly options: WorkerControlOptions) {
+    this.credentials = options.credentials ?? new BrokerWorkerLeaseCredentialCustodian();
     this.now = options.now ?? (() => Date.now());
     this.forceStopGraceMs = Math.max(0, options.forceStopGraceMs ?? 5_000);
   }
@@ -540,7 +546,10 @@ export class WorkerControlService {
     const leaseTokens: Record<string, string> = {};
     const missing: LeaseSubjectResult[] = [];
     for (const subject of held) {
-      const token = this.tokens.get(tokenKey(controller, subject.subjectId));
+      const token = this.credentials.get(
+        controller.controllerId,
+        subject.subjectId,
+      )?.leaseToken;
       if (token === undefined) missing.push(ownershipLost(subject.subjectId, subject));
       else leaseTokens[subject.subjectId] = token;
     }
@@ -578,7 +587,7 @@ export class WorkerControlService {
       replay = replay && result.idempotentReplay;
       for (const outcome of result.outcomes) results.push(publicOutcome(outcome));
       if (request.action === "release" || request.action === "transfer") {
-        this.tokens.delete(tokenKey(controller, subject.subjectId));
+        this.credentials.delete(controller.controllerId, subject.subjectId);
       }
       if (newController !== undefined) this.captureTokens(newController, result.outcomes);
     }
@@ -820,7 +829,7 @@ export class WorkerControlService {
     subject: OwnershipSubject,
     controller: ControllerIdentity,
   ): Promise<WorkerControlResult> {
-    const token = this.tokens.get(tokenKey(controller, request.workerId))!;
+    const token = this.credentials.get(controller.controllerId, request.workerId)!.leaseToken;
     const mode = request.decisionGate ? "decision-gate" as const : "non-blocking" as const;
     const existing = this.options.coordination
       .listCheckpoints(request.workerId)
@@ -895,7 +904,10 @@ export class WorkerControlService {
     reason: string,
     action: string,
   ): Promise<{ rejection?: Omit<WorkerControlResult, "action" | "workerId"> & { code: WorkerControlCode } }> {
-    const token = this.tokens.get(tokenKey(controller, subject.subjectId));
+    const token = this.credentials.get(
+      controller.controllerId,
+      subject.subjectId,
+    )?.leaseToken;
     if (token === undefined) {
       return {
         rejection: {
@@ -922,7 +934,7 @@ export class WorkerControlService {
     });
     const outcome = result.outcomes[0];
     if (outcome === undefined || outcome.code === "ALREADY_CONTROLLED") return {};
-    this.tokens.delete(tokenKey(controller, subject.subjectId));
+    this.credentials.delete(controller.controllerId, subject.subjectId);
     return {
       rejection: {
         code: outcome.code === "ORPHANED" ? "LEASE_EXPIRED" : "OWNERSHIP_LOST",
@@ -940,7 +952,10 @@ export class WorkerControlService {
     controller: ControllerIdentity,
     reason: string,
   ): Promise<void> {
-    const token = this.tokens.get(tokenKey(controller, subject.subjectId));
+    const token = this.credentials.get(
+      controller.controllerId,
+      subject.subjectId,
+    )?.leaseToken;
     if (token === undefined) return;
     await this.options.coordination.updateLifecycle({
       mutationId: `ctl:stop:lifecycle:${randomUUID()}`,
@@ -1034,8 +1049,11 @@ export class WorkerControlService {
 
   private captureTokens(controller: ControllerIdentity, outcomes: readonly OwnershipOutcome[]): void {
     for (const outcome of outcomes) {
-      if (outcome.leaseToken === undefined) continue;
-      this.tokens.set(tokenKey(controller, outcome.subjectId), outcome.leaseToken);
+      if (outcome.leaseToken === undefined || outcome.leaseVersion === undefined) continue;
+      this.credentials.set(controller.controllerId, outcome.subjectId, {
+        leaseToken: outcome.leaseToken,
+        leaseVersion: outcome.leaseVersion,
+      });
     }
   }
 
@@ -1114,10 +1132,6 @@ export function stableController(binding: OrchestratorBinding): ControllerIdenti
       ? { kind: "fleet", scopeId: binding.key }
       : { kind: "worktree", scopeId: binding.key, worktreePath: binding.scope.cwd },
   };
-}
-
-function tokenKey(controller: ControllerIdentity, subjectId: string): string {
-  return `${controller.controllerId} ${subjectId}`;
 }
 
 function publicOutcome(outcome: OwnershipOutcome): LeaseSubjectResult {

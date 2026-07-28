@@ -40,6 +40,7 @@ import type { SessionRecord } from "../domain/session.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
 import { WorkerCoordinationRuntime } from "./worker-coordination-runtime.js";
 import { WorkerEventChannel } from "./worker-event-channel.js";
+import { BrokerWorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -155,8 +156,10 @@ export async function runBroker(
   );
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
   instructions.start();
+  const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerControl = new WorkerControlService({
     coordination: workerCoordination.service,
+    credentials: workerLeaseCredentials,
     registry,
     orchestrators: orchestratorStore,
     instructions,
@@ -166,6 +169,8 @@ export async function runBroker(
     registry,
     orchestratorStore,
     instructions,
+    undefined,
+    workerLeaseCredentials,
   );
   const workflows = new WorkflowService(
     registry,

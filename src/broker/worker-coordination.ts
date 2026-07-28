@@ -628,7 +628,7 @@ export class WorkerCoordinationService {
       const prior = this.events.get(event.eventId);
       if (prior !== undefined) {
         const same = prior.submissionHash === hashEvent(event);
-        return this.recordAck(input.mutationId, {
+        return this.recordAck(input.mutationId, "event-submit", {
           code: same ? "duplicate" : "rejected",
           eventId: event.eventId,
           sequence: event.sequence,
@@ -686,7 +686,7 @@ export class WorkerCoordinationService {
       const expected = lastSequence + 1;
       if (event.sequence < expected) {
         if (event.kind === "PROGRESS") {
-          return this.recordAck(input.mutationId, {
+          return this.recordAck(input.mutationId, "event-submit", {
             code: "superseded",
             eventId: event.eventId,
             sequence: event.sequence,
@@ -833,6 +833,7 @@ export class WorkerCoordinationService {
           undefined,
           undefined,
           currentSubject === subject ? {} : { subjects: [currentSubject] },
+          "event-resolve",
         );
       }
       const updated: StoredWorkerEvent = {
@@ -1400,8 +1401,9 @@ export class WorkerCoordinationService {
     sequence?: number,
     expectedSequence?: number,
     transaction: CoordinationTransaction = {},
+    operation: "event-submit" | "event-resolve" = "event-submit",
   ): Promise<EventAck> {
-    return this.recordAck(mutationId, {
+    return this.recordAck(mutationId, operation, {
       code: "rejected",
       eventId,
       ...(sequence === undefined ? {} : { sequence }),
@@ -1413,10 +1415,11 @@ export class WorkerCoordinationService {
 
   private async recordAck(
     mutationId: string,
+    operation: "event-submit" | "event-resolve",
     ack: EventAck,
     transaction: CoordinationTransaction = {},
   ): Promise<EventAck> {
-    await this.persistReceipt(mutationId, "event-submit", ack, transaction);
+    await this.persistReceipt(mutationId, operation, ack, transaction);
     return EventAckSchema.parse(ack);
   }
 

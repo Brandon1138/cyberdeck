@@ -164,14 +164,17 @@ describe("worker coordination: event delivery and coalescing", () => {
     expect(afterRestart.events[0]?.state).toBe("active");
 
     // The retired controller cannot close the intervention it opened.
-    await expect(broker.service.resolveEvent({
+    const staleResolution = {
       mutationId: "stale-resolution",
       controller: first,
       leaseToken: worker.token!,
       eventId: failure.eventId,
       resolution: "closed",
       reason: "stale controller tries to close",
-    })).resolves.toMatchObject({ code: "rejected", errorCode: "OWNERSHIP_LOST" });
+    } as const;
+    const rejected = await broker.service.resolveEvent(staleResolution);
+    expect(rejected).toMatchObject({ code: "rejected", errorCode: "OWNERSHIP_LOST" });
+    await expect(broker.service.resolveEvent(staleResolution)).resolves.toEqual(rejected);
     expect(broker.service.projectEvents({ filter: { intervention: "unresolved" } })
       .events).toHaveLength(1);
 

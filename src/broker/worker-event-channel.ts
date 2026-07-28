@@ -20,6 +20,10 @@ import {
   WorkerCoordinationError,
   type WorkerCoordinationService,
 } from "./worker-coordination.js";
+import {
+  BrokerWorkerLeaseCredentialCustodian,
+  type WorkerLeaseCredentialCustodian,
+} from "./worker-lease-credential-custodian.js";
 
 export const WorkerEventSubmitParamsSchema = z.object({
   workerId: z.uuid(),
@@ -71,7 +75,6 @@ interface CheckpointDelivery {
  * then sends every provider through WorkerCoordinationService.submitEvent.
  */
 export class WorkerEventChannel {
-  private readonly credentials = new Map<string, Credential>();
   private tail = Promise.resolve();
 
   constructor(
@@ -80,6 +83,8 @@ export class WorkerEventChannel {
     private readonly controllers: ControllerCatalog,
     private readonly delivery: CheckpointDelivery,
     private readonly now: () => string = () => new Date().toISOString(),
+    private readonly credentials: WorkerLeaseCredentialCustodian =
+      new BrokerWorkerLeaseCredentialCustodian(),
   ) {}
 
   submit(input: WorkerEventSubmitParams): Promise<EventAck> {
@@ -233,8 +238,7 @@ export class WorkerEventChannel {
     });
     const outcome = result.outcomes[0];
     if (outcome?.leaseToken !== undefined && outcome.leaseVersion !== undefined) {
-      this.credentials.set(workerId, {
-        controller,
+      this.credentials.set(controller.controllerId, workerId, {
         leaseToken: outcome.leaseToken,
         leaseVersion: outcome.leaseVersion,
       });
@@ -244,54 +248,28 @@ export class WorkerEventChannel {
 
   private async credential(workerId: string): Promise<Credential> {
     const subject = this.coordination.getSubject(workerId) ?? await this.registerWorker(workerId);
-    const cached = this.credentials.get(workerId);
+    const controller = subject.lease.controller;
+    if (controller === undefined) {
+      throw new WorkerCoordinationError(
+        "OWNERSHIP_LOST",
+        `Worker ${workerId} has no current controller; acquire or adopt control explicitly`,
+      );
+    }
+    const cached = this.credentials.get(controller.controllerId, workerId);
     const expired = Date.parse(subject.lease.expiresAt) <= Date.parse(this.now());
     if (
       cached !== undefined
       && cached.leaseVersion === subject.lease.version
+      && subject.lease.state === "active"
+      && subject.lease.controller?.controllerId === controller.controllerId
       && !expired
     ) {
-      return cached;
+      return { controller, ...cached };
     }
-    const session = this.requireWorker(workerId);
-    let controller = subject.lease.controller;
-    if (controller === undefined) {
-      const binding = session.parentSessionId === undefined
-        ? undefined
-        : await this.controllers.findBySessionId(session.parentSessionId);
-      controller = binding === undefined ? fallbackController(workerId) : controllerFor(binding, session);
-    }
-    const result = expired
-      || subject.lease.state === "orphaned"
-      || subject.lease.state === "expired"
-      ? await this.coordination.adopt({
-          mutationId: `worker-reporting:credential:${workerId}:${subject.lease.version}`,
-          actor: controller,
-          selector: { scope: "single", subjectId: workerId },
-          newController: controller,
-          reason: "activate worker reporting channel",
-        })
-      : await this.coordination.acquire({
-          mutationId: `worker-reporting:credential:${workerId}:${subject.lease.version}`,
-          actor: controller,
-          selector: { scope: "single", subjectId: workerId },
-          controller,
-          reason: "mint worker reporting channel credential",
-        });
-    const outcome = result.outcomes[0];
-    if (outcome?.leaseToken === undefined || outcome.leaseVersion === undefined) {
-      throw new WorkerCoordinationError(
-        "OWNERSHIP_LOST",
-        outcome?.message ?? `Cannot obtain reporting lease for worker ${workerId}`,
-      );
-    }
-    const credential = {
-      controller,
-      leaseToken: outcome.leaseToken,
-      leaseVersion: outcome.leaseVersion,
-    };
-    this.credentials.set(workerId, credential);
-    return credential;
+    throw new WorkerCoordinationError(
+      "OWNERSHIP_LOST",
+      `Broker holds no current reporting credential for worker ${workerId}; acquire or adopt control explicitly`,
+    );
   }
 
   private requireWorker(workerId: string): SessionRecord {

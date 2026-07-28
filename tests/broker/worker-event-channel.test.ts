@@ -7,6 +7,7 @@ import { WorkerCoordinationService } from "../../src/broker/worker-coordination.
 import { createProgram } from "../../src/cli.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
+import { WorkerControlService } from "../../src/orchestration/worker-control-service.js";
 import { WorkerCoordinationStore } from "../../src/persistence/worker-coordination-store.js";
 
 const WORKER_ID = "11111111-1111-4111-8111-111111111111";
@@ -43,7 +44,7 @@ function binding(): OrchestratorBinding {
     scope: { kind: "fleet" },
     grant: {
       subjectSessionId: ORC_ID,
-      capabilities: ["thread.enqueue"],
+      capabilities: ["thread.enqueue", "worker.start"],
       scope: { kind: "fleet" },
     },
     createdAt: NOW,
@@ -51,12 +52,31 @@ function binding(): OrchestratorBinding {
   };
 }
 
-async function harness(options: { directory?: string; now?: () => string } = {}) {
+function credentialCustodian() {
+  const entries = new Map<string, { leaseToken: string; leaseVersion: number }>();
+  const key = (controllerId: string, workerId: string) => `${controllerId}\0${workerId}`;
+  return {
+    get: (controllerId: string, workerId: string) => entries.get(key(controllerId, workerId)),
+    set: (
+      controllerId: string,
+      workerId: string,
+      credential: { leaseToken: string; leaseVersion: number },
+    ) => entries.set(key(controllerId, workerId), credential),
+    delete: (controllerId: string, workerId: string) => entries.delete(key(controllerId, workerId)),
+  };
+}
+
+async function harness(options: {
+  directory?: string;
+  now?: () => string;
+  credentials?: ReturnType<typeof credentialCustodian>;
+} = {}) {
   const directory = options.directory
     ?? await mkdtemp(join(tmpdir(), "cyberdeck-worker-event-channel-"));
+  const currentTime = options.now ?? (() => NOW);
   const coordination = new WorkerCoordinationService({
     store: new WorkerCoordinationStore(directory),
-    now: options.now ?? (() => NOW),
+    now: currentTime,
     leaseDurationMs: 60_000,
   });
   await coordination.initialize();
@@ -77,9 +97,27 @@ async function harness(options: { directory?: string; now?: () => string } = {})
     { get: () => worker() },
     { findBySessionId: async (sessionId) => sessionId === ORC_ID ? binding() : undefined },
     { enqueue },
-    options.now ?? (() => NOW),
+    currentTime,
+    options.credentials,
   );
-  return { directory, coordination, channel, enqueue };
+  const control = new WorkerControlService({
+    coordination,
+    registry: {
+      get: () => worker(),
+      ownsProcess: () => true,
+      isStopRequested: () => false,
+      stopRequestedAt: () => undefined,
+      stop: async () => undefined,
+      forceStop: () => undefined,
+    } as never,
+    orchestrators: {
+      findBySessionId: async (sessionId: string) => sessionId === ORC_ID ? binding() : undefined,
+    } as never,
+    instructions: { enqueue } as never,
+    now: () => Date.parse(currentTime()),
+    ...(options.credentials === undefined ? {} : { credentials: options.credentials }),
+  });
+  return { directory, coordination, channel, control, enqueue };
 }
 
 describe("WorkerEventChannel", () => {
@@ -203,16 +241,50 @@ describe("WorkerEventChannel", () => {
     };
     await first.channel.submit(input);
     const restarted = await harness({ directory: first.directory });
-    await expect(restarted.channel.submit(input)).resolves.toMatchObject({
-      code: "duplicate",
-      eventId: "durable-event",
-      sequence: 1,
+    await expect(restarted.channel.submit(input)).rejects.toMatchObject({
+      code: "OWNERSHIP_LOST",
     });
   });
 
-  it("re-adopts expired reporting leases without blocking later submissions", async () => {
+  it("shares one stable lease token across reporting retries and control calls", async () => {
+    const credentials = credentialCustodian();
+    const state = await harness({ credentials });
+    const report = {
+      workerId: WORKER_ID,
+      eventId: "stable-report",
+      kind: "PROGRESS" as const,
+      summary: "working",
+    };
+
+    await expect(state.channel.submit(report)).resolves.toMatchObject({ code: "accepted" });
+    const initialLease = state.coordination.getSubject(WORKER_ID)!.lease;
+
+    await expect(state.control.lease({
+      actorSessionId: ORC_ID,
+      action: "renew",
+      scope: "worker",
+      workerId: WORKER_ID,
+      reason: "continue control after first report",
+    })).resolves.toMatchObject({ results: [{ code: "ALREADY_CONTROLLED" }] });
+    await expect(state.channel.submit(report)).resolves.toMatchObject({ code: "duplicate" });
+    await expect(state.control.control({
+      actorSessionId: ORC_ID,
+      action: "request_checkpoint",
+      workerId: WORKER_ID,
+      reason: "verify control credential remains valid",
+      correlationId: "stable-token-checkpoint",
+    })).resolves.toMatchObject({ code: "CHECKPOINT_REQUESTED" });
+
+    expect(state.coordination.getSubject(WORKER_ID)!.lease).toMatchObject({
+      version: initialLease.version,
+      tokenHash: initialLease.tokenHash,
+    });
+  });
+
+  it("does not reacquire an expired reporting lease", async () => {
     let now = NOW;
-    const state = await harness({ now: () => now });
+    const credentials = credentialCustodian();
+    const state = await harness({ now: () => now, credentials });
     await state.channel.submit({
       workerId: WORKER_ID,
       eventId: "before-expiry",
@@ -225,7 +297,7 @@ describe("WorkerEventChannel", () => {
       eventId: "after-expiry",
       kind: "PROGRESS",
       summary: "still working",
-    })).resolves.toMatchObject({ code: "accepted", sequence: 2 });
+    })).rejects.toMatchObject({ code: "OWNERSHIP_LOST" });
   });
 
   it("runs CLI parsing end-to-end against real coordination store", async () => {
