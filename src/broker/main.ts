@@ -164,6 +164,7 @@ export async function runBroker(
     orchestratorStore,
     workerPreferences,
     custodyColors,
+    providerPermissions,
   );
   const agentControl = new AgentControlService(
     registry,

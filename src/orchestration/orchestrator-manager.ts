@@ -15,10 +15,12 @@ import {
   type OrchestratorScope,
   type ResetOrchestratorRequest,
 } from "../domain/orchestrator.js";
-import type { ProviderId, SessionRecord } from "../domain/session.js";
+import type { ApprovalMode, ProviderId, SessionRecord } from "../domain/session.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import type { ProviderPermissionPreferencePort } from "../persistence/provider-permission-preference-store.js";
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
+import { resolveProviderPermission } from "../client/permission-policy.js";
 import { ORCHESTRATOR_CATALOG } from "./orchestrator-catalog.js";
 
 export interface OrchestratorManagerResult {
@@ -54,6 +56,7 @@ export class OrchestratorManager {
     private readonly store: OrchestratorStore,
     private readonly workerPreferences?: WorkerPreferenceStore,
     private readonly custodyColors?: OrchestratorCustodyColors,
+    private readonly providerPermissions?: ProviderPermissionPreferencePort,
   ) {}
 
   async ensure(input: EnsureOrchestratorRequest): Promise<OrchestratorManagerResult> {
@@ -116,10 +119,13 @@ export class OrchestratorManager {
     scope: OrchestratorScope,
     peer: boolean,
   ): Promise<OrchestratorManagerResult> {
+    const approvalMode = request.approvalMode
+      ?? await this.configuredApprovalMode(request.provider);
     const session = await this.registry.start({
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
       ...(request.effort === undefined ? {} : { effort: request.effort }),
+      ...(approvalMode === undefined ? {} : { approvalMode }),
       cwd: request.cwd,
       detached: true,
       sandbox: "read-only",
@@ -168,6 +174,20 @@ export class OrchestratorManager {
     }
     await this.assignCustodyColor(binding);
     return { binding, session, created: true };
+  }
+
+  private async configuredApprovalMode(provider: ProviderId): Promise<ApprovalMode | undefined> {
+    const policy = (await this.providerPermissions?.list())?.[provider];
+    if (policy === undefined) return undefined;
+    const resolution = resolveProviderPermission(provider, policy, "read-only");
+    if (!resolution.ok) {
+      throw Object.assign(new Error(resolution.message), {
+        code: "APPROVAL_MODE_NOT_SUPPORTED",
+      });
+    }
+    return resolution.value.application.kind === "post-launch-command"
+      ? "auto"
+      : resolution.value.application.value;
   }
 
   /**
