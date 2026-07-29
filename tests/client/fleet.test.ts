@@ -91,6 +91,20 @@ function expandedState(snapshot: FleetSnapshot, cwd: string): FleetState {
   return { ...createFleetState(snapshot), expandedCwds: [cwd] };
 }
 
+/** A fleet of orchestrators alone, newest first, each launched in its own folder. */
+function orcFleet(count: number): FleetSnapshot {
+  return fleet(...Array.from({ length: count }, (_, index) => ({
+    record: session({
+      id: `99999999-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      kind: "orchestrator",
+      role: "orchestrator",
+      cwd: `/repo/${String(index + 1).padStart(2, "0")}`,
+      name: `Orc ${index + 1}`,
+      updatedAt: `2026-07-22T09:${String(59 - index).padStart(2, "0")}:00.000Z`,
+    }),
+  })));
+}
+
 function threadFleet(count: number, cwd = "/repo/one"): FleetSnapshot {
   return fleet(...Array.from({ length: count }, (_, index) => ({
     record: session({
@@ -254,6 +268,137 @@ describe("fleet presentation", () => {
     expect(rendered).toContain("Thread 5");
     expect(rendered).not.toMatch(/\+ \d+ more/u);
     expect(rendered).not.toContain("show less");
+  });
+
+  it("caps the Orcs roster at five behind the same show-more row a folder uses", () => {
+    const snapshot = orcFleet(8);
+    const view = { color: false, width: 100, height: 40, now: NOW_MS };
+    const initial = createFleetState(snapshot);
+    const capped = renderFleet(snapshot, initial, view);
+
+    expect(capped).toContain("Orc 5");
+    expect(capped).not.toContain("Orc 6");
+    expect(capped).toContain("+ 3 more");
+
+    // Five steps down from the newest orc land on the roster's show-more row, not past it.
+    let onShowMore = initial;
+    for (let step = 0; step < 5; step += 1) {
+      onShowMore = transitionFleet(onShowMore, snapshot, "down", NOW_MS).state;
+    }
+    expect(onShowMore.focusedShowMoreCwd).toBe("/@orcs");
+
+    const expanded = transitionFleet(onShowMore, snapshot, "enter", NOW_MS).state;
+    expect(expanded.expandedCwds).toEqual(["/@orcs"]);
+    const expandedRender = renderFleet(snapshot, expanded, view);
+    expect(expandedRender).toContain("Orc 8");
+    expect(expandedRender).toContain("− show less");
+
+    // Right opens it and left puts it back, exactly as on a folder's show-more row.
+    const recapped = transitionFleet(expanded, snapshot, "left", NOW_MS).state;
+    expect(recapped.expandedCwds).toEqual([]);
+    expect(renderFleet(snapshot, recapped, view)).not.toContain("Orc 6");
+    expect(transitionFleet(recapped, snapshot, "right", NOW_MS).state.expandedCwds)
+      .toEqual(["/@orcs"]);
+  });
+
+  it("raises focus onto the Orcs show-more row when churn pushes the selected orc under the cap", () => {
+    const snapshot = orcFleet(8);
+    const hidden = {
+      ...createFleetState(snapshot),
+      selectedSessionId: snapshot.threads[7]?.record.id,
+    };
+    const normalized = transitionFleet(hidden, snapshot, "ctrl+x", NOW_MS);
+
+    expect(normalized.state.focusedShowMoreCwd).toBe("/@orcs");
+    expect(normalized.action).toBeUndefined();
+  });
+
+  it("folds the whole Orcs section from its header, leaving the folders below it alone", () => {
+    const snapshot = fleet(
+      ...orcFleet(2).threads.map(({ record }) => ({ record })),
+      {
+        record: session({
+          id: "22222222-2222-4222-8222-222222222222",
+          kind: "worker",
+          role: "worker",
+          cwd: "/repo/zulu",
+          name: "Zulu worker",
+        }),
+      },
+    );
+    const view = { color: false, width: 100, height: 40, now: NOW_MS };
+    const onHeader = transitionFleet(createFleetState(snapshot), snapshot, "home", NOW_MS).state;
+    expect(onHeader.focusedFolderCwd).toBe("/@orcs");
+
+    const folded = transitionFleet(onHeader, snapshot, "left", NOW_MS).state;
+    expect(folded.collapsedCwds).toEqual(["/@orcs"]);
+    const foldedRender = renderFleet(snapshot, folded, view);
+    expect(foldedRender).toContain("▸ Orcs · 2 threads");
+    expect(foldedRender).not.toContain("Orc 1");
+    // Folding the roster is not folding a project: the folders keep their own rows.
+    expect(foldedRender).toContain("▾ /repo/zulu");
+    expect(foldedRender).toContain("Zulu worker");
+
+    // Enter on the header toggles it back open, and the roster returns intact.
+    const unfolded = transitionFleet(folded, snapshot, "enter", NOW_MS).state;
+    expect(unfolded.collapsedCwds).toEqual([]);
+    expect(renderFleet(snapshot, unfolded, view)).toContain("Orc 1");
+  });
+
+  it("lists a Cyberdeck orchestrator under a short name without renaming the record", () => {
+    const record = session({ kind: "orchestrator", name: "Cyberdeck orchestrator (claude:opus)" });
+    const plain = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "orchestrator",
+      name: "Some other orchestrator (claude:opus)",
+    });
+    const snapshot = fleet({ record }, { record: plain });
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width: 140, height: 30, now: NOW_MS,
+    });
+
+    expect(rendered).toContain("cd-orc (claude:opus)");
+    expect(rendered).not.toContain("Cyberdeck orchestrator");
+    // The stored name is untouched, and a name that does not match the pattern is left alone.
+    expect(record.name).toBe("Cyberdeck orchestrator (claude:opus)");
+    expect(rendered).toContain("Some other orchestrator (claude:opus)");
+  });
+
+  it("clamps every row to the pane so a narrow fleet never soft-wraps", () => {
+    const snapshot = fleet(
+      {
+        record: session({
+          kind: "orchestrator",
+          cwd: "/Users/brandon/code/personal/cyberdeck/worktrees/fleet-orcs-layout",
+          name: "Cyberdeck orchestrator (claude:opus)",
+          latestPreview: "A reply long enough to fill the preview column many times over",
+        }),
+      },
+      {
+        record: session({
+          id: "22222222-2222-4222-8222-222222222222",
+          kind: "worker",
+          role: "worker",
+          cwd: "/Users/brandon/code/personal/cyberdeck/worktrees/fleet-orcs-layout",
+          name: "A worker whose name is far wider than a split pane",
+        }),
+      },
+    );
+    const width = 50;
+    const printed = (line: string) => [...line.replace(/\[[0-9;]*m/gu, "")].length;
+    for (const color of [false, true]) {
+      const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+        color, width, height: 30, now: NOW_MS, home: "/Users/brandon",
+      });
+      expect(Math.max(...rendered.split("\n").map(printed))).toBeLessThanOrEqual(width);
+      // A cut inside painted text closes its own color rather than leaking it down the pane.
+      if (color) {
+        for (const line of rendered.split("\n")) {
+          const opens = line.match(/\[(?!0m)[0-9;]*m/gu)?.length ?? 0;
+          expect(line.match(/\[0m/gu)?.length ?? 0).toBe(opens);
+        }
+      }
+    }
   });
 
   it("raises focus onto the show-more row when churn pushes the selected worker under the cap", () => {

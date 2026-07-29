@@ -307,6 +307,12 @@ const QUIT_CONFIRMATION_MS = 5_000;
 const QUIT_CONFIRMATION_NOTICE = "Press ctrl+c again to exit";
 const COMMAND_PALETTE_VISIBLE_ROWS = 3;
 const ORCS_SECTION_LABEL = "Orcs";
+/**
+ * The Orcs roster folds and caps like a folder, so it answers to the same collapsed and expanded
+ * arrays under a key of its own. It is shaped like an absolute path because that is what those
+ * arrays hold, and no folder can ever be called this.
+ */
+const ORCS_SECTION_KEY = "/@orcs";
 const WORKERS_SECTION_LABEL = "Workers";
 /** Workers shown per folder before the rest go behind a show-more row. */
 const FOLDER_THREAD_CAP = 5;
@@ -1600,6 +1606,8 @@ function renderFleetList(
   const hideOrphanedFolder = lastVisibleRow?.kind === "folder"
     && (nextRowKind === "thread" || nextRowKind === "section")
     && viewportState.focusedFolderCwd !== lastVisibleRow.cwd;
+  // Every composed row is clamped to the pane, because a row wider than the pane is soft-wrapped
+  // by the terminal into an orphaned fragment line the viewport never counted.
   const listLines = rows.length === 0
     ? ["No durable agent threads yet."].slice(0, threadListViewportHeight)
     : visibleRows.map((row, visibleIndex) => {
@@ -1620,6 +1628,7 @@ function renderFleetList(
           return renderFolderRow(
             row.cwd,
             row.threadCount,
+            row.label,
             viewportState,
             options,
             indicator,
@@ -1649,7 +1658,7 @@ function renderFleetList(
         return indicator === undefined
           ? ""
           : rowGutter(false, options.color, indicator).trimEnd();
-      });
+      }).map((line) => clampRowWidth(line, options.width));
   const body = [...header.slice(0, bodyHeight), ...listLines];
   while (body.length < bodyHeight) body.push("");
   return [...body, ...footer].join("\n");
@@ -1961,7 +1970,9 @@ function existingOrchestrators(snapshot: FleetSnapshot): SessionRecord[] {
 }
 
 function existingOrchestratorLabel(record: SessionRecord, color: boolean): string {
-  const name = record.name ?? `${friendlyModel(record.provider, record.model)} orchestrator`;
+  const name = displayThreadName(
+    record.name ?? `${friendlyModel(record.provider, record.model)} orchestrator`,
+  );
   const lifecycle = record.attachmentState === "controlled"
     ? paint("in use", "yellow", color)
     : record.executionState === "active"
@@ -2012,11 +2023,13 @@ function threadListScrollbar(
 
 /**
  * A folder header. Plain by default — paths are structure, not state — and bold
- * when focused. Collapsed folders report how many threads they are hiding.
+ * when focused. Collapsed folders report how many threads they are hiding. The Orcs
+ * section wears the same row under its own name rather than a path.
  */
 function renderFolderRow(
   cwd: string,
   threadCount: number,
+  heading: string | undefined,
   state: FleetState,
   options: ResolvedFleetRenderOptions,
   scrollbar?: "track" | "thumb" | undefined,
@@ -2027,7 +2040,7 @@ function renderFolderRow(
     ? ` · ${threadCount} thread${threadCount === 1 ? "" : "s"}`
     : "";
   const label = fit(
-    `${collapsed ? "▸" : "▾"} ${shortPath(cwd, options.home)}${summary}`,
+    `${collapsed ? "▸" : "▾"} ${heading ?? shortPath(cwd, options.home)}${summary}`,
     Math.max(1, options.width - ROW_GUTTER.length),
   );
   return `${rowGutter(focused, options.color, scrollbar)}${focused ? paint(label, "bold", options.color) : label}`;
@@ -2066,7 +2079,9 @@ function renderThreadRow(
 ): string {
   const selected = !threadFocusInert(state)
     && thread.record.id === state.selectedSessionId;
-  const baseTitle = thread.record.name ?? thread.record.role ?? `Untitled ${thread.record.id.slice(0, 8)}`;
+  const baseTitle = displayThreadName(
+    thread.record.name ?? thread.record.role ?? `Untitled ${thread.record.id.slice(0, 8)}`,
+  );
   const title = `${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
   const identity = `${friendlyModel(thread.record.provider, thread.record.model)} · ${friendlyEffort(thread.record.effort ?? "provider-managed")}`;
   const status = threadStatus(thread);
@@ -2769,11 +2784,20 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
   const threads = orderedThreads(snapshot);
   const selectedExists = threads.some(({ record }) => record.id === state.selectedSessionId);
   const selectedSessionId = selectedExists ? state.selectedSessionId : threads[0]?.record.id;
-  // Only a worker's row can be hidden by its folder. Orcs sit in the global section
-  // and stay visible however their folder is folded, so they have no folder to rise to.
+  // An orc's row is never hidden by the folder it was launched in — it lives in the global
+  // Orcs section — but that section folds and caps like a folder, so the orc answers to it
+  // under the sentinel key instead.
   const selectedRecord = threads.find(({ record }) => record.id === selectedSessionId)?.record;
-  const selectedCwd = selectedRecord?.kind === "orchestrator" ? undefined : selectedRecord?.cwd;
-  const folders = groupThreads(snapshot.threads);
+  const selectedCwd = selectedRecord === undefined
+    ? undefined
+    : selectedRecord.kind === "orchestrator"
+      ? ORCS_SECTION_KEY
+      : selectedRecord.cwd;
+  const orcs = orchestratorThreads(snapshot.threads);
+  const folders = [
+    ...(orcs.length === 0 ? [] : [{ cwd: ORCS_SECTION_KEY, threads: orcs }]),
+    ...groupThreads(snapshot.threads),
+  ];
   const folderExists = state.focusedFolderCwd !== undefined
     && folders.some(({ cwd }) => cwd === state.focusedFolderCwd);
   // A capped folder only offers a show-more row once it has more workers than it shows,
@@ -2858,7 +2882,13 @@ function orderedThreads(snapshot: FleetSnapshot): FleetThread[] {
  * their own right: focus lands on them, and Enter there collapses or expands the folder.
  */
 type FleetRow =
-  | { kind: "folder"; cwd: string; threadCount: number }
+  | {
+    kind: "folder";
+    cwd: string;
+    threadCount: number;
+    /** Set on the Orcs header, which names a section rather than a path on disk. */
+    label?: string;
+  }
   | {
     kind: "thread";
     cwd: string;
@@ -2903,7 +2933,7 @@ function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow
   const orcs = orchestratorThreads(snapshot.threads);
   const orcRows: FleetListRow[] = orcs.length === 0
     ? []
-    : sectionRows(ORCS_SECTION_LABEL, orcs, orcs, state, true);
+    : orcSectionRows(orcs, state);
   const folderRows = groupThreads(snapshot.threads).flatMap(({ cwd, threads }, groupIndex): FleetListRow[] => {
     const header: FleetRow = { kind: "folder", cwd, threadCount: threads.length };
     const spacer: FleetListRow[] = groupIndex === 0 && orcRows.length === 0
@@ -2925,6 +2955,29 @@ function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow
 }
 
 /**
+ * The global Orcs roster, headed by a row that folds it exactly as a folder header folds a
+ * project. A fleet accumulates orchestrators without bound, so the roster is capped the same
+ * way too: an unbounded section would shove every folder below it down the screen.
+ */
+function orcSectionRows(orcs: readonly FleetThread[], state: FleetState): FleetListRow[] {
+  const header: FleetRow = {
+    kind: "folder",
+    cwd: ORCS_SECTION_KEY,
+    threadCount: orcs.length,
+    label: ORCS_SECTION_LABEL,
+  };
+  if (isCollapsed(state, ORCS_SECTION_KEY)) return [header];
+  const visible = isExpanded(state, ORCS_SECTION_KEY) ? orcs : orcs.slice(0, FOLDER_THREAD_CAP);
+  return [
+    header,
+    ...threadRows(visible, state, true, undefined),
+    ...(orcs.length > FOLDER_THREAD_CAP
+      ? [{ kind: "show-more" as const, cwd: ORCS_SECTION_KEY, hiddenCount: orcs.length - visible.length }]
+      : []),
+  ];
+}
+
+/**
  * A role heading and the thread rows under it. `all` carries the whole group even when the
  * cap trims what is shown, so the heading keeps describing the folder rather than the slice.
  */
@@ -2940,26 +2993,36 @@ function sectionRows(
   const rollup = uniformLeaseCustody(all.map(threadLeaseCustody));
   return [
     { kind: "section", label: sectionLabel(label, all.length, rollup) },
-    ...visible.flatMap((thread): FleetListRow[] => {
-      const custody = threadLeaseCustody(thread);
-      const badge = rollup !== undefined || custody === undefined
-        ? undefined
-        : leaseCustodyBadge(custody);
-      return [
-        {
-          kind: "thread",
-          cwd: thread.record.cwd,
-          thread,
-          ...(showFolder ? { showFolder: true as const } : {}),
-          ...(badge === undefined ? {} : { leaseBadge: badge }),
-        },
-        ...(state.leaseDetail === true && thread.coordination !== undefined
-          && thread.record.kind !== "orchestrator"
-          ? [{ kind: "ownership" as const, coordination: thread.coordination }]
-          : []),
-      ];
-    }),
+    ...threadRows(visible, state, showFolder, rollup),
   ];
+}
+
+/** The thread rows of one section, each with the ownership line it owns when detail is on. */
+function threadRows(
+  visible: readonly FleetThread[],
+  state: FleetState,
+  showFolder: boolean,
+  rollup: LeaseCustody | undefined,
+): FleetListRow[] {
+  return visible.flatMap((thread): FleetListRow[] => {
+    const custody = threadLeaseCustody(thread);
+    const badge = rollup !== undefined || custody === undefined
+      ? undefined
+      : leaseCustodyBadge(custody);
+    return [
+      {
+        kind: "thread",
+        cwd: thread.record.cwd,
+        thread,
+        ...(showFolder ? { showFolder: true as const } : {}),
+        ...(badge === undefined ? {} : { leaseBadge: badge }),
+      },
+      ...(state.leaseDetail === true && thread.coordination !== undefined
+        && thread.record.kind !== "orchestrator"
+        ? [{ kind: "ownership" as const, coordination: thread.coordination }]
+        : []),
+    ];
+  });
 }
 
 function threadLeaseCustody(thread: FleetThread): LeaseCustody | undefined {
@@ -3401,6 +3464,49 @@ function renderComposerLines(
   const visibleRows = rows.slice(-maximumRows);
   visibleRows[0] = `… ${(visibleRows[0] ?? "").slice(2)}`;
   return visibleRows;
+}
+
+/** Splits a painted line into plain text and the escape sequences between it. */
+const ANSI_SEQUENCE = /(\u001b\[[0-9;]*m)/u;
+
+/**
+ * A composed row cut to the columns it prints. Escape sequences cost no columns, so they are
+ * carried across whole and a cut inside painted text closes its own color: a row truncated
+ * mid-sequence would leak the rest of the pane's paint, and one left open would leak its hue.
+ */
+function clampRowWidth(value: string, width: number): string {
+  if (width <= 0) return "";
+  const parts = value.split(ANSI_SEQUENCE);
+  let printed = 0;
+  let painted = false;
+  let clamped = "";
+  for (const [index, part] of parts.entries()) {
+    // Odd parts are the captured escape sequences; even parts are what the terminal shows.
+    if (index % 2 === 1) {
+      clamped += part;
+      painted = part !== ANSI.reset;
+      continue;
+    }
+    const characters = [...part];
+    if (printed + characters.length <= width) {
+      clamped += part;
+      printed += characters.length;
+      continue;
+    }
+    clamped += characters.slice(0, width - printed).join("");
+    return painted ? `${clamped}${ANSI.reset}` : clamped;
+  }
+  return clamped;
+}
+
+/**
+ * The name a thread is listed under. Stored orchestrator names spell the fleet out in full, which
+ * is the right thing for a record and far too wide for a row, so the row abbreviates it. Threads
+ * named anything else are listed exactly as they were named.
+ */
+function displayThreadName(name: string): string {
+  const orchestrator = /^Cyberdeck orchestrator \((.+)\)$/u.exec(name);
+  return orchestrator === null ? name : `cd-orc (${orchestrator[1]})`;
 }
 
 function fit(value: string, width: number): string {
