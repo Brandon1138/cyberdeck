@@ -77,7 +77,7 @@ describe("ScoutReportStore", () => {
     expect(runtime.reportPath).toBe(join(runtime.dropBoxPath, "card.md"));
     const capture = await store.capture(
       runtime,
-      `${JSON.stringify({ type: "result", result: card })}\n`,
+      assistantFrame(card),
     );
 
     expect(capture).toMatchObject({
@@ -105,6 +105,57 @@ describe("ScoutReportStore", () => {
       runtime,
       `${SCOUT_REPORT_BEGIN}\n{"findings":[]}\n${SCOUT_REPORT_END}`,
     )).resolves.toMatchObject({ state: "invalid" });
+  });
+
+  it("keeps valid A when later candidates are partial or invalid", async () => {
+    const repo = await directory("cyberdeck-scout-repo-");
+    const state = await directory("cyberdeck-scout-state-");
+    const store = new ScoutReportStore(state);
+    const runtime = await store.initialize("99999999-9999-4999-8999-999999999999", repo);
+
+    await expect(store.capture(runtime, assistantFrame(card)))
+      .resolves.toMatchObject({ state: "complete", card: { verdict: "SUPPORTED" } });
+    await expect(store.capture(
+      runtime,
+      assistantFrame(`${SCOUT_CARD_BEGIN}\nQUESTION\nLater partial`),
+    )).resolves.toMatchObject({ state: "complete", card: { verdict: "SUPPORTED" } });
+    await expect(store.capture(
+      runtime,
+      assistantFrame(`${SCOUT_CARD_BEGIN}\nQUESTION\nLater invalid\n${SCOUT_CARD_END}`),
+    )).resolves.toMatchObject({ state: "complete", card: { verdict: "SUPPORTED" } });
+    expect(await readFile(runtime.reportPath, "utf8"))
+      .toContain("Cursor selects plan mode for read-only Scout launches.");
+  });
+
+  it("atomically replaces valid A with later valid B and recovers B after restart", async () => {
+    const repo = await directory("cyberdeck-scout-repo-");
+    const state = await directory("cyberdeck-scout-state-");
+    const runtime = await new ScoutReportStore(state).initialize(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      repo,
+    );
+    const store = new ScoutReportStore(state);
+    const cardB = card.replace(
+      "Cursor selects plan mode for read-only Scout launches.",
+      "Cursor uses a verified read-only launch for Scout sessions.",
+    );
+
+    await store.capture(runtime, assistantFrame(card));
+    await expect(store.capture(runtime, assistantFrame(cardB))).resolves.toMatchObject({
+      state: "complete",
+      card: { finding: "Cursor uses a verified read-only launch for Scout sessions." },
+    });
+
+    const recovered = await new ScoutReportStore(state).collect({
+      ...runtime,
+      reportState: "complete",
+    });
+    expect(recovered).toMatchObject({
+      state: "complete",
+      card: { finding: "Cursor uses a verified read-only launch for Scout sessions." },
+    });
+    expect(await readFile(runtime.reportPath, "utf8"))
+      .not.toContain("Cursor selects plan mode for read-only Scout launches.");
   });
 
   it("does not promote complete JSON without closing frame marker after restart", async () => {
@@ -139,6 +190,19 @@ describe("ScoutReportStore", () => {
         SCOUT_REPORT_END,
       ].join("\n"),
     )).resolves.toMatchObject({ state: "complete", report });
+  });
+
+  it("does not let unknown or non-JSON stream frames inject a card", async () => {
+    const repo = await directory("cyberdeck-scout-repo-");
+    const state = await directory("cyberdeck-scout-state-");
+    const store = new ScoutReportStore(state);
+    const runtime = await store.initialize("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", repo);
+
+    await expect(store.capture(runtime, [
+      JSON.stringify({ type: "future", output: card }),
+      card,
+    ].join("\n"))).resolves.toEqual({ state: "missing" });
+    await expect(store.collect(runtime)).resolves.toEqual({ state: "missing" });
   });
 
   it("rejects drop-box state that overlaps the worker worktree", async () => {
@@ -199,3 +263,10 @@ describe("ScoutReportStore", () => {
     await expect(store.remove("../outside")).rejects.toThrow("must stay inside");
   });
 });
+
+function assistantFrame(text: string): string {
+  return `${JSON.stringify({
+    type: "assistant",
+    message: { role: "assistant", content: [{ type: "text", text }] },
+  })}\n`;
+}

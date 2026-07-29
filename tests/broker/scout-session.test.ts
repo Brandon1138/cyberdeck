@@ -29,13 +29,14 @@ class FakePty implements PtyHandle {
   private exited = false;
   private readonly outputs = new Set<(chunk: Buffer) => void>();
   private readonly exits = new Set<(code: number, signal?: number) => void>();
+  constructor(private readonly killExitCode = 0) {}
 
   write(data: Buffer): void { this.writes.push(Buffer.from(data)); }
   resize(): void {}
   snapshot(): Buffer { return Buffer.from(this.replay); }
   kill(signal?: string): void {
     this.kills.push(signal);
-    this.exit(0);
+    this.exit(this.killExitCode);
   }
   onOutput(listener: (chunk: Buffer) => void): () => void {
     this.outputs.add(listener);
@@ -86,8 +87,11 @@ const card = [
 
 function streamText(text: string, usage?: { input_tokens: number; output_tokens: number }): string {
   return `${JSON.stringify({
-    type: "result",
-    result: text,
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text }],
+    },
     ...(usage === undefined ? {} : { usage }),
   })}\n`;
 }
@@ -95,11 +99,13 @@ function streamText(text: string, usage?: { input_tokens: number; output_tokens:
 async function harness(options: {
   spawnError?: Error;
   workspaceStates?: string[];
+  captureDelayMs?: number;
+  killExitCode?: number;
 } = {}) {
   const repo = await mkdtemp(join(tmpdir(), "cyberdeck-scout-repo-"));
   const state = await mkdtemp(join(tmpdir(), "cyberdeck-scout-state-"));
   directories.push(repo, state);
-  const pty = new FakePty();
+  const pty = new FakePty(options.killExitCode);
   const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => {
     if (options.spawnError !== undefined) throw options.spawnError;
     return pty;
@@ -118,13 +124,26 @@ async function harness(options: {
     buildResumeSpec: () => { throw new Error("not used"); },
   };
   const states = [...(options.workspaceStates ?? ["a".repeat(64), "a".repeat(64)])];
+  const reportStore = new ScoutReportStore(state);
   const registry = new SessionRegistry({
     adapters: { cursor },
     ptyFactory,
     journal: { append: async () => {} },
     validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({}),
-    scoutReports: new ScoutReportStore(state),
+    scoutReports: options.captureDelayMs === undefined
+      ? reportStore
+      : {
+          initialize: reportStore.initialize.bind(reportStore),
+          capture: async (...args: Parameters<ScoutReportStore["capture"]>) => {
+            await new Promise((resolve) => setTimeout(resolve, options.captureDelayMs));
+            return reportStore.capture(...args);
+          },
+          collect: reportStore.collect.bind(reportStore),
+          appendTrace: reportStore.appendTrace.bind(reportStore),
+          readArtifact: reportStore.readArtifact.bind(reportStore),
+          remove: reportStore.remove.bind(reportStore),
+        },
     scoutWorkspaceState: async () => states.shift() ?? states.at(-1) ?? "a".repeat(64),
   });
   return { registry, pty, ptyFactory, repo, state, cursor };
@@ -221,13 +240,6 @@ describe("Scout session lifecycle", () => {
     expect(ptyFactory).toHaveBeenCalledWith(expect.any(Object), MIN_SCOUT_REPLAY_BYTES);
 
     pty.emit(streamText(card));
-    await expect(registry.waitForWorkerResults([
-      { sessionId: record.id, completionTarget: 1 },
-    ], 0, 4_000)).resolves.toMatchObject({
-      timedOut: true,
-      results: [{ status: "waiting" }],
-    });
-    pty.exit(0);
     const result = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
     ], 2_000, 4_000);
@@ -247,14 +259,15 @@ describe("Scout session lifecycle", () => {
     expect(registry.get(record.id).scout?.canary.status).toBe("verified");
     expect(await readFile(record.scout!.tracePath!, "utf8")).toContain(SCOUT_CARD_BEGIN);
     expect(pty.writes).toEqual([]);
+    expect(pty.kills).toEqual(["SIGTERM"]);
     await registry.delete(record.id);
     await expect(lstat(record.scout!.dropBoxPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("terminates on token budget and preserves partial report after kill mid-write", async () => {
+  it("preserves partial report when wall-clock cutoff stops the Scout", async () => {
     const { registry, pty, repo } = await harness();
     const record = await registry.start(
-      request(repo, { maxWallClockMs: 10_000, maxTokens: 4_000 }),
+      request(repo, { maxWallClockMs: 20, maxTokens: 4_000 }),
       "Scout prompt",
     );
     pty.emit(streamText(
@@ -276,7 +289,7 @@ describe("Scout session lifecycle", () => {
     expect(await readFile(record.scout!.reportPath, "utf8")).toContain("QUESTION");
   });
 
-  it("uses cumulative stream-json usage for an optional token ceiling", async () => {
+  it("accepts deprecated maxTokens without using it as terminal authority", async () => {
     const { registry, pty, repo } = await harness();
     const record = await registry.start(
       request(repo, { maxWallClockMs: 10_000, maxTokens: 1_000 }),
@@ -287,14 +300,50 @@ describe("Scout session lifecycle", () => {
     expect(registry.get(record.id).scout?.terminalState).toBeUndefined();
     expect(pty.kills).toEqual([]);
 
-    pty.emit(streamText("working", { input_tokens: 500, output_tokens: 600 }));
+    pty.emit(streamText(card, { input_tokens: 500, output_tokens: 600 }));
     await expect(registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
     ], 2_000, 4_000)).resolves.toMatchObject({
       results: [{
-        status: "budget_exhausted",
-        terminalState: "budget_exhausted",
+        status: "completed",
+        terminalState: "complete",
       }],
+    });
+  });
+
+  it("settles pre-cutoff async capture before deciding wall-clock exhaustion", async () => {
+    const { registry, pty, repo } = await harness({ captureDelayMs: 40 });
+    const record = await registry.start(
+      request(repo, { maxWallClockMs: 10, maxTokens: 1 }),
+      "Scout prompt",
+    );
+
+    pty.emit(streamText(card, { input_tokens: 100_000, output_tokens: 100_000 }));
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 2_000, 4_000)).resolves.toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "completed",
+        completedTurns: 1,
+        terminalState: "complete",
+        reportState: "complete",
+      }],
+    });
+  });
+
+  it("treats expected early SIGTERM close as successful completion", async () => {
+    const { registry, pty, repo } = await harness({ killExitCode: 143 });
+    const record = await registry.start(
+      request(repo, { maxWallClockMs: 10_000, maxTokens: 1 }),
+      "Scout prompt",
+    );
+
+    pty.emit(streamText(card));
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 2_000, 4_000)).resolves.toMatchObject({
+      results: [{ status: "completed", terminalState: "complete" }],
     });
   });
 
@@ -310,6 +359,25 @@ describe("Scout session lifecycle", () => {
 
     expect(result.results[0]).toMatchObject({
       status: "budget_exhausted",
+      terminalState: "budget_exhausted",
+      reportState: "missing",
+    });
+  });
+
+  it("does not promote a valid card received after persisted cutoff", async () => {
+    const { registry, pty, repo } = await harness();
+    const record = await registry.start(
+      request(repo, { maxWallClockMs: 20, maxTokens: 1 }),
+      "Scout prompt",
+    );
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 2_000, 4_000)).resolves.toMatchObject({
+      results: [{ status: "budget_exhausted", reportState: "missing" }],
+    });
+
+    pty.emit(streamText(card));
+    expect(registry.get(record.id).scout).toMatchObject({
       terminalState: "budget_exhausted",
       reportState: "missing",
     });

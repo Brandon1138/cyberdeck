@@ -18,7 +18,8 @@ export const WorkerLeasePolicySchema = z.enum([
 
 export const ScoutBudgetSchema = z.object({
   maxWallClockMs: z.number().int().positive().max(86_400_000),
-  maxTokens: z.number().int().positive().max(10_000_000).optional(),
+  maxTokens: z.number().int().positive().max(10_000_000).optional()
+    .describe("Deprecated compatibility field; accepted but ignored for Scout termination"),
 });
 
 export const ScoutBriefSchema = z.object({

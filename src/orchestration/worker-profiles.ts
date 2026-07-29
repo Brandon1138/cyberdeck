@@ -15,12 +15,6 @@ export const SCOUT_REPORT_END = "CYBERDECK_SCOUT_REPORT_END";
  * resolved and enforced outside this prompt.
  */
 export function scoutDispatchPrompt(brief: ScoutBrief): string {
-  const budget = [
-    `wall-clock cap ${brief.budget.maxWallClockMs}ms`,
-    ...(brief.budget.maxTokens === undefined
-      ? []
-      : [`provider token guard ${brief.budget.maxTokens}`]),
-  ].join("; ");
   return [
     "CYBERDECK SCOUT PROFILE — TIER 1",
     "",
@@ -30,9 +24,14 @@ export function scoutDispatchPrompt(brief: ScoutBrief): string {
     "Questions:",
     ...brief.questions.map((question) => `- ${question}`),
     `Stop condition: ${brief.stopCondition}`,
-    `Budget: ${budget}`,
+    `Budget: wall-clock cap ${brief.budget.maxWallClockMs}ms`,
     "",
     "Inspect only listed scope. Do not mutate repository, git state, dependencies, or environment.",
+    "Inspect highest-signal scoped symbols first. Stop searching when evidence supports an answer.",
+    "Use at most 70% of wall time for search and, when the budget permits, reserve at least 15 seconds for finalization.",
+    "Emit a complete valid card early after first decision-relevant evidence. BLOCKED and INCONCLUSIVE are valid outcomes.",
+    "Any later replacement must be complete and self-contained.",
+    "At the margin, stop tools and emit the best supported valid card.",
     "Do not narrate your chronological process. Untaken or rejected branches belong only in evidence when ruling them out changes the parent Orc's decision.",
     "Finish with one compact natural-language decision card using the exact headings and framing below. VERDICT must be SUPPORTED, REFUTED, MIXED, INCONCLUSIVE, BLOCKED, or NEW_FINDING. BASIS must be direct-test, direct-source, history, corroborated, inference, speculation, or none.",
     SCOUT_CARD_BEGIN,

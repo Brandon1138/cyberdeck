@@ -63,19 +63,26 @@ const HEADINGS = [
   "CAVEAT",
   "NEXT PROBE",
 ] as const;
-const TEXT_FIELD_KEYS = new Set([
-  "content",
-  "delta",
-  "message",
-  "output",
-  "response",
-  "result",
-  "text",
-]);
 
-function normalizedKey(value: string): string {
-  return value.toLowerCase().replace(/[^a-z]/gu, "");
-}
+const CursorTextBlockSchema = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+}).passthrough();
+
+const CursorAssistantEventSchema = z.object({
+  type: z.literal("assistant"),
+  message: z.object({
+    role: z.literal("assistant"),
+    content: z.array(z.unknown()),
+  }).passthrough(),
+}).passthrough();
+
+const CursorSuccessfulResultEventSchema = z.object({
+  type: z.literal("result"),
+  subtype: z.literal("success"),
+  is_error: z.literal(false),
+  result: z.string(),
+}).passthrough();
 
 /**
  * Parse the compact, human-readable decision card Composer emits. JSON remains a transport detail;
@@ -187,108 +194,35 @@ export function compactScoutDecisionCard(card: ScoutDecisionCard): string {
   return `${card.verdict} · ${card.basis} · ${card.finding}`;
 }
 
-/**
- * Cursor's stream-json frame schema may evolve, but the final model text remains a string value.
- * Extract only strings carrying Scout framing markers; all provider telemetry stays out of the
- * decision-card parser and therefore out of the Orc's context.
- */
+/** Extract model-authored text from known Cursor stream-json events only. */
 export function scoutFramedTextFromCursorStream(replay: string): string {
-  const candidates: string[] = [];
-  let insideFrame = false;
+  const assistantText: string[] = [];
+  let terminalSnapshot: string | undefined;
   for (const line of replay.replace(/\r\n?/gu, "\n").split("\n")) {
     if (line.trim() === "") continue;
-    let strings: string[];
+    let frame: unknown;
     try {
-      strings = [];
-      collectTextStrings(JSON.parse(line), strings);
+      frame = JSON.parse(line);
     } catch {
-      strings = [line];
+      continue;
     }
-    for (const value of strings) {
-      const opens = value.includes(SCOUT_CARD_BEGIN)
-        || value.includes(SCOUT_EVIDENCE_BEGIN);
-      const closes = value.includes(SCOUT_CARD_END)
-        || value.includes(SCOUT_EVIDENCE_END);
-      if (insideFrame || opens) candidates.push(value);
-      if (opens && !closes) insideFrame = true;
-      if (closes) insideFrame = false;
-    }
-  }
-  return candidates.join("\n");
-}
 
-/**
- * Cursor has used several usage shapes across stream-json releases. The broker accepts only
- * explicitly token-named numeric fields and takes the largest cumulative observation, so an
- * optional Scout token ceiling does not depend on terminal decoration or model-authored text.
- */
-export function scoutTokenCountFromCursorStream(replay: string): number | undefined {
-  let maximum: number | undefined;
-  for (const line of replay.replace(/\r\n?/gu, "\n").split("\n")) {
-    if (line.trim() === "") continue;
-    try {
-      maximum = maximumTokenObservation(JSON.parse(line), maximum);
-    } catch {
-      // Raw stderr and provider diagnostics are durable trace, never token-accounting input.
+    const successfulResult = CursorSuccessfulResultEventSchema.safeParse(frame);
+    if (successfulResult.success) {
+      terminalSnapshot = successfulResult.data.result;
+      continue;
+    }
+
+    const assistant = CursorAssistantEventSchema.safeParse(frame);
+    if (!assistant.success) continue;
+    for (const block of assistant.data.message.content) {
+      const text = CursorTextBlockSchema.safeParse(block);
+      if (text.success) assistantText.push(text.data.text);
     }
   }
-  return maximum;
-}
-
-function collectTextStrings(
-  value: unknown,
-  output: string[],
-  textField = false,
-): void {
-  if (typeof value === "string") {
-    if (
-      textField
-      || value.includes(SCOUT_CARD_BEGIN)
-      || value.includes(SCOUT_CARD_END)
-      || value.includes(SCOUT_EVIDENCE_BEGIN)
-      || value.includes(SCOUT_EVIDENCE_END)
-    ) output.push(value);
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) collectTextStrings(entry, output, textField);
-    return;
-  }
-  if (typeof value !== "object" || value === null) return;
-  for (const [key, entry] of Object.entries(value)) {
-    collectTextStrings(entry, output, TEXT_FIELD_KEYS.has(normalizedKey(key)));
-  }
-}
-
-function maximumTokenObservation(
-  value: unknown,
-  current: number | undefined,
-): number | undefined {
-  if (Array.isArray(value)) {
-    return value.reduce<number | undefined>(
-      (maximum, entry) => maximumTokenObservation(entry, maximum),
-      current,
-    );
-  }
-  if (typeof value !== "object" || value === null) return current;
-
-  const fields = new Map<string, number>();
-  for (const [key, entry] of Object.entries(value)) {
-    if (typeof entry !== "number" || !Number.isFinite(entry) || entry < 0) continue;
-    fields.set(key.toLowerCase().replace(/[^a-z]/gu, ""), entry);
-  }
-  const total = fields.get("totaltokens");
-  const input = fields.get("inputtokens");
-  const output = fields.get("outputtokens");
-  const observation = total
-    ?? (input === undefined && output === undefined ? undefined : (input ?? 0) + (output ?? 0));
-  let maximum = observation === undefined
-    ? current
-    : Math.max(current ?? 0, Math.floor(observation));
-  for (const entry of Object.values(value)) {
-    maximum = maximumTokenObservation(entry, maximum);
-  }
-  return maximum;
+  // Successful terminal result repeats Cursor's complete assistant answer. Prefer it instead of
+  // appending a duplicate decision card.
+  return terminalSnapshot ?? assistantText.join("");
 }
 
 function cardSections(text: string): Map<(typeof HEADINGS)[number], string> {
