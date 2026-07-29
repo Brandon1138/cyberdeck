@@ -12,7 +12,12 @@ export const FleetLaunchProfileSchema = z.object({
   effort: ReasoningEffortSchema.optional(),
 });
 
-const FleetPreferenceRecordSchema = z.object({
+export const FleetFolderDispositionSchema = z.object({
+  collapsed: z.boolean(),
+  expanded: z.boolean(),
+});
+
+const FleetLaunchProfileRecordSchema = z.object({
   recordType: z.literal("fleet.launch-profile"),
   eventId: z.uuid(),
   persistedAt: z.iso.datetime(),
@@ -20,7 +25,28 @@ const FleetPreferenceRecordSchema = z.object({
   profile: FleetLaunchProfileSchema,
 });
 
+/**
+ * Folder folds live beside launch profiles because both are per-key operator intent for the same
+ * list. The key is only required to look like an absolute path, never to exist on disk: the Orcs
+ * roster folds under a sentinel key that no directory can ever occupy.
+ */
+const FleetFolderDispositionRecordSchema = z.object({
+  recordType: z.literal("fleet.folder-collapse"),
+  eventId: z.uuid(),
+  persistedAt: z.iso.datetime(),
+  key: z.string().startsWith("/"),
+  disposition: FleetFolderDispositionSchema,
+});
+
+const FleetPreferenceRecordSchema = z.discriminatedUnion("recordType", [
+  FleetLaunchProfileRecordSchema,
+  FleetFolderDispositionRecordSchema,
+]);
+
+type FleetPreferenceRecord = z.infer<typeof FleetPreferenceRecordSchema>;
+
 export type FleetLaunchProfile = z.infer<typeof FleetLaunchProfileSchema>;
+export type FleetFolderDisposition = z.infer<typeof FleetFolderDispositionSchema>;
 
 /** Append-only per-project explicit worker launch selections. */
 export class FleetPreferenceStore {
@@ -30,13 +56,42 @@ export class FleetPreferenceStore {
   }
 
   async set(cwd: string, profile: FleetLaunchProfile): Promise<void> {
-    const record = FleetPreferenceRecordSchema.parse({
+    await this.append(FleetPreferenceRecordSchema.parse({
       recordType: "fleet.launch-profile",
       eventId: randomUUID(),
       persistedAt: new Date().toISOString(),
       cwd,
       profile,
-    });
+    }));
+  }
+
+  async setFolderDisposition(key: string, disposition: FleetFolderDisposition): Promise<void> {
+    await this.append(FleetPreferenceRecordSchema.parse({
+      recordType: "fleet.folder-collapse",
+      eventId: randomUUID(),
+      persistedAt: new Date().toISOString(),
+      key,
+      disposition,
+    }));
+  }
+
+  async list(): Promise<Record<string, FleetLaunchProfile>> {
+    const profiles: Record<string, FleetLaunchProfile> = {};
+    for (const record of await this.load()) {
+      if (record.recordType === "fleet.launch-profile") profiles[record.cwd] = record.profile;
+    }
+    return profiles;
+  }
+
+  async listFolderDispositions(): Promise<Record<string, FleetFolderDisposition>> {
+    const dispositions: Record<string, FleetFolderDisposition> = {};
+    for (const record of await this.load()) {
+      if (record.recordType === "fleet.folder-collapse") dispositions[record.key] = record.disposition;
+    }
+    return dispositions;
+  }
+
+  private async append(record: FleetPreferenceRecord): Promise<void> {
     const handle = await openPrivateAppendFile(this.path);
     try {
       await handle.write(`${JSON.stringify(record)}\n`, undefined, "utf8");
@@ -46,23 +101,22 @@ export class FleetPreferenceStore {
     }
   }
 
-  async list(): Promise<Record<string, FleetLaunchProfile>> {
+  private async load(): Promise<readonly FleetPreferenceRecord[]> {
     const content = await readFile(this.path, "utf8").catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return "";
       throw error;
     });
     const lines = content.split("\n");
     if (!content.endsWith("\n")) lines.pop();
-    const profiles: Record<string, FleetLaunchProfile> = {};
+    const records: FleetPreferenceRecord[] = [];
     for (const [index, line] of lines.entries()) {
       if (line.trim() === "") continue;
       try {
-        const record = FleetPreferenceRecordSchema.parse(JSON.parse(line));
-        profiles[record.cwd] = record.profile;
+        records.push(FleetPreferenceRecordSchema.parse(JSON.parse(line)));
       } catch (error) {
         throw new Error(`Invalid Fleet preference at line ${index + 1}`, { cause: error });
       }
     }
-    return profiles;
+    return records;
   }
 }

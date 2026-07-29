@@ -91,6 +91,20 @@ function expandedState(snapshot: FleetSnapshot, cwd: string): FleetState {
   return { ...createFleetState(snapshot), expandedCwds: [cwd] };
 }
 
+/** A fleet of orchestrators alone, newest first, each launched in its own folder. */
+function orcFleet(count: number): FleetSnapshot {
+  return fleet(...Array.from({ length: count }, (_, index) => ({
+    record: session({
+      id: `99999999-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      kind: "orchestrator",
+      role: "orchestrator",
+      cwd: `/repo/${String(index + 1).padStart(2, "0")}`,
+      name: `Orc ${index + 1}`,
+      updatedAt: `2026-07-22T09:${String(59 - index).padStart(2, "0")}:00.000Z`,
+    }),
+  })));
+}
+
 function threadFleet(count: number, cwd = "/repo/one"): FleetSnapshot {
   return fleet(...Array.from({ length: count }, (_, index) => ({
     record: session({
@@ -254,6 +268,137 @@ describe("fleet presentation", () => {
     expect(rendered).toContain("Thread 5");
     expect(rendered).not.toMatch(/\+ \d+ more/u);
     expect(rendered).not.toContain("show less");
+  });
+
+  it("caps the Orcs roster at five behind the same show-more row a folder uses", () => {
+    const snapshot = orcFleet(8);
+    const view = { color: false, width: 100, height: 40, now: NOW_MS };
+    const initial = createFleetState(snapshot);
+    const capped = renderFleet(snapshot, initial, view);
+
+    expect(capped).toContain("Orc 5");
+    expect(capped).not.toContain("Orc 6");
+    expect(capped).toContain("+ 3 more");
+
+    // Five steps down from the newest orc land on the roster's show-more row, not past it.
+    let onShowMore = initial;
+    for (let step = 0; step < 5; step += 1) {
+      onShowMore = transitionFleet(onShowMore, snapshot, "down", NOW_MS).state;
+    }
+    expect(onShowMore.focusedShowMoreCwd).toBe("/@orcs");
+
+    const expanded = transitionFleet(onShowMore, snapshot, "enter", NOW_MS).state;
+    expect(expanded.expandedCwds).toEqual(["/@orcs"]);
+    const expandedRender = renderFleet(snapshot, expanded, view);
+    expect(expandedRender).toContain("Orc 8");
+    expect(expandedRender).toContain("− show less");
+
+    // Right opens it and left puts it back, exactly as on a folder's show-more row.
+    const recapped = transitionFleet(expanded, snapshot, "left", NOW_MS).state;
+    expect(recapped.expandedCwds).toEqual([]);
+    expect(renderFleet(snapshot, recapped, view)).not.toContain("Orc 6");
+    expect(transitionFleet(recapped, snapshot, "right", NOW_MS).state.expandedCwds)
+      .toEqual(["/@orcs"]);
+  });
+
+  it("raises focus onto the Orcs show-more row when churn pushes the selected orc under the cap", () => {
+    const snapshot = orcFleet(8);
+    const hidden = {
+      ...createFleetState(snapshot),
+      selectedSessionId: snapshot.threads[7]?.record.id,
+    };
+    const normalized = transitionFleet(hidden, snapshot, "ctrl+x", NOW_MS);
+
+    expect(normalized.state.focusedShowMoreCwd).toBe("/@orcs");
+    expect(normalized.action).toBeUndefined();
+  });
+
+  it("folds the whole Orcs section from its header, leaving the folders below it alone", () => {
+    const snapshot = fleet(
+      ...orcFleet(2).threads.map(({ record }) => ({ record })),
+      {
+        record: session({
+          id: "22222222-2222-4222-8222-222222222222",
+          kind: "worker",
+          role: "worker",
+          cwd: "/repo/zulu",
+          name: "Zulu worker",
+        }),
+      },
+    );
+    const view = { color: false, width: 100, height: 40, now: NOW_MS };
+    const onHeader = transitionFleet(createFleetState(snapshot), snapshot, "home", NOW_MS).state;
+    expect(onHeader.focusedFolderCwd).toBe("/@orcs");
+
+    const folded = transitionFleet(onHeader, snapshot, "left", NOW_MS).state;
+    expect(folded.collapsedCwds).toEqual(["/@orcs"]);
+    const foldedRender = renderFleet(snapshot, folded, view);
+    expect(foldedRender).toContain("▸ Orcs · 2 threads");
+    expect(foldedRender).not.toContain("Orc 1");
+    // Folding the roster is not folding a project: the folders keep their own rows.
+    expect(foldedRender).toContain("▾ /repo/zulu");
+    expect(foldedRender).toContain("Zulu worker");
+
+    // Enter on the header toggles it back open, and the roster returns intact.
+    const unfolded = transitionFleet(folded, snapshot, "enter", NOW_MS).state;
+    expect(unfolded.collapsedCwds).toEqual([]);
+    expect(renderFleet(snapshot, unfolded, view)).toContain("Orc 1");
+  });
+
+  it("lists a Cyberdeck orchestrator under a short name without renaming the record", () => {
+    const record = session({ kind: "orchestrator", name: "Cyberdeck orchestrator (claude:opus)" });
+    const plain = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "orchestrator",
+      name: "Some other orchestrator (claude:opus)",
+    });
+    const snapshot = fleet({ record }, { record: plain });
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width: 140, height: 30, now: NOW_MS,
+    });
+
+    expect(rendered).toContain("cd-orc (claude:opus)");
+    expect(rendered).not.toContain("Cyberdeck orchestrator");
+    // The stored name is untouched, and a name that does not match the pattern is left alone.
+    expect(record.name).toBe("Cyberdeck orchestrator (claude:opus)");
+    expect(rendered).toContain("Some other orchestrator (claude:opus)");
+  });
+
+  it("clamps every row to the pane so a narrow fleet never soft-wraps", () => {
+    const snapshot = fleet(
+      {
+        record: session({
+          kind: "orchestrator",
+          cwd: "/Users/brandon/code/personal/cyberdeck/worktrees/fleet-orcs-layout",
+          name: "Cyberdeck orchestrator (claude:opus)",
+          latestPreview: "A reply long enough to fill the preview column many times over",
+        }),
+      },
+      {
+        record: session({
+          id: "22222222-2222-4222-8222-222222222222",
+          kind: "worker",
+          role: "worker",
+          cwd: "/Users/brandon/code/personal/cyberdeck/worktrees/fleet-orcs-layout",
+          name: "A worker whose name is far wider than a split pane",
+        }),
+      },
+    );
+    const width = 50;
+    const printed = (line: string) => [...line.replace(/\[[0-9;]*m/gu, "")].length;
+    for (const color of [false, true]) {
+      const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+        color, width, height: 30, now: NOW_MS, home: "/Users/brandon",
+      });
+      expect(Math.max(...rendered.split("\n").map(printed))).toBeLessThanOrEqual(width);
+      // A cut inside painted text closes its own color rather than leaking it down the pane.
+      if (color) {
+        for (const line of rendered.split("\n")) {
+          const opens = line.match(/\[(?!0m)[0-9;]*m/gu)?.length ?? 0;
+          expect(line.match(/\[0m/gu)?.length ?? 0).toBe(opens);
+        }
+      }
+    }
   });
 
   it("raises focus onto the show-more row when churn pushes the selected worker under the cap", () => {
@@ -1426,6 +1571,22 @@ describe("fleet controls", () => {
     expect(decoder.push(Buffer.from([0x15, 0x04]))).toEqual(["ctrl+u", "ctrl+d"]);
   });
 
+  it("names Ctrl+V rather than dropping it, and asks for the pasteboard without touching the frame", () => {
+    expect(new FleetKeyDecoder().push(Buffer.from([0x16]))).toEqual(["ctrl+v"]);
+
+    const snapshot = { threads: [] };
+    const state = {
+      ...createFleetState(snapshot),
+      draft: "Read",
+      notice: "Working directory: /repo",
+      noticeTone: "neutral" as const,
+    };
+    const transition = transitionFleet(state, snapshot, "ctrl+v", NOW_MS);
+
+    expect(transition.action).toEqual({ type: "attach-clipboard-image" });
+    expect(transition.state).toEqual(state);
+  });
+
   it("pages through rendered rows including folder headers, role headings, and group spacing", () => {
     const one = session({ cwd: "/repo/one", name: "One", displayOrder: 0 });
     const two = session({
@@ -1596,6 +1757,40 @@ describe("fleet controls", () => {
     const expanded = transitionFleet(collapsed, snapshot, "enter", NOW_MS).state;
     expect(expanded.collapsedCwds).toEqual([]);
     expect(transitionFleet(expanded, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(second.id);
+  });
+
+  it("reports every fold as a persistable disposition, and repeats as nothing at all", () => {
+    const second = session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" });
+    const snapshot = fleet({ record: session({ cwd: "/repo/one" }) }, { record: second });
+    const onFolder = transitionFleet(createFleetState(snapshot), snapshot, "down", NOW_MS).state;
+
+    const collapsed = transitionFleet(onFolder, snapshot, "left", NOW_MS);
+    expect(collapsed.action).toEqual({
+      type: "folder-disposition",
+      cwd: "/repo/two",
+      disposition: { collapsed: true, expanded: false },
+    });
+
+    // Holding left against an already-folded folder is not a new decision to record.
+    expect(transitionFleet(collapsed.state, snapshot, "left", NOW_MS).action).toBeUndefined();
+
+    expect(transitionFleet(collapsed.state, snapshot, "right", NOW_MS).action).toEqual({
+      type: "folder-disposition",
+      cwd: "/repo/two",
+      disposition: { collapsed: false, expanded: false },
+    });
+  });
+
+  it("reports the Orcs roster fold under its own key so the roster stays folded across restarts", () => {
+    const snapshot = orcFleet(2);
+    const onHeader = transitionFleet(createFleetState(snapshot), snapshot, "home", NOW_MS).state;
+    expect(onHeader.focusedFolderCwd).toBe("/@orcs");
+
+    expect(transitionFleet(onHeader, snapshot, "left", NOW_MS).action).toEqual({
+      type: "folder-disposition",
+      cwd: "/@orcs",
+      disposition: { collapsed: true, expanded: false },
+    });
   });
 
   it("keeps thread keys inert while a folder header holds focus", () => {
@@ -2483,6 +2678,73 @@ describe("runFleet", () => {
     expect(transport.close).toHaveBeenCalledOnce();
   });
 
+  it("starts with the folds the operator last left, and writes each new one back", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    const first = session({ cwd: "/repo/one", role: "worker", kind: "worker", name: "One worker" });
+    const second = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      cwd: "/repo/two",
+      role: "worker",
+      kind: "worker",
+      name: "Two worker",
+    });
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [first, second];
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "fleet.preferences") return {};
+        if (method === "fleet.folderDispositions") {
+          return { "/repo/two": { collapsed: true, expanded: false } };
+        }
+        if (method === "fleet.folderDisposition.set") return { saved: true };
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) { closeListeners.add(listener); return () => closeListeners.delete(listener); },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    // The persisted fold is in force before the operator touches anything.
+    await vi.waitFor(() => {
+      const screen = Buffer.concat(output.chunks).toString();
+      expect(screen).toContain("▸ /repo/two");
+      expect(screen).not.toContain("Two worker");
+    });
+
+    input.emit("data", Buffer.from("\u001b[B"));
+    input.emit("data", Buffer.from("\u001b[C"));
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("fleet.folderDisposition.set", {
+      key: "/repo/two",
+      disposition: { collapsed: false, expanded: false },
+    }));
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
   it("places the cursor on the final soft-wrapped composer row", async () => {
     class Input extends EventEmitter {
       isTTY = true;
@@ -2658,6 +2920,74 @@ describe("runFleet", () => {
       expect(latestScreen).toContain("▌ · Third thread");
       expect(latestScreen).not.toContain("▌ · First thread");
     });
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("splices a pasted image path into the composer and leaves the draft alone without one", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [];
+        if (method === "fleet.preferences") return {};
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) { closeListeners.add(listener); return () => closeListeners.delete(listener); },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    let pasted: string | undefined = "/state/Application Support/Cyberdeck/pasted-images/paste-a.png";
+    const pasteboardImage = vi.fn(async () => pasted);
+    const running = runFleet(
+      transport as never,
+      input,
+      output,
+      new EventEmitter(),
+      { pasteboardImage },
+    );
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("Read"));
+    input.emit("data", Buffer.from([0x16]));
+    await vi.waitFor(() => {
+      const latestScreen = Buffer.concat(output.chunks).toString().split("\u001b[2J\u001b[H").at(-1) ?? "";
+      expect(latestScreen).toContain(
+        "Read \"/state/Application Support/Cyberdeck/pasted-images/paste-a.png\"",
+      );
+      expect(latestScreen).toContain("Attached paste-a.png");
+    });
+
+    // A pasteboard holding text or nothing must not disturb the frame the operator is looking at.
+    pasted = undefined;
+    output.chunks.length = 0;
+    input.emit("data", Buffer.from([0x16]));
+    await vi.waitFor(() => expect(pasteboardImage).toHaveBeenCalledTimes(2));
+    const afterEmptyPaste = Buffer.concat(output.chunks).toString().split("\u001b[2J\u001b[H").at(-1) ?? "";
+    expect(afterEmptyPaste).toContain(
+      "Read \"/state/Application Support/Cyberdeck/pasted-images/paste-a.png\"",
+    );
+    expect(afterEmptyPaste).toContain("Attached paste-a.png");
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
