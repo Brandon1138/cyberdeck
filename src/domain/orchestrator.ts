@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { CapabilityGrantSchema } from "./capability.js";
-import { ProviderIdSchema, ReasoningEffortSchema, SandboxSchema } from "./session.js";
+import {
+  ApprovalModeSchema,
+  ProviderIdSchema,
+  ReasoningEffortSchema,
+  SandboxSchema,
+} from "./session.js";
 
 export const OrchestratorScopeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("workspace"), cwd: z.string().min(1) }),
@@ -29,6 +34,7 @@ export const EnsureOrchestratorRequestSchema = z.object({
   provider: ProviderIdSchema.optional(),
   model: z.string().optional(),
   effort: ReasoningEffortSchema.optional(),
+  approvalMode: ApprovalModeSchema.optional(),
   cwd: z.string().min(1),
   scope: z.enum(["workspace", "fleet"]).default("fleet"),
 });

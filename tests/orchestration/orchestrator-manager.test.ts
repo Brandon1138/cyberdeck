@@ -6,6 +6,7 @@ import {
   type OrchestratorBinding,
 } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
+import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const record: SessionRecord = {
@@ -88,8 +89,122 @@ describe("OrchestratorManager", () => {
     expect(instructions).toContain("cyberdeck_workers_wait once");
     expect(instructions).toContain("never reread from cursor zero");
     expect(start.mock.calls[0]).toHaveLength(1);
+    expect(start.mock.calls[0]![0]).not.toHaveProperty("approvalMode");
     expect(put).toHaveBeenCalledOnce();
     expect(result.binding.grant.capabilities).not.toContain("worker.start.fable");
+  });
+
+  it("starts a Claude orchestrator in the persisted automatic permission mode and exposes it", async () => {
+    let launchArgs: string[] = [];
+    const start = vi.fn(async (request: object) => {
+      const session = {
+        ...record,
+        ...request,
+        provider: "claude" as const,
+        model: "opus",
+      };
+      launchArgs = new ClaudeProviderAdapter().buildLaunchSpec(session).args;
+      return session;
+    });
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+      undefined,
+      undefined,
+      {
+        list: vi.fn(async () => ({ claude: "automatic" as const })),
+        set: vi.fn(async () => undefined),
+      },
+    );
+
+    await expect(manager.create({
+      provider: "claude",
+      model: "opus",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    })).resolves.toMatchObject({
+      session: {
+        provider: "claude",
+        approvalMode: "auto",
+      },
+    });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "claude",
+      approvalMode: "auto",
+    }));
+    expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "auto"]));
+  });
+
+  it("starts a Claude orchestrator in persisted permissioned mode", async () => {
+    const start = vi.fn(async (request: object) => ({
+      ...record,
+      ...request,
+      provider: "claude" as const,
+      model: "opus",
+    }));
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+      undefined,
+      undefined,
+      {
+        list: vi.fn(async () => ({ claude: "permissioned" as const })),
+        set: vi.fn(async () => undefined),
+      },
+    );
+
+    await manager.create({
+      provider: "claude",
+      model: "opus",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    });
+
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "claude",
+      approvalMode: "prompt",
+    }));
+  });
+
+  it("keeps an explicit prompt mode ahead of persisted automatic permission policy", async () => {
+    let launchArgs: string[] = [];
+    const start = vi.fn(async (request: object) => {
+      const session = {
+        ...record,
+        ...request,
+        provider: "claude" as const,
+        model: "opus",
+      };
+      launchArgs = new ClaudeProviderAdapter().buildLaunchSpec(session).args;
+      return session;
+    });
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+      undefined,
+      undefined,
+      {
+        list: vi.fn(async () => ({ claude: "automatic" as const })),
+        set: vi.fn(async () => undefined),
+      },
+    );
+
+    await manager.create({
+      provider: "claude",
+      model: "opus",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+      approvalMode: "prompt",
+    });
+
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "claude",
+      approvalMode: "prompt",
+    }));
+    expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "plan"]));
   });
 
   it("persists operator-controlled Fable worker access on the binding", async () => {

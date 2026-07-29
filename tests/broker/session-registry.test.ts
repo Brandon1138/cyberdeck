@@ -218,6 +218,56 @@ describe("SessionRegistry", () => {
     expect(puts.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("preserves a durable Claude automatic mode across recovery and exposes resumed launch diagnostics", async () => {
+    const persisted: SessionRecord = {
+      id: "22222222-2222-4222-8222-222222222222",
+      provider: "claude",
+      model: "opus",
+      approvalMode: "auto",
+      cwd: "/tmp/repo",
+      detached: true,
+      sandbox: "read-only",
+      kind: "orchestrator",
+      role: "orchestrator",
+      name: "Claude Orc",
+      createdAt: "2026-07-22T10:00:00.000Z",
+      updatedAt: "2026-07-22T10:01:00.000Z",
+      executionState: "active",
+      attachmentState: "detached",
+      pid: 4321,
+      exitCode: null,
+      childIds: [],
+    };
+    const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(9002));
+    const registry = new SessionRegistry({
+      adapters: { claude: new ClaudeProviderAdapter() },
+      recoveredSessions: [persisted],
+      store: {
+        put: async () => {},
+        delete: async () => {},
+      },
+      ptyFactory,
+      journal: { append: async () => {} },
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+
+    await registry.ready();
+    await registry.resume(persisted.id);
+
+    expect(registry.get(persisted.id)).toMatchObject({
+      approvalMode: "auto",
+      executionState: "active",
+    });
+    expect(ptyFactory.mock.calls[0]?.[0]).toMatchObject({
+      args: expect.arrayContaining(["--resume", persisted.id, "--permission-mode", "auto"]),
+    });
+    expect(registry.launchRecord(persisted.id)).toMatchObject({
+      mode: "resume",
+      args: expect.arrayContaining(["--permission-mode", "auto"]),
+    });
+  });
+
   it("runs provider preflight after command validation and before PTY spawn", async () => {
     const prepareLaunch = vi.fn(async () => undefined);
     const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(1000));
