@@ -1743,6 +1743,40 @@ describe("fleet controls", () => {
     expect(transitionFleet(expanded, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(second.id);
   });
 
+  it("reports every fold as a persistable disposition, and repeats as nothing at all", () => {
+    const second = session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" });
+    const snapshot = fleet({ record: session({ cwd: "/repo/one" }) }, { record: second });
+    const onFolder = transitionFleet(createFleetState(snapshot), snapshot, "down", NOW_MS).state;
+
+    const collapsed = transitionFleet(onFolder, snapshot, "left", NOW_MS);
+    expect(collapsed.action).toEqual({
+      type: "folder-disposition",
+      cwd: "/repo/two",
+      disposition: { collapsed: true, expanded: false },
+    });
+
+    // Holding left against an already-folded folder is not a new decision to record.
+    expect(transitionFleet(collapsed.state, snapshot, "left", NOW_MS).action).toBeUndefined();
+
+    expect(transitionFleet(collapsed.state, snapshot, "right", NOW_MS).action).toEqual({
+      type: "folder-disposition",
+      cwd: "/repo/two",
+      disposition: { collapsed: false, expanded: false },
+    });
+  });
+
+  it("reports the Orcs roster fold under its own key so the roster stays folded across restarts", () => {
+    const snapshot = orcFleet(2);
+    const onHeader = transitionFleet(createFleetState(snapshot), snapshot, "home", NOW_MS).state;
+    expect(onHeader.focusedFolderCwd).toBe("/@orcs");
+
+    expect(transitionFleet(onHeader, snapshot, "left", NOW_MS).action).toEqual({
+      type: "folder-disposition",
+      cwd: "/@orcs",
+      disposition: { collapsed: true, expanded: false },
+    });
+  });
+
   it("keeps thread keys inert while a folder header holds focus", () => {
     const second = session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" });
     const snapshot = fleet({ record: session() }, { record: second });
@@ -2626,6 +2660,73 @@ describe("runFleet", () => {
 
     await expect(running).resolves.toBeUndefined();
     expect(transport.close).toHaveBeenCalledOnce();
+  });
+
+  it("starts with the folds the operator last left, and writes each new one back", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    const first = session({ cwd: "/repo/one", role: "worker", kind: "worker", name: "One worker" });
+    const second = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      cwd: "/repo/two",
+      role: "worker",
+      kind: "worker",
+      name: "Two worker",
+    });
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [first, second];
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "fleet.preferences") return {};
+        if (method === "fleet.folderDispositions") {
+          return { "/repo/two": { collapsed: true, expanded: false } };
+        }
+        if (method === "fleet.folderDisposition.set") return { saved: true };
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) { closeListeners.add(listener); return () => closeListeners.delete(listener); },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    // The persisted fold is in force before the operator touches anything.
+    await vi.waitFor(() => {
+      const screen = Buffer.concat(output.chunks).toString();
+      expect(screen).toContain("▸ /repo/two");
+      expect(screen).not.toContain("Two worker");
+    });
+
+    input.emit("data", Buffer.from("\u001b[B"));
+    input.emit("data", Buffer.from("\u001b[C"));
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("fleet.folderDisposition.set", {
+      key: "/repo/two",
+      disposition: { collapsed: false, expanded: false },
+    }));
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
   });
 
   it("places the cursor on the final soft-wrapped composer row", async () => {

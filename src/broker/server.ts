@@ -15,6 +15,7 @@ import { StartSessionRequestSchema } from "../domain/session.js";
 import { ScoutEgressRequestSchema } from "../domain/worker-profile.js";
 import { DelegationIntentSchema } from "../domain/delegation.js";
 import {
+  FleetFolderDispositionSchema,
   FleetLaunchProfileSchema,
   type FleetPreferenceStore,
 } from "../persistence/fleet-preference-store.js";
@@ -439,6 +440,8 @@ export class BrokerServer {
       }
       case "fleet.preferences":
         return this.requireFleetPreferences().list();
+      case "fleet.folderDispositions":
+        return this.requireFleetPreferences().listFolderDispositions();
       case "fleet.workerCoordination":
         return fleetWorkerCoordinationView(this.options.workerCoordination?.listSubjects() ?? [], {
           custodyColors: await this.options.custodyColors?.table() ?? [],
@@ -467,6 +470,15 @@ export class BrokerServer {
           profile: FleetLaunchProfileSchema,
         }).parse(frame.params);
         await this.requireFleetPreferences().set(request.cwd, request.profile);
+        return { saved: true };
+      }
+      case "fleet.folderDisposition.set": {
+        // The key is the Fleet list's own folder key, so the sentinel Orcs roster persists here too.
+        const request = z.object({
+          key: z.string().startsWith("/"),
+          disposition: FleetFolderDispositionSchema,
+        }).parse(frame.params);
+        await this.requireFleetPreferences().setFolderDisposition(request.key, request.disposition);
         return { saved: true };
       }
       case "session.submit": {

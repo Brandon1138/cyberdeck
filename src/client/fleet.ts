@@ -116,6 +116,12 @@ export interface LaunchProfile {
   effort?: ReasoningEffort;
 }
 
+/** How one folder key sits in the list: folded away, and whether its thread cap is lifted. */
+export interface FolderDisposition {
+  collapsed: boolean;
+  expanded: boolean;
+}
+
 export interface WorkerPickerState {
   step: "model" | "effort";
   modelIndex: number;
@@ -214,6 +220,7 @@ export type FleetAction =
   | { type: "pin"; sessionId: string }
   | { type: "reorder"; sessionId: string; direction: "up" | "down" }
   | { type: "profile"; cwd: string; profile: LaunchProfile }
+  | { type: "folder-disposition"; cwd: string; disposition: FolderDisposition }
   | {
     type: "permission-policy";
     provider: ConfigurablePermissionProvider;
@@ -812,41 +819,25 @@ export function transitionFleet(
   }
 
   if (focusedFolderCwd !== undefined && (key === "left" || key === "right")) {
-    return {
-      state: {
-        ...setCollapsed(state, focusedFolderCwd, key === "left"),
-        deleteConfirmation: undefined,
-        notice: undefined,
-      },
-    };
+    return foldTransition(state, setCollapsed(state, focusedFolderCwd, key === "left"), focusedFolderCwd);
   }
   if (key === "enter" && focusedFolderCwd !== undefined && state.draft.trim() === "") {
-    return {
-      state: {
-        ...setCollapsed(state, focusedFolderCwd, !isCollapsed(state, focusedFolderCwd)),
-        deleteConfirmation: undefined,
-        notice: undefined,
-      },
-    };
+    return foldTransition(
+      state,
+      setCollapsed(state, focusedFolderCwd, !isCollapsed(state, focusedFolderCwd)),
+      focusedFolderCwd,
+    );
   }
   // The show-more row is the folder's cap in reverse: right opens it, left puts it back.
   if (focusedShowMoreCwd !== undefined && (key === "left" || key === "right")) {
-    return {
-      state: {
-        ...setExpanded(state, focusedShowMoreCwd, key === "right"),
-        deleteConfirmation: undefined,
-        notice: undefined,
-      },
-    };
+    return foldTransition(state, setExpanded(state, focusedShowMoreCwd, key === "right"), focusedShowMoreCwd);
   }
   if (key === "enter" && focusedShowMoreCwd !== undefined && state.draft.trim() === "") {
-    return {
-      state: {
-        ...setExpanded(state, focusedShowMoreCwd, !isExpanded(state, focusedShowMoreCwd)),
-        deleteConfirmation: undefined,
-        notice: undefined,
-      },
-    };
+    return foldTransition(
+      state,
+      setExpanded(state, focusedShowMoreCwd, !isExpanded(state, focusedShowMoreCwd)),
+      focusedShowMoreCwd,
+    );
   }
   if (key === "right" && selected !== undefined) {
     return {
@@ -2253,6 +2244,20 @@ export async function runFleet(
     // Older brokers and isolated presentation tests have no persisted preference surface.
   }
   try {
+    const dispositions = await client.request<Record<string, FolderDisposition>>(
+      "fleet.folderDispositions",
+      {},
+    );
+    const keys = Object.entries(dispositions);
+    state = {
+      ...state,
+      collapsedCwds: keys.filter(([, disposition]) => disposition.collapsed).map(([key]) => key),
+      expandedCwds: keys.filter(([, disposition]) => disposition.expanded).map(([key]) => key),
+    };
+  } catch {
+    // Same as launch profiles: an unfolded list is the right fallback when nothing was persisted.
+  }
+  try {
     state = {
       ...state,
       permissionPolicies: {
@@ -2455,6 +2460,11 @@ export async function runFleet(
         });
       } else if (action?.type === "profile") {
         await client.request("fleet.preference.set", { cwd: action.cwd, profile: action.profile });
+      } else if (action?.type === "folder-disposition") {
+        await client.request("fleet.folderDisposition.set", {
+          key: action.cwd,
+          disposition: action.disposition,
+        });
       } else if (action?.type === "permission-policy") {
         await permissionPreferences.set(action.provider, action.policy);
       } else if (action?.type === "change-directory") {
@@ -2480,6 +2490,7 @@ export async function runFleet(
         && action.type !== "create-orchestrator"
         && action.type !== "change-directory"
         && action.type !== "permission-policy"
+        && action.type !== "folder-disposition"
         && action.type !== "delete"
       ) {
         snapshot = await collectFleetSnapshot(client);
@@ -3150,6 +3161,24 @@ function setExpanded(state: FleetState, cwd: string, expanded: boolean): FleetSt
     expandedCwds: expanded
       ? [...current, cwd]
       : current.filter((candidate) => candidate !== cwd),
+  };
+}
+
+/**
+ * A fold is a standing operator decision, not view state, so each toggle writes through to the
+ * preference store. Arrow keys repeat against a folder that is already folded, and an append-only
+ * store would take a line for every one of those, so a toggle that changed nothing stays silent.
+ */
+function foldTransition(state: FleetState, next: FleetState, cwd: string): FleetTransition {
+  const settled: FleetState = { ...next, deleteConfirmation: undefined, notice: undefined };
+  if (next === state) return { state: settled };
+  return {
+    state: settled,
+    action: {
+      type: "folder-disposition",
+      cwd,
+      disposition: { collapsed: isCollapsed(next, cwd), expanded: isExpanded(next, cwd) },
+    },
   };
 }
 
