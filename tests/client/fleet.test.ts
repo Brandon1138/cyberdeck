@@ -1426,6 +1426,22 @@ describe("fleet controls", () => {
     expect(decoder.push(Buffer.from([0x15, 0x04]))).toEqual(["ctrl+u", "ctrl+d"]);
   });
 
+  it("names Ctrl+V rather than dropping it, and asks for the pasteboard without touching the frame", () => {
+    expect(new FleetKeyDecoder().push(Buffer.from([0x16]))).toEqual(["ctrl+v"]);
+
+    const snapshot = { threads: [] };
+    const state = {
+      ...createFleetState(snapshot),
+      draft: "Read",
+      notice: "Working directory: /repo",
+      noticeTone: "neutral" as const,
+    };
+    const transition = transitionFleet(state, snapshot, "ctrl+v", NOW_MS);
+
+    expect(transition.action).toEqual({ type: "attach-clipboard-image" });
+    expect(transition.state).toEqual(state);
+  });
+
   it("pages through rendered rows including folder headers, role headings, and group spacing", () => {
     const one = session({ cwd: "/repo/one", name: "One", displayOrder: 0 });
     const two = session({
@@ -2658,6 +2674,74 @@ describe("runFleet", () => {
       expect(latestScreen).toContain("▌ · Third thread");
       expect(latestScreen).not.toContain("▌ · First thread");
     });
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("splices a pasted image path into the composer and leaves the draft alone without one", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [];
+        if (method === "fleet.preferences") return {};
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) { closeListeners.add(listener); return () => closeListeners.delete(listener); },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    let pasted: string | undefined = "/state/Application Support/Cyberdeck/pasted-images/paste-a.png";
+    const pasteboardImage = vi.fn(async () => pasted);
+    const running = runFleet(
+      transport as never,
+      input,
+      output,
+      new EventEmitter(),
+      { pasteboardImage },
+    );
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("Read"));
+    input.emit("data", Buffer.from([0x16]));
+    await vi.waitFor(() => {
+      const latestScreen = Buffer.concat(output.chunks).toString().split("\u001b[2J\u001b[H").at(-1) ?? "";
+      expect(latestScreen).toContain(
+        "Read \"/state/Application Support/Cyberdeck/pasted-images/paste-a.png\"",
+      );
+      expect(latestScreen).toContain("Attached paste-a.png");
+    });
+
+    // A pasteboard holding text or nothing must not disturb the frame the operator is looking at.
+    pasted = undefined;
+    output.chunks.length = 0;
+    input.emit("data", Buffer.from([0x16]));
+    await vi.waitFor(() => expect(pasteboardImage).toHaveBeenCalledTimes(2));
+    const afterEmptyPaste = Buffer.concat(output.chunks).toString().split("\u001b[2J\u001b[H").at(-1) ?? "";
+    expect(afterEmptyPaste).toContain(
+      "Read \"/state/Application Support/Cyberdeck/pasted-images/paste-a.png\"",
+    );
+    expect(afterEmptyPaste).toContain("Attached paste-a.png");
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
