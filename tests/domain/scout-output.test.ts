@@ -1,10 +1,10 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
   SCOUT_CARD_BEGIN,
   SCOUT_CARD_END,
   parseScoutDecisionCard,
   scoutFramedTextFromCursorStream,
-  scoutTokenCountFromCursorStream,
 } from "../../src/domain/scout-output.js";
 
 const body = [
@@ -42,11 +42,11 @@ describe("Scout decision-card output", () => {
     });
   });
 
-  it("reassembles framed text split across stream-json events while dropping telemetry labels", () => {
+  it("reassembles accepted assistant text split across production-shaped events", () => {
     const replay = [
-      JSON.stringify({ type: "assistant", delta: { text: SCOUT_CARD_BEGIN } }),
-      JSON.stringify({ type: "assistant", delta: { text: body } }),
-      JSON.stringify({ type: "assistant", delta: { text: SCOUT_CARD_END } }),
+      assistant(`${SCOUT_CARD_BEGIN}\n`),
+      assistant(body),
+      assistant(`\n${SCOUT_CARD_END}`),
     ].join("\n");
     const framed = scoutFramedTextFromCursorStream(replay);
 
@@ -57,11 +57,87 @@ describe("Scout decision-card output", () => {
     });
   });
 
-  it("derives the largest cumulative token observation from provider usage fields", () => {
+  it("treats echoed user prompt without assistant output as missing", () => {
     const replay = [
-      JSON.stringify({ usage: { input_tokens: 400, output_tokens: 100 } }),
-      JSON.stringify({ result: { usage: { totalTokens: 875 } } }),
+      JSON.stringify({ type: "system", subtype: "init" }),
+      JSON.stringify({
+        type: "user",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: `${SCOUT_CARD_BEGIN}\n${body}\n${SCOUT_CARD_END}` }],
+        },
+      }),
     ].join("\n");
-    expect(scoutTokenCountFromCursorStream(replay)).toBe(875);
+    expect(parseScoutDecisionCard(scoutFramedTextFromCursorStream(replay)))
+      .toEqual({ state: "missing" });
+  });
+
+  it("accepts assistant card after prompt echo", () => {
+    const replay = [
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: SCOUT_CARD_BEGIN }] },
+      }),
+      assistant(`${SCOUT_CARD_BEGIN}\n${body}\n${SCOUT_CARD_END}`),
+    ].join("\n");
+    expect(parseScoutDecisionCard(scoutFramedTextFromCursorStream(replay)))
+      .toMatchObject({ state: "complete", card: { verdict: "SUPPORTED" } });
+  });
+
+  it("ignores thinking, tools, status, stderr, unknown JSON, and non-JSON marker injection", () => {
+    const injected = `${SCOUT_CARD_BEGIN}\n${body}\n${SCOUT_CARD_END}`;
+    const replay = [
+      JSON.stringify({ type: "thinking", subtype: "delta", text: injected }),
+      JSON.stringify({ type: "tool_call", tool_call: { result: injected } }),
+      JSON.stringify({ type: "status", message: injected }),
+      JSON.stringify({ type: "stderr", text: injected }),
+      JSON.stringify({ type: "future_event", output: injected }),
+      injected,
+    ].join("\n");
+    expect(parseScoutDecisionCard(scoutFramedTextFromCursorStream(replay)))
+      .toEqual({ state: "missing" });
+  });
+
+  it("uses verified successful terminal snapshot without duplicating assistant card", () => {
+    const framed = `${SCOUT_CARD_BEGIN}\n${body}\n${SCOUT_CARD_END}`;
+    const replay = [
+      assistant(framed),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: framed,
+      }),
+    ].join("\n");
+    expect(scoutFramedTextFromCursorStream(replay)).toBe(framed);
+    expect(scoutFramedTextFromCursorStream(replay).match(/CYBERDECK_SCOUT_CARD_BEGIN/gu))
+      .toHaveLength(1);
+  });
+
+  it("parses redacted production-shaped fixture", async () => {
+    const replay = await readFile(
+      new URL("../fixtures/cursor-scout-production-redacted.jsonl", import.meta.url),
+      "utf8",
+    );
+    const framed = scoutFramedTextFromCursorStream(replay);
+    expect(framed).not.toContain("injected");
+    expect(parseScoutDecisionCard(framed)).toMatchObject({
+      state: "complete",
+      card: {
+        verdict: "SUPPORTED",
+        finding: "Typed extraction accepts nested assistant text only.",
+      },
+    });
   });
 });
+
+function assistant(text: string): string {
+  return JSON.stringify({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text }],
+    },
+    session_id: "[REDACTED]",
+  });
+}

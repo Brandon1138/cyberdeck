@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { open, realpath, rm, stat } from "node:fs/promises";
+import { open, realpath, rename, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   MAX_SCOUT_EVIDENCE_BYTES,
@@ -60,6 +61,7 @@ export interface ScoutArtifactRead {
  */
 export class ScoutReportStore {
   private readonly writeTails = new Map<string, Promise<void>>();
+  private readonly captureTails = new Map<string, Promise<ScoutReportCapture>>();
 
   constructor(private readonly stateDirectory: string) {}
 
@@ -96,8 +98,30 @@ export class ScoutReportStore {
 
   async capture(runtime: ScoutRuntimeState, replay: string): Promise<ScoutReportCapture> {
     await this.assertRuntimePaths(runtime);
+    const previous = this.captureTails.get(runtime.reportPath)
+      ?? Promise.resolve({ state: "missing" as const });
+    const next = previous.catch(() => ({ state: "missing" as const }))
+      .then(() => this.captureOnce(runtime, replay));
+    this.captureTails.set(runtime.reportPath, next);
+    try {
+      return await next;
+    } finally {
+      if (this.captureTails.get(runtime.reportPath) === next) {
+        this.captureTails.delete(runtime.reportPath);
+      }
+    }
+  }
+
+  private async captureOnce(
+    runtime: ScoutRuntimeState,
+    replay: string,
+  ): Promise<ScoutReportCapture> {
     const captured = captureScoutReport(replay);
     if (captured.state === "missing") return captured;
+    const existing = await this.collect(runtime);
+    if (existing.state === "complete" && captured.state !== "complete") {
+      return existing;
+    }
     const durable = captured.state === "partial"
       ? `${PARTIAL_REPORT_PREFIX}${captured.text}`
       : captured.state === "invalid"
@@ -270,6 +294,8 @@ export class ScoutReportStore {
       throw new Error("Scout drop box must stay inside broker Scout state");
     }
     await Promise.all([
+      this.captureTails.get(join(dropBoxPath, "card.md"))?.catch(() => undefined),
+      this.captureTails.get(join(dropBoxPath, "report.json"))?.catch(() => undefined),
       this.writeTails.get(join(dropBoxPath, "card.md"))?.catch(() => undefined),
       this.writeTails.get(join(dropBoxPath, "report.json"))?.catch(() => undefined),
       this.writeTails.get(join(dropBoxPath, "evidence.md"))?.catch(() => undefined),
@@ -323,20 +349,31 @@ export class ScoutReportStore {
     const previous = this.writeTails.get(path) ?? Promise.resolve();
     const next = previous.then(async () => {
       await ensurePrivateDirectory(dirname(path));
+      const existing = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined;
+          throw error;
+        },
+      );
+      await existing?.close();
+      const temporaryPath = join(dirname(path), `.${randomUUID()}.tmp`);
       const handle = await open(
-        path,
-        constants.O_WRONLY
-          | constants.O_CREAT
-          | constants.O_TRUNC
-          | constants.O_NOFOLLOW,
+        temporaryPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
         0o600,
       );
       try {
-        await handle.chmod(0o600);
-        await handle.writeFile(bounded, "utf8");
-        await handle.sync();
-      } finally {
-        await handle.close();
+        try {
+          await handle.chmod(0o600);
+          await handle.writeFile(bounded, "utf8");
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        await rename(temporaryPath, path);
+      } catch (error) {
+        await rm(temporaryPath, { force: true });
+        throw error;
       }
     });
     this.writeTails.set(path, next);
@@ -397,7 +434,20 @@ export function captureScoutReport(replay: string): ScoutReportCapture {
     }
     return card;
   }
+  if (containsJsonStreamFrame(replay)) return { state: "missing" };
   return captureLegacyScoutReport(replay);
+}
+
+function containsJsonStreamFrame(replay: string): boolean {
+  return replay.replace(/\r\n?/gu, "\n").split("\n").some((line) => {
+    if (line.trim() === "") return false;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      return typeof parsed === "object" && parsed !== null && "type" in parsed;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function captureLegacyScoutReport(replay: string): ScoutReportCapture {

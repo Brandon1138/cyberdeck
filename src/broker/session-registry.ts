@@ -49,7 +49,6 @@ import type {
   ScoutRuntimeState,
 } from "../domain/worker-profile.js";
 import {
-  scoutTokenCountFromCursorStream,
   type ScoutDecisionCard,
 } from "../domain/scout-output.js";
 import type {
@@ -150,8 +149,10 @@ interface RuntimeSession {
   scoutFinalizing?: boolean;
   scoutBudgetTimer?: ReturnType<typeof setTimeout>;
   scoutBudgetActive?: boolean;
-  scoutTokenBaseline?: number;
   scoutBudgetExhausting?: boolean;
+  scoutCutoffStarted?: boolean;
+  scoutExpectedSuccessfulStop?: boolean;
+  scoutAcceptedCardStopRequested?: boolean;
   scoutCard?: ScoutDecisionCard;
 }
 
@@ -1161,14 +1162,12 @@ export class SessionRegistry {
     if (runtime.record.scout?.transport === "headless-stream-json") {
       this.appendScoutTrace(runtime, chunk);
       this.captureScoutReport(runtime, replay);
-      this.enforceScoutTokenBudget(runtime, replay);
       runtime.controller?.output(chunk);
       for (const watcher of runtime.watchers.values()) watcher.output(chunk);
       this.notifySessionUpdate(runtime.record.id);
       return;
     }
     this.captureScoutReport(runtime, replay);
-    this.enforceScoutTokenBudget(runtime, replay);
     if (this.observeFatalError(runtime, replay)) {
       // The bytes still reach anyone attached — the operator should be able to read the fault —
       // but no activity is derived from them. A dead session has no activity to derive.
@@ -1422,7 +1421,7 @@ export class SessionRegistry {
       this.handleExit(runtime, exitCode, signal);
       return;
     }
-    if (exitCode !== 0) {
+    if (exitCode !== 0 && runtime.scoutExpectedSuccessfulStop !== true) {
       await this.markFinalScoutFailure(
         runtime,
         "execute",
@@ -2085,6 +2084,8 @@ export class SessionRegistry {
       || runtime.record.scout === undefined
       || runtime.record.scout.terminalState === "complete"
       || runtime.record.scout.terminalState === "failed"
+      || runtime.record.scout.terminalState === "budget_exhausted"
+      || runtime.scoutCutoffStarted === true
       || this.options.scoutReports === undefined
     ) return;
     const scout = { ...runtime.record.scout, canary: { ...runtime.record.scout.canary } };
@@ -2096,6 +2097,7 @@ export class SessionRegistry {
       })
       .catch(async (error) => {
         if (runtime.record.scout === undefined) return;
+        if (runtime.record.scout.reportState === "complete") return;
         runtime.record.scout.reportState = "invalid";
         runtime.latestResult = error instanceof Error ? error.message : String(error);
         await this.persist(runtime).catch(() => undefined);
@@ -2117,6 +2119,16 @@ export class SessionRegistry {
     }
     if (changed || result.state === "complete") await this.persist(runtime);
     this.notifySessionUpdate(runtime.record.id);
+    if (
+      result.state === "complete"
+      && "card" in result
+      && runtime.scoutFinalizing !== true
+      && runtime.scoutAcceptedCardStopRequested !== true
+    ) {
+      runtime.scoutAcceptedCardStopRequested = true;
+      runtime.scoutExpectedSuccessfulStop = true;
+      runtime.pty?.kill("SIGTERM");
+    }
   }
 
   private armScoutBudget(runtime: RuntimeSession): void {
@@ -2127,46 +2139,15 @@ export class SessionRegistry {
       || runtime.scoutBudgetActive === true
     ) return;
     runtime.scoutBudgetActive = true;
-    const replay = runtime.pty?.snapshot().toString("utf8") ?? "";
-    const tokenBaseline = runtime.record.scout?.transport === "headless-stream-json"
-      ? scoutTokenCountFromCursorStream(replay)
-      : terminalTokenCount(replay);
-    if (tokenBaseline === undefined) delete runtime.scoutTokenBaseline;
-    else runtime.scoutTokenBaseline = tokenBaseline;
     runtime.scoutBudgetTimer = setTimeout(() => {
       void this.exhaustScoutBudget(runtime, "time", budget.maxWallClockMs);
     }, budget.maxWallClockMs);
     runtime.scoutBudgetTimer.unref?.();
   }
 
-  private enforceScoutTokenBudget(runtime: RuntimeSession, replay: string): void {
-    const budget = runtime.record.brief?.budget;
-    if (
-      runtime.record.profile !== "scout"
-      || budget === undefined
-      || budget.maxTokens === undefined
-      || runtime.scoutBudgetActive !== true
-      || runtime.record.scout?.terminalState !== undefined
-    ) return;
-    const tokens = runtime.record.scout?.transport === "headless-stream-json"
-      ? scoutTokenCountFromCursorStream(replay)
-      : terminalTokenCount(replay);
-    if (tokens !== undefined) {
-      const baseline = runtime.scoutTokenBaseline;
-      const consumed = baseline === undefined
-        ? tokens
-        : tokens >= baseline
-          ? tokens - baseline
-          : tokens;
-      if (consumed >= budget.maxTokens) {
-        void this.exhaustScoutBudget(runtime, "tokens", consumed);
-      }
-    }
-  }
-
   private async exhaustScoutBudget(
     runtime: RuntimeSession,
-    dimension: "time" | "tokens",
+    dimension: "time",
     observed: number,
   ): Promise<void> {
     const scout = runtime.record.scout;
@@ -2176,19 +2157,30 @@ export class SessionRegistry {
       || runtime.scoutBudgetExhausting === true
     ) return;
     runtime.scoutBudgetExhausting = true;
+    runtime.scoutCutoffStarted = true;
     runtime.scoutBudgetActive = false;
     if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
     delete runtime.scoutBudgetTimer;
+    await runtime.scoutCaptureTail?.catch(() => undefined);
+    if (scout.reportState === "complete" && runtime.scoutCard !== undefined) {
+      runtime.scoutExpectedSuccessfulStop = true;
+      if (runtime.scoutAcceptedCardStopRequested !== true) {
+        runtime.scoutAcceptedCardStopRequested = true;
+        runtime.pty?.kill("SIGTERM");
+      }
+      runtime.scoutBudgetExhausting = false;
+      this.notifySessionUpdate(runtime.record.id);
+      return;
+    }
     scout.terminalState = "budget_exhausted";
     runtime.record.executionState = "cancelled";
     runtime.record.attentionState = "stopped";
     runtime.record.updatedAt = new Date().toISOString();
     runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
-    // Kill at threshold before durable I/O. Report capture already queued from the triggering PTY
-    // frame and remains allowed to update reportState/content after this terminal verdict.
-    runtime.pty?.kill("SIGTERM");
-    await runtime.scoutCaptureTail?.catch(() => undefined);
     try {
+      // Persist cutoff before stopping provider. Later output cannot promote this terminal result.
+      await this.persist(runtime);
+      runtime.pty?.kill("SIGTERM");
       await this.appendEvent("scout.budget.exhausted", runtime.record.id, {
         dimension,
         observed,
@@ -2202,7 +2194,10 @@ export class SessionRegistry {
         "Scout budget exhausted",
         { dimension, observed, reportState: scout.reportState },
       );
-      await this.persist(runtime);
+    } catch (error) {
+      // A persistence failure must not leave an over-budget provider running indefinitely.
+      runtime.pty?.kill("SIGTERM");
+      throw error;
     } finally {
       runtime.scoutBudgetExhausting = false;
       this.notifySessionUpdate(runtime.record.id);

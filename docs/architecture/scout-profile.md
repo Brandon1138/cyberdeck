@@ -12,7 +12,8 @@ context.
 - relative path/glob `scope` entries that cannot escape the worker cwd;
 - lookup-shaped `questions`;
 - a `stopCondition`;
-- an optional `budget` (15-minute wall-clock default; `maxTokens` is optional).
+- an optional `budget` (15-minute wall-clock default). `maxTokens` remains accepted for backward
+  compatibility but is deprecated and ignored for termination.
 
 Profile resolution is fixed and durable:
 
@@ -134,10 +135,11 @@ an explicit attention decision; ordinary collection never injects raw explorator
 
 ## Budgets and parallelism
 
-The wall-clock guard begins after the one-shot process is adopted. If `maxTokens` is supplied,
-Cyberdeck reads cumulative token usage fields from stream JSON rather than terminal decoration.
-Crossing either ceiling sends `SIGTERM`, records `budget_exhausted`, and lets queued trace/card
-writes settle.
+The wall-clock guard begins after the one-shot process is adopted. `maxTokens` is accepted for
+backward compatibility but is deprecated and ignored for termination; there is no hidden token
+kill cap. At wall-clock cutoff, already-received output capture settles first. A valid card wins and
+stops successfully after process close and verification. Without a valid card, Cyberdeck persists
+`budget_exhausted`, sends `SIGTERM`, and rejects later output promotion.
 
 Batch dispatch retains the existing 64-worker admission ceiling and reserves capacity during
 preflight. Every Scout has isolated Cursor state and artifacts. No pane interaction, manual provider

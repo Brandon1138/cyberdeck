@@ -198,7 +198,7 @@ exposes the same explicit override as `--approval-mode auto`.
 
 An Orc may instead set `profile: "scout"` and pass a structured brief (`objective`, relative
 path/glob `scope`, lookup-shaped `questions`, `stopCondition`, optional `hypothesisId`, and optional
-wall-clock/token `budget`).
+wall-clock `budget`). Deprecated `maxTokens` input remains accepted but is ignored for termination.
 Cyberdeck resolves that profile to the existing worker lifecycle with fixed Tier 1 state: Cursor
 Composer, read-only plan+sandbox, provider-native `--print --output-format stream-json`, and lease
 policy `expire-and-discard` (`orphan-for-adoption` is recorded only for forward compatibility).
@@ -207,13 +207,14 @@ Source egress fails closed until the operator grants the exact canonical Git roo
 replacement; MCP exposes no mutation path.
 
 Cyberdeck redirects Cursor state outside the repository, disables MCPs in that isolated state, and
-compares a pre/post fingerprint of HEAD, tracked diffs, and nonignored untracked content. A successful Scout needs exit
-code zero, an unchanged repository, and a compact natural-language decision card. The complete raw
+compares a pre/post fingerprint of HEAD, tracked diffs, and nonignored untracked content. A successful Scout needs an
+unchanged repository and a compact natural-language decision card; Cyberdeck may stop it after that
+card is durable. The complete raw
 stream (8 MiB), deeper evidence (512 KiB), and card (96 KiB) remain durable private artifacts; only
 the card or a multi-Scout digest enters normal wait results. Digests promote contradictions and
 new findings and carry `scout://<session>/<card|evidence|trace>` handles for explicit
 `cyberdeck_scout_read` drill-down. Failed launches remain visible with their session ID and phase.
-The default wall-clock ceiling is 15 minutes and the token ceiling is optional. Batch starts launch
+The default wall-clock ceiling is 15 minutes. No token kill cap is enforced. Batch starts launch
 independent Scouts concurrently; no pane interaction, prompt scraping, or approval keypress
 participates.
 

@@ -557,7 +557,13 @@ function scoutBriefInputSchema(): Record<string, unknown> {
         type: "object",
         properties: {
           maxWallClockMs: { type: "integer", minimum: 1, maximum: 86_400_000 },
-          maxTokens: { type: "integer", minimum: 1, maximum: 10_000_000 },
+          maxTokens: {
+            type: "integer",
+            minimum: 1,
+            maximum: 10_000_000,
+            deprecated: true,
+            description: "Deprecated compatibility field; accepted but ignored for termination.",
+          },
         },
         required: ["maxWallClockMs"],
         additionalProperties: false,

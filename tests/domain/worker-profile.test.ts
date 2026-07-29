@@ -45,7 +45,7 @@ describe("Scout worker profile contracts", () => {
     }).transport).toBe("interactive-pty");
   });
 
-  it("requires a narrow brief while defaulting a generous wall clock and optional token cap", () => {
+  it("accepts deprecated maxTokens while defaulting wall-clock budget", () => {
     expect(ScoutBriefSchema.parse(brief)).toEqual(brief);
     expect(() => ScoutBriefSchema.parse({ ...brief, scope: [] })).toThrow();
     expect(ScoutBriefSchema.parse({
