@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import { basename, join } from "node:path";
 import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
@@ -23,6 +24,11 @@ import {
 import { conversationPreview } from "../runtime/conversation-preview.js";
 import { providerTerminalActivity, stripTerminalControl } from "../runtime/terminal-replay.js";
 import { attachSession, type AttachTransport } from "./attach.js";
+import {
+  capturePasteboardImage,
+  draftWithImageReference,
+  type PasteboardImageAttachment,
+} from "./clipboard-image.js";
 import { collectDashboardSnapshot, renderDashboard } from "./dashboard.js";
 import {
   custodyColorTone,
@@ -228,6 +234,7 @@ export type FleetAction =
     previousPolicy: ProviderPermissionPolicy;
   }
   | { type: "change-directory"; cwd: string }
+  | { type: "attach-clipboard-image" }
   | { type: "quit" };
 
 export interface FleetTransition {
@@ -292,6 +299,7 @@ export interface FleetRuntimeOptions {
   changeDirectory?: ((cwd: string) => Promise<string | undefined>) | undefined;
   detachIdentity?: string | undefined;
   openOrchestrator?: ((target: OrchestratorCockpitTarget) => Promise<SessionRecord>) | undefined;
+  pasteboardImage?: PasteboardImageAttachment | undefined;
   permissionPreferences?: ProviderPermissionPreferencePort | undefined;
   pullRequestStatus?: PullRequestStatusPort | undefined;
 }
@@ -928,6 +936,12 @@ export function transitionFleet(
   }
   if (key === "backspace") {
     return { state: { ...state, draft: [...state.draft].slice(0, -1).join(""), notice: undefined } };
+  }
+  // Reading the pasteboard is I/O, so the reducer only asks for it and the draft grows once the
+  // path exists. The state is returned untouched — not even the notice is cleared — so a chord
+  // pressed over a text-only pasteboard leaves the frame byte-identical.
+  if (key === "ctrl+v") {
+    return { state, action: { type: "attach-clipboard-image" } };
   }
   // Newline in the composer. Option+Enter is the convention operators arrive with, so it is bound
   // here and nowhere else: no fleet action may ever answer it, or a half-written task would launch.
@@ -1737,7 +1751,7 @@ function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
     "pgup/dn page", "ctrl+u/d half", "home/end", "shift+↑↓ reorder", "←→ fold project", "ctrl+s switch views",
     "@ mention", "alt+1–9 open", "esc back/clear",
-    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+] detach/reattach", "ctrl+g cwd", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
+    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+g cwd", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
   ];
   if (width >= 110) {
     return [
@@ -2284,6 +2298,10 @@ export async function runFleet(
   // any out-of-band probe could land, so it never pays the subprocess cost.
   const pullRequestStatus = runtime.pullRequestStatus
     ?? (output.isTTY === true ? new PullRequestStatusCache() : NO_PULL_REQUEST_STATUS);
+  // Pasted images land beside the rest of the fleet's state so a worker in any worktree can read
+  // the path it is handed, and so one directory bounds every image the operator ever pastes.
+  const pasteboardImage = runtime.pasteboardImage
+    ?? (() => capturePasteboardImage({ directory: join(appStateDirectory, "pasted-images") }));
 
   const previousRawMode = input.isRaw === true;
   let stopped = false;
@@ -2467,6 +2485,16 @@ export async function runFleet(
         });
       } else if (action?.type === "permission-policy") {
         await permissionPreferences.set(action.provider, action.policy);
+      } else if (action?.type === "attach-clipboard-image") {
+        const image = await pasteboardImage();
+        if (image !== undefined) {
+          state = {
+            ...state,
+            draft: draftWithImageReference(state.draft, image),
+            notice: `Attached ${basename(image)}`,
+            noticeTone: "neutral",
+          };
+        }
       } else if (action?.type === "change-directory") {
         if (runtime.changeDirectory === undefined) {
           throw new Error("Working-directory navigation is unavailable in this client");
@@ -2492,6 +2520,7 @@ export async function runFleet(
         && action.type !== "permission-policy"
         && action.type !== "folder-disposition"
         && action.type !== "delete"
+        && action.type !== "attach-clipboard-image"
       ) {
         snapshot = await collectFleetSnapshot(client);
       }
@@ -2730,6 +2759,7 @@ export class FleetKeyDecoder {
     else if (code === 0x13) keys.push("ctrl+s");
     else if (code === 0x14) keys.push("ctrl+t");
     else if (code === 0x15) keys.push("ctrl+u");
+    else if (code === 0x16) keys.push("ctrl+v");
     else if (code === 0x18) keys.push("ctrl+x");
     else if (code === 0x1d) keys.push("ctrl+]");
     else if (code === 0x0d) keys.push("enter");
