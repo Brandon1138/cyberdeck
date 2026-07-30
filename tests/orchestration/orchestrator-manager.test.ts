@@ -691,7 +691,7 @@ describe("OrchestratorManager", () => {
       expect(colors.assign).toHaveBeenCalledWith("orchestrator:workspace:/repo/one");
     });
 
-    it("gives a peer no slot, because a peer owns no workers", async () => {
+    it("gives a peer its own slot, because a peer owns workers like any orchestrator", async () => {
       const colors = custodyColors();
       const manager = new OrchestratorManager(
         spawning() as never,
@@ -708,7 +708,9 @@ describe("OrchestratorManager", () => {
         scope: "workspace",
       });
 
-      expect(colors.assign).not.toHaveBeenCalled();
+      expect(colors.assign).toHaveBeenCalledWith(
+        expect.stringMatching(/^orchestrator:workspace:\/repo\/one:peer:/),
+      );
     });
 
     it("releases the slot on both reset paths", async () => {

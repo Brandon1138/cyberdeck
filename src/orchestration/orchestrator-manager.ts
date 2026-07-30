@@ -192,14 +192,16 @@ export class OrchestratorManager {
 
   /**
    * A hue is assigned once the binding is durable, so a binding that failed never burns a slot.
-   * Peer bindings prove no durable controller family, so they own no workers and take no color.
+   * Every bound orchestrator takes one, peers included: a peer is an orchestrator running
+   * alongside the scope's primary rather than a lesser kind of one, and it owns workers exactly
+   * as the primary does. Releasing has always treated the two alike; assigning now does too.
    *
    * Allocation failure is deliberately not fatal: the orchestrator is already spawned and bound,
    * and refusing a working orchestrator over a cosmetic ledger would be the worse outcome. The
    * orchestrator simply renders in the neutral tone until its next bind.
    */
   private async assignCustodyColor(binding: OrchestratorBinding): Promise<void> {
-    if (this.custodyColors === undefined || binding.key.includes(":peer:")) return;
+    if (this.custodyColors === undefined) return;
     await this.custodyColors.assign(orchestratorControllerId(binding.key)).catch(() => undefined);
   }
 
