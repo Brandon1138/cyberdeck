@@ -187,6 +187,7 @@ export interface FleetState {
   permissionPicker?: PermissionPickerState | undefined;
   launchProfiles: Record<string, LaunchProfile>;
   permissionPolicies: ProviderPermissionPreferences;
+  nvimLayoutEnabled: boolean;
   view: "fleet" | "diagnostics";
   helpOpen?: boolean | undefined;
   /**
@@ -222,6 +223,7 @@ export type FleetAction =
   }
   | { type: "fable-workers"; request: FableWorkersRequest }
   | { type: "caveman-workers"; request: CavemanWorkersRequest }
+  | { type: "nvim-layout"; enabled: boolean }
   | { type: "open-worktree"; sessionId: string }
   | { type: "rename"; sessionId: string; name: string }
   | { type: "pin"; sessionId: string }
@@ -283,7 +285,8 @@ type SlashCommandName =
   | "/model"
   | "/permissions"
   | "/fable-workers"
-  | "/caveman-workers";
+  | "/caveman-workers"
+  | "/nvim-settings";
 
 interface SlashCommandDefinition {
   name: SlashCommandName;
@@ -301,7 +304,15 @@ export interface FleetRuntimeOptions {
   detachIdentity?: string | undefined;
   openOrchestrator?: ((target: OrchestratorCockpitTarget) => Promise<SessionRecord>) | undefined;
   /** Opens a worker's worktree in the nvim already running in Fleet's tmux window. */
-  openWorktree?: ((session: SessionRecord) => Promise<string>) | undefined;
+  openWorktree?: ((
+    session: SessionRecord,
+    layout: { enabled: boolean; orchestratorSessionIds: readonly string[] },
+  ) => Promise<string>) | undefined;
+  nvimLayoutHooks?: {
+    install(orchestratorSessionIds: readonly string[]): void | Promise<void>;
+    rebalance(orchestratorSessionIds: readonly string[]): unknown | Promise<unknown>;
+    remove(): void | Promise<void>;
+  } | undefined;
   pasteboardImage?: PasteboardImageAttachment | undefined;
   permissionPreferences?: ProviderPermissionPreferencePort | undefined;
   pullRequestStatus?: PullRequestStatusPort | undefined;
@@ -369,6 +380,15 @@ const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
       { value: "status", description: "Show current Caveman worker preference" },
       { value: "on", description: "Enable Caveman workers" },
       { value: "off", description: "Disable Caveman workers" },
+    ],
+  },
+  {
+    name: "/nvim-settings",
+    description: "Inspect or toggle automatic nvim layout",
+    values: [
+      { value: "status", description: "Show current nvim layout preference" },
+      { value: "on", description: "Enable automatic nvim layout" },
+      { value: "off", description: "Disable automatic nvim layout" },
     ],
   },
 ];
@@ -536,6 +556,7 @@ export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.
     draft: "",
     launchProfiles: {},
     permissionPolicies: { ...DEFAULT_PERMISSION_POLICIES },
+    nvimLayoutEnabled: false,
     view: "fleet",
   };
 }
@@ -2252,6 +2273,18 @@ function statusMarker(
   return selected ? paint(painted, "bold", color) : painted;
 }
 
+function layoutOrchestratorSessionIds(
+  snapshot: FleetSnapshot,
+  additional?: string | undefined,
+): string[] {
+  return [...new Set([
+    ...snapshot.threads
+      .filter(({ record }) => record.kind === "orchestrator")
+      .map(({ record }) => record.id),
+    ...(additional === undefined ? [] : [additional]),
+  ])];
+}
+
 export async function runFleet(
   client: InteractiveFleetTransport,
   input: FleetInput = process.stdin,
@@ -2288,6 +2321,14 @@ export async function runFleet(
   try {
     state = {
       ...state,
+      nvimLayoutEnabled: await client.request<boolean>("fleet.nvimLayout", {}),
+    };
+  } catch {
+    // Absence and an older broker both mean off; no migration or compatibility guess is needed.
+  }
+  try {
+    state = {
+      ...state,
       permissionPolicies: {
         ...state.permissionPolicies,
         ...await permissionPreferences.list(),
@@ -2306,6 +2347,21 @@ export async function runFleet(
     output.write(`${renderFleet(snapshot, state, { color: false, width: output.columns, height: output.rows })}\n`);
     client.close();
     return;
+  }
+  let nvimLayoutHookInstalled = false;
+  if (state.nvimLayoutEnabled && runtime.nvimLayoutHooks !== undefined) {
+    try {
+      await runtime.nvimLayoutHooks.install(layoutOrchestratorSessionIds(snapshot));
+      nvimLayoutHookInstalled = true;
+    } catch (error) {
+      state = {
+        ...state,
+        notice: `Could not install automatic nvim layout: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        noticeTone: "error",
+      };
+    }
   }
 
   // Probing is an interactive affordance: a piped fleet renders once, before
@@ -2383,6 +2439,11 @@ export async function runFleet(
     try {
       const session = await runtime.openOrchestrator(target);
       state = { ...state, selectedSessionId: session.id, notice: undefined };
+      if (nvimLayoutHookInstalled) {
+        await runtime.nvimLayoutHooks?.rebalance(
+          layoutOrchestratorSessionIds(snapshot, session.id),
+        );
+      }
     } finally {
       attaching = false;
       if (!stopped) {
@@ -2481,6 +2542,38 @@ export async function runFleet(
           action.request,
         );
         state = { ...state, notice: cavemanWorkersNotice(result), noticeTone: "neutral" };
+      } else if (action?.type === "nvim-layout") {
+        if (runtime.nvimLayoutHooks === undefined) {
+          throw new Error("Automatic nvim layout is unavailable in this Fleet client");
+        }
+        const orchestratorSessionIds = layoutOrchestratorSessionIds(snapshot);
+        if (action.enabled) {
+          await runtime.nvimLayoutHooks.install(orchestratorSessionIds);
+          nvimLayoutHookInstalled = true;
+          try {
+            await client.request("fleet.nvimLayout.set", { enabled: true });
+          } catch (error) {
+            await runtime.nvimLayoutHooks.remove();
+            nvimLayoutHookInstalled = false;
+            throw error;
+          }
+        } else {
+          await runtime.nvimLayoutHooks.remove();
+          nvimLayoutHookInstalled = false;
+          try {
+            await client.request("fleet.nvimLayout.set", { enabled: false });
+          } catch (error) {
+            await runtime.nvimLayoutHooks.install(orchestratorSessionIds);
+            nvimLayoutHookInstalled = true;
+            throw error;
+          }
+        }
+        state = {
+          ...state,
+          nvimLayoutEnabled: action.enabled,
+          notice: `Automatic nvim layout: ${action.enabled ? "ON" : "OFF"}`,
+          noticeTone: "neutral",
+        };
       } else if (action?.type === "rename") {
         await client.request("session.rename", { sessionId: action.sessionId, name: action.name });
       } else if (action?.type === "pin") {
@@ -2505,7 +2598,14 @@ export async function runFleet(
         }
         const session = snapshot.threads.find(({ record }) => record.id === action.sessionId)?.record;
         if (session === undefined) throw new Error("Selected worker is no longer available");
-        state = { ...state, notice: await runtime.openWorktree(session), noticeTone: "neutral" };
+        state = {
+          ...state,
+          notice: await runtime.openWorktree(session, {
+            enabled: state.nvimLayoutEnabled,
+            orchestratorSessionIds: layoutOrchestratorSessionIds(snapshot),
+          }),
+          noticeTone: "neutral",
+        };
       } else if (action?.type === "attach-clipboard-image") {
         const image = await pasteboardImage();
         if (image !== undefined) {
@@ -2540,6 +2640,7 @@ export async function runFleet(
         && action.type !== "change-directory"
         && action.type !== "permission-policy"
         && action.type !== "folder-disposition"
+        && action.type !== "nvim-layout"
         && action.type !== "delete"
         && action.type !== "open-worktree"
         && action.type !== "attach-clipboard-image"
@@ -2632,6 +2733,12 @@ export async function runFleet(
     }
     await inputQueue;
   } finally {
+    let layoutCleanupError: unknown;
+    try {
+      if (nvimLayoutHookInstalled) await runtime.nvimLayoutHooks?.remove();
+    } catch (error) {
+      layoutCleanupError = error;
+    }
     unsubscribeClose();
     signals.off("SIGINT", onSigint);
     signals.off("SIGTERM", stop);
@@ -2642,6 +2749,7 @@ export async function runFleet(
     if (decoderFlushTimer !== undefined) clearTimeout(decoderFlushTimer);
     output.write(LEAVE_FLEET_SCREEN);
     client.close();
+    if (layoutCleanupError !== undefined) throw layoutCleanupError;
   }
 }
 
@@ -3438,13 +3546,47 @@ function cavemanWorkersTransition(
   };
 }
 
+function nvimLayoutTransition(
+  state: FleetState,
+  command: string,
+): FleetTransition | undefined {
+  if (!command.startsWith("/nvim-settings")) return undefined;
+  const match = /^\/nvim-settings(?:\s+(status|on|off))?$/u.exec(command);
+  if (match === null) {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        notice: "Usage: /nvim-settings status|on|off",
+        noticeTone: "error",
+      },
+    };
+  }
+  const mode = match[1] ?? "status";
+  if (mode === "status") {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        notice: `Automatic nvim layout: ${state.nvimLayoutEnabled ? "ON" : "OFF"}`,
+        noticeTone: "neutral",
+      },
+    };
+  }
+  return {
+    state: { ...state, draft: "", notice: undefined },
+    action: { type: "nvim-layout", enabled: mode === "on" },
+  };
+}
+
 function workerPolicyTransition(
   state: FleetState,
   snapshot: FleetSnapshot,
   command: string,
 ): FleetTransition | undefined {
   return fableWorkersTransition(state, snapshot, command)
-    ?? cavemanWorkersTransition(state, snapshot, command);
+    ?? cavemanWorkersTransition(state, snapshot, command)
+    ?? nvimLayoutTransition(state, command);
 }
 
 function policyOrchestrator(snapshot: FleetSnapshot, state: FleetState): SessionRecord | undefined {

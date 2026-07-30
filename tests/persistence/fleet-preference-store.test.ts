@@ -57,6 +57,22 @@ describe("FleetPreferenceStore", () => {
     });
   });
 
+  it("defaults automatic nvim layout off and keeps its latest explicit toggle", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-"));
+    directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+
+    await expect(store.nvimLayoutEnabled()).resolves.toBe(false);
+    await store.setNvimLayout(true);
+    await store.set("/repo/one", { provider: "codex", model: "gpt-5.6-sol" });
+    await store.setNvimLayout(false);
+
+    await expect(store.nvimLayoutEnabled()).resolves.toBe(false);
+    await expect(store.list()).resolves.toEqual({
+      "/repo/one": { provider: "codex", model: "gpt-5.6-sol" },
+    });
+  });
+
   it("reads a file written before folds existed", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-"));
     directories.push(directory);
@@ -80,6 +96,7 @@ describe("FleetPreferenceStore", () => {
       "/repo/legacy": { provider: "claude", model: "sonnet" },
     });
     await expect(store.listFolderDispositions()).resolves.toEqual({});
+    await expect(store.nvimLayoutEnabled()).resolves.toBe(false);
   });
 
   it("refuses a file with a malformed line rather than silently dropping preferences", async () => {

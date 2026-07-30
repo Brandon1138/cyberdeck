@@ -61,6 +61,10 @@ export interface OpenWorktreeOptions {
   uid?: number | undefined;
   /** Seams for the case where this window has no nvim and one has to be started. */
   spawn?: NvimSpawnOptions | undefined;
+  layout?: {
+    enabled: boolean;
+    orchestratorSessionIds: readonly string[];
+  } | undefined;
   /** The one disk check this function makes, injected so the ordering below can be asserted. */
   worktreeExists?: ((path: string) => boolean) | undefined;
 }
@@ -106,6 +110,7 @@ export async function openWorktreeInNvim(options: OpenWorktreeOptions): Promise<
       ...(options.nvimPath === undefined ? {} : { nvimPath: options.nvimPath }),
       ...(options.spawn ?? {}),
     },
+    ...(options.layout === undefined ? {} : { layout: options.layout }),
   });
   const live = isWorkerLive(options.session);
   const changes = await (options.changes ?? worktreeChanges)(options.session.cwd);

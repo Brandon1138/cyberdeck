@@ -271,7 +271,7 @@ export function hostWindowId(spawnSync: SpawnSyncLike, hostPaneId: string): stri
  * named the orchestrator, so a dead pane is rejected rather than focused. Only the window Fleet
  * is in was listed, so a pane matching in some other window is out of scope by construction.
  */
-function findLiveOrchestratorPane(output: string, sessionId: string): string | undefined {
+export function findLiveOrchestratorPane(output: string, sessionId: string): string | undefined {
   for (const line of output.split("\n")) {
     const [paneId, dead, ...rest] = line.split("\t");
     if (paneId === undefined || dead === undefined) continue;

@@ -17,6 +17,8 @@ export const FleetFolderDispositionSchema = z.object({
   expanded: z.boolean(),
 });
 
+export const FLEET_NVIM_LAYOUT_KEY = "/@nvim-layout";
+
 const FleetLaunchProfileRecordSchema = z.object({
   recordType: z.literal("fleet.launch-profile"),
   eventId: z.uuid(),
@@ -38,9 +40,25 @@ const FleetFolderDispositionRecordSchema = z.object({
   disposition: FleetFolderDispositionSchema,
 });
 
+/**
+ * Automatic geometry is one machine-local Fleet preference, not an orchestrator policy.
+ *
+ * The sentinel follows the Orc roster's impossible-path convention so this third record kind can
+ * share the append-only file without colliding with a real project. Absence means off; old files
+ * therefore need no migration, while an explicit false record can supersede an earlier true one.
+ */
+const FleetNvimLayoutRecordSchema = z.object({
+  recordType: z.literal("fleet.nvim-layout"),
+  eventId: z.uuid(),
+  persistedAt: z.iso.datetime(),
+  key: z.literal(FLEET_NVIM_LAYOUT_KEY),
+  enabled: z.boolean(),
+});
+
 const FleetPreferenceRecordSchema = z.discriminatedUnion("recordType", [
   FleetLaunchProfileRecordSchema,
   FleetFolderDispositionRecordSchema,
+  FleetNvimLayoutRecordSchema,
 ]);
 
 type FleetPreferenceRecord = z.infer<typeof FleetPreferenceRecordSchema>;
@@ -75,6 +93,16 @@ export class FleetPreferenceStore {
     }));
   }
 
+  async setNvimLayout(enabled: boolean): Promise<void> {
+    await this.append(FleetPreferenceRecordSchema.parse({
+      recordType: "fleet.nvim-layout",
+      eventId: randomUUID(),
+      persistedAt: new Date().toISOString(),
+      key: FLEET_NVIM_LAYOUT_KEY,
+      enabled,
+    }));
+  }
+
   async list(): Promise<Record<string, FleetLaunchProfile>> {
     const profiles: Record<string, FleetLaunchProfile> = {};
     for (const record of await this.load()) {
@@ -89,6 +117,14 @@ export class FleetPreferenceStore {
       if (record.recordType === "fleet.folder-collapse") dispositions[record.key] = record.disposition;
     }
     return dispositions;
+  }
+
+  async nvimLayoutEnabled(): Promise<boolean> {
+    let enabled = false;
+    for (const record of await this.load()) {
+      if (record.recordType === "fleet.nvim-layout") enabled = record.enabled;
+    }
+    return enabled;
   }
 
   private async append(record: FleetPreferenceRecord): Promise<void> {
