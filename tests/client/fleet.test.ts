@@ -2436,18 +2436,18 @@ describe("fleet controls", () => {
 
   it("reports and toggles machine-local automatic nvim layout", () => {
     const snapshot = fleet();
-    const off = createFleetState(snapshot);
+    const on = createFleetState(snapshot);
     const status = transitionFleet(
-      { ...off, draft: "/nvim-settings status" },
+      { ...on, draft: "/nvim-settings status" },
       snapshot,
       "enter",
       NOW_MS,
     );
     expect(status.action).toBeUndefined();
-    expect(status.state.notice).toBe("Automatic nvim layout: OFF");
+    expect(status.state.notice).toBe("Automatic nvim layout: ON");
 
     expect(transitionFleet(
-      { ...off, draft: "/nvim-settings on" },
+      { ...on, nvimLayoutEnabled: false, draft: "/nvim-settings on" },
       snapshot,
       "enter",
       NOW_MS,
@@ -2456,13 +2456,13 @@ describe("fleet controls", () => {
       action: { type: "nvim-layout", enabled: true },
     });
     expect(transitionFleet(
-      { ...off, nvimLayoutEnabled: true, draft: "/nvim-settings status" },
+      { ...on, draft: "/nvim-settings status" },
       snapshot,
       "enter",
       NOW_MS,
     ).state.notice).toBe("Automatic nvim layout: ON");
     expect(transitionFleet(
-      { ...off, draft: "/nvim-settings off" },
+      { ...on, draft: "/nvim-settings off" },
       snapshot,
       "enter",
       NOW_MS,
@@ -2883,7 +2883,7 @@ describe("runFleet", () => {
     input.emit("data", Buffer.from([0x0e]));
 
     await vi.waitFor(() => expect(openWorktree).toHaveBeenCalledWith(worker, {
-      enabled: false,
+      enabled: true,
       orchestratorSessionIds: [],
     }));
     await vi.waitFor(() => expect(

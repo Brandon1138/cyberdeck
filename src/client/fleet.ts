@@ -556,7 +556,7 @@ export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.
     draft: "",
     launchProfiles: {},
     permissionPolicies: { ...DEFAULT_PERMISSION_POLICIES },
-    nvimLayoutEnabled: false,
+    nvimLayoutEnabled: true,
     view: "fleet",
   };
 }
@@ -2324,7 +2324,7 @@ export async function runFleet(
       nvimLayoutEnabled: await client.request<boolean>("fleet.nvimLayout", {}),
     };
   } catch {
-    // Absence and an older broker both mean off; no migration or compatibility guess is needed.
+    // Automatic layout is the local default; an older broker cannot supply a durable opt-out.
   }
   try {
     state = {

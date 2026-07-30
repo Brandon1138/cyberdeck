@@ -26,9 +26,9 @@ export interface FleetNvimLayoutHooks {
 /**
  * Own one hook for the window Fleet itself occupies.
  *
- * Window options carry Fleet's preflight-proven pane id and an exact process fingerprint into the
- * later `pane-exited` subprocess. The fingerprint binds PID, process start time, full command, and
- * this CLI path. A replacement `node` in the same pane therefore cannot reactivate a stale hook,
+ * Window options carry Fleet's preflight-proven pane id, exact process fingerprint, and hook CLI
+ * path into the later `pane-exited` subprocess. The fingerprint binds PID, process start time, and
+ * full command. A replacement `node` in the same pane therefore cannot reactivate a stale hook,
  * even after PID reuse. `pane_current_command` was rejected because it says only `node`, which is
  * shared by unrelated programs and survives none of the identity questions the hook must answer.
  *
@@ -218,9 +218,14 @@ interface FleetProcessIdentity {
 /**
  * PID alone can be reused, and command name alone collapses every Node program to `node`.
  *
- * macOS `ps` supplies immutable process start time plus full argv for one live PID. Storing both
- * with the exact CLI path proves the original Fleet process still exists; a dead process, reused
- * PID, moved executable, or unrelated Node command all fail closed before tmux geometry is read.
+ * macOS `ps` supplies immutable process start time plus full argv for one live PID. Storing that
+ * exact fingerprint proves the original Fleet process still exists; a dead process, reused PID, or
+ * unrelated Node command fails closed before tmux geometry is read.
+ *
+ * The fingerprint deliberately does not require argv to contain `cliPath`. pnpm launches through a
+ * global symlink while Node can report the real module path in `process.argv[1]`, so comparing those
+ * spellings rejects the real Fleet process. The hook path is still stored and compared exactly; it
+ * answers which executable owns the hook, while the fingerprint answers whether Fleet is alive.
  */
 function captureFleetProcessIdentity(
   spawnSync: SpawnSyncLike,
@@ -228,7 +233,7 @@ function captureFleetProcessIdentity(
   cliPath: string,
 ): FleetProcessIdentity {
   const fingerprint = captureProcessFingerprint(spawnSync, pid);
-  if (fingerprint === undefined || !fingerprint.includes(cliPath)) {
+  if (fingerprint === undefined) {
     throw new Error("Could not prove Fleet's process identity for nvim layout");
   }
   return { pid, cliPath, fingerprint };

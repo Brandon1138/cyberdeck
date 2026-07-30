@@ -9,7 +9,7 @@ import {
 
 const FLEET_PID = 4_321;
 const FLEET_FINGERPRINT =
-  "Thu Jul 30 20:00:00 2026 /usr/bin/node /opt/cyberdeck";
+  "Thu Jul 30 20:00:00 2026 /usr/bin/node /pnpm/global/cyberdeck/dist/src/cli.js";
 const FLEET_IDENTITY = JSON.stringify({
   pid: FLEET_PID,
   cliPath: "/opt/cyberdeck",
@@ -38,7 +38,7 @@ function layoutTmux(calls: string[][]): SpawnSyncLike {
 }
 
 describe("Fleet nvim layout hook", () => {
-  it("installs exact window-scoped pane-exited hook and records Fleet pane identity", () => {
+  it("records Fleet identity when ps and the hook spell the symlinked CLI differently", () => {
     const calls: string[][] = [];
     const hooks = createFleetNvimLayoutHooks({
       spawnSync: layoutTmux(calls),
