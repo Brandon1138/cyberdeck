@@ -1030,10 +1030,16 @@ describe("AgentControlService", () => {
 
   it("clamps a short wait to the caller's own timeout instead of the segment length", async () => {
     const waitForWorkerResults = vi.fn(async () => ({ timedOut: false, results: [] }));
+    // The segment is the caller's remaining budget, so it is measured, not fixed: the ticket records
+    // a deadline and the segment is what is left of it. Against a real clock a millisecond spent
+    // between those two reads makes this 4999, which is why the clock is frozen rather than the
+    // assertion loosened — 5000 exactly is the property under test.
     const service = new AgentControlService(
       { get: () => worker, waitForWorkerResults } as never,
       { findBySessionId: vi.fn(async () => binding) } as never,
       { read: vi.fn() } as never,
+      undefined,
+      { now: () => 0 },
     );
 
     await expect(service.waitForWorkers({
