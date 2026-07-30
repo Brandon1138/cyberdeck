@@ -331,8 +331,6 @@ const ORCS_SECTION_KEY = "/@orcs";
 const WORKERS_SECTION_LABEL = "Workers";
 /** Workers shown per folder before the rest go behind a show-more row. */
 const FOLDER_THREAD_CAP = 5;
-/** Widest the Orcs section's inline folder column is allowed to grow. */
-const ORC_FOLDER_COLUMN_MAX = 32;
 const DEFAULT_PERMISSION_POLICIES: Readonly<Record<ConfigurablePermissionProvider, ProviderPermissionPolicy>> = {
   codex: "permissioned",
   claude: "permissioned",
@@ -1590,17 +1588,6 @@ function renderFleetList(
       : widest,
     0,
   );
-  // Orc rows are the only ones whose folder is not already stated by a header above them,
-  // so the column exists only for them and only as wide as the longest path it holds.
-  const folderColumnWidth = Math.min(
-    ORC_FOLDER_COLUMN_MAX,
-    rows.reduce(
-      (widest, row) => row.kind === "thread" && row.showFolder === true
-        ? Math.max(widest, [...shortPath(row.thread.record.cwd, options.home)].length)
-        : widest,
-      0,
-    ),
-  );
   const viewportState = scrollFocusedRowIntoView(
     state,
     rows,
@@ -1653,7 +1640,6 @@ function renderFleetList(
             leaseBadgeWidth,
             row.leaseBadge,
             indicator,
-            row.showFolder === true ? folderColumnWidth : 0,
           );
         }
         if (row.kind === "show-more") {
@@ -2091,7 +2077,6 @@ function renderThreadRow(
   leaseBadgeWidth = 0,
   leaseBadge?: LeaseCustodyBadge | undefined,
   scrollbar?: "track" | "thumb" | undefined,
-  folderColumnWidth = 0,
 ): string {
   const selected = !threadFocusInert(state)
     && thread.record.id === state.selectedSessionId;
@@ -2113,16 +2098,12 @@ function renderThreadRow(
   const fixedWidth = 12 + titleWidth + statusWidth
     + (showIdentity ? identityWidth + 1 : 0)
     + (pullRequestColumn ? 2 : 0)
-    + (leaseBadgeWidth === 0 ? 0 : leaseBadgeWidth + 1)
-    + (folderColumnWidth === 0 ? 0 : folderColumnWidth + 1);
+    + (leaseBadgeWidth === 0 ? 0 : leaseBadgeWidth + 1);
   const previewWidth = Math.max(1, options.width - fixedWidth);
   const preview = threadPreview(thread, previewWidth);
   return [
     `${rowGutter(selected, options.color, scrollbar)}${statusMarker(status, selected, options.color, thread.custodyColor)}`,
     titleCell(thread, pad(title, titleWidth), selected, options.color),
-    ...(folderColumnWidth === 0
-      ? []
-      : [paint(pad(shortPath(thread.record.cwd, options.home), folderColumnWidth), "subtle", options.color)]),
     ...(leaseBadgeWidth === 0
       ? []
       : [leaseBadgeCell(leaseBadge, leaseBadgeWidth, options.color)]),
@@ -2945,8 +2926,6 @@ type FleetRow =
     kind: "thread";
     cwd: string;
     thread: FleetThread;
-    /** Set on the global Orcs section, whose rows name the folder they belong to. */
-    showFolder?: true;
     /** Absent when custody is healthy, unknown, or already stated by the group rollup. */
     leaseBadge?: LeaseCustodyBadge;
   }
@@ -2996,7 +2975,7 @@ function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow
     return [
       ...spacer,
       header,
-      ...sectionRows(WORKERS_SECTION_LABEL, visible, threads, state, false),
+      ...sectionRows(WORKERS_SECTION_LABEL, visible, threads, state),
       // The row survives expansion so the folder can be rolled back up from the same place.
       ...(threads.length > FOLDER_THREAD_CAP
         ? [{ kind: "show-more" as const, cwd, hiddenCount: threads.length - visible.length }]
@@ -3022,7 +3001,7 @@ function orcSectionRows(orcs: readonly FleetThread[], state: FleetState): FleetL
   const visible = isExpanded(state, ORCS_SECTION_KEY) ? orcs : orcs.slice(0, FOLDER_THREAD_CAP);
   return [
     header,
-    ...threadRows(visible, state, true, undefined),
+    ...threadRows(visible, state, undefined),
     ...(orcs.length > FOLDER_THREAD_CAP
       ? [{ kind: "show-more" as const, cwd: ORCS_SECTION_KEY, hiddenCount: orcs.length - visible.length }]
       : []),
@@ -3038,14 +3017,13 @@ function sectionRows(
   visible: readonly FleetThread[],
   all: readonly FleetThread[],
   state: FleetState,
-  showFolder: boolean,
 ): FleetListRow[] {
   // A section whose workers all share one custody says it once on the heading, and
   // its rows go bare: a badge repeated down the whole group is a column of noise.
   const rollup = uniformLeaseCustody(all.map(threadLeaseCustody));
   return [
     { kind: "section", label: sectionLabel(label, all.length, rollup) },
-    ...threadRows(visible, state, showFolder, rollup),
+    ...threadRows(visible, state, rollup),
   ];
 }
 
@@ -3053,7 +3031,6 @@ function sectionRows(
 function threadRows(
   visible: readonly FleetThread[],
   state: FleetState,
-  showFolder: boolean,
   rollup: LeaseCustody | undefined,
 ): FleetListRow[] {
   return visible.flatMap((thread): FleetListRow[] => {
@@ -3066,7 +3043,6 @@ function threadRows(
         kind: "thread",
         cwd: thread.record.cwd,
         thread,
-        ...(showFolder ? { showFolder: true as const } : {}),
         ...(badge === undefined ? {} : { leaseBadge: badge }),
       },
       ...(state.leaseDetail === true && thread.coordination !== undefined

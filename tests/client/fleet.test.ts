@@ -162,12 +162,14 @@ describe("fleet presentation", () => {
     const lines = rendered.split("\n");
     const lineOf = (needle: string) => lines.findIndex((line) => line.includes(needle));
 
-    // One Orcs section for the whole fleet, most recent first, each row naming its folder.
+    // One Orcs section for the whole fleet, most recent first. Orc rows carry no folder: an orc
+    // works across repos, so the path it spawned in says nothing, and a column only orcs filled
+    // knocked every column right of it out of line with the worker rows below.
     expect(rendered.match(/Orcs/g)).toHaveLength(1);
     expect(lineOf("Orcs")).toBeLessThan(lineOf("Newer orc"));
     expect(lineOf("Newer orc")).toBeLessThan(lineOf("Older orc"));
-    expect(lines[lineOf("Newer orc")]).toContain("/repo/alpha");
-    expect(lines[lineOf("Older orc")]).toContain("/repo/zulu");
+    expect(lines[lineOf("Newer orc")]).not.toContain("/repo/alpha");
+    expect(lines[lineOf("Older orc")]).not.toContain("/repo/zulu");
 
     // Both orcs sit above the first folder header, and no folder repeats them.
     expect(lineOf("Older orc")).toBeLessThan(lineOf("▾ /repo/alpha"));
@@ -188,6 +190,36 @@ describe("fleet presentation", () => {
     expect(zuluFolder.focusedFolderCwd).toBe("/repo/zulu");
     expect(transitionFleet(zuluFolder, snapshot, "down", NOW_MS).state.selectedSessionId)
       .toBe(worker.id);
+  });
+
+  it("aligns orc rows with worker rows, column for column", () => {
+    const orc = session({
+      id: "33333333-3333-4333-8333-333333333333",
+      kind: "orchestrator",
+      role: "orchestrator",
+      cwd: "/repo/some/deeply/nested/working/directory",
+      name: "Overseer",
+      updatedAt: "2026-07-22T09:58:00.000Z",
+    });
+    const worker = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "worker",
+      role: "worker",
+      cwd: "/repo/zulu",
+      name: "Minion",
+      updatedAt: "2026-07-22T09:59:59.000Z",
+    });
+    const snapshot = fleet({ record: orc }, { record: worker });
+    const lines = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width: 150, height: 40, now: NOW_MS, home: "/Users/brandon",
+    }).split("\n");
+    const rowOf = (needle: string) => lines.find((line) => line.includes(needle))!;
+
+    // The orc's cwd is far longer than the worker's, so any per-row folder cell would show up
+    // here as the two rows disagreeing about where the model column starts.
+    expect(rowOf("Overseer")).not.toContain("/repo/some");
+    expect(rowOf("Overseer").indexOf("Claude")).toBeGreaterThan(0);
+    expect(rowOf("Overseer").indexOf("Claude")).toBe(rowOf("Minion").indexOf("Claude"));
   });
 
   it("orders workers inside a folder by last activity, most recent first", () => {
