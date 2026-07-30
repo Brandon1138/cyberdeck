@@ -62,11 +62,11 @@ operator for the base ref for that worktree and record it, not to widen the gues
 ### A SIGKILL can leave Fleet's window hook pointing at an old binary
 
 Opting into `/nvim-settings on` installs window-scoped `pane-exited` and `after-kill-pane` hooks whose
-background command names the Cyberdeck binary Fleet was started with. Clean Fleet shutdown and
-`/nvim-settings off` remove them, and their rebalance command is deliberately inert once the saved
-Fleet process identity is gone. A SIGKILL cannot run that cleanup, though, so the inert hooks remain
-attached to a surviving window. If Cyberdeck later moves, tmux will still try the old path on each
-pane exit.
+background command names the Node executable and Cyberdeck module Fleet was started with. Clean
+Fleet shutdown and `/nvim-settings off` remove them, and their rebalance command is deliberately
+inert once the saved Fleet process identity is gone. A SIGKILL cannot run that cleanup, though, so
+the inert hooks remain attached to a surviving window. If Cyberdeck later moves, tmux will still try
+the old path on each pane exit.
 
 Deferred because the operator's global install is a symlink whose path stays stable across builds,
 and a stale hook neither resizes nor prints when Fleet's pane is absent. **Trigger:** moving or

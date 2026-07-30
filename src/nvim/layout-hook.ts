@@ -13,6 +13,7 @@ const LAYOUT_HOOKS = ["pane-exited", "after-kill-pane"] as const;
 export interface FleetNvimLayoutHookOptions {
   spawnSync: SpawnSyncLike;
   preflight: () => CockpitPreflight;
+  nodePath?: string | undefined;
   cliPath: string;
   fleetPid?: number | undefined;
 }
@@ -97,6 +98,7 @@ export function createFleetNvimLayoutHooks(
         throw new Error("tmux failed to record Fleet's process identity for nvim layout");
       }
       const shellCommand = [
+        shellQuote(options.nodePath ?? process.execPath),
         shellQuote(options.cliPath),
         "nvim-layout",
         "rebalance",

@@ -47,6 +47,7 @@ describe("Fleet nvim layout hook", () => {
         presentationCommand: "switch-client",
         hostPaneId: "%1",
       }),
+      nodePath: "/usr/bin/node",
       cliPath: "/opt/cyberdeck",
       fleetPid: FLEET_PID,
     });
@@ -68,7 +69,7 @@ describe("Fleet nvim layout hook", () => {
       "-t",
       "@4",
       "pane-exited",
-      'run-shell -b "/opt/cyberdeck nvim-layout rebalance -w @4"',
+      'run-shell -b "/usr/bin/node /opt/cyberdeck nvim-layout rebalance -w @4"',
     ]);
     expect(calls).toContainEqual([
       "set-hook",
@@ -76,7 +77,7 @@ describe("Fleet nvim layout hook", () => {
       "-t",
       "@4",
       "after-kill-pane",
-      'run-shell -b "/opt/cyberdeck nvim-layout rebalance -w @4"',
+      'run-shell -b "/usr/bin/node /opt/cyberdeck nvim-layout rebalance -w @4"',
     ]);
   });
 

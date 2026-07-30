@@ -272,6 +272,7 @@ async function runCyberdeck(): Promise<void> {
   const nvimLayoutHooks = createFleetNvimLayoutHooks({
     spawnSync: nodeSpawnSync as SpawnSyncLike,
     preflight: () => preflightCockpit(),
+    nodePath: process.execPath,
     cliPath,
   });
   await runFleet(client, process.stdin, process.stdout, process, {
