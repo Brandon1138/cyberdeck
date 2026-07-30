@@ -1518,6 +1518,74 @@ describe("fleet controls", () => {
     });
   });
 
+  it("reaches the selected orchestrator with Ctrl+] while the Orcs header holds focus", () => {
+    const orc = session({ kind: "orchestrator", role: "orchestrator", cwd: "/repo/one" });
+    const snapshot = fleet({ record: orc });
+    const folded: FleetState = {
+      ...createFleetState(snapshot, "/repo/one"),
+      collapsedCwds: ["/@orcs"],
+    };
+
+    const attached = transitionFleet(folded, snapshot, "ctrl+]", NOW_MS);
+
+    expect(attached.state.focusedFolderCwd).toBe("/@orcs");
+    expect(attached.action).toEqual({
+      type: "open-orchestrator",
+      sessionId: orc.id,
+      cockpitCwd: "/repo/one",
+      requiresResume: false,
+    });
+  });
+
+  it("reaches the selected orchestrator with Ctrl+] while the show-more row holds focus", () => {
+    const orcs = Array.from({ length: 6 }, (_unused, index) =>
+      session({
+        id: `${index + 1}${"1".repeat(7)}-1111-4111-8111-111111111111`,
+        kind: "orchestrator",
+        role: "orchestrator",
+        cwd: "/repo/one",
+        displayOrder: index,
+      }));
+    const hidden = orcs.at(-1)!;
+    const snapshot = fleet(...orcs.map((record) => ({ record })));
+    const capped: FleetState = {
+      ...createFleetState(snapshot, "/repo/one"),
+      selectedSessionId: hidden.id,
+    };
+
+    const attached = transitionFleet(capped, snapshot, "ctrl+]", NOW_MS);
+
+    expect(attached.state.focusedShowMoreCwd).toBe("/@orcs");
+    expect(attached.action).toEqual({
+      type: "open-orchestrator",
+      sessionId: hidden.id,
+      cockpitCwd: "/repo/one",
+      requiresResume: false,
+    });
+  });
+
+  it("offers a starting orchestrator in the picker and opens it without a resume", () => {
+    const starting = session({
+      kind: "orchestrator",
+      role: "orchestrator",
+      name: "Booting peer",
+      executionState: "starting",
+      cwd: "/repo/one",
+    });
+    const snapshot = fleet({ record: starting });
+    const opened = transitionFleet(createFleetState(snapshot, "/repo/one"), snapshot, "ctrl+o", NOW_MS);
+    const rendered = renderFleet(snapshot, opened.state, { color: false, width: 110, height: 30 });
+
+    expect(rendered).toContain("Booting peer");
+    expect(rendered).toContain("starting");
+    expect(transitionFleet(opened.state, snapshot, "enter", NOW_MS).action).toEqual({
+      type: "open-orchestrator",
+      sessionId: starting.id,
+      cockpitCwd: "/repo/one",
+      requiresResume: false,
+    });
+  });
+
   it("uses Ctrl+G for cwd navigation while leaving Tab unbound", () => {
     const decoder = new FleetKeyDecoder();
     expect(decoder.push(Buffer.from([0x07]))).toEqual(["ctrl+g"]);

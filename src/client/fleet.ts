@@ -701,7 +701,12 @@ export function transitionFleet(
   }
 
   if (key === "ctrl+]") {
-    if (selected?.record.kind !== "orchestrator") {
+    // A collapsed Orcs section, or its show-more row, takes focus off the roster while the orc
+    // the operator picked stays the selection. The cockpit chord answers to that selection, so
+    // folding the roster never puts the selected orc out of reach.
+    const cockpitTarget = selected
+      ?? threads.find(({ record }) => record.id === state.selectedSessionId);
+    if (cockpitTarget?.record.kind !== "orchestrator") {
       return {
         state: {
           ...state,
@@ -711,7 +716,7 @@ export function transitionFleet(
         },
       };
     }
-    if (selected.record.attachmentState === "controlled") {
+    if (cockpitTarget.record.attachmentState === "controlled") {
       return {
         state: {
           ...state,
@@ -725,10 +730,10 @@ export function transitionFleet(
       state: { ...state, helpOpen: false, notice: undefined },
       action: {
         type: "open-orchestrator",
-        sessionId: selected.record.id,
+        sessionId: cockpitTarget.record.id,
         cockpitCwd: state.fallbackCwd,
-        requiresResume: selected.record.executionState !== "active"
-          && selected.record.executionState !== "starting",
+        requiresResume: cockpitTarget.record.executionState !== "active"
+          && cockpitTarget.record.executionState !== "starting",
       },
     };
   }
@@ -1845,7 +1850,8 @@ function transitionOrchestratorPicker(
           type: "open-orchestrator",
           sessionId: selectedExisting.id,
           cockpitCwd: state.fallbackCwd,
-          requiresResume: selectedExisting.executionState !== "active",
+          requiresResume: selectedExisting.executionState !== "active"
+            && selectedExisting.executionState !== "starting",
         },
       };
     }
@@ -1965,6 +1971,9 @@ function existingOrchestrators(snapshot: FleetSnapshot): SessionRecord[] {
       && record.role === "orchestrator"
       && (
         record.executionState === "active"
+        // A `starting` orc is healthy and already the operator's; leaving it out of the picker
+        // is what made them start a second one while the first was still coming up.
+        || record.executionState === "starting"
         || (
           record.executionState === "cancelled"
           // `done` joins `interrupted` here because a broker shutdown now preserves the outcome of
@@ -1982,7 +1991,9 @@ function existingOrchestratorLabel(record: SessionRecord, color: boolean): strin
     ? paint("in use", "yellow", color)
     : record.executionState === "active"
       ? paint("available", "green", color)
-      : paint("reconnect", "yellow", color);
+      : record.executionState === "starting"
+        ? paint("starting", "green", color)
+        : paint("reconnect", "yellow", color);
   return `${name}  ${paint(record.id.slice(0, 8), "dim", color)}  ${lifecycle}`;
 }
 
