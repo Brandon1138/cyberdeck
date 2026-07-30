@@ -201,6 +201,11 @@ end
 
 --- Open one worker's worktree: a new tab scoped to it, the agent's changed files and hunks in that
 --- tab's list, and every buffer under it locked while the agent is still running.
+---
+--- The guard is claimed *before* the tab is landed, and the order is load-bearing. Landing opens
+--- files, and `:edit` can fail outright — a reused tab whose buffer has unsaved changes raises E37 —
+--- which would abort this function before the guard was ever installed and leave a live worker's
+--- files editable. Claiming first means the worst a failed landing costs is the landing.
 function M.open(encoded)
   return answer(pcall(function()
     local request = decode(encoded)
@@ -209,6 +214,12 @@ function M.open(encoded)
     local tab = ensure_tab(worktree)
     local win = vim.api.nvim_get_current_win()
     set_list(win, request, " ")
+    if request.live then
+      guarded[session] = worktree
+      install_guard()
+    else
+      guarded[session] = nil
+    end
     land({
       session = session,
       worktree = worktree,
@@ -218,12 +229,6 @@ function M.open(encoded)
       tab = tab,
       win = win,
     })
-    if request.live then
-      guarded[session] = worktree
-      install_guard()
-    else
-      guarded[session] = nil
-    end
     reapply_to_open_buffers(worktree)
     return "ok:" .. tostring(#(request.entries or {}))
   end))

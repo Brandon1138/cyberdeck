@@ -167,6 +167,8 @@ interface LandingReport {
   hookedBuffer: string;
   suppressedBuffer: string;
   threwBuffer: string;
+  liveFailAnswer: string;
+  liveFailEditable: boolean;
   seen: Array<Record<string, unknown>>;
 }
 
@@ -179,12 +181,12 @@ local cyberdeck = require("cyberdeck")
 local answers, seen = {}, {}
 local mode = "none"
 
-local function payload(session, worktree, entries)
+local function payload(session, worktree, entries, live)
   return vim.base64.encode(vim.json.encode({
     session = session,
     worktree = worktree,
     title = "Cyberdeck · " .. session,
-    live = false,
+    live = live == true,
     entries = entries,
   }))
 end
@@ -247,12 +249,37 @@ mode = "throw"
 local threw_tree = base .. "/threw"
 report.threwBuffer = open("session-threw", threw_tree, change(threw_tree))
 
+-- A landing that fails must not cost the guard.
+--
+-- The landing runs after the guard is claimed, and this is what that ordering buys. An :edit
+-- refuses to abandon a modified buffer only when the operator turned 'hidden' off, so this is not
+-- the default Neovim the cases above run under -- it is turned off here deliberately, to make the
+-- one failure a landing can actually raise reachable and deterministic. Whatever the trigger, the
+-- rule is the same: a live worker's files stay locked even when the open that claimed them errored.
+-- Two workers in one worktree is the ordinary case this has to survive: tabs are keyed by worktree,
+-- so the second worker's *first* open reuses the first worker's tab -- and inherits whatever state
+-- the operator left in it. That is the only way a worker's opening claim on the guard and a failing
+-- landing can meet, and it is why the failing open below carries a session that has never been seen.
+cyberdeck.listen({})
+vim.o.hidden = false
+local live_tree = base .. "/livefail"
+cyberdeck.open(payload("session-finished", live_tree, {}, false))
+
+-- Leave the tab's window on a modified buffer, so the next landing cannot succeed.
+vim.cmd("enew")
+vim.api.nvim_buf_set_lines(0, 0, -1, false, { "unsaved" })
+report.liveFailAnswer = cyberdeck.open(payload("session-live", live_tree, {}, true))
+
+vim.bo.modified = false
+vim.cmd("edit " .. vim.fn.fnameescape(live_tree .. "/changed.txt"))
+report.liveFailEditable = vim.bo.modifiable
+
 report.answers = answers
 report.seen = seen
 io.stdout:write(vim.json.encode(report))
 `;
 
-const LANDING_TREES = ["empty", "entries", "hooked", "suppressed", "threw"] as const;
+const LANDING_TREES = ["empty", "entries", "hooked", "suppressed", "threw", "livefail"] as const;
 
 describe.skipIf(!hasNvim)("where an open lands in a real nvim", () => {
   let directory: string;
@@ -325,5 +352,12 @@ describe.skipIf(!hasNvim)("where an open lands in a real nvim", () => {
   it("reports a hook that throws and lands the tab without it", () => {
     expect(report.threwBuffer).toBe(join(directory, "threw", "changed.txt"));
     expect(stderr).toContain("on_open failed");
+  });
+
+  it("keeps a live worker's files locked even when the landing failed", () => {
+    // The open is reported as failed, honestly: the operator asked for a tab they did not get.
+    expect(report.liveFailAnswer).toMatch(/^error:/u);
+    // The guard is what must not have been lost with it.
+    expect(report.liveFailEditable).toBe(false);
   });
 });
