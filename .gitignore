@@ -6,5 +6,6 @@ dist/
 coverage/
 .DS_Store
 .cyberdeck/
+worktrees
 *.tgz
 package-output.json
