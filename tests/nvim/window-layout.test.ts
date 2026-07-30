@@ -179,6 +179,43 @@ describe("rebalanceNvimWindow", () => {
     })).toBeUndefined();
     expect(spawnSync.mock.calls.some(([, args]) => args[0] === "resize-pane")).toBe(false);
   });
+
+  it("classifies a surviving Orc launched through a symlinked CLI path", () => {
+    const calls: string[][] = [];
+    const spawnSync: SpawnSyncLike = vi.fn((_command, args) => {
+      calls.push(args);
+      if (args[0] === "display-message") return { status: 0, stdout: "235\t40\t0\n" };
+      if (args[0] === "list-panes") {
+        return {
+          status: 0,
+          stdout: [
+            "%1\t0\t0\t0\t40\t64\tnode\t/repo/dist/src/cli.js",
+            "%2\t0\t65\t0\t40\t170\tnode\t/pnpm/global/cyberdeck/dist/src/cli.js attach 11111111-1111-4111-8111-111111111111",
+          ].join("\n"),
+        };
+      }
+      return { status: 0 };
+    });
+    const canonicalizePath = vi.fn((path: string) => {
+      if (
+        path === "/repo/dist/src/cli.js"
+        || path === "/pnpm/global/cyberdeck/dist/src/cli.js"
+      ) return "/canonical/cyberdeck/dist/src/cli.js";
+      throw new Error("not the Cyberdeck CLI");
+    });
+
+    expect(rebalanceNvimWindow({
+      spawnSync,
+      windowId: "@4",
+      paneFormat: "layout-format",
+      hostPaneId: "%1",
+      cliPath: "/repo/dist/src/cli.js",
+      canonicalizePath,
+    })?.state).toBe("fleet-orc");
+    expect(calls.filter(([verb]) => verb === "resize-pane")).toEqual([
+      ["resize-pane", "-t", "%1", "-x", "117"],
+    ]);
+  });
 });
 
 describe("out-of-process Orc predicate", () => {
@@ -201,5 +238,28 @@ describe("out-of-process Orc predicate", () => {
       `%2\t0\t${command}`,
       "11111111-1111-4111-8111-111111111111",
     )).toBe("%2");
+  });
+
+  it("accepts distinct CLI spellings only when they resolve to the same file", () => {
+    const canonicalizePath = vi.fn((path: string) => ({
+      "/repo/dist/src/cli.js": "/canonical/cyberdeck/dist/src/cli.js",
+      "/pnpm/global/cyberdeck/dist/src/cli.js": "/canonical/cyberdeck/dist/src/cli.js",
+    })[path] ?? path);
+
+    expect(startsThisCliAttach(
+      "/pnpm/global/cyberdeck/dist/src/cli.js attach 11111111-1111-4111-8111-111111111111",
+      "/repo/dist/src/cli.js",
+      canonicalizePath,
+    )).toBe(true);
+  });
+
+  it("fails closed when distinct CLI spellings cannot be canonicalized", () => {
+    expect(startsThisCliAttach(
+      "/missing/cyberdeck attach 11111111-1111-4111-8111-111111111111",
+      "/repo/dist/src/cli.js",
+      () => {
+        throw new Error("missing");
+      },
+    )).toBe(false);
   });
 });
