@@ -15,6 +15,7 @@ export interface FleetNvimLayoutHookOptions {
   preflight: () => CockpitPreflight;
   nodePath?: string | undefined;
   cliPath: string;
+  hookPath?: string | undefined;
   fleetPid?: number | undefined;
 }
 
@@ -97,7 +98,7 @@ export function createFleetNvimLayoutHooks(
         );
         throw new Error("tmux failed to record Fleet's process identity for nvim layout");
       }
-      const shellCommand = [
+      const command = [
         shellQuote(options.nodePath ?? process.execPath),
         shellQuote(options.cliPath),
         "nvim-layout",
@@ -105,6 +106,9 @@ export function createFleetNvimLayoutHooks(
         "-w",
         shellQuote(windowId),
       ].join(" ");
+      const shellCommand = options.hookPath === undefined
+        ? command
+        : `/usr/bin/env ${shellQuote(`PATH=${options.hookPath}`)} ${command}`;
       const hook = `run-shell -b "${tmuxDoubleQuote(shellCommand)}"`;
       const installedHooks: string[] = [];
       for (const hookName of LAYOUT_HOOKS) {
