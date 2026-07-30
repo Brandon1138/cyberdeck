@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { decodeNvimPayload } from "../../src/nvim/quickfix.js";
@@ -7,7 +10,10 @@ import {
   selectSession,
   worktreeSubject,
 } from "../../src/nvim/open-worktree.js";
+import type { WorktreeBaseline } from "../../src/nvim/worktree-changes.js";
 import type { SpawnSyncLike } from "../../src/tmux/cockpit.js";
+
+const FORK_POINT: WorktreeBaseline = { kind: "fork-point", label: "since origin/main" };
 
 const NOW = "2026-07-22T10:00:00.000Z";
 
@@ -93,7 +99,12 @@ describe("openWorktreeInNvim", () => {
       hostPaneId: "%1",
       spawnSync,
       uid: 501,
-      changes: async () => ({ changes: [{ path: "src/a.ts", line: 7, text: "fn a() {" }], dropped: 0 }),
+      worktreeExists: () => true,
+      changes: async () => ({
+        changes: [{ path: "src/a.ts", line: 7, text: "fn a() {" }],
+        dropped: 0,
+        baseline: FORK_POINT,
+      }),
     });
 
     expect(opened).toEqual({
@@ -103,6 +114,7 @@ describe("openWorktreeInNvim", () => {
       address: "/tmp/cyberdeck-nvim-501/pane-2.sock",
       entries: 1,
       live: true,
+      baseline: FORK_POINT,
     });
 
     const nvimCall = calls.find(({ command }) => command === "nvim");
@@ -111,7 +123,7 @@ describe("openWorktreeInNvim", () => {
     expect(decodeNvimPayload(payload)).toEqual({
       session: "11111111-1111-4111-8111-111111111111",
       worktree: "/work/tree",
-      title: "Cyberdeck · worker-one",
+      title: "Cyberdeck · worker-one · since origin/main",
       live: true,
       entries: [{ filename: "/work/tree/src/a.ts", lnum: 7, col: 1, text: "fn a() {" }],
     });
@@ -125,7 +137,8 @@ describe("openWorktreeInNvim", () => {
       hostPaneId: "%1",
       spawnSync,
       uid: 501,
-      changes: async () => ({ changes: [], dropped: 0 }),
+      worktreeExists: () => true,
+      changes: async () => ({ changes: [], dropped: 0, baseline: FORK_POINT }),
     });
 
     expect(opened.live).toBe(false);
@@ -152,10 +165,11 @@ describe("openWorktreeInNvim", () => {
       hostPaneId: "%1",
       spawnSync,
       uid: 501,
+      worktreeExists: () => true,
       spawn: { socketExists: () => true },
       changes: async () => {
         collectedBeforeSpawn = !calls.some(({ args }) => args[0] === "split-window");
-        return { changes: [], dropped: 0 };
+        return { changes: [], dropped: 0, baseline: FORK_POINT };
       },
     });
 
@@ -178,6 +192,7 @@ describe("openWorktreeInNvim", () => {
       hostPaneId: "%1",
       spawnSync,
       uid: 501,
+      worktreeExists: () => true,
       spawn: {
         socketExists: () => false,
         now: () => clock,
@@ -188,9 +203,54 @@ describe("openWorktreeInNvim", () => {
       },
       changes: async () => {
         collected = true;
-        return { changes: [], dropped: 0 };
+        return { changes: [], dropped: 0, baseline: FORK_POINT };
       },
     })).rejects.toThrow(/nothing was listening on/u);
     expect(collected).toBe(false);
+  });
+
+  it("refuses a worktree that is gone before it touches tmux at all", async () => {
+    const { calls, spawnSync } = tmuxAndNvim();
+    let thrown: unknown;
+
+    try {
+      await openWorktreeInNvim({
+        session: session({ cwd: "/work/cleaned-up" }),
+        hostPaneId: "%1",
+        spawnSync,
+        uid: 501,
+        worktreeExists: () => false,
+        changes: async () => ({ changes: [], dropped: 0, baseline: FORK_POINT }),
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect((thrown as { code?: string }).code).toBe("WORKTREE_MISSING");
+    expect(String(thrown)).toContain("/work/cleaned-up");
+    // Nothing was spawned and no pane was even looked for: an nvim started only to be told the
+    // worktree is gone is a pane the operator now has to close by hand.
+    expect(calls).toEqual([]);
+  });
+
+  it("opens a directory that is not a repository with an empty list that says so", async () => {
+    const { spawnSync } = tmuxAndNvim();
+    // A real directory and the real git path: the scratchpad threads this is about have a cwd that
+    // was never `git init`-ed, and the answer has to come from git rather than from a stub.
+    const scratch = mkdtempSync(join(tmpdir(), "cyberdeck-not-a-repo-"));
+
+    try {
+      const opened = await openWorktreeInNvim({
+        session: session({ cwd: scratch }),
+        hostPaneId: "%1",
+        spawnSync,
+        uid: 501,
+      });
+
+      expect(opened.entries).toBe(0);
+      expect(opened.baseline).toEqual({ kind: "not-a-repo", label: "not a git repository" });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });

@@ -150,3 +150,180 @@ describe.skipIf(!hasNvim)("the worktree guard in a real nvim", () => {
     });
   });
 });
+
+/**
+ * Where an open lands, in a real nvim.
+ *
+ * `:tabnew` starts on a `[No Name]` scratch buffer, and only a location-list entry ever displaced
+ * it — so a worker with nothing to show landed the operator nowhere. What replaces it is a
+ * directory buffer, which is whatever the operator's config makes it, and an `on_open` hook that
+ * can take the landing over entirely. None of that is checkable without running the Lua.
+ */
+interface LandingReport {
+  answers: string[];
+  emptyBuffer: string;
+  entriesBuffer: string;
+  entriesLine: number;
+  hookedBuffer: string;
+  suppressedBuffer: string;
+  threwBuffer: string;
+  seen: Array<Record<string, unknown>>;
+}
+
+const LANDING_DRIVER = `
+local runtime, base = _G.arg[1], _G.arg[2]
+vim.opt.runtimepath:append(runtime)
+vim.o.swapfile = false
+
+local cyberdeck = require("cyberdeck")
+local answers, seen = {}, {}
+local mode = "none"
+
+local function payload(session, worktree, entries)
+  return vim.base64.encode(vim.json.encode({
+    session = session,
+    worktree = worktree,
+    title = "Cyberdeck · " .. session,
+    live = false,
+    entries = entries,
+  }))
+end
+
+local function open(session, worktree, entries)
+  table.insert(answers, cyberdeck.open(payload(session, worktree, entries)))
+  return vim.api.nvim_buf_get_name(0)
+end
+
+local function change(worktree)
+  return { { filename = worktree .. "/changed.txt", lnum = 2, col = 1, text = "changed" } }
+end
+
+local report = {}
+
+-- No hook at all: an empty list has to leave the operator on the worktree, not on [No Name].
+report.emptyBuffer = open("session-empty", base .. "/empty", {})
+
+-- No hook, one entry: the change is still where the operator lands.
+local entries_tree = base .. "/entries"
+report.entriesBuffer = open("session-entries", entries_tree, change(entries_tree))
+report.entriesLine = vim.api.nvim_win_get_cursor(0)[1]
+
+-- Registering a hook is the only thing listen() is being asked to do here. TMUX_PANE is unset by
+-- the test, so no socket is served and the operator's own nvim is left alone.
+cyberdeck.listen({
+  on_open = function(ctx)
+    if mode == "throw" then
+      error("the operator's hook blew up")
+    end
+    table.insert(seen, {
+      session = ctx.session,
+      worktree = ctx.worktree,
+      title = ctx.title,
+      live = ctx.live,
+      entries = #ctx.entries,
+      first = ctx.entries[1] ~= nil and ctx.entries[1].filename or nil,
+      tab_is_current = ctx.tab == vim.api.nvim_get_current_tabpage(),
+      win_is_current = ctx.win == vim.api.nvim_get_current_win(),
+      cwd = vim.fn.getcwd(),
+    })
+    if mode == "suppress" then
+      return true
+    end
+  end,
+})
+
+-- A hook that returns nothing observes and then gets out of the way.
+mode = "observe"
+local hooked_tree = base .. "/hooked"
+report.hookedBuffer = open("session-hooked", hooked_tree, change(hooked_tree))
+
+-- A hook that returns true landed the tab itself, so Cyberdeck must not land it again.
+mode = "suppress"
+local suppressed_tree = base .. "/suppressed"
+report.suppressedBuffer = open("session-suppressed", suppressed_tree, change(suppressed_tree))
+
+-- A hook that throws costs the operator a message, not the worktree.
+mode = "throw"
+local threw_tree = base .. "/threw"
+report.threwBuffer = open("session-threw", threw_tree, change(threw_tree))
+
+report.answers = answers
+report.seen = seen
+io.stdout:write(vim.json.encode(report))
+`;
+
+const LANDING_TREES = ["empty", "entries", "hooked", "suppressed", "threw"] as const;
+
+describe.skipIf(!hasNvim)("where an open lands in a real nvim", () => {
+  let directory: string;
+  let report: LandingReport;
+  let stderr: string;
+
+  beforeAll(() => {
+    directory = realpathSync(mkdtempSync(join(tmpdir(), "cyberdeck-nvim-landing-")));
+    for (const name of LANDING_TREES) {
+      mkdirSync(join(directory, name), { recursive: true });
+      writeFileSync(join(directory, name, "changed.txt"), "one\ntwo\nthree\n");
+    }
+
+    const driver = join(directory, "driver.lua");
+    writeFileSync(driver, LANDING_DRIVER);
+    // Without this the driver would inherit the operator's own pane, and `listen()` would take over
+    // the socket their real nvim is serving on.
+    const { TMUX_PANE: _pane, ...env } = process.env;
+    const run = spawnSync("nvim", ["--clean", "-l", driver, RUNTIME_PATH, directory], {
+      encoding: "utf8",
+      env,
+    });
+    expect(run.status).toBe(0);
+    stderr = run.stderr ?? "";
+    report = JSON.parse(run.stdout ?? "") as LandingReport;
+  });
+
+  afterAll(() => {
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("accepts every request, including the ones a hook interfered with", () => {
+    expect(report.answers).toEqual(["ok:0", "ok:1", "ok:1", "ok:1", "ok:1"]);
+  });
+
+  it("shows the worktree itself when there is nothing to land on", () => {
+    // The bug: this was the `[No Name]` buffer `:tabnew` creates, whose name is the empty string.
+    expect(report.emptyBuffer).toBe(join(directory, "empty"));
+  });
+
+  it("still lands on the first change when there is one", () => {
+    expect(report.entriesBuffer).toBe(join(directory, "entries", "changed.txt"));
+    expect(report.entriesLine).toBe(2);
+  });
+
+  it("hands the hook the tab, the window and the request that produced them", () => {
+    expect(report.seen[0]).toEqual({
+      session: "session-hooked",
+      worktree: join(directory, "hooked"),
+      title: "Cyberdeck · session-hooked",
+      live: false,
+      entries: 1,
+      first: join(directory, "hooked", "changed.txt"),
+      tab_is_current: true,
+      win_is_current: true,
+      // `:tcd` has already run, so a hook that opens an explorer at the cwd is at the worktree.
+      cwd: join(directory, "hooked"),
+    });
+  });
+
+  it("lands the tab anyway when the hook declines to say it did", () => {
+    expect(report.hookedBuffer).toBe(join(directory, "hooked", "changed.txt"));
+  });
+
+  it("leaves the tab alone when the hook returns true", () => {
+    expect(report.seen).toHaveLength(2);
+    expect(report.suppressedBuffer).toBe("");
+  });
+
+  it("reports a hook that throws and lands the tab without it", () => {
+    expect(report.threwBuffer).toBe(join(directory, "threw", "changed.txt"));
+    expect(stderr).toContain("on_open failed");
+  });
+});

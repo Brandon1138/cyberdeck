@@ -230,6 +230,9 @@ async function openWorkerWorktree(session: SessionRecord, client: RpcClient): Pr
   const opened = await openWorktreeInNvim({ session, hostPaneId });
   const subject = worktreeSubject(session);
   const changes = `${opened.entries} change${opened.entries === 1 ? "" : "s"}`;
+  // Never make the operator guess what produced the count: the same "0 changes" means a clean
+  // branch, a repository with no default branch to compare against, or no repository at all.
+  const baseline = ` · ${opened.baseline.label}`;
   const guard = opened.live ? " · read-only while it runs" : "";
   try {
     await client.request("nvim.bind", {
@@ -238,9 +241,9 @@ async function openWorkerWorktree(session: SessionRecord, client: RpcClient): Pr
       live: opened.live,
     });
   } catch {
-    return `${subject} opened in ${opened.paneId} · ${changes}${guard} · no refresh on completion`;
+    return `${subject} opened in ${opened.paneId} · ${changes}${baseline}${guard} · no refresh on completion`;
   }
-  return `${subject} opened in ${opened.paneId} · ${changes}${guard}`;
+  return `${subject} opened in ${opened.paneId} · ${changes}${baseline}${guard}`;
 }
 
 async function runCyberdeck(): Promise<void> {
