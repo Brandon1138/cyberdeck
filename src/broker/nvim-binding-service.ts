@@ -9,6 +9,14 @@ export const NvimBindParamsSchema = z.object({
   sessionId: z.uuid(),
   /** Derived by the client from the tmux pane nvim occupies; never chosen by the caller. */
   address: z.string().trim().min(1).max(4_096),
+  /**
+   * The flag the client already sent nvim, not the worker's state now.
+   *
+   * The client reads the session, sends `open`, and only then binds, so the worker can reach its
+   * terminal state inside that window. Being told what nvim was locked with is what lets this
+   * service notice a transition that happened before it was ever watching.
+   */
+  live: z.boolean(),
 });
 
 export type NvimBindParams = z.infer<typeof NvimBindParamsSchema>;
@@ -58,7 +66,7 @@ export class NvimBindingService {
 
   start(): void {
     this.#unsubscribe ??= this.#options.onSessionUpdate((sessionId) => {
-      this.#tail = this.#tail.then(() => this.settle(sessionId), () => this.settle(sessionId));
+      this.#queue(() => this.settle(sessionId));
     });
   }
 
@@ -69,9 +77,14 @@ export class NvimBindingService {
   }
 
   /**
-   * Record that this nvim is showing this worker. Binding a session that is already terminal is
-   * accepted and simply left unbound: the client has just rendered its final list, and there is no
-   * later transition to wait for.
+   * Record that this nvim is showing this worker. A session that is already terminal is accepted
+   * and left unbound: there is no later transition to wait for.
+   *
+   * Unbound is not the same as untouched. If the client locked nvim on the way in and the worker
+   * went terminal before this call, the transition this service settles on is already behind it,
+   * so the release has to be issued here or those buffers stay `nomodifiable` for the life of that
+   * nvim. A client that already rendered the worker as finished asks for nothing, which is what
+   * keeps the normal path — bind while live, settle on the transition — to one refresh.
    */
   bind(params: NvimBindParams): NvimBinding {
     const request = NvimBindParamsSchema.parse(params);
@@ -82,6 +95,7 @@ export class NvimBindingService {
       worktree: record.cwd,
     };
     if (isWorkerLive(record)) this.#bindings.set(record.id, binding);
+    else if (request.live) this.#queue(() => this.#release(binding, record));
     return binding;
   }
 
@@ -108,6 +122,15 @@ export class NvimBindingService {
     }
     if (isWorkerLive(record)) return;
     this.#bindings.delete(sessionId);
+    await this.#release(binding, record);
+  }
+
+  /** Serialize against every other message this service sends to nvim. */
+  #queue(work: () => Promise<void>): void {
+    this.#tail = this.#tail.then(work, work);
+  }
+
+  async #release(binding: NvimBinding, record: SessionRecord): Promise<void> {
     try {
       const changes = await (this.#options.changes ?? worktreeChanges)(binding.worktree);
       const notify = this.#options.notify ?? callNvim;
@@ -115,6 +138,7 @@ export class NvimBindingService {
         address: binding.address,
         entryPoint: "refresh",
         request: worktreeRequest({
+          session: binding.sessionId,
           worktree: binding.worktree,
           subject: worktreeSubject(record),
           live: false,

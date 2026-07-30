@@ -232,7 +232,11 @@ async function openWorkerWorktree(session: SessionRecord, client: RpcClient): Pr
   const changes = `${opened.entries} change${opened.entries === 1 ? "" : "s"}`;
   const guard = opened.live ? " · read-only while it runs" : "";
   try {
-    await client.request("nvim.bind", { sessionId: opened.sessionId, address: opened.address });
+    await client.request("nvim.bind", {
+      sessionId: opened.sessionId,
+      address: opened.address,
+      live: opened.live,
+    });
   } catch {
     return `${subject} opened in ${opened.paneId} · ${changes}${guard} · no refresh on completion`;
   }

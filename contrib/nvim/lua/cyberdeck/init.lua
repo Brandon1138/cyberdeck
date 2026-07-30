@@ -24,9 +24,14 @@ local uv = vim.uv or vim.loop
 --- worktrees coexist without fighting over the global cwd.
 local tabs = {}
 
---- worktree -> true while the worker owning it is still running. This is what the buffer guard
+--- session id -> worktree, one entry per worker still running. This is what the buffer guard
 --- consults, so a file opened long after the initial request is protected on the same terms as one
 --- that was already open.
+---
+--- Keyed by session rather than by worktree because worktrees nest: a worker working in
+--- `~/code/x/worktrees/y` is inside another worker's `~/code/x`, and the two guards then cover
+--- overlapping sets of files. Keyed by path, the outer worker finishing would release the inner
+--- worker's files as well.
 local guarded = {}
 
 local guard_installed = false
@@ -62,10 +67,29 @@ local function set_lock(buf, locked)
   vim.bo[buf].modifiable = not locked
 end
 
-local function apply_to_open_buffers(root, locked)
+--- A file is locked while any running worker's worktree contains it. Overlapping worktrees are
+--- ordinary here, so the question is never which guard owns a file, only whether one still claims
+--- it.
+local function is_guarded(path)
+  for _, root in pairs(guarded) do
+    if is_under(path, root) then
+      return true
+    end
+  end
+  return false
+end
+
+--- Re-derive the lock of every open buffer under `root` from the guards that remain.
+---
+--- Deriving rather than being handed a flag is the whole point: the buffers under a worktree that
+--- was just released are not all free, only the ones no surviving guard covers.
+local function reapply_to_open_buffers(root)
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(buf) and is_under(vim.api.nvim_buf_get_name(buf), root) then
-      set_lock(buf, locked)
+    if vim.api.nvim_buf_is_loaded(buf) then
+      local name = vim.api.nvim_buf_get_name(buf)
+      if is_under(name, root) then
+        set_lock(buf, is_guarded(name))
+      end
     end
   end
 end
@@ -79,12 +103,8 @@ local function install_guard()
   vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile" }, {
     group = group,
     callback = function(args)
-      local name = vim.api.nvim_buf_get_name(args.buf)
-      for root in pairs(guarded) do
-        if is_under(name, root) then
-          set_lock(args.buf, true)
-          return
-        end
+      if is_guarded(vim.api.nvim_buf_get_name(args.buf)) then
+        set_lock(args.buf, true)
       end
     end,
   })
@@ -118,6 +138,17 @@ local function decode(encoded)
   return vim.json.decode(vim.base64.decode(encoded))
 end
 
+--- Every request names the worker it belongs to, and a request that does not is refused rather
+--- than guessed at: without the session id two nested worktrees are the same guard to this module,
+--- which is the one thing it must never conflate.
+local function session_of(request)
+  local session = request.session
+  if type(session) ~= "string" or session == "" then
+    error("request carries no session id; this module and Cyberdeck are out of step")
+  end
+  return session
+end
+
 --- Both entry points answer with a string rather than raising, so a rejected request is
 --- distinguishable from a socket nobody is listening on: Cyberdeck reads a nonzero exit as "no
 --- server" and an `error:` answer as "the server said no".
@@ -133,6 +164,7 @@ end
 function M.open(encoded)
   return answer(pcall(function()
     local request = decode(encoded)
+    local session = session_of(request)
     local worktree = normalize(request.worktree)
     ensure_tab(worktree)
     local win = vim.api.nvim_get_current_win()
@@ -141,12 +173,12 @@ function M.open(encoded)
       vim.cmd("silent! lfirst")
     end
     if request.live then
-      guarded[worktree] = true
+      guarded[session] = worktree
       install_guard()
     else
-      guarded[worktree] = nil
+      guarded[session] = nil
     end
-    apply_to_open_buffers(worktree, request.live == true)
+    reapply_to_open_buffers(worktree)
     return "ok:" .. tostring(#(request.entries or {}))
   end))
 end
@@ -154,11 +186,14 @@ end
 --- The worker finished. Replace its list with the final change set and release the lock in the same
 --- call, so the operator can never be looking at a finished worker they still cannot edit.
 ---
---- No tab is created here: if the operator closed the tab, there is nothing to refresh and the
---- release still has to happen, which is why the lock is lifted unconditionally.
+--- No tab is created here: if the operator closed the tab, there is nothing to refresh and this
+--- worker's guard still has to go, which is why the release does not depend on the tab.
+---
+--- Only this session's guard is dropped. Buffers another running worker still claims stay locked.
 function M.refresh(encoded)
   return answer(pcall(function()
     local request = decode(encoded)
+    local session = session_of(request)
     local worktree = normalize(request.worktree)
     local tab = tabs[worktree]
     if tab ~= nil and vim.api.nvim_tabpage_is_valid(tab) then
@@ -167,8 +202,8 @@ function M.refresh(encoded)
       tabs[worktree] = nil
     end
     if not request.live then
-      guarded[worktree] = nil
-      apply_to_open_buffers(worktree, false)
+      guarded[session] = nil
+      reapply_to_open_buffers(worktree)
     end
     return "ok:" .. tostring(#(request.entries or {}))
   end))

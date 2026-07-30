@@ -80,6 +80,7 @@ export async function openWorktreeInNvim(options: OpenWorktreeOptions): Promise<
   const live = isWorkerLive(options.session);
   const changes = await (options.changes ?? worktreeChanges)(options.session.cwd);
   const request = worktreeRequest({
+    session: options.session.id,
     worktree: options.session.cwd,
     subject: worktreeSubject(options.session),
     live,

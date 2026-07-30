@@ -15,7 +15,10 @@ and persisted schemas remain under active alpha development.
   already running in the same tmux window: a `:tcd`-scoped tab with the worker's
   changed files and hunks in that tab's location list. Buffers under a running
   worker's worktree are held read-only, and one push on the worker's terminal
-  transition both refreshes the list and releases the lock. The nvim side ships
+  transition both refreshes the list and releases the lock. The lock is tracked
+  per worker, so a finished worker never unlocks files belonging to a second
+  worker whose worktree nests inside its own, and a worker that finishes between
+  the open and the bind is released rather than left locked. The nvim side ships
   as `contrib/nvim` and needs one `require("cyberdeck").listen()` line.
 
 ### Fixed

@@ -10,6 +10,14 @@ export interface QuickfixEntry {
 }
 
 export interface NvimWorktreeRequest {
+  /**
+   * Which worker this request is about.
+   *
+   * The worktree cannot stand in for it. Worktrees nest — a worker running under another worker's
+   * worktree shares its whole path prefix — so a guard keyed by path alone cannot tell two
+   * overlapping workers apart, and releasing the outer one would unlock the inner one's files.
+   */
+  session: string;
   worktree: string;
   title: string;
   /**
@@ -37,6 +45,7 @@ export function quickfixEntries(worktree: string, changes: WorktreeChangeSet): Q
 }
 
 export function worktreeRequest(options: {
+  session: string;
   worktree: string;
   subject: string;
   live: boolean;
@@ -44,6 +53,7 @@ export function worktreeRequest(options: {
 }): NvimWorktreeRequest {
   const suffix = options.changes.dropped === 0 ? "" : ` (+${options.changes.dropped} more)`;
   return {
+    session: options.session,
     worktree: options.worktree,
     title: `Cyberdeck · ${options.subject}${suffix}`,
     live: options.live,
