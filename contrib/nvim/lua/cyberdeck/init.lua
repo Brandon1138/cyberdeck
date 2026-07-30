@@ -4,6 +4,10 @@
 --- single autocommand it does install is created the first time a worktree is opened, not on load.
 --- The operator's own config needs one line: `require("cyberdeck").listen()`.
 ---
+--- What a worktree looks like once it is open is the operator's call, not this module's: see
+--- `contrib/nvim/README.md` for `listen({ on_open = ... })` and what the default landing does
+--- without it. This module depends on no plugin and never names one.
+---
 --- Cyberdeck drives the two entry points below over `nvim --server <addr> --remote-expr`. They take
 --- one base64-encoded JSON payload each, which is what lets a worktree path or a diff context line
 --- contain quotes and newlines without any escaping question arising.
@@ -35,6 +39,10 @@ local tabs = {}
 local guarded = {}
 
 local guard_installed = false
+
+--- The operator's own landing, handed to `listen()`. Nil is the ordinary case and means this module
+--- lands the tab itself; see `land()` for what that is and why a hook can decline it.
+local on_open = nil
 
 local function normalize(path)
   local normalized = vim.fs.normalize(path)
@@ -159,6 +167,38 @@ local function answer(ok, value)
   return "error: " .. tostring(value):gsub("\n", " ")
 end
 
+--- Put the tab on something the operator can work from.
+---
+--- The tab starts on the `[No Name]` buffer `:tabnew` creates, and only the first list entry ever
+--- displaced it. A worker with nothing to show — a clean branch, a baseline that came up empty, a
+--- directory that is not a repository — therefore landed the operator on an empty scratch buffer
+--- with no sign of the worktree at all. `:edit <worktree>` is the answer because a directory buffer
+--- is whatever the operator's own config makes it: netrw, or whatever replaced netrw. No plugin is
+--- named here, and none is required.
+---
+--- `on_open` comes first and can decline the landing by returning `true`, which is how an operator
+--- docks their own explorer instead. Any other return value falls through to the default, so a hook
+--- that forgets to return does the harmless thing rather than the invisible one.
+---
+--- A hook that throws is reported and then ignored. The operator's config is not in a position to
+--- cost them the worktree they asked for, and an open that half-happened is worse than one that
+--- landed plainly.
+local function land(context)
+  if on_open ~= nil then
+    local ok, handled = pcall(on_open, context)
+    if not ok then
+      vim.notify("cyberdeck: on_open failed: " .. tostring(handled), vim.log.levels.WARN)
+    elseif handled == true then
+      return
+    end
+  end
+  if #context.entries > 0 then
+    vim.cmd("silent! lfirst")
+  else
+    vim.cmd("edit " .. vim.fn.fnameescape(context.worktree))
+  end
+end
+
 --- Open one worker's worktree: a new tab scoped to it, the agent's changed files and hunks in that
 --- tab's list, and every buffer under it locked while the agent is still running.
 function M.open(encoded)
@@ -166,12 +206,18 @@ function M.open(encoded)
     local request = decode(encoded)
     local session = session_of(request)
     local worktree = normalize(request.worktree)
-    ensure_tab(worktree)
+    local tab = ensure_tab(worktree)
     local win = vim.api.nvim_get_current_win()
     set_list(win, request, " ")
-    if #(request.entries or {}) > 0 then
-      vim.cmd("silent! lfirst")
-    end
+    land({
+      session = session,
+      worktree = worktree,
+      title = request.title,
+      live = request.live == true,
+      entries = request.entries or {},
+      tab = tab,
+      win = win,
+    })
     if request.live then
       guarded[session] = worktree
       install_guard()
@@ -228,7 +274,21 @@ end
 --- A socket left behind by an nvim that was killed rather than quit would make `serverstart` fail
 --- for the rest of that pane's life, so a stale one is removed first. Nothing else in this module
 --- runs until Cyberdeck connects.
-function M.listen()
+---
+--- `opts.on_open` is the one thing configurable here: a function called with the request's context
+--- once the tab and its list exist, returning `true` if it landed the tab itself. `listen()` with no
+--- arguments is unchanged and remains the whole contract for an operator who wants none of this.
+--- See `contrib/nvim/README.md`.
+---
+--- A non-function `on_open` is refused at config time rather than at the first open, because a
+--- config error the operator sees when they reload is worth far more than one that surfaces hours
+--- later as a rejected request from a worker.
+function M.listen(opts)
+  opts = opts or {}
+  if opts.on_open ~= nil and type(opts.on_open) ~= "function" then
+    error("cyberdeck.listen: on_open must be a function, got " .. type(opts.on_open))
+  end
+  on_open = opts.on_open
   local address = M.server_address()
   if address == nil then
     return nil

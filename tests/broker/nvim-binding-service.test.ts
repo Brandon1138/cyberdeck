@@ -3,6 +3,9 @@ import { NvimBindingService } from "../../src/broker/nvim-binding-service.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import type { NvimEntryPoint } from "../../src/nvim/bridge.js";
 import type { NvimWorktreeRequest } from "../../src/nvim/quickfix.js";
+import type { WorktreeBaseline } from "../../src/nvim/worktree-changes.js";
+
+const FORK_POINT: WorktreeBaseline = { kind: "fork-point", label: "since origin/main" };
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const NOW = "2026-07-22T10:00:00.000Z";
@@ -52,7 +55,11 @@ function harness(initial: SessionRecord = session()): Harness {
       listener = subscriber;
       return () => { unsubscribed = true; };
     },
-    changes: async () => ({ changes: [{ path: "src/a.ts", line: 4, text: "fn a() {" }], dropped: 0 }),
+    changes: async () => ({
+      changes: [{ path: "src/a.ts", line: 4, text: "fn a() {" }],
+      dropped: 0,
+      baseline: FORK_POINT,
+    }),
     notify: (options) => { notifications.push(options); },
   });
   return {
@@ -80,7 +87,7 @@ describe("NvimBindingService", () => {
       request: {
         session: SESSION_ID,
         worktree: "/work/tree",
-        title: "Cyberdeck · worker-one",
+        title: "Cyberdeck · worker-one · since origin/main",
         live: false,
         entries: [{ filename: "/work/tree/src/a.ts", lnum: 4, col: 1, text: "fn a() {" }],
       },
@@ -135,7 +142,7 @@ describe("NvimBindingService", () => {
       request: {
         session: SESSION_ID,
         worktree: "/work/tree",
-        title: "Cyberdeck · worker-one",
+        title: "Cyberdeck · worker-one · since origin/main",
         live: false,
         entries: [{ filename: "/work/tree/src/a.ts", lnum: 4, col: 1, text: "fn a() {" }],
       },
@@ -174,7 +181,7 @@ describe("NvimBindingService", () => {
     const failing = new NvimBindingService({
       sessions: { get: () => record },
       onSessionUpdate: () => () => {},
-      changes: async () => ({ changes: [], dropped: 0 }),
+      changes: async () => ({ changes: [], dropped: 0, baseline: FORK_POINT }),
       notify: () => { throw new Error("nvim did not answer"); },
     });
     failing.start();

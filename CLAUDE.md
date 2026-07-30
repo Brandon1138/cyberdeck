@@ -40,6 +40,25 @@ Cyberdeck, which the operator has already flagged as plausible on an employer-pr
 fix is to key the namespace on something that distinguishes instances — the tmux server socket or
 the broker's own identity — not on the pane alone.
 
+### A worktree with no `origin/HEAD` gets no baseline at all
+
+`src/nvim/worktree-changes.ts` resolves the default branch from `refs/remotes/origin/HEAD` and
+diffs the working tree against `merge-base(<default>, HEAD)`. When that ref does not resolve — a
+`git init` repository with no remote, a clone whose `origin/HEAD` was never set, a repository whose
+default branch lives somewhere other than `origin` — there is no third guess. The list is the
+untracked files and nothing else, and the title says `no baseline`.
+
+Two rungs were deliberately left off the ladder. `@{upstream}` is the bug this replaced, not a
+fallback: once a worker's branch is pushed, its upstream is `origin/<that same branch>`, so the
+merge base is HEAD and the diff is empty by construction — the whole point of reading `origin/HEAD`
+instead. `HEAD~1` and friends guess at how many commits count as "the worker's work", which is a
+number nothing here knows.
+
+Deferred because every repository the operator dispatches workers into is a clone with
+`origin/HEAD`. **Trigger:** a worker in a repository without one — most plausibly a scratch repo
+created on the fly, or a clone made with a tool that does not set the symref. The fix is to ask the
+operator for the base ref for that worktree and record it, not to widen the guessing.
+
 ## Things that are not deferred
 
 - When Fleet's window has no nvim, one is spawned into that same window — and nowhere else. No

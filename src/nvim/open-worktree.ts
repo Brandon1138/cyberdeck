@@ -1,10 +1,15 @@
 import { spawnSync as nodeSpawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import type { SessionRecord } from "../domain/session.js";
 import type { SpawnSyncLike } from "../tmux/cockpit.js";
 import { callNvim } from "./bridge.js";
 import { discoverNvimPane, type NvimSpawnOptions } from "./pane.js";
 import { worktreeRequest } from "./quickfix.js";
-import { worktreeChanges, type WorktreeChangeSet } from "./worktree-changes.js";
+import {
+  worktreeChanges,
+  type WorktreeBaseline,
+  type WorktreeChangeSet,
+} from "./worktree-changes.js";
 
 /**
  * Live means a provider process can still be writing to the worktree.
@@ -56,6 +61,8 @@ export interface OpenWorktreeOptions {
   uid?: number | undefined;
   /** Seams for the case where this window has no nvim and one has to be started. */
   spawn?: NvimSpawnOptions | undefined;
+  /** The one disk check this function makes, injected so the ordering below can be asserted. */
+  worktreeExists?: ((path: string) => boolean) | undefined;
 }
 
 export interface OpenedWorktree {
@@ -65,6 +72,8 @@ export interface OpenedWorktree {
   address: string;
   entries: number;
   live: boolean;
+  /** What the entry count is measured from, for the operator's status line. */
+  baseline: WorktreeBaseline;
 }
 
 /**
@@ -72,8 +81,23 @@ export interface OpenedWorktree {
  *
  * The order matters: the pane is resolved before any git work, so the nvim the change list is
  * destined for exists — and answers — before a large tree is diffed for it.
+ *
+ * The one thing that goes *ahead* of the pane is whether the worktree is still on disk. A worktree
+ * that has been cleaned up has nothing to open, and resolving the pane first would spawn an nvim
+ * into the operator's window purely to then fail. This is a single `existsSync`, not a diff, so it
+ * costs the ordering above nothing: the expensive work stays behind the pane, as before.
+ *
+ * A directory that exists but is not a repository is *not* an error — the operator keeps scratchpad
+ * threads like that, and they open with an empty list that says so.
  */
 export async function openWorktreeInNvim(options: OpenWorktreeOptions): Promise<OpenedWorktree> {
+  const exists = options.worktreeExists ?? existsSync;
+  if (!exists(options.session.cwd)) {
+    throw Object.assign(
+      new Error(`The worktree ${options.session.cwd} is no longer on disk, so there is nothing to open`),
+      { code: "WORKTREE_MISSING" },
+    );
+  }
   const pane = await discoverNvimPane({
     spawnSync: options.spawnSync ?? (nodeSpawnSync as SpawnSyncLike),
     hostPaneId: options.hostPaneId,
@@ -106,5 +130,6 @@ export async function openWorktreeInNvim(options: OpenWorktreeOptions): Promise<
     address: pane.address,
     entries: request.entries.length,
     live,
+    baseline: changes.baseline,
   };
 }

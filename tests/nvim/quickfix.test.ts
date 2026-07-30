@@ -5,6 +5,9 @@ import {
   quickfixEntries,
   worktreeRequest,
 } from "../../src/nvim/quickfix.js";
+import type { WorktreeBaseline } from "../../src/nvim/worktree-changes.js";
+
+const FORK_POINT: WorktreeBaseline = { kind: "fork-point", label: "since origin/main" };
 
 describe("quickfixEntries", () => {
   it("resolves worktree-relative paths against the worktree Cyberdeck already knows", () => {
@@ -26,10 +29,14 @@ describe("worktreeRequest", () => {
       worktree: "/work/tree",
       subject: "scout-7",
       live: true,
-      changes: { changes: [{ path: "a.ts", line: 1, text: "changed" }], dropped: 0 },
+      changes: {
+        changes: [{ path: "a.ts", line: 1, text: "changed" }],
+        dropped: 0,
+        baseline: FORK_POINT,
+      },
     });
 
-    expect(request.title).toBe("Cyberdeck · scout-7");
+    expect(request.title).toBe("Cyberdeck · scout-7 · since origin/main");
     expect(request.live).toBe(true);
     expect(request.worktree).toBe("/work/tree");
     expect(request.entries).toHaveLength(1);
@@ -41,14 +48,14 @@ describe("worktreeRequest", () => {
       worktree: "/work/tree",
       subject: "outer",
       live: true,
-      changes: { changes: [], dropped: 0 },
+      changes: { changes: [], dropped: 0, baseline: FORK_POINT },
     });
     const inner = worktreeRequest({
       session: "22222222-2222-4222-8222-222222222222",
       worktree: "/work/tree/worktrees/inner",
       subject: "inner",
       live: true,
-      changes: { changes: [], dropped: 0 },
+      changes: { changes: [], dropped: 0, baseline: FORK_POINT },
     });
 
     // The inner worktree is under the outer one, so the ids are the only thing separating them.
@@ -63,10 +70,10 @@ describe("worktreeRequest", () => {
       worktree: "/work/tree",
       subject: "scout-7",
       live: false,
-      changes: { changes: [], dropped: 12 },
+      changes: { changes: [], dropped: 12, baseline: FORK_POINT },
     });
 
-    expect(request.title).toBe("Cyberdeck · scout-7 (+12 more)");
+    expect(request.title).toBe("Cyberdeck · scout-7 · since origin/main (+12 more)");
   });
 });
 
@@ -80,6 +87,7 @@ describe("encodeNvimPayload", () => {
       changes: {
         changes: [{ path: "src/a.ts", line: 1, text: "const s = 'x' + \"y\" + `z` \\ end" }],
         dropped: 0,
+        baseline: FORK_POINT,
       },
     });
     const encoded = encodeNvimPayload(request);

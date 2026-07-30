@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { WorktreeChangeSet } from "./worktree-changes.js";
+import type { BoundedChanges, WorktreeChangeSet } from "./worktree-changes.js";
 
 /** Exactly the fields nvim's `setqflist`/`setloclist` item dictionaries accept. */
 export interface QuickfixEntry {
@@ -35,7 +35,7 @@ export interface NvimWorktreeRequest {
  * operator jumps, and nvim's per-tab cwd is exactly the thing that is not global. Resolving here,
  * once, against the worktree Cyberdeck already knows exactly, removes the question entirely.
  */
-export function quickfixEntries(worktree: string, changes: WorktreeChangeSet): QuickfixEntry[] {
+export function quickfixEntries(worktree: string, changes: BoundedChanges): QuickfixEntry[] {
   return changes.changes.map((change) => ({
     filename: resolve(worktree, change.path),
     lnum: change.line,
@@ -55,7 +55,10 @@ export function worktreeRequest(options: {
   return {
     session: options.session,
     worktree: options.worktree,
-    title: `Cyberdeck · ${options.subject}${suffix}`,
+    // The baseline is in the title because a list the operator cannot attribute is worse than no
+    // list: an empty one has to say whether nothing changed, nothing could be compared against, or
+    // there was no repository, and a full one has to say what "changed" was measured from.
+    title: `Cyberdeck · ${options.subject} · ${options.changes.baseline.label}${suffix}`,
     live: options.live,
     entries: quickfixEntries(options.worktree, options.changes),
   };

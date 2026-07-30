@@ -84,25 +84,85 @@ export function parseUntrackedPaths(output: string): string[] {
 }
 
 /**
- * The upstream branch git itself recorded for this worktree, when there is one.
+ * Which rung of {@link diffBaseline}'s ladder produced a change list.
  *
- * This is read rather than guessed: `git worktree add -b <branch> origin/main` records the start
- * point, and comparing against the merge base is the only way an agent that *committed* its work
- * shows up at all. With no upstream configured the honest baseline is HEAD, and work the agent
- * committed and left clean is then invisible — an accepted limit, not something to go searching for.
+ * The kind travels with the changes because the operator has to be able to read an empty list
+ * correctly: "nothing changed since you branched" and "this directory is not a repository at all"
+ * are the same zero entries and completely different facts. The label is what nvim's list title and
+ * Fleet's status line render, so it is written to be read, not parsed.
  */
-export async function diffBaseline(git: GitOutput): Promise<readonly string[]> {
-  const upstream = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
-    .then((value) => value.trim(), () => "");
-  return upstream === ""
-    ? ["diff", "--no-ext-diff", "--unified=0", "HEAD", "--"]
-    : ["diff", "--no-ext-diff", "--unified=0", "--merge-base", upstream, "--"];
+export type WorktreeBaselineKind = "fork-point" | "uncommitted" | "none" | "not-a-repo";
+
+export interface WorktreeBaseline {
+  kind: WorktreeBaselineKind;
+  /** Short enough to sit in a title beside the worker's name. */
+  label: string;
 }
 
-export interface WorktreeChangeSet {
+const NO_BASELINE: WorktreeBaseline = { kind: "none", label: "no baseline" };
+const NOT_A_REPO: WorktreeBaseline = { kind: "not-a-repo", label: "not a git repository" };
+const UNCOMMITTED: WorktreeBaseline = { kind: "uncommitted", label: "uncommitted only" };
+
+/** A rung: the baseline that was chosen, and the diff that expresses it — if it has one. */
+export interface DiffPlan {
+  baseline: WorktreeBaseline;
+  /** Absent on the rung that has nothing to diff against, which is an answer rather than a failure. */
+  args?: readonly string[];
+}
+
+/**
+ * Pick the baseline the agent's work is visible against, most informative rung first.
+ *
+ * **A branch's upstream is its own mirror, not its base.** This is the distinction the whole ladder
+ * exists for. Once a worker's branch is pushed, `@{upstream}` resolves to `origin/<that same
+ * branch>`, so `merge-base(@{upstream}, HEAD)` is HEAD itself and the diff is empty *by
+ * construction* — the worker's entire body of work disappears the moment it is pushed. The fork
+ * point is what an upstream was being used as a proxy for, and `refs/remotes/origin/HEAD` names the
+ * default branch directly, so it is read rather than approximated.
+ *
+ * Rung 1, fork point: the working tree against `merge-base(<default branch>, HEAD)`. Diffing the
+ * *working tree* rather than HEAD puts committed and uncommitted work in one list, which is what a
+ * worker mid-task and a worker that already committed both need. It also keeps covering a
+ * squash-merged branch: a squash never makes HEAD an ancestor of the default branch, so the fork
+ * point stays where it was and the full diff stays visible.
+ *
+ * Rung 2, uncommitted only: taken when HEAD *is* an ancestor of the default branch, which is a
+ * merged-via-merge-commit branch or a worker running directly on the default branch. The fork point
+ * is then HEAD, so rung 1 would produce exactly this list under a label claiming more than it did.
+ * The rung is chosen from the refs, not from an empty rung-1 result, because the two are the same
+ * diff and only the label distinguishes them.
+ *
+ * Rung 3, nothing: no `refs/remotes/origin/HEAD` to resolve, or no common ancestor with it. There is
+ * no baseline to be honest about, so none is claimed. See CLAUDE.md for why no further rung
+ * (`@{upstream}`, `HEAD~1`) is guessed at here.
+ */
+export async function diffBaseline(git: GitOutput): Promise<DiffPlan> {
+  const defaultBranch = await git(["rev-parse", "--abbrev-ref", "refs/remotes/origin/HEAD"])
+    .then((value) => value.trim(), () => "");
+  if (defaultBranch === "") return { baseline: NO_BASELINE };
+  const [forkPoint, head] = await Promise.all([
+    git(["merge-base", defaultBranch, "HEAD"]).then((value) => value.trim(), () => ""),
+    git(["rev-parse", "HEAD"]).then((value) => value.trim(), () => ""),
+  ]);
+  if (forkPoint === "" || head === "") return { baseline: NO_BASELINE };
+  if (forkPoint === head) {
+    return { baseline: UNCOMMITTED, args: ["diff", "--no-ext-diff", "--unified=0", "HEAD", "--"] };
+  }
+  return {
+    baseline: { kind: "fork-point", label: `since ${defaultBranch}` },
+    args: ["diff", "--no-ext-diff", "--unified=0", forkPoint, "--"],
+  };
+}
+
+/** What survived {@link MAX_WORKTREE_CHANGES}, before a baseline is attached to it. */
+export interface BoundedChanges {
   changes: readonly WorktreeChange[];
   /** How many entries were dropped by {@link MAX_WORKTREE_CHANGES}. */
   dropped: number;
+}
+
+export interface WorktreeChangeSet extends BoundedChanges {
+  baseline: WorktreeBaseline;
 }
 
 /**
@@ -111,23 +171,38 @@ export interface WorktreeChangeSet {
  */
 export const MAX_WORKTREE_CHANGES = 500;
 
-export function boundChanges(changes: readonly WorktreeChange[]): WorktreeChangeSet {
+export function boundChanges(changes: readonly WorktreeChange[]): BoundedChanges {
   return {
     changes: changes.slice(0, MAX_WORKTREE_CHANGES),
     dropped: Math.max(0, changes.length - MAX_WORKTREE_CHANGES),
   };
 }
 
-/** Tracked hunks first, in diff order, then untracked files — the order git reports them in. */
+/**
+ * Tracked hunks first, in diff order, then untracked files — the order git reports them in.
+ *
+ * A directory that is not a repository is an answer, not an error: the operator keeps scratchpad
+ * threads whose cwd was never `git init`-ed, and the right thing there is an empty list that says
+ * why, not a failed open. Untracked files are collected on every rung that has a repository at all,
+ * including the one with no baseline, because "git has never seen this file" is true independently
+ * of what the diff is taken against.
+ */
 export async function collectWorktreeChanges(git: GitOutput): Promise<WorktreeChangeSet> {
+  const inRepository = await git(["rev-parse", "--is-inside-work-tree"])
+    .then((value) => value.trim() === "true", () => false);
+  if (!inRepository) return { changes: [], dropped: 0, baseline: NOT_A_REPO };
+  const plan = await diffBaseline(git);
   const [diff, untracked] = await Promise.all([
-    diffBaseline(git).then((args) => git(args)),
+    plan.args === undefined ? Promise.resolve("") : git(plan.args),
     git(["ls-files", "--others", "--exclude-standard", "-z"]),
   ]);
-  return boundChanges([
-    ...parseUnifiedDiff(diff),
-    ...parseUntrackedPaths(untracked).map((path) => ({ path, line: 1, text: "untracked" })),
-  ]);
+  return {
+    ...boundChanges([
+      ...parseUnifiedDiff(diff),
+      ...parseUntrackedPaths(untracked).map((path) => ({ path, line: 1, text: "untracked" })),
+    ]),
+    baseline: plan.baseline,
+  };
 }
 
 /**
