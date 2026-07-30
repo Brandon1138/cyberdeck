@@ -1338,16 +1338,18 @@ describe("fleet presentation", () => {
 
   it("shows Ctrl+O as the first-class orchestrator command", () => {
     const snapshot = fleet({ record: session() });
+    // Wide enough for the whole hint line: at 120 columns `fit` truncates its tail, which is what
+    // the hint line is designed to do and not what this test is about.
     const rendered = renderFleet(snapshot, createFleetState(snapshot), {
       color: false,
-      width: 120,
+      width: 140,
       height: 28,
       now: NOW_MS,
     });
 
     expect(rendered).toContain("ctrl+o to choose");
     expect(rendered.split("\n").at(-1)).toBe(
-      "↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ? more · ctrl+x stop agent",
+      "↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ctrl+x stop agent",
     );
   });
 
@@ -1654,8 +1656,8 @@ describe("fleet controls", () => {
   it("decodes shortcut-panel keys without leaking escape sequences into the composer", () => {
     const decoder = new FleetKeyDecoder();
     expect(decoder.push("\u001b[1;2A\u001b[1;2B\u001b1")).toEqual(["shift+up", "shift+down", "alt+1"]);
-    expect(decoder.push(Buffer.from([0x0a, 0x12, 0x13, 0x14]))).toEqual([
-      "ctrl+j", "ctrl+r", "ctrl+s", "ctrl+t",
+    expect(decoder.push(Buffer.from([0x0a, 0x0e, 0x12, 0x13, 0x14]))).toEqual([
+      "ctrl+j", "ctrl+n", "ctrl+r", "ctrl+s", "ctrl+t",
     ]);
   });
 
@@ -2448,7 +2450,26 @@ describe("fleet controls", () => {
     expect(rendered).toContain("shift+↑↓ reorder");
     expect(rendered).toContain("ctrl+r rename");
     expect(rendered).toContain("ctrl+t pin to top");
+    expect(rendered).toContain("ctrl+n nvim");
     expect(transitionFleet(open.state, snapshot, "?", NOW_MS).state.helpOpen).toBe(false);
+  });
+
+  it("opens the selected worker's worktree in nvim on ctrl+n", () => {
+    const worker = session({ kind: "worker" });
+    const snapshot = fleet({ record: worker });
+    const transition = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+n", NOW_MS);
+
+    expect(transition.action).toEqual({ type: "open-worktree", sessionId: worker.id });
+    expect(transition.state.notice).toBeUndefined();
+  });
+
+  it("declines to open an Orc's cwd, which no agent is rewriting", () => {
+    const orc = session({ kind: "orchestrator" });
+    const snapshot = fleet({ record: orc });
+    const transition = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+n", NOW_MS);
+
+    expect(transition.action).toBeUndefined();
+    expect(transition.state.notice).toBe("Select a worker to open its worktree in nvim");
   });
 
   it("maps rename, pin, reorder, view, mention, and numbered-open shortcuts", () => {
@@ -2776,6 +2797,63 @@ describe("runFleet", () => {
 
     await expect(running).resolves.toBeUndefined();
     expect(transport.close).toHaveBeenCalledOnce();
+  });
+
+  it("hands the selected worker to the nvim opener and shows what it reported", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    const worker = session({ cwd: "/repo/one", role: "worker", kind: "worker", name: "One worker" });
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [worker];
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "fleet.preferences") return {};
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) { closeListeners.add(listener); return () => closeListeners.delete(listener); },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const openWorktree = vi.fn(async () => "One worker opened in %2 · 3 changes · read-only while it runs");
+    const running = runFleet(
+      transport as never,
+      input,
+      output,
+      new EventEmitter(),
+      { detachIdentity: "operator:one", openWorktree },
+    );
+
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.list", {}));
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+    input.emit("data", Buffer.from([0x0e]));
+
+    await vi.waitFor(() => expect(openWorktree).toHaveBeenCalledWith(worker));
+    await vi.waitFor(() => expect(
+      Buffer.concat(output.chunks).toString("utf8"),
+    ).toContain("read-only while it runs"));
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
   });
 
   it("starts with the folds the operator last left, and writes each new one back", async () => {

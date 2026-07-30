@@ -222,6 +222,7 @@ export type FleetAction =
   }
   | { type: "fable-workers"; request: FableWorkersRequest }
   | { type: "caveman-workers"; request: CavemanWorkersRequest }
+  | { type: "open-worktree"; sessionId: string }
   | { type: "rename"; sessionId: string; name: string }
   | { type: "pin"; sessionId: string }
   | { type: "reorder"; sessionId: string; direction: "up" | "down" }
@@ -299,6 +300,8 @@ export interface FleetRuntimeOptions {
   changeDirectory?: ((cwd: string) => Promise<string | undefined>) | undefined;
   detachIdentity?: string | undefined;
   openOrchestrator?: ((target: OrchestratorCockpitTarget) => Promise<SessionRecord>) | undefined;
+  /** Opens a worker's worktree in the nvim already running in Fleet's tmux window. */
+  openWorktree?: ((session: SessionRecord) => Promise<string>) | undefined;
   pasteboardImage?: PasteboardImageAttachment | undefined;
   permissionPreferences?: ProviderPermissionPreferencePort | undefined;
   pullRequestStatus?: PullRequestStatusPort | undefined;
@@ -759,6 +762,25 @@ export function transitionFleet(
         helpOpen: false,
         notice: undefined,
       },
+    };
+  }
+
+  if (key === "ctrl+n") {
+    // An Orc's cwd is the workspace it coordinates from, not a worktree an agent is rewriting, so
+    // there is nothing there to land on and nothing to protect from co-editing.
+    if (selected === undefined || selected.record.kind === "orchestrator") {
+      return {
+        state: {
+          ...state,
+          helpOpen: false,
+          notice: "Select a worker to open its worktree in nvim",
+          noticeTone: "neutral",
+        },
+      };
+    }
+    return {
+      state: { ...state, helpOpen: false, notice: undefined },
+      action: { type: "open-worktree", sessionId: selected.record.id },
     };
   }
 
@@ -1691,7 +1713,7 @@ function renderFleetFooter(
     paint("─".repeat(options.width), "dim", options.color),
     ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
     paint(fit(launchContext, options.width), "dim", options.color),
-    paint(fit(`↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ? more · ${destructiveHint}`, options.width), "dim", options.color),
+    paint(fit(`↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
   ];
   return footer;
 }
@@ -1742,7 +1764,7 @@ function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
     "pgup/dn page", "ctrl+u/d half", "home/end", "shift+↑↓ reorder", "←→ fold project", "ctrl+s switch views",
     "@ mention", "alt+1–9 open", "esc back/clear",
-    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+g cwd", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
+    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim", "ctrl+g cwd", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
   ];
   if (width >= 110) {
     return [
@@ -2477,6 +2499,13 @@ export async function runFleet(
         });
       } else if (action?.type === "permission-policy") {
         await permissionPreferences.set(action.provider, action.policy);
+      } else if (action?.type === "open-worktree") {
+        if (runtime.openWorktree === undefined) {
+          throw new Error("nvim worktree navigation is unavailable in this client");
+        }
+        const session = snapshot.threads.find(({ record }) => record.id === action.sessionId)?.record;
+        if (session === undefined) throw new Error("Selected worker is no longer available");
+        state = { ...state, notice: await runtime.openWorktree(session), noticeTone: "neutral" };
       } else if (action?.type === "attach-clipboard-image") {
         const image = await pasteboardImage();
         if (image !== undefined) {
@@ -2512,6 +2541,7 @@ export async function runFleet(
         && action.type !== "permission-policy"
         && action.type !== "folder-disposition"
         && action.type !== "delete"
+        && action.type !== "open-worktree"
         && action.type !== "attach-clipboard-image"
       ) {
         snapshot = await collectFleetSnapshot(client);
@@ -2746,6 +2776,7 @@ export class FleetKeyDecoder {
     else if (code === 0x07) keys.push("ctrl+g");
     else if (code === 0x0a) keys.push("ctrl+j");
     else if (code === 0x0c) keys.push("ctrl+l");
+    else if (code === 0x0e) keys.push("ctrl+n");
     else if (code === 0x0f) keys.push("ctrl+o");
     else if (code === 0x12) keys.push("ctrl+r");
     else if (code === 0x13) keys.push("ctrl+s");

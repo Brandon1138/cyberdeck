@@ -251,7 +251,7 @@ function isPaneId(value: string | undefined): value is string {
   return value !== undefined && /^%\d+$/.test(value.trim());
 }
 
-function hostWindowId(spawnSync: SpawnSyncLike, hostPaneId: string): string {
+export function hostWindowId(spawnSync: SpawnSyncLike, hostPaneId: string): string {
   const result = spawnSync(
     "tmux",
     ["display-message", "-p", "-t", hostPaneId, "#{window_id}"],

@@ -346,6 +346,54 @@ cyberdeck logs SESSION_ID
 adapter encodes its terminal's actual Enter key, so steering does not depend on a portable newline
 assumption. `logs` prints the current replay snapshot.
 
+## Open a worker's worktree in nvim
+
+Press `Ctrl-N` on a focused worker row in Fleet, or run the same thing from the CLI:
+
+```bash
+cyberdeck open SESSION_ID
+cyberdeck open my-worker-name
+```
+
+Cyberdeck opens the worker's cwd in the nvim **already running in the same tmux window** as the
+invoking client: a new tab, `:tcd`-scoped to that worktree so several worktrees coexist without
+fighting over a global cwd, with a location list of the files and hunks that worker changed. No nvim
+is spawned, no other window is searched, and no socket directory is scanned; if there is no nvim in
+this window, Cyberdeck says so instead of guessing.
+
+While the worker is running, every buffer under its worktree is `readonly` and `nomodifiable`,
+including buffers that were already open before the worktree was opened. Agents commonly rewrite
+whole files rather than editing them, so a live worktree is not a place two writers can share. When
+the worker reaches a terminal state the broker pushes one message that both refreshes the list with
+the final change set and releases the lock — one transition, one message, so the lock can never
+outlive the run.
+
+The nvim side ships in this repository and installs nothing on its own. Point your own config at it
+and call `listen()` once:
+
+```lua
+vim.opt.runtimepath:append("/absolute/path/to/cyberdeck/contrib/nvim")
+require("cyberdeck").listen()
+```
+
+Under a plugin manager that rewrites `runtimepath` — lazy.nvim does — appending it by hand is
+discarded during setup and `require` then fails. Let the manager own the entry instead:
+
+```lua
+-- lazy.nvim
+{ dir = "/absolute/path/to/cyberdeck/contrib/nvim", name = "cyberdeck", lazy = false,
+  config = function() require("cyberdeck").listen() end }
+```
+
+`listen()` starts an RPC server on a socket derived from the pane's own `$TMUX_PANE`, which is the
+same address Cyberdeck derives — neither side is ever told where the other is. It requires Neovim
+0.10 or newer and does nothing outside tmux. The association between a worker and an nvim address is
+held in memory only: if the broker restarts, press `Ctrl-N` again.
+
+Changed files are computed against the upstream branch git itself recorded for the worktree, or
+against `HEAD` when there is none. With no upstream configured, work the agent committed and left
+clean does not appear in the list.
+
 ## Delegate one explicitly selected worker
 
 Delegation still requires an explicit provider; the role is only an optional user-defined label:

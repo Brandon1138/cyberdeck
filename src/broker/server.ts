@@ -25,6 +25,7 @@ import {
 } from "../persistence/fleet-detach-store.js";
 import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type RequestFrame } from "../protocol/frames.js";
 import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
+import { NvimBindParamsSchema, type NvimBindingService } from "./nvim-binding-service.js";
 import { RegistryError, type AttachmentMode, type SessionRegistry } from "./session-registry.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
@@ -131,6 +132,8 @@ export interface BrokerServerOptions {
   workerCoordination?: WorkerCoordinationService;
   workerControl?: WorkerControlService;
   workerEvents?: WorkerEventChannel;
+  /** Which nvim is showing which worker's worktree. In memory only, by design. */
+  nvimBindings?: NvimBindingService;
   onShutdown?: () => void;
 }
 
@@ -301,6 +304,11 @@ export class BrokerServer {
         return this.requireOrchestrators().fableWorkers(FableWorkersRequestSchema.parse(frame.params));
       case "orchestrator.cavemanWorkers":
         return this.requireOrchestrators().cavemanWorkers(CavemanWorkersRequestSchema.parse(frame.params));
+      // The client resolved the nvim address from its own tmux pane and has already drawn the
+      // first list. Registering it here only buys the completion refresh, which needs an observer
+      // that outlives a one-shot `cyberdeck open`.
+      case "nvim.bind":
+        return this.requireNvimBindings().bind(NvimBindParamsSchema.parse(frame.params));
       case "scout.egress": {
         const request = ScoutEgressRequestSchema.parse(frame.params);
         if (request.enabled !== undefined) {
@@ -626,6 +634,15 @@ export class BrokerServer {
       throw Object.assign(new Error("Agent control service is not available"), { code: "METHOD_NOT_FOUND" });
     }
     return this.options.agentControl;
+  }
+
+  private requireNvimBindings(): NvimBindingService {
+    if (this.options.nvimBindings === undefined) {
+      throw Object.assign(new Error("nvim binding registry is not available"), {
+        code: "METHOD_NOT_FOUND",
+      });
+    }
+    return this.options.nvimBindings;
   }
 
   private requireScoutEgress(): Pick<ScoutEgressGrantStore, "set" | "status"> {
