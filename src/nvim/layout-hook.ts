@@ -7,13 +7,14 @@ import { NVIM_LAYOUT_PANE_FORMAT } from "./pane.js";
 import { rebalanceNvimWindow, type WindowLayoutPlan } from "./window-layout.js";
 
 export const FLEET_PANE_WINDOW_OPTION = "@cyberdeck_fleet_pane";
-export const FLEET_COMMAND_WINDOW_OPTION = "@cyberdeck_fleet_command";
+export const FLEET_PROCESS_WINDOW_OPTION = "@cyberdeck_fleet_process";
 const LAYOUT_HOOKS = ["pane-exited", "after-kill-pane"] as const;
 
 export interface FleetNvimLayoutHookOptions {
   spawnSync: SpawnSyncLike;
   preflight: () => CockpitPreflight;
   cliPath: string;
+  fleetPid?: number | undefined;
 }
 
 export interface FleetNvimLayoutHooks {
@@ -25,10 +26,11 @@ export interface FleetNvimLayoutHooks {
 /**
  * Own one hook for the window Fleet itself occupies.
  *
- * Window options carry Fleet's preflight-proven pane id and foreground command into the later
- * `pane-exited` subprocess. Passing only the window id to the CLI keeps the hook stable across every
- * other pane exiting, while both stored values make a SIGKILL-left stale hook inert after Fleet's
- * pane disappears or falls back to its shell.
+ * Window options carry Fleet's preflight-proven pane id and an exact process fingerprint into the
+ * later `pane-exited` subprocess. The fingerprint binds PID, process start time, full command, and
+ * this CLI path. A replacement `node` in the same pane therefore cannot reactivate a stale hook,
+ * even after PID reuse. `pane_current_command` was rejected because it says only `node`, which is
+ * shared by unrelated programs and survives none of the identity questions the hook must answer.
  *
  * This belongs in tmux, not nvim or Fleet's redraw loop. `VimLeavePre` misses `kill-pane`, and the
  * nvim module is deliberately inert outside an explicit RPC. Redraw-time geometry polling would
@@ -60,15 +62,12 @@ export function createFleetNvimLayoutHooks(
   return {
     install(orchestratorSessionIds) {
       const { hostPaneId, windowId } = target();
-      const hostCommandResult = options.spawnSync(
-        "tmux",
-        ["display-message", "-p", "-t", hostPaneId, "#{pane_current_command}"],
-        { encoding: "utf8" },
+      const fleetPid = options.fleetPid ?? process.pid;
+      const processIdentity = captureFleetProcessIdentity(
+        options.spawnSync,
+        fleetPid,
+        options.cliPath,
       );
-      const hostCommand = (hostCommandResult.stdout ?? "").trim();
-      if (hostCommandResult.status !== 0 || hostCommand === "") {
-        throw new Error("tmux failed to identify Fleet's pane command for nvim layout");
-      }
       requireSuccess(
         options.spawnSync(
           "tmux",
@@ -77,18 +76,25 @@ export function createFleetNvimLayoutHooks(
         ),
         "record Fleet's pane for nvim layout",
       );
-      const commandRecorded = options.spawnSync(
+      const processRecorded = options.spawnSync(
         "tmux",
-        ["set-option", "-w", "-t", windowId, FLEET_COMMAND_WINDOW_OPTION, hostCommand],
+        [
+          "set-option",
+          "-w",
+          "-t",
+          windowId,
+          FLEET_PROCESS_WINDOW_OPTION,
+          JSON.stringify(processIdentity),
+        ],
         { stdio: "ignore" },
       );
-      if (commandRecorded.status !== 0) {
+      if (processRecorded.status !== 0) {
         options.spawnSync(
           "tmux",
           ["set-option", "-u", "-w", "-t", windowId, FLEET_PANE_WINDOW_OPTION],
           { stdio: "ignore" },
         );
-        throw new Error("tmux failed to record Fleet's pane command for nvim layout");
+        throw new Error("tmux failed to record Fleet's process identity for nvim layout");
       }
       const shellCommand = [
         shellQuote(options.cliPath),
@@ -109,23 +115,7 @@ export function createFleetNvimLayoutHooks(
           installedHooks.push(hookName);
           continue;
         }
-        for (const installedHook of installedHooks) {
-          options.spawnSync(
-            "tmux",
-            ["set-hook", "-u", "-w", "-t", windowId, installedHook],
-            { stdio: "ignore" },
-          );
-        }
-        options.spawnSync(
-          "tmux",
-          ["set-option", "-u", "-w", "-t", windowId, FLEET_PANE_WINDOW_OPTION],
-          { stdio: "ignore" },
-        );
-        options.spawnSync(
-          "tmux",
-          ["set-option", "-u", "-w", "-t", windowId, FLEET_COMMAND_WINDOW_OPTION],
-          { stdio: "ignore" },
-        );
+        clearLayoutState(options.spawnSync, windowId, installedHooks);
         throw new Error(`tmux failed to install the nvim layout ${hookName} hook`);
       }
       try {
@@ -137,23 +127,7 @@ export function createFleetNvimLayoutHooks(
           orchestratorSessionIds,
         });
       } catch (error) {
-        for (const hookName of LAYOUT_HOOKS) {
-          options.spawnSync(
-            "tmux",
-            ["set-hook", "-u", "-w", "-t", windowId, hookName],
-            { stdio: "ignore" },
-          );
-        }
-        options.spawnSync(
-          "tmux",
-          ["set-option", "-u", "-w", "-t", windowId, FLEET_PANE_WINDOW_OPTION],
-          { stdio: "ignore" },
-        );
-        options.spawnSync(
-          "tmux",
-          ["set-option", "-u", "-w", "-t", windowId, FLEET_COMMAND_WINDOW_OPTION],
-          { stdio: "ignore" },
-        );
+        clearLayoutState(options.spawnSync, windowId);
         throw error;
       }
     },
@@ -171,32 +145,10 @@ export function createFleetNvimLayoutHooks(
 
     remove() {
       const { windowId } = target();
-      for (const hookName of LAYOUT_HOOKS) {
-        requireSuccess(
-          options.spawnSync(
-            "tmux",
-            ["set-hook", "-u", "-w", "-t", windowId, hookName],
-            { stdio: "ignore" },
-          ),
-          `remove the nvim layout ${hookName} hook`,
-        );
+      const failures = clearLayoutState(options.spawnSync, windowId);
+      if (failures.length > 0) {
+        throw new Error(`tmux failed to clean up nvim layout: ${failures.join(", ")}`);
       }
-      requireSuccess(
-        options.spawnSync(
-          "tmux",
-          ["set-option", "-u", "-w", "-t", windowId, FLEET_PANE_WINDOW_OPTION],
-          { stdio: "ignore" },
-        ),
-        "forget Fleet's pane for nvim layout",
-      );
-      requireSuccess(
-        options.spawnSync(
-          "tmux",
-          ["set-option", "-u", "-w", "-t", windowId, FLEET_COMMAND_WINDOW_OPTION],
-          { stdio: "ignore" },
-        ),
-        "forget Fleet's pane command for nvim layout",
-      );
     },
   };
 }
@@ -228,7 +180,7 @@ export function rebalanceNvimLayoutFromHook(options: {
   if (fleetPane.status !== 0) return undefined;
   const hostPaneId = (fleetPane.stdout ?? "").trim();
   if (!/^%\d+$/u.test(hostPaneId)) return undefined;
-  const fleetCommand = options.spawnSync(
+  const fleetProcess = options.spawnSync(
     "tmux",
     [
       "show-options",
@@ -236,22 +188,121 @@ export function rebalanceNvimLayoutFromHook(options: {
       "-v",
       "-t",
       options.windowId,
-      FLEET_COMMAND_WINDOW_OPTION,
+      FLEET_PROCESS_WINDOW_OPTION,
     ],
     { encoding: "utf8" },
   );
-  if (fleetCommand.status !== 0) return undefined;
-  const expectedHostCommand = (fleetCommand.stdout ?? "").trim();
-  if (expectedHostCommand === "") return undefined;
+  if (fleetProcess.status !== 0) return undefined;
+  const identity = parseFleetProcessIdentity((fleetProcess.stdout ?? "").trim());
+  if (
+    identity === undefined
+    || identity.cliPath !== options.cliPath
+    || captureProcessFingerprint(options.spawnSync, identity.pid) !== identity.fingerprint
+  ) return undefined;
   return rebalanceNvimWindow({
     spawnSync: options.spawnSync,
     windowId: options.windowId,
     paneFormat: NVIM_LAYOUT_PANE_FORMAT,
     hostPaneId,
-    expectedHostCommand,
     cliPath: options.cliPath,
     quiet: true,
   });
+}
+
+interface FleetProcessIdentity {
+  pid: number;
+  cliPath: string;
+  fingerprint: string;
+}
+
+/**
+ * PID alone can be reused, and command name alone collapses every Node program to `node`.
+ *
+ * macOS `ps` supplies immutable process start time plus full argv for one live PID. Storing both
+ * with the exact CLI path proves the original Fleet process still exists; a dead process, reused
+ * PID, moved executable, or unrelated Node command all fail closed before tmux geometry is read.
+ */
+function captureFleetProcessIdentity(
+  spawnSync: SpawnSyncLike,
+  pid: number,
+  cliPath: string,
+): FleetProcessIdentity {
+  const fingerprint = captureProcessFingerprint(spawnSync, pid);
+  if (fingerprint === undefined || !fingerprint.includes(cliPath)) {
+    throw new Error("Could not prove Fleet's process identity for nvim layout");
+  }
+  return { pid, cliPath, fingerprint };
+}
+
+function captureProcessFingerprint(
+  spawnSync: SpawnSyncLike,
+  pid: number,
+): string | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  const result = spawnSync(
+    "ps",
+    ["-ww", "-p", String(pid), "-o", "lstart=", "-o", "command="],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) return undefined;
+  const fingerprint = (result.stdout ?? "").trim();
+  return fingerprint === "" ? undefined : fingerprint;
+}
+
+function parseFleetProcessIdentity(value: string): FleetProcessIdentity | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      typeof parsed !== "object"
+      || parsed === null
+      || !("pid" in parsed)
+      || !("cliPath" in parsed)
+      || !("fingerprint" in parsed)
+      || !Number.isSafeInteger(parsed.pid)
+      || (parsed.pid as number) <= 0
+      || typeof parsed.cliPath !== "string"
+      || parsed.cliPath === ""
+      || typeof parsed.fingerprint !== "string"
+      || parsed.fingerprint === ""
+    ) return undefined;
+    return parsed as FleetProcessIdentity;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Cleanup is a four-operation best-effort transaction.
+ *
+ * Stopping after one failed `set-hook -u` would preserve later external tmux state—the exact leak
+ * this lifecycle owns. Every hook and option is attempted, then one combined error reports what
+ * remained uncertain so Fleet can finish terminal cleanup without silently claiming success.
+ */
+function clearLayoutState(
+  spawnSync: SpawnSyncLike,
+  windowId: string,
+  hooks: readonly string[] = LAYOUT_HOOKS,
+): string[] {
+  const operations: Array<{ args: string[]; label: string }> = [
+    ...hooks.map((hookName) => ({
+      args: ["set-hook", "-u", "-w", "-t", windowId, hookName],
+      label: `${hookName} hook`,
+    })),
+    {
+      args: ["set-option", "-u", "-w", "-t", windowId, FLEET_PANE_WINDOW_OPTION],
+      label: "Fleet pane option",
+    },
+    {
+      args: ["set-option", "-u", "-w", "-t", windowId, FLEET_PROCESS_WINDOW_OPTION],
+      label: "Fleet process option",
+    },
+  ];
+  const failures: string[] = [];
+  for (const operation of operations) {
+    const result = spawnSync("tmux", operation.args, { stdio: "ignore" });
+    if (result.status !== 0) failures.push(operation.label);
+  }
+  return failures;
 }
 
 function shellQuote(value: string): string {

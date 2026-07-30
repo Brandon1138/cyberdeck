@@ -2,19 +2,26 @@ import { describe, expect, it, vi } from "vitest";
 import type { SpawnSyncLike } from "../../src/tmux/cockpit.js";
 import {
   createFleetNvimLayoutHooks,
-  FLEET_COMMAND_WINDOW_OPTION,
   FLEET_PANE_WINDOW_OPTION,
+  FLEET_PROCESS_WINDOW_OPTION,
   rebalanceNvimLayoutFromHook,
 } from "../../src/nvim/layout-hook.js";
 
+const FLEET_PID = 4_321;
+const FLEET_FINGERPRINT =
+  "Thu Jul 30 20:00:00 2026 /usr/bin/node /opt/cyberdeck";
+const FLEET_IDENTITY = JSON.stringify({
+  pid: FLEET_PID,
+  cliPath: "/opt/cyberdeck",
+  fingerprint: FLEET_FINGERPRINT,
+});
+
 function layoutTmux(calls: string[][]): SpawnSyncLike {
-  return vi.fn<SpawnSyncLike>((_command, args) => {
+  return vi.fn<SpawnSyncLike>((command, args) => {
     calls.push(args);
+    if (command === "ps") return { status: 0, stdout: `${FLEET_FINGERPRINT}\n` };
     if (args[0] === "display-message" && args.at(-1) === "#{window_id}") {
       return { status: 0, stdout: "@4\n" };
-    }
-    if (args[0] === "display-message" && args.at(-1) === "#{pane_current_command}") {
-      return { status: 0, stdout: "node\n" };
     }
     if (args[0] === "display-message") return { status: 0, stdout: "235\t40\t0\n" };
     if (args[0] === "list-panes") {
@@ -41,15 +48,19 @@ describe("Fleet nvim layout hook", () => {
         hostPaneId: "%1",
       }),
       cliPath: "/opt/cyberdeck",
+      fleetPid: FLEET_PID,
     });
 
     hooks.install([]);
 
     expect(calls).toContainEqual([
+      "-ww", "-p", String(FLEET_PID), "-o", "lstart=", "-o", "command=",
+    ]);
+    expect(calls).toContainEqual([
       "set-option", "-w", "-t", "@4", FLEET_PANE_WINDOW_OPTION, "%1",
     ]);
     expect(calls).toContainEqual([
-      "set-option", "-w", "-t", "@4", FLEET_COMMAND_WINDOW_OPTION, "node",
+      "set-option", "-w", "-t", "@4", FLEET_PROCESS_WINDOW_OPTION, FLEET_IDENTITY,
     ]);
     expect(calls).toContainEqual([
       "set-hook",
@@ -79,6 +90,7 @@ describe("Fleet nvim layout hook", () => {
         hostPaneId: "%1",
       }),
       cliPath: "/opt/cyberdeck",
+      fleetPid: FLEET_PID,
     });
 
     hooks.remove();
@@ -93,7 +105,39 @@ describe("Fleet nvim layout hook", () => {
       "set-option", "-u", "-w", "-t", "@4", FLEET_PANE_WINDOW_OPTION,
     ]);
     expect(calls).toContainEqual([
-      "set-option", "-u", "-w", "-t", "@4", FLEET_COMMAND_WINDOW_OPTION,
+      "set-option", "-u", "-w", "-t", "@4", FLEET_PROCESS_WINDOW_OPTION,
+    ]);
+  });
+
+  it("attempts every hook and option cleanup before reporting failures", () => {
+    const calls: string[][] = [];
+    const spawnSync: SpawnSyncLike = (_command, args) => {
+      calls.push(args);
+      if (args[0] === "display-message") return { status: 0, stdout: "@4\n" };
+      if (args.includes("pane-exited") || args.includes(FLEET_PROCESS_WINDOW_OPTION)) {
+        return { status: 1 };
+      }
+      return { status: 0 };
+    };
+    const hooks = createFleetNvimLayoutHooks({
+      spawnSync,
+      preflight: () => ({
+        tmuxVersion: "tmux 3.6a",
+        presentationCommand: "switch-client",
+        hostPaneId: "%1",
+      }),
+      cliPath: "/opt/cyberdeck",
+      fleetPid: FLEET_PID,
+    });
+
+    expect(() => hooks.remove()).toThrow(
+      "tmux failed to clean up nvim layout: pane-exited hook, Fleet process option",
+    );
+    expect(calls.slice(-4)).toEqual([
+      ["set-hook", "-u", "-w", "-t", "@4", "pane-exited"],
+      ["set-hook", "-u", "-w", "-t", "@4", "after-kill-pane"],
+      ["set-option", "-u", "-w", "-t", "@4", FLEET_PANE_WINDOW_OPTION],
+      ["set-option", "-u", "-w", "-t", "@4", FLEET_PROCESS_WINDOW_OPTION],
     ]);
   });
 
@@ -109,11 +153,12 @@ describe("Fleet nvim layout hook", () => {
   });
 
   it("does nothing quietly when the surviving window has an unrecognized pane", () => {
-    const spawnSync = vi.fn<SpawnSyncLike>((_command, args) => {
+    const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
+      if (command === "ps") return { status: 0, stdout: `${FLEET_FINGERPRINT}\n` };
       if (args[0] === "show-options") {
         return {
           status: 0,
-          stdout: args.at(-1) === FLEET_PANE_WINDOW_OPTION ? "%1\n" : "node\n",
+          stdout: args.at(-1) === FLEET_PANE_WINDOW_OPTION ? "%1\n" : `${FLEET_IDENTITY}\n`,
         };
       }
       if (args[0] === "display-message") return { status: 0, stdout: "235\t40\t0\n" };
@@ -137,12 +182,15 @@ describe("Fleet nvim layout hook", () => {
     expect(spawnSync.mock.calls.some(([, args]) => args[0] === "resize-pane")).toBe(false);
   });
 
-  it("does nothing quietly when SIGKILL returns Fleet's saved pane to its shell", () => {
-    const spawnSync = vi.fn<SpawnSyncLike>((_command, args) => {
+  it("does nothing when the same pane and node command belong to a replacement process", () => {
+    const replacementFingerprint =
+      "Thu Jul 30 21:00:00 2026 /usr/bin/node /tmp/unrelated-service.js";
+    const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
+      if (command === "ps") return { status: 0, stdout: `${replacementFingerprint}\n` };
       if (args[0] === "show-options") {
         return {
           status: 0,
-          stdout: args.at(-1) === FLEET_PANE_WINDOW_OPTION ? "%1\n" : "node\n",
+          stdout: args.at(-1) === FLEET_PANE_WINDOW_OPTION ? "%1\n" : `${FLEET_IDENTITY}\n`,
         };
       }
       if (args[0] === "display-message") return { status: 0, stdout: "235\t40\t0\n" };
@@ -150,7 +198,7 @@ describe("Fleet nvim layout hook", () => {
         return {
           status: 0,
           stdout: [
-            "%1\t0\t0\t0\t40\t117\tzsh\tzsh",
+            "%1\t0\t0\t0\t40\t117\tnode\t/tmp/unrelated-service.js",
             "%3\t0\t118\t0\t40\t117\tnvim\tnvim",
           ].join("\n"),
         };
@@ -167,11 +215,12 @@ describe("Fleet nvim layout hook", () => {
   });
 
   it("uses the bounded attach predicate when the pane-exit process has no Orc session id", () => {
-    const spawnSync = vi.fn<SpawnSyncLike>((_command, args) => {
+    const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
+      if (command === "ps") return { status: 0, stdout: `${FLEET_FINGERPRINT}\n` };
       if (args[0] === "show-options") {
         return {
           status: 0,
-          stdout: args.at(-1) === FLEET_PANE_WINDOW_OPTION ? "%1\n" : "node\n",
+          stdout: args.at(-1) === FLEET_PANE_WINDOW_OPTION ? "%1\n" : `${FLEET_IDENTITY}\n`,
         };
       }
       if (args[0] === "display-message") return { status: 0, stdout: "235\t40\t0\n" };

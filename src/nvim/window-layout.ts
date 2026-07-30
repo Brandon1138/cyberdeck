@@ -105,8 +105,6 @@ export interface RebalanceNvimWindowOptions {
   windowId: string;
   paneFormat: string;
   hostPaneId: string;
-  /** Hook subprocess guard: Fleet's pane must still be running the command seen at installation. */
-  expectedHostCommand?: string | undefined;
   orchestratorSessionIds?: readonly string[] | undefined;
   /** Used only by the pane-exit subprocess, which has no broker session id to compare. */
   cliPath?: string | undefined;
@@ -155,10 +153,6 @@ export function rebalanceNvimWindow(
     const classified = panes.map((pane): WindowLayoutPane => ({
       ...pane,
       role: pane.paneId === options.hostPaneId
-          && (
-            options.expectedHostCommand === undefined
-            || pane.currentCommand === options.expectedHostCommand
-          )
         ? "fleet"
         : !pane.dead && pane.currentCommand === "nvim"
           ? "nvim"
