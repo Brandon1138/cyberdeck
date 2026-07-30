@@ -4,6 +4,7 @@ import { encodeNvimPayload, type NvimWorktreeRequest } from "../../src/nvim/quic
 import type { SpawnSyncLike } from "../../src/tmux/cockpit.js";
 
 const request: NvimWorktreeRequest = {
+  session: "11111111-1111-4111-8111-111111111111",
   worktree: "/work/tree",
   title: "Cyberdeck · scout-7",
   live: true,

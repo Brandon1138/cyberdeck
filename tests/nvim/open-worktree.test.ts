@@ -109,6 +109,7 @@ describe("openWorktreeInNvim", () => {
     expect(nvimCall?.args[1]).toBe("/tmp/cyberdeck-nvim-501/pane-2.sock");
     const payload = /\.open\('([A-Za-z0-9+/=]+)'\)$/u.exec(nvimCall?.args[3] ?? "")?.[1] ?? "";
     expect(decodeNvimPayload(payload)).toEqual({
+      session: "11111111-1111-4111-8111-111111111111",
       worktree: "/work/tree",
       title: "Cyberdeck · worker-one",
       live: true,

@@ -366,7 +366,8 @@ including buffers that were already open before the worktree was opened. Agents 
 whole files rather than editing them, so a live worktree is not a place two writers can share. When
 the worker reaches a terminal state the broker pushes one message that both refreshes the list with
 the final change set and releases the lock — one transition, one message, so the lock can never
-outlive the run.
+outlive the run. Locks are tracked per worker, not per path, so a worktree nested inside another
+open worktree keeps its own files locked for as long as its own worker runs.
 
 The nvim side ships in this repository and installs nothing on its own. Point your own config at it
 and call `listen()` once:
