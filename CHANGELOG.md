@@ -11,6 +11,12 @@ and persisted schemas remain under active alpha development.
 - Tier 1 Scout workers resolve to Cursor Composer with a verified read-only
   boundary, isolated MCP state, structured briefs, bounded execution, and
   broker-owned canonical reports outside the inspected worktree.
+- `cyberdeck open` and Fleet's `Ctrl-N` open a worker's worktree in the nvim
+  already running in the same tmux window: a `:tcd`-scoped tab with the worker's
+  changed files and hunks in that tab's location list. Buffers under a running
+  worker's worktree are held read-only, and one push on the worker's terminal
+  transition both refreshes the list and releases the lock. The nvim side ships
+  as `contrib/nvim` and needs one `require("cyberdeck").listen()` line.
 
 ### Fixed
 

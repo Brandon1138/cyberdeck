@@ -18,6 +18,7 @@ import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
 import { PtyProcess } from "../runtime/pty-process.js";
 import { PipeProcess } from "../runtime/pipe-process.js";
 import { Journal } from "./journal.js";
+import { NvimBindingService } from "./nvim-binding-service.js";
 import { BrokerServer } from "./server.js";
 import { SessionRegistry } from "./session-registry.js";
 import { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
@@ -202,6 +203,14 @@ export async function runBroker(
     new WorkflowStore(stateDirectory),
     instructions,
   );
+  // Nothing durable is composed here on purpose: an nvim address only means anything while the
+  // nvim that owns the pane it was derived from is still running, which a restarted broker cannot
+  // know. It subscribes to session updates so a worker going terminal is a push, not a poll.
+  const nvimBindings = new NvimBindingService({
+    sessions: registry,
+    onSessionUpdate: (listener) => registry.onSessionUpdate(listener),
+  });
+  nvimBindings.start();
 
   // The control plane owns durable job state, admission, budgets, leases, and reconciliation. Its
   // runtime enforces the ordering: persistence, then recovery, then reconciliation, and only then is
@@ -222,6 +231,7 @@ export async function runBroker(
     // Admission stops first, then in-flight jobs drain and persist, then live sessions stop.
     await runtime.shutdown(reason);
     instructions.stop();
+    nvimBindings.stop();
     await registry.stopAll();
     await journal.append(brokerEvent("broker.shutdown", { reason, pid: process.pid }));
     await server.close();
@@ -246,6 +256,7 @@ export async function runBroker(
     workerCoordination: workerCoordination.service,
     workerControl,
     workerEvents,
+    nvimBindings,
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();

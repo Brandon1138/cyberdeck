@@ -38,6 +38,11 @@ import {
   type CockpitOptions,
   type CockpitPreflight,
 } from "./tmux/cockpit.js";
+import {
+  openWorktreeInNvim,
+  selectSession,
+  worktreeSubject,
+} from "./nvim/open-worktree.js";
 import { CYBERDECK_VERSION } from "./version.js";
 import { resolveLaunchConversationId, runMcpServer } from "./mcp/server.js";
 import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
@@ -205,6 +210,35 @@ async function restartDetachedBroker(): Promise<void> {
   process.stdout.write(`Cyberdeck broker restarted at ${brokerSocketPath}\n`);
 }
 
+/**
+ * Open one worker's worktree in the nvim of the window this client occupies, then tell the broker
+ * which address that was.
+ *
+ * The binding is what turns a one-shot open into something that keeps up: without it nvim keeps a
+ * list and a read-only lock that nothing would ever lift when the worker finishes. It is reported
+ * rather than thrown, because an open that succeeded is still worth having and the operator needs
+ * to know it will not refresh itself.
+ */
+async function openWorkerWorktree(session: SessionRecord, client: RpcClient): Promise<string> {
+  const { hostPaneId } = preflightCockpit();
+  if (hostPaneId === undefined) {
+    throw Object.assign(
+      new Error("Cyberdeck is not running inside a tmux pane, so there is no window to find nvim in"),
+      { code: "TMUX_PANE_UNKNOWN" },
+    );
+  }
+  const opened = await openWorktreeInNvim({ session, hostPaneId });
+  const subject = worktreeSubject(session);
+  const changes = `${opened.entries} change${opened.entries === 1 ? "" : "s"}`;
+  const guard = opened.live ? " · read-only while it runs" : "";
+  try {
+    await client.request("nvim.bind", { sessionId: opened.sessionId, address: opened.address });
+  } catch {
+    return `${subject} opened in ${opened.paneId} · ${changes}${guard} · no refresh on completion`;
+  }
+  return `${subject} opened in ${opened.paneId} · ${changes}${guard}`;
+}
+
 async function runCyberdeck(): Promise<void> {
   let client: RpcClient;
   try {
@@ -224,6 +258,7 @@ async function runCyberdeck(): Promise<void> {
       stop: (sessionId) => client.request<void>("session.stop", { sessionId }),
       present: launchCockpit,
     }),
+    openWorktree: (session) => openWorkerWorktree(session, client),
   });
 }
 
@@ -541,6 +576,19 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     .argument("<id>", "session UUID")
     .action(async (sessionId: string) => {
       await withClient((client) => client.request("session.stop", { sessionId }));
+    });
+
+  // The nvim being opened into is the one in this client's tmux window, so this verb is only
+  // meaningful run from that window — the same place the Fleet keybinding runs from.
+  program.command("open")
+    .description("open a worker's worktree in the nvim running in this tmux window")
+    .argument("<id>", "session UUID or exact session name")
+    .action(async (query: string) => {
+      const notice = await withClient(async (client) => {
+        const sessions = await client.request<SessionRecord[]>("session.list", {});
+        return await openWorkerWorktree(selectSession(sessions, query), client);
+      });
+      process.stdout.write(`${notice}\n`);
     });
 
   program.command("logs")
