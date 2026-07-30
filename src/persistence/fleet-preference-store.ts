@@ -44,8 +44,9 @@ const FleetFolderDispositionRecordSchema = z.object({
  * Automatic geometry is one machine-local Fleet preference, not an orchestrator policy.
  *
  * The sentinel follows the Orc roster's impossible-path convention so this third record kind can
- * share the append-only file without colliding with a real project. Absence means off; old files
- * therefore need no migration, while an explicit false record can supersede an earlier true one.
+ * share the append-only file without colliding with a real project. Absence means on: automatic
+ * layout is the normal cockpit behavior, while an explicit false record is the durable opt-out.
+ * Old files therefore need no migration.
  */
 const FleetNvimLayoutRecordSchema = z.object({
   recordType: z.literal("fleet.nvim-layout"),
@@ -120,7 +121,7 @@ export class FleetPreferenceStore {
   }
 
   async nvimLayoutEnabled(): Promise<boolean> {
-    let enabled = false;
+    let enabled = true;
     for (const record of await this.load()) {
       if (record.recordType === "fleet.nvim-layout") enabled = record.enabled;
     }
