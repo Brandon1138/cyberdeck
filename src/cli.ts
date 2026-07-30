@@ -274,6 +274,7 @@ async function runCyberdeck(): Promise<void> {
     preflight: () => preflightCockpit(),
     nodePath: process.execPath,
     cliPath,
+    hookPath: process.env.PATH,
   });
   await runFleet(client, process.stdin, process.stdout, process, {
     changeDirectory: chooseWorkingDirectory,

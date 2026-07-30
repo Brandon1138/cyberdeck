@@ -49,6 +49,7 @@ describe("Fleet nvim layout hook", () => {
       }),
       nodePath: "/usr/bin/node",
       cliPath: "/opt/cyberdeck",
+      hookPath: "/opt/homebrew/bin:/usr/bin:/bin",
       fleetPid: FLEET_PID,
     });
 
@@ -69,7 +70,7 @@ describe("Fleet nvim layout hook", () => {
       "-t",
       "@4",
       "pane-exited",
-      'run-shell -b "/usr/bin/node /opt/cyberdeck nvim-layout rebalance -w @4"',
+      'run-shell -b "/usr/bin/env \'PATH=/opt/homebrew/bin:/usr/bin:/bin\' /usr/bin/node /opt/cyberdeck nvim-layout rebalance -w @4"',
     ]);
     expect(calls).toContainEqual([
       "set-hook",
@@ -77,7 +78,7 @@ describe("Fleet nvim layout hook", () => {
       "-t",
       "@4",
       "after-kill-pane",
-      'run-shell -b "/usr/bin/node /opt/cyberdeck nvim-layout rebalance -w @4"',
+      'run-shell -b "/usr/bin/env \'PATH=/opt/homebrew/bin:/usr/bin:/bin\' /usr/bin/node /opt/cyberdeck nvim-layout rebalance -w @4"',
     ]);
   });
 
@@ -248,5 +249,64 @@ describe("Fleet nvim layout hook", () => {
         ["resize-pane", "-t", "%1", "-x", "64"],
         ["resize-pane", "-t", "%2", "-x", "52"],
       ]);
+  });
+
+  it("restores Fleet PATH and resizes the exact two-pane state seen during pane-exited", () => {
+    const installCalls: string[][] = [];
+    const hooks = createFleetNvimLayoutHooks({
+      spawnSync: layoutTmux(installCalls),
+      preflight: () => ({
+        tmuxVersion: "tmux 3.6a",
+        presentationCommand: "switch-client",
+        hostPaneId: "%0",
+      }),
+      nodePath: "/usr/bin/node",
+      cliPath: "/opt/cyberdeck",
+      hookPath: "/opt/homebrew/bin:/usr/bin:/bin",
+      fleetPid: FLEET_PID,
+    });
+    hooks.install([]);
+    expect(installCalls).toContainEqual([
+      "set-hook",
+      "-w",
+      "-t",
+      "@4",
+      "pane-exited",
+      'run-shell -b "/usr/bin/env \'PATH=/opt/homebrew/bin:/usr/bin:/bin\' /usr/bin/node /opt/cyberdeck nvim-layout rebalance -w @4"',
+    ]);
+
+    const calls: string[][] = [];
+    const spawnSync = vi.fn<SpawnSyncLike>((command, args) => {
+      calls.push(args);
+      if (command === "ps") return { status: 0, stdout: `${FLEET_FINGERPRINT}\n` };
+      if (args[0] === "show-options") {
+        return {
+          status: 0,
+          stdout: args.at(-1) === FLEET_PANE_WINDOW_OPTION
+            ? "%0\n"
+            : `${FLEET_IDENTITY}\n`,
+        };
+      }
+      if (args[0] === "display-message") return { status: 0, stdout: "235\t53\t0\n" };
+      if (args[0] === "list-panes") {
+        return {
+          status: 0,
+          stdout: [
+            "%0\t0\t0\t0\t53\t78\tnode\t/opt/cyberdeck",
+            "%12\t0\t79\t0\t53\t156\tnode\t/opt/cyberdeck attach 11111111-1111-4111-8111-111111111111",
+          ].join("\n"),
+        };
+      }
+      return { status: 0 };
+    });
+
+    expect(rebalanceNvimLayoutFromHook({
+      spawnSync,
+      windowId: "@0",
+      cliPath: "/opt/cyberdeck",
+    })?.state).toBe("fleet-orc");
+    expect(calls.filter(([verb]) => verb === "resize-pane")).toEqual([
+      ["resize-pane", "-t", "%0", "-x", "117"],
+    ]);
   });
 });
