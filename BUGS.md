@@ -1,3 +1,34 @@
+# Standing constraints
+
+Entries in this section are **not stale** and are not superseded by anything below. They describe
+properties of the terminal, not decisions we are free to revisit. Everything after this section is a
+dated Open/Resolved log and may well be out of date; these are not. Do not re-litigate them, and do
+not accept a spec that violates one without saying so out loud to the operator first.
+
+## `Ctrl+[` can never be bound to anything
+
+A terminal transmits `Ctrl+[` as byte `0x1b`. That is the same byte Esc sends. Not similar — identical.
+No amount of care in the decoder can separate them, because there is nothing to separate: by the time
+the bytes reach us, the two keys have produced the same input. The same applies to `Ctrl+M`/Enter
+(`0x0d`), `Ctrl+I`/Tab (`0x09`) and `Ctrl+H`/Backspace (`0x08`).
+
+This was specified as the detach key, implemented, shipped, and reverted — see "Resolved: Esc and
+Option+Enter were stolen from the attached provider" below for the damage. Every bare Esc ejected the
+operator out of the attached provider, and because an `ESC`-prefixed byte below `0x20` is exactly how a
+terminal encodes an Alt/Meta chord, Option+Enter and friends detached too.
+
+The only mechanism that could distinguish them is the Kitty keyboard protocol (CSI-u), which the fleet
+deliberately *pops* on entering its screen, and which would have to be forced on the attached Claude
+Code or Codex TUI as well — breaking their input handling to buy one keybinding. Not a trade worth
+making.
+
+Detach and reattach are therefore both `Ctrl+]` (`0x1d`), deliberately. The two contexts are disjoint —
+`Ctrl+]` in the fleet list attaches, `Ctrl+]` while attached detaches — so the overload is never
+ambiguous in practice. Confirmed with the operator on 2026-07-29 as the preferred behaviour, with the
+constraint understood.
+
+# Dated bug log
+
 ## Open: a decision gate is cleared by an answer to any checkpoint, not the matching one
 
 Found on 2026-07-27 by the worker-coordination integration matrix (MIK-55 Wave 2d). An
