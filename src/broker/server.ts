@@ -450,6 +450,8 @@ export class BrokerServer {
         return this.requireFleetPreferences().list();
       case "fleet.folderDispositions":
         return this.requireFleetPreferences().listFolderDispositions();
+      case "fleet.nvimLayout":
+        return this.requireFleetPreferences().nvimLayoutEnabled();
       case "fleet.workerCoordination":
         return fleetWorkerCoordinationView(this.options.workerCoordination?.listSubjects() ?? [], {
           custodyColors: await this.options.custodyColors?.table() ?? [],
@@ -487,6 +489,11 @@ export class BrokerServer {
           disposition: FleetFolderDispositionSchema,
         }).parse(frame.params);
         await this.requireFleetPreferences().setFolderDisposition(request.key, request.disposition);
+        return { saved: true };
+      }
+      case "fleet.nvimLayout.set": {
+        const { enabled } = z.object({ enabled: z.boolean() }).parse(frame.params);
+        await this.requireFleetPreferences().setNvimLayout(enabled);
         return { saved: true };
       }
       case "session.submit": {

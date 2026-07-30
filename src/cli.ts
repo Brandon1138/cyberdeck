@@ -2,7 +2,7 @@
 
 import { closeSync, existsSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync as nodeSpawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 import { runBroker } from "./broker/main.js";
@@ -37,12 +37,17 @@ import {
   preflightCockpit,
   type CockpitOptions,
   type CockpitPreflight,
+  type SpawnSyncLike,
 } from "./tmux/cockpit.js";
 import {
   openWorktreeInNvim,
   selectSession,
   worktreeSubject,
 } from "./nvim/open-worktree.js";
+import {
+  createFleetNvimLayoutHooks,
+  rebalanceNvimLayoutFromHook,
+} from "./nvim/layout-hook.js";
 import { CYBERDECK_VERSION } from "./version.js";
 import { resolveLaunchConversationId, runMcpServer } from "./mcp/server.js";
 import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
@@ -219,7 +224,11 @@ async function restartDetachedBroker(): Promise<void> {
  * rather than thrown, because an open that succeeded is still worth having and the operator needs
  * to know it will not refresh itself.
  */
-async function openWorkerWorktree(session: SessionRecord, client: RpcClient): Promise<string> {
+async function openWorkerWorktree(
+  session: SessionRecord,
+  client: RpcClient,
+  layout: { enabled: boolean; orchestratorSessionIds: readonly string[] },
+): Promise<string> {
   const { hostPaneId } = preflightCockpit();
   if (hostPaneId === undefined) {
     throw Object.assign(
@@ -227,7 +236,11 @@ async function openWorkerWorktree(session: SessionRecord, client: RpcClient): Pr
       { code: "TMUX_PANE_UNKNOWN" },
     );
   }
-  const opened = await openWorktreeInNvim({ session, hostPaneId });
+  const opened = await openWorktreeInNvim({
+    session,
+    hostPaneId,
+    layout,
+  });
   const subject = worktreeSubject(session);
   const changes = `${opened.entries} change${opened.entries === 1 ? "" : "s"}`;
   // Never make the operator guess what produced the count: the same "0 changes" means a clean
@@ -255,6 +268,12 @@ async function runCyberdeck(): Promise<void> {
     await startDetachedBroker(false);
     client = await RpcClient.connect(brokerSocketPath);
   }
+  const cliPath = resolve(process.argv[1] ?? fileURLToPath(import.meta.url));
+  const nvimLayoutHooks = createFleetNvimLayoutHooks({
+    spawnSync: nodeSpawnSync as SpawnSyncLike,
+    preflight: () => preflightCockpit(),
+    cliPath,
+  });
   await runFleet(client, process.stdin, process.stdout, process, {
     changeDirectory: chooseWorkingDirectory,
     detachIdentity: `operator:${process.getuid?.() ?? "local"}`,
@@ -265,7 +284,8 @@ async function runCyberdeck(): Promise<void> {
       stop: (sessionId) => client.request<void>("session.stop", { sessionId }),
       present: launchCockpit,
     }),
-    openWorktree: (session) => openWorkerWorktree(session, client),
+    openWorktree: (session, layout) => openWorkerWorktree(session, client, layout),
+    nvimLayoutHooks,
   });
 }
 
@@ -398,6 +418,7 @@ interface CreateProgramOptions {
   pruneLegacyTranscript?: () => Promise<{ path: string; removed: boolean }>;
   submitWorkerEvent?: (request: WorkerEventSubmitParams) => Promise<EventAck>;
   scoutEgress?: (request: { root: string; enabled?: boolean }) => Promise<ScoutEgressStatus>;
+  rebalanceNvimLayout?: (windowId: string) => void | Promise<void>;
 }
 
 export function createProgram(options: CreateProgramOptions = {}): Command {
@@ -423,6 +444,14 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   const scoutEgress = options.scoutEgress
     ?? ((request: { root: string; enabled?: boolean }) =>
       withClient((client) => client.request<ScoutEgressStatus>("scout.egress", request)));
+  const rebalanceNvimLayout = options.rebalanceNvimLayout
+    ?? ((windowId: string) => {
+      rebalanceNvimLayoutFromHook({
+        spawnSync: nodeSpawnSync as SpawnSyncLike,
+        windowId,
+        cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
+      });
+    });
   const program = new Command()
     .name("cyberdeck")
     .version(CYBERDECK_VERSION)
@@ -447,6 +476,15 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     process.stdout.write("Cyberdeck broker shutdown requested\n");
   });
   broker.command("restart").description("gracefully replace the running broker").action(restartBroker);
+
+  const nvimLayout = program.command("nvim-layout")
+    .description("internal tmux nvim layout maintenance");
+  nvimLayout.command("rebalance")
+    .description("quietly rebalance one Fleet window")
+    .requiredOption("-w, --window <window-id>", "tmux window id")
+    .action(async (options: { window: string }) => {
+      await rebalanceNvimLayout(options.window);
+    });
 
   const scoutEgressCommand = program.command("scout-egress")
     .description("manage durable exact-repository Cursor Scout source egress");
@@ -593,7 +631,14 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     .action(async (query: string) => {
       const notice = await withClient(async (client) => {
         const sessions = await client.request<SessionRecord[]>("session.list", {});
-        return await openWorkerWorktree(selectSession(sessions, query), client);
+        return await openWorkerWorktree(selectSession(sessions, query), client, {
+          // This verb opens in its caller's window, which need not be Fleet's. Automatic geometry
+          // is intentionally reserved for Fleet's Ctrl+N and its own window-scoped hooks.
+          enabled: false,
+          orchestratorSessionIds: sessions
+            .filter((session) => session.kind === "orchestrator")
+            .map((session) => session.id),
+        });
       });
       process.stdout.write(`${notice}\n`);
     });

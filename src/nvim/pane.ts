@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { hostWindowId, type SpawnSyncLike } from "../tmux/cockpit.js";
 import { nvimServerAddress } from "./server-address.js";
+import { rebalanceNvimWindow } from "./window-layout.js";
 
 /**
  * Only Fleet's own tmux window is ever listed. Cyberdeck opens a worktree in the nvim the operator
@@ -16,6 +17,23 @@ export const NVIM_PANE_FORMAT = "#{pane_id}\t#{pane_dead}\t#{pane_current_comman
  * exactly one job.
  */
 export const NVIM_SPLIT_TARGET_FORMAT = "#{pane_id}\t#{pane_dead}\t#{pane_right}";
+
+/**
+ * Full-row geometry belongs to layout planning, not nvim discovery or split targeting.
+ *
+ * `pane_left` is included so resize commands follow what the operator sees rather than tmux's pane
+ * index order. Keeping this third format separate leaves both older parsers narrow and unchanged.
+ */
+export const NVIM_LAYOUT_PANE_FORMAT = [
+  "#{pane_id}",
+  "#{pane_dead}",
+  "#{pane_left}",
+  "#{pane_top}",
+  "#{pane_height}",
+  "#{pane_width}",
+  "#{pane_current_command}",
+  "#{pane_start_command}",
+].join("\t");
 
 /**
  * How long a freshly split nvim gets to call `listen()`.
@@ -91,6 +109,10 @@ export interface DiscoverNvimPaneOptions {
   hostPaneId: string;
   uid?: number | undefined;
   spawn?: NvimSpawnOptions | undefined;
+  layout?: {
+    enabled: boolean;
+    orchestratorSessionIds: readonly string[];
+  } | undefined;
 }
 
 /**
@@ -116,8 +138,12 @@ export async function discoverNvimPane(options: DiscoverNvimPaneOptions): Promis
     throw new Error("tmux failed to inspect the window Fleet is running in");
   }
   const found = findNvimPane(panes.stdout ?? "");
-  if (found !== undefined) return describePane(found, options.uid);
+  if (found !== undefined) {
+    applyLayout(options, windowId);
+    return describePane(found, options.uid);
+  }
   const spawned = spawnNvimPane(options, windowId);
+  applyLayout(options, windowId);
   const pane = describePane(spawned, options.uid);
   await awaitNvimSocket(pane.address, options.spawn ?? {});
   return pane;
@@ -149,6 +175,7 @@ function spawnNvimPane(options: DiscoverNvimPaneOptions, windowId: string): stri
     [
       "split-window",
       "-h",
+      ...(options.layout?.enabled === true ? ["-l", "50%"] : []),
       "-P",
       "-F",
       "#{pane_id}",
@@ -167,6 +194,17 @@ function spawnNvimPane(options: DiscoverNvimPaneOptions, windowId: string): stri
     );
   }
   return paneId;
+}
+
+function applyLayout(options: DiscoverNvimPaneOptions, windowId: string): void {
+  if (options.layout?.enabled !== true) return;
+  rebalanceNvimWindow({
+    spawnSync: options.spawnSync,
+    windowId,
+    paneFormat: NVIM_LAYOUT_PANE_FORMAT,
+    hostPaneId: options.hostPaneId,
+    orchestratorSessionIds: options.layout.orchestratorSessionIds,
+  });
 }
 
 /**

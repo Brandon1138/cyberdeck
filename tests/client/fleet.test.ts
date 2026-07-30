@@ -2217,7 +2217,7 @@ describe("fleet controls", () => {
       width: 100,
       height: 24,
     });
-    expect(rendered).toContain("2-4 of 4");
+    expect(rendered).toContain("2-4 of 5");
     expect(rendered).not.toContain("/model  ");
 
     expect(transitionFleet(fourth.state, snapshot, "escape", NOW_MS).state)
@@ -2432,6 +2432,41 @@ describe("fleet controls", () => {
         request: { enabled: true },
       },
     });
+  });
+
+  it("reports and toggles machine-local automatic nvim layout", () => {
+    const snapshot = fleet();
+    const off = createFleetState(snapshot);
+    const status = transitionFleet(
+      { ...off, draft: "/nvim-settings status" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+    expect(status.action).toBeUndefined();
+    expect(status.state.notice).toBe("Automatic nvim layout: OFF");
+
+    expect(transitionFleet(
+      { ...off, draft: "/nvim-settings on" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    )).toMatchObject({
+      state: { draft: "" },
+      action: { type: "nvim-layout", enabled: true },
+    });
+    expect(transitionFleet(
+      { ...off, nvimLayoutEnabled: true, draft: "/nvim-settings status" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    ).state.notice).toBe("Automatic nvim layout: ON");
+    expect(transitionFleet(
+      { ...off, draft: "/nvim-settings off" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    ).action).toEqual({ type: "nvim-layout", enabled: false });
   });
 
   it("reports the missing orchestrator instead of treating /fable-workers as a task", () => {
@@ -2847,7 +2882,10 @@ describe("runFleet", () => {
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
     input.emit("data", Buffer.from([0x0e]));
 
-    await vi.waitFor(() => expect(openWorktree).toHaveBeenCalledWith(worker));
+    await vi.waitFor(() => expect(openWorktree).toHaveBeenCalledWith(worker, {
+      enabled: false,
+      orchestratorSessionIds: [],
+    }));
     await vi.waitFor(() => expect(
       Buffer.concat(output.chunks).toString("utf8"),
     ).toContain("read-only while it runs"));
@@ -3169,5 +3207,75 @@ describe("runFleet", () => {
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
+  });
+
+  it("installs and removes the nvim hook on toggle, then removes it again on clean shutdown", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      write(_chunk: string | Uint8Array): boolean { return true; }
+    }
+    const transport = {
+      request: vi.fn(async (method: string, params?: { enabled?: boolean }) => {
+        if (method === "session.list") return [];
+        if (method === "fleet.preferences") return {};
+        if (method === "fleet.folderDispositions") return {};
+        if (method === "fleet.nvimLayout") return false;
+        if (method === "fleet.nvimLayout.set") return { saved: params?.enabled };
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose: vi.fn(() => () => undefined),
+      close: vi.fn(),
+    };
+    const hooks = {
+      install: vi.fn(),
+      rebalance: vi.fn(),
+      remove: vi.fn(),
+    };
+    const input = new Input();
+    const running = runFleet(
+      transport as never,
+      input,
+      new Output(),
+      new EventEmitter(),
+      {
+        nvimLayoutHooks: hooks,
+        permissionPreferences: {
+          list: async () => ({}),
+          set: async () => {},
+        },
+      },
+    );
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("/nvim-settings on\r"));
+    await vi.waitFor(() => expect(hooks.install).toHaveBeenCalledWith([]));
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith(
+      "fleet.nvimLayout.set",
+      { enabled: true },
+    ));
+
+    input.emit("data", Buffer.from("/nvim-settings off\r"));
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith(
+      "fleet.nvimLayout.set",
+      { enabled: false },
+    ));
+    expect(hooks.remove).toHaveBeenCalledTimes(1);
+
+    input.emit("data", Buffer.from("/nvim-settings on\r"));
+    await vi.waitFor(() => expect(hooks.install).toHaveBeenCalledTimes(2));
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+    expect(hooks.remove).toHaveBeenCalledTimes(2);
   });
 });

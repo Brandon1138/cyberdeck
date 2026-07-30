@@ -219,4 +219,86 @@ describe("discoverNvimPane", () => {
 
     expect((thrown as { code?: string }).code).toBe("NVIM_SPAWN_UNIDENTIFIED");
   });
+
+  it("reapplies exact layout when reusing nvim, intentionally undoing manual widths", async () => {
+    const calls: string[][] = [];
+    const spawnSync: SpawnSyncLike = (_command, args) => {
+      calls.push(args);
+      if (args[0] === "display-message" && args.at(-1) === "#{window_id}") {
+        return { status: 0, stdout: "@4\n" };
+      }
+      if (args[0] === "display-message") return { status: 0, stdout: "235\t40\t0\n" };
+      if (args[0] === "list-panes" && args.includes("#{pane_id}\t#{pane_dead}\t#{pane_current_command}")) {
+        return { status: 0, stdout: "%1\t0\tnode\n%3\t0\tnvim\n" };
+      }
+      if (args[0] === "list-panes") {
+        return {
+          status: 0,
+          stdout: [
+            "%1\t0\t0\t0\t40\t80\tnode\t/opt/cyberdeck",
+            "%3\t0\t81\t0\t40\t154\tnvim\tnvim",
+          ].join("\n"),
+        };
+      }
+      return { status: 0 };
+    };
+
+    await discoverNvimPane({
+      spawnSync,
+      hostPaneId: "%1",
+      uid: 501,
+      layout: { enabled: true, orchestratorSessionIds: [] },
+    });
+
+    expect(calls.filter(([verb]) => verb === "resize-pane")).toEqual([
+      ["resize-pane", "-t", "%1", "-x", "117"],
+    ]);
+    expect(calls.some(([verb]) => verb === "split-window")).toBe(false);
+  });
+
+  it("starts nvim at 50%, then applies exact three-pane widths without resizing nvim", async () => {
+    const calls: string[][] = [];
+    const spawnSync: SpawnSyncLike = (_command, args) => {
+      calls.push(args);
+      if (args[0] === "display-message" && args.at(-1) === "#{window_id}") {
+        return { status: 0, stdout: "@4\n" };
+      }
+      if (args[0] === "display-message") return { status: 0, stdout: "235\t40\t0\n" };
+      if (args[0] === "list-panes" && args.includes("#{pane_id}\t#{pane_dead}\t#{pane_current_command}")) {
+        return { status: 0, stdout: "%1\t0\tnode\n%2\t0\tnode\n" };
+      }
+      if (args[0] === "list-panes" && args.includes("#{pane_id}\t#{pane_dead}\t#{pane_right}")) {
+        return { status: 0, stdout: "%1\t0\t116\n%2\t0\t234\n" };
+      }
+      if (args[0] === "list-panes") {
+        return {
+          status: 0,
+          stdout: [
+            "%1\t0\t0\t0\t40\t64\tnode\t/opt/cyberdeck",
+            "%2\t0\t65\t0\t40\t52\tnode\t/opt/cyberdeck attach orc-session",
+            "%7\t0\t118\t0\t40\t117\tnvim\tnvim",
+          ].join("\n"),
+        };
+      }
+      if (args[0] === "split-window") return { status: 0, stdout: "%7\n" };
+      return { status: 0 };
+    };
+
+    await discoverNvimPane({
+      spawnSync,
+      hostPaneId: "%1",
+      uid: 501,
+      spawn: fakeWait(0),
+      layout: { enabled: true, orchestratorSessionIds: ["orc-session"] },
+    });
+
+    expect(calls).toContainEqual([
+      "split-window", "-h", "-l", "50%", "-P", "-F", "#{pane_id}", "-t", "%2", "nvim",
+    ]);
+    expect(calls.filter(([verb]) => verb === "resize-pane")).toEqual([
+      ["resize-pane", "-t", "%1", "-x", "64"],
+      ["resize-pane", "-t", "%2", "-x", "52"],
+    ]);
+    expect(calls.some((args) => args[0] === "resize-pane" && args.includes("%7"))).toBe(false);
+  });
 });

@@ -67,6 +67,17 @@ describe("Cyberdeck CLI", () => {
     expect(restartBroker).toHaveBeenCalledOnce();
   });
 
+  it("exposes the quiet window-scoped nvim layout rebalance subprocess", async () => {
+    const rebalanceNvimLayout = vi.fn();
+    const program = createProgram({ rebalanceNvimLayout });
+    const group = program.commands.find((candidate) => candidate.name() === "nvim-layout")!;
+    const rebalance = group.commands.find((candidate) => candidate.name() === "rebalance")!;
+
+    await rebalance.parseAsync(["-w", "@7"], { from: "user" });
+
+    expect(rebalanceNvimLayout).toHaveBeenCalledWith("@7");
+  });
+
   it("requires explicit confirmation before pruning the legacy transcript", async () => {
     const pruneLegacyTranscript = vi.fn(async () => ({
       path: "/tmp/state/threads/transcript.jsonl",
