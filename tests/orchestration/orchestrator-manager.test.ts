@@ -7,6 +7,7 @@ import {
 } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
+import { CodexProviderAdapter } from "../../src/providers/codex.js";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const record: SessionRecord = {
@@ -227,6 +228,74 @@ describe("OrchestratorManager", () => {
       approvalMode: "prompt",
     }), undefined, expect.any(Function));
     expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "plan"]));
+  });
+
+  it("starts a Codex orchestrator whose automatic mode reaches the CLI as -a never", async () => {
+    let launchArgs: string[] = [];
+    const start = vi.fn(async (request: object) => {
+      const session = { ...record, ...request, provider: "codex" as const };
+      launchArgs = new CodexProviderAdapter().buildLaunchSpec(session).args;
+      return session;
+    });
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+      undefined,
+      undefined,
+      {
+        list: vi.fn(async () => ({ codex: "automatic" as const })),
+        set: vi.fn(async () => undefined),
+      },
+    );
+
+    await expect(manager.create({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    })).resolves.toMatchObject({
+      session: {
+        provider: "codex",
+        approvalMode: "auto",
+      },
+    });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "codex",
+      approvalMode: "auto",
+    }));
+    expect(launchArgs).toEqual(expect.arrayContaining(["-a", "never"]));
+    expect(launchArgs).not.toContain("on-request");
+  });
+
+  it("keeps an explicit prompt mode ahead of persisted automatic Codex policy", async () => {
+    let launchArgs: string[] = [];
+    const start = vi.fn(async (request: object) => {
+      const session = { ...record, ...request, provider: "codex" as const };
+      launchArgs = new CodexProviderAdapter().buildLaunchSpec(session).args;
+      return session;
+    });
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+      undefined,
+      undefined,
+      {
+        list: vi.fn(async () => ({ codex: "automatic" as const })),
+        set: vi.fn(async () => undefined),
+      },
+    );
+
+    await manager.create({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+      approvalMode: "prompt",
+    });
+
+    expect(launchArgs).toEqual(expect.arrayContaining(["-a", "on-request"]));
   });
 
   it("persists operator-controlled Fable worker access on the binding", async () => {

@@ -19,7 +19,7 @@ and `docs/architecture/antigravity-adapter.md`.
 | --- | --- | --- | --- | --- |
 | Adapter | `src/providers/codex.ts:24` | `src/providers/claude.ts:13` | `src/providers/cursor/session-adapter.ts:49` | `src/providers/antigravity/session-adapter.ts:9` |
 | Executable | `codex` | `claude` | `agent` | `agy` |
-| Permission/approval flags | `-s <sandbox> -a on-request` (`codex.ts:36-44`) | `--permission-mode plan\|manual` (`claude.ts:38-39`) | `--sandbox enabled` + `--mode plan` when read-only (`cursor/commands.ts:59-66`) | `--mode plan --sandbox` always (`antigravity/commands.ts:82-87`) |
+| Permission/approval flags | `-s <sandbox> -a never\|on-request` (`codex.ts:36-45`) | `--permission-mode auto\|plan\|manual` (`claude.ts:38-39`) | `--sandbox enabled` + `--mode plan` when read-only (`cursor/commands.ts:59-66`) | `--mode plan --sandbox` always (`antigravity/commands.ts:82-87`) |
 | `workspace-write` supported | yes | yes (`manual`) | yes (no `--mode`) | **no** — throws `ANTIGRAVITY_WORKSPACE_WRITE_UNSUPPORTED` (`antigravity/commands.ts:83-85`) |
 | Cyberdeck MCP server injected | yes, when `session.kind` is set (`codex.ts:97-110`) | yes, when `session.kind` is set (`claude.ts:95-106`) | yes, when `session.kind` is set, through a session-scoped plugin directory (`cursor/mcp-hosting.ts`, `cursor/session-adapter.ts:117-131`) | **never** (`main.ts:137`) |
 | `providerInstructions` forwarded | `-c developer_instructions=` (`codex.ts:92-95`) | `--append-system-prompt` (`claude.ts:90-93`) | no flag exists; submitted as the first message (`cursor/session-adapter.ts:143-165`) | **silently dropped** (`antigravity/commands.ts:34-45`) |
@@ -38,12 +38,15 @@ The Cyberdeck-level input is always `session.sandbox`, a two-value enum
 (`src/orchestration/orchestrator-manager.ts:90`), and worker starts forward the requested value
 verbatim (`src/orchestration/agent-control-service.ts:141`). No adapter widens it.
 
-- **Codex** forwards the sandbox string unchanged as `-s` and always pins `-a on-request`
-  (`src/providers/codex.ts:36-44`, `:65-76`). `read-only` and `workspace-write` happen to be
-  Codex's own native sandbox-mode names, so no mapping table exists. `on-request` is the same on
-  launch and resume; Cyberdeck never emits `--dangerously-bypass-approvals-and-sandbox`.
+- **Codex** forwards the sandbox string unchanged as `-s` and resolves `-a` from the
+  provider-neutral `approvalMode`: `auto → never`, everything else `→ on-request`
+  (`src/providers/codex.ts:36-45`, `:71-82`). `read-only` and `workspace-write` happen to be
+  Codex's own native sandbox-mode names, so no mapping table exists. The same resolution runs on
+  launch and resume; Cyberdeck never emits `--dangerously-bypass-approvals-and-sandbox`, so the
+  sandbox stays in force even when approvals are automatic.
 - **Claude** maps through one shared table so a sandbox cannot mean two things depending on
-  execution dimension: `read-only → plan`, `workspace-write → manual`
+  execution dimension: `read-only → plan`, `workspace-write → manual`, with `approvalMode: "auto"`
+  overriding both to `auto`
   (`src/providers/claude/permissions.ts:12-19`), applied at `src/providers/claude.ts:38-39` and
   `:72-73`. `bypassPermissions` and `dontAsk` are deliberately never emitted.
 - **Cursor** always sets `--sandbox enabled` and adds `--mode plan` only for `read-only`

@@ -9,6 +9,7 @@ import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { renderScoutDecisionCard } from "../../src/domain/scout-output.js";
+import { CodexProviderAdapter } from "../../src/providers/codex.js";
 
 const ACTOR = "11111111-1111-4111-8111-111111111111";
 const WORKER = "22222222-2222-4222-8222-222222222222";
@@ -459,6 +460,34 @@ describe("AgentControlService", () => {
       prompt: "Review the fix",
     });
     expect(start.mock.calls.at(-1)?.[0]).not.toHaveProperty("approvalMode");
+  });
+
+  it("composes an MCP-requested auto Codex worker into -a never", async () => {
+    let launchArgs: string[] = [];
+    const start = vi.fn(async (request) => {
+      const session = { ...worker, ...request, id: WORKER, provider: "codex" as const };
+      launchArgs = new CodexProviderAdapter().buildLaunchSpec(session).args;
+      return session;
+    });
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    await service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd: "/repo/one",
+      sandbox: "workspace-write",
+      approvalMode: "auto",
+      prompt: "Land the focused fix",
+    });
+
+    expect(launchArgs).toEqual(expect.arrayContaining(["-a", "never"]));
+    expect(launchArgs).not.toContain("on-request");
+    expect(launchArgs).toEqual(expect.arrayContaining(["-s", "workspace-write"]));
   });
 
   it("applies persisted Composer automatic mode to MCP-started workers", async () => {
