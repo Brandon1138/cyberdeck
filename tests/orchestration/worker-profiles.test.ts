@@ -17,6 +17,10 @@ describe("Scout dispatch prompt", () => {
     expect(prompt).toContain("BLOCKED and INCONCLUSIVE are valid outcomes");
     expect(prompt).toContain("Any later replacement must be complete and self-contained.");
     expect(prompt).toContain("At the margin, stop tools and emit the best supported valid card.");
+    expect(prompt).toContain("Do not call createPlan");
+    expect(prompt).toContain("normal assistant text response");
+    expect(prompt).toContain("3,500 characters");
+    expect(prompt).toContain("at most 8 evidence bullets");
     expect(prompt).not.toContain("token guard");
     expect(prompt).not.toContain("maxTokens");
   });

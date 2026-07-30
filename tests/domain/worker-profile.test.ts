@@ -25,6 +25,7 @@ describe("Scout worker profile contracts", () => {
       model: "composer",
       permissions: "read-only",
       approvalMode: "auto",
+      providerMode: "ask",
       transport: "headless-stream-json",
       leasePolicy: "expire-and-discard",
     });
@@ -42,7 +43,10 @@ describe("Scout worker profile contracts", () => {
       permissions: "read-only",
       approvalMode: "auto",
       leasePolicy: "expire-and-discard",
-    }).transport).toBe("interactive-pty");
+    })).toMatchObject({
+      providerMode: "plan",
+      transport: "interactive-pty",
+    });
   });
 
   it("accepts deprecated maxTokens while defaulting wall-clock budget", () => {

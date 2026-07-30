@@ -68,7 +68,11 @@ export const WorkerEffectiveStateSchema = z.object({
   provider: z.literal("cursor"),
   model: z.literal("composer"),
   permissions: z.literal("read-only"),
+  // Broker instruction approval is automatic, while Cursor itself stays in read-only Ask mode.
+  // Keeping both fields explicit prevents approvalMode from being mistaken for provider authority.
   approvalMode: z.literal("auto"),
+  // Durable Scouts created before Ask mode launched Cursor in Plan mode and lack this field.
+  providerMode: z.enum(["plan", "ask"]).default("plan"),
   // Records created by the original Scout profile predate this field and used the interactive
   // PTY path. Defaulting during catalog decode keeps those durable sessions recoverable without
   // misrepresenting them as provider-native headless runs.
@@ -136,6 +140,7 @@ export function resolveScoutEffectiveState(
     model: "composer",
     permissions: "read-only",
     approvalMode: "auto",
+    providerMode: "ask",
     transport: "headless-stream-json",
     leasePolicy,
   });

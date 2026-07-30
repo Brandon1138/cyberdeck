@@ -32,6 +32,8 @@ export function scoutDispatchPrompt(brief: ScoutBrief): string {
     "Emit a complete valid card early after first decision-relevant evidence. BLOCKED and INCONCLUSIVE are valid outcomes.",
     "Any later replacement must be complete and self-contained.",
     "At the margin, stop tools and emit the best supported valid card.",
+    "Do not call createPlan or any planning/reporting tool. The deliverable must be a normal assistant text response, not a tool call.",
+    "Keep the complete card within 3,500 characters and use at most 8 evidence bullets. Do not add tables, diagrams, phases, todos, or an implementation plan.",
     "Do not narrate your chronological process. Untaken or rejected branches belong only in evidence when ruling them out changes the parent Orc's decision.",
     "Finish with one compact natural-language decision card using the exact headings and framing below. VERDICT must be SUPPORTED, REFUTED, MIXED, INCONCLUSIVE, BLOCKED, or NEW_FINDING. BASIS must be direct-test, direct-source, history, corroborated, inference, speculation, or none.",
     SCOUT_CARD_BEGIN,

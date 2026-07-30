@@ -228,6 +228,7 @@ describe("Scout session lifecycle", () => {
         model: "composer",
         permissions: "read-only",
         approvalMode: "auto",
+        providerMode: "ask",
         transport: "headless-stream-json",
         leasePolicy: "expire-and-discard",
       },

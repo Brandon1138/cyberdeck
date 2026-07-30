@@ -164,7 +164,7 @@ describe("Cursor command construction", () => {
       "--sandbox",
       "enabled",
       "--mode",
-      "plan",
+      "ask",
       "--trust",
       "Probe command construction",
     ]);

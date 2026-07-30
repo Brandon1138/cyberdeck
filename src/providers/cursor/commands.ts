@@ -79,7 +79,7 @@ export function buildCursorHeadlessCommand(
 /**
  * One-shot Scout command. The brief is a positional prompt documented by Cursor; `--print` and
  * stream-json eliminate terminal menus, readiness glyphs, pasted-input timing, and completion
- * scraping. Plan mode plus Cursor sandboxing remains the read-only execution boundary. `--trust`
+ * scraping. Ask mode plus Cursor sandboxing remains the read-only execution boundary. `--trust`
  * acknowledges only the exact operator-granted workspace and does not grant write access.
  */
 export function buildCursorScoutCommand(
@@ -97,7 +97,7 @@ export function buildCursorScoutCommand(
     "--print",
     "--output-format",
     "stream-json",
-    ...cursorSafetyArgs(request),
+    ...cursorSafetyArgs(request, "ask"),
     "--trust",
   ];
   if (request.model !== undefined) args.push("--model", request.model);
@@ -119,9 +119,12 @@ export function buildCursorScoutCommand(
   };
 }
 
-function cursorSafetyArgs(request: Pick<JobRequest, "cwd" | "sandbox">): string[] {
+function cursorSafetyArgs(
+  request: Pick<JobRequest, "cwd" | "sandbox">,
+  readOnlyMode: "plan" | "ask" = "plan",
+): string[] {
   const args = ["--workspace", request.cwd, "--sandbox", "enabled"];
-  if (request.sandbox === "read-only") args.push("--mode", "plan");
+  if (request.sandbox === "read-only") args.push("--mode", readOnlyMode);
   // Cursor advertises only plan/ask as read-only modes. Workspace-write therefore omits --mode and
   // relies on the documented normal agent mode while keeping the explicit sandbox enabled. It does
   // not add force, yolo, trust, Smart Auto, or automatic MCP approval.
