@@ -48,7 +48,10 @@ export function resolveProviderPermission(
       value: {
         provider,
         policy,
-        nativeMode: automatic ? "automatic" : "approve-for-me",
+        // Codex calls these "automatic" and "approve-for-me", but both mislead in the picker:
+        // "approve-for-me" reads as "it approves for me" when it means "it asks me", and the
+        // `-a never` beside it reads as "never allowed" rather than "never asks". Say the effect.
+        nativeMode: automatic ? "never asks · sandboxed" : "asks you to approve",
         launchArguments: ["-a", automatic ? "never" : "on-request"],
         application: { kind: "approval-mode", value: automatic ? "auto" : "prompt" },
       },
