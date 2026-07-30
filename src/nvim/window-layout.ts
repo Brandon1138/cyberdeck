@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { findLiveOrchestratorPane, type SpawnSyncLike } from "../tmux/cockpit.js";
 
 export const MINIMUM_LAYOUT_USABLE_COLUMNS = 120;
@@ -108,6 +109,8 @@ export interface RebalanceNvimWindowOptions {
   orchestratorSessionIds?: readonly string[] | undefined;
   /** Used only by the pane-exit subprocess, which has no broker session id to compare. */
   cliPath?: string | undefined;
+  /** Tests model installed aliases without creating fake CLI files on the host filesystem. */
+  canonicalizePath?: ((path: string) => string) | undefined;
   quiet?: boolean | undefined;
 }
 
@@ -160,7 +163,11 @@ export function rebalanceNvimWindow(
             ? "orc"
             : options.cliPath !== undefined
                 && !pane.dead
-                && startsThisCliAttach(pane.startCommand, options.cliPath)
+                && startsThisCliAttach(
+                  pane.startCommand,
+                  options.cliPath,
+                  options.canonicalizePath,
+                )
               ? "orc"
               : undefined,
     }));
@@ -290,11 +297,26 @@ function shellWords(command: string): string[] | undefined {
   return words;
 }
 
-export function startsThisCliAttach(startCommand: string, cliPath: string): boolean {
+export function startsThisCliAttach(
+  startCommand: string,
+  cliPath: string,
+  canonicalizePath: (path: string) => string = realpathSync,
+): boolean {
   const words = shellWords(startCommand);
   if (words === undefined) return false;
-  const cliIndex = words.indexOf(cliPath);
-  if (cliIndex === -1 || words[cliIndex + 1] !== "attach") return false;
+  const cliIndex = words.findIndex((word, index) => {
+    if (words[index + 1] !== "attach") return false;
+    if (word === cliPath) return true;
+    try {
+      // Fleet resolves its executable from the repository module while a surviving Orc can retain
+      // the pnpm-global symlink spelling in `pane_start_command`. Basename matching would also admit
+      // another Cyberdeck install, so aliases count only when the filesystem proves one real path.
+      return canonicalizePath(word) === canonicalizePath(cliPath);
+    } catch {
+      return false;
+    }
+  });
+  if (cliIndex === -1) return false;
   const sessionId = words[cliIndex + 2];
   if (
     sessionId === undefined
