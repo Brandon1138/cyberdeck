@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { hostWindowId, type SpawnSyncLike } from "../tmux/cockpit.js";
 import { nvimServerAddress } from "./server-address.js";
 
@@ -7,6 +8,28 @@ import { nvimServerAddress } from "./server-address.js";
  * of scope by construction rather than by ranking.
  */
 export const NVIM_PANE_FORMAT = "#{pane_id}\t#{pane_dead}\t#{pane_current_command}";
+
+/**
+ * Geometry, asked for separately from {@link NVIM_PANE_FORMAT} and only when a pane has to be
+ * created. `pane_right` is the column of the pane's right edge, which is what "rightmost" means
+ * here; the two formats stay apart so the parse that decides *which nvim to talk to* keeps having
+ * exactly one job.
+ */
+export const NVIM_SPLIT_TARGET_FORMAT = "#{pane_id}\t#{pane_dead}\t#{pane_right}";
+
+/**
+ * How long a freshly split nvim gets to call `listen()`.
+ *
+ * The socket does not exist when `split-window` returns: nvim has to boot, and under a plugin
+ * manager that defers work — lazy.nvim does — `require("cyberdeck").listen()` runs some way into
+ * startup. Five seconds covers a cold start on a loaded config; past that the config almost
+ * certainly never calls `listen()` at all, which is a different problem and gets said out loud
+ * rather than waited on.
+ */
+export const NVIM_SPAWN_TIMEOUT_MS = 5_000;
+
+/** Short enough that a fast nvim is not made to look slow, long enough not to spin. */
+export const NVIM_SPAWN_POLL_INTERVAL_MS = 50;
 
 export interface NvimPane {
   paneId: string;
@@ -30,21 +53,59 @@ export function findNvimPane(listPanesOutput: string): string | undefined {
   return undefined;
 }
 
+/**
+ * The pane a new nvim is split off from: the one furthest right in the window.
+ *
+ * The arrangement this is written for is `Fleet | Orc | Code`, and the orchestrator attachment
+ * already sits immediately right of Fleet. Splitting Fleet's own pane would wedge nvim between the
+ * two panes the operator reads together, so the split anchors on the right edge instead. Dead panes
+ * are skipped for the same reason they are skipped elsewhere: tmux is only holding them open. Ties
+ * — panes stacked at the same right edge — keep the first tmux listed, which is the topmost.
+ */
+export function rightmostPane(listPanesOutput: string): string | undefined {
+  let best: { paneId: string; right: number } | undefined;
+  for (const line of listPanesOutput.split("\n")) {
+    const [paneId, dead, right] = line.split("\t");
+    if (paneId === undefined || dead === undefined || right === undefined) continue;
+    if (dead.trim() !== "0") continue;
+    const edge = Number(right.trim());
+    if (!Number.isFinite(edge)) continue;
+    if (best === undefined || edge > best.right) best = { paneId: paneId.trim(), right: edge };
+  }
+  return best?.paneId;
+}
+
+/** Seams for the spawn path; every one of them has a real default and exists for the tests. */
+export interface NvimSpawnOptions {
+  nvimPath?: string | undefined;
+  socketExists?: ((address: string) => boolean) | undefined;
+  sleep?: ((ms: number) => Promise<void>) | undefined;
+  now?: (() => number) | undefined;
+  timeoutMs?: number | undefined;
+  pollIntervalMs?: number | undefined;
+}
+
 export interface DiscoverNvimPaneOptions {
   spawnSync: SpawnSyncLike;
   /** The pane Fleet — or the `cyberdeck open` invocation — occupies. */
   hostPaneId: string;
   uid?: number | undefined;
+  spawn?: NvimSpawnOptions | undefined;
 }
 
 /**
- * Name the nvim Cyberdeck will drive, or say plainly that there is none.
+ * Name the nvim Cyberdeck will drive, creating one only if this window has none.
  *
- * There is deliberately no fallback: no nvim is spawned, no other window is searched, and no
- * socket directory is scanned. Any of those would open a worktree somewhere the operator is not
- * looking, which is worse than an error telling them what to do.
+ * The fallback is deliberately the narrowest one that helps: an nvim is split into Fleet's *own*
+ * window, so the worktree still opens where the operator is looking. No other window is searched
+ * and no socket directory is scanned — either would open a worktree somewhere out of sight, which
+ * is worse than an error telling the operator what to do.
+ *
+ * An nvim that is running but never called `listen()` is not this function's problem: that pane is
+ * found, returned, and `callNvim` reports `NVIM_NOT_SERVING` against it. Spawning a second nvim on
+ * top of the operator's own would be a guess about which one they meant.
  */
-export function discoverNvimPane(options: DiscoverNvimPaneOptions): NvimPane {
+export async function discoverNvimPane(options: DiscoverNvimPaneOptions): Promise<NvimPane> {
   const windowId = hostWindowId(options.spawnSync, options.hostPaneId);
   const panes = options.spawnSync(
     "tmux",
@@ -54,17 +115,93 @@ export function discoverNvimPane(options: DiscoverNvimPaneOptions): NvimPane {
   if (panes.status !== 0) {
     throw new Error("tmux failed to inspect the window Fleet is running in");
   }
-  const paneId = findNvimPane(panes.stdout ?? "");
-  if (paneId === undefined) {
-    throw Object.assign(
-      new Error("No nvim in this tmux window. Open nvim here (for example `tmux split-window nvim`) and try again."),
-      { code: "NVIM_NOT_IN_WINDOW" },
-    );
-  }
+  const found = findNvimPane(panes.stdout ?? "");
+  if (found !== undefined) return describePane(found, options.uid);
+  const spawned = spawnNvimPane(options, windowId);
+  const pane = describePane(spawned, options.uid);
+  await awaitNvimSocket(pane.address, options.spawn ?? {});
+  return pane;
+}
+
+function describePane(paneId: string, uid: number | undefined): NvimPane {
   return {
     paneId,
-    ...(options.uid === undefined
+    ...(uid === undefined
       ? { address: nvimServerAddress(paneId) }
-      : { address: nvimServerAddress(paneId, options.uid) }),
+      : { address: nvimServerAddress(paneId, uid) }),
   };
+}
+
+/**
+ * The pane id comes back from tmux rather than being derived: the RPC socket address is a function
+ * of that id and nothing else, so guessing it is not an option.
+ */
+function spawnNvimPane(options: DiscoverNvimPaneOptions, windowId: string): string {
+  const layout = options.spawnSync(
+    "tmux",
+    ["list-panes", "-t", windowId, "-F", NVIM_SPLIT_TARGET_FORMAT],
+    { encoding: "utf8" },
+  );
+  requireSuccess(layout, "measure the window Fleet is running in");
+  const target = rightmostPane(layout.stdout ?? "") ?? options.hostPaneId;
+  const created = options.spawnSync(
+    "tmux",
+    [
+      "split-window",
+      "-h",
+      "-P",
+      "-F",
+      "#{pane_id}",
+      "-t",
+      target,
+      options.spawn?.nvimPath ?? "nvim",
+    ],
+    { encoding: "utf8" },
+  );
+  requireSuccess(created, "open an nvim pane in the window Fleet is running in");
+  const paneId = (created.stdout ?? "").trim();
+  if (!/^%\d+$/u.test(paneId)) {
+    throw Object.assign(
+      new Error(`tmux did not name the nvim pane it created: ${paneId === "" ? "no output" : paneId}`),
+      { code: "NVIM_SPAWN_UNIDENTIFIED" },
+    );
+  }
+  return paneId;
+}
+
+/**
+ * Wait for the spawned nvim to be reachable, or say why it is not.
+ *
+ * Falling through to `--remote-expr` on a socket nobody is listening on would report the generic
+ * "nvim did not answer" against an nvim Cyberdeck itself just started, which reads as a bug in the
+ * open rather than as the missing config line it almost always is.
+ */
+async function awaitNvimSocket(address: string, spawn: NvimSpawnOptions): Promise<void> {
+  const socketExists = spawn.socketExists ?? existsSync;
+  const now = spawn.now ?? Date.now;
+  const sleep = spawn.sleep ?? delay;
+  const interval = spawn.pollIntervalMs ?? NVIM_SPAWN_POLL_INTERVAL_MS;
+  const deadline = now() + (spawn.timeoutMs ?? NVIM_SPAWN_TIMEOUT_MS);
+  for (;;) {
+    if (socketExists(address)) return;
+    if (now() >= deadline) {
+      throw Object.assign(
+        new Error(
+          `Started nvim in this window, but nothing was listening on ${address}. Add \`require("cyberdeck").listen()\` to your nvim config.`,
+        ),
+        { code: "NVIM_SPAWN_NOT_SERVING" },
+      );
+    }
+    await sleep(interval);
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function requireSuccess(result: { status: number | null }, action: string): void {
+  if (result.status !== 0) throw new Error(`tmux failed to ${action}`);
 }
