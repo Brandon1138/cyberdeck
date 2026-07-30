@@ -132,11 +132,45 @@ describe("openWorktreeInNvim", () => {
     expect(opened.entries).toBe(0);
   });
 
-  it("fails on a missing nvim before doing any git work", async () => {
-    const spawnSync: SpawnSyncLike = (_command, args) =>
-      args[0] === "display-message"
-        ? { status: 0, stdout: "@4\n" }
-        : { status: 0, stdout: "%1\t0\tzsh\n" };
+  it("starts nvim in this window when there is none, before doing any git work", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const spawnSync: SpawnSyncLike = (command, args) => {
+      calls.push({ command, args });
+      if (args[0] === "display-message") return { status: 0, stdout: "@4\n" };
+      if (args[0] === "list-panes") {
+        return args.includes("#{pane_id}\t#{pane_dead}\t#{pane_right}")
+          ? { status: 0, stdout: "%1\t0\t79\n" }
+          : { status: 0, stdout: "%1\t0\tzsh\n" };
+      }
+      if (args[0] === "split-window") return { status: 0, stdout: "%7\n" };
+      return { status: 0, stdout: "ok:1\n" };
+    };
+    let collectedBeforeSpawn = false;
+
+    const opened = await openWorktreeInNvim({
+      session: session(),
+      hostPaneId: "%1",
+      spawnSync,
+      uid: 501,
+      spawn: { socketExists: () => true },
+      changes: async () => {
+        collectedBeforeSpawn = !calls.some(({ args }) => args[0] === "split-window");
+        return { changes: [], dropped: 0 };
+      },
+    });
+
+    expect(opened.paneId).toBe("%7");
+    expect(opened.address).toBe("/tmp/cyberdeck-nvim-501/pane-7.sock");
+    expect(collectedBeforeSpawn).toBe(false);
+  });
+
+  it("stops before any git work when the nvim it started never listens", async () => {
+    let clock = 0;
+    const spawnSync: SpawnSyncLike = (_command, args) => {
+      if (args[0] === "display-message") return { status: 0, stdout: "@4\n" };
+      if (args[0] === "list-panes") return { status: 0, stdout: "%1\t0\t79\n" };
+      return { status: 0, stdout: "%7\n" };
+    };
     let collected = false;
 
     await expect(openWorktreeInNvim({
@@ -144,11 +178,19 @@ describe("openWorktreeInNvim", () => {
       hostPaneId: "%1",
       spawnSync,
       uid: 501,
+      spawn: {
+        socketExists: () => false,
+        now: () => clock,
+        sleep: async (ms: number) => {
+          clock += ms;
+        },
+        timeoutMs: 500,
+      },
       changes: async () => {
         collected = true;
         return { changes: [], dropped: 0 };
       },
-    })).rejects.toThrow(/No nvim in this tmux window/u);
+    })).rejects.toThrow(/nothing was listening on/u);
     expect(collected).toBe(false);
   });
 });

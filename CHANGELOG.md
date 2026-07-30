@@ -20,6 +20,12 @@ and persisted schemas remain under active alpha development.
   worker whose worktree nests inside its own, and a worker that finishes between
   the open and the bind is released rather than left locked. The nvim side ships
   as `contrib/nvim` and needs one `require("cyberdeck").listen()` line.
+- A window with no nvim no longer stops the open: nvim is started in that same
+  window, split off its rightmost pane so it lands beyond the orchestrator
+  attachment rather than between it and Fleet, and the open waits for the new
+  nvim to start serving before sending anything. A spawned nvim that never calls
+  `listen()` is named as the reason, instead of the request being sent to an
+  address nobody answers on.
 
 ### Fixed
 

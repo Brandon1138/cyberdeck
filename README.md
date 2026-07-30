@@ -355,11 +355,16 @@ cyberdeck open SESSION_ID
 cyberdeck open my-worker-name
 ```
 
-Cyberdeck opens the worker's cwd in the nvim **already running in the same tmux window** as the
-invoking client: a new tab, `:tcd`-scoped to that worktree so several worktrees coexist without
-fighting over a global cwd, with a location list of the files and hunks that worker changed. No nvim
-is spawned, no other window is searched, and no socket directory is scanned; if there is no nvim in
-this window, Cyberdeck says so instead of guessing.
+Cyberdeck opens the worker's cwd in the nvim running in the **same tmux window** as the invoking
+client: a new tab, `:tcd`-scoped to that worktree so several worktrees coexist without fighting over
+a global cwd, with a location list of the files and hunks that worker changed.
+
+If that window has no nvim, one is started there — split off the rightmost pane, so it lands beyond
+the orchestrator attachment rather than between it and Fleet — and the open waits up to five seconds
+for the new nvim to call `listen()`. Nothing else is guessed at: no other window is searched and no
+socket directory is scanned, because either would open a worktree somewhere you are not looking. An
+nvim that is already running but never called `listen()` is reported as such rather than having a
+second nvim started on top of it.
 
 While the worker is running, every buffer under its worktree is `readonly` and `nomodifiable`,
 including buffers that were already open before the worktree was opened. Agents commonly rewrite

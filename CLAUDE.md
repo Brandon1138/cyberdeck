@@ -42,8 +42,9 @@ the broker's own identity — not on the pane alone.
 
 ## Things that are not deferred
 
-- No nvim is ever spawned, no window other than Fleet's is searched, and no socket directory is
-  scanned. With no nvim in the window, Cyberdeck says so. Spawning is a wanted follow-up; the
-  absence of guessing is not a gap to close.
+- When Fleet's window has no nvim, one is spawned into that same window — and nowhere else. No
+  window other than Fleet's is searched and no socket directory is scanned; both would open a
+  worktree somewhere the operator is not looking. The absence of guessing is not a gap to close.
+  An nvim that is running but never called `listen()` is reported, not spawned over.
 - nvim is driven with `--remote-expr`, never `--remote-send`. Injected keystrokes land in whatever
   mode the operator's buffer happens to be in and can fire mappings.

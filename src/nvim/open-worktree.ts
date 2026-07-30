@@ -2,7 +2,7 @@ import { spawnSync as nodeSpawnSync } from "node:child_process";
 import type { SessionRecord } from "../domain/session.js";
 import type { SpawnSyncLike } from "../tmux/cockpit.js";
 import { callNvim } from "./bridge.js";
-import { discoverNvimPane } from "./pane.js";
+import { discoverNvimPane, type NvimSpawnOptions } from "./pane.js";
 import { worktreeRequest } from "./quickfix.js";
 import { worktreeChanges, type WorktreeChangeSet } from "./worktree-changes.js";
 
@@ -54,6 +54,8 @@ export interface OpenWorktreeOptions {
   changes?: ((cwd: string) => Promise<WorktreeChangeSet>) | undefined;
   nvimPath?: string | undefined;
   uid?: number | undefined;
+  /** Seams for the case where this window has no nvim and one has to be started. */
+  spawn?: NvimSpawnOptions | undefined;
 }
 
 export interface OpenedWorktree {
@@ -66,16 +68,20 @@ export interface OpenedWorktree {
 }
 
 /**
- * Open one worker's worktree in the nvim already running in this tmux window.
+ * Open one worker's worktree in the nvim running in this tmux window, starting one if there is none.
  *
- * The order matters: the pane is resolved before any git work, so an operator with no nvim open
- * gets the actionable error immediately rather than after a diff of a large tree.
+ * The order matters: the pane is resolved before any git work, so the nvim the change list is
+ * destined for exists — and answers — before a large tree is diffed for it.
  */
 export async function openWorktreeInNvim(options: OpenWorktreeOptions): Promise<OpenedWorktree> {
-  const pane = discoverNvimPane({
+  const pane = await discoverNvimPane({
     spawnSync: options.spawnSync ?? (nodeSpawnSync as SpawnSyncLike),
     hostPaneId: options.hostPaneId,
     ...(options.uid === undefined ? {} : { uid: options.uid }),
+    spawn: {
+      ...(options.nvimPath === undefined ? {} : { nvimPath: options.nvimPath }),
+      ...(options.spawn ?? {}),
+    },
   });
   const live = isWorkerLive(options.session);
   const changes = await (options.changes ?? worktreeChanges)(options.session.cwd);
