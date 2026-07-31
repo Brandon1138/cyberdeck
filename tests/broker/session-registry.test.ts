@@ -343,6 +343,78 @@ describe("SessionRegistry", () => {
     ]);
   });
 
+  // A provider with no system-prompt flag submits its instructions as the first message, so that
+  // turn — and any broker call it makes — happens inside `start`. Whatever the caller has to make
+  // durable first gets its chance before the provider is spoken to at all.
+  it("runs the caller's activation before the provider's first turn", async () => {
+    const order: string[] = [];
+    const cursor: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session) => ({
+        executable: "fake",
+        args: [],
+        cwd: session.cwd,
+        env: {},
+      }),
+      deferInitialPrompt: () => true,
+      initializeSession: async () => { order.push("instructions"); },
+      submitInputToTerminal: async () => { order.push("prompt"); },
+      buildResumeSpec: () => {
+        throw new Error("not used");
+      },
+    };
+    const { registry } = harness({ adapters: { ...adapters, cursor } });
+    const activated: SessionRecord[] = [];
+
+    const record = await registry.start(
+      request({ provider: "cursor", model: "composer", approvalMode: "auto" }),
+      "Open the pull request",
+      async (started) => {
+        order.push("activate");
+        activated.push(started);
+      },
+    );
+
+    expect(order).toEqual(["activate", "instructions", "prompt"]);
+    expect(activated).toEqual([expect.objectContaining({ id: record.id, pid: record.pid })]);
+  });
+
+  it("leaves no live session behind when activation fails", async () => {
+    const initializeSession = vi.fn(async () => undefined);
+    const cursor: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session) => ({
+        executable: "fake",
+        args: [],
+        cwd: session.cwd,
+        env: {},
+      }),
+      deferInitialPrompt: () => true,
+      initializeSession,
+      buildResumeSpec: () => {
+        throw new Error("not used");
+      },
+    };
+    const { registry, ptys, events } = harness({ adapters: { ...adapters, cursor } });
+
+    await expect(registry.start(
+      request({ provider: "cursor", model: "composer", approvalMode: "auto" }),
+      "Open the pull request",
+      async () => {
+        throw Object.assign(new Error("binding store unavailable"), { code: "STORE_UNAVAILABLE" });
+      },
+    )).rejects.toMatchObject({
+      code: "STORE_UNAVAILABLE",
+      message: "binding store unavailable",
+    });
+    expect(initializeSession).not.toHaveBeenCalled();
+    expect(ptys[0]!.killCount).toBe(1);
+    expect(registry.list()).toEqual([]);
+    expect(events).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "session.created" }),
+    ]));
+  });
+
   it("does not count Composer permission setup as worker task completion", async () => {
     let ptys: FakePty[] = [];
     const cursor: ProviderAdapter = {

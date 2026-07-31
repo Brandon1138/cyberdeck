@@ -17,6 +17,7 @@ import type {
   OrchestratorManagerResult,
   OrchestratorResetResult,
 } from "./orchestration/orchestrator-manager.js";
+import { ORCHESTRATOR_CATALOG } from "./orchestration/orchestrator-catalog.js";
 import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
@@ -336,6 +337,21 @@ function sessionRequest(options: StartOptions, parentSessionId?: string) {
     ...(options.approvalMode === undefined ? {} : { approvalMode: options.approvalMode }),
     ...(parentSessionId === undefined ? {} : { parentSessionId }),
   };
+}
+
+/**
+ * The catalog is the single source of truth for which providers can host an orchestrator, so the
+ * first-launch cockpit flow offers exactly what Fleet's picker offers instead of drifting behind it.
+ */
+const ORCHESTRATOR_PROVIDERS: readonly ProviderId[] = ORCHESTRATOR_CATALOG.map(
+  (entry) => entry.provider,
+);
+
+function parseOrchestratorProvider(value: string): ProviderId {
+  if (!ORCHESTRATOR_PROVIDERS.includes(value)) {
+    throw new Error(`orchestrator provider must be ${ORCHESTRATOR_PROVIDERS.join(", ")}`);
+  }
+  return value;
 }
 
 interface OpenCockpitServices {
@@ -723,15 +739,12 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   });
 
   program.command("cockpit")
-    .option("--orchestrator <provider>", "explicit orchestrator provider", (value: string) => {
-      if (value !== "codex" && value !== "claude") throw new Error("orchestrator provider must be codex or claude");
-      return value;
-    })
+    .option("--orchestrator <provider>", "explicit orchestrator provider", parseOrchestratorProvider)
     .option("--model <model>", "explicit orchestrator model")
     .addOption(new Option("--effort <effort>", "explicit orchestrator reasoning effort")
       .choices(["low", "medium", "high", "xhigh", "max", "ultra"]))
     .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("fleet"))
-    .action(async (options: { orchestrator?: "codex" | "claude"; model?: string; effort?: ReasoningEffort; scope: "workspace" | "fleet" }) => {
+    .action(async (options: { orchestrator?: ProviderId; model?: string; effort?: ReasoningEffort; scope: "workspace" | "fleet" }) => {
       const cwd = process.cwd();
       await openCockpit({
         cwd,

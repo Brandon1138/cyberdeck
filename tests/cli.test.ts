@@ -163,6 +163,38 @@ describe("Cyberdeck CLI", () => {
     }));
   });
 
+  // Fleet's picker offers every catalog provider, so first-launch cockpit has to accept the same
+  // set or an operator can pick an orchestrator in one entry point and not the other.
+  it.each(["codex", "claude", "cursor"])(
+    "accepts %s as an explicit cockpit orchestrator provider",
+    async (provider) => {
+      const ensureOrchestrator = vi.fn(async () => orchestratorResult(false));
+      const program = createProgram({
+        preflightCockpit: () => ({ tmuxVersion: "tmux 3.5a", presentationCommand: "switch-client" }),
+        ensureOrchestrator,
+        launchCockpit: vi.fn(),
+      });
+      const cockpit = program.commands.find((candidate) => candidate.name() === "cockpit")!;
+
+      await cockpit.parseAsync(["--orchestrator", provider], { from: "user" });
+
+      expect(ensureOrchestrator).toHaveBeenCalledWith(expect.objectContaining({ provider }));
+    },
+  );
+
+  it("names every selectable provider when refusing an unsupported cockpit orchestrator", async () => {
+    const ensureOrchestrator = vi.fn(async () => orchestratorResult(false));
+    const program = createProgram({ ensureOrchestrator });
+    const cockpit = program.commands
+      .find((candidate) => candidate.name() === "cockpit")!
+      .exitOverride()
+      .configureOutput({ writeOut: () => {}, writeErr: () => {} });
+
+    await expect(cockpit.parseAsync(["--orchestrator", "antigravity"], { from: "user" }))
+      .rejects.toThrow("orchestrator provider must be codex, claude, cursor");
+    expect(ensureOrchestrator).not.toHaveBeenCalled();
+  });
+
   it("creates and presents a Fleet-selected orchestrator through the cockpit transaction", async () => {
     const order: string[] = [];
     const result = orchestratorResult(true);
