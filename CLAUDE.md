@@ -73,6 +73,18 @@ and a stale hook neither resizes nor prints when Fleet's pane is absent. **Trigg
 replacing that global symlink path while keeping a SIGKILL-surviving Fleet window. The fix is durable
 hook ownership and reconciliation, not a global tmux hook or another executable-path guess.
 
+### Ctrl+G only hands back a cwd when the login shell is zsh
+
+`src/tmux/interactive-shell.ts` opens `$SHELL -li` in a `tmux display-popup` and learns where the
+operator ended up from a zsh `zshexit`/`chpwd` hook installed through a one-file `ZDOTDIR`. A popup
+is **not a pane** — `list-panes -a` omits it, and `#{pane_current_path}` read inside one reports the
+*launching* pane's directory — so there is no tmux-side answer to fall back on. A non-zsh `$SHELL`
+gets the popup and no capture: Fleet's spawn cwd is simply left where it was.
+
+Deferred because the operator's shell is zsh. **Trigger:** changing `$SHELL` to bash or fish. The
+fix is that shell's own exit hook (`PROMPT_COMMAND`, `fish_exit`) writing the same file, not a wrapper
+REPL and not a pane query that cannot see the popup.
+
 ## Things that are not deferred
 
 - When Fleet's window has no nvim, one is spawned into that same window — and nowhere else. No

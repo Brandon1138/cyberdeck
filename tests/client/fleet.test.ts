@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import {
+  appendShellOutput,
   collectFleetSnapshot,
   createFleetState,
   FleetKeyDecoder,
@@ -3336,5 +3337,167 @@ describe("runFleet", () => {
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
     expect(hooks.remove).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("fleet shell mode", () => {
+  const shellSnapshot = fleet({ record: session({ cwd: "/repo/one" }) });
+
+  it("enters on ! only from an empty composer, and esc gives the fleet back", () => {
+    const opened = transitionFleet(createFleetState(shellSnapshot), shellSnapshot, "!", NOW_MS);
+    expect(opened.state.shellMode).toEqual({ draft: "", transcript: [] });
+    expect(opened.action).toBeUndefined();
+
+    // Mid-draft a `!` is the character the operator typed. A task line may well contain one.
+    const typing = transitionFleet(
+      { ...createFleetState(shellSnapshot), draft: "fix the" },
+      shellSnapshot,
+      "!",
+      NOW_MS,
+    );
+    expect(typing.state.shellMode).toBeUndefined();
+    expect(typing.state.draft).toBe("fix the!");
+
+    const left = transitionFleet(opened.state, shellSnapshot, "escape", NOW_MS);
+    expect(left.state.shellMode).toBeUndefined();
+  });
+
+  it("runs the line where Fleet would spawn, and marks the mode with a red ! and nothing else", () => {
+    let state = transitionFleet(createFleetState(shellSnapshot), shellSnapshot, "!", NOW_MS).state;
+    for (const key of [..."ls -a"]) {
+      state = transitionFleet(state, shellSnapshot, key, NOW_MS).state;
+    }
+    expect(state.shellMode?.draft).toBe("ls -a");
+
+    const painted = renderFleet(shellSnapshot, state, { color: true, width: 110, height: 30 });
+    expect(painted).toContain("[38;2;217;108;117m![0m ls -a");
+    // No coloured frame and no restyled border: the red ! is the whole indicator.
+    expect(painted).not.toContain("[38;2;217;108;117m─");
+
+    const ran = transitionFleet(state, shellSnapshot, "enter", NOW_MS);
+    expect(ran.action).toEqual({ type: "shell-run", command: "ls -a", cwd: "/repo/one" });
+    expect(ran.state.shellMode).toEqual({
+      draft: "",
+      running: true,
+      transcript: ["! ls -a", ""],
+    });
+    // Nothing may be typed into a shell that is still answering.
+    expect(transitionFleet(ran.state, shellSnapshot, "x", NOW_MS).state.shellMode?.draft).toBe("");
+  });
+
+  it("renders output into the body and drops the row the shell has left open", () => {
+    const state: FleetState = {
+      ...createFleetState(shellSnapshot),
+      shellMode: { draft: "", transcript: ["! git status", "On branch main", ""] },
+    };
+    const rendered = renderFleet(shellSnapshot, state, { color: false, width: 110, height: 30 });
+    expect(rendered).toContain("! git status");
+    expect(rendered).toContain("On branch main");
+    // The thread list is not competing with the output while the mode is on.
+    expect(rendered).not.toContain("Implement modular cryptographic scheme");
+  });
+
+  it("folds chunk-sized output into rows without breaking a line in half", () => {
+    let transcript = appendShellOutput([], "On branch ");
+    transcript = appendShellOutput(transcript, "main\nnothing to commit");
+    expect(transcript).toEqual(["On branch main", "nothing to commit"]);
+    expect(appendShellOutput(transcript, "\n")).toEqual([
+      "On branch main",
+      "nothing to commit",
+      "",
+    ]);
+  });
+
+  it("carries cd into the next line, and shows a non-zero exit rather than swallowing it", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [];
+        if (method === "fleet.preferences") return {};
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) {
+        closeListeners.add(listener);
+        return () => closeListeners.delete(listener);
+      },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const calls: Array<{ command: string; cwd: string }> = [];
+    const runShellCommand = vi.fn(async (
+      request: { command: string; cwd: string; onOutput: (chunk: string) => void },
+    ) => {
+      calls.push({ command: request.command, cwd: request.cwd });
+      if (request.command === "cd sub") return { exitStatus: 0, cwd: "/repo/one/sub" };
+      if (request.command === "false") {
+        request.onOutput("boom\n");
+        return { exitStatus: 3, cwd: "/repo/one/sub" };
+      }
+      // A line whose output merely resembles a sentinel reports no directory at all, and Fleet
+      // stays exactly where the last real answer put it.
+      request.onOutput("0000 0 /nowhere-at-all\n");
+      return { exitStatus: 0 };
+    });
+    const running = runFleet(
+      transport as never,
+      input,
+      output,
+      new EventEmitter(),
+      { runShellCommand, detachIdentity: "operator:one" },
+    );
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("!"));
+    await vi.waitFor(() => expect(Buffer.concat(output.chunks).toString()).toContain("esc leaves"));
+
+    input.emit("data", Buffer.from("cd sub\r"));
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toEqual({ command: "cd sub", cwd: process.cwd() });
+
+    input.emit("data", Buffer.from("false\r"));
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    // The directory the first line ended in is the directory the second line runs in.
+    expect(calls[1]).toEqual({ command: "false", cwd: "/repo/one/sub" });
+    await vi.waitFor(() => {
+      const rendered = Buffer.concat(output.chunks).toString();
+      expect(rendered).toContain("boom");
+      expect(rendered).toContain("exit 3");
+    });
+
+    input.emit("data", Buffer.from("git log\r"));
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    input.emit("data", Buffer.from("pwd\r"));
+    await vi.waitFor(() => expect(calls).toHaveLength(4));
+    expect(calls[3]).toEqual({ command: "pwd", cwd: "/repo/one/sub" });
+
+    // A lone escape byte is only a key once the decoder has waited out a sequence, so the mode
+    // leaves on the flush rather than on the byte: the frame after it is the fleet again.
+    const mark = output.chunks.length;
+    input.emit("data", Buffer.from([0x1b]));
+    await vi.waitFor(() => expect(Buffer.concat(output.chunks.slice(mark)).toString()).toContain(
+      "ctrl+g change",
+    ));
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
   });
 });
