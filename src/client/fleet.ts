@@ -14,6 +14,10 @@ import type {
   FleetOrchestratorCustodyColorView,
   FleetWorkerCoordinationView,
 } from "../broker/worker-coordination-view.js";
+import type {
+  FleetProjectAddResult,
+  FleetProjectRemoveResult,
+} from "../broker/fleet-project-service.js";
 import type { CustodyColor } from "../domain/custody-color.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
@@ -50,6 +54,7 @@ import {
   type ProviderPermissionPolicy,
   type ProviderPermissionResolution,
 } from "./permission-policy.js";
+import { completeDirectoryPath, expandPath } from "./path-completion.js";
 import {
   NO_PULL_REQUEST_STATUS,
   PullRequestStatusCache,
@@ -100,6 +105,13 @@ export interface FleetThread {
 
 export interface FleetSnapshot {
   threads: FleetThread[];
+  /**
+   * The operator's registered project roots, or `undefined` when this Fleet has no registry to
+   * group by — an older broker, or a presentation test. The two are deliberately distinct: an
+   * empty registry means every thread is unregistered, while no registry at all means the list
+   * falls back to one folder per working directory.
+   */
+  projects?: readonly string[] | undefined;
 }
 
 export interface DeleteConfirmation {
@@ -157,6 +169,15 @@ export interface RenameState {
   draft: string;
 }
 
+export interface ProjectPromptState {
+  draft: string;
+  /**
+   * A repository the broker offered after the draft resolved to one of its worktrees. While this is
+   * set, Enter registers the repository rather than re-sending the path the operator typed.
+   */
+  parentOffer?: { root: string; toplevel: string } | undefined;
+}
+
 export type FleetNoticeTone = "neutral" | "warning" | "error" | "confirmation";
 
 export interface FleetState {
@@ -199,6 +220,8 @@ export interface FleetState {
    */
   leaseDetail?: boolean | undefined;
   rename?: RenameState | undefined;
+  /** Set while the operator is naming a repository to register as a project. */
+  projectPrompt?: ProjectPromptState | undefined;
   notice?: string | undefined;
   noticeTone?: FleetNoticeTone | undefined;
 }
@@ -241,6 +264,9 @@ export type FleetAction =
     previousPolicy: ProviderPermissionPolicy;
   }
   | { type: "change-directory"; cwd: string }
+  | { type: "project-add"; path: string; acceptParent?: boolean | undefined }
+  | { type: "project-remove"; root: string }
+  | { type: "project-complete"; draft: string }
   | { type: "attach-clipboard-image" }
   | { type: "quit" };
 
@@ -347,7 +373,18 @@ const ORCS_SECTION_LABEL = "Orcs";
  * arrays hold, and no folder can ever be called this.
  */
 const ORCS_SECTION_KEY = "/@orcs";
+const UNREGISTERED_SECTION_LABEL = "Unregistered";
+/**
+ * Threads under no registered project. It folds under a sentinel of the same impossible shape as
+ * the Orcs roster, and starts folded: it is where work goes to be found again, not a list the
+ * operator reads every time they open the fleet.
+ */
+export const UNREGISTERED_SECTION_KEY = "/@unregistered";
 const WORKERS_SECTION_LABEL = "Workers";
+/** An older broker has no registry, so the list is still grouped one folder per directory. */
+const PROJECTS_UNAVAILABLE_NOTICE = "Project registry unavailable on this broker";
+/** How much of a worktree path a row spends naming itself before the name is trimmed. */
+const WORKTREE_TAG_WIDTH = 22;
 /** Workers shown per folder before the rest go behind a show-more row. */
 const FOLDER_THREAD_CAP = 5;
 const DEFAULT_PERMISSION_POLICIES: Readonly<Record<ConfigurablePermissionProvider, ProviderPermissionPolicy>> = {
@@ -538,6 +575,10 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
       .catch(() => []))
       .map((entry) => [entry.sessionId, entry.slot] as const),
   );
+  // Undefined rather than empty when the broker has no registry: an empty list is an answer, and
+  // grouping every thread under "Unregistered" is the wrong answer to a question nobody asked.
+  const projects = await client.request<string[]>("fleet.projects", {})
+    .then((roots) => roots as readonly string[] | undefined, () => undefined);
   const threads = await Promise.all(sessions.map(async (record): Promise<FleetThread | null> => {
     try {
       const snapshot = await client.request<{ data: string }>("session.snapshot", {
@@ -559,7 +600,10 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
       throw error;
     }
   }));
-  return { threads: threads.filter((thread): thread is FleetThread => thread !== null) };
+  return {
+    threads: threads.filter((thread): thread is FleetThread => thread !== null),
+    ...(projects === undefined ? {} : { projects }),
+  };
 }
 
 export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.cwd()): FleetState {
@@ -699,6 +743,10 @@ export function transitionFleet(
       };
     }
     return { state };
+  }
+
+  if (state.projectPrompt !== undefined) {
+    return transitionProjectPrompt(state, snapshot, key);
   }
 
   if (state.workerPicker !== undefined) {
@@ -886,6 +934,30 @@ export function transitionFleet(
     };
   }
 
+  // Registry keys are plain letters and therefore only reachable from a folder header with an empty
+  // composer: on a thread row, or mid-draft, those letters are text the operator is typing.
+  if (key === "a" && focusedFolderCwd !== undefined && state.draft === "") {
+    if (snapshot.projects === undefined) {
+      return { state: { ...state, notice: PROJECTS_UNAVAILABLE_NOTICE, noticeTone: "error" } };
+    }
+    return {
+      state: { ...state, projectPrompt: { draft: "" }, helpOpen: false, notice: undefined },
+    };
+  }
+  if (key === "d" && focusedFolderCwd !== undefined && state.draft === "") {
+    if (snapshot.projects === undefined) {
+      return { state: { ...state, notice: PROJECTS_UNAVAILABLE_NOTICE, noticeTone: "error" } };
+    }
+    // The Orc roster and the unregistered bucket are sections, not projects; neither is the
+    // operator's to remove.
+    if (focusedFolderCwd.startsWith("/@")) {
+      return { state: { ...state, notice: "Not a project folder", noticeTone: "warning" } };
+    }
+    return {
+      state: { ...state, notice: undefined },
+      action: { type: "project-remove", root: focusedFolderCwd },
+    };
+  }
   if (focusedFolderCwd !== undefined && (key === "left" || key === "right")) {
     return foldTransition(state, setCollapsed(state, focusedFolderCwd, key === "left"), focusedFolderCwd);
   }
@@ -1307,7 +1379,7 @@ function renderCommandPalette(
     )} of ${candidates.length}`;
   const footer = [
     paint("─".repeat(options.width), "dim", options.color),
-    ...renderComposerLines(state.draft, false, options),
+    ...renderComposerLines(state.draft, "task", options),
     paint("─".repeat(options.width), "dim", options.color),
     paint(fit(`↑↓ select · enter complete · esc close · ${range}`, options.width), "dim", options.color),
   ];
@@ -1537,6 +1609,65 @@ function openWorkerPickerForCwd(state: FleetState, cwd: string, returnDraft: str
   };
 }
 
+/**
+ * Type a repository path into the composer row and register it.
+ *
+ * The draft is sent as typed rather than resolved here: only the broker runs beside the
+ * repositories, and a path is not a project until git agrees it is one. Tab completes against the
+ * filesystem, which is what makes a long worktree path bearable to type at all.
+ *
+ * An offered parent turns Enter into an answer: the operator named a worktree, the broker named the
+ * repository above it, and pressing Enter takes that repository. Editing the draft withdraws the
+ * offer, because the answer no longer belongs to the question.
+ */
+function transitionProjectPrompt(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  key: string,
+): FleetTransition {
+  const prompt = state.projectPrompt!;
+  if (key === "escape") {
+    return { state: { ...state, projectPrompt: undefined, notice: undefined } };
+  }
+  if (key === "enter") {
+    if (prompt.parentOffer !== undefined) {
+      return {
+        state: { ...state, projectPrompt: undefined, notice: undefined },
+        action: { type: "project-add", path: prompt.parentOffer.root, acceptParent: true },
+      };
+    }
+    const draft = prompt.draft.trim();
+    if (draft === "") {
+      return { state: { ...state, notice: "Project path cannot be empty", noticeTone: "error" } };
+    }
+    return {
+      state: { ...state, projectPrompt: undefined, notice: undefined },
+      action: { type: "project-add", path: expandPath(draft, composerCwd(state, snapshot)) },
+    };
+  }
+  if (key === "tab") {
+    return {
+      state: { ...state, projectPrompt: { draft: prompt.draft }, notice: undefined },
+      action: { type: "project-complete", draft: prompt.draft },
+    };
+  }
+  if (key === "backspace") {
+    return {
+      state: {
+        ...state,
+        projectPrompt: { draft: [...prompt.draft].slice(0, -1).join("") },
+        notice: undefined,
+      },
+    };
+  }
+  if ([...key].length === 1 && key.charCodeAt(0) >= 0x20) {
+    return {
+      state: { ...state, projectPrompt: { draft: `${prompt.draft}${key}` }, notice: undefined },
+    };
+  }
+  return { state };
+}
+
 function transitionWorkerPicker(state: FleetState, key: string): FleetTransition {
   const picker = state.workerPicker!;
   if (key === "escape") {
@@ -1667,6 +1798,14 @@ function renderFleetList(
       : widest,
     0,
   );
+  // Same bargain again: a fleet whose workers all sit at their project roots — no worktrees
+  // folded in — never pays for the column at all.
+  const worktreeWidth = rows.reduce(
+    (widest, row) => row.kind === "thread" && row.worktree !== undefined
+      ? Math.max(widest, Math.min(WORKTREE_TAG_WIDTH, row.worktree.length))
+      : widest,
+    0,
+  );
   const viewportState = scrollFocusedRowIntoView(
     state,
     rows,
@@ -1718,6 +1857,8 @@ function renderFleetList(
             pullRequestColumn,
             leaseBadgeWidth,
             row.leaseBadge,
+            worktreeWidth,
+            row.worktree,
             indicator,
           );
         }
@@ -1753,8 +1894,8 @@ function renderFleetFooter(
   const cwd = composerCwd(state, snapshot);
   const profile = state.launchProfiles[cwd];
   const composerLines = renderComposerLines(
-    state.rename?.draft ?? state.draft,
-    state.rename !== undefined,
+    state.rename?.draft ?? state.projectPrompt?.draft ?? state.draft,
+    state.rename !== undefined ? "rename" : state.projectPrompt !== undefined ? "project" : "task",
     options,
   );
   const launchContext = profile === undefined
@@ -1819,26 +1960,19 @@ function renderHeader(
 
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
-    "pgup/dn page", "ctrl+u/d half", "home/end", "shift+↑↓ reorder", "←→ fold project", "ctrl+s switch views",
+    "pgup/dn page", "ctrl+u/d half", "home/end", "shift+↑↓ reorder", "←→ fold project",
+    "a add project", "d remove project", "ctrl+s switch views",
     "@ mention", "alt+1–9 open", "esc back/clear",
     "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim", "ctrl+g cwd", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
   ];
-  if (width >= 110) {
-    return [
-      entries.slice(0, 5).join("   "),
-      entries.slice(5, 10).join("   "),
-      entries.slice(10).join("   "),
-    ];
+  // Wrapping by a count rather than fixed slices is what keeps the last row from silently
+  // swallowing every entry added since: a new shortcut costs a row, never another key's visibility.
+  const perRow = width >= 110 ? 6 : width >= 70 ? 4 : 1;
+  const rows: string[] = [];
+  for (let index = 0; index < entries.length; index += perRow) {
+    rows.push(entries.slice(index, index + perRow).join("   "));
   }
-  if (width >= 70) {
-    return [
-      entries.slice(0, 4).join("   "),
-      entries.slice(4, 8).join("   "),
-      entries.slice(8, 12).join("   "),
-      entries.slice(12).join("   "),
-    ];
-  }
-  return entries;
+  return rows;
 }
 
 function transitionOrchestratorPicker(
@@ -2155,6 +2289,8 @@ function renderThreadRow(
   pullRequestColumn = false,
   leaseBadgeWidth = 0,
   leaseBadge?: LeaseCustodyBadge | undefined,
+  worktreeWidth = 0,
+  worktree?: string | undefined,
   scrollbar?: "track" | "thumb" | undefined,
 ): string {
   const selected = !threadFocusInert(state)
@@ -2177,7 +2313,8 @@ function renderThreadRow(
   const fixedWidth = 12 + titleWidth + statusWidth
     + (showIdentity ? identityWidth + 1 : 0)
     + (pullRequestColumn ? 2 : 0)
-    + (leaseBadgeWidth === 0 ? 0 : leaseBadgeWidth + 1);
+    + (leaseBadgeWidth === 0 ? 0 : leaseBadgeWidth + 1)
+    + (worktreeWidth === 0 ? 0 : worktreeWidth + 1);
   const previewWidth = Math.max(1, options.width - fixedWidth);
   const preview = threadPreview(thread, previewWidth);
   return [
@@ -2186,6 +2323,9 @@ function renderThreadRow(
     ...(leaseBadgeWidth === 0
       ? []
       : [leaseBadgeCell(leaseBadge, leaseBadgeWidth, options.color)]),
+    ...(worktreeWidth === 0
+      ? []
+      : [paint(pad(fit(worktree ?? "", worktreeWidth), worktreeWidth), "subtle", options.color)]),
     ...(pullRequestColumn
       ? [pullRequestCell(options.pullRequests.get(thread.record.cwd), options.color)]
       : []),
@@ -2346,9 +2486,15 @@ export async function runFleet(
       {},
     );
     const keys = Object.entries(dispositions);
+    const collapsed = keys.filter(([, disposition]) => disposition.collapsed).map(([key]) => key);
     state = {
       ...state,
-      collapsedCwds: keys.filter(([, disposition]) => disposition.collapsed).map(([key]) => key),
+      // The unregistered bucket starts folded because it is where anything the registry does not
+      // account for lands — scratch directories, one-off clones — and that is a list to open on
+      // purpose, not one to read past every time. An explicit unfold is persisted like any other.
+      collapsedCwds: dispositions[UNREGISTERED_SECTION_KEY] === undefined
+        ? [...collapsed, UNREGISTERED_SECTION_KEY]
+        : collapsed,
       expandedCwds: keys.filter(([, disposition]) => disposition.expanded).map(([key]) => key),
     };
   } catch {
@@ -2666,6 +2812,59 @@ export async function runFleet(
             noticeTone: "neutral",
           };
         }
+      } else if (action?.type === "project-add") {
+        const result = await client.request<FleetProjectAddResult>("fleet.project.add", {
+          path: action.path,
+          ...(action.acceptParent === true ? { acceptParent: true } : {}),
+        });
+        if (result.status === "worktree") {
+          // Nothing was written. The prompt comes back holding the broker's answer so Enter means
+          // the repository, and any other key means the operator is still typing.
+          state = {
+            ...state,
+            projectPrompt: {
+              draft: action.path,
+              parentOffer: { root: result.root, toplevel: result.toplevel },
+            },
+            notice: `${shortPath(result.toplevel, renderOptions.home)} is a worktree of ${shortPath(result.root, renderOptions.home)} — enter registers the repository, esc cancels`,
+            noticeTone: "confirmation",
+          };
+        } else {
+          snapshot = await collectFleetSnapshot(client);
+          state = {
+            ...state,
+            notice: result.alreadyRegistered
+              ? `Already a project: ${shortPath(result.root, renderOptions.home)}`
+              : `Registered project ${shortPath(result.root, renderOptions.home)}`,
+            noticeTone: "neutral",
+          };
+        }
+      } else if (action?.type === "project-remove") {
+        const result = await client.request<FleetProjectRemoveResult>("fleet.project.remove", {
+          path: action.root,
+        });
+        snapshot = await collectFleetSnapshot(client);
+        state = {
+          ...state,
+          notice: result.removed
+            ? `Removed project ${shortPath(result.root, renderOptions.home)} — its threads are now unregistered`
+            : `Not a registered project: ${shortPath(result.root, renderOptions.home)}`,
+          noticeTone: result.removed ? "neutral" : "warning",
+        };
+      } else if (action?.type === "project-complete") {
+        const completion = await completeDirectoryPath(action.draft, {
+          cwd: composerCwd(state, snapshot),
+          home: renderOptions.home,
+        });
+        state = {
+          ...state,
+          projectPrompt: { draft: completion.value },
+          // Several matches are worth showing; one is already in the draft.
+          notice: completion.candidates.length > 1
+            ? completion.candidates.slice(0, 12).join("  ")
+            : undefined,
+          noticeTone: "neutral",
+        };
       } else if (action?.type === "change-directory") {
         if (runtime.changeDirectory === undefined) {
           throw new Error("Working-directory navigation is unavailable in this client");
@@ -2694,6 +2893,9 @@ export async function runFleet(
         && action.type !== "delete"
         && action.type !== "open-worktree"
         && action.type !== "attach-clipboard-image"
+        && action.type !== "project-add"
+        && action.type !== "project-remove"
+        && action.type !== "project-complete"
       ) {
         snapshot = await collectFleetSnapshot(client);
       }
@@ -2701,6 +2903,8 @@ export async function runFleet(
       state = {
         ...state,
         ...(action?.type === "start" ? { draft: action.request.initialPrompt } : {}),
+        // A rejected path is almost always a typo, so the prompt comes back with it still in hand.
+        ...(action?.type === "project-add" ? { projectPrompt: { draft: action.path } } : {}),
         ...(action?.type === "permission-policy"
           ? {
               permissionPolicies: {
@@ -2944,6 +3148,9 @@ export class FleetKeyDecoder {
     else if (code === 0x18) keys.push("ctrl+x");
     else if (code === 0x1d) keys.push("ctrl+]");
     else if (code === 0x0d) keys.push("enter");
+    // Tab is byte-identical to Ctrl+I, so this names one key, not two. It is bound only inside the
+    // project prompt, where Ctrl+I completing a path as well costs the operator nothing.
+    else if (code === 0x09) keys.push("tab");
     else if (code === 0x7f || code === 0x08) keys.push("backspace");
     else if (code >= 0x20) keys.push(value[index]!);
     index += 1;
@@ -2976,6 +3183,7 @@ function decodeCsiUKey(sequence: string): string | undefined {
     return ctrl ? "ctrl+enter" : "enter";
   }
   if (code === 127 || code === 8) return "backspace";
+  if (code === 9) return "tab";
   if (ctrl || code < 0x20) return undefined;
   const character = String.fromCodePoint(code);
   return alt ? `alt+${character}` : character;
@@ -3010,16 +3218,19 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
   // Orcs section — but that section folds and caps like a folder, so the orc answers to it
   // under the sentinel key instead.
   const selectedRecord = threads.find(({ record }) => record.id === selectedSessionId)?.record;
+  const orcs = orchestratorThreads(snapshot.threads);
+  const folders = [
+    ...(orcs.length === 0 ? [] : [{ cwd: ORCS_SECTION_KEY, threads: orcs }]),
+    ...groupThreads(snapshot),
+  ];
+  // A worker answers to the section it renders in, which under a registry is its project rather
+  // than its own working directory.
   const selectedCwd = selectedRecord === undefined
     ? undefined
     : selectedRecord.kind === "orchestrator"
       ? ORCS_SECTION_KEY
-      : selectedRecord.cwd;
-  const orcs = orchestratorThreads(snapshot.threads);
-  const folders = [
-    ...(orcs.length === 0 ? [] : [{ cwd: ORCS_SECTION_KEY, threads: orcs }]),
-    ...groupThreads(snapshot.threads),
-  ];
+      : folders.find(({ threads: workers }) =>
+        workers.some(({ record }) => record.id === selectedRecord.id))?.cwd;
   const folderExists = state.focusedFolderCwd !== undefined
     && folders.some(({ cwd }) => cwd === state.focusedFolderCwd);
   // A capped folder only offers a show-more row once it has more workers than it shows,
@@ -3095,7 +3306,7 @@ function isTerminalSession(record: SessionRecord): boolean {
 function orderedThreads(snapshot: FleetSnapshot): FleetThread[] {
   return [
     ...orchestratorThreads(snapshot.threads),
-    ...groupThreads(snapshot.threads).flatMap(({ threads }) => threads),
+    ...groupThreads(snapshot).flatMap(({ threads }) => threads),
   ];
 }
 
@@ -3117,6 +3328,8 @@ type FleetRow =
     thread: FleetThread;
     /** Absent when custody is healthy, unknown, or already stated by the group rollup. */
     leaseBadge?: LeaseCustodyBadge;
+    /** Where under its project the worker lives, when that is not the project root itself. */
+    worktree?: string;
   }
   | {
     kind: "show-more";
@@ -3154,8 +3367,13 @@ function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow
   const orcRows: FleetListRow[] = orcs.length === 0
     ? []
     : orcSectionRows(orcs, state);
-  const folderRows = groupThreads(snapshot.threads).flatMap(({ cwd, threads }, groupIndex): FleetListRow[] => {
-    const header: FleetRow = { kind: "folder", cwd, threadCount: threads.length };
+  const folderRows = groupThreads(snapshot).flatMap(({ cwd, label, threads }, groupIndex): FleetListRow[] => {
+    const header: FleetRow = {
+      kind: "folder",
+      cwd,
+      threadCount: threads.length,
+      ...(label === undefined ? {} : { label }),
+    };
     const spacer: FleetListRow[] = groupIndex === 0 && orcRows.length === 0
       ? []
       : [{ kind: "spacer" }];
@@ -3164,7 +3382,7 @@ function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow
     return [
       ...spacer,
       header,
-      ...sectionRows(WORKERS_SECTION_LABEL, visible, threads, state),
+      ...sectionRows(WORKERS_SECTION_LABEL, visible, threads, state, cwd),
       // The row survives expansion so the folder can be rolled back up from the same place.
       ...(threads.length > FOLDER_THREAD_CAP
         ? [{ kind: "show-more" as const, cwd, hiddenCount: threads.length - visible.length }]
@@ -3206,13 +3424,14 @@ function sectionRows(
   visible: readonly FleetThread[],
   all: readonly FleetThread[],
   state: FleetState,
+  root?: string | undefined,
 ): FleetListRow[] {
   // A section whose workers all share one custody says it once on the heading, and
   // its rows go bare: a badge repeated down the whole group is a column of noise.
   const rollup = uniformLeaseCustody(all.map(threadLeaseCustody));
   return [
     { kind: "section", label: sectionLabel(label, all.length, rollup) },
-    ...threadRows(visible, state, rollup),
+    ...threadRows(visible, state, rollup, root),
   ];
 }
 
@@ -3221,18 +3440,25 @@ function threadRows(
   visible: readonly FleetThread[],
   state: FleetState,
   rollup: LeaseCustody | undefined,
+  root?: string | undefined,
 ): FleetListRow[] {
   return visible.flatMap((thread): FleetListRow[] => {
     const custody = threadLeaseCustody(thread);
     const badge = rollup !== undefined || custody === undefined
       ? undefined
       : leaseCustodyBadge(custody);
+    // A worktree folded into its project says so on its own row; that is what the row costs the
+    // section it no longer gets to head.
+    const worktree = root === undefined || root.startsWith("/@")
+      ? undefined
+      : worktreeTag(thread.record.cwd, root);
     return [
       {
         kind: "thread",
         cwd: thread.record.cwd,
         thread,
         ...(badge === undefined ? {} : { leaseBadge: badge }),
+        ...(worktree === undefined ? {} : { worktree }),
       },
       ...(state.leaseDetail === true && thread.coordination !== undefined
         && thread.record.kind !== "orchestrator"
@@ -3418,21 +3644,77 @@ function orchestratorThreads(threads: readonly FleetThread[]): FleetThread[] {
     .sort(byRecency);
 }
 
+/** One section of the worker list: a registered project, the unregistered bucket, or a folder. */
+interface FleetFolder {
+  cwd: string;
+  threads: FleetThread[];
+  /** Set on the unregistered bucket, which names a condition rather than a path on disk. */
+  label?: string;
+}
+
 /**
- * Workers by folder. Folders are alphabetical by absolute path so the fleet reads in the
- * same order as `ls`, and stays put while activity reshuffles the rows inside each one.
+ * The registered root a directory belongs to, longest first.
+ *
+ * Longest wins so a project nested inside another still claims its own threads, and the match is
+ * taken at a path separator so `/repo-two` is never swallowed by `/repo`.
  */
-function groupThreads(threads: readonly FleetThread[]): Array<{ cwd: string; threads: FleetThread[] }> {
-  const groups = new Map<string, FleetThread[]>();
-  for (const thread of threads) {
-    if (thread.record.kind === "orchestrator") continue;
-    const group = groups.get(thread.record.cwd) ?? [];
-    group.push(thread);
-    groups.set(thread.record.cwd, group);
+function projectRootFor(cwd: string, projects: readonly string[]): string | undefined {
+  let match: string | undefined;
+  for (const root of projects) {
+    if (cwd !== root && !cwd.startsWith(`${root}/`)) continue;
+    if (match === undefined || root.length > match.length) match = root;
   }
-  return [...groups.entries()]
-    .map(([cwd, entries]) => ({ cwd, threads: entries.sort(byRecency) }))
-    .sort((left, right) => left.cwd.localeCompare(right.cwd));
+  return match;
+}
+
+/** What a worker's row says about where under its project it actually lives. */
+function worktreeTag(cwd: string, root: string): string | undefined {
+  return cwd === root ? undefined : cwd.slice(root.length + 1);
+}
+
+/**
+ * Workers by section.
+ *
+ * With a registry, a section is a project the operator named: every per-task worktree under it
+ * folds into it and says which worktree on its own row, and a registered project holds its
+ * section open even with nothing in it. Threads under no registered root land in one bucket
+ * rather than disappearing — the operator has to be able to find work to finish it.
+ *
+ * Without a registry the fleet falls back to one folder per working directory, alphabetical by
+ * absolute path so the list reads in the same order as `ls`.
+ */
+function groupThreads(snapshot: FleetSnapshot): FleetFolder[] {
+  const workers = snapshot.threads.filter(({ record }) => record.kind !== "orchestrator");
+  const projects = snapshot.projects;
+  if (projects === undefined) {
+    const groups = new Map<string, FleetThread[]>();
+    for (const thread of workers) {
+      const group = groups.get(thread.record.cwd) ?? [];
+      group.push(thread);
+      groups.set(thread.record.cwd, group);
+    }
+    return [...groups.entries()]
+      .map(([cwd, entries]) => ({ cwd, threads: entries.sort(byRecency) }))
+      .sort((left, right) => left.cwd.localeCompare(right.cwd));
+  }
+  const roots = [...new Set(projects)].sort((left, right) => left.localeCompare(right));
+  const groups = new Map<string, FleetThread[]>(roots.map((root) => [root, []]));
+  const unregistered: FleetThread[] = [];
+  for (const thread of workers) {
+    const root = projectRootFor(thread.record.cwd, roots);
+    if (root === undefined) unregistered.push(thread);
+    else groups.get(root)!.push(thread);
+  }
+  return [
+    ...[...groups.entries()].map(([cwd, entries]) => ({ cwd, threads: entries.sort(byRecency) })),
+    ...(unregistered.length === 0
+      ? []
+      : [{
+        cwd: UNREGISTERED_SECTION_KEY,
+        label: UNREGISTERED_SECTION_LABEL,
+        threads: unregistered.sort(byRecency),
+      }]),
+  ];
 }
 
 function taskName(instruction: string): string {
@@ -3758,15 +4040,23 @@ function renderNotice(
   return value;
 }
 
+/** What the composer row is collecting: a task to dispatch, a new thread name, or a project path. */
+type ComposerMode = "task" | "rename" | "project";
+
+const COMPOSER_PROMPTS: Readonly<Record<ComposerMode, { prefix: string; placeholder: string }>> = {
+  task: { prefix: "›", placeholder: "Describe a task for a new session" },
+  rename: { prefix: "Rename ›", placeholder: "Rename thread" },
+  project: { prefix: "Project ›", placeholder: "Repository path · tab completes · enter registers" },
+};
+
 function renderComposerLines(
   value: string,
-  renaming: boolean,
+  mode: ComposerMode,
   options: ResolvedFleetRenderOptions,
 ): string[] {
+  const prompt = COMPOSER_PROMPTS[mode];
   if (value === "") {
-    return [
-      `${renaming ? "Rename ›" : "›"} ${paint(renaming ? "Rename thread" : "Describe a task for a new session", "dim", options.color)}`,
-    ];
+    return [`${prompt.prefix} ${paint(prompt.placeholder, "dim", options.color)}`];
   }
 
   const rows: string[] = [];
@@ -3775,9 +4065,7 @@ function renderComposerLines(
     const characters = [...logicalLine];
     let offset = 0;
     do {
-      const prefix = rows.length === 0
-        ? renaming ? "Rename › " : "› "
-        : "  ";
+      const prefix = rows.length === 0 ? `${prompt.prefix} ` : "  ";
       const capacity = Math.max(1, options.width - [...prefix].length - 1);
       const segment = characters.slice(offset, offset + capacity).join("");
       rows.push(`${prefix}${segment}`);

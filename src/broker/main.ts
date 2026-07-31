@@ -20,6 +20,7 @@ import { PipeProcess } from "../runtime/pipe-process.js";
 import { Journal } from "./journal.js";
 import { NvimBindingService } from "./nvim-binding-service.js";
 import { BrokerServer } from "./server.js";
+import { FleetProjectService } from "./fleet-project-service.js";
 import { SessionRegistry } from "./session-registry.js";
 import { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
 import { OrchestratorStore } from "../persistence/orchestrator-store.js";
@@ -117,6 +118,7 @@ export async function runBroker(
   const sessionStore = new SessionStore(stateDirectory);
   const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
+  const fleetProjects = new FleetProjectService({ store: fleetPreferences });
   const workerPreferences = new WorkerPreferenceStore(stateDirectory);
   const providerPermissions = new ProviderPermissionPreferenceStore(stateDirectory);
   const scoutReports = new ScoutReportStore(stateDirectory);
@@ -147,6 +149,13 @@ export async function runBroker(
     config,
   });
   await registry.ready();
+  // One pass, on the first broker start that has this code: the directories threads already live
+  // in are the only evidence of the operator's projects that predates the registry. It runs before
+  // the socket is listening so the first Fleet render never sees a half-seeded list.
+  await fleetProjects.seed(recoveredSessions.map((record) => record.cwd)).catch(() => {
+    // A machine without git, or with none of these directories left on disk, starts empty. The
+    // operator registers projects by hand from there; refusing to boot over it would be worse.
+  });
   const orchestratorStore = new OrchestratorStore(stateDirectory);
   const workerCoordination = new WorkerCoordinationRuntime({
     stateDirectory,
@@ -249,6 +258,7 @@ export async function runBroker(
     controlPlaneRuntime: runtime,
     fleetDetaches,
     fleetPreferences,
+    fleetProjects,
     workerPreferences,
     scoutEgress,
     custodyColors,

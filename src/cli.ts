@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 import { runBroker } from "./broker/main.js";
 import type {
+  FleetProjectAddResult,
+  FleetProjectRemoveResult,
+} from "./broker/fleet-project-service.js";
+import type {
   ApprovalMode,
   ReasoningEffort,
   ResolvedLaunchRecord,
@@ -440,6 +444,9 @@ interface CreateProgramOptions {
   submitWorkerEvent?: (request: WorkerEventSubmitParams) => Promise<EventAck>;
   scoutEgress?: (request: { root: string; enabled?: boolean }) => Promise<ScoutEgressStatus>;
   rebalanceNvimLayout?: (windowId: string) => void | Promise<void>;
+  listProjects?: () => Promise<string[]>;
+  addProject?: (request: { path: string; acceptParent?: boolean }) => Promise<FleetProjectAddResult>;
+  removeProject?: (request: { path: string }) => Promise<FleetProjectRemoveResult>;
 }
 
 export function createProgram(options: CreateProgramOptions = {}): Command {
@@ -475,6 +482,14 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
         cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
       });
     });
+  const listProjects = options.listProjects
+    ?? (() => withClient((client) => client.request<string[]>("fleet.projects", {})));
+  const addProject = options.addProject
+    ?? ((request: { path: string; acceptParent?: boolean }) =>
+      withClient((client) => client.request<FleetProjectAddResult>("fleet.project.add", request)));
+  const removeProject = options.removeProject
+    ?? ((request: { path: string }) =>
+      withClient((client) => client.request<FleetProjectRemoveResult>("fleet.project.remove", request)));
   const program = new Command()
     .name("cyberdeck")
     .version(CYBERDECK_VERSION)
@@ -508,6 +523,50 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     .requiredOption("-w, --window <window-id>", "tmux window id")
     .action(async (options: { window: string }) => {
       await rebalanceNvimLayout(options.window);
+    });
+
+  // The registry the Fleet list groups by. Paths are resolved against the shell's cwd here and
+  // against git in the broker, so `cyberdeck project add .` inside a repository is the short form.
+  const projectCommand = program.command("project")
+    .description("manage the repositories the Fleet list groups threads under");
+  projectCommand.command("list")
+    .description("list registered projects")
+    .action(async () => {
+      const roots = await listProjects();
+      process.stdout.write(roots.length === 0 ? "No registered projects\n" : `${roots.join("\n")}\n`);
+    });
+  projectCommand.command("add")
+    .description("register a repository as a project")
+    .argument("[path]", "path inside the repository (defaults to current directory)")
+    .option("--parent", "when the path is a linked worktree, register its repository")
+    .action(async (path: string | undefined, commandOptions: { parent?: boolean }) => {
+      const result = await addProject({
+        path: resolve(path ?? process.cwd()),
+        ...(commandOptions.parent === true ? { acceptParent: true } : {}),
+      });
+      if (result.status === "worktree") {
+        process.stdout.write(
+          `${result.toplevel} is a linked worktree of ${result.root}\n`
+            + `Nothing was registered. Re-run with --parent to register ${result.root}\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write(
+        `${result.alreadyRegistered ? "Already a project" : "Registered project"}: ${result.root}\n`,
+      );
+    });
+  projectCommand.command("rm")
+    .description("unregister a project; its threads become unregistered, nothing is deleted")
+    .argument("[path]", "registered project root (defaults to current directory)")
+    .action(async (path: string | undefined) => {
+      const result = await removeProject({ path: resolve(path ?? process.cwd()) });
+      process.stdout.write(
+        result.removed
+          ? `Removed project: ${result.root}\n`
+          : `Not a registered project: ${result.root}\n`,
+      );
+      if (!result.removed) process.exitCode = 1;
     });
 
   const scoutEgressCommand = program.command("scout-egress")
