@@ -3360,6 +3360,16 @@ describe("fleet shell mode", () => {
 
     const left = transitionFleet(opened.state, shellSnapshot, "escape", NOW_MS);
     expect(left.state.shellMode).toBeUndefined();
+
+    // Ctrl+G leaves too, including while a line is still running: the running guard is about not
+    // editing a draft mid-flight, not about holding the operator inside a command that will not end.
+    const byCtrlG = transitionFleet(opened.state, shellSnapshot, "ctrl+g", NOW_MS);
+    expect(byCtrlG.state.shellMode).toBeUndefined();
+    const running = { ...opened.state, shellMode: { draft: "", running: true, transcript: [] } };
+    expect(transitionFleet(running, shellSnapshot, "ctrl+g", NOW_MS).state.shellMode)
+      .toBeUndefined();
+    expect(transitionFleet(running, shellSnapshot, "escape", NOW_MS).state.shellMode)
+      .toBeUndefined();
   });
 
   it("runs the line where Fleet would spawn, and marks the mode with a red ! and nothing else", () => {
@@ -3468,7 +3478,8 @@ describe("fleet shell mode", () => {
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
 
     input.emit("data", Buffer.from("!"));
-    await vi.waitFor(() => expect(Buffer.concat(output.chunks).toString()).toContain("esc leaves"));
+    await vi.waitFor(() =>
+      expect(Buffer.concat(output.chunks).toString()).toContain("esc or ctrl+g leaves"));
 
     input.emit("data", Buffer.from("cd sub\r"));
     await vi.waitFor(() => expect(calls).toHaveLength(1));
@@ -3497,6 +3508,74 @@ describe("fleet shell mode", () => {
     await vi.waitFor(() => expect(Buffer.concat(output.chunks.slice(mark)).toString()).toContain(
       "ctrl+g change",
     ));
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("gets the operator out of a line that never ends, instead of queueing the key behind it", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [];
+        if (method === "fleet.preferences") return {};
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose: vi.fn(() => () => undefined),
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    let interrupted: AbortSignal | undefined;
+    // A `tail -f`: it answers the composer only once something stops it.
+    const runShellCommand = vi.fn(async (request: { signal?: AbortSignal | undefined }) => {
+      interrupted = request.signal;
+      await new Promise<void>((resolve) => {
+        request.signal?.addEventListener("abort", () => { resolve(); }, { once: true });
+      });
+      return { exitStatus: 130 };
+    });
+    const running = runFleet(
+      transport as never,
+      input,
+      output,
+      new EventEmitter(),
+      { runShellCommand, detachIdentity: "operator:one" },
+    );
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("!"));
+    input.emit("data", Buffer.from("tail -f log\r"));
+    await vi.waitFor(() => expect(runShellCommand).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(Buffer.concat(output.chunks).toString()).toContain("ctrl+g stops and leaves"));
+
+    // Every key after this one is queued behind the line itself, so the interrupt has to be fired
+    // on arrival rather than in turn — otherwise the key that ends the command waits for it.
+    const mark = output.chunks.length;
+    input.emit("data", Buffer.from([0x07]));
+    await vi.waitFor(() => expect(interrupted?.aborted).toBe(true));
+    await vi.waitFor(() => expect(Buffer.concat(output.chunks.slice(mark)).toString()).toContain(
+      "ctrl+g change",
+    ));
+
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
   });

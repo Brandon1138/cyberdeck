@@ -12,7 +12,15 @@ export interface ShellCommandRequest {
   /** Defaults to the operator's `$SHELL`. */
   shell?: string | undefined;
   env?: NodeJS.ProcessEnv | undefined;
+  /**
+   * Aborting interrupts the line. A command that outlives Fleet's patience for it is not a command
+   * Fleet can wait on: without this, `tail -f` or a dev server holds the composer forever.
+   */
+  signal?: AbortSignal | undefined;
 }
+
+/** How long an interrupted line has to take the hint before it is killed outright. */
+const INTERRUPT_GRACE_MS = 2_000;
 
 export interface ShellCommandResult {
   /** The operator's line's status, read off the sentinel rather than off the wrapper. */
@@ -90,17 +98,38 @@ export async function runShellCommand(request: ShellCommandRequest): Promise<She
     // No stdin: a line that wants to prompt should fail rather than hang a Fleet the operator
     // cannot type into.
     stdio: ["ignore", "pipe", "pipe"],
+    // Its own process group, so an interrupt reaches what the line actually started. Signalling the
+    // shell alone leaves a grandchild holding the pipes open, and `close` would never arrive.
+    detached: true,
   });
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", consumeStdout);
   child.stderr.on("data", (chunk: string) => { emit(chunk); });
 
-  const exitStatus = await new Promise<number>((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", (code, signal) =>
-      resolve(code ?? (signal === null ? 1 : 128 + signalNumber(signal))));
-  });
+  let escalation: ReturnType<typeof setTimeout> | undefined;
+  const interrupt = () => {
+    signalGroup(child.pid, "SIGINT");
+    // A line that ignores SIGINT still has to let go of the composer.
+    escalation = setTimeout(() => { signalGroup(child.pid, "SIGKILL"); }, INTERRUPT_GRACE_MS);
+    escalation.unref?.();
+  };
+  if (request.signal !== undefined) {
+    if (request.signal.aborted) interrupt();
+    else request.signal.addEventListener("abort", interrupt, { once: true });
+  }
+
+  let exitStatus: number;
+  try {
+    exitStatus = await new Promise<number>((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code, signal) =>
+        resolve(code ?? (signal === null ? 1 : 128 + signalNumber(signal))));
+    });
+  } finally {
+    if (escalation !== undefined) clearTimeout(escalation);
+    request.signal?.removeEventListener("abort", interrupt);
+  }
 
   // Whatever was held back for a separator that never came is still the operator's output.
   if (!sealed && pending !== "") emit(pending);
@@ -135,6 +164,20 @@ async function directoryOrUndefined(path: string): Promise<{ cwd?: string }> {
     return {};
   }
   return { cwd: path };
+}
+
+/**
+ * Signal the line's whole process group. A pipeline's members are not the shell, and killing only
+ * the shell leaves them running with the pipes still open.
+ */
+function signalGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (pid === undefined) return;
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // Already gone, or never had a group of its own; the direct signal is the only thing left to try.
+    try { process.kill(pid, signal); } catch { /* the line is already over */ }
+  }
 }
 
 function signalNumber(signal: NodeJS.Signals): number {

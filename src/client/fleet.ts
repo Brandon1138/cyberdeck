@@ -359,6 +359,8 @@ export interface FleetRuntimeOptions {
     command: string;
     cwd: string;
     onOutput: (chunk: string) => void;
+    /** Aborted when the operator leaves the shell while the line is still running. */
+    signal?: AbortSignal | undefined;
   }) => Promise<ShellCommandResult>) | undefined;
   detachIdentity?: string | undefined;
   openOrchestrator?: ((target: OrchestratorCockpitTarget) => Promise<SessionRecord>) | undefined;
@@ -1722,7 +1724,9 @@ function transitionShellMode(
   key: string,
 ): FleetTransition {
   const shell = state.shellMode!;
-  if (key === "escape") {
+  // Both leave, and both leave while a line is still running: the running guard below is about not
+  // editing a draft mid-flight, not about trapping the operator inside a command that will not end.
+  if (key === "escape" || key === "ctrl+g") {
     return { state: { ...state, shellMode: undefined, notice: undefined } };
   }
   // A line already in flight owns the shell. Typing into it would edit a draft the operator cannot
@@ -2066,7 +2070,7 @@ function renderFleetFooter(
     options,
   );
   const launchContext = state.shellMode !== undefined
-    ? `▶ ${shellName()} -lc${state.shellMode.running === true ? " · running" : ""} · cwd ${shortPath(cwd, options.home)} · enter runs · esc leaves`
+    ? `▶ ${shellName()} -lc${state.shellMode.running === true ? " · running" : ""} · cwd ${shortPath(cwd, options.home)} · enter runs · ${state.shellMode.running === true ? "ctrl+g stops and leaves" : "esc or ctrl+g leaves"}`
     : profile === undefined
     ? `▶ /model required · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+g change`
     : `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+g change`;
@@ -2737,6 +2741,8 @@ export async function runFleet(
   let inputQueue = Promise.resolve();
   const keyDecoder = new FleetKeyDecoder();
   let decoderFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Set while a `!` line is running, so the key that leaves the shell can reach it. */
+  let shellInterrupt: AbortController | undefined;
   const notify = () => { wake?.(); };
   const stop = () => {
     stopped = true;
@@ -3044,9 +3050,12 @@ export async function runFleet(
         if (runtime.runShellCommand === undefined) {
           throw new Error("Shell mode is unavailable in this Fleet client");
         }
+        const abort = new AbortController();
+        shellInterrupt = abort;
         const result = await runtime.runShellCommand({
           command: action.command,
           cwd: action.cwd,
+          signal: abort.signal,
           // Output is folded into the transcript as it arrives and the frame is woken for each
           // chunk, so a slow command shows its progress rather than landing all at once.
           onOutput: (chunk) => {
@@ -3059,6 +3068,7 @@ export async function runFleet(
             notify();
           },
         });
+        shellInterrupt = undefined;
         const shell = state.shellMode;
         state = {
           ...state,
@@ -3116,6 +3126,7 @@ export async function runFleet(
         snapshot = await collectFleetSnapshot(client);
       }
     } catch (error) {
+      shellInterrupt = undefined;
       state = {
         ...state,
         ...(action?.type === "start" ? { draft: action.request.initialPrompt } : {}),
@@ -3142,6 +3153,16 @@ export async function runFleet(
     notify();
   };
   const queueKeys = (keys: readonly string[]) => {
+    // Keys are performed one at a time, and a shell line is performed like any other action — so
+    // while one runs, every later key is stuck behind it in this chain, the key that would stop it
+    // most of all. The interrupt is therefore fired here, on arrival, and the key still queues
+    // normally to leave the mode once the line lets go.
+    if (
+      shellInterrupt !== undefined
+      && keys.some((key) => key === "ctrl+g" || key === "escape" || key === "ctrl+c")
+    ) {
+      shellInterrupt.abort();
+    }
     for (const key of keys) inputQueue = inputQueue.then(() => perform(key));
   };
   const onInput = (value: Buffer | string) => {
@@ -4279,7 +4300,11 @@ const COMPOSER_PROMPTS: Readonly<Record<ComposerMode, {
   task: { prefix: "›", placeholder: "Describe a task for a new session" },
   rename: { prefix: "Rename ›", placeholder: "Rename thread" },
   project: { prefix: "Project ›", placeholder: "Repository path · tab completes · enter registers" },
-  shell: { prefix: "!", placeholder: "Run a shell command · enter runs · esc leaves", tone: "red" },
+  shell: {
+    prefix: "!",
+    placeholder: "Run a shell command · enter runs · esc or ctrl+g leaves",
+    tone: "red",
+  },
 };
 
 function renderComposerLines(

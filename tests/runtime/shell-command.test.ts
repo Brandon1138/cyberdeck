@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -101,4 +101,69 @@ describe("shell command", () => {
     await finished;
     expect(chunks.join("")).toBe("first\nsecond\n");
   });
+
+  it("ends a line that would otherwise never finish when the operator interrupts it", async () => {
+    const root = await temporaryDirectory();
+    const abort = new AbortController();
+    const finished = runShellCommand({
+      // The composer has no other way out of this: a `tail -f` or a dev server never returns.
+      command: "sleep 30",
+      cwd: root,
+      shell: "/bin/zsh",
+      signal: abort.signal,
+    });
+    await new Promise((resolve) => { setTimeout(resolve, 200); });
+    abort.abort();
+
+    const result = await finished;
+    expect(result.exitStatus).not.toBe(0);
+    // The sentinel never printed, so the interrupted line moves Fleet nowhere.
+    expect(result.cwd).toBeUndefined();
+  });
+
+  it("interrupts the whole line rather than only the shell that started it", async () => {
+    const root = await temporaryDirectory();
+    const pidFile = join(root, "sleeper.pid");
+    const abort = new AbortController();
+    const finished = runShellCommand({
+      command: `sleep 30 & printf '%s' "$!" > '${pidFile}'; wait`,
+      cwd: root,
+      shell: "/bin/zsh",
+      signal: abort.signal,
+    });
+
+    const sleeper = await waitFor(async () => {
+      const pid = Number.parseInt(await readFile(pidFile, "utf8"), 10);
+      return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+    });
+    abort.abort();
+    await finished;
+
+    // Signalling the shell alone would leave this one running with the pipes still open.
+    await waitFor(async () => (alive(sleeper) ? undefined : true));
+  });
 });
+
+/** Retries until the probe answers, so a test never depends on a fixed wait being long enough. */
+async function waitFor<T>(probe: () => Promise<T | undefined>): Promise<T> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try {
+      const answer = await probe();
+      if (answer !== undefined) return answer;
+    } catch {
+      // Not there yet.
+    }
+    if (Date.now() > deadline) throw new Error("timed out waiting");
+    await new Promise((resolve) => { setTimeout(resolve, 25); });
+  }
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
