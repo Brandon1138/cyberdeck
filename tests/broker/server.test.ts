@@ -536,6 +536,16 @@ describe("BrokerServer", () => {
         enabled: true,
         sessionId: ensured.session.id,
       });
+      await expect(client.request("orchestrator.cursorWorkers", {
+        cwd: "/tmp/repo",
+        scope: "fleet",
+        enabled: true,
+      })).resolves.toMatchObject({
+        key: "fleet",
+        configured: true,
+        enabled: true,
+        sessionId: ensured.session.id,
+      });
       await expect(client.request("orchestrator.cavemanWorkers", {
         enabled: true,
       })).resolves.toMatchObject({
@@ -543,7 +553,9 @@ describe("BrokerServer", () => {
         enabled: true,
       });
       await expect(orchestratorStore.get("fleet")).resolves.toMatchObject({
-        grant: { capabilities: expect.arrayContaining(["worker.start.fable"]) },
+        grant: {
+          capabilities: expect.arrayContaining(["worker.start.fable", "worker.start.cursor"]),
+        },
       });
       await expect(workerPreferences.get()).resolves.toEqual({ caveman: true });
       const child = await client.request<{ id: string }>("session.start", {

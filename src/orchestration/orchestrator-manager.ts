@@ -1,6 +1,7 @@
 import {
   CavemanWorkersRequestSchema,
   CreateOrchestratorRequestSchema,
+  CursorWorkersRequestSchema,
   EnsureOrchestratorRequestSchema,
   FableWorkersRequestSchema,
   orchestratorControllerId,
@@ -8,13 +9,18 @@ import {
   type CavemanWorkersRequest,
   type CavemanWorkersResult,
   type CreateOrchestratorRequest,
+  type CursorWorkersRequest,
+  type CursorWorkersResult,
   type EnsureOrchestratorRequest,
   type FableWorkersRequest,
   type FableWorkersResult,
   type OrchestratorBinding,
+  type OrchestratorGrantToggleRequest,
+  type OrchestratorGrantToggleResult,
   type OrchestratorScope,
   type ResetOrchestratorRequest,
 } from "../domain/orchestrator.js";
+import type { CyberdeckCapability } from "../domain/capability.js";
 import type { ApprovalMode, ProviderId, SessionRecord } from "../domain/session.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { ProviderPermissionPreferencePort } from "../persistence/provider-permission-preference-store.js";
@@ -215,7 +221,31 @@ export class OrchestratorManager {
 
   /** Operator-owned durable control over whether this binding may start Fable workers. */
   async fableWorkers(input: FableWorkersRequest): Promise<FableWorkersResult> {
-    const request = FableWorkersRequestSchema.parse(input);
+    return this.toggleGrantCapability(
+      "worker.start.fable",
+      FableWorkersRequestSchema.parse(input),
+    );
+  }
+
+  /** Operator-owned durable control over whether this binding may start Cursor workers. */
+  async cursorWorkers(input: CursorWorkersRequest): Promise<CursorWorkersResult> {
+    return this.toggleGrantCapability(
+      "worker.start.cursor",
+      CursorWorkersRequestSchema.parse(input),
+    );
+  }
+
+  /**
+   * Read or rewrite one delegation capability on the scope's primary binding.
+   *
+   * The grant is the durable record, so a toggle survives broker restarts and applies to the exact
+   * scope the operator named. Every per-capability command shares this path so a new grant cannot
+   * acquire subtly different scope, persistence, or unconfigured-binding behavior.
+   */
+  private async toggleGrantCapability(
+    capability: Extract<CyberdeckCapability, `worker.start.${string}`>,
+    request: OrchestratorGrantToggleRequest,
+  ): Promise<OrchestratorGrantToggleResult> {
     const scope: OrchestratorScope = request.scope === "fleet"
       ? { kind: "fleet" }
       : { kind: "workspace", cwd: request.cwd };
@@ -231,14 +261,14 @@ export class OrchestratorManager {
       return { key, configured: false, enabled: false };
     }
 
-    const enabled = binding.grant.capabilities.includes("worker.start.fable");
+    const enabled = binding.grant.capabilities.includes(capability);
     if (request.enabled === undefined || request.enabled === enabled) {
       return { key, configured: true, enabled, sessionId: binding.sessionId };
     }
 
     const capabilities = request.enabled
-      ? [...binding.grant.capabilities, "worker.start.fable" as const]
-      : binding.grant.capabilities.filter((capability) => capability !== "worker.start.fable");
+      ? [...binding.grant.capabilities, capability]
+      : binding.grant.capabilities.filter((entry) => entry !== capability);
     const updated: OrchestratorBinding = {
       ...binding,
       grant: { ...binding.grant, capabilities },

@@ -133,7 +133,7 @@ export async function runBroker(
     adapters: {
       codex: new CodexProviderAdapter({ mcp }),
       claude: new ClaudeProviderAdapter({ mcp }),
-      cursor: new CursorProviderAdapter(),
+      cursor: new CursorProviderAdapter({ mcp }),
       antigravity: new AntigravityProviderAdapter(),
     },
     ptyFactory: (spec, replayBytes) => spec.transport === "pipe"

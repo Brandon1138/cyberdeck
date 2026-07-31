@@ -93,6 +93,9 @@ Fleet controls:
 - Enter `/fable-workers status`, `/fable-workers on`, or `/fable-workers off` to inspect or change
   autonomous Fable access for the selected/bound orchestrator. The grant is durable with that
   binding; disabling it blocks new Fable workers without stopping existing threads.
+- Enter `/cursor-workers status`, `/cursor-workers on`, or `/cursor-workers off` for the same durable
+  control over autonomous Cursor workers. It is a separate grant from Fable's: a Cursor Fable slug
+  such as `claude-fable-5-high` requires both to be on.
 - Enter `/caveman-workers status`, `/caveman-workers on`, or `/caveman-workers off` to control the
   durable, default-off box preference for subsequently started workers. It is independent of Orc
   bindings and survives broker and Orc replacement. An optional box skill supplies the full policy;
@@ -127,18 +130,25 @@ invocation. Killing the entire tmux server still leaves the broker and its sessi
 
 An orchestrator is a durable, typed Cyberdeck binding, not a privileged role label. The binding pins
 an explicit provider, optional model and reasoning effort, workspace or fleet scope, read-only filesystem sandbox, and a
-capability grant. Cyberdeck injects its session-scoped stdio MCP server into broker-launched Codex
-and Claude sessions. Broker RPC remains the source of truth and rechecks every MCP call. Cursor and
-Antigravity sessions receive no MCP server: neither `agent` nor `agy` accepts a per-invocation MCP
-server definition, so those providers can be workers but not orchestrators or workflow
-participants. See [docs/architecture/provider-parity.md](docs/architecture/provider-parity.md) for
-the full per-provider matrix — permission mapping, MCP injection, effort support, and resume — with
-source citations.
+capability grant. Cyberdeck injects its session-scoped stdio MCP server into broker-launched Codex,
+Claude, and Cursor sessions. Broker RPC remains the source of truth and rechecks every MCP call.
+Antigravity sessions receive no MCP server: `agy` accepts no per-invocation MCP server definition, so
+it can be a worker but not an orchestrator or workflow participant. See
+[docs/architecture/provider-parity.md](docs/architecture/provider-parity.md) for the full
+per-provider matrix — permission mapping, MCP injection, effort support, and resume — with source
+citations.
+
+Cursor's `agent` also accepts no MCP flag, so its server arrives through a session-scoped plugin
+directory and permission configuration that Cyberdeck writes under its own private launch-files root
+and removes on exit. The operator's `~/.cursor` and the repository's `.cursor/mcp.json` are never
+read from or written to, and `HOME` is never redirected, so Cursor authentication is untouched.
 
 Opening an orchestrator cockpit starts the provider TUI without a positional user prompt, so startup
 does not automatically submit a model turn. Guidance is supplied through native provider
 configuration (`developer_instructions` for Codex and `--append-system-prompt` for Claude), and both
-that guidance and the session-scoped MCP configuration are retained by provider-native resume.
+that guidance and the session-scoped MCP configuration are retained by provider-native resume. Cursor
+has no system-prompt flag, so a Cursor orchestrator receives its guidance as the first submitted
+message, visible in the transcript, and the conversation is reopened afterwards by chat id.
 
 Bindings are append-only but explicitly recoverable. Reset refuses an active orchestrator and tells
 the operator which session to stop; after it is inactive, invalidate the latest workspace or fleet
@@ -150,6 +160,9 @@ cyberdeck orchestrator reset
 cyberdeck orchestrator fable-workers status
 cyberdeck orchestrator fable-workers on
 cyberdeck orchestrator fable-workers off
+cyberdeck orchestrator cursor-workers status
+cyberdeck orchestrator cursor-workers on
+cyberdeck orchestrator cursor-workers off
 cyberdeck orchestrator caveman-workers status
 cyberdeck orchestrator caveman-workers on
 cyberdeck orchestrator caveman-workers off
@@ -410,8 +423,13 @@ cyberdeck delegate --parent PARENT_SESSION_ID --provider codex --cwd /absolute/p
 
 Cyberdeck does not infer a provider or model from the role. An explicit operator start may select
 Fable directly. Autonomous Fable workers are disabled by default and fail before launch unless the
-bound orchestrator has the durable `worker.start.fable` capability. Only the operator Fleet/CLI
-surface can change that grant; an orchestrator cannot enable itself. Opus has no special restriction.
+bound orchestrator has the durable `worker.start.fable` capability. Autonomous Cursor workers are
+gated the same way by `worker.start.cursor`, and a Cursor Fable slug needs both grants. Only the
+operator Fleet/CLI surface can change either grant; an orchestrator cannot enable itself. Opus has no
+special restriction.
+
+Cursor worker models are exact slugs with the effort rung inside the slug (`gpt-5.6-sol-high`,
+`claude-sonnet-5-xhigh`, `composer-2.5`); passing a separate effort is refused rather than folded in.
 
 ## Stop and inspect
 

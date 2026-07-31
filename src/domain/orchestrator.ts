@@ -49,9 +49,17 @@ export const ResetOrchestratorRequestSchema = EnsureOrchestratorRequestSchema.pi
   scope: true,
 });
 
-export const FableWorkersRequestSchema = ResetOrchestratorRequestSchema.extend({
+/**
+ * One operator toggle of one durable delegation grant on one scope's binding. `enabled` absent
+ * reads the current state without writing.
+ */
+export const OrchestratorGrantToggleRequestSchema = ResetOrchestratorRequestSchema.extend({
   enabled: z.boolean().optional(),
 });
+
+export const FableWorkersRequestSchema = OrchestratorGrantToggleRequestSchema;
+
+export const CursorWorkersRequestSchema = OrchestratorGrantToggleRequestSchema;
 
 export const CavemanWorkersRequestSchema = z.object({
   enabled: z.boolean().optional(),
@@ -68,16 +76,22 @@ export type OrchestratorBinding = z.infer<typeof OrchestratorBindingSchema>;
 export type EnsureOrchestratorRequest = z.infer<typeof EnsureOrchestratorRequestSchema>;
 export type CreateOrchestratorRequest = z.infer<typeof CreateOrchestratorRequestSchema>;
 export type ResetOrchestratorRequest = z.infer<typeof ResetOrchestratorRequestSchema>;
+export type OrchestratorGrantToggleRequest = z.infer<typeof OrchestratorGrantToggleRequestSchema>;
 export type FableWorkersRequest = z.infer<typeof FableWorkersRequestSchema>;
+export type CursorWorkersRequest = z.infer<typeof CursorWorkersRequestSchema>;
 export type CavemanWorkersRequest = z.infer<typeof CavemanWorkersRequestSchema>;
 export type OrchestratorBindingReset = z.infer<typeof OrchestratorBindingResetSchema>;
 
-export interface FableWorkersResult {
+export interface OrchestratorGrantToggleResult {
   key: string;
   configured: boolean;
   enabled: boolean;
   sessionId?: string;
 }
+
+export type FableWorkersResult = OrchestratorGrantToggleResult;
+
+export type CursorWorkersResult = OrchestratorGrantToggleResult;
 
 export interface CavemanWorkersResult {
   scope: "box";

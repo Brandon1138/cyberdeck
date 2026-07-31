@@ -20,7 +20,17 @@ describe("worker provider capabilities", () => {
       }),
       expect.objectContaining({
         provider: "cursor",
-        models: ["composer"],
+        // Effort is part of the slug, so the model list is the effort list; `efforts` stays empty and
+        // an explicit effort is refused rather than folded into the slug.
+        models: expect.arrayContaining([
+          "composer-2.5",
+          "gpt-5.6-sol-high",
+          "claude-fable-5-high",
+          "claude-opus-5-thinking-xhigh",
+          "kimi-k3-max",
+          "glm-5.2-high",
+          "cursor-grok-4.5-high",
+        ]),
         efforts: [],
         approvalModes: ["prompt", "auto"],
       }),
@@ -46,9 +56,27 @@ describe("worker provider capabilities", () => {
     })).toEqual({ ok: true });
     expect(validateWorkerSelection({
       provider: "cursor",
-      model: "composer",
+      model: "composer-2.5",
       approvalMode: "auto",
     })).toEqual({ ok: true });
+  });
+
+  it("refuses a Cursor effort value and the retired bare composer slug", () => {
+    expect(validateWorkerSelection({
+      provider: "cursor",
+      model: "claude-fable-5-high",
+      effort: "high",
+    })).toEqual(expect.objectContaining({
+      ok: false,
+      code: "EFFORT_NOT_SUPPORTED",
+      message: expect.stringContaining("no separate effort values"),
+    }));
+    expect(validateWorkerSelection({ provider: "cursor", model: "composer" }))
+      .toEqual(expect.objectContaining({
+        ok: false,
+        code: "MODEL_NOT_ADVERTISED",
+        message: expect.stringContaining("composer-2.5"),
+      }));
   });
 
   it("rejects shorthand rather than translating it at launch", () => {

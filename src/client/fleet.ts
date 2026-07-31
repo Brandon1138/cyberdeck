@@ -4,8 +4,11 @@ import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
   CreateOrchestratorRequest,
+  CursorWorkersRequest,
+  CursorWorkersResult,
   FableWorkersRequest,
   FableWorkersResult,
+  OrchestratorGrantToggleResult,
 } from "../domain/orchestrator.js";
 import type {
   FleetOrchestratorCustodyColorView,
@@ -222,6 +225,7 @@ export type FleetAction =
     cockpitCwd: string;
   }
   | { type: "fable-workers"; request: FableWorkersRequest }
+  | { type: "cursor-workers"; request: CursorWorkersRequest }
   | { type: "caveman-workers"; request: CavemanWorkersRequest }
   | { type: "nvim-layout"; enabled: boolean }
   | { type: "open-worktree"; sessionId: string }
@@ -285,6 +289,7 @@ type SlashCommandName =
   | "/model"
   | "/permissions"
   | "/fable-workers"
+  | "/cursor-workers"
   | "/caveman-workers"
   | "/nvim-settings";
 
@@ -371,6 +376,15 @@ const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
       { value: "status", description: "Show current Fable worker preference" },
       { value: "on", description: "Enable Fable workers" },
       { value: "off", description: "Disable Fable workers" },
+    ],
+  },
+  {
+    name: "/cursor-workers",
+    description: "Inspect or toggle Cursor workers",
+    values: [
+      { value: "status", description: "Show current Cursor worker grant" },
+      { value: "on", description: "Enable Cursor workers" },
+      { value: "off", description: "Disable Cursor workers" },
     ],
   },
   {
@@ -1583,15 +1597,37 @@ function transitionWorkerPicker(state: FleetState, key: string): FleetTransition
   };
 }
 
+/**
+ * Keep the selected row on screen. The model list is longer than a terminal — Cursor alone
+ * contributes one entry per model-and-effort pair — so without a window the selection walks off the
+ * bottom and the picker stops responding to the eye. Derived from the index rather than stored, so
+ * there is no second cursor that can disagree with the selection.
+ */
+function pickerScrollOffset(selectedIndex: number, total: number, visibleRows: number): number {
+  const centered = selectedIndex - Math.floor(visibleRows / 2);
+  return Math.max(0, Math.min(centered, total - visibleRows));
+}
+
 function renderWorkerPicker(state: FleetState, options: ResolvedFleetRenderOptions): string {
   const picker = state.workerPicker!;
   const choice = WORKER_MODEL_CHOICES[picker.modelIndex]!;
   const lines = renderHeader([], state, options);
   lines.push("");
+  let range = "";
   if (picker.step === "model") {
     lines.push("Choose a model", "");
-    lines.push(...WORKER_MODEL_CHOICES.map((model, index) =>
-      pickerRow(`${model.label}  ${paint(model.provider, "dim", options.color)}`, index === picker.modelIndex, options.color)));
+    const total = WORKER_MODEL_CHOICES.length;
+    const visibleRows = Math.max(1, options.height - 3 - lines.length);
+    const offset = pickerScrollOffset(picker.modelIndex, total, visibleRows);
+    lines.push(...WORKER_MODEL_CHOICES.slice(offset, offset + visibleRows).map((model, index) =>
+      pickerRow(
+        `${model.label}  ${paint(model.provider, "dim", options.color)}`,
+        offset + index === picker.modelIndex,
+        options.color,
+      )));
+    if (total > visibleRows) {
+      range = ` · ${offset + 1}-${Math.min(total, offset + visibleRows)} of ${total}`;
+    }
   } else {
     lines.push(`${choice.label} effort`, "");
     lines.push(...choice.efforts.map((effort, index) =>
@@ -1600,7 +1636,7 @@ function renderWorkerPicker(state: FleetState, options: ResolvedFleetRenderOptio
   const footer = [
     paint("─".repeat(options.width), "dim", options.color),
     paint(fit(`${choice.label} · ${shortPath(picker.cwd, options.home)}`, options.width), "muted", options.color),
-    paint(fit("↑↓ select · enter apply/next · esc back", options.width), "dim", options.color),
+    paint(fit(`↑↓ select · enter apply/next · esc back${range}`, options.width), "dim", options.color),
   ];
   const body = lines.slice(0, Math.max(0, options.height - footer.length));
   while (body.length < options.height - footer.length) body.push("");
@@ -2535,7 +2571,21 @@ export async function runFleet(
           "orchestrator.fableWorkers",
           action.request,
         );
-        state = { ...state, notice: fableWorkersNotice(result), noticeTone: "neutral" };
+        state = {
+          ...state,
+          notice: grantToggleNotice("Fable workers", result),
+          noticeTone: "neutral",
+        };
+      } else if (action?.type === "cursor-workers") {
+        const result = await client.request<CursorWorkersResult>(
+          "orchestrator.cursorWorkers",
+          action.request,
+        );
+        state = {
+          ...state,
+          notice: grantToggleNotice("Cursor workers", result),
+          noticeTone: "neutral",
+        };
       } else if (action?.type === "caveman-workers") {
         const result = await client.request<CavemanWorkersResult>(
           "orchestrator.cavemanWorkers",
@@ -3396,8 +3446,49 @@ function composerCwd(state: FleetState, snapshot: FleetSnapshot): string {
     ?? state.fallbackCwd;
 }
 
+/**
+ * Cursor's catalog is one slug per model-and-effort pair, so labels are composed from a family and
+ * the slug's effort suffix rather than enumerated. A new rung inside a known family therefore reads
+ * correctly in Fleet without a label edit; an unknown family falls back to the raw slug.
+ */
+function cursorModelLabel(model: string): string | undefined {
+  const families: Record<string, string> = {
+    "composer-2.5": "Composer 2.5",
+    "gpt-5.6-luna": "GPT-5.6 Luna",
+    "gpt-5.6-terra": "GPT-5.6 Terra",
+    "gpt-5.6-sol": "GPT-5.6 Sol",
+    "claude-sonnet-5": "Sonnet 5",
+    "claude-opus-5": "Opus 5",
+    "claude-opus-5-thinking": "Opus 5 Thinking",
+    "claude-fable-5": "Fable 5",
+    "claude-fable-5-thinking": "Fable 5 Thinking",
+    "cursor-grok-4.5": "Grok 4.5",
+    "kimi-k2.7-code": "Kimi K2.7 Code",
+    "kimi-k3": "Kimi K3",
+    "glm-5.2": "GLM 5.2",
+  };
+  const efforts: Record<string, string> = {
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    xhigh: "Extra High",
+    max: "Max",
+  };
+  const direct = families[model];
+  if (direct !== undefined) return direct;
+  const separator = model.lastIndexOf("-");
+  if (separator === -1) return undefined;
+  const family = families[model.slice(0, separator)];
+  const effort = efforts[model.slice(separator + 1)];
+  return family === undefined || effort === undefined ? undefined : `${family} ${effort}`;
+}
+
 function friendlyModel(provider: string, model: string | undefined): string {
   if (model === undefined) return `${titleCase(provider)} Native`;
+  if (provider === "cursor") {
+    const label = cursorModelLabel(model);
+    if (label !== undefined) return label;
+  }
   const known: Record<string, string> = {
     "gpt-5.6-luna": "Codex Luna",
     "gpt-5.6-terra": "Codex Terra",
@@ -3475,19 +3566,25 @@ function startTransition(
   };
 }
 
-function fableWorkersTransition(
+/**
+ * One `/<grant>-workers status|on|off` command against the bound orchestrator of the current scope.
+ * Every delegation grant the operator can toggle from Fleet routes through here, so they cannot
+ * drift apart in which binding they address or how a missing binding is reported.
+ */
+function grantToggleTransition(
   state: FleetState,
   snapshot: FleetSnapshot,
   command: string,
+  grant: { name: "/fable-workers" | "/cursor-workers"; action: "fable-workers" | "cursor-workers" },
 ): FleetTransition | undefined {
-  if (!command.startsWith("/fable-workers")) return undefined;
-  const match = /^\/fable-workers(?:\s+(status|on|off))?$/u.exec(command);
+  if (!command.startsWith(grant.name)) return undefined;
+  const match = new RegExp(`^${grant.name}(?:\\s+(status|on|off))?$`, "u").exec(command);
   if (match === null) {
     return {
       state: {
         ...state,
         draft: "",
-        notice: "Usage: /fable-workers status|on|off",
+        notice: `Usage: ${grant.name} status|on|off`,
         noticeTone: "error",
       },
     };
@@ -3507,7 +3604,7 @@ function fableWorkersTransition(
   return {
     state: { ...state, draft: "", notice: undefined },
     action: {
-      type: "fable-workers",
+      type: grant.action,
       request: {
         cwd: orchestrator.cwd,
         scope: orchestrator.orchestratorScope ?? "workspace",
@@ -3584,7 +3681,14 @@ function workerPolicyTransition(
   snapshot: FleetSnapshot,
   command: string,
 ): FleetTransition | undefined {
-  return fableWorkersTransition(state, snapshot, command)
+  return grantToggleTransition(state, snapshot, command, {
+    name: "/fable-workers",
+    action: "fable-workers",
+  })
+    ?? grantToggleTransition(state, snapshot, command, {
+      name: "/cursor-workers",
+      action: "cursor-workers",
+    })
     ?? cavemanWorkersTransition(state, snapshot, command)
     ?? nvimLayoutTransition(state, command);
 }
@@ -3599,9 +3703,12 @@ function policyOrchestrator(snapshot: FleetSnapshot, state: FleetState): Session
     ?? snapshot.threads.find(({ record }) => record.kind === "orchestrator")?.record;
 }
 
-function fableWorkersNotice(result: FableWorkersResult): string {
-  if (!result.configured) return `Fable workers: OFF · no orchestrator bound for ${result.key}`;
-  return `Fable workers: ${result.enabled ? "ON" : "OFF"} · ${result.key} · ${result.sessionId}`;
+function grantToggleNotice(
+  label: string,
+  result: OrchestratorGrantToggleResult,
+): string {
+  if (!result.configured) return `${label}: OFF · no orchestrator bound for ${result.key}`;
+  return `${label}: ${result.enabled ? "ON" : "OFF"} · ${result.key} · ${result.sessionId}`;
 }
 
 function cavemanWorkersNotice(result: CavemanWorkersResult): string {

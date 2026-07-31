@@ -274,11 +274,99 @@ describe("OrchestratorManager", () => {
       {} as never,
       { get: vi.fn(async () => undefined) } as never,
     );
-    await expect(manager.fableWorkers({ cwd: "/repo/one", scope: "workspace" })).resolves.toEqual({
+    for (const toggle of ["fableWorkers", "cursorWorkers"] as const) {
+      await expect(manager[toggle]({ cwd: "/repo/one", scope: "workspace" })).resolves.toEqual({
+        key: "workspace:/repo/one",
+        configured: false,
+        enabled: false,
+      });
+    }
+  });
+
+  it("persists operator-controlled Cursor worker access independently of Fable's", async () => {
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const manager = new OrchestratorManager(
+      {} as never,
+      { get: vi.fn(async () => binding), put } as never,
+    );
+
+    await expect(manager.cursorWorkers({
+      cwd: "/repo/one",
+      scope: "workspace",
+      enabled: true,
+    })).resolves.toEqual({
       key: "workspace:/repo/one",
-      configured: false,
-      enabled: false,
+      configured: true,
+      enabled: true,
+      sessionId: SESSION_ID,
     });
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({
+      grant: expect.objectContaining({
+        capabilities: ["thread.list", "worker.start.cursor"],
+      }),
+    }));
+  });
+
+  it("refuses to toggle a grant for a scope with no binding", async () => {
+    const manager = new OrchestratorManager(
+      {} as never,
+      { get: vi.fn(async () => undefined), put: vi.fn() } as never,
+    );
+
+    await expect(manager.cursorWorkers({
+      cwd: "/repo/one",
+      scope: "workspace",
+      enabled: true,
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_NOT_CONFIGURED" });
+  });
+
+  it("leaves both delegation grants off when an orchestrator is created", async () => {
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const manager = new OrchestratorManager(
+      { start: vi.fn(async () => record), get: vi.fn(() => record) } as never,
+      { get: vi.fn(async () => undefined), put } as never,
+    );
+
+    await manager.ensure({
+      provider: "cursor",
+      model: "claude-fable-5-thinking-high",
+      cwd: "/repo/one",
+      scope: "workspace",
+    });
+
+    const created = put.mock.calls[0]![0] as OrchestratorBinding;
+    expect(created.grant.capabilities).toContain("worker.start");
+    expect(created.grant.capabilities).not.toContain("worker.start.cursor");
+    expect(created.grant.capabilities).not.toContain("worker.start.fable");
+  });
+
+  it("accepts the advertised Cursor orchestrator slugs and refuses anything else", async () => {
+    const start = vi.fn(async () => record);
+    const manager = new OrchestratorManager(
+      { start, get: vi.fn(() => record), stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+    );
+
+    await expect(manager.create({
+      provider: "cursor",
+      model: "claude-fable-5-thinking-high",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).resolves.toMatchObject({ created: true });
+    // Effort lives in the slug, so naming one separately is a selection error, not a translation.
+    await expect(manager.create({
+      provider: "cursor",
+      model: "claude-fable-5-thinking-high",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
+    await expect(manager.create({
+      provider: "cursor",
+      model: "composer-2.5",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
   });
 
   it("disables future Fable starts without removing unrelated capabilities", async () => {
@@ -409,7 +497,6 @@ describe("OrchestratorManager", () => {
   });
 
   it.each([
-    ["cursor", "its adapter has no supported MCP surface"],
     ["antigravity", "its adapter has no supported MCP surface"],
   ])("refuses %s when it cannot receive the Cyberdeck MCP server", async (provider, reason) => {
     const start = vi.fn();
@@ -419,7 +506,7 @@ describe("OrchestratorManager", () => {
     );
 
     await expect(manager.ensure({
-      provider: provider as "cursor" | "antigravity",
+      provider: provider as "antigravity",
       cwd: "/repo/one",
       scope: "workspace",
     })).rejects.toMatchObject({
@@ -430,10 +517,9 @@ describe("OrchestratorManager", () => {
   });
 
   it.each([
-    ["cursor"],
     ["antigravity"],
   ])("refuses a durable %s binding before resuming it", async (provider) => {
-    const inert: OrchestratorBinding = { ...binding, provider: provider as "cursor" | "antigravity" };
+    const inert: OrchestratorBinding = { ...binding, provider: provider as "antigravity" };
     const get = vi.fn(() => record);
     const resume = vi.fn(async () => record);
     const start = vi.fn();
@@ -457,7 +543,7 @@ describe("OrchestratorManager", () => {
     const resume = vi.fn(async () => record);
     const manager = new OrchestratorManager(
       { get, resume } as never,
-      { get: vi.fn(async () => ({ ...binding, provider: "cursor" as const })) } as never,
+      { get: vi.fn(async () => ({ ...binding, provider: "antigravity" as const })) } as never,
     );
 
     await expect(manager.get("/repo/one", "workspace")).rejects.toMatchObject({

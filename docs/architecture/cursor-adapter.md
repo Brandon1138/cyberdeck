@@ -7,8 +7,16 @@ alter shared contracts: composition registers `CURSOR_PROVIDER_DESCRIPTOR` throu
 
 The interactive session contract now consumes the same open provider identity and registers
 `CursorProviderAdapter` in the broker. `session.start`, Fleet slash launches, and orchestrator
-`worker_start` therefore accept the explicit `cursor` provider. Provider-native resume is still
-unverified and fails with `SESSION_RESUME_UNAVAILABLE` rather than creating a different chat.
+`worker_start` therefore accept the explicit `cursor` provider, and Cursor is also an orchestrator
+provider: the Cyberdeck MCP server is hosted per session by
+[`mcp-hosting.ts`](../../src/providers/cursor/mcp-hosting.ts), whose header records what the installed
+CLI actually reads MCP configuration from and why the plugin directory is the only usable seam.
+
+Provider-native resume is bound rather than refused. Both launch and resume emit
+`--resume <cyberdeck session id>`, because `agent` reopens a known chat id and adopts an unknown one,
+which makes the two commands identical and the identity stable across broker restarts. A thread whose
+launch record does not name that id predates the binding, so it refuses with
+`SESSION_RESUME_UNAVAILABLE` instead of opening an empty chat under the operator's thread name.
 
 ## Commands and permissions
 
@@ -20,8 +28,13 @@ enabled|disabled`, `--mode plan|ask`, `--print`, `--output-format stream-json`,
 Interactive, with an optional explicit initial prompt:
 
 ```text
-agent --workspace <cwd> --sandbox enabled [--mode plan] [--model <explicit>] [prompt]
+agent --workspace <cwd> --sandbox enabled [--mode plan] [--model <explicit>] \
+  [--plugin-dir <session MCP plugin>] --resume <cyberdeck session id> [prompt]
 ```
+
+`--plugin-dir` appears only for sessions Cyberdeck orchestrates, alongside a session-scoped
+`CURSOR_CONFIG_DIR`. Guidance has no flag on this CLI and is submitted as the first message, so a
+session carrying `providerInstructions` defers its initial prompt the same way `auto` mode does.
 
 Bounded/headless:
 
@@ -41,8 +54,11 @@ control-plane label and is not forwarded.
 
 Cursor advertises only `plan` and `ask` as read-only modes, so B3 does not mislabel them as
 workspace-write. It also does not emit `--force`, `--yolo`, `--auto-review` (Smart Auto),
-`--approve-mcps`, `--trust`, worktree flags, API keys, automatic model selection, fallback, resume,
-or continuation. A caller-supplied model is forwarded exactly once; omission stays omission.
+`--approve-mcps`, `--trust`, worktree flags, API keys, automatic model selection, or fallback.
+`--force` is refused for a second reason beyond approval widening: at launch it disables MCP servers
+outright, so it would silently strip an orchestrator of the control plane it exists to use. The
+in-session `/run-everything` that `auto` mode verifies does not have that effect. A caller-supplied
+model is forwarded exactly once; omission stays omission.
 
 ## Output, cancellation, and evidence boundary
 

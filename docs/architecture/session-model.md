@@ -50,6 +50,16 @@ the operator Fleet/CLI path, persists with the append-only binding, and disappea
 is reset or deleted. Disabling it blocks new Fable workers without stopping existing threads. Opus
 has no special broker restriction.
 
+Autonomous Cursor delegation carries the identically shaped `worker.start.cursor` grant, also default
+off, including when the bound orchestrator is itself Cursor. The two grants compose rather than
+substitute: a Cursor Fable slug (`claude-fable-5-high` and siblings) needs both, and the
+provider-level refusal is reported first so the operator is not sent after one grant at a time. The
+gate governs interactive workers; the Tier 1 Scout profile keeps its own permission model and is
+reached before these checks.
+
+Cursor worker models carry the effort rung inside the slug, so its advertised catalog is one entry per
+model-and-effort pair and the separate `effort` field is refused rather than translated.
+
 Cyberdeck supplies `DISABLE_UPDATES=1` to every Claude process. It otherwise preserves the native provider's model behavior. In particular, an omitted model is not proof that the native default is non-Fable; the operator must know or explicitly choose the intended provider model.
 
 The original Phase 1 contained no role catalog, model recommendation, workflow, automatic fallback,
@@ -107,6 +117,15 @@ prompt. Cyberdeck supplies its guidance through the provider's native instructio
 session-scoped MCP configuration. The session record carries that provider guidance, so a
 provider-native resume reconstructs the same guidance and MCP arguments without submitting a turn.
 
+Cursor is the exception on both counts, because `agent` has neither a system-prompt flag nor an MCP
+flag. Its guidance is submitted as the session's first message — one turn, visible in the transcript —
+and its MCP server is contributed by a session-scoped plugin directory plus a session-scoped
+`CURSOR_CONFIG_DIR` holding a Cyberdeck-only permission entry, both written under Cyberdeck's private
+launch-files root and rebuilt on every launch and resume. Neither the operator's `~/.cursor` nor the
+repository's `.cursor/mcp.json` is read or written, and `HOME` is left alone so provider
+authentication is unaffected. Resume reopens the conversation by chat id rather than resupplying the
+guidance, so the instructions are not submitted twice.
+
 The binding registry is append-only and treats a reset record as a tombstone for the latest binding.
 `cyberdeck orchestrator reset` targets the fleet binding by default and refuses while the bound broker session is active, preventing an
 orphaned provider; the operator must stop that exact session first. Once inactive, reset makes the
@@ -115,9 +134,10 @@ latest binding. Model strings remain opaque and provider-native: no alias transl
 performed.
 
 `/fable-workers status|on|off` in Fleet and `cyberdeck orchestrator fable-workers status|on|off`
-operate on the selected/bound orchestrator scope. The orchestrator MCP surface can observe Fable in
-the explicit provider catalog and request it only when granted; it has no tool for changing its own
-grant.
+operate on the selected/bound orchestrator scope. `/cursor-workers` and
+`cyberdeck orchestrator cursor-workers` are the same command shape for the Cursor grant. The
+orchestrator MCP surface can observe both in the explicit provider catalog and request them only when
+granted; it has no tool for changing its own grants.
 
 `/caveman-workers status|on|off` and its `cyberdeck orchestrator caveman-workers` CLI equivalent
 manage a box-level worker preference independent of every orchestrator binding. It defaults off,
