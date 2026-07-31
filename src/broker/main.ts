@@ -168,6 +168,7 @@ export async function runBroker(
   const custodyColors = new CustodyColorService({
     store: new CustodyColorStore(stateDirectory),
     subjects: workerCoordination.service,
+    orchestratorBindings: orchestratorStore,
   });
   const orchestrators = new OrchestratorManager(
     registry,
