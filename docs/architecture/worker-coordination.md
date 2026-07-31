@@ -110,7 +110,7 @@ identity, current lease version, sequence, timestamp, and schema version. It ret
 limits are enforced by the shared event service; rejected acks name the exact violated limit and no
 field is truncated.
 
-Codex and Claude already receive Cyberdeck MCP injection during worker launch. They additionally see
+Codex, Claude, and Cursor already receive Cyberdeck MCP injection during worker launch. They additionally see
 thin wrappers named `cyberdeck_signal_exception`, `cyberdeck_report_progress`,
 `cyberdeck_signal_risk`, `cyberdeck_request_decision`, and
 `cyberdeck_respond_checkpoint`. Every wrapper calls the same broker method and event service as the

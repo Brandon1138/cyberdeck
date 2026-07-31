@@ -307,7 +307,19 @@ export class SessionRegistry {
     return () => this.controllerReleasedListeners.delete(listener);
   }
 
-  async start(request: StartSessionRequest, initialPrompt?: string): Promise<SessionRecord> {
+  /**
+   * `activate` is the caller's chance to make a record durable *before* the session can act on it.
+   * A provider whose instructions have to be submitted as a message rather than a system prompt
+   * takes its first model turn inside `initializeSession`, still within this call, so anything that
+   * turn may read back through the broker — an orchestrator's grant above all — cannot be written
+   * after `start` returns. A throwing `activate` tears the session down exactly as a failed
+   * initialization does; it is never left live but unauthorized.
+   */
+  async start(
+    request: StartSessionRequest,
+    initialPrompt?: string,
+    activate?: (record: SessionRecord) => Promise<void>,
+  ): Promise<SessionRecord> {
     const validated = StartSessionRequestSchema.parse(request);
     if (validated.profile === "scout") {
       if (validated.brief === undefined) {
@@ -492,6 +504,9 @@ export class SessionRegistry {
         write: (data) => pty.write(data),
         wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
       };
+      // Before initialization, because initialization is where a message-instructed provider takes
+      // its first model turn and can immediately call back into the broker.
+      await activate?.(this.cloneRecord(record));
       await adapter.initializeSession?.(record, sessionTerminal);
       if (
         runtime.record.profile !== "scout"

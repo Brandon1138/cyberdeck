@@ -91,8 +91,10 @@ Cyberdeck separates explicit model selection from autonomous delegation authorit
   fails with `CLAUDE_LAUNCH_REQUIRES_EXPLICIT_MODEL`. Any explicitly selected model, including
   Fable, can proceed through an operator-owned start path.
 - **Autonomous worker boundary** (`AgentControlService.startWorker`): an explicit Fable request
-  additionally requires `worker.start.fable` in the bound orchestrator's capability grant. The
-  request fails before session/process creation when the grant is absent.
+  additionally requires `worker.start.fable` in the bound orchestrator's capability grant, and any
+  Cursor request additionally requires `worker.start.cursor`. The request fails before
+  session/process creation when a grant is absent. The two are independent, so a Cursor Fable slug
+  needs both; the provider-level check runs first.
 - **Operator provenance**: direct Fleet/CLI/broker starts and orchestrator binding changes are
   operator control paths. The MCP worker path can consume a grant but exposes no method or request
   field for minting one, so an orchestrator cannot self-authorize.

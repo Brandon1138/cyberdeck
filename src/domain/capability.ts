@@ -6,6 +6,7 @@ export const CyberdeckCapabilitySchema = z.enum([
   "thread.enqueue",
   "worker.start",
   "worker.start.fable",
+  "worker.start.cursor",
   "orchestrator.inspect",
   "orchestrator.stop",
   "workflow.run",

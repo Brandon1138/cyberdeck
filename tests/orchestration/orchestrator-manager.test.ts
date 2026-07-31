@@ -30,6 +30,26 @@ const record: SessionRecord = {
   childIds: [],
 };
 
+/**
+ * A registry double that honors `start`'s activation contract: the caller's activation runs before
+ * the session is handed back, exactly as the real registry runs it before the provider's first turn.
+ * A double that swallowed it would let a manager bug — persisting the grant after `start` resolved —
+ * pass every test in this file.
+ */
+function activatingStart<T extends SessionRecord>(
+  resolve: (request: never) => T | Promise<T>,
+) {
+  return vi.fn(async (
+    request: never,
+    _initialPrompt?: string,
+    activate?: (started: SessionRecord) => Promise<void>,
+  ) => {
+    const session = await resolve(request);
+    await activate?.(session);
+    return session;
+  });
+}
+
 const binding: OrchestratorBinding = {
   key: "workspace:/repo/one",
   sessionId: SESSION_ID,
@@ -51,7 +71,7 @@ const binding: OrchestratorBinding = {
 describe("OrchestratorManager", () => {
   it("creates an explicit scoped orchestrator with native provider instructions and reports ownership", async () => {
     const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
-    const start = vi.fn(async (_request: unknown) => record);
+    const start = activatingStart(() => record);
     const manager = new OrchestratorManager(
       { start, get: vi.fn(() => record), stop: vi.fn(async () => {}) } as never,
       { get: vi.fn(async () => undefined), put } as never,
@@ -81,14 +101,16 @@ describe("OrchestratorManager", () => {
       orchestratorScope: "workspace",
       effort: "high",
       providerInstructions: expect.stringContaining("Cyberdeck orchestrator"),
-    }));
+    }), undefined, expect.any(Function));
     const startedRequest = start.mock.calls[0]![0] as { providerInstructions: string };
     const instructions = startedRequest.providerInstructions;
     expect(instructions).toContain("cyberdeck_provider_capabilities");
     expect(instructions).toContain("cyberdeck_workers_start once");
     expect(instructions).toContain("cyberdeck_workers_wait once");
     expect(instructions).toContain("never reread from cursor zero");
-    expect(start.mock.calls[0]).toHaveLength(1);
+    // Request, no initial prompt, and the activation the grant is written from.
+    expect(start.mock.calls[0]).toHaveLength(3);
+    expect(start.mock.calls[0]![1]).toBeUndefined();
     expect(start.mock.calls[0]![0]).not.toHaveProperty("approvalMode");
     expect(put).toHaveBeenCalledOnce();
     expect(result.binding.grant.capabilities).not.toContain("worker.start.fable");
@@ -96,7 +118,7 @@ describe("OrchestratorManager", () => {
 
   it("starts a Claude orchestrator in the persisted automatic permission mode and exposes it", async () => {
     let launchArgs: string[] = [];
-    const start = vi.fn(async (request: object) => {
+    const start = activatingStart((request: object) => {
       const session = {
         ...record,
         ...request,
@@ -132,12 +154,12 @@ describe("OrchestratorManager", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       provider: "claude",
       approvalMode: "auto",
-    }));
+    }), undefined, expect.any(Function));
     expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "auto"]));
   });
 
   it("starts a Claude orchestrator in persisted permissioned mode", async () => {
-    const start = vi.fn(async (request: object) => ({
+    const start = activatingStart((request: object) => ({
       ...record,
       ...request,
       provider: "claude" as const,
@@ -165,12 +187,12 @@ describe("OrchestratorManager", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       provider: "claude",
       approvalMode: "prompt",
-    }));
+    }), undefined, expect.any(Function));
   });
 
   it("keeps an explicit prompt mode ahead of persisted automatic permission policy", async () => {
     let launchArgs: string[] = [];
-    const start = vi.fn(async (request: object) => {
+    const start = activatingStart((request: object) => {
       const session = {
         ...record,
         ...request,
@@ -203,7 +225,7 @@ describe("OrchestratorManager", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       provider: "claude",
       approvalMode: "prompt",
-    }));
+    }), undefined, expect.any(Function));
     expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "plan"]));
   });
 
@@ -274,11 +296,193 @@ describe("OrchestratorManager", () => {
       {} as never,
       { get: vi.fn(async () => undefined) } as never,
     );
-    await expect(manager.fableWorkers({ cwd: "/repo/one", scope: "workspace" })).resolves.toEqual({
+    for (const toggle of ["fableWorkers", "cursorWorkers"] as const) {
+      await expect(manager[toggle]({ cwd: "/repo/one", scope: "workspace" })).resolves.toEqual({
+        key: "workspace:/repo/one",
+        configured: false,
+        enabled: false,
+      });
+    }
+  });
+
+  it("persists operator-controlled Cursor worker access independently of Fable's", async () => {
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const manager = new OrchestratorManager(
+      {} as never,
+      { get: vi.fn(async () => binding), put } as never,
+    );
+
+    await expect(manager.cursorWorkers({
+      cwd: "/repo/one",
+      scope: "workspace",
+      enabled: true,
+    })).resolves.toEqual({
       key: "workspace:/repo/one",
-      configured: false,
-      enabled: false,
+      configured: true,
+      enabled: true,
+      sessionId: SESSION_ID,
     });
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({
+      grant: expect.objectContaining({
+        capabilities: ["thread.list", "worker.start.cursor"],
+      }),
+    }));
+  });
+
+  it("refuses to toggle a grant for a scope with no binding", async () => {
+    const manager = new OrchestratorManager(
+      {} as never,
+      { get: vi.fn(async () => undefined), put: vi.fn() } as never,
+    );
+
+    await expect(manager.cursorWorkers({
+      cwd: "/repo/one",
+      scope: "workspace",
+      enabled: true,
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_NOT_CONFIGURED" });
+  });
+
+  it("leaves both delegation grants off when an orchestrator is created", async () => {
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const manager = new OrchestratorManager(
+      { start: activatingStart(() => record), get: vi.fn(() => record) } as never,
+      { get: vi.fn(async () => undefined), put } as never,
+    );
+
+    await manager.ensure({
+      provider: "cursor",
+      model: "claude-fable-5-thinking-high",
+      cwd: "/repo/one",
+      scope: "workspace",
+    });
+
+    const created = put.mock.calls[0]![0] as OrchestratorBinding;
+    expect(created.grant.capabilities).toContain("worker.start");
+    expect(created.grant.capabilities).not.toContain("worker.start.cursor");
+    expect(created.grant.capabilities).not.toContain("worker.start.fable");
+  });
+
+  // Cursor has no system-prompt flag, so its orchestrator guidance arrives as the session's first
+  // message and that turn runs inside `start`. The grant has to answer a tool call made from it.
+  it("makes the grant readable back before the orchestrator's first turn", async () => {
+    const persisted: OrchestratorBinding[] = [];
+    const store = {
+      get: vi.fn(async () => undefined),
+      put: vi.fn(async (value: OrchestratorBinding) => { persisted.push(value); }),
+      findBySessionId: vi.fn(async (sessionId: string) =>
+        persisted.findLast((entry) => entry.sessionId === sessionId)),
+    };
+    const cursorRecord = { ...record, provider: "cursor" as const, model: "kimi-k3-max" };
+    let bindingAtFirstTurn: OrchestratorBinding | undefined;
+    const start = vi.fn(async (
+      _request: never,
+      _initialPrompt?: string,
+      activate?: (started: SessionRecord) => Promise<void>,
+    ) => {
+      await activate?.(cursorRecord);
+      // Stands in for the guidance turn: what the orchestrator's opening tool call would resolve.
+      bindingAtFirstTurn = await store.findBySessionId(cursorRecord.id);
+      return cursorRecord;
+    });
+    const manager = new OrchestratorManager({ start } as never, store as never);
+
+    await expect(manager.ensure({
+      provider: "cursor",
+      model: "kimi-k3-max",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).resolves.toMatchObject({ created: true });
+
+    expect(bindingAtFirstTurn).toMatchObject({
+      key: "workspace:/repo/one",
+      sessionId: cursorRecord.id,
+      grant: {
+        subjectSessionId: cursorRecord.id,
+        capabilities: expect.arrayContaining(["worker.start", "thread.enqueue"]),
+      },
+    });
+  });
+
+  it("takes back a grant it wrote when the rest of the start then fails", async () => {
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const reset = vi.fn(async (_key: string) => undefined);
+    const start = vi.fn(async (
+      _request: never,
+      _initialPrompt?: string,
+      activate?: (started: SessionRecord) => Promise<void>,
+    ) => {
+      await activate?.(record);
+      throw new Error("Provider session exited during initialization");
+    });
+    const manager = new OrchestratorManager(
+      { start } as never,
+      { get: vi.fn(async () => undefined), put, reset } as never,
+    );
+
+    await expect(manager.ensure({
+      provider: "cursor",
+      model: "kimi-k3-max",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).rejects.toThrow("Provider session exited during initialization");
+    expect(put).toHaveBeenCalledOnce();
+    expect(reset).toHaveBeenCalledWith("workspace:/repo/one");
+  });
+
+  it("restores the binding it replaced when a rebinding start fails", async () => {
+    const writes: OrchestratorBinding[] = [];
+    const put = vi.fn(async (value: OrchestratorBinding) => { writes.push(value); });
+    const reset = vi.fn(async (_key: string) => undefined);
+    const start = vi.fn(async (
+      _request: never,
+      _initialPrompt?: string,
+      activate?: (started: SessionRecord) => Promise<void>,
+    ) => {
+      await activate?.({ ...record, id: "22222222-2222-4222-8222-222222222222" });
+      throw new Error("pty allocation failed");
+    });
+    const manager = new OrchestratorManager(
+      { get: vi.fn(() => ({ ...record, executionState: "cancelled" })), start } as never,
+      { get: vi.fn(async () => binding), put, reset } as never,
+    );
+
+    await expect(manager.ensure({
+      provider: "claude",
+      model: "sonnet",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).rejects.toThrow("pty allocation failed");
+    expect(writes.at(-1)).toEqual(binding);
+    expect(reset).not.toHaveBeenCalled();
+  });
+
+  it("accepts the advertised Cursor orchestrator slugs and refuses anything else", async () => {
+    const start = activatingStart(() => record);
+    const manager = new OrchestratorManager(
+      { start, get: vi.fn(() => record), stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+    );
+
+    await expect(manager.create({
+      provider: "cursor",
+      model: "claude-fable-5-thinking-high",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).resolves.toMatchObject({ created: true });
+    // Effort lives in the slug, so naming one separately is a selection error, not a translation.
+    await expect(manager.create({
+      provider: "cursor",
+      model: "claude-fable-5-thinking-high",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
+    await expect(manager.create({
+      provider: "cursor",
+      model: "composer-2.5",
+      cwd: "/repo/one",
+      scope: "workspace",
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
   });
 
   it("disables future Fable starts without removing unrelated capabilities", async () => {
@@ -307,7 +511,7 @@ describe("OrchestratorManager", () => {
 
   it("creates one cwd-independent fleet grant", async () => {
     const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
-    const start = vi.fn(async (request: Partial<SessionRecord>) => ({ ...record, ...request }));
+    const start = activatingStart((request: Partial<SessionRecord>) => ({ ...record, ...request }));
     const manager = new OrchestratorManager(
       { start, get: vi.fn(() => record), stop: vi.fn(async () => {}) } as never,
       { get: vi.fn(async () => undefined), put } as never,
@@ -329,7 +533,7 @@ describe("OrchestratorManager", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       cwd: "/repo/one",
       orchestratorScope: "fleet",
-    }));
+    }), undefined, expect.any(Function));
   });
 
   it("always creates a separately bound peer without consulting or replacing the primary binding", async () => {
@@ -339,7 +543,7 @@ describe("OrchestratorManager", () => {
     };
     const get = vi.fn(async () => binding);
     const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
-    const start = vi.fn(async () => peer);
+    const start = activatingStart(() => peer);
     const manager = new OrchestratorManager(
       { start, stop: vi.fn(async () => undefined) } as never,
       { get, put } as never,
@@ -409,7 +613,6 @@ describe("OrchestratorManager", () => {
   });
 
   it.each([
-    ["cursor", "its adapter has no supported MCP surface"],
     ["antigravity", "its adapter has no supported MCP surface"],
   ])("refuses %s when it cannot receive the Cyberdeck MCP server", async (provider, reason) => {
     const start = vi.fn();
@@ -419,7 +622,7 @@ describe("OrchestratorManager", () => {
     );
 
     await expect(manager.ensure({
-      provider: provider as "cursor" | "antigravity",
+      provider: provider as "antigravity",
       cwd: "/repo/one",
       scope: "workspace",
     })).rejects.toMatchObject({
@@ -430,10 +633,9 @@ describe("OrchestratorManager", () => {
   });
 
   it.each([
-    ["cursor"],
     ["antigravity"],
   ])("refuses a durable %s binding before resuming it", async (provider) => {
-    const inert: OrchestratorBinding = { ...binding, provider: provider as "cursor" | "antigravity" };
+    const inert: OrchestratorBinding = { ...binding, provider: provider as "antigravity" };
     const get = vi.fn(() => record);
     const resume = vi.fn(async () => record);
     const start = vi.fn();
@@ -457,7 +659,7 @@ describe("OrchestratorManager", () => {
     const resume = vi.fn(async () => record);
     const manager = new OrchestratorManager(
       { get, resume } as never,
-      { get: vi.fn(async () => ({ ...binding, provider: "cursor" as const })) } as never,
+      { get: vi.fn(async () => ({ ...binding, provider: "antigravity" as const })) } as never,
     );
 
     await expect(manager.get("/repo/one", "workspace")).rejects.toMatchObject({
@@ -485,7 +687,7 @@ describe("OrchestratorManager", () => {
   });
 
   it("allows Claude orchestrator creation", async () => {
-    const start = vi.fn(async () => ({ ...record, provider: "claude" as const }));
+    const start = activatingStart(() => ({ ...record, provider: "claude" as const }));
     const manager = new OrchestratorManager(
       { start } as never,
       { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
@@ -524,7 +726,7 @@ describe("OrchestratorManager", () => {
     const resume = vi.fn(async () => {
       throw Object.assign(new Error("native conversation missing"), { code: "SESSION_RESUME_UNAVAILABLE" });
     });
-    const start = vi.fn(async () => replacement);
+    const start = activatingStart(() => replacement);
     const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
     const manager = new OrchestratorManager(
       { get: vi.fn(() => stopped), resume, start } as never,
@@ -593,7 +795,7 @@ describe("OrchestratorManager", () => {
       name: "Cyberdeck orchestrator (claude:sonnet)",
     };
     const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
-    const start = vi.fn(async () => replacement);
+    const start = activatingStart(() => replacement);
     const manager = new OrchestratorManager(
       { get: vi.fn(() => ({ ...record, executionState: "cancelled" })), start } as never,
       { get: vi.fn(async () => binding), put } as never,
@@ -665,7 +867,7 @@ describe("OrchestratorManager", () => {
       release: vi.fn(async () => undefined),
     });
     const spawning = () => ({
-      start: vi.fn(async () => record),
+      start: activatingStart(() => record),
       get: vi.fn(() => record),
       stop: vi.fn(async () => {}),
     });

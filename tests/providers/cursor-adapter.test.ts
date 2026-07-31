@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,6 +22,13 @@ import {
   buildCursorScoutCommand,
 } from "../../src/providers/cursor/commands.js";
 import { CursorStreamDecoder } from "../../src/providers/cursor/stream-codec.js";
+import { CursorProviderAdapter } from "../../src/providers/cursor/session-adapter.js";
+import {
+  CURSOR_CYBERDECK_MCP_IDENTIFIER,
+  cursorMcpHostPaths,
+} from "../../src/providers/cursor/mcp-hosting.js";
+import type { ProviderSessionTerminal } from "../../src/providers/provider.js";
+import type { SessionRecord } from "../../src/domain/session.js";
 
 const RECORDING_AGENT = fileURLToPath(new URL("../fixtures/recording-agent.mjs", import.meta.url));
 const tempDirs: string[] = [];
@@ -146,8 +153,8 @@ describe("Cursor command construction", () => {
   });
 
   it("adds an explicit initial prompt as Cursor's positional interactive prompt", () => {
-    expect(buildCursorInteractiveCommand(request().request, "Ping back").args.slice(-1))
-      .toEqual(["Ping back"]);
+    expect(buildCursorInteractiveCommand(request().request, { initialPrompt: "Ping back" })
+      .args.slice(-1)).toEqual(["Ping back"]);
   });
 
   it("builds a noninteractive Scout command and marks its prompt sensitive", () => {
@@ -440,5 +447,185 @@ describe("CursorJobDispatchAdapter", () => {
     expect(submitted.job.lifecycle.status).toBe("dispatched");
     handle.exit(0, null);
     await plane.whenIdle();
+  });
+});
+
+function sessionRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    provider: "cursor",
+    cwd: "/tmp/repo",
+    detached: true,
+    sandbox: "read-only",
+    model: "composer-2.5",
+    createdAt: now,
+    updatedAt: now,
+    executionState: "active",
+    attachmentState: "detached",
+    pid: 123,
+    exitCode: null,
+    childIds: [],
+    ...overrides,
+  };
+}
+
+/** A launch record proving the session's conversation was opened under its own id. */
+function boundLaunchRecord(record: SessionRecord, args: string[]): SessionRecord {
+  return {
+    ...record,
+    launchRecord: {
+      mode: "launch",
+      transport: "pty",
+      resolvedAt: NOW,
+      executable: "agent",
+      args,
+      cwd: record.cwd,
+      cyberdeckEnv: {},
+      inheritedEnvCount: 0,
+      truncated: false,
+    },
+  };
+}
+
+function recordingTerminal(): {
+  terminal: ProviderSessionTerminal;
+  writes: string[];
+  snapshot: { text: string };
+} {
+  const writes: string[] = [];
+  const snapshot = { text: "" };
+  return {
+    writes,
+    snapshot,
+    terminal: {
+      snapshot: () => Buffer.from(snapshot.text),
+      write: (data) => writes.push(data.toString("utf8")),
+      wait: async () => {},
+    },
+  };
+}
+
+describe("Cursor interactive session adapter", () => {
+  it("binds one chat id so launch and resume reopen the same conversation", () => {
+    const adapter = new CursorProviderAdapter();
+    const record = sessionRecord();
+    const launch = adapter.buildLaunchSpec(record, "Inspect HistoryView");
+
+    expect(launch.args.slice(-3)).toEqual(["--resume", record.id, "Inspect HistoryView"]);
+
+    const resume = adapter.buildResumeSpec(boundLaunchRecord(record, launch.args));
+    expect(resume.args).toEqual(launch.args.slice(0, -1));
+    expect(resume.args).toContain(record.id);
+  });
+
+  it("refuses to resume a thread whose conversation was never bound", () => {
+    const adapter = new CursorProviderAdapter();
+    const unbound = boundLaunchRecord(sessionRecord(), [
+      "--workspace",
+      "/tmp/repo",
+      "--sandbox",
+      "enabled",
+    ]);
+
+    expect(() => adapter.buildResumeSpec(unbound)).toThrow(
+      expect.objectContaining({ code: "SESSION_RESUME_UNAVAILABLE" }),
+    );
+    expect(() => adapter.buildResumeSpec(sessionRecord())).toThrow(
+      expect.objectContaining({ code: "SESSION_RESUME_UNAVAILABLE" }),
+    );
+  });
+
+  it("never resumes a Scout", () => {
+    const scout = sessionRecord({ profile: "scout" });
+    expect(() => new CursorProviderAdapter().buildResumeSpec(scout)).toThrow(
+      expect.objectContaining({ code: "SESSION_RESUME_UNAVAILABLE" }),
+    );
+  });
+
+  it("hosts the Cyberdeck MCP server for an orchestrator without touching the workspace", async () => {
+    const directory = tempDir();
+    const adapter = new CursorProviderAdapter({
+      directory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    });
+    const record = sessionRecord({ kind: "orchestrator", providerInstructions: "guidance" });
+    const spec = adapter.buildLaunchSpec(record);
+    const paths = cursorMcpHostPaths(record.id, { directory });
+
+    expect(spec.args).toEqual(expect.arrayContaining(["--plugin-dir", paths.pluginDirectory]));
+    expect(spec.env.CURSOR_CONFIG_DIR).toBe(paths.configDirectory);
+    // The operator's own Cursor state is never named, and neither is the repository's.
+    expect(spec.args.join(" ")).not.toContain(join(homedir(), ".cursor"));
+    expect(spec.args.join(" ")).not.toContain(join(record.cwd, ".cursor"));
+
+    await adapter.prepareLaunch(record, spec);
+    const mcp = JSON.parse(readFileSync(join(paths.pluginDirectory, ".mcp.json"), "utf8"));
+    expect(mcp.mcpServers.cyberdeck).toEqual({
+      command: "/node",
+      args: ["/cyberdeck.js", "mcp", "--actor-session", record.id],
+    });
+    const config = JSON.parse(readFileSync(join(paths.configDirectory, "cli-config.json"), "utf8"));
+    expect(config.permissions.allow).toEqual([`Mcp(${CURSOR_CYBERDECK_MCP_IDENTIFIER}:*)`]);
+    expect(readFileSync(join(paths.pluginDirectory, ".cursor-plugin", "plugin.json"), "utf8"))
+      .toContain("cyberdeck");
+
+    // Rebuildable and removable any number of times: the broker prepares on every resume and
+    // cleans up on every exit.
+    await adapter.prepareLaunch(record, spec);
+    await adapter.cleanupLaunch(record);
+    await adapter.cleanupLaunch(record);
+    expect(existsSync(paths.pluginDirectory)).toBe(false);
+    await adapter.prepareLaunch(record, spec);
+    expect(existsSync(join(paths.pluginDirectory, ".mcp.json"))).toBe(true);
+  });
+
+  it("offers the MCP server only to sessions Cyberdeck orchestrates", async () => {
+    const directory = tempDir();
+    const adapter = new CursorProviderAdapter({
+      directory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    });
+    const plain = sessionRecord();
+    const spec = adapter.buildLaunchSpec(plain);
+
+    expect(spec.args).not.toContain("--plugin-dir");
+    expect(spec.env.CURSOR_CONFIG_DIR).toBeUndefined();
+    await adapter.prepareLaunch(plain, spec);
+    expect(existsSync(cursorMcpHostPaths(plain.id, { directory }).pluginDirectory)).toBe(false);
+  });
+
+  it("delivers provider instructions as the first message rather than dropping them", async () => {
+    const adapter = new CursorProviderAdapter({ inputCommitDelayMs: 0 });
+    const record = sessionRecord({
+      kind: "orchestrator",
+      providerInstructions: "You are the user's Cyberdeck orchestrator.",
+    });
+    const { terminal, writes } = recordingTerminal();
+
+    // Deferred even in prompt mode, so the instructions cannot arrive after a positional prompt.
+    expect(adapter.deferInitialPrompt(record)).toBe(true);
+    expect(adapter.buildLaunchSpec(record).args).not.toContain(record.providerInstructions);
+
+    await adapter.initializeSession(record, terminal);
+    expect(writes[0]).toBe("You are the user's Cyberdeck orchestrator.");
+  });
+
+  it("keeps Scouts one-shot with no instructions, plugin, or deferral", async () => {
+    const adapter = new CursorProviderAdapter({
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    });
+    const scout = sessionRecord({
+      kind: "worker",
+      profile: "scout",
+      providerInstructions: "guidance",
+    });
+    const { terminal, writes } = recordingTerminal();
+
+    expect(adapter.deferInitialPrompt(scout)).toBe(false);
+    await adapter.initializeSession(scout, terminal);
+    expect(writes).toEqual([]);
+    expect(adapter.buildLaunchSpec(scout, "Probe the repository").args)
+      .not.toContain("--plugin-dir");
   });
 });

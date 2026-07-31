@@ -1,6 +1,7 @@
 import {
   CavemanWorkersRequestSchema,
   CreateOrchestratorRequestSchema,
+  CursorWorkersRequestSchema,
   EnsureOrchestratorRequestSchema,
   FableWorkersRequestSchema,
   orchestratorControllerId,
@@ -8,13 +9,18 @@ import {
   type CavemanWorkersRequest,
   type CavemanWorkersResult,
   type CreateOrchestratorRequest,
+  type CursorWorkersRequest,
+  type CursorWorkersResult,
   type EnsureOrchestratorRequest,
   type FableWorkersRequest,
   type FableWorkersResult,
   type OrchestratorBinding,
+  type OrchestratorGrantToggleRequest,
+  type OrchestratorGrantToggleResult,
   type OrchestratorScope,
   type ResetOrchestratorRequest,
 } from "../domain/orchestrator.js";
+import type { CyberdeckCapability } from "../domain/capability.js";
 import type { ApprovalMode, ProviderId, SessionRecord } from "../domain/session.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { ProviderPermissionPreferencePort } from "../persistence/provider-permission-preference-store.js";
@@ -101,7 +107,7 @@ export class OrchestratorManager {
       );
     }
 
-    return this.createBound(request as BoundOrchestratorRequest, scope, false);
+    return this.createBound(request as BoundOrchestratorRequest, scope, false, existing);
   }
 
   /** Always creates a distinct bound peer; it never consults or replaces the scope's primary binding. */
@@ -114,66 +120,97 @@ export class OrchestratorManager {
     return this.createBound(request, scope, true);
   }
 
+  /**
+   * The grant is written *during* the start, not after it.
+   *
+   * A provider with no system-prompt flag — Cursor — receives `providerInstructions` as the
+   * session's first message, and that turn runs inside `registry.start`. An orchestrator told what
+   * it is will reach for Cyberdeck's tools immediately, so a binding persisted after `start`
+   * returned would lose the race and the orchestrator's opening move would come back
+   * `ACTOR_NOT_AUTHORIZED`. Persisting from the activation step closes the window for every
+   * provider at once rather than special-casing the one that exposed it.
+   *
+   * `previous` is the binding this call is replacing, if any. A start that fails after the grant is
+   * durable would otherwise strand a binding pointing at a session that never lived, so the prior
+   * state is put back exactly as it was.
+   */
   private async createBound(
     request: BoundOrchestratorRequest,
     scope: OrchestratorScope,
     peer: boolean,
+    previous?: OrchestratorBinding,
   ): Promise<OrchestratorManagerResult> {
     const approvalMode = request.approvalMode
       ?? await this.configuredApprovalMode(request.provider);
-    const session = await this.registry.start({
-      provider: request.provider,
-      ...(request.model === undefined ? {} : { model: request.model }),
-      ...(request.effort === undefined ? {} : { effort: request.effort }),
-      ...(approvalMode === undefined ? {} : { approvalMode }),
-      cwd: request.cwd,
-      detached: true,
-      sandbox: "read-only",
-      role: "orchestrator",
-      kind: "orchestrator",
-      orchestratorScope: request.scope,
-      name: `Cyberdeck orchestrator (${request.provider}${request.model === undefined ? "" : `:${request.model}`})`,
-      providerInstructions: orchestratorPrompt(scope),
-    });
-    const now = new Date().toISOString();
     const primaryKey = orchestratorKey(scope);
-    const binding: OrchestratorBinding = {
-      key: peer ? `${primaryKey}:peer:${session.id}` : primaryKey,
-      sessionId: session.id,
-      provider: request.provider,
-      ...(request.model === undefined ? {} : { model: request.model }),
-      ...(request.effort === undefined ? {} : { effort: request.effort }),
-      cwd: request.cwd,
-      sandbox: "read-only",
-      scope,
-      grant: {
-        subjectSessionId: session.id,
-        capabilities: [
-          "thread.list",
-          "thread.read",
-          "thread.enqueue",
-          "worker.start",
-          "orchestrator.inspect",
-          "orchestrator.stop",
-          "workflow.run",
-        ],
-        scope,
-      },
-      createdAt: now,
-      updatedAt: now,
-    };
+    let binding: OrchestratorBinding | undefined;
+    let session: SessionRecord;
     try {
-      await this.store.put(binding);
+      session = await this.registry.start({
+        provider: request.provider,
+        ...(request.model === undefined ? {} : { model: request.model }),
+        ...(request.effort === undefined ? {} : { effort: request.effort }),
+        ...(approvalMode === undefined ? {} : { approvalMode }),
+        cwd: request.cwd,
+        detached: true,
+        sandbox: "read-only",
+        role: "orchestrator",
+        kind: "orchestrator",
+        orchestratorScope: request.scope,
+        name: `Cyberdeck orchestrator (${request.provider}${request.model === undefined ? "" : `:${request.model}`})`,
+        providerInstructions: orchestratorPrompt(scope),
+      }, undefined, async (started) => {
+        const now = new Date().toISOString();
+        binding = {
+          key: peer ? `${primaryKey}:peer:${started.id}` : primaryKey,
+          sessionId: started.id,
+          provider: request.provider,
+          ...(request.model === undefined ? {} : { model: request.model }),
+          ...(request.effort === undefined ? {} : { effort: request.effort }),
+          cwd: request.cwd,
+          sandbox: "read-only",
+          scope,
+          grant: {
+            subjectSessionId: started.id,
+            capabilities: [
+              "thread.list",
+              "thread.read",
+              "thread.enqueue",
+              "worker.start",
+              "orchestrator.inspect",
+              "orchestrator.stop",
+              "workflow.run",
+            ],
+            scope,
+          },
+          createdAt: now,
+          updatedAt: now,
+        };
+        await this.store.put(binding);
+      });
     } catch (error) {
-      try {
-        await this.registry.stop(session.id);
-      } catch (cleanupError) {
-        throw addCleanupContext(error, cleanupError, "stop newly created orchestrator after binding failure");
-      }
+      if (binding !== undefined) await this.restoreBinding(binding.key, previous, error);
       throw error;
+    }
+    if (binding === undefined) {
+      throw new Error(`Orchestrator session ${session.id} started without persisting its binding`);
     }
     await this.assignCustodyColor(binding);
     return { binding, session, created: true };
+  }
+
+  /** Undo a binding written during a start that then failed, back to whatever preceded it. */
+  private async restoreBinding(
+    key: string,
+    previous: OrchestratorBinding | undefined,
+    cause: unknown,
+  ): Promise<void> {
+    try {
+      if (previous === undefined) await this.store.reset(key);
+      else await this.store.put(previous);
+    } catch (cleanupError) {
+      throw addCleanupContext(cause, cleanupError, `restore the orchestrator binding for ${key}`);
+    }
   }
 
   private async configuredApprovalMode(provider: ProviderId): Promise<ApprovalMode | undefined> {
@@ -215,7 +252,31 @@ export class OrchestratorManager {
 
   /** Operator-owned durable control over whether this binding may start Fable workers. */
   async fableWorkers(input: FableWorkersRequest): Promise<FableWorkersResult> {
-    const request = FableWorkersRequestSchema.parse(input);
+    return this.toggleGrantCapability(
+      "worker.start.fable",
+      FableWorkersRequestSchema.parse(input),
+    );
+  }
+
+  /** Operator-owned durable control over whether this binding may start Cursor workers. */
+  async cursorWorkers(input: CursorWorkersRequest): Promise<CursorWorkersResult> {
+    return this.toggleGrantCapability(
+      "worker.start.cursor",
+      CursorWorkersRequestSchema.parse(input),
+    );
+  }
+
+  /**
+   * Read or rewrite one delegation capability on the scope's primary binding.
+   *
+   * The grant is the durable record, so a toggle survives broker restarts and applies to the exact
+   * scope the operator named. Every per-capability command shares this path so a new grant cannot
+   * acquire subtly different scope, persistence, or unconfigured-binding behavior.
+   */
+  private async toggleGrantCapability(
+    capability: Extract<CyberdeckCapability, `worker.start.${string}`>,
+    request: OrchestratorGrantToggleRequest,
+  ): Promise<OrchestratorGrantToggleResult> {
     const scope: OrchestratorScope = request.scope === "fleet"
       ? { kind: "fleet" }
       : { kind: "workspace", cwd: request.cwd };
@@ -231,14 +292,14 @@ export class OrchestratorManager {
       return { key, configured: false, enabled: false };
     }
 
-    const enabled = binding.grant.capabilities.includes("worker.start.fable");
+    const enabled = binding.grant.capabilities.includes(capability);
     if (request.enabled === undefined || request.enabled === enabled) {
       return { key, configured: true, enabled, sessionId: binding.sessionId };
     }
 
     const capabilities = request.enabled
-      ? [...binding.grant.capabilities, "worker.start.fable" as const]
-      : binding.grant.capabilities.filter((capability) => capability !== "worker.start.fable");
+      ? [...binding.grant.capabilities, capability]
+      : binding.grant.capabilities.filter((entry) => entry !== capability);
     const updated: OrchestratorBinding = {
       ...binding,
       grant: { ...binding.grant, capabilities },

@@ -28,25 +28,39 @@ export interface CursorHeadlessOptions {
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
 }
 
+export interface CursorInteractiveOptions {
+  initialPrompt?: string | undefined;
+  /**
+   * The provider-native conversation this Cyberdeck thread owns. Cursor adopts an unknown chat id
+   * as a new conversation and reopens a known one, so naming it makes launch and resume the same
+   * command and keeps the identity stable across broker restarts.
+   */
+  chatId?: string | undefined;
+  /** Session-scoped plugin directory contributing the Cyberdeck MCP server. */
+  pluginDirectory?: string | undefined;
+  sourceEnvironment?: Readonly<NodeJS.ProcessEnv> | undefined;
+}
+
 /**
  * Interactive Cursor Agent command suitable for a broker-owned PTY. An explicit initial prompt is
- * the documented positional operand; no resume, worktree, or approval flag is emitted.
- * `--workspace` and `cwd` deliberately name the same root. Scouts never use this path.
+ * the documented positional operand; no worktree or approval flag is emitted. `--workspace` and
+ * `cwd` deliberately name the same root. Scouts never use this path.
  */
 export function buildCursorInteractiveCommand(
   request: CursorInteractiveRequest,
-  initialPrompt?: string,
-  sourceEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
+  options: CursorInteractiveOptions = {},
 ): CursorCommand {
   const args = cursorSafetyArgs(request);
   if (request.model !== undefined) args.push("--model", request.model);
-  if (initialPrompt !== undefined) args.push(initialPrompt);
+  if (options.pluginDirectory !== undefined) args.push("--plugin-dir", options.pluginDirectory);
+  if (options.chatId !== undefined) args.push("--resume", options.chatId);
+  if (options.initialPrompt !== undefined) args.push(options.initialPrompt);
   return {
     executable: "agent",
     args,
     cwd: request.cwd,
     env: buildProviderChildEnvironment({
-      source: sourceEnvironment,
+      source: options.sourceEnvironment ?? process.env,
       provider: "cursor",
       cwd: request.cwd,
       terminal: "pty",

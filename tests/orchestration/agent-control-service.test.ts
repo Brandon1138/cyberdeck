@@ -43,6 +43,20 @@ const binding: OrchestratorBinding = {
   updatedAt: now,
 };
 
+/** The same binding with one or more operator delegation grants added. */
+function granted(...capabilities: readonly string[]): OrchestratorBinding {
+  return {
+    ...binding,
+    grant: {
+      ...binding.grant,
+      capabilities: [
+        ...binding.grant.capabilities,
+        ...capabilities,
+      ] as OrchestratorBinding["grant"]["capabilities"],
+    },
+  };
+}
+
 describe("AgentControlService", () => {
   it("cannot request child-environment grants through worker-start input", () => {
     const parsed = AgentStartWorkerParamsSchema.parse({
@@ -456,7 +470,7 @@ describe("AgentControlService", () => {
     }));
     const service = new AgentControlService(
       { start } as never,
-      { findBySessionId: vi.fn(async () => binding) } as never,
+      { findBySessionId: vi.fn(async () => granted("worker.start.cursor")) } as never,
       {} as never,
       undefined,
       {
@@ -470,7 +484,7 @@ describe("AgentControlService", () => {
     await service.startWorker({
       actorSessionId: ACTOR,
       provider: "cursor",
-      model: "composer",
+      model: "composer-2.5",
       cwd: "/repo/one",
       sandbox: "workspace-write",
       prompt: "Open the pull request",
@@ -562,11 +576,76 @@ describe("AgentControlService", () => {
     }), "Review the architecture");
   });
 
+  it("denies Cursor workers until the operator grant is enabled", async () => {
+    const start = vi.fn();
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "cursor",
+      model: "composer-2.5",
+      cwd: "/repo/one",
+      prompt: "Open the pull request",
+    })).rejects.toMatchObject({
+      code: "CAPABILITY_DENIED",
+      message: expect.stringContaining("/cursor-workers on"),
+    });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("double-gates a Cursor Fable worker on both grants, provider denial first", async () => {
+    const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
+    const fableOnly = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => granted("worker.start.fable")) } as never,
+      {} as never,
+    );
+    const cursorOnly = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => granted("worker.start.cursor")) } as never,
+      {} as never,
+    );
+    const both = new AgentControlService(
+      { start } as never,
+      {
+        findBySessionId: vi.fn(async () => granted("worker.start.cursor", "worker.start.fable")),
+      } as never,
+      {} as never,
+    );
+    const fableWorker = {
+      actorSessionId: ACTOR,
+      provider: "cursor" as const,
+      model: "claude-fable-5-high",
+      cwd: "/repo/one",
+      prompt: "Review the architecture",
+    };
+
+    await expect(fableOnly.startWorker(fableWorker)).rejects.toMatchObject({
+      code: "CAPABILITY_DENIED",
+      message: expect.stringContaining("/cursor-workers on"),
+    });
+    await expect(cursorOnly.startWorker(fableWorker)).rejects.toMatchObject({
+      code: "CAPABILITY_DENIED",
+      message: expect.stringContaining("/fable-workers on"),
+    });
+    await expect(both.startWorker(fableWorker)).resolves.toMatchObject({ provider: "cursor" });
+  });
+
   it("rejects guessed Codex aliases and unsupported effort before launch", async () => {
     const start = vi.fn();
     const service = new AgentControlService(
       { start } as never,
       { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+    // Permission is decided before the catalog, so the effort refusal needs a granted binding.
+    const permitted = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => granted("worker.start.cursor")) } as never,
       {} as never,
     );
 
@@ -580,10 +659,10 @@ describe("AgentControlService", () => {
       code: "MODEL_ID_NOT_CANONICAL",
       message: expect.stringContaining("gpt-5.6-sol"),
     });
-    await expect(service.startWorker({
+    await expect(permitted.startWorker({
       actorSessionId: ACTOR,
       provider: "cursor",
-      model: "composer",
+      model: "composer-2.5",
       effort: "low",
       cwd: "/repo/one",
       prompt: "Ping",

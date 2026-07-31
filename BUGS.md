@@ -60,6 +60,46 @@ Repro: register a worker under a controller, never report liveness, advance past
 gap rather than data loss. Not fixed here: the selector's grace check exists to stop a live
 controller being adopted out from under itself, and relaxing it correctly is a substrate decision.
 
+## Resolved: a Cursor orchestrator's first turn outran its own grant
+
+Observed on 2026-07-31 by the operator, and confirmed by review on the branch that introduced Cursor
+as an orchestrator provider. The Cursor CLI has no system-prompt flag, so `providerInstructions` are
+delivered the only way it accepts them: as the session's first message, submitted from
+`CursorSessionAdapter.initializeSession`. That call runs *inside* `SessionRegistry.start`.
+`OrchestratorManager.createBound` then built its `OrchestratorBinding` — the grant — only after
+`start` had already resolved.
+
+An orchestrator that has just been told what it is reaches for Cyberdeck's tools immediately, so the
+opening move raced the record that authorizes it. `requireBinding` found nothing and answered
+`ACTOR_NOT_AUTHORIZED`. The operator's report of the symptom was a model replying to the effect of
+"I received the guidance but no work" and then spending a full reasoning turn against no objective,
+which is what an orchestrator does when its first tool call is refused and it cannot see why.
+
+Codex and Claude never exposed this. They carry guidance natively — `developer_instructions` and
+`--append-system-prompt` — so no model turn starts inside `start` for them at all (see "cockpit
+startup leaked an invisible tmux session and a failed orchestrator" for why orchestrator startup
+emits no positional initial prompt). Cursor is simply the first provider whose instructions have to
+be a turn.
+
+Resolved by making the grant durable *during* the start rather than after it. `SessionRegistry.start`
+takes an optional `activate` callback and runs it once the pty is adopted and before
+`adapter.initializeSession`, and `createBound` persists its binding from inside that callback. The
+call sits within the existing initialization `try`, so an `activate` that throws tears the session
+down on exactly the path a failed initialization already used — a session is never left live but
+unauthorized, and no new error path was added. Because the window is closed in the registry rather
+than in the Cursor adapter, it is closed for every provider, including any future one that also has
+to be instructed by message.
+
+Rollback needed care in one place. A start that fails after the grant is already durable would
+strand a binding pointing at a session that never lived, so `createBound` restores the binding it
+replaced, exactly as it was, instead of resetting the key. A blanket reset would destroy a healthy
+existing orchestrator whenever a rebind failed.
+
+The worker start path was checked for the same ordering and does not have it: a worker holds no
+grant of its own, its authority is the parent orchestrator's grant checked before `registry.start` is
+called, and the worker-facing event channel resolves through the in-memory session map that is
+populated before initialization begins.
+
 ## Resolved: one failed append poisoned every later write to the coordination log
 
 Found on 2026-07-27 by the same matrix. `WorkerCoordinationStore` serialises appends through a

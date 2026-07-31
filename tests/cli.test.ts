@@ -163,6 +163,38 @@ describe("Cyberdeck CLI", () => {
     }));
   });
 
+  // Fleet's picker offers every catalog provider, so first-launch cockpit has to accept the same
+  // set or an operator can pick an orchestrator in one entry point and not the other.
+  it.each(["codex", "claude", "cursor"])(
+    "accepts %s as an explicit cockpit orchestrator provider",
+    async (provider) => {
+      const ensureOrchestrator = vi.fn(async () => orchestratorResult(false));
+      const program = createProgram({
+        preflightCockpit: () => ({ tmuxVersion: "tmux 3.5a", presentationCommand: "switch-client" }),
+        ensureOrchestrator,
+        launchCockpit: vi.fn(),
+      });
+      const cockpit = program.commands.find((candidate) => candidate.name() === "cockpit")!;
+
+      await cockpit.parseAsync(["--orchestrator", provider], { from: "user" });
+
+      expect(ensureOrchestrator).toHaveBeenCalledWith(expect.objectContaining({ provider }));
+    },
+  );
+
+  it("names every selectable provider when refusing an unsupported cockpit orchestrator", async () => {
+    const ensureOrchestrator = vi.fn(async () => orchestratorResult(false));
+    const program = createProgram({ ensureOrchestrator });
+    const cockpit = program.commands
+      .find((candidate) => candidate.name() === "cockpit")!
+      .exitOverride()
+      .configureOutput({ writeOut: () => {}, writeErr: () => {} });
+
+    await expect(cockpit.parseAsync(["--orchestrator", "antigravity"], { from: "user" }))
+      .rejects.toThrow("orchestrator provider must be codex, claude, cursor");
+    expect(ensureOrchestrator).not.toHaveBeenCalled();
+  });
+
   it("creates and presents a Fleet-selected orchestrator through the cockpit transaction", async () => {
     const order: string[] = [];
     const result = orchestratorResult(true);
@@ -383,6 +415,41 @@ describe("Cyberdeck CLI", () => {
       scope: "fleet",
       enabled: true,
     }));
+  });
+
+  it("inspects and toggles Cursor workers on one binding through the operator CLI", async () => {
+    const cursorWorkers = vi.fn(async () => ({
+      key: "workspace:/repo/one",
+      configured: true,
+      enabled: false,
+      sessionId: "11111111-1111-4111-8111-111111111111",
+    }));
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const program = createProgram({ cursorWorkers });
+    const orchestrator = program.commands.find((candidate) => candidate.name() === "orchestrator")!;
+    const command = orchestrator.commands.find((candidate) => candidate.name() === "cursor-workers")!;
+
+    try {
+      await command.parseAsync(["status", "--scope", "workspace", "--cwd", "/repo/one"], {
+        from: "user",
+      });
+      await command.parseAsync(["off", "--scope", "workspace", "--cwd", "/repo/one"], {
+        from: "user",
+      });
+      await expect(command.parseAsync(["sideways"], { from: "user" })).rejects.toThrow(
+        /status, on, or off/,
+      );
+    } finally {
+      write.mockRestore();
+    }
+
+    // Status reads without writing; only an explicit on/off carries `enabled`.
+    expect(cursorWorkers).toHaveBeenNthCalledWith(1, { cwd: "/repo/one", scope: "workspace" });
+    expect(cursorWorkers).toHaveBeenNthCalledWith(2, {
+      cwd: "/repo/one",
+      scope: "workspace",
+      enabled: false,
+    });
   });
 
   it("enables the box-wide Caveman worker default through the operator CLI", async () => {

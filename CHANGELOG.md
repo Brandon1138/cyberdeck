@@ -27,6 +27,28 @@ and persisted schemas remain under active alpha development.
   `listen()` is named as the reason, instead of the request being sent to an
   address nobody answers on.
 
+- Cursor is a full orchestrator provider. Its Ctrl+O entry offers
+  `claude-fable-5-thinking-high`, `gpt-5.6-sol-high`, `claude-opus-5-thinking-high`,
+  and `kimi-k3-max`, and the Cyberdeck MCP server reaches `agent` — which has no
+  MCP flag — through a session-scoped plugin directory and `CURSOR_CONFIG_DIR`
+  written under Cyberdeck's private launch-files root and removed on exit. The
+  operator's `~/.cursor` and the repository's `.cursor/mcp.json` are never touched
+  and `HOME` is never redirected, so provider authentication is unaffected.
+  Guidance, which `agent` cannot take as a flag, arrives as the session's first
+  submitted message.
+- Cursor interactive sessions resume. Launch and resume both name the Cyberdeck
+  session id as the chat id, so a broker restart reopens the same conversation
+  instead of forcing an orchestrator rebind. A thread launched before chat ids
+  were bound refuses to resume rather than presenting a new empty chat under its
+  name. Scouts stay one-shot.
+- `/cursor-workers status|on|off` and `cyberdeck orchestrator cursor-workers`
+  control a durable, default-off `worker.start.cursor` grant per orchestrator
+  binding. It composes with the Fable grant rather than replacing it: a Cursor
+  Fable slug needs both, and the provider-level refusal is reported first.
+- Cursor worker models cover the installed catalog — Composer 2.5, the GPT-5.6
+  Luna/Terra/Sol rungs, Sonnet 5, Opus 5, Fable 5, Kimi, GLM, and Grok — as exact
+  slugs with the effort rung inside the slug.
+
 ### Fixed
 
 - `workers_wait` no longer accepts a timeout it cannot honor. One logical wait is
@@ -48,6 +70,10 @@ and persisted schemas remain under active alpha development.
   bounds `latestPreview`.
 - Batch worker starts now prepare independent standard and Scout workers
   concurrently while reserving capacity before provider launch.
+- The `/model` picker scrolls, keeping the selected row on screen now that the
+  Cursor catalog is longer than a terminal.
+- The bare `composer` worker slug is retired in favor of `composer-2.5`, the
+  identifier `agent models` actually advertises.
 
 ## [0.1.0-alpha.1] - 2026-07-23
 

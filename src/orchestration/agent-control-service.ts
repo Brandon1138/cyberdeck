@@ -632,6 +632,18 @@ export class AgentControlService {
     if (request.profile === "scout") {
       return this.startScout(request);
     }
+    // Provider first, then model: a Cursor Fable worker needs both grants, and the operator should
+    // learn about the provider-level denial before being sent after the model-level one.
+    if (request.provider === "cursor" && !grantAllows(
+      binding.grant,
+      "worker.start.cursor",
+      { cwd: request.cwd },
+    )) {
+      throw new AgentControlError(
+        "CAPABILITY_DENIED",
+        "Cursor workers are disabled for this orchestrator; the operator can run /cursor-workers on",
+      );
+    }
     if (isFableModel(request.model) && !grantAllows(
       binding.grant,
       "worker.start.fable",

@@ -21,4 +21,17 @@ export const ORCHESTRATOR_CATALOG: readonly OrchestratorCatalogEntry[] = [
     models: ["sonnet", "opus", "fable"],
     efforts: ["native-default", "low", "medium", "high", "xhigh", "max"],
   },
+  {
+    // Cursor encodes effort in the model slug, so `native-default` is the only effort it can offer;
+    // an explicit effort is refused by the adapter rather than silently ignored.
+    provider: "cursor",
+    label: "Cursor",
+    models: [
+      "claude-fable-5-thinking-high",
+      "gpt-5.6-sol-high",
+      "claude-opus-5-thinking-high",
+      "kimi-k3-max",
+    ],
+    efforts: ["native-default"],
+  },
 ];

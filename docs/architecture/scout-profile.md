@@ -32,6 +32,12 @@ leasePolicy expire-and-discard
 `leasePolicy` remains the plain `expire-and-discard | orphan-for-adoption` record. This slice does
 not add expiry, adoption, or heartbeat behavior.
 
+`model composer` is a durable literal in `WorkerEffectiveStateSchema`, so it stays as written even
+though the interactive worker catalog now advertises `composer-2.5` — the identifier `agent models`
+prints. The Scout path builds its own command and never consults that catalog, so the two do not
+interact; changing the literal would invalidate already-recorded Scout state, and is a migration
+rather than a rename.
+
 ## Durable operator grant
 
 Cursor source egress fails closed until the operator grants one exact canonical Git repository

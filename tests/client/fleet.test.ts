@@ -2134,8 +2134,17 @@ describe("fleet controls", () => {
     expect(rendered).toContain("Codex Luna");
     expect(rendered).toContain("Claude Opus");
     expect(rendered).toContain("Claude Fable");
-    expect(rendered).toContain("Cursor Composer");
-    expect(rendered).toContain("Gemini 3.6 Flash");
+    expect(rendered).toContain("Composer 2.5");
+    // The catalog is longer than the terminal, so the tail is reached by scrolling to it and the
+    // window stops at the final entry rather than scrolling past it.
+    expect(rendered).not.toContain("Gemini 3.6 Flash");
+    const last = Array.from({ length: 64 }).reduce<FleetState>(
+      (state) => transitionFleet(state, snapshot, "down", NOW_MS).state,
+      model.state,
+    );
+    const atEnd = renderFleet(snapshot, last, { color: false, width: 100, height: 28 });
+    expect(atEnd).toContain("Gemini 3.6 Flash");
+    expect(atEnd).toMatch(/(\d+) of \1/u);
 
     const effort = transitionFleet(model.state, snapshot, "enter", NOW_MS);
     expect(effort.state.workerPicker).toMatchObject({ step: "effort" });
@@ -2217,7 +2226,7 @@ describe("fleet controls", () => {
       width: 100,
       height: 24,
     });
-    expect(rendered).toContain("2-4 of 5");
+    expect(rendered).toContain("2-4 of 6");
     expect(rendered).not.toContain("/model  ");
 
     expect(transitionFleet(fourth.state, snapshot, "escape", NOW_MS).state)
@@ -2419,6 +2428,50 @@ describe("fleet controls", () => {
         request: { cwd: "/repo/one", scope: "workspace", enabled: true },
       },
     });
+  });
+
+  it("routes /cursor-workers to the bound orchestrator as its own grant", () => {
+    const orchestrator = session({
+      kind: "orchestrator",
+      provider: "cursor",
+      model: "claude-fable-5-thinking-high",
+      cwd: "/repo/one",
+      orchestratorScope: "workspace",
+    });
+    const snapshot = fleet({ record: orchestrator });
+
+    expect(transitionFleet(
+      { ...createFleetState(snapshot), draft: "/cursor-workers on" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    )).toMatchObject({
+      state: { draft: "" },
+      action: {
+        type: "cursor-workers",
+        request: { cwd: "/repo/one", scope: "workspace", enabled: true },
+      },
+    });
+    // Cursor and Fable are separate grants, so one command never stands in for the other.
+    expect(transitionFleet(
+      { ...createFleetState(snapshot), draft: "/cursor-workers off" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    ).action).toMatchObject({ type: "cursor-workers", request: { enabled: false } });
+  });
+
+  it("reports the missing orchestrator instead of treating /cursor-workers as a task", () => {
+    const snapshot = fleet();
+    const transition = transitionFleet(
+      { ...createFleetState(snapshot), draft: "/cursor-workers status" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+
+    expect(transition.action).toBeUndefined();
+    expect(transition.state.notice).toContain("No orchestrator is bound");
   });
 
   it("routes /caveman-workers on to the box preference without an orchestrator", () => {

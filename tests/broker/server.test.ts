@@ -7,6 +7,7 @@ import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import { BrokerServer } from "../../src/broker/server.js";
 import { SessionRegistry, type PtyHandle } from "../../src/broker/session-registry.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
+import type { SessionRecord } from "../../src/domain/session.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import { ServerFrameSchema, type ServerFrame, type WireFrame } from "../../src/protocol/frames.js";
 import { JsonlDecoder, encodeFrame } from "../../src/protocol/jsonl.js";
@@ -45,7 +46,21 @@ const SENTINEL_SECRETS = {
   GITHUB_TOKEN: "ghp_SENTINELBROKER",
 };
 
-const adapters: Record<"codex" | "claude", ProviderAdapter> = {
+/**
+ * Stands in for the Cursor CLI's first model turn. Cursor has no system-prompt flag, so its
+ * orchestrator guidance is submitted as a message from `initializeSession` and whatever that turn
+ * does reaches the broker while `start` is still running.
+ */
+let cursorFirstTurn: ((session: SessionRecord) => Promise<void>) | undefined;
+
+const adapters: Record<"codex" | "claude" | "cursor", ProviderAdapter> = {
+  cursor: {
+    id: "cursor",
+    buildLaunchSpec: (session) => ({ executable: "fake", args: [], cwd: session.cwd, env: {} }),
+    buildResumeSpec: (session) => ({ executable: "fake", args: ["resume", session.id], cwd: session.cwd, env: {} }),
+    deferInitialPrompt: () => true,
+    initializeSession: async (session) => { await cursorFirstTurn?.(session); },
+  },
   codex: {
     id: "codex",
     buildLaunchSpec: (session, initialPrompt) => ({ executable: "fake", args: initialPrompt === undefined ? [] : [initialPrompt], cwd: session.cwd, env: { ...SENTINEL_SECRETS } }),
@@ -183,6 +198,7 @@ async function harness() {
     scoutEgress,
     catalogWrites,
     brokerEvents,
+    agentControl,
   };
 }
 
@@ -380,6 +396,35 @@ describe("BrokerServer", () => {
     }
   });
 
+  // The operator hit this with Cursor: guidance goes in as the first message, the orchestrator
+  // reaches for its tools on that turn, and a grant written after `start` returned was not there
+  // yet. The whole chain is real here — registry, binding store, and the authorization check.
+  it("authorizes an orchestrator's opening tool call on its own guidance turn", async () => {
+    const { server, socketPath, agentControl } = await harness();
+    const client = await TestClient.open(socketPath);
+    let firstTurn: { ok: boolean; detail: string } | undefined;
+    cursorFirstTurn = async (session: SessionRecord) => {
+      firstTurn = await agentControl.listThreads({ actorSessionId: session.id })
+        .then(() => ({ ok: true, detail: "authorized" }))
+        .catch((error: Error) => ({ ok: false, detail: error.message }));
+    };
+    try {
+      const ensured = await client.request<{ binding: { sessionId: string } }>("orchestrator.ensure", {
+        provider: "cursor",
+        model: "kimi-k3-max",
+        cwd: "/tmp/repo",
+        scope: "fleet",
+      });
+
+      expect(firstTurn).toEqual({ ok: true, detail: "authorized" });
+      expect(ensured.binding.sessionId).toBeDefined();
+    } finally {
+      cursorFirstTurn = undefined;
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("creates a unique peer orchestrator without replacing or stopping the current one", async () => {
     const { server, socketPath, orchestratorStore } = await harness();
     const client = await TestClient.open(socketPath);
@@ -536,6 +581,16 @@ describe("BrokerServer", () => {
         enabled: true,
         sessionId: ensured.session.id,
       });
+      await expect(client.request("orchestrator.cursorWorkers", {
+        cwd: "/tmp/repo",
+        scope: "fleet",
+        enabled: true,
+      })).resolves.toMatchObject({
+        key: "fleet",
+        configured: true,
+        enabled: true,
+        sessionId: ensured.session.id,
+      });
       await expect(client.request("orchestrator.cavemanWorkers", {
         enabled: true,
       })).resolves.toMatchObject({
@@ -543,7 +598,9 @@ describe("BrokerServer", () => {
         enabled: true,
       });
       await expect(orchestratorStore.get("fleet")).resolves.toMatchObject({
-        grant: { capabilities: expect.arrayContaining(["worker.start.fable"]) },
+        grant: {
+          capabilities: expect.arrayContaining(["worker.start.fable", "worker.start.cursor"]),
+        },
       });
       await expect(workerPreferences.get()).resolves.toEqual({ caveman: true });
       const child = await client.request<{ id: string }>("session.start", {

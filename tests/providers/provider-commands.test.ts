@@ -416,12 +416,10 @@ describe("extended interactive provider adapters", () => {
     expect(build).toThrow(expect.objectContaining({ code: "APPROVAL_MODE_NOT_SUPPORTED" }));
   });
 
-  it("starts Cursor Composer with the exact initial prompt and explicit model", () => {
+  it("starts Cursor Composer with the exact initial prompt, explicit model, and bound chat id", () => {
     const adapter = new CursorProviderAdapter();
-    const spec = adapter.buildLaunchSpec(
-      session({ provider: "cursor", model: "composer" }),
-      "Return eight bits",
-    );
+    const record = session({ provider: "cursor", model: "composer" });
+    const spec = adapter.buildLaunchSpec(record, "Return eight bits");
 
     expect(spec.executable).toBe("agent");
     expect(spec.args).toEqual([
@@ -433,6 +431,8 @@ describe("extended interactive provider adapters", () => {
       "plan",
       "--model",
       "composer",
+      "--resume",
+      record.id,
       "Return eight bits",
     ]);
   });

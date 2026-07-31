@@ -17,18 +17,18 @@ and `docs/architecture/antigravity-adapter.md`.
 
 | Dimension | `codex` | `claude` | `cursor` | `antigravity` |
 | --- | --- | --- | --- | --- |
-| Adapter | `src/providers/codex.ts:24` | `src/providers/claude.ts:13` | `src/providers/cursor/session-adapter.ts:8` | `src/providers/antigravity/session-adapter.ts:9` |
+| Adapter | `src/providers/codex.ts:24` | `src/providers/claude.ts:13` | `src/providers/cursor/session-adapter.ts:49` | `src/providers/antigravity/session-adapter.ts:9` |
 | Executable | `codex` | `claude` | `agent` | `agy` |
 | Permission/approval flags | `-s <sandbox> -a on-request` (`codex.ts:36-44`) | `--permission-mode plan\|manual` (`claude.ts:38-39`) | `--sandbox enabled` + `--mode plan` when read-only (`cursor/commands.ts:59-66`) | `--mode plan --sandbox` always (`antigravity/commands.ts:82-87`) |
 | `workspace-write` supported | yes | yes (`manual`) | yes (no `--mode`) | **no** — throws `ANTIGRAVITY_WORKSPACE_WRITE_UNSUPPORTED` (`antigravity/commands.ts:83-85`) |
-| Cyberdeck MCP server injected | yes, when `session.kind` is set (`codex.ts:97-110`) | yes, when `session.kind` is set (`claude.ts:95-106`) | **never** (`main.ts:85`) | **never** (`main.ts:86`) |
-| `providerInstructions` forwarded | `-c developer_instructions=` (`codex.ts:92-95`) | `--append-system-prompt` (`claude.ts:90-93`) | **silently dropped** (`cursor/commands.ts:23-36`) | **silently dropped** (`antigravity/commands.ts:34-45`) |
-| Effort values accepted | all six (`codex.ts:48-50`) | all except `ultra` (`claude.ts:46`) | **none** — any effort throws (`cursor/session-adapter.ts:12`) | `low\|medium\|high` only (`antigravity/commands.ts:93-99`) |
+| Cyberdeck MCP server injected | yes, when `session.kind` is set (`codex.ts:97-110`) | yes, when `session.kind` is set (`claude.ts:95-106`) | yes, when `session.kind` is set, through a session-scoped plugin directory (`cursor/mcp-hosting.ts`, `cursor/session-adapter.ts:117-131`) | **never** (`main.ts:137`) |
+| `providerInstructions` forwarded | `-c developer_instructions=` (`codex.ts:92-95`) | `--append-system-prompt` (`claude.ts:90-93`) | no flag exists; submitted as the first message (`cursor/session-adapter.ts:143-165`) | **silently dropped** (`antigravity/commands.ts:34-45`) |
+| Effort values accepted | all six (`codex.ts:48-50`) | all except `ultra` (`claude.ts:46`) | **none** — any effort throws; the rung is inside the model slug (`cursor/session-adapter.ts:55`) | `low\|medium\|high` only (`antigravity/commands.ts:93-99`) |
 | Explicit model required | no | **yes** (`domain/policy.ts:47-56`) | no | no (but Fable is refused, `antigravity/commands.ts:107-109`) |
-| `buildResumeSpec` | filesystem scan for the native rollout id (`codex.ts:65-90`) | `--resume <cyberdeck session id>` (`claude.ts:63-88`) | throws `SESSION_RESUME_UNAVAILABLE` (`cursor/session-adapter.ts:17-19`) | throws `SESSION_RESUME_UNAVAILABLE` (`antigravity/session-adapter.ts:34-36`) |
-| `prepareLaunch` | none | none | none | writes the exact cwd to `agy`'s trust store (`antigravity/session-adapter.ts:30-32`) |
-| `submitInput` | `CSI 13 u` (`codex.ts:29-33`) | `CSI 13 u` (`claude.ts:18-22`) | `\r` (`cursor/session-adapter.ts:21-23`) | `\r` (`antigravity/session-adapter.ts:38-40`) |
-| Advertised worker models | 3 (`worker-capabilities.ts:20-26`) | 4 (`worker-capabilities.ts:27-36`) | 1 (`worker-capabilities.ts:37-43`) | 3 (`worker-capabilities.ts:44-53`) |
+| `buildResumeSpec` | filesystem scan for the native rollout id (`codex.ts:65-90`) | `--resume <cyberdeck session id>` (`claude.ts:63-88`) | `--resume <cyberdeck session id>`, refused without launch-record evidence (`cursor/session-adapter.ts:83-94`) | throws `SESSION_RESUME_UNAVAILABLE` (`antigravity/session-adapter.ts:34-36`) |
+| `prepareLaunch` | none | none | writes the session-scoped MCP plugin and permission config, or isolates a Scout (`cursor/session-adapter.ts:123-131`) | writes the exact cwd to `agy`'s trust store (`antigravity/session-adapter.ts:30-32`) |
+| `submitInput` | `CSI 13 u` (`codex.ts:29-33`) | `CSI 13 u` (`claude.ts:18-22`) | paced `\r` through the terminal (`cursor/session-adapter.ts:167-177`) | `\r` (`antigravity/session-adapter.ts:38-40`) |
+| Advertised worker models | 3 (`worker-capabilities.ts:21-28`) | 4 (`worker-capabilities.ts:29-39`) | 28, one per model-and-effort pair (`worker-capabilities.ts:40-84`) | 3 (`worker-capabilities.ts:85-95`) |
 
 ## Permission / approval mode, and how it is resolved
 
@@ -66,22 +66,26 @@ guarantee the provider has not been shown to give.
 
 ## Cyberdeck MCP server injection
 
-Both injecting adapters gate on the same condition — `session.kind === undefined || options.mcp ===
-undefined` returns early (`src/providers/codex.ts:98`, `src/providers/claude.ts:96`). Two
-consequences follow:
+All three injecting adapters gate on the same condition — `session.kind === undefined ||
+options.mcp === undefined` returns early (`src/providers/codex.ts:98`, `src/providers/claude.ts:96`,
+`src/providers/cursor/session-adapter.ts:117-121`). Two consequences follow:
 
 1. A plain human `cyberdeck start` thread has no `kind` (`src/cli.ts` builds no `kind` field), so it
    receives **no** MCP server on any provider. Only orchestrators
-   (`src/orchestration/orchestrator-manager.ts:92`) and delegated workers
-   (`src/orchestration/agent-control-service.ts:143`) do.
-2. Cursor and Antigravity are constructed without an `mcp` option at all
-   (`src/broker/main.ts:85-86`), so the second half of the guard can never be satisfied for them.
+   (`src/orchestration/orchestrator-manager.ts:139`) and delegated workers
+   (`src/orchestration/agent-control-service.ts:677`) do.
+2. Antigravity is constructed without an `mcp` option at all (`src/broker/main.ts:137`), so the second
+   half of the guard can never be satisfied for it.
 
 Injection shape:
 
 - Codex: two `-c` overrides, `mcp_servers.cyberdeck.command` and `.args`
   (`src/providers/codex.ts:99-109`).
 - Claude: one `--mcp-config` with an inline stdio server JSON (`src/providers/claude.ts:97-105`).
+- Cursor: no flag exists, so `prepareLaunch` writes a session-scoped plugin whose `.mcp.json` names
+  the server, `--plugin-dir` loads it, and a session-scoped `CURSOR_CONFIG_DIR` pre-approves exactly
+  that server's tools (`src/providers/cursor/mcp-hosting.ts`). Both directories live under
+  Cyberdeck's private launch-files root and are removed by `cleanupLaunch`.
 
 Both carry `mcp --actor-session <session id>`, which is what scopes the grant. Claude now emits
 `--strict-mcp-config` alongside the config for orchestrators *and* workers, so a Claude session
@@ -97,9 +101,9 @@ The tools exposed are orchestration-and-workflow shaped — `cyberdeck_threads_l
 A session without them can still be a worker (completion is observed from the terminal, not
 reported over MCP) but cannot orchestrate or join a workflow.
 
-### Decision: Cursor and Antigravity do not receive the Cyberdeck MCP server
+### Decision: Cursor hosts the server from a session-scoped plugin; Antigravity cannot
 
-**Status: recorded as out of scope. Neither CLI accepts a per-invocation MCP server definition.**
+**Status: Cursor resolved. Antigravity remains out of scope — `agy` has no MCP surface to wire.**
 
 Evidence, from the installed executables (see [Provider help evidence](#provider-help-evidence)):
 
@@ -110,35 +114,35 @@ Evidence, from the installed executables (see [Provider help evidence](#provider
   Its subcommand list (`agent`, `agents`, `changelog`, `help`, `install`, `models`, `plugin`,
   `plugins`, `update`) contains no `mcp` command either. There is no mechanism to wire.
 
-- **`agent` (Cursor 2026.07.20-8cc9c0b) has MCP, but only as persistent on-disk config.** The only
-  MCP flag on the invocation is `--approve-mcps` ("Automatically approve all MCP servers"), which
-  approves servers that are already configured; it does not define one. Server definition lives
-  behind the `agent mcp` subcommand, whose help states servers are "configured in `.cursor/mcp.json`
-  or `~/.cursor/mcp.json`" and whose verbs are `login`, `list`, `list-tools`, `enable`, `disable`.
-  There is no `--mcp-config` equivalent.
+- **`agent` (Cursor 2026.07.23-e383d2b) still has no per-invocation MCP flag,** and that has not
+  changed: the only MCP flag is `--approve-mcps` ("Automatically approve all MCP servers"), which
+  approves already-configured servers rather than defining one, and definition lives behind the
+  `agent mcp` subcommand over `.cursor/mcp.json` or `~/.cursor/mcp.json`. Measured against the
+  installed binary, there is a third source those two documented paths do not mention: **the
+  `.mcp.json` of every loaded plugin**, and plugins are nameable per invocation with `--plugin-dir`.
 
-Wiring Cursor would therefore mean writing a Cyberdeck server into the operator's
-`~/.cursor/mcp.json` or the workspace's `.cursor/mcp.json`. That is not the same feature as Codex's
-and Claude's injection, for three reasons:
+That third path is what Cyberdeck uses, and it satisfies the constraints the first two could not:
 
-1. It is **not session-scoped**. The `--actor-session <id>` argument is what binds the MCP server to
-   one thread's capability grant; a shared config file has exactly one value for all Cursor sessions
-   at once, so concurrent workers would share or race one actor identity.
-2. It **mutates operator-owned state** outside `~/Library/Application Support/Cyberdeck/`, and
-   outlives the session, which contradicts the existing boundary — the one file Cyberdeck already
-   writes outside its own state directory (Antigravity's trust store) is deliberately narrow and
-   documented.
-3. It would still require `--approve-mcps` or an interactive approval to be usable, and
-   `--approve-mcps` auto-approves *every* configured server, not just Cyberdeck's. That is a
-   permission widening the adapters are explicitly written to avoid
-   (`tests/providers/cursor-adapter.test.ts:206-227`).
+1. It is **session-scoped**. The plugin directory is created per session under Cyberdeck's private
+   launch-files root, and the `.mcp.json` inside it carries that session's own
+   `--actor-session <id>`, so two concurrent Cursor sessions cannot share or race one actor identity
+   (`src/providers/cursor/mcp-hosting.ts`).
+2. It **mutates no operator-owned state**. `~/.cursor` is not read or written, the workspace's
+   `.cursor/mcp.json` is not created, and `HOME` is not redirected — which matters beyond tidiness,
+   because overriding `HOME` loses the operator's Cursor credentials.
+3. It needs **no blanket approval**. Loading a server is not permission to call it, so the session
+   also gets a `CURSOR_CONFIG_DIR` of its own holding a `cli-config.json` that allows exactly
+   `Mcp(plugin-cyberdeck-cyberdeck:*)`. `--approve-mcps`, which would auto-approve every configured
+   server, is still never emitted; neither is `--force`, whose launch-time effect is to disable MCP
+   servers outright.
 
-So the practical answer for both providers is the same: **Cursor and Antigravity sessions cannot
-call back into the fleet.** They are usable as workers and as human-attached threads. They are not
-usable as orchestrators or as workflow participants. `src/broker/main.ts:85-86` is the intentional
-encoding of that fact, and this section is the record it previously lacked.
+So the two providers now differ: **a Cursor session can call back into the fleet and can be an
+orchestrator or workflow participant** (`src/broker/main.ts:136`), while an Antigravity session
+cannot (`:137`). `assertMcpCapableProvider` derives that from `ORCHESTRATOR_CATALOG` membership, so
+the refusal and the capability cannot drift apart
+(`src/orchestration/orchestrator-manager.ts:370-384`).
 
-Revisit this if Cursor ships a `--mcp-config`-style flag, or if Antigravity ships any MCP surface.
+Revisit the Antigravity half if `agy` ships any MCP surface.
 
 ## Effort support
 
@@ -185,45 +189,50 @@ are three different mechanisms and two refusals.
   `--session-id <cyberdeck session id>` (`src/providers/claude.ts:34-35`) and resume passes
   `--resume <same id>` (`:68-69`). The launch-safety gate, permission mode, effort rules, guidance,
   and MCP config are all re-applied identically on resume (`:64-81`).
-- **Cursor** throws `SessionResumeUnavailableError` (`src/providers/cursor/session-adapter.ts:17-19`).
-  `agent` does advertise `--resume [chatId]`, `--continue`, `create-chat`, `ls`, and a `resume`
-  subcommand, so a mechanism plausibly exists — but the chat-id-to-Cyberdeck-thread binding is
-  unverified, and resuming the wrong chat is worse than refusing.
+- **Cursor** now takes Claude's approach: `agent --resume <chatId>` reopens a known chat and adopts
+  an unknown id as a new one, so launch and resume both name the Cyberdeck session id and the binding
+  needs nothing persisted (`src/providers/cursor/commands.ts:49-70`,
+  `src/providers/cursor/session-adapter.ts:83-115`). The refusal that remains is narrower and exact:
+  a thread whose launch record does not contain that id was launched before chat ids were bound, so
+  resuming it would open an empty chat presenting as the operator's original thread. That raises
+  `CursorResumeError` / `SESSION_RESUME_UNAVAILABLE`, which the orchestrator manager treats as
+  recoverable and answers with a rebind prompt. Scouts remain one-shot with no resume.
 - **Antigravity** throws the same error (`src/providers/antigravity/session-adapter.ts:34-36`).
   `agy` advertises `--continue` and `--conversation <id>`; the capability register grades
   conversation resume `live-unverified` because the identifiers and their durability require a live
   session (`src/providers/antigravity/capabilities.ts:57-61`).
 
-Failing closed on both is the correct current state: a wrong-conversation resume silently
-misattributes work. It should stay a refusal until the id binding is proven live.
+Failing closed is still the correct state for Antigravity, and for any Cursor thread whose
+conversation identity was never bound: a wrong-conversation resume silently misattributes work.
 
 ## Provider instructions
 
-Only Codex and Claude forward `session.providerInstructions`. Cursor and Antigravity's command
-builders accept `cwd`, `sandbox`, `model`, and (Antigravity only) `effort`; the field is not part of
-their request type and is discarded without error (`src/providers/cursor/commands.ts:5`, `:23-36`;
-`src/providers/antigravity/commands.ts:7-9`, `:34-45`). Neither `agent --help` nor `agy --help`
-documents a system-prompt append flag, so this is inherent, not an omission.
+Codex and Claude forward `session.providerInstructions` through a native flag. Neither
+`agent --help` nor `agy --help` documents a system-prompt append flag, so for the other two providers
+there is nothing to forward it *to*; that much is inherent.
 
-The consequence is only reachable through the orchestrator path, which is the one place that sets
-`providerInstructions` (`src/orchestration/orchestrator-manager.ts:95`). See below.
+Cursor no longer discards it. Because the guidance must arrive before any operator prompt, the
+adapter defers the initial prompt whenever instructions are present — not only in `auto` mode — and
+submits them as the session's first message after post-launch setup
+(`src/providers/cursor/session-adapter.ts:143-165`). It costs one visible turn in the transcript,
+which is accepted; it is not written into a rules file or `AGENTS.md` in the workspace. Resume does
+not resubmit, because the conversation being reopened already contains them.
+
+Antigravity still discards the field (`src/providers/antigravity/commands.ts:7-9`, `:34-45`). The
+consequence is only reachable through the orchestrator path, which is the one place that sets
+`providerInstructions` (`src/orchestration/orchestrator-manager.ts:142`) — and an Antigravity
+orchestrator is refused outright, so an inert one can no longer be created.
 
 ## Known gaps, deliberately not closed
 
 Recorded, not fixed, because closing them is out of scope for a documentation-first change:
 
-1. **A Cursor or Antigravity orchestrator can be created and is silently inert.**
-   `OrchestratorManager.ensure` accepts any registered provider (`src/orchestration/orchestrator-manager.ts:84-96`)
-   and does not check for MCP capability. Such an orchestrator would start with neither its
-   orchestrator prompt (dropped, above) nor any `cyberdeck_*` tool, and would have no way to
-   discover it is meant to orchestrate. The guard belongs in `OrchestratorManager.ensure` as an
-   explicit refusal — not in the adapters.
-2. **Effort refusal uses three unrelated error shapes.** Claude throws a bare `Error`
+1. **Effort refusal uses three unrelated error shapes.** Claude throws a bare `Error`
    (`src/providers/claude.ts:46`, `:77`) with no `code`, while Cursor uses
    `PROVIDER_EFFORT_UNSUPPORTED` and Antigravity uses `ANTIGRAVITY_LAUNCH_UNSAFE`. Callers cannot
    handle "provider rejected this effort" uniformly. `src/providers/claude.ts` is owned by another
    change in flight; the recommendation is to reuse `UnsupportedProviderEffortError`.
-3. **Cyberdeck MCP is not injected into human-started threads on any provider,** because the guard
+2. **Cyberdeck MCP is not injected into human-started threads on any provider,** because the guard
    keys on `session.kind` rather than on MCP availability. This may be intended (a human thread has
    no capability grant), but like the Cursor/Antigravity case it was previously unstated.
 
