@@ -6,6 +6,7 @@ import {
   FADED_CUSTODY_MAX_AGE_MS,
   allocateCustodyColorSlot,
   custodyColor,
+  reconcileCustodyColorTable,
   releaseCustodyColorSlot,
   type CustodyColorTable,
 } from "../../src/domain/custody-color.js";
@@ -370,6 +371,64 @@ describe("releaseCustodyColorSlot", () => {
 
     expect(releaseCustodyColorSlot(table, "orchestrator:absent", at(1_000))).toBe(table);
     expect(releaseCustodyColorSlot(released, "orchestrator:fleet", at(2_000))).toBe(released);
+  });
+});
+
+describe("reconcileCustodyColorTable", () => {
+  it("reclaims a slot whose holder has no live binding", () => {
+    const table = allocateCustodyColorSlot({
+      controllerId: "orchestrator:dead",
+      table: [],
+      subjects: [],
+      now: at(0),
+    }).table;
+
+    const reconciled = reconcileCustodyColorTable(table, new Set(), at(1_000));
+
+    expect(reconciled[0]).toMatchObject({ slot: 0, releasedAt: at(1_000) });
+  });
+
+  it("never touches a slot whose controller is still live", () => {
+    const table = allocateCustodyColorSlot({
+      controllerId: "orchestrator:live",
+      table: [],
+      subjects: [],
+      now: at(0),
+    }).table;
+
+    const reconciled = reconcileCustodyColorTable(table, new Set(["orchestrator:live"]), at(1_000));
+
+    expect(reconciled).toBe(table);
+    expect(reconciled[0]?.releasedAt).toBeUndefined();
+  });
+
+  it("returns the same table when nothing is stale", () => {
+    const table = allocateCustodyColorSlot({
+      controllerId: "orchestrator:fleet",
+      table: [],
+      subjects: [],
+      now: at(0),
+    }).table;
+    const released = releaseCustodyColorSlot(table, "orchestrator:fleet", at(1_000));
+
+    expect(reconcileCustodyColorTable(released, new Set(), at(2_000))).toBe(released);
+  });
+
+  it("marks the slot released rather than deleting it, so a reclaimed slot's leftover workers still fade", () => {
+    const table = allocateCustodyColorSlot({
+      controllerId: "orchestrator:dead",
+      table: [],
+      subjects: [],
+      now: at(0),
+    }).table;
+
+    const reconciled = reconcileCustodyColorTable(table, new Set(), at(1_000));
+
+    expect(custodyColor(
+      subject({ controllerId: "orchestrator:dead", state: "released", endedAt: at(1_000) }),
+      reconciled,
+      at(2_000),
+    )).toEqual({ slot: 0, intensity: "faded" });
   });
 });
 

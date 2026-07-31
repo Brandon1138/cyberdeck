@@ -152,6 +152,27 @@ export function allocateCustodyColorSlot(input: {
 }
 
 /**
+ * Reclaim slots whose holder has no live binding. A crash or SIGKILL skips the graceful
+ * `releaseCustodyColorSlot` path entirely, so without this sweep a dead orchestrator's slot
+ * is held forever — the table has no other way to learn the holder is gone. Marks the slot
+ * released rather than deleting the row, the same as a graceful release, so any of that
+ * controller's workers still fade on it instead of losing their hue outright.
+ */
+export function reconcileCustodyColorTable(
+  table: CustodyColorTable,
+  liveControllerIds: ReadonlySet<string>,
+  now: string,
+): CustodyColorTable {
+  const stale = table.some((entry) =>
+    entry.releasedAt === undefined && !liveControllerIds.has(entry.controllerId));
+  if (!stale) return table;
+  return table.map((entry) =>
+    entry.releasedAt === undefined && !liveControllerIds.has(entry.controllerId)
+      ? { ...entry, releasedAt: now }
+      : entry);
+}
+
+/**
  * Release the slot without freeing it: workers keep fading on it until they time out.
  * Returns the same table when there was nothing to release, so callers can skip the write.
  */
