@@ -8,7 +8,7 @@ import {
   fleetOrchestratorCustodyColors,
   fleetWorkerCoordinationView,
 } from "../../src/broker/worker-coordination-view.js";
-import { CUSTODY_COLOR_SLOT_COUNT } from "../../src/domain/custody-color.js";
+import { CUSTODY_COLOR_SLOT_COUNT, CustodyColorTableSchema } from "../../src/domain/custody-color.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { LeaseState, OwnershipSubject } from "../../src/domain/worker-coordination.js";
 import { OwnershipSubjectSchema } from "../../src/domain/worker-coordination.js";
@@ -129,6 +129,77 @@ describe("CustodyColorService", () => {
     await colors.release("orchestrator:fleet");
 
     await expect(colors.assign("orchestrator:workspace:/repo")).resolves.toBe(1);
+  });
+});
+
+describe("CustodyColorService reconciliation", () => {
+  async function primed(table: Parameters<typeof CustodyColorTableSchema.parse>[0]) {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-custody-service-"));
+    directories.push(directory);
+    const store = new CustodyColorStore(directory);
+    await store.write(CustodyColorTableSchema.parse(table));
+    return store;
+  }
+
+  it("reclaims a slot on load when its holder has no live binding", async () => {
+    const store = await primed([{ slot: 0, controllerId: "orchestrator:dead", assignedAt: at(0) }]);
+
+    const colors = new CustodyColorService({
+      store,
+      orchestratorBindings: { list: async () => [] },
+      now: () => at(1_000),
+    });
+
+    const table = await colors.table();
+    expect(table[0]).toMatchObject({ slot: 0, releasedAt: at(1_000) });
+  });
+
+  it("never reclaims a slot from a controller with a live binding", async () => {
+    const store = await primed([{ slot: 0, controllerId: "orchestrator:fleet", assignedAt: at(0) }]);
+
+    const colors = new CustodyColorService({
+      store,
+      orchestratorBindings: { list: async () => [{ key: "fleet" }] },
+      now: () => at(1_000),
+    });
+
+    const table = await colors.table();
+    expect(table[0]?.releasedAt).toBeUndefined();
+  });
+
+  it("presents a reclaimed slot as faded rather than dropping it to neutral", async () => {
+    const store = await primed([{ slot: 0, controllerId: "orchestrator:dead", assignedAt: at(0) }]);
+    const colors = new CustodyColorService({
+      store,
+      orchestratorBindings: { list: async () => [] },
+      now: () => at(1_000),
+    });
+    const table = await colors.table();
+
+    const [view] = fleetWorkerCoordinationView(
+      [worker({ controllerId: "orchestrator:dead", state: "released", endedAt: at(1_000) })],
+      { custodyColors: table, now: at(2_000) },
+    );
+
+    expect(view?.custodyColor).toEqual({ slot: 0, intensity: "faded" });
+  });
+
+  it("recovers allocation after every slot was leaked by dead peers", async () => {
+    const store = await primed(
+      Array.from({ length: CUSTODY_COLOR_SLOT_COUNT }, (_, slot) => ({
+        slot,
+        controllerId: `orchestrator:workspace:/repo/${slot}`,
+        assignedAt: at(0),
+      })),
+    );
+
+    const colors = new CustodyColorService({
+      store,
+      orchestratorBindings: { list: async () => [] },
+      now: () => at(1_000),
+    });
+
+    await expect(colors.assign("orchestrator:newcomer")).resolves.toBeDefined();
   });
 });
 

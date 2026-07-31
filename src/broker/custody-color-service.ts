@@ -1,8 +1,10 @@
 import {
   allocateCustodyColorSlot,
+  reconcileCustodyColorTable,
   releaseCustodyColorSlot,
   type CustodyColorTable,
 } from "../domain/custody-color.js";
+import { orchestratorControllerId } from "../domain/orchestrator.js";
 import type { OwnershipSubject } from "../domain/worker-coordination.js";
 import type { CustodyColorStore } from "../persistence/custody-color-store.js";
 
@@ -10,10 +12,19 @@ export interface CustodyColorSubjects {
   listSubjects(): OwnershipSubject[];
 }
 
+export interface CustodyColorLiveBindings {
+  list(): Promise<readonly { key: string }[]>;
+}
+
 export interface CustodyColorServiceOptions {
   store: CustodyColorStore;
   /** Fading workers make a slot unavailable, so allocation has to see live subjects. */
   subjects?: CustodyColorSubjects;
+  /**
+   * Live orchestrator bindings, checked once on load to reclaim a slot whose holder crashed
+   * or was SIGKILLed rather than released gracefully. Absent in tests that do not care.
+   */
+  orchestratorBindings?: CustodyColorLiveBindings;
   now?: () => string;
 }
 
@@ -31,8 +42,19 @@ export class CustodyColorService {
   constructor(private readonly options: CustodyColorServiceOptions) {}
 
   async table(): Promise<CustodyColorTable> {
-    if (this.cached === undefined) this.cached = await this.options.store.read();
+    if (this.cached === undefined) this.cached = await this.load();
     return this.cached;
+  }
+
+  private async load(): Promise<CustodyColorTable> {
+    const table = await this.options.store.read();
+    if (this.options.orchestratorBindings === undefined) return table;
+    const live = new Set(
+      (await this.options.orchestratorBindings.list())
+        .map((binding) => orchestratorControllerId(binding.key)),
+    );
+    const reconciled = reconcileCustodyColorTable(table, live, this.now());
+    return reconciled === table ? table : await this.options.store.write(reconciled);
   }
 
   /** The spawning orchestrator's slot, or `undefined` when six live orchestrators already hold them. */
