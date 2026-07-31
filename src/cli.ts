@@ -57,7 +57,8 @@ import {
 } from "./nvim/layout-hook.js";
 import { CYBERDECK_VERSION } from "./version.js";
 import { resolveLaunchConversationId, runMcpServer } from "./mcp/server.js";
-import { chooseWorkingDirectory } from "./tmux/cwd-navigator.js";
+import { openInteractiveShell } from "./tmux/interactive-shell.js";
+import { runShellCommand } from "./runtime/shell-command.js";
 import { pruneLegacyTranscript as pruneLegacyTranscriptFile } from "./persistence/thread-transcript-store.js";
 import type { ScoutEgressStatus } from "./persistence/scout-egress-grant-store.js";
 import type {
@@ -284,7 +285,8 @@ async function runCyberdeck(): Promise<void> {
     hookPath: process.env.PATH,
   });
   await runFleet(client, process.stdin, process.stdout, process, {
-    changeDirectory: chooseWorkingDirectory,
+    changeDirectory: openInteractiveShell,
+    runShellCommand,
     detachIdentity: `operator:${process.getuid?.() ?? "local"}`,
     openOrchestrator: (target) => openFleetCockpit(target, {
       preflight: () => preflightCockpit(),

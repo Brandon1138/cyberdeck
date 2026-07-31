@@ -29,6 +29,7 @@ import {
   type ProviderPermissionPreferences,
 } from "../persistence/provider-permission-preference-store.js";
 import { conversationPreview } from "../runtime/conversation-preview.js";
+import type { ShellCommandResult } from "../runtime/shell-command.js";
 import { providerTerminalActivity, stripTerminalControl } from "../runtime/terminal-replay.js";
 import { attachSession, type AttachTransport } from "./attach.js";
 import {
@@ -178,6 +179,24 @@ export interface ProjectPromptState {
   parentOffer?: { root: string; toplevel: string } | undefined;
 }
 
+/**
+ * The composer running the operator's own shell rather than dispatching work.
+ *
+ * Lines run through `$SHELL -lc` in Fleet's spawn cwd, with the operator's full privileges and no
+ * allowlist between them and it — that is the point of the mode, not an oversight. `cd` persists
+ * because each line reports where the shell ended up and Fleet adopts it.
+ */
+export interface ShellModeState {
+  draft: string;
+  /**
+   * Rendered output, oldest first. The last element is the line the shell has not finished writing
+   * yet, so a chunk that arrives mid-line extends it rather than starting a new row.
+   */
+  transcript: readonly string[];
+  /** Set while a line is in flight. Nothing may be typed into a shell that is still answering. */
+  running?: boolean | undefined;
+}
+
 export type FleetNoticeTone = "neutral" | "warning" | "error" | "confirmation";
 
 export interface FleetState {
@@ -222,6 +241,8 @@ export interface FleetState {
   rename?: RenameState | undefined;
   /** Set while the operator is naming a repository to register as a project. */
   projectPrompt?: ProjectPromptState | undefined;
+  /** Set while the composer is a shell rather than a task line. Entered with `!`, left with esc. */
+  shellMode?: ShellModeState | undefined;
   notice?: string | undefined;
   noticeTone?: FleetNoticeTone | undefined;
 }
@@ -264,6 +285,7 @@ export type FleetAction =
     previousPolicy: ProviderPermissionPolicy;
   }
   | { type: "change-directory"; cwd: string }
+  | { type: "shell-run"; command: string; cwd: string }
   | { type: "project-add"; path: string; acceptParent?: boolean | undefined }
   | { type: "project-remove"; root: string }
   | { type: "project-complete"; draft: string }
@@ -332,6 +354,12 @@ interface SlashCommandValue {
 
 export interface FleetRuntimeOptions {
   changeDirectory?: ((cwd: string) => Promise<string | undefined>) | undefined;
+  /** Runs one `!` line. Output arrives through `onOutput` as the shell writes it. */
+  runShellCommand?: ((request: {
+    command: string;
+    cwd: string;
+    onOutput: (chunk: string) => void;
+  }) => Promise<ShellCommandResult>) | undefined;
   detachIdentity?: string | undefined;
   openOrchestrator?: ((target: OrchestratorCockpitTarget) => Promise<SessionRecord>) | undefined;
   /** Opens a worker's worktree in the nvim already running in Fleet's tmux window. */
@@ -749,6 +777,10 @@ export function transitionFleet(
     return transitionProjectPrompt(state, snapshot, key);
   }
 
+  if (state.shellMode !== undefined) {
+    return transitionShellMode(state, snapshot, key);
+  }
+
   if (state.workerPicker !== undefined) {
     return transitionWorkerPicker(state, key);
   }
@@ -1088,6 +1120,18 @@ export function transitionFleet(
   if (key === "@" && state.draft === "" && selected !== undefined) {
     const reference = (selected.record.name ?? selected.record.id.slice(0, 8)).replace(/\s+/gu, "-");
     return { state: { ...state, draft: `@${reference} `, notice: undefined } };
+  }
+  // `!` is a shell only on an empty composer, exactly as `/` is a command palette only there: mid
+  // draft it is the character the operator typed, and a task line may well contain one.
+  if (key === "!" && state.draft === "") {
+    return {
+      state: {
+        ...state,
+        shellMode: { draft: "", transcript: [] },
+        helpOpen: false,
+        notice: undefined,
+      },
+    };
   }
   if (key === "/" && state.draft === "") {
     return {
@@ -1668,6 +1712,90 @@ function transitionProjectPrompt(
   return { state };
 }
 
+/**
+ * The composer while it is a shell. Enter runs the line where Fleet would spawn an agent, esc puts
+ * the composer back to dispatching work and drops the transcript with it.
+ */
+function transitionShellMode(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  key: string,
+): FleetTransition {
+  const shell = state.shellMode!;
+  if (key === "escape") {
+    return { state: { ...state, shellMode: undefined, notice: undefined } };
+  }
+  // A line already in flight owns the shell. Typing into it would edit a draft the operator cannot
+  // see the effect of, and Enter would race two commands into one cwd.
+  if (shell.running === true) return { state };
+  if (key === "enter") {
+    const command = shell.draft.trim();
+    if (command === "") return { state };
+    return {
+      state: {
+        ...state,
+        shellMode: {
+          draft: "",
+          running: true,
+          // The echoed line, then the open row its output extends.
+          transcript: [...capShellTranscript(shell.transcript), `! ${command}`, ""],
+        },
+        notice: undefined,
+      },
+      action: { type: "shell-run", command, cwd: composerCwd(state, snapshot) },
+    };
+  }
+  if (key === "ctrl+j" || key === "alt+enter" || key === "shift+enter") {
+    return { state: { ...state, shellMode: { ...shell, draft: `${shell.draft}\n` }, notice: undefined } };
+  }
+  if (key === "backspace") {
+    return {
+      state: {
+        ...state,
+        shellMode: { ...shell, draft: [...shell.draft].slice(0, -1).join("") },
+        notice: undefined,
+      },
+    };
+  }
+  if ([...key].length === 1 && key.charCodeAt(0) >= 0x20) {
+    return {
+      state: { ...state, shellMode: { ...shell, draft: `${shell.draft}${key}` }, notice: undefined },
+    };
+  }
+  return { state };
+}
+
+/** How much shell output Fleet keeps. Older rows are dropped from the top, never from the tail. */
+const SHELL_TRANSCRIPT_LINES = 500;
+
+function capShellTranscript(transcript: readonly string[]): readonly string[] {
+  return transcript.length <= SHELL_TRANSCRIPT_LINES
+    ? transcript
+    : transcript.slice(transcript.length - SHELL_TRANSCRIPT_LINES);
+}
+
+/**
+ * Folds one chunk of shell output into the transcript. The last element is the row the shell has
+ * left open, so a chunk that does not begin at a line boundary extends it rather than starting a
+ * new one — output arrives in whatever sizes the pipe hands over, not in lines.
+ */
+export function appendShellOutput(
+  transcript: readonly string[],
+  chunk: string,
+): readonly string[] {
+  const text = stripTerminalControl(chunk)
+    .replace(/\r\n/gu, "\n")
+    .replace(/\r/gu, "\n")
+    .replace(/\t/gu, "  ")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, "");
+  if (text === "") return transcript;
+  const segments = text.split("\n");
+  const lines = transcript.length === 0 ? [""] : [...transcript];
+  lines[lines.length - 1] = `${lines[lines.length - 1] ?? ""}${segments[0] ?? ""}`;
+  for (const segment of segments.slice(1)) lines.push(segment);
+  return capShellTranscript(lines);
+}
+
 function transitionWorkerPicker(state: FleetState, key: string): FleetTransition {
   const picker = state.workerPicker!;
   if (key === "escape") {
@@ -1789,6 +1917,14 @@ function renderFleetList(
   const footer = renderFleetFooter(snapshot, state, options);
   const bodyHeight = Math.max(0, options.height - footer.length);
   const threadListViewportHeight = Math.max(0, bodyHeight - header.length);
+  // Shell output takes the list's room while the mode is on. It is the only thing the operator is
+  // reading, it is the one surface long enough to hold a `git log`, and esc gives the fleet back.
+  if (state.shellMode !== undefined) {
+    const transcript = renderShellTranscript(state.shellMode, threadListViewportHeight, options);
+    const shellBody = [...header.slice(0, bodyHeight), ...transcript];
+    while (shellBody.length < bodyHeight) shellBody.push("");
+    return [...shellBody, ...footer].join("\n");
+  }
   const rows = fleetListRows(snapshot, state);
   // Same bargain as the pull-request column: a fleet whose leases are all healthy — or whose
   // groups all rolled up — never pays for the column, and it is only as wide as it must be.
@@ -1880,6 +2016,33 @@ function renderFleetList(
   return [...body, ...footer].join("\n");
 }
 
+/**
+ * The tail of the shell transcript, anchored to the bottom: the newest output is the output the
+ * operator is waiting for, so a command that overruns the pane scrolls off the top, never the end.
+ * An open final row that is still empty is not shown — it is the shell's cursor, not a blank line.
+ */
+function renderShellTranscript(
+  shell: ShellModeState,
+  viewportHeight: number,
+  options: ResolvedFleetRenderOptions,
+): string[] {
+  if (viewportHeight <= 0) return [];
+  const lines = shell.transcript.at(-1) === ""
+    ? shell.transcript.slice(0, -1)
+    : shell.transcript;
+  if (lines.length === 0) {
+    return [paint(fit("No output yet.", options.width), "dim", options.color)];
+  }
+  return lines
+    .slice(Math.max(0, lines.length - viewportHeight))
+    .map((line) => clampRowWidth(
+      line.startsWith("! ")
+        ? `${paint("!", "red", options.color)}${line.slice(1)}`
+        : line,
+      options.width,
+    ));
+}
+
 function renderFleetFooter(
   snapshot: FleetSnapshot,
   state: FleetState,
@@ -1894,11 +2057,17 @@ function renderFleetFooter(
   const cwd = composerCwd(state, snapshot);
   const profile = state.launchProfiles[cwd];
   const composerLines = renderComposerLines(
-    state.rename?.draft ?? state.projectPrompt?.draft ?? state.draft,
-    state.rename !== undefined ? "rename" : state.projectPrompt !== undefined ? "project" : "task",
+    state.rename?.draft ?? state.projectPrompt?.draft ?? state.shellMode?.draft ?? state.draft,
+    state.rename !== undefined
+      ? "rename"
+      : state.projectPrompt !== undefined
+        ? "project"
+        : state.shellMode !== undefined ? "shell" : "task",
     options,
   );
-  const launchContext = profile === undefined
+  const launchContext = state.shellMode !== undefined
+    ? `▶ ${shellName()} -lc${state.shellMode.running === true ? " · running" : ""} · cwd ${shortPath(cwd, options.home)} · enter runs · esc leaves`
+    : profile === undefined
     ? `▶ /model required · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+g change`
     : `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+g change`;
   const helpLines = state.helpOpen === true
@@ -1914,6 +2083,12 @@ function renderFleetFooter(
     paint(fit(`↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
   ];
   return footer;
+}
+
+/** What `!` mode runs the operator's lines through, named so the footer is never a guess. */
+function shellName(): string {
+  const shell = process.env.SHELL;
+  return shell === undefined || shell === "" ? "shell" : basename(shell);
 }
 
 function renderHeader(
@@ -1963,7 +2138,7 @@ function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
     "pgup/dn page", "ctrl+u/d half", "home/end", "shift+↑↓ reorder", "←→ fold project",
     "a add project", "d remove project", "ctrl+s switch views",
     "@ mention", "alt+1–9 open", "esc back/clear",
-    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim", "ctrl+g cwd", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
+    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim", "! shell", "ctrl+g shell popup", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
   ];
   // Wrapping by a count rather than fixed slices is what keeps the last row from silently
   // swallowing every entry added since: a new shortcut costs a row, never another key's visibility.
@@ -2865,6 +3040,46 @@ export async function runFleet(
             : undefined,
           noticeTone: "neutral",
         };
+      } else if (action?.type === "shell-run") {
+        if (runtime.runShellCommand === undefined) {
+          throw new Error("Shell mode is unavailable in this Fleet client");
+        }
+        const result = await runtime.runShellCommand({
+          command: action.command,
+          cwd: action.cwd,
+          // Output is folded into the transcript as it arrives and the frame is woken for each
+          // chunk, so a slow command shows its progress rather than landing all at once.
+          onOutput: (chunk) => {
+            const shell = state.shellMode;
+            if (shell === undefined) return;
+            state = {
+              ...state,
+              shellMode: { ...shell, transcript: appendShellOutput(shell.transcript, chunk) },
+            };
+            notify();
+          },
+        });
+        const shell = state.shellMode;
+        state = {
+          ...state,
+          // A `cd` only persists because the shell says where it ended up; when it says nothing,
+          // Fleet stays exactly where it was.
+          ...(result.cwd === undefined ? {} : { workingDirectory: result.cwd }),
+          ...(shell === undefined ? {} : {
+            shellMode: {
+              ...shell,
+              running: false,
+              // A failing line says so on a row of its own, whether or not its output ended on a
+              // line boundary. A status nobody prints is a status nobody notices.
+              transcript: result.exitStatus === 0
+                ? shell.transcript
+                : appendShellOutput(
+                    shell.transcript,
+                    `${(shell.transcript.at(-1) ?? "") === "" ? "" : "\n"}exit ${result.exitStatus}\n`,
+                  ),
+            },
+          }),
+        };
       } else if (action?.type === "change-directory") {
         if (runtime.changeDirectory === undefined) {
           throw new Error("Working-directory navigation is unavailable in this client");
@@ -2887,6 +3102,7 @@ export async function runFleet(
         && action.type !== "open-orchestrator"
         && action.type !== "create-orchestrator"
         && action.type !== "change-directory"
+        && action.type !== "shell-run"
         && action.type !== "permission-policy"
         && action.type !== "folder-disposition"
         && action.type !== "nvim-layout"
@@ -2905,6 +3121,10 @@ export async function runFleet(
         ...(action?.type === "start" ? { draft: action.request.initialPrompt } : {}),
         // A rejected path is almost always a typo, so the prompt comes back with it still in hand.
         ...(action?.type === "project-add" ? { projectPrompt: { draft: action.path } } : {}),
+        // A shell that could not be run is still a shell the operator is standing in.
+        ...(action?.type === "shell-run" && state.shellMode !== undefined
+          ? { shellMode: { ...state.shellMode, running: false } }
+          : {}),
         ...(action?.type === "permission-policy"
           ? {
               permissionPolicies: {
@@ -4040,13 +4260,26 @@ function renderNotice(
   return value;
 }
 
-/** What the composer row is collecting: a task to dispatch, a new thread name, or a project path. */
-type ComposerMode = "task" | "rename" | "project";
+/**
+ * What the composer row is collecting: a task to dispatch, a new thread name, a project path, or a
+ * shell line.
+ */
+type ComposerMode = "task" | "rename" | "project" | "shell";
 
-const COMPOSER_PROMPTS: Readonly<Record<ComposerMode, { prefix: string; placeholder: string }>> = {
+/**
+ * Shell mode announces itself with a red `!` and nothing else — no border, no frame. The prefix is
+ * painted after the row's width is measured, because escape sequences cost no columns and counting
+ * them would shorten every wrap.
+ */
+const COMPOSER_PROMPTS: Readonly<Record<ComposerMode, {
+  prefix: string;
+  placeholder: string;
+  tone?: keyof typeof ANSI;
+}>> = {
   task: { prefix: "›", placeholder: "Describe a task for a new session" },
   rename: { prefix: "Rename ›", placeholder: "Rename thread" },
   project: { prefix: "Project ›", placeholder: "Repository path · tab completes · enter registers" },
+  shell: { prefix: "!", placeholder: "Run a shell command · enter runs · esc leaves", tone: "red" },
 };
 
 function renderComposerLines(
@@ -4055,8 +4288,11 @@ function renderComposerLines(
   options: ResolvedFleetRenderOptions,
 ): string[] {
   const prompt = COMPOSER_PROMPTS[mode];
+  const paintedPrefix = prompt.tone === undefined
+    ? prompt.prefix
+    : paint(prompt.prefix, prompt.tone, options.color);
   if (value === "") {
-    return [`${prompt.prefix} ${paint(prompt.placeholder, "dim", options.color)}`];
+    return [`${paintedPrefix} ${paint(prompt.placeholder, "dim", options.color)}`];
   }
 
   const rows: string[] = [];
@@ -4065,10 +4301,11 @@ function renderComposerLines(
     const characters = [...logicalLine];
     let offset = 0;
     do {
-      const prefix = rows.length === 0 ? `${prompt.prefix} ` : "  ";
+      const leading = rows.length === 0;
+      const prefix = leading ? `${prompt.prefix} ` : "  ";
       const capacity = Math.max(1, options.width - [...prefix].length - 1);
       const segment = characters.slice(offset, offset + capacity).join("");
-      rows.push(`${prefix}${segment}`);
+      rows.push(`${leading ? `${paintedPrefix} ` : "  "}${segment}`);
       offset += capacity;
     } while (offset < characters.length);
   }
