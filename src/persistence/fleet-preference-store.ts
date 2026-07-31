@@ -18,6 +18,7 @@ export const FleetFolderDispositionSchema = z.object({
 });
 
 export const FLEET_NVIM_LAYOUT_KEY = "/@nvim-layout";
+export const FLEET_PROJECT_MIGRATION_KEY = "/@project-migration";
 
 const FleetLaunchProfileRecordSchema = z.object({
   recordType: z.literal("fleet.launch-profile"),
@@ -56,10 +57,39 @@ const FleetNvimLayoutRecordSchema = z.object({
   enabled: z.boolean(),
 });
 
+/**
+ * A repository the operator calls a project of their own.
+ *
+ * The registry is what the Fleet list groups by, so it has to remember removals as loudly as it
+ * remembers additions: a root that only ever appeared as an absence would be re-added by the next
+ * seeding pass. `registered: false` is therefore a record in its own right rather than a deletion.
+ */
+const FleetProjectRecordSchema = z.object({
+  recordType: z.literal("fleet.project"),
+  eventId: z.uuid(),
+  persistedAt: z.iso.datetime(),
+  root: z.string().startsWith("/"),
+  registered: z.boolean(),
+});
+
+/**
+ * The seeding pass has run. It is a record rather than a computed condition because "the registry
+ * is empty" and "the registry has never been seeded" are different states with different answers,
+ * and only the second one may scan.
+ */
+const FleetProjectMigrationRecordSchema = z.object({
+  recordType: z.literal("fleet.project-migration"),
+  eventId: z.uuid(),
+  persistedAt: z.iso.datetime(),
+  key: z.literal(FLEET_PROJECT_MIGRATION_KEY),
+});
+
 const FleetPreferenceRecordSchema = z.discriminatedUnion("recordType", [
   FleetLaunchProfileRecordSchema,
   FleetFolderDispositionRecordSchema,
   FleetNvimLayoutRecordSchema,
+  FleetProjectRecordSchema,
+  FleetProjectMigrationRecordSchema,
 ]);
 
 type FleetPreferenceRecord = z.infer<typeof FleetPreferenceRecordSchema>;
@@ -102,6 +132,46 @@ export class FleetPreferenceStore {
       key: FLEET_NVIM_LAYOUT_KEY,
       enabled,
     }));
+  }
+
+  async setProject(root: string, registered: boolean): Promise<void> {
+    await this.append(FleetPreferenceRecordSchema.parse({
+      recordType: "fleet.project",
+      eventId: randomUUID(),
+      persistedAt: new Date().toISOString(),
+      root,
+      registered,
+    }));
+  }
+
+  async completeProjectMigration(): Promise<void> {
+    await this.append(FleetPreferenceRecordSchema.parse({
+      recordType: "fleet.project-migration",
+      eventId: randomUUID(),
+      persistedAt: new Date().toISOString(),
+      key: FLEET_PROJECT_MIGRATION_KEY,
+    }));
+  }
+
+  /** Registered roots, alphabetically — the order the Fleet list renders its sections in. */
+  async listProjects(): Promise<string[]> {
+    return [...(await this.projectDispositions()).entries()]
+      .filter(([, registered]) => registered)
+      .map(([root]) => root)
+      .sort((left, right) => left.localeCompare(right));
+  }
+
+  /** Every root the registry has an opinion about, registered or explicitly removed. */
+  async projectDispositions(): Promise<Map<string, boolean>> {
+    const dispositions = new Map<string, boolean>();
+    for (const record of await this.load()) {
+      if (record.recordType === "fleet.project") dispositions.set(record.root, record.registered);
+    }
+    return dispositions;
+  }
+
+  async projectMigrationCompleted(): Promise<boolean> {
+    return (await this.load()).some((record) => record.recordType === "fleet.project-migration");
   }
 
   async list(): Promise<Record<string, FleetLaunchProfile>> {

@@ -99,6 +99,62 @@ describe("FleetPreferenceStore", () => {
     await expect(store.nvimLayoutEnabled()).resolves.toBe(true);
   });
 
+  it("keeps the latest registration for each project root", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-"));
+    directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+
+    await store.setProject("/code/soma", true);
+    await store.setProject("/code/ammo", true);
+    await store.setProject("/code/soma", false);
+    await store.setProject("/code/soma", true);
+
+    await expect(store.listProjects()).resolves.toEqual(["/code/ammo", "/code/soma"]);
+  });
+
+  it("remembers a removed root as an explicit absence rather than forgetting it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-"));
+    directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+
+    await store.setProject("/code/soma", true);
+    await store.setProject("/code/soma", false);
+
+    await expect(store.listProjects()).resolves.toEqual([]);
+    // The difference that matters to seeding: removed is not the same as never seen.
+    await expect(store.projectDispositions()).resolves.toEqual(new Map([["/code/soma", false]]));
+  });
+
+  it("records that the seeding pass has run, separately from what it found", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-"));
+    directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+
+    await expect(store.projectMigrationCompleted()).resolves.toBe(false);
+    await store.completeProjectMigration();
+
+    await expect(store.projectMigrationCompleted()).resolves.toBe(true);
+    await expect(store.listProjects()).resolves.toEqual([]);
+  });
+
+  it("reads projects out of a file that also holds every other preference kind", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-"));
+    directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+
+    await store.set("/code/soma", { provider: "codex", model: "gpt-5.6-sol" });
+    await store.setProject("/code/soma", true);
+    await store.setFolderDisposition("/@orcs", { collapsed: true, expanded: false });
+    await store.setNvimLayout(false);
+    await store.completeProjectMigration();
+
+    await expect(store.listProjects()).resolves.toEqual(["/code/soma"]);
+    await expect(store.nvimLayoutEnabled()).resolves.toBe(false);
+    await expect(store.listFolderDispositions()).resolves.toEqual({
+      "/@orcs": { collapsed: true, expanded: false },
+    });
+  });
+
   it("refuses a file with a malformed line rather than silently dropping preferences", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-"));
     directories.push(directory);

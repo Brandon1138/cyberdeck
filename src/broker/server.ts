@@ -23,6 +23,7 @@ import {
   FleetDetachIdentitySchema,
   type FleetDetachStore,
 } from "../persistence/fleet-detach-store.js";
+import type { FleetProjectService } from "./fleet-project-service.js";
 import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type RequestFrame } from "../protocol/frames.js";
 import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
 import { NvimBindParamsSchema, type NvimBindingService } from "./nvim-binding-service.js";
@@ -124,6 +125,8 @@ export interface BrokerServerOptions {
   controlPlaneRuntime?: Pick<ControlPlaneRuntime, "lastReconciliation">;
   fleetDetaches?: FleetDetachStore;
   fleetPreferences?: FleetPreferenceStore;
+  /** Which repositories the operator calls projects. The Fleet list groups by these. */
+  fleetProjects?: FleetProjectService;
   workerPreferences?: WorkerPreferenceStore;
   scoutEgress?: Pick<ScoutEgressGrantStore, "set" | "status">;
   /** Custody hues, and the bindings that say which orchestrator session wears each one. */
@@ -501,6 +504,22 @@ export class BrokerServer {
         await this.requireFleetPreferences().setNvimLayout(enabled);
         return { saved: true };
       }
+      // The registry is resolved through git here rather than in the client: only the broker is
+      // guaranteed to be running beside the repositories, and a path is not a project until git
+      // agrees it is a repository root.
+      case "fleet.projects":
+        return this.requireFleetProjects().list();
+      case "fleet.project.add": {
+        const request = z.object({
+          path: z.string().startsWith("/"),
+          acceptParent: z.boolean().optional(),
+        }).parse(frame.params);
+        return this.requireFleetProjects().add(request);
+      }
+      case "fleet.project.remove": {
+        const request = z.object({ path: z.string().startsWith("/") }).parse(frame.params);
+        return this.requireFleetProjects().remove(request);
+      }
       case "session.submit": {
         const { sessionId, message } = SubmitParamsSchema.parse(frame.params);
         if (context.attachments.get(sessionId)?.mode === "watch") {
@@ -701,6 +720,15 @@ export class BrokerServer {
       throw Object.assign(new Error("Fleet preferences are not available"), { code: "METHOD_NOT_FOUND" });
     }
     return this.options.fleetPreferences;
+  }
+
+  private requireFleetProjects(): FleetProjectService {
+    if (this.options.fleetProjects === undefined) {
+      throw Object.assign(new Error("Fleet project registry is not available"), {
+        code: "METHOD_NOT_FOUND",
+      });
+    }
+    return this.options.fleetProjects;
   }
 
   private requireFleetDetaches(): FleetDetachStore {

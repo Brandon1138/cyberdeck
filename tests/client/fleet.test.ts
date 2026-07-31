@@ -1620,12 +1620,18 @@ describe("fleet controls", () => {
     });
   });
 
-  it("uses Ctrl+G for cwd navigation while leaving Tab unbound", () => {
+  it("uses Ctrl+G for cwd navigation and leaves Tab inert outside the project prompt", () => {
     const decoder = new FleetKeyDecoder();
     expect(decoder.push(Buffer.from([0x07]))).toEqual(["ctrl+g"]);
-    expect(decoder.push(Buffer.from([0x09]))).toEqual([]);
+    // Tab is named so the project prompt can complete with it. Everywhere else it does nothing,
+    // and it is never told apart from Ctrl+I, which sends the same byte.
+    expect(decoder.push(Buffer.from([0x09]))).toEqual(["tab"]);
 
     const snapshot = fleet({ record: session({ cwd: "/repo/one" }) });
+    const inert = transitionFleet(createFleetState(snapshot), snapshot, "tab", NOW_MS);
+    expect(inert.action).toBeUndefined();
+    expect(inert.state.draft).toBe("");
+    expect(inert.state.projectPrompt).toBeUndefined();
     expect(transitionFleet(createFleetState(snapshot), snapshot, "ctrl+g", NOW_MS).action).toEqual({
       type: "change-directory",
       cwd: "/repo/one",
