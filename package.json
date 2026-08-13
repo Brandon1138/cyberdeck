@@ -51,6 +51,7 @@
     "pretest": "pnpm run postinstall",
     "test": "vitest run",
     "test:watch": "vitest",
+    "release:alpha": "node scripts/release-alpha.mjs",
     "probe": "tsx scripts/probe-runtimes.ts",
     "gate:live-codex": "tsx scripts/run-live-codex-gate.ts",
     "dev": "tsx src/cli.ts",
