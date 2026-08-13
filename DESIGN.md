@@ -252,8 +252,8 @@ The composer is a stable five-row footer while empty and expands upward as the d
 ────────────────────────────────────────────────────────────────
 › Describe a task for a new session
 ────────────────────────────────────────────────────────────────
-▶ Claude Opus · high · read-only · cwd ~/code/personal/mikoshi · ctrl+g change
-enter open/start · ctrl+g cwd · space reply · /model configure · ? shortcuts
+▶ Claude Opus · high · read-only · cwd ~/code/personal/mikoshi · ctrl+s change
+enter open/start · ctrl+s cwd · space reply · /model configure · ? shortcuts
 ```
 
 - Empty composer plus `Enter` opens the selected thread. Nonempty composer plus `Enter` starts a new worker with the visible model, effort, sandbox, and project context.
@@ -261,7 +261,7 @@ enter open/start · ctrl+g cwd · space reply · /model configure · ? shortcuts
 - The full draft remains intact when earlier rows leave the visible composer, and the cursor stays on the final visible wrapped row.
 - `Space` from an empty composer enters reply mode for the selected thread. Reply mode names its target and does not change the new-worker configuration.
 - `Ctrl+J` inserts a newline. `Esc` leaves reply, rename, or picker mode before it can clear a draft; from the base view it does nothing and never exits Fleet.
-- `Ctrl+G` opens a tmux-native, zsh-first working-directory navigator at the draft cwd. Tab remains unbound in Fleet and retains its native shell-completion role inside the popup. Empty Enter confirms; Ctrl-C cancels.
+- `Ctrl+S` opens a tmux-native, zsh-first working-directory navigator at the draft cwd. Tab remains unbound in Fleet and retains its native shell-completion role inside the popup. Empty Enter confirms; Ctrl-C cancels.
 - The navigator accepts only `cd [directory]`, `cd ..`, `cd -`, and `z <terms>`. It loads the user's trusted zsh startup/completion code, but typed non-navigation commands, chains, pipes, redirects, backgrounding, and command/process substitution are never executed.
 - If no explicit new-worker model has been selected, the context line reads `▶ /model required · read-only · <project>`, and submission opens the picker instead of starting anything.
 - Persist the last explicit model and effort per project. Selecting a thread never silently rewrites this configuration.
@@ -282,13 +282,13 @@ If a provider exposes no effort control, show a single `Provider managed` choice
 Pressing `?` with an empty composer expands a help panel in the footer. Pressing `?` again closes it. Within a nonempty draft, `?` remains literal input.
 
 ```text
-shift+↑↓ reorder   ←→ fold project   ctrl+s switch views   @ mention   alt+1–9 open
-esc back/clear     ctrl+r rename     ctrl+j newline        ctrl+g cwd  ctrl+t pin to top   ctrl+x stop   ? close
+shift+↑↓ reorder   ←→ fold project   ctrl+w switch views   @ mention   alt+1–9 open
+esc back/clear     ctrl+r rename     ctrl+j newline        ctrl+s cwd  ctrl+t pin to top   ctrl+x stop   ? close
 ```
 
 - `Shift+Up/Down` reorders the selected row within its project and persists the order.
 - `Left`/`Right` collapse and expand a focused project heading; `Enter` there toggles it. On a thread row `Right` opens the thread and `Left` does nothing.
-- `Ctrl+S` switches between Fleet and Diagnostics without changing provider state.
+- `Ctrl+W` switches between Fleet and Diagnostics without changing provider state.
 - `@` inserts a passive thread reference. Mentioning never wakes another agent.
 - `Alt+1` through `Alt+9` opens the corresponding visible thread.
 - `Ctrl+R` renames the selected thread inline and persists the title.

@@ -73,7 +73,7 @@ and a stale hook neither resizes nor prints when Fleet's pane is absent. **Trigg
 replacing that global symlink path while keeping a SIGKILL-surviving Fleet window. The fix is durable
 hook ownership and reconciliation, not a global tmux hook or another executable-path guess.
 
-### Ctrl+G only hands back a cwd when the login shell is zsh
+### Ctrl+S only hands back a cwd when the login shell is zsh
 
 `src/tmux/interactive-shell.ts` opens `$SHELL -li` in a `tmux display-popup` and learns where the
 operator ended up from a zsh `zshexit`/`chpwd` hook installed through a one-file `ZDOTDIR`. A popup

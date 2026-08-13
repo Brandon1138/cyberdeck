@@ -39,6 +39,13 @@ import {
 } from "./clipboard-image.js";
 import { collectDashboardSnapshot, renderDashboard } from "./dashboard.js";
 import {
+  OCTOPUS_MARK,
+  OCTOPUS_SPLASH,
+  pixelArtHeight,
+  pixelArtWidth,
+  renderPixelArt,
+} from "./octopus.js";
+import {
   custodyColorTone,
   leaseCustody,
   leaseCustodyBadge,
@@ -535,8 +542,8 @@ const ANSI = {
 
   // Semantic tokens.
 
-  /** Cyberdeck logo and wordmark. Reserved: no state may borrow the brand hue. */
-  brand: "\u001b[38;2;182;158;255m",
+  // The mark carries its own palette now — see `octopus.ts`, which holds the reservation the retired
+  // `brand` token used to: no state may borrow the hues the octopus is drawn in.
   /** A thread is blocked and wants the operator: needs input, or a prompt awaiting an answer. */
   attention: "\u001b[38;2;212;168;91m",
   /** A thread finished successfully and is waiting to be read. */
@@ -735,7 +742,7 @@ export function transitionFleet(
     ? undefined
     : threads.find(({ record }) => record.id === state.selectedSessionId);
 
-  if (key === "ctrl+s") {
+  if (key === "ctrl+w") {
     return {
       state: {
         ...state,
@@ -811,7 +818,9 @@ export function transitionFleet(
     return transitionOrchestratorPicker(state, snapshot, key);
   }
 
-  if (key === "ctrl+g") {
+  // Ctrl+S, not Ctrl+G: "s for shell" is the association the operator's hand actually makes, and it
+  // leaves Ctrl+G doing one coherent job — getting out of the `!` shell line — instead of three.
+  if (key === "ctrl+s") {
     return {
       state: { ...state, helpOpen: false, notice: undefined },
       action: { type: "change-directory", cwd: composerCwd(state, snapshot) },
@@ -1964,7 +1973,7 @@ function renderFleetList(
   // Every composed row is clamped to the pane, because a row wider than the pane is soft-wrapped
   // by the terminal into an orphaned fragment line the viewport never counted.
   const listLines = rows.length === 0
-    ? ["No durable agent threads yet."].slice(0, threadListViewportHeight)
+    ? renderEmptyFleet(threadListViewportHeight, options)
     : visibleRows.map((row, visibleIndex) => {
         const indicator = truncated
           ? threadListScrollbar(
@@ -2072,8 +2081,8 @@ function renderFleetFooter(
   const launchContext = state.shellMode !== undefined
     ? `▶ ${shellName()} -lc${state.shellMode.running === true ? " · running" : ""} · cwd ${shortPath(cwd, options.home)} · enter runs · ${state.shellMode.running === true ? "ctrl+g stops and leaves" : "esc or ctrl+g leaves"}`
     : profile === undefined
-    ? `▶ /model required · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+g change`
-    : `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+g change`;
+    ? `▶ /model required · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+s change`
+    : `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+s change`;
   const helpLines = state.helpOpen === true
     ? shortcutHelp(options.width, terminal && stopAcknowledged ? "delete" : "stop")
     : [];
@@ -2093,6 +2102,33 @@ function renderFleetFooter(
 function shellName(): string {
   const shell = process.env.SHELL;
   return shell === undefined || shell === "" ? "shell" : basename(shell);
+}
+
+/**
+ * The empty fleet: the octopus at full size, over the one line of copy that explains it.
+ *
+ * This is the only surface with room for the whole animal and the only moment nothing is competing
+ * for that room, which is the entire argument for spending it here. A viewport too short or too
+ * narrow drops the art whole and keeps the sentence — a cropped octopus reads as a rendering fault
+ * rather than as art, so there is no partial version of this.
+ */
+function renderEmptyFleet(
+  viewportHeight: number,
+  options: ResolvedFleetRenderOptions,
+): string[] {
+  const caption = "No durable agent threads yet.";
+  const width = pixelArtWidth(OCTOPUS_SPLASH);
+  const height = pixelArtHeight(OCTOPUS_SPLASH);
+  if (viewportHeight < height + 2 || options.width < width) {
+    return [caption].slice(0, viewportHeight);
+  }
+  const center = (span: number) => " ".repeat(Math.max(0, Math.floor((options.width - span) / 2)));
+  const indent = center(width);
+  return [
+    ...renderPixelArt(OCTOPUS_SPLASH, options.color).map((line) => `${indent}${line}`),
+    "",
+    `${center(caption.length)}${paint(caption, "dim", options.color)}`,
+  ];
 }
 
 function renderHeader(
@@ -2126,23 +2162,31 @@ function renderHeader(
   const context = orchestrator === undefined
     ? `No orchestrator · ctrl+o to choose · ${shortPath(state.fallbackCwd, options.home)}`
     : `${friendlyModel(orchestrator.provider, orchestrator.model)} · ${friendlyEffort(orchestrator.effort ?? "provider-managed")} · ${scope}`;
+  // The mark is taller than the three lines of text beside it. Eight pixel rows is the floor at
+  // which the octopus is still the octopus — below it the tentacles have nowhere to hang and the
+  // silhouette reads as a space invader — so the header is as tall as the animal, not the copy.
+  const showsMark = options.width >= 64;
+  const markWidth = pixelArtWidth(OCTOPUS_MARK);
+  const textWidth = Math.max(1, options.width - (showsMark ? markWidth + 2 : 0));
   const textLines = [
     paint("Cyberdeck", "bold", options.color),
-    paint(fit(context, Math.max(1, options.width - 10)), "dim", options.color),
-    paint(fit(counts, Math.max(1, options.width - 10)), "dim", options.color),
+    paint(fit(context, textWidth), "dim", options.color),
+    paint(fit(counts, textWidth), "dim", options.color),
   ];
-  if (options.width < 64) return textLines;
-  const logo = [" ▄████▄", "▟█▄██▄█▙", "▌▌▌▌▐▐▐▐"];
-  return textLines.map((line, index) =>
-    `${paint(pad(logo[index] ?? "", 8), "brand", options.color)}  ${line}`);
+  if (!showsMark) return textLines;
+  const mark = renderPixelArt(OCTOPUS_MARK, options.color);
+  return Array.from(
+    { length: Math.max(mark.length, textLines.length) },
+    (_, index) => `${mark[index] ?? " ".repeat(markWidth)}  ${textLines[index] ?? ""}`,
+  );
 }
 
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
     "pgup/dn page", "ctrl+u/d half", "home/end", "shift+↑↓ reorder", "←→ fold project",
-    "a add project", "d remove project", "ctrl+s switch views",
+    "a add project", "d remove project", "ctrl+w switch views",
     "@ mention", "alt+1–9 open", "esc back/clear",
-    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim", "! shell", "ctrl+g shell popup", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
+    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim", "! shell", "ctrl+s shell popup", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
   ];
   // Wrapping by a count rather than fixed slices is what keeps the last row from silently
   // swallowing every entry added since: a new shortcut costs a row, never another key's visibility.
@@ -3203,7 +3247,7 @@ export async function runFleet(
         const footer = [
           ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, width, output.isTTY === true)]),
           paint("─".repeat(width), "dim", output.isTTY === true),
-          "ctrl+s Fleet · ctrl+c twice to exit",
+          "ctrl+w Fleet · ctrl+c twice to exit",
         ];
         const body = diagnostics.slice(0, Math.max(0, height - footer.length));
         while (body.length < height - footer.length) body.push("");
@@ -3386,6 +3430,7 @@ export class FleetKeyDecoder {
     else if (code === 0x14) keys.push("ctrl+t");
     else if (code === 0x15) keys.push("ctrl+u");
     else if (code === 0x16) keys.push("ctrl+v");
+    else if (code === 0x17) keys.push("ctrl+w");
     else if (code === 0x18) keys.push("ctrl+x");
     else if (code === 0x1d) keys.push("ctrl+]");
     else if (code === 0x0d) keys.push("enter");

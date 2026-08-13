@@ -110,8 +110,12 @@ export async function openInteractiveShell(
       "90%",
       "-h",
       "85%",
+      // The title carries the way out. While the popup is up, Fleet's process is parked in this
+      // very call and tmux is routing the keyboard into the popup's pane, so no Fleet binding can
+      // reach Fleet to close it — the exit is the shell's own `exit`, and the title is the only
+      // surface that can say so.
       "-T",
-      "Cyberdeck · shell",
+      "Cyberdeck · shell · ctrl+d or exit to close",
       ...environment,
       shell,
       "-li",

@@ -14,6 +14,12 @@ import {
   type FleetSnapshot,
   type FleetState,
 } from "../../src/client/fleet.js";
+import {
+  OCTOPUS_MARK,
+  OCTOPUS_SPLASH,
+  pixelArtWidth,
+  renderPixelArt,
+} from "../../src/client/octopus.js";
 import type { PullRequestState } from "../../src/client/pr-status.js";
 import type { FleetWorkerCoordinationView } from "../../src/broker/worker-coordination-view.js";
 
@@ -1002,7 +1008,8 @@ describe("fleet presentation", () => {
   });
 
   it("renders no scrollbar and resets the effective offset when every row fits", () => {
-    // Five threads plus the folder header and its "Workers" heading fill the viewport exactly.
+    // Five threads plus the folder header and its "Workers" heading fill the viewport exactly —
+    // once the four-row header and the footer have taken their share of these seventeen rows.
     const exact = threadFleet(5);
     const exactState = {
       ...createFleetState(exact),
@@ -1011,7 +1018,7 @@ describe("fleet presentation", () => {
     const exactRendered = renderFleet(exact, exactState, {
       color: false,
       width: 100,
-      height: 16,
+      height: 17,
       now: NOW_MS,
     });
 
@@ -1146,6 +1153,47 @@ describe("fleet presentation", () => {
 
     expect(rendered).toContain("No durable agent threads yet.");
     expect(rendered).not.toMatch(/[│┃]/u);
+  });
+
+  it("gives an empty fleet the whole octopus, and drops it whole when the pane is short", () => {
+    const snapshot = fleet();
+    const state = createFleetState(snapshot);
+    const splash = renderPixelArt(OCTOPUS_SPLASH, false);
+
+    const tall = renderFleet(snapshot, state, {
+      color: false, width: 100, height: 40, now: NOW_MS,
+    });
+    for (const line of splash) expect(tall).toContain(line);
+    expect(tall).toContain("No durable agent threads yet.");
+
+    // Half an octopus reads as a rendering fault rather than as art, so there is no cropped
+    // version of it: a pane with no room keeps the sentence and nothing else.
+    const short = renderFleet(snapshot, state, {
+      color: false, width: 100, height: 16, now: NOW_MS,
+    });
+    expect(short).toContain("No durable agent threads yet.");
+    expect(short).not.toContain(splash[0]);
+  });
+
+  it("stands the header mark beside the header text, and drops it in a narrow pane", () => {
+    const snapshot = fleet({ record: session({ cwd: "/repo/one" }) });
+    const state = createFleetState(snapshot);
+    const mark = renderPixelArt(OCTOPUS_MARK, false);
+
+    const lines = renderFleet(snapshot, state, {
+      color: false, width: 100, height: 30, now: NOW_MS,
+    }).split("\n");
+    expect(lines.slice(0, mark.length).map((line) => line.slice(0, pixelArtWidth(OCTOPUS_MARK))))
+      .toEqual(mark);
+    expect(lines[0]).toContain("Cyberdeck");
+
+    // The mark is four rows to the text's three, so the header is as tall as the animal.
+    expect(lines[mark.length - 1]?.trim()).toBe(mark.at(-1)?.trim());
+
+    const narrow = renderFleet(snapshot, state, {
+      color: false, width: 60, height: 30, now: NOW_MS,
+    });
+    expect(narrow.split("\n")[0]).toBe("Cyberdeck");
   });
 
   it("reorders orcs as their activity changes while folder groups stay put", () => {
@@ -1296,7 +1344,7 @@ describe("fleet presentation", () => {
     const lines = rendered.split("\n");
     expect(lines.at(-4)).toBe("› Inspect the failure");
     expect(lines.at(-2)).toContain("▶ Claude Opus · high · read-only");
-    expect(lines.at(-2)).toContain("cwd ~/code/personal/cyberdeck · ctrl+g change");
+    expect(lines.at(-2)).toContain("cwd ~/code/personal/cyberdeck · ctrl+s change");
     expect(lines.at(-1)).toContain("enter open/start");
   });
 
@@ -1621,9 +1669,9 @@ describe("fleet controls", () => {
     });
   });
 
-  it("uses Ctrl+G for cwd navigation and leaves Tab inert outside the project prompt", () => {
+  it("uses Ctrl+S for cwd navigation and leaves Tab inert outside the project prompt", () => {
     const decoder = new FleetKeyDecoder();
-    expect(decoder.push(Buffer.from([0x07]))).toEqual(["ctrl+g"]);
+    expect(decoder.push(Buffer.from([0x13]))).toEqual(["ctrl+s"]);
     // Tab is named so the project prompt can complete with it. Everywhere else it does nothing,
     // and it is never told apart from Ctrl+I, which sends the same byte.
     expect(decoder.push(Buffer.from([0x09]))).toEqual(["tab"]);
@@ -1633,7 +1681,7 @@ describe("fleet controls", () => {
     expect(inert.action).toBeUndefined();
     expect(inert.state.draft).toBe("");
     expect(inert.state.projectPrompt).toBeUndefined();
-    expect(transitionFleet(createFleetState(snapshot), snapshot, "ctrl+g", NOW_MS).action).toEqual({
+    expect(transitionFleet(createFleetState(snapshot), snapshot, "ctrl+s", NOW_MS).action).toEqual({
       type: "change-directory",
       cwd: "/repo/one",
     });
@@ -1663,8 +1711,8 @@ describe("fleet controls", () => {
   it("decodes shortcut-panel keys without leaking escape sequences into the composer", () => {
     const decoder = new FleetKeyDecoder();
     expect(decoder.push("\u001b[1;2A\u001b[1;2B\u001b1")).toEqual(["shift+up", "shift+down", "alt+1"]);
-    expect(decoder.push(Buffer.from([0x0a, 0x0e, 0x12, 0x13, 0x14]))).toEqual([
-      "ctrl+j", "ctrl+n", "ctrl+r", "ctrl+s", "ctrl+t",
+    expect(decoder.push(Buffer.from([0x0a, 0x0e, 0x12, 0x13, 0x14, 0x17]))).toEqual([
+      "ctrl+j", "ctrl+n", "ctrl+r", "ctrl+s", "ctrl+t", "ctrl+w",
     ]);
   });
 
@@ -2581,7 +2629,7 @@ describe("fleet controls", () => {
     expect(transitionFleet(initial, snapshot, "alt+2", NOW_MS).action).toEqual({
       type: "attach", sessionId: second.id,
     });
-    expect(transitionFleet(initial, snapshot, "ctrl+s", NOW_MS).state.view).toBe("diagnostics");
+    expect(transitionFleet(initial, snapshot, "ctrl+w", NOW_MS).state.view).toBe("diagnostics");
     expect(transitionFleet(initial, snapshot, "@", NOW_MS).state.draft).toContain("@Implement-modular");
 
     const renaming = transitionFleet(initial, snapshot, "ctrl+r", NOW_MS);
@@ -2719,10 +2767,10 @@ describe("runFleet", () => {
     );
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
 
-    input.emit("data", Buffer.from([0x07]));
+    input.emit("data", Buffer.from([0x13]));
     await vi.waitFor(() => expect(changeDirectory).toHaveBeenCalledWith(process.cwd()));
     await vi.waitFor(() => expect(Buffer.concat(output.chunks).toString()).toContain(
-      "cwd /repo/two · ctrl+g change",
+      "cwd /repo/two · ctrl+s change",
     ));
 
     input.emit("data", Buffer.from([0x1d]));
@@ -3506,7 +3554,7 @@ describe("fleet shell mode", () => {
     const mark = output.chunks.length;
     input.emit("data", Buffer.from([0x1b]));
     await vi.waitFor(() => expect(Buffer.concat(output.chunks.slice(mark)).toString()).toContain(
-      "ctrl+g change",
+      "ctrl+s change",
     ));
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
@@ -3573,7 +3621,7 @@ describe("fleet shell mode", () => {
     input.emit("data", Buffer.from([0x07]));
     await vi.waitFor(() => expect(interrupted?.aborted).toBe(true));
     await vi.waitFor(() => expect(Buffer.concat(output.chunks.slice(mark)).toString()).toContain(
-      "ctrl+g change",
+      "ctrl+s change",
     ));
 
     input.emit("data", Buffer.from([0x03, 0x03]));
