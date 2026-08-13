@@ -8,7 +8,7 @@ Cyberdeck is a neutral local broker for durable Codex, Claude, Cursor, and Antig
 
 > **Stop and detach are different.** `cyberdeck stop <session-id>` terminates the selected provider process and, for an orchestrator, its owned worker tree. Pressing `Ctrl-]`, closing an attached terminal, or closing a tmux pane only detaches that view; the session keeps running while the broker is alive. In Fleet, `Ctrl-]` reattaches the exact most recently explicitly detached live session.
 
-> **Alpha software.** `0.1.0-alpha.1` is a macOS developer preview. Persisted schemas and provider compatibility may change before the first stable release.
+> **Alpha software.** `0.1.0-alpha.2` is a macOS developer preview. Persisted schemas and provider compatibility may change before the first stable release.
 
 ## Requirements and installation
 
