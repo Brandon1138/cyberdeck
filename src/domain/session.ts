@@ -2,6 +2,7 @@ import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { ProviderIdSchema } from "./provider-registration.js";
 import { WorkerWorkspaceSchema } from "./worker-workspace.js";
+import { SessionTerminationSchema } from "./worker-truth.js";
 import {
   ScoutBriefSchema,
   ScoutRuntimeStateSchema,
@@ -122,6 +123,11 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
   launchRecord: ResolvedLaunchRecordSchema.optional(),
   effectiveState: WorkerEffectiveStateSchema.optional(),
   scout: ScoutRuntimeStateSchema.optional(),
+  /**
+   * Why the session stopped, when the provider said so itself. A session limit or a rejected
+   * over-long prompt leaves the process alive, so `executionState` and `exitCode` cannot express it.
+   */
+  termination: SessionTerminationSchema.optional(),
 });
 
 export type ProviderId = z.infer<typeof ProviderIdSchema>;

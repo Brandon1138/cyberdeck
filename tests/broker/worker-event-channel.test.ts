@@ -85,10 +85,10 @@ async function harness(options: {
     actorSessionId: input.actorSessionId,
     targetSessionId: input.targetSessionId,
     message: input.message,
-    status: "delivered" as const,
+    status: "rendered" as const,
     createdAt: NOW,
     updatedAt: NOW,
-    deliveredAt: NOW,
+    renderedAt: NOW,
     messageId: input.messageId ?? crypto.randomUUID(),
     hop: 0,
   }));

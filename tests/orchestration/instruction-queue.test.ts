@@ -28,6 +28,7 @@ describe("InstructionQueue", () => {
     const records = new Map<string, InstructionRecord>();
     const submitInstruction = vi.fn(async () => {
       if (busy) throw Object.assign(new Error("busy"), { code: "SESSION_BUSY" });
+      return { state: "rendered", expectedTurn: 1, at: new Date().toISOString() };
     });
     const queue = new InstructionQueue(
       {
@@ -37,6 +38,8 @@ describe("InstructionQueue", () => {
           available = listener;
           return () => { available = undefined; };
         },
+        onDeliveryBoundary: () => () => undefined,
+        onInstructionState: () => () => undefined,
       } as never,
       { findBySessionId: vi.fn(async () => binding) } as never,
       {
@@ -48,15 +51,17 @@ describe("InstructionQueue", () => {
 
     const queued = await queue.enqueue({ actorSessionId: ACTOR, targetSessionId: TARGET, message: "Summarize" });
     expect(queued.status).toBe("queued");
+    expect(queued.holdReason).toBe("human-controller");
     busy = false;
     available?.(TARGET);
-    await vi.waitFor(async () => expect((await queue.list(TARGET))[0]?.status).toBe("delivered"));
+    // `rendered`, not `delivered`: the queue may only report what the broker actually observed.
+    await vi.waitFor(async () => expect((await queue.list(TARGET))[0]?.status).toBe("rendered"));
     expect(submitInstruction).toHaveBeenCalledTimes(2);
   });
 
   it("deduplicates retries by message id", async () => {
     const messageId = crypto.randomUUID();
-    const existing = { id: crypto.randomUUID(), messageId, status: "delivered" } as InstructionRecord;
+    const existing = { id: crypto.randomUUID(), messageId, status: "rendered" } as InstructionRecord;
     const queue = new InstructionQueue(
       { get: () => ({ cwd: "/repo" }) } as never,
       { findBySessionId: vi.fn(async () => binding) } as never,

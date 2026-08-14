@@ -534,6 +534,10 @@ describe("SessionRegistry", () => {
         text: expect.stringContaining("1042"),
         retrieval: "fresh",
         completedAt: expect.any(String),
+        // No provider transcript behind this one, and the snapshot says so rather than
+        // letting a screen scrape pass for a canonical turn.
+        provenance: "terminal-replay",
+        truth: expect.objectContaining({ state: "idle", completedTurns: 1, canonicalTurns: 0 }),
       }],
     });
     expect((await waiting).results[0]!.text.length).toBeLessThanOrEqual(300);
@@ -1056,7 +1060,10 @@ describe("SessionRegistry", () => {
       .rejects.toMatchObject({ code: "SESSION_BUSY" });
     expect(ptys[0]!.writes).toEqual([]);
     await registry.detach(record.id, "human");
-    await expect(registry.submitInstruction(record.id, "queued instruction")).resolves.toBeUndefined();
+    // `rendered`, never `delivered`: the bytes are at the terminal and nothing has been observed
+    // about the provider consuming them.
+    await expect(registry.submitInstruction(record.id, "queued instruction"))
+      .resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
     expect(ptys[0]!.writes.at(-1)?.toString()).toBe("queued instruction\n");
     expect(transcripts).toContainEqual(expect.objectContaining({
       kind: "instruction",

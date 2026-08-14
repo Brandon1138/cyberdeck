@@ -53,7 +53,7 @@ interface FakeSession {
 
 async function harness(options: {
   leaseDurationMs?: number;
-  enqueueStatus?: "queued" | "delivered";
+  enqueueStatus?: "queued" | "rendered";
   eventRateLimit?: number;
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-worker-control-"));

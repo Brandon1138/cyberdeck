@@ -39,6 +39,15 @@ export interface CaptureProviderTurns {
   createdAt: string;
   turnNumber: number;
   fallbackText?: string;
+  /**
+   * Whether a terminal-replay turn may stand in when the provider's own transcript has nothing.
+   *
+   * The caller retries a provider-native read a few times before giving up, so it passes `false`
+   * until the last attempt. On that attempt it must be `true` for every provider: a completed turn
+   * with no `turn` event at all is the cursor gap MIK-71 reported, where a worker was marked
+   * completed and `thread_read` showed nothing to account for it.
+   */
+  allowFallback?: boolean;
 }
 
 export interface ThreadTranscriptStoreOptions {
@@ -122,9 +131,14 @@ export class ThreadTranscriptStore {
       : input.provider === "codex"
         ? await this.readCodexTurns(input)
         : [];
+    // Cursor and Antigravity have no native transcript at all, so a fallback is their only turn and
+    // is always allowed. For Claude and Codex the caller controls it, and only permits one after the
+    // native read has been retried and come back empty.
+    const fallbackAllowed = input.allowFallback
+      ?? (input.provider === "cursor" || input.provider === "antigravity");
     const turns = nativeTurns.length > 0
       ? nativeTurns
-      : input.provider === "cursor" || input.provider === "antigravity"
+      : fallbackAllowed
         ? [{
             id: `fallback:${input.turnNumber}`,
             occurredAt: this.options.now?.() ?? new Date().toISOString(),

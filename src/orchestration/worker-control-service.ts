@@ -13,6 +13,7 @@ import {
   type StoredWorkerEvent,
 } from "../domain/worker-coordination.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
+import type { WorkerTruth } from "../domain/worker-truth.js";
 import type { WorkerCoordinationService } from "../broker/worker-coordination.js";
 import {
   BrokerWorkerLeaseCredentialCustodian,
@@ -176,7 +177,8 @@ export type WorkerControlCode =
   | "STOP_REQUESTED"
   | "ALREADY_TERMINAL"
   | "APPROVAL_REQUIRED"
-  | "DELIVERED"
+  /** Bytes are in the provider input surface. Not a claim that the provider consumed them. */
+  | "RENDERED"
   | "QUEUED"
   | "CHECKPOINT_REQUESTED"
   | "CHECKPOINT_REPLAY"
@@ -203,7 +205,14 @@ export interface WorkerControlResult {
   instructionId?: string;
   correlationId?: string;
   checkpointMode?: "non-blocking" | "decision-gate";
-  delivery?: "delivered" | "queued" | "deferred" | "unavailable";
+  /**
+   * How far the instruction got, in the vocabulary of the worker state machine. `delivered` is
+   * deliberately absent: it used to be returned for bytes written at a PTY, which at a permission
+   * modal meant text sitting unsent in the composer while the caller was told it had landed.
+   */
+  delivery?: "rendered" | "queued" | "deferred" | "unavailable";
+  /** Why an instruction is held rather than written, when it is held. */
+  holdReason?: string;
 }
 
 export interface WorkerStateSummary {
@@ -216,6 +225,8 @@ export interface WorkerStateSummary {
   unresolvedEvents: number;
   pendingCheckpoints: number;
   lastOrdinal: number;
+  /** The broker projection of what this worker is actually doing. Absent once its runtime is gone. */
+  truth?: WorkerTruth;
 }
 
 export interface WorkerEventsResult {
@@ -813,10 +824,11 @@ export class WorkerControlService {
       return {
         action: "redirect",
         workerId: request.workerId,
-        code: record.status === "delivered" ? "DELIVERED" : "QUEUED",
+        code: record.status === "rendered" ? "RENDERED" : "QUEUED",
         lifecycle: subject.lifecycle,
         instructionId: record.id,
-        delivery: record.status === "delivered" ? "delivered" : "queued",
+        delivery: record.status === "rendered" ? "rendered" : "queued",
+        ...(record.holdReason === undefined ? {} : { holdReason: record.holdReason }),
       };
     } catch (error) {
       return {
@@ -872,7 +884,7 @@ export class WorkerControlService {
   private async deliverCheckpointPrompt(
     request: z.infer<typeof AgentWorkerControlParamsSchema>,
     mode: "non-blocking" | "decision-gate",
-  ): Promise<"delivered" | "queued" | "unavailable"> {
+  ): Promise<"rendered" | "queued" | "unavailable"> {
     const instructions = this.options.instructions;
     if (instructions === undefined) return "unavailable";
     const lines = [
@@ -890,7 +902,7 @@ export class WorkerControlService {
         targetSessionId: request.workerId,
         message: lines.join("\n"),
       });
-      return record.status === "delivered" ? "delivered" : "queued";
+      return record.status === "rendered" ? "rendered" : "queued";
     } catch {
       return "unavailable";
     }
@@ -1045,7 +1057,24 @@ export class WorkerControlService {
       unresolvedEvents: this.unresolvedCount(subject.subjectId),
       pendingCheckpoints: this.options.coordination.listCheckpoints(subject.subjectId, "pending").length,
       lastOrdinal: this.lastOrdinal(subject.subjectId),
+      ...(this.workerTruth(subject.subjectId) ?? {}),
     };
+  }
+
+  /**
+   * The broker's own reading of the worker, projected into this summary.
+   *
+   * `lifecycle` above is the ownership substrate's view and answers a different question: whether a
+   * lease can be taken. It said `active` for workers that had already stopped, which is half of the
+   * contradiction MIK-71 reported. `truth` is the same projection `workers_wait` settles from.
+   */
+  private workerTruth(workerId: string): { truth: WorkerTruth } | undefined {
+    try {
+      return { truth: this.options.registry.workerTruth(workerId) };
+    } catch {
+      // A subject the broker no longer holds a runtime for. The substrate's own view is all there is.
+      return undefined;
+    }
   }
 
   private unresolvedCount(workerId: string): number {

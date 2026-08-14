@@ -1,3 +1,4 @@
+import type { ProviderLimitTermination } from "../domain/worker-truth.js";
 import { stripTerminalControl } from "./terminal-replay.js";
 
 /**
@@ -64,6 +65,63 @@ const RETRY_MARKERS: readonly RegExp[] = [
   /\battempt \d+ of \d+/iu,
 ];
 
+/**
+ * Limits the provider imposes on itself, which are terminal but are not faults.
+ *
+ * A worker that hits its five-hour cap, or is handed a prompt longer than the model's context, stops
+ * for a reason the operator can act on — wait for the reset, or split the work. Both used to reach
+ * nobody: the notice went into the provider's own transcript, `executionState` stayed `active`
+ * because the process was still there, and the wait kept waiting. They are matched before the
+ * generic 4xx patterns below precisely so `provider API rejected the request` never swallows the one
+ * detail that says what to do next.
+ */
+const PROVIDER_LIMIT_PATTERNS: readonly {
+  readonly pattern: RegExp;
+  readonly kind: ProviderLimitTermination["kind"];
+  readonly reason: string;
+}[] = [
+  {
+    pattern: /\bprompt is too long\b/iu,
+    kind: "prompt-too-long",
+    reason: "provider refused the prompt as too long for its context window",
+  },
+  {
+    pattern: /\binput length and `?max_tokens`? exceed context limit\b/iu,
+    kind: "prompt-too-long",
+    reason: "provider refused the prompt as too long for its context window",
+  },
+  {
+    pattern: /\bcontext (?:window|length) exceeded\b/iu,
+    kind: "prompt-too-long",
+    reason: "provider refused the prompt as too long for its context window",
+  },
+  {
+    pattern: /\bexceeds? the (?:maximum )?context (?:window|length)\b/iu,
+    kind: "prompt-too-long",
+    reason: "provider refused the prompt as too long for its context window",
+  },
+  {
+    pattern: /\busage limit reached\b/iu,
+    kind: "session-limit",
+    reason: "provider usage limit reached",
+  },
+  {
+    pattern: /\byou(?:'|’)?ve (?:reached|hit) your (?:usage|weekly|session) limit\b/iu,
+    kind: "session-limit",
+    reason: "provider usage limit reached",
+  },
+  {
+    pattern: /\b\d+-hour limit reached\b/iu,
+    kind: "session-limit",
+    reason: "provider usage limit reached",
+  },
+  {
+    pattern: /\b(?:usage )?limit (?:will )?reset(?:s)? at\b/iu,
+    kind: "session-limit",
+    reason: "provider usage limit reached",
+  },
+];
+
 export interface SessionFatalError {
   /** Operator-facing summary; short enough to sit in a transcript line. */
   readonly reason: string;
@@ -104,6 +162,36 @@ export function detectSessionFatalError(replay: string): SessionFatalError | und
   if (RETRY_MARKERS.some((marker) => marker.test(after))) return undefined;
 
   return { reason: best.reason, detail: best.detail };
+}
+
+/**
+ * Classify a PTY replay as carrying a provider-imposed limit that ended the session.
+ *
+ * Read from the same provider-owned lines as `detectSessionFatalError`, for the same reason: an
+ * assistant paragraph explaining that a prompt was too long is prose about the problem, not the
+ * provider hitting it. A retry marker after the notice still vetoes the verdict — a provider that is
+ * about to try again has not stopped.
+ */
+export function detectProviderLimitTermination(replay: string): ProviderLimitTermination | undefined {
+  const plain = stripTerminalControl(replay);
+  const truncated = plain.length > TAIL_BYTES;
+  const tail = truncated ? plain.slice(plain.length - TAIL_BYTES) : plain;
+
+  let best: { index: number; kind: ProviderLimitTermination["kind"]; reason: string; detail: string }
+    | undefined;
+  for (const { line, index } of providerOwnedLines(tail, truncated)) {
+    for (const { pattern, kind, reason } of PROVIDER_LIMIT_PATTERNS) {
+      if (!pattern.test(line)) continue;
+      if (best === undefined || index > best.index) {
+        best = { index, kind, reason, detail: boundedDetail(line) };
+      }
+      break;
+    }
+  }
+  const found = best;
+  if (found === undefined) return undefined;
+  if (RETRY_MARKERS.some((marker) => marker.test(tail.slice(found.index)))) return undefined;
+  return { kind: found.kind, reason: found.reason, detail: found.detail };
 }
 
 /**

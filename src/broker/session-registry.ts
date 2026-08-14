@@ -37,7 +37,19 @@ import {
   truncateResult,
   type ProviderTerminalActivity,
 } from "../runtime/terminal-replay.js";
-import { detectSessionFatalError } from "../runtime/session-liveness.js";
+import { detectProviderLimitTermination, detectSessionFatalError } from "../runtime/session-liveness.js";
+import { terminalComposerState } from "../runtime/composer-state.js";
+import {
+  advanceInstruction,
+  DELIVERY_HOLD_DETAIL,
+  projectWorkerTruth,
+  type ComposerObservation,
+  type DeliveryHoldReason,
+  type InstructionLifecycleState,
+  type ProviderLimitTermination,
+  type SessionTermination,
+  type WorkerTruth,
+} from "../domain/worker-truth.js";
 import { selectExpiredThreads } from "../domain/thread-retention.js";
 import {
   MIN_SCOUT_REPLAY_BYTES,
@@ -111,6 +123,46 @@ interface CompletionLedgerEntry {
   text: string;
   completedAt: string;
   deliveries: number;
+  /**
+   * Where the text came from. `provider-transcript` is a canonical turn the provider itself wrote;
+   * `terminal-replay` is a screen scrape the broker settled for. Both count as completed turns —
+   * refusing to count a replay turn would hang every provider without a native transcript — but a
+   * caller that was told a worker "completed" while `thread_read` showed zero semantic turns was
+   * looking at this distinction with no way to see it.
+   */
+  provenance: "provider-transcript" | "terminal-replay";
+}
+
+/**
+ * An instruction whose bytes are in the provider's input surface but whose submission has not been
+ * observed. It is the object the `rendered` state is about.
+ */
+interface RenderedInstruction {
+  instructionId: string;
+  /** The turn ordinal that will answer this instruction, fixed at render time. */
+  expectedTurn: number;
+  renderedAt: string;
+  state: InstructionLifecycleState;
+}
+
+/** What `submitInstruction` actually did, as opposed to what it hopes happened next. */
+export interface InstructionDelivery {
+  /** Never stronger than `rendered`: submission is observed later, never claimed synchronously. */
+  state: "queued" | "rendered";
+  hold?: DeliveryHoldReason;
+  detail?: string;
+  /** Present when `rendered`: the turn ordinal that will answer this instruction. */
+  expectedTurn?: number;
+  at: string;
+}
+
+/** A transition the broker observed for an instruction it had already rendered. */
+export interface InstructionStateUpdate {
+  sessionId: string;
+  instructionId: string;
+  state: InstructionLifecycleState;
+  at: string;
+  turn?: number;
 }
 
 interface RuntimeSession {
@@ -123,6 +175,22 @@ interface RuntimeSession {
   activity: ProviderTerminalActivity;
   observedWorking: boolean;
   completedTurns: number;
+  /** Subset of `completedTurns` whose text came from a provider-native transcript turn. */
+  canonicalTurns: number;
+  /**
+   * Completed turns at the moment the newest instruction was rendered. A `completionTarget` at or
+   * below this floor names a turn that finished before the instruction existed, so settling a wait
+   * from that ledger slot would hand back an answer to an older question.
+   */
+  turnsBeforeLatestInstruction: number;
+  /** What the provider's input surface is holding, refreshed from every observed frame. */
+  composer: ComposerObservation;
+  /** Instructions written into the composer whose submission has not been observed yet. */
+  rendered: RenderedInstruction[];
+  /** Set while the delivery boundary is unsafe, so the return to safety can be announced once. */
+  deliveryHeld: boolean;
+  /** Set once the provider stopped itself on its own limits. */
+  providerLimit?: ProviderLimitTermination;
   latestResult?: string;
   /** Set once a fatal provider fault has been recorded, so replay never re-reports the same death. */
   fatalReported: boolean;
@@ -158,6 +226,29 @@ interface RuntimeSession {
 
 const MAX_COMPLETION_LEDGER_ENTRIES = 64;
 
+/**
+ * The state-machine fields every runtime session starts with, in one place so a construction site
+ * added later cannot silently omit one and leave a worker projecting from undefined.
+ */
+function freshTruthState(): Pick<
+  RuntimeSession,
+  | "completedTurns"
+  | "canonicalTurns"
+  | "turnsBeforeLatestInstruction"
+  | "composer"
+  | "rendered"
+  | "deliveryHeld"
+> {
+  return {
+    completedTurns: 0,
+    canonicalTurns: 0,
+    turnsBeforeLatestInstruction: 0,
+    composer: { modalOpen: false, occupied: false },
+    rendered: [],
+    deliveryHeld: false,
+  };
+}
+
 export interface WorkerWaitTarget {
   sessionId: string;
   completionTarget: number;
@@ -178,9 +269,20 @@ export interface WorkerResultSnapshot {
     | "failed"
     | "stopped"
     | "exited"
-    | "budget_exhausted";
+    | "budget_exhausted"
+    /** The provider stopped itself on its own limits. Terminal, and the process may still be alive. */
+    | "provider-limit";
   completedTurns: number;
   text: string;
+  /**
+   * The authoritative worker state this snapshot was projected from. `status` above answers "what
+   * happened to the turn this wait asked about"; `truth` answers "what is this worker doing", and
+   * both come from the same projection so a wait cannot disagree with `threads_list`.
+   */
+  truth: WorkerTruth;
+  /** Whether the target turn's text is a provider turn or a screen scrape the broker settled for. */
+  provenance?: "provider-transcript" | "terminal-replay";
+  providerLimit?: ProviderLimitTermination;
   /** Only on a completed target: whether this delivery is the first one for that completion. */
   retrieval?: "fresh" | "replay";
   completedAt?: string;
@@ -261,6 +363,8 @@ export class SessionRegistry {
   private readonly sessions = new Map<string, RuntimeSession>();
   private readonly controllerReleasedListeners = new Set<(sessionId: string) => void>();
   private readonly sessionUpdateListeners = new Set<(sessionId: string) => void>();
+  private readonly deliveryBoundaryListeners = new Set<(sessionId: string) => void>();
+  private readonly instructionStateListeners = new Set<(update: InstructionStateUpdate) => void>();
   private readonly scoutWorkspaceStateInflight = new Map<string, Promise<string>>();
   private readonly recovery: Promise<void>;
   /** Starts admitted by policy but not yet represented in `sessions`. */
@@ -278,7 +382,7 @@ export class SessionRegistry {
         stopRequested: false,
         activity: "unknown",
         observedWorking: false,
-        completedTurns: 0,
+        ...freshTruthState(),
         fatalReported: false,
         completions: new Map(),
         launchTail: Promise.resolve(),
@@ -479,7 +583,7 @@ export class SessionRegistry {
       stopRequested: false,
       activity: "unknown",
       observedWorking: false,
-      completedTurns: 0,
+      ...freshTruthState(),
       fatalReported: false,
       completions: new Map(),
       suppressSemanticTurns: true,
@@ -781,12 +885,27 @@ export class SessionRegistry {
     await this.write(sessionId, clientId, data);
   }
 
+  /**
+   * Put one instruction in front of a worker, and report only what actually happened.
+   *
+   * The old contract wrote the payload at the PTY unconditionally and let the caller record
+   * `delivered`. Bytes written at a terminal are not delivery: a worker sitting at a permission
+   * modal is not reading its composer, so the entire instruction stayed there unsent while the
+   * orchestrator had been told it landed, and the worker's next turn — a stale one — settled the
+   * wait that was asking about it.
+   *
+   * Two rules replace that. The payload is never written at an unsafe boundary, so nothing lands in
+   * a composer nobody is going to submit; and the strongest state this call can return is
+   * `rendered`, because submission is something the broker observes afterwards rather than something
+   * it may assume.
+   */
   async submitInstruction(
     sessionId: string,
     message: string,
     source: "orchestrator" | "worker" = "orchestrator",
     metadata: Record<string, unknown> = {},
-  ): Promise<void> {
+    instructionId?: string,
+  ): Promise<InstructionDelivery> {
     const runtime = this.requireRuntime(sessionId);
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
@@ -795,16 +914,118 @@ export class SessionRegistry {
       throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
     }
     this.requireInteractiveInput(runtime);
+    const hold = this.deliveryHold(runtime);
+    if (hold !== undefined) return this.holdInstruction(runtime, hold, source, instructionId);
     const adapter = this.requireAdapter(runtime.record.provider);
     const encoded = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
     delete runtime.stallObservation;
-    await this.appendTranscript(sessionId, "instruction", source, message, metadata);
+    const at = new Date().toISOString();
+    const expectedTurn = runtime.completedTurns + 1;
+    await this.appendTranscript(sessionId, "instruction", source, message, {
+      ...metadata,
+      instructionState: "rendered" satisfies InstructionLifecycleState,
+      expectedTurn,
+      ...(instructionId === undefined ? {} : { instructionId }),
+    });
     if (runtime.controller !== undefined) {
       throw new RegistryError("SESSION_BUSY", "A human controller claimed this thread before delivery");
+    }
+    // Every turn already in the ledger answers a question older than this instruction. Record where
+    // the ledger stood so a wait cannot settle from one of them.
+    runtime.turnsBeforeLatestInstruction = runtime.completedTurns;
+    if (instructionId !== undefined) {
+      runtime.rendered.push({ instructionId, expectedTurn, renderedAt: at, state: "rendered" });
     }
     await this.setAttention(runtime, "working", true);
     this.requirePty(runtime).write(encoded);
     await this.appendEvent("session.input", sessionId, { bytes: encoded.length, source });
+    return { state: "rendered", expectedTurn, at };
+  }
+
+  /**
+   * Whether the provider is in a state where a written payload would actually be read.
+   *
+   * A blocking modal and an occupied composer are both "the input surface is not yours right now".
+   * The difference from a human controller is only who took it, and all three answers are the same:
+   * hold the instruction rather than writing into a surface that will swallow it.
+   */
+  private deliveryHold(runtime: RuntimeSession): DeliveryHoldReason | undefined {
+    if (runtime.record.executionState !== "active") return "worker-terminal";
+    if (runtime.controller !== undefined) return "human-controller";
+    this.observeComposer(runtime);
+    if (runtime.composer.modalOpen || runtime.activity === "needs-input") return "provider-modal";
+    if (runtime.composer.occupied) return "composer-occupied";
+    return undefined;
+  }
+
+  private async holdInstruction(
+    runtime: RuntimeSession,
+    hold: DeliveryHoldReason,
+    source: "orchestrator" | "worker",
+    instructionId: string | undefined,
+  ): Promise<InstructionDelivery> {
+    runtime.deliveryHeld = true;
+    const at = new Date().toISOString();
+    await this.appendTranscript(runtime.record.id, "lifecycle", "broker", "instruction held", {
+      instructionState: "queued" satisfies InstructionLifecycleState,
+      holdReason: hold,
+      source,
+      ...(instructionId === undefined ? {} : { instructionId }),
+    });
+    await this.appendEvent("session.input", runtime.record.id, {
+      bytes: 0,
+      source,
+      held: hold,
+    });
+    return { state: "queued", hold, detail: DELIVERY_HOLD_DETAIL[hold], at };
+  }
+
+  /** Announce that a worker which was refusing instructions can take one again. */
+  onDeliveryBoundary(listener: (sessionId: string) => void): () => void {
+    this.deliveryBoundaryListeners.add(listener);
+    return () => this.deliveryBoundaryListeners.delete(listener);
+  }
+
+  /** Observe an instruction the broker had already rendered moving on through its lifecycle. */
+  onInstructionState(listener: (update: InstructionStateUpdate) => void): () => void {
+    this.instructionStateListeners.add(listener);
+    return () => this.instructionStateListeners.delete(listener);
+  }
+
+  /**
+   * The one place any surface may ask what a worker is doing.
+   *
+   * `cyberdeck_workers_wait`, `cyberdeck_threads_list` and `cyberdeck_worker_events` all render this
+   * value, which is what stops them contradicting each other in front of an orchestrator.
+   */
+  /**
+   * The one authoritative reading of what a worker is doing.
+   *
+   * `workers_wait`, `threads_list`, and `worker_events` all project from this, so an orchestrator
+   * cannot be told a worker is done by one surface and active by another — the contradiction MIK-71
+   * was filed for.
+   */
+  workerTruth(sessionId: string): WorkerTruth {
+    const runtime = this.requireRuntime(sessionId);
+    return this.projectTruth(runtime, runtime.pty?.snapshot().toString("utf8") ?? "");
+  }
+
+  private projectTruth(runtime: RuntimeSession, replay: string): WorkerTruth {
+    this.observeComposer(runtime, replay);
+    const stalled = this.stalledWorker(runtime, replay);
+    return projectWorkerTruth({
+      executionState: runtime.record.executionState,
+      exitCode: runtime.record.exitCode,
+      activity: runtime.activity,
+      composer: runtime.composer,
+      completedTurns: runtime.completedTurns,
+      canonicalTurns: runtime.canonicalTurns,
+      pendingInstructions: runtime.rendered.length,
+      providerLimit: runtime.providerLimit,
+      stalledForSeconds: stalled?.stalledForSeconds,
+      scoutTerminalState: runtime.record.scout?.terminalState,
+      stopRequested: runtime.stopRequested,
+    });
   }
 
   resize(sessionId: string, clientId: string | undefined, cols: number, rows: number): void {
@@ -1213,6 +1434,14 @@ export class SessionRegistry {
       }
     }
     runtime.activity = activity;
+    this.observeComposer(runtime, replay);
+    // The provider left the composer and started a turn: the only evidence that a payload the broker
+    // wrote was actually consumed. Nothing about the write itself is admissible here.
+    if (activity === "working" && !runtime.composer.occupied) {
+      this.advanceRenderedInstructions(runtime, "submitted");
+      this.advanceRenderedInstructions(runtime, "acknowledged");
+    }
+    this.notifyDeliveryBoundary(runtime);
     if (runtime.suppressSemanticTurns === true) {
       runtime.controller?.output(chunk);
       for (const watcher of runtime.watchers.values()) watcher.output(chunk);
@@ -1225,9 +1454,15 @@ export class SessionRegistry {
       runtime.idleTimer = setTimeout(() => {
         delete runtime.idleTimer;
         if (runtime.activity !== "awaiting-input" || !runtime.observedWorking) return;
+        const completedReplay = runtime.pty?.snapshot().toString("utf8") ?? replay;
+        // A composer holding text the provider never took is not a finished turn. Counting it is how
+        // an unsent instruction came to satisfy the very wait that was asking whether it had run.
+        if (this.observeComposer(runtime, completedReplay).occupied) {
+          this.notifySessionUpdate(runtime.record.id);
+          return;
+        }
         runtime.completedTurns += 1;
         runtime.observedWorking = false;
-        const completedReplay = runtime.pty?.snapshot().toString("utf8") ?? replay;
         void this.completeSemanticTurn(runtime, completedReplay);
       }, 200);
     } else if (activity === "needs-input") {
@@ -1259,26 +1494,42 @@ export class SessionRegistry {
   private observeFatalError(runtime: RuntimeSession, replay: string): boolean {
     if (runtime.record.executionState === "errored") return true;
     if (runtime.fatalReported || runtime.record.executionState !== "active") return false;
-    const fatal = detectSessionFatalError(replay);
-    if (fatal === undefined) return false;
+    // A limit the provider set for itself is read first. It is terminal for the same reason a fault
+    // is — nothing more will run — but "hit the session cap" and "prompt too long" name a remedy,
+    // and the generic 4xx pattern below would otherwise swallow both into "rejected the request".
+    const limit = detectProviderLimitTermination(replay);
+    const fault = limit === undefined ? detectSessionFatalError(replay) : undefined;
+    const at = new Date().toISOString();
+    const termination: SessionTermination | undefined = limit !== undefined
+      ? { kind: limit.kind, reason: limit.reason, detail: limit.detail, at }
+      : fault === undefined
+        ? undefined
+        : { kind: "provider-fault", reason: fault.reason, detail: fault.detail, at };
+    if (termination === undefined) return false;
+    if (limit !== undefined) runtime.providerLimit = limit;
+    runtime.record.termination = termination;
 
+    // Whatever is still sitting in the composer will never be read now.
+    this.advanceRenderedInstructions(runtime, "undelivered");
     runtime.fatalReported = true;
     if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
     delete runtime.idleTimer;
     runtime.activity = "unknown";
     runtime.observedWorking = false;
-    runtime.latestResult = fatal.detail;
+    runtime.latestResult = termination.detail;
     // exitCode stays null on purpose: the process is still there, and deleting the thread must
     // still require stopping it. Only the slot and the "can accept input" claim are released.
     runtime.record.executionState = "errored";
     void this.appendEvent("session.errored", runtime.record.id, {
-      reason: fatal.reason,
-      detail: fatal.detail,
+      reason: termination.reason,
+      detail: termination.detail,
+      kind: termination.kind,
       pid: runtime.record.pid,
     }).catch(() => undefined);
     void this.appendTranscript(runtime.record.id, "lifecycle", "broker", "session errored", {
-      reason: fatal.reason,
-      detail: fatal.detail,
+      reason: termination.reason,
+      detail: termination.detail,
+      kind: termination.kind,
     }).catch(() => undefined);
     void this.setAttention(runtime, "failed", true).catch(() => undefined);
     return true;
@@ -1303,6 +1554,10 @@ export class SessionRegistry {
               ? "exited"
               : "failed";
     runtime.record.exitCode = exitCode;
+    // Anything still sitting in the composer died with the process. Saying so is the difference
+    // between an orchestrator retrying an instruction and one waiting forever on a turn that can
+    // no longer happen.
+    this.advanceRenderedInstructions(runtime, "undelivered");
     const controller = runtime.controller;
     const watchers = [...runtime.watchers.values()];
     delete runtime.controller;
@@ -1694,7 +1949,7 @@ export class SessionRegistry {
       stopRequested: false,
       activity: "unknown",
       observedWorking: false,
-      completedTurns: 0,
+      ...freshTruthState(),
       latestResult: record.latestPreview,
       fatalReported: false,
       completions: new Map(),
@@ -1813,6 +2068,9 @@ export class SessionRegistry {
           }),
       completedTurns: runtime.completedTurns,
       text,
+      truth: this.projectTruth(runtime, replay),
+      ...(recorded === undefined ? {} : { provenance: recorded.provenance }),
+      ...(runtime.providerLimit === undefined ? {} : { providerLimit: runtime.providerLimit }),
     };
     if (runtime.scoutBudgetExhausting === true) {
       return { ...base, status: "working" };
@@ -1826,12 +2084,24 @@ export class SessionRegistry {
     if (runtime.record.scout?.terminalState === "budget_exhausted") {
       return { ...base, status: "budget_exhausted" };
     }
-    if (runtime.completedTurns >= target.completionTarget) {
+    // `completionTarget` is an ordinal, not an identity, so a target the worker passed before its
+    // newest instruction was written must not settle: the ledger slot it names was filled by a turn
+    // that predates the question this wait is asking. A slot that has already been handed to a
+    // caller is exempt — re-asking for a result you were given is a replay, not a stale settle, and
+    // that replay is how an orchestrator proves the work already ran.
+    const alreadyDelivered = (recorded?.deliveries ?? 0) > 0;
+    if (
+      runtime.completedTurns >= target.completionTarget
+      && (alreadyDelivered || target.completionTarget > runtime.turnsBeforeLatestInstruction)
+    ) {
       return {
         ...base,
         status: "completed",
         ...(recorded === undefined ? {} : { completedAt: recorded.completedAt }),
       };
+    }
+    if (runtime.providerLimit !== undefined) {
+      return { ...base, status: "provider-limit", providerLimit: runtime.providerLimit };
     }
     if (runtime.activity === "needs-input") return { ...base, status: "needs-input" };
     if (runtime.record.executionState === "failed") return { ...base, status: "failed" };
@@ -1938,13 +2208,16 @@ export class SessionRegistry {
     runtime: RuntimeSession,
     completionTarget: number,
     text: string,
+    provenance: CompletionLedgerEntry["provenance"] = "terminal-replay",
   ): CompletionLedgerEntry {
     const existing = runtime.completions.get(completionTarget);
     if (existing !== undefined) return existing;
+    if (provenance === "provider-transcript") runtime.canonicalTurns += 1;
     const entry: CompletionLedgerEntry = {
       text,
       completedAt: new Date().toISOString(),
       deliveries: 0,
+      provenance,
     };
     runtime.completions.set(completionTarget, entry);
     while (runtime.completions.size > MAX_COMPLETION_LEDGER_ENTRIES) {
@@ -1956,6 +2229,82 @@ export class SessionRegistry {
 
   private notifySessionUpdate(sessionId: string): void {
     for (const listener of this.sessionUpdateListeners) listener(sessionId);
+  }
+
+  /**
+   * Refresh what the provider's input surface is holding.
+   *
+   * Called from the broadcast path and from anything that is about to make a claim about the
+   * worker, because a claim made from a composer reading taken minutes ago is the class of lie this
+   * whole change exists to stop.
+   */
+  private observeComposer(runtime: RuntimeSession, replay?: string): ComposerObservation {
+    const frame = replay ?? runtime.pty?.snapshot().toString("utf8");
+    if (frame === undefined) return runtime.composer;
+    runtime.composer = terminalComposerState(runtime.record.provider, frame, {
+      modalOpen: runtime.activity === "needs-input",
+    });
+    return runtime.composer;
+  }
+
+  /**
+   * Announce the boundary reopening, once per closure.
+   *
+   * Held instructions are flushed by whoever is listening; the registry deliberately does not hold
+   * a queue of its own. Its job is to say when writing would be safe, not to decide what to write.
+   */
+  private notifyDeliveryBoundary(runtime: RuntimeSession): void {
+    if (!runtime.deliveryHeld) return;
+    if (this.deliveryHold(runtime) !== undefined) return;
+    runtime.deliveryHeld = false;
+    for (const listener of this.deliveryBoundaryListeners) listener(runtime.record.id);
+  }
+
+  /**
+   * Move every rendered instruction on, and tell anyone recording instruction state.
+   *
+   * `submitted` is only ever reached here, from an observation: the provider left the composer and
+   * started a turn. Nothing about writing bytes reaches this path.
+   */
+  private advanceRenderedInstructions(
+    runtime: RuntimeSession,
+    state: InstructionLifecycleState,
+    turn?: number,
+  ): void {
+    if (runtime.rendered.length === 0) return;
+    const at = new Date().toISOString();
+    const remaining: RenderedInstruction[] = [];
+    for (const entry of runtime.rendered) {
+      // A completion only answers the instruction whose expected turn it is. An instruction rendered
+      // during turn N is not answered by turn N-1 finishing, which is exactly how a wait used to
+      // settle on output older than the question it was asking.
+      const applies = state !== "completed" || turn === undefined || entry.expectedTurn <= turn;
+      // A turn can complete without the broker having caught the frame where the provider took the
+      // payload — a fast turn between two polls. Walk the intermediate states rather than dropping
+      // the completion on the floor: the instruction did reach the provider, that is what a
+      // completed turn for its ordinal means.
+      const path = state === "completed"
+        ? (["submitted", "acknowledged", "completed"] as const)
+        : ([state] as const);
+      let next = entry.state;
+      if (applies) for (const step of path) next = advanceInstruction(next, step);
+      if (next !== entry.state) {
+        entry.state = next;
+        for (const listener of this.instructionStateListeners) {
+          listener({
+            sessionId: runtime.record.id,
+            instructionId: entry.instructionId,
+            state: next,
+            at,
+            ...(turn === undefined ? {} : { turn }),
+          });
+        }
+      }
+      if (next !== "completed" && next !== "undelivered" && next !== "cancelled") {
+        remaining.push(entry);
+      }
+    }
+    runtime.rendered = remaining;
   }
 
   private async completeSemanticTurn(runtime: RuntimeSession, replay: string): Promise<void> {
@@ -1970,7 +2319,7 @@ export class SessionRegistry {
       return;
     }
     const fallback = terminalFallbackResult(replay);
-    let nativeTurns: Array<{ text?: string | undefined }> = [];
+    let nativeTurns: Array<{ text?: string | undefined; data?: Record<string, unknown> }> = [];
     try {
       const capture = this.options.transcripts?.captureProviderTurns;
       const attempts = runtime.record.provider === "claude" || runtime.record.provider === "codex"
@@ -1984,6 +2333,9 @@ export class SessionRegistry {
           createdAt: runtime.record.createdAt,
           turnNumber: runtime.completedTurns,
           fallbackText: fallback,
+          // A screen scrape is accepted only once the provider's own transcript has been given every
+          // retry. Accepting one earlier would mark real canonical turns as replay-derived.
+          allowFallback: attempt + 1 === attempts,
         });
         if (nativeTurns.length > 0) break;
         if (attempt + 1 < attempts) {
@@ -2002,7 +2354,17 @@ export class SessionRegistry {
     const texts = nativeTurns.length > 0
       ? nativeTurns.map((turn) => turn.text ?? fallback)
       : [fallback];
-    texts.forEach((text, index) => this.recordCompletion(runtime, firstTurn + index, text));
+    // Where the text came from travels with it. A worker that completed turns with nothing but
+    // screen scrapes behind them is exactly the shape of the incident where two Codex workers
+    // stamped identical completion seconds and `thread_read` showed no semantic turn at all. The
+    // transcript store labels each turn it wrote; a fallback turn is a scrape wearing a turn's shape.
+    const provenance = nativeTurns.some((turn) => turn.data?.transport === "provider-native")
+      ? "provider-transcript"
+      : "terminal-replay";
+    texts.forEach((text, index) =>
+      this.recordCompletion(runtime, firstTurn + index, text, provenance));
+    // The turn that answers an instruction is the one it has been waiting for since it was written.
+    this.advanceRenderedInstructions(runtime, "completed", runtime.completedTurns);
     runtime.latestResult = latest;
     await this.refreshPreview(
       runtime,
@@ -2363,6 +2725,7 @@ export class SessionRegistry {
             },
           }),
       ...(launchRecord === undefined ? {} : { launchRecord }),
+      ...(record.termination === undefined ? {} : { termination: { ...record.termination } }),
     };
   }
 }

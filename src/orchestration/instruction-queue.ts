@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows } from "../domain/capability.js";
 import { InstructionRecordSchema, type InstructionRecord } from "../domain/instruction.js";
-import type { SessionRegistry } from "../broker/session-registry.js";
+import { instructionReachedProvider, type InstructionLifecycleState } from "../domain/worker-truth.js";
+import type { InstructionStateUpdate, SessionRegistry } from "../broker/session-registry.js";
 import type { InstructionStore } from "../persistence/instruction-store.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 
@@ -18,7 +19,7 @@ export const EnqueueInstructionParamsSchema = z.object({
 });
 
 export class InstructionQueue {
-  private unsubscribe: (() => void) | undefined;
+  private subscriptions: Array<() => void> = [];
 
   constructor(
     private readonly registry: SessionRegistry,
@@ -27,14 +28,25 @@ export class InstructionQueue {
   ) {}
 
   start(): void {
-    this.unsubscribe ??= this.registry.onControllerReleased((sessionId) => {
-      void this.flush(sessionId);
-    });
+    if (this.subscriptions.length > 0) return;
+    this.subscriptions = [
+      this.registry.onControllerReleased((sessionId) => {
+        void this.flush(sessionId);
+      }),
+      // A held instruction is only held because the boundary was unsafe. When the worker leaves the
+      // modal or empties its composer, that is the moment to try again — nothing else will.
+      this.registry.onDeliveryBoundary((sessionId) => {
+        void this.flush(sessionId);
+      }),
+      this.registry.onInstructionState((update) => {
+        void this.applyState(update);
+      }),
+    ];
   }
 
   stop(): void {
-    this.unsubscribe?.();
-    this.unsubscribe = undefined;
+    for (const unsubscribe of this.subscriptions) unsubscribe();
+    this.subscriptions = [];
   }
 
   async enqueue(input: z.input<typeof EnqueueInstructionParamsSchema>): Promise<InstructionRecord> {
@@ -56,7 +68,9 @@ export class InstructionQueue {
       ...(request.senderSessionId === undefined ? {} : { senderSessionId: request.senderSessionId }),
       targetSessionId: request.targetSessionId,
       message: request.message,
-      status: "queued",
+      // The broker has the instruction and nothing more has happened to it yet. `queued` below means
+      // something stronger and narrower: the broker tried to deliver and the boundary was unsafe.
+      status: "accepted",
       createdAt: now,
       updatedAt: now,
       ...(request.workflowRunId === undefined ? {} : { workflowRunId: request.workflowRunId }),
@@ -69,12 +83,15 @@ export class InstructionQueue {
   }
 
   async flush(targetSessionId: string): Promise<InstructionRecord[]> {
-    const queued = (await this.store.list(targetSessionId)).filter((record) => record.status === "queued");
+    const pending = (await this.store.list(targetSessionId))
+      .filter((record) => record.status === "accepted" || record.status === "queued");
     const results: InstructionRecord[] = [];
-    for (const record of queued) {
-      const delivered = await this.tryDeliver(record);
-      results.push(delivered);
-      if (delivered.status === "queued") break;
+    for (const record of pending) {
+      const attempted = await this.tryDeliver(record);
+      results.push(attempted);
+      // Still held: the boundary that stopped this one stops everything behind it, and order is the
+      // whole point of a queue.
+      if (!instructionReachedProvider(attempted.status)) break;
     }
     return results;
   }
@@ -83,31 +100,65 @@ export class InstructionQueue {
     return this.store.list(targetSessionId);
   }
 
+  /**
+   * Carry a broker-observed lifecycle step onto the durable record.
+   *
+   * The broker is the only thing that can see submission and completion, and it reports them long
+   * after `enqueue` returned. Writing them here is what makes `thread_read` able to walk an
+   * instruction from accepted through to the turn that answered it with no gap in between.
+   */
+  private async applyState(update: InstructionStateUpdate): Promise<void> {
+    const record = (await this.store.list(update.sessionId)).find(({ id }) => id === update.instructionId);
+    if (record === undefined || record.status === update.state) return;
+    await this.store.put(InstructionRecordSchema.parse({
+      ...record,
+      status: update.state,
+      updatedAt: update.at,
+      ...(update.state === "submitted" ? { submittedAt: update.at } : {}),
+      ...(update.state === "completed" ? { completedAt: update.at } : {}),
+    }));
+  }
+
   private async tryDeliver(record: InstructionRecord): Promise<InstructionRecord> {
+    const source = record.senderSessionId !== undefined && record.senderSessionId !== record.actorSessionId
+      ? "worker"
+      : "orchestrator";
+    let delivery;
     try {
-      const source = record.senderSessionId !== undefined && record.senderSessionId !== record.actorSessionId
-        ? "worker"
-        : "orchestrator";
-      await this.registry.submitInstruction(record.targetSessionId, record.message, source, {
+      delivery = await this.registry.submitInstruction(record.targetSessionId, record.message, source, {
         actorSessionId: record.actorSessionId,
         senderSessionId: record.senderSessionId ?? record.actorSessionId,
         messageId: record.messageId,
         workflowRunId: record.workflowRunId ?? null,
-      });
+      }, record.id);
     } catch (error) {
       if (typeof error === "object" && error !== null && "code" in error && error.code === "SESSION_BUSY") {
-        return record;
+        return this.persistState(record, "queued", { holdReason: "human-controller" });
       }
       throw error;
     }
-    const now = new Date().toISOString();
-    const delivered = InstructionRecordSchema.parse({
+    // `rendered` is the strongest thing an enqueue can honestly claim: the bytes are in the
+    // provider's input surface. Whether the provider took them is observed later, or never.
+    return delivery.state === "queued"
+      ? this.persistState(record, "queued", { ...(delivery.hold === undefined ? {} : { holdReason: delivery.hold }) })
+      : this.persistState(record, "rendered", {
+          renderedAt: delivery.at,
+          ...(delivery.expectedTurn === undefined ? {} : { expectedTurn: delivery.expectedTurn }),
+        });
+  }
+
+  private async persistState(
+    record: InstructionRecord,
+    status: InstructionLifecycleState,
+    fields: Partial<InstructionRecord>,
+  ): Promise<InstructionRecord> {
+    const updated = InstructionRecordSchema.parse({
       ...record,
-      status: "delivered",
-      updatedAt: now,
-      deliveredAt: now,
+      ...fields,
+      status,
+      updatedAt: new Date().toISOString(),
     });
-    await this.store.put(delivered);
-    return delivered;
+    await this.store.put(updated);
+    return updated;
   }
 }
