@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { ProviderIdSchema } from "./provider-registration.js";
+import { WorkerWorkspaceSchema } from "./worker-workspace.js";
 import {
   ScoutBriefSchema,
   ScoutRuntimeStateSchema,
@@ -56,6 +57,12 @@ export const StartSessionRequestSchema = z.object({
   orchestratorScope: z.enum(["workspace", "fleet"]).optional(),
   providerInstructions: z.string().trim().min(1).optional(),
   workerMode: WorkerModeSchema.optional(),
+  /**
+   * Where this session's work lives, when the caller declared it. Typed rather than described in
+   * the prompt so the broker can validate the worktree, the branch, and the base before a process
+   * exists, and can grant the writable roots the declared provisioning mode actually needs.
+   */
+  workspace: WorkerWorkspaceSchema.optional(),
   profile: WorkerProfileSchema.optional(),
   brief: ScoutBriefSchema.optional(),
   leasePolicy: WorkerLeasePolicySchema.optional(),

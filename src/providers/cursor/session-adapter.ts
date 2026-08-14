@@ -1,4 +1,5 @@
 import type { SessionRecord } from "../../domain/session.js";
+import { resolveProviderPermissionPlan } from "../../domain/permission-resolution.js";
 import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "../provider.js";
 import {
   SessionResumeUnavailableError,
@@ -142,7 +143,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
    */
   deferInitialPrompt(session: SessionRecord): boolean {
     return session.profile !== "scout"
-      && (session.approvalMode === "auto" || session.providerInstructions !== undefined);
+      && (cursorRunsEverything(session) || session.providerInstructions !== undefined);
   }
 
   async initializeSession(
@@ -150,7 +151,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     terminal: ProviderSessionTerminal,
   ) {
     if (session.profile === "scout") return;
-    if (session.approvalMode === "auto") {
+    if (cursorRunsEverything(session)) {
       await enableCursorRunEverything(terminal, {
         ...(this.options.timeoutMs === undefined ? {} : { timeoutMs: this.options.timeoutMs }),
         ...(this.options.pollIntervalMs === undefined
@@ -174,4 +175,18 @@ export class CursorProviderAdapter implements ProviderAdapter {
         : { commitDelayMs: this.options.inputCommitDelayMs }),
     });
   }
+}
+
+/**
+ * `/run-everything` grants automatic approval but is not bounded by the read-only mode, so running
+ * it inside a read-only session would widen exactly the request the sandbox refused. The shared
+ * resolver decides; a read-only session that asked for automatic approval keeps its prompts and the
+ * shortfall is reported at worker start rather than discovered at one.
+ */
+function cursorRunsEverything(session: SessionRecord): boolean {
+  const plan = resolveProviderPermissionPlan("cursor", {
+    sandbox: session.sandbox,
+    approvalMode: session.approvalMode,
+  });
+  return plan.ok && plan.value.postLaunch.includes("cursor-run-everything");
 }

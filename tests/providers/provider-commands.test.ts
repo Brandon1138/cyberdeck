@@ -381,9 +381,25 @@ describe("extended interactive provider adapters", () => {
 
   it("defers Cursor auto mode to verified post-launch setup", () => {
     const adapter = new CursorProviderAdapter();
-    const record = session({ provider: "cursor", model: "composer", approvalMode: "auto" });
+    const record = session({
+      provider: "cursor",
+      model: "composer",
+      approvalMode: "auto",
+      sandbox: "workspace-write",
+    });
     expect(adapter.buildLaunchSpec(record).args).not.toContain("/run-everything");
     expect(adapter.deferInitialPrompt(record)).toBe(true);
+  });
+
+  it("withholds /run-everything from a read-only Cursor session that asked for auto", () => {
+    const adapter = new CursorProviderAdapter();
+    const record = session({ provider: "cursor", model: "composer", approvalMode: "auto" });
+    // `/run-everything` is not bounded by `--mode plan`, so granting it here would widen the
+    // read-only request exactly as Claude's `--permission-mode auto` used to.
+    expect(adapter.buildLaunchSpec(record).args).toEqual(
+      expect.arrayContaining(["--mode", "plan"]),
+    );
+    expect(adapter.deferInitialPrompt(record)).toBe(false);
   });
 
   it("accepts and submits pasted Cursor input with paced Enter keypresses", async () => {

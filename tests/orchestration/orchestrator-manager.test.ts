@@ -117,7 +117,7 @@ describe("OrchestratorManager", () => {
     expect(result.binding.grant.capabilities).not.toContain("worker.start.fable");
   });
 
-  it("starts a Claude orchestrator in the persisted automatic permission mode and exposes it", async () => {
+  it("keeps a persisted automatic Claude orchestrator inside its read-only sandbox", async () => {
     let launchArgs: string[] = [];
     const start = activatingStart((request: object) => {
       const session = {
@@ -156,7 +156,11 @@ describe("OrchestratorManager", () => {
       provider: "claude",
       approvalMode: "auto",
     }), undefined, expect.any(Function));
-    expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "auto"]));
+    // Orchestrator sessions hardcode `sandbox: "read-only"`. `--permission-mode auto` would answer
+    // the approval question by granting workspace writes, which is how the same stored request
+    // produced a sandboxed Codex orchestrator and an unsandboxed Claude one.
+    expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "plan"]));
+    expect(launchArgs).not.toContain("auto");
   });
 
   it("starts a Claude orchestrator in persisted permissioned mode", async () => {
