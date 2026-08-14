@@ -33,6 +33,17 @@ import type { ProviderPermissionPreferencePort } from "../persistence/provider-p
 import { resolveProviderPermission } from "../client/permission-policy.js";
 import { validateWorkerSelection } from "./worker-capabilities.js";
 import {
+  resolveProviderPermissionPlan,
+  type PermissionResolutionFailureCode,
+} from "../domain/permission-resolution.js";
+import {
+  WorkerWorkspaceSchema,
+  validateWorkerWorkspace,
+  workspaceWritableRoots,
+  type WorkerWorkspaceFailureCode,
+  type WorkspaceProbe,
+} from "../domain/worker-workspace.js";
+import {
   ScoutArtifactKindSchema,
   ScoutBriefSchema,
   WorkerLeasePolicySchema,
@@ -77,6 +88,12 @@ const AgentStandardWorkerInputSchema = z.object({
   approvalMode: ApprovalModeSchema.optional(),
   prompt: z.string().trim().min(1),
   name: z.string().optional(),
+  /**
+   * Where the work lives, when the dispatch knows. Declaring it lets the broker check the worktree,
+   * the branch, and the base before a process exists, and lets the launch grant the writable roots
+   * the declared provisioning mode needs. Omitted, the worker is validated exactly as before.
+   */
+  workspace: WorkerWorkspaceSchema.optional(),
 });
 const AgentScoutWorkerInputSchema = z.object({
   profile: z.literal("scout"),
@@ -222,6 +239,12 @@ const WAIT_TICKET_GRACE_MS = 60_000;
 
 export interface WorkerStartResult {
   sessionId: string;
+  /**
+   * Capabilities the request asked for that this provider cannot deliver. Present means the worker
+   * started anyway with less than it asked for, which is the one outcome that used to be silent:
+   * an automatic Codex worker stopping at an MCP approval prompt nobody was watching.
+   */
+  warnings?: string[];
   name: string;
   provider: string;
   model?: string;
@@ -268,7 +291,9 @@ export class AgentControlError extends Error {
       | "MODEL_NOT_ADVERTISED"
       | "EFFORT_NOT_SUPPORTED"
       | "MODEL_EFFORT_MISMATCH"
-      | "APPROVAL_MODE_NOT_SUPPORTED",
+      | "APPROVAL_MODE_NOT_SUPPORTED"
+      | PermissionResolutionFailureCode
+      | WorkerWorkspaceFailureCode,
     message: string,
   ) {
     super(message);
@@ -292,6 +317,8 @@ export interface AgentControlOptions {
   interventionPollMs?: number;
   /** Durable operator-owned grant. Absence fails Scout source egress closed. */
   scoutEgress?: { allows(root: string): Promise<boolean> };
+  /** Reads repositories to validate a declared worker workspace. Absent skips the git-backed checks. */
+  workspaceProbe?: WorkspaceProbe;
 }
 
 export class AgentControlService {
@@ -306,6 +333,7 @@ export class AgentControlService {
   private readonly workerCoordination: WorkerInterventionProjection | undefined;
   private readonly interventionPollMs: number;
   private readonly scoutEgress: AgentControlOptions["scoutEgress"];
+  private readonly workspaceProbe: WorkspaceProbe | undefined;
 
   constructor(
     private readonly registry: SessionRegistry,
@@ -322,6 +350,7 @@ export class AgentControlService {
     this.workerCoordination = options.workerCoordination;
     this.interventionPollMs = Math.max(10, options.interventionPollMs ?? 100);
     this.scoutEgress = options.scoutEgress;
+    this.workspaceProbe = options.workspaceProbe;
   }
 
   async listThreads(input: string | z.input<typeof AgentListThreadsParamsSchema>): Promise<ThreadListPage> {
@@ -663,6 +692,24 @@ export class AgentControlService {
       ...(approvalMode === undefined ? {} : { approvalMode }),
     });
     if (!selection.ok) throw new AgentControlError(selection.code, selection.message);
+    if (request.workspace !== undefined) {
+      const workspace = await validateWorkerWorkspace({
+        workspace: request.workspace,
+        cwd: request.cwd,
+        sandbox: request.sandbox,
+        probe: this.workspaceProbe,
+      });
+      if (!workspace.ok) throw new AgentControlError(workspace.code, workspace.message);
+    }
+    const plan = resolveProviderPermissionPlan(request.provider, {
+      sandbox: request.sandbox,
+      approvalMode,
+      writableRoots: workspaceWritableRoots(request.workspace),
+      // Every delegated worker is started with `kind: "worker"`, which is what makes the adapters
+      // inject the Cyberdeck MCP server.
+      mcpInjected: true,
+    });
+    if (!plan.ok) throw new AgentControlError(plan.code, plan.message);
     const name = request.name ?? taskName(request.prompt);
     const workerMode = (await this.workerPreferences?.get())?.caveman === true ? "caveman" : "normal";
     const worker = await this.registry.start({
@@ -673,18 +720,21 @@ export class AgentControlService {
       cwd: request.cwd,
       detached: true,
       sandbox: request.sandbox,
+      ...(request.workspace === undefined ? {} : { workspace: request.workspace }),
       parentSessionId: request.actorSessionId,
       kind: "worker",
       role: "worker",
       workerMode,
       name,
     }, request.prompt);
+    const warnings = plan.value.shortfalls.map((shortfall) => shortfall.message);
     return {
       sessionId: worker.id,
       name,
       provider: worker.provider,
       ...(worker.model === undefined ? {} : { model: worker.model }),
       ...(worker.effort === undefined ? {} : { effort: worker.effort }),
+      ...(warnings.length === 0 ? {} : { warnings }),
       completionTarget: 1,
     };
   }

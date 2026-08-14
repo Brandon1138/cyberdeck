@@ -281,6 +281,7 @@ const TOOLS = [
         sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
         approvalMode: { type: "string", enum: ["prompt", "auto"] },
         prompt: { type: "string" },
+        workspace: workerWorkspaceInputSchema(),
         brief: scoutBriefInputSchema(),
         leasePolicy: {
           type: "string",
@@ -298,7 +299,7 @@ const TOOLS = [
           required: ["profile", "brief"],
           properties: { profile: { const: "scout" } },
           not: {
-            anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt"]
+            anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt", "workspace"]
               .map((field) => ({ required: [field] })),
           },
         },
@@ -327,6 +328,7 @@ const TOOLS = [
               sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
               approvalMode: { type: "string", enum: ["prompt", "auto"] },
               prompt: { type: "string" },
+              workspace: workerWorkspaceInputSchema(),
               brief: scoutBriefInputSchema(),
               leasePolicy: {
                 type: "string",
@@ -344,7 +346,7 @@ const TOOLS = [
                 required: ["profile", "brief"],
                 properties: { profile: { const: "scout" } },
                 not: {
-                  anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt"]
+                  anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt", "workspace"]
                     .map((field) => ({ required: [field] })),
                 },
               },
@@ -533,6 +535,37 @@ const TOOLS = [
     },
   },
 ] as const;
+
+/** Typed worker workspace, mirroring `WorkerWorkspaceSchema`. */
+function workerWorkspaceInputSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    description:
+      "Where this worker's work lives. Declaring it lets Cyberdeck validate the worktree, branch, "
+      + "and base before the worker starts, and grant the writable roots its provisioning mode needs.",
+    properties: {
+      worktreePath: { type: "string", description: "Absolute path of the worktree the worker runs in." },
+      branch: { type: "string", description: "Branch the worker's commits land on." },
+      baseRef: { type: "string", description: "Ref the branch was cut from and reviews diff against." },
+      provisioning: {
+        type: "string",
+        enum: ["pre-provisioned", "worker-provisioned"],
+        description:
+          "pre-provisioned: the worktree already exists and is validated. worker-provisioned: the "
+          + "worker runs `git worktree add`, which requires workspace-write and the repository's git "
+          + "common directory in writableRoots.",
+      },
+      writableRoots: {
+        type: "array",
+        items: { type: "string" },
+        maxItems: 8,
+        description: "Absolute directories writable in addition to the worktree.",
+      },
+    },
+    required: ["worktreePath", "branch", "baseRef", "provisioning"],
+    additionalProperties: false,
+  };
+}
 
 function scoutBriefInputSchema(): Record<string, unknown> {
   return {

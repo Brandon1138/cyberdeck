@@ -32,6 +32,7 @@ import { ProviderPermissionPreferenceStore } from "../persistence/provider-permi
 import { ensurePrivateDirectory } from "../persistence/private-files.js";
 import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import { AgentControlService } from "../orchestration/agent-control-service.js";
+import { GitWorkspaceProbe } from "../orchestration/git-workspace-probe.js";
 import { InstructionQueue } from "../orchestration/instruction-queue.js";
 import { WorkerControlService } from "../orchestration/worker-control-service.js";
 import { InstructionStore } from "../persistence/instruction-store.js";
@@ -187,6 +188,7 @@ export async function runBroker(
       providerPermissions,
       workerCoordination: workerCoordination.service,
       scoutEgress,
+      workspaceProbe: new GitWorkspaceProbe(),
     },
   );
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
