@@ -85,6 +85,22 @@ Deferred because the operator's shell is zsh. **Trigger:** changing `$SHELL` to 
 fix is that shell's own exit hook (`PROMPT_COMMAND`, `fish_exit`) writing the same file, not a wrapper
 REPL and not a pane query that cannot see the popup.
 
+### A peer binding may message a worker but may not control or observe it
+
+`orchestrator-manager.ts` grants every binding — primary or `:peer:` — the same capability list,
+including `thread.enqueue`. `stableController` then refuses any `:peer:` key, so `cyberdeck_worker_ctl`
+and `cyberdeck_worker_events` answer `NO_STABLE_CONTROLLER_IDENTITY` for the very binding that was
+just allowed to enqueue. A worker reporting through that path can be rejected with `OWNERSHIP_LOST`
+while its orchestrator is still able to send it instructions. The asymmetry is real and was seen in
+the MIK-71 incident.
+
+It is not fixed here because it is an authorization decision, not a truth-projection one: the lease
+substrate refuses peer bindings deliberately, so closing the gap means either narrowing the peer grant
+or giving peers a durable controller family, and both change what a peer is allowed to do. Deferred
+because the operator's orchestrators are primary bindings. **Trigger:** a peer orchestrator that needs
+to observe or control its own workers. The fix is to decide what a peer binding is, in one place, and
+make the grant and the lease agree — not to special-case the tools that currently refuse it.
+
 ## Things that are not deferred
 
 - When Fleet's window has no nvim, one is spawned into that same window — and nowhere else. No
