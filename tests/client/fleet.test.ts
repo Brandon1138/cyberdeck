@@ -4,6 +4,7 @@ import type { SessionRecord } from "../../src/domain/session.js";
 import {
   appendShellOutput,
   collectFleetSnapshot,
+  composerCursor,
   createFleetState,
   FleetKeyDecoder,
   renderFleet,
@@ -20,6 +21,7 @@ import {
   pixelArtWidth,
   renderPixelArt,
 } from "../../src/client/octopus.js";
+import { displayWidth } from "../../src/client/display-width.js";
 import type { PullRequestState } from "../../src/client/pr-status.js";
 import type { FleetWorkerCoordinationView } from "../../src/broker/worker-coordination-view.js";
 
@@ -3303,15 +3305,17 @@ describe("runFleet", () => {
     });
 
     // A pasteboard holding text or nothing must not disturb the frame the operator is looking at.
+    // A frame equal to the painted one is not written at all, so the pane keeps the bytes it has.
     pasted = undefined;
+    const beforeEmptyPaste = Buffer.concat(output.chunks).toString().split("\u001b[2J\u001b[H").at(-1) ?? "";
     output.chunks.length = 0;
     input.emit("data", Buffer.from([0x16]));
     await vi.waitFor(() => expect(pasteboardImage).toHaveBeenCalledTimes(2));
-    const afterEmptyPaste = Buffer.concat(output.chunks).toString().split("\u001b[2J\u001b[H").at(-1) ?? "";
-    expect(afterEmptyPaste).toContain(
+    expect(Buffer.concat(output.chunks).toString()).toBe("");
+    expect(beforeEmptyPaste).toContain(
       "Read \"/state/Application Support/Cyberdeck/pasted-images/paste-a.png\"",
     );
-    expect(afterEmptyPaste).toContain("Attached paste-a.png");
+    expect(beforeEmptyPaste).toContain("Attached paste-a.png");
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
@@ -3623,6 +3627,162 @@ describe("fleet shell mode", () => {
     await vi.waitFor(() => expect(Buffer.concat(output.chunks.slice(mark)).toString()).toContain(
       "ctrl+s change",
     ));
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+});
+
+describe("composer caret", () => {
+  const snapshot = threadFleet(2);
+  const options = { color: false, width: 60, height: 30, now: NOW_MS, home: "/Users/brandon" };
+  const caret = (state: FleetState) =>
+    composerCursor(renderFleet(snapshot, state, options), state, options.width);
+  const base = createFleetState(snapshot);
+
+  it("parks the caret off the prompt of the composer that owns the frame", () => {
+    // "› " is two cells, so an empty task draft starts in the third.
+    expect(caret(base)?.column).toBe(3);
+    expect(caret({ ...base, rename: { sessionId: "x", draft: "" } })?.column).toBe(10);
+    expect(caret({ ...base, projectPrompt: { draft: "" } })?.column).toBe(11);
+    expect(caret({ ...base, shellMode: { draft: "", transcript: [] } })?.column).toBe(3);
+  });
+
+  it("reads the draft the composer row is showing, not the task draft underneath it", () => {
+    // The shell and the project prompt borrow the row while the task draft keeps its text. A caret
+    // placed off `state.draft` lands past the end of a row that is showing something else.
+    expect(caret({
+      ...base,
+      draft: "a task the operator typed earlier",
+      shellMode: { draft: "", transcript: [] },
+    })?.column).toBe(3);
+    expect(caret({
+      ...base,
+      draft: "a task the operator typed earlier",
+      projectPrompt: { draft: "" },
+    })?.column).toBe(11);
+    expect(caret({
+      ...base,
+      draft: "",
+      shellMode: { draft: "git status", transcript: [] },
+    })?.column).toBe("! git status".length + 1);
+  });
+
+  it("counts the draft in terminal cells rather than code points", () => {
+    // Three ideographs print six cells. Counting the string would leave the caret three columns
+    // inside the operator's own text.
+    expect(caret({ ...base, draft: "日本語" })?.column).toBe(9);
+    expect(caret({ ...base, draft: "abc" })?.column).toBe(6);
+    expect(caret({ ...base, draft: "\u{1f419}" })?.column).toBe(5);
+  });
+
+  it("wraps the composer on cells, so a wide draft never overruns the pane", () => {
+    const wide = "日".repeat(40);
+    const rows = renderFleet(snapshot, { ...base, draft: wide }, options)
+      .split("\n")
+      .filter((line) => line.startsWith("› 日") || line.startsWith("  日"));
+    expect(rows.length).toBeGreaterThan(1);
+    for (const row of rows) expect(displayWidth(row)).toBeLessThan(options.width);
+  });
+
+  it("gives no caret to a view without a composer", () => {
+    expect(caret({
+      ...base,
+      workerPicker: { step: "model", modelIndex: 0, effortIndex: 0, cwd: "/repo/one", returnDraft: "" },
+    })).toBeUndefined();
+    expect(caret({
+      ...base,
+      permissionPicker: { step: "provider", providerIndex: 0, policyIndex: 0 },
+    })).toBeUndefined();
+    expect(caret({
+      ...base,
+      orchestratorPicker: { step: "target", choiceIndex: 0 },
+    })).toBeUndefined();
+    expect(caret({ ...base, view: "diagnostics" })).toBeUndefined();
+    // The palette does collect text, so it keeps its caret.
+    expect(caret({
+      ...base,
+      draft: "/",
+      commandPalette: { level: "commands", selectedIndex: 0, scrollOffset: 0 },
+    })).toBeDefined();
+  });
+});
+
+describe("fleet repaint", () => {
+  class Input extends EventEmitter {
+    isTTY = true;
+    isRaw = false;
+    setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+    resume(): this { return this; }
+    pause(): this { return this; }
+  }
+  class Output {
+    isTTY = false;
+    columns = 60;
+    rows = 30;
+    chunks: Buffer[] = [];
+    write(chunk: string | Uint8Array): boolean {
+      this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+      return true;
+    }
+  }
+
+  function transport() {
+    const closeListeners = new Set<() => void>();
+    return {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [];
+        if (method === "fleet.preferences") return {};
+        if (method === "session.snapshot") return { data: "" };
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) {
+        closeListeners.add(listener);
+        return () => closeListeners.delete(listener);
+      },
+      close: vi.fn(),
+    };
+  }
+
+  it("hides the caret for the whole repaint and restores it once the frame is written", async () => {
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport() as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("build it"));
+    await vi.waitFor(() =>
+      expect(Buffer.concat(output.chunks).toString()).toContain("› build it"));
+
+    const frames = Buffer.concat(output.chunks).toString().split("\u001b[2J\u001b[H");
+    expect(frames.length).toBeGreaterThan(1);
+    // Nothing clears or repaints with the caret showing: every clear is preceded by the hide.
+    for (const preceding of frames.slice(0, -1)) {
+      expect(preceding.endsWith("\u001b[?25l")).toBe(true);
+    }
+    const painted = frames.at(-1) ?? "";
+    expect(painted.match(/\u001b\[\?25h/gu) ?? []).toHaveLength(1);
+    expect(painted).toMatch(/\u001b\[\d+;\d+H\u001b\[\?25h$/u);
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("leaves the pane alone when the next frame is the painted one", async () => {
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport() as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+    await vi.waitFor(() =>
+      expect(Buffer.concat(output.chunks).toString()).toContain("Describe a task"));
+
+    // The idle cadence collects a snapshot twice a second. An unchanged frame that cleared and
+    // repainted anyway is a flash the operator sees for no change at all.
+    output.chunks.length = 0;
+    await new Promise((resolve) => { setTimeout(resolve, 1_200); });
+    expect(Buffer.concat(output.chunks).toString()).toBe("");
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();

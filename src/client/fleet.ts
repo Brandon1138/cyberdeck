@@ -38,6 +38,7 @@ import {
   type PasteboardImageAttachment,
 } from "./clipboard-image.js";
 import { collectDashboardSnapshot, renderDashboard } from "./dashboard.js";
+import { displayWidth, graphemeWidth, graphemes } from "./display-width.js";
 import {
   OCTOPUS_MARK,
   OCTOPUS_SPLASH,
@@ -2779,6 +2780,32 @@ export async function runFleet(
     ?? (() => capturePasteboardImage({ directory: join(appStateDirectory, "pasted-images") }));
 
   const previousRawMode = input.isRaw === true;
+  /**
+   * The last frame written to the pane, caret sequence included, or nothing when the pane's
+   * contents are unknown — before the first frame, and after any excursion off the alternate
+   * screen. A frame equal to this one would clear the pane and paint it back exactly as it stands,
+   * which at the idle cadence is a visible flash several times a second for no change at all.
+   */
+  let paintedFrame: string | undefined;
+  const enterFleetScreen = () => {
+    output.write(ENTER_FLEET_SCREEN);
+    paintedFrame = undefined;
+  };
+  /**
+   * Paint one frame, caret hidden for the whole of it.
+   *
+   * The clear and every line of the repaint move the caret, and a caret left visible walks all of
+   * them in front of the operator. It is hidden before the clear, moved to where it belongs once
+   * the frame is on screen, and shown again only when a composer owns it.
+   */
+  const writeFrame = (body: string, cursor: { row: number; column: number } | undefined) => {
+    const frame = cursor === undefined
+      ? body
+      : `${body}\u001b[${cursor.row};${cursor.column}H\u001b[?25h`;
+    if (frame === paintedFrame) return;
+    paintedFrame = frame;
+    output.write(`\u001b[?25l\u001b[2J\u001b[H${frame}`);
+  };
   let stopped = false;
   let attaching = false;
   let wake: (() => void) | undefined;
@@ -2824,7 +2851,7 @@ export async function runFleet(
         input.setRawMode?.(true);
         input.on("data", onInput);
         input.resume?.();
-        output.write(ENTER_FLEET_SCREEN);
+        enterFleetScreen();
         snapshot = await collectFleetSnapshot(client);
       }
       notify();
@@ -2857,7 +2884,7 @@ export async function runFleet(
         input.setRawMode?.(true);
         input.on("data", onInput);
         input.resume?.();
-        output.write(ENTER_FLEET_SCREEN);
+        enterFleetScreen();
         snapshot = await collectFleetSnapshot(client);
       }
       notify();
@@ -3229,7 +3256,7 @@ export async function runFleet(
   signals.on("SIGINT", onSigint);
   signals.on("SIGTERM", stop);
   signals.on("SIGWINCH", onResize);
-  output.write(ENTER_FLEET_SCREEN);
+  enterFleetScreen();
 
   try {
     while (!stopped) {
@@ -3251,7 +3278,7 @@ export async function runFleet(
         ];
         const body = diagnostics.slice(0, Math.max(0, height - footer.length));
         while (body.length < height - footer.length) body.push("");
-        output.write(`\u001b[2J\u001b[H${[...body, ...footer].join("\n")}\u001b[?25l`);
+        writeFrame([...body, ...footer].join("\n"), undefined);
       } else {
         const renderOptions = {
           color: output.isTTY === true,
@@ -3265,8 +3292,7 @@ export async function runFleet(
           home: homedir(),
         });
         const rendered = renderFleet(snapshot, state, renderOptions);
-        const cursor = composerCursor(rendered, state, width);
-        output.write(`\u001b[2J\u001b[H${rendered}\u001b[${cursor.row};${cursor.column}H\u001b[?25h`);
+        writeFrame(rendered, composerCursor(rendered, state, width));
       }
       await waitForRefresh((resume) => { wake = resume; }, () => { wake = undefined; });
     }
@@ -3306,19 +3332,52 @@ function waitForRefresh(register: (wake: () => void) => void, clear: () => void)
   });
 }
 
-function composerCursor(rendered: string, state: FleetState, width: number): { row: number; column: number } {
+/**
+ * The composer that owns text input in the rendered frame, or nothing when none does.
+ *
+ * The precedence is {@link renderFleet}'s own, not a second opinion about it: a picker that renders
+ * instead of the list collects arrow keys, not text, and the two surfaces that do render a composer
+ * row — the list's footer and the command palette — must be read for the same draft the row shows.
+ */
+function composerFocus(state: FleetState): { mode: ComposerMode; value: string } | undefined {
+  if (state.view !== "fleet") return undefined;
+  if (state.workerPicker !== undefined || state.permissionPicker !== undefined) return undefined;
+  if (state.commandPalette !== undefined) return { mode: "task", value: state.draft };
+  if (state.orchestratorPicker !== undefined) return undefined;
+  if (state.rename !== undefined) return { mode: "rename", value: state.rename.draft };
+  if (state.projectPrompt !== undefined) return { mode: "project", value: state.projectPrompt.draft };
+  if (state.shellMode !== undefined) return { mode: "shell", value: state.shellMode.draft };
+  return { mode: "task", value: state.draft };
+}
+
+/**
+ * Where the caret belongs in the rendered frame, or nothing when no composer owns it.
+ *
+ * The column is counted in terminal cells rather than code points, because that is what the `CUP`
+ * sequence addresses: a draft holding an ideograph or an emoji is wider on screen than it is long
+ * in JavaScript, and counting the string would park the caret inside the text the operator typed.
+ */
+export function composerCursor(
+  rendered: string,
+  state: FleetState,
+  width: number,
+): { row: number; column: number } | undefined {
+  const focus = composerFocus(state);
+  if (focus === undefined) return undefined;
   const lines = rendered.split("\n");
-  const value = state.rename?.draft ?? state.draft;
   const divider = "─".repeat(width);
   const lowerDividerIndex = lines.findLastIndex((line) => stripTerminalControl(line) === divider);
-  const rowIndex = Math.max(0, lowerDividerIndex - 1);
+  if (lowerDividerIndex <= 0) return undefined;
+  const rowIndex = lowerDividerIndex - 1;
   const visibleLine = stripTerminalControl(lines[rowIndex] ?? "");
-  const emptyColumn = state.rename === undefined ? 3 : 10;
+  // An empty draft shows its placeholder, so the caret is placed off the prompt the composer wears
+  // rather than off the end of copy the operator did not type.
+  const emptyColumn = displayWidth(COMPOSER_PROMPTS[focus.mode].prefix) + 2;
   return {
     row: Math.max(1, rowIndex + 1),
-    column: value === ""
+    column: focus.value === ""
       ? emptyColumn
-      : Math.min(width, [...visibleLine].length + 1),
+      : Math.min(width, displayWidth(visibleLine) + 1),
   };
 }
 
@@ -4368,16 +4427,28 @@ function renderComposerLines(
   const rows: string[] = [];
   const logicalLines = value.split("\n");
   for (const logicalLine of logicalLines) {
-    const characters = [...logicalLine];
+    // Wrapping is measured in cells and cut between grapheme clusters: a row cut by code point
+    // overruns the pane on wide text — the terminal then soft-wraps a fragment the fleet never
+    // counted — and a cut inside a cluster splits a character from the marks that complete it.
+    const clusters = graphemes(logicalLine);
     let offset = 0;
     do {
       const leading = rows.length === 0;
       const prefix = leading ? `${prompt.prefix} ` : "  ";
-      const capacity = Math.max(1, options.width - [...prefix].length - 1);
-      const segment = characters.slice(offset, offset + capacity).join("");
-      rows.push(`${leading ? `${paintedPrefix} ` : "  "}${segment}`);
-      offset += capacity;
-    } while (offset < characters.length);
+      const capacity = Math.max(1, options.width - displayWidth(prefix) - 1);
+      let end = offset;
+      let printed = 0;
+      while (end < clusters.length) {
+        const cell = graphemeWidth(clusters[end]!);
+        if (printed + cell > capacity) break;
+        printed += cell;
+        end += 1;
+      }
+      // A cluster wider than the whole row still has to move: no capacity is an empty row forever.
+      if (end === offset) end = offset + 1;
+      rows.push(`${leading ? `${paintedPrefix} ` : "  "}${clusters.slice(offset, end).join("")}`);
+      offset = end;
+    } while (offset < clusters.length);
   }
 
   const maximumRows = Math.max(1, Math.min(12, Math.floor(options.height / 3)));
