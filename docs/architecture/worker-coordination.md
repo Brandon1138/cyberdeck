@@ -54,6 +54,11 @@ rate and active-queue limits prevent noisy workers from consuming unbounded memo
 coalesce by worker and kind while merging bounded material deltas. Exceptions, decision requests,
 and intervention-required events remain pinned until explicitly resolved.
 
+What a worker *is* — and how far an instruction sent to it has actually got — is one projection,
+described in [worker-truth.md](worker-truth.md). Redirects and checkpoint prompts ride the same
+instruction lifecycle, so a prompt written into a blocked worker's composer is reported `queued` with
+its hold reason rather than as a delivery.
+
 Checkpoint requests are durable and correlation-idempotent. Non-blocking is default and does not
 change worker lifecycle. Decision gates set structured `decisionGate` state. A `CHECKPOINT` event
 answers one pending correlation through the same bounded event schema.

@@ -30,6 +30,16 @@ function result(sessionId: string, value: ScoutDecisionCard): WorkerResultSnapsh
     status: "completed",
     completedTurns: 1,
     text: renderScoutDecisionCard(value),
+    truth: {
+      state: "exited",
+      terminal: true,
+      completedTurns: 1,
+      canonicalTurns: 1,
+      pendingInstructions: 0,
+      composerOccupied: false,
+      modalOpen: false,
+      detail: "scout reported and exited",
+    },
   };
 }
 

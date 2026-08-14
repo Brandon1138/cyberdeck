@@ -25,6 +25,7 @@ import {
   type SessionRecord,
 } from "../domain/session.js";
 import type { ThreadReadResult } from "../domain/thread.js";
+import type { WorkerTruth } from "../domain/worker-truth.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
@@ -142,11 +143,21 @@ export interface ThreadStatusRecord {
   provider: string;
   executionState: SessionRecord["executionState"];
   attentionState?: SessionRecord["attentionState"];
+  /**
+   * The broker projection of what this worker is doing, identical to the one `workers_wait` settles
+   * from. `executionState` and `attentionState` are inputs to it, and reading them separately is how
+   * a listing came to say `active + done` about a worker a wait had already called completed.
+   */
+  truth?: WorkerTruth;
+  /** Why the session stopped, when the provider said so itself rather than exiting. */
+  termination?: SessionRecord["termination"];
 }
+
+export type ThreadFullRecord = SessionRecord & { truth?: WorkerTruth };
 
 export interface ThreadListPage {
   view: "status" | "full";
-  threads: Array<ThreadStatusRecord | SessionRecord>;
+  threads: Array<ThreadStatusRecord | ThreadFullRecord>;
   total: number;
   cursor: number;
   returned: number;
@@ -353,6 +364,19 @@ export class AgentControlService {
     this.workspaceProbe = options.workspaceProbe;
   }
 
+  /**
+   * The broker projection for a thread, or nothing when the broker holds no runtime for it.
+   *
+   * Every orchestrator-facing surface reads it from here, so none of them can invent its own answer.
+   */
+  private truthOf(sessionId: string): WorkerTruth | undefined {
+    try {
+      return this.registry.workerTruth(sessionId);
+    } catch {
+      return undefined;
+    }
+  }
+
   async listThreads(input: string | z.input<typeof AgentListThreadsParamsSchema>): Promise<ThreadListPage> {
     const request = AgentListThreadsParamsSchema.parse(
       typeof input === "string" ? { actorSessionId: input } : input,
@@ -370,7 +394,12 @@ export class AgentControlService {
     const nextCursor = request.cursor + page.length;
     return {
       view: request.view,
-      threads: page.map((record) => request.view === "status" ? statusRecord(record) : boundedRecord(record)),
+      threads: page.map((record) => {
+        const truth = this.truthOf(record.id);
+        return request.view === "status"
+          ? statusRecord(record, truth)
+          : { ...boundedRecord(record), ...(truth === undefined ? {} : { truth }) };
+      }),
       total: visible.length,
       cursor: request.cursor,
       returned: page.length,
@@ -1179,13 +1208,15 @@ function actorFamilyKey(record: SessionRecord): string | undefined {
 }
 
 /** Everything a liveness or duplicate-safety check needs, and nothing that grows with transcript size. */
-function statusRecord(record: SessionRecord): ThreadStatusRecord {
+function statusRecord(record: SessionRecord, truth: WorkerTruth | undefined): ThreadStatusRecord {
   return {
     id: record.id,
     ...(record.name === undefined ? {} : { name: record.name }),
     provider: record.provider,
     executionState: record.executionState,
     ...(record.attentionState === undefined ? {} : { attentionState: record.attentionState }),
+    ...(truth === undefined ? {} : { truth }),
+    ...(record.termination === undefined ? {} : { termination: record.termination }),
   };
 }
 

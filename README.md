@@ -202,6 +202,22 @@ to a status projection (id, name, provider,
 executionState, attentionState) and pages with `limit`/`cursor`, so a liveness check stays inside a
 caller's token budget at 64 concurrent workers; pass `view: "full"` for whole records.
 
+`workers_wait`, `threads_list`, and `worker_events` all carry the same `truth` value, projected from
+one per-worker state machine, so they cannot disagree about whether a worker is working, blocked on a
+provider prompt, holding text it never submitted, stalled, or terminal. That machine also fixes the
+vocabulary an instruction moves through. `cyberdeck_thread_message` returns `accepted` (held, not yet
+attempted), `queued` (attempted and refused at an unsafe boundary, with a `holdReason`, retried
+automatically at the next safe one), or `rendered` (bytes are in the provider's input surface, and
+`expectedTurn` names the turn that will answer them). `rendered` is the strongest claim an enqueue
+may return: at a permission modal those are exactly the bytes that sit unsent in the composer. Only
+`submitted`, `acknowledged`, and `completed` say the provider took the payload, and a worker that
+reaches a terminal state with it unconsumed reports `undelivered` rather than dropping it. There is
+no `delivered`. A completion target settles only from the canonical completed turn for that ordinal —
+an earlier turn cannot answer a later instruction, and an unsent composer buffer never increments
+`completedTurns`. A provider that stops itself on a usage cap or an over-long prompt is its own
+terminal state, `provider-limit`, rather than a transcript line nobody reads. See
+[docs/architecture/worker-truth.md](docs/architecture/worker-truth.md).
+
 Worker starts may explicitly set provider-neutral `approvalMode` to `auto` for Codex, Claude, or
 Cursor. Cursor maps it to verified post-launch `/run-everything`: Cyberdeck waits for Composer input,
 commits the command, reads the enabled state back through the command menu, and always closes that
