@@ -29,6 +29,23 @@ constraint understood.
 
 # Dated bug log
 
+## Open: Fleet learns about provider progress only by asking, every 500 ms
+
+Found on 2026-08-14 while fixing the dancing caret. Fleet's loop collects a whole snapshot, renders
+it, and then waits 500 ms before doing it again — an idle cadence under 2 FPS. Nothing a detached
+provider writes wakes that loop: `waitForRefresh` is resumed by a key, by a chunk of `!` shell
+output, by `SIGWINCH`, by an attach transition, and by the transport closing — and by nothing else.
+A worker that finishes between two ticks is on screen up to half a second later, and there is no
+path by which the broker can say so sooner.
+
+The repaint itself no longer costs anything when nothing changed — an identical frame is not written
+at all, so the pane is left as it stands rather than cleared and painted back — and the frame that is
+written is atomic behind a hidden caret. That removes the flicker the cadence used to produce; it
+does not make the cadence a subscription.
+
+Not fixed here: waking on provider output means a broker-side event Fleet subscribes to, which is a
+transport change rather than a rendering one, and the fix for the caret had no business carrying it.
+
 ## Open: a decision gate is cleared by an answer to any checkpoint, not the matching one
 
 Found on 2026-07-27 by the worker-coordination integration matrix (MIK-55 Wave 2d). An
