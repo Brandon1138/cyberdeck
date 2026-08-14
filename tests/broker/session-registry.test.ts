@@ -218,7 +218,7 @@ describe("SessionRegistry", () => {
     expect(puts.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("preserves a durable Claude automatic mode across recovery and exposes resumed launch diagnostics", async () => {
+  it("resumes a durable read-only Claude session without widening it to automatic mode", async () => {
     const persisted: SessionRecord = {
       id: "22222222-2222-4222-8222-222222222222",
       provider: "claude",
@@ -260,11 +260,15 @@ describe("SessionRegistry", () => {
       executionState: "active",
     });
     expect(ptyFactory.mock.calls[0]?.[0]).toMatchObject({
-      args: expect.arrayContaining(["--resume", persisted.id, "--permission-mode", "auto"]),
+      // `approvalMode: "auto"` answers the approval question, not the write question. Resuming a
+      // read-only session into `--permission-mode auto` would grant on resume what the stored
+      // request refused at launch.
+      args: expect.arrayContaining(["--resume", persisted.id, "--permission-mode", "plan"]),
     });
+    expect(ptyFactory.mock.calls[0]?.[0]?.args).not.toContain("auto");
     expect(registry.launchRecord(persisted.id)).toMatchObject({
       mode: "resume",
-      args: expect.arrayContaining(["--permission-mode", "auto"]),
+      args: expect.arrayContaining(["--permission-mode", "plan"]),
     });
   });
 

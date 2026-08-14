@@ -239,6 +239,45 @@ describe("Cursor command construction", () => {
     }
   });
 
+  it("grants a Cursor worker every declared writable root with --add-dir", () => {
+    // Cursor sandboxes writes to `--workspace` exactly as Codex and Claude sandbox theirs, so a
+    // worker whose external roots never reached the resolver started clean and then failed on the
+    // git common directory and the report directory its dispatch had already declared.
+    const command = buildCursorInteractiveCommand({
+      ...request({ sandbox: "workspace-write" }).request,
+      workspace: {
+        worktreePath: "/tmp/repo/worktrees/mik-70",
+        branch: "brandon/mik-70",
+        baseRef: "main",
+        provisioning: "worker-provisioned",
+        writableRoots: ["/tmp/repo/.git", "/var/tmp/reports"],
+      },
+    });
+    expect(command.args).toEqual([
+      "--workspace",
+      "/tmp/repo",
+      "--sandbox",
+      "enabled",
+      "--add-dir",
+      "/tmp/repo/.git",
+      "--add-dir",
+      "/var/tmp/reports",
+    ]);
+  });
+
+  it("refuses to launch a read-only Cursor session that declared writable roots", () => {
+    expect(() => buildCursorInteractiveCommand({
+      ...request().request,
+      workspace: {
+        worktreePath: "/tmp/repo/worktrees/mik-70",
+        branch: "brandon/mik-70",
+        baseRef: "main",
+        provisioning: "pre-provisioned",
+        writableRoots: ["/tmp/repo/.git"],
+      },
+    })).toThrow(/WRITABLE_ROOTS_REQUIRE_WORKSPACE_WRITE|read-only cursor session/i);
+  });
+
   it("forwards only an explicitly supplied model and never forwards role", () => {
     const omitted = buildCursorHeadlessCommand(request({ role: "reviewer" }).request);
     expect(omitted.args).not.toContain("--model");

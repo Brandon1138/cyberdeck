@@ -9,6 +9,7 @@ import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { renderScoutDecisionCard } from "../../src/domain/scout-output.js";
+import { CodexProviderAdapter } from "../../src/providers/codex.js";
 
 const ACTOR = "11111111-1111-4111-8111-111111111111";
 const WORKER = "22222222-2222-4222-8222-222222222222";
@@ -215,6 +216,172 @@ describe("AgentControlService", () => {
       completionTarget: 1,
     });
     expect(start).toHaveBeenCalledWith(expect.objectContaining({ effort: "low" }), "Return 8 + 1000");
+  });
+
+  it("tells an automatic Codex worker that its MCP calls will still stop at an approval prompt", async () => {
+    // Silence here is what stalled the 2026-08-14 workers: automatic approval was granted, the
+    // session dead-ended at an interactive MCP prompt, and nothing had said it would.
+    const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    const result = await service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      approvalMode: "auto",
+      cwd: "/repo/one",
+      prompt: "Inspect",
+    });
+    expect(result.warnings?.join("\n")).toContain("MCP tool");
+  });
+
+  it("says a read-only Claude worker keeps its approval prompts instead of widening its sandbox", async () => {
+    const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    const result = await service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "claude",
+      model: "opus",
+      approvalMode: "auto",
+      sandbox: "read-only",
+      cwd: "/repo/one",
+      prompt: "Inspect",
+    });
+    expect(result.warnings?.join("\n")).toContain("plan");
+    expect(start).toHaveBeenCalledWith(
+      expect.objectContaining({ sandbox: "read-only", approvalMode: "auto" }),
+      "Inspect",
+    );
+  });
+
+  it("does not warn when the provider delivers everything the request asked for", async () => {
+    const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd: "/repo/one",
+      prompt: "Inspect",
+    })).resolves.not.toHaveProperty("warnings");
+  });
+
+  it("refuses a worker told to create a worktree it will not be allowed to create", async () => {
+    const start = vi.fn();
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+      undefined,
+      {
+        workspaceProbe: {
+          gitCommonDirectory: async () => "/repo/one/.git/worktrees-store",
+          worktreeRoot: async () => "/repo/one",
+          checkedOutBranch: async () => "main",
+          refResolves: async () => true,
+        },
+      },
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd: "/repo/one",
+      prompt: "Create a worktree and work in it",
+      sandbox: "read-only",
+      workspace: {
+        worktreePath: "/repo/one/worktrees/mik-70",
+        branch: "brandon/mik-70",
+        baseRef: "main",
+        provisioning: "worker-provisioned",
+        writableRoots: [],
+      },
+    })).rejects.toMatchObject({ code: "WORKSPACE_PROVISIONING_REQUIRES_WRITE" });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("grants a validated worker its declared writable roots at launch", async () => {
+    const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+      undefined,
+      {
+        workspaceProbe: {
+          gitCommonDirectory: async () => "/repo/one/.git",
+          worktreeRoot: async () => "/repo/one",
+          checkedOutBranch: async () => "main",
+          refResolves: async () => true,
+        },
+      },
+    );
+
+    const workspace = {
+      worktreePath: "/repo/one",
+      branch: "main",
+      baseRef: "main",
+      provisioning: "pre-provisioned" as const,
+      writableRoots: ["/var/tmp/mik-70-reports"],
+    };
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd: "/repo/one",
+      prompt: "Write a report",
+      sandbox: "workspace-write",
+      workspace,
+    })).resolves.toMatchObject({ sessionId: WORKER });
+    expect(start.mock.calls[0]?.[0]).toMatchObject({ workspace });
+  });
+
+  it("refuses a pre-provisioned workspace whose worktree nobody created", async () => {
+    const service = new AgentControlService(
+      { start: vi.fn() } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+      undefined,
+      {
+        workspaceProbe: {
+          gitCommonDirectory: async () => undefined,
+          worktreeRoot: async () => undefined,
+          checkedOutBranch: async () => undefined,
+          refResolves: async () => false,
+        },
+      },
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd: "/repo/one",
+      prompt: "Work",
+      sandbox: "workspace-write",
+      workspace: {
+        worktreePath: "/repo/one",
+        branch: "brandon/mik-70",
+        baseRef: "main",
+        provisioning: "pre-provisioned",
+        writableRoots: [],
+      },
+    })).rejects.toMatchObject({ code: "WORKSPACE_WORKTREE_MISSING" });
   });
 
   it("resolves Scout profile into fixed Tier 1 Composer state and structured prompt", async () => {
@@ -459,6 +626,34 @@ describe("AgentControlService", () => {
       prompt: "Review the fix",
     });
     expect(start.mock.calls.at(-1)?.[0]).not.toHaveProperty("approvalMode");
+  });
+
+  it("composes an MCP-requested auto Codex worker into -a never", async () => {
+    let launchArgs: string[] = [];
+    const start = vi.fn(async (request) => {
+      const session = { ...worker, ...request, id: WORKER, provider: "codex" as const };
+      launchArgs = new CodexProviderAdapter().buildLaunchSpec(session).args;
+      return session;
+    });
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    await service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd: "/repo/one",
+      sandbox: "workspace-write",
+      approvalMode: "auto",
+      prompt: "Land the focused fix",
+    });
+
+    expect(launchArgs).toEqual(expect.arrayContaining(["-a", "never"]));
+    expect(launchArgs).not.toContain("on-request");
+    expect(launchArgs).toEqual(expect.arrayContaining(["-s", "workspace-write"]));
   });
 
   it("applies persisted Composer automatic mode to MCP-started workers", async () => {

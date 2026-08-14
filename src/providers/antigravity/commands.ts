@@ -1,6 +1,7 @@
 import type { JobRequest } from "../../domain/job.js";
 import { isFableModel } from "../../domain/policy.js";
 import type { ReasoningEffort, Sandbox } from "../../domain/session.js";
+import { resolveProviderPermissionPlan } from "../../domain/permission-resolution.js";
 import {
   buildProviderChildEnvironment,
   jobLaunchEnvironment,
@@ -95,11 +96,18 @@ function command(
   };
 }
 
+/**
+ * Antigravity's permission flags come from the shared resolver like every other provider's, so the
+ * parity table and the argv cannot drift. Its two refusals keep their own error identities, because
+ * callers already discriminate on them.
+ */
 function antigravitySandboxArgs(sandbox: Sandbox): string[] {
-  if (sandbox === "workspace-write") {
-    throw new AntigravityUnsupportedSandboxError();
+  const plan = resolveProviderPermissionPlan("antigravity", { sandbox });
+  if (!plan.ok) {
+    if (plan.code === "PROVIDER_SANDBOX_UNSUPPORTED") throw new AntigravityUnsupportedSandboxError();
+    throw new AntigravityLaunchSafetyError(plan.message);
   }
-  return ["--mode", "plan", "--sandbox"];
+  return [...plan.value.args];
 }
 
 function appendExplicitModel(args: string[], model: string | undefined): void {

@@ -19,8 +19,10 @@ and `docs/architecture/antigravity-adapter.md`.
 | --- | --- | --- | --- | --- |
 | Adapter | `src/providers/codex.ts:24` | `src/providers/claude.ts:13` | `src/providers/cursor/session-adapter.ts:49` | `src/providers/antigravity/session-adapter.ts:9` |
 | Executable | `codex` | `claude` | `agent` | `agy` |
-| Permission/approval flags | `-s <sandbox> -a on-request` (`codex.ts:36-44`) | `--permission-mode plan\|manual` (`claude.ts:38-39`) | `--sandbox enabled` + `--mode plan` when read-only (`cursor/commands.ts:59-66`) | `--mode plan --sandbox` always (`antigravity/commands.ts:82-87`) |
+| Permission/approval flags | `-s <sandbox> -a never\|on-request` | `--permission-mode auto\|plan\|manual` | `--sandbox enabled` + `--mode plan\|ask` when read-only | `--mode plan --sandbox` always |
+| Resolved by | `src/domain/permission-resolution.ts` for all four — see [the resolution table](#the-resolution-table) | ← | ← | ← |
 | `workspace-write` supported | yes | yes (`manual`) | yes (no `--mode`) | **no** — throws `ANTIGRAVITY_WORKSPACE_WRITE_UNSUPPORTED` (`antigravity/commands.ts:83-85`) |
+| Writable roots outside cwd | `--add-dir` | `--add-dir` | `--add-dir` | `--add-dir` (unreachable: read-only only) |
 | Cyberdeck MCP server injected | yes, when `session.kind` is set (`codex.ts:97-110`) | yes, when `session.kind` is set (`claude.ts:95-106`) | yes, when `session.kind` is set, through a session-scoped plugin directory (`cursor/mcp-hosting.ts`, `cursor/session-adapter.ts:117-131`) | **never** (`main.ts:137`) |
 | `providerInstructions` forwarded | `-c developer_instructions=` (`codex.ts:92-95`) | `--append-system-prompt` (`claude.ts:90-93`) | no flag exists; submitted as the first message (`cursor/session-adapter.ts:143-165`) | **silently dropped** (`antigravity/commands.ts:34-45`) |
 | Effort values accepted | all six (`codex.ts:48-50`) | all except `ultra` (`claude.ts:46`) | **none** — any effort throws; the rung is inside the model slug (`cursor/session-adapter.ts:55`) | `low\|medium\|high` only (`antigravity/commands.ts:93-99`) |
@@ -32,37 +34,160 @@ and `docs/architecture/antigravity-adapter.md`.
 
 ## Permission / approval mode, and how it is resolved
 
-The Cyberdeck-level input is always `session.sandbox`, a two-value enum
-(`src/domain/session.ts:8`). It is never inferred: the CLI defaults it to `read-only`
-(`src/cli.ts:71`), orchestrator sessions hardcode `read-only`
-(`src/orchestration/orchestrator-manager.ts:90`), and worker starts forward the requested value
-verbatim (`src/orchestration/agent-control-service.ts:141`). No adapter widens it.
+A stored permission request is two values: `session.sandbox`, a two-value enum
+(`src/domain/session.ts`), and `session.approvalMode`, which is optional and absent means `prompt`.
+Neither is inferred: the CLI defaults the sandbox to `read-only` (`src/cli.ts`), orchestrator
+sessions hardcode `read-only` (`src/orchestration/orchestrator-manager.ts`), and worker starts
+forward the requested value verbatim.
 
-- **Codex** forwards the sandbox string unchanged as `-s` and always pins `-a on-request`
-  (`src/providers/codex.ts:36-44`, `:65-76`). `read-only` and `workspace-write` happen to be
-  Codex's own native sandbox-mode names, so no mapping table exists. `on-request` is the same on
-  launch and resume; Cyberdeck never emits `--dangerously-bypass-approvals-and-sandbox`.
-- **Claude** maps through one shared table so a sandbox cannot mean two things depending on
-  execution dimension: `read-only → plan`, `workspace-write → manual`
-  (`src/providers/claude/permissions.ts:12-19`), applied at `src/providers/claude.ts:38-39` and
-  `:72-73`. `bypassPermissions` and `dontAsk` are deliberately never emitted.
-- **Cursor** always sets `--sandbox enabled` and adds `--mode plan` only for `read-only`
-  (`src/providers/cursor/commands.ts:59-66`). `agent` advertises only `plan` and `ask` as read-only
-  modes, so `workspace-write` deliberately omits `--mode` and relies on the normal agent mode with
-  the sandbox still explicit. `--force`, `--yolo`, `--auto-review`, `--trust`, and `--approve-mcps`
-  are never emitted (proved by `tests/providers/cursor-adapter.test.ts:206-227`).
-- **Antigravity** is the outlier: it emits `--mode plan --sandbox` for `read-only` and **refuses**
-  `workspace-write` outright (`src/providers/antigravity/commands.ts:82-87`). `agy` advertises
-  `accept-edits`, but the committed evidence does not establish that `accept-edits` preserves
-  workspace-write semantics without automatic approval, so the adapter fails closed rather than
-  silently granting more than asked (`src/providers/antigravity/capabilities.ts:26-31`).
+### The two dimensions, named once
+
+The providers conflate the two in opposite directions, which is why Cyberdeck names them itself
+before any provider sees them (`src/domain/permission-resolution.ts`):
+
+| Dimension | Values | Question it answers |
+| --- | --- | --- |
+| `writes` | `denied` / `workspace` | May the session modify files at all? |
+| `prompts` | `interactive` / `never` | Does the session stop for a human before acting? |
+
+`resolveProviderPermissionPlan(provider, request)` is the **only** place either dimension becomes
+provider-native argv. All four adapters call it, so the same stored request cannot mean different
+things in different adapters. Before it existed, `read-only + auto` reached Codex as
+`-s read-only -a never` and reached Claude as `--permission-mode auto` — a session that could write,
+which the request had explicitly refused, with nothing recording that the two had diverged (MIK-70).
+
+### The resolution table
+
+Every cell is asserted in `tests/domain/permission-resolution.test.ts`.
+
+| provider | sandbox | approvalMode | emitted flags | achieved | shortfall |
+| --- | --- | --- | --- | --- | --- |
+| `codex` | `read-only` | `prompt` | `-s read-only -a on-request` | denied / interactive | — |
+| `codex` | `read-only` | `auto` | `-s read-only -a never` | denied / never | MCP¹ |
+| `codex` | `workspace-write` | `prompt` | `-s workspace-write -a on-request` | workspace / interactive | — |
+| `codex` | `workspace-write` | `auto` | `-s workspace-write -a never` | workspace / never | MCP¹ |
+| `claude` | `read-only` | `prompt` | `--permission-mode plan` | denied / interactive | — |
+| `claude` | `read-only` | `auto` | `--permission-mode plan` | denied / **interactive** | `APPROVAL_PROMPTS_REMAIN` |
+| `claude` | `workspace-write` | `prompt` | `--permission-mode manual` | workspace / interactive | — |
+| `claude` | `workspace-write` | `auto` | `--permission-mode auto` | workspace / never | — |
+| `cursor` | `read-only` | `prompt` | `--sandbox enabled --mode plan` | denied / interactive | — |
+| `cursor` | `read-only` | `auto` | `--sandbox enabled --mode plan` | denied / **interactive** | `APPROVAL_PROMPTS_REMAIN` |
+| `cursor` | `workspace-write` | `prompt` | `--sandbox enabled` | workspace / interactive | — |
+| `cursor` | `workspace-write` | `auto` | `--sandbox enabled` + post-launch `/run-everything` | workspace / never | — |
+| `antigravity` | `read-only` | `prompt` | `--mode plan --sandbox` | denied / interactive | — |
+| `antigravity` | `read-only` | `auto` | **refused** `PROVIDER_APPROVAL_MODE_UNSUPPORTED` | — | — |
+| `antigravity` | `workspace-write` | any | **refused** `PROVIDER_SANDBOX_UNSUPPORTED` | — | — |
+
+¹ Only when the Cyberdeck MCP server is injected — see [MCP approval](#mcp-approval-is-not-covered-by-codexs-approval-mode).
+
+Two invariants hold across the whole table and are asserted as such:
+
+- **`achieved.writes` always equals `requested.writes`.** A provider that cannot match the requested
+  write boundary refuses; it never diverges. This is the anti-widening rule.
+- **`achieved.prompts` may fall back to `interactive`, and only in that direction**, and never
+  silently: every fallback carries a `PermissionShortfall`.
+
+### Shortfalls: denial is loud
+
+A `PermissionShortfall` is a declared record of a capability the provider cannot deliver. Resolution
+returns them, `startWorker` and `OrchestratorManager.create` surface them as `warnings` on the start
+result. There is no path where a request is quietly downgraded.
+
+- `APPROVAL_PROMPTS_REMAIN` — automatic approval was asked for and cannot be granted without
+  widening the write boundary. Claude's only write-denying mode is `plan`, which still asks before
+  leaving it; Cursor's `/run-everything` is not bounded by `--mode plan`, so it is withheld rather
+  than run inside a read-only session.
+- `MCP_APPROVAL_PROMPTS_REMAIN` — see below.
+
+**Operational consequence for orchestrators.** Orchestrator sessions hardcode `sandbox: "read-only"`,
+so a Claude orchestrator configured `automatic` now launches `--permission-mode plan` and carries an
+`APPROVAL_PROMPTS_REMAIN` warning, where it previously launched `auto` and could write. The remedy is
+one of two operator decisions — configure Claude orchestrators to `permissioned`, or decide
+orchestrators should request `workspace-write` — not a resolution-layer change.
+
+### MCP approval is not covered by Codex's approval mode
+
+`-a never` governs shell execution. Codex 0.147.0 advertises no per-server or per-tool MCP approval
+setting, and on 2026-08-14 automatic Codex workers were observed stopping at an interactive approval
+prompt for a Cyberdeck MCP tool call. `MCP_APPROVAL_AUTOMATIC.codex` is therefore `false`: unproven
+is treated as unavailable, and an automatic Codex session with the MCP server injected starts with a
+warning telling it to report through the `cyberdeck` CLI instead. Claude's `auto` covers MCP tools;
+Cursor grants MCP at launch through its session-scoped `cli-config.json` allowlist; Antigravity has
+no MCP surface.
+
+### Writable roots
+
+`--add-dir <path>` exists on all four CLIs and is the one mechanism that grants a session write
+access outside its workspace root. It is the mechanism a worker needs to run `git worktree add`: that
+command writes `refs/heads/<branch>` and `worktrees/<name>` under the git **common** directory of the
+source repository, which is never inside the worktree being created. Requesting writable roots
+alongside `sandbox: "read-only"` is refused (`WRITABLE_ROOTS_REQUIRE_WORKSPACE_WRITE`) rather than
+resolved into flags that cannot take effect.
+
+Roots reach resolution from the typed `workspace` field on a worker start; see
+[Worker workspaces](#worker-workspaces). Codex, Claude, and Cursor each forward them from that field
+into their own launch arguments — Cursor's sandbox is bounded by `--workspace` exactly as the other
+two are bounded by their cwd, so it is not the exception it briefly was. Antigravity never reaches
+the roots at all, because it refuses `workspace-write` first.
+
+`workspaceWritableRoots` drops exactly one declared root: a **pre-provisioned** worker's own
+worktree, which is where that worker already runs, so granting it again emits an argument that says
+nothing. A **worker-provisioned** worker runs in the *source* repository instead, so its target is
+outside cwd and does not exist yet; its `worktreePath` survives into `--add-dir` and is what makes
+`git worktree add` able to create the directory the dispatch named.
+
+### Provider-specific notes
+
+- **Codex** is the one provider whose flags are a direct transcription: it names both dimensions
+  natively and applies both literally. Cyberdeck never emits
+  `--dangerously-bypass-approvals-and-sandbox`, so the sandbox stays in force even when approvals are
+  automatic.
+- **Claude** has one flag for both dimensions. `bypassPermissions` and `dontAsk` are deliberately
+  never emitted, asserted in `tests/domain/permission-resolution.test.ts`.
+- **Cursor** advertises only `plan` and `ask` as read-only modes, so `workspace-write` omits `--mode`
+  and relies on the normal agent mode with the sandbox still explicit. `ask` is used for Scouts.
+  `--force`, `--yolo`, `--auto-review`, `--trust`, and `--approve-mcps` are never emitted.
+- **Antigravity** refuses `workspace-write` outright. `agy` advertises `accept-edits`, but the
+  committed evidence does not establish that it preserves workspace-write semantics without
+  automatic approval, so the adapter fails closed rather than silently granting more than asked.
   `--dangerously-skip-permissions` is never emitted. Antigravity additionally has a pre-spawn step:
   `prepareLaunch` appends the canonicalized cwd — and only that cwd, never a parent — to
-  `~/.gemini/antigravity-cli/settings.json` (`src/providers/antigravity/workspace-trust.ts:22-56`).
+  `~/.gemini/antigravity-cli/settings.json` (`src/providers/antigravity/workspace-trust.ts`).
 
-This is **not** a closable parity gap. Antigravity's missing `workspace-write` is an evidence
-boundary, not an oversight; closing it means emitting `--mode accept-edits`, which would claim a
-guarantee the provider has not been shown to give.
+Antigravity's missing `workspace-write` is **not** a closable parity gap. It is an evidence boundary,
+not an oversight; closing it means emitting `--mode accept-edits`, which would claim a guarantee the
+provider has not been shown to give.
+
+## Worker workspaces
+
+Worktree requirements used to exist only as prose in a worker's prompt, so the broker could not check
+that the worktree was there, could not tell whether the worker was expected to create it, and could
+not notice that the sandbox it was about to grant made creating it impossible.
+`WorkerWorkspaceSchema` (`src/domain/worker-workspace.ts`) types the requirement instead:
+
+| Field | Meaning |
+| --- | --- |
+| `worktreePath` | Absolute path of the worktree the work happens in |
+| `branch` | The branch the worker's commits land on |
+| `baseRef` | The ref the branch was cut from, and the baseline a review diffs against |
+| `provisioning` | `pre-provisioned` (the broker made it) or `worker-provisioned` (the worker will) |
+| `writableRoots` | Absolute directories that must be writable in addition to the workspace root |
+
+`validateWorkerWorkspace` runs in `startWorker` before any process exists, using a `WorkspaceProbe`
+(`GitWorkspaceProbe` in the broker, read-only git plumbing only). Its failures:
+
+| Code | Cause |
+| --- | --- |
+| `WORKSPACE_CWD_OUTSIDE_WORKTREE` | A pre-provisioned worker's cwd is not in its worktree, or a worker-provisioned one's cwd is inside the worktree it has yet to create |
+| `WORKSPACE_PROVISIONING_REQUIRES_WRITE` | `worker-provisioned` under a read-only sandbox, which cannot run `git worktree add` at all |
+| `WORKSPACE_TARGET_NOT_WRITABLE` | The worktree to be created is outside cwd and outside every writable root |
+| `WORKSPACE_GIT_DIR_NOT_WRITABLE` | The git common directory, where the ref is created, is not writable — the 2026-08-14 `cannot lock ref ... 'Operation not permitted'` denial, caught before launch and naming the directory to add |
+| `WORKSPACE_WORKTREE_MISSING` | A declared pre-provisioned worktree is absent or is not its own root; or a worker-provisioned cwd is not a repository |
+| `WORKSPACE_BRANCH_MISMATCH` | The declared branch is not what is checked out (detached HEAD is named as such) |
+| `WORKSPACE_BASE_REF_UNRESOLVED` | The base ref does not resolve, so no review has a baseline |
+
+The field is optional. A start without it behaves exactly as before, which keeps every existing
+dispatch working; validation applies to dispatches that declare what they need.
 
 ## Cyberdeck MCP server injection
 

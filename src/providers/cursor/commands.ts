@@ -1,5 +1,10 @@
 import type { JobRequest } from "../../domain/job.js";
-import type { StartSessionRequest } from "../../domain/session.js";
+import type { ApprovalMode, StartSessionRequest } from "../../domain/session.js";
+import { resolveProviderPermissionPlan } from "../../domain/permission-resolution.js";
+import {
+  workspaceWritableRoots,
+  type WorkerWorkspace,
+} from "../../domain/worker-workspace.js";
 import type { ProviderLaunchSpec } from "../provider.js";
 import {
   buildProviderChildEnvironment,
@@ -9,11 +14,11 @@ import { applyWorkerMode } from "../worker-mode.js";
 
 type CursorInteractiveRequest = Pick<
   StartSessionRequest,
-  "cwd" | "sandbox" | "model"
+  "cwd" | "sandbox" | "model" | "approvalMode" | "workspace"
 >;
 type CursorScoutRequest = Pick<
   StartSessionRequest,
-  "cwd" | "sandbox" | "model" | "profile"
+  "cwd" | "sandbox" | "model" | "profile" | "workspace"
 >;
 
 export interface CursorCommand {
@@ -133,14 +138,30 @@ export function buildCursorScoutCommand(
   };
 }
 
+/**
+ * Permission flags come from the shared resolver so a Cursor session cannot read a stored request
+ * differently from a Codex or Claude one. `--workspace` is not a permission flag and stays here.
+ * `--force`, `--yolo`, `--trust`, and `--approve-mcps` are never emitted.
+ *
+ * The declared workspace's writable roots go in with everything else. Cursor sandboxes writes to
+ * `--workspace` exactly like Codex and Claude sandbox theirs, so a Cursor worker whose roots were
+ * dropped here launched successfully and then hit sandbox denials on the git common directory or
+ * the report directory its dispatch had already declared. A job carries no workspace, so the
+ * headless path grants nothing extra.
+ */
 function cursorSafetyArgs(
-  request: Pick<JobRequest, "cwd" | "sandbox">,
+  request: Pick<JobRequest, "cwd" | "sandbox"> & {
+    approvalMode?: ApprovalMode | undefined;
+    workspace?: WorkerWorkspace | undefined;
+  },
   readOnlyMode: "plan" | "ask" = "plan",
 ): string[] {
-  const args = ["--workspace", request.cwd, "--sandbox", "enabled"];
-  if (request.sandbox === "read-only") args.push("--mode", readOnlyMode);
-  // Cursor advertises only plan/ask as read-only modes. Workspace-write therefore omits --mode and
-  // relies on the documented normal agent mode while keeping the explicit sandbox enabled. It does
-  // not add force, yolo, trust, Smart Auto, or automatic MCP approval.
-  return args;
+  const plan = resolveProviderPermissionPlan("cursor", {
+    sandbox: request.sandbox,
+    approvalMode: request.approvalMode,
+    writableRoots: workspaceWritableRoots(request.workspace),
+    cursorReadOnlyMode: readOnlyMode,
+  });
+  if (!plan.ok) throw Object.assign(new Error(plan.message), { code: plan.code });
+  return ["--workspace", request.cwd, ...plan.value.args];
 }

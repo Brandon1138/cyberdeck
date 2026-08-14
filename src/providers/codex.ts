@@ -4,6 +4,24 @@ import { join } from "node:path";
 import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
 import type { SessionRecord } from "../domain/session.js";
 import { sessionLaunchEnvironment } from "./launch-environment.js";
+import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
+import { workspaceWritableRoots } from "../domain/worker-workspace.js";
+
+/**
+ * Codex names both permission dimensions natively, so its flags are a direct transcription of the
+ * request. They are still built by the shared resolver: the point of one resolution layer is that
+ * the provider whose reading is literal and the provider whose reading was not cannot disagree
+ * about what the same stored request meant.
+ */
+function codexPermissionArgs(session: SessionRecord): string[] {
+  const plan = resolveProviderPermissionPlan("codex", {
+    sandbox: session.sandbox,
+    approvalMode: session.approvalMode,
+    writableRoots: workspaceWritableRoots(session.workspace),
+  });
+  if (!plan.ok) throw Object.assign(new Error(plan.message), { code: plan.code });
+  return [...plan.value.args];
+}
 
 const CODEX_SESSION_MATCH_WINDOW_MS = 30_000;
 
@@ -38,10 +56,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       "--no-alt-screen",
       "-C",
       session.cwd,
-      "-s",
-      session.sandbox,
-      "-a",
-      session.approvalMode === "auto" ? "never" : "on-request",
+      ...codexPermissionArgs(session),
     ];
     if (session.model !== undefined) {
       args.push("-m", session.model);
@@ -75,10 +90,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       "--no-alt-screen",
       "-C",
       session.cwd,
-      "-s",
-      session.sandbox,
-      "-a",
-      session.approvalMode === "auto" ? "never" : "on-request",
+      ...codexPermissionArgs(session),
     ];
     if (session.model !== undefined) args.push("-m", session.model);
     if (session.effort !== undefined) {

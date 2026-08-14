@@ -319,6 +319,51 @@ describe("ClaudeProviderAdapter", () => {
   });
 });
 
+describe("workspace writable roots", () => {
+  const workspace = {
+    worktreePath: "/tmp/repo/worktrees/mik-70",
+    branch: "brandon/mik-70",
+    baseRef: "main",
+    provisioning: "worker-provisioned" as const,
+    writableRoots: ["/tmp/repo/.git", "/tmp/repo/worktrees/mik-70"],
+  };
+
+  /** Every `--add-dir` value in emission order, so a mispaired grant cannot pass as a present one. */
+  function addDirValues(args: readonly string[]): string[] {
+    return args.flatMap((arg, index) => (arg === "--add-dir" ? [args[index + 1]!] : []));
+  }
+
+  it.each([
+    ["codex", new CodexProviderAdapter(), undefined],
+    ["claude", new ClaudeProviderAdapter(), "sonnet"],
+    ["cursor", new CursorProviderAdapter(), "composer"],
+  ] as const)("grants %s the worktree it was dispatched to create", (provider, adapter, model) => {
+    // The worker starts in /tmp/repo, not in the worktree it is about to add, so the target is
+    // covered by neither cwd nor any other root. Without this grant `git worktree add` cannot
+    // create the directory the dispatch named.
+    const spec = adapter.buildLaunchSpec(session({
+      provider,
+      sandbox: "workspace-write",
+      ...(model === undefined ? {} : { model }),
+      workspace,
+    }));
+    expect(addDirValues(spec.args)).toEqual(["/tmp/repo/.git", "/tmp/repo/worktrees/mik-70"]);
+  });
+
+  it("does not re-grant a pre-provisioned worktree the session already runs in", () => {
+    const spec = new CodexProviderAdapter().buildLaunchSpec(session({
+      cwd: "/tmp/repo/worktrees/mik-70",
+      sandbox: "workspace-write",
+      workspace: {
+        ...workspace,
+        provisioning: "pre-provisioned",
+        writableRoots: ["/tmp/repo/worktrees/mik-70"],
+      },
+    }));
+    expect(addDirValues(spec.args)).toEqual([]);
+  });
+});
+
 describe("strict MCP isolation", () => {
   it("bounds every Claude worker launch and no other provider's", () => {
     // The flags are Claude CLI surface. Codex configures MCP through `-c mcp_servers.*` and the
@@ -381,9 +426,25 @@ describe("extended interactive provider adapters", () => {
 
   it("defers Cursor auto mode to verified post-launch setup", () => {
     const adapter = new CursorProviderAdapter();
-    const record = session({ provider: "cursor", model: "composer", approvalMode: "auto" });
+    const record = session({
+      provider: "cursor",
+      model: "composer",
+      approvalMode: "auto",
+      sandbox: "workspace-write",
+    });
     expect(adapter.buildLaunchSpec(record).args).not.toContain("/run-everything");
     expect(adapter.deferInitialPrompt(record)).toBe(true);
+  });
+
+  it("withholds /run-everything from a read-only Cursor session that asked for auto", () => {
+    const adapter = new CursorProviderAdapter();
+    const record = session({ provider: "cursor", model: "composer", approvalMode: "auto" });
+    // `/run-everything` is not bounded by `--mode plan`, so granting it here would widen the
+    // read-only request exactly as Claude's `--permission-mode auto` used to.
+    expect(adapter.buildLaunchSpec(record).args).toEqual(
+      expect.arrayContaining(["--mode", "plan"]),
+    );
+    expect(adapter.deferInitialPrompt(record)).toBe(false);
   });
 
   it("accepts and submits pasted Cursor input with paced Enter keypresses", async () => {

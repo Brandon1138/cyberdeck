@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import { resolveProviderPermission } from "../../src/client/permission-policy.js";
 
 describe("provider permission policy resolution", () => {
-  it("resolves Codex approve-for-me and automatic into native approval arguments", () => {
+  it("describes Codex approval policies by effect, not by Codex's inverted native names", () => {
     expect(resolveProviderPermission("codex", "permissioned", "workspace-write"))
       .toEqual({
         ok: true,
         value: {
           provider: "codex",
           policy: "permissioned",
-          nativeMode: "approve-for-me",
+          nativeMode: "asks you to approve",
           launchArguments: ["-a", "on-request"],
           application: { kind: "approval-mode", value: "prompt" },
         },
@@ -20,7 +20,7 @@ describe("provider permission policy resolution", () => {
         value: {
           provider: "codex",
           policy: "automatic",
-          nativeMode: "automatic",
+          nativeMode: "never asks · sandboxed",
           launchArguments: ["-a", "never"],
           application: { kind: "approval-mode", value: "auto" },
         },

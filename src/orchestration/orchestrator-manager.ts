@@ -27,12 +27,19 @@ import type { ProviderPermissionPreferencePort } from "../persistence/provider-p
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
 import { resolveProviderPermission } from "../client/permission-policy.js";
+import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
 import { ORCHESTRATOR_CATALOG } from "./orchestrator-catalog.js";
 
 export interface OrchestratorManagerResult {
   binding: OrchestratorBinding;
   session: SessionRecord;
   created: boolean;
+  /**
+   * Capabilities the resolved permission mode could not deliver. An orchestrator session hardcodes
+   * `sandbox: "read-only"`, so an automatic Claude orchestrator asks for something Claude has no
+   * write-denying mode to express without prompting. It starts, and says so.
+   */
+  warnings?: string[];
 }
 
 export interface OrchestratorResetResult {
@@ -142,6 +149,17 @@ export class OrchestratorManager {
   ): Promise<OrchestratorManagerResult> {
     const approvalMode = request.approvalMode
       ?? await this.configuredApprovalMode(request.provider);
+    // Resolved before the session exists so an unsatisfiable request is refused at create time,
+    // and a satisfiable-but-diminished one is reported instead of discovered at a prompt.
+    const plan = resolveProviderPermissionPlan(request.provider, {
+      sandbox: "read-only",
+      approvalMode,
+      mcpInjected: true,
+    });
+    if (!plan.ok) {
+      throw Object.assign(new Error(plan.message), { code: plan.code });
+    }
+    const warnings = plan.value.shortfalls.map((shortfall) => shortfall.message);
     const primaryKey = orchestratorKey(scope);
     let binding: OrchestratorBinding | undefined;
     let session: SessionRecord;
@@ -196,7 +214,12 @@ export class OrchestratorManager {
       throw new Error(`Orchestrator session ${session.id} started without persisting its binding`);
     }
     await this.assignCustodyColor(binding);
-    return { binding, session, created: true };
+    return {
+      binding,
+      session,
+      created: true,
+      ...(warnings.length === 0 ? {} : { warnings }),
+    };
   }
 
   /** Undo a binding written during a start that then failed, back to whatever preceded it. */

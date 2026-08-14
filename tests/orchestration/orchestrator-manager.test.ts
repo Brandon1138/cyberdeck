@@ -7,6 +7,7 @@ import {
 } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
+import { CodexProviderAdapter } from "../../src/providers/codex.js";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const record: SessionRecord = {
@@ -116,7 +117,7 @@ describe("OrchestratorManager", () => {
     expect(result.binding.grant.capabilities).not.toContain("worker.start.fable");
   });
 
-  it("starts a Claude orchestrator in the persisted automatic permission mode and exposes it", async () => {
+  it("keeps a persisted automatic Claude orchestrator inside its read-only sandbox", async () => {
     let launchArgs: string[] = [];
     const start = activatingStart((request: object) => {
       const session = {
@@ -155,7 +156,62 @@ describe("OrchestratorManager", () => {
       provider: "claude",
       approvalMode: "auto",
     }), undefined, expect.any(Function));
-    expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "auto"]));
+    // Orchestrator sessions hardcode `sandbox: "read-only"`. `--permission-mode auto` would answer
+    // the approval question by granting workspace writes, which is how the same stored request
+    // produced a sandboxed Codex orchestrator and an unsandboxed Claude one.
+    expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "plan"]));
+    expect(launchArgs).not.toContain("auto");
+  });
+
+  it("reports what an automatic orchestrator gave up to its read-only sandbox", async () => {
+    const start = activatingStart((request: object) => ({
+      ...record,
+      ...request,
+      provider: "claude" as const,
+      model: "opus",
+    }));
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+      undefined,
+      undefined,
+      {
+        list: vi.fn(async () => ({ claude: "automatic" as const })),
+        set: vi.fn(async () => undefined),
+      },
+    );
+
+    const result = await manager.create({
+      provider: "claude",
+      model: "opus",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    });
+    expect(result.warnings?.join("\n")).toContain("plan");
+  });
+
+  it("warns that an automatic Codex orchestrator still stops at MCP approval prompts", async () => {
+    const start = activatingStart((request: object) => ({ ...record, ...request }));
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+      undefined,
+      undefined,
+      {
+        list: vi.fn(async () => ({ codex: "automatic" as const })),
+        set: vi.fn(async () => undefined),
+      },
+    );
+
+    const result = await manager.create({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    });
+    expect(result.warnings?.join("\n")).toContain("MCP tool");
   });
 
   it("starts a Claude orchestrator in persisted permissioned mode", async () => {
@@ -227,6 +283,84 @@ describe("OrchestratorManager", () => {
       approvalMode: "prompt",
     }), undefined, expect.any(Function));
     expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "plan"]));
+  });
+
+  it("starts a Codex orchestrator whose automatic mode reaches the CLI as -a never", async () => {
+    let launchArgs: string[] = [];
+    const start = vi.fn(async (
+      request: object,
+      _initialPrompt?: string,
+      activate?: (started: SessionRecord) => Promise<void>,
+    ) => {
+      const session = { ...record, ...request, provider: "codex" as const };
+      launchArgs = new CodexProviderAdapter().buildLaunchSpec(session).args;
+      await activate?.(session);
+      return session;
+    });
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+      undefined,
+      undefined,
+      {
+        list: vi.fn(async () => ({ codex: "automatic" as const })),
+        set: vi.fn(async () => undefined),
+      },
+    );
+
+    await expect(manager.create({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    })).resolves.toMatchObject({
+      session: {
+        provider: "codex",
+        approvalMode: "auto",
+      },
+    });
+    expect(start.mock.calls[0]?.[0]).toMatchObject({
+      provider: "codex",
+      approvalMode: "auto",
+    });
+    expect(launchArgs).toEqual(expect.arrayContaining(["-a", "never"]));
+    expect(launchArgs).not.toContain("on-request");
+  });
+
+  it("keeps an explicit prompt mode ahead of persisted automatic Codex policy", async () => {
+    let launchArgs: string[] = [];
+    const start = vi.fn(async (
+      request: object,
+      _initialPrompt?: string,
+      activate?: (started: SessionRecord) => Promise<void>,
+    ) => {
+      const session = { ...record, ...request, provider: "codex" as const };
+      launchArgs = new CodexProviderAdapter().buildLaunchSpec(session).args;
+      await activate?.(session);
+      return session;
+    });
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+      undefined,
+      undefined,
+      {
+        list: vi.fn(async () => ({ codex: "automatic" as const })),
+        set: vi.fn(async () => undefined),
+      },
+    );
+
+    await manager.create({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+      approvalMode: "prompt",
+    });
+
+    expect(launchArgs).toEqual(expect.arrayContaining(["-a", "on-request"]));
   });
 
   it("persists operator-controlled Fable worker access on the binding", async () => {

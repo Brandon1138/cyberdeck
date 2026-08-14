@@ -1,9 +1,10 @@
 import type { SessionRecord } from "../domain/session.js";
 import { evaluateClaudeLaunchSafety } from "../domain/policy.js";
 import { ClaudeLaunchSafetyError } from "./claude/headless-command.js";
-import { claudePermissionMode } from "./claude/permissions.js";
+import { claudePermissionArgs } from "./claude/permissions.js";
 import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
 import { sessionLaunchEnvironment } from "./launch-environment.js";
+import { workspaceWritableRoots } from "../domain/worker-workspace.js";
 import {
   resolveAllowlistedMcpServers,
   type McpAllowlistPaths,
@@ -58,8 +59,11 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       session.id,
       "--name",
       session.name ?? session.id,
-      "--permission-mode",
-      claudePermissionMode(session.sandbox, session.approvalMode),
+      ...claudePermissionArgs(
+        session.sandbox,
+        session.approvalMode,
+        workspaceWritableRoots(session.workspace),
+      ),
     ];
     addClaudeNoSubagentArgs(
       args,
@@ -98,8 +102,11 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       session.id,
       "--name",
       session.name ?? session.id,
-      "--permission-mode",
-      claudePermissionMode(session.sandbox, session.approvalMode),
+      ...claudePermissionArgs(
+        session.sandbox,
+        session.approvalMode,
+        workspaceWritableRoots(session.workspace),
+      ),
     ];
     addClaudeNoSubagentArgs(
       args,
