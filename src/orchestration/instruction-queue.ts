@@ -20,6 +20,15 @@ export const EnqueueInstructionParamsSchema = z.object({
 
 export class InstructionQueue {
   private subscriptions: Array<() => void> = [];
+  /**
+   * One writer per target at a time.
+   *
+   * A boundary observation and a lifecycle observation can arrive from the same PTY frame, and both
+   * want to act. Without this, two of them read the same record before either has written, and the
+   * later write silently discards the earlier one — a payload delivered twice, or a `submittedAt`
+   * that never appears because `acknowledged` was computed from a pre-submission read.
+   */
+  private readonly writers = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly registry: SessionRegistry,
@@ -79,21 +88,45 @@ export class InstructionQueue {
       hop: request.hop,
     });
     await this.store.put(record);
-    return this.tryDeliver(record);
+    // Delivered through the same serialized flush as everything else: an instruction written while
+    // an older one is still held would arrive out of order, and two composers' worth of text in one
+    // input surface is one corrupted payload.
+    await this.flush(record.targetSessionId);
+    return (await this.store.list(record.targetSessionId)).find(({ id }) => id === record.id) ?? record;
   }
 
-  async flush(targetSessionId: string): Promise<InstructionRecord[]> {
-    const pending = (await this.store.list(targetSessionId))
-      .filter((record) => record.status === "accepted" || record.status === "queued");
-    const results: InstructionRecord[] = [];
-    for (const record of pending) {
-      const attempted = await this.tryDeliver(record);
-      results.push(attempted);
-      // Still held: the boundary that stopped this one stops everything behind it, and order is the
-      // whole point of a queue.
-      if (!instructionReachedProvider(attempted.status)) break;
-    }
-    return results;
+  flush(targetSessionId: string): Promise<InstructionRecord[]> {
+    return this.serialize(targetSessionId, async () => {
+      const pending = (await this.store.list(targetSessionId))
+        .filter((record) => record.status === "accepted" || record.status === "queued");
+      const results: InstructionRecord[] = [];
+      for (const [index, record] of pending.entries()) {
+        const attempted = await this.tryDeliver(record);
+        results.push(attempted);
+        // Still held: the boundary that stopped this one stops everything behind it, and order is
+        // the whole point of a queue. Everything behind it is held for a reason it can be told —
+        // leaving it `accepted` would read as "the broker has not looked at this yet".
+        if (instructionReachedProvider(attempted.status)) continue;
+        const holdReason = attempted.status === "rendered"
+          ? "composer-occupied"
+          : attempted.holdReason ?? "composer-occupied";
+        for (const behind of pending.slice(index + 1)) {
+          results.push(await this.persistState(behind, "queued", { holdReason }));
+        }
+        break;
+      }
+      return results;
+    });
+  }
+
+  private serialize<T>(targetSessionId: string, work: () => Promise<T>): Promise<T> {
+    const next = (this.writers.get(targetSessionId) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(work);
+    this.writers.set(targetSessionId, next);
+    return next.finally(() => {
+      if (this.writers.get(targetSessionId) === next) this.writers.delete(targetSessionId);
+    });
   }
 
   list(targetSessionId?: string): Promise<InstructionRecord[]> {
@@ -108,15 +141,26 @@ export class InstructionQueue {
    * instruction from accepted through to the turn that answered it with no gap in between.
    */
   private async applyState(update: InstructionStateUpdate): Promise<void> {
-    const record = (await this.store.list(update.sessionId)).find(({ id }) => id === update.instructionId);
-    if (record === undefined || record.status === update.state) return;
-    await this.store.put(InstructionRecordSchema.parse({
-      ...record,
-      status: update.state,
-      updatedAt: update.at,
-      ...(update.state === "submitted" ? { submittedAt: update.at } : {}),
-      ...(update.state === "completed" ? { completedAt: update.at } : {}),
-    }));
+    await this.serialize(update.sessionId, async () => {
+      const record = (await this.store.list(update.sessionId)).find(({ id }) => id === update.instructionId);
+      if (record === undefined || record.status === update.state) return;
+      await this.store.put(InstructionRecordSchema.parse({
+        ...record,
+        status: update.state,
+        updatedAt: update.at,
+        // A provider can be seen to have taken the payload only once, and the broker may report that
+        // as `acknowledged` or straight through to `completed` if the turn was faster than a poll.
+        // The stamp is about the fact, not about which frame carried the news.
+        ...(record.submittedAt === undefined && instructionReachedProvider(update.state)
+          ? { submittedAt: update.at }
+          : {}),
+        ...(update.state === "completed" ? { completedAt: update.at } : {}),
+      }));
+    });
+    // The composer this instruction was occupying is now empty, which is the boundary the next
+    // instruction in line has been waiting for. Nothing else notices: the broker only announces a
+    // boundary for a hold it knows about, and a queue entry behind a rendered one is not held.
+    if (instructionReachedProvider(update.state)) await this.flush(update.sessionId);
   }
 
   private async tryDeliver(record: InstructionRecord): Promise<InstructionRecord> {

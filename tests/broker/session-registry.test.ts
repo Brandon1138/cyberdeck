@@ -13,7 +13,7 @@ import type {
   ProviderLaunchSpec,
   ProviderSessionTerminal,
 } from "../../src/providers/provider.js";
-import type { PtyHandle } from "../../src/broker/session-registry.js";
+import type { InstructionStateUpdate, PtyHandle } from "../../src/broker/session-registry.js";
 import {
   ThreadTranscriptStore,
   type AppendThreadEvent,
@@ -1070,6 +1070,235 @@ describe("SessionRegistry", () => {
       source: "orchestrator",
       text: "queued instruction",
     }));
+  });
+
+  it("never settles a wait from a turn that completed before its own instruction", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ name: "stale-turn-worker" }), "First task");
+
+    ptys[0]!.emitOutput("\u001b]0;\u2839 stale-turn-worker\u0007\u001b[2JWorking");
+    ptys[0]!.emitOutput("\u001b[2Janswer to the first task\r\n\u001b]0;stale-turn-worker\u0007");
+    const first = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
+    expect(first.results[0]).toMatchObject({ status: "completed", completedTurns: 1 });
+
+    await registry.submitInstruction(record.id, "Second task");
+
+    // Target 2 is what the second task will answer. It must not settle from turn 1, which finished
+    // before the instruction existed, so this wait runs out its own deadline instead.
+    const stale = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 2 },
+    ], 50, 300);
+    expect(stale).toMatchObject({
+      timedOut: true,
+      results: [{ status: "waiting", completedTurns: 1 }],
+    });
+
+    // Re-asking for a target already handed back is a replay, not a stale settle, and stays legal:
+    // it is how an orchestrator proves work already ran without starting a duplicate worker.
+    const replay = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 50, 300);
+    expect(replay.results[0]).toMatchObject({ status: "completed", retrieval: "replay" });
+
+    ptys[0]!.emitOutput("\u001b]0;\u2839 stale-turn-worker\u0007\u001b[2JWorking");
+    ptys[0]!.emitOutput("\u001b[2Janswer to the second task\r\n\u001b]0;stale-turn-worker\u0007");
+    const second = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 2 },
+    ], 5_000, 300);
+    expect(second.results[0]).toMatchObject({ status: "completed", completedTurns: 2 });
+    expect(second.results[0]!.text).toContain("second task");
+  });
+
+  it("holds an instruction at a permission modal and submits it at the next safe boundary", async () => {
+    // The MIK-64 sequence end to end: modal up, follow-up instruction arrives, the instruction is
+    // never written into the composer, the modal clears, the instruction goes in, the provider takes
+    // it, and exactly one canonical completion answers it.
+    const instructionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const { registry, ptys } = harness();
+    const record = await registry.start(
+      request({ provider: "claude", model: "opus", name: "modal-worker" }),
+      "Run the checks",
+    );
+    const states: InstructionStateUpdate[] = [];
+    const boundaries: string[] = [];
+    registry.onInstructionState((update) => states.push(update));
+    registry.onDeliveryBoundary((sessionId) => boundaries.push(sessionId));
+
+    ptys[0]!.emitOutput([
+      "Claude needs your permission to use Bash",
+      "  pnpm test",
+      "Do you want to proceed?",
+      "\u276f 1. Yes",
+      "  3. No",
+    ].join("\r\n"));
+    await vi.waitFor(() => expect(registry.get(record.id).attentionState).toBe("needs-input"));
+
+    const held = await registry.submitInstruction(
+      record.id, "Then run the linter", "orchestrator", {}, instructionId,
+    );
+    expect(held).toMatchObject({ state: "queued", hold: "provider-modal" });
+    expect(ptys[0]!.writes).toEqual([]);
+    expect(registry.workerTruth(record.id)).toMatchObject({ state: "blocked-modal", terminal: false });
+
+    // The operator answers the prompt.
+    ptys[0]!.emitOutput("\u001b]0;\u2839 modal-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    await vi.waitFor(() => expect(boundaries).toContain(record.id));
+
+    const rendered = await registry.submitInstruction(
+      record.id, "Then run the linter", "orchestrator", {}, instructionId,
+    );
+    expect(rendered).toMatchObject({ state: "rendered", expectedTurn: 1 });
+    expect(ptys[0]!.writes.at(-1)?.toString()).toBe("Then run the linter\n");
+
+    // The provider consumes the composer and starts a turn. Only this is submission.
+    ptys[0]!.emitOutput("\u001b]0;\u2839 modal-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    await vi.waitFor(() =>
+      expect(states.map(({ state }) => state)).toEqual(["submitted", "acknowledged"]));
+
+    ptys[0]!.emitOutput("\u001b[2Jlinter clean\r\n\u001b]0;modal-worker\u0007");
+    const settled = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
+    expect(settled.results[0]).toMatchObject({
+      status: "completed",
+      completedTurns: 1,
+      retrieval: "fresh",
+    });
+    expect(settled.results[0]!.text).toContain("linter clean");
+    expect(states.filter(({ state }) => state === "completed")).toEqual([
+      { sessionId: record.id, instructionId, state: "completed", at: expect.any(String), turn: 1 },
+    ]);
+  });
+
+  it("does not count an unsent composer buffer as a completed turn", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ provider: "claude", name: "composer-worker" }));
+
+    ptys[0]!.emitOutput("\u001b]0;\u2839 composer-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput([
+      "\u001b[2Jpartial output",
+      "\u2502 > queued follow-up \u2502",
+      "tab to queue message",
+      "\u001b]0;composer-worker\u0007",
+    ].join("\r\n"));
+
+    // Returning to the input surface with text still in it is not a finished turn. Counting it is
+    // how an unsent instruction came to satisfy the very wait that was asking whether it had run.
+    const waiting = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 400, 300);
+    expect(waiting).toMatchObject({
+      timedOut: true,
+      results: [{
+        status: "waiting",
+        completedTurns: 0,
+        truth: expect.objectContaining({ state: "blocked-composer", composerOccupied: true }),
+      }],
+    });
+
+    ptys[0]!.emitOutput("\u001b]0;\u2839 composer-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b[2Jfollow-up answered\r\n\u001b]0;composer-worker\u0007");
+    const settled = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
+    expect(settled.results[0]).toMatchObject({ status: "completed", completedTurns: 1 });
+    expect(settled.results[0]!.text).toContain("follow-up answered");
+  });
+
+  it("reports a provider-declared limit as its own terminal state", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ name: "capped-worker" }), "Long task");
+
+    ptys[0]!.emitOutput("Usage limit reached \u00b7 resets 3:00pm\r\n");
+
+    const result = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
+    expect(result).toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "provider-limit",
+        providerLimit: { kind: "session-limit", reason: "provider usage limit reached" },
+        truth: expect.objectContaining({ state: "provider-limit", terminal: true }),
+      }],
+    });
+    // The process is still alive, which is why this cannot live in `executionState` alone.
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "errored",
+      exitCode: null,
+      termination: { kind: "session-limit", at: expect.any(String) },
+    });
+  });
+
+  it("paginates an instruction through to its completion with no cursor gap", async () => {
+    // A Claude worker whose native transcript never appears used to complete turns that
+    // `thread_read` had no record of at all: the wait said completed, the transcript showed nothing
+    // between the instruction and silence. The scrape is now written as an explicitly labelled turn.
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-thread-gap-"));
+    const transcripts = new ThreadTranscriptStore(join(root, "state"), {
+      claudeProjectsDirectory: join(root, "no-such-claude-projects"),
+    });
+    const ptys: FakePty[] = [];
+    const registry = new SessionRegistry({
+      adapters,
+      ptyFactory: () => {
+        const pty = new FakePty(3000 + ptys.length);
+        ptys.push(pty);
+        return pty;
+      },
+      journal: { append: async () => {} },
+      transcripts,
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+    const instructionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const record = await registry.start(
+      request({ provider: "claude", name: "gap-worker" }),
+      "Initial task",
+    );
+    await registry.submitInstruction(
+      record.id, "Run the suite", "orchestrator", {}, instructionId,
+    );
+
+    ptys[0]!.emitOutput("\u001b]0;\u2839 gap-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b[2Jsuite passed\r\n\u001b]0;gap-worker\u0007");
+    const settled = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 400);
+    expect(settled.results[0]).toMatchObject({
+      status: "completed",
+      completedTurns: 1,
+      // No provider transcript stood behind this turn, and the snapshot says so out loud.
+      provenance: "terminal-replay",
+      truth: expect.objectContaining({ completedTurns: 1, canonicalTurns: 0 }),
+    });
+
+    const events: Array<{ kind: string; data?: Record<string, unknown> }> = [];
+    let cursor = 0;
+    for (;;) {
+      const page = await transcripts.read(record.id, cursor, 1);
+      if (page.events.length === 0) break;
+      expect(page.nextCursor).toBeGreaterThan(cursor);
+      cursor = page.nextCursor;
+      events.push(page.events[0]!);
+    }
+
+    const instruction = events.findIndex(({ kind }) => kind === "instruction");
+    const turn = events.findIndex(({ kind }) => kind === "turn");
+    expect(instruction).toBeGreaterThanOrEqual(0);
+    expect(turn).toBeGreaterThan(instruction);
+    expect(events[instruction]!.data).toMatchObject({
+      instructionId,
+      instructionState: "rendered",
+      expectedTurn: 1,
+    });
+    expect(events[turn]!.data).toMatchObject({
+      semantic: true,
+      transport: "terminal-replay-fallback",
+      turnNumber: 1,
+    });
   });
 
   it("deletes only terminal sessions and journals the deletion", async () => {

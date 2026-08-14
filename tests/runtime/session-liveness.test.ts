@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { detectSessionFatalError } from "../../src/runtime/session-liveness.js";
+import {
+  detectProviderLimitTermination,
+  detectSessionFatalError,
+} from "../../src/runtime/session-liveness.js";
 
 describe("detectSessionFatalError", () => {
   it("reports the API 4xx that killed three worker sessions while their processes kept running", () => {
@@ -107,5 +110,43 @@ describe("detectSessionFatalError", () => {
     const replay = `⏺ the run failed earlier today with ${tail}`;
 
     expect(detectSessionFatalError(replay)).toBeUndefined();
+  });
+});
+
+describe("detectProviderLimitTermination", () => {
+  it("names a session cap the operator can wait out rather than a generic rejection", () => {
+    expect(detectProviderLimitTermination("Usage limit reached · resets 3:00pm\n")).toMatchObject({
+      kind: "session-limit",
+      reason: "provider usage limit reached",
+    });
+    expect(detectProviderLimitTermination("5-hour limit reached\n")?.kind).toBe("session-limit");
+    expect(detectProviderLimitTermination("You've reached your weekly limit\n")?.kind).toBe("session-limit");
+  });
+
+  it("names a prompt the provider refused for length", () => {
+    expect(detectProviderLimitTermination("Prompt is too long\n")).toMatchObject({
+      kind: "prompt-too-long",
+      reason: "provider refused the prompt as too long for its context window",
+    });
+    expect(detectProviderLimitTermination("input length and `max_tokens` exceed context limit\n")?.kind)
+      .toBe("prompt-too-long");
+  });
+
+  it("ignores a worker talking about limits instead of hitting one", () => {
+    // Both lines carry a conversation marker in the first column, so neither is the provider's own
+    // notice. Reading them would kill a healthy session for describing the failure it just fixed.
+    expect(detectProviderLimitTermination("⏺ The earlier run died because the prompt is too long.\n"))
+      .toBeUndefined();
+    expect(detectProviderLimitTermination("> what happens when usage limit reached?\n")).toBeUndefined();
+  });
+
+  it("does not call a retrying provider limited", () => {
+    expect(detectProviderLimitTermination("Usage limit reached\nRetrying in 30s\n")).toBeUndefined();
+  });
+
+  it("bounds the detail the same way a fault does", () => {
+    const detail = detectProviderLimitTermination(`Prompt is too long ${"y".repeat(900)}\n`)?.detail ?? "";
+    expect(detail.length).toBeLessThanOrEqual(240);
+    expect(detail).not.toContain("\n");
   });
 });
