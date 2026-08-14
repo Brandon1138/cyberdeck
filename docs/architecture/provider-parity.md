@@ -125,7 +125,16 @@ alongside `sandbox: "read-only"` is refused (`WRITABLE_ROOTS_REQUIRE_WORKSPACE_W
 resolved into flags that cannot take effect.
 
 Roots reach resolution from the typed `workspace` field on a worker start; see
-[Worker workspaces](#worker-workspaces).
+[Worker workspaces](#worker-workspaces). Codex, Claude, and Cursor each forward them from that field
+into their own launch arguments — Cursor's sandbox is bounded by `--workspace` exactly as the other
+two are bounded by their cwd, so it is not the exception it briefly was. Antigravity never reaches
+the roots at all, because it refuses `workspace-write` first.
+
+`workspaceWritableRoots` drops exactly one declared root: a **pre-provisioned** worker's own
+worktree, which is where that worker already runs, so granting it again emits an argument that says
+nothing. A **worker-provisioned** worker runs in the *source* repository instead, so its target is
+outside cwd and does not exist yet; its `worktreePath` survives into `--add-dir` and is what makes
+`git worktree add` able to create the directory the dispatch named.
 
 ### Provider-specific notes
 

@@ -300,7 +300,7 @@ describe("workspaceWritableRoots", () => {
     expect(workspaceWritableRoots(undefined)).toEqual([]);
   });
 
-  it("normalizes, deduplicates, and drops the worktree the provider already grants", () => {
+  it("normalizes, deduplicates, and drops the worktree a pre-provisioned worker runs in", () => {
     expect(workspaceWritableRoots({
       ...workspace,
       writableRoots: [
@@ -310,5 +310,20 @@ describe("workspaceWritableRoots", () => {
         "/var/tmp/reports",
       ],
     })).toEqual(["/repo/.git", "/var/tmp/reports"]);
+  });
+
+  it("keeps the target root of a worker-provisioned workspace", () => {
+    // A worker-provisioned worker launches in the source repository, so its cwd does not cover the
+    // worktree it has yet to create. Dropping the declared target here is what left `git worktree
+    // add` without a grant for the directory the dispatch named.
+    expect(workspaceWritableRoots({
+      ...workspace,
+      provisioning: "worker-provisioned",
+      writableRoots: [
+        "/repo/.git",
+        "/repo/worktrees/mik-70",
+        "/repo/worktrees/./mik-70",
+      ],
+    })).toEqual(["/repo/.git", "/repo/worktrees/mik-70"]);
   });
 });

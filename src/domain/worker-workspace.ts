@@ -221,13 +221,25 @@ export async function validateWorkerWorkspace(
   return shape;
 }
 
-/** The writable roots a launch must grant: the declared extras, deduplicated and normalized. */
+/**
+ * The writable roots a launch must grant: the declared extras, deduplicated and normalized.
+ *
+ * Only a `pre-provisioned` worker's own worktree is dropped, and only because that worker launches
+ * inside it — the provider already grants the session its cwd, so re-granting the worktree emits an
+ * argument that says nothing. A `worker-provisioned` worker launches in the *source* repository
+ * instead, so its target is neither inside cwd nor created yet; a declared `worktreePath` root is
+ * the grant that lets `git worktree add` create it, and dropping it is what left the 2026-08-14
+ * worker unable to write the very directory it was dispatched to make.
+ */
 export function workspaceWritableRoots(workspace: WorkerWorkspace | undefined): string[] {
   if (workspace === undefined) return [];
+  const alreadyGranted = workspace.provisioning === "pre-provisioned"
+    ? resolve(workspace.worktreePath)
+    : undefined;
   const seen = new Set<string>();
   for (const root of workspace.writableRoots) {
     const normalized = resolve(root);
-    if (normalized !== resolve(workspace.worktreePath)) seen.add(normalized);
+    if (normalized !== alreadyGranted) seen.add(normalized);
   }
   return [...seen].sort();
 }
