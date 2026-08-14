@@ -426,7 +426,7 @@ describe("fleet presentation", () => {
       },
     );
     const width = 50;
-    const printed = (line: string) => [...line.replace(/\[[0-9;]*m/gu, "")].length;
+    const printed = (line: string) => [...line.replace(/\u001b\[[0-9;]*m/gu, "")].length;
     for (const color of [false, true]) {
       const rendered = renderFleet(snapshot, createFleetState(snapshot), {
         color, width, height: 30, now: NOW_MS, home: "/Users/brandon",
@@ -435,8 +435,8 @@ describe("fleet presentation", () => {
       // A cut inside painted text closes its own color rather than leaking it down the pane.
       if (color) {
         for (const line of rendered.split("\n")) {
-          const opens = line.match(/\[(?!0m)[0-9;]*m/gu)?.length ?? 0;
-          expect(line.match(/\[0m/gu)?.length ?? 0).toBe(opens);
+          const opens = line.match(/\u001b\[(?!0m)[0-9;]*m/gu)?.length ?? 0;
+          expect(line.match(/\u001b\[0m/gu)?.length ?? 0).toBe(opens);
         }
       }
     }
@@ -534,9 +534,9 @@ describe("fleet presentation", () => {
       lines.find((line) => line.includes(`Lease ${leaseHealth}`))!;
 
     // subtle is bare dim; attention and alert carry the fleet's warning and error hues.
-    expect(row("released")).toContain("[2munowned");
-    expect(row("orphaned")).toContain("[38;2;212;168;91madoptable");
-    expect(row("contested")).toContain("[38;2;217;108;117mconflict");
+    expect(row("released")).toContain("\u001b[2munowned");
+    expect(row("orphaned")).toContain("\u001b[38;2;212;168;91madoptable");
+    expect(row("contested")).toContain("\u001b[38;2;217;108;117mconflict");
   });
 
   it("keeps the five-field custody breakdown behind ctrl+l", () => {
@@ -830,7 +830,7 @@ describe("fleet presentation", () => {
         pullRequests: new Map([["/repo/one", "checks-failing" as PullRequestState]]),
       });
 
-      expect(rendered).toContain("[38;2;217;108;117m✗[0m");
+      expect(rendered).toContain("\u001b[38;2;217;108;117m✗\u001b[0m");
     });
 
     it("keeps the column at narrow widths where the identity column is dropped", () => {
@@ -3432,9 +3432,9 @@ describe("fleet shell mode", () => {
     expect(state.shellMode?.draft).toBe("ls -a");
 
     const painted = renderFleet(shellSnapshot, state, { color: true, width: 110, height: 30 });
-    expect(painted).toContain("[38;2;217;108;117m![0m ls -a");
+    expect(painted).toContain("\u001b[38;2;217;108;117m!\u001b[0m ls -a");
     // No coloured frame and no restyled border: the red ! is the whole indicator.
-    expect(painted).not.toContain("[38;2;217;108;117m─");
+    expect(painted).not.toContain("\u001b[38;2;217;108;117m─");
 
     const ran = transitionFleet(state, shellSnapshot, "enter", NOW_MS);
     expect(ran.action).toEqual({ type: "shell-run", command: "ls -a", cwd: "/repo/one" });
@@ -3685,6 +3685,23 @@ describe("composer caret", () => {
     for (const row of rows) expect(displayWidth(row)).toBeLessThan(options.width);
   });
 
+  it("clamps every row to the pane in cells, so nothing above the composer soft-wraps", () => {
+    // A row wider than the pane is soft-wrapped by the terminal onto a line the fleet never
+    // counted, and the composer — with the caret addressed to it — moves down by one.
+    const wide = fleet({
+      record: session({
+        id: "88888888-0000-4000-8000-000000000001",
+        cwd: "/repo/one",
+        name: "日本語で名付けられた作業者",
+        latestPreview: "日本語表示幅の計算",
+      }),
+    });
+    const rendered = renderFleet(wide, createFleetState(wide), options);
+    for (const line of rendered.split("\n")) {
+      expect(displayWidth(line)).toBeLessThanOrEqual(options.width);
+    }
+  });
+
   it("gives no caret to a view without a composer", () => {
     expect(caret({
       ...base,
@@ -3727,11 +3744,11 @@ describe("fleet repaint", () => {
     }
   }
 
-  function transport() {
+  function transport(sessions: () => SessionRecord[] = () => []) {
     const closeListeners = new Set<() => void>();
     return {
       request: vi.fn(async (method: string) => {
-        if (method === "session.list") return [];
+        if (method === "session.list") return sessions();
         if (method === "fleet.preferences") return {};
         if (method === "session.snapshot") return { data: "" };
         throw new Error(`unexpected ${method}`);
@@ -3783,6 +3800,89 @@ describe("fleet repaint", () => {
     output.chunks.length = 0;
     await new Promise((resolve) => { setTimeout(resolve, 1_200); });
     expect(Buffer.concat(output.chunks).toString()).toBe("");
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("holds the caret still while an orchestrator streams underneath the composer", async () => {
+    const input = new Input();
+    const output = new Output();
+    // The draft never changes; only the orc's output does. Every repaint the operator sees from
+    // here is poll-driven, which is the case the key-driven test above cannot reach.
+    const draft = "日本 build";
+    let streamed = "thinking";
+    const record = () => session({
+      id: "99999999-0000-4000-8000-000000000001",
+      kind: "orchestrator",
+      role: "orchestrator",
+      cwd: "/repo/one",
+      name: "Orc",
+      latestPreview: streamed,
+    });
+    const running = runFleet(
+      transport(() => [record()]) as never,
+      input,
+      output,
+      new EventEmitter(),
+    );
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from(draft));
+    await vi.waitFor(
+      () => expect(Buffer.concat(output.chunks).toString()).toContain(`› ${draft}`),
+      { timeout: 5_000, interval: 20 },
+    );
+
+    // Three ideograph cells plus a Latin tail: counting the string rather than the grid would put
+    // the caret two columns inside the operator's own text.
+    const column = displayWidth(`› ${draft}`) + 1;
+    expect(column).toBe(13);
+    expect(column).not.toBe([...`› ${draft}`].length + 1);
+
+    output.chunks.length = 0;
+    // Short enough to survive the preview column's own truncation, so each one is visibly a
+    // different frame rather than the same elided prefix three times. One of them is ideographic,
+    // because a row measured in code points prints wider than the pane on that text and the
+    // terminal soft-wraps the overrun onto a line of its own — which walks the composer, and the
+    // caret sitting on it, down a row and back again as the orc streams.
+    for (const chunk of ["alpha", "日本語表示幅", "delta"]) {
+      streamed = chunk;
+      await vi.waitFor(
+        () => expect(Buffer.concat(output.chunks).toString()).toContain(chunk),
+        { timeout: 5_000, interval: 20 },
+      );
+    }
+
+    // One write per frame, so a chunk is a frame. The caret is addressed exactly once in each —
+    // last, after the whole body is on screen — and shown exactly once, there. A frame that moved
+    // a visible caret would carry more than one of either.
+    const frames = output.chunks.map((chunk) => chunk.toString());
+    expect(frames.length).toBeGreaterThanOrEqual(3);
+    const rows = new Set<string>();
+    for (const frame of frames) {
+      expect(frame.startsWith("\u001b[?25l\u001b[2J\u001b[H")).toBe(true);
+      expect(frame.match(/\u001b\[\?25h/gu) ?? []).toHaveLength(1);
+      expect(frame.match(/\u001b\[\?25l/gu) ?? []).toHaveLength(1);
+      const addresses = frame.match(/\u001b\[\d+;\d+H/gu) ?? [];
+      expect(addresses).toHaveLength(1);
+      expect(frame.endsWith(`${addresses[0]}\u001b[?25h`)).toBe(true);
+      expect(addresses[0]).toMatch(new RegExp(`^\u001b\\[\\d+;${column}H$`, "u"));
+      rows.add(addresses[0]!);
+      expect(frame).toContain(`› ${draft}`);
+      // No row is wider than the pane, so the terminal never soft-wraps one and the row the caret
+      // was addressed to is the row the composer is actually printed on.
+      const caretSequence = `${addresses[0]}\u001b[?25h`;
+      const body = frame.slice(
+        "\u001b[?25l\u001b[2J\u001b[H".length,
+        frame.length - caretSequence.length,
+      );
+      for (const line of body.split("\n")) {
+        expect(displayWidth(line)).toBeLessThanOrEqual(output.columns);
+      }
+    }
+    // Same cell in every frame: the streaming rows above the composer never shift it.
+    expect(rows.size).toBe(1);
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();

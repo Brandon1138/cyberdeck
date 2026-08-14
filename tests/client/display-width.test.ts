@@ -19,6 +19,12 @@ describe("displayWidth", () => {
     expect(displayWidth("\u2764\uFE0F")).toBe(2);
   });
 
+  it("counts a BMP character with default emoji presentation as two cells", () => {
+    expect(displayWidth("\u231A")).toBe(2); // \u231A draws as emoji without any variation selector
+    expect(displayWidth("\u231B")).toBe(2); // \u231B likewise
+    expect(displayWidth("\u2194")).toBe(1); // \u2194 defaults to text presentation and stays narrow
+  });
+
   it("counts a combining mark with the character it decorates", () => {
     expect(displayWidth("\u00e9")).toBe(1);
     expect(displayWidth("e\u0301")).toBe(1);

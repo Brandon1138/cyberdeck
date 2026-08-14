@@ -4462,6 +4462,29 @@ function renderComposerLines(
 const ANSI_SEQUENCE = /(\u001b\[[0-9;]*m)/u;
 
 /**
+ * The longest prefix of `value` that prints inside `width` cells.
+ *
+ * The cut falls between grapheme clusters and the budget is counted in cells, because both of the
+ * other answers put text on screen the fleet never counted. A cut by code point splits a character
+ * from the marks that complete it, and a budget in code points lets an ideograph print two cells
+ * against a one-cell allowance — until the row overruns the pane, the terminal soft-wraps the
+ * remainder onto a line of its own, and everything below it moves down one, the composer row and
+ * the caret parked on it included.
+ */
+function cutToWidth(value: string, width: number): string {
+  if (width <= 0) return "";
+  let printed = 0;
+  let cut = "";
+  for (const cluster of graphemes(value)) {
+    const cell = graphemeWidth(cluster);
+    if (printed + cell > width) break;
+    printed += cell;
+    cut += cluster;
+  }
+  return cut;
+}
+
+/**
  * A composed row cut to the columns it prints. Escape sequences cost no columns, so they are
  * carried across whole and a cut inside painted text closes its own color: a row truncated
  * mid-sequence would leak the rest of the pane's paint, and one left open would leak its hue.
@@ -4479,13 +4502,13 @@ function clampRowWidth(value: string, width: number): string {
       painted = part !== ANSI.reset;
       continue;
     }
-    const characters = [...part];
-    if (printed + characters.length <= width) {
+    const cells = displayWidth(part);
+    if (printed + cells <= width) {
       clamped += part;
-      printed += characters.length;
+      printed += cells;
       continue;
     }
-    clamped += characters.slice(0, width - printed).join("");
+    clamped += cutToWidth(part, width - printed);
     return painted ? `${clamped}${ANSI.reset}` : clamped;
   }
   return clamped;
@@ -4501,18 +4524,18 @@ function displayThreadName(name: string): string {
   return orchestrator === null ? name : `cd-orc (${orchestrator[1]})`;
 }
 
+/** Plain text cut to `width` cells, with an ellipsis in the last one when anything was dropped. */
 function fit(value: string, width: number): string {
-  const characters = [...value];
-  if (characters.length <= width) return value;
-  if (width <= 1) return characters.slice(0, width).join("");
-  return `${characters.slice(0, width - 1).join("")}…`;
+  if (displayWidth(value) <= width) return value;
+  if (width <= 1) return cutToWidth(value, width);
+  return `${cutToWidth(value, width - 1)}…`;
 }
 
 function pad(value: string, width: number): string {
   const fitted = fit(value, width);
-  return `${fitted}${" ".repeat(Math.max(0, width - [...fitted].length))}`;
+  return `${fitted}${" ".repeat(Math.max(0, width - displayWidth(fitted)))}`;
 }
 
 function padStart(value: string, width: number): string {
-  return `${" ".repeat(Math.max(0, width - [...value].length))}${value}`;
+  return `${" ".repeat(Math.max(0, width - displayWidth(value)))}${value}`;
 }
