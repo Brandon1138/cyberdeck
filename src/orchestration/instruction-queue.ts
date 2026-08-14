@@ -107,6 +107,9 @@ export class InstructionQueue {
         // the whole point of a queue. Everything behind it is held for a reason it can be told —
         // leaving it `accepted` would read as "the broker has not looked at this yet".
         if (instructionReachedProvider(attempted.status)) continue;
+        // A terminal worker holds nothing back: the next record hits the same dead session and
+        // resolves itself the same way, each with its own honest terminal state.
+        if (attempted.status === "undelivered") continue;
         const holdReason = attempted.status === "rendered"
           ? "composer-occupied"
           : attempted.holdReason ?? "composer-occupied";
@@ -176,13 +179,26 @@ export class InstructionQueue {
         workflowRunId: record.workflowRunId ?? null,
       }, record.id);
     } catch (error) {
-      if (typeof error === "object" && error !== null && "code" in error && error.code === "SESSION_BUSY") {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? error.code
+        : undefined;
+      if (code === "SESSION_BUSY") {
         return this.persistState(record, "queued", { holdReason: "human-controller" });
+      }
+      // The thread is gone, not busy. Rethrowing left the record `accepted`, and an `accepted`
+      // record is both retried forever and deduplicated against the retry that would replace it.
+      if (code === "SESSION_NOT_FOUND") {
+        return this.persistState(record, "undelivered", { holdReason: "worker-terminal" });
       }
       throw error;
     }
     // `rendered` is the strongest thing an enqueue can honestly claim: the bytes are in the
     // provider's input surface. Whether the provider took them is observed later, or never.
+    if (delivery.state === "undelivered") {
+      return this.persistState(record, "undelivered", {
+        ...(delivery.hold === undefined ? {} : { holdReason: delivery.hold }),
+      });
+    }
     return delivery.state === "queued"
       ? this.persistState(record, "queued", { ...(delivery.hold === undefined ? {} : { holdReason: delivery.hold }) })
       : this.persistState(record, "rendered", {

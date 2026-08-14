@@ -43,6 +43,7 @@ import {
   advanceInstruction,
   DELIVERY_HOLD_DETAIL,
   projectWorkerTruth,
+  providerLimitFromTermination,
   type ComposerObservation,
   type DeliveryHoldReason,
   type InstructionLifecycleState,
@@ -147,8 +148,11 @@ interface RenderedInstruction {
 
 /** What `submitInstruction` actually did, as opposed to what it hopes happened next. */
 export interface InstructionDelivery {
-  /** Never stronger than `rendered`: submission is observed later, never claimed synchronously. */
-  state: "queued" | "rendered";
+  /**
+   * Never stronger than `rendered`: submission is observed later, never claimed synchronously.
+   * `undelivered` is the other terminal answer — the worker will not read this, ever.
+   */
+  state: "queued" | "rendered" | "undelivered";
   hold?: DeliveryHoldReason;
   detail?: string;
   /** Present when `rendered`: the turn ordinal that will answer this instruction. */
@@ -376,6 +380,11 @@ export class SessionRegistry {
     const writes: Promise<void>[] = [];
     for (const stored of options.recoveredSessions ?? []) {
       const record = this.recoverRecord(stored);
+      // A provider limit is the one piece of runtime truth that survives the process that observed
+      // it, because the cap belongs to the account rather than to the PTY. Recovery folds `errored`
+      // into `failed`, so without rehydrating this the operator is told the worker crashed when it
+      // was actually told to come back at 3:00pm.
+      const providerLimit = providerLimitFromTermination(record.termination);
       this.sessions.set(record.id, {
         record,
         watchers: new Map(),
@@ -383,6 +392,7 @@ export class SessionRegistry {
         activity: "unknown",
         observedWorking: false,
         ...freshTruthState(),
+        ...(providerLimit === undefined ? {} : { providerLimit }),
         fatalReported: false,
         completions: new Map(),
         launchTail: Promise.resolve(),
@@ -908,7 +918,10 @@ export class SessionRegistry {
   ): Promise<InstructionDelivery> {
     const runtime = this.requireRuntime(sessionId);
     if (runtime.record.executionState !== "active") {
-      throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
+      // Not an exception: a worker that died between acceptance and delivery has answered the
+      // question. Throwing here left the durable record `accepted` forever, deduplicating every
+      // retry of an instruction nothing would ever read.
+      return this.terminalDelivery(runtime, source, instructionId);
     }
     if (runtime.controller !== undefined) {
       throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
@@ -918,26 +931,25 @@ export class SessionRegistry {
     if (hold !== undefined) return this.holdInstruction(runtime, hold, source, instructionId);
     const adapter = this.requireAdapter(runtime.record.provider);
     const encoded = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
+    const pty = this.requirePty(runtime);
     delete runtime.stallObservation;
     const at = new Date().toISOString();
     const expectedTurn = runtime.completedTurns + 1;
+    // Nothing is awaited between the boundary check and the write. An await here is a window for a
+    // human to attach or for the provider to start a turn of its own, and either one would make the
+    // ordinal above name a turn this instruction did not cause.
+    runtime.turnsBeforeLatestInstruction = runtime.completedTurns;
+    if (instructionId !== undefined) {
+      runtime.rendered.push({ instructionId, expectedTurn, renderedAt: at, state: "rendered" });
+    }
+    pty.write(encoded);
     await this.appendTranscript(sessionId, "instruction", source, message, {
       ...metadata,
       instructionState: "rendered" satisfies InstructionLifecycleState,
       expectedTurn,
       ...(instructionId === undefined ? {} : { instructionId }),
     });
-    if (runtime.controller !== undefined) {
-      throw new RegistryError("SESSION_BUSY", "A human controller claimed this thread before delivery");
-    }
-    // Every turn already in the ledger answers a question older than this instruction. Record where
-    // the ledger stood so a wait cannot settle from one of them.
-    runtime.turnsBeforeLatestInstruction = runtime.completedTurns;
-    if (instructionId !== undefined) {
-      runtime.rendered.push({ instructionId, expectedTurn, renderedAt: at, state: "rendered" });
-    }
     await this.setAttention(runtime, "working", true);
-    this.requirePty(runtime).write(encoded);
     await this.appendEvent("session.input", sessionId, { bytes: encoded.length, source });
     return { state: "rendered", expectedTurn, at };
   }
@@ -955,7 +967,40 @@ export class SessionRegistry {
     this.observeComposer(runtime);
     if (runtime.composer.modalOpen || runtime.activity === "needs-input") return "provider-modal";
     if (runtime.composer.occupied) return "composer-occupied";
+    // A turn in flight owns the ordinal this instruction would otherwise be given. `observedWorking`
+    // keeps the hold through the gap between the provider returning to its prompt and the ledger
+    // counting that turn: for those milliseconds the screen looks idle and the turn is not banked
+    // yet, which is the same ordinal collision one frame later.
+    if (runtime.activity === "working" || runtime.observedWorking) return "provider-busy";
     return undefined;
+  }
+
+  /**
+   * Answer an instruction aimed at a worker that is already gone.
+   *
+   * `queued` would be a lie with no end: nothing will ever clear this hold, and the queue would keep
+   * the record alive and deduplicated against every retry. `undelivered` is terminal and says the
+   * one thing the caller needs — the payload was never read, so the work did not happen.
+   */
+  private async terminalDelivery(
+    runtime: RuntimeSession,
+    source: "orchestrator" | "worker",
+    instructionId: string | undefined,
+  ): Promise<InstructionDelivery> {
+    const at = new Date().toISOString();
+    await this.appendTranscript(runtime.record.id, "lifecycle", "broker", "instruction undelivered", {
+      instructionState: "undelivered" satisfies InstructionLifecycleState,
+      holdReason: "worker-terminal" satisfies DeliveryHoldReason,
+      executionState: runtime.record.executionState,
+      source,
+      ...(instructionId === undefined ? {} : { instructionId }),
+    });
+    return {
+      state: "undelivered",
+      hold: "worker-terminal",
+      detail: DELIVERY_HOLD_DETAIL["worker-terminal"],
+      at,
+    };
   }
 
   private async holdInstruction(
@@ -1162,6 +1207,11 @@ export class SessionRegistry {
     runtime.activity = "unknown";
     runtime.observedWorking = false;
     runtime.fatalReported = false;
+    // The limit belonged to the generation that hit it. A resumed session is a new generation with
+    // its own budget, so carrying the old one forward would report a live worker as terminal for
+    // the rest of its life. The journal keeps the history; the record carries current truth only.
+    delete runtime.providerLimit;
+    delete runtime.record.termination;
     delete runtime.stallObservation;
     if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
     delete runtime.idleTimer;
@@ -1463,6 +1513,10 @@ export class SessionRegistry {
         }
         runtime.completedTurns += 1;
         runtime.observedWorking = false;
+        // The turn that owned the next ordinal has banked it. Anything held for that reason can go
+        // now, and this is the only announcement it will get: a provider that has finished and is
+        // sitting at its prompt emits nothing more to trigger one.
+        this.notifyDeliveryBoundary(runtime);
         void this.completeSemanticTurn(runtime, completedReplay);
       }, 200);
     } else if (activity === "needs-input") {
@@ -1509,8 +1563,10 @@ export class SessionRegistry {
     if (limit !== undefined) runtime.providerLimit = limit;
     runtime.record.termination = termination;
 
-    // Whatever is still sitting in the composer will never be read now.
+    // Whatever is still sitting in the composer will never be read now, and anything the queue was
+    // holding for a safe boundary has run out of boundaries.
     this.advanceRenderedInstructions(runtime, "undelivered");
+    this.releaseDeliveryHolds(runtime);
     runtime.fatalReported = true;
     if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
     delete runtime.idleTimer;
@@ -1558,6 +1614,7 @@ export class SessionRegistry {
     // between an orchestrator retrying an instruction and one waiting forever on a turn that can
     // no longer happen.
     this.advanceRenderedInstructions(runtime, "undelivered");
+    this.releaseDeliveryHolds(runtime);
     const controller = runtime.controller;
     const watchers = [...runtime.watchers.values()];
     delete runtime.controller;
@@ -2256,6 +2313,20 @@ export class SessionRegistry {
   private notifyDeliveryBoundary(runtime: RuntimeSession): void {
     if (!runtime.deliveryHeld) return;
     if (this.deliveryHold(runtime) !== undefined) return;
+    runtime.deliveryHeld = false;
+    for (const listener of this.deliveryBoundaryListeners) listener(runtime.record.id);
+  }
+
+  /**
+   * Wake the queue for a worker that just became terminal.
+   *
+   * The boundary this announces is not a safe one — it is the last one. Held instructions have to be
+   * told something, and a re-delivery attempt against a terminal session is exactly what turns each
+   * of them into `undelivered` rather than leaving them queued against a worker that is never coming
+   * back.
+   */
+  private releaseDeliveryHolds(runtime: RuntimeSession): void {
+    if (!runtime.deliveryHeld) return;
     runtime.deliveryHeld = false;
     for (const listener of this.deliveryBoundaryListeners) listener(runtime.record.id);
   }

@@ -210,7 +210,7 @@ export interface WorkerControlResult {
    * deliberately absent: it used to be returned for bytes written at a PTY, which at a permission
    * modal meant text sitting unsent in the composer while the caller was told it had landed.
    */
-  delivery?: "rendered" | "queued" | "deferred" | "unavailable";
+  delivery?: "rendered" | "queued" | "deferred" | "undelivered" | "unavailable";
   /** Why an instruction is held rather than written, when it is held. */
   holdReason?: string;
 }
@@ -821,13 +821,24 @@ export class WorkerControlService {
         message: request.instruction!,
         ...(request.messageId === undefined ? {} : { messageId: request.messageId }),
       });
+      // A worker can die between the lease check above and the write. The instruction is terminal
+      // then, and saying `QUEUED` would leave the caller waiting on a turn that cannot happen.
+      const code = record.status === "rendered"
+        ? "RENDERED"
+        : record.status === "undelivered"
+          ? "WORKER_TERMINAL"
+          : "QUEUED";
       return {
         action: "redirect",
         workerId: request.workerId,
-        code: record.status === "rendered" ? "RENDERED" : "QUEUED",
+        code,
         lifecycle: subject.lifecycle,
         instructionId: record.id,
-        delivery: record.status === "rendered" ? "rendered" : "queued",
+        delivery: record.status === "rendered"
+          ? "rendered"
+          : record.status === "undelivered"
+            ? "undelivered"
+            : "queued",
         ...(record.holdReason === undefined ? {} : { holdReason: record.holdReason }),
       };
     } catch (error) {
@@ -884,7 +895,7 @@ export class WorkerControlService {
   private async deliverCheckpointPrompt(
     request: z.infer<typeof AgentWorkerControlParamsSchema>,
     mode: "non-blocking" | "decision-gate",
-  ): Promise<"rendered" | "queued" | "unavailable"> {
+  ): Promise<"rendered" | "queued" | "undelivered" | "unavailable"> {
     const instructions = this.options.instructions;
     if (instructions === undefined) return "unavailable";
     const lines = [
@@ -902,7 +913,11 @@ export class WorkerControlService {
         targetSessionId: request.workerId,
         message: lines.join("\n"),
       });
-      return record.status === "rendered" ? "rendered" : "queued";
+      return record.status === "rendered"
+        ? "rendered"
+        : record.status === "undelivered"
+          ? "undelivered"
+          : "queued";
     } catch {
       return "unavailable";
     }

@@ -101,6 +101,21 @@ export const SessionTerminationSchema = z.object({
 
 export type SessionTermination = z.infer<typeof SessionTerminationSchema>;
 
+/**
+ * Read a durable termination back as the in-memory limit it came from.
+ *
+ * A provider limit outlives the process that hit it, and the broker that observed it does not
+ * outlive a restart. Without this, a worker stopped by a usage cap comes back from recovery as a
+ * generic `failed` — the operator is told the process died rather than that the account is capped
+ * until 3:00pm, which is the difference between "retry" and "wait".
+ */
+export function providerLimitFromTermination(
+  termination: SessionTermination | undefined,
+): ProviderLimitTermination | undefined {
+  if (termination === undefined || termination.kind === "provider-fault") return undefined;
+  return { kind: termination.kind, reason: termination.reason, detail: termination.detail };
+}
+
 /** What the input surface of the provider TUI is holding. */
 export interface ComposerObservation {
   /** A blocking prompt (permission, trust, approval) owns the UI. */
@@ -312,6 +327,11 @@ export const DeliveryHoldReasonSchema = z.enum([
   "provider-modal",
   /** The composer already holds text; appending would corrupt whatever is there. */
   "composer-occupied",
+  /**
+   * A turn is already in flight. Writing now would give the instruction the ordinal of a turn that
+   * started before it existed, so that older turn's answer would settle the wait asking about it.
+   */
+  "provider-busy",
   /** The worker is terminal and will never consume anything. */
   "worker-terminal",
 ]);
@@ -322,5 +342,6 @@ export const DELIVERY_HOLD_DETAIL: Readonly<Record<DeliveryHoldReason, string>> 
   "human-controller": "A human controller currently owns this thread",
   "provider-modal": "The worker is blocked at a provider prompt; the instruction is held until it clears",
   "composer-occupied": "The worker's composer already holds unsent text; the instruction is held until it clears",
+  "provider-busy": "The worker is mid-turn; the instruction is held until that turn finishes so it is answered by its own turn",
   "worker-terminal": "The worker is terminal and cannot consume this instruction",
 };

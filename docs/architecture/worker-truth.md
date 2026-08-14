@@ -39,6 +39,12 @@ sees. `blocked-composer` sits below `working` but above `idle`: unsent text is n
 terminal with its process still alive — the slot and the "can accept input" claim are released, and
 stopping it is still required.
 
+A limit belongs to the account, so it is durable: it is persisted on the record's `termination` and
+rehydrated at recovery, because a broker restart folds `errored` into `failed` and reporting a
+capped worker as a crashed one sends the operator to retry something that cannot run until the cap
+resets. It is also generation-scoped: `resume` clears it, since the new generation has its own
+budget and a stale cap would report a live worker as terminal for the rest of its life.
+
 `completedTurns` counts turns the broker settled. `canonicalTurns` counts how many of those had a
 provider transcript behind them rather than a terminal scrape. Two Codex workers stamping identical
 completion seconds with zero semantic turns — the MIK-71 report — is now visible as
@@ -63,9 +69,12 @@ Precise meanings, because the incident was caused by two of these being used int
 - **accepted** — the broker holds the instruction and has not attempted delivery. Durable; survives
   a busy worker.
 - **queued** — delivery was attempted and refused. `holdReason` names which boundary refused it:
-  `provider-modal`, `composer-occupied`, `human-controller`, `worker-terminal`. Everything behind a
-  hold is queued with the blocker's reason rather than left reading as `accepted`. A held
-  instruction is retried automatically at the next safe boundary; nothing else retries it.
+  `provider-modal`, `composer-occupied`, `provider-busy`, `human-controller`, `worker-terminal`.
+  Everything behind a hold is queued with the blocker's reason rather than left reading as
+  `accepted`. A held instruction is retried automatically at the next safe boundary; nothing else
+  retries it. `provider-busy` is the ordinal boundary: an instruction written into a turn that was
+  already in flight would be given that older turn's ordinal, and the answer to a question asked
+  before it existed would settle the wait about it.
 - **rendered** — the bytes are in the provider's input surface, and `expectedTurn` is fixed at the
   turn ordinal that will answer it. This is the strongest claim an enqueue call may return. It is
   explicitly *not* delivery: at a permission modal these are exactly the bytes the operator found

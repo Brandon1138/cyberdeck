@@ -1142,14 +1142,24 @@ describe("SessionRegistry", () => {
     expect(ptys[0]!.writes).toEqual([]);
     expect(registry.workerTruth(record.id)).toMatchObject({ state: "blocked-modal", terminal: false });
 
-    // The operator answers the prompt.
+    // The operator answers the prompt and the worker resumes the tool call it was asking about.
+    // That turn is still the *first task's*, so the instruction stays held rather than borrowing it.
     ptys[0]!.emitOutput("\u001b]0;\u2839 modal-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("working"));
+    await expect(registry.submitInstruction(
+      record.id, "Then run the linter", "orchestrator", {}, instructionId,
+    )).resolves.toMatchObject({ state: "queued", hold: "provider-busy" });
+    expect(ptys[0]!.writes).toEqual([]);
+
+    // The first task's turn lands in the ledger. Now the composer is free and the next ordinal is
+    // one nothing else has a claim on.
+    ptys[0]!.emitOutput("\u001b[2Jchecks passed\r\n\u001b]0;modal-worker\u0007");
     await vi.waitFor(() => expect(boundaries).toContain(record.id));
 
     const rendered = await registry.submitInstruction(
       record.id, "Then run the linter", "orchestrator", {}, instructionId,
     );
-    expect(rendered).toMatchObject({ state: "rendered", expectedTurn: 1 });
+    expect(rendered).toMatchObject({ state: "rendered", expectedTurn: 2 });
     expect(ptys[0]!.writes.at(-1)?.toString()).toBe("Then run the linter\n");
 
     // The provider consumes the composer and starts a turn. Only this is submission.
@@ -1159,16 +1169,64 @@ describe("SessionRegistry", () => {
 
     ptys[0]!.emitOutput("\u001b[2Jlinter clean\r\n\u001b]0;modal-worker\u0007");
     const settled = await registry.waitForWorkerResults([
-      { sessionId: record.id, completionTarget: 1 },
+      { sessionId: record.id, completionTarget: 2 },
     ], 5_000, 300);
     expect(settled.results[0]).toMatchObject({
       status: "completed",
-      completedTurns: 1,
+      completedTurns: 2,
       retrieval: "fresh",
     });
     expect(settled.results[0]!.text).toContain("linter clean");
     expect(states.filter(({ state }) => state === "completed")).toEqual([
-      { sessionId: record.id, instructionId, state: "completed", at: expect.any(String), turn: 1 },
+      { sessionId: record.id, instructionId, state: "completed", at: expect.any(String), turn: 2 },
+    ]);
+  });
+
+  it("never gives an instruction the ordinal of a turn that was already in flight", async () => {
+    // The P1 the review caught: an instruction rendered mid-turn took `completedTurns + 1`, which is
+    // the ordinal of the turn that started before it existed. That turn then completed it, and the
+    // wait asking whether the instruction had run settled with the previous task's answer.
+    const instructionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const { registry, ptys } = harness();
+    const record = await registry.start(
+      request({ provider: "claude", name: "busy-worker" }),
+      "First task",
+    );
+    const states: InstructionStateUpdate[] = [];
+    registry.onInstructionState((update) => states.push(update));
+
+    ptys[0]!.emitOutput("\u001b]0;\u2839 busy-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("working"));
+
+    await expect(registry.submitInstruction(
+      record.id, "Then run the linter", "orchestrator", {}, instructionId,
+    )).resolves.toMatchObject({ state: "queued", hold: "provider-busy" });
+    expect(ptys[0]!.writes).toEqual([]);
+
+    // The in-flight turn ends. It answered the first task, so it settles target 1 and nothing else.
+    ptys[0]!.emitOutput("\u001b[2Jfirst task done\r\n\u001b]0;busy-worker\u0007");
+    const first = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
+    expect(first.results[0]).toMatchObject({ status: "completed", completedTurns: 1 });
+    expect(first.results[0]!.text).toContain("first task done");
+    expect(states).toEqual([]);
+
+    const rendered = await registry.submitInstruction(
+      record.id, "Then run the linter", "orchestrator", {}, instructionId,
+    );
+    expect(rendered).toMatchObject({ state: "rendered", expectedTurn: 2 });
+
+    ptys[0]!.emitOutput("\u001b]0;\u2839 busy-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b[2Jlinter clean\r\n\u001b]0;busy-worker\u0007");
+    const second = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 2 },
+    ], 5_000, 300);
+    expect(second.results[0]).toMatchObject({ status: "completed", completedTurns: 2 });
+    expect(second.results[0]!.text).toContain("linter clean");
+    // One completion, and it is the instruction's own turn — not the one it was queued behind.
+    expect(states.filter(({ state }) => state === "completed")).toEqual([
+      { sessionId: record.id, instructionId, state: "completed", at: expect.any(String), turn: 2 },
     ]);
   });
 
@@ -1205,6 +1263,88 @@ describe("SessionRegistry", () => {
     ], 5_000, 300);
     expect(settled.results[0]).toMatchObject({ status: "completed", completedTurns: 1 });
     expect(settled.results[0]!.text).toContain("follow-up answered");
+  });
+
+  it("keeps a provider limit terminal across a restart and drops it on resume", async () => {
+    // The limit belongs to the account, not to the process that hit it, so it has to survive a
+    // broker restart: recovery folds `errored` into `failed`, and reporting a capped worker as a
+    // crashed one sends the operator to retry something that cannot run until the cap resets.
+    const persisted: SessionRecord = {
+      id: "33333333-3333-4333-8333-333333333333",
+      provider: "claude",
+      cwd: "/tmp/repo",
+      detached: true,
+      sandbox: "read-only",
+      kind: "worker",
+      name: "capped-worker",
+      createdAt: "2026-08-14T10:00:00.000Z",
+      updatedAt: "2026-08-14T10:01:00.000Z",
+      executionState: "errored",
+      attachmentState: "detached",
+      pid: 4321,
+      exitCode: null,
+      childIds: [],
+      attentionState: "failed",
+      termination: {
+        kind: "session-limit",
+        reason: "provider usage limit reached",
+        detail: "Usage limit reached \u00b7 resets 3:00pm",
+        at: "2026-08-14T10:01:00.000Z",
+      },
+    };
+    const registry = new SessionRegistry({
+      adapters,
+      recoveredSessions: [persisted],
+      store: { put: async () => {}, delete: async () => {} },
+      ptyFactory: vi.fn(() => new FakePty(9100)),
+      journal: { append: async () => {} },
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+    await registry.ready();
+
+    expect(registry.get(persisted.id)).toMatchObject({
+      executionState: "failed",
+      termination: { kind: "session-limit" },
+    });
+    expect(registry.workerTruth(persisted.id)).toMatchObject({
+      state: "provider-limit",
+      terminal: true,
+      detail: "provider usage limit reached",
+    });
+
+    // A resume is a new generation with its own budget. Carrying the old cap forward would report a
+    // live worker as terminal for the rest of its life.
+    await registry.resume(persisted.id);
+    expect(registry.get(persisted.id).termination).toBeUndefined();
+    expect(registry.workerTruth(persisted.id)).toMatchObject({ state: "idle", terminal: false });
+  });
+
+  it("clears a provider limit observed in this process when the session is resumed", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ name: "capped-live" }), "Long task");
+
+    ptys[0]!.emitOutput("Usage limit reached \u00b7 resets 3:00pm' + CRLF + '");
+    await vi.waitFor(() =>
+      expect(registry.workerTruth(record.id)).toMatchObject({ state: "provider-limit", terminal: true }));
+
+    await registry.resume(record.id);
+    expect(registry.workerTruth(record.id)).toMatchObject({ state: "idle", terminal: false });
+    expect(registry.get(record.id).executionState).toBe("active");
+    expect(registry.get(record.id).termination).toBeUndefined();
+  });
+
+  it("answers an instruction aimed at a dead worker as undelivered rather than queued", async () => {
+    // `queued` promises a later boundary. A terminal worker has none, so the record would sit
+    // accepted forever, deduplicating every retry of an instruction nothing will ever read.
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ name: "dead-worker" }), "Task");
+    ptys[0]!.emitExit(1);
+    await vi.waitFor(() => expect(registry.get(record.id).executionState).toBe("failed"));
+
+    await expect(registry.submitInstruction(
+      record.id, "Then run the linter", "orchestrator", {}, "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    )).resolves.toMatchObject({ state: "undelivered", hold: "worker-terminal" });
   });
 
   it("reports a provider-declared limit as its own terminal state", async () => {
