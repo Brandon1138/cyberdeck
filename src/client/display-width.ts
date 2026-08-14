@@ -36,6 +36,7 @@ const WIDE_RANGES: readonly (readonly [number, number])[] = [
 
 const ZERO_WIDTH = /^[\p{Mn}\p{Me}\p{Cf}]$/u;
 const PICTOGRAPHIC = /^\p{Extended_Pictographic}$/u;
+const EMOJI_PRESENTATION = /^\p{Emoji_Presentation}$/u;
 
 /** Splits a string into the units a terminal draws one at a time. */
 export function graphemes(value: string): string[] {
@@ -54,8 +55,10 @@ export function graphemeWidth(grapheme: string): number {
   // emoji presentation is two cells wide even when the bare code point is one.
   if (grapheme.includes("\u{FE0F}")) return 2;
   if (WIDE_RANGES.some(([low, high]) => first >= low && first <= high)) return 2;
-  // Astral pictographs default to emoji presentation; the text-presentation ones below U+1F000
+  // A character whose default presentation is emoji draws two cells wherever it lives — ⌚ and ⌛
+  // sit in the BMP but the terminal still gives them a double cell. Text-presentation pictographs
   // (arrows, dingbats) stay one cell unless U+FE0F said otherwise above.
+  if (EMOJI_PRESENTATION.test(head)) return 2;
   if (first >= 0x1f000 && PICTOGRAPHIC.test(head)) return 2;
   return 1;
 }
