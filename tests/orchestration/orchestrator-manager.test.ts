@@ -163,6 +163,57 @@ describe("OrchestratorManager", () => {
     expect(launchArgs).not.toContain("auto");
   });
 
+  it("reports what an automatic orchestrator gave up to its read-only sandbox", async () => {
+    const start = activatingStart((request: object) => ({
+      ...record,
+      ...request,
+      provider: "claude" as const,
+      model: "opus",
+    }));
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+      undefined,
+      undefined,
+      {
+        list: vi.fn(async () => ({ claude: "automatic" as const })),
+        set: vi.fn(async () => undefined),
+      },
+    );
+
+    const result = await manager.create({
+      provider: "claude",
+      model: "opus",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    });
+    expect(result.warnings?.join("\n")).toContain("plan");
+  });
+
+  it("warns that an automatic Codex orchestrator still stops at MCP approval prompts", async () => {
+    const start = activatingStart((request: object) => ({ ...record, ...request }));
+    const manager = new OrchestratorManager(
+      { start, stop: vi.fn(async () => {}) } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
+      undefined,
+      undefined,
+      {
+        list: vi.fn(async () => ({ codex: "automatic" as const })),
+        set: vi.fn(async () => undefined),
+      },
+    );
+
+    const result = await manager.create({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/one",
+      scope: "fleet",
+    });
+    expect(result.warnings?.join("\n")).toContain("MCP tool");
+  });
+
   it("starts a Claude orchestrator in persisted permissioned mode", async () => {
     const start = activatingStart((request: object) => ({
       ...record,

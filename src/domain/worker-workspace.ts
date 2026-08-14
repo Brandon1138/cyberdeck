@@ -47,6 +47,7 @@ export type WorkerWorkspaceFailureCode =
   | "WORKSPACE_CWD_OUTSIDE_WORKTREE"
   | "WORKSPACE_PROVISIONING_REQUIRES_WRITE"
   | "WORKSPACE_GIT_DIR_NOT_WRITABLE"
+  | "WORKSPACE_TARGET_NOT_WRITABLE"
   | "WORKSPACE_WORKTREE_MISSING"
   | "WORKSPACE_BRANCH_MISMATCH"
   | "WORKSPACE_BASE_REF_UNRESOLVED";
@@ -76,11 +77,10 @@ function contains(parent: string, child: string): boolean {
 }
 
 function coveredByWritableRoot(
-  workspace: WorkerWorkspace,
+  roots: readonly string[],
   path: string,
 ): boolean {
-  return [workspace.worktreePath, ...workspace.writableRoots]
-    .some((root) => contains(root, path));
+  return roots.some((root) => contains(root, path));
 }
 
 /**
@@ -92,11 +92,23 @@ export function checkWorkerWorkspaceShape(
   workspace: WorkerWorkspace,
   cwd: string,
 ): WorkerWorkspaceCheck {
-  if (!contains(workspace.worktreePath, cwd)) {
+  // Only a pre-provisioned worker starts inside its worktree. A worker-provisioned one starts in
+  // the repository it will run `git worktree add` from, which is by definition not the worktree it
+  // is about to create.
+  if (workspace.provisioning === "pre-provisioned" && !contains(workspace.worktreePath, cwd)) {
     return {
       ok: false,
       code: "WORKSPACE_CWD_OUTSIDE_WORKTREE",
       message: `Worker cwd ${cwd} is outside its declared worktree ${workspace.worktreePath}`,
+    };
+  }
+  if (workspace.provisioning === "worker-provisioned" && contains(workspace.worktreePath, cwd)) {
+    return {
+      ok: false,
+      code: "WORKSPACE_CWD_OUTSIDE_WORKTREE",
+      message:
+        `Worker cwd ${cwd} is inside the worktree ${workspace.worktreePath} it is supposed to `
+        + "create. Start the worker in the repository the worktree is cut from.",
     };
   }
   return { ok: true, value: workspace };
@@ -137,8 +149,20 @@ export async function validateWorkerWorkspace(
   if (probe === undefined) return shape;
 
   if (workspace.provisioning === "worker-provisioned") {
-    // `git worktree add` writes refs/heads/<branch> and worktrees/<name> under the git common
-    // directory of the *source* repository, which is never inside the worktree being created.
+    // The provider grants the session its cwd and the declared writable roots, and nothing else.
+    // `git worktree add` writes in two places, and neither is granted by default: the new worktree
+    // directory, and refs/heads/<branch> plus worktrees/<name> under the git common directory of
+    // the *source* repository.
+    if (!coveredByWritableRoot([cwd, ...workspace.writableRoots], workspace.worktreePath)) {
+      return {
+        ok: false,
+        code: "WORKSPACE_TARGET_NOT_WRITABLE",
+        message:
+          `A worker-provisioned workspace must be able to create ${workspace.worktreePath}, which is `
+          + `outside the worker's cwd ${cwd}. Add ${workspace.worktreePath} or its parent to `
+          + "writableRoots.",
+      };
+    }
     const common = await probe.gitCommonDirectory(cwd);
     if (common === undefined) {
       return {
@@ -147,7 +171,7 @@ export async function validateWorkerWorkspace(
         message: `Worker cwd ${cwd} is not inside a git repository, so no worktree can be created from it`,
       };
     }
-    if (!coveredByWritableRoot(workspace, common)) {
+    if (!coveredByWritableRoot([cwd, ...workspace.writableRoots], common)) {
       return {
         ok: false,
         code: "WORKSPACE_GIT_DIR_NOT_WRITABLE",
