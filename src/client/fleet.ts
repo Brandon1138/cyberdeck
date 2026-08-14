@@ -2800,8 +2800,16 @@ export async function runFleet(
    * state the terminal is free to put on screen, so a clear followed by a paint — however few bytes
    * apart — can be shown as a black frame, and every legitimate repaint was a chance at one: a
    * handful a second while a worker streams. Home, then each row written over the row it replaces
-   * with `ESC[K` erasing whatever of the old row ran past the new one, then `ESC[0J` for the rows
-   * a previously taller frame left below. At no point in that sequence is the pane empty.
+   * with `ESC[K` erasing whatever of the old row ran past the new one. At no point in that
+   * sequence is the pane empty.
+   *
+   * A row that fills the terminal exactly gets no erase. The caret stops on that row's last cell
+   * with the wrap pending rather than moving past it, and `ESC[K` erases from the caret inclusive
+   * — it would take the glyph just written, which on a full-width divider is a visible notch. Such
+   * a row has no stale tail to erase either, so skipping it is both necessary and sufficient. The
+   * same cell is why the erase for the rows a previously taller frame left below is addressed
+   * absolutely rather than emitted from wherever the last row ended, and why it is emitted at all
+   * only when there are such rows.
    *
    * A clear is still right where there is no old geometry to overwrite — the first frame on a
    * screen, and the first after a resize — and both arrive with `paintedFrame` unset.
@@ -2817,9 +2825,20 @@ export async function runFleet(
     const frame = `${body}${caret}`;
     if (frame === paintedFrame) return;
     const clear = paintedFrame === undefined ? "\u001b[2J" : "";
+    // The caret sequence carries no newline, so the painted frame's rows are its lines.
+    const paintedRows = paintedFrame?.split("\n").length;
     paintedFrame = frame;
-    const rows = body.split("\n").join("\u001b[K\n");
-    output.write(`\u001b[?25l${clear}\u001b[H${rows}\u001b[0J${caret}`);
+    const columns = output.columns ?? Number.POSITIVE_INFINITY;
+    const rows = body.split("\n");
+    const painted = rows
+      .map((row) => (printedWidth(row) < columns ? `${row}\u001b[K` : row))
+      .join("\n");
+    // Only where a taller frame left rows below this one, and from a cell the caret is definitely
+    // on: a row was painted there, so addressing it cannot scroll the pane.
+    const below = paintedRows !== undefined && paintedRows > rows.length
+      ? `\u001b[${rows.length + 1};1H\u001b[0J`
+      : "";
+    output.write(`\u001b[?25l${clear}\u001b[H${painted}${below}${caret}`);
   };
   let stopped = false;
   let attaching = false;
@@ -4503,6 +4522,18 @@ function cutToWidth(value: string, width: number): string {
     cut += cluster;
   }
   return cut;
+}
+
+/**
+ * The columns a composed row prints. Escape sequences steer the terminal rather than filling it, so
+ * they cost nothing here — the byte length of a painted row and the cells it occupies are different
+ * numbers, and the caret follows the second one.
+ */
+function printedWidth(value: string): number {
+  // Odd parts are the captured escape sequences; even parts are what the terminal shows.
+  return value
+    .split(ANSI_SEQUENCE)
+    .reduce((cells, part, index) => (index % 2 === 1 ? cells : cells + displayWidth(part)), 0);
 }
 
 /**

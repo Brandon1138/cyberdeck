@@ -87,9 +87,17 @@ what it draws then is an empty pane. Every legitimate repaint could show one, so
 whatever changed the frame: the relative-age column each second, snapshot and preview deltas while a
 worker streams, the five-second confirmation expiry.
 
-The repaint now overwrites the pane in place. Home, each row written over the row it replaces with
-`ESC[K` taking the old row's tail with it, `ESC[0J` after the last row for anything a taller frame
-left below. There is no instant in that sequence at which the pane is empty. A clear is still right
+The repaint now overwrites the pane in place. Home, then each row written over the row it replaces
+with `ESC[K` taking the old row's tail with it. There is no instant in that sequence at which the
+pane is empty.
+
+A row that fills the terminal exactly is the one exception, found in review of the first fix: the
+caret stops on that row's last cell with the wrap pending rather than moving past it, and `ESC[K`
+erases from the caret *inclusive*, so the erase would rub out the glyph just written — a notch in
+every full-width divider. Such a row has no stale tail to erase either, so it simply gets none. The
+same cell is why the erase for rows a previously taller frame left below is addressed absolutely
+rather than emitted from wherever the last row ended, and why it is emitted at all only when the
+frame shrank. A clear is still right
 where there is nothing underneath to overwrite — the first frame on a screen, and the first after a
 resize reflowed the pane — and both are exactly the cases that leave `paintedFrame` unset, so the
 same field answers both questions. The frame dedup that fixed the dancing caret is untouched: an

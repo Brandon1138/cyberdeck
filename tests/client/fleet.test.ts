@@ -3822,10 +3822,10 @@ describe("fleet repaint", () => {
     for (const frame of repaints) {
       expect(frame).not.toContain("\u001b[2J");
       expect(frame.startsWith("\u001b[?25l\u001b[H")).toBe(true);
-      // Each row takes the tail of the row it replaced with it, and the rows a previously taller
-      // frame left below go with the erase that closes the frame.
+      // Each row takes the tail of the row it replaced with it. Nothing is left below a frame the
+      // same height as the one it replaces, so nothing erases below it either.
       expect(frame).toContain("\u001b[K\n");
-      expect(frame).toContain("\u001b[0J");
+      expect(frame).not.toContain("\u001b[0J");
     }
 
     // A resize reflows the pane under the fleet, so the geometry an in-place repaint overwrites is
@@ -3839,6 +3839,47 @@ describe("fleet repaint", () => {
         .find((chunk) => chunk.includes("\u001b[H")) ?? "";
       expect(cleared.startsWith("\u001b[?25l\u001b[2J\u001b[H")).toBe(true);
     });
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("erases the tail of a short row and leaves a full-width row its last cell", async () => {
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport() as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("build it"));
+    await vi.waitFor(() =>
+      expect(Buffer.concat(output.chunks).toString()).toContain("› build it"));
+
+    const frame = output.chunks
+      .map((chunk) => chunk.toString())
+      .filter((chunk) => chunk.includes("\u001b[H"))
+      .at(-1) ?? "";
+    const caretSequence = /\u001b\[\d+;\d+H\u001b\[\?25h$/u.exec(frame)?.[0] ?? "";
+    const body = frame.slice("\u001b[?25l\u001b[H".length, frame.length - caretSequence.length);
+    // Escape sequences steer the terminal rather than filling it, so the cells a row prints are
+    // not its byte length.
+    const cells = (row: string) => displayWidth(row.replaceAll(/\u001b\[[0-9;]*m/gu, ""));
+
+    const rows = body.split("\n").map((row) => ({
+      erased: row.endsWith("\u001b[K"),
+      width: cells(row.replace(/\u001b\[K$/u, "")),
+    }));
+    // A row narrower than the pane may have a stale tail behind it, and the erase takes it.
+    const short = rows.filter((row) => row.width < output.columns);
+    expect(short.length).toBeGreaterThan(0);
+    expect(short.every((row) => row.erased)).toBe(true);
+    // A row that fills the pane exactly — the dividers do — has none, and the caret is still on its
+    // last cell with the wrap pending. `ESC[K` erases from that cell inclusive, so an erase here
+    // would rub out the glyph just written.
+    const full = rows.filter((row) => row.width === output.columns);
+    expect(full.length).toBeGreaterThan(0);
+    expect(full.some((row) => row.erased)).toBe(false);
+    // Nothing prints past the pane, so those are the only two kinds of row in the frame.
+    expect(short.length + full.length).toBe(rows.length);
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
@@ -3930,10 +3971,7 @@ describe("fleet repaint", () => {
       // No row is wider than the pane, so the terminal never soft-wraps one and the row the caret
       // was addressed to is the row the composer is actually printed on.
       const caretSequence = `${addresses[0]}\u001b[?25h`;
-      const body = frame.slice(
-        "\u001b[?25l\u001b[H".length,
-        frame.length - caretSequence.length - "\u001b[0J".length,
-      );
+      const body = frame.slice("\u001b[?25l\u001b[H".length, frame.length - caretSequence.length);
       for (const line of body.split("\n")) {
         // Each row carries the erase that takes the old row's tail with it; the row itself is
         // what has to fit the pane.
