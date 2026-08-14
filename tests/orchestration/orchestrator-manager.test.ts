@@ -232,9 +232,14 @@ describe("OrchestratorManager", () => {
 
   it("starts a Codex orchestrator whose automatic mode reaches the CLI as -a never", async () => {
     let launchArgs: string[] = [];
-    const start = vi.fn(async (request: object) => {
+    const start = vi.fn(async (
+      request: object,
+      _initialPrompt?: string,
+      activate?: (started: SessionRecord) => Promise<void>,
+    ) => {
       const session = { ...record, ...request, provider: "codex" as const };
       launchArgs = new CodexProviderAdapter().buildLaunchSpec(session).args;
+      await activate?.(session);
       return session;
     });
     const manager = new OrchestratorManager(
@@ -260,19 +265,24 @@ describe("OrchestratorManager", () => {
         approvalMode: "auto",
       },
     });
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+    expect(start.mock.calls[0]?.[0]).toMatchObject({
       provider: "codex",
       approvalMode: "auto",
-    }));
+    });
     expect(launchArgs).toEqual(expect.arrayContaining(["-a", "never"]));
     expect(launchArgs).not.toContain("on-request");
   });
 
   it("keeps an explicit prompt mode ahead of persisted automatic Codex policy", async () => {
     let launchArgs: string[] = [];
-    const start = vi.fn(async (request: object) => {
+    const start = vi.fn(async (
+      request: object,
+      _initialPrompt?: string,
+      activate?: (started: SessionRecord) => Promise<void>,
+    ) => {
       const session = { ...record, ...request, provider: "codex" as const };
       launchArgs = new CodexProviderAdapter().buildLaunchSpec(session).args;
+      await activate?.(session);
       return session;
     });
     const manager = new OrchestratorManager(
