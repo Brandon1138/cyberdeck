@@ -77,6 +77,28 @@ Repro: register a worker under a controller, never report liveness, advance past
 gap rather than data loss. Not fixed here: the selector's grace check exists to stop a live
 controller being adopted out from under itself, and relaxing it correctly is a substrate decision.
 
+## Resolved: every Fleet repaint was a chance at a black frame
+
+Reported on 2026-08-15 by the operator: the fleet pane flashes fully black for about a frame, every
+few seconds at idle and far more often while a worker streams. `writeFrame` painted by writing
+hide-caret, `ESC[2J`, `ESC[H` and the whole new frame in one `write`. One write is not one screen
+update — nothing stops the terminal from compositing after the erase and before the rows land, and
+what it draws then is an empty pane. Every legitimate repaint could show one, so the flash tracked
+whatever changed the frame: the relative-age column each second, snapshot and preview deltas while a
+worker streams, the five-second confirmation expiry.
+
+The repaint now overwrites the pane in place. Home, each row written over the row it replaces with
+`ESC[K` taking the old row's tail with it, `ESC[0J` after the last row for anything a taller frame
+left below. There is no instant in that sequence at which the pane is empty. A clear is still right
+where there is nothing underneath to overwrite — the first frame on a screen, and the first after a
+resize reflowed the pane — and both are exactly the cases that leave `paintedFrame` unset, so the
+same field answers both questions. The frame dedup that fixed the dancing caret is untouched: an
+identical frame is still not written at all.
+
+Not done here: DEC mode 2026 synchronized output, which asks the terminal to hold the update rather
+than removing the empty state. The operator chose the repaint over the mode — one depends on the
+terminal honouring a private mode, the other cannot flash on a terminal that ignores everything.
+
 ## Resolved: a Cursor orchestrator's first turn outran its own grant
 
 Observed on 2026-07-31 by the operator, and confirmed by review on the branch that introduced Cursor

@@ -2782,9 +2782,11 @@ export async function runFleet(
   const previousRawMode = input.isRaw === true;
   /**
    * The last frame written to the pane, caret sequence included, or nothing when the pane's
-   * contents are unknown — before the first frame, and after any excursion off the alternate
-   * screen. A frame equal to this one would clear the pane and paint it back exactly as it stands,
-   * which at the idle cadence is a visible flash several times a second for no change at all.
+   * contents are unknown — before the first frame, after any excursion off the alternate screen,
+   * and after a resize reflowed whatever was on it. A frame equal to this one would repaint the
+   * pane exactly as it stands, which at the idle cadence is bytes several times a second for no
+   * change at all. Unset is also what tells `writeFrame` there is no geometry to overwrite in
+   * place, so the next frame clears first.
    */
   let paintedFrame: string | undefined;
   const enterFleetScreen = () => {
@@ -2794,17 +2796,30 @@ export async function runFleet(
   /**
    * Paint one frame, caret hidden for the whole of it.
    *
-   * The clear and every line of the repaint move the caret, and a caret left visible walks all of
-   * them in front of the operator. It is hidden before the clear, moved to where it belongs once
-   * the frame is on screen, and shown again only when a composer owns it.
+   * The repaint overwrites the pane in place instead of clearing it first. A cleared pane is a
+   * state the terminal is free to put on screen, so a clear followed by a paint — however few bytes
+   * apart — can be shown as a black frame, and every legitimate repaint was a chance at one: a
+   * handful a second while a worker streams. Home, then each row written over the row it replaces
+   * with `ESC[K` erasing whatever of the old row ran past the new one, then `ESC[0J` for the rows
+   * a previously taller frame left below. At no point in that sequence is the pane empty.
+   *
+   * A clear is still right where there is no old geometry to overwrite — the first frame on a
+   * screen, and the first after a resize — and both arrive with `paintedFrame` unset.
+   *
+   * Every line of the repaint moves the caret, and a caret left visible walks all of them in front
+   * of the operator. It is hidden before the first byte, moved to where it belongs once the frame
+   * is on screen, and shown again only when a composer owns it.
    */
   const writeFrame = (body: string, cursor: { row: number; column: number } | undefined) => {
-    const frame = cursor === undefined
-      ? body
-      : `${body}\u001b[${cursor.row};${cursor.column}H\u001b[?25h`;
+    const caret = cursor === undefined
+      ? ""
+      : `\u001b[${cursor.row};${cursor.column}H\u001b[?25h`;
+    const frame = `${body}${caret}`;
     if (frame === paintedFrame) return;
+    const clear = paintedFrame === undefined ? "\u001b[2J" : "";
     paintedFrame = frame;
-    output.write(`\u001b[?25l\u001b[2J\u001b[H${frame}`);
+    const rows = body.split("\n").join("\u001b[K\n");
+    output.write(`\u001b[?25l${clear}\u001b[H${rows}\u001b[0J${caret}`);
   };
   let stopped = false;
   let attaching = false;
@@ -3252,7 +3267,13 @@ export async function runFleet(
   input.on("data", onInput);
   input.resume?.();
   const onSigint = () => { queueKeys(["ctrl+c"]); };
-  const onResize = () => { notify(); };
+  // A resize invalidates the geometry an in-place repaint overwrites: the terminal reflows what is
+  // on screen, and the row the frame's last line lands on is no longer the row it left. Dropping
+  // the painted frame makes the next one clear and paint in full, whether or not it differs.
+  const onResize = () => {
+    paintedFrame = undefined;
+    notify();
+  };
   signals.on("SIGINT", onSigint);
   signals.on("SIGTERM", stop);
   signals.on("SIGWINCH", onResize);
