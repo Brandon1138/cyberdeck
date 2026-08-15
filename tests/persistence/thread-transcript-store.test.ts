@@ -142,6 +142,58 @@ describe("ThreadTranscriptStore", () => {
     }]);
   });
 
+  it("reads the model a Claude session is running now, not the one it opened with", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const projects = join(root, "claude-projects");
+    const cwd = "/tmp/repo";
+    await mkdir(join(projects, cwd.replace(/[^A-Za-z0-9-]/gu, "-")), { recursive: true });
+    await writeFile(
+      join(projects, cwd.replace(/[^A-Za-z0-9-]/gu, "-"), `${SESSION_ONE}.jsonl`),
+      [
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-08-16T10:00:00.000Z",
+          effort: "low",
+          message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "a" }] },
+        }),
+        // The operator switched model inside the CLI; the next turn is the first to say so.
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-08-16T10:05:00.000Z",
+          effort: "high",
+          message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "b" }] },
+        }),
+        "",
+      ].join("\n"),
+    );
+    const store = new ThreadTranscriptStore(root, { claudeProjectsDirectory: projects });
+
+    await expect(store.readObservedModel({
+      sessionId: SESSION_ONE,
+      provider: "claude",
+      cwd,
+      createdAt: "2026-08-16T10:00:00.000Z",
+      turnNumber: 2,
+    })).resolves.toEqual({
+      model: "claude-opus-5",
+      effort: "high",
+      observedAt: "2026-08-16T10:05:00.000Z",
+    });
+  });
+
+  it("observes no model for a provider that writes no transcript", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const store = new ThreadTranscriptStore(root);
+
+    await expect(store.readObservedModel({
+      sessionId: SESSION_ONE,
+      provider: "cursor",
+      cwd: "/tmp/repo",
+      createdAt: "2026-08-16T10:00:00.000Z",
+      turnNumber: 1,
+    })).resolves.toBeUndefined();
+  });
+
   it("requires explicit confirmation before pruning a legacy transcript", async () => {
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
     const legacy = join(root, "threads", "transcript.jsonl");

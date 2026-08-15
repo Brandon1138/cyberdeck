@@ -9,7 +9,7 @@ import {
 } from "../limits.js";
 import type { Readable, Writable } from "node:stream";
 import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
-import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
+import { fallbackWorkerCapabilities } from "../orchestration/worker-capabilities.js";
 import { CYBERDECK_VERSION } from "../version.js";
 
 export interface McpBrokerTransport {
@@ -170,7 +170,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_provider_capabilities",
-    description: "Return Cyberdeck's authoritative worker model IDs, effort values, and launch notes. Use this instead of inspecting repository source or guessing aliases.",
+    description: "Return Cyberdeck's authoritative worker model IDs, effort values, and launch notes, read from the provider CLIs themselves. Use this instead of inspecting repository source or guessing aliases. Each entry carries `source`: `provider-query` with `observedAt` is what the provider offers now; `fallback-catalog` with `fallbackReason` is a stored snapshot served because that provider could not be asked.",
     inputSchema: {
       type: "object",
       properties: {
@@ -819,6 +819,31 @@ async function callTool(
 ): Promise<unknown> {
   // Answered before any gate: the one tool whose job is to explain why the others cannot run.
   if (name === "cyberdeck_diagnose") return diagnose(context);
+  // Also answered before the gate. What models exist is knowable without a broker, and an
+  // orchestrator that cannot reach one still needs a list to plan against — served explicitly as
+  // the stand-in it is rather than as the providers' present tense.
+  if (name === "cyberdeck_provider_capabilities") {
+    const provider = typeof args.provider === "string" ? args.provider : undefined;
+    if (context.transport === undefined) {
+      return fallbackWorkerCapabilities(
+        context.brokerUnavailable
+          ?? "the Cyberdeck broker is unreachable, so the provider CLIs could not be queried",
+        provider,
+      );
+    }
+    try {
+      return await context.transport.request("worker.capabilities", {
+        ...(provider === undefined ? {} : { provider }),
+      });
+    } catch (error) {
+      // A broker too old to serve the route, or one that failed mid-probe, still gets a named
+      // answer: silence here would read as "this provider offers nothing".
+      return fallbackWorkerCapabilities(
+        `the broker could not serve provider capabilities: ${error instanceof Error ? error.message : String(error)}`,
+        provider,
+      );
+    }
+  }
   const transport = context.transport;
   if (transport === undefined) {
     throw new McpToolError(
@@ -879,12 +904,6 @@ async function callTool(
       ...event,
       checkpointCorrelationId: correlationId,
     });
-  }
-  if (name === "cyberdeck_provider_capabilities") {
-    const provider = typeof args.provider === "string" ? args.provider : undefined;
-    return provider === undefined
-      ? WORKER_PROVIDER_CAPABILITIES
-      : WORKER_PROVIDER_CAPABILITIES.filter((entry) => entry.provider === provider);
   }
   if (name === "cyberdeck_orchestrator_inspect") {
     return transport.request("agent.orchestrator.inspect", { actorSessionId, ...args });

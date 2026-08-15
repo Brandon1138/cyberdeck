@@ -14,6 +14,7 @@ import { JsonlDecoder, encodeFrame } from "../../src/protocol/jsonl.js";
 import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-store.js";
 import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
+import { WorkerCapabilityCatalog } from "../../src/orchestration/worker-capability-catalog.js";
 import { WorkerPreferenceStore } from "../../src/persistence/worker-preference-store.js";
 import { FleetDetachStore } from "../../src/persistence/fleet-detach-store.js";
 import { AgentControlService } from "../../src/orchestration/agent-control-service.js";
@@ -134,7 +135,7 @@ class TestClient {
   }
 }
 
-async function harness() {
+async function harness(options: { workerCapabilities?: WorkerCapabilityCatalog } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-server-"));
   const socketPath = join(directory, "broker.sock");
   const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(2000 + ptyFactory.mock.calls.length));
@@ -172,7 +173,13 @@ async function harness() {
     orchestratorStore,
     transcripts,
     workerPreferences,
-    { audit: journal, scoutEgress },
+    {
+      audit: journal,
+      scoutEgress,
+      ...(options.workerCapabilities === undefined
+        ? {}
+        : { workerCapabilities: options.workerCapabilities }),
+    },
   );
   let server: BrokerServer;
   server = new BrokerServer({
@@ -184,6 +191,9 @@ async function harness() {
     fleetDetaches,
     workerPreferences,
     scoutEgress,
+    ...(options.workerCapabilities === undefined
+      ? {}
+      : { workerCapabilities: options.workerCapabilities }),
     onShutdown: () => { void server.close(); },
   });
   await server.listen();
@@ -212,6 +222,41 @@ describe("BrokerServer", () => {
         enabled: true,
       })).resolves.toEqual({ root: "/repo/one", enabled: true });
       expect(scoutEgress.set).toHaveBeenCalledWith("/repo/one", true);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("serves one advertised model set to Fleet, orchestrators, and the launch boundary", async () => {
+    // MIK-81: a model the provider added after the stored catalog was written.
+    const workerCapabilities = new WorkerCapabilityCatalog({
+      probe: {
+        list: async (provider) => provider === "codex"
+          ? { models: [{ id: "gpt-5.7-nova", label: "Codex Nova" }] }
+          : { unavailable: `${provider} advertises no model-listing command` },
+      },
+    });
+    const { server, socketPath } = await harness({ workerCapabilities });
+    const client = await TestClient.open(socketPath);
+    try {
+      await expect(client.request("worker.capabilities", { provider: "codex" })).resolves.toEqual([
+        expect.objectContaining({
+          provider: "codex",
+          models: ["gpt-5.7-nova"],
+          modelLabels: { "gpt-5.7-nova": "Codex Nova" },
+          source: "provider-query",
+        }),
+      ]);
+      // And the launch boundary judges against that same answer, so the offer cannot be refused.
+      await expect(client.request<{ model: string }>("session.startWithPrompt", {
+        provider: "codex",
+        cwd: "/tmp/repo",
+        detached: true,
+        sandbox: "read-only",
+        model: "gpt-5.7-nova",
+        initialPrompt: "Inspect the failing test",
+      })).resolves.toMatchObject({ model: "gpt-5.7-nova" });
     } finally {
       await client.close();
       await server.close();

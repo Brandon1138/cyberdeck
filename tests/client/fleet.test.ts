@@ -10,8 +10,11 @@ import {
   renderFleet,
   runFleet,
   startFleetSession,
+  threadIdentity,
   threadStatus,
   transitionFleet,
+  workerModelCatalog,
+  adoptWorkerModels,
   type FleetSnapshot,
   type FleetState,
 } from "../../src/client/fleet.js";
@@ -716,8 +719,10 @@ describe("fleet presentation", () => {
 
     expect(rendered).toContain("~/code/personal/cyberdeck");
     expect(rendered).toContain("~/code/personal/keystone");
-    expect(rendered).toContain("Claude provider-nat…");
-    expect(rendered).toContain("Codex another-model…");
+    // `~` marks a launch value: neither of these sessions has a provider transcript naming
+    // a running model, so the column shows what they were started with and says as much.
+    expect(rendered).toContain("~Claude Provider Na…");
+    expect(rendered).toContain("~Codex Another Mode…");
     expect(rendered).toContain("Done");
     expect(rendered).toContain("Latest useful response");
     expect(rendered).toContain("14s");
@@ -804,7 +809,7 @@ describe("fleet presentation", () => {
       // The empty cell still holds the column open so rows stay aligned.
       expect(withoutPr).toHaveLength(120);
       expect(withPr).toHaveLength(120);
-      expect(withPr.indexOf("●")).toBe(withoutPr.indexOf("Claude") - 2);
+      expect(withPr.indexOf("●")).toBe(withoutPr.indexOf("~Claude") - 2);
     });
 
     it("renders a distinct glyph per state", () => {
@@ -1573,8 +1578,8 @@ describe("fleet controls", () => {
       now: NOW_MS,
     });
 
-    expect(rendered).toContain("provider-native-model · Provider managed · fleet");
-    expect(rendered).not.toContain("provider-native-model · Provider managed · /repo/one");
+    expect(rendered).toContain("Claude Provider Native Model · Provider managed · fleet");
+    expect(rendered).not.toContain("Claude Provider Native Model · Provider managed · /repo/one");
   });
 
   it("decodes Ctrl+O without inserting it into the task composer", () => {
@@ -2459,11 +2464,150 @@ describe("fleet controls", () => {
     });
   });
 
+  it("shows the model a session is running now, and marks a launch value as unverified", () => {
+    // MIK-80: started on Sonnet, switched to Opus effort high inside the provider's own CLI.
+    expect(threadIdentity(session({
+      provider: "claude",
+      model: "sonnet",
+      effort: "low",
+      observedModel: { model: "claude-opus-5", effort: "high", observedAt: NOW },
+    }))).toBe("Claude Opus 5 · high");
+
+    // Nothing observed yet: the launch value stands, wearing the mark that says it is one.
+    expect(threadIdentity(session({ provider: "claude", model: "sonnet", effort: "low" })))
+      .toBe("~Claude Sonnet · low");
+
+    // A provider that names a model without naming an effort is only half observed, and says so.
+    expect(threadIdentity(session({
+      provider: "claude",
+      model: "sonnet",
+      effort: "low",
+      observedModel: { model: "claude-opus-5" },
+    }))).toBe("~Claude Opus 5 · low");
+
+    // Cursor writes no transcript at all, so its column can never be more than a launch value.
+    expect(threadIdentity(session({ provider: "cursor", model: "cursor-grok-4.6-high" })))
+      .toBe("~Cursor Grok 4.6 High · Provider managed");
+  });
+
+  it("offers the models the providers currently advertise, marking a list nobody could verify", () => {
+    const snapshot = fleet({ record: session() });
+    const state: FleetState = {
+      ...createFleetState(snapshot),
+      workerModels: workerModelCatalog([
+        {
+          provider: "cursor",
+          models: ["cursor-grok-4.6-high", "composer-2.5"],
+          modelLabels: { "cursor-grok-4.6-high": "Grok 4.6 (High)" },
+          efforts: [],
+          approvalModes: ["auto"],
+          modelIdRule: "",
+          notes: [],
+          source: "provider-query",
+          observedAt: NOW,
+        },
+        {
+          provider: "claude",
+          models: ["opus"],
+          efforts: ["high"],
+          approvalModes: ["auto"],
+          modelIdRule: "",
+          notes: [],
+          source: "fallback-catalog",
+          fallbackReason: "the claude CLI advertises no model-listing subcommand",
+        },
+      ]),
+      workerPicker: {
+        step: "model",
+        modelIndex: 0,
+        effortIndex: 0,
+        cwd: "/repo/one",
+        returnDraft: "",
+        filter: "",
+      },
+    };
+
+    const rendered = renderFleet(snapshot, state, { color: false, width: 100, height: 28 });
+    // A model that exists only because Cursor just listed it is reachable, under Cursor's own name.
+    expect(rendered).toContain("Grok 4.6 (High)");
+    // And the provider that could not be asked says so, on the list and on its rows.
+    expect(rendered).toContain("~ claude models are a stored list");
+    expect(rendered).toContain("the claude CLI advertises no model-listing subcommand");
+    expect(rendered).toContain("~ Claude Opus");
+
+    const filtered = transitionFleet(
+      transitionFleet(state, snapshot, "g", NOW_MS).state,
+      snapshot,
+      "r",
+      NOW_MS,
+    ).state;
+    const narrowed = renderFleet(snapshot, filtered, { color: false, width: 100, height: 28 });
+    expect(narrowed).toContain("Grok 4.6 (High)");
+    expect(narrowed).not.toContain("Composer 2.5");
+
+    // The slug is applied exactly as the provider spells it; no effort is composed onto it.
+    const effort = transitionFleet(filtered, snapshot, "enter", NOW_MS);
+    const applied = transitionFleet(effort.state, snapshot, "enter", NOW_MS);
+    expect(applied.action).toEqual({
+      type: "profile",
+      cwd: "/repo/one",
+      profile: { provider: "cursor", model: "cursor-grok-4.6-high" },
+    });
+  });
+
+  it("keeps the selected model when a fresh capability read lands under the open picker", () => {
+    const snapshot = fleet({ record: session() });
+    const opened: FleetState = {
+      ...createFleetState(snapshot),
+      workerModels: workerModelCatalog([{
+        provider: "codex",
+        models: ["gpt-5.6-luna", "gpt-5.6-sol"],
+        efforts: ["high"],
+        approvalModes: ["auto"],
+        modelIdRule: "",
+        notes: [],
+        source: "provider-query",
+      }]),
+      workerPicker: {
+        step: "model",
+        modelIndex: 1,
+        effortIndex: 0,
+        cwd: "/repo/one",
+        returnDraft: "",
+        filter: "",
+      },
+    };
+
+    const reordered = adoptWorkerModels(opened, workerModelCatalog([{
+      provider: "codex",
+      models: ["gpt-5.7-nova", "gpt-5.6-luna", "gpt-5.6-sol"],
+      efforts: ["high"],
+      approvalModes: ["auto"],
+      modelIdRule: "",
+      notes: [],
+      source: "provider-query",
+    }]));
+    expect(reordered.workerPicker?.modelIndex).toBe(2);
+
+    // A model the provider dropped has no row to keep, so the cursor goes somewhere that exists.
+    const dropped = adoptWorkerModels(opened, workerModelCatalog([{
+      provider: "codex",
+      models: ["gpt-5.7-nova"],
+      efforts: ["high"],
+      approvalModes: ["auto"],
+      modelIdRule: "",
+      notes: [],
+      source: "provider-query",
+    }]));
+    expect(dropped.workerPicker?.modelIndex).toBe(0);
+  });
+
   it("opens /model instead of parsing provider syntax when no launch profile exists", () => {
     const snapshot = fleet();
     const initial = { ...createFleetState(snapshot, "/repo/empty"), draft: "Fix the failing test" };
     const picker = transitionFleet(initial, snapshot, "enter", NOW_MS);
-    expect(picker.action).toBeUndefined();
+    // Nothing is launched; the only thing the open asks for is a fresh read of what is launchable.
+    expect(picker.action).toEqual({ type: "worker-capabilities" });
     expect(picker.state.workerPicker).toMatchObject({ cwd: "/repo/empty", returnDraft: "Fix the failing test" });
   });
 
@@ -3707,7 +3851,7 @@ describe("composer caret", () => {
   it("gives no caret to a view without a composer", () => {
     expect(caret({
       ...base,
-      workerPicker: { step: "model", modelIndex: 0, effortIndex: 0, cwd: "/repo/one", returnDraft: "" },
+      workerPicker: { step: "model", modelIndex: 0, effortIndex: 0, cwd: "/repo/one", returnDraft: "", filter: "" },
     })).toBeUndefined();
     expect(caret({
       ...base,

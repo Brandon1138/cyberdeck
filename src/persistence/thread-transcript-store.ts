@@ -17,6 +17,7 @@ import {
   PREVIEW_MESSAGE_WINDOW,
   type TranscriptMessage,
 } from "../runtime/conversation-preview.js";
+import { observedModelParser, type ObservedModel } from "../runtime/observed-model.js";
 import { openPrivateAppendFile } from "./private-files.js";
 
 const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
@@ -200,6 +201,31 @@ export class ThreadTranscriptStore {
     });
     if (messages.length > 0) this.nativePaths.set(input.sessionId, path);
     return messages;
+  }
+
+  /**
+   * The model this session is running now, read from the provider's own transcript.
+   *
+   * The last frame that names a model wins, because that is the one the provider wrote most
+   * recently — an in-session switch is a later frame, never an edit to an earlier one. A provider
+   * that keeps no native transcript answers nothing, and the caller is expected to say so rather
+   * than pass the launch value off as an observation.
+   */
+  async readObservedModel(input: CaptureProviderTurns): Promise<ObservedModel | undefined> {
+    await this.init();
+    const parse = observedModelParser(input.provider);
+    if (parse === undefined) return undefined;
+    const path = input.provider === "claude"
+      ? this.claudeTranscriptPath(input)
+      : this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
+    if (path === undefined) return undefined;
+    let observed: ObservedModel | undefined;
+    await visitLines(path, (line) => {
+      observed = parse(line) ?? observed;
+      return true;
+    });
+    if (observed !== undefined) this.nativePaths.set(input.sessionId, path);
+    return observed;
   }
 
   async read(sessionId: string, afterCursor = 0, limit = 200): Promise<ThreadReadResult> {

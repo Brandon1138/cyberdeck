@@ -663,6 +663,73 @@ describe("SessionRegistry", () => {
     });
   });
 
+  it("projects the model a Claude session switched to mid-session onto its record", async () => {
+    // MIK-80: launched on Sonnet, switched to Opus inside the provider's CLI. The switch becomes a
+    // fact when the first turn the new model produced is written, so that is when it is read.
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-observed-model-"));
+    const claudeProjects = join(root, "claude-projects");
+    const project = join(claudeProjects, "-tmp-repo");
+    const transcripts = new ThreadTranscriptStore(join(root, "state"), {
+      claudeProjectsDirectory: claudeProjects,
+    });
+    const ptys: FakePty[] = [];
+    const registry = new SessionRegistry({
+      adapters,
+      ptyFactory: () => {
+        const pty = new FakePty(2000 + ptys.length);
+        ptys.push(pty);
+        return pty;
+      },
+      journal: { append: async () => {} },
+      transcripts,
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+    const record = await registry.start(
+      request({ provider: "claude", model: "sonnet", effort: "low" }),
+      "Inspect the failing test",
+    );
+    expect(registry.get(record.id).observedModel).toBeUndefined();
+
+    await mkdir(project, { recursive: true });
+    await writeFile(join(project, `${record.id}.jsonl`), [
+      JSON.stringify({
+        type: "assistant",
+        uuid: "20000000-0000-4000-8000-000000000001",
+        timestamp: "2026-07-25T10:00:04.000Z",
+        effort: "high",
+        message: {
+          id: "msg_after_switch",
+          role: "assistant",
+          model: "claude-opus-5",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "Answered on the new model." }],
+        },
+      }),
+      "",
+    ].join("\n"));
+
+    const wait = registry.waitForWorkerResults(
+      [{ sessionId: record.id, completionTarget: 1 }],
+      5_000,
+      4_000,
+    );
+    ptys[0]!.emitOutput("\u001b]0;⠹ worker\u0007Working\nesc to interrupt");
+    ptys[0]!.emitOutput("\n\u001b]0;worker\u0007");
+    await expect(wait).resolves.toMatchObject({ timedOut: false });
+
+    // The launch request is untouched — it still says what the session was started with.
+    expect(registry.get(record.id)).toMatchObject({
+      model: "sonnet",
+      effort: "low",
+      observedModel: {
+        model: "claude-opus-5",
+        effort: "high",
+        observedAt: "2026-07-25T10:00:04.000Z",
+      },
+    });
+  });
+
   it("uses Claude native final responses for two gap-free semantic completion targets", async () => {
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-native-turns-"));
     const claudeProjects = join(root, "claude-projects");

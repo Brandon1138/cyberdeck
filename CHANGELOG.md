@@ -6,6 +6,24 @@ and persisted schemas remain under active alpha development.
 
 ## [Unreleased]
 
+### Changed
+
+- Worker model capabilities are read from the provider CLIs rather than kept in a
+  hand-maintained list. The broker asks each provider what it currently offers,
+  caches the answer briefly, and serves it on `worker.capabilities`; Fleet's
+  `/model` composer, the `cyberdeck_provider_capabilities` MCP tool, and the
+  launch boundary all read that one answer, so an offered model can no longer be
+  a refused one. A provider that cannot be asked — Claude and Codex advertise no
+  listing subcommand — keeps the stored catalog, served and rendered as a
+  stand-in with the reason attached. The model step of `/model` now filters as
+  you type, because a provider listing runs to hundreds of slugs.
+- Fleet's model column shows the model a session is running now, read from the
+  provider's own transcript, instead of the model it was launched with. A model
+  changed inside the provider's CLI is picked up on the next completed turn. A
+  leading `~` marks a value that is not a full observation: the provider keeps no
+  transcript to read, it has not produced a turn yet, or it named a model without
+  an effort.
+
 ## [0.1.0-alpha.2] - 2026-08-14
 
 ### Added

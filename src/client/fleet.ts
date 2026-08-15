@@ -21,7 +21,11 @@ import type {
 import type { CustodyColor } from "../domain/custody-color.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
-import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
+import {
+  capabilityModelEfforts,
+  fallbackWorkerCapabilities,
+  type ResolvedWorkerCapability,
+} from "../orchestration/worker-capabilities.js";
 import { appStateDirectory } from "../paths.js";
 import {
   ProviderPermissionPreferenceStore,
@@ -158,6 +162,8 @@ export interface WorkerPickerState {
   effortIndex: number;
   cwd: string;
   returnDraft: string;
+  /** Typed substring narrowing the model list. A provider listing runs to hundreds of slugs. */
+  filter: string;
 }
 
 export interface CommandPaletteState {
@@ -237,6 +243,8 @@ export interface FleetState {
   commandPalette?: CommandPaletteState | undefined;
   permissionPicker?: PermissionPickerState | undefined;
   launchProfiles: Record<string, LaunchProfile>;
+  /** What the providers currently advertise, as last read from the broker. */
+  workerModels: WorkerModelCatalog;
   permissionPolicies: ProviderPermissionPreferences;
   nvimLayoutEnabled: boolean;
   view: "fleet" | "diagnostics";
@@ -285,6 +293,7 @@ export type FleetAction =
   | { type: "pin"; sessionId: string }
   | { type: "reorder"; sessionId: string; direction: "up" | "down" }
   | { type: "profile"; cwd: string; profile: LaunchProfile }
+  | { type: "worker-capabilities" }
   | { type: "folder-disposition"; cwd: string; disposition: FolderDisposition }
   | {
     type: "permission-policy";
@@ -333,6 +342,21 @@ interface WorkerModelChoice {
   model: string;
   label: string;
   efforts: readonly (ReasoningEffort | "provider-managed")[];
+  /** Whether the provider itself listed this model, or the stored catalog stood in for it. */
+  source: ResolvedWorkerCapability["source"];
+}
+
+/**
+ * What Fleet may offer to launch, and which providers it could not ask.
+ *
+ * The choices come from the same `worker.capabilities` answer the launch boundary validates
+ * against, so the composer cannot offer a model the broker would then refuse. A provider that could
+ * not be queried keeps its stored models and appears in `fallbacks`, because a list nobody could
+ * verify has to say so on screen rather than pass for the present tense.
+ */
+export interface WorkerModelCatalog {
+  choices: readonly WorkerModelChoice[];
+  fallbacks: readonly { provider: ProviderId; reason: string }[];
 }
 
 interface OrchestratorModelChoice {
@@ -481,16 +505,48 @@ const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
     ],
   },
 ];
-const WORKER_MODEL_CHOICES: readonly WorkerModelChoice[] = WORKER_PROVIDER_CAPABILITIES.flatMap((capability) =>
-  (capability.provider === "antigravity" ? ["gemini-3.6-flash"] : capability.models)
-    .map((model): WorkerModelChoice => ({
-    provider: capability.provider,
-    model,
-    label: friendlyModel(capability.provider, model),
-    efforts: capability.efforts.length === 0
-        ? ["provider-managed"]
-        : capability.efforts,
-    })),
+/**
+ * The composer's offer, built from what the providers answered.
+ *
+ * A model is offered exactly as the provider spells it — no id is composed here from a stem and an
+ * effort, because a provider that encodes effort in the slug has already printed every combination
+ * it supports, and inventing a further one produces a launch identifier nobody advertises. The
+ * provider's own display name is preferred over Fleet's table, which is a courtesy for ids it
+ * recognises and cannot possibly cover ids that did not exist when it was written.
+ */
+export function workerModelCatalog(
+  capabilities: readonly ResolvedWorkerCapability[],
+): WorkerModelCatalog {
+  return {
+    choices: capabilities.flatMap((capability) =>
+      capability.models.map((model): WorkerModelChoice => {
+        const efforts = capabilityModelEfforts(capability, model);
+        return {
+          provider: capability.provider,
+          model,
+          label: capability.modelLabels?.[model] ?? friendlyModel(capability.provider, model),
+          efforts: efforts.length === 0 ? ["provider-managed"] : efforts,
+          source: capability.source,
+        };
+      })),
+    fallbacks: capabilities.flatMap((capability) =>
+      capability.source === "fallback-catalog"
+        ? [{
+          provider: capability.provider,
+          reason: capability.fallbackReason ?? "this provider could not be asked what it offers",
+        }]
+        : []),
+  };
+}
+
+/**
+ * What the composer offers before the broker has answered, and if it never does.
+ *
+ * Marked as a fallback for every provider, so a Fleet that started without a broker shows a stale
+ * list labelled stale rather than a stale list labelled nothing.
+ */
+const UNQUERIED_WORKER_MODELS: WorkerModelCatalog = workerModelCatalog(
+  fallbackWorkerCapabilities("Fleet has not read provider capabilities from the broker"),
 );
 const ORCHESTRATOR_MODEL_CHOICES: readonly OrchestratorModelChoice[] = ORCHESTRATOR_CATALOG.flatMap((provider) =>
   provider.models.map((model) => ({
@@ -651,6 +707,7 @@ export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.
     fallbackCwd,
     draft: "",
     launchProfiles: {},
+    workerModels: UNQUERIED_WORKER_MODELS,
     permissionPolicies: { ...DEFAULT_PERMISSION_POLICIES },
     nvimLayoutEnabled: true,
     view: "fleet",
@@ -1644,14 +1701,13 @@ function openWorkerPicker(state: FleetState, snapshot: FleetSnapshot, returnDraf
 
 function openWorkerPickerForCwd(state: FleetState, cwd: string, returnDraft: string): FleetTransition {
   const current = state.launchProfiles[cwd];
+  const choices = state.workerModels.choices;
   const modelIndex = current === undefined
     ? 0
-    : Math.max(0, WORKER_MODEL_CHOICES.findIndex((choice) =>
-      choice.provider === current.provider
-      && (choice.model === current.model
-        || (choice.provider === "antigravity" && current.model.startsWith(`${choice.model}-`)))));
-  const choice = WORKER_MODEL_CHOICES[modelIndex]!;
-  const effortIndex = current?.effort === undefined
+    : Math.max(0, choices.findIndex((choice) =>
+      choice.provider === current.provider && choice.model === current.model));
+  const choice = choices[modelIndex];
+  const effortIndex = current?.effort === undefined || choice === undefined
     ? 0
     : Math.max(0, choice.efforts.indexOf(current.effort));
   return {
@@ -1660,9 +1716,25 @@ function openWorkerPickerForCwd(state: FleetState, cwd: string, returnDraft: str
       draft: "",
       helpOpen: false,
       notice: undefined,
-      workerPicker: { step: "model", modelIndex, effortIndex, cwd, returnDraft },
+      workerPicker: { step: "model", modelIndex, effortIndex, cwd, returnDraft, filter: "" },
     },
+    // Opening the picker is the moment the offer has to be current: Fleet outlives a provider's
+    // release, so a list read once at startup is a list that goes stale while the pane stays open.
+    action: { type: "worker-capabilities" },
   };
+}
+
+/**
+ * The rows the picker is showing: every model the providers advertise, narrowed by what was typed.
+ *
+ * Matched against the slug and the label together, and case-insensitively, because the operator
+ * knows the model by whichever of the two they last read.
+ */
+function pickerModelChoices(state: FleetState): readonly WorkerModelChoice[] {
+  const filter = state.workerPicker?.filter.trim().toLowerCase() ?? "";
+  if (filter === "") return state.workerModels.choices;
+  return state.workerModels.choices.filter((choice) =>
+    `${choice.model} ${choice.label} ${choice.provider}`.toLowerCase().includes(filter));
 }
 
 /**
@@ -1812,6 +1884,7 @@ export function appendShellOutput(
 
 function transitionWorkerPicker(state: FleetState, key: string): FleetTransition {
   const picker = state.workerPicker!;
+  const choices = pickerModelChoices(state);
   if (key === "escape") {
     if (picker.step === "effort") {
       return { state: { ...state, workerPicker: { ...picker, step: "model" }, notice: undefined } };
@@ -1826,35 +1899,50 @@ function transitionWorkerPicker(state: FleetState, key: string): FleetTransition
           ...state,
           workerPicker: {
             ...picker,
-            modelIndex: boundedIndex(picker.modelIndex + delta, WORKER_MODEL_CHOICES.length),
+            modelIndex: boundedIndex(picker.modelIndex + delta, choices.length),
             effortIndex: 0,
           },
         },
       };
     }
-    const choice = WORKER_MODEL_CHOICES[picker.modelIndex]!;
+    const selected = choices[picker.modelIndex];
+    if (selected === undefined) return { state };
     return {
       state: {
         ...state,
         workerPicker: {
           ...picker,
-          effortIndex: boundedIndex(picker.effortIndex + delta, choice.efforts.length),
+          effortIndex: boundedIndex(picker.effortIndex + delta, selected.efforts.length),
         },
       },
     };
   }
+  if (picker.step === "model" && (key === "backspace" || ([...key].length === 1 && key.charCodeAt(0) >= 0x20))) {
+    const filter = key === "backspace"
+      ? [...picker.filter].slice(0, -1).join("")
+      : `${picker.filter}${key}`;
+    // The cursor returns to the top of whatever the narrowed list now is; keeping an index across
+    // a changed list points it at a model the operator never selected.
+    return { state: { ...state, workerPicker: { ...picker, filter, modelIndex: 0, effortIndex: 0 } } };
+  }
   if (key !== "enter") return { state };
+  const choice = choices[picker.modelIndex];
+  if (choice === undefined) {
+    return {
+      state: {
+        ...state,
+        notice: picker.filter === "" ? "No models are advertised" : `No model matches ${picker.filter}`,
+        noticeTone: "error",
+      },
+    };
+  }
   if (picker.step === "model") {
     return { state: { ...state, workerPicker: { ...picker, step: "effort", effortIndex: 0 } } };
   }
-  const choice = WORKER_MODEL_CHOICES[picker.modelIndex]!;
   const effort = choice.efforts[picker.effortIndex]!;
-  const model = choice.provider === "antigravity" && effort !== "provider-managed"
-    ? `${choice.model}-${effort}`
-    : choice.model;
   const profile: LaunchProfile = {
     provider: choice.provider,
-    model,
+    model: choice.model,
     ...(effort === "provider-managed" ? {} : { effort }),
   };
   return {
@@ -1871,6 +1959,26 @@ function transitionWorkerPicker(state: FleetState, key: string): FleetTransition
 }
 
 /**
+ * Adopt a freshly read model catalog without moving the operator's selection.
+ *
+ * The catalog can land while the picker is open — that is the point of refreshing on open — so the
+ * row under the cursor is re-found by provider and slug rather than by position. A model that is no
+ * longer advertised has no row to keep, and the cursor goes to the top of the list that does exist.
+ */
+export function adoptWorkerModels(state: FleetState, workerModels: WorkerModelCatalog): FleetState {
+  const picker = state.workerPicker;
+  if (picker === undefined) return { ...state, workerModels };
+  const selected = pickerModelChoices(state)[picker.modelIndex];
+  const next = { ...state, workerModels };
+  if (selected === undefined) return next;
+  const modelIndex = pickerModelChoices(next).findIndex((choice) =>
+    choice.provider === selected.provider && choice.model === selected.model);
+  return modelIndex === -1
+    ? { ...next, workerPicker: { ...picker, step: "model", modelIndex: 0, effortIndex: 0 } }
+    : { ...next, workerPicker: { ...picker, modelIndex } };
+}
+
+/**
  * Keep the selected row on screen. The model list is longer than a terminal — Cursor alone
  * contributes one entry per model-and-effort pair — so without a window the selection walks off the
  * bottom and the picker stops responding to the eye. Derived from the index rather than stored, so
@@ -1883,33 +1991,53 @@ function pickerScrollOffset(selectedIndex: number, total: number, visibleRows: n
 
 function renderWorkerPicker(state: FleetState, options: ResolvedFleetRenderOptions): string {
   const picker = state.workerPicker!;
-  const choice = WORKER_MODEL_CHOICES[picker.modelIndex]!;
+  const choices = pickerModelChoices(state);
+  const choice = choices[picker.modelIndex];
   const lines = renderHeader([], state, options);
   lines.push("");
   let range = "";
   if (picker.step === "model") {
-    lines.push("Choose a model", "");
-    const total = WORKER_MODEL_CHOICES.length;
+    lines.push(picker.filter === "" ? "Choose a model" : `Choose a model · ${picker.filter}`, "");
+    // Named, not implied: a provider Fleet could not ask is showing a stored list, and the
+    // operator has to be able to tell that from a list read a moment ago.
+    for (const fallback of state.workerModels.fallbacks) {
+      lines.push(paint(
+        fit(`~ ${fallback.provider} models are a stored list — ${fallback.reason}`, options.width),
+        "muted",
+        options.color,
+      ));
+    }
+    if (state.workerModels.fallbacks.length > 0) lines.push("");
+    const total = choices.length;
     const visibleRows = Math.max(1, options.height - 3 - lines.length);
     const offset = pickerScrollOffset(picker.modelIndex, total, visibleRows);
-    lines.push(...WORKER_MODEL_CHOICES.slice(offset, offset + visibleRows).map((model, index) =>
+    lines.push(...choices.slice(offset, offset + visibleRows).map((model, index) =>
       pickerRow(
-        `${model.label}  ${paint(model.provider, "dim", options.color)}`,
+        `${model.source === "fallback-catalog" ? "~ " : ""}${model.label}  ${paint(model.provider, "dim", options.color)}`,
         offset + index === picker.modelIndex,
         options.color,
       )));
+    if (total === 0) lines.push(paint(`No model matches ${picker.filter}`, "muted", options.color));
     if (total > visibleRows) {
       range = ` · ${offset + 1}-${Math.min(total, offset + visibleRows)} of ${total}`;
     }
-  } else {
+  } else if (choice !== undefined) {
     lines.push(`${choice.label} effort`, "");
     lines.push(...choice.efforts.map((effort, index) =>
       pickerRow(friendlyEffort(effort), index === picker.effortIndex, options.color)));
   }
+  const heading = choice === undefined ? "No model selected" : choice.label;
   const footer = [
     paint("─".repeat(options.width), "dim", options.color),
-    paint(fit(`${choice.label} · ${shortPath(picker.cwd, options.home)}`, options.width), "muted", options.color),
-    paint(fit(`↑↓ select · enter apply/next · esc back${range}`, options.width), "dim", options.color),
+    paint(fit(`${heading} · ${shortPath(picker.cwd, options.home)}`, options.width), "muted", options.color),
+    paint(
+      fit(
+        `↑↓ select · enter apply/next · esc back${picker.step === "model" ? " · type to filter" : ""}${range}`,
+        options.width,
+      ),
+      "dim",
+      options.color,
+    ),
   ];
   const body = lines.slice(0, Math.max(0, options.height - footer.length));
   while (body.length < options.height - footer.length) body.push("");
@@ -2523,7 +2651,7 @@ function renderThreadRow(
     thread.record.name ?? thread.record.role ?? `Untitled ${thread.record.id.slice(0, 8)}`,
   );
   const title = `${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
-  const identity = `${friendlyModel(thread.record.provider, thread.record.model)} · ${friendlyEffort(thread.record.effort ?? "provider-managed")}`;
+  const identity = threadIdentity(thread.record);
   const status = threadStatus(thread);
   const age = relativeTime(thread.record.meaningfulUpdatedAt ?? thread.record.updatedAt, options.now);
   const showIdentity = options.width >= 80;
@@ -2685,6 +2813,27 @@ function layoutOrchestratorSessionIds(
   ])];
 }
 
+/**
+ * What the providers advertise, or a stored list that says why it is standing in.
+ *
+ * The broker is the one place that asks the provider CLIs, so a Fleet that cannot reach it has not
+ * learned that a provider offers nothing — it has learned nothing, and the catalog it falls back to
+ * is rendered as the snapshot it is.
+ */
+async function readWorkerModels(client: InteractiveFleetTransport): Promise<WorkerModelCatalog> {
+  try {
+    return workerModelCatalog(
+      await client.request<readonly ResolvedWorkerCapability[]>("worker.capabilities", {}),
+    );
+  } catch (error) {
+    return workerModelCatalog(fallbackWorkerCapabilities(
+      `Fleet could not read provider capabilities from the broker: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    ));
+  }
+}
+
 export async function runFleet(
   client: InteractiveFleetTransport,
   input: FleetInput = process.stdin,
@@ -2724,6 +2873,7 @@ export async function runFleet(
   } catch {
     // Same as launch profiles: an unfolded list is the right fallback when nothing was persisted.
   }
+  state = { ...state, workerModels: await readWorkerModels(client) };
   try {
     state = {
       ...state,
@@ -3067,6 +3217,8 @@ export async function runFleet(
         });
       } else if (action?.type === "profile") {
         await client.request("fleet.preference.set", { cwd: action.cwd, profile: action.profile });
+      } else if (action?.type === "worker-capabilities") {
+        state = adoptWorkerModels(state, await readWorkerModels(client));
       } else if (action?.type === "folder-disposition") {
         await client.request("fleet.folderDisposition.set", {
           key: action.cwd,
@@ -4150,6 +4302,24 @@ function cursorModelLabel(model: string): string | undefined {
   return family === undefined || effort === undefined ? undefined : `${family} ${effort}`;
 }
 
+/**
+ * The model column: what the session is running, not what it was started with.
+ *
+ * The operator can switch model inside the provider's own CLI, and the launch request cannot know
+ * it happened — so this prefers the model the provider itself last recorded. A leading `~` marks a
+ * pair that is not fully observed: the provider keeps no transcript to read a running model out of,
+ * it has not produced a turn yet, or it named a model without naming an effort. The launch value is
+ * still shown, because the alternative is a blank column, but it is shown as the guess it is.
+ */
+export function threadIdentity(record: SessionRecord): string {
+  const observed = record.observedModel;
+  const effort = observed?.effort ?? record.effort;
+  const unverified = observed === undefined || observed.effort === undefined;
+  return `${unverified ? "~" : ""}${
+    friendlyModel(record.provider, observed?.model ?? record.model)
+  } · ${friendlyEffort(effort ?? "provider-managed")}`;
+}
+
 function friendlyModel(provider: string, model: string | undefined): string {
   if (model === undefined) return `${titleCase(provider)} Native`;
   if (provider === "cursor") {
@@ -4170,7 +4340,32 @@ function friendlyModel(provider: string, model: string | undefined): string {
     "gemini-3.6-flash-medium": "Gemini 3.6 Flash",
     "gemini-3.6-flash-high": "Gemini 3.6 Flash",
   };
-  return known[model] ?? `${titleCase(provider)} ${model}`;
+  return known[model] ?? readableSlug(provider, model);
+}
+
+/**
+ * A model id nothing recognises, made readable without being renamed.
+ *
+ * An observed id is whatever the provider wrote — `claude-opus-4-8` — and the table above can only
+ * ever cover ids that existed when it was written. Words are capitalised as printed and adjacent
+ * digit groups are rejoined into the version they were, so `claude-opus-4-8` reads as
+ * `Claude Opus 4.8` and is still recognisably the same string. A prefix the provider already
+ * supplies is not repeated.
+ */
+function readableSlug(provider: string, model: string): string {
+  const words: string[] = [];
+  for (const token of model.split("-")) {
+    const previous = words.at(-1);
+    if (/^\d+$/u.test(token) && previous !== undefined && /\d$/u.test(previous)) {
+      words[words.length - 1] = `${previous}.${token}`;
+      continue;
+    }
+    words.push(/^[a-z]/u.test(token) ? titleCase(token) : token);
+  }
+  const readable = words.join(" ");
+  return readable.toLowerCase().startsWith(provider.toLowerCase())
+    ? readable
+    : `${titleCase(provider)} ${readable}`;
 }
 
 function friendlyEffort(effort: ReasoningEffort | "provider-managed"): string {

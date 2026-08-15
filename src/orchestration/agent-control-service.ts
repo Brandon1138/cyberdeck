@@ -32,7 +32,8 @@ import type { ThreadTranscriptStore } from "../persistence/thread-transcript-sto
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import type { ProviderPermissionPreferencePort } from "../persistence/provider-permission-preference-store.js";
 import { resolveProviderPermission } from "../client/permission-policy.js";
-import { validateWorkerSelection } from "./worker-capabilities.js";
+import { WORKER_PROVIDER_CAPABILITIES, validateWorkerSelection } from "./worker-capabilities.js";
+import type { WorkerCapabilityCatalog } from "./worker-capability-catalog.js";
 import {
   resolveProviderPermissionPlan,
   type PermissionResolutionFailureCode,
@@ -330,6 +331,11 @@ export interface AgentControlOptions {
   scoutEgress?: { allows(root: string): Promise<boolean> };
   /** Reads repositories to validate a declared worker workspace. Absent skips the git-backed checks. */
   workspaceProbe?: WorkspaceProbe;
+  /**
+   * What the providers currently advertise. Absent judges launches against the static fallback,
+   * which will refuse a model a provider added after that catalog was written.
+   */
+  workerCapabilities?: WorkerCapabilityCatalog;
 }
 
 export class AgentControlService {
@@ -345,6 +351,7 @@ export class AgentControlService {
   private readonly interventionPollMs: number;
   private readonly scoutEgress: AgentControlOptions["scoutEgress"];
   private readonly workspaceProbe: WorkspaceProbe | undefined;
+  private readonly workerCapabilities: WorkerCapabilityCatalog | undefined;
 
   constructor(
     private readonly registry: SessionRegistry,
@@ -362,6 +369,7 @@ export class AgentControlService {
     this.interventionPollMs = Math.max(10, options.interventionPollMs ?? 100);
     this.scoutEgress = options.scoutEgress;
     this.workspaceProbe = options.workspaceProbe;
+    this.workerCapabilities = options.workerCapabilities;
   }
 
   /**
@@ -714,12 +722,15 @@ export class AgentControlService {
     }
     const approvalMode = request.approvalMode
       ?? await this.configuredApprovalMode(request.provider, request.sandbox);
+    // Judged against what the providers advertise right now, which is the same set Fleet's composer
+    // and `cyberdeck_provider_capabilities` are served, so an offered model can never be a refused one.
+    const advertised = await this.workerCapabilities?.resolve();
     const selection = validateWorkerSelection({
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
       ...(request.effort === undefined ? {} : { effort: request.effort }),
       ...(approvalMode === undefined ? {} : { approvalMode }),
-    });
+    }, advertised ?? WORKER_PROVIDER_CAPABILITIES);
     if (!selection.ok) throw new AgentControlError(selection.code, selection.message);
     if (request.workspace !== undefined) {
       const workspace = await validateWorkerWorkspace({

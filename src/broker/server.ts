@@ -32,6 +32,8 @@ import type { ThreadTranscriptStore } from "../persistence/thread-transcript-sto
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import type { ScoutEgressGrantStore } from "../persistence/scout-egress-grant-store.js";
 import type { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
+import type { WorkerCapabilityCatalog } from "../orchestration/worker-capability-catalog.js";
+import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import {
   CavemanWorkersRequestSchema,
@@ -102,6 +104,9 @@ const ThreadChangesParamsSchema = z.object({
   afterCursor: z.number().int().nonnegative().default(0),
   limit: z.number().int().positive().max(2_000).default(500),
 });
+const WorkerCapabilitiesParamsSchema = z.object({
+  provider: z.enum(CANONICAL_PROVIDER_IDS).optional(),
+});
 
 interface ConnectionContext {
   id: string;
@@ -128,6 +133,12 @@ export interface BrokerServerOptions {
   /** Which repositories the operator calls projects. The Fleet list groups by these. */
   fleetProjects?: FleetProjectService;
   workerPreferences?: WorkerPreferenceStore;
+  /**
+   * What each provider currently says it can launch. One catalog serves Fleet's composer, the
+   * `cyberdeck_provider_capabilities` tool, and the launch boundary, so those three cannot disagree
+   * about which models exist.
+   */
+  workerCapabilities?: WorkerCapabilityCatalog;
   scoutEgress?: Pick<ScoutEgressGrantStore, "set" | "status">;
   /** Custody hues, and the bindings that say which orchestrator session wears each one. */
   custodyColors?: CustodyColorService;
@@ -460,6 +471,12 @@ export class BrokerServer {
         return this.requireFleetPreferences().listFolderDispositions();
       case "fleet.nvimLayout":
         return this.requireFleetPreferences().nvimLayoutEnabled();
+      // The single served answer to "what can be launched". Fleet's composer and the MCP
+      // capabilities tool both read it here so neither can hold a list the other does not.
+      case "worker.capabilities": {
+        const { provider } = WorkerCapabilitiesParamsSchema.parse(frame.params);
+        return this.requireWorkerCapabilities().resolve(provider);
+      }
       case "fleet.workerCoordination":
         return fleetWorkerCoordinationView(this.options.workerCoordination?.listSubjects() ?? [], {
           custodyColors: await this.options.custodyColors?.table() ?? [],
@@ -713,6 +730,15 @@ export class BrokerServer {
       });
     }
     return this.options.workerEvents;
+  }
+
+  private requireWorkerCapabilities(): WorkerCapabilityCatalog {
+    if (this.options.workerCapabilities === undefined) {
+      throw Object.assign(new Error("Worker capability catalog is not available"), {
+        code: "METHOD_NOT_FOUND",
+      });
+    }
+    return this.options.workerCapabilities;
   }
 
   private requireFleetPreferences(): FleetPreferenceStore {
