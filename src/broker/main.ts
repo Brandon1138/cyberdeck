@@ -23,6 +23,7 @@ import { BrokerServer } from "./server.js";
 import { FleetProjectService } from "./fleet-project-service.js";
 import { SessionRegistry } from "./session-registry.js";
 import { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
+import { ClaudeConversationBindingStore } from "../persistence/claude-conversation-bindings.js";
 import { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import { SessionStore } from "../persistence/session-store.js";
 import { FleetPreferenceStore } from "../persistence/fleet-preference-store.js";
@@ -111,7 +112,8 @@ export async function runBroker(
 ): Promise<BrokerServer> {
   await ensurePrivateDirectory(stateDirectory);
   const journal = new Journal(stateDirectory);
-  const transcripts = new ThreadTranscriptStore(stateDirectory);
+  const claudeConversations = new ClaudeConversationBindingStore(stateDirectory);
+  const transcripts = new ThreadTranscriptStore(stateDirectory, { claudeConversations });
   await transcripts.init();
   const cliPath = resolve(dirname(fileURLToPath(import.meta.url)), "../cli.js");
   const mcp = { nodePath: process.execPath, cliPath };
@@ -130,12 +132,13 @@ export async function runBroker(
     Date.now(),
     async (record) => {
       if (record.profile === "scout") await scoutReports.remove(record.id);
+      await claudeConversations.remove(record.id);
     },
   );
   const registry = new SessionRegistry({
     adapters: {
       codex: new CodexProviderAdapter({ mcp }),
-      claude: new ClaudeProviderAdapter({ mcp }),
+      claude: new ClaudeProviderAdapter({ mcp, stateDirectory }),
       cursor: new CursorProviderAdapter({ mcp }),
       antigravity: new AntigravityProviderAdapter(),
     },

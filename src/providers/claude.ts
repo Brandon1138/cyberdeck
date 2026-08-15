@@ -21,12 +21,15 @@ import {
   CLAUDE_ORCHESTRATOR_TOOL_DENIALS,
   CLAUDE_NO_SUBAGENT_ENV,
 } from "./claude/no-subagents.js";
+import { claudeTranscriptHookSettings } from "./claude/transcript-hook.js";
 
 export interface ClaudeProviderAdapterOptions extends SessionLaunchFilesOptions {
   mcp?: CyberdeckMcpLaunch;
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
   /** Overrides the operator state `resolveAllowlistedMcpServers` reads; for tests. */
   mcpAllowlist?: McpAllowlistPaths;
+  /** Where the transcript-rebind hook writes its binding. Omitted, no hook is installed. */
+  stateDirectory?: string;
 }
 
 /**
@@ -81,6 +84,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     this.addOrchestratorIsolation(args, session);
     this.addCyberdeckMcp(args, session);
     this.useMcpConfigFile(args, session);
+    this.addTranscriptHook(args, session);
     if (initialPrompt !== undefined) {
       args.push("--", initialPrompt);
     }
@@ -121,6 +125,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     this.addOrchestratorIsolation(args, session);
     this.addCyberdeckMcp(args, session);
     this.useMcpConfigFile(args, session);
+    this.addTranscriptHook(args, session);
     return {
       executable: "claude",
       args,
@@ -177,6 +182,19 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
         session.id,
         "provider-instructions.txt",
         session.providerInstructions,
+        this.options,
+      ));
+    }
+    if (this.transcriptHookInstallable()) {
+      writes.push(writeSessionLaunchFile(
+        session.id,
+        "transcript-hook-settings.json",
+        claudeTranscriptHookSettings({
+          nodePath: this.options.mcp!.nodePath,
+          cliPath: this.options.mcp!.cliPath,
+          sessionId: session.id,
+          stateDirectory: this.options.stateDirectory!,
+        }),
         this.options,
       ));
     }
@@ -279,6 +297,30 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     if (session.kind === undefined || this.options.mcp === undefined) return;
     const configIndex = args.lastIndexOf("--mcp-config") + 1;
     args[configIndex] = this.mcpConfigPath(session);
+  }
+
+  /**
+   * Ask Claude to report which file its conversation is in, on every SessionStart.
+   *
+   * `/clear` starts a new native conversation under a new id while this process, its session record
+   * and its actor binding all stay alive — so the transcript Cyberdeck was reading simply stops
+   * growing and nothing fails. The hook's `clear` report is the only signal that names the new file
+   * with the authority of the process that opened it (MIK-46).
+   *
+   * `--settings` *adds* a settings source, so the operator's own hooks still run. It is emitted for
+   * every session kind, including a top-level one with no MCP server: transcript capture is not an
+   * orchestration feature.
+   */
+  private addTranscriptHook(args: string[], session: SessionRecord): void {
+    if (!this.transcriptHookInstallable()) return;
+    args.push(
+      "--settings",
+      sessionLaunchFilePath(session.id, "transcript-hook-settings.json", this.options),
+    );
+  }
+
+  private transcriptHookInstallable(): boolean {
+    return this.options.mcp !== undefined && this.options.stateDirectory !== undefined;
   }
 
   private instructionsPath(session: SessionRecord): string {

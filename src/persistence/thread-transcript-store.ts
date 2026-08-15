@@ -17,6 +17,7 @@ import {
   PREVIEW_MESSAGE_WINDOW,
   type TranscriptMessage,
 } from "../runtime/conversation-preview.js";
+import { ClaudeConversationBindingStore } from "./claude-conversation-bindings.js";
 import { openPrivateAppendFile } from "./private-files.js";
 
 const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
@@ -57,6 +58,7 @@ export interface ThreadTranscriptStoreOptions {
   retainedFiles?: number;
   claudeProjectsDirectory?: string;
   codexSessionsDirectory?: string;
+  claudeConversations?: ClaudeConversationBindingStore;
 }
 
 interface NativeTurn {
@@ -64,6 +66,23 @@ interface NativeTurn {
   occurredAt: string;
   text: string;
 }
+
+/**
+ * Whether a Claude session's semantic capture is following a file, and why it is not.
+ *
+ * `bound` — a transcript is being read for this session.
+ * `cleared-unbound` — the file it was following ends in `/clear`, and no binding names the file the
+ *   conversation moved to. Capture is dark on purpose: guessing at the newest file in the project
+ *   directory would attribute one worker's conversation to another when they share a worktree.
+ * `foreign-cwd` — a binding exists but names a different working directory than the session's.
+ * `attribution-conflict` — the file this session's binding names is already being read for a
+ *   different session.
+ */
+export type ClaudeTranscriptStatus =
+  | "bound"
+  | "cleared-unbound"
+  | "foreign-cwd"
+  | "attribution-conflict";
 
 /**
  * Bounded semantic transcript.
@@ -82,6 +101,9 @@ export class ThreadTranscriptStore {
   private readonly semanticTurnIds = new Set<string>();
   private readonly nativePaths = new Map<string, string>();
   private readonly claimedCodexPaths = new Map<string, string>();
+  private readonly claimedClaudePaths = new Map<string, string>();
+  private readonly claudeStatuses = new Map<string, ClaudeTranscriptStatus>();
+  private readonly claudeConversations: ClaudeConversationBindingStore;
 
   constructor(
     stateDirectory: string,
@@ -90,6 +112,15 @@ export class ThreadTranscriptStore {
     const threadsDirectory = join(stateDirectory, "threads");
     this.path = join(threadsDirectory, "semantic-transcript.jsonl");
     this.legacyPath = join(threadsDirectory, "transcript.jsonl");
+    this.claudeConversations = options.claudeConversations
+      ?? new ClaudeConversationBindingStore(stateDirectory);
+  }
+
+  /**
+   * Why a Claude session is or is not capturing, for callers that must not report silence as health.
+   */
+  claudeTranscriptStatus(sessionId: string): ClaudeTranscriptStatus | undefined {
+    return this.claudeStatuses.get(sessionId);
   }
 
   async init(): Promise<void> {
@@ -145,6 +176,12 @@ export class ThreadTranscriptStore {
             text: input.fallbackText ?? "No useful provider output yet",
           }]
         : [];
+    // A Claude session whose conversation moved and could not be re-identified still produces
+    // fallback turns, but they are labelled with the reason so a reader can tell a quiet worker
+    // from one whose semantic capture went dark.
+    const claudeStatus = input.provider === "claude"
+      ? this.claudeStatuses.get(input.sessionId)
+      : undefined;
     const captured: ThreadEvent[] = [];
     for (const turn of turns) {
       const semanticTurnId = `${input.provider}:${turn.id}`;
@@ -162,6 +199,9 @@ export class ThreadTranscriptStore {
           originalLength: turn.text.length,
           turnNumber: input.turnNumber + captured.length,
           providerOccurredAt: turn.occurredAt,
+          ...(claudeStatus === undefined || claudeStatus === "bound"
+            ? {}
+            : { claudeTranscriptStatus: claudeStatus }),
         },
       }));
     }
@@ -185,17 +225,26 @@ export class ThreadTranscriptStore {
         ? parseCodexRolloutLine
         : undefined;
     if (parse === undefined) return [];
-    const path = input.provider === "claude"
-      ? this.claudeTranscriptPath(input)
-      : this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
-    if (path === undefined) return [];
-    const messages: TranscriptMessage[] = [];
-    await visitLines(path, (line) => {
+    const collect = (line: string): void => {
       const message = parse(line);
       if (message !== undefined) {
         messages.push(message);
         if (messages.length > PREVIEW_MESSAGE_WINDOW) messages.shift();
       }
+    };
+    const messages: TranscriptMessage[] = [];
+    if (input.provider === "claude") {
+      const claudePath = await this.resolveClaudeTranscript(input);
+      if (claudePath === undefined) return [];
+      // A preview that keeps rendering the pre-`/clear` conversation is the stale record MIK-46
+      // reported, so an abandoned file yields nothing and the caller falls back to the pane.
+      const usable = await this.visitClaudeTranscript(input.sessionId, claudePath, collect);
+      return usable ? messages : [];
+    }
+    const path = this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
+    if (path === undefined) return [];
+    await visitLines(path, (line) => {
+      collect(line);
       return true;
     });
     if (messages.length > 0) this.nativePaths.set(input.sessionId, path);
@@ -324,23 +373,96 @@ export class ThreadTranscriptStore {
     return join(this.path.replace(/\.jsonl$/u, `.${index}.jsonl`));
   }
 
-  private claudeTranscriptPath(input: CaptureProviderTurns): string {
-    return this.nativePaths.get(input.sessionId) ?? join(
+  /**
+   * The file Claude was launched against: `--session-id` is Cyberdeck's own session id, so before
+   * any `/clear` the conversation is named by the session record alone and needs no signal at all.
+   */
+  private claudeLaunchTranscriptPath(input: CaptureProviderTurns): string {
+    return join(
       this.options.claudeProjectsDirectory ?? join(homedir(), ".claude", "projects"),
       claudeProjectSlug(input.cwd),
       `${input.sessionId}.jsonl`,
     );
   }
 
-  private async readClaudeTurns(input: CaptureProviderTurns): Promise<NativeTurn[]> {
-    const path = this.claudeTranscriptPath(input);
-    const byId = new Map<string, NativeTurn>();
+  /**
+   * Which file this session's Claude conversation is in right now.
+   *
+   * A `/clear` starts a new native conversation under a new id while the session record, PTY and
+   * actor binding all stay alive, so the launch-derived path stops receiving turns without anything
+   * failing. The authoritative answer comes from Claude itself: the SessionStart hook Cyberdeck
+   * installs per session reports `transcript_path` for every `startup`, `resume`, `clear` and
+   * `compact`, keyed by the Cyberdeck session id fixed in the hook's own command line.
+   *
+   * Everything else fails closed. There is deliberately no cwd-only and no newest-file search:
+   * several workers can share one worktree, and the wrong worker's conversation recorded as this
+   * one's is worse than no capture at all.
+   */
+  private async resolveClaudeTranscript(
+    input: CaptureProviderTurns,
+  ): Promise<string | undefined> {
+    const binding = await this.claudeConversations.read(input.sessionId);
+    if (binding !== undefined && binding.cwd !== input.cwd) {
+      return this.refuseClaudeTranscript(input.sessionId, "foreign-cwd");
+    }
+    const path = binding?.transcriptPath ?? this.claudeLaunchTranscriptPath(input);
+    const claimedBy = this.claimedClaudePaths.get(path);
+    if (claimedBy !== undefined && claimedBy !== input.sessionId) {
+      return this.refuseClaudeTranscript(input.sessionId, "attribution-conflict");
+    }
+    return path;
+  }
+
+  private refuseClaudeTranscript(
+    sessionId: string,
+    status: ClaudeTranscriptStatus,
+  ): undefined {
+    this.claudeStatuses.set(sessionId, status);
+    for (const [path, owner] of this.claimedClaudePaths) {
+      if (owner === sessionId) this.claimedClaudePaths.delete(path);
+    }
+    return undefined;
+  }
+
+  /**
+   * One pass over a Claude transcript that also answers whether the conversation left it.
+   *
+   * `/clear` is written into the file being abandoned as a final `<command-name>/clear</command-name>`
+   * user frame, so the file states its own death. Reading it is what turns a silent stop into a
+   * detected one, and it costs nothing: every caller already streams the whole file.
+   */
+  private async visitClaudeTranscript(
+    sessionId: string,
+    path: string,
+    visitor: (line: string) => void,
+  ): Promise<boolean> {
+    let cleared = false;
     await visitLines(path, (line) => {
-      const turn = parseClaudeTurn(line, this.options.now);
-      if (turn !== undefined) byId.set(turn.id, turn);
+      if (isClaudeClearFrame(line)) {
+        cleared = true;
+        return true;
+      }
+      visitor(line);
       return true;
     });
-    if (byId.size > 0) this.nativePaths.set(input.sessionId, path);
+    if (cleared) {
+      this.refuseClaudeTranscript(sessionId, "cleared-unbound");
+      return false;
+    }
+    this.claimedClaudePaths.set(path, sessionId);
+    this.claudeStatuses.set(sessionId, "bound");
+    return true;
+  }
+
+  private async readClaudeTurns(input: CaptureProviderTurns): Promise<NativeTurn[]> {
+    const path = await this.resolveClaudeTranscript(input);
+    if (path === undefined) return [];
+    const byId = new Map<string, NativeTurn>();
+    const usable = await this.visitClaudeTranscript(input.sessionId, path, (line) => {
+      const turn = parseClaudeTurn(line, this.options.now);
+      if (turn !== undefined) byId.set(turn.id, turn);
+    });
+    if (!usable) return [];
     return [...byId.values()].sort(compareNativeTurns);
   }
 
@@ -503,6 +625,45 @@ function parseClaudeTurn(line: string, now: (() => string) | undefined): NativeT
     };
   } catch {
     return undefined;
+  }
+}
+
+const CLAUDE_CLEAR_COMMAND = "<command-name>/clear</command-name>";
+
+/**
+ * The `/clear` Claude writes as the last user frame of the conversation it is abandoning.
+ *
+ * Deliberately strict about *where* the marker sits. The same literal appears inside ordinary
+ * conversation whenever a session greps its own transcripts or quotes this file, and those arrive
+ * as tool-result user frames carrying `toolUseResult`. Only a frame whose entire content opens with
+ * the command block is Claude's own record of the command.
+ */
+export function isClaudeClearFrame(line: string): boolean {
+  if (!line.includes(CLAUDE_CLEAR_COMMAND)) return false;
+  try {
+    const frame = JSON.parse(line) as {
+      type?: unknown;
+      toolUseResult?: unknown;
+      message?: { role?: unknown; content?: unknown };
+    };
+    if (frame.type !== "user" || frame.toolUseResult !== undefined) return false;
+    const content = frame.message?.content;
+    const text = typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+          .map((block) =>
+            typeof block === "object"
+            && block !== null
+            && typeof (block as { text?: unknown }).text === "string"
+              ? (block as { text: string }).text
+              : ""
+          )
+          .join("")
+        : "";
+    return text.trimStart().startsWith(CLAUDE_CLEAR_COMMAND);
+  } catch {
+    return false;
   }
 }
 
