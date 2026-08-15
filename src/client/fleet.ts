@@ -137,7 +137,13 @@ export interface StopAcknowledgement {
 }
 
 export type OrchestratorPickerState =
-  | { step: "target"; choiceIndex: number }
+  | {
+    step: "target";
+    choiceIndex: number;
+    /** Mirrors the fleet list's ctrl+x ladder, scoped to the picker's own selection. */
+    stopAcknowledgement?: StopAcknowledgement | undefined;
+    deleteConfirmation?: DeleteConfirmation | undefined;
+  }
   | { step: "effort"; modelIndex: number; effortIndex: number };
 
 export interface LaunchProfile {
@@ -816,7 +822,7 @@ export function transitionFleet(
   }
 
   if (state.orchestratorPicker !== undefined) {
-    return transitionOrchestratorPicker(state, snapshot, key);
+    return transitionOrchestratorPicker(state, snapshot, key, now);
   }
 
   // Ctrl+S, not Ctrl+G: "s for shell" is the association the operator's hand actually makes, and it
@@ -2203,6 +2209,7 @@ function transitionOrchestratorPicker(
   state: FleetState,
   snapshot: FleetSnapshot,
   key: string,
+  now: number,
 ): FleetTransition {
   const picker = state.orchestratorPicker!;
   if (key === "escape") {
@@ -2244,6 +2251,54 @@ function transitionOrchestratorPicker(
           ...picker,
           effortIndex: boundedIndex(picker.effortIndex + delta, choice.provider.efforts.length),
         },
+      },
+    };
+  }
+
+  // Same durable-id target, same graceful-stop/confirm/delete ladder as the fleet list's own
+  // ctrl+x — this is a second place to reach it, not a second way to do it. A "New orchestrator"
+  // row has no session to stop, so the key is inert there.
+  if (key === "ctrl+x" && picker.step === "target") {
+    const selectedExisting = existingOrchestrators(snapshot)[picker.choiceIndex];
+    if (selectedExisting === undefined) return { state };
+    const terminal = isTerminalSession(selectedExisting);
+    const stopAcknowledged = picker.stopAcknowledgement?.sessionId === selectedExisting.id;
+    if (!terminal || !stopAcknowledged) {
+      return {
+        state: {
+          ...state,
+          orchestratorPicker: {
+            ...picker,
+            stopAcknowledgement: { sessionId: selectedExisting.id },
+            deleteConfirmation: undefined,
+          },
+          notice: `Stopping ${threadSubject(selectedExisting)}`,
+          noticeTone: "warning",
+        },
+        action: { type: "stop", sessionId: selectedExisting.id },
+      };
+    }
+    const deleteConfirmed = picker.deleteConfirmation?.sessionId === selectedExisting.id
+      && picker.deleteConfirmation.expiresAt > now;
+    if (deleteConfirmed) {
+      return {
+        state: {
+          ...state,
+          orchestratorPicker: { ...picker, deleteConfirmation: undefined },
+          notice: undefined,
+        },
+        action: { type: "delete", sessionId: selectedExisting.id },
+      };
+    }
+    return {
+      state: {
+        ...state,
+        orchestratorPicker: {
+          ...picker,
+          deleteConfirmation: { sessionId: selectedExisting.id, expiresAt: now + DELETE_CONFIRMATION_MS },
+        },
+        notice: `Delete ${threadSubject(selectedExisting)}? press ctrl+x again`,
+        noticeTone: "confirmation",
       },
     };
   }
@@ -2330,6 +2385,9 @@ function renderOrchestratorPicker(
     "",
   ];
 
+  // Set only when the focused row is an existing orchestrator, never a "New orchestrator"
+  // profile — that row has nothing for ctrl+x to target, so the hint stays silent on it.
+  let destructiveHint: string | undefined;
   if (picker.step === "target") {
     const existing = existingOrchestrators(snapshot);
     lines.push("Existing orchestrators", "");
@@ -2346,12 +2404,22 @@ function renderOrchestratorPicker(
         existing.length + index === picker.choiceIndex,
         options.color,
       )));
+    const selectedExisting = existing[picker.choiceIndex];
+    if (selectedExisting !== undefined) {
+      destructiveHint = isTerminalSession(selectedExisting)
+        && picker.stopAcknowledgement?.sessionId === selectedExisting.id
+        ? "ctrl+x delete"
+        : "ctrl+x stop";
+    }
   } else {
     lines.push(`${selection!.provider.label} effort`, "");
     lines.push(...selection!.provider.efforts.map((effort, index) =>
       pickerRow(effort === "native-default" ? "Provider managed" : effort, index === picker.effortIndex, options.color)));
   }
 
+  const targetHint = destructiveHint === undefined
+    ? "↑↓ select · enter focus/next · esc back"
+    : `↑↓ select · enter focus/next · ${destructiveHint} · esc back`;
   const footer = [
     ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
     paint("─".repeat(options.width), "dim", options.color),
@@ -2361,7 +2429,7 @@ function renderOrchestratorPicker(
     paint(
       fit(picker.step === "effort"
         ? "↑↓ select · enter create in cockpit · esc back"
-        : "↑↓ select · enter focus/next · esc back", options.width),
+        : targetHint, options.width),
       "dim",
       options.color,
     ),
@@ -2963,14 +3031,32 @@ export async function runFleet(
           0,
           orderedThreads(snapshot).findIndex(({ record }) => record.id === action.sessionId),
         );
+        // The picker walks a shorter list by numeric position, not by durable id, so its own
+        // position has to be carried across the delete separately from the fleet list's.
+        const picker = state.orchestratorPicker;
+        const pickerIndex = picker?.step === "target"
+          ? existingOrchestrators(snapshot).findIndex((record) => record.id === action.sessionId)
+          : -1;
         await client.request("session.delete", { sessionId: action.sessionId });
         snapshot = await collectFleetSnapshot(client);
         const remaining = orderedThreads(snapshot);
+        const remainingExisting = existingOrchestrators(snapshot);
         state = {
           ...state,
           selectedSessionId: remaining[selectedIndex]?.record.id ?? remaining[selectedIndex - 1]?.record.id,
           notice: "Deleted thread",
           noticeTone: "neutral",
+          ...(picker?.step === "target" && pickerIndex >= 0
+            ? {
+                orchestratorPicker: {
+                  ...picker,
+                  choiceIndex: remainingExisting[pickerIndex] !== undefined
+                    ? pickerIndex
+                    : Math.max(0, pickerIndex - 1),
+                  deleteConfirmation: undefined,
+                },
+              }
+            : {}),
         };
       } else if (action?.type === "attach") {
         await openNativeThread(action.sessionId);

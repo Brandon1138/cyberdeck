@@ -1559,6 +1559,90 @@ describe("fleet controls", () => {
     expect(refused.state.notice).toContain("another controller");
   });
 
+  it("stops a selected existing orchestrator from the picker via Ctrl+X, then walks the same delete ladder", () => {
+    const peer = session({ kind: "orchestrator", role: "orchestrator", name: "Peer orc" });
+    const snapshot = fleet({ record: peer });
+    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+
+    const stop = transitionFleet(opened.state, snapshot, "ctrl+x", NOW_MS);
+    expect(stop.action).toEqual({ type: "stop", sessionId: peer.id });
+    expect(stop.state.notice).toBe("Stopping orchestrator");
+    expect(stop.state.orchestratorPicker).toMatchObject({
+      step: "target",
+      stopAcknowledgement: { sessionId: peer.id },
+    });
+
+    // The picker's own filter only keeps a cancelled orchestrator reconnectable when its
+    // attention settled on "interrupted" or "done" — unlike the fleet list, "stopped" drops it.
+    const terminalSnapshot = fleet({
+      record: { ...peer, executionState: "cancelled", attentionState: "done", exitCode: 0 },
+    });
+    const armed = transitionFleet(stop.state, terminalSnapshot, "ctrl+x", NOW_MS + 1);
+    expect(armed.action).toBeUndefined();
+    expect(armed.state.orchestratorPicker).toMatchObject({
+      deleteConfirmation: { sessionId: peer.id },
+    });
+    const rendered = renderFleet(terminalSnapshot, armed.state, { color: false, width: 140, height: 30 });
+    expect(rendered).toContain("Delete orchestrator? press ctrl+x again");
+
+    const confirmed = transitionFleet(armed.state, terminalSnapshot, "ctrl+x", NOW_MS + 2);
+    expect(confirmed.action).toEqual({ type: "delete", sessionId: peer.id });
+  });
+
+  it("cancels a picker deletion left pending too long instead of deleting on the next press", () => {
+    const stopped = session({
+      kind: "orchestrator",
+      role: "orchestrator",
+      executionState: "cancelled",
+      attentionState: "done",
+      exitCode: 0,
+    });
+    const snapshot = fleet({ record: stopped });
+    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+
+    const stop = transitionFleet(opened.state, snapshot, "ctrl+x", NOW_MS);
+    expect(stop.action).toEqual({ type: "stop", sessionId: stopped.id });
+
+    const armed = transitionFleet(stop.state, snapshot, "ctrl+x", NOW_MS + 1);
+    expect(armed.action).toBeUndefined();
+    expect(armed.state.orchestratorPicker).toMatchObject({
+      deleteConfirmation: { sessionId: stopped.id },
+    });
+
+    // Same 5s window as the fleet list's own confirmation — this rearms rather than deletes.
+    const expired = transitionFleet(armed.state, snapshot, "ctrl+x", NOW_MS + 6_000);
+    expect(expired.action).toBeUndefined();
+    expect(expired.state.orchestratorPicker).toMatchObject({
+      deleteConfirmation: { sessionId: stopped.id, expiresAt: NOW_MS + 11_000 },
+    });
+  });
+
+  it("does nothing on Ctrl+X when a New orchestrator profile is focused", () => {
+    const peer = session({ kind: "orchestrator", role: "orchestrator", name: "Peer orc" });
+    const snapshot = fleet({ record: peer });
+    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+    const onNewProfile = transitionFleet(opened.state, snapshot, "down", NOW_MS);
+    expect(onNewProfile.state.orchestratorPicker).toMatchObject({ choiceIndex: 1 });
+
+    const result = transitionFleet(onNewProfile.state, snapshot, "ctrl+x", NOW_MS);
+    expect(result.action).toBeUndefined();
+    expect(result.state).toEqual(onNewProfile.state);
+  });
+
+  it("shows the Ctrl+X hint only while an existing orchestrator row is focused", () => {
+    const peer = session({ kind: "orchestrator", role: "orchestrator", name: "Peer orc" });
+    const snapshot = fleet({ record: peer });
+    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+
+    const onExisting = renderFleet(snapshot, opened.state, { color: false, width: 140, height: 30 });
+    expect(onExisting).toContain("ctrl+x stop");
+
+    const onNewProfile = transitionFleet(opened.state, snapshot, "down", NOW_MS).state;
+    const rendered = renderFleet(snapshot, onNewProfile, { color: false, width: 140, height: 30 });
+    expect(rendered).not.toContain("ctrl+x stop");
+    expect(rendered).not.toContain("ctrl+x delete");
+  });
+
   it("renders a fleet orchestrator independently of its process cwd", () => {
     const current = session({
       kind: "orchestrator",
@@ -3168,6 +3252,141 @@ describe("runFleet", () => {
       sessionId: orchestrator.id,
     }));
     expect(transport.request).not.toHaveBeenCalledWith("session.deleteTree", expect.anything());
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("leaves the picker entry intact and surfaces the error when the fleet's stop RPC is denied", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    const orchestrator = session({
+      kind: "orchestrator",
+      role: "orchestrator",
+      name: "Denied peer",
+      executionState: "active",
+      attachmentState: "detached",
+      detached: true,
+      exitCode: null,
+    });
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [orchestrator];
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "session.stopOne") throw new Error("Not permitted to stop this orchestrator");
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) { closeListeners.add(listener); return () => closeListeners.delete(listener); },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from([0x0f])); // ctrl+o opens the picker on the only existing orchestrator
+    input.emit("data", Buffer.from([0x18])); // ctrl+x, denied by the broker
+    await vi.waitFor(() => {
+      const latestScreen = Buffer.concat(output.chunks).toString().split("[?25l[H").at(-1) ?? "";
+      expect(latestScreen).toContain("Not permitted to stop this orchestrator");
+      expect(latestScreen).toContain("Denied peer");
+      expect(latestScreen).toContain("Existing orchestrators");
+    });
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("keeps the picker's selection on the existing list after deleting the last entry", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    const makeOrc = (n: number, updatedAt: string) => session({
+      id: `9999999${n}-0000-4000-8000-00000000000${n}`,
+      kind: "orchestrator",
+      role: "orchestrator",
+      name: `Orc ${n}`,
+      executionState: "cancelled",
+      attentionState: "done",
+      exitCode: 0,
+      updatedAt,
+    });
+    const first = makeOrc(1, "2026-07-22T09:59:00.000Z");
+    const second = makeOrc(2, "2026-07-22T09:58:00.000Z");
+    let records = [first, second];
+    const transport = {
+      request: vi.fn(async (method: string, params: { sessionId?: string }) => {
+        if (method === "session.list") return records;
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "session.stopOne") return { stopped: true };
+        if (method === "session.delete") {
+          records = records.filter((record) => record.id !== params.sessionId);
+          return { deleted: true };
+        }
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose: vi.fn(() => () => undefined),
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from([0x0f])); // ctrl+o, choiceIndex 0 = Orc 1
+    input.emit("data", Buffer.from("[B")); // down, choiceIndex 1 = Orc 2 (the last existing row)
+    // Orc 2 is already terminal: stop no-ops, second arms the confirmation, third deletes it.
+    input.emit("data", Buffer.from([0x18, 0x18, 0x18]));
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.delete", {
+      sessionId: second.id,
+    }));
+
+    await vi.waitFor(() => {
+      const latestScreen = Buffer.concat(output.chunks).toString().split("[?25l[H").at(-1) ?? "";
+      expect(latestScreen).toContain("Existing orchestrators");
+      expect(latestScreen).toContain("Orc 1");
+      expect(latestScreen).not.toContain("Orc 2");
+      // Selection falls back onto the remaining existing row rather than spilling into "New
+      // orchestrator" — the same neighbour fallback the fleet list itself uses.
+      const orcOneLine = latestScreen.split("\n").find((line) => line.includes("Orc 1"));
+      expect(orcOneLine).toContain("›");
+    });
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
