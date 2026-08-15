@@ -20,6 +20,7 @@ import type {
 } from "../broker/fleet-project-service.js";
 import type { CustodyColor } from "../domain/custody-color.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
+import { provisionedWorktreeSlug } from "../domain/worker-workspace.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
 import { WORKER_PROVIDER_CAPABILITIES } from "../orchestration/worker-capabilities.js";
 import { appStateDirectory } from "../paths.js";
@@ -144,7 +145,19 @@ export interface LaunchProfile {
   provider: ProviderId;
   model: string;
   effort?: ReasoningEffort;
+  /**
+   * Whether a worker started from this folder gets its own worktree. Absent means `shared`, which
+   * is what every profile written before the choice existed meant: run in the checkout named.
+   */
+  isolation?: WorkerIsolation;
 }
+
+/**
+ * `worktree` asks Cyberdeck to cut a fresh worktree for each worker started here; `shared` runs the
+ * worker in the folder itself, which is the right answer for a checkout the operator has already
+ * put on the branch they want.
+ */
+export type WorkerIsolation = "shared" | "worktree";
 
 /** How one folder key sits in the list: folded away, and whether its thread cap is lifted. */
 export interface FolderDisposition {
@@ -347,7 +360,8 @@ type SlashCommandName =
   | "/fable-workers"
   | "/cursor-workers"
   | "/caveman-workers"
-  | "/nvim-settings";
+  | "/nvim-settings"
+  | "/worktree";
 
 interface SlashCommandDefinition {
   name: SlashCommandName;
@@ -478,6 +492,15 @@ const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
       { value: "status", description: "Show current nvim layout preference" },
       { value: "on", description: "Enable automatic nvim layout" },
       { value: "off", description: "Disable automatic nvim layout" },
+    ],
+  },
+  {
+    name: "/worktree",
+    description: "Inspect or toggle per-worker worktrees for this folder",
+    values: [
+      { value: "status", description: "Show whether workers here get their own worktree" },
+      { value: "on", description: "Cyberdeck cuts a worktree for each new worker" },
+      { value: "off", description: "Workers run in this folder as-is" },
     ],
   },
 ];
@@ -1852,10 +1875,14 @@ function transitionWorkerPicker(state: FleetState, key: string): FleetTransition
   const model = choice.provider === "antigravity" && effort !== "provider-managed"
     ? `${choice.model}-${effort}`
     : choice.model;
+  const isolation = state.launchProfiles[picker.cwd]?.isolation;
   const profile: LaunchProfile = {
     provider: choice.provider,
     model,
     ...(effort === "provider-managed" ? {} : { effort }),
+    // Choosing a model is not choosing to share the operator's checkout again. Isolation is a
+    // property of the folder, so it survives every re-pick of what runs in it.
+    ...(isolation === undefined ? {} : { isolation }),
   };
   return {
     state: {
@@ -3836,7 +3863,7 @@ function threadRows(
     // section it no longer gets to head.
     const worktree = root === undefined || root.startsWith("/@")
       ? undefined
-      : worktreeTag(thread.record.cwd, root);
+      : worktreeTag(thread, root);
     return [
       {
         kind: "thread",
@@ -4052,9 +4079,31 @@ function projectRootFor(cwd: string, projects: readonly string[]): string | unde
   return match;
 }
 
-/** What a worker's row says about where under its project it actually lives. */
-function worktreeTag(cwd: string, root: string): string | undefined {
-  return cwd === root ? undefined : cwd.slice(root.length + 1);
+/**
+ * Which project a worker belongs to, which is not always where it is running.
+ *
+ * A worktree Cyberdeck provisioned is a *sibling* of the repository it was cut from, so nothing
+ * about its path puts it under a registered project root. The workspace the broker recorded says
+ * which repository it belongs to, and that is the section the operator looks for it in — a worker
+ * on a Cyberdeck branch reads as Cyberdeck work, not as a stray root named after a branch.
+ */
+function sectionPath(thread: FleetThread): string {
+  return thread.record.workspace?.repositoryPath ?? thread.record.cwd;
+}
+
+/**
+ * What a worker's row says about where under its project it actually lives.
+ *
+ * A worktree under the project root names itself relatively, which is both short and true. A
+ * provisioned sibling worktree has no such relative name, so it says its own directory name — the
+ * one Cyberdeck's naming policy derived from the branch, and the one `cd` takes.
+ */
+function worktreeTag(thread: FleetThread, root: string): string | undefined {
+  const cwd = thread.record.cwd;
+  if (cwd === root) return undefined;
+  if (cwd.startsWith(`${root}/`)) return cwd.slice(root.length + 1);
+  const worktreePath = thread.record.workspace?.worktreePath;
+  return worktreePath === undefined ? undefined : basename(worktreePath);
 }
 
 /**
@@ -4086,7 +4135,7 @@ function groupThreads(snapshot: FleetSnapshot): FleetFolder[] {
   const groups = new Map<string, FleetThread[]>(roots.map((root) => [root, []]));
   const unregistered: FleetThread[] = [];
   for (const thread of workers) {
-    const root = projectRootFor(thread.record.cwd, roots);
+    const root = projectRootFor(sectionPath(thread), roots) ?? projectRootFor(thread.record.cwd, roots);
     if (root === undefined) unregistered.push(thread);
     else groups.get(root)!.push(thread);
   }
@@ -4100,6 +4149,25 @@ function groupThreads(snapshot: FleetSnapshot): FleetFolder[] {
         threads: unregistered.sort(byRecency),
       }]),
   ];
+}
+
+/**
+ * The workspace a composer start declares when the folder is set to `worktree`.
+ *
+ * The branch is named after the task because that is the only thing the operator has said, and it
+ * goes under `cyberdeck/` so a repository's branch list keeps saying which branches a fleet made.
+ * `HEAD` is the base because the composer starts work from the checkout the operator is looking at,
+ * and no guess about a default branch is better than the branch they actually left it on. The path
+ * is deliberately absent: naming the worktree is Cyberdeck's job, and the broker refuses loudly
+ * rather than reusing a directory or a branch that already exists.
+ */
+function composerWorkspace(instruction: string): StartSessionRequest["workspace"] {
+  return {
+    branch: `cyberdeck/${provisionedWorktreeSlug(taskName(instruction))}`,
+    baseRef: "HEAD",
+    provisioning: "cyberdeck-provisioned",
+    writableRoots: [],
+  };
 }
 
 function taskName(instruction: string): string {
@@ -4225,6 +4293,7 @@ function startTransition(
         detached: true,
         name: taskName(initialPrompt),
         initialPrompt,
+        ...(profile.isolation === "worktree" ? { workspace: composerWorkspace(initialPrompt) } : {}),
       },
       ...(permission.value.application.kind === "post-launch-command"
         ? { permissionLaunch: permission.value }
@@ -4343,6 +4412,74 @@ function nvimLayoutTransition(
   };
 }
 
+/**
+ * `/worktree status|on|off` for the folder the composer is pointed at.
+ *
+ * Isolation is a per-folder decision rather than a per-worker one because the operator makes it
+ * once, about a repository, and then stops thinking about it: either work in this project belongs
+ * in its own worktree or it does not. It rides on the launch profile for the same reason the
+ * provider and model do — it is what "start a worker here" means in this folder.
+ */
+function worktreeModeTransition(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  command: string,
+): FleetTransition | undefined {
+  if (!command.startsWith("/worktree")) return undefined;
+  const match = /^\/worktree(?:\s+(status|on|off))?$/u.exec(command);
+  if (match === null) {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        notice: "Usage: /worktree status|on|off",
+        noticeTone: "error",
+      },
+    };
+  }
+  const cwd = composerCwd(state, snapshot);
+  const profile = state.launchProfiles[cwd];
+  const mode = match[1] ?? "status";
+  if (mode === "status") {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        notice: profile === undefined
+          ? `${shortPath(cwd, homedir())} has no worker profile yet — /model first`
+          : `Own worktree per worker in ${shortPath(cwd, homedir())}: ${
+            profile.isolation === "worktree" ? "ON" : "OFF"
+          }`,
+        noticeTone: "neutral",
+      },
+    };
+  }
+  if (profile === undefined) {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        notice: "Choose a worker with /model before setting how it is isolated",
+        noticeTone: "error",
+      },
+    };
+  }
+  const isolation: WorkerIsolation = mode === "on" ? "worktree" : "shared";
+  const updated: LaunchProfile = { ...profile, isolation };
+  return {
+    state: {
+      ...state,
+      draft: "",
+      launchProfiles: { ...state.launchProfiles, [cwd]: updated },
+      notice: isolation === "worktree"
+        ? "Workers started here get their own worktree, cut by Cyberdeck"
+        : "Workers started here run in this folder",
+      noticeTone: "neutral",
+    },
+    action: { type: "profile", cwd, profile: updated },
+  };
+}
+
 function workerPolicyTransition(
   state: FleetState,
   snapshot: FleetSnapshot,
@@ -4357,7 +4494,8 @@ function workerPolicyTransition(
       action: "cursor-workers",
     })
     ?? cavemanWorkersTransition(state, snapshot, command)
-    ?? nvimLayoutTransition(state, command);
+    ?? nvimLayoutTransition(state, command)
+    ?? worktreeModeTransition(state, snapshot, command);
 }
 
 function policyOrchestrator(snapshot: FleetSnapshot, state: FleetState): SessionRecord | undefined {

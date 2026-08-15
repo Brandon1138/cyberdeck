@@ -7,6 +7,11 @@ import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import type {
+  WorkerWorkspace,
+  WorktreeProvisionRequest,
+  WorktreeProvisioner,
+} from "../../src/domain/worker-workspace.js";
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
 import type {
   ProviderAdapter,
@@ -107,6 +112,7 @@ function harness(options: {
   workerStallSeconds?: number;
   now?: () => number;
   adapters?: Record<string, ProviderAdapter>;
+  worktreeProvisioner?: WorktreeProvisioner;
 } = {}) {
   const ptys: FakePty[] = [];
   const events: BrokerEvent[] = [];
@@ -139,9 +145,115 @@ function harness(options: {
         : { workerStallSeconds: options.workerStallSeconds }),
     }),
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.worktreeProvisioner === undefined
+      ? {}
+      : { worktreeProvisioner: options.worktreeProvisioner }),
   });
   return { registry, ptys, events, transcripts, ptyFactory };
 }
+
+/** A provisioner that records what it was asked to do and touches no disk. */
+function fakeProvisioner(overrides: { failWith?: Error } = {}) {
+  const provisioned: WorktreeProvisionRequest[] = [];
+  const discarded: WorkerWorkspace[] = [];
+  const provisioner: WorktreeProvisioner = {
+    provision: async (provisionRequest) => {
+      provisioned.push(provisionRequest);
+      if (overrides.failWith !== undefined) throw overrides.failWith;
+      return {
+        workspace: {
+          ...provisionRequest.workspace,
+          worktreePath: "/tmp/repo-mik-75",
+          repositoryPath: "/tmp/repo",
+        },
+        warnings: ["/tmp/repo-mik-75 has no node_modules"],
+      };
+    },
+    discard: async (workspace) => { discarded.push(workspace); },
+  };
+  return { provisioner, provisioned, discarded };
+}
+
+const cyberdeckProvisioned: WorkerWorkspace = {
+  branch: "cyberdeck/mik-75",
+  baseRef: "HEAD",
+  provisioning: "cyberdeck-provisioned",
+  writableRoots: [],
+};
+
+describe("SessionRegistry worktree provisioning", () => {
+  it("cuts the worktree before the provider starts and runs the session in it", async () => {
+    const { provisioner, provisioned } = fakeProvisioner();
+    const { registry, events, ptyFactory } = harness({ worktreeProvisioner: provisioner });
+
+    const record = await registry.start(request({ workspace: cyberdeckProvisioned }));
+
+    expect(record.cwd).toBe("/tmp/repo-mik-75");
+    expect(record.workspace?.worktreePath).toBe("/tmp/repo-mik-75");
+    expect(provisioned).toHaveLength(1);
+    expect(provisioned[0]?.sessionId).toBe(record.id);
+    expect(ptyFactory.mock.calls[0]?.[0]?.cwd).toBe("/tmp/repo-mik-75");
+    expect(events.filter((event) => event.type === "workspace.provisioned"))
+      .toEqual([expect.objectContaining({
+        sessionId: record.id,
+        data: expect.objectContaining({
+          worktreePath: "/tmp/repo-mik-75",
+          branch: "cyberdeck/mik-75",
+          warnings: ["/tmp/repo-mik-75 has no node_modules"],
+        }),
+      })]);
+  });
+
+  it("refuses the start when no provisioner is configured rather than sharing the checkout", async () => {
+    const { registry } = harness();
+
+    await expect(registry.start(request({ workspace: cyberdeckProvisioned })))
+      .rejects.toMatchObject({ code: "WORKSPACE_PROVISIONER_UNAVAILABLE" });
+  });
+
+  it("reports a provisioning failure as a start failure", async () => {
+    const { provisioner } = fakeProvisioner({ failWith: new Error("branch already exists") });
+    const { registry } = harness({ worktreeProvisioner: provisioner });
+
+    await expect(registry.start(request({ workspace: cyberdeckProvisioned })))
+      .rejects.toMatchObject({ code: "WORKSPACE_PROVISION_FAILED" });
+  });
+
+  it("provisions nothing for a pre-provisioned workspace", async () => {
+    const { provisioner, provisioned } = fakeProvisioner();
+    const { registry } = harness({ worktreeProvisioner: provisioner });
+
+    const record = await registry.start(request({
+      workspace: {
+        worktreePath: "/tmp/repo",
+        branch: "brandon/mik-70",
+        baseRef: "main",
+        provisioning: "pre-provisioned",
+        writableRoots: [],
+      },
+    }));
+
+    expect(provisioned).toEqual([]);
+    expect(record.cwd).toBe("/tmp/repo");
+  });
+
+  it("discards the worktree it just cut when the launch fails", async () => {
+    const { provisioner, discarded } = fakeProvisioner();
+    const { registry } = harness({
+      worktreeProvisioner: provisioner,
+      adapters: {
+        codex: {
+          ...adapters.codex,
+          buildLaunchSpec: () => { throw new Error("provider missing"); },
+        } as ProviderAdapter,
+      },
+    });
+
+    await expect(registry.start(request({ workspace: cyberdeckProvisioned }))).rejects.toThrow();
+
+    expect(discarded).toEqual([expect.objectContaining({ worktreePath: "/tmp/repo-mik-75" })]);
+  });
+});
 
 describe("SessionRegistry", () => {
   it("records provider, optional model, opaque role, and PID", async () => {

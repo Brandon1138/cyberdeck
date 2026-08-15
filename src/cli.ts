@@ -22,6 +22,7 @@ import type {
   OrchestratorResetResult,
 } from "./orchestration/orchestrator-manager.js";
 import { ORCHESTRATOR_CATALOG } from "./orchestration/orchestrator-catalog.js";
+import { GitWorktreeInventory, retentionVerdict } from "./orchestration/worktree-inventory.js";
 import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
@@ -148,6 +149,23 @@ async function withClient<T>(operation: (client: RpcClient) => Promise<T>): Prom
   } finally {
     client.close();
   }
+}
+
+/**
+ * Where non-terminal sessions are running, so pruning never pulls a directory out from under a
+ * worker. A broker that is not running answers with an empty map rather than an error: worktree
+ * hygiene is useful on a machine with no live Cyberdeck, and the other retention rules still hold.
+ */
+async function liveSessionCwds(): Promise<Map<string, string>> {
+  const sessions = await withClient((client) => client.request<SessionRecord[]>("session.list", {}))
+    .catch(() => [] as SessionRecord[]);
+  const live = new Map<string, string>();
+  for (const session of sessions) {
+    if (session.executionState === "starting" || session.executionState === "active") {
+      live.set(resolve(session.cwd), session.id);
+    }
+  }
+  return live;
 }
 
 function projectRoot(): string {
@@ -569,6 +587,67 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
           : `Not a registered project: ${result.root}\n`,
       );
       if (!result.removed) process.exitCode = 1;
+    });
+
+  // Cyberdeck creates worktrees automatically and removes them only here, on an explicit command.
+  // The asymmetry is the retention policy: `retentionVerdict` decides what may go, and `--yes`
+  // decides whether anything actually does. See docs/architecture/worktree-provisioning.md.
+  const worktreeCommand = program.command("worktree")
+    .description("inspect and reclaim the worktrees Cyberdeck provisioned for workers");
+  worktreeCommand.command("list")
+    .description("list Cyberdeck-provisioned worktrees of a repository and their retention verdict")
+    .argument("[path]", "path inside the repository (defaults to current directory)")
+    .option("--json", "print machine-readable JSON")
+    .action(async (path: string | undefined, options: { json?: boolean }) => {
+      const inventory = new GitWorktreeInventory({ liveSessions: await liveSessionCwds() });
+      const worktrees = await inventory.list(resolve(path ?? process.cwd()));
+      const rows = worktrees.map((worktree) => ({ worktree, verdict: retentionVerdict(worktree) }));
+      if (options.json === true) {
+        process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+        return;
+      }
+      if (rows.length === 0) {
+        process.stdout.write("No Cyberdeck-provisioned worktrees\n");
+        return;
+      }
+      for (const { worktree, verdict } of rows) {
+        process.stdout.write(
+          `${verdict.keep ? "keep " : "prune"} ${worktree.path} ${worktree.branch ?? "detached"} (${verdict.reason})\n`,
+        );
+      }
+    });
+  worktreeCommand.command("prune")
+    .description("remove Cyberdeck-provisioned worktrees that the retention policy clears")
+    .argument("[path]", "path inside the repository (defaults to current directory)")
+    .option("--yes", "actually remove; without it this prints the plan and changes nothing")
+    .action(async (path: string | undefined, options: { yes?: boolean }) => {
+      const inventory = new GitWorktreeInventory({ liveSessions: await liveSessionCwds() });
+      const worktrees = await inventory.list(resolve(path ?? process.cwd()));
+      let removable = 0;
+      for (const worktree of worktrees) {
+        const verdict = retentionVerdict(worktree);
+        if (verdict.keep) {
+          process.stdout.write(`kept    ${worktree.path} (${verdict.reason})\n`);
+          continue;
+        }
+        removable += 1;
+        if (options.yes !== true) {
+          process.stdout.write(
+            `would remove ${worktree.path}${verdict.removeBranch ? ` and branch ${worktree.branch ?? ""}` : ""} (${verdict.reason})\n`,
+          );
+          continue;
+        }
+        try {
+          await inventory.remove(worktree, verdict.removeBranch);
+          process.stdout.write(`removed ${worktree.path}\n`);
+        } catch (error) {
+          process.stdout.write(`failed  ${worktree.path}: ${(error as Error).message}\n`);
+          process.exitCode = 1;
+        }
+      }
+      if (removable > 0 && options.yes !== true) {
+        process.stdout.write(`Nothing was removed. Re-run with --yes to reclaim ${removable}.\n`);
+      }
     });
 
   const scoutEgressCommand = program.command("scout-egress")

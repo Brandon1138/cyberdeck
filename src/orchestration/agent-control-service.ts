@@ -721,19 +721,24 @@ export class AgentControlService {
       ...(approvalMode === undefined ? {} : { approvalMode }),
     });
     if (!selection.ok) throw new AgentControlError(selection.code, selection.message);
-    if (request.workspace !== undefined) {
-      const workspace = await validateWorkerWorkspace({
-        workspace: request.workspace,
+    // Validation resolves as well as checks: a cyberdeck-provisioned workspace comes back naming
+    // the worktree the naming policy picked and the repository it is cut from, and that resolved
+    // form is what the launch is planned and recorded against.
+    let workspace = request.workspace;
+    if (workspace !== undefined) {
+      const checked = await validateWorkerWorkspace({
+        workspace,
         cwd: request.cwd,
         sandbox: request.sandbox,
         probe: this.workspaceProbe,
       });
-      if (!workspace.ok) throw new AgentControlError(workspace.code, workspace.message);
+      if (!checked.ok) throw new AgentControlError(checked.code, checked.message);
+      workspace = checked.value;
     }
     const plan = resolveProviderPermissionPlan(request.provider, {
       sandbox: request.sandbox,
       approvalMode,
-      writableRoots: workspaceWritableRoots(request.workspace),
+      writableRoots: workspaceWritableRoots(workspace),
       // Every delegated worker is started with `kind: "worker"`, which is what makes the adapters
       // inject the Cyberdeck MCP server.
       mcpInjected: true,
@@ -749,7 +754,7 @@ export class AgentControlService {
       cwd: request.cwd,
       detached: true,
       sandbox: request.sandbox,
-      ...(request.workspace === undefined ? {} : { workspace: request.workspace }),
+      ...(workspace === undefined ? {} : { workspace }),
       parentSessionId: request.actorSessionId,
       kind: "worker",
       role: "worker",

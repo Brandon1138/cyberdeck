@@ -231,6 +231,37 @@ describe("fleet presentation", () => {
     expect(rowOf("Overseer").indexOf("Claude")).toBe(rowOf("Minion").indexOf("Claude"));
   });
 
+  it("groups a Cyberdeck-provisioned sibling worktree under its repository and names it", () => {
+    // The worktree is a sibling of the repository, not a directory inside it, so nothing about the
+    // cwd puts the thread under its project. `workspace.repositoryPath` is what does, and the
+    // worktree column falls back to the worktree's own basename.
+    const worker = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "worker",
+      role: "worker",
+      cwd: "/repo-mik-75",
+      name: "Provisioned",
+      workspace: {
+        worktreePath: "/repo-mik-75",
+        repositoryPath: "/repo",
+        branch: "cyberdeck/mik-75",
+        baseRef: "HEAD",
+        provisioning: "cyberdeck-provisioned",
+        writableRoots: [],
+      },
+    });
+    const snapshot: FleetSnapshot = { ...fleet({ record: worker }), projects: ["/repo"] };
+    const lines = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width: 150, height: 30, now: NOW_MS,
+    }).split("\n");
+    const lineOf = (needle: string) => lines.findIndex((line) => line.includes(needle));
+
+    expect(lineOf("▾ /repo")).toBeGreaterThanOrEqual(0);
+    expect(lines.some((line) => line.includes("Unregistered"))).toBe(false);
+    expect(lineOf("▾ /repo")).toBeLessThan(lineOf("Provisioned"));
+    expect(lines[lineOf("Provisioned")]).toContain("repo-mik-75");
+  });
+
   it("orders workers inside a folder by last activity, most recent first", () => {
     const workerAt = (index: number, name: string, updatedAt: string, extra = {}) => session({
       id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
@@ -2283,7 +2314,7 @@ describe("fleet controls", () => {
       width: 100,
       height: 24,
     });
-    expect(rendered).toContain("2-4 of 6");
+    expect(rendered).toContain("2-4 of 7");
     expect(rendered).not.toContain("/model  ");
 
     expect(transitionFleet(fourth.state, snapshot, "escape", NOW_MS).state)
