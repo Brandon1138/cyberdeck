@@ -16,6 +16,15 @@ export class UnsupportedProviderEffortError extends Error {
   }
 }
 
+export class UnsupportedProviderFastModeError extends Error {
+  readonly code = "PROVIDER_FAST_MODE_UNSUPPORTED";
+
+  constructor(provider: string, detail?: string) {
+    super(detail ?? `${provider} does not expose a verified fast-mode option`);
+    this.name = "UnsupportedProviderFastModeError";
+  }
+}
+
 export class UnsupportedProviderApprovalModeError extends Error {
   readonly code = "APPROVAL_MODE_NOT_SUPPORTED";
 

@@ -84,6 +84,7 @@ const AgentStandardWorkerInputSchema = z.object({
   provider: ProviderIdSchema,
   model: z.string().optional(),
   effort: ReasoningEffortSchema.optional(),
+  fast: z.boolean().optional(),
   cwd: z.string().min(1),
   sandbox: SandboxSchema.default("read-only"),
   approvalMode: ApprovalModeSchema.optional(),
@@ -260,6 +261,7 @@ export interface WorkerStartResult {
   provider: string;
   model?: string;
   effort?: string;
+  fast?: boolean;
   profile?: "scout";
   completionTarget: number;
   effectiveState?: SessionRecord["effectiveState"];
@@ -301,6 +303,7 @@ export class AgentControlError extends Error {
       | "MODEL_ID_NOT_CANONICAL"
       | "MODEL_NOT_ADVERTISED"
       | "EFFORT_NOT_SUPPORTED"
+      | "FAST_NOT_SUPPORTED"
       | "MODEL_EFFORT_MISMATCH"
       | "APPROVAL_MODE_NOT_SUPPORTED"
       | PermissionResolutionFailureCode
@@ -718,6 +721,7 @@ export class AgentControlService {
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
       ...(request.effort === undefined ? {} : { effort: request.effort }),
+      ...(request.fast === undefined ? {} : { fast: request.fast }),
       ...(approvalMode === undefined ? {} : { approvalMode }),
     });
     if (!selection.ok) throw new AgentControlError(selection.code, selection.message);
@@ -745,6 +749,7 @@ export class AgentControlService {
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
       ...(request.effort === undefined ? {} : { effort: request.effort }),
+      ...(request.fast === undefined ? {} : { fast: request.fast }),
       ...(approvalMode === undefined ? {} : { approvalMode }),
       cwd: request.cwd,
       detached: true,
@@ -763,6 +768,7 @@ export class AgentControlService {
       provider: worker.provider,
       ...(worker.model === undefined ? {} : { model: worker.model }),
       ...(worker.effort === undefined ? {} : { effort: worker.effort }),
+      ...(worker.fast === undefined ? {} : { fast: worker.fast }),
       ...(warnings.length === 0 ? {} : { warnings }),
       completionTarget: 1,
     };

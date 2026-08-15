@@ -15,7 +15,10 @@ import {
   writeSessionLaunchFile,
   type SessionLaunchFilesOptions,
 } from "./session-launch-files.js";
-import { UnsupportedProviderEffortError } from "./session-adapter-errors.js";
+import {
+  UnsupportedProviderEffortError,
+  UnsupportedProviderFastModeError,
+} from "./session-adapter-errors.js";
 import {
   addClaudeNoSubagentArgs,
   CLAUDE_ORCHESTRATOR_TOOL_DENIALS,
@@ -77,6 +80,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       if (session.effort === "ultra") throw new UnsupportedProviderEffortError(this.id);
       args.push("--effort", session.effort);
     }
+    this.addFastMode(args, session);
     this.addProviderInstructions(args, session);
     this.addOrchestratorIsolation(args, session);
     this.addCyberdeckMcp(args, session);
@@ -117,6 +121,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       if (session.effort === "ultra") throw new UnsupportedProviderEffortError(this.id);
       args.push("--effort", session.effort);
     }
+    this.addFastMode(args, session);
     this.addProviderInstructions(args, session);
     this.addOrchestratorIsolation(args, session);
     this.addCyberdeckMcp(args, session);
@@ -163,6 +168,24 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       ),
       ...CLAUDE_NO_SUBAGENT_ENV,
     };
+  }
+
+  /**
+   * Fast mode is a launch-time settings value, not a flag: `/fast` inside a non-interactive or
+   * scripted session only works when the session was launched with `fastMode` already in its
+   * `--settings`. It is Opus-only (Opus 5/4.8) and bills usage credits rather than subscription
+   * limits, so a non-opus request fails loudly here instead of silently launching at standard speed.
+   */
+  private addFastMode(args: string[], session: SessionRecord): void {
+    if (session.fast !== true) return;
+    // "opus" is the catalog alias; full claude-opus-* IDs stay possible for direct human starts.
+    if (session.model !== "opus" && !(session.model?.startsWith("claude-opus-") ?? false)) {
+      throw new UnsupportedProviderFastModeError(
+        this.id,
+        "Claude fast mode requires model opus; other models would silently launch at standard speed",
+      );
+    }
+    args.push("--settings", JSON.stringify({ fastMode: true }));
   }
 
   private addProviderInstructions(args: string[], session: SessionRecord): void {

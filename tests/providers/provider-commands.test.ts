@@ -60,6 +60,13 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args).toContain("model_reasoning_effort=\"xhigh\"");
   });
 
+  it("forwards fast mode as the native Codex service tier", () => {
+    const spec = new CodexProviderAdapter().buildLaunchSpec(session({ fast: true }));
+    expect(spec.args).toContain("service_tier=\"fast\"");
+    expect(new CodexProviderAdapter().buildLaunchSpec(session({})).args)
+      .not.toContain("service_tier=\"fast\"");
+  });
+
   it("maps explicit auto approval mode to Codex never while preserving the sandbox", () => {
     const spec = new CodexProviderAdapter().buildLaunchSpec(session({
       sandbox: "workspace-write",

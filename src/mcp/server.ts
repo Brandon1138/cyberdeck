@@ -277,6 +277,7 @@ const TOOLS = [
         provider: { type: "string", enum: [...CANONICAL_PROVIDER_IDS] },
         model: { type: "string" },
         effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+        fast: { type: "boolean" },
         cwd: { type: "string" },
         sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
         approvalMode: { type: "string", enum: ["prompt", "auto"] },
@@ -299,7 +300,7 @@ const TOOLS = [
           required: ["profile", "brief"],
           properties: { profile: { const: "scout" } },
           not: {
-            anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt", "workspace"]
+            anyOf: ["provider", "model", "effort", "fast", "sandbox", "approvalMode", "prompt", "workspace"]
               .map((field) => ({ required: [field] })),
           },
         },
@@ -324,6 +325,7 @@ const TOOLS = [
               provider: { type: "string", enum: [...CANONICAL_PROVIDER_IDS] },
               model: { type: "string" },
               effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+              fast: { type: "boolean" },
               cwd: { type: "string" },
               sandbox: { type: "string", enum: ["read-only", "workspace-write"] },
               approvalMode: { type: "string", enum: ["prompt", "auto"] },
@@ -346,7 +348,7 @@ const TOOLS = [
                 required: ["profile", "brief"],
                 properties: { profile: { const: "scout" } },
                 not: {
-                  anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt", "workspace"]
+                  anyOf: ["provider", "model", "effort", "fast", "sandbox", "approvalMode", "prompt", "workspace"]
                     .map((field) => ({ required: [field] })),
                 },
               },

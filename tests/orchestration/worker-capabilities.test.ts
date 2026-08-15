@@ -97,6 +97,25 @@ describe("worker provider capabilities", () => {
       .toEqual({ ok: true });
   });
 
+  it("bounds fast mode to fast-capable models and providers", () => {
+    expect(validateWorkerSelection({ provider: "claude", model: "opus", fast: true }))
+      .toEqual({ ok: true });
+    expect(validateWorkerSelection({ provider: "claude", model: "haiku", fast: true }))
+      .toEqual(expect.objectContaining({
+        ok: false,
+        code: "FAST_NOT_SUPPORTED",
+        message: expect.stringContaining("opus"),
+      }));
+    // Codex's omitted-model default is fast-capable, and every advertised gpt-5.6 ID is too.
+    expect(validateWorkerSelection({ provider: "codex", fast: true })).toEqual({ ok: true });
+    expect(validateWorkerSelection({ provider: "codex", model: "gpt-5.6-luna", fast: true }))
+      .toEqual({ ok: true });
+    expect(validateWorkerSelection({ provider: "cursor", model: "composer-2.5", fast: true }))
+      .toEqual(expect.objectContaining({ ok: false, code: "FAST_NOT_SUPPORTED" }));
+    expect(validateWorkerSelection({ provider: "antigravity", model: "gemini-3.6-flash-low", fast: true }))
+      .toEqual(expect.objectContaining({ ok: false, code: "FAST_NOT_SUPPORTED" }));
+  });
+
   it("requires Antigravity's installed effort-suffixed ID to match effort", () => {
     expect(validateWorkerSelection({ provider: "antigravity", model: "gemini-3.6-flash", effort: "low" }))
       .toEqual(expect.objectContaining({ ok: false, code: "MODEL_ID_NOT_CANONICAL" }));

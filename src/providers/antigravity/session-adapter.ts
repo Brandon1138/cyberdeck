@@ -4,7 +4,10 @@ import { SessionResumeUnavailableError } from "../session-adapter-errors.js";
 import { buildAntigravityInteractiveCommand } from "./commands.js";
 import { AntigravityWorkspaceTrust, type AntigravityWorkspaceTrustOptions } from "./workspace-trust.js";
 import { sessionLaunchEnvironment } from "../launch-environment.js";
-import { UnsupportedProviderApprovalModeError } from "../session-adapter-errors.js";
+import {
+  UnsupportedProviderApprovalModeError,
+  UnsupportedProviderFastModeError,
+} from "../session-adapter-errors.js";
 
 export interface AntigravityProviderAdapterOptions extends AntigravityWorkspaceTrustOptions {
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
@@ -21,6 +24,7 @@ export class AntigravityProviderAdapter implements ProviderAdapter {
 
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec {
     if (session.approvalMode === "auto") throw new UnsupportedProviderApprovalModeError(this.id);
+    if (session.fast === true) throw new UnsupportedProviderFastModeError(this.id);
     const command = buildAntigravityInteractiveCommand({
       provider: session.provider,
       cwd: session.cwd,

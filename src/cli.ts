@@ -77,6 +77,7 @@ interface StartOptions {
   cwd: string;
   model?: string;
   effort?: ReasoningEffort;
+  fast?: boolean;
   role?: string;
   name?: string;
   sandbox: "read-only" | "workspace-write";
@@ -132,6 +133,7 @@ function addSessionOptions(command: Command, allowAttach: boolean): Command {
     .option("--model <model>", "explicit provider model")
     .addOption(new Option("--effort <effort>", "explicit provider-native reasoning effort")
       .choices(["low", "medium", "high", "xhigh", "max", "ultra"]))
+    .option("--fast", "provider-native fast mode (Claude: opus + usage credits; Codex: service_tier fast)")
     .option("--role <role>", "optional opaque user-defined role label")
     .option("--name <name>", "session name")
     .addOption(new Option("--approval-mode <mode>", "provider permission/approval behavior")
@@ -338,6 +340,7 @@ function sessionRequest(options: StartOptions, parentSessionId?: string) {
     sandbox: options.sandbox,
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.effort === undefined ? {} : { effort: options.effort }),
+    ...(options.fast === undefined ? {} : { fast: options.fast }),
     ...(options.role === undefined ? {} : { role: options.role }),
     ...(options.name === undefined ? {} : { name: options.name }),
     ...(options.approvalMode === undefined ? {} : { approvalMode: options.approvalMode }),

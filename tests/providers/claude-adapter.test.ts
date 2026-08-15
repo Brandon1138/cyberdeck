@@ -146,6 +146,19 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
       .toThrow(expect.objectContaining({ code: "PROVIDER_EFFORT_UNSUPPORTED" }));
   });
 
+  it("launches fast mode as a settings value on opus and refuses it on other models", () => {
+    const spec = new ClaudeProviderAdapter().buildLaunchSpec(session({ fast: true }));
+    const settings = spec.args[spec.args.indexOf("--settings") + 1]!;
+    expect(JSON.parse(settings)).toEqual({ fastMode: true });
+    const resume = new ClaudeProviderAdapter().buildResumeSpec(session({ fast: true }));
+    expect(resume.args).toContain("--settings");
+    expect(new ClaudeProviderAdapter().buildLaunchSpec(session({})).args).not.toContain("--settings");
+    for (const model of ["sonnet", "haiku", "claude-fable-5"]) {
+      expect(() => new ClaudeProviderAdapter().buildLaunchSpec(session({ model, fast: true })))
+        .toThrow(expect.objectContaining({ code: "PROVIDER_FAST_MODE_UNSUPPORTED" }));
+    }
+  });
+
   it("writes private per-session payload files before a Claude launch", async () => {
     const directory = tempDir();
     const record = session({ kind: "orchestrator", providerInstructions: "Cyberdeck guidance" });

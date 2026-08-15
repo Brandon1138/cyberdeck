@@ -4,6 +4,7 @@ import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "..
 import {
   SessionResumeUnavailableError,
   UnsupportedProviderEffortError,
+  UnsupportedProviderFastModeError,
 } from "../session-adapter-errors.js";
 import type { ProviderSessionTerminal } from "../provider.js";
 import {
@@ -54,6 +55,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
 
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec {
     if (session.effort !== undefined) throw new UnsupportedProviderEffortError(this.id);
+    if (session.fast === true) throw new UnsupportedProviderFastModeError(this.id);
     const source = this.options.sourceEnvironment ?? process.env;
     if (session.profile === "scout" && initialPrompt === undefined) {
       throw new Error("Headless Cursor Scout launch requires its complete initial prompt");

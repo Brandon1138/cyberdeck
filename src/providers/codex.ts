@@ -64,6 +64,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (session.effort !== undefined) {
       args.push("-c", `model_reasoning_effort=${JSON.stringify(session.effort)}`);
     }
+    this.addFastMode(args, session);
     this.addProviderInstructions(args, session);
     this.addCyberdeckMcp(args, session);
     if (initialPrompt !== undefined) {
@@ -96,6 +97,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (session.effort !== undefined) {
       args.push("-c", `model_reasoning_effort=${JSON.stringify(session.effort)}`);
     }
+    this.addFastMode(args, session);
     this.addProviderInstructions(args, session);
     this.addCyberdeckMcp(args, session);
     args.push(nativeSessionId);
@@ -110,6 +112,16 @@ export class CodexProviderAdapter implements ProviderAdapter {
         session,
       ),
     };
+  }
+
+  /**
+   * Codex fast mode is the `service_tier = "fast"` config value (the `[features].fast_mode` flag
+   * only gates the capability). It applies to the gpt-5.6 family and burns ChatGPT rate limits
+   * roughly twice as fast; the capability catalog is what bounds which models may ask for it.
+   */
+  private addFastMode(args: string[], session: SessionRecord): void {
+    if (session.fast !== true) return;
+    args.push("-c", `service_tier=${JSON.stringify("fast")}`);
   }
 
   private addProviderInstructions(args: string[], session: SessionRecord): void {

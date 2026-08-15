@@ -51,6 +51,12 @@ export const StartSessionRequestSchema = z.object({
   approvalMode: ApprovalModeSchema.optional(),
   model: z.string().optional(),
   effort: ReasoningEffortSchema.optional(),
+  /**
+   * Provider-native fast mode: same model, lower latency, billed outside the plan's normal limits
+   * (Claude bills usage credits; Codex burns ChatGPT rate limits roughly twice as fast). Forwarded
+   * only when the caller explicitly asked; Cyberdeck never turns it on by default.
+   */
+  fast: z.boolean().optional(),
   role: z.string().optional(),
   name: z.string().optional(),
   parentSessionId: z.uuid().optional(),

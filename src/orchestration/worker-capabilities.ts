@@ -4,6 +4,8 @@ export interface WorkerProviderCapability {
   provider: ProviderId;
   models: readonly string[];
   efforts: readonly ReasoningEffort[];
+  /** Models that may launch with `fast: true`. Empty means the provider has no fast mode. */
+  fastModels: readonly string[];
   approvalModes: readonly ApprovalMode[];
   modelIdRule: string;
   notes: readonly string[];
@@ -22,19 +24,25 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
     provider: "codex",
     models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
     efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    fastModels: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
     approvalModes: ["prompt", "auto"],
     modelIdRule: "Use the complete gpt-5.6-* identifier; luna, terra, and sol are labels, not launch IDs.",
-    notes: ["Omitting model uses the provider-native default."],
+    notes: [
+      "Omitting model uses the provider-native default.",
+      "fast: true launches with service_tier=\"fast\" — lower latency, roughly double the ChatGPT rate-limit burn.",
+    ],
   },
   {
     provider: "claude",
     models: ["haiku", "sonnet", "opus", "fable"],
     efforts: ["low", "medium", "high", "xhigh", "max"],
+    fastModels: ["opus"],
     approvalModes: ["prompt", "auto"],
     modelIdRule: "haiku, sonnet, opus, and fable are provider-native Claude aliases.",
     notes: [
       "Fable requires the operator-controlled worker.start.fable grant for autonomous delegation.",
       "An explicit model is required.",
+      "fast: true requires model opus and bills the operator's usage credits, not subscription limits.",
     ],
   },
   {
@@ -71,6 +79,7 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
       "cursor-grok-4.5-high",
     ],
     efforts: [],
+    fastModels: [],
     approvalModes: ["prompt", "auto"],
     modelIdRule:
       "Use the exact Cursor model slug; effort is encoded in the slug suffix and Cursor exposes no separate effort flag or bracket override.",
@@ -86,6 +95,7 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
     provider: "antigravity",
     models: ["gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high"],
     efforts: ["low", "medium", "high"],
+    fastModels: [],
     approvalModes: ["prompt"],
     modelIdRule: "Use the exact effort-suffixed provider ID and pass the matching effort value.",
     notes: [
@@ -108,6 +118,7 @@ export type WorkerSelectionValidation =
         | "MODEL_NOT_ADVERTISED"
         | "EFFORT_NOT_SUPPORTED"
         | "MODEL_EFFORT_MISMATCH"
+        | "FAST_NOT_SUPPORTED"
         | "APPROVAL_MODE_NOT_SUPPORTED";
       message: string;
     };
@@ -116,6 +127,7 @@ export function validateWorkerSelection(input: {
   provider: ProviderId;
   model?: string;
   effort?: ReasoningEffort;
+  fast?: boolean;
   approvalMode?: ApprovalMode;
 }): WorkerSelectionValidation {
   const capability = workerProviderCapability(input.provider);
@@ -165,6 +177,24 @@ export function validateWorkerSelection(input: {
       code: "EFFORT_NOT_SUPPORTED",
       message: `${input.provider} does not support worker effort ${input.effort}; supported: ${supported}`,
     };
+  }
+
+  if (input.fast === true) {
+    if (capability.fastModels.length === 0) {
+      return {
+        ok: false,
+        code: "FAST_NOT_SUPPORTED",
+        message: `${input.provider} has no fast mode for autonomous workers`,
+      };
+    }
+    // Claude requires an explicit model elsewhere; Codex's omitted-model default is fast-capable.
+    if (input.model !== undefined && !capability.fastModels.includes(input.model)) {
+      return {
+        ok: false,
+        code: "FAST_NOT_SUPPORTED",
+        message: `${input.provider} fast mode is not available on ${input.model}; supported: ${capability.fastModels.join(", ")}`,
+      };
+    }
   }
 
   if (input.approvalMode !== undefined && !capability.approvalModes.includes(input.approvalMode)) {
