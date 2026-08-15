@@ -6,6 +6,16 @@ and persisted schemas remain under active alpha development.
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude semantic capture follows the conversation across `/clear`. Sessions launch
+  with a SessionStart hook that reports the native `transcript_path` against the
+  Cyberdeck session id fixed on its command line, so a rebind is exact even when
+  several workers share a worktree. An abandoned transcript is detected from the
+  `/clear` frame Claude writes into it, and an unresolved successor fails closed
+  with a reported status rather than guessing at the newest file in the directory
+  (MIK-46).
+
 ## [0.1.0-alpha.2] - 2026-08-14
 
 ### Added
