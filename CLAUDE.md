@@ -103,6 +103,15 @@ make the grant and the lease agree — not to special-case the tools that curren
 
 ## Things that are not deferred
 
+- A thread's pull-request indicator is attributed to **the branch that thread's own work lands on**,
+  never to the directory it runs in. A thread declares that branch through its `workspace`, or it
+  inherits one by running in a linked worktree, which exists precisely because one piece of work
+  needed its own branch. A thread in a repository's *primary* checkout that declared no branch gets
+  no indicator, even when that checkout has an open pull request: the checkout has one branch and
+  every thread there shares it, so crediting any single thread with it is a guess. Losing the
+  indicator in that case is the fix, not a gap in it — it is what MIK-86 was. Dispatch with a
+  declared `workspace` if a thread needs the indicator.
+
 - When Fleet's window has no nvim, one is spawned into that same window — and nowhere else. No
   window other than Fleet's is searched and no socket directory is scanned; both would open a
   worktree somewhere the operator is not looking. The absence of guessing is not a gap to close.
