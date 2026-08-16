@@ -123,10 +123,27 @@ function harness(options: {
   adapters?: Record<string, ProviderAdapter>;
   worktreeProvisioner?: WorktreeProvisioner;
   failJournal?: (event: BrokerEvent) => boolean;
+  /**
+   * Provider-native turns a transcript read will find, keyed by the provider's own turn id.
+   *
+   * Handed out once each, the way {@link ThreadTranscriptStore.captureProviderTurns} does: the
+   * store remembers every semantic turn id it has appended, and that deduplication is the whole
+   * reason two banking paths cannot count the same turn twice.
+   */
+  providerTurns?: readonly { id: string; text: string }[];
 } = {}) {
   const ptys: FakePty[] = [];
   const events: BrokerEvent[] = [];
   const transcripts: AppendThreadEvent[] = [];
+  const captured = new Set<string>();
+  const captureProviderTurns = async (input: { allowFallback?: boolean }) => {
+    const pending = (options.providerTurns ?? []).filter((turn) => !captured.has(turn.id));
+    for (const turn of pending) captured.add(turn.id);
+    if (pending.length > 0) {
+      return pending.map((turn) => ({ text: turn.text, data: { transport: "provider-native" } }));
+    }
+    return input.allowFallback === true ? [{ text: "", data: { transport: "terminal-replay-fallback" } }] : [];
+  };
   const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => {
     const pty = new FakePty(1000 + ptys.length, options.exitOnKill ?? true);
     ptys.push(pty);
@@ -142,10 +159,15 @@ function harness(options: {
       if (options.failJournal?.(event) === true) throw new Error("journal unavailable");
       events.push(event);
     } },
-    transcripts: { append: async (event: AppendThreadEvent) => {
-      transcripts.push(event);
-      return {} as never;
-    } } as never,
+    transcripts: {
+      append: async (event: AppendThreadEvent) => {
+        transcripts.push(event);
+        return {} as never;
+      },
+      // Only supplied when a test says what the provider transcript holds. A registry with no
+      // capture at all is the shape every other test in this file runs under.
+      ...(options.providerTurns === undefined ? {} : { captureProviderTurns }),
+    } as never,
     validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({
       ...(options.maxConcurrentWorkers === undefined
@@ -1418,6 +1440,108 @@ describe("SessionRegistry", () => {
     expect(states.filter(({ state }) => state === "completed")).toEqual([
       { sessionId: record.id, instructionId, state: "completed", at: expect.any(String), turn: 2 },
     ]);
+  });
+
+  it("records a finished turn from the provider transcript while a dialog is parked on top", async () => {
+    // MIK-89. The worker finished, pushed its work, and then Claude painted its session-limit dialog
+    // over the result. The screen never walks back to `awaiting-input` from there, so the only path
+    // that banked a turn never ran: `completedTurns` stayed 0, `workers_wait` on target 1 could not
+    // settle, and the row said "Working" about a worker that was done.
+    const { registry, ptys, events } = harness({
+      providerTurns: [{ id: "turn-1", text: "opened pull request #38" }],
+    });
+    const record = await registry.start(
+      request({ provider: "claude", name: "reconcile-worker" }),
+      "Land the fix",
+    );
+
+    ptys[0]!.emitOutput("\u001b]0;⠹ reconcile-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("working"));
+
+    ptys[0]!.emitOutput([
+      "\u001b[2J╭────────────────╮",
+      "│ You've hit your session limit · resets 10:10pm │",
+      "│ ❯ Upgrade your plan                          │",
+      "│ Enter to confirm · Esc to cancel              │",
+      "╰────────────────╯",
+    ].join("\r\n"));
+    await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("blocked-modal"));
+
+    // Once the screen goes quiet, the ledger is corrected against the transcript the provider wrote
+    // when the turn ended — the record the screen path never got to see.
+    await vi.waitFor(
+      () => expect(events.filter(({ type }) => type === "session.turn_reconciled")).toHaveLength(1),
+      { timeout: 8_000, interval: 50 },
+    );
+
+    // The wait is the point: a finished worker has to settle one as completed, dialog or no dialog.
+    const settled = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 2_000, 100);
+    expect(settled.timedOut).toBe(false);
+    expect(settled.results[0]).toMatchObject({
+      status: "completed",
+      completedTurns: 1,
+      provenance: "provider-transcript",
+      text: "opened pull request #38",
+    });
+    // Completed and still blocked are both true. The turn is banked; the dialog still wants a key.
+    expect(settled.results[0]!.truth).toMatchObject({ state: "blocked-modal", terminal: false });
+    expect(registry.get(record.id).attentionState).toBe("needs-input");
+    expect(events.filter(({ type }) => type === "session.turn_reconciled")).toHaveLength(1);
+  });
+
+  it("does not bank a turn the provider transcript has nothing to say about", async () => {
+    // The other half of the same rule. A worker sitting at a dialog that has *not* finished its turn
+    // must stay uncompleted: `allowFallback: false` means a screen scrape can never stand in for the
+    // turn, so there is nothing to count and the wait keeps waiting.
+    const { registry, ptys, events } = harness({ providerTurns: [] });
+    const record = await registry.start(
+      request({ provider: "claude", name: "unfinished-worker" }),
+      "Land the fix",
+    );
+
+    ptys[0]!.emitOutput("\u001b]0;⠹ unfinished-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("working"));
+    ptys[0]!.emitOutput("\u001b[2JAlso scan your other repos [ ]\r\n←/→ to change · Enter to confirm");
+    await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("blocked-modal"));
+
+    // Well past the quiet window the reconcile fires in, so its silence here is a decision and not
+    // a race that had not run yet.
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(events.filter(({ type }) => type === "session.turn_reconciled")).toEqual([]);
+
+    // The dialog still settles the wait — it wants a keypress, and the caller has to hear that — but
+    // it settles as the thing it is, with an empty ledger behind it.
+    const settled = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 1_000, 100);
+    expect(settled.results[0]).toMatchObject({ status: "needs-input", completedTurns: 0 });
+  });
+
+  it("holds an instruction at an onboarding dialog rather than writing into it", async () => {
+    // MIK-88's delivery half. The onboarding wizard shares no wording with a permission prompt, so
+    // nothing saw it: the enqueue came back `rendered` and the payload went into a surface that was
+    // never going to submit it.
+    const { registry, ptys } = harness();
+    const record = await registry.start(
+      request({ provider: "claude", name: "onboarding-worker" }),
+      "Land the fix",
+    );
+
+    ptys[0]!.emitOutput([
+      "\u001b[2JClaude Code can scan this repository for you",
+      "❯ 1. Yes",
+      "  2. Not now",
+      "  3. Don't show again",
+      "Enter to confirm",
+    ].join("\r\n"));
+    await vi.waitFor(() => expect(registry.get(record.id).attentionState).toBe("needs-input"));
+
+    const held = await registry.submitInstruction(record.id, "Then run the linter");
+    expect(held).toMatchObject({ state: "queued", hold: "provider-modal" });
+    expect(ptys[0]!.writes).toEqual([]);
+    expect(registry.workerTruth(record.id)).toMatchObject({ state: "blocked-modal", terminal: false });
   });
 
   it("never gives an instruction the ordinal of a turn that was already in flight", async () => {

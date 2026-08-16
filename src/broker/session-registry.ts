@@ -224,6 +224,13 @@ interface RuntimeSession {
   /** Per-turn results keyed by completion target, bounded by MAX_COMPLETION_LEDGER_ENTRIES. */
   completions: Map<number, CompletionLedgerEntry>;
   idleTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Armed whenever the broker is expecting a turn to land and the screen has gone quiet without
+   * banking one. See {@link SessionRegistry.reconcileCanonicalTurns}.
+   */
+  canonicalReconcileTimer?: ReturnType<typeof setTimeout>;
+  /** Set while a reconcile read is in flight, so two of them cannot bank the same turn twice. */
+  canonicalReconcileInflight?: boolean;
   /** Provider-native setup output must never satisfy the worker task's first completion target. */
   suppressSemanticTurns?: boolean;
   stallObservation?: {
@@ -267,6 +274,18 @@ const SESSION_UPDATE_FLUSH_MS = 16;
 
 /** First wait between provider-transcript reads; each further attempt doubles it. */
 const TRANSCRIPT_RETRY_BASE_MS = 50;
+
+/**
+ * How long a session must produce nothing before its ledger is reconciled against the provider's
+ * own transcript.
+ *
+ * Comfortably above the 200 ms the screen path banks a turn in, so the two never race for the same
+ * turn in the ordinary case: by the time this fires, a screen-observed completion has already been
+ * counted and cleared `observedWorking`, and the reconcile finds nothing to do. It is also long
+ * enough that a provider still emitting tokens keeps pushing the timer out — which is the whole
+ * safety condition for concluding that a turn named in the transcript is over.
+ */
+const CANONICAL_RECONCILE_QUIET_MS = 1_500;
 
 /**
  * The state-machine fields every runtime session starts with, in one place so a construction site
@@ -741,8 +760,7 @@ export class SessionRegistry {
         await this.failLiveScout(runtime, "initialize", error);
         throw this.scoutLaunchError(record.id, error);
       }
-      if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
-      delete runtime.idleTimer;
+      this.clearTurnTimers(runtime);
       if (runtime.pty === pty) delete runtime.pty;
       pty.kill();
       this.sessions.delete(id);
@@ -1305,8 +1323,7 @@ export class SessionRegistry {
     delete runtime.providerLimit;
     delete runtime.record.termination;
     delete runtime.stallObservation;
-    if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
-    delete runtime.idleTimer;
+    this.clearTurnTimers(runtime);
     this.adoptPty(runtime, pty);
     await this.appendEvent("session.resumed", sessionId, {
       provider: runtime.record.provider,
@@ -1687,6 +1704,11 @@ export class SessionRegistry {
         void this.refreshObservedModel(runtime).catch(() => undefined);
       }
     }
+    // Armed on every chunk, whatever the screen said. The branch above only banks a turn when the
+    // provider walks back to its prompt in front of the broker; a worker that finished under a
+    // dialog, or behind a spinner frame that was never redrawn, takes neither branch and used to
+    // leave its finished turn unbanked forever. This is the path that notices.
+    this.armCanonicalReconcile(runtime);
     runtime.controller?.output(chunk);
     for (const watcher of runtime.watchers.values()) {
       watcher.output(chunk);
@@ -1730,8 +1752,7 @@ export class SessionRegistry {
     this.advanceRenderedInstructions(runtime, "undelivered");
     this.releaseDeliveryHolds(runtime);
     runtime.fatalReported = true;
-    if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
-    delete runtime.idleTimer;
+    this.clearTurnTimers(runtime);
     runtime.activity = "unknown";
     runtime.observedWorking = false;
     runtime.latestResult = termination.detail;
@@ -1754,8 +1775,7 @@ export class SessionRegistry {
   }
 
   private handleExit(runtime: RuntimeSession, exitCode: number, signal?: number): void {
-    if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
-    delete runtime.idleTimer;
+    this.clearTurnTimers(runtime);
     if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
     delete runtime.scoutBudgetTimer;
     runtime.scoutBudgetActive = false;
@@ -2720,6 +2740,153 @@ export class SessionRegistry {
     );
     await this.refreshObservedModel(runtime);
     await this.setAttention(runtime, "done", true);
+    this.notifySessionUpdate(runtime.record.id);
+  }
+
+  /** Both timers that can bank a turn, dropped together wherever a session stops earning one. */
+  private clearTurnTimers(runtime: RuntimeSession): void {
+    if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
+    delete runtime.idleTimer;
+    if (runtime.canonicalReconcileTimer !== undefined) {
+      clearTimeout(runtime.canonicalReconcileTimer);
+    }
+    delete runtime.canonicalReconcileTimer;
+  }
+
+  /**
+   * Re-arm the reconcile, so it only fires once the session has actually gone quiet.
+   *
+   * Debounced rather than periodic: every chunk pushes it out, so a provider that is still emitting
+   * never reaches it, and the only sessions it runs against are the ones that have stopped
+   * producing output without the broker having banked a turn.
+   */
+  private armCanonicalReconcile(runtime: RuntimeSession): void {
+    if (this.options.transcripts?.captureProviderTurns === undefined) return;
+    if (!this.canReconcileCanonicalTurns(runtime)) return;
+    if (runtime.canonicalReconcileTimer !== undefined) clearTimeout(runtime.canonicalReconcileTimer);
+    runtime.canonicalReconcileTimer = setTimeout(() => {
+      delete runtime.canonicalReconcileTimer;
+      void this.reconcileCanonicalTurns(runtime);
+    }, CANONICAL_RECONCILE_QUIET_MS);
+    // A ledger correction is never a reason to keep a broker that is on its way out alive.
+    runtime.canonicalReconcileTimer.unref?.();
+  }
+
+  /**
+   * Whether reconciling this session's ledger against a provider transcript could mean anything.
+   *
+   * Two conditions say the broker is *expecting* a turn: it watched one start and has not banked it
+   * (`observedWorking`), or it wrote an instruction whose answering turn has not arrived
+   * (`rendered`). Without one of them there is no missing turn to recover, and reading a transcript
+   * would only risk counting conversation the session was resumed on top of.
+   */
+  private canReconcileCanonicalTurns(runtime: RuntimeSession): boolean {
+    if (runtime.record.executionState !== "active") return false;
+    if (runtime.suppressSemanticTurns === true) return false;
+    // A scout completes on a validated drop-box report and on nothing else.
+    if (runtime.record.profile === "scout") return false;
+    // Only providers that write a transcript of their own. Cursor and Antigravity write none, so the
+    // only turn a capture could hand back for them is a screen scrape wearing a turn's shape — the
+    // guess this whole path exists to replace.
+    if (runtime.record.provider !== "claude" && runtime.record.provider !== "codex") return false;
+    return runtime.observedWorking || runtime.rendered.length > 0;
+  }
+
+  /**
+   * Bank the turns the provider's own transcript records and the screen never reported.
+   *
+   * The screen path banks a turn on one transition: the provider walked back to its prompt while the
+   * broker was watching. Three shapes never make it, and all three were MIK-89. A worker that
+   * finished and then painted a dialog over the result reads `needs-input`, not `awaiting-input`. A
+   * worker whose last spinner frame was never redrawn reads `working` forever. A worker whose
+   * composer holds text at the moment the idle timer fires has its turn dropped and never re-armed.
+   * In every one of them the turn happened, the work was pushed, and `completedTurns` stayed at zero
+   * — so `workers_wait` on `completionTarget: 1` could not settle, ever.
+   *
+   * The provider's own transcript is not a second guess at the screen; it is the record the provider
+   * wrote because the turn ended. `allowFallback: false` is what keeps that true: a scrape cannot
+   * tell a finished turn from a dialog painted over an unfinished one, and inventing a turn here
+   * would be worse than the silence it replaces. Turns already seen are filtered out by the store
+   * itself, keyed on the provider's own turn id, so this is idempotent by construction.
+   */
+  private async reconcileCanonicalTurns(runtime: RuntimeSession): Promise<void> {
+    const transcripts = this.options.transcripts;
+    const capture = transcripts?.captureProviderTurns;
+    if (transcripts === undefined || capture === undefined) return;
+    if (runtime.canonicalReconcileInflight === true) return;
+    if (!this.canReconcileCanonicalTurns(runtime)) return;
+    // The screen path owns the turn it is about to bank, and it will bank it 200 ms from now.
+    if (runtime.idleTimer !== undefined) return;
+
+    runtime.canonicalReconcileInflight = true;
+    const before = runtime.completedTurns;
+    let turns: Array<{ text?: string | undefined; data?: Record<string, unknown> }> = [];
+    try {
+      turns = await capture.call(transcripts, {
+        sessionId: runtime.record.id,
+        provider: runtime.record.provider,
+        cwd: runtime.record.cwd,
+        createdAt: runtime.record.createdAt,
+        turnNumber: before + 1,
+        allowFallback: false,
+      });
+    } catch {
+      return;
+    } finally {
+      runtime.canonicalReconcileInflight = false;
+    }
+
+    // Only turns the provider itself wrote. The store labels every turn it appends, and a session
+    // configured to allow fallbacks elsewhere must not smuggle one in through here.
+    const native = turns.filter((turn) => turn.data?.transport === "provider-native");
+    if (native.length === 0) return;
+    // The screen path may have banked while the read was in flight. Those are the same turns — the
+    // store deduplicates on the provider's turn id, so whichever call ran second saw nothing — and
+    // counting them again would hand a wait an ordinal no work stands behind. The transcript keeps
+    // them either way; what is given up is only this path's claim to have been the one to bank them.
+    if (runtime.completedTurns !== before || runtime.idleTimer !== undefined) return;
+
+    const firstTurn = before + 1;
+    runtime.completedTurns = before + native.length;
+    native.forEach((turn, index) =>
+      this.recordCompletion(runtime, firstTurn + index, turn.text ?? "", "provider-transcript"));
+    runtime.observedWorking = false;
+    // The screen said `working` because of a frame the provider never redrew. Its transcript says
+    // the turn ended, and after this much silence there is no turn in flight for that to be wrong
+    // about. A modal is left alone: the dialog on top of the finished turn is real, and saying so is
+    // the difference between a worker that needs a keypress and one that needs nothing.
+    if (runtime.activity === "working") runtime.activity = "awaiting-input";
+    this.observeComposer(runtime);
+    // Whatever the queue was holding for the ordinal this turn owned can go now.
+    this.notifyDeliveryBoundary(runtime);
+    this.advanceRenderedInstructions(runtime, "completed", runtime.completedTurns);
+    const latest = native.at(-1)?.text;
+    if (latest !== undefined) runtime.latestResult = latest;
+    await this.appendEvent("session.turn_reconciled", runtime.record.id, {
+      provider: runtime.record.provider,
+      completionTarget: runtime.completedTurns,
+      turns: native.length,
+    }).catch(() => undefined);
+    await this.appendTranscript(
+      runtime.record.id,
+      "lifecycle",
+      "broker",
+      "turn recorded from the provider transcript; the terminal never reported it finishing",
+      { provider: runtime.record.provider, completionTarget: runtime.completedTurns },
+    ).catch(() => undefined);
+    await this.refreshPreview(
+      runtime,
+      runtime.pty?.snapshot().toString("utf8") ?? "",
+      native.map((turn): TranscriptMessage => ({ role: "assistant", text: turn.text ?? "" })),
+    ).catch(() => undefined);
+    await this.refreshObservedModel(runtime).catch(() => undefined);
+    // A worker parked at a dialog has finished its turn *and* still needs a keypress. Both are true,
+    // and the attention state has to be the one the operator can act on.
+    await this.setAttention(
+      runtime,
+      runtime.activity === "needs-input" ? "needs-input" : "done",
+      true,
+    );
     this.notifySessionUpdate(runtime.record.id);
   }
 

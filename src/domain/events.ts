@@ -16,6 +16,15 @@ export const BrokerEventTypeSchema = z.enum([
    * not land within the retry budget. The turn is real; its text is a degraded reading of it.
    */
   "session.turn_scraped",
+  /**
+   * A completed turn the screen never reported was recovered from the provider's own transcript.
+   *
+   * The screen path banks a turn when the provider returns to its prompt. A provider that finished
+   * and then painted a dialog over the result, or whose last spinner frame was never redrawn, never
+   * makes that transition — so the turn happened, the ledger did not know, and every wait on it
+   * hung. This says the ledger was corrected and how many turns it was behind.
+   */
+  "session.turn_reconciled",
   "session.stopped",
   "session.deleted",
   /** Cyberdeck created a worktree for a worker. `data` names the path, branch, base, and repository. */

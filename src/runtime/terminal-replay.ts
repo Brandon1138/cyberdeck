@@ -275,9 +275,12 @@ export function lastTerminalTitle(replay: string): string | undefined {
  * printed.
  */
 export function blockedPromptIndexInTail(provider: ProviderId, tail: string): number {
-  const common = lastRegexIndex(
-    tail,
-    /Do you trust the contents of this project\?|workspace-trust|needs authentication|permission prompt/giu,
+  const common = Math.max(
+    lastRegexIndex(
+      tail,
+      /Do you trust the contents of this project\?|workspace-trust|needs authentication|permission prompt/giu,
+    ),
+    dialogAffordanceIndexInTail(tail),
   );
   const providerPrompt = provider === "codex"
     ? Math.max(
@@ -300,6 +303,73 @@ function lastRegexIndex(value: string, pattern: RegExp): number {
   let index = -1;
   for (const match of value.matchAll(pattern)) index = match.index;
   return index;
+}
+
+/**
+ * Box-drawing and padding a TUI wraps a dialog's own lines in.
+ *
+ * Stripped from both ends before a line is read, because the dialogs this has to see are drawn
+ * inside a border and the border is the only thing between the affordance and the left margin.
+ */
+const DIALOG_BORDER = /^[\s│┃┆┊║▌▏▕╭╮╰╯┌┐└┘├┤┬┴┼─═━┈]+|[\s│┃┆┊║▌▏▕╭╮╰╯┌┐└┘├┤┬┴┼─═━┈]+$/gu;
+
+/** The `·`-style separator a provider puts between two affordances on one footer line. */
+const AFFORDANCE_SEPARATOR = /\s*[·•]\s*/u;
+
+/**
+ * One keypress affordance: a key, and what pressing it does.
+ *
+ * Every segment of a footer line has to be one of these for the line to be read as a footer at all.
+ * That is what keeps an assistant sentence containing the words "enter to confirm" from being read
+ * as a dialog: prose has other clauses in it, and they are not keypresses.
+ */
+const KEY_AFFORDANCE =
+  /^(?:press\s+)?(?:enter|return|esc(?:ape)?|tab|shift\+tab|space|ctrl\+\S+|[←→↑↓](?:\/[←→↑↓])?|arrows?)\s+to\s+\S/iu;
+
+/**
+ * The affordances that mean the surface is *waiting* on the operator, not merely offering a way out.
+ *
+ * `esc to interrupt` and `ctrl+c to stop` are printed by a provider that is working and would keep
+ * working if nobody touched the keyboard; `enter to confirm` and `←/→ to change` are printed by one
+ * that will do nothing at all until a key is pressed. Only the second kind is a blocked prompt.
+ */
+const DIALOG_CONFIRM_AFFORDANCE =
+  /^(?:press\s+)?(?:enter|return|[←→↑↓](?:\/[←→↑↓])?|arrows?)\s+to\s+(?:confirm|continue|select|submit|accept|change|choose|cycle)\b/iu;
+
+/**
+ * Offset of the last dialog footer in the tail, or -1.
+ *
+ * A provider dialog names the keypress that dismisses it, on its own line, under whatever it is
+ * asking. That footer is the one part of a dialog whose shape does not change with what the dialog
+ * says — which is the whole reason this exists. Claude's onboarding wizard and its session-limit
+ * notice share no wording at all, and enumerating each dialog's prose is how both came to be
+ * invisible: `truth.modalOpen` stayed false, the worker read `stalled`, and an instruction was
+ * written into a surface that was never going to submit it. That was MIK-88.
+ *
+ * The session-limit dialog reaches here rather than the terminal `provider-limit` reading precisely
+ * because it is boxed: `session-liveness` scans only the lines a provider prints flush left, so a
+ * limit drawn inside a border is not the terminal notice it looks like. Boxed and answerable is a
+ * modal; flush left and final is a termination. Both readings stay true by keeping that line.
+ *
+ * A false positive here holds an instruction that could have been delivered — recoverable, and
+ * reported to the caller as `provider-modal`. A false negative is the incident.
+ */
+function dialogAffordanceIndexInTail(tail: string): number {
+  let index = -1;
+  // Matched rather than split so the offsets are exact: the tail keeps its carriage returns, and a
+  // `\r\n` counted as one character would put every later marker comparison off by a line.
+  for (const match of tail.matchAll(/[^\r\n]+/gu)) {
+    if (isDialogAffordanceLine(match[0])) index = match.index;
+  }
+  return index;
+}
+
+function isDialogAffordanceLine(line: string): boolean {
+  const content = line.replace(DIALOG_BORDER, "");
+  if (content === "") return false;
+  const segments = content.split(AFFORDANCE_SEPARATOR);
+  if (!segments.every((segment) => KEY_AFFORDANCE.test(segment))) return false;
+  return segments.some((segment) => DIALOG_CONFIRM_AFFORDANCE.test(segment));
 }
 
 export function lastBrailleIndex(value: string): number {

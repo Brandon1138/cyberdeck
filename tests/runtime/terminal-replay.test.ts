@@ -61,6 +61,60 @@ describe("terminal replay semantics", () => {
     expect(providerTerminalActivity("claude", claude)).toBe("needs-input");
   });
 
+  it("recognizes a dialog by the keypress it asks for, not by what it says", () => {
+    // MIK-88. The onboarding wizard and the session-limit notice share no wording with each other or
+    // with a permission prompt, so a detector built out of their prose saw neither: `modalOpen`
+    // stayed false, the worker read `stalled`, and an instruction was written into a surface that
+    // was never going to submit it. The footer is what every dialog has in common.
+    const onboarding = [
+      "Claude Code can scan this repository for you",
+      "❯ 1. Yes",
+      "  2. Not now",
+      "  3. Don't show again",
+      "Enter to confirm",
+    ].join("\n");
+    const usage = [
+      "Also scan your other repos [ ]",
+      "  Continue",
+      "←/→ to change · Enter to confirm",
+    ].join("\n");
+    expect(providerTerminalActivity("claude", onboarding)).toBe("needs-input");
+    expect(providerTerminalActivity("claude", usage)).toBe("needs-input");
+  });
+
+  it("reads a boxed session limit as an answerable dialog rather than a silent stall", () => {
+    // The limit notice is drawn inside a border, which is exactly why the terminal `provider-limit`
+    // reading never saw it: that scan only reads lines a provider prints flush left. Boxed and
+    // answerable is a modal; flush left and final is a termination. This is the boxed one.
+    const replay = [
+      "╭──────────────────────────────────────────────╮",
+      "│ You've hit your session limit · resets 10:10pm │",
+      "│                                              │",
+      "│ ❯ Upgrade your plan                          │",
+      "│                                              │",
+      "│ Enter to confirm · Esc to cancel             │",
+      "╰──────────────────────────────────────────────╯",
+    ].join("\n");
+    expect(providerTerminalActivity("claude", replay)).toBe("needs-input");
+  });
+
+  it("does not read a working footer or an assistant sentence as a dialog", () => {
+    // `esc to interrupt` and `ctrl+c to stop` are printed by a provider that would keep working if
+    // nobody touched the keyboard. Only an affordance that stops the session until a key is pressed
+    // is a blocked prompt, and a line has to be nothing but affordances to be read as a footer.
+    expect(providerTerminalActivity("claude", "Working\nesc to interrupt")).toBe("working");
+    expect(providerTerminalActivity("cursor", "Composing 12 tokens\nctrl+c to stop")).toBe("working");
+    expect(providerTerminalActivity(
+      "claude",
+      "\u001b]0;worker\u0007I added a prompt where you press Enter to confirm the deletion.",
+    )).toBe("awaiting-input");
+  });
+
+  it("clears a stale dialog when the provider resumes work behind it", () => {
+    const dialog = ["Also scan your other repos [ ]", "←/→ to change · Enter to confirm"].join("\n");
+    expect(providerTerminalActivity("claude", `${dialog}\nWorking\nesc to interrupt`)).toBe("working");
+  });
+
   it("clears a stale approval surface when later provider output resumes work", () => {
     const approval = [
       "Would you like to run the following command?",
