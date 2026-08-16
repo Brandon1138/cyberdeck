@@ -67,9 +67,10 @@ import { completeDirectoryPath, expandPath } from "./path-completion.js";
 import {
   NO_PULL_REQUEST_STATUS,
   PullRequestStatusCache,
-  pullRequestGlyph,
-  type PullRequestState,
+  pullRequestLabel,
+  pullRequestTone,
   type PullRequestStatusPort,
+  type PullRequestSummary,
 } from "./pr-status.js";
 import { RpcError } from "./rpc-client.js";
 
@@ -333,8 +334,12 @@ export interface FleetRenderOptions {
   height?: number | undefined;
   now?: number | undefined;
   home?: string | undefined;
-  /** Pull-request state per worktree, read synchronously from an async cache. */
-  pullRequests?: ReadonlyMap<string, PullRequestState> | undefined;
+  /**
+   * Pull request per thread id — never per worktree. A thread's pull request is
+   * the one on the branch its own work lands on, so threads that happen to share
+   * a checkout no longer inherit each other's.
+   */
+  pullRequests?: ReadonlyMap<string, PullRequestSummary> | undefined;
 }
 
 interface ResolvedFleetRenderOptions {
@@ -343,7 +348,7 @@ interface ResolvedFleetRenderOptions {
   height: number;
   now: number;
   home: string;
-  pullRequests: ReadonlyMap<string, PullRequestState>;
+  pullRequests: ReadonlyMap<string, PullRequestSummary>;
 }
 
 interface WorkerModelChoice {
@@ -441,6 +446,12 @@ const WORKERS_SECTION_LABEL = "Workers";
 const PROJECTS_UNAVAILABLE_NOTICE = "Project registry unavailable on this broker";
 /** How much of a worktree path a row spends naming itself before the name is trimmed. */
 const WORKTREE_TAG_WIDTH = 22;
+/**
+ * The most a row will ever spend on a pull-request number: `#` plus six digits,
+ * which is more than any repository this fleet dispatches into will reach. The
+ * column is normally four or five cells wide, and only as wide as it must be.
+ */
+const PULL_REQUEST_CELL_WIDTH = 7;
 /** Workers shown per folder before the rest go behind a show-more row. */
 const FOLDER_THREAD_CAP = 5;
 const DEFAULT_PERMISSION_POLICIES: Readonly<Record<ConfigurablePermissionProvider, ProviderPermissionPolicy>> = {
@@ -1084,8 +1095,8 @@ export function transitionFleet(
     || key === "down"
     || key === "pageup"
     || key === "pagedown"
-    || key === "ctrl+u"
-    || key === "ctrl+d"
+    || key === "alt+k"
+    || key === "alt+j"
     || key === "home"
     || key === "end"
   ) {
@@ -1106,7 +1117,7 @@ export function transitionFleet(
                   ? -pageDistance
                   : key === "pagedown"
                     ? pageDistance
-                    : key === "ctrl+u"
+                    : key === "alt+k"
                       ? -halfPageDistance
                       : halfPageDistance
           );
@@ -1943,9 +1954,14 @@ function renderFleetList(
   const header = [...renderHeader(threads, state, options), ""];
 
   // The column only exists once some thread actually has a pull request, so a
-  // fleet without `gh` — or without PRs — never pays for it.
-  const pullRequestColumn = threads.some(({ record }) =>
-    options.pullRequests.get(record.cwd) !== undefined);
+  // fleet without `gh` — or without PRs — never pays for it, and it is only ever
+  // as wide as the longest number on screen.
+  const pullRequestWidth = threads.reduce((widest, { record }) => {
+    const summary = options.pullRequests.get(record.id);
+    return summary === undefined
+      ? widest
+      : Math.max(widest, Math.min(PULL_REQUEST_CELL_WIDTH, pullRequestLabel(summary).length));
+  }, 0);
   const footer = renderFleetFooter(snapshot, state, options);
   const bodyHeight = Math.max(0, options.height - footer.length);
   const threadListViewportHeight = Math.max(0, bodyHeight - header.length);
@@ -2022,7 +2038,7 @@ function renderFleetList(
             row.thread,
             viewportState,
             options,
-            pullRequestColumn,
+            pullRequestWidth,
             leaseBadgeWidth,
             row.leaseBadge,
             worktreeWidth,
@@ -2112,7 +2128,7 @@ function renderFleetFooter(
     paint("─".repeat(options.width), "dim", options.color),
     ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
     paint(fit(launchContext, options.width), "dim", options.color),
-    paint(fit(`↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
+    paint(fit(`↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
   ];
   return footer;
 }
@@ -2202,7 +2218,7 @@ function renderHeader(
 
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
-    "pgup/dn page", "ctrl+u/d half", "home/end", "shift+↑↓ reorder", "←→ fold project",
+    "pgup/dn page", "alt+k/j half", "home/end", "shift+↑↓ reorder", "←→ fold project",
     "a add project", "d remove project", "ctrl+w switch views",
     "@ mention", "alt+1–9 open", "esc back/clear",
     "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim", "! shell", "ctrl+s shell popup", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
@@ -2626,7 +2642,7 @@ function renderThreadRow(
   thread: FleetThread,
   state: FleetState,
   options: ResolvedFleetRenderOptions,
-  pullRequestColumn = false,
+  pullRequestWidth = 0,
   leaseBadgeWidth = 0,
   leaseBadge?: LeaseCustodyBadge | undefined,
   worktreeWidth = 0,
@@ -2652,7 +2668,7 @@ function renderThreadRow(
   const statusWidth = 11;
   const fixedWidth = 12 + titleWidth + statusWidth
     + (showIdentity ? identityWidth + 1 : 0)
-    + (pullRequestColumn ? 2 : 0)
+    + (pullRequestWidth === 0 ? 0 : pullRequestWidth + 1)
     + (leaseBadgeWidth === 0 ? 0 : leaseBadgeWidth + 1)
     + (worktreeWidth === 0 ? 0 : worktreeWidth + 1);
   const previewWidth = Math.max(1, options.width - fixedWidth);
@@ -2666,12 +2682,14 @@ function renderThreadRow(
     ...(worktreeWidth === 0
       ? []
       : [paint(pad(fit(worktree ?? "", worktreeWidth), worktreeWidth), "subtle", options.color)]),
-    ...(pullRequestColumn
-      ? [pullRequestCell(options.pullRequests.get(thread.record.cwd), options.color)]
-      : []),
     ...(showIdentity ? [paint(pad(identity, identityWidth), "subtle", options.color)] : []),
     statusText(pad(status, statusWidth), false, options.color),
     paint(pad(preview, previewWidth), "muted", options.color),
+    // The number sits between the preview and the time: right of everything that
+    // says what the thread is doing, left of when it last did it.
+    ...(pullRequestWidth === 0
+      ? []
+      : [pullRequestCell(options.pullRequests.get(thread.record.id), pullRequestWidth, options.color)]),
     padStart(age, 5),
   ].join(" ");
 }
@@ -2730,11 +2748,20 @@ function renderWorkerCoordinationRow(
   return `${rowGutter(false, options.color, scrollbar)}${paint(label, badge?.tone ?? "subtle", options.color)}`;
 }
 
-/** A thread with no known pull request holds the column open and shows nothing. */
-function pullRequestCell(state: PullRequestState | undefined, color: boolean): string {
-  if (state === undefined) return " ";
-  const { glyph, tone } = pullRequestGlyph(state);
-  return paint(glyph, tone, color);
+/**
+ * The pull request a thread's own branch produced, as its number in the colour of
+ * its state. A thread with no known pull request holds the column open and shows
+ * nothing. The number is right-aligned so the column reads as a column even when
+ * one thread is at `#7` and another at `#1204`.
+ */
+function pullRequestCell(
+  summary: PullRequestSummary | undefined,
+  width: number,
+  color: boolean,
+): string {
+  if (summary === undefined) return " ".repeat(width);
+  const label = fit(pullRequestLabel(summary), width);
+  return paint(padStart(label, width), pullRequestTone(summary.state), color);
 }
 
 /**
@@ -3447,7 +3474,15 @@ export async function runFleet(
       }
       snapshot = await collectFleetSnapshot(client);
       state = normalizeState(state, snapshot, Date.now());
-      pullRequestStatus.refresh(snapshot.threads.map(({ record }) => record.cwd));
+      // A thread is asked about by the branch its own work lands on. The declared
+      // workspace branch is the only thing that separates threads sharing one
+      // checkout; a thread without one is answered for by its worktree, or not at
+      // all. Either way the answer is that thread's, not its directory's.
+      pullRequestStatus.refresh(snapshot.threads.map(({ record }) => ({
+        threadId: record.id,
+        cwd: record.cwd,
+        ...(record.workspace?.branch === undefined ? {} : { branch: record.workspace.branch }),
+      })));
       const height = Math.max(16, output.rows ?? 32);
       const width = Math.max(50, output.columns ?? 120);
       if (state.view === "diagnostics") {

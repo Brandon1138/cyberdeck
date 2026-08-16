@@ -22,7 +22,7 @@ import {
   renderPixelArt,
 } from "../../src/client/octopus.js";
 import { displayWidth } from "../../src/client/display-width.js";
-import type { PullRequestState } from "../../src/client/pr-status.js";
+import type { PullRequestState, PullRequestSummary } from "../../src/client/pr-status.js";
 import type { FleetWorkerCoordinationView } from "../../src/broker/worker-coordination-view.js";
 
 const NOW = "2026-07-22T10:00:00.000Z";
@@ -784,16 +784,20 @@ describe("fleet presentation", () => {
   });
 
   describe("pull request column", () => {
-    const first = session({ name: "Ship indicator", cwd: "/repo/one", displayOrder: 0 });
+    const FIRST_ID = "11111111-1111-4111-8111-111111111111";
+    const SECOND_ID = "22222222-2222-4222-8222-222222222222";
+    const first = session({ id: FIRST_ID, name: "Ship indicator", cwd: "/repo/one", displayOrder: 0 });
     const second = session({
-      id: "22222222-2222-4222-8222-222222222222",
+      id: SECOND_ID,
       name: "No branch yet",
       cwd: "/repo/two",
       displayOrder: 1,
     });
     const snapshot = fleet({ record: first }, { record: second });
 
-    const render = (pullRequests: Map<string, PullRequestState>, width = 120): string =>
+    const pr = (state: PullRequestState, number: number): PullRequestSummary => ({ state, number });
+
+    const render = (pullRequests: Map<string, PullRequestSummary>, width = 120): string =>
       renderFleet(snapshot, createFleetState(snapshot), {
         color: false,
         width,
@@ -810,62 +814,79 @@ describe("fleet presentation", () => {
       const rendered = render(new Map());
       const row = rowFor(rendered, "Ship indicator");
 
-      expect(row).not.toMatch(/[●○◆⊘✗]/u);
+      expect(row).not.toMatch(/#\d/u);
       expect(row).toHaveLength(120);
     });
 
-    it("shows a glyph for the thread with a pull request and nothing for the one without", () => {
-      const rendered = render(new Map([["/repo/one", "open" as PullRequestState]]));
+    it("shows the number for the thread with a pull request and nothing for the one without", () => {
+      const rendered = render(new Map([[FIRST_ID, pr("open", 123)]]));
       const withPr = rowFor(rendered, "Ship indicator");
       const withoutPr = rowFor(rendered, "No branch yet");
 
-      expect(withPr).toContain("●");
-      expect(withoutPr).not.toMatch(/[●○◆⊘✗]/u);
+      expect(withPr).toContain("#123");
+      expect(withoutPr).not.toMatch(/#\d/u);
       // The empty cell still holds the column open so rows stay aligned.
       expect(withoutPr).toHaveLength(120);
       expect(withPr).toHaveLength(120);
-      expect(withPr.indexOf("●")).toBe(withoutPr.indexOf("Claude") - 2);
     });
 
-    it("renders a distinct glyph per state", () => {
-      const glyphs: Array<[PullRequestState, string]> = [
-        ["open", "●"],
-        ["draft", "○"],
-        ["merged", "◆"],
-        ["closed", "⊘"],
-        ["checks-failing", "✗"],
-      ];
-      for (const [state, glyph] of glyphs) {
-        const row = rowFor(render(new Map([["/repo/one", state]])), "Ship indicator");
-        expect(row).toContain(glyph);
-      }
+    it("is keyed by thread, so one thread's pull request never lights up another", () => {
+      // Both threads could share a checkout; only the one that owns the branch
+      // the pull request was opened from is credited with it. This is MIK-86.
+      const rendered = render(new Map([[SECOND_ID, pr("open", 88)]]));
+
+      expect(rowFor(rendered, "No branch yet")).toContain("#88");
+      expect(rowFor(rendered, "Ship indicator")).not.toMatch(/#\d/u);
     });
 
-    it("paints each glyph with an existing palette tone", () => {
-      const rendered = renderFleet(snapshot, createFleetState(snapshot), {
-        color: true,
-        width: 120,
-        height: 28,
-        now: NOW_MS,
-        pullRequests: new Map([["/repo/one", "checks-failing" as PullRequestState]]),
-      });
+    it("puts the number between the preview and the time", () => {
+      const rendered = render(new Map([[FIRST_ID, pr("open", 123)]]));
+      const row = rowFor(rendered, "Ship indicator");
 
-      expect(rendered).toContain("\u001b[38;2;217;108;117m✗\u001b[0m");
+      expect(row).toMatch(/#123 +\S+$/u);
+      // Everything the row says about what the thread is doing comes first.
+      expect(row.indexOf("#123")).toBeGreaterThan(row.indexOf("Claude"));
+    });
+
+    it("keeps the column exactly as wide as the widest number on screen", () => {
+      const narrow = render(new Map([[FIRST_ID, pr("open", 7)]]));
+      const wide = render(new Map([[FIRST_ID, pr("open", 7)], [SECOND_ID, pr("merged", 1204)]]));
+
+      // `#7` costs two cells; a `#1204` elsewhere in the fleet widens the column
+      // to five and right-aligns the shorter number under it.
+      expect(rowFor(narrow, "Ship indicator")).toMatch(/[^#]#7 +\S+$/u);
+      expect(rowFor(wide, "Ship indicator")).toMatch(/ {3}#7 +\S+$/u);
+      expect(rowFor(wide, "No branch yet")).toContain("#1204");
+    });
+
+    it("paints the number with the tone of its state", () => {
+      const paintedWith = (state: PullRequestState): string =>
+        renderFleet(snapshot, createFleetState(snapshot), {
+          color: true,
+          width: 120,
+          height: 28,
+          now: NOW_MS,
+          pullRequests: new Map([[FIRST_ID, pr(state, 9)]]),
+        });
+
+      expect(paintedWith("checks-failing")).toContain("\u001b[38;2;217;108;117m#9\u001b[0m");
+      expect(paintedWith("merged")).toContain("\u001b[38;2;198;120;221m#9\u001b[0m");
+      expect(paintedWith("open")).toContain("\u001b[38;2;120;198;121m#9\u001b[0m");
     });
 
     it("keeps the column at narrow widths where the identity column is dropped", () => {
-      const rendered = render(new Map([["/repo/one", "merged" as PullRequestState]]), 60);
+      const rendered = render(new Map([[FIRST_ID, pr("merged", 42)]]), 60);
       const row = rowFor(rendered, "Ship indicator");
 
-      expect(row).toContain("◆");
+      expect(row).toContain("#42");
       expect(row).toHaveLength(60);
       expect(rowFor(rendered, "No branch yet")).toHaveLength(60);
     });
 
-    it("ignores pull request state for worktrees not on screen", () => {
-      const rendered = render(new Map([["/repo/elsewhere", "open" as PullRequestState]]));
+    it("ignores pull request state for threads not on screen", () => {
+      const rendered = render(new Map([["99999999-9999-4999-8999-999999999999", pr("open", 5)]]));
 
-      expect(rowFor(rendered, "Ship indicator")).not.toMatch(/[●○◆⊘✗]/u);
+      expect(rowFor(rendered, "Ship indicator")).not.toMatch(/#\d/u);
     });
   });
 
@@ -1420,7 +1441,7 @@ describe("fleet presentation", () => {
 
     expect(rendered).toContain("ctrl+o to choose");
     expect(rendered.split("\n").at(-1)).toBe(
-      "↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ctrl+x stop agent",
+      "↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ctrl+x stop agent",
     );
   });
 
@@ -1918,7 +1939,7 @@ describe("fleet controls", () => {
       "home",
       "end",
     ]);
-    expect(decoder.push(Buffer.from([0x15, 0x04]))).toEqual(["ctrl+u", "ctrl+d"]);
+    expect(decoder.push("\u001bk\u001bj")).toEqual(["alt+k", "alt+j"]);
   });
 
   it("names Ctrl+V rather than dropping it, and asks for the pasteboard without touching the frame", () => {
@@ -1970,7 +1991,7 @@ describe("fleet controls", () => {
     expect(pageDown.focusedFolderCwd).toBe("/repo/two");
     expect(pageDown.threadListScrollOffset).toBe(2);
 
-    const halfDown = transitionFleet(pageDown, snapshot, "ctrl+d", NOW_MS, 4).state;
+    const halfDown = transitionFleet(pageDown, snapshot, "alt+j", NOW_MS, 4).state;
     expect(halfDown.selectedSessionId).toBe(three.id);
     expect(halfDown.threadListScrollOffset).toBe(4);
 

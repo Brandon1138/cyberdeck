@@ -137,6 +137,8 @@ The palette is cool graphite. Color is reserved for state that demands action, p
 
 **The Reduced-Color Rule.** Truecolor renderers use the palette above. Sixteen-color terminals map needs input to yellow, done to green, working to cyan, failed to red, merged to magenta, an open pull request to green, and muted content to bright black. The selection rule is a plain glyph and the live marker is a filled `•` against a hollow `·`, so both the focused row and the live thread stay visible with color disabled entirely.
 
+The pull-request cell is the one deliberate exception, and it is bounded: it prints the pull request's number, so with color off a row still says *which* pull request its branch produced — the fact an operator acts on — and stops saying what state that pull request is in. State there is carried by hue alone. A glyph column carried the state and could not carry the number, and between the two the number is what an operator can do something with.
+
 ## Typography
 
 **Display Font:** inherited terminal monospace
