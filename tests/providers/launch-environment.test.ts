@@ -73,7 +73,6 @@ describe("provider child environment", () => {
       COLORTERM: SOURCE.COLORTERM,
       SECURITYSESSIONID: SOURCE.SECURITYSESSIONID,
       CLAUDE_CONFIG_DIR: SOURCE.CLAUDE_CONFIG_DIR,
-      ANTHROPIC_BASE_URL: SOURCE.ANTHROPIC_BASE_URL,
       HTTPS_PROXY: SOURCE.HTTPS_PROXY,
       NODE_EXTRA_CA_CERTS: SOURCE.NODE_EXTRA_CA_CERTS,
       CYBERDECK_PROCESS_ROLE: "orchestrator",
@@ -100,9 +99,30 @@ describe("provider child environment", () => {
       "UNRELATED_SENTINEL",
       "CODEX_HOME",
       "OPENAI_BASE_URL",
+      "ANTHROPIC_BASE_URL",
     ]) {
       expect(environment[key]).toBeUndefined();
     }
+  });
+
+  it("withholds ANTHROPIC_BASE_URL from orchestrators only", () => {
+    const worker = buildProviderChildEnvironment({
+      source: SOURCE,
+      provider: "claude",
+      cwd: "/workspace/worker",
+      terminal: "pipe",
+      identity: { role: "worker" },
+    });
+    const session = buildProviderChildEnvironment({
+      source: SOURCE,
+      provider: "claude",
+      cwd: "/workspace/session",
+      terminal: "pty",
+      identity: { role: "session" },
+    });
+
+    expect(worker.ANTHROPIC_BASE_URL).toBe(SOURCE.ANTHROPIC_BASE_URL);
+    expect(session.ANTHROPIC_BASE_URL).toBe(SOURCE.ANTHROPIC_BASE_URL);
   });
 
   it("keeps provider routing in its matching profile only", () => {

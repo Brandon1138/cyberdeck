@@ -99,6 +99,18 @@ const PROVIDER_KEYS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
+ * Claude gates Remote Control to first-party `api.anthropic.com`: under any other
+ * `ANTHROPIC_BASE_URL` the feature-flag evaluation that registers `/remote-control` is skipped
+ * entirely. The operator routes workers through a local compression proxy but drives
+ * orchestrators from a phone, so orchestrator launches go direct while every other role keeps the
+ * inherited routing. Orchestrators also launch with `--setting-sources project,local`, so nothing
+ * re-injects the dropped value from user settings.
+ */
+const ORCHESTRATOR_WITHHELD_KEYS = [
+  "ANTHROPIC_BASE_URL",
+] as const;
+
+/**
  * Build one provider/app-server child environment from reviewed exact-name layers.
  *
  * No source spread, pattern matching, family prefix, or inherit-all path exists. Unknown provider
@@ -112,6 +124,10 @@ export function buildProviderChildEnvironment(
   copyExact(environment, options.source, COMPATIBILITY_KEYS);
   copyExact(environment, options.source, PROVIDER_KEYS[options.provider] ?? []);
   copyExact(environment, options.source, PROXY_AND_TLS_KEYS);
+
+  if (options.identity.role === "orchestrator") {
+    for (const key of ORCHESTRATOR_WITHHELD_KEYS) delete environment[key];
+  }
 
   environment.PWD = options.cwd;
   if (options.terminal === "pty") environment.TERM = "xterm-256color";
