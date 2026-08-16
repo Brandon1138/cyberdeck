@@ -52,6 +52,7 @@ import {
   type SpawnSyncLike,
 } from "./tmux/cockpit.js";
 import {
+  openCheckoutInNvim,
   openWorktreeInNvim,
   selectSession,
   worktreeSubject,
@@ -289,6 +290,32 @@ async function openWorkerWorktree(
   return `${subject} opened in ${opened.paneId} · ${changes}${baseline}${guard}`;
 }
 
+/**
+ * Open a project's primary checkout in the same nvim, with no binding behind it.
+ *
+ * A binding exists to lift a worker's read-only lock when that worker finishes, and a checkout has
+ * no worker of its own to wait for. The threads Fleet is already holding come along so the open can
+ * see whether one of them is running in the checkout: that is what installs the guard on first
+ * contact, rather than inheriting one from a worker row that may never have been opened.
+ */
+async function openMainCheckout(
+  cwd: string,
+  layout: { enabled: boolean; orchestratorSessionIds: readonly string[] },
+  sessions: readonly SessionRecord[],
+): Promise<string> {
+  const { hostPaneId } = preflightCockpit();
+  if (hostPaneId === undefined) {
+    throw Object.assign(
+      new Error("Cyberdeck is not running inside a tmux pane, so there is no window to find nvim in"),
+      { code: "TMUX_PANE_UNKNOWN" },
+    );
+  }
+  const opened = await openCheckoutInNvim({ checkout: cwd, hostPaneId, layout, sessions });
+  const changes = `${opened.entries} change${opened.entries === 1 ? "" : "s"}`;
+  const guard = opened.live ? " · read-only while a worker runs in it" : "";
+  return `${basename(cwd)} checkout opened in ${opened.paneId} · ${changes} · ${opened.baseline.label}${guard}`;
+}
+
 async function runCyberdeck(): Promise<void> {
   let client: RpcClient;
   try {
@@ -318,6 +345,7 @@ async function runCyberdeck(): Promise<void> {
       present: launchCockpit,
     }),
     openWorktree: (session, layout) => openWorkerWorktree(session, client, layout),
+    openCheckout: (cwd, layout, sessions) => openMainCheckout(cwd, layout, sessions),
     nvimLayoutHooks,
   });
 }

@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { BoundedChanges, WorktreeChangeSet } from "./worktree-changes.js";
+import type { BoundedChanges, WorktreeBaseline, WorktreeChangeSet } from "./worktree-changes.js";
 
 /** Exactly the fields nvim's `setqflist`/`setloclist` item dictionaries accept. */
 export interface QuickfixEntry {
@@ -25,6 +25,15 @@ export interface NvimWorktreeRequest {
    * on the nvim side, and it is the same flag the completion refresh flips back.
    */
   live: boolean;
+  /**
+   * What the entries were measured from, in full rather than as the phrase folded into the title.
+   *
+   * The title is written to be read; this is written to be acted on. Cyberdeck is the only side
+   * that knows which rung of the ladder produced the list and which commit that rung resolved to,
+   * so it sends both and leaves how a file is shown against them to the operator's config. See
+   * `docs/architecture/nvim-surface.md` for where that line falls and why.
+   */
+  baseline: WorktreeBaseline;
   entries: readonly QuickfixEntry[];
 }
 
@@ -60,6 +69,7 @@ export function worktreeRequest(options: {
     // there was no repository, and a full one has to say what "changed" was measured from.
     title: `Cyberdeck · ${options.subject} · ${options.changes.baseline.label}${suffix}`,
     live: options.live,
+    baseline: options.changes.baseline,
     entries: quickfixEntries(options.worktree, options.changes),
   };
 }

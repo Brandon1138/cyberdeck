@@ -89,6 +89,7 @@ describe("NvimBindingService", () => {
         worktree: "/work/tree",
         title: "Cyberdeck · worker-one · since origin/main",
         live: false,
+        baseline: FORK_POINT,
         entries: [{ filename: "/work/tree/src/a.ts", lnum: 4, col: 1, text: "fn a() {" }],
       },
     }]);
@@ -144,6 +145,7 @@ describe("NvimBindingService", () => {
         worktree: "/work/tree",
         title: "Cyberdeck · worker-one · since origin/main",
         live: false,
+        baseline: FORK_POINT,
         entries: [{ filename: "/work/tree/src/a.ts", lnum: 4, col: 1, text: "fn a() {" }],
       },
     }]);

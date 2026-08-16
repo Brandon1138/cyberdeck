@@ -321,6 +321,7 @@ export type FleetAction =
   | { type: "caveman-workers"; request: CavemanWorkersRequest }
   | { type: "nvim-layout"; enabled: boolean }
   | { type: "open-worktree"; sessionId: string }
+  | { type: "open-checkout"; cwd: string }
   | { type: "rename"; sessionId: string; name: string }
   | { type: "pin"; sessionId: string }
   | { type: "reorder"; sessionId: string; direction: "up" | "down" }
@@ -437,6 +438,16 @@ export interface FleetRuntimeOptions {
   openWorktree?: ((
     session: SessionRecord,
     layout: { enabled: boolean; orchestratorSessionIds: readonly string[] },
+  ) => Promise<string>) | undefined;
+  /**
+   * Opens a project's primary checkout in that same nvim. No worker owns the checkout, but one can
+   * be running in it, so the threads this client is holding travel with the request: an occupied
+   * checkout has to land locked even when that worker's own row was never opened.
+   */
+  openCheckout?: ((
+    cwd: string,
+    layout: { enabled: boolean; orchestratorSessionIds: readonly string[] },
+    sessions: readonly SessionRecord[],
   ) => Promise<string>) | undefined;
   nvimLayoutHooks?: {
     install(orchestratorSessionIds: readonly string[]): void | Promise<void>;
@@ -1017,6 +1028,21 @@ export function transitionFleet(
   }
 
   if (key === "ctrl+n") {
+    // A folder header names the repository itself, so Ctrl+N there opens its primary checkout —
+    // the one place in a project no worker's worktree reaches, and the reason the operator used to
+    // have to leave Fleet for a one-line manual edit. The Orcs roster and the unregistered bucket
+    // are sections rather than paths, so neither is a checkout to open.
+    if (focusedFolderCwd !== undefined) {
+      if (focusedFolderCwd.startsWith("/@")) {
+        return {
+          state: { ...state, helpOpen: false, notice: "Not a project folder", noticeTone: "warning" },
+        };
+      }
+      return {
+        state: { ...state, helpOpen: false, notice: undefined },
+        action: { type: "open-checkout", cwd: focusedFolderCwd },
+      };
+    }
     // An Orc's cwd is the workspace it coordinates from, not a worktree an agent is rewriting, so
     // there is nothing there to land on and nothing to protect from co-editing.
     if (selected === undefined || selected.record.kind === "orchestrator") {
@@ -2391,7 +2417,7 @@ function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
     "pgup/dn page", "alt+k/j half", "home/end", "shift+↑↓ reorder", "←→ fold project",
     "a add project", "d remove project", "ctrl+w switch views",
     "@ mention", "alt+1–9 open", "esc back/clear",
-    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim", "! shell", "ctrl+s shell popup", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
+    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim (folder: main checkout)", "! shell", "ctrl+s shell popup", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
   ];
   // Wrapping by a count rather than fixed slices is what keeps the last row from silently
   // swallowing every entry added since: a new shortcut costs a row, never another key's visibility.
@@ -3513,6 +3539,24 @@ export async function runFleet(
           }),
           noticeTone: "neutral",
         };
+      } else if (action?.type === "open-checkout") {
+        if (runtime.openCheckout === undefined) {
+          throw new Error("nvim worktree navigation is unavailable in this client");
+        }
+        state = {
+          ...state,
+          notice: await runtime.openCheckout(
+            action.cwd,
+            {
+              enabled: state.nvimLayoutEnabled,
+              orchestratorSessionIds: layoutOrchestratorSessionIds(snapshot),
+            },
+            // Every thread, not the folder's own rows: which of them is running *in* the checkout is
+            // the open's question to answer, and it answers it from the same truth Fleet renders.
+            snapshot.threads.map(({ record }) => record),
+          ),
+          noticeTone: "neutral",
+        };
       } else if (action?.type === "attach-clipboard-image") {
         const image = await pasteboardImage();
         if (image !== undefined) {
@@ -3648,6 +3692,7 @@ export async function runFleet(
         && action.type !== "nvim-layout"
         && action.type !== "delete"
         && action.type !== "open-worktree"
+        && action.type !== "open-checkout"
         && action.type !== "attach-clipboard-image"
         && action.type !== "project-add"
         && action.type !== "project-remove"

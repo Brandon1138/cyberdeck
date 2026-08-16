@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { decodeNvimPayload } from "../../src/nvim/quickfix.js";
 import {
+  CHECKOUT_IDENTITY_PREFIX,
   isWorkerLive,
+  openCheckoutInNvim,
   openWorktreeInNvim,
   selectSession,
   worktreeSubject,
@@ -125,6 +127,7 @@ describe("openWorktreeInNvim", () => {
       worktree: "/work/tree",
       title: "Cyberdeck · worker-one · since origin/main",
       live: true,
+      baseline: FORK_POINT,
       entries: [{ filename: "/work/tree/src/a.ts", lnum: 7, col: 1, text: "fn a() {" }],
     });
   });
@@ -230,6 +233,111 @@ describe("openWorktreeInNvim", () => {
     expect(String(thrown)).toContain("/work/cleaned-up");
     // Nothing was spawned and no pane was even looked for: an nvim started only to be told the
     // worktree is gone is a pane the operator now has to close by hand.
+    expect(calls).toEqual([]);
+  });
+
+  it("opens a repository's main checkout unlocked, under an identity no session id can take", async () => {
+    const { calls, spawnSync } = tmuxAndNvim();
+
+    const opened = await openCheckoutInNvim({
+      checkout: "/code/ammo",
+      hostPaneId: "%1",
+      spawnSync,
+      uid: 501,
+      worktreeExists: () => true,
+      changes: async () => ({
+        changes: [{ path: "Package.swift", line: 3, text: "changed" }],
+        dropped: 0,
+        baseline: FORK_POINT,
+      }),
+    });
+
+    expect(opened).toEqual({
+      checkout: "/code/ammo",
+      paneId: "%2",
+      address: "/tmp/cyberdeck-nvim-501/pane-2.sock",
+      entries: 1,
+      live: false,
+      baseline: FORK_POINT,
+    });
+
+    const nvimCall = calls.find(({ command }) => command === "nvim");
+    const payload = /\.open\('([A-Za-z0-9+/=]+)'\)$/u.exec(nvimCall?.args[3] ?? "")?.[1] ?? "";
+    const request = decodeNvimPayload(payload);
+    // A checkout that reused a worker's identity would release that worker's files the moment the
+    // operator opened the repository beside it.
+    expect(request.session).toBe("checkout:/code/ammo");
+    expect(request.session.startsWith(CHECKOUT_IDENTITY_PREFIX)).toBe(true);
+    expect(request.live).toBe(false);
+    expect(request.title).toBe("Cyberdeck · ammo · since origin/main");
+  });
+
+  it("locks a checkout a live worker is running in, even when that worker's row was never opened", async () => {
+    const { calls, spawnSync } = tmuxAndNvim();
+
+    const opened = await openCheckoutInNvim({
+      checkout: "/code/ammo",
+      hostPaneId: "%1",
+      spawnSync,
+      uid: 501,
+      worktreeExists: () => true,
+      // The nvim module learns guards from live opens alone, so this worker has installed none: the
+      // guard has to be standing on this first contact or the checkout lands writable under it.
+      sessions: [session({ cwd: "/code/ammo", executionState: "active" })],
+      changes: async () => ({ changes: [], dropped: 0, baseline: FORK_POINT }),
+    });
+
+    expect(opened.live).toBe(true);
+
+    const nvimCall = calls.find(({ command }) => command === "nvim");
+    const payload = /\.open\('([A-Za-z0-9+/=]+)'\)$/u.exec(nvimCall?.args[3] ?? "")?.[1] ?? "";
+    const request = decodeNvimPayload(payload);
+    expect(request.live).toBe(true);
+    // Still the checkout's own identity: a guard keyed by the worker's would be dropped by that
+    // worker's completion refresh, and a checkout has no binding to send one.
+    expect(request.session).toBe("checkout:/code/ammo");
+  });
+
+  it("leaves a checkout unlocked when the worker in it is finished, or is working elsewhere", async () => {
+    const { spawnSync } = tmuxAndNvim();
+    const open = (sessions: readonly SessionRecord[]) => openCheckoutInNvim({
+      checkout: "/code/ammo",
+      hostPaneId: "%1",
+      spawnSync,
+      uid: 501,
+      worktreeExists: () => true,
+      sessions,
+      changes: async () => ({ changes: [], dropped: 0, baseline: FORK_POINT }),
+    });
+
+    expect((await open([session({ cwd: "/code/ammo", executionState: "exited" })])).live).toBe(false);
+    // A worker in a worktree nested under the checkout keeps its own guard over its own tree.
+    // Locking the whole repository for it would cost the manual edit this open exists for.
+    expect((await open([session({ cwd: "/code/ammo/worktrees/y" })])).live).toBe(false);
+    expect((await open([session({ cwd: "/code/other" })])).live).toBe(false);
+    expect((await open([])).live).toBe(false);
+    // One directory, two spellings.
+    expect((await open([session({ cwd: "/code/ammo/" })])).live).toBe(true);
+  });
+
+  it("refuses a checkout that is gone, in the words of the thing that was asked for", async () => {
+    const { calls, spawnSync } = tmuxAndNvim();
+    let thrown: unknown;
+
+    try {
+      await openCheckoutInNvim({
+        checkout: "/code/moved-away",
+        hostPaneId: "%1",
+        spawnSync,
+        uid: 501,
+        worktreeExists: () => false,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect((thrown as { code?: string }).code).toBe("CHECKOUT_MISSING");
+    expect(String(thrown)).toContain("/code/moved-away");
     expect(calls).toEqual([]);
   });
 

@@ -113,8 +113,11 @@ describe("diffBaseline", () => {
   it("diffs the working tree against the fork point with the default branch", async () => {
     const { git } = repository({ defaultBranch: "origin/main", head: "aaa", forkPoint: "base" });
 
+    // The revision travels beside the label: nvim can say "since origin/main" from the label, but
+    // it can only show a file against that baseline if it is told which commit the phrase resolved
+    // to — and told once, so a branch moving underneath does not change the answer.
     expect(await diffBaseline(git)).toEqual({
-      baseline: { kind: "fork-point", label: "since origin/main" },
+      baseline: { kind: "fork-point", label: "since origin/main", rev: "base" },
       args: ["diff", "--no-ext-diff", "--unified=0", "base", "--"],
     });
   });
@@ -139,9 +142,20 @@ describe("diffBaseline", () => {
     const { git } = repository({ defaultBranch: "origin/main", head: "same", forkPoint: "same" });
 
     expect(await diffBaseline(git)).toEqual({
-      baseline: { kind: "uncommitted", label: "uncommitted only" },
-      args: ["diff", "--no-ext-diff", "--unified=0", "HEAD", "--"],
+      baseline: { kind: "uncommitted", label: "uncommitted only", rev: "same" },
+      args: ["diff", "--no-ext-diff", "--unified=0", "same", "--"],
     });
+  });
+
+  it("diffs from the resolved head, so a commit landing mid-plan cannot move the baseline", async () => {
+    // The live worker commits between `rev-parse HEAD` answering and the diff running. A literal
+    // `HEAD` in the arguments would resolve to the new commit while `baseline.rev` still named the
+    // old one, and the list and `:CyberdeckDiff` would then be measured from different revisions.
+    const { git } = repository({ defaultBranch: "origin/main", head: "before", forkPoint: "before" });
+    const plan = await diffBaseline(git);
+
+    expect(plan.args).not.toContain("HEAD");
+    expect(plan.args).toContain(plan.baseline.rev);
   });
 
   it("keeps showing a squash-merged branch in full, because a squash leaves the fork point alone", async () => {
@@ -186,7 +200,7 @@ describe("collectWorktreeChanges", () => {
         { path: "new.ts", line: 1, text: "untracked" },
       ],
       dropped: 0,
-      baseline: { kind: "fork-point", label: "since origin/main" },
+      baseline: { kind: "fork-point", label: "since origin/main", rev: "base" },
     });
   });
 

@@ -97,6 +97,16 @@ export interface WorktreeBaseline {
   kind: WorktreeBaselineKind;
   /** Short enough to sit in a title beside the worker's name. */
   label: string;
+  /**
+   * The revision the change list was measured against, when the rung has one.
+   *
+   * The label says *which* baseline in words; this says which commit, so the nvim side can show a
+   * file against it rather than only listing that it moved. It is a resolved object name rather
+   * than a ref name — `HEAD` and a branch tip both move while the operator is reading — so a diff
+   * taken minutes later is still the diff the list described. Absent on the rungs with nothing to
+   * compare against, which is why nvim has to check rather than assume.
+   */
+  rev?: string;
 }
 
 const NO_BASELINE: WorktreeBaseline = { kind: "none", label: "no baseline" };
@@ -146,10 +156,16 @@ export async function diffBaseline(git: GitOutput): Promise<DiffPlan> {
   ]);
   if (forkPoint === "" || head === "") return { baseline: NO_BASELINE };
   if (forkPoint === head) {
-    return { baseline: UNCOMMITTED, args: ["diff", "--no-ext-diff", "--unified=0", "HEAD", "--"] };
+    return {
+      baseline: { ...UNCOMMITTED, rev: head },
+      // The resolved commit rather than the literal `HEAD`, for the same reason `rev` is resolved at
+      // all: the worker can commit between this plan being made and the diff being run, and a `HEAD`
+      // that moved would measure the list from one revision while `:CyberdeckDiff` shows another.
+      args: ["diff", "--no-ext-diff", "--unified=0", head, "--"],
+    };
   }
   return {
-    baseline: { kind: "fork-point", label: `since ${defaultBranch}` },
+    baseline: { kind: "fork-point", label: `since ${defaultBranch}`, rev: forkPoint },
     args: ["diff", "--no-ext-diff", "--unified=0", forkPoint, "--"],
   };
 }
