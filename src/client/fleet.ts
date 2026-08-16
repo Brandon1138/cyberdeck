@@ -136,10 +136,22 @@ export interface StopAcknowledgement {
   sessionId: string;
 }
 
+/**
+ * Which row of the target step holds focus, by durable identity rather than by row number.
+ *
+ * The ctrl+x ladder needs three presses against one orchestrator, and the snapshot is refreshed
+ * between them: stopping a row rewrites its state and its `updatedAt`, so the list it sits in is
+ * re-labelled and re-ordered under the operator's hand. A row number would silently follow
+ * whatever slid into the slot; a session id cannot.
+ */
+export type OrchestratorPickerFocus =
+  | { kind: "existing"; sessionId: string }
+  | { kind: "profile"; modelIndex: number };
+
 export type OrchestratorPickerState =
   | {
     step: "target";
-    choiceIndex: number;
+    focus: OrchestratorPickerFocus;
     /** Mirrors the fleet list's ctrl+x ladder, scoped to the picker's own selection. */
     stopAcknowledgement?: StopAcknowledgement | undefined;
     deleteConfirmation?: DeleteConfirmation | undefined;
@@ -2217,10 +2229,7 @@ function transitionOrchestratorPicker(
       state: {
         ...state,
         orchestratorPicker: picker.step === "effort"
-          ? {
-              step: "target",
-              choiceIndex: existingOrchestrators(snapshot).length + picker.modelIndex,
-            }
+          ? { step: "target", focus: { kind: "profile", modelIndex: picker.modelIndex } }
           : undefined,
         notice: undefined,
       },
@@ -2230,16 +2239,17 @@ function transitionOrchestratorPicker(
   if (key === "up" || key === "down") {
     const delta = key === "up" ? -1 : 1;
     if (picker.step === "target") {
+      const existing = existingOrchestrators(snapshot);
+      const current = orchestratorFocusIndex(picker.focus, existing);
+      // An unresolved focus — its orchestrator was deleted from under the picker — is rescued onto
+      // the first row rather than moved relative to a position it no longer has.
+      const index = current < 0
+        ? 0
+        : boundedIndex(current + delta, existing.length + ORCHESTRATOR_MODEL_CHOICES.length);
       return {
         state: {
           ...state,
-          orchestratorPicker: {
-            ...picker,
-            choiceIndex: boundedIndex(
-              picker.choiceIndex + delta,
-              existingOrchestrators(snapshot).length + ORCHESTRATOR_MODEL_CHOICES.length,
-            ),
-          },
+          orchestratorPicker: { ...picker, focus: orchestratorFocusAt(index, existing) },
         },
       };
     }
@@ -2259,7 +2269,10 @@ function transitionOrchestratorPicker(
   // ctrl+x — this is a second place to reach it, not a second way to do it. A "New orchestrator"
   // row has no session to stop, so the key is inert there.
   if (key === "ctrl+x" && picker.step === "target") {
-    const selectedExisting = existingOrchestrators(snapshot)[picker.choiceIndex];
+    const focus = picker.focus;
+    if (focus.kind !== "existing") return { state };
+    const selectedExisting = existingOrchestrators(snapshot)
+      .find((record) => record.id === focus.sessionId);
     if (selectedExisting === undefined) return { state };
     const terminal = isTerminalSession(selectedExisting);
     const stopAcknowledged = picker.stopAcknowledgement?.sessionId === selectedExisting.id;
@@ -2305,9 +2318,13 @@ function transitionOrchestratorPicker(
 
   if (key !== "enter") return { state };
   if (picker.step === "target") {
+    const focus = picker.focus;
     const existing = existingOrchestrators(snapshot);
-    const selectedExisting = existing[picker.choiceIndex];
-    if (selectedExisting !== undefined) {
+    if (focus.kind === "existing") {
+      const selectedExisting = existing.find((record) => record.id === focus.sessionId);
+      // The row was deleted between the keypress and this snapshot. Enter opens nothing rather
+      // than the orchestrator that inherited the position.
+      if (selectedExisting === undefined) return { state };
       if (selectedExisting.attachmentState === "controlled") {
         return {
           state: {
@@ -2317,6 +2334,8 @@ function transitionOrchestratorPicker(
           },
         };
       }
+      // A terminal row is joined, not ignored: Enter resumes it and focuses the cockpit, which is
+      // exactly what Enter on a terminal thread does in the fleet list.
       return {
         state: {
           ...state,
@@ -2333,7 +2352,7 @@ function transitionOrchestratorPicker(
         },
       };
     }
-    const modelIndex = picker.choiceIndex - existing.length;
+    const modelIndex = focus.modelIndex;
     const choice = ORCHESTRATOR_MODEL_CHOICES[modelIndex];
     if (choice === undefined) {
       return {
@@ -2390,21 +2409,22 @@ function renderOrchestratorPicker(
   let destructiveHint: string | undefined;
   if (picker.step === "target") {
     const existing = existingOrchestrators(snapshot);
+    const focusIndex = orchestratorFocusIndex(picker.focus, existing);
     lines.push("Existing orchestrators", "");
     if (existing.length === 0) {
       lines.push(paint("  No interactive orchestrators", "dim", options.color));
     } else {
       lines.push(...existing.map((record, index) =>
-        pickerRow(existingOrchestratorLabel(record, options.color), index === picker.choiceIndex, options.color)));
+        pickerRow(existingOrchestratorLabel(record, options.color), index === focusIndex, options.color)));
     }
     lines.push("", "New orchestrator", "");
     lines.push(...ORCHESTRATOR_MODEL_CHOICES.map((choice, index) =>
       pickerRow(
         `${choice.label}  ${paint(choice.provider.label, "dim", options.color)}`,
-        existing.length + index === picker.choiceIndex,
+        existing.length + index === focusIndex,
         options.color,
       )));
-    const selectedExisting = existing[picker.choiceIndex];
+    const selectedExisting = existing[focusIndex];
     if (selectedExisting !== undefined) {
       destructiveHint = isTerminalSession(selectedExisting)
         && picker.stopAcknowledgement?.sessionId === selectedExisting.id
@@ -2450,28 +2470,45 @@ function orchestratorSelection(picker: Extract<OrchestratorPickerState, { step: 
   };
 }
 
-function initialOrchestratorPicker(_snapshot: FleetSnapshot, _cwd: string): OrchestratorPickerState {
-  return { step: "target", choiceIndex: 0 };
+function initialOrchestratorPicker(snapshot: FleetSnapshot, _cwd: string): OrchestratorPickerState {
+  return { step: "target", focus: orchestratorFocusAt(0, existingOrchestrators(snapshot)) };
 }
 
+/** Where a focus sits in the picker's combined row order, or -1 when its orchestrator is gone. */
+function orchestratorFocusIndex(
+  focus: OrchestratorPickerFocus,
+  existing: readonly SessionRecord[],
+): number {
+  return focus.kind === "profile"
+    ? existing.length + focus.modelIndex
+    : existing.findIndex((record) => record.id === focus.sessionId);
+}
+
+/** The inverse: the durable focus a row position names, so navigation never stores a position. */
+function orchestratorFocusAt(
+  index: number,
+  existing: readonly SessionRecord[],
+): OrchestratorPickerFocus {
+  const record = existing[index];
+  return record === undefined
+    ? { kind: "profile", modelIndex: Math.max(0, index - existing.length) }
+    : { kind: "existing", sessionId: record.id };
+}
+
+/**
+ * Every orchestrator the broker still holds, live or terminal, in the fleet list's own order.
+ *
+ * Terminal rows stay until they are deleted, exactly as they do in the fleet list. Filtering them
+ * out broke the ctrl+x ladder on the real broker: `SessionRegistry.stop()` moves a live
+ * orchestrator to cancelled/stopping on the first press, so the row vanished before the second
+ * press could arm the delete and the third could run it. A row that cannot be reached is a row
+ * that cannot be cleaned up, so retention is now the whole record set and the label carries the
+ * state instead.
+ */
 function existingOrchestrators(snapshot: FleetSnapshot): SessionRecord[] {
   return orderedThreads(snapshot)
     .map(({ record }) => record)
-    .filter((record) =>
-      record.kind === "orchestrator"
-      && record.role === "orchestrator"
-      && (
-        record.executionState === "active"
-        // A `starting` orc is healthy and already the operator's; leaving it out of the picker
-        // is what made them start a second one while the first was still coming up.
-        || record.executionState === "starting"
-        || (
-          record.executionState === "cancelled"
-          // `done` joins `interrupted` here because a broker shutdown now preserves the outcome of
-          // an orchestrator that had finished its turn; it is still reconnectable.
-          && (record.attentionState === "interrupted" || record.attentionState === "done")
-        )
-      ));
+    .filter((record) => record.kind === "orchestrator" && record.role === "orchestrator");
 }
 
 function existingOrchestratorLabel(record: SessionRecord, color: boolean): string {
@@ -2484,8 +2521,19 @@ function existingOrchestratorLabel(record: SessionRecord, color: boolean): strin
       ? paint("available", "green", color)
       : record.executionState === "starting"
         ? paint("starting", "green", color)
-        : paint("reconnect", "yellow", color);
+        // Anything else wears its own outcome rather than a join affordance. A stopped orchestrator
+        // sits in this list until it is deleted, and must not read as one waiting to be joined.
+        : paint(terminalOrchestratorState(record), "dim", color);
   return `${name}  ${paint(record.id.slice(0, 8), "dim", color)}  ${lifecycle}`;
+}
+
+/**
+ * The fleet list's own status vocabulary, lowercased for a picker row. Only non-active records
+ * reach it, so the `active` branch of {@link threadStatus} — the one that reads the terminal
+ * replay — is unreachable and the empty replay below is never consulted.
+ */
+function terminalOrchestratorState(record: SessionRecord): string {
+  return threadStatus({ record, replay: "" }).toLowerCase();
 }
 
 function pickerRow(value: string, selected: boolean, color: boolean): string {
@@ -3031,10 +3079,13 @@ export async function runFleet(
           0,
           orderedThreads(snapshot).findIndex(({ record }) => record.id === action.sessionId),
         );
-        // The picker walks a shorter list by numeric position, not by durable id, so its own
-        // position has to be carried across the delete separately from the fleet list's.
+        // Deleting the focused row is the one moment the picker's focus cannot survive as an id.
+        // Its position in the pre-delete list is read here so focus can land on the neighbour the
+        // row leaves behind, and is turned straight back into an id below.
         const picker = state.orchestratorPicker;
         const pickerIndex = picker?.step === "target"
+          && picker.focus.kind === "existing"
+          && picker.focus.sessionId === action.sessionId
           ? existingOrchestrators(snapshot).findIndex((record) => record.id === action.sessionId)
           : -1;
         await client.request("session.delete", { sessionId: action.sessionId });
@@ -3050,9 +3101,13 @@ export async function runFleet(
             ? {
                 orchestratorPicker: {
                   ...picker,
-                  choiceIndex: remainingExisting[pickerIndex] !== undefined
-                    ? pickerIndex
-                    : Math.max(0, pickerIndex - 1),
+                  focus: orchestratorFocusAt(
+                    remainingExisting[pickerIndex] !== undefined
+                      ? pickerIndex
+                      : Math.max(0, pickerIndex - 1),
+                    remainingExisting,
+                  ),
+                  stopAcknowledgement: undefined,
                   deleteConfirmation: undefined,
                 },
               }
@@ -3750,9 +3805,45 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
     stopAcknowledgement,
     deleteConfirmation,
     quitConfirmation,
+    ...(state.orchestratorPicker === undefined
+      ? {}
+      : { orchestratorPicker: normalizeOrchestratorPicker(state.orchestratorPicker, snapshot, now) }),
     ...(confirmationExpired
       ? { notice: undefined }
       : {}),
+  };
+}
+
+/**
+ * Carry the picker across a snapshot refresh.
+ *
+ * The focus itself is durable, so nothing has to be re-derived from a row number; the only work is
+ * rescuing a focus whose orchestrator was deleted, and dropping a stop acknowledgement or a delete
+ * confirmation that is no longer the focused row's — the same rules the fleet list applies to its
+ * own copies of that ladder state.
+ */
+function normalizeOrchestratorPicker(
+  picker: OrchestratorPickerState,
+  snapshot: FleetSnapshot,
+  now: number,
+): OrchestratorPickerState {
+  if (picker.step !== "target") return picker;
+  const existing = existingOrchestrators(snapshot);
+  const focus = orchestratorFocusIndex(picker.focus, existing) < 0
+    ? orchestratorFocusAt(0, existing)
+    : picker.focus;
+  const focusedId = focus.kind === "existing" ? focus.sessionId : undefined;
+  return {
+    ...picker,
+    focus,
+    stopAcknowledgement: picker.stopAcknowledgement?.sessionId === focusedId
+      ? picker.stopAcknowledgement
+      : undefined,
+    deleteConfirmation: picker.deleteConfirmation !== undefined
+      && picker.deleteConfirmation.sessionId === focusedId
+      && picker.deleteConfirmation.expiresAt > now
+      ? picker.deleteConfirmation
+      : undefined,
   };
 }
 
