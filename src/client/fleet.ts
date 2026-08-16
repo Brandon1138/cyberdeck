@@ -4930,7 +4930,7 @@ function grantToggleNotice(
 }
 
 function cavemanWorkersNotice(result: CavemanWorkersResult): string {
-  return `Caveman workers: ${result.enabled ? "ON" : "OFF"} · box default · new workers`;
+  return `Caveman workers: ${result.enabled ? "ON" : "OFF"} · box default · orchestrator-spawned workers`;
 }
 
 function shortPath(path: string, home: string): string {

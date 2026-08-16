@@ -641,15 +641,15 @@ export class BrokerServer {
     return this.options.controlPlane;
   }
 
-  private async withSessionWorkerMode<T extends z.infer<typeof StartSessionRequestSchema>>(
-    request: T,
-  ): Promise<T> {
+  /**
+   * `session.start`/`session.startWithPrompt` is the composer path: the operator launches and
+   * drives it by hand. It is always eloquent, regardless of the box `caveman-workers` preference
+   * — that preference scopes orchestrator spawns (`AgentControlService.startWorker`) only
+   * (MIK-79). An explicit `workerMode` on the request still wins, unchanged from before.
+   */
+  private withSessionWorkerMode<T extends z.infer<typeof StartSessionRequestSchema>>(request: T): T {
     if ((request.kind ?? "worker") !== "worker" || request.workerMode !== undefined) return request;
-    const preferences = await this.options.workerPreferences?.get();
-    return {
-      ...request,
-      workerMode: preferences?.caveman === true ? "caveman" : "normal",
-    };
+    return { ...request, workerMode: "normal" };
   }
 
   private async withJobWorkerMode<T extends z.infer<typeof SubmitJobParamsSchema>["request"]>(
