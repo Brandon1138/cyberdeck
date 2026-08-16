@@ -272,7 +272,10 @@ describe("BrokerServer", () => {
     }
   });
 
-  it("persists Caveman mode without an Orc and injects it into new worker tasks", async () => {
+  it("keeps a composer-launched worker eloquent even with an enabled Caveman preference (MIK-79)", async () => {
+    // `session.startWithPrompt` is Fleet's manual composer path: the operator launches and reads
+    // it by hand. The box `caveman-workers` preference scopes orchestrator spawns only, so this
+    // worker stays normal even though the preference persists as enabled for the box.
     const { server, socketPath, ptyFactory, workerPreferences } = await harness();
     const client = await TestClient.open(socketPath);
     try {
@@ -288,9 +291,9 @@ describe("BrokerServer", () => {
         initialPrompt: "Describe the result",
       });
 
-      expect(worker.workerMode).toBe("caveman");
-      expect(ptyFactory.mock.calls[0]?.[0].args[0]).toContain("CAVEMAN MODE ACTIVE");
-      expect(ptyFactory.mock.calls[0]?.[0].args[0]).toContain("WORKER TASK\nDescribe the result");
+      expect(worker.workerMode).toBe("normal");
+      expect(ptyFactory.mock.calls[0]?.[0].args[0]).not.toContain("CAVEMAN MODE ACTIVE");
+      expect(ptyFactory.mock.calls[0]?.[0].args[0]).toContain("Describe the result");
       await expect(workerPreferences.get()).resolves.toEqual({ caveman: true });
     } finally {
       client.socket.destroy();

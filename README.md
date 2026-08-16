@@ -97,9 +97,10 @@ Fleet controls:
   control over autonomous Cursor workers. It is a separate grant from Fable's: a Cursor Fable slug
   such as `claude-fable-5-high` requires both to be on.
 - Enter `/caveman-workers status`, `/caveman-workers on`, or `/caveman-workers off` to control the
-  durable, default-off box preference for subsequently started workers. It is independent of Orc
-  bindings and survives broker and Orc replacement. An optional box skill supplies the full policy;
-  Cyberdeck uses a compact built-in fallback when that skill is absent.
+  durable, default-off box preference for orchestrator-spawned workers. Composer-launched workers
+  (started from Fleet's bottom composer) always use normal mode, regardless of this preference. It
+  is independent of Orc bindings and survives broker and Orc replacement. An optional box skill
+  supplies the full policy; Cyberdeck uses a compact built-in fallback when that skill is absent.
 - Type a task in the persistent bottom composer and press `Enter`: start a new thread using the
   visible model, effort, sandbox, and project context, then attach to its native TUI.
 - `?`: toggle the shortcut panel. It documents reorder, view switch, rename, multiline, pin, numbered

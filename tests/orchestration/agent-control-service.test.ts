@@ -714,6 +714,30 @@ describe("AgentControlService", () => {
     }), "Inspect");
   });
 
+  it("lets a per-spawn workerMode opt an orchestrator spawn out of an enabled Caveman preference (MIK-79)", async () => {
+    const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+      { get: vi.fn(async () => ({ caveman: true })) } as never,
+    );
+
+    await service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd: "/repo/one",
+      prompt: "Inspect",
+      workerMode: "normal",
+    });
+
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "worker",
+      workerMode: "normal",
+    }), "Inspect");
+  });
+
   it("denies Fable workers until the operator grant is enabled", async () => {
     const start = vi.fn();
     const service = new AgentControlService(
