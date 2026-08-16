@@ -186,6 +186,57 @@ describe("validateWorkerWorkspace, pre-provisioned", () => {
     if (check.ok) return;
     expect(check.code).toBe("WORKSPACE_BASE_REF_UNRESOLVED");
   });
+
+  // MIK-90: a worker started with a pre-provisioned linked worktree fell into Fleet's
+  // "Unregistered" section, because the declared workspace carried no repositoryPath and nothing
+  // filled it in — unlike a cyberdeck-provisioned worktree, whose repositoryPath the provisioner
+  // resolves itself. `sectionPath` in the Fleet client groups a thread by `workspace.repositoryPath`
+  // when it is present, so resolving it here is what a linked worktree needs to group correctly.
+  it("resolves repositoryPath from the worktree's git-common-dir when the caller declared none", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace,
+      cwd: worktreePath,
+      sandbox: "workspace-write",
+      probe: probeFor({
+        worktreeRoot: worktreePath,
+        checkedOutBranch: "brandon/mik-70",
+        gitCommonDirectory: "/repo/.git",
+        refs: ["main"],
+      }),
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.value.repositoryPath).toBe("/repo");
+  });
+
+  it("keeps a repositoryPath the caller already declared rather than re-deriving it", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace: { ...workspace, repositoryPath: "/declared/repo" },
+      cwd: worktreePath,
+      sandbox: "workspace-write",
+      probe: probeFor({
+        worktreeRoot: worktreePath,
+        checkedOutBranch: "brandon/mik-70",
+        gitCommonDirectory: "/repo/.git",
+        refs: ["main"],
+      }),
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.value.repositoryPath).toBe("/declared/repo");
+  });
+
+  it("leaves repositoryPath undefined when the probe cannot answer, rather than failing the start", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace,
+      cwd: worktreePath,
+      sandbox: "workspace-write",
+      probe,
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.value.repositoryPath).toBeUndefined();
+  });
 });
 
 describe("validateWorkerWorkspace, worker-provisioned", () => {

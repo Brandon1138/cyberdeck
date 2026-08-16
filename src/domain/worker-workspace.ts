@@ -334,7 +334,36 @@ export async function validateWorkerWorkspace(
       message: `Base ref ${workspace.baseRef} does not resolve in ${worktreePath}`,
     };
   }
-  return shape;
+  // A pre-provisioned worktree already exists, so its repository is knowable the same way git
+  // knows it, rather than left to whatever the caller happened to declare. Filling it in here is
+  // what lets a worktree Cyberdeck never provisioned still group under its repository's Fleet
+  // section instead of falling to Unregistered (MIK-90).
+  const repositoryPath = workspace.repositoryPath
+    ?? await repositoryPathFromWorktree(worktreePath, probe);
+  return {
+    ok: true,
+    value: repositoryPath === undefined ? workspace : { ...workspace, repositoryPath },
+  };
+}
+
+/**
+ * The repository a worktree belongs to, read from git's own bookkeeping rather than the path it
+ * happens to sit at.
+ *
+ * Every worktree of a repository — the primary checkout and every linked one — reports the same
+ * `--git-common-dir`. Its parent is the repository: for the primary checkout that parent is the
+ * checkout itself (`<root>/.git`), and for a linked worktree it is the sibling directory the
+ * worktree was cut from, whether or not that sibling is a Fleet-registered project root. A common
+ * directory not named `.git` is a bare repository with no working tree to point at instead, so the
+ * worktree path stands as its own answer.
+ */
+async function repositoryPathFromWorktree(
+  worktreePath: string,
+  probe: WorkspaceProbe,
+): Promise<string | undefined> {
+  const commonDir = await probe.gitCommonDirectory(worktreePath);
+  if (commonDir === undefined) return undefined;
+  return basename(commonDir) === ".git" ? dirname(commonDir) : worktreePath;
 }
 
 /**
