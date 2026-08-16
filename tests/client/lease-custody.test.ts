@@ -146,15 +146,20 @@ describe("leaseCustodyBadge", () => {
       .toBeUndefined();
   });
 
-  it("recedes for expected orphans and escalates only for attention and conflict", () => {
-    expect(leaseCustodyBadge({ kind: "orphaned-legacy", legacyOrigin: true }))
-      .toEqual({ label: "legacy", tone: "subtle" });
-    expect(leaseCustodyBadge({ kind: "orphaned-legacy", legacyOrigin: false }))
-      .toEqual({ label: "unowned", tone: "subtle" });
-    expect(leaseCustodyBadge({ kind: "orphaned-adoptable" }))
-      .toEqual({ label: "adoptable", tone: "attention" });
+  it("renders nothing for an unowned lease, whatever an operator could do about it", () => {
+    // No unowned state earns a row tag any more: the operator has no move to make about one, and
+    // the width it took is the width the model and state columns needed. The states themselves
+    // still exist and still read in full through the rollup and the detail line.
+    expect(leaseCustodyBadge({ kind: "orphaned-legacy", legacyOrigin: true })).toBeUndefined();
+    expect(leaseCustodyBadge({ kind: "orphaned-legacy", legacyOrigin: false })).toBeUndefined();
+    expect(leaseCustodyBadge({ kind: "orphaned-adoptable" })).toBeUndefined();
+  });
+
+  it("escalates only for a broker that contradicts itself", () => {
     expect(leaseCustodyBadge({ kind: "conflict-or-anomalous", conflict: true, reason: "x" }))
       .toEqual({ label: "conflict", tone: "alert" });
+    expect(leaseCustodyBadge({ kind: "conflict-or-anomalous", conflict: false, reason: "x" }))
+      .toEqual({ label: "anomaly", tone: "alert" });
   });
 });
 

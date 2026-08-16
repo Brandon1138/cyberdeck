@@ -314,6 +314,37 @@ describe("fleet presentation", () => {
     expect(rendered.indexOf("Middle")).toBeLessThan(rendered.indexOf("Oldest"));
   });
 
+  it("floats every pinned worker above the unpinned ones, however new their activity", () => {
+    // A pin that only broke ties lost its place to the first sibling that reported newer activity,
+    // which is the same as not having pinned at all. The pin outranks recency outright; recency
+    // still orders each group internally.
+    const workerAt = (index: number, name: string, updatedAt: string, pinned?: boolean) => session({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      kind: "worker",
+      role: "worker",
+      cwd: "/repo/one",
+      name,
+      createdAt: "2026-07-22T09:00:00.000Z",
+      updatedAt,
+      ...(pinned === undefined ? {} : { pinned }),
+    });
+    const snapshot = fleet(
+      { record: workerAt(1, "Pinned stale", "2026-07-22T09:10:00.000Z", true) },
+      { record: workerAt(2, "Loud unpinned", "2026-07-22T09:59:00.000Z") },
+      { record: workerAt(3, "Pinned newer", "2026-07-22T09:20:00.000Z", true) },
+      // Explicitly unpinned rather than absent: the two spellings must rank together.
+      { record: workerAt(4, "Quiet unpinned", "2026-07-22T09:30:00.000Z", false) },
+    );
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width: 140, height: 30, now: NOW_MS,
+    });
+    const at = (name: string) => rendered.indexOf(name);
+
+    expect(at("Pinned newer")).toBeLessThan(at("Pinned stale"));
+    expect(at("Pinned stale")).toBeLessThan(at("Loud unpinned"));
+    expect(at("Loud unpinned")).toBeLessThan(at("Quiet unpinned"));
+  });
+
   it("caps a folder at five workers behind a navigable show-more row that expands and closes", () => {
     const snapshot = threadFleet(8);
     const view = { color: false, width: 100, height: 30, now: NOW_MS };
@@ -545,7 +576,7 @@ describe("fleet presentation", () => {
     }));
   }
 
-  it("reduces each worker's lease custody to one badge on its own row", () => {
+  it("tags a worker row only when the broker contradicts itself", () => {
     const snapshot = leaseFleet();
     const rendered = renderFleet(snapshot, createFleetState(snapshot), {
       color: false,
@@ -555,11 +586,13 @@ describe("fleet presentation", () => {
       home: "/Users/brandon",
     });
     const lines = rendered.split("\n");
+    // Every unowned lease is now silent on the row. `legacy` and `adoptable` were on nearly every
+    // worker and named no move the operator could make, so the width goes back to model and state.
     const badges: Record<(typeof LEASE_STATES)[number], string | undefined> = {
       active: undefined,
-      expired: "adoptable",
-      released: "unowned",
-      orphaned: "adoptable",
+      expired: undefined,
+      released: undefined,
+      orphaned: undefined,
       contested: "conflict",
     };
 
@@ -574,7 +607,7 @@ describe("fleet presentation", () => {
     }
   });
 
-  it("paints the badge by severity: dim for expected orphans, alert for conflicts", () => {
+  it("paints the surviving badge in the alert hue", () => {
     const snapshot = leaseFleet();
     const rendered = renderFleet(snapshot, createFleetState(snapshot), {
       color: true,
@@ -587,10 +620,10 @@ describe("fleet presentation", () => {
     const row = (leaseHealth: string) =>
       lines.find((line) => line.includes(`Lease ${leaseHealth}`))!;
 
-    // subtle is bare dim; attention and alert carry the fleet's warning and error hues.
-    expect(row("released")).toContain("\u001b[2munowned");
-    expect(row("orphaned")).toContain("\u001b[38;2;212;168;91madoptable");
     expect(row("contested")).toContain("\u001b[38;2;217;108;117mconflict");
+    // The two tones the unowned states used to wear have nothing left to paint.
+    expect(row("released")).not.toContain("\u001b[2munowned");
+    expect(row("orphaned")).not.toContain("\u001b[38;2;212;168;91madoptable");
   });
 
   it("keeps the five-field custody breakdown behind ctrl+l", () => {
@@ -662,7 +695,7 @@ describe("fleet presentation", () => {
     }
   });
 
-  it("keeps per-row badges when a group's workers disagree", () => {
+  it("keeps the per-row badge on the contradicting worker and nothing on its neighbour", () => {
     const first = "00000000-0000-4000-8000-000000000001";
     const second = "00000000-0000-4000-8000-000000000002";
     const snapshot = fleet(
@@ -677,18 +710,20 @@ describe("fleet presentation", () => {
       },
       {
         record: session({
-          id: second, kind: "worker", role: "worker", name: "Claimable worker", displayOrder: 1,
+          id: second, kind: "worker", role: "worker", name: "Contested worker", displayOrder: 1,
         }),
-        coordination: coordination(second, "orphaned"),
+        coordination: coordination(second, "contested"),
       },
     );
     const lines = renderFleet(snapshot, createFleetState(snapshot), {
       color: false, width: 220, height: 50, now: NOW_MS, home: "/Users/brandon",
     }).split("\n");
 
+    // The two disagree, so the group has no rollup to state — and the row that survives the
+    // disagreement is the one an operator would act on.
     expect(lines.some((line) => line.includes("Workers ("))).toBe(false);
-    expect(lines.find((line) => line.includes("Legacy worker"))!).toContain("legacy");
-    expect(lines.find((line) => line.includes("Claimable worker"))!).toContain("adoptable");
+    expect(lines.find((line) => line.includes("Legacy worker"))!).not.toContain("legacy");
+    expect(lines.find((line) => line.includes("Contested worker"))!).toContain("conflict");
   });
 
   it("skips section headings and lease detail rows during keyboard navigation", () => {
@@ -811,12 +846,53 @@ describe("fleet presentation", () => {
     expect(lines).toContain("  ▾ ~/code/personal/cyberdeck");
     expect(doneLine).toMatch(/^▌ ·/u);
     expect(needsInputLine).toMatch(/^  ·/u);
-    expect(doneLine).toContain("The latest reply begins");
+    // The preview yields to the model column at this width, rather than the other way round:
+    // which agent is on a thread outranks the first words of what it last said.
+    expect(doneLine).toContain("The lates");
+    expect(doneLine).toContain("~Claude Provi");
+    expect(doneLine).toContain("Done");
     expect(doneLine).not.toContain("\n");
     expect(doneLine).toHaveLength(76);
     expect(needsInputLine).toHaveLength(76);
     expect(doneLine).toMatch(/14s$/u);
     expect(needsInputLine).toMatch(/ 2m$/u);
+  });
+
+  it("spends a narrowing row on the model and the state, and drops the worktree name first", () => {
+    // The order columns yield in: the worktree name goes first — the folder above already said
+    // where the thread lives — and the model and the state never go at all. They are what an
+    // operator reads a row for: which agent is on this, and is it moving.
+    const worker = session({
+      id: "22222222-2222-4222-8222-222222222222",
+      kind: "worker",
+      role: "worker",
+      cwd: "/repo-mik-76",
+      name: "A worker whose name is far wider than a split pane",
+      model: "opus",
+      attentionState: "done",
+      workspace: {
+        worktreePath: "/repo-mik-76",
+        repositoryPath: "/repo",
+        branch: "cyberdeck/mik-76",
+        baseRef: "HEAD",
+        provisioning: "cyberdeck-provisioned",
+        writableRoots: [],
+      },
+    });
+    const snapshot: FleetSnapshot = { ...fleet({ record: worker }), projects: ["/repo"] };
+    const rowAt = (width: number) => renderFleet(snapshot, createFleetState(snapshot), {
+      color: false, width, height: 30, now: NOW_MS,
+    }).split("\n").find((line) => line.includes("Claude Opus"))!;
+
+    const wide = rowAt(140);
+    expect(wide).toContain("repo-mik-76");
+    expect(wide).toContain("Done");
+
+    // 50 columns is a Fleet pane split twice over — the narrowest the list is expected to render.
+    const narrow = rowAt(50);
+    expect(narrow).not.toContain("repo-mik-76");
+    expect(narrow).toContain("Done");
+    expect(narrow.length).toBeLessThanOrEqual(50);
   });
 
   describe("pull request column", () => {
@@ -910,19 +986,58 @@ describe("fleet presentation", () => {
       expect(paintedWith("open")).toContain("\u001b[38;2;120;198;121m#9\u001b[0m");
     });
 
-    it("keeps the column at narrow widths where the identity column is dropped", () => {
+    it("keeps the column at narrow widths, where the title is what yields instead", () => {
       const rendered = render(new Map([[FIRST_ID, pr("merged", 42)]]), 60);
-      const row = rowFor(rendered, "Ship indicator");
+      const row = rowFor(rendered, "Ship indic");
 
       expect(row).toContain("#42");
       expect(row).toHaveLength(60);
-      expect(rowFor(rendered, "No branch yet")).toHaveLength(60);
+      expect(rowFor(rendered, "No branch")).toHaveLength(60);
     });
 
     it("ignores pull request state for threads not on screen", () => {
       const rendered = render(new Map([["99999999-9999-4999-8999-999999999999", pr("open", 5)]]));
 
       expect(rowFor(rendered, "Ship indicator")).not.toMatch(/#\d/u);
+    });
+
+    it("budgets the conflict badge before the pull-request column at a narrow width", () => {
+      // MIK-63/76 regression: a `#1` anywhere in the fleet used to win the optional-column
+      // budget outright at 61 columns, leaving no room for the one badge that flags a broker
+      // inconsistency — so a lone contested worker rendered with neither a group rollup nor a
+      // row badge, invisible unless the operator already knew to open lease detail.
+      const contestedId = "33333333-3333-4333-8333-333333333333";
+      const snapshot: FleetSnapshot = fleet(
+        { record: first },
+        { record: second },
+        {
+          record: session({
+            id: contestedId,
+            kind: "worker",
+            role: "worker",
+            name: "Contested worker",
+            cwd: "/repo/three",
+            displayOrder: 2,
+          }),
+          coordination: coordination(contestedId, "contested"),
+        },
+      );
+      const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+        color: false,
+        width: 61,
+        height: 28,
+        now: NOW_MS,
+        home: "/Users/brandon",
+        pullRequests: new Map([[FIRST_ID, pr("open", 1)]]),
+      });
+      // The title column is squeezed to its floor at this width, so the row's own name is
+      // truncated below "Contested worker" — the badge is what has to survive, not the title.
+      const rows = rendered.split("\n");
+      const badgeRow = rows.find((line) => line.includes("conflict"));
+
+      expect(badgeRow).toBeDefined();
+      expect(badgeRow).toHaveLength(61);
+      expect(rows.some((line) => /#1\b/u.test(line))).toBe(false);
     });
   });
 
@@ -4699,7 +4814,7 @@ describe("fleet repaint", () => {
     // because a row measured in code points prints wider than the pane on that text and the
     // terminal soft-wraps the overrun onto a line of its own — which walks the composer, and the
     // caret sitting on it, down a row and back again as the orc streams.
-    for (const chunk of ["alpha", "日本語表示幅", "delta"]) {
+    for (const chunk of ["alpha", "日本語", "delta"]) {
       streamed = chunk;
       await vi.waitFor(
         () => expect(Buffer.concat(output.chunks).toString()).toContain(chunk),

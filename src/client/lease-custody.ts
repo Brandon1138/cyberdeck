@@ -110,15 +110,19 @@ export function leaseCustody(view: FleetWorkerCoordinationView): LeaseCustody {
 /**
  * Exception-only rendering: the healthy state has no badge at all, so anything painted on
  * a worker row is by construction something that departs from it.
+ *
+ * The unowned states are silent here too. `legacy`, `unowned` and `adoptable` describe a lease
+ * an operator has no move to make about — nearly every worker carries one — and as a per-row tag
+ * they only ate the width the model and state columns needed. What remains is the pair that says
+ * the broker is contradicting itself. A deliberate operator-facing view of lease provenance is
+ * MIK-85's to design; this is not a placeholder for one.
  */
 export function leaseCustodyBadge(custody: LeaseCustody): LeaseCustodyBadge | undefined {
   switch (custody.kind) {
     case "attached":
-      return undefined;
     case "orphaned-legacy":
-      return { label: custody.legacyOrigin ? "legacy" : "unowned", tone: "subtle" };
     case "orphaned-adoptable":
-      return { label: "adoptable", tone: "attention" };
+      return undefined;
     case "conflict-or-anomalous":
       return { label: custody.conflict ? "conflict" : "anomaly", tone: "alert" };
   }

@@ -22,6 +22,7 @@ import {
   ApprovalModeSchema,
   ReasoningEffortSchema,
   SandboxSchema,
+  WorkerModeSchema,
   type SessionRecord,
 } from "../domain/session.js";
 import type { ThreadReadResult } from "../domain/thread.js";
@@ -96,6 +97,14 @@ const AgentStandardWorkerInputSchema = z.object({
    * the declared provisioning mode needs. Omitted, the worker is validated exactly as before.
    */
   workspace: WorkerWorkspaceSchema.optional(),
+  /**
+   * Per-spawn override of the box `caveman-workers` default (MIK-79). Orchestrator spawns are
+   * caveman by default when the operator has that box preference on; passing "normal" here opts
+   * this one spawn out, e.g. a research worker the orchestrator wants to read eloquent. Composer
+   * launches (Fleet's `session.start`/`session.startWithPrompt`) never consult this default at
+   * all and are always "normal".
+   */
+  workerMode: WorkerModeSchema.optional(),
 });
 const AgentScoutWorkerInputSchema = z.object({
   profile: z.literal("scout"),
@@ -756,7 +765,10 @@ export class AgentControlService {
     });
     if (!plan.ok) throw new AgentControlError(plan.code, plan.message);
     const name = request.name ?? taskName(request.prompt);
-    const workerMode = (await this.workerPreferences?.get())?.caveman === true ? "caveman" : "normal";
+    // Orchestrator spawns default to the box `caveman-workers` preference; an explicit
+    // `workerMode` on this one spawn (e.g. "normal" for a research worker) wins over it (MIK-79).
+    const workerMode = request.workerMode
+      ?? ((await this.workerPreferences?.get())?.caveman === true ? "caveman" : "normal");
     const worker = await this.registry.start({
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
