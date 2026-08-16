@@ -85,6 +85,33 @@ Deferred because the operator's shell is zsh. **Trigger:** changing `$SHELL` to 
 fix is that shell's own exit hook (`PROMPT_COMMAND`, `fish_exit`) writing the same file, not a wrapper
 REPL and not a pane query that cannot see the popup.
 
+### Cursor and Antigravity model columns can only ever be launch values
+
+Fleet reads a session's running model out of the provider's own transcript — Claude's JSONL names
+it on every assistant frame, Codex's rollout names it on every `turn_context`. Cursor and
+Antigravity write no native transcript at all; Cyberdeck already falls back to terminal replay for
+their *turns*, and a screen scrape cannot say which model produced it. So a Cursor or Antigravity
+row shows the model the session was launched with, marked `~` to say exactly that.
+
+Deferred because there is nothing to read: this is not an unimplemented parser, it is a provider
+that records nothing. **Trigger:** either CLI gaining a session log that names its model. The fix is
+a parser in `src/runtime/observed-model.ts` and a row in `observedModelParser`, not a heuristic over
+pane bytes.
+
+### A provider's model list is only as current as its CLI on the broker's PATH
+
+`WorkerCapabilityCatalog` runs `agent models` and `agy models` — read-only listings — and caches
+each answer for five minutes. A provider with no listing command, a CLI missing from the broker's
+PATH, or a listing that times out falls back to the static catalog in `worker-capabilities.ts`,
+carrying `source: "fallback-catalog"` and the reason, which Fleet prints above the list and the MCP
+tool returns to orchestrators. That fallback is a snapshot with a date on it, never a claim about
+the present.
+
+Deferred because the operator's `agent` and `agy` are installed and on PATH. **Trigger:** running
+the broker somewhere those CLIs are absent, or a provider changing its listing format. The fix is a
+row in `PROVIDER_MODEL_LISTING_COMMANDS` and a parser case, not widening the accepted line shapes
+until prose starts parsing as a model id.
+
 ### A peer binding may message a worker but may not control or observe it
 
 `orchestrator-manager.ts` grants every binding — primary or `:peer:` — the same capability list,

@@ -33,6 +33,7 @@ import {
   PREVIEW_STORAGE_LIMIT,
   type TranscriptMessage,
 } from "../runtime/conversation-preview.js";
+import type { ObservedModel } from "../runtime/observed-model.js";
 import {
   compactTerminalResult,
   providerTerminalActivity,
@@ -105,6 +106,7 @@ interface TranscriptLike {
   dropClaudeBinding?(sessionId: string): Promise<void>;
   captureProviderTurns?(input: CaptureProviderTurns): Promise<Array<{ text?: string | undefined }>>;
   readTranscriptMessages?(input: CaptureProviderTurns): Promise<TranscriptMessage[]>;
+  readObservedModel?(input: CaptureProviderTurns): Promise<ObservedModel | undefined>;
 }
 
 interface Controller {
@@ -1618,6 +1620,9 @@ export class SessionRegistry {
         // A blocked session has no completed turn, so the transcript is the only place the last
         // real reply exists. Read it off the broadcast path, once per transition into the state.
         void this.refreshPreview(runtime, replay, []).catch(() => undefined);
+        // A session can sit blocked for a long time after a model switch, so this transition is the
+        // other place the running model is worth re-reading.
+        void this.refreshObservedModel(runtime).catch(() => undefined);
       }
     }
     runtime.controller?.output(chunk);
@@ -2546,6 +2551,7 @@ export class SessionRegistry {
       replay,
       nativeTurns.map((turn): TranscriptMessage => ({ role: "assistant", text: turn.text ?? "" })),
     );
+    await this.refreshObservedModel(runtime);
     await this.setAttention(runtime, "done", true);
     this.notifySessionUpdate(runtime.record.id);
   }
@@ -2576,6 +2582,37 @@ export class SessionRegistry {
     if (preview.kind === "none" || preview.text === runtime.record.latestPreview) return;
     runtime.record.latestPreview = preview.text;
     await this.persist(runtime);
+  }
+
+  /**
+   * Project the model the provider is actually running onto the session record.
+   *
+   * Read at the same points the preview is: a provider writes the new model into its transcript with
+   * the first turn that model produces, so turn completion is the earliest moment the switch is a
+   * fact rather than a guess. Unchanged observations persist nothing; a provider that keeps no
+   * transcript leaves the field absent, which is what every reader renders as "launch value, not a
+   * current one" instead of silently passing the launch model off as observed.
+   */
+  private async refreshObservedModel(runtime: RuntimeSession): Promise<void> {
+    const transcripts = this.options.transcripts;
+    const read = transcripts?.readObservedModel;
+    if (transcripts === undefined || read === undefined) return;
+    const observed = await read.call(transcripts, {
+      sessionId: runtime.record.id,
+      provider: runtime.record.provider,
+      cwd: runtime.record.cwd,
+      createdAt: runtime.record.createdAt,
+      turnNumber: runtime.completedTurns,
+    }).catch(() => undefined);
+    if (observed === undefined) return;
+    const current = runtime.record.observedModel;
+    if (
+      current?.model === observed.model
+      && current.effort === observed.effort
+    ) return;
+    runtime.record.observedModel = observed;
+    await this.persist(runtime);
+    this.notifySessionUpdate(runtime.record.id);
   }
 
   private async readTranscriptMessages(runtime: RuntimeSession): Promise<TranscriptMessage[]> {

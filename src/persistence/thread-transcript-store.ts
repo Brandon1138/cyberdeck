@@ -18,6 +18,7 @@ import {
   type TranscriptMessage,
 } from "../runtime/conversation-preview.js";
 import { ClaudeConversationBindingStore } from "./claude-conversation-bindings.js";
+import { observedModelParser, type ObservedModel } from "../runtime/observed-model.js";
 import { openPrivateAppendFile } from "./private-files.js";
 
 const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
@@ -86,6 +87,19 @@ export type ClaudeTranscriptStatus =
   | "attribution-conflict";
 
 /**
+ * Where a session's model observation last left off.
+ *
+ * `offset` only ever advances past complete lines, so a read that lands mid-write of the transcript's
+ * newest frame simply leaves the offset short until the next call — never past a line whose bytes
+ * arrived incomplete.
+ */
+interface ObservedModelCursor {
+  path: string;
+  offset: number;
+  observation: ObservedModel | undefined;
+}
+
+/**
  * Bounded semantic transcript.
  *
  * New events use semantic-transcript.jsonl so broker startup never opens or parses legacy
@@ -101,6 +115,7 @@ export class ThreadTranscriptStore {
   private nextCursor = 0;
   private readonly semanticTurnIds = new Set<string>();
   private readonly nativePaths = new Map<string, string>();
+  private readonly observedModelCursors = new Map<string, ObservedModelCursor>();
   private readonly claimedCodexPaths = new Map<string, string>();
   private readonly claimedClaudePaths = new Map<string, string>();
   private readonly claudeStatuses = new Map<string, ClaudeTranscriptStatus>();
@@ -250,6 +265,57 @@ export class ThreadTranscriptStore {
     });
     if (messages.length > 0) this.nativePaths.set(input.sessionId, path);
     return messages;
+  }
+
+  /**
+   * The model this session is running now, read from the provider's own transcript.
+   *
+   * The last frame that names a model wins, because that is the one the provider wrote most
+   * recently — an in-session switch is a later frame, never an edit to an earlier one. A provider
+   * that keeps no native transcript answers nothing, and the caller is expected to say so rather
+   * than pass the launch value off as an observation.
+   *
+   * Every completed turn calls this, and these files grow to tens of megabytes, so a full reread each
+   * time is quadratic over a session's life. A byte-offset cursor per session lets each call scan only
+   * what was appended since the last one. The cursor resets — offset back to zero, prior observation
+   * discarded — whenever the resolved path changes (a rebind to a new native file) or the file is
+   * now smaller than the cursor (truncation or rotation): either means the bytes the offset pointed
+   * into no longer mean what they meant last time.
+   */
+  async readObservedModel(input: CaptureProviderTurns): Promise<ObservedModel | undefined> {
+    await this.init();
+    const parse = observedModelParser(input.provider);
+    if (parse === undefined) return undefined;
+    const path = input.provider === "claude"
+      ? await this.resolveClaudeTranscript(input)
+      : this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
+    if (path === undefined) return undefined;
+
+    const cached = this.observedModelCursors.get(input.sessionId);
+    let cursor: ObservedModelCursor = cached !== undefined && cached.path === path
+      ? cached
+      : { path, offset: 0, observation: undefined };
+
+    const size = await stat(path).then(
+      (info) => info.size,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      },
+    );
+    if (size === undefined) return cursor.observation;
+    if (size < cursor.offset) cursor = { path, offset: 0, observation: undefined };
+
+    const { lines, nextOffset } = await readCompleteLinesFromOffset(path, cursor.offset);
+    let observation = cursor.observation;
+    for (const line of lines) {
+      if (line.trim() === "") continue;
+      observation = parse(line) ?? observation;
+    }
+    cursor = { path, offset: nextOffset, observation };
+    this.observedModelCursors.set(input.sessionId, cursor);
+    if (observation !== undefined) this.nativePaths.set(input.sessionId, path);
+    return observation;
   }
 
   async read(sessionId: string, afterCursor = 0, limit = 200): Promise<ThreadReadResult> {
@@ -757,4 +823,37 @@ async function visitLines(
 
 function ignoreMissing(error: NodeJS.ErrnoException): void {
   if (error.code !== "ENOENT") throw error;
+}
+
+/**
+ * The complete newline-terminated lines appended after `offset`, and the offset just past the last
+ * one. A trailing line with no terminating `\n` yet — the writer mid-append — is left unread and
+ * `nextOffset` stops before it, so the next call picks it back up whole rather than parsing a
+ * half-written frame.
+ */
+async function readCompleteLinesFromOffset(
+  path: string,
+  offset: number,
+): Promise<{ lines: string[]; nextOffset: number }> {
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(path, { start: offset });
+    stream.on("data", (chunk) => chunks.push(chunk as Buffer));
+    stream.on("end", resolve);
+    stream.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") resolve();
+      else reject(error);
+    });
+  });
+  if (chunks.length === 0) return { lines: [], nextOffset: offset };
+  const buffer = Buffer.concat(chunks);
+  const lastNewline = buffer.lastIndexOf(0x0a);
+  if (lastNewline === -1) return { lines: [], nextOffset: offset };
+  const lines = buffer
+    .subarray(0, lastNewline + 1)
+    .toString("utf8")
+    .split("\n")
+    .slice(0, -1)
+    .map((line) => line.replace(/\r$/u, ""));
+  return { lines, nextOffset: offset + lastNewline + 1 };
 }

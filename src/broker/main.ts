@@ -35,6 +35,7 @@ import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import { AgentControlService } from "../orchestration/agent-control-service.js";
 import { GitWorkspaceProbe } from "../orchestration/git-workspace-probe.js";
 import { GitWorktreeProvisioner } from "../orchestration/git-worktree-provisioner.js";
+import { WorkerCapabilityCatalog } from "../orchestration/worker-capability-catalog.js";
 import { InstructionQueue } from "../orchestration/instruction-queue.js";
 import { WorkerControlService } from "../orchestration/worker-control-service.js";
 import { InstructionStore } from "../persistence/instruction-store.js";
@@ -185,6 +186,10 @@ export async function runBroker(
     custodyColors,
     providerPermissions,
   );
+  // One catalog, composed before anything that decides what may be launched: the launch boundary
+  // validates against it, the Fleet composer offers what it serves, and the MCP capabilities tool
+  // reads the same instance.
+  const workerCapabilities = new WorkerCapabilityCatalog();
   const agentControl = new AgentControlService(
     registry,
     orchestratorStore,
@@ -196,6 +201,7 @@ export async function runBroker(
       workerCoordination: workerCoordination.service,
       scoutEgress,
       workspaceProbe: new GitWorkspaceProbe(),
+      workerCapabilities,
     },
   );
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
@@ -270,6 +276,7 @@ export async function runBroker(
     fleetPreferences,
     fleetProjects,
     workerPreferences,
+    workerCapabilities,
     scoutEgress,
     custodyColors,
     orchestratorBindings: orchestratorStore,

@@ -103,6 +103,20 @@ export const ResolvedLaunchRecordSchema = z.object({
   truncated: z.boolean(),
 });
 
+/**
+ * The model a session was last seen running, as its own provider's transcript recorded it.
+ *
+ * Separate from the request's `model`/`effort`, which say what the session was launched with and
+ * stay true forever. An operator who switches model inside the provider's CLI changes this and not
+ * that, so nothing that renders it can be read as a claim about how the session started.
+ */
+export const ObservedModelSchema = z.object({
+  model: z.string().min(1).max(256),
+  effort: ReasoningEffortSchema.optional(),
+  /** The provider frame's own timestamp, quoted rather than validated so an odd format cannot void the record. */
+  observedAt: z.string().max(64).optional(),
+});
+
 export const SessionRecordSchema = StartSessionRequestSchema.extend({
   id: z.uuid(),
   /** Monotonic provider-process generation. Incremented every time this durable session resumes. */
@@ -121,6 +135,8 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
   pinned: z.boolean().optional(),
   displayOrder: z.number().int().nonnegative().optional(),
   launchRecord: ResolvedLaunchRecordSchema.optional(),
+  /** What the session is running now, when its provider keeps a transcript that says so. */
+  observedModel: ObservedModelSchema.optional(),
   effectiveState: WorkerEffectiveStateSchema.optional(),
   scout: ScoutRuntimeStateSchema.optional(),
   /**

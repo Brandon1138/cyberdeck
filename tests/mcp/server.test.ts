@@ -233,20 +233,50 @@ describe("Cyberdeck MCP server", () => {
     });
   });
 
-  it("returns authoritative provider capabilities without a broker round trip", async () => {
-    const request = vi.fn();
-    const response = await handleMcpRequest(context({ request }), {
+  it("reads provider capabilities from the broker, which is the surface that asks the CLIs", async () => {
+    const request = vi.fn(async () => [{
+      provider: "codex",
+      models: ["gpt-5.6-luna", "gpt-5.7-nova"],
+      efforts: ["low"],
+      approvalModes: ["auto"],
+      modelIdRule: "",
+      notes: [],
+      source: "provider-query",
+      observedAt: "2026-08-16T00:00:00.000Z",
+    }]);
+    const response = await handleMcpRequest(context({ request: request as never }), {
       jsonrpc: "2.0",
       id: 2,
       method: "tools/call",
       params: { name: "cyberdeck_provider_capabilities", arguments: { provider: "codex" } },
     });
+    expect(request).toHaveBeenCalledWith("worker.capabilities", { provider: "codex" });
+    const text = ((response?.result as { content: Array<{ text: string }> }).content[0]!.text);
+    // A model that exists only because the provider just listed it still reaches the orchestrator.
+    expect(JSON.parse(text)).toEqual([expect.objectContaining({
+      provider: "codex",
+      models: ["gpt-5.6-luna", "gpt-5.7-nova"],
+      source: "provider-query",
+    })]);
+  });
+
+  it("serves the stored catalog, marked as a stand-in, when no broker can be reached", async () => {
+    const response = await handleMcpRequest(
+      context(undefined, {}, "Cyberdeck broker is unreachable at /tmp/missing.sock"),
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "cyberdeck_provider_capabilities", arguments: { provider: "codex" } },
+      },
+    );
     const text = ((response?.result as { content: Array<{ text: string }> }).content[0]!.text);
     expect(JSON.parse(text)).toEqual([expect.objectContaining({
       provider: "codex",
       models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+      source: "fallback-catalog",
+      fallbackReason: "Cyberdeck broker is unreachable at /tmp/missing.sock",
     })]);
-    expect(request).not.toHaveBeenCalled();
   });
 
   it("routes one blocking wait request for multiple workers", async () => {

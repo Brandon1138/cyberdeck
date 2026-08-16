@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   WORKER_PROVIDER_CAPABILITIES,
+  capabilityModelEfforts,
+  fallbackWorkerCapabilities,
   validateWorkerSelection,
+  workerProviderCapability,
 } from "../../src/orchestration/worker-capabilities.js";
 
 describe("worker provider capabilities", () => {
@@ -110,5 +113,61 @@ describe("worker provider capabilities", () => {
       model: "gemini-3.6-flash-low",
       effort: "low",
     })).toEqual({ ok: true });
+  });
+
+  it("judges a selection against what the providers advertise now, not the stored catalog", () => {
+    const listed = [{
+      provider: "cursor" as const,
+      // The slug MIK-81 reported unreachable: Cursor ships it, the stored catalog predates it.
+      models: ["cursor-grok-4.6-high"],
+      efforts: [],
+      approvalModes: ["prompt" as const, "auto" as const],
+      modelIdRule: "",
+      notes: [],
+    }];
+
+    expect(validateWorkerSelection({ provider: "cursor", model: "cursor-grok-4.6-high" }))
+      .toEqual(expect.objectContaining({ ok: false, code: "MODEL_NOT_ADVERTISED" }));
+    expect(validateWorkerSelection({ provider: "cursor", model: "cursor-grok-4.6-high" }, listed))
+      .toEqual({ ok: true });
+    // And what the provider dropped stops being launchable, without a code change either.
+    expect(validateWorkerSelection({ provider: "cursor", model: "cursor-grok-4.5-high" }, listed))
+      .toEqual(expect.objectContaining({ ok: false, code: "MODEL_NOT_ADVERTISED" }));
+  });
+
+  it("bounds a refusal that would otherwise paste a provider's entire listing", () => {
+    const many = Array.from({ length: 40 }, (unused, index) => `model-${index}`);
+    const refusal = validateWorkerSelection({ provider: "codex", model: "absent" }, [{
+      provider: "codex",
+      models: many,
+      efforts: [],
+      approvalModes: [],
+      modelIdRule: "",
+      notes: [],
+    }]);
+
+    expect(refusal).toEqual(expect.objectContaining({ ok: false, code: "MODEL_NOT_ADVERTISED" }));
+    expect(refusal.ok === false && refusal.message).toContain("and 28 more");
+    expect(refusal.ok === false && refusal.message).not.toContain("model-39");
+  });
+
+  it("offers a slug only the effort it already names", () => {
+    const codex = workerProviderCapability("codex")!;
+    const antigravity = workerProviderCapability("antigravity")!;
+    const cursor = workerProviderCapability("cursor")!;
+
+    expect(capabilityModelEfforts(codex, "gpt-5.6-sol")).toEqual(codex.efforts);
+    expect(capabilityModelEfforts(antigravity, "gemini-3.6-flash-high")).toEqual(["high"]);
+    expect(capabilityModelEfforts(cursor, "claude-opus-5-high")).toEqual([]);
+  });
+
+  it("serves the stored catalog as a stand-in that says why it is one", () => {
+    expect(fallbackWorkerCapabilities("the broker is unreachable", "claude")).toEqual([
+      expect.objectContaining({
+        provider: "claude",
+        source: "fallback-catalog",
+        fallbackReason: "the broker is unreachable",
+      }),
+    ]);
   });
 });
