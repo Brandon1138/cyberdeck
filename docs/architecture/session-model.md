@@ -141,8 +141,9 @@ granted; it has no tool for changing its own grants.
 
 `/caveman-workers status|on|off` and its `cyberdeck orchestrator caveman-workers` CLI equivalent
 manage a box-level worker preference independent of every orchestrator binding. It defaults off,
-persists across broker and Orc replacement, and is snapshotted when a worker session or bounded job
-starts; changing it does not rewrite already-running conversations.
+persists across broker and Orc replacement, and applies to orchestrator-spawned workers only;
+composer-launched sessions always use normal mode (MIK-79). The preference is snapshotted when an
+orchestrator spawns a worker; changing it does not rewrite already-running conversations.
 Provider child processes receive `CYBERDECK_PROCESS_ROLE=worker|orchestrator|session` and
 `CYBERDECK_WORKER_MODE=normal|caveman` after a deterministic exact-name child environment is built.
 Compatibility, locale, matching-provider routing, and reviewed proxy/TLS trust entries may pass;
