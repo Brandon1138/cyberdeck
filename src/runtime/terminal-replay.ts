@@ -313,18 +313,48 @@ function lastRegexIndex(value: string, pattern: RegExp): number {
  */
 const DIALOG_BORDER = /^[\s│┃┆┊║▌▏▕╭╮╰╯┌┐└┘├┤┬┴┼─═━┈]+|[\s│┃┆┊║▌▏▕╭╮╰╯┌┐└┘├┤┬┴┼─═━┈]+$/gu;
 
-/** The `·`-style separator a provider puts between two affordances on one footer line. */
-const AFFORDANCE_SEPARATOR = /\s*[·•]\s*/u;
+/**
+ * The `·`-style separator a provider puts between two affordances on one footer line.
+ *
+ * An interior box rule counts too. {@link DIALOG_BORDER} only strips the border off the ends, so a
+ * footer that rules between its affordances would otherwise reach {@link KEY_AFFORDANCE} as one
+ * segment with a `│` sitting in the middle of it — and that segment has to validate whole.
+ */
+const AFFORDANCE_SEPARATOR = /\s*[·•│┃║]\s*/u;
+
+/** Keys a footer names. */
+const AFFORDANCE_KEY =
+  String.raw`(?:enter|return|esc(?:ape)?|tab|shift\+tab|space|ctrl\+\S+|[←→↑↓](?:\/[←→↑↓])?|arrows?)`;
+
+/** The subset of {@link AFFORDANCE_KEY} that can appear in an affordance which *blocks*. */
+const CONFIRM_KEY = String.raw`(?:enter|return|[←→↑↓](?:\/[←→↑↓])?|arrows?)`;
 
 /**
- * One keypress affordance: a key, and what pressing it does.
+ * What pressing the key does: at most three words, none of them carrying sentence punctuation, and
+ * then the end of the segment.
+ *
+ * The bound is the whole defence against prose, and it has to be a *tail* anchor rather than a
+ * prefix one. `Press Enter to continue installing dependencies, then rerun tests.` opens with a
+ * perfectly good affordance and continues as a sentence; matching only its opening read a finished
+ * response's follow-up instructions as a dialog, held them as `provider-modal`, and — because
+ * `markerTerminalActivity` answers `needs-input` before it ever consults the provider's idle title —
+ * projected a worker that was actively writing files as blocked. A footer hint is three words at the
+ * outside (`confirm`, `go back`, `confirm (default)`); a sentence is longer than that or has a comma
+ * in it, and either one is enough to tell them apart.
+ */
+const AFFORDANCE_ACTION = String.raw`[^\s.,;:!?]+(?:\s+[^\s.,;:!?]+){0,2}\.?`;
+
+/**
+ * One keypress affordance: a key, and what pressing it does, and nothing else.
  *
  * Every segment of a footer line has to be one of these for the line to be read as a footer at all.
  * That is what keeps an assistant sentence containing the words "enter to confirm" from being read
  * as a dialog: prose has other clauses in it, and they are not keypresses.
  */
-const KEY_AFFORDANCE =
-  /^(?:press\s+)?(?:enter|return|esc(?:ape)?|tab|shift\+tab|space|ctrl\+\S+|[←→↑↓](?:\/[←→↑↓])?|arrows?)\s+to\s+\S/iu;
+const KEY_AFFORDANCE = new RegExp(
+  String.raw`^(?:press\s+)?${AFFORDANCE_KEY}\s+to\s+${AFFORDANCE_ACTION}$`,
+  "iu",
+);
 
 /**
  * The affordances that mean the surface is *waiting* on the operator, not merely offering a way out.
@@ -332,9 +362,15 @@ const KEY_AFFORDANCE =
  * `esc to interrupt` and `ctrl+c to stop` are printed by a provider that is working and would keep
  * working if nobody touched the keyboard; `enter to confirm` and `←/→ to change` are printed by one
  * that will do nothing at all until a key is pressed. Only the second kind is a blocked prompt.
+ *
+ * Anchored at both ends for the same reason {@link KEY_AFFORDANCE} is: `Press Enter to continue`
+ * opens this pattern just as readily when the rest of the line is a sentence about installing
+ * dependencies.
  */
-const DIALOG_CONFIRM_AFFORDANCE =
-  /^(?:press\s+)?(?:enter|return|[←→↑↓](?:\/[←→↑↓])?|arrows?)\s+to\s+(?:confirm|continue|select|submit|accept|change|choose|cycle)\b/iu;
+const DIALOG_CONFIRM_AFFORDANCE = new RegExp(
+  String.raw`^(?:press\s+)?${CONFIRM_KEY}\s+to\s+(?:confirm|continue|select|submit|accept|change|choose|cycle)\b(?:\s+[^\s.,;:!?]+){0,2}\.?$`,
+  "iu",
+);
 
 /**
  * Offset of the last dialog footer in the tail, or -1.

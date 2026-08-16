@@ -110,6 +110,37 @@ describe("terminal replay semantics", () => {
     )).toBe("awaiting-input");
   });
 
+  it("does not read flush-left prose that opens with an affordance as a dialog", () => {
+    // Both footer patterns used to anchor only at the start, so a completed response whose last line
+    // opened with a keypress and continued as a sentence read as a footer. That is not hypothetical:
+    // it projected `needs-input` on a worker that was actively writing files, and every
+    // `workers_wait` on it settled instantly and uselessly. A segment has to validate whole.
+    for (const prose of [
+      "Press Enter to continue installing dependencies, then rerun tests.",
+      "Esc to cancel is also available.",
+      "Enter to confirm the deletion once you have reviewed the plan above.",
+      "Press Enter to select the branch you want, then push it when the build is green.",
+      "←/→ to change the sort order is documented in the README.",
+    ]) {
+      expect(providerTerminalActivity("claude", `\u001b]0;worker\u0007Done.\n${prose}`))
+        .toBe("awaiting-input");
+    }
+  });
+
+  it("still reads a footer whose action carries a qualifier or a full stop", () => {
+    // The prose bound is three words and no sentence punctuation, not "one bare verb" — narrowing it
+    // past what real footers print would trade the false positive above for the incident it replaces.
+    for (const footer of [
+      "Press Enter to continue.",
+      "Enter to confirm (default)",
+      "Enter to select · Esc to go back",
+      "Enter to confirm │ Esc to cancel",
+    ]) {
+      expect(providerTerminalActivity("claude", `Also scan your other repos [ ]\n${footer}`))
+        .toBe("needs-input");
+    }
+  });
+
   it("clears a stale dialog when the provider resumes work behind it", () => {
     const dialog = ["Also scan your other repos [ ]", "←/→ to change · Enter to confirm"].join("\n");
     expect(providerTerminalActivity("claude", `${dialog}\nWorking\nesc to interrupt`)).toBe("working");
