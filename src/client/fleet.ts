@@ -439,10 +439,15 @@ export interface FleetRuntimeOptions {
     session: SessionRecord,
     layout: { enabled: boolean; orchestratorSessionIds: readonly string[] },
   ) => Promise<string>) | undefined;
-  /** Opens a project's primary checkout in that same nvim. No worker owns it, so nothing locks it. */
+  /**
+   * Opens a project's primary checkout in that same nvim. No worker owns the checkout, but one can
+   * be running in it, so the threads this client is holding travel with the request: an occupied
+   * checkout has to land locked even when that worker's own row was never opened.
+   */
   openCheckout?: ((
     cwd: string,
     layout: { enabled: boolean; orchestratorSessionIds: readonly string[] },
+    sessions: readonly SessionRecord[],
   ) => Promise<string>) | undefined;
   nvimLayoutHooks?: {
     install(orchestratorSessionIds: readonly string[]): void | Promise<void>;
@@ -3466,10 +3471,16 @@ export async function runFleet(
         }
         state = {
           ...state,
-          notice: await runtime.openCheckout(action.cwd, {
-            enabled: state.nvimLayoutEnabled,
-            orchestratorSessionIds: layoutOrchestratorSessionIds(snapshot),
-          }),
+          notice: await runtime.openCheckout(
+            action.cwd,
+            {
+              enabled: state.nvimLayoutEnabled,
+              orchestratorSessionIds: layoutOrchestratorSessionIds(snapshot),
+            },
+            // Every thread, not the folder's own rows: which of them is running *in* the checkout is
+            // the open's question to answer, and it answers it from the same truth Fleet renders.
+            snapshot.threads.map(({ record }) => record),
+          ),
           noticeTone: "neutral",
         };
       } else if (action?.type === "attach-clipboard-image") {

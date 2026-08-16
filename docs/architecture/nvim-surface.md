@@ -65,9 +65,14 @@ Three things about that lock are deliberate:
 
 - **It is derived, never assigned.** The module recomputes each buffer's lock from the guards
   standing at that moment, so a released worktree frees only the buffers no surviving guard covers.
-  This is also why opening a main checkout that a live worker happens to be running *in* still lands
-  read-only: the request says `live: false`, and the worker's own guard says otherwise, and the
-  guard wins.
+  A guard the module was never sent is no guard at all, though: it learns them from live open
+  requests alone. So a main checkout open carries the threads Fleet is holding and asks whether one
+  of them is running in the checkout itself — an occupied checkout sends `live: true` and stands its
+  own guard up on first contact, rather than inheriting one from a worker row nobody opened. That
+  guard is the checkout's: the next unoccupied open of the same checkout drops it, and
+  `:CyberdeckUnlock` is the way out of it before then. A worker one directory down, or in a worktree
+  nested under the checkout, is left to its own guard over its own tree — locking a whole repository
+  for it would cost the manual edit the checkout open exists for.
 - **It is lifted by the worker finishing, not by a timer.** `NvimBindingService` watches the one
   transition that matters and sends the final change set and the release as a single `refresh`.
 - **The operator can override it, explicitly.** `:CyberdeckUnlock` unlocks the current buffer;

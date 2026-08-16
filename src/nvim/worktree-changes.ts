@@ -158,7 +158,10 @@ export async function diffBaseline(git: GitOutput): Promise<DiffPlan> {
   if (forkPoint === head) {
     return {
       baseline: { ...UNCOMMITTED, rev: head },
-      args: ["diff", "--no-ext-diff", "--unified=0", "HEAD", "--"],
+      // The resolved commit rather than the literal `HEAD`, for the same reason `rev` is resolved at
+      // all: the worker can commit between this plan being made and the diff being run, and a `HEAD`
+      // that moved would measure the list from one revision while `:CyberdeckDiff` shows another.
+      args: ["diff", "--no-ext-diff", "--unified=0", head, "--"],
     };
   }
   return {

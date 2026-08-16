@@ -3457,6 +3457,72 @@ describe("runFleet", () => {
     await expect(running).resolves.toBeUndefined();
   });
 
+  it("hands the checkout opener every thread, so a worker running in the checkout is seen", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    // The worker runs in the checkout itself, and its own row was never opened in nvim. The opener
+    // can only install a guard for it if the threads travel with the request.
+    const worker = session({ cwd: "/repo/one", role: "worker", kind: "worker", name: "One worker" });
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [worker];
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "fleet.preferences") return {};
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) { closeListeners.add(listener); return () => closeListeners.delete(listener); },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const openCheckout = vi.fn(async () =>
+      "one checkout opened in %2 · 0 changes · since origin/main · read-only while a worker runs in it");
+    const running = runFleet(
+      transport as never,
+      input,
+      output,
+      new EventEmitter(),
+      { detachIdentity: "operator:one", openCheckout },
+    );
+
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.list", {}));
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+    // Up onto the folder header — the checkout's own row — and then Ctrl+N.
+    input.emit("data", Buffer.from("\u001b[A"));
+    input.emit("data", Buffer.from([0x0e]));
+
+    await vi.waitFor(() => expect(openCheckout).toHaveBeenCalledWith(
+      "/repo/one",
+      { enabled: true, orchestratorSessionIds: [] },
+      [worker],
+    ));
+    await vi.waitFor(() => expect(
+      Buffer.concat(output.chunks).toString("utf8"),
+    ).toContain("read-only while a worker runs in it"));
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
   it("starts with the folds the operator last left, and writes each new one back", async () => {
     class Input extends EventEmitter {
       isTTY = true;

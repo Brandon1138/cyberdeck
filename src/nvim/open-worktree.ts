@@ -77,7 +77,18 @@ export interface OpenWorktreeOptions extends NvimOpenOptions {
 export interface OpenCheckoutOptions extends NvimOpenOptions {
   /** The repository's primary checkout — the folder header's own path, not a worker's worktree. */
   checkout: string;
+  /**
+   * Every thread the client knows about, so the open can see who is running in the checkout.
+   *
+   * The nvim module learns a guard only from a live open request, so a worker whose row was never
+   * opened has no guard standing there. Omitting this is a claim that nothing is running in the
+   * checkout, which is why the caller passes its whole list rather than pre-filtering it.
+   */
+  sessions?: readonly CheckoutOccupant[] | undefined;
 }
+
+/** All an occupancy check needs of a thread: where it runs and whether it still can be writing. */
+export type CheckoutOccupant = Pick<SessionRecord, "cwd" | "executionState">;
 
 /** What every open reports back, whoever it was opened for. */
 interface OpenedInNvim {
@@ -144,12 +155,42 @@ export async function openWorktreeInNvim(options: OpenWorktreeOptions): Promise<
 }
 
 /**
+ * Is a live worker running in this checkout itself?
+ *
+ * The nvim module derives a buffer's lock from the guards that are standing, and it learns a guard
+ * only from a live open request. A worker running directly in the checkout whose row the operator
+ * never opened has therefore installed nothing, and an unlocked checkout open would hand back the
+ * very files that worker is rewriting — the silent co-edit the lock exists to prevent. So the open
+ * asks who is there rather than trusting a guard that may never have been installed.
+ *
+ * Equality, not containment. A worker one directory down — including one in a worktree nested under
+ * the checkout — carries its own guard covering exactly its own tree, and locking a whole repository
+ * on its behalf would take away the manual edit this open exists for.
+ */
+export function isCheckoutOccupied(
+  checkout: string,
+  sessions: readonly CheckoutOccupant[],
+): boolean {
+  const path = trimTrailingSlash(checkout);
+  return sessions.some((record) => isWorkerLive(record) && trimTrailingSlash(record.cwd) === path);
+}
+
+/** `/code/x/` and `/code/x` are one directory; only the spelling differs. */
+function trimTrailingSlash(path: string): string {
+  const trimmed = path.replace(/\/+$/u, "");
+  return trimmed === "" ? path : trimmed;
+}
+
+/**
  * Open a repository's primary checkout — the one place in a project no worker's worktree reaches.
  *
- * It is opened unlocked, deliberately: the checkout is where the operator makes the quick manual
- * edit that Ctrl+N on a worker exists to prevent them making. That is a claim about this request,
- * not about the files: the nvim module derives every buffer's lock from the guards that are
- * actually standing, so a checkout a live worker happens to be running *in* still lands read-only.
+ * It is opened unlocked whenever it can be: the checkout is where the operator makes the quick
+ * manual edit that Ctrl+N on a worker exists to prevent them making. A checkout a live worker is
+ * running *in* is the exception, and it lands read-only under the checkout's own identity, because
+ * that worker may never have had its row opened and so may have no guard standing here at all.
+ *
+ * That guard is the checkout's, not the worker's: it is dropped by the next unoccupied open of the
+ * same checkout, and `:CyberdeckUnlock` is the operator's immediate way out of it in the meantime.
  *
  * No binding follows this open. A binding exists to lift a worker's lock when that worker finishes,
  * and a checkout has neither.
@@ -159,7 +200,7 @@ export async function openCheckoutInNvim(options: OpenCheckoutOptions): Promise<
     identity: checkoutIdentity(options.checkout),
     path: options.checkout,
     subject: basename(options.checkout),
-    live: false,
+    live: isCheckoutOccupied(options.checkout, options.sessions ?? []),
     missing: {
       code: "CHECKOUT_MISSING",
       message: (path) => `The checkout ${path} is no longer on disk, so there is nothing to open`,

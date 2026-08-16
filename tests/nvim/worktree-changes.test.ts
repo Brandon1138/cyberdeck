@@ -143,8 +143,19 @@ describe("diffBaseline", () => {
 
     expect(await diffBaseline(git)).toEqual({
       baseline: { kind: "uncommitted", label: "uncommitted only", rev: "same" },
-      args: ["diff", "--no-ext-diff", "--unified=0", "HEAD", "--"],
+      args: ["diff", "--no-ext-diff", "--unified=0", "same", "--"],
     });
+  });
+
+  it("diffs from the resolved head, so a commit landing mid-plan cannot move the baseline", async () => {
+    // The live worker commits between `rev-parse HEAD` answering and the diff running. A literal
+    // `HEAD` in the arguments would resolve to the new commit while `baseline.rev` still named the
+    // old one, and the list and `:CyberdeckDiff` would then be measured from different revisions.
+    const { git } = repository({ defaultBranch: "origin/main", head: "before", forkPoint: "before" });
+    const plan = await diffBaseline(git);
+
+    expect(plan.args).not.toContain("HEAD");
+    expect(plan.args).toContain(plan.baseline.rev);
   });
 
   it("keeps showing a squash-merged branch in full, because a squash leaves the fork point alone", async () => {

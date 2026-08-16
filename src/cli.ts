@@ -293,12 +293,15 @@ async function openWorkerWorktree(
 /**
  * Open a project's primary checkout in the same nvim, with no binding behind it.
  *
- * A binding exists to lift a worker's read-only lock when that worker finishes. A checkout has no
- * worker and no lock, so there is no transition to wait for and nothing to tell the broker.
+ * A binding exists to lift a worker's read-only lock when that worker finishes, and a checkout has
+ * no worker of its own to wait for. The threads Fleet is already holding come along so the open can
+ * see whether one of them is running in the checkout: that is what installs the guard on first
+ * contact, rather than inheriting one from a worker row that may never have been opened.
  */
 async function openMainCheckout(
   cwd: string,
   layout: { enabled: boolean; orchestratorSessionIds: readonly string[] },
+  sessions: readonly SessionRecord[],
 ): Promise<string> {
   const { hostPaneId } = preflightCockpit();
   if (hostPaneId === undefined) {
@@ -307,9 +310,10 @@ async function openMainCheckout(
       { code: "TMUX_PANE_UNKNOWN" },
     );
   }
-  const opened = await openCheckoutInNvim({ checkout: cwd, hostPaneId, layout });
+  const opened = await openCheckoutInNvim({ checkout: cwd, hostPaneId, layout, sessions });
   const changes = `${opened.entries} change${opened.entries === 1 ? "" : "s"}`;
-  return `${basename(cwd)} checkout opened in ${opened.paneId} · ${changes} · ${opened.baseline.label}`;
+  const guard = opened.live ? " · read-only while a worker runs in it" : "";
+  return `${basename(cwd)} checkout opened in ${opened.paneId} · ${changes} · ${opened.baseline.label}${guard}`;
 }
 
 async function runCyberdeck(): Promise<void> {
@@ -341,7 +345,7 @@ async function runCyberdeck(): Promise<void> {
       present: launchCockpit,
     }),
     openWorktree: (session, layout) => openWorkerWorktree(session, client, layout),
-    openCheckout: (cwd, layout) => openMainCheckout(cwd, layout),
+    openCheckout: (cwd, layout, sessions) => openMainCheckout(cwd, layout, sessions),
     nvimLayoutHooks,
   });
 }
