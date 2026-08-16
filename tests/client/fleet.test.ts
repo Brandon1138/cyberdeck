@@ -1400,7 +1400,7 @@ describe("fleet presentation", () => {
 
     expect(rendered).toContain("ctrl+o to choose");
     expect(rendered.split("\n").at(-1)).toBe(
-      "↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ctrl+x stop agent",
+      "↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ctrl+x stop agent",
     );
   });
 
@@ -1727,7 +1727,7 @@ describe("fleet controls", () => {
       "home",
       "end",
     ]);
-    expect(decoder.push(Buffer.from([0x15, 0x04]))).toEqual(["ctrl+u", "ctrl+d"]);
+    expect(decoder.push("\u001bk\u001bj")).toEqual(["alt+k", "alt+j"]);
   });
 
   it("names Ctrl+V rather than dropping it, and asks for the pasteboard without touching the frame", () => {
@@ -1779,7 +1779,7 @@ describe("fleet controls", () => {
     expect(pageDown.focusedFolderCwd).toBe("/repo/two");
     expect(pageDown.threadListScrollOffset).toBe(2);
 
-    const halfDown = transitionFleet(pageDown, snapshot, "ctrl+d", NOW_MS, 4).state;
+    const halfDown = transitionFleet(pageDown, snapshot, "alt+j", NOW_MS, 4).state;
     expect(halfDown.selectedSessionId).toBe(three.id);
     expect(halfDown.threadListScrollOffset).toBe(4);
 
