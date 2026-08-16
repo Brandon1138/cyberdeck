@@ -11,6 +11,10 @@ import {
   type StartSessionRequest,
   type ThreadAttentionState,
 } from "../domain/session.js";
+import type {
+  ProvisionedWorktree,
+  WorktreeProvisioner,
+} from "../domain/worker-workspace.js";
 import { resolvedLaunchRecord } from "../providers/launch-record.js";
 import type {
   ProviderAdapter,
@@ -337,6 +341,13 @@ export interface SessionRegistryOptions {
     "initialize" | "capture" | "collect" | "appendTrace" | "readArtifact" | "remove"
   >;
   scoutWorkspaceState?: (cwd: string) => Promise<string>;
+  /**
+   * Creates the worktree for a `cyberdeck-provisioned` workspace. Absent means the broker cannot
+   * provision, and a start that asks it to is refused rather than quietly downgraded to running in
+   * whatever checkout the caller happened to name — silently sharing the operator's working copy is
+   * the failure the mode exists to prevent.
+   */
+  worktreeProvisioner?: WorktreeProvisioner;
 }
 
 export class RegistryError extends Error {
@@ -355,7 +366,9 @@ export class RegistryError extends Error {
       | "INVALID_SESSION_CWD"
       | "INVALID_WORKER_PROFILE"
       | "SCOUT_REPORT_STORE_UNAVAILABLE"
-      | "SCOUT_LAUNCH_FAILED",
+      | "SCOUT_LAUNCH_FAILED"
+      | "WORKSPACE_PROVISIONER_UNAVAILABLE"
+      | "WORKSPACE_PROVISION_FAILED",
     message: string,
     readonly sessionId?: string,
   ) {
@@ -496,8 +509,21 @@ export class SessionRegistry {
       releaseReservation();
       throw error;
     }
+    // Isolation is created here, after admission and before any provider process exists: a worktree
+    // made for a start that the concurrency budget was about to refuse is litter nobody asked for,
+    // and a worker that has already launched cannot be moved into one.
+    let provisioned: ProvisionedWorktree | undefined;
+    try {
+      provisioned = await this.provisionWorkspace(parsed, id);
+    } catch (error) {
+      releaseReservation();
+      throw error;
+    }
     const provisional: SessionRecord = {
       ...parsed,
+      ...(provisioned === undefined
+        ? {}
+        : { cwd: provisioned.workspace.worktreePath ?? parsed.cwd, workspace: provisioned.workspace }),
       kind: parsed.kind ?? "worker",
       id,
       generation: 1,
@@ -569,6 +595,12 @@ export class SessionRegistry {
       );
     } catch (error) {
       releaseReservation();
+      // The worktree was made for a worker that never started, so it holds nothing and belongs to
+      // nobody. `discard` still refuses to force, so anything that did land in it survives.
+      if (provisioned !== undefined) {
+        await this.options.worktreeProvisioner?.discard(provisioned.workspace)
+          .catch(() => undefined);
+      }
       if (provisional.profile === "scout" && provisional.scout !== undefined) {
         await this.preserveFailedScoutLaunch(
           provisional,
@@ -1430,6 +1462,65 @@ export class SessionRegistry {
       );
     }
     return adapter;
+  }
+
+  /**
+   * Create the worktree a `cyberdeck-provisioned` start asked for, and answer with nothing for
+   * every other mode.
+   *
+   * This is the whole of "an orchestrator no longer shells out": the declaration reached the broker
+   * as typed fields, the broker owns the one `git worktree add`, and the worker's cwd becomes the
+   * worktree it never had to know how to make. Every other provisioning mode is untouched — a
+   * pre-provisioned worktree is still validated and used as-is, and a worker-provisioned one still
+   * gets the grants that let the worker do it itself.
+   */
+  private async provisionWorkspace(
+    request: StartSessionRequest,
+    sessionId: string,
+  ): Promise<ProvisionedWorktree | undefined> {
+    const workspace = request.workspace;
+    if (workspace?.provisioning !== "cyberdeck-provisioned") return undefined;
+    const provisioner = this.options.worktreeProvisioner;
+    if (provisioner === undefined) {
+      throw new RegistryError(
+        "WORKSPACE_PROVISIONER_UNAVAILABLE",
+        "This broker cannot provision worktrees; pre-provision one and declare provisioning "
+        + "pre-provisioned",
+      );
+    }
+    let provisioned: ProvisionedWorktree;
+    try {
+      provisioned = await provisioner.provision({ workspace, cwd: request.cwd, sessionId });
+    } catch (error) {
+      throw new RegistryError(
+        "WORKSPACE_PROVISION_FAILED",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    // Everything past this point has a worktree behind it, and throwing from here would return no
+    // `ProvisionedWorktree` for the caller's discard path to act on: the start would fail leaving
+    // the branch and the directory behind, and the deterministic naming means the retry that
+    // follows is refused with WORKSPACE_BRANCH_EXISTS. So this failure gives the worktree back
+    // itself — still non-forced, so anything that somehow landed in it survives.
+    try {
+      await this.appendEvent("workspace.provisioned", sessionId, {
+        worktreePath: provisioned.workspace.worktreePath ?? null,
+        repositoryPath: provisioned.workspace.repositoryPath ?? null,
+        branch: provisioned.workspace.branch,
+        baseRef: provisioned.workspace.baseRef,
+        baseCommit: provisioned.baseCommit,
+        warnings: provisioned.warnings,
+      });
+    } catch (error) {
+      await provisioner.discard(provisioned.workspace).catch(() => undefined);
+      throw new RegistryError(
+        "WORKSPACE_PROVISION_FAILED",
+        `Worktree ${provisioned.workspace.worktreePath ?? "(unnamed)"} was created and then given `
+        + `back because its provisioning could not be journaled: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return provisioned;
   }
 
   private updateAttachmentState(runtime: RuntimeSession): void {

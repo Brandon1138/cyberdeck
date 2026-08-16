@@ -542,18 +542,35 @@ function workerWorkspaceInputSchema(): Record<string, unknown> {
     type: "object",
     description:
       "Where this worker's work lives. Declaring it lets Cyberdeck validate the worktree, branch, "
-      + "and base before the worker starts, and grant the writable roots its provisioning mode needs.",
+      + "and base before the worker starts, grant the writable roots its provisioning mode needs, "
+      + "and — with provisioning cyberdeck-provisioned — create the worktree itself so no "
+      + "orchestrator has to shell out to `git worktree add`.",
     properties: {
-      worktreePath: { type: "string", description: "Absolute path of the worktree the worker runs in." },
+      worktreePath: {
+        type: "string",
+        description:
+          "Absolute path of the worktree the worker runs in. Required unless provisioning is "
+          + "cyberdeck-provisioned, where omitting it lets Cyberdeck name the worktree "
+          + "<repository>-<branch leaf> beside the repository.",
+      },
       branch: { type: "string", description: "Branch the worker's commits land on." },
       baseRef: { type: "string", description: "Ref the branch was cut from and reviews diff against." },
       provisioning: {
         type: "string",
-        enum: ["pre-provisioned", "worker-provisioned"],
+        enum: ["pre-provisioned", "worker-provisioned", "cyberdeck-provisioned"],
         description:
-          "pre-provisioned: the worktree already exists and is validated. worker-provisioned: the "
-          + "worker runs `git worktree add`, which requires workspace-write and the repository's git "
-          + "common directory in writableRoots.",
+          "cyberdeck-provisioned: Cyberdeck runs `git worktree add` before the worker starts, cwd "
+          + "becomes the new worktree, the branch must not already exist, and no extra writable "
+          + "roots are needed. pre-provisioned: the worktree already exists and is validated — this "
+          + "is also how a worker runs directly in a checkout or branch you already have. "
+          + "worker-provisioned: the worker runs `git worktree add` itself, which requires "
+          + "workspace-write and the repository's git common directory in writableRoots.",
+      },
+      repositoryPath: {
+        type: "string",
+        description:
+          "Absolute path of the repository the worktree belongs to. Cyberdeck fills this in when it "
+          + "provisions; declaring it is not required.",
       },
       writableRoots: {
         type: "array",
@@ -562,7 +579,7 @@ function workerWorkspaceInputSchema(): Record<string, unknown> {
         description: "Absolute directories writable in addition to the worktree.",
       },
     },
-    required: ["worktreePath", "branch", "baseRef", "provisioning"],
+    required: ["branch", "baseRef", "provisioning"],
     additionalProperties: false,
   };
 }
