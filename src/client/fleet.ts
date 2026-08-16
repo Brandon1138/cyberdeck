@@ -484,6 +484,21 @@ const WORKERS_SECTION_LABEL = "Workers";
 const PROJECTS_UNAVAILABLE_NOTICE = "Project registry unavailable on this broker";
 /** How much of a worktree path a row spends naming itself before the name is trimmed. */
 const WORKTREE_TAG_WIDTH = 22;
+/** The state label's column. Fixed, because the state is one of a known set of words. */
+const STATUS_CELL_WIDTH = 11;
+/**
+ * A row at this width or more can afford the full layout. Below it the row keeps every column it
+ * can pay for and yields the rest, in the order `threadRowLayout` spends its width.
+ */
+const WIDE_ROW_WIDTH = 80;
+/**
+ * Model and effort in a narrow pane. Wide enough that the model name itself survives — the effort
+ * after it is what a cut takes — because the model is the half of the cell an operator scans for.
+ */
+const NARROW_IDENTITY_CELL_WIDTH = 14;
+/** The floors title and preview shrink to before the supplementary columns start dropping out. */
+const MIN_TITLE_CELL_WIDTH = 8;
+const MIN_PREVIEW_CELL_WIDTH = 6;
 /**
  * The most a row will ever spend on a pull-request number: `#` plus six digits,
  * which is more than any repository this fleet dispatches into will reach. The
@@ -2813,40 +2828,96 @@ function renderThreadRow(
   const identity = threadIdentity(thread.record);
   const status = threadStatus(thread);
   const age = relativeTime(thread.record.meaningfulUpdatedAt ?? thread.record.updatedAt, options.now);
-  const showIdentity = options.width >= 80;
-  const titleWidth = showIdentity
-    ? Math.min(38, Math.max(22, Math.floor(options.width * 0.28)))
-    : Math.min(28, Math.max(16, Math.floor(options.width * 0.38)));
-  const identityWidth = showIdentity
-    ? Math.min(20, Math.max(12, Math.floor(options.width * 0.15)))
-    : 0;
-  const statusWidth = 11;
-  const fixedWidth = 12 + titleWidth + statusWidth
-    + (showIdentity ? identityWidth + 1 : 0)
-    + (pullRequestWidth === 0 ? 0 : pullRequestWidth + 1)
-    + (leaseBadgeWidth === 0 ? 0 : leaseBadgeWidth + 1)
-    + (worktreeWidth === 0 ? 0 : worktreeWidth + 1);
-  const previewWidth = Math.max(1, options.width - fixedWidth);
-  const preview = threadPreview(thread, previewWidth);
+  const layout = threadRowLayout(
+    options.width,
+    pullRequestWidth,
+    leaseBadgeWidth,
+    worktreeWidth,
+  );
+  const preview = threadPreview(thread, layout.preview);
   return [
     `${rowGutter(selected, options.color, scrollbar)}${statusMarker(status, selected, options.color, thread.custodyColor)}`,
-    titleCell(thread, pad(title, titleWidth), selected, options.color),
-    ...(leaseBadgeWidth === 0
+    titleCell(thread, pad(title, layout.title), selected, options.color),
+    ...(layout.leaseBadge === 0
       ? []
-      : [leaseBadgeCell(leaseBadge, leaseBadgeWidth, options.color)]),
-    ...(worktreeWidth === 0
+      : [leaseBadgeCell(leaseBadge, layout.leaseBadge, options.color)]),
+    ...(layout.worktree === 0
       ? []
-      : [paint(pad(fit(worktree ?? "", worktreeWidth), worktreeWidth), "subtle", options.color)]),
-    ...(showIdentity ? [paint(pad(identity, identityWidth), "subtle", options.color)] : []),
-    statusText(pad(status, statusWidth), false, options.color),
-    paint(pad(preview, previewWidth), "muted", options.color),
+      : [paint(pad(fit(worktree ?? "", layout.worktree), layout.worktree), "subtle", options.color)]),
+    paint(pad(identity, layout.identity), "subtle", options.color),
+    statusText(pad(status, STATUS_CELL_WIDTH), false, options.color),
+    paint(pad(preview, layout.preview), "muted", options.color),
     // The number sits between the preview and the time: right of everything that
     // says what the thread is doing, left of when it last did it.
-    ...(pullRequestWidth === 0
+    ...(layout.pullRequest === 0
       ? []
-      : [pullRequestCell(options.pullRequests.get(thread.record.id), pullRequestWidth, options.color)]),
+      : [pullRequestCell(options.pullRequests.get(thread.record.id), layout.pullRequest, options.color)]),
     padStart(age, 5),
   ].join(" ");
+}
+
+/**
+ * How one thread row spends its width.
+ *
+ * The columns are not equals, and the order they yield in is the whole point of this function.
+ * Model and state are what an operator reads a row *for* — which agent is on this, and is it
+ * moving — so they are budgeted first and never yield, at any width the fleet supports. Title and
+ * preview shrink to floors. The supplementary columns, the pull-request number and the worktree
+ * name, are handed whatever is left over and drop out entirely when it does not cover them; the
+ * worktree name is last in line because it repeats what the folder above already said.
+ *
+ * Every input is either the pane width or a column width the caller measured across the whole
+ * list, so two rows in the same frame always resolve to the same layout and the columns stay
+ * columns.
+ */
+function threadRowLayout(
+  width: number,
+  pullRequestWidth: number,
+  leaseBadgeWidth: number,
+  worktreeWidth: number,
+): {
+  title: number;
+  identity: number;
+  leaseBadge: number;
+  worktree: number;
+  pullRequest: number;
+  preview: number;
+} {
+  const wide = width >= WIDE_ROW_WIDTH;
+  const identity = wide
+    ? Math.min(20, Math.max(NARROW_IDENTITY_CELL_WIDTH, Math.floor(width * 0.15)))
+    : NARROW_IDENTITY_CELL_WIDTH;
+  // Gutter, marker, age, and the separator between every one of the six cells a row always has.
+  const reserved = 13 + STATUS_CELL_WIDTH + identity;
+  let optional = width - reserved - MIN_TITLE_CELL_WIDTH - MIN_PREVIEW_CELL_WIDTH;
+  const affordable = (cell: number): number => {
+    if (cell === 0 || optional < cell + 1) return 0;
+    optional -= cell + 1;
+    return cell;
+  };
+  const pullRequest = affordable(pullRequestWidth);
+  const leaseBadge = affordable(leaseBadgeWidth);
+  const worktree = affordable(worktreeWidth);
+  const spent = reserved
+    + (pullRequest === 0 ? 0 : pullRequest + 1)
+    + (leaseBadge === 0 ? 0 : leaseBadge + 1)
+    + (worktree === 0 ? 0 : worktree + 1);
+  const remaining = width - spent;
+  const desiredTitle = wide
+    ? Math.min(38, Math.max(22, Math.floor(width * 0.28)))
+    : Math.min(28, Math.max(16, Math.floor(width * 0.38)));
+  const title = Math.min(
+    desiredTitle,
+    Math.max(MIN_TITLE_CELL_WIDTH, remaining - MIN_PREVIEW_CELL_WIDTH),
+  );
+  return {
+    title,
+    identity,
+    leaseBadge,
+    worktree,
+    pullRequest,
+    preview: Math.max(1, remaining - title),
+  };
 }
 
 /**
@@ -4404,13 +4475,22 @@ function lastActivity(record: SessionRecord): string {
 }
 
 /**
- * Most recent first. Ties fall back to the operator's own ordering — pinned, then explicit
- * reorder, then age — so threads that share a timestamp still hold a stable position.
+ * Pinned threads first, then most recent first within each group.
+ *
+ * A pin is a standing operator decision that a thread stays where it can be seen; recency is the
+ * fleet's own guess at what matters now. A pin that only broke ties lost to the first sibling that
+ * reported newer activity, which is the same as not having pinned at all — so the pin outranks
+ * recency outright. Below both, ties fall back to explicit reorder and then age, so threads that
+ * share a timestamp still hold a stable position.
  */
 function byRecency(left: FleetThread, right: FleetThread): number {
+  // `pinned` is optional, so an unpinned thread is `false` on one record and absent on another.
+  // Comparing the raw fields would rank those two against each other.
+  const leftPinned = left.record.pinned === true;
+  const rightPinned = right.record.pinned === true;
+  if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
   const recency = lastActivity(right.record).localeCompare(lastActivity(left.record));
   if (recency !== 0) return recency;
-  if (left.record.pinned !== right.record.pinned) return left.record.pinned === true ? -1 : 1;
   const leftOrder = left.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
   const rightOrder = right.record.displayOrder ?? Number.MAX_SAFE_INTEGER;
   if (leftOrder !== rightOrder) return leftOrder - rightOrder;

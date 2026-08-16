@@ -8,6 +8,11 @@ and persisted schemas remain under active alpha development.
 
 ### Fixed
 
+- A pinned thread stays at the top of its folder. Pins outrank last activity
+  outright rather than breaking ties between equal timestamps, so a pinned thread
+  no longer loses its place the moment a sibling reports newer work. Recency still
+  orders the pinned and unpinned groups internally (MIK-63).
+
 - Claude semantic capture follows the conversation across `/clear`. Sessions launch
   with a SessionStart hook that reports the native `transcript_path` against the
   Cyberdeck session id fixed on its command line, so a rebind is exact even when
@@ -17,6 +22,16 @@ and persisted schemas remain under active alpha development.
   (MIK-46).
 
 ### Changed
+
+- Thread rows no longer carry the `legacy`, `unowned`, or `adoptable` lease tags.
+  They named a lease state an operator has no move to make about, sat on nearly
+  every worker row, and took the width the model and state columns needed. A group
+  that shares one custody still says so once on its section heading, the five-field
+  breakdown is still behind `ctrl+l`, and a `conflict` or `anomaly` — the broker
+  contradicting itself — still tags its row. Columns now yield in a fixed order as
+  a pane narrows: worktree name, then pull-request number, then title and preview
+  to their floors. Model and state are budgeted first and survive the narrowest
+  layout (MIK-76).
 
 - Worker model capabilities are read from the provider CLIs rather than kept in a
   hand-maintained list. The broker asks each provider what it currently offers,
