@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  isProbeSafeBranch,
   NO_PULL_REQUEST_STATUS,
   parsePullRequestPayload,
   PullRequestStatusCache,
-  pullRequestGlyph,
+  pullRequestLabel,
   pullRequestState,
+  pullRequestTone,
   rollupHasFailure,
+  type BranchOwnership,
   type PullRequestProbeOutcome,
   type PullRequestState,
 } from "../../src/client/pr-status.js";
@@ -147,36 +150,67 @@ describe("pullRequestState", () => {
   });
 });
 
-describe("pullRequestGlyph", () => {
-  it("gives every state a distinct glyph", () => {
+describe("pullRequestTone", () => {
+  it("gives every state a distinct tone", () => {
     const states: PullRequestState[] = ["open", "draft", "merged", "closed", "checks-failing"];
-    const glyphs = states.map((state) => pullRequestGlyph(state).glyph);
-    expect(new Set(glyphs).size).toBe(states.length);
-    expect(glyphs.every((glyph) => glyph.length === 1)).toBe(true);
+    const tones = states.map((state) => pullRequestTone(state));
+    expect(new Set(tones).size).toBe(states.length);
   });
 
   it("reserves the alarm tone for failing checks among live pull requests", () => {
-    expect(pullRequestGlyph("checks-failing").tone).toBe("prFailing");
-    expect(pullRequestGlyph("open").tone).toBe("prOpen");
+    expect(pullRequestTone("checks-failing")).toBe("prFailing");
+    expect(pullRequestTone("open")).toBe("prOpen");
   });
 
   it("names semantic palette tokens rather than raw hues", () => {
     // The column paints pull-request state, so the tone travels as state and
     // the fleet palette owns the hue. Closed is inert, not a fault; merged is
     // its own token so it can never collapse into the reserved brand purple.
-    expect(pullRequestGlyph("draft").tone).toBe("prDraft");
-    expect(pullRequestGlyph("merged").tone).toBe("prMerged");
-    expect(pullRequestGlyph("closed").tone).toBe("prClosed");
+    expect(pullRequestTone("draft")).toBe("prDraft");
+    expect(pullRequestTone("merged")).toBe("prMerged");
+    expect(pullRequestTone("closed")).toBe("prClosed");
+  });
+});
+
+describe("pullRequestLabel", () => {
+  it("is the pull request's own number", () => {
+    expect(pullRequestLabel({ state: "open", number: 123 })).toBe("#123");
+    expect(pullRequestLabel({ state: "merged", number: 7 })).toBe("#7");
+  });
+});
+
+describe("isProbeSafeBranch", () => {
+  it("accepts the branch shapes dispatches actually use", () => {
+    expect(isProbeSafeBranch("main")).toBe(true);
+    expect(isProbeSafeBranch("brandonaron38/mik-86-77-pr-indicator")).toBe(true);
+  });
+
+  it("refuses anything gh would read as a flag or git as a pattern", () => {
+    // `gh pr view` has no `--` terminator, so a leading dash is not a branch.
+    expect(isProbeSafeBranch("--json")).toBe(false);
+    expect(isProbeSafeBranch("")).toBe(false);
+    expect(isProbeSafeBranch("feature branch")).toBe(false);
+    expect(isProbeSafeBranch("feature..other")).toBe(false);
+    expect(isProbeSafeBranch("feature^")).toBe(false);
+  });
+
+  it("refuses an all-digit branch, which gh reads as a PR number instead", () => {
+    expect(isProbeSafeBranch("123")).toBe(false);
+    expect(isProbeSafeBranch("0")).toBe(false);
+    // Not a digit-only match: a leading zero or a mixed name is still a branch.
+    expect(isProbeSafeBranch("123abc")).toBe(true);
+    expect(isProbeSafeBranch("v123")).toBe(true);
   });
 });
 
 describe("parsePullRequestPayload", () => {
   it("reads a gh payload", () => {
     expect(parsePullRequestPayload(JSON.stringify({
+      number: 412,
       state: "OPEN",
       isDraft: false,
       statusCheckRollup: [checkRun({ conclusion: "TIMED_OUT" })],
-    }))).toBe("checks-failing");
+    }))).toEqual({ state: "checks-failing", number: 412 });
   });
 
   it("shows nothing for output that is not a pull request object", () => {
@@ -185,76 +219,249 @@ describe("parsePullRequestPayload", () => {
     expect(parsePullRequestPayload("null")).toBeUndefined();
     expect(parsePullRequestPayload("[]")).toBeUndefined();
   });
+
+  it("shows nothing for a pull request it cannot name by number", () => {
+    // The number is the whole indicator now; an anonymous one is not paintable.
+    expect(parsePullRequestPayload(JSON.stringify({ state: "OPEN" }))).toBeUndefined();
+    expect(parsePullRequestPayload(JSON.stringify({ state: "OPEN", number: 0 }))).toBeUndefined();
+    expect(parsePullRequestPayload(JSON.stringify({ state: "OPEN", number: "12" }))).toBeUndefined();
+    expect(parsePullRequestPayload(JSON.stringify({ state: "OPEN", number: 1.5 }))).toBeUndefined();
+  });
+
+  it("shows nothing for a numbered payload whose state is unreadable", () => {
+    expect(parsePullRequestPayload(JSON.stringify({ number: 5, state: "SOMETHING" }))).toBeUndefined();
+  });
 });
 
 describe("PullRequestStatusCache", () => {
-  const okWith = (state: string, rollup: unknown = null): PullRequestProbeOutcome => ({
+  const okWith = (state: string, number = 1, rollup: unknown = null): PullRequestProbeOutcome => ({
     kind: "ok",
-    stdout: JSON.stringify({ state, isDraft: false, statusCheckRollup: rollup }),
+    stdout: JSON.stringify({ number, state, isDraft: false, statusCheckRollup: rollup }),
   });
+
+  /** A thread that declared the branch its work lands on, which is what makes it attributable. */
+  const onBranch = (threadId: string, branch: string, cwd = "/repo"): {
+    threadId: string;
+    cwd: string;
+    branch: string;
+  } => ({ threadId, cwd, branch });
+
+  /** No thread here asks git anything unless a test says what git would answer. */
+  const noOwnership = async (): Promise<BranchOwnership> => ({ kind: "unknown" });
 
   it("never blocks a read: states are empty until a probe lands", async () => {
     let release = (): void => undefined;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const probe = vi.fn(async () => {
       await blocked;
-      return okWith("OPEN");
+      return okWith("OPEN", 12);
     });
-    const cache = new PullRequestStatusCache({ probe });
+    const cache = new PullRequestStatusCache({ probe, branchOwnership: noOwnership });
 
-    cache.refresh(["/repo/one"]);
+    cache.refresh([onBranch("t1", "feature")]);
     expect(cache.states().size).toBe(0);
 
     release();
     await cache.settled();
-    expect(cache.states().get("/repo/one")).toBe("open");
+    expect(cache.states().get("t1")).toEqual({ state: "open", number: 12 });
   });
 
-  it("does not re-probe a resolved worktree inside the TTL, and does after it", async () => {
+  describe("attribution", () => {
+    it("credits a pull request to the one thread whose branch produced it", async () => {
+      // Four workers in the same checkout. Only one of them opened a PR, and the
+      // operator has to be able to see which — this is MIK-86.
+      const cache = new PullRequestStatusCache({
+        probe: async (_cwd, branch) => (branch === "worker-two" ? okWith("OPEN", 91) : { kind: "absent" }),
+        branchOwnership: noOwnership,
+        now: () => 0,
+      });
+
+      cache.refresh([
+        onBranch("t1", "worker-one"),
+        onBranch("t2", "worker-two"),
+        onBranch("t3", "worker-three"),
+      ]);
+      await cache.settled();
+
+      expect([...cache.states()]).toEqual([["t2", { state: "open", number: 91 }]]);
+    });
+
+    it("moves a thread through merged on its own, leaving its neighbours alone", async () => {
+      let state = "OPEN";
+      let now = 0;
+      const cache = new PullRequestStatusCache({
+        probe: async (_cwd, branch) => (branch === "worker-two" ? okWith(state, 91) : { kind: "absent" }),
+        branchOwnership: noOwnership,
+        now: () => now,
+      });
+      const threads = [onBranch("t1", "worker-one"), onBranch("t2", "worker-two")];
+
+      cache.refresh(threads);
+      await cache.settled();
+      expect(cache.states().get("t2")?.state).toBe("open");
+
+      state = "MERGED";
+      now += 61_000;
+      cache.refresh(threads);
+      await cache.settled();
+
+      expect(cache.states().get("t2")).toEqual({ state: "merged", number: 91 });
+      expect(cache.states().has("t1")).toBe(false);
+    });
+
+    it("asks about the branch a thread declared, in that thread's own directory", async () => {
+      const probe = vi.fn(async () => okWith("OPEN", 5));
+      const cache = new PullRequestStatusCache({
+        probe,
+        branchOwnership: noOwnership,
+        now: () => 0,
+      });
+
+      cache.refresh([{ threadId: "t1", cwd: "/repo/checkout", branch: "worker-one" }]);
+      await cache.settled();
+
+      expect(probe).toHaveBeenCalledWith("/repo/checkout", "worker-one");
+    });
+
+    it("never hands gh a digit-only branch, which it would read as an unrelated PR number", async () => {
+      // Regression: a thread declaring branch "123" must not surface PR #123's
+      // state — `gh pr view 123` reads a bare number as a PR number, not a branch.
+      const probe = vi.fn(async () => okWith("OPEN", 123));
+      const cache = new PullRequestStatusCache({
+        probe,
+        branchOwnership: noOwnership,
+        now: () => 0,
+      });
+
+      cache.refresh([{ threadId: "t1", cwd: "/repo", branch: "123" }]);
+      await cache.settled();
+
+      expect(probe).not.toHaveBeenCalled();
+      expect(cache.states().size).toBe(0);
+    });
+
+    it("says nothing about a thread sharing a checkout it does not own a branch in", async () => {
+      // The primary checkout's branch belongs to the checkout, not to any one of
+      // the threads sitting in it, so no thread inherits its pull request.
+      const probe = vi.fn(async () => okWith("OPEN", 5));
+      const cache = new PullRequestStatusCache({
+        probe,
+        branchOwnership: async () => ({ kind: "shared" }),
+        now: () => 0,
+      });
+
+      cache.refresh([{ threadId: "t1", cwd: "/repo" }, { threadId: "t2", cwd: "/repo" }]);
+      await cache.settled();
+
+      expect(probe).not.toHaveBeenCalled();
+      expect(cache.states().size).toBe(0);
+    });
+
+    it("keeps a thread in a worktree branch-scoped without any declaration", async () => {
+      const probe = vi.fn(async () => okWith("OPEN", 33));
+      const cache = new PullRequestStatusCache({
+        probe,
+        branchOwnership: async (cwd) => (cwd === "/repo/cd-task"
+          ? { kind: "owned", branch: "task-branch" }
+          : { kind: "shared" }),
+        now: () => 0,
+      });
+
+      cache.refresh([{ threadId: "t1", cwd: "/repo/cd-task" }, { threadId: "t2", cwd: "/repo" }]);
+      await cache.settled();
+
+      expect(probe).toHaveBeenCalledExactlyOnceWith("/repo/cd-task", "task-branch");
+      expect([...cache.states()]).toEqual([["t1", { state: "open", number: 33 }]]);
+    });
+
+    it("gives both threads in one worktree the pull request they share", async () => {
+      const probe = vi.fn(async () => okWith("OPEN", 33));
+      const cache = new PullRequestStatusCache({
+        probe,
+        branchOwnership: async () => ({ kind: "owned", branch: "task-branch" }),
+        now: () => 0,
+      });
+
+      cache.refresh([{ threadId: "t1", cwd: "/repo/cd-task" }, { threadId: "t2", cwd: "/repo/cd-task" }]);
+      await cache.settled();
+
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(cache.states().get("t1")).toEqual({ state: "open", number: 33 });
+      expect(cache.states().get("t2")).toEqual({ state: "open", number: 33 });
+    });
+
+    it("never hands gh a declared branch that would read as a flag", async () => {
+      const probe = vi.fn(async () => okWith("OPEN", 5));
+      const cache = new PullRequestStatusCache({ probe, branchOwnership: noOwnership, now: () => 0 });
+
+      cache.refresh([onBranch("t1", "--json")]);
+      await cache.settled();
+
+      expect(probe).not.toHaveBeenCalled();
+      expect(cache.states().size).toBe(0);
+    });
+
+    it("forgets a thread that has left the fleet", async () => {
+      const cache = new PullRequestStatusCache({
+        probe: async () => okWith("OPEN", 5),
+        branchOwnership: noOwnership,
+        now: () => 0,
+      });
+
+      cache.refresh([onBranch("t1", "feature")]);
+      await cache.settled();
+      expect(cache.states().size).toBe(1);
+
+      cache.refresh([]);
+      expect(cache.states().size).toBe(0);
+    });
+  });
+
+  it("does not re-probe a resolved branch inside the TTL, and does after it", async () => {
     let now = 1_000;
     const probe = vi.fn(async () => okWith("OPEN"));
-    const cache = new PullRequestStatusCache({ probe, now: () => now });
+    const cache = new PullRequestStatusCache({ probe, branchOwnership: noOwnership, now: () => now });
 
-    cache.refresh(["/repo/one"]);
+    cache.refresh([onBranch("t1", "feature")]);
     await cache.settled();
     now += 59_000;
-    cache.refresh(["/repo/one"]);
+    cache.refresh([onBranch("t1", "feature")]);
     await cache.settled();
     expect(probe).toHaveBeenCalledTimes(1);
 
     now += 2_000;
-    cache.refresh(["/repo/one"]);
+    cache.refresh([onBranch("t1", "feature")]);
     await cache.settled();
     expect(probe).toHaveBeenCalledTimes(2);
   });
 
-  it("backs off harder on a worktree with no pull request", async () => {
+  it("backs off harder on a branch with no pull request", async () => {
     let now = 1_000;
     const probe = vi.fn(async (): Promise<PullRequestProbeOutcome> => ({ kind: "absent" }));
-    const cache = new PullRequestStatusCache({ probe, now: () => now });
+    const cache = new PullRequestStatusCache({ probe, branchOwnership: noOwnership, now: () => now });
 
-    cache.refresh(["/repo/one"]);
+    cache.refresh([onBranch("t1", "feature")]);
     await cache.settled();
     expect(cache.states().size).toBe(0);
 
     now += 120_000;
-    cache.refresh(["/repo/one"]);
+    cache.refresh([onBranch("t1", "feature")]);
     await cache.settled();
     expect(probe).toHaveBeenCalledTimes(1);
 
     now += 200_000;
-    cache.refresh(["/repo/one"]);
+    cache.refresh([onBranch("t1", "feature")]);
     await cache.settled();
     expect(probe).toHaveBeenCalledTimes(2);
   });
 
   it("stops probing for good once gh turns out to be missing", async () => {
     const probe = vi.fn(async (): Promise<PullRequestProbeOutcome> => ({ kind: "unavailable" }));
-    const cache = new PullRequestStatusCache({ probe });
+    const cache = new PullRequestStatusCache({ probe, branchOwnership: noOwnership });
 
-    cache.refresh(["/repo/one"]);
+    cache.refresh([onBranch("t1", "one")]);
     await cache.settled();
-    cache.refresh(["/repo/one", "/repo/two"]);
+    cache.refresh([onBranch("t1", "one"), onBranch("t2", "two")]);
     await cache.settled();
 
     expect(probe).toHaveBeenCalledTimes(1);
@@ -266,56 +473,62 @@ describe("PullRequestStatusCache", () => {
     let index = 0;
     const cache = new PullRequestStatusCache({
       probe: async () => outcomes[index++] ?? { kind: "absent" },
+      branchOwnership: noOwnership,
       now: () => 0,
     });
 
-    cache.refresh(["/repo/one"]);
+    cache.refresh([onBranch("t1", "one")]);
     await cache.settled();
-    expect(cache.states().get("/repo/one")).toBe("open");
+    expect(cache.states().get("t1")?.state).toBe("open");
 
-    cache.refresh(["/repo/two"]);
+    cache.refresh([onBranch("t1", "one"), onBranch("t2", "two")]);
     await cache.settled();
     expect(cache.states().size).toBe(0);
   });
 
-  it("swallows a probe that throws and treats the worktree as having no PR", async () => {
+  it("swallows a probe that throws and treats the branch as having no PR", async () => {
     const cache = new PullRequestStatusCache({
       probe: async () => { throw new Error("gh exploded"); },
+      branchOwnership: noOwnership,
     });
 
-    cache.refresh(["/repo/one"]);
+    cache.refresh([onBranch("t1", "one")]);
     await expect(cache.settled()).resolves.toBeUndefined();
     expect(cache.states().size).toBe(0);
   });
 
-  it("deduplicates worktrees within one refresh and bounds the queue", async () => {
+  it("deduplicates identical questions within one refresh and bounds the queue", async () => {
     const probe = vi.fn(async () => okWith("MERGED"));
-    const cache = new PullRequestStatusCache({ probe, now: () => 0 });
+    const cache = new PullRequestStatusCache({ probe, branchOwnership: noOwnership, now: () => 0 });
 
-    cache.refresh(["/repo/one", "/repo/one", "/repo/one"]);
+    cache.refresh([onBranch("t1", "one"), onBranch("t2", "one"), onBranch("t3", "one")]);
     await cache.settled();
     expect(probe).toHaveBeenCalledTimes(1);
 
-    cache.refresh(["/a", "/b", "/c", "/d", "/e", "/f"]);
+    cache.refresh([
+      onBranch("a", "a"), onBranch("b", "b"), onBranch("c", "c"),
+      onBranch("d", "d"), onBranch("e", "e"), onBranch("f", "f"),
+    ]);
     await cache.settled();
     expect(probe).toHaveBeenCalledTimes(5);
   });
 
-  it("omits worktrees whose probe resolved to no pull request", async () => {
+  it("omits threads whose probe resolved to no pull request", async () => {
     const cache = new PullRequestStatusCache({
-      probe: async (cwd) => (cwd === "/repo/one" ? okWith("CLOSED") : { kind: "absent" }),
+      probe: async (_cwd, branch) => (branch === "one" ? okWith("CLOSED", 4) : { kind: "absent" }),
+      branchOwnership: noOwnership,
       now: () => 0,
     });
 
-    cache.refresh(["/repo/one", "/repo/two"]);
+    cache.refresh([onBranch("t1", "one"), onBranch("t2", "two")]);
     await cache.settled();
-    expect([...cache.states()]).toEqual([["/repo/one", "closed"]]);
+    expect([...cache.states()]).toEqual([["t1", { state: "closed", number: 4 }]]);
   });
 });
 
 describe("NO_PULL_REQUEST_STATUS", () => {
   it("is inert", () => {
-    expect(() => NO_PULL_REQUEST_STATUS.refresh(["/repo/one"])).not.toThrow();
+    expect(() => NO_PULL_REQUEST_STATUS.refresh([{ threadId: "t1", cwd: "/repo" }])).not.toThrow();
     expect(NO_PULL_REQUEST_STATUS.states().size).toBe(0);
   });
 });
