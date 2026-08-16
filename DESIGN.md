@@ -219,7 +219,9 @@ At `80` to `99` columns, the same single-line structure is retained with narrowe
 ▌ · Create iPhoneDoctor…  Opus · high  Done       Shader background is ready…  2m
 ```
 
-Below `80` columns, model and effort yield before task, state, age, or preview. The row remains one line so multiplexing does not switch Fleet into a separate compact presentation.
+Below `80` columns the row still yields, but the model does not. Columns give up width in a fixed order: the worktree name first — the folder heading above it already said where the thread lives — then the pull-request number, then title and preview down to their floors. Model and state are budgeted before any of them and survive the narrowest pane Fleet renders into. The row remains one line so multiplexing does not switch Fleet into a separate compact presentation.
+
+Lease custody is not a permanent column either. `legacy`, `unowned`, and `adoptable` describe a lease an operator has no move to make about, and nearly every worker carries one, so no unowned state prints on a row; a group that shares one still states it once on its section heading, and the full five-field breakdown stays behind `ctrl+l`. The only tag left on a row is `conflict` or `anomaly`, which says the broker is contradicting itself.
 
 ### Attention States
 
