@@ -139,6 +139,11 @@ make the grant and the lease agree — not to special-case the tools that curren
   indicator in that case is the fix, not a gap in it — it is what MIK-86 was. Dispatch with a
   declared `workspace` if a thread needs the indicator.
 
+- Which half of the nvim surface owns what — Cyberdeck's `src/nvim/` and the shipped Lua module
+  versus the operator's own nvim config — is written down in `docs/architecture/nvim-surface.md`.
+  Read it before adding presentation to either side: landing, docking, diff rendering, and keymaps
+  are the config's, and `on_open(ctx)` is the seam that hands them what they need.
+
 - When Fleet's window has no nvim, one is spawned into that same window — and nowhere else. No
   window other than Fleet's is searched and no socket directory is scanned; both would open a
   worktree somewhere the operator is not looking. The absence of guessing is not a gap to close.

@@ -113,8 +113,11 @@ describe("diffBaseline", () => {
   it("diffs the working tree against the fork point with the default branch", async () => {
     const { git } = repository({ defaultBranch: "origin/main", head: "aaa", forkPoint: "base" });
 
+    // The revision travels beside the label: nvim can say "since origin/main" from the label, but
+    // it can only show a file against that baseline if it is told which commit the phrase resolved
+    // to — and told once, so a branch moving underneath does not change the answer.
     expect(await diffBaseline(git)).toEqual({
-      baseline: { kind: "fork-point", label: "since origin/main" },
+      baseline: { kind: "fork-point", label: "since origin/main", rev: "base" },
       args: ["diff", "--no-ext-diff", "--unified=0", "base", "--"],
     });
   });
@@ -139,7 +142,7 @@ describe("diffBaseline", () => {
     const { git } = repository({ defaultBranch: "origin/main", head: "same", forkPoint: "same" });
 
     expect(await diffBaseline(git)).toEqual({
-      baseline: { kind: "uncommitted", label: "uncommitted only" },
+      baseline: { kind: "uncommitted", label: "uncommitted only", rev: "same" },
       args: ["diff", "--no-ext-diff", "--unified=0", "HEAD", "--"],
     });
   });
@@ -186,7 +189,7 @@ describe("collectWorktreeChanges", () => {
         { path: "new.ts", line: 1, text: "untracked" },
       ],
       dropped: 0,
-      baseline: { kind: "fork-point", label: "since origin/main" },
+      baseline: { kind: "fork-point", label: "since origin/main", rev: "base" },
     });
   });
 

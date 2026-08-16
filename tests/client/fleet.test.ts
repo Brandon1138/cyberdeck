@@ -2995,6 +2995,31 @@ describe("fleet controls", () => {
     expect(transition.state.notice).toBeUndefined();
   });
 
+  it("opens a project's main checkout from its folder header, which no worker's worktree reaches", () => {
+    const first = session({ cwd: "/repo/one" });
+    const second = session({ id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" });
+    const snapshot = fleet({ record: first }, { record: second });
+    const onFolder = transitionFleet(createFleetState(snapshot), snapshot, "down", NOW_MS).state;
+    expect(onFolder.focusedFolderCwd).toBe("/repo/two");
+
+    const transition = transitionFleet(onFolder, snapshot, "ctrl+n", NOW_MS);
+
+    expect(transition.action).toEqual({ type: "open-checkout", cwd: "/repo/two" });
+    expect(transition.state.notice).toBeUndefined();
+  });
+
+  it("has no checkout to open for the Orcs roster, which is a section rather than a path", () => {
+    const orc = session({ kind: "orchestrator" });
+    const worker = session({ id: "22222222-2222-4222-8222-222222222222", kind: "worker" });
+    const snapshot = fleet({ record: orc }, { record: worker });
+    const onHeader = { ...createFleetState(snapshot), focusedFolderCwd: "/@orcs" };
+
+    const transition = transitionFleet(onHeader, snapshot, "ctrl+n", NOW_MS);
+
+    expect(transition.action).toBeUndefined();
+    expect(transition.state.notice).toBe("Not a project folder");
+  });
+
   it("declines to open an Orc's cwd, which no agent is rewriting", () => {
     const orc = session({ kind: "orchestrator" });
     const snapshot = fleet({ record: orc });

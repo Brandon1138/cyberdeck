@@ -52,6 +52,7 @@ import {
   type SpawnSyncLike,
 } from "./tmux/cockpit.js";
 import {
+  openCheckoutInNvim,
   openWorktreeInNvim,
   selectSession,
   worktreeSubject,
@@ -289,6 +290,28 @@ async function openWorkerWorktree(
   return `${subject} opened in ${opened.paneId} · ${changes}${baseline}${guard}`;
 }
 
+/**
+ * Open a project's primary checkout in the same nvim, with no binding behind it.
+ *
+ * A binding exists to lift a worker's read-only lock when that worker finishes. A checkout has no
+ * worker and no lock, so there is no transition to wait for and nothing to tell the broker.
+ */
+async function openMainCheckout(
+  cwd: string,
+  layout: { enabled: boolean; orchestratorSessionIds: readonly string[] },
+): Promise<string> {
+  const { hostPaneId } = preflightCockpit();
+  if (hostPaneId === undefined) {
+    throw Object.assign(
+      new Error("Cyberdeck is not running inside a tmux pane, so there is no window to find nvim in"),
+      { code: "TMUX_PANE_UNKNOWN" },
+    );
+  }
+  const opened = await openCheckoutInNvim({ checkout: cwd, hostPaneId, layout });
+  const changes = `${opened.entries} change${opened.entries === 1 ? "" : "s"}`;
+  return `${basename(cwd)} checkout opened in ${opened.paneId} · ${changes} · ${opened.baseline.label}`;
+}
+
 async function runCyberdeck(): Promise<void> {
   let client: RpcClient;
   try {
@@ -318,6 +341,7 @@ async function runCyberdeck(): Promise<void> {
       present: launchCockpit,
     }),
     openWorktree: (session, layout) => openWorkerWorktree(session, client, layout),
+    openCheckout: (cwd, layout) => openMainCheckout(cwd, layout),
     nvimLayoutHooks,
   });
 }

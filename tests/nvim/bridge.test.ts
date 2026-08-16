@@ -8,6 +8,7 @@ const request: NvimWorktreeRequest = {
   worktree: "/work/tree",
   title: "Cyberdeck · scout-7",
   live: true,
+  baseline: { kind: "fork-point", label: "since origin/main", rev: "abc123" },
   entries: [{ filename: "/work/tree/a.ts", lnum: 3, col: 1, text: "changed" }],
 };
 

@@ -1,5 +1,6 @@
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { basename } from "node:path";
 import type { SessionRecord } from "../domain/session.js";
 import type { SpawnSyncLike } from "../tmux/cockpit.js";
 import { callNvim } from "./bridge.js";
@@ -51,8 +52,8 @@ export function selectSession(
   throw Object.assign(new Error(`No session matches ${wanted}`), { code: "SESSION_NOT_FOUND" });
 }
 
-export interface OpenWorktreeOptions {
-  session: SessionRecord;
+/** Everything an open needs that is the same whether a worker or a checkout is being opened. */
+export interface NvimOpenOptions {
   /** The pane the invoking client occupies; nvim is looked for in that pane's window. */
   hostPaneId: string;
   spawnSync?: SpawnSyncLike | undefined;
@@ -69,9 +70,17 @@ export interface OpenWorktreeOptions {
   worktreeExists?: ((path: string) => boolean) | undefined;
 }
 
-export interface OpenedWorktree {
-  sessionId: string;
-  worktree: string;
+export interface OpenWorktreeOptions extends NvimOpenOptions {
+  session: SessionRecord;
+}
+
+export interface OpenCheckoutOptions extends NvimOpenOptions {
+  /** The repository's primary checkout — the folder header's own path, not a worker's worktree. */
+  checkout: string;
+}
+
+/** What every open reports back, whoever it was opened for. */
+interface OpenedInNvim {
   paneId: string;
   address: string;
   entries: number;
@@ -80,13 +89,92 @@ export interface OpenedWorktree {
   baseline: WorktreeBaseline;
 }
 
+export interface OpenedWorktree extends OpenedInNvim {
+  sessionId: string;
+  worktree: string;
+}
+
+export interface OpenedCheckout extends OpenedInNvim {
+  checkout: string;
+}
+
+/**
+ * The prefix a checkout's nvim-side identity carries.
+ *
+ * Every request names the thing it is about, and the nvim module keys its read-only guard by that
+ * name. A worker sends its session id; a main checkout has no session, so it sends its path — under
+ * a prefix no session id can take, because ids are UUIDs. A checkout that reused a worker's id
+ * would release that worker's files the moment the operator opened the repository beside it.
+ */
+export const CHECKOUT_IDENTITY_PREFIX = "checkout:";
+
+export function checkoutIdentity(checkout: string): string {
+  return `${CHECKOUT_IDENTITY_PREFIX}${checkout}`;
+}
+
+/** One thing to open: who it belongs to, where it is, and whether anything is still writing to it. */
+interface NvimOpenTarget {
+  identity: string;
+  path: string;
+  subject: string;
+  live: boolean;
+  /** What the operator is told when the path is gone, in the words of the thing they asked for. */
+  missing: { code: string; message: (path: string) => string };
+}
+
 /**
  * Open one worker's worktree in the nvim running in this tmux window, starting one if there is none.
+ *
+ * Live means locked: the buffers land read-only for as long as the agent can still be writing to
+ * them. Releasing that lock early is the operator's own deliberate act on the nvim side, never
+ * something Cyberdeck infers for them — see `docs/architecture/nvim-surface.md`.
+ */
+export async function openWorktreeInNvim(options: OpenWorktreeOptions): Promise<OpenedWorktree> {
+  const opened = await openInNvim({
+    identity: options.session.id,
+    path: options.session.cwd,
+    subject: worktreeSubject(options.session),
+    live: isWorkerLive(options.session),
+    missing: {
+      code: "WORKTREE_MISSING",
+      message: (path) => `The worktree ${path} is no longer on disk, so there is nothing to open`,
+    },
+  }, options);
+  return { ...opened, sessionId: options.session.id, worktree: options.session.cwd };
+}
+
+/**
+ * Open a repository's primary checkout — the one place in a project no worker's worktree reaches.
+ *
+ * It is opened unlocked, deliberately: the checkout is where the operator makes the quick manual
+ * edit that Ctrl+N on a worker exists to prevent them making. That is a claim about this request,
+ * not about the files: the nvim module derives every buffer's lock from the guards that are
+ * actually standing, so a checkout a live worker happens to be running *in* still lands read-only.
+ *
+ * No binding follows this open. A binding exists to lift a worker's lock when that worker finishes,
+ * and a checkout has neither.
+ */
+export async function openCheckoutInNvim(options: OpenCheckoutOptions): Promise<OpenedCheckout> {
+  const opened = await openInNvim({
+    identity: checkoutIdentity(options.checkout),
+    path: options.checkout,
+    subject: basename(options.checkout),
+    live: false,
+    missing: {
+      code: "CHECKOUT_MISSING",
+      message: (path) => `The checkout ${path} is no longer on disk, so there is nothing to open`,
+    },
+  }, options);
+  return { ...opened, checkout: options.checkout };
+}
+
+/**
+ * The one path both opens take.
  *
  * The order matters: the pane is resolved before any git work, so the nvim the change list is
  * destined for exists — and answers — before a large tree is diffed for it.
  *
- * The one thing that goes *ahead* of the pane is whether the worktree is still on disk. A worktree
+ * The one thing that goes *ahead* of the pane is whether the directory is still on disk. A worktree
  * that has been cleaned up has nothing to open, and resolving the pane first would spawn an nvim
  * into the operator's window purely to then fail. This is a single `existsSync`, not a diff, so it
  * costs the ordering above nothing: the expensive work stays behind the pane, as before.
@@ -94,13 +182,13 @@ export interface OpenedWorktree {
  * A directory that exists but is not a repository is *not* an error — the operator keeps scratchpad
  * threads like that, and they open with an empty list that says so.
  */
-export async function openWorktreeInNvim(options: OpenWorktreeOptions): Promise<OpenedWorktree> {
+async function openInNvim(
+  target: NvimOpenTarget,
+  options: NvimOpenOptions,
+): Promise<OpenedInNvim> {
   const exists = options.worktreeExists ?? existsSync;
-  if (!exists(options.session.cwd)) {
-    throw Object.assign(
-      new Error(`The worktree ${options.session.cwd} is no longer on disk, so there is nothing to open`),
-      { code: "WORKTREE_MISSING" },
-    );
+  if (!exists(target.path)) {
+    throw Object.assign(new Error(target.missing.message(target.path)), { code: target.missing.code });
   }
   const pane = await discoverNvimPane({
     spawnSync: options.spawnSync ?? (nodeSpawnSync as SpawnSyncLike),
@@ -112,13 +200,12 @@ export async function openWorktreeInNvim(options: OpenWorktreeOptions): Promise<
     },
     ...(options.layout === undefined ? {} : { layout: options.layout }),
   });
-  const live = isWorkerLive(options.session);
-  const changes = await (options.changes ?? worktreeChanges)(options.session.cwd);
+  const changes = await (options.changes ?? worktreeChanges)(target.path);
   const request = worktreeRequest({
-    session: options.session.id,
-    worktree: options.session.cwd,
-    subject: worktreeSubject(options.session),
-    live,
+    session: target.identity,
+    worktree: target.path,
+    subject: target.subject,
+    live: target.live,
     changes,
   });
   callNvim({
@@ -129,12 +216,10 @@ export async function openWorktreeInNvim(options: OpenWorktreeOptions): Promise<
     ...(options.nvimPath === undefined ? {} : { nvimPath: options.nvimPath }),
   });
   return {
-    sessionId: options.session.id,
-    worktree: options.session.cwd,
     paneId: pane.paneId,
     address: pane.address,
     entries: request.entries.length,
-    live,
+    live: target.live,
     baseline: changes.baseline,
   };
 }

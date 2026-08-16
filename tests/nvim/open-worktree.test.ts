@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { decodeNvimPayload } from "../../src/nvim/quickfix.js";
 import {
+  CHECKOUT_IDENTITY_PREFIX,
   isWorkerLive,
+  openCheckoutInNvim,
   openWorktreeInNvim,
   selectSession,
   worktreeSubject,
@@ -125,6 +127,7 @@ describe("openWorktreeInNvim", () => {
       worktree: "/work/tree",
       title: "Cyberdeck · worker-one · since origin/main",
       live: true,
+      baseline: FORK_POINT,
       entries: [{ filename: "/work/tree/src/a.ts", lnum: 7, col: 1, text: "fn a() {" }],
     });
   });
@@ -230,6 +233,63 @@ describe("openWorktreeInNvim", () => {
     expect(String(thrown)).toContain("/work/cleaned-up");
     // Nothing was spawned and no pane was even looked for: an nvim started only to be told the
     // worktree is gone is a pane the operator now has to close by hand.
+    expect(calls).toEqual([]);
+  });
+
+  it("opens a repository's main checkout unlocked, under an identity no session id can take", async () => {
+    const { calls, spawnSync } = tmuxAndNvim();
+
+    const opened = await openCheckoutInNvim({
+      checkout: "/code/ammo",
+      hostPaneId: "%1",
+      spawnSync,
+      uid: 501,
+      worktreeExists: () => true,
+      changes: async () => ({
+        changes: [{ path: "Package.swift", line: 3, text: "changed" }],
+        dropped: 0,
+        baseline: FORK_POINT,
+      }),
+    });
+
+    expect(opened).toEqual({
+      checkout: "/code/ammo",
+      paneId: "%2",
+      address: "/tmp/cyberdeck-nvim-501/pane-2.sock",
+      entries: 1,
+      live: false,
+      baseline: FORK_POINT,
+    });
+
+    const nvimCall = calls.find(({ command }) => command === "nvim");
+    const payload = /\.open\('([A-Za-z0-9+/=]+)'\)$/u.exec(nvimCall?.args[3] ?? "")?.[1] ?? "";
+    const request = decodeNvimPayload(payload);
+    // A checkout that reused a worker's identity would release that worker's files the moment the
+    // operator opened the repository beside it.
+    expect(request.session).toBe("checkout:/code/ammo");
+    expect(request.session.startsWith(CHECKOUT_IDENTITY_PREFIX)).toBe(true);
+    expect(request.live).toBe(false);
+    expect(request.title).toBe("Cyberdeck · ammo · since origin/main");
+  });
+
+  it("refuses a checkout that is gone, in the words of the thing that was asked for", async () => {
+    const { calls, spawnSync } = tmuxAndNvim();
+    let thrown: unknown;
+
+    try {
+      await openCheckoutInNvim({
+        checkout: "/code/moved-away",
+        hostPaneId: "%1",
+        spawnSync,
+        uid: 501,
+        worktreeExists: () => false,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect((thrown as { code?: string }).code).toBe("CHECKOUT_MISSING");
+    expect(String(thrown)).toContain("/code/moved-away");
     expect(calls).toEqual([]);
   });
 
