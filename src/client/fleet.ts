@@ -2862,9 +2862,12 @@ function renderThreadRow(
  * The columns are not equals, and the order they yield in is the whole point of this function.
  * Model and state are what an operator reads a row *for* — which agent is on this, and is it
  * moving — so they are budgeted first and never yield, at any width the fleet supports. Title and
- * preview shrink to floors. The supplementary columns, the pull-request number and the worktree
- * name, are handed whatever is left over and drop out entirely when it does not cover them; the
- * worktree name is last in line because it repeats what the folder above already said.
+ * preview shrink to floors. Of the supplementary columns, the lease conflict/anomaly badge is
+ * budgeted before the pull-request number: a contested worker with nowhere to show a badge is
+ * invisible unless the operator already knows to open lease detail, and unrelated PR metadata must
+ * not be the reason it stays that way. Pull request and worktree name are handed whatever is left
+ * over after that and drop out entirely when it does not cover them; the worktree name is last in
+ * line because it repeats what the folder above already said.
  *
  * Every input is either the pane width or a column width the caller measured across the whole
  * list, so two rows in the same frame always resolve to the same layout and the columns stay
@@ -2895,8 +2898,8 @@ function threadRowLayout(
     optional -= cell + 1;
     return cell;
   };
-  const pullRequest = affordable(pullRequestWidth);
   const leaseBadge = affordable(leaseBadgeWidth);
+  const pullRequest = affordable(pullRequestWidth);
   const worktree = affordable(worktreeWidth);
   const spent = reserved
     + (pullRequest === 0 ? 0 : pullRequest + 1)

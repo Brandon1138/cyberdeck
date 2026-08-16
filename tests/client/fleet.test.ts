@@ -1000,6 +1000,45 @@ describe("fleet presentation", () => {
 
       expect(rowFor(rendered, "Ship indicator")).not.toMatch(/#\d/u);
     });
+
+    it("budgets the conflict badge before the pull-request column at a narrow width", () => {
+      // MIK-63/76 regression: a `#1` anywhere in the fleet used to win the optional-column
+      // budget outright at 61 columns, leaving no room for the one badge that flags a broker
+      // inconsistency — so a lone contested worker rendered with neither a group rollup nor a
+      // row badge, invisible unless the operator already knew to open lease detail.
+      const contestedId = "33333333-3333-4333-8333-333333333333";
+      const snapshot: FleetSnapshot = fleet(
+        { record: first },
+        { record: second },
+        {
+          record: session({
+            id: contestedId,
+            kind: "worker",
+            role: "worker",
+            name: "Contested worker",
+            cwd: "/repo/three",
+            displayOrder: 2,
+          }),
+          coordination: coordination(contestedId, "contested"),
+        },
+      );
+      const rendered = renderFleet(snapshot, createFleetState(snapshot), {
+        color: false,
+        width: 61,
+        height: 28,
+        now: NOW_MS,
+        home: "/Users/brandon",
+        pullRequests: new Map([[FIRST_ID, pr("open", 1)]]),
+      });
+      // The title column is squeezed to its floor at this width, so the row's own name is
+      // truncated below "Contested worker" — the badge is what has to survive, not the title.
+      const rows = rendered.split("\n");
+      const badgeRow = rows.find((line) => line.includes("conflict"));
+
+      expect(badgeRow).toBeDefined();
+      expect(badgeRow).toHaveLength(61);
+      expect(rows.some((line) => /#1\b/u.test(line))).toBe(false);
+    });
   });
 
   it("counts only running agents in the header while finished threads stay listed", () => {
