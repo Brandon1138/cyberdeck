@@ -11,6 +11,11 @@ export const BrokerEventTypeSchema = z.enum([
   "session.exited",
   /** The provider session took an unrecoverable fault while its OS process kept running. */
   "session.errored",
+  /**
+   * A completed turn was recorded from a terminal scrape because the provider's own transcript did
+   * not land within the retry budget. The turn is real; its text is a degraded reading of it.
+   */
+  "session.turn_scraped",
   "session.stopped",
   "session.deleted",
   /** Cyberdeck created a worktree for a worker. `data` names the path, branch, base, and repository. */

@@ -67,6 +67,16 @@ const COMPOSER_PLACEHOLDERS: readonly RegExp[] = [
   /^\/\S+ for /iu,
 ];
 
+/**
+ * How far back a composer reading looks.
+ *
+ * A composer sits at the bottom of the screen, and every hint this reads is rendered against it. A
+ * provider that never clears the screen has no frame boundary, so without this bound the scan grew
+ * with everything the worker had ever printed — and an occurrence found thousands of lines up was
+ * scrollback being mistaken for the live input surface either way.
+ */
+const COMPOSER_SCAN_LINES = 200;
+
 export function terminalComposerState(
   provider: ProviderId,
   replay: string,
@@ -75,20 +85,37 @@ export function terminalComposerState(
 ): ComposerObservation {
   const modalOpen = options.modalOpen
     ?? providerTerminalActivity(provider, replay) === "needs-input";
-  const lines = plainTerminalText(currentFrame(replay))
-    .split("\n")
-    .map((line) => line.replace(/\s+$/u, ""));
+  return frameComposerState(provider, plainTerminalText(currentFrame(replay)), { modalOpen });
+}
+
+/**
+ * {@link terminalComposerState} for a caller that already holds the normalized current frame.
+ *
+ * `modalOpen` is required here rather than derived: a caller holding a frame has already decided
+ * what the provider is doing, and re-deriving it would mean stripping a replay this path never
+ * receives.
+ */
+export function frameComposerState(
+  provider: ProviderId,
+  frame: string,
+  options: { modalOpen: boolean },
+): ComposerObservation {
+  const { modalOpen } = options;
+  const lines = frame.split("\n");
+  // Both passes read upward from the bottom of the frame and stop at the scan window. This runs on
+  // every observed frame, so it walks the lines rather than building a trimmed copy of them first.
+  const first = Math.max(0, lines.length - COMPOSER_SCAN_LINES);
 
   for (const hint of UNSENT_BUFFER_HINTS[provider] ?? []) {
-    const matched = lines.find((line) => hint.test(line.trim()));
-    if (matched !== undefined) {
-      return { modalOpen, occupied: true, evidence: matched.trim() };
+    for (let index = lines.length - 1; index >= first; index -= 1) {
+      const line = lines[index]!.trim();
+      if (line !== "" && hint.test(line)) return { modalOpen, occupied: true, evidence: line };
     }
   }
 
   // Read the *last* boxed prompt line: a composer is at the bottom of the screen, and an earlier
   // match is more likely to be a quoted block than the live input surface.
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
+  for (let index = lines.length - 1; index >= first; index -= 1) {
     const content = BOXED_COMPOSER_LINE.exec(lines[index]!.trim())?.[1];
     if (content === undefined) continue;
     if (COMPOSER_PLACEHOLDERS.some((placeholder) => placeholder.test(content))) break;

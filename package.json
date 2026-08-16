@@ -52,6 +52,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "release:alpha": "node scripts/release-alpha.mjs",
+    "bench:ingest": "tsx scripts/bench-pty-ingest.ts",
     "probe": "tsx scripts/probe-runtimes.ts",
     "gate:live-codex": "tsx scripts/run-live-codex-gate.ts",
     "dev": "tsx src/cli.ts",

@@ -5,7 +5,7 @@ import { stripTerminalControl } from "./terminal-replay.js";
  * How much of the replay tail is examined. A fatal notice is always the last thing a provider
  * prints, and bounding the scan keeps this cheap enough to run on every output chunk.
  */
-const TAIL_BYTES = 4_000;
+export const TAIL_BYTES = 4_000;
 
 /**
  * Conversation chrome, in the first column.
@@ -142,10 +142,21 @@ export interface SessionFatalError {
  * merely contained `API Error: 400` read exactly like the fault it was describing.
  */
 export function detectSessionFatalError(replay: string): SessionFatalError | undefined {
-  const plain = stripTerminalControl(replay);
-  const truncated = plain.length > TAIL_BYTES;
-  const tail = truncated ? plain.slice(plain.length - TAIL_BYTES) : plain;
+  return detectSessionFatalErrorInTail(strippedTail(replay));
+}
 
+/**
+ * {@link detectSessionFatalError} over a stripped tail the caller already holds.
+ *
+ * The scan was always bounded to the last {@link TAIL_BYTES} characters, but the bounding used to
+ * happen after stripping the whole replay — so a scan that reads 4 000 characters cost a pass over
+ * 128 KiB on every output chunk. A caller keeping a rolling stripped tail hands it over instead.
+ * `truncated` must say whether that tail's head was cut, because a line whose left edge was severed
+ * cannot be told apart from one that genuinely began at column 0.
+ */
+export function detectSessionFatalErrorInTail(
+  { text: tail, truncated }: { text: string; truncated: boolean },
+): SessionFatalError | undefined {
   let best: { index: number; reason: string; detail: string } | undefined;
   for (const { line, index } of providerOwnedLines(tail, truncated)) {
     for (const { pattern, reason } of FATAL_PATTERNS) {
@@ -173,10 +184,13 @@ export function detectSessionFatalError(replay: string): SessionFatalError | und
  * about to try again has not stopped.
  */
 export function detectProviderLimitTermination(replay: string): ProviderLimitTermination | undefined {
-  const plain = stripTerminalControl(replay);
-  const truncated = plain.length > TAIL_BYTES;
-  const tail = truncated ? plain.slice(plain.length - TAIL_BYTES) : plain;
+  return detectProviderLimitTerminationInTail(strippedTail(replay));
+}
 
+/** {@link detectProviderLimitTermination} over a stripped tail the caller already holds. */
+export function detectProviderLimitTerminationInTail(
+  { text: tail, truncated }: { text: string; truncated: boolean },
+): ProviderLimitTermination | undefined {
   let best: { index: number; kind: ProviderLimitTermination["kind"]; reason: string; detail: string }
     | undefined;
   for (const { line, index } of providerOwnedLines(tail, truncated)) {
@@ -214,6 +228,12 @@ function* providerOwnedLines(
     if (severed || line.length === 0 || CONVERSATION_CHROME.test(line)) continue;
     yield { line, index: start };
   }
+}
+
+function strippedTail(replay: string): { text: string; truncated: boolean } {
+  const plain = stripTerminalControl(replay);
+  const truncated = plain.length > TAIL_BYTES;
+  return { text: truncated ? plain.slice(plain.length - TAIL_BYTES) : plain, truncated };
 }
 
 function boundedDetail(line: string): string {
