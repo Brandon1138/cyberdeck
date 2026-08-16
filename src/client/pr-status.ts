@@ -176,10 +176,19 @@ const PROBE_TIMEOUT_MS = 5_000;
  * whitespace and glob characters are not branch names any dispatch has needed.
  * The broker validates declared branches too — this is the client-side half of
  * the same rule, applied to whatever git happens to report as well.
+ *
+ * An all-digit branch is refused outright, not passed through: `gh pr view`'s
+ * positional argument is `<number> | <url> | <branch>`, and a numeric argument
+ * is read as a PR number — running `PullRequestByNumber` against whatever PR
+ * happens to have that number, not `PullRequestForBranch` against this thread's
+ * branch. A branch named e.g. `123` is valid git; there is no probe form that
+ * makes it unambiguous, so consistent with this file's refuse-to-guess stance
+ * such a thread shows no indicator rather than risk borrowing someone else's PR.
  */
 export function isProbeSafeBranch(branch: string): boolean {
   if (branch.length === 0 || branch.length > 255) return false;
   if (branch.startsWith("-")) return false;
+  if (/^\d+$/u.test(branch)) return false;
   return !/[\s~^:?*[\\]/u.test(branch) && !branch.includes("..");
 }
 

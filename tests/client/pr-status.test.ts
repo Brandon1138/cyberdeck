@@ -193,6 +193,14 @@ describe("isProbeSafeBranch", () => {
     expect(isProbeSafeBranch("feature..other")).toBe(false);
     expect(isProbeSafeBranch("feature^")).toBe(false);
   });
+
+  it("refuses an all-digit branch, which gh reads as a PR number instead", () => {
+    expect(isProbeSafeBranch("123")).toBe(false);
+    expect(isProbeSafeBranch("0")).toBe(false);
+    // Not a digit-only match: a leading zero or a mixed name is still a branch.
+    expect(isProbeSafeBranch("123abc")).toBe(true);
+    expect(isProbeSafeBranch("v123")).toBe(true);
+  });
 });
 
 describe("parsePullRequestPayload", () => {
@@ -313,6 +321,23 @@ describe("PullRequestStatusCache", () => {
       await cache.settled();
 
       expect(probe).toHaveBeenCalledWith("/repo/checkout", "worker-one");
+    });
+
+    it("never hands gh a digit-only branch, which it would read as an unrelated PR number", async () => {
+      // Regression: a thread declaring branch "123" must not surface PR #123's
+      // state — `gh pr view 123` reads a bare number as a PR number, not a branch.
+      const probe = vi.fn(async () => okWith("OPEN", 123));
+      const cache = new PullRequestStatusCache({
+        probe,
+        branchOwnership: noOwnership,
+        now: () => 0,
+      });
+
+      cache.refresh([{ threadId: "t1", cwd: "/repo", branch: "123" }]);
+      await cache.settled();
+
+      expect(probe).not.toHaveBeenCalled();
+      expect(cache.states().size).toBe(0);
     });
 
     it("says nothing about a thread sharing a checkout it does not own a branch in", async () => {
