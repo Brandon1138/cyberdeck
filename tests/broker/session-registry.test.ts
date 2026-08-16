@@ -40,9 +40,15 @@ class FakePty implements PtyHandle {
     this.pid = pid;
   }
 
+  /** How many times the registry asked for the whole replay buffer. See the MIK-87 ingest test. */
+  snapshotCount = 0;
+
   write(data: Buffer): void { this.writes.push(Buffer.from(data)); }
   resize(): void {}
-  snapshot(): Buffer { return Buffer.from(this.replay); }
+  snapshot(): Buffer {
+    this.snapshotCount += 1;
+    return Buffer.from(this.replay);
+  }
   kill(signal?: string): void {
     this.killCount += 1;
     this.killSignals.push(signal);
@@ -2117,6 +2123,50 @@ describe("SessionRegistry resolved launch records", () => {
       args: specs[0]!.args,
       cyberdeckEnv: {},
       inheritedEnvCount: 2,
+    });
+  });
+});
+
+describe("SessionRegistry ingest cost", () => {
+  it("reads no accumulated replay while a provider streams", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request());
+    const pty = ptys[0]!;
+    const before = pty.snapshotCount;
+
+    for (let index = 0; index < 500; index += 1) {
+      pty.emitOutput(`\u001b[2K\r⠋ Working (esc to interrupt) · ${index} tokens · line ${index}\n`);
+    }
+
+    // Every reading the broadcast path makes is now folded from the chunk it was handed. Asking the
+    // PTY for its whole buffer per chunk is what MIK-87 was: a copy and a decode of 128 KiB, then
+    // half a dozen regex passes over it, per chunk, per session.
+    expect(pty.snapshotCount - before).toBe(0);
+    expect(registry.workerTruth(record.id).state).toBe("working");
+  });
+
+  it("keeps a wait over many workers from re-reading every worker on one worker's output", async () => {
+    const { registry, ptys } = harness();
+    const records = await Promise.all(
+      Array.from({ length: 6 }, () => registry.start(request())),
+    );
+    const targets = records.map((record) => ({ sessionId: record.id, completionTarget: 1 }));
+    const noisy = ptys[0]!;
+    const quiet = ptys.slice(1);
+    for (const pty of ptys) pty.emitOutput("\u001b[2J⠋ Working (esc to interrupt)\n");
+    const counts = quiet.map((pty) => pty.snapshotCount);
+
+    const waiting = registry.waitForWorkerResults(targets, 50);
+    for (let index = 0; index < 200; index += 1) {
+      noisy.emitOutput(`\u001b[2K\r⠋ Working (esc to interrupt) · ${index} tokens\n`);
+    }
+    await waiting;
+
+    // A wait used to rebuild every target's snapshot on every update from any target, so one
+    // streaming worker dragged all six replays through a full scan per chunk. Only the worker that
+    // produced output is re-read, and the snapshots are built once, when the wait answers.
+    quiet.forEach((pty, index) => {
+      expect(pty.snapshotCount - counts[index]!).toBeLessThanOrEqual(1);
     });
   });
 });
