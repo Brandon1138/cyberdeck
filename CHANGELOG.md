@@ -16,6 +16,19 @@ and persisted schemas remain under active alpha development.
   with a reported status rather than guessing at the newest file in the directory
   (MIK-46).
 
+### Changed
+
+- Fleet's pull-request indicator is attributed to the branch a thread's own work
+  lands on rather than to the directory it runs in. Threads that share a
+  repository's primary checkout no longer inherit each other's pull requests: a
+  thread is credited with one only through the branch its `workspace` declared,
+  or through the linked worktree it runs in. A thread in a shared checkout that
+  declared no branch shows nothing.
+- The indicator prints the pull request's number — `#123`, between the preview
+  and the time — instead of a state glyph. The open/draft/merged/closed/failing
+  colourway is unchanged, so state still reads at a glance in color; with color
+  off a row now says which pull request it has rather than what state it is in.
+
 ## [0.1.0-alpha.2] - 2026-08-14
 
 ### Added
