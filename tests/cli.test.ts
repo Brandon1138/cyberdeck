@@ -103,6 +103,37 @@ describe("Cyberdeck CLI", () => {
     expect(pruneLegacyTranscript).toHaveBeenCalledOnce();
   });
 
+  it("records a transcript rebind for the session named on its own command line", async () => {
+    const rebindClaudeTranscript = vi.fn(async () => ({
+      recorded: false,
+      reason: "unreadable-payload",
+    } as const));
+    const program = createProgram({ rebindClaudeTranscript });
+    const transcript = program.commands.find((candidate) => candidate.name() === "transcript")!;
+    const rebind = transcript.commands.find((candidate) => candidate.name() === "rebind")!
+      .exitOverride()
+      .configureOutput({ writeOut: () => {}, writeErr: () => {} });
+
+    await expect(rebind.parseAsync([], { from: "user" })).rejects.toMatchObject({
+      code: "commander.missingMandatoryOptionValue",
+    });
+
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await rebind.parseAsync(
+        ["--actor-session", "session-1", "--state-directory", "/tmp/state"],
+        { from: "user" },
+      );
+    } finally {
+      write.mockRestore();
+    }
+    // A payload it cannot use is reported, never thrown: the hook runs inside the worker's session.
+    expect(rebindClaudeTranscript).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      stateDirectory: "/tmp/state",
+    });
+  });
+
   it("requires explicit provider and cwd for start", async () => {
     await expect(
       quietCommand("start").parseAsync(["--cwd", "/tmp/repo"], { from: "user" }),
