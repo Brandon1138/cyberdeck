@@ -29,6 +29,31 @@ constraint understood.
 
 # Dated bug log
 
+## Resolved: `/clear` moved Claude's transcript and semantic capture never followed (MIK-46)
+
+Found on 2026-08-16. `ThreadTranscriptStore` derived a Claude session's transcript from the identity
+it was launched with — `--session-id` is Cyberdeck's own session id, so the file is
+`~/.claude/projects/<cwd-slug>/<session-id>.jsonl`. A `/clear` starts a new native conversation under
+a new id and writes every subsequent turn to a new file, while the session record, the PTY and the
+actor binding all stay alive. The store kept reading the abandoned path, so `thread_read` and
+`workers_wait` returned stale or missing semantic results, ledgers never received later turns, and
+Fleet previews fell back to a pane scrape. Nothing failed and liveness stayed green, which is why it
+was invisible. Separate from MIK-35: restoring the actor binding does not move the file being read.
+
+Fixed by making Claude name the file itself. Every Claude session now launches with `--settings`
+installing a SessionStart hook on `startup|resume|clear|compact` that runs
+`cyberdeck transcript rebind --actor-session <session id>`; the payload supplies `transcript_path`,
+the command line supplies the Cyberdeck session id. Attribution is exact when several workers share a
+worktree because neither half is inferred from the other. The binding lands on disk before the broker
+has to be listening, so a restart or resume reads it back.
+
+The store also reads the `/clear` marker Claude writes into the file it abandons, so a session whose
+hook never fired fails **closed** — `claudeTranscriptStatus` becomes `cleared-unbound`, no native read
+happens, and the fallback turn carries the status rather than passing for a healthy quiet worker.
+There is no cwd-only or newest-file search for a successor, deliberately: one worker's conversation
+recorded as another's is worse than no capture. Full design in
+`docs/architecture/claude-adapter.md`.
+
 ## Open: Fleet learns about provider progress only by asking, every 500 ms
 
 Found on 2026-08-14 while fixing the dancing caret. Fleet's loop collects a whole snapshot, renders
