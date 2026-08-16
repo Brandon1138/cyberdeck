@@ -229,8 +229,24 @@ interface RuntimeSession {
    * banking one. See {@link SessionRegistry.reconcileCanonicalTurns}.
    */
   canonicalReconcileTimer?: ReturnType<typeof setTimeout>;
-  /** Set while a reconcile read is in flight, so two of them cannot bank the same turn twice. */
-  canonicalReconcileInflight?: boolean;
+  /**
+   * Which of the two paths that can bank a turn currently owns the next one, while it owns it.
+   *
+   * Both paths consume the same source: `captureProviderTurns` *appends and deduplicates* the
+   * provider's native turn ids, so a read is not a peek — whichever call runs first takes them, and
+   * the other finds an empty transcript and settles for a scrape. That made a discard-after-the-fact
+   * guard the wrong shape: by the time it can tell it lost, it has already spent the turns. This
+   * field is claimed synchronously, before either path reads anything, so ownership is decided
+   * rather than discovered. See {@link SessionRegistry.releaseTurnCapture} for the hand-back.
+   */
+  turnCaptureOwner?: "screen" | "reconcile";
+  /**
+   * The screen path reached its turn while a reconcile owned the capture, and stood down.
+   *
+   * A deferral is not a completion: if the reconcile then banks nothing, the turn the screen
+   * observed is still owed, and this is what says so.
+   */
+  screenTurnDeferred?: boolean;
   /** Provider-native setup output must never satisfy the worker task's first completion target. */
   suppressSemanticTurns?: boolean;
   stallObservation?: {
@@ -286,6 +302,14 @@ const TRANSCRIPT_RETRY_BASE_MS = 50;
  * safety condition for concluding that a turn named in the transcript is over.
  */
 const CANONICAL_RECONCILE_QUIET_MS = 1_500;
+
+/**
+ * How long the screen path waits, after the provider returns to its prompt, before banking the turn.
+ *
+ * Long enough that a prompt redrawn mid-frame does not read as a completion, short enough that a
+ * waiter is not kept guessing.
+ */
+const SCREEN_TURN_BANK_MS = 200;
 
 /**
  * The state-machine fields every runtime session starts with, in one place so a construction site
@@ -1671,27 +1695,7 @@ export class SessionRegistry {
     }
     this.updateStallObservation(runtime);
     if (activity === "awaiting-input" && runtime.observedWorking) {
-      if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
-      runtime.idleTimer = setTimeout(() => {
-        delete runtime.idleTimer;
-        if (runtime.activity !== "awaiting-input" || !runtime.observedWorking) return;
-        // A composer holding text the provider never took is not a finished turn. Counting it is how
-        // an unsent instruction came to satisfy the very wait that was asking whether it had run.
-        if (this.observeComposer(runtime).occupied) {
-          this.notifySessionUpdate(runtime.record.id);
-          return;
-        }
-        runtime.completedTurns += 1;
-        runtime.observedWorking = false;
-        // The turn that owned the next ordinal has banked it. Anything held for that reason can go
-        // now, and this is the only announcement it will get: a provider that has finished and is
-        // sitting at its prompt emits nothing more to trigger one.
-        this.notifyDeliveryBoundary(runtime);
-        // One snapshot, once per completed turn — a turn boundary is rare enough to pay for it, and
-        // the fallback text a provider without a native transcript falls back to is drawn from the
-        // whole replay rather than from the screen the digest keeps.
-        void this.completeSemanticTurn(runtime, rawReplay());
-      }, 200);
+      this.armScreenTurnBank(runtime, rawReplay);
     } else if (activity === "needs-input") {
       runtime.latestResult = compactFrameResult(runtime.replay.frameText());
       if (runtime.record.attentionState !== "needs-input") {
@@ -2751,6 +2755,73 @@ export class SessionRegistry {
       clearTimeout(runtime.canonicalReconcileTimer);
     }
     delete runtime.canonicalReconcileTimer;
+    // A turn nobody is going to bank cannot still be owed to the screen path.
+    delete runtime.screenTurnDeferred;
+  }
+
+  /**
+   * Arm the screen path's claim on the turn the provider just walked back from.
+   *
+   * Kept as its own method because it has two callers: the ingest path, which arms it the moment the
+   * provider returns to its prompt, and {@link SessionRegistry.releaseTurnCapture}, which re-arms it
+   * when a reconcile that owned this turn banked nothing after all.
+   */
+  private armScreenTurnBank(runtime: RuntimeSession, rawReplay: () => string): void {
+    if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
+    runtime.idleTimer = setTimeout(() => {
+      delete runtime.idleTimer;
+      this.bankScreenObservedTurn(runtime, rawReplay);
+    }, SCREEN_TURN_BANK_MS);
+  }
+
+  /** The turn the screen watched end, banked — unless something truer than the screen owns it. */
+  private bankScreenObservedTurn(runtime: RuntimeSession, rawReplay: () => string): void {
+    if (runtime.activity !== "awaiting-input" || !runtime.observedWorking) return;
+    // A composer holding text the provider never took is not a finished turn. Counting it is how
+    // an unsent instruction came to satisfy the very wait that was asking whether it had run.
+    if (this.observeComposer(runtime).occupied) {
+      this.notifySessionUpdate(runtime.record.id);
+      return;
+    }
+    // A reconcile claimed this turn before it read the provider's transcript, and that read consumes
+    // what it finds. Banking here now would either duplicate the ordinal or — because the native
+    // turns are already spent — record this one as a scrape while the record of it sits unread in
+    // the transcript. Stand down and let the owner finish; it hands the turn back if it banks none.
+    if (runtime.turnCaptureOwner !== undefined) {
+      runtime.screenTurnDeferred = true;
+      this.notifySessionUpdate(runtime.record.id);
+      return;
+    }
+    runtime.turnCaptureOwner = "screen";
+    runtime.completedTurns += 1;
+    runtime.observedWorking = false;
+    // The turn that owned the next ordinal has banked it. Anything held for that reason can go
+    // now, and this is the only announcement it will get: a provider that has finished and is
+    // sitting at its prompt emits nothing more to trigger one.
+    this.notifyDeliveryBoundary(runtime);
+    // One snapshot, once per completed turn — a turn boundary is rare enough to pay for it, and
+    // the fallback text a provider without a native transcript falls back to is drawn from the
+    // whole replay rather than from the screen the digest keeps.
+    void this.completeSemanticTurn(runtime, rawReplay()).finally(() => {
+      if (runtime.turnCaptureOwner === "screen") delete runtime.turnCaptureOwner;
+    });
+  }
+
+  /**
+   * Release a reconcile's claim, and give the turn back if the screen path stood down for it.
+   *
+   * Ownership is taken before anything is consumed, which is what makes the two paths exclusive —
+   * but it also means a reconcile that ends up banking nothing has silenced a screen-observed
+   * completion that was ready to bank. Handing it back is the other half of that bargain: without
+   * it, the guard that fixed a double-bank would have invented a way to lose a turn instead.
+   */
+  private releaseTurnCapture(runtime: RuntimeSession): void {
+    if (runtime.turnCaptureOwner === "reconcile") delete runtime.turnCaptureOwner;
+    if (runtime.screenTurnDeferred !== true) return;
+    delete runtime.screenTurnDeferred;
+    const pty = runtime.pty;
+    if (pty === undefined) return;
+    this.armScreenTurnBank(runtime, () => pty.snapshot().toString("utf8"));
   }
 
   /**
@@ -2813,12 +2884,17 @@ export class SessionRegistry {
     const transcripts = this.options.transcripts;
     const capture = transcripts?.captureProviderTurns;
     if (transcripts === undefined || capture === undefined) return;
-    if (runtime.canonicalReconcileInflight === true) return;
+    // Ownership first, and synchronously — before a single native turn is read, let alone consumed.
+    // `captureProviderTurns` appends and deduplicates the provider's turn ids, so a read spends
+    // them: two paths reading concurrently either append the same turn twice, or leave the loser
+    // recording a scrape while the real record sits already-consumed in the store.
+    if (runtime.turnCaptureOwner !== undefined) return;
     if (!this.canReconcileCanonicalTurns(runtime)) return;
-    // The screen path owns the turn it is about to bank, and it will bank it 200 ms from now.
+    // The screen path already has a claim on this turn and will bank it 200 ms from now.
     if (runtime.idleTimer !== undefined) return;
 
-    runtime.canonicalReconcileInflight = true;
+    runtime.turnCaptureOwner = "reconcile";
+    delete runtime.screenTurnDeferred;
     const before = runtime.completedTurns;
     let turns: Array<{ text?: string | undefined; data?: Record<string, unknown> }> = [];
     try {
@@ -2831,26 +2907,38 @@ export class SessionRegistry {
         allowFallback: false,
       });
     } catch {
+      this.releaseTurnCapture(runtime);
       return;
-    } finally {
-      runtime.canonicalReconcileInflight = false;
     }
 
     // Only turns the provider itself wrote. The store labels every turn it appends, and a session
     // configured to allow fallbacks elsewhere must not smuggle one in through here.
     const native = turns.filter((turn) => turn.data?.transport === "provider-native");
-    if (native.length === 0) return;
-    // The screen path may have banked while the read was in flight. Those are the same turns — the
-    // store deduplicates on the provider's turn id, so whichever call ran second saw nothing — and
-    // counting them again would hand a wait an ordinal no work stands behind. The transcript keeps
-    // them either way; what is given up is only this path's claim to have been the one to bank them.
-    if (runtime.completedTurns !== before || runtime.idleTimer !== undefined) return;
+    if (native.length === 0) {
+      this.releaseTurnCapture(runtime);
+      return;
+    }
+    // Nothing else may have moved the ledger while the read was in flight. Exclusive ownership is
+    // what makes that true of the screen path — a prompt redrawn mid-read arms its timer, that timer
+    // finds this reconcile holding the turn and defers instead of banking — so this is the assertion
+    // that the invariant held, not the mechanism that enforces it. A turn is never discarded here
+    // after being consumed: the only path that could have taken this ordinal stood down for it.
+    if (runtime.completedTurns !== before) {
+      this.releaseTurnCapture(runtime);
+      return;
+    }
 
     const firstTurn = before + 1;
     runtime.completedTurns = before + native.length;
     native.forEach((turn, index) =>
       this.recordCompletion(runtime, firstTurn + index, turn.text ?? "", "provider-transcript"));
     runtime.observedWorking = false;
+    // The ledger is authoritative from here, so the claim is spent: released synchronously rather
+    // than after the event, preview and model reads below, none of which the next turn should wait
+    // on. A screen path that deferred to this reconcile has had its turn banked by it — with the
+    // provider's own record behind it — so there is nothing left to hand back.
+    delete runtime.turnCaptureOwner;
+    delete runtime.screenTurnDeferred;
     // The screen said `working` because of a frame the provider never redrew. Its transcript says
     // the turn ended, and after this much silence there is no turn in flight for that to be wrong
     // about. A modal is left alone: the dialog on top of the finished turn is real, and saying so is

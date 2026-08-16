@@ -131,14 +131,25 @@ function harness(options: {
    * reason two banking paths cannot count the same turn twice.
    */
   providerTurns?: readonly { id: string; text: string }[];
+  /**
+   * Held open in the middle of a transcript read, after it has consumed the turns it found.
+   *
+   * The store consumes on read, so "in flight" is the window where the native turns are already
+   * spent and no path has banked them yet. A test that wants to interleave the screen path with a
+   * reconcile has to be able to stand inside that window.
+   */
+  onProviderTurnsRead?: () => Promise<void>;
 } = {}) {
   const ptys: FakePty[] = [];
   const events: BrokerEvent[] = [];
   const transcripts: AppendThreadEvent[] = [];
   const captured = new Set<string>();
+  const captureCalls: string[] = [];
   const captureProviderTurns = async (input: { allowFallback?: boolean }) => {
     const pending = (options.providerTurns ?? []).filter((turn) => !captured.has(turn.id));
     for (const turn of pending) captured.add(turn.id);
+    captureCalls.push(input.allowFallback === true ? "fallback-allowed" : "native-only");
+    await options.onProviderTurnsRead?.();
     if (pending.length > 0) {
       return pending.map((turn) => ({ text: turn.text, data: { transport: "provider-native" } }));
     }
@@ -182,7 +193,7 @@ function harness(options: {
       ? {}
       : { worktreeProvisioner: options.worktreeProvisioner }),
   });
-  return { registry, ptys, events, transcripts, ptyFactory };
+  return { registry, ptys, events, transcripts, ptyFactory, captureCalls };
 }
 
 /** A provisioner that records what it was asked to do and touches no disk. */
@@ -1489,6 +1500,65 @@ describe("SessionRegistry", () => {
     expect(settled.results[0]!.truth).toMatchObject({ state: "blocked-modal", terminal: false });
     expect(registry.get(record.id).attentionState).toBe("needs-input");
     expect(events.filter(({ type }) => type === "session.turn_reconciled")).toHaveLength(1);
+  });
+
+  it("banks one turn when a prompt redraw interleaves with an in-flight reconcile", async () => {
+    // The two banking paths read the same source, and that read *consumes*: `captureProviderTurns`
+    // appends and deduplicates the provider's turn ids. So a provider that redraws its prompt while
+    // a reconcile's read is in flight used to arm the 200 ms screen path against turns the reconcile
+    // had already spent — the reconcile would discard its result on finding the ledger moved, and
+    // the screen path would find an empty transcript and settle for a scrape. One turn, banked
+    // twice or banked as a guess. Ownership is claimed before anything is read instead.
+    const gate: { redraw?: () => Promise<void> } = {};
+    const { registry, ptys, events, captureCalls } = harness({
+      providerTurns: [{ id: "turn-1", text: "pushed the branch" }],
+      onProviderTurnsRead: async () => {
+        const redraw = gate.redraw;
+        delete gate.redraw;
+        await redraw?.();
+      },
+    });
+    const record = await registry.start(
+      request({ provider: "claude", name: "interleave-worker" }),
+      "Land the fix",
+    );
+
+    ptys[0]!.emitOutput("\u001b]0;⠹ interleave-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("working"));
+
+    // The last spinner frame is never redrawn, so the screen keeps reading `working` and never arms
+    // its own banking path. The reconcile is what notices, and it reaches the transcript first.
+    gate.redraw = async () => {
+      // The dialog is dismissed and the prompt comes back while the read is still in flight. That is
+      // exactly the transition the screen path banks on, and its timer is shorter than this wait.
+      ptys[0]!.emitOutput("\u001b[2Jpushed the branch\r\n\u001b]0;interleave-worker\u0007");
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    };
+
+    await vi.waitFor(
+      () => expect(events.filter(({ type }) => type === "session.turn_reconciled")).toHaveLength(1),
+      { timeout: 8_000, interval: 50 },
+    );
+
+    const settled = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 2_000, 100);
+    expect(settled.timedOut).toBe(false);
+    // One turn, and the provider's own record behind it — not a scrape recorded because the native
+    // turns had already been consumed by the path that then threw them away.
+    expect(settled.results[0]).toMatchObject({
+      status: "completed",
+      completedTurns: 1,
+      provenance: "provider-transcript",
+      text: "pushed the branch",
+    });
+
+    // And it stays one. A second bank would hand a waiter an ordinal no work stands behind.
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+    expect(registry.workerTruth(record.id).completedTurns).toBe(1);
+    expect(events.filter(({ type }) => type === "session.turn_reconciled")).toHaveLength(1);
+    // The screen path stood down rather than starting a competing read of the same turn.
+    expect(captureCalls).toEqual(["native-only"]);
   });
 
   it("does not bank a turn the provider transcript has nothing to say about", async () => {
