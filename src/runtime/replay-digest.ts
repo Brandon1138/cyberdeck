@@ -78,6 +78,24 @@ export class ReplayDigest implements TerminalMarkerSource {
   /** Enough overlap for the longest tracked literal and the longest token counter to be re-found. */
   static readonly #OVERLAP_CHARS = 64;
 
+  /** Matches the `replayBytes` default, so a digest built without one ages titles the same way. */
+  static readonly DEFAULT_REPLAY_CHARS = 128 * 1024;
+
+  /**
+   * How much raw stream a title stays visible in.
+   *
+   * Marker positions may outlive the replay buffer — see the note above, they lose to every newer
+   * marker exactly as a forgotten one would. A title cannot: {@link markerTerminalActivity} gives it
+   * unconditional precedence over every marker, so a remembered-forever title is a verdict that
+   * never yields. A provider that names a spinner in its title once and then prints its way past the
+   * replay buffer would stay `working` for the rest of the session, ignoring every waiting marker
+   * after it. The replay-backed reading stops finding that title, and so does this.
+   *
+   * Counted in characters against a buffer bounded in bytes, which for UTF-8 can only make the
+   * window wider than the buffer — a title is dropped no earlier than the replay would drop it.
+   */
+  readonly #replayChars: number;
+
   #decoder = new StringDecoder("utf8");
   readonly #markers = new Map<ActivityMarker, number>();
   readonly #rawMarkers = new Map<ActivityMarker, number>();
@@ -92,8 +110,18 @@ export class ReplayDigest implements TerminalMarkerSource {
   #frameOffset = 0;
   #braille = -1;
   #title: string | undefined;
+  #titleAt = -1;
   #tokens: number | undefined;
   #version = 0;
+  /** Set while an oversized OSC payload is being thrown away; see {@link append}. */
+  #discardingOsc = false;
+  /** The one character an `ESC \` terminator could have started in, and nothing else. */
+  #oscSeam = "";
+
+  /** @param replayChars How much raw stream the session's PTY replay buffer holds. */
+  constructor(replayChars: number = ReplayDigest.DEFAULT_REPLAY_CHARS) {
+    this.#replayChars = Math.max(1, replayChars);
+  }
 
   /**
    * Increments once per non-empty append, and never goes backwards — not even across a reset.
@@ -134,7 +162,10 @@ export class ReplayDigest implements TerminalMarkerSource {
     this.#frameOffset = 0;
     this.#braille = -1;
     this.#title = undefined;
+    this.#titleAt = -1;
     this.#tokens = undefined;
+    this.#discardingOsc = false;
+    this.#oscSeam = "";
     if (replay !== "") this.append(replay);
   }
 
@@ -145,19 +176,59 @@ export class ReplayDigest implements TerminalMarkerSource {
    * stripped by neither half, so the trailing fragment is withheld and prepended to the next chunk.
    * That is the whole correctness condition for stripping incrementally: no match may straddle the
    * cut, and the cut is placed where none can.
+   *
+   * An OSC that outgrows the carry gets its payload discarded rather than consumed. The carry is
+   * bounded, and past that bound a still-unterminated sequence used to be handed to the visible-text
+   * path — but its terminator arrives in a later chunk, so `stripTerminalControl` never sees a whole
+   * sequence and never removes the prefix. An OSC 52 clipboard payload big enough to reach that
+   * bound would then land in the activity, composer, liveness and fallback-result readings as if the
+   * provider had printed it, and payload text shaped like a fatal error would mark the session
+   * errored. So the opener and everything after it is thrown away until the terminator shows up,
+   * which costs one retained character and reaches the same visible text the terminator would have.
    */
   append(chunk: string): void {
     if (chunk.length === 0) return;
     this.#version += 1;
     this.#ingestRaw(chunk);
-    const pending = this.#carry + chunk;
+
+    let text = chunk;
+    if (this.#discardingOsc) {
+      const search = this.#oscSeam + chunk;
+      const resume = oscTerminatorEnd(search);
+      if (resume < 0) {
+        this.#oscSeam = chunk.slice(-1);
+        return;
+      }
+      this.#discardingOsc = false;
+      this.#oscSeam = "";
+      text = search.slice(resume);
+    }
+
+    const pending = this.#carry + text;
     const cut = consumableEnd(pending);
-    const boundary = pending.length - cut > ReplayDigest.MAX_CARRY_CHARS ? pending.length : cut;
-    this.#carry = pending.slice(boundary);
-    const consumable = pending.slice(0, boundary);
+    let consumable: string;
+    if (pending.length - cut.at <= ReplayDigest.MAX_CARRY_CHARS) {
+      this.#carry = pending.slice(cut.at);
+      consumable = pending.slice(0, cut.at);
+    } else if (cut.osc) {
+      this.#carry = "";
+      this.#discardingOsc = true;
+      this.#oscSeam = pending.slice(-1);
+      consumable = pending.slice(0, cut.at);
+    } else {
+      // Not an OSC: a CSI or a shorter escape this long is not a sequence any provider is writing,
+      // and consuming it as text is what the whole-replay strip would have done with it anyway.
+      this.#carry = "";
+      consumable = pending;
+    }
     if (consumable.length === 0) return;
 
-    for (const match of consumable.matchAll(OSC_TITLE)) this.#title = match[1];
+    // Raw coordinates, so the title ages against the same stream the PTY replay buffer bounds.
+    const consumableStart = this.#rawOffset - pending.length;
+    for (const match of consumable.matchAll(OSC_TITLE)) {
+      this.#title = match[1];
+      this.#titleAt = consumableStart + match.index;
+    }
 
     // Split at the last clear-screen so the frame boundary is exact rather than chunk-aligned. The
     // split lands on the first byte of an escape sequence, so neither half loses a match.
@@ -208,6 +279,12 @@ export class ReplayDigest implements TerminalMarkerSource {
   }
 
   lastTitle(): string | undefined {
+    if (this.#title === undefined) return undefined;
+    if (this.#rawOffset - this.#titleAt > this.#replayChars) {
+      this.#title = undefined;
+      this.#titleAt = -1;
+      return undefined;
+    }
     return this.#title;
   }
 
@@ -286,6 +363,8 @@ export class ReplayDigest implements TerminalMarkerSource {
 
 const CLEAR_SCREEN = "\u001b[2J";
 const OSC_OPENER = "\u001b]";
+const OSC_BEL = "\u0007";
+const OSC_ST = "\u001b\\";
 
 /** An OSC that has arrived in full, anchored at its opener. */
 const TERMINATED_OSC = /^\u001b\][^\u0007]*(?:\u0007|\u001b\\)/u;
@@ -302,20 +381,38 @@ const COMPLETE_SEQUENCE =
   /^(?:\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|\u001b(?:[()][0-9A-Z]|[@-Z\\^-_]))/u;
 
 /**
- * Where the withheld tail of a chunk begins.
+ * Where the withheld tail of a chunk begins, and whether an unterminated OSC is what put it there.
  *
  * Three things can straddle a chunk boundary and be missed by both halves: an OSC whose terminator
  * has not arrived, a shorter escape sequence in the same state, and a carriage return whose newline
  * has not — normalization folds `CR LF` into one newline, so splitting between them would turn one
  * line break into two.
+ *
+ * The OSC case is reported separately because it is the only one of the three with an unbounded
+ * payload, and so the only one {@link ReplayDigest.append} can be asked to discard instead of hold.
  */
-function consumableEnd(value: string): number {
+function consumableEnd(value: string): { at: number; osc: boolean } {
   // An OSC payload can contain escapes of its own, so the last escape in the text is not
   // necessarily the one that opened the sequence still being written. Its opener is checked first.
   const osc = value.lastIndexOf(OSC_OPENER);
-  if (osc >= 0 && !TERMINATED_OSC.test(value.slice(osc))) return osc;
+  if (osc >= 0 && !TERMINATED_OSC.test(value.slice(osc))) return { at: osc, osc: true };
   const escape = value.lastIndexOf("\u001b");
-  if (escape >= 0 && !COMPLETE_SEQUENCE.test(value.slice(escape))) return escape;
-  if (value.endsWith("\r")) return value.length - 1;
-  return value.length;
+  if (escape >= 0 && !COMPLETE_SEQUENCE.test(value.slice(escape))) return { at: escape, osc: false };
+  if (value.endsWith("\r")) return { at: value.length - 1, osc: false };
+  return { at: value.length, osc: false };
+}
+
+/**
+ * One past the first OSC terminator in `value`, or -1.
+ *
+ * First, not last: a reader that sees the stream once cannot know whether a later terminator is
+ * coming, and stopping at the first one is what a terminal does. It is also the safe direction —
+ * text after it is shown rather than swallowed.
+ */
+function oscTerminatorEnd(value: string): number {
+  const bel = value.indexOf(OSC_BEL);
+  const st = value.indexOf(OSC_ST);
+  if (bel < 0) return st < 0 ? -1 : st + OSC_ST.length;
+  if (st < 0 || bel < st) return bel + OSC_BEL.length;
+  return st + OSC_ST.length;
 }

@@ -130,6 +130,56 @@ describe("ReplayDigest", () => {
     expect(late).toBeLessThan(Math.max(early * 5, 25));
   });
 
+  it("stops reporting a title once it has scrolled out of the replay window", () => {
+    const window = 4_096;
+    const head = "\u001b[2J\u001b]0;\u280b Working\u0007";
+    const tail = `${"x".repeat(window)}\n> ready\nAdd a follow-up\n`;
+
+    const digest = new ReplayDigest(window);
+    digest.append(head);
+    expect(digest.lastTitle()).toBe("\u280b Working");
+    // A spinner named in the title outranks every marker, so the verdict is working while it lasts.
+    expect(markerTerminalActivity("claude", digest)).toBe("working");
+
+    for (let at = 0; at < tail.length; at += 64) digest.append(tail.slice(at, at + 64));
+
+    // The replay buffer has scrolled the title away, and so has the digest: the waiting marker that
+    // arrived after it decides the turn instead of losing to a title nothing can still see.
+    expect(digest.lastTitle()).toBeUndefined();
+    expect(markerTerminalActivity("claude", digest))
+      .toBe(providerTerminalActivity("claude", `${head}${tail}`.slice(-window)));
+    expect(markerTerminalActivity("claude", digest)).toBe("awaiting-input");
+  });
+
+  it("keeps a title that is still inside the replay window", () => {
+    const digest = new ReplayDigest(4_096);
+    digest.append("\u001b[2J\u001b]0;\u280b Working\u0007");
+    digest.append(`${"x".repeat(1_000)}\nAdd a follow-up\n`);
+    expect(digest.lastTitle()).toBe("\u280b Working");
+    expect(markerTerminalActivity("claude", digest)).toBe("working");
+  });
+
+  it("discards an oversized OSC payload instead of reading it as provider output", () => {
+    // An OSC 52 clipboard write far past MAX_CARRY_CHARS, carrying text shaped like a fatal error.
+    const payload = `API Error: 401 {"type":"authentication_error"} ${"QUJDRA".repeat(12_000)}`;
+    const replay = `\u001b[2Jvisible head\n\u001b]52;c;${payload}\u0007visible tail\n`;
+    expect(detectSessionFatalError(replay)).toBeUndefined();
+
+    for (const size of CHUNK_SIZES) {
+      const digest = fed(replay, size);
+      const at = `at chunk size ${size}`;
+      const frame = digest.frameText();
+      expect(frame, at).toContain("visible head");
+      expect(frame, at).toContain("visible tail");
+      expect(frame, at).not.toContain("QUJDRA");
+      // Not into liveness either: a clipboard payload is not a session that failed to authenticate.
+      expect(detectSessionFatalErrorInTail(digest.strippedTail(TAIL_BYTES)), at)
+        .toEqual(detectSessionFatalError(replay));
+      // And none of it is retained — the digest holds the visible text, not the 72 KB it threw away.
+      expect(digest.strippedTail(Number.MAX_SAFE_INTEGER).text.length, at).toBeLessThan(200);
+    }
+  });
+
   it("forgets the previous process when a session adopts a new PTY", () => {
     const digest = new ReplayDigest();
     digest.append(`\u001b[2J⠋ Working (esc to interrupt)\n`);

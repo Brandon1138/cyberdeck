@@ -272,7 +272,7 @@ const TRANSCRIPT_RETRY_BASE_MS = 50;
  * The state-machine fields every runtime session starts with, in one place so a construction site
  * added later cannot silently omit one and leave a worker projecting from undefined.
  */
-function freshTruthState(): Pick<
+function freshTruthState(replayChars: number): Pick<
   RuntimeSession,
   | "completedTurns"
   | "canonicalTurns"
@@ -283,7 +283,7 @@ function freshTruthState(): Pick<
   | "replay"
 > {
   return {
-    replay: new ReplayDigest(),
+    replay: new ReplayDigest(replayChars),
     completedTurns: 0,
     canonicalTurns: 0,
     turnsBeforeLatestInstruction: 0,
@@ -449,7 +449,7 @@ export class SessionRegistry {
         stopRequested: false,
         activity: "unknown",
         observedWorking: false,
-        ...freshTruthState(),
+        ...freshTruthState(this.replayBytesFor(record)),
         ...(providerLimit === undefined ? {} : { providerLimit }),
         fatalReported: false,
         completions: new Map(),
@@ -670,7 +670,7 @@ export class SessionRegistry {
       stopRequested: false,
       activity: "unknown",
       observedWorking: false,
-      ...freshTruthState(),
+      ...freshTruthState(this.replayBytesFor(record)),
       fatalReported: false,
       completions: new Map(),
       suppressSemanticTurns: true,
@@ -2054,6 +2054,19 @@ export class SessionRegistry {
    * Provider launch artifacts belong to the prepared launch until a live PTY takes them over, so
    * any failure before that hand-off has to remove them itself — nothing downstream will.
    */
+  /**
+   * The replay window this session's PTY keeps.
+   *
+   * Read twice: the handle is bounded by it, and the digest ages its window title against it. Those
+   * two have to be the same number — a title the replay has already forgotten must stop deciding the
+   * session's activity, and a title the replay still holds must keep deciding it.
+   */
+  private replayBytesFor(record: SessionRecord): number {
+    return record.profile === "scout"
+      ? Math.max(this.options.config.replayBytes, MIN_SCOUT_REPLAY_BYTES)
+      : this.options.config.replayBytes;
+  }
+
   private async spawnPreparedLaunch(
     adapter: ProviderAdapter,
     record: SessionRecord,
@@ -2065,9 +2078,7 @@ export class SessionRegistry {
       onPhase?.("prepare");
       if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
       await beforeSpawn?.();
-      const replayBytes = record.profile === "scout"
-        ? Math.max(this.options.config.replayBytes, MIN_SCOUT_REPLAY_BYTES)
-        : this.options.config.replayBytes;
+      const replayBytes = this.replayBytesFor(record);
       onPhase?.("spawn");
       return this.options.ptyFactory(spec, replayBytes);
     } catch (error) {
@@ -2183,7 +2194,7 @@ export class SessionRegistry {
       stopRequested: false,
       activity: "unknown",
       observedWorking: false,
-      ...freshTruthState(),
+      ...freshTruthState(this.replayBytesFor(record)),
       latestResult: record.latestPreview,
       fatalReported: false,
       completions: new Map(),
