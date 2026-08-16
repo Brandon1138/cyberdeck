@@ -132,7 +132,9 @@ export async function runBroker(
     Date.now(),
     async (record) => {
       if (record.profile === "scout") await scoutReports.remove(record.id);
-      await claudeConversations.remove(record.id);
+      // The same drop the runtime deletion paths use, so a binding is retired identically whether
+      // its thread expired while the broker was down or was deleted while it was up.
+      await transcripts.dropClaudeBinding(record.id);
     },
   );
   const registry = new SessionRegistry({

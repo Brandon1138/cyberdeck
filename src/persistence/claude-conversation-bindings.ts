@@ -104,6 +104,20 @@ export class ClaudeConversationBindingStore {
     await rm(this.bindingPath(sessionId), { force: true });
   }
 
+  /**
+   * Every session whose durable binding names `transcriptPath`.
+   *
+   * Answered from disk rather than from whatever a running broker happens to have claimed, so the
+   * answer does not depend on read order: two bindings naming one file are a conflict for both of
+   * the sessions that named it, on the first read after a restart as much as on the hundredth.
+   */
+  async sessionsBoundTo(transcriptPath: string): Promise<string[]> {
+    const bindings = await this.list();
+    return bindings
+      .filter((binding) => binding.transcriptPath === transcriptPath)
+      .map((binding) => binding.sessionId);
+  }
+
   async list(): Promise<ClaudeConversationBinding[]> {
     const entries = await readdir(this.directory).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return [];

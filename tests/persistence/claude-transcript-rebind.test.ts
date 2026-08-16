@@ -2,6 +2,10 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { BrokerRuntimeConfigSchema } from "../../src/config.js";
+import { SessionRegistry } from "../../src/broker/session-registry.js";
+import type { SessionRecord } from "../../src/domain/session.js";
+import type { ProviderAdapter } from "../../src/providers/provider.js";
 import {
   ClaudeConversationBindingStore,
 } from "../../src/persistence/claude-conversation-bindings.js";
@@ -93,6 +97,78 @@ async function harness(): Promise<Harness> {
     // A fresh store is exactly what a broker restart produces: nothing is carried in memory.
     store: () => new ThreadTranscriptStore(root, { claudeProjectsDirectory: projects }),
   };
+}
+
+const LONG_AGO = "2026-06-01T10:00:00.000Z";
+const RECENTLY = "2026-08-15T11:00:00.000Z";
+const SWEEP_AT = Date.parse("2026-08-15T12:00:00.000Z");
+
+/** Record a binding for a session, naming a file whose contents no deletion test reads. */
+async function bind(context: Harness, sessionId: string): Promise<void> {
+  await runClaudeTranscriptRebind({
+    sessionId,
+    payload: JSON.stringify({
+      session_id: REBOUND_CONVERSATION,
+      transcript_path: join(context.projects, `${sessionId}.jsonl`),
+      cwd: WORKTREE,
+      source: "clear",
+    }),
+    store: context.bindings,
+  });
+  await expect(context.bindings.read(sessionId)).resolves.toMatchObject({ sessionId });
+}
+
+function retiredThread(id: string, updatedAt: string): SessionRecord {
+  return {
+    id,
+    provider: "claude",
+    cwd: WORKTREE,
+    detached: true,
+    sandbox: "read-only",
+    kind: "worker",
+    name: "Retired thread",
+    createdAt: "2026-08-15T09:00:00.000Z",
+    updatedAt,
+    meaningfulUpdatedAt: updatedAt,
+    executionState: "exited",
+    attachmentState: "detached",
+    pid: 4321,
+    exitCode: 0,
+    childIds: [],
+    attentionState: "done",
+  } as SessionRecord;
+}
+
+const claudeAdapter: ProviderAdapter = {
+  id: "claude",
+  buildLaunchSpec: (session) => ({
+    executable: "fake",
+    args: [session.id],
+    cwd: session.cwd,
+    env: {},
+  }),
+  buildResumeSpec: (session) => ({
+    executable: "fake",
+    args: ["resume", session.id],
+    cwd: session.cwd,
+    env: {},
+  }),
+};
+
+/** The registry as the broker composes it, minus everything a deletion does not touch. */
+function registryFor(
+  transcripts: ThreadTranscriptStore,
+  recoveredSessions: SessionRecord[],
+): SessionRegistry {
+  return new SessionRegistry({
+    adapters: { claude: claudeAdapter },
+    ptyFactory: () => { throw new Error("no session is launched in these tests"); },
+    journal: { append: async () => undefined },
+    transcripts,
+    recoveredSessions,
+    validateCwd: async () => undefined,
+    config: BrokerRuntimeConfigSchema.parse({ threadRetention: { maxAgeDays: 1 } }),
+  });
 }
 
 function capture(sessionId: string, turnNumber: number) {
@@ -220,13 +296,73 @@ describe("Claude transcript rebinding after /clear", () => {
     ]);
   });
 
-  it("captures nothing when a candidate is ambiguous rather than guessing", async () => {
+  it("captures nothing for either claimant when two bindings name one transcript", async () => {
+    // Both read orders, because read order is exactly what must not decide attribution.
+    for (const order of [[WORKER_ONE, WORKER_TWO], [WORKER_TWO, WORKER_ONE]]) {
+      const context = await harness();
+      const shared = await writeTranscript(
+        context.projects,
+        WORKTREE,
+        CLEARED_CONVERSATION,
+        [assistantFrame("msg_shared", "one conversation, two claimants", "2026-08-15T10:05:00.000Z")],
+      );
+      for (const sessionId of [WORKER_ONE, WORKER_TWO]) {
+        await runClaudeTranscriptRebind({
+          sessionId,
+          payload: JSON.stringify({
+            session_id: CLEARED_CONVERSATION,
+            transcript_path: shared,
+            cwd: WORKTREE,
+            source: "clear",
+          }),
+          store: context.bindings,
+        });
+      }
+      // A fresh store is a broker that has just restarted: it has claimed nothing in memory, so the
+      // durable bindings are the only thing that can answer who owns this file.
+      const store = context.store();
+
+      // No capture beats wrong attribution, and that holds for the first reader too.
+      for (const sessionId of order) {
+        await expect(store.captureProviderTurns({ ...capture(sessionId, 2), allowFallback: false }))
+          .resolves.toEqual([]);
+        expect(store.claudeTranscriptStatus(sessionId)).toBe("attribution-conflict");
+        await expect(store.readTranscriptMessages(capture(sessionId, 2))).resolves.toEqual([]);
+      }
+    }
+  });
+
+  it("refuses a session whose launch-derived file another session's binding names", async () => {
+    const context = await harness();
+    // Worker one never cleared, so it is still reading the file named after its own session id —
+    // the one worker two's binding now claims.
+    const launched = await writeTranscript(context.projects, WORKTREE, WORKER_ONE, [
+      assistantFrame("msg_launched", "worker one, launch-derived", "2026-08-15T10:05:00.000Z"),
+    ]);
+    await runClaudeTranscriptRebind({
+      sessionId: WORKER_TWO,
+      payload: JSON.stringify({
+        session_id: WORKER_ONE,
+        transcript_path: launched,
+        cwd: WORKTREE,
+        source: "clear",
+      }),
+      store: context.bindings,
+    });
+    const store = context.store();
+
+    await expect(store.captureProviderTurns({ ...capture(WORKER_ONE, 1), allowFallback: false }))
+      .resolves.toEqual([]);
+    expect(store.claudeTranscriptStatus(WORKER_ONE)).toBe("attribution-conflict");
+  });
+
+  it("frees a shared transcript once the conflicting binding is dropped", async () => {
     const context = await harness();
     const shared = await writeTranscript(
       context.projects,
       WORKTREE,
       CLEARED_CONVERSATION,
-      [assistantFrame("msg_shared", "one conversation, two claimants", "2026-08-15T10:05:00.000Z")],
+      [assistantFrame("msg_shared", "one conversation, one claimant", "2026-08-15T10:05:00.000Z")],
     );
     for (const sessionId of [WORKER_ONE, WORKER_TWO]) {
       await runClaudeTranscriptRebind({
@@ -241,15 +377,15 @@ describe("Claude transcript rebinding after /clear", () => {
       });
     }
     const store = context.store();
+    await expect(store.captureProviderTurns({ ...capture(WORKER_ONE, 2), allowFallback: false }))
+      .resolves.toEqual([]);
+
+    await store.dropClaudeBinding(WORKER_TWO);
 
     await expect(store.captureProviderTurns(capture(WORKER_ONE, 2))).resolves.toMatchObject([
-      { text: "one conversation, two claimants" },
+      { text: "one conversation, one claimant", data: { transport: "provider-native" } },
     ]);
-    // No capture beats wrong attribution: the second claimant reads nothing native at all.
-    await expect(store.captureProviderTurns({ ...capture(WORKER_TWO, 2), allowFallback: false }))
-      .resolves.toEqual([]);
-    expect(store.claudeTranscriptStatus(WORKER_TWO)).toBe("attribution-conflict");
-    await expect(store.readTranscriptMessages(capture(WORKER_TWO, 2))).resolves.toEqual([]);
+    expect(store.claudeTranscriptStatus(WORKER_ONE)).toBe("bound");
   });
 
   it("refuses a binding recorded against a different working directory", async () => {
@@ -324,6 +460,40 @@ describe("Claude transcript rebinding after /clear", () => {
       store: context.bindings,
     })).resolves.toEqual({ recorded: false, reason: "unreadable-payload" });
     await expect(context.bindings.read(WORKER_ONE)).resolves.toBeUndefined();
+  });
+});
+
+describe("Claude bindings are dropped when their thread is", () => {
+  it("deleted while the broker is running", async () => {
+    const context = await harness();
+    const store = context.store();
+    await bind(context, WORKER_ONE);
+    const registry = registryFor(store, [retiredThread(WORKER_ONE, RECENTLY)]);
+    await registry.ready();
+
+    await registry.delete(WORKER_ONE);
+
+    await expect(context.bindings.read(WORKER_ONE)).resolves.toBeUndefined();
+  });
+
+  it("swept by retention while the broker is running", async () => {
+    const context = await harness();
+    const store = context.store();
+    await bind(context, WORKER_ONE);
+    await bind(context, WORKER_TWO);
+    const registry = registryFor(store, [
+      retiredThread(WORKER_ONE, LONG_AGO),
+      retiredThread(WORKER_TWO, RECENTLY),
+    ]);
+    await registry.ready();
+
+    await expect(registry.sweepRetention(SWEEP_AT)).resolves.toEqual([WORKER_ONE]);
+
+    // Only the retired thread's binding goes; the surviving thread keeps its own.
+    await expect(context.bindings.read(WORKER_ONE)).resolves.toBeUndefined();
+    await expect(context.bindings.read(WORKER_TWO)).resolves.toMatchObject({
+      sessionId: WORKER_TWO,
+    });
   });
 });
 

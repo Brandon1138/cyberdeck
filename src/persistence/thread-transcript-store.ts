@@ -75,8 +75,9 @@ interface NativeTurn {
  *   conversation moved to. Capture is dark on purpose: guessing at the newest file in the project
  *   directory would attribute one worker's conversation to another when they share a worktree.
  * `foreign-cwd` — a binding exists but names a different working directory than the session's.
- * `attribution-conflict` — the file this session's binding names is already being read for a
- *   different session.
+ * `attribution-conflict` — another session also claims the file this session resolved to, either
+ *   through its own durable binding or by already being read from it here. Every claimant of a
+ *   shared file is refused, not just the later one.
  */
 export type ClaudeTranscriptStatus =
   | "bound"
@@ -406,11 +407,36 @@ export class ThreadTranscriptStore {
       return this.refuseClaudeTranscript(input.sessionId, "foreign-cwd");
     }
     const path = binding?.transcriptPath ?? this.claudeLaunchTranscriptPath(input);
+    // The durable bindings are the whole answer to "who else claims this file", and they are
+    // consulted before anything in memory. An in-memory claim only exists for a session this
+    // process has already read, so a restarted broker holding two bindings that name one file
+    // would otherwise let whichever session read first capture it and refuse only the second —
+    // attribution decided by read order. Every claimant of a shared path is refused instead,
+    // including a session whose launch-derived path some other session's binding has named.
+    const durableClaimants = await this.claudeConversations.sessionsBoundTo(path);
+    if (durableClaimants.some((sessionId) => sessionId !== input.sessionId)) {
+      return this.refuseClaudeTranscript(input.sessionId, "attribution-conflict");
+    }
     const claimedBy = this.claimedClaudePaths.get(path);
     if (claimedBy !== undefined && claimedBy !== input.sessionId) {
       return this.refuseClaudeTranscript(input.sessionId, "attribution-conflict");
     }
     return path;
+  }
+
+  /**
+   * Forget a retired session's Claude conversation, on disk and in memory alike.
+   *
+   * A session id is never reused, so a binding that outlives its thread is pure residue — and not
+   * inert residue: it still counts as a claimant, so a stale binding can refuse capture for a live
+   * session that legitimately holds the same path.
+   */
+  async dropClaudeBinding(sessionId: string): Promise<void> {
+    await this.claudeConversations.remove(sessionId);
+    this.claudeStatuses.delete(sessionId);
+    for (const [path, owner] of this.claimedClaudePaths) {
+      if (owner === sessionId) this.claimedClaudePaths.delete(path);
+    }
   }
 
   private refuseClaudeTranscript(

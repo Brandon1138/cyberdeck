@@ -91,7 +91,7 @@ from health, which is what the original bug was not.
 | `bound` | A transcript is being read for this session. | Native turns and previews. |
 | `cleared-unbound` | The bound file ends in a `/clear` frame and no binding names its successor. | No native read. Turns fall back to terminal replay, labelled. |
 | `foreign-cwd` | A binding names a different working directory than the session's. | No native read. |
-| `attribution-conflict` | The file this binding names is already being read for another session. | No native read for the later claimant. |
+| `attribution-conflict` | Another session claims the file this one resolved to — through its own durable binding, or by already being read from it here. | No native read for *any* claimant, whichever read first. |
 
 `/clear` is also detected **in-band**, independent of the hook: Claude writes the command as the last
 user frame of the file it abandons, so the file states its own death and the store reads it on the
@@ -103,6 +103,16 @@ greps its own transcripts quotes the same literal in a tool result.
 There is deliberately **no cwd-only and no newest-file** search for a successor. Workers share
 worktrees, and one worker's conversation recorded as another's is worse than no capture: an
 unresolved candidate stays unresolved.
+
+The conflict check reads the **durable bindings**, not the broker's in-memory claims. Two bindings
+naming one file — a restarted broker that has read neither yet — would otherwise let whichever
+session was polled first capture the shared transcript and refuse only the other, making attribution
+a function of read order. Every claimant is refused instead, including a session whose
+launch-derived `<session-id>.jsonl` some other session's binding has named. A binding is therefore
+also a claim that outlives its own thread, which is why deletion drops it: `session.delete` and
+`sweepRetention` both retire the binding through `ThreadTranscriptStore.dropClaudeBinding`, the same
+drop the startup retention pass makes, so no deleted thread leaves a file behind to refuse a live
+session later.
 
 ## Session persistence is not process lifetime
 

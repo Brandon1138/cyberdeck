@@ -98,6 +98,7 @@ interface SessionStoreLike {
 
 interface TranscriptLike {
   append(event: AppendThreadEvent): Promise<unknown>;
+  dropClaudeBinding?(sessionId: string): Promise<void>;
   captureProviderTurns?(input: CaptureProviderTurns): Promise<Array<{ text?: string | undefined }>>;
   readTranscriptMessages?(input: CaptureProviderTurns): Promise<TranscriptMessage[]>;
 }
@@ -1933,6 +1934,18 @@ export class SessionRegistry {
     ) {
       try {
         await this.options.scoutReports.remove(record.id);
+      } catch (error) {
+        cleanupFailures.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    // Deletion is the last moment anything knows this thread existed: once its record is gone from
+    // the session store, no later broker startup can discover the binding it left behind. Both
+    // runtime deletion paths — an operator's `session.delete` and `sweepRetention` — reach here, so
+    // this is where the binding is dropped rather than accumulating a file per deleted thread.
+    const transcripts = this.options.transcripts;
+    if (reason === "session-deleted" && transcripts?.dropClaudeBinding !== undefined) {
+      try {
+        await transcripts.dropClaudeBinding.call(transcripts, record.id);
       } catch (error) {
         cleanupFailures.push(error instanceof Error ? error.message : String(error));
       }
