@@ -1077,8 +1077,8 @@ export function transitionFleet(
     || key === "down"
     || key === "pageup"
     || key === "pagedown"
-    || key === "ctrl+u"
-    || key === "ctrl+d"
+    || key === "alt+k"
+    || key === "alt+j"
     || key === "home"
     || key === "end"
   ) {
@@ -1099,7 +1099,7 @@ export function transitionFleet(
                   ? -pageDistance
                   : key === "pagedown"
                     ? pageDistance
-                    : key === "ctrl+u"
+                    : key === "alt+k"
                       ? -halfPageDistance
                       : halfPageDistance
           );
@@ -2110,7 +2110,7 @@ function renderFleetFooter(
     paint("─".repeat(options.width), "dim", options.color),
     ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
     paint(fit(launchContext, options.width), "dim", options.color),
-    paint(fit(`↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
+    paint(fit(`↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
   ];
   return footer;
 }
@@ -2200,7 +2200,7 @@ function renderHeader(
 
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
-    "pgup/dn page", "ctrl+u/d half", "home/end", "shift+↑↓ reorder", "←→ fold project",
+    "pgup/dn page", "alt+k/j half", "home/end", "shift+↑↓ reorder", "←→ fold project",
     "a add project", "d remove project", "ctrl+w switch views",
     "@ mention", "alt+1–9 open", "esc back/clear",
     "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim", "! shell", "ctrl+s shell popup", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
