@@ -337,7 +337,11 @@ export class OrchestratorManager {
     };
   }
 
-  /** Operator-owned box default for Caveman communication in subsequently started workers. */
+  /**
+   * Operator-owned box default for Caveman communication in subsequently started *orchestrator*
+   * workers. Composer-launched workers (Fleet's manual `session.start`/`session.startWithPrompt`)
+   * never read this default; they are always eloquent (MIK-79).
+   */
   async cavemanWorkers(input: CavemanWorkersRequest): Promise<CavemanWorkersResult> {
     const request = CavemanWorkersRequestSchema.parse(input);
     const preferences = this.requireWorkerPreferences();

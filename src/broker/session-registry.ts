@@ -35,15 +35,20 @@ import {
 } from "../runtime/conversation-preview.js";
 import type { ObservedModel } from "../runtime/observed-model.js";
 import {
+  compactFrameResult,
   compactTerminalResult,
-  providerTerminalActivity,
-  terminalTokenCount,
+  markerTerminalActivity,
   terminalFallbackResult,
   truncateResult,
   type ProviderTerminalActivity,
 } from "../runtime/terminal-replay.js";
-import { detectProviderLimitTermination, detectSessionFatalError } from "../runtime/session-liveness.js";
-import { terminalComposerState } from "../runtime/composer-state.js";
+import { ReplayDigest } from "../runtime/replay-digest.js";
+import {
+  detectProviderLimitTerminationInTail,
+  detectSessionFatalErrorInTail,
+  TAIL_BYTES,
+} from "../runtime/session-liveness.js";
+import { frameComposerState } from "../runtime/composer-state.js";
 import {
   advanceInstruction,
   DELIVERY_HOLD_DETAIL,
@@ -179,6 +184,15 @@ export interface InstructionStateUpdate {
 interface RuntimeSession {
   record: SessionRecord;
   pty?: PtyHandle;
+  /**
+   * Everything the broker reads out of this session's output, folded in one chunk at a time.
+   *
+   * The PTY handle still owns the raw replay — that is what an attaching client is handed. What
+   * lives here is the reading of it: the broker used to re-derive activity, composer state, token
+   * count and liveness by re-scanning that whole buffer on every chunk, which is what pinned a core
+   * in MIK-87.
+   */
+  replay: ReplayDigest;
   controller?: Controller;
   watchers: Map<string, Watcher>;
   stopRequested: boolean;
@@ -213,7 +227,12 @@ interface RuntimeSession {
   /** Provider-native setup output must never satisfy the worker task's first completion target. */
   suppressSemanticTurns?: boolean;
   stallObservation?: {
-    replay: string;
+    /**
+     * The digest revision this observation was taken at. Used to be a retained copy of the whole
+     * replay, compared character by character on every chunk — a second 128 KiB of resident memory
+     * per session to answer a question a counter answers.
+     */
+    version: number;
     tokenCount: number;
     unchangedSinceMs: number;
   };
@@ -238,10 +257,22 @@ interface RuntimeSession {
 const MAX_COMPLETION_LEDGER_ENTRIES = 64;
 
 /**
+ * How long an output-driven session update may sit before it is announced.
+ *
+ * One frame at 60 Hz. Below the threshold where an operator can see a Fleet row lag, and far above
+ * the rate a streaming provider redraws its screen at — which is the point: the announcement is
+ * bounded by the clock instead of by how fast a model is emitting tokens.
+ */
+const SESSION_UPDATE_FLUSH_MS = 16;
+
+/** First wait between provider-transcript reads; each further attempt doubles it. */
+const TRANSCRIPT_RETRY_BASE_MS = 50;
+
+/**
  * The state-machine fields every runtime session starts with, in one place so a construction site
  * added later cannot silently omit one and leave a worker projecting from undefined.
  */
-function freshTruthState(): Pick<
+function freshTruthState(replayChars: number): Pick<
   RuntimeSession,
   | "completedTurns"
   | "canonicalTurns"
@@ -249,8 +280,10 @@ function freshTruthState(): Pick<
   | "composer"
   | "rendered"
   | "deliveryHeld"
+  | "replay"
 > {
   return {
+    replay: new ReplayDigest(replayChars),
     completedTurns: 0,
     canonicalTurns: 0,
     turnsBeforeLatestInstruction: 0,
@@ -310,6 +343,12 @@ export interface WorkerResultSnapshot {
 export interface WorkerWaitResult {
   timedOut: boolean;
   results: WorkerResultSnapshot[];
+}
+
+/** The status half of a {@link WorkerResultSnapshot}, which is all a wait needs to decide settling. */
+interface WorkerStatusReading {
+  status: WorkerResultSnapshot["status"];
+  stalled?: { stalledForSeconds: number; tokenCount: number };
 }
 
 export interface SessionTreeProgress {
@@ -386,6 +425,9 @@ export class SessionRegistry {
   private readonly deliveryBoundaryListeners = new Set<(sessionId: string) => void>();
   private readonly instructionStateListeners = new Set<(update: InstructionStateUpdate) => void>();
   private readonly scoutWorkspaceStateInflight = new Map<string, Promise<string>>();
+  /** Sessions whose output has changed but whose update has not been announced yet. */
+  private readonly pendingSessionUpdates = new Set<string>();
+  private sessionUpdateFlush?: ReturnType<typeof setTimeout>;
   private readonly recovery: Promise<void>;
   /** Starts admitted by policy but not yet represented in `sessions`. */
   private pendingWorkerStarts = 0;
@@ -407,7 +449,7 @@ export class SessionRegistry {
         stopRequested: false,
         activity: "unknown",
         observedWorking: false,
-        ...freshTruthState(),
+        ...freshTruthState(this.replayBytesFor(record)),
         ...(providerLimit === undefined ? {} : { providerLimit }),
         fatalReported: false,
         completions: new Map(),
@@ -628,7 +670,7 @@ export class SessionRegistry {
       stopRequested: false,
       activity: "unknown",
       observedWorking: false,
-      ...freshTruthState(),
+      ...freshTruthState(this.replayBytesFor(record)),
       fatalReported: false,
       completions: new Map(),
       suppressSemanticTurns: true,
@@ -810,11 +852,17 @@ export class SessionRegistry {
     const snapshot = (): WorkerResultSnapshot[] => targets.map((target) =>
       this.workerResultSnapshot(target, maxResultChars)
     );
-    const isSettled = (result: WorkerResultSnapshot): boolean =>
-      result.status !== "working" && result.status !== "waiting";
+    const isSettled = (status: WorkerResultSnapshot["status"]): boolean =>
+      status !== "working" && status !== "waiting";
+    // Settling is decided from statuses, not from full snapshots. Rebuilding every target's
+    // snapshot on every update meant one chunk from one worker re-scanned all N workers' replays,
+    // which is the fan-out MIK-87 profiled as `ArrayMap` over an accumulated structure. A snapshot
+    // is built when the wait actually answers.
+    const statuses = targets.map((target) => this.workerResultStatus(target).status);
 
-    const initial = snapshot();
-    if (initial.every(isSettled)) return { timedOut: false, results: this.deliver(targets, initial) };
+    if (statuses.every(isSettled)) {
+      return { timedOut: false, results: this.deliver(targets, snapshot()) };
+    }
 
     return new Promise<WorkerWaitResult>((resolve) => {
       let settled = false;
@@ -825,18 +873,28 @@ export class SessionRegistry {
         this.sessionUpdateListeners.delete(onUpdate);
         const results = snapshot();
         resolve({
-          timedOut: timedOut && !results.every(isSettled),
+          timedOut: timedOut && !results.every((result) => isSettled(result.status)),
           results: this.deliver(targets, results),
         });
       };
-      const targetIds = new Set(targets.map(({ sessionId }) => sessionId));
       const onUpdate = (sessionId: string) => {
-        if (!targetIds.has(sessionId)) return;
-        if (snapshot().every(isSettled)) finish(false);
+        let touched = false;
+        targets.forEach((target, index) => {
+          if (target.sessionId !== sessionId) return;
+          statuses[index] = this.workerResultStatus(target).status;
+          touched = true;
+        });
+        if (!touched) return;
+        if (statuses.every(isSettled)) finish(false);
       };
       const timer = setTimeout(() => finish(true), boundedTimeout);
       this.sessionUpdateListeners.add(onUpdate);
-      if (snapshot().every(isSettled)) finish(false);
+      // A target can settle between the reading above and the listener being attached, and nothing
+      // more would arrive to notice it.
+      for (const [index, target] of targets.entries()) {
+        statuses[index] = this.workerResultStatus(target).status;
+      }
+      if (statuses.every(isSettled)) finish(false);
     });
   }
 
@@ -1086,13 +1144,12 @@ export class SessionRegistry {
    * was filed for.
    */
   workerTruth(sessionId: string): WorkerTruth {
-    const runtime = this.requireRuntime(sessionId);
-    return this.projectTruth(runtime, runtime.pty?.snapshot().toString("utf8") ?? "");
+    return this.projectTruth(this.requireRuntime(sessionId));
   }
 
-  private projectTruth(runtime: RuntimeSession, replay: string): WorkerTruth {
-    this.observeComposer(runtime, replay);
-    const stalled = this.stalledWorker(runtime, replay);
+  private projectTruth(runtime: RuntimeSession): WorkerTruth {
+    this.observeComposer(runtime);
+    const stalled = this.stalledWorker(runtime);
     return projectWorkerTruth({
       executionState: runtime.record.executionState,
       exitCode: runtime.record.exitCode,
@@ -1538,17 +1595,20 @@ export class SessionRegistry {
     runtime.record.updatedAt = new Date().toISOString();
     const pty = runtime.pty;
     if (pty === undefined) return;
-    const replay = pty.snapshot().toString("utf8");
+    // The raw replay is read lazily, and by the two readers that genuinely need every byte: a
+    // scout's drop-box capture and a preview refresh. Materializing it here cost a 128 KiB copy and
+    // decode on every chunk of provider output, for readers that were about to look at one screen.
+    const rawReplay = (): string => pty.snapshot().toString("utf8");
     if (runtime.record.scout?.transport === "headless-stream-json") {
       this.appendScoutTrace(runtime, chunk);
-      this.captureScoutReport(runtime, replay);
+      this.captureScoutReport(runtime, rawReplay);
       runtime.controller?.output(chunk);
       for (const watcher of runtime.watchers.values()) watcher.output(chunk);
-      this.notifySessionUpdate(runtime.record.id);
+      this.scheduleSessionUpdate(runtime.record.id);
       return;
     }
-    this.captureScoutReport(runtime, replay);
-    if (this.observeFatalError(runtime, replay)) {
+    this.captureScoutReport(runtime, rawReplay);
+    if (this.observeFatalError(runtime)) {
       // The bytes still reach anyone attached — the operator should be able to read the fault —
       // but no activity is derived from them. A dead session has no activity to derive.
       const controller = runtime.controller;
@@ -1568,7 +1628,7 @@ export class SessionRegistry {
       this.notifySessionUpdate(runtime.record.id);
       return;
     }
-    const activity = providerTerminalActivity(runtime.record.provider, replay);
+    const activity = markerTerminalActivity(runtime.record.provider, runtime.replay);
     if (activity === "working") {
       runtime.observedWorking = true;
       if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
@@ -1578,7 +1638,7 @@ export class SessionRegistry {
       }
     }
     runtime.activity = activity;
-    this.observeComposer(runtime, replay);
+    this.observeComposer(runtime);
     // The provider left the composer and started a turn: the only evidence that a payload the broker
     // wrote was actually consumed. Nothing about the write itself is admissible here.
     if (activity === "working" && !runtime.composer.occupied) {
@@ -1589,19 +1649,18 @@ export class SessionRegistry {
     if (runtime.suppressSemanticTurns === true) {
       runtime.controller?.output(chunk);
       for (const watcher of runtime.watchers.values()) watcher.output(chunk);
-      this.notifySessionUpdate(runtime.record.id);
+      this.scheduleSessionUpdate(runtime.record.id);
       return;
     }
-    this.updateStallObservation(runtime, replay);
+    this.updateStallObservation(runtime);
     if (activity === "awaiting-input" && runtime.observedWorking) {
       if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
       runtime.idleTimer = setTimeout(() => {
         delete runtime.idleTimer;
         if (runtime.activity !== "awaiting-input" || !runtime.observedWorking) return;
-        const completedReplay = runtime.pty?.snapshot().toString("utf8") ?? replay;
         // A composer holding text the provider never took is not a finished turn. Counting it is how
         // an unsent instruction came to satisfy the very wait that was asking whether it had run.
-        if (this.observeComposer(runtime, completedReplay).occupied) {
+        if (this.observeComposer(runtime).occupied) {
           this.notifySessionUpdate(runtime.record.id);
           return;
         }
@@ -1611,15 +1670,18 @@ export class SessionRegistry {
         // now, and this is the only announcement it will get: a provider that has finished and is
         // sitting at its prompt emits nothing more to trigger one.
         this.notifyDeliveryBoundary(runtime);
-        void this.completeSemanticTurn(runtime, completedReplay);
+        // One snapshot, once per completed turn — a turn boundary is rare enough to pay for it, and
+        // the fallback text a provider without a native transcript falls back to is drawn from the
+        // whole replay rather than from the screen the digest keeps.
+        void this.completeSemanticTurn(runtime, rawReplay());
       }, 200);
     } else if (activity === "needs-input") {
-      runtime.latestResult = compactTerminalResult(replay);
+      runtime.latestResult = compactFrameResult(runtime.replay.frameText());
       if (runtime.record.attentionState !== "needs-input") {
         void this.setAttention(runtime, "needs-input", true);
         // A blocked session has no completed turn, so the transcript is the only place the last
         // real reply exists. Read it off the broadcast path, once per transition into the state.
-        void this.refreshPreview(runtime, replay, []).catch(() => undefined);
+        void this.refreshPreview(runtime, rawReplay(), []).catch(() => undefined);
         // A session can sit blocked for a long time after a model switch, so this transition is the
         // other place the running model is worth re-reading.
         void this.refreshObservedModel(runtime).catch(() => undefined);
@@ -1629,7 +1691,7 @@ export class SessionRegistry {
     for (const watcher of runtime.watchers.values()) {
       watcher.output(chunk);
     }
-    this.notifySessionUpdate(runtime.record.id);
+    this.scheduleSessionUpdate(runtime.record.id);
   }
 
   /**
@@ -1642,14 +1704,17 @@ export class SessionRegistry {
    * the operator to type at a session that can never read it again. The verdict comes from the
    * session's last result instead.
    */
-  private observeFatalError(runtime: RuntimeSession, replay: string): boolean {
+  private observeFatalError(runtime: RuntimeSession): boolean {
     if (runtime.record.executionState === "errored") return true;
     if (runtime.fatalReported || runtime.record.executionState !== "active") return false;
+    // Both scans only ever read the last few thousand characters — a fatal notice is the last thing
+    // a provider prints. They used to reach that tail by stripping the whole replay first.
+    const tail = runtime.replay.strippedTail(TAIL_BYTES);
     // A limit the provider set for itself is read first. It is terminal for the same reason a fault
     // is — nothing more will run — but "hit the session cap" and "prompt too long" name a remedy,
     // and the generic 4xx pattern below would otherwise swallow both into "rejected the request".
-    const limit = detectProviderLimitTermination(replay);
-    const fault = limit === undefined ? detectSessionFatalError(replay) : undefined;
+    const limit = detectProviderLimitTerminationInTail(tail);
+    const fault = limit === undefined ? detectSessionFatalErrorInTail(tail) : undefined;
     const at = new Date().toISOString();
     const termination: SessionTermination | undefined = limit !== undefined
       ? { kind: limit.kind, reason: limit.reason, detail: limit.detail, at }
@@ -1769,8 +1834,7 @@ export class SessionRegistry {
       return;
     }
 
-    const replay = runtime.pty?.snapshot().toString("utf8") ?? "";
-    this.captureScoutReport(runtime, replay);
+    this.captureScoutReport(runtime, () => runtime.pty?.snapshot().toString("utf8") ?? "");
     await runtime.scoutCaptureTail?.catch(() => undefined);
     await runtime.scoutTraceTail?.catch(() => undefined);
 
@@ -1946,8 +2010,12 @@ export class SessionRegistry {
    */
   private adoptPty(runtime: RuntimeSession, pty: PtyHandle): void {
     runtime.pty = pty;
+    // A resumed session inherits whatever the new handle already replayed, and starts its reading
+    // over: the old process's markers describe a process that is gone.
+    runtime.replay.reset(pty.snapshot().toString("utf8"));
     pty.onOutput((chunk) => {
       if (runtime.pty !== pty) return;
+      runtime.replay.appendBytes(chunk);
       this.broadcast(runtime, chunk);
     });
     pty.onExit((exitCode, signal) => {
@@ -1986,6 +2054,19 @@ export class SessionRegistry {
    * Provider launch artifacts belong to the prepared launch until a live PTY takes them over, so
    * any failure before that hand-off has to remove them itself — nothing downstream will.
    */
+  /**
+   * The replay window this session's PTY keeps.
+   *
+   * Read twice: the handle is bounded by it, and the digest ages its window title against it. Those
+   * two have to be the same number — a title the replay has already forgotten must stop deciding the
+   * session's activity, and a title the replay still holds must keep deciding it.
+   */
+  private replayBytesFor(record: SessionRecord): number {
+    return record.profile === "scout"
+      ? Math.max(this.options.config.replayBytes, MIN_SCOUT_REPLAY_BYTES)
+      : this.options.config.replayBytes;
+  }
+
   private async spawnPreparedLaunch(
     adapter: ProviderAdapter,
     record: SessionRecord,
@@ -1997,9 +2078,7 @@ export class SessionRegistry {
       onPhase?.("prepare");
       if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
       await beforeSpawn?.();
-      const replayBytes = record.profile === "scout"
-        ? Math.max(this.options.config.replayBytes, MIN_SCOUT_REPLAY_BYTES)
-        : this.options.config.replayBytes;
+      const replayBytes = this.replayBytesFor(record);
       onPhase?.("spawn");
       return this.options.ptyFactory(spec, replayBytes);
     } catch (error) {
@@ -2115,7 +2194,7 @@ export class SessionRegistry {
       stopRequested: false,
       activity: "unknown",
       observedWorking: false,
-      ...freshTruthState(),
+      ...freshTruthState(this.replayBytesFor(record)),
       latestResult: record.latestPreview,
       fatalReported: false,
       completions: new Map(),
@@ -2194,7 +2273,6 @@ export class SessionRegistry {
 
   private workerResultSnapshot(target: WorkerWaitTarget, maxResultChars: number): WorkerResultSnapshot {
     const runtime = this.requireRuntime(target.sessionId);
-    const replay = runtime.pty?.snapshot().toString("utf8") ?? runtime.record.latestPreview ?? "";
     // A recorded completion wins over live runtime state: once the target turn is in the ledger its
     // text is fixed, so a later turn cannot overwrite the answer this wait was asked for.
     const recorded = runtime.completions.get(target.completionTarget);
@@ -2210,7 +2288,7 @@ export class SessionRegistry {
             ? `Scout running · result ${runtime.record.scout?.reportState ?? "missing"} · raw provider stream retained in trace artifact`
             : `Scout ${runtime.record.executionState} without a verified decision card`
         : runtime.latestResult === undefined
-          ? compactTerminalResult(replay, maxResultChars)
+          ? this.fallbackResult(runtime, maxResultChars)
           : runtime.latestResult);
     const text = truncateResult(result, maxResultChars);
     const base = {
@@ -2234,21 +2312,52 @@ export class SessionRegistry {
           }),
       completedTurns: runtime.completedTurns,
       text,
-      truth: this.projectTruth(runtime, replay),
+      truth: this.projectTruth(runtime),
       ...(recorded === undefined ? {} : { provenance: recorded.provenance }),
       ...(runtime.providerLimit === undefined ? {} : { providerLimit: runtime.providerLimit }),
     };
-    if (runtime.scoutBudgetExhausting === true) {
-      return { ...base, status: "working" };
+    const reading = this.workerResultStatus(target);
+    if (reading.status === "completed") {
+      return {
+        ...base,
+        status: "completed",
+        ...(recorded === undefined ? {} : { completedAt: recorded.completedAt }),
+      };
     }
+    if (reading.stalled !== undefined) {
+      return {
+        ...base,
+        status: "stalled",
+        stalledForSeconds: reading.stalled.stalledForSeconds,
+        stallReason: "transcript-and-token-count-unchanged-while-idle",
+        tokenCount: reading.stalled.tokenCount,
+      };
+    }
+    // `providerLimit` is already on `base` when it is set, which is exactly when this status is.
+    return { ...base, status: reading.status };
+  }
+
+  /**
+   * What happened to the turn a wait is asking about, with none of the text a caller is handed.
+   *
+   * Split out of {@link workerResultSnapshot} because a wait over N workers used to rebuild all N
+   * snapshots on every output chunk from any one of them — the quadratic fan-out that showed up in
+   * the MIK-87 profile as a single `ArrayMap` branch owning most of the samples. Settling is a
+   * question about status alone, so only the status is recomputed, and only for the worker that
+   * actually produced output.
+   */
+  private workerResultStatus(target: WorkerWaitTarget): WorkerStatusReading {
+    const runtime = this.requireRuntime(target.sessionId);
+    const recorded = runtime.completions.get(target.completionTarget);
+    if (runtime.scoutBudgetExhausting === true) return { status: "working" };
     if (
       runtime.record.scout?.terminalState === "budget_exhausted"
       && runtime.record.exitCode === null
     ) {
-      return { ...base, status: "working" };
+      return { status: "working" };
     }
     if (runtime.record.scout?.terminalState === "budget_exhausted") {
-      return { ...base, status: "budget_exhausted" };
+      return { status: "budget_exhausted" };
     }
     // `completionTarget` is an ordinal, not an identity, so a target the worker passed before its
     // newest instruction was written must not settle: the ledger slot it names was filled by a turn
@@ -2260,47 +2369,48 @@ export class SessionRegistry {
       runtime.completedTurns >= target.completionTarget
       && (alreadyDelivered || target.completionTarget > runtime.turnsBeforeLatestInstruction)
     ) {
-      return {
-        ...base,
-        status: "completed",
-        ...(recorded === undefined ? {} : { completedAt: recorded.completedAt }),
-      };
+      return { status: "completed" };
     }
-    if (runtime.providerLimit !== undefined) {
-      return { ...base, status: "provider-limit", providerLimit: runtime.providerLimit };
-    }
-    if (runtime.activity === "needs-input") return { ...base, status: "needs-input" };
-    if (runtime.record.executionState === "failed") return { ...base, status: "failed" };
-    if (runtime.record.executionState === "cancelled") return { ...base, status: "stopped" };
-    if (runtime.record.executionState === "exited") return { ...base, status: "exited" };
-    if (runtime.activity === "working") return { ...base, status: "working" };
-    const stalled = this.stalledWorker(runtime, replay);
-    if (stalled !== undefined) {
-      return {
-        ...base,
-        status: "stalled",
-        stalledForSeconds: stalled.stalledForSeconds,
-        stallReason: "transcript-and-token-count-unchanged-while-idle",
-        tokenCount: stalled.tokenCount,
-      };
-    }
-    return { ...base, status: "waiting" };
+    if (runtime.providerLimit !== undefined) return { status: "provider-limit" };
+    if (runtime.activity === "needs-input") return { status: "needs-input" };
+    if (runtime.record.executionState === "failed") return { status: "failed" };
+    if (runtime.record.executionState === "cancelled") return { status: "stopped" };
+    if (runtime.record.executionState === "exited") return { status: "exited" };
+    if (runtime.activity === "working") return { status: "working" };
+    const stalled = this.stalledWorker(runtime);
+    if (stalled !== undefined) return { status: "stalled", stalled };
+    return { status: "waiting" };
   }
 
-  private updateStallObservation(runtime: RuntimeSession, replay: string): void {
-    const tokenCount = terminalTokenCount(replay);
+  /**
+   * Screen-scrape text for a worker whose provider produced no result of its own.
+   *
+   * The current frame is all `compactTerminalResult` ever read — it slices from the last
+   * clear-screen before doing anything else — so the digest's frame is the same reading without the
+   * re-normalization of everything before it. A session with no PTY has no frame, and falls back to
+   * the preview that outlived its process.
+   */
+  private fallbackResult(runtime: RuntimeSession, maxResultChars: number): string {
+    return runtime.pty === undefined
+      ? compactTerminalResult(runtime.record.latestPreview ?? "", maxResultChars)
+      : compactFrameResult(runtime.replay.frameText(), maxResultChars);
+  }
+
+  private updateStallObservation(runtime: RuntimeSession): void {
+    const tokenCount = runtime.replay.tokenCount();
     if (tokenCount === undefined) {
       delete runtime.stallObservation;
       return;
     }
     const previous = runtime.stallObservation;
+    const version = runtime.replay.version;
     if (
       previous === undefined
-      || previous.replay !== replay
+      || previous.version !== version
       || previous.tokenCount !== tokenCount
     ) {
       runtime.stallObservation = {
-        replay,
+        version,
         tokenCount,
         unchangedSinceMs: this.now(),
       };
@@ -2309,9 +2419,8 @@ export class SessionRegistry {
 
   private stalledWorker(
     runtime: RuntimeSession,
-    replay: string,
   ): { stalledForSeconds: number; tokenCount: number } | undefined {
-    this.updateStallObservation(runtime, replay);
+    this.updateStallObservation(runtime);
     const observation = runtime.stallObservation;
     if (
       observation === undefined
@@ -2394,7 +2503,42 @@ export class SessionRegistry {
   }
 
   private notifySessionUpdate(sessionId: string): void {
+    this.pendingSessionUpdates.delete(sessionId);
     for (const listener of this.sessionUpdateListeners) listener(sessionId);
+  }
+
+  /**
+   * Announce an output-driven update, at most once per flush interval per session.
+   *
+   * Every listener of this — waits, the MCP event stream, Fleet's projection — asks the same
+   * question about the same state, and a provider streaming a response drives it thousands of times
+   * a second. Answering each one inline put all of that work between an operator's keystroke and
+   * the broker reading it. Coalescing bounds it to a fixed rate without changing the answer: a
+   * pending flush is a session whose latest state is already recorded and merely unannounced.
+   *
+   * Only the ingest path uses this. Every state transition the broker decides for itself — a turn
+   * completing, a fault, an exit, an attention change — still calls {@link notifySessionUpdate}
+   * directly, which also flushes anything pending for that session, so nothing material waits on a
+   * timer. Bytes are never delayed: the controller and every watcher are written to inline.
+   */
+  private scheduleSessionUpdate(sessionId: string): void {
+    this.pendingSessionUpdates.add(sessionId);
+    if (this.sessionUpdateFlush !== undefined) return;
+    this.sessionUpdateFlush = setTimeout(() => {
+      delete this.sessionUpdateFlush;
+      this.flushSessionUpdates();
+    }, SESSION_UPDATE_FLUSH_MS);
+    // A flush must never be the reason a broker stays alive; it has nothing to say about a process
+    // that is on its way out.
+    this.sessionUpdateFlush.unref?.();
+  }
+
+  private flushSessionUpdates(): void {
+    const pending = [...this.pendingSessionUpdates];
+    this.pendingSessionUpdates.clear();
+    for (const sessionId of pending) {
+      for (const listener of this.sessionUpdateListeners) listener(sessionId);
+    }
   }
 
   /**
@@ -2404,10 +2548,9 @@ export class SessionRegistry {
    * worker, because a claim made from a composer reading taken minutes ago is the class of lie this
    * whole change exists to stop.
    */
-  private observeComposer(runtime: RuntimeSession, replay?: string): ComposerObservation {
-    const frame = replay ?? runtime.pty?.snapshot().toString("utf8");
-    if (frame === undefined) return runtime.composer;
-    runtime.composer = terminalComposerState(runtime.record.provider, frame, {
+  private observeComposer(runtime: RuntimeSession): ComposerObservation {
+    if (runtime.pty === undefined) return runtime.composer;
+    runtime.composer = frameComposerState(runtime.record.provider, runtime.replay.frameText(), {
       modalOpen: runtime.activity === "needs-input",
     });
     return runtime.composer;
@@ -2499,12 +2642,14 @@ export class SessionRegistry {
       return;
     }
     const fallback = terminalFallbackResult(replay);
+    const transcriptAttempts = runtime.record.provider === "claude"
+      || runtime.record.provider === "codex"
+      ? 4
+      : 1;
     let nativeTurns: Array<{ text?: string | undefined; data?: Record<string, unknown> }> = [];
     try {
       const capture = this.options.transcripts?.captureProviderTurns;
-      const attempts = runtime.record.provider === "claude" || runtime.record.provider === "codex"
-        ? 4
-        : 1;
+      const attempts = transcriptAttempts;
       for (let attempt = 0; capture !== undefined && attempt < attempts; attempt += 1) {
         nativeTurns = await capture.call(this.options.transcripts, {
           sessionId: runtime.record.id,
@@ -2519,7 +2664,11 @@ export class SessionRegistry {
         });
         if (nativeTurns.length > 0) break;
         if (attempt + 1 < attempts) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
+          // Escalating, not fixed. A flat 50 ms was four reads inside 150 ms, and a broker under
+          // ingest load is exactly when a provider's transcript writer is slowest to land its
+          // frame — so the retry budget ran out precisely in the case it existed for, and the turn
+          // settled for a scrape. Doubling spends the same first read and buys 350 ms in total.
+          await new Promise((resolve) => setTimeout(resolve, TRANSCRIPT_RETRY_BASE_MS * 2 ** attempt));
         }
       }
     } catch {
@@ -2543,6 +2692,24 @@ export class SessionRegistry {
       : "terminal-replay";
     texts.forEach((text, index) =>
       this.recordCompletion(runtime, firstTurn + index, text, provenance));
+    // A scrape standing in for a turn is a degraded reading, and it used to reach nobody who was not
+    // already inspecting a snapshot's `provenance` field. Under the MIK-87 saturation every turn
+    // degraded this way at once and the only evidence was scrambled result text. Say it where the
+    // operator and the event stream can both see it.
+    if (provenance === "terminal-replay") {
+      void this.appendEvent("session.turn_scraped", runtime.record.id, {
+        provider: runtime.record.provider,
+        completionTarget: runtime.completedTurns,
+        attempts: transcriptAttempts,
+      }).catch(() => undefined);
+      void this.appendTranscript(
+        runtime.record.id,
+        "lifecycle",
+        "broker",
+        "turn recorded from a terminal scrape; the provider transcript did not land in time",
+        { provider: runtime.record.provider, completionTarget: runtime.completedTurns },
+      ).catch(() => undefined);
+    }
     // The turn that answers an instruction is the one it has been waiting for since it was written.
     this.advanceRenderedInstructions(runtime, "completed", runtime.completedTurns);
     runtime.latestResult = latest;
@@ -2667,7 +2834,12 @@ export class SessionRegistry {
       });
   }
 
-  private captureScoutReport(runtime: RuntimeSession, replay: string): void {
+  /**
+   * `replay` is a thunk because this is called from the broadcast path for every session, and only
+   * a scout ever gets past the guard below. Materializing the replay for the check was a copy and a
+   * decode of the whole buffer that every non-scout session paid on every chunk.
+   */
+  private captureScoutReport(runtime: RuntimeSession, replay: () => string): void {
     if (
       runtime.record.profile !== "scout"
       || runtime.record.scout === undefined
@@ -2679,9 +2851,10 @@ export class SessionRegistry {
     ) return;
     const scout = { ...runtime.record.scout, canary: { ...runtime.record.scout.canary } };
     const capture = this.options.scoutReports.capture.bind(this.options.scoutReports);
+    const text = replay();
     runtime.scoutCaptureTail = (runtime.scoutCaptureTail ?? Promise.resolve())
       .then(async () => {
-        const result = await capture(scout, replay);
+        const result = await capture(scout, text);
         await this.applyScoutCapture(runtime, result);
       })
       .catch(async (error) => {

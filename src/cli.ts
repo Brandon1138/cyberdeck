@@ -1003,7 +1003,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     });
 
   orchestrator.command("caveman-workers")
-    .description("inspect or change the box default for subsequently started workers")
+    .description("inspect or change the box default for subsequently started orchestrator-spawned workers")
     .argument("[mode]", "status, on, or off", "status")
     .action(async (mode: string) => {
       if (mode !== "status" && mode !== "on" && mode !== "off") {
@@ -1013,7 +1013,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
         ...(mode === "status" ? {} : { enabled: mode === "on" }),
       });
       process.stdout.write(
-        `Caveman workers: ${result.enabled ? "ON" : "OFF"} · box default · new workers\n`,
+        `Caveman workers: ${result.enabled ? "ON" : "OFF"} · box default · orchestrator-spawned workers\n`,
       );
     });
 
