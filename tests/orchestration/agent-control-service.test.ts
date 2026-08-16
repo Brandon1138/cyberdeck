@@ -293,6 +293,8 @@ describe("AgentControlService", () => {
           worktreeRoot: async () => "/repo/one",
           checkedOutBranch: async () => "main",
           refResolves: async () => true,
+          isBareRepository: async () => undefined,
+          primaryWorktree: async () => undefined,
         },
       },
     );
@@ -328,6 +330,8 @@ describe("AgentControlService", () => {
           worktreeRoot: async () => "/repo/one",
           checkedOutBranch: async () => "main",
           refResolves: async () => true,
+          isBareRepository: async () => undefined,
+          primaryWorktree: async () => undefined,
         },
       },
     );
@@ -363,6 +367,8 @@ describe("AgentControlService", () => {
           worktreeRoot: async () => undefined,
           checkedOutBranch: async () => undefined,
           refResolves: async () => false,
+          isBareRepository: async () => undefined,
+          primaryWorktree: async () => undefined,
         },
       },
     );

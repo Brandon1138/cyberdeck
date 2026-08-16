@@ -37,6 +37,33 @@ export class GitWorkspaceProbe implements WorkspaceProbe {
     return await this.git(path, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]) !== undefined;
   }
 
+  async isBareRepository(gitDir: string): Promise<boolean | undefined> {
+    const output = await this.git(gitDir, ["rev-parse", "--is-bare-repository"]);
+    if (output === "true") return true;
+    if (output === "false") return false;
+    return undefined;
+  }
+
+  async primaryWorktree(gitDir: string): Promise<string | undefined> {
+    // `core.worktree` is the config git itself uses to find a relocated main worktree, and it wins
+    // when set. Verified against real git (2.54): `git init --separate-git-dir` does NOT write it,
+    // so it is commonly absent — this is not a redundant first attempt, it is the only path that
+    // works when a `--separate-git-dir` repository was set up the way git's own docs recommend
+    // (`git-worktree(1)`: "you need to update the core.worktree setting").
+    const configured = await this.git(gitDir, ["config", "--get", "core.worktree"]);
+    if (configured !== undefined) return resolve(gitDir, configured);
+    // Without `core.worktree`, git has no bookkeeping for the *main* worktree at all — only linked
+    // worktrees get an entry under `$GIT_DIR/worktrees`. `worktree list --porcelain`'s first line is
+    // supposed to be the main worktree, but when git doesn't know where it is, the line it prints is
+    // the git directory itself rather than an actual working tree. That echo is not an answer; the
+    // repository is correctly identified as non-bare, but where its worktree lives is unknowable.
+    const output = await this.git(gitDir, ["worktree", "list", "--porcelain"]);
+    const firstLine = output?.split("\n", 1)[0];
+    if (firstLine === undefined || !firstLine.startsWith("worktree ")) return undefined;
+    const reported = resolve(firstLine.slice("worktree ".length));
+    return reported === resolve(gitDir) ? undefined : reported;
+  }
+
   private async git(cwd: string, args: string[]): Promise<string | undefined> {
     try {
       const { stdout } = await run("git", ["-C", cwd, ...args], { timeout: this.timeoutMs });
