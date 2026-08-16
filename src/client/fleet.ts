@@ -2873,7 +2873,6 @@ export async function runFleet(
   } catch {
     // Same as launch profiles: an unfolded list is the right fallback when nothing was persisted.
   }
-  state = { ...state, workerModels: await readWorkerModels(client) };
   try {
     state = {
       ...state,
@@ -2904,6 +2903,11 @@ export async function runFleet(
     client.close();
     return;
   }
+  // workerModels feeds only the interactive composer's model picker — the list rendering above
+  // never reads it. Probing for it runs the provider listing CLIs (WorkerCapabilityCatalog), which
+  // can hold a cold broker for the full capability-probe timeout, so a piped snapshot must never
+  // reach this line.
+  state = { ...state, workerModels: await readWorkerModels(client) };
   let nvimLayoutHookInstalled = false;
   if (state.nvimLayoutEnabled && runtime.nvimLayoutHooks !== undefined) {
     try {

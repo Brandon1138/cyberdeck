@@ -1,12 +1,27 @@
 import { access, mkdir, mkdtemp, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { grantAllows, type CapabilityGrant } from "../../src/domain/capability.js";
 import {
   pruneLegacyTranscript,
   ThreadTranscriptStore,
 } from "../../src/persistence/thread-transcript-store.js";
+
+// The store's incremental-scan behaviour is asserted by watching the `start` byte offset every
+// createReadStream call opens at. Node's own ESM namespace cannot be spied on directly, so the
+// module is mocked wholesale and every export but this one delegates straight to the real thing.
+const readStreamStarts = vi.hoisted(() => [] as Array<{ path: string; start: number }>);
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    createReadStream: (path: string, options?: { start?: number }) => {
+      readStreamStarts.push({ path, start: options?.start ?? 0 });
+      return actual.createReadStream(path, options);
+    },
+  };
+});
 
 const SESSION_ONE = "11111111-1111-4111-8111-111111111111";
 const SESSION_TWO = "22222222-2222-4222-8222-222222222222";
@@ -192,6 +207,162 @@ describe("ThreadTranscriptStore", () => {
       createdAt: "2026-08-16T10:00:00.000Z",
       turnNumber: 1,
     })).resolves.toBeUndefined();
+  });
+
+  it("scans only the bytes appended since the previous observed-model read", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const projects = join(root, "claude-projects");
+    const cwd = "/tmp/repo";
+    const dir = join(projects, cwd.replace(/[^A-Za-z0-9-]/gu, "-"));
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, `${SESSION_ONE}.jsonl`);
+    const frameOne = JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-08-16T10:00:00.000Z",
+      effort: "low",
+      message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "a" }] },
+    });
+    await writeFile(path, `${frameOne}\n`);
+    const store = new ThreadTranscriptStore(root, { claudeProjectsDirectory: projects });
+    const input = {
+      sessionId: SESSION_ONE,
+      provider: "claude",
+      cwd,
+      createdAt: "2026-08-16T10:00:00.000Z",
+      turnNumber: 1,
+    };
+
+    // Every createReadStream call against this file is a scan; its `start` offset is the byte
+    // position the store believed it had already consumed.
+    readStreamStarts.length = 0;
+    const startsFor = () => readStreamStarts
+      .filter((call) => call.path === path)
+      .map((call) => call.start);
+
+    await expect(store.readObservedModel(input)).resolves.toEqual({
+      model: "claude-sonnet-5",
+      effort: "low",
+      observedAt: "2026-08-16T10:00:00.000Z",
+    });
+    expect(startsFor()).toEqual([0]);
+
+    const sizeAfterFirstRead = (await stat(path)).size;
+    const frameTwo = JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-08-16T10:05:00.000Z",
+      effort: "high",
+      message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "b" }] },
+    });
+    await writeFile(path, `${frameOne}\n${frameTwo}\n`);
+
+    await expect(store.readObservedModel({ ...input, turnNumber: 2 })).resolves.toEqual({
+      model: "claude-opus-5",
+      effort: "high",
+      observedAt: "2026-08-16T10:05:00.000Z",
+    });
+    // The second scan started exactly where the first left off: only frameTwo's bytes were read,
+    // never frameOne's again.
+    expect(startsFor()).toEqual([0, sizeAfterFirstRead]);
+  });
+
+  it("resets the cursor and re-scans from the start when a session's resolved transcript path changes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const codexRoot = join(root, "codex-sessions");
+    const day = join(codexRoot, "2026", "07", "25");
+    await mkdir(day, { recursive: true });
+    const cwd = "/tmp/repo";
+    const createdAt = "2026-07-25T10:00:00.000Z";
+    // The first-matched file carries no model frame at all, so the store never locks its
+    // `nativePaths` mapping onto it — leaving room for a later, closer-matching file to win.
+    await writeFile(join(day, "rollout-a.jsonl"), [
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-07-25T10:00:20.000Z",
+        payload: {
+          id: "019f0000-0000-7000-8000-00000000000a",
+          timestamp: "2026-07-25T10:00:20.000Z",
+          cwd,
+          originator: "codex-tui",
+        },
+      }),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-25T10:00:21.000Z", payload: { type: "other" } }),
+      "",
+    ].join("\n"));
+    const store = new ThreadTranscriptStore(root, { codexSessionsDirectory: codexRoot });
+    const input = { sessionId: SESSION_ONE, provider: "codex", cwd, createdAt, turnNumber: 1 };
+
+    await expect(store.readObservedModel(input)).resolves.toBeUndefined();
+
+    // A second, exactly-timestamped rollout appears for the same session — the case a Claude
+    // /clear rebind or a fresh Codex resume produces: the same session now resolves to a different
+    // physical file.
+    await writeFile(join(day, "rollout-b.jsonl"), [
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: createdAt,
+        payload: {
+          id: "019f0000-0000-7000-8000-00000000000b",
+          timestamp: createdAt,
+          cwd,
+          originator: "codex-tui",
+        },
+      }),
+      JSON.stringify({
+        type: "turn_context",
+        timestamp: "2026-07-25T10:00:01.000Z",
+        payload: { model: "gpt-6-codex", effort: "medium" },
+      }),
+      "",
+    ].join("\n"));
+
+    await expect(store.readObservedModel({ ...input, turnNumber: 2 })).resolves.toEqual({
+      model: "gpt-6-codex",
+      effort: "medium",
+      observedAt: "2026-07-25T10:00:01.000Z",
+    });
+  });
+
+  it("resets the cursor and re-scans from the start when the transcript shrinks (truncation or rotation)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const projects = join(root, "claude-projects");
+    const cwd = "/tmp/repo";
+    const dir = join(projects, cwd.replace(/[^A-Za-z0-9-]/gu, "-"));
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, `${SESSION_ONE}.jsonl`);
+    await writeFile(path, [
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-08-16T10:00:00.000Z",
+        message: { role: "assistant", model: "claude-sonnet-5", content: [{ type: "text", text: "a" }] },
+      }),
+      "padding-line-to-push-the-cursor-well-past-the-shrunken-file-size",
+      "",
+    ].join("\n"));
+    const store = new ThreadTranscriptStore(root, { claudeProjectsDirectory: projects });
+    const input = {
+      sessionId: SESSION_ONE,
+      provider: "claude",
+      cwd,
+      createdAt: "2026-08-16T10:00:00.000Z",
+      turnNumber: 1,
+    };
+    await expect(store.readObservedModel(input)).resolves.toMatchObject({ model: "claude-sonnet-5" });
+
+    // The file is rewritten shorter than the cursor's remembered offset — a rotation or a fresh
+    // session log reusing the name.
+    await writeFile(path, [
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-08-16T11:00:00.000Z",
+        message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "b" }] },
+      }),
+      "",
+    ].join("\n"));
+
+    await expect(store.readObservedModel({ ...input, turnNumber: 2 })).resolves.toEqual({
+      model: "claude-opus-5",
+      observedAt: "2026-08-16T11:00:00.000Z",
+    });
   });
 
   it("requires explicit confirmation before pruning a legacy transcript", async () => {

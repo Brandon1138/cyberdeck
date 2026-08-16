@@ -2871,6 +2871,47 @@ describe("collectFleetSnapshot", () => {
 });
 
 describe("runFleet", () => {
+  it("renders a non-interactive snapshot without probing worker capabilities", async () => {
+    class Input extends EventEmitter {
+      isTTY = false;
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+    const requested: string[] = [];
+    const closeListeners = new Set<() => void>();
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        requested.push(method);
+        if (method === "session.list") return [];
+        if (method === "fleet.preferences") return {};
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose(listener: () => void) { closeListeners.add(listener); return () => closeListeners.delete(listener); },
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+
+    // A piped snapshot renders once and returns — it must never reach the interactive-only probes,
+    // chief among them worker.capabilities, which spawns the provider listing CLIs broker-side and
+    // can hold a cold broker for the full capability-probe timeout.
+    await runFleet(transport as never, input as never, output as never, new EventEmitter());
+
+    expect(requested).not.toContain("worker.capabilities");
+    expect(transport.close).toHaveBeenCalledTimes(1);
+    expect(Buffer.concat(output.chunks).toString().length).toBeGreaterThan(0);
+  });
+
   it("visibly applies a Ctrl+G cwd selection before launch", async () => {
     class Input extends EventEmitter {
       isTTY = true;
