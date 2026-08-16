@@ -20,6 +20,7 @@ import type {
 } from "../broker/fleet-project-service.js";
 import type { CustodyColor } from "../domain/custody-color.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
+import { provisionedWorktreeSlug } from "../domain/worker-workspace.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
 import {
   capabilityModelEfforts,
@@ -71,9 +72,10 @@ import { completeDirectoryPath, expandPath } from "./path-completion.js";
 import {
   NO_PULL_REQUEST_STATUS,
   PullRequestStatusCache,
-  pullRequestGlyph,
-  type PullRequestState,
+  pullRequestLabel,
+  pullRequestTone,
   type PullRequestStatusPort,
+  type PullRequestSummary,
 } from "./pr-status.js";
 import { RpcError } from "./rpc-client.js";
 
@@ -140,15 +142,45 @@ export interface StopAcknowledgement {
   sessionId: string;
 }
 
+/**
+ * Which row of the target step holds focus, by durable identity rather than by row number.
+ *
+ * The ctrl+x ladder needs three presses against one orchestrator, and the snapshot is refreshed
+ * between them: stopping a row rewrites its state and its `updatedAt`, so the list it sits in is
+ * re-labelled and re-ordered under the operator's hand. A row number would silently follow
+ * whatever slid into the slot; a session id cannot.
+ */
+export type OrchestratorPickerFocus =
+  | { kind: "existing"; sessionId: string }
+  | { kind: "profile"; modelIndex: number };
+
 export type OrchestratorPickerState =
-  | { step: "target"; choiceIndex: number }
+  | {
+    step: "target";
+    focus: OrchestratorPickerFocus;
+    /** Mirrors the fleet list's ctrl+x ladder, scoped to the picker's own selection. */
+    stopAcknowledgement?: StopAcknowledgement | undefined;
+    deleteConfirmation?: DeleteConfirmation | undefined;
+  }
   | { step: "effort"; modelIndex: number; effortIndex: number };
 
 export interface LaunchProfile {
   provider: ProviderId;
   model: string;
   effort?: ReasoningEffort;
+  /**
+   * Whether a worker started from this folder gets its own worktree. Absent means `shared`, which
+   * is what every profile written before the choice existed meant: run in the checkout named.
+   */
+  isolation?: WorkerIsolation;
 }
+
+/**
+ * `worktree` asks Cyberdeck to cut a fresh worktree for each worker started here; `shared` runs the
+ * worker in the folder itself, which is the right answer for a checkout the operator has already
+ * put on the branch they want.
+ */
+export type WorkerIsolation = "shared" | "worktree";
 
 /** How one folder key sits in the list: folded away, and whether its thread cap is lifted. */
 export interface FolderDisposition {
@@ -324,8 +356,12 @@ export interface FleetRenderOptions {
   height?: number | undefined;
   now?: number | undefined;
   home?: string | undefined;
-  /** Pull-request state per worktree, read synchronously from an async cache. */
-  pullRequests?: ReadonlyMap<string, PullRequestState> | undefined;
+  /**
+   * Pull request per thread id — never per worktree. A thread's pull request is
+   * the one on the branch its own work lands on, so threads that happen to share
+   * a checkout no longer inherit each other's.
+   */
+  pullRequests?: ReadonlyMap<string, PullRequestSummary> | undefined;
 }
 
 interface ResolvedFleetRenderOptions {
@@ -334,7 +370,7 @@ interface ResolvedFleetRenderOptions {
   height: number;
   now: number;
   home: string;
-  pullRequests: ReadonlyMap<string, PullRequestState>;
+  pullRequests: ReadonlyMap<string, PullRequestSummary>;
 }
 
 interface WorkerModelChoice {
@@ -371,7 +407,8 @@ type SlashCommandName =
   | "/fable-workers"
   | "/cursor-workers"
   | "/caveman-workers"
-  | "/nvim-settings";
+  | "/nvim-settings"
+  | "/worktree";
 
 interface SlashCommandDefinition {
   name: SlashCommandName;
@@ -447,6 +484,12 @@ const WORKERS_SECTION_LABEL = "Workers";
 const PROJECTS_UNAVAILABLE_NOTICE = "Project registry unavailable on this broker";
 /** How much of a worktree path a row spends naming itself before the name is trimmed. */
 const WORKTREE_TAG_WIDTH = 22;
+/**
+ * The most a row will ever spend on a pull-request number: `#` plus six digits,
+ * which is more than any repository this fleet dispatches into will reach. The
+ * column is normally four or five cells wide, and only as wide as it must be.
+ */
+const PULL_REQUEST_CELL_WIDTH = 7;
 /** Workers shown per folder before the rest go behind a show-more row. */
 const FOLDER_THREAD_CAP = 5;
 const DEFAULT_PERMISSION_POLICIES: Readonly<Record<ConfigurablePermissionProvider, ProviderPermissionPolicy>> = {
@@ -502,6 +545,15 @@ const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
       { value: "status", description: "Show current nvim layout preference" },
       { value: "on", description: "Enable automatic nvim layout" },
       { value: "off", description: "Disable automatic nvim layout" },
+    ],
+  },
+  {
+    name: "/worktree",
+    description: "Inspect or toggle per-worker worktrees for this folder",
+    values: [
+      { value: "status", description: "Show whether workers here get their own worktree" },
+      { value: "on", description: "Cyberdeck cuts a worktree for each new worker" },
+      { value: "off", description: "Workers run in this folder as-is" },
     ],
   },
 ];
@@ -873,7 +925,7 @@ export function transitionFleet(
   }
 
   if (state.orchestratorPicker !== undefined) {
-    return transitionOrchestratorPicker(state, snapshot, key);
+    return transitionOrchestratorPicker(state, snapshot, key, now);
   }
 
   // Ctrl+S, not Ctrl+G: "s for shell" is the association the operator's hand actually makes, and it
@@ -1123,8 +1175,8 @@ export function transitionFleet(
     || key === "down"
     || key === "pageup"
     || key === "pagedown"
-    || key === "ctrl+u"
-    || key === "ctrl+d"
+    || key === "alt+k"
+    || key === "alt+j"
     || key === "home"
     || key === "end"
   ) {
@@ -1145,7 +1197,7 @@ export function transitionFleet(
                   ? -pageDistance
                   : key === "pagedown"
                     ? pageDistance
-                    : key === "ctrl+u"
+                    : key === "alt+k"
                       ? -halfPageDistance
                       : halfPageDistance
           );
@@ -1940,10 +1992,14 @@ function transitionWorkerPicker(state: FleetState, key: string): FleetTransition
     return { state: { ...state, workerPicker: { ...picker, step: "effort", effortIndex: 0 } } };
   }
   const effort = choice.efforts[picker.effortIndex]!;
+  const isolation = state.launchProfiles[picker.cwd]?.isolation;
   const profile: LaunchProfile = {
     provider: choice.provider,
     model: choice.model,
     ...(effort === "provider-managed" ? {} : { effort }),
+    // Choosing a model is not choosing to share the operator's checkout again. Isolation is a
+    // property of the folder, so it survives every re-pick of what runs in it.
+    ...(isolation === undefined ? {} : { isolation }),
   };
   return {
     state: {
@@ -2053,9 +2109,14 @@ function renderFleetList(
   const header = [...renderHeader(threads, state, options), ""];
 
   // The column only exists once some thread actually has a pull request, so a
-  // fleet without `gh` — or without PRs — never pays for it.
-  const pullRequestColumn = threads.some(({ record }) =>
-    options.pullRequests.get(record.cwd) !== undefined);
+  // fleet without `gh` — or without PRs — never pays for it, and it is only ever
+  // as wide as the longest number on screen.
+  const pullRequestWidth = threads.reduce((widest, { record }) => {
+    const summary = options.pullRequests.get(record.id);
+    return summary === undefined
+      ? widest
+      : Math.max(widest, Math.min(PULL_REQUEST_CELL_WIDTH, pullRequestLabel(summary).length));
+  }, 0);
   const footer = renderFleetFooter(snapshot, state, options);
   const bodyHeight = Math.max(0, options.height - footer.length);
   const threadListViewportHeight = Math.max(0, bodyHeight - header.length);
@@ -2132,7 +2193,7 @@ function renderFleetList(
             row.thread,
             viewportState,
             options,
-            pullRequestColumn,
+            pullRequestWidth,
             leaseBadgeWidth,
             row.leaseBadge,
             worktreeWidth,
@@ -2222,7 +2283,7 @@ function renderFleetFooter(
     paint("─".repeat(options.width), "dim", options.color),
     ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
     paint(fit(launchContext, options.width), "dim", options.color),
-    paint(fit(`↑↓ · pgup/dn · ctrl+u/d half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
+    paint(fit(`↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
   ];
   return footer;
 }
@@ -2312,7 +2373,7 @@ function renderHeader(
 
 function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
-    "pgup/dn page", "ctrl+u/d half", "home/end", "shift+↑↓ reorder", "←→ fold project",
+    "pgup/dn page", "alt+k/j half", "home/end", "shift+↑↓ reorder", "←→ fold project",
     "a add project", "d remove project", "ctrl+w switch views",
     "@ mention", "alt+1–9 open", "esc back/clear",
     "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim", "! shell", "ctrl+s shell popup", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
@@ -2331,6 +2392,7 @@ function transitionOrchestratorPicker(
   state: FleetState,
   snapshot: FleetSnapshot,
   key: string,
+  now: number,
 ): FleetTransition {
   const picker = state.orchestratorPicker!;
   if (key === "escape") {
@@ -2338,10 +2400,7 @@ function transitionOrchestratorPicker(
       state: {
         ...state,
         orchestratorPicker: picker.step === "effort"
-          ? {
-              step: "target",
-              choiceIndex: existingOrchestrators(snapshot).length + picker.modelIndex,
-            }
+          ? { step: "target", focus: { kind: "profile", modelIndex: picker.modelIndex } }
           : undefined,
         notice: undefined,
       },
@@ -2351,16 +2410,17 @@ function transitionOrchestratorPicker(
   if (key === "up" || key === "down") {
     const delta = key === "up" ? -1 : 1;
     if (picker.step === "target") {
+      const existing = existingOrchestrators(snapshot);
+      const current = orchestratorFocusIndex(picker.focus, existing);
+      // An unresolved focus — its orchestrator was deleted from under the picker — is rescued onto
+      // the first row rather than moved relative to a position it no longer has.
+      const index = current < 0
+        ? 0
+        : boundedIndex(current + delta, existing.length + ORCHESTRATOR_MODEL_CHOICES.length);
       return {
         state: {
           ...state,
-          orchestratorPicker: {
-            ...picker,
-            choiceIndex: boundedIndex(
-              picker.choiceIndex + delta,
-              existingOrchestrators(snapshot).length + ORCHESTRATOR_MODEL_CHOICES.length,
-            ),
-          },
+          orchestratorPicker: { ...picker, focus: orchestratorFocusAt(index, existing) },
         },
       };
     }
@@ -2376,11 +2436,66 @@ function transitionOrchestratorPicker(
     };
   }
 
+  // Same durable-id target, same graceful-stop/confirm/delete ladder as the fleet list's own
+  // ctrl+x — this is a second place to reach it, not a second way to do it. A "New orchestrator"
+  // row has no session to stop, so the key is inert there.
+  if (key === "ctrl+x" && picker.step === "target") {
+    const focus = picker.focus;
+    if (focus.kind !== "existing") return { state };
+    const selectedExisting = existingOrchestrators(snapshot)
+      .find((record) => record.id === focus.sessionId);
+    if (selectedExisting === undefined) return { state };
+    const terminal = isTerminalSession(selectedExisting);
+    const stopAcknowledged = picker.stopAcknowledgement?.sessionId === selectedExisting.id;
+    if (!terminal || !stopAcknowledged) {
+      return {
+        state: {
+          ...state,
+          orchestratorPicker: {
+            ...picker,
+            stopAcknowledgement: { sessionId: selectedExisting.id },
+            deleteConfirmation: undefined,
+          },
+          notice: `Stopping ${threadSubject(selectedExisting)}`,
+          noticeTone: "warning",
+        },
+        action: { type: "stop", sessionId: selectedExisting.id },
+      };
+    }
+    const deleteConfirmed = picker.deleteConfirmation?.sessionId === selectedExisting.id
+      && picker.deleteConfirmation.expiresAt > now;
+    if (deleteConfirmed) {
+      return {
+        state: {
+          ...state,
+          orchestratorPicker: { ...picker, deleteConfirmation: undefined },
+          notice: undefined,
+        },
+        action: { type: "delete", sessionId: selectedExisting.id },
+      };
+    }
+    return {
+      state: {
+        ...state,
+        orchestratorPicker: {
+          ...picker,
+          deleteConfirmation: { sessionId: selectedExisting.id, expiresAt: now + DELETE_CONFIRMATION_MS },
+        },
+        notice: `Delete ${threadSubject(selectedExisting)}? press ctrl+x again`,
+        noticeTone: "confirmation",
+      },
+    };
+  }
+
   if (key !== "enter") return { state };
   if (picker.step === "target") {
+    const focus = picker.focus;
     const existing = existingOrchestrators(snapshot);
-    const selectedExisting = existing[picker.choiceIndex];
-    if (selectedExisting !== undefined) {
+    if (focus.kind === "existing") {
+      const selectedExisting = existing.find((record) => record.id === focus.sessionId);
+      // The row was deleted between the keypress and this snapshot. Enter opens nothing rather
+      // than the orchestrator that inherited the position.
+      if (selectedExisting === undefined) return { state };
       if (selectedExisting.attachmentState === "controlled") {
         return {
           state: {
@@ -2390,6 +2505,8 @@ function transitionOrchestratorPicker(
           },
         };
       }
+      // A terminal row is joined, not ignored: Enter resumes it and focuses the cockpit, which is
+      // exactly what Enter on a terminal thread does in the fleet list.
       return {
         state: {
           ...state,
@@ -2406,7 +2523,7 @@ function transitionOrchestratorPicker(
         },
       };
     }
-    const modelIndex = picker.choiceIndex - existing.length;
+    const modelIndex = focus.modelIndex;
     const choice = ORCHESTRATOR_MODEL_CHOICES[modelIndex];
     if (choice === undefined) {
       return {
@@ -2458,28 +2575,42 @@ function renderOrchestratorPicker(
     "",
   ];
 
+  // Set only when the focused row is an existing orchestrator, never a "New orchestrator"
+  // profile — that row has nothing for ctrl+x to target, so the hint stays silent on it.
+  let destructiveHint: string | undefined;
   if (picker.step === "target") {
     const existing = existingOrchestrators(snapshot);
+    const focusIndex = orchestratorFocusIndex(picker.focus, existing);
     lines.push("Existing orchestrators", "");
     if (existing.length === 0) {
       lines.push(paint("  No interactive orchestrators", "dim", options.color));
     } else {
       lines.push(...existing.map((record, index) =>
-        pickerRow(existingOrchestratorLabel(record, options.color), index === picker.choiceIndex, options.color)));
+        pickerRow(existingOrchestratorLabel(record, options.color), index === focusIndex, options.color)));
     }
     lines.push("", "New orchestrator", "");
     lines.push(...ORCHESTRATOR_MODEL_CHOICES.map((choice, index) =>
       pickerRow(
         `${choice.label}  ${paint(choice.provider.label, "dim", options.color)}`,
-        existing.length + index === picker.choiceIndex,
+        existing.length + index === focusIndex,
         options.color,
       )));
+    const selectedExisting = existing[focusIndex];
+    if (selectedExisting !== undefined) {
+      destructiveHint = isTerminalSession(selectedExisting)
+        && picker.stopAcknowledgement?.sessionId === selectedExisting.id
+        ? "ctrl+x delete"
+        : "ctrl+x stop";
+    }
   } else {
     lines.push(`${selection!.provider.label} effort`, "");
     lines.push(...selection!.provider.efforts.map((effort, index) =>
       pickerRow(effort === "native-default" ? "Provider managed" : effort, index === picker.effortIndex, options.color)));
   }
 
+  const targetHint = destructiveHint === undefined
+    ? "↑↓ select · enter focus/next · esc back"
+    : `↑↓ select · enter focus/next · ${destructiveHint} · esc back`;
   const footer = [
     ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
     paint("─".repeat(options.width), "dim", options.color),
@@ -2489,7 +2620,7 @@ function renderOrchestratorPicker(
     paint(
       fit(picker.step === "effort"
         ? "↑↓ select · enter create in cockpit · esc back"
-        : "↑↓ select · enter focus/next · esc back", options.width),
+        : targetHint, options.width),
       "dim",
       options.color,
     ),
@@ -2510,28 +2641,45 @@ function orchestratorSelection(picker: Extract<OrchestratorPickerState, { step: 
   };
 }
 
-function initialOrchestratorPicker(_snapshot: FleetSnapshot, _cwd: string): OrchestratorPickerState {
-  return { step: "target", choiceIndex: 0 };
+function initialOrchestratorPicker(snapshot: FleetSnapshot, _cwd: string): OrchestratorPickerState {
+  return { step: "target", focus: orchestratorFocusAt(0, existingOrchestrators(snapshot)) };
 }
 
+/** Where a focus sits in the picker's combined row order, or -1 when its orchestrator is gone. */
+function orchestratorFocusIndex(
+  focus: OrchestratorPickerFocus,
+  existing: readonly SessionRecord[],
+): number {
+  return focus.kind === "profile"
+    ? existing.length + focus.modelIndex
+    : existing.findIndex((record) => record.id === focus.sessionId);
+}
+
+/** The inverse: the durable focus a row position names, so navigation never stores a position. */
+function orchestratorFocusAt(
+  index: number,
+  existing: readonly SessionRecord[],
+): OrchestratorPickerFocus {
+  const record = existing[index];
+  return record === undefined
+    ? { kind: "profile", modelIndex: Math.max(0, index - existing.length) }
+    : { kind: "existing", sessionId: record.id };
+}
+
+/**
+ * Every orchestrator the broker still holds, live or terminal, in the fleet list's own order.
+ *
+ * Terminal rows stay until they are deleted, exactly as they do in the fleet list. Filtering them
+ * out broke the ctrl+x ladder on the real broker: `SessionRegistry.stop()` moves a live
+ * orchestrator to cancelled/stopping on the first press, so the row vanished before the second
+ * press could arm the delete and the third could run it. A row that cannot be reached is a row
+ * that cannot be cleaned up, so retention is now the whole record set and the label carries the
+ * state instead.
+ */
 function existingOrchestrators(snapshot: FleetSnapshot): SessionRecord[] {
   return orderedThreads(snapshot)
     .map(({ record }) => record)
-    .filter((record) =>
-      record.kind === "orchestrator"
-      && record.role === "orchestrator"
-      && (
-        record.executionState === "active"
-        // A `starting` orc is healthy and already the operator's; leaving it out of the picker
-        // is what made them start a second one while the first was still coming up.
-        || record.executionState === "starting"
-        || (
-          record.executionState === "cancelled"
-          // `done` joins `interrupted` here because a broker shutdown now preserves the outcome of
-          // an orchestrator that had finished its turn; it is still reconnectable.
-          && (record.attentionState === "interrupted" || record.attentionState === "done")
-        )
-      ));
+    .filter((record) => record.kind === "orchestrator" && record.role === "orchestrator");
 }
 
 function existingOrchestratorLabel(record: SessionRecord, color: boolean): string {
@@ -2544,8 +2692,19 @@ function existingOrchestratorLabel(record: SessionRecord, color: boolean): strin
       ? paint("available", "green", color)
       : record.executionState === "starting"
         ? paint("starting", "green", color)
-        : paint("reconnect", "yellow", color);
+        // Anything else wears its own outcome rather than a join affordance. A stopped orchestrator
+        // sits in this list until it is deleted, and must not read as one waiting to be joined.
+        : paint(terminalOrchestratorState(record), "dim", color);
   return `${name}  ${paint(record.id.slice(0, 8), "dim", color)}  ${lifecycle}`;
+}
+
+/**
+ * The fleet list's own status vocabulary, lowercased for a picker row. Only non-active records
+ * reach it, so the `active` branch of {@link threadStatus} — the one that reads the terminal
+ * replay — is unreachable and the empty replay below is never consulted.
+ */
+function terminalOrchestratorState(record: SessionRecord): string {
+  return threadStatus({ record, replay: "" }).toLowerCase();
 }
 
 function pickerRow(value: string, selected: boolean, color: boolean): string {
@@ -2638,7 +2797,7 @@ function renderThreadRow(
   thread: FleetThread,
   state: FleetState,
   options: ResolvedFleetRenderOptions,
-  pullRequestColumn = false,
+  pullRequestWidth = 0,
   leaseBadgeWidth = 0,
   leaseBadge?: LeaseCustodyBadge | undefined,
   worktreeWidth = 0,
@@ -2664,7 +2823,7 @@ function renderThreadRow(
   const statusWidth = 11;
   const fixedWidth = 12 + titleWidth + statusWidth
     + (showIdentity ? identityWidth + 1 : 0)
-    + (pullRequestColumn ? 2 : 0)
+    + (pullRequestWidth === 0 ? 0 : pullRequestWidth + 1)
     + (leaseBadgeWidth === 0 ? 0 : leaseBadgeWidth + 1)
     + (worktreeWidth === 0 ? 0 : worktreeWidth + 1);
   const previewWidth = Math.max(1, options.width - fixedWidth);
@@ -2678,12 +2837,14 @@ function renderThreadRow(
     ...(worktreeWidth === 0
       ? []
       : [paint(pad(fit(worktree ?? "", worktreeWidth), worktreeWidth), "subtle", options.color)]),
-    ...(pullRequestColumn
-      ? [pullRequestCell(options.pullRequests.get(thread.record.cwd), options.color)]
-      : []),
     ...(showIdentity ? [paint(pad(identity, identityWidth), "subtle", options.color)] : []),
     statusText(pad(status, statusWidth), false, options.color),
     paint(pad(preview, previewWidth), "muted", options.color),
+    // The number sits between the preview and the time: right of everything that
+    // says what the thread is doing, left of when it last did it.
+    ...(pullRequestWidth === 0
+      ? []
+      : [pullRequestCell(options.pullRequests.get(thread.record.id), pullRequestWidth, options.color)]),
     padStart(age, 5),
   ].join(" ");
 }
@@ -2742,11 +2903,20 @@ function renderWorkerCoordinationRow(
   return `${rowGutter(false, options.color, scrollbar)}${paint(label, badge?.tone ?? "subtle", options.color)}`;
 }
 
-/** A thread with no known pull request holds the column open and shows nothing. */
-function pullRequestCell(state: PullRequestState | undefined, color: boolean): string {
-  if (state === undefined) return " ";
-  const { glyph, tone } = pullRequestGlyph(state);
-  return paint(glyph, tone, color);
+/**
+ * The pull request a thread's own branch produced, as its number in the colour of
+ * its state. A thread with no known pull request holds the column open and shows
+ * nothing. The number is right-aligned so the column reads as a column even when
+ * one thread is at `#7` and another at `#1204`.
+ */
+function pullRequestCell(
+  summary: PullRequestSummary | undefined,
+  width: number,
+  color: boolean,
+): string {
+  if (summary === undefined) return " ".repeat(width);
+  const label = fit(pullRequestLabel(summary), width);
+  return paint(padStart(label, width), pullRequestTone(summary.state), color);
 }
 
 /**
@@ -3117,14 +3287,39 @@ export async function runFleet(
           0,
           orderedThreads(snapshot).findIndex(({ record }) => record.id === action.sessionId),
         );
+        // Deleting the focused row is the one moment the picker's focus cannot survive as an id.
+        // Its position in the pre-delete list is read here so focus can land on the neighbour the
+        // row leaves behind, and is turned straight back into an id below.
+        const picker = state.orchestratorPicker;
+        const pickerIndex = picker?.step === "target"
+          && picker.focus.kind === "existing"
+          && picker.focus.sessionId === action.sessionId
+          ? existingOrchestrators(snapshot).findIndex((record) => record.id === action.sessionId)
+          : -1;
         await client.request("session.delete", { sessionId: action.sessionId });
         snapshot = await collectFleetSnapshot(client);
         const remaining = orderedThreads(snapshot);
+        const remainingExisting = existingOrchestrators(snapshot);
         state = {
           ...state,
           selectedSessionId: remaining[selectedIndex]?.record.id ?? remaining[selectedIndex - 1]?.record.id,
           notice: "Deleted thread",
           noticeTone: "neutral",
+          ...(picker?.step === "target" && pickerIndex >= 0
+            ? {
+                orchestratorPicker: {
+                  ...picker,
+                  focus: orchestratorFocusAt(
+                    remainingExisting[pickerIndex] !== undefined
+                      ? pickerIndex
+                      : Math.max(0, pickerIndex - 1),
+                    remainingExisting,
+                  ),
+                  stopAcknowledgement: undefined,
+                  deleteConfirmation: undefined,
+                },
+              }
+            : {}),
         };
       } else if (action?.type === "attach") {
         await openNativeThread(action.sessionId);
@@ -3462,7 +3657,15 @@ export async function runFleet(
       }
       snapshot = await collectFleetSnapshot(client);
       state = normalizeState(state, snapshot, Date.now());
-      pullRequestStatus.refresh(snapshot.threads.map(({ record }) => record.cwd));
+      // A thread is asked about by the branch its own work lands on. The declared
+      // workspace branch is the only thing that separates threads sharing one
+      // checkout; a thread without one is answered for by its worktree, or not at
+      // all. Either way the answer is that thread's, not its directory's.
+      pullRequestStatus.refresh(snapshot.threads.map(({ record }) => ({
+        threadId: record.id,
+        cwd: record.cwd,
+        ...(record.workspace?.branch === undefined ? {} : { branch: record.workspace.branch }),
+      })));
       const height = Math.max(16, output.rows ?? 32);
       const width = Math.max(50, output.columns ?? 120);
       if (state.view === "diagnostics") {
@@ -3820,9 +4023,45 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
     stopAcknowledgement,
     deleteConfirmation,
     quitConfirmation,
+    ...(state.orchestratorPicker === undefined
+      ? {}
+      : { orchestratorPicker: normalizeOrchestratorPicker(state.orchestratorPicker, snapshot, now) }),
     ...(confirmationExpired
       ? { notice: undefined }
       : {}),
+  };
+}
+
+/**
+ * Carry the picker across a snapshot refresh.
+ *
+ * The focus itself is durable, so nothing has to be re-derived from a row number; the only work is
+ * rescuing a focus whose orchestrator was deleted, and dropping a stop acknowledgement or a delete
+ * confirmation that is no longer the focused row's — the same rules the fleet list applies to its
+ * own copies of that ladder state.
+ */
+function normalizeOrchestratorPicker(
+  picker: OrchestratorPickerState,
+  snapshot: FleetSnapshot,
+  now: number,
+): OrchestratorPickerState {
+  if (picker.step !== "target") return picker;
+  const existing = existingOrchestrators(snapshot);
+  const focus = orchestratorFocusIndex(picker.focus, existing) < 0
+    ? orchestratorFocusAt(0, existing)
+    : picker.focus;
+  const focusedId = focus.kind === "existing" ? focus.sessionId : undefined;
+  return {
+    ...picker,
+    focus,
+    stopAcknowledgement: picker.stopAcknowledgement?.sessionId === focusedId
+      ? picker.stopAcknowledgement
+      : undefined,
+    deleteConfirmation: picker.deleteConfirmation !== undefined
+      && picker.deleteConfirmation.sessionId === focusedId
+      && picker.deleteConfirmation.expiresAt > now
+      ? picker.deleteConfirmation
+      : undefined,
   };
 }
 
@@ -3992,7 +4231,7 @@ function threadRows(
     // section it no longer gets to head.
     const worktree = root === undefined || root.startsWith("/@")
       ? undefined
-      : worktreeTag(thread.record.cwd, root);
+      : worktreeTag(thread, root);
     return [
       {
         kind: "thread",
@@ -4208,9 +4447,31 @@ function projectRootFor(cwd: string, projects: readonly string[]): string | unde
   return match;
 }
 
-/** What a worker's row says about where under its project it actually lives. */
-function worktreeTag(cwd: string, root: string): string | undefined {
-  return cwd === root ? undefined : cwd.slice(root.length + 1);
+/**
+ * Which project a worker belongs to, which is not always where it is running.
+ *
+ * A worktree Cyberdeck provisioned is a *sibling* of the repository it was cut from, so nothing
+ * about its path puts it under a registered project root. The workspace the broker recorded says
+ * which repository it belongs to, and that is the section the operator looks for it in — a worker
+ * on a Cyberdeck branch reads as Cyberdeck work, not as a stray root named after a branch.
+ */
+function sectionPath(thread: FleetThread): string {
+  return thread.record.workspace?.repositoryPath ?? thread.record.cwd;
+}
+
+/**
+ * What a worker's row says about where under its project it actually lives.
+ *
+ * A worktree under the project root names itself relatively, which is both short and true. A
+ * provisioned sibling worktree has no such relative name, so it says its own directory name — the
+ * one Cyberdeck's naming policy derived from the branch, and the one `cd` takes.
+ */
+function worktreeTag(thread: FleetThread, root: string): string | undefined {
+  const cwd = thread.record.cwd;
+  if (cwd === root) return undefined;
+  if (cwd.startsWith(`${root}/`)) return cwd.slice(root.length + 1);
+  const worktreePath = thread.record.workspace?.worktreePath;
+  return worktreePath === undefined ? undefined : basename(worktreePath);
 }
 
 /**
@@ -4242,7 +4503,7 @@ function groupThreads(snapshot: FleetSnapshot): FleetFolder[] {
   const groups = new Map<string, FleetThread[]>(roots.map((root) => [root, []]));
   const unregistered: FleetThread[] = [];
   for (const thread of workers) {
-    const root = projectRootFor(thread.record.cwd, roots);
+    const root = projectRootFor(sectionPath(thread), roots) ?? projectRootFor(thread.record.cwd, roots);
     if (root === undefined) unregistered.push(thread);
     else groups.get(root)!.push(thread);
   }
@@ -4256,6 +4517,27 @@ function groupThreads(snapshot: FleetSnapshot): FleetFolder[] {
         threads: unregistered.sort(byRecency),
       }]),
   ];
+}
+
+/**
+ * The workspace a composer start declares when the folder is set to `worktree`.
+ *
+ * The branch is named after the task because that is the only thing the operator has said, and it
+ * goes under `cyberdeck/` so a repository's branch list keeps saying which branches a fleet made.
+ * `HEAD` is the base because the composer starts work from the checkout the operator is looking at,
+ * and no guess about a default branch is better than the branch they actually left it on. It stays
+ * a declaration of intent: the provisioner resolves it to the commit it named and records *that*,
+ * because `HEAD` re-read inside the worktree later is the worktree's own tip. The path is
+ * deliberately absent: naming the worktree is Cyberdeck's job, and the broker refuses loudly rather
+ * than reusing a directory or a branch that already exists.
+ */
+function composerWorkspace(instruction: string): StartSessionRequest["workspace"] {
+  return {
+    branch: `cyberdeck/${provisionedWorktreeSlug(taskName(instruction))}`,
+    baseRef: "HEAD",
+    provisioning: "cyberdeck-provisioned",
+    writableRoots: [],
+  };
 }
 
 function taskName(instruction: string): string {
@@ -4424,6 +4706,7 @@ function startTransition(
         detached: true,
         name: taskName(initialPrompt),
         initialPrompt,
+        ...(profile.isolation === "worktree" ? { workspace: composerWorkspace(initialPrompt) } : {}),
       },
       ...(permission.value.application.kind === "post-launch-command"
         ? { permissionLaunch: permission.value }
@@ -4542,6 +4825,74 @@ function nvimLayoutTransition(
   };
 }
 
+/**
+ * `/worktree status|on|off` for the folder the composer is pointed at.
+ *
+ * Isolation is a per-folder decision rather than a per-worker one because the operator makes it
+ * once, about a repository, and then stops thinking about it: either work in this project belongs
+ * in its own worktree or it does not. It rides on the launch profile for the same reason the
+ * provider and model do — it is what "start a worker here" means in this folder.
+ */
+function worktreeModeTransition(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  command: string,
+): FleetTransition | undefined {
+  if (!command.startsWith("/worktree")) return undefined;
+  const match = /^\/worktree(?:\s+(status|on|off))?$/u.exec(command);
+  if (match === null) {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        notice: "Usage: /worktree status|on|off",
+        noticeTone: "error",
+      },
+    };
+  }
+  const cwd = composerCwd(state, snapshot);
+  const profile = state.launchProfiles[cwd];
+  const mode = match[1] ?? "status";
+  if (mode === "status") {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        notice: profile === undefined
+          ? `${shortPath(cwd, homedir())} has no worker profile yet — /model first`
+          : `Own worktree per worker in ${shortPath(cwd, homedir())}: ${
+            profile.isolation === "worktree" ? "ON" : "OFF"
+          }`,
+        noticeTone: "neutral",
+      },
+    };
+  }
+  if (profile === undefined) {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        notice: "Choose a worker with /model before setting how it is isolated",
+        noticeTone: "error",
+      },
+    };
+  }
+  const isolation: WorkerIsolation = mode === "on" ? "worktree" : "shared";
+  const updated: LaunchProfile = { ...profile, isolation };
+  return {
+    state: {
+      ...state,
+      draft: "",
+      launchProfiles: { ...state.launchProfiles, [cwd]: updated },
+      notice: isolation === "worktree"
+        ? "Workers started here get their own worktree, cut by Cyberdeck"
+        : "Workers started here run in this folder",
+      noticeTone: "neutral",
+    },
+    action: { type: "profile", cwd, profile: updated },
+  };
+}
+
 function workerPolicyTransition(
   state: FleetState,
   snapshot: FleetSnapshot,
@@ -4556,7 +4907,8 @@ function workerPolicyTransition(
       action: "cursor-workers",
     })
     ?? cavemanWorkersTransition(state, snapshot, command)
-    ?? nvimLayoutTransition(state, command);
+    ?? nvimLayoutTransition(state, command)
+    ?? worktreeModeTransition(state, snapshot, command);
 }
 
 function policyOrchestrator(snapshot: FleetSnapshot, state: FleetState): SessionRecord | undefined {

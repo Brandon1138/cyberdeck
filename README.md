@@ -527,7 +527,10 @@ policy — explicit provider, opaque model/role, no ranking or routing, no unaut
 — is unchanged. Exact recovery and storage operations are documented in
 `docs/architecture/persistence-and-recovery.md`. App Server compatibility, interruption mapping,
 lease fencing, and orphan remediation are in
-`docs/architecture/app-server-and-worktree-leases.md`.
+`docs/architecture/app-server-and-worktree-leases.md`. Spawn-time worktree isolation — the
+provisioning modes, the naming policy, the retention/cleanup policy behind
+`cyberdeck worktree list|prune`, and the `node_modules` stance — is in
+`docs/architecture/worktree-provisioning.md`.
 
 ## Security, privacy, and contributing
 

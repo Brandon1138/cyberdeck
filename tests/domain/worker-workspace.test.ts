@@ -2,14 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   WorkerWorkspaceSchema,
   checkWorkerWorkspaceShape,
+  defaultProvisionedWorktreePath,
+  provisionedWorktreeSlug,
   validateWorkerWorkspace,
   workspaceWritableRoots,
   type WorkerWorkspace,
   type WorkspaceProbe,
 } from "../../src/domain/worker-workspace.js";
 
+const worktreePath = "/repo/worktrees/mik-70";
+
 const workspace: WorkerWorkspace = {
-  worktreePath: "/repo/worktrees/mik-70",
+  worktreePath,
   branch: "brandon/mik-70",
   baseRef: "main",
   provisioning: "pre-provisioned",
@@ -63,7 +67,7 @@ describe("WorkerWorkspaceSchema", () => {
 
 describe("checkWorkerWorkspaceShape", () => {
   it("accepts a pre-provisioned cwd at or below the declared worktree", () => {
-    expect(checkWorkerWorkspaceShape(workspace, workspace.worktreePath).ok).toBe(true);
+    expect(checkWorkerWorkspaceShape(workspace, worktreePath).ok).toBe(true);
     expect(checkWorkerWorkspaceShape(workspace, "/repo/worktrees/mik-70/src").ok).toBe(true);
   });
 
@@ -82,7 +86,7 @@ describe("checkWorkerWorkspaceShape", () => {
   it("expects a worker-provisioned cwd to be the repository, not the worktree it will create", () => {
     const workerProvisioned = { ...workspace, provisioning: "worker-provisioned" as const };
     expect(checkWorkerWorkspaceShape(workerProvisioned, "/repo").ok).toBe(true);
-    const check = checkWorkerWorkspaceShape(workerProvisioned, workspace.worktreePath);
+    const check = checkWorkerWorkspaceShape(workerProvisioned, worktreePath);
     expect(check.ok).toBe(false);
     if (check.ok) return;
     expect(check.code).toBe("WORKSPACE_CWD_OUTSIDE_WORKTREE");
@@ -100,7 +104,7 @@ describe("validateWorkerWorkspace, pre-provisioned", () => {
   it("accepts a worktree that is there, on the declared branch, with a resolvable base", async () => {
     const check = await validateWorkerWorkspace({
       workspace,
-      cwd: workspace.worktreePath,
+      cwd: worktreePath,
       sandbox: "workspace-write",
       probe,
     });
@@ -110,7 +114,7 @@ describe("validateWorkerWorkspace, pre-provisioned", () => {
   it("does not require write access, because nothing has to be created", async () => {
     const check = await validateWorkerWorkspace({
       workspace,
-      cwd: workspace.worktreePath,
+      cwd: worktreePath,
       sandbox: "read-only",
       probe,
     });
@@ -120,7 +124,7 @@ describe("validateWorkerWorkspace, pre-provisioned", () => {
   it("reports a worktree nothing provisioned", async () => {
     const check = await validateWorkerWorkspace({
       workspace,
-      cwd: workspace.worktreePath,
+      cwd: worktreePath,
       sandbox: "workspace-write",
       probe: probeFor({ worktreeRoot: undefined }),
     });
@@ -132,7 +136,7 @@ describe("validateWorkerWorkspace, pre-provisioned", () => {
   it("reports a path that is inside some other worktree rather than being one", async () => {
     const check = await validateWorkerWorkspace({
       workspace,
-      cwd: workspace.worktreePath,
+      cwd: worktreePath,
       sandbox: "workspace-write",
       probe: probeFor({ worktreeRoot: "/repo", checkedOutBranch: "brandon/mik-70" }),
     });
@@ -145,7 +149,7 @@ describe("validateWorkerWorkspace, pre-provisioned", () => {
   it("reports the branch actually checked out when it is not the declared one", async () => {
     const check = await validateWorkerWorkspace({
       workspace,
-      cwd: workspace.worktreePath,
+      cwd: worktreePath,
       sandbox: "workspace-write",
       probe: probeFor({
         worktreeRoot: "/repo/worktrees/mik-70",
@@ -161,7 +165,7 @@ describe("validateWorkerWorkspace, pre-provisioned", () => {
   it("names a detached HEAD rather than reporting a missing branch", async () => {
     const check = await validateWorkerWorkspace({
       workspace,
-      cwd: workspace.worktreePath,
+      cwd: worktreePath,
       sandbox: "workspace-write",
       probe: probeFor({ worktreeRoot: "/repo/worktrees/mik-70", checkedOutBranch: undefined }),
     });
@@ -174,7 +178,7 @@ describe("validateWorkerWorkspace, pre-provisioned", () => {
   it("reports a base ref that does not resolve, so no review has a baseline", async () => {
     const check = await validateWorkerWorkspace({
       workspace: { ...workspace, baseRef: "origin/gone" },
-      cwd: workspace.worktreePath,
+      cwd: worktreePath,
       sandbox: "workspace-write",
       probe,
     });
@@ -295,6 +299,113 @@ describe("validateWorkerWorkspace, worker-provisioned", () => {
   });
 });
 
+describe("provisionedWorktreeSlug and defaultProvisionedWorktreePath", () => {
+  it("slugs the branch leaf, so a namespaced branch does not become a nested directory", () => {
+    expect(provisionedWorktreeSlug("cyberdeck/MIK-75 worktree provisioning"))
+      .toBe("mik-75-worktree-provisioning");
+  });
+
+  it("survives a branch with nothing sluggable left in it", () => {
+    expect(provisionedWorktreeSlug("///")).toBe("worktree");
+  });
+
+  it("names a sibling of the repository, never a directory inside it", () => {
+    // Inside the repository the worktree would be untracked in the operator's `git status` and in
+    // every glob the worker runs. A sibling is invisible to the repository it was cut from.
+    expect(defaultProvisionedWorktreePath("/Users/me/code/cyberdeck", "cyberdeck/mik-75"))
+      .toBe("/Users/me/code/cyberdeck-mik-75");
+  });
+});
+
+describe("validateWorkerWorkspace, cyberdeck-provisioned", () => {
+  const cyberdeckProvisioned: WorkerWorkspace = {
+    branch: "cyberdeck/mik-75",
+    baseRef: "main",
+    provisioning: "cyberdeck-provisioned",
+    writableRoots: [],
+  };
+  const probe = probeFor({ worktreeRoot: "/repo", refs: ["main"] });
+
+  it("does not require a declared worktreePath, and resolves the one it will create", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace: cyberdeckProvisioned,
+      cwd: "/repo",
+      sandbox: "workspace-write",
+      probe: {
+        ...probe,
+        worktreeRoot: async (path) => (path === "/repo" ? "/repo" : undefined),
+      },
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.value.worktreePath).toBe("/repo-mik-75");
+    expect(check.value.repositoryPath).toBe("/repo");
+  });
+
+  it("reports a cwd that is not a repository, because nothing can be cut from it", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace: cyberdeckProvisioned,
+      cwd: "/not/a/repo",
+      sandbox: "workspace-write",
+      probe: probeFor({ worktreeRoot: undefined }),
+    });
+    expect(check.ok).toBe(false);
+    if (check.ok) return;
+    expect(check.code).toBe("WORKSPACE_WORKTREE_MISSING");
+  });
+
+  it("refuses a branch something already claimed rather than uniquifying the name", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace: cyberdeckProvisioned,
+      cwd: "/repo",
+      sandbox: "workspace-write",
+      probe: probeFor({ worktreeRoot: "/repo", refs: ["main", "refs/heads/cyberdeck/mik-75"] }),
+    });
+    expect(check.ok).toBe(false);
+    if (check.ok) return;
+    expect(check.code).toBe("WORKSPACE_BRANCH_EXISTS");
+  });
+
+  it("refuses a target path that is already a worktree", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace: cyberdeckProvisioned,
+      cwd: "/repo",
+      sandbox: "workspace-write",
+      probe: { ...probe, worktreeRoot: async (path) => path },
+    });
+    expect(check.ok).toBe(false);
+    if (check.ok) return;
+    expect(check.code).toBe("WORKSPACE_TARGET_EXISTS");
+  });
+
+  it("reports a base ref that does not resolve, so the new branch has no baseline", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace: { ...cyberdeckProvisioned, baseRef: "origin/nope" },
+      cwd: "/repo",
+      sandbox: "workspace-write",
+      probe: {
+        ...probe,
+        worktreeRoot: async (path) => (path === "/repo" ? "/repo" : undefined),
+      },
+    });
+    expect(check.ok).toBe(false);
+    if (check.ok) return;
+    expect(check.code).toBe("WORKSPACE_BASE_REF_UNRESOLVED");
+  });
+
+  it("refuses to cut a worktree the worker's own cwd sits inside", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace: { ...cyberdeckProvisioned, worktreePath: "/repo" },
+      cwd: "/repo",
+      sandbox: "workspace-write",
+      probe,
+    });
+    expect(check.ok).toBe(false);
+    if (check.ok) return;
+    expect(check.code).toBe("WORKSPACE_CWD_OUTSIDE_WORKTREE");
+  });
+});
+
 describe("workspaceWritableRoots", () => {
   it("grants nothing when no workspace was declared", () => {
     expect(workspaceWritableRoots(undefined)).toEqual([]);
@@ -325,5 +436,13 @@ describe("workspaceWritableRoots", () => {
         "/repo/worktrees/./mik-70",
       ],
     })).toEqual(["/repo/.git", "/repo/worktrees/mik-70"]);
+  });
+
+  it("drops the worktree of a cyberdeck-provisioned workspace, which is its cwd by launch time", () => {
+    expect(workspaceWritableRoots({
+      ...workspace,
+      provisioning: "cyberdeck-provisioned",
+      writableRoots: ["/repo/worktrees/mik-70", "/var/tmp/reports"],
+    })).toEqual(["/var/tmp/reports"]);
   });
 });

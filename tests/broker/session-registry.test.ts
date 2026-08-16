@@ -1,12 +1,20 @@
+import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { appendFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import type {
+  WorkerWorkspace,
+  WorktreeProvisionRequest,
+  WorktreeProvisioner,
+} from "../../src/domain/worker-workspace.js";
+import { GitWorktreeProvisioner } from "../../src/orchestration/git-worktree-provisioner.js";
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
 import type {
   ProviderAdapter,
@@ -107,6 +115,8 @@ function harness(options: {
   workerStallSeconds?: number;
   now?: () => number;
   adapters?: Record<string, ProviderAdapter>;
+  worktreeProvisioner?: WorktreeProvisioner;
+  failJournal?: (event: BrokerEvent) => boolean;
 } = {}) {
   const ptys: FakePty[] = [];
   const events: BrokerEvent[] = [];
@@ -123,6 +133,7 @@ function harness(options: {
       if (options.failAttachJournal === true && event.type === "session.attached") {
         throw new Error("journal unavailable");
       }
+      if (options.failJournal?.(event) === true) throw new Error("journal unavailable");
       events.push(event);
     } },
     transcripts: { append: async (event: AppendThreadEvent) => {
@@ -139,9 +150,163 @@ function harness(options: {
         : { workerStallSeconds: options.workerStallSeconds }),
     }),
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.worktreeProvisioner === undefined
+      ? {}
+      : { worktreeProvisioner: options.worktreeProvisioner }),
   });
   return { registry, ptys, events, transcripts, ptyFactory };
 }
+
+/** A provisioner that records what it was asked to do and touches no disk. */
+function fakeProvisioner(overrides: { failWith?: Error } = {}) {
+  const provisioned: WorktreeProvisionRequest[] = [];
+  const discarded: WorkerWorkspace[] = [];
+  const provisioner: WorktreeProvisioner = {
+    provision: async (provisionRequest) => {
+      provisioned.push(provisionRequest);
+      if (overrides.failWith !== undefined) throw overrides.failWith;
+      return {
+        workspace: {
+          ...provisionRequest.workspace,
+          worktreePath: "/tmp/repo-mik-75",
+          repositoryPath: "/tmp/repo",
+        },
+        baseCommit: "0123456789abcdef0123456789abcdef01234567",
+        warnings: ["/tmp/repo-mik-75 has no node_modules"],
+      };
+    },
+    discard: async (workspace) => { discarded.push(workspace); },
+  };
+  return { provisioner, provisioned, discarded };
+}
+
+async function gitOutput(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await promisify(execFile)("git", ["-C", cwd, ...args]);
+  return stdout.trim();
+}
+
+/** A throwaway repository with one commit, for the provisioning paths that have no useful fake. */
+async function gitRepository(): Promise<string> {
+  const parent = await mkdtemp(join(tmpdir(), "cyberdeck-registry-worktree-"));
+  temporaryDirectories.push(parent);
+  const root = join(parent, "project");
+  await mkdir(root, { recursive: true });
+  await gitOutput(root, ["init", "--initial-branch", "main"]);
+  await gitOutput(root, ["config", "user.email", "test@example.com"]);
+  await gitOutput(root, ["config", "user.name", "Test"]);
+  await writeFile(join(root, "README.md"), "base\n", "utf8");
+  await gitOutput(root, ["add", "."]);
+  await gitOutput(root, ["commit", "-m", "base"]);
+  // The system temp directory is a symlink on macOS and git answers in real paths.
+  return realpath(root);
+}
+
+const cyberdeckProvisioned: WorkerWorkspace = {
+  branch: "cyberdeck/mik-75",
+  baseRef: "HEAD",
+  provisioning: "cyberdeck-provisioned",
+  writableRoots: [],
+};
+
+describe("SessionRegistry worktree provisioning", () => {
+  it("cuts the worktree before the provider starts and runs the session in it", async () => {
+    const { provisioner, provisioned } = fakeProvisioner();
+    const { registry, events, ptyFactory } = harness({ worktreeProvisioner: provisioner });
+
+    const record = await registry.start(request({ workspace: cyberdeckProvisioned }));
+
+    expect(record.cwd).toBe("/tmp/repo-mik-75");
+    expect(record.workspace?.worktreePath).toBe("/tmp/repo-mik-75");
+    expect(provisioned).toHaveLength(1);
+    expect(provisioned[0]?.sessionId).toBe(record.id);
+    expect(ptyFactory.mock.calls[0]?.[0]?.cwd).toBe("/tmp/repo-mik-75");
+    expect(events.filter((event) => event.type === "workspace.provisioned"))
+      .toEqual([expect.objectContaining({
+        sessionId: record.id,
+        data: expect.objectContaining({
+          worktreePath: "/tmp/repo-mik-75",
+          branch: "cyberdeck/mik-75",
+          warnings: ["/tmp/repo-mik-75 has no node_modules"],
+        }),
+      })]);
+  });
+
+  it("refuses the start when no provisioner is configured rather than sharing the checkout", async () => {
+    const { registry } = harness();
+
+    await expect(registry.start(request({ workspace: cyberdeckProvisioned })))
+      .rejects.toMatchObject({ code: "WORKSPACE_PROVISIONER_UNAVAILABLE" });
+  });
+
+  it("reports a provisioning failure as a start failure", async () => {
+    const { provisioner } = fakeProvisioner({ failWith: new Error("branch already exists") });
+    const { registry } = harness({ worktreeProvisioner: provisioner });
+
+    await expect(registry.start(request({ workspace: cyberdeckProvisioned })))
+      .rejects.toMatchObject({ code: "WORKSPACE_PROVISION_FAILED" });
+  });
+
+  it("provisions nothing for a pre-provisioned workspace", async () => {
+    const { provisioner, provisioned } = fakeProvisioner();
+    const { registry } = harness({ worktreeProvisioner: provisioner });
+
+    const record = await registry.start(request({
+      workspace: {
+        worktreePath: "/tmp/repo",
+        branch: "brandon/mik-70",
+        baseRef: "main",
+        provisioning: "pre-provisioned",
+        writableRoots: [],
+      },
+    }));
+
+    expect(provisioned).toEqual([]);
+    expect(record.cwd).toBe("/tmp/repo");
+  });
+
+  it("discards the worktree it just cut when the launch fails", async () => {
+    const { provisioner, discarded } = fakeProvisioner();
+    const { registry } = harness({
+      worktreeProvisioner: provisioner,
+      adapters: {
+        codex: {
+          ...adapters.codex,
+          buildLaunchSpec: () => { throw new Error("provider missing"); },
+        } as ProviderAdapter,
+      },
+    });
+
+    await expect(registry.start(request({ workspace: cyberdeckProvisioned }))).rejects.toThrow();
+
+    expect(discarded).toEqual([expect.objectContaining({ worktreePath: "/tmp/repo-mik-75" })]);
+  });
+
+  it("gives the worktree back when the journal rejects, leaving the branch free to retry", async () => {
+    // A real provisioner and a real repository, because the failure being tested is the state left
+    // on disk: a start that throws after `git worktree add` and before the caller can see the
+    // result would leave a branch and a directory whose deterministic names then refuse the retry.
+    const root = await gitRepository();
+    let journalWorks = false;
+    const provisioner = new GitWorktreeProvisioner();
+    const { registry } = harness({
+      worktreeProvisioner: provisioner,
+      failJournal: (event) => event.type === "workspace.provisioned" && !journalWorks,
+    });
+    const start = () => registry.start(request({
+      cwd: root,
+      workspace: { ...cyberdeckProvisioned, branch: "cyberdeck/journal-gap" },
+    }));
+
+    await expect(start()).rejects.toMatchObject({ code: "WORKSPACE_PROVISION_FAILED" });
+
+    expect(await gitOutput(root, ["branch", "--list", "cyberdeck/journal-gap"])).toBe("");
+    expect(existsSync(join(root, "..", "project-journal-gap"))).toBe(false);
+
+    journalWorks = true;
+    const record = await start();
+    expect(record.workspace?.worktreePath).toBe(join(root, "..", "project-journal-gap"));
+  });
+});
 
 describe("SessionRegistry", () => {
   it("records provider, optional model, opaque role, and PID", async () => {

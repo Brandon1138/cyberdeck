@@ -10,6 +10,11 @@ export const FleetLaunchProfileSchema = z.object({
   provider: ProviderIdSchema,
   model: z.string().min(1),
   effort: ReasoningEffortSchema.optional(),
+  /**
+   * Whether workers started in this folder get a worktree Cyberdeck cuts for them. Optional so
+   * every profile written before the choice existed replays as what it meant: run in the folder.
+   */
+  isolation: z.enum(["shared", "worktree"]).optional(),
 });
 
 export const FleetFolderDispositionSchema = z.object({

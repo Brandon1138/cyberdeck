@@ -13,6 +13,8 @@ export const BrokerEventTypeSchema = z.enum([
   "session.errored",
   "session.stopped",
   "session.deleted",
+  /** Cyberdeck created a worktree for a worker. `data` names the path, branch, base, and repository. */
+  "workspace.provisioned",
   "scout.report.captured",
   "scout.budget.exhausted",
   "scout.launch.failed",

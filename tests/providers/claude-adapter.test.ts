@@ -181,6 +181,40 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(() => readFileSync(mcpPath)).toThrow();
   });
 
+  it("installs a transcript-rebind SessionStart hook on launch and resume", async () => {
+    const directory = tempDir();
+    const stateDirectory = tempDir();
+    const record = session({ kind: "worker" });
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      stateDirectory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      mcpAllowlist: { allowlistPath: join(directory, "no-allowlist.json") },
+    });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+
+    const settingsPath = spec.args[spec.args.indexOf("--settings") + 1]!;
+    expect(adapter.buildResumeSpec(record).args).toContain(settingsPath);
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+      hooks: { SessionStart: Array<{ matcher: string; hooks: Array<{ command: string }> }> };
+    };
+    const entry = settings.hooks.SessionStart[0]!;
+    expect(entry.matcher).toBe("startup|resume|clear|compact");
+    expect(entry.hooks[0]!.command).toBe(
+      `/node /cyberdeck.js transcript rebind --actor-session ${record.id}`
+        + ` --state-directory ${stateDirectory}`,
+    );
+    expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("omits the transcript hook when no state directory is configured", () => {
+    const adapter = new ClaudeProviderAdapter({
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    });
+    expect(adapter.buildLaunchSpec(session({ kind: "worker" })).args).not.toContain("--settings");
+  });
+
   it("merges allowlisted operator servers into an orchestrator's exclusive config", async () => {
     const directory = tempDir();
     const allowlistPath = join(directory, "orchestrator-mcp.json");

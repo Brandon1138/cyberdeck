@@ -22,6 +22,11 @@ import type {
   OrchestratorResetResult,
 } from "./orchestration/orchestrator-manager.js";
 import { ORCHESTRATOR_CATALOG } from "./orchestration/orchestrator-catalog.js";
+import {
+  GitWorktreeInventory,
+  liveWorktreeCwds,
+  retentionVerdict,
+} from "./orchestration/worktree-inventory.js";
 import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
@@ -60,6 +65,11 @@ import { resolveLaunchConversationId, runMcpServer } from "./mcp/server.js";
 import { openInteractiveShell } from "./tmux/interactive-shell.js";
 import { runShellCommand } from "./runtime/shell-command.js";
 import { pruneLegacyTranscript as pruneLegacyTranscriptFile } from "./persistence/thread-transcript-store.js";
+import { ClaudeConversationBindingStore } from "./persistence/claude-conversation-bindings.js";
+import {
+  runClaudeTranscriptRebind,
+  type ClaudeTranscriptRebindOutcome,
+} from "./providers/claude/transcript-hook.js";
 import type { ScoutEgressStatus } from "./persistence/scout-egress-grant-store.js";
 import type {
   WorkerEventSubmitParams,
@@ -148,6 +158,18 @@ async function withClient<T>(operation: (client: RpcClient) => Promise<T>): Prom
   } finally {
     client.close();
   }
+}
+
+/**
+ * Where a worker process may still be running, so pruning never pulls a directory out from under
+ * one. The rule itself lives in `liveWorktreeCwds`; this is only the broker call. A broker that is
+ * not running answers with an empty map rather than an error: worktree hygiene is useful on a
+ * machine with no live Cyberdeck, and the other retention rules still hold.
+ */
+async function liveSessionCwds(): Promise<Map<string, string>> {
+  const sessions = await withClient((client) => client.request<SessionRecord[]>("session.list", {}))
+    .catch(() => [] as SessionRecord[]);
+  return liveWorktreeCwds(sessions);
 }
 
 function projectRoot(): string {
@@ -431,6 +453,12 @@ export async function openFleetCockpit(
   }
 }
 
+async function readAllStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 interface CreateProgramOptions {
   runDefault?: () => Promise<void>;
   restartBroker?: () => Promise<void>;
@@ -443,6 +471,10 @@ interface CreateProgramOptions {
   cursorWorkers?: (request: CursorWorkersRequest) => Promise<CursorWorkersResult>;
   cavemanWorkers?: (request: CavemanWorkersRequest) => Promise<CavemanWorkersResult>;
   pruneLegacyTranscript?: () => Promise<{ path: string; removed: boolean }>;
+  /** Reads the SessionStart payload itself, so the command has no stdin of its own to stub. */
+  rebindClaudeTranscript?: (
+    request: { sessionId: string; stateDirectory: string },
+  ) => Promise<ClaudeTranscriptRebindOutcome>;
   submitWorkerEvent?: (request: WorkerEventSubmitParams) => Promise<EventAck>;
   scoutEgress?: (request: { root: string; enabled?: boolean }) => Promise<ScoutEgressStatus>;
   rebalanceNvimLayout?: (windowId: string) => void | Promise<void>;
@@ -470,6 +502,13 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     withClient((client) => client.request<CavemanWorkersResult>("orchestrator.cavemanWorkers", request)));
   const pruneLegacyTranscript = options.pruneLegacyTranscript
     ?? (() => pruneLegacyTranscriptFile(appStateDirectory, true));
+  const rebindClaudeTranscript = options.rebindClaudeTranscript
+    ?? (async (request: { sessionId: string; stateDirectory: string }) =>
+      runClaudeTranscriptRebind({
+        sessionId: request.sessionId,
+        payload: await readAllStdin(),
+        store: new ClaudeConversationBindingStore(request.stateDirectory),
+      }));
   const submitWorkerEvent = options.submitWorkerEvent
     ?? ((request) => withClient((client) =>
       client.request<EventAck>("worker.event.submit", request)));
@@ -571,6 +610,67 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
       if (!result.removed) process.exitCode = 1;
     });
 
+  // Cyberdeck creates worktrees automatically and removes them only here, on an explicit command.
+  // The asymmetry is the retention policy: `retentionVerdict` decides what may go, and `--yes`
+  // decides whether anything actually does. See docs/architecture/worktree-provisioning.md.
+  const worktreeCommand = program.command("worktree")
+    .description("inspect and reclaim the worktrees Cyberdeck provisioned for workers");
+  worktreeCommand.command("list")
+    .description("list Cyberdeck-provisioned worktrees of a repository and their retention verdict")
+    .argument("[path]", "path inside the repository (defaults to current directory)")
+    .option("--json", "print machine-readable JSON")
+    .action(async (path: string | undefined, options: { json?: boolean }) => {
+      const inventory = new GitWorktreeInventory({ liveSessions: await liveSessionCwds() });
+      const worktrees = await inventory.list(resolve(path ?? process.cwd()));
+      const rows = worktrees.map((worktree) => ({ worktree, verdict: retentionVerdict(worktree) }));
+      if (options.json === true) {
+        process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+        return;
+      }
+      if (rows.length === 0) {
+        process.stdout.write("No Cyberdeck-provisioned worktrees\n");
+        return;
+      }
+      for (const { worktree, verdict } of rows) {
+        process.stdout.write(
+          `${verdict.keep ? "keep " : "prune"} ${worktree.path} ${worktree.branch ?? "detached"} (${verdict.reason})\n`,
+        );
+      }
+    });
+  worktreeCommand.command("prune")
+    .description("remove Cyberdeck-provisioned worktrees that the retention policy clears")
+    .argument("[path]", "path inside the repository (defaults to current directory)")
+    .option("--yes", "actually remove; without it this prints the plan and changes nothing")
+    .action(async (path: string | undefined, options: { yes?: boolean }) => {
+      const inventory = new GitWorktreeInventory({ liveSessions: await liveSessionCwds() });
+      const worktrees = await inventory.list(resolve(path ?? process.cwd()));
+      let removable = 0;
+      for (const worktree of worktrees) {
+        const verdict = retentionVerdict(worktree);
+        if (verdict.keep) {
+          process.stdout.write(`kept    ${worktree.path} (${verdict.reason})\n`);
+          continue;
+        }
+        removable += 1;
+        if (options.yes !== true) {
+          process.stdout.write(
+            `would remove ${worktree.path}${verdict.removeBranch ? ` and branch ${worktree.branch ?? ""}` : ""} (${verdict.reason})\n`,
+          );
+          continue;
+        }
+        try {
+          await inventory.remove(worktree, verdict.removeBranch);
+          process.stdout.write(`removed ${worktree.path}\n`);
+        } catch (error) {
+          process.stdout.write(`failed  ${worktree.path}: ${(error as Error).message}\n`);
+          process.exitCode = 1;
+        }
+      }
+      if (removable > 0 && options.yes !== true) {
+        process.stdout.write(`Nothing was removed. Re-run with --yes to reclaim ${removable}.\n`);
+      }
+    });
+
   const scoutEgressCommand = program.command("scout-egress")
     .description("manage durable exact-repository Cursor Scout source egress");
   scoutEgressCommand.command("status")
@@ -658,6 +758,24 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
       process.stdout.write(result.removed
         ? `Deleted legacy transcript ${result.path}\n`
         : `No legacy transcript exists at ${result.path}\n`);
+    });
+  transcript.command("rebind")
+    .description("record where a Claude session's conversation moved (SessionStart hook)")
+    .requiredOption("--actor-session <session-id>", "Cyberdeck session UUID fixed at launch")
+    .option("--state-directory <path>", "Cyberdeck state directory", appStateDirectory)
+    .action(async (rebindOptions: { actorSession: string; stateDirectory: string }) => {
+      // Runs inside the operator's own session. A hook that throws is a hook that interrupts a
+      // worker, and a rebind that never lands already fails closed in the transcript store.
+      const outcome = await rebindClaudeTranscript({
+        sessionId: rebindOptions.actorSession,
+        stateDirectory: rebindOptions.stateDirectory,
+      }).catch((error: unknown) => {
+        process.stderr.write(`cyberdeck transcript rebind: ${String(error)}\n`);
+        return { recorded: false, reason: "unreadable-payload" } as ClaudeTranscriptRebindOutcome;
+      });
+      if (!outcome.recorded) {
+        process.stderr.write(`cyberdeck transcript rebind: ${outcome.reason}\n`);
+      }
     });
 
   addSessionOptions(program.command("start").description("start a durable top-level session"), true)
