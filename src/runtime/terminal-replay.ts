@@ -1,61 +1,156 @@
 import type { ProviderId } from "../domain/session.js";
 
-const OSC_TITLE = /\u001b\]0;([^\u0007\u001b]*)(?:\u0007|\u001b\\)/gu;
+export const OSC_TITLE = /\u001b\]0;([^\u0007\u001b]*)(?:\u0007|\u001b\\)/gu;
 const OSC_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)/gu;
 const HORIZONTAL_CURSOR_SEQUENCE = /\u001b\[(?:\d+)?[CG]/gu;
 const CSI_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/gu;
 const OTHER_ESCAPE = /\u001b(?:[()][0-9A-Z]|[@-_])/gu;
 const BRAILLE_SPINNER = /^[\u2800-\u28ff]/u;
 
+/** How much stripped tail a blocked-prompt reading is drawn from. */
+export const BLOCKED_PROMPT_TAIL_CHARS = 8_000;
+
 export type ProviderTerminalActivity = "working" | "awaiting-input" | "needs-input" | "unknown";
+
+/**
+ * Every literal whose last occurrence can decide an activity verdict.
+ *
+ * Named in one place because a marker source that tracks occurrences incrementally has to know the
+ * whole set up front — it sees each PTY chunk exactly once, so a literal added to the decision
+ * below and not to this list would simply never be found.
+ */
+export const ACTIVITY_MARKERS = [
+  "esc to interrupt",
+  "Composing",
+  "Working",
+  "Cursor is waiting for you",
+  "Add a follow-up",
+  "Write tests for",
+  "? for shortcuts",
+  "> Plan mode:",
+  "ctrl+c to stop",
+  "No matches",
+  "/run-everything",
+  "/model [filter]",
+] as const;
+
+export type ActivityMarker = (typeof ACTIVITY_MARKERS)[number];
+
+/**
+ * Where an activity verdict reads its evidence.
+ *
+ * Two implementations exist and have to agree: {@link replayMarkerSource}, which strips a whole
+ * replay on every call, and `ReplayDigest`, which strips each PTY chunk once and remembers where
+ * the markers landed. Both answer in the same coordinate space — offsets into the stripped stream —
+ * so the decision below never learns which one it is talking to. That seam is the point: a broker
+ * ingesting seven concurrent workers cannot afford the first implementation, and a second copy of
+ * the decision would drift from this one within a release.
+ */
+export interface TerminalMarkerSource {
+  /** Offset of the last occurrence of `marker` in the stripped stream, or -1. */
+  lastIndexOf(marker: ActivityMarker): number;
+  /**
+   * Offset of the last occurrence of `marker` in the raw stream, or -1.
+   *
+   * Cursor announces that it is waiting inside an OSC notification, which stripping removes — so
+   * the one provider whose idle marker is not rendered text has to be read before stripping. Raw
+   * and stripped offsets are different coordinate spaces and are never compared with each other.
+   */
+  lastRawIndexOf(marker: ActivityMarker): number;
+  /** Offset of the last braille spinner glyph in the stripped stream, or -1. */
+  lastBrailleIndex(): number;
+  /** The last window title the provider set through OSC, or undefined. */
+  lastTitle(): string | undefined;
+  /** Offset of the last blocked-prompt match in the stripped stream, or -1. */
+  blockedPromptIndex(provider: ProviderId): number;
+}
 
 /**
  * Derive the same compact provider activity used by both the cockpit and semantic worker waits.
  * Last-occurrence comparisons matter because PTY replay contains old working and idle frames.
  */
 export function providerTerminalActivity(provider: ProviderId, replay: string): ProviderTerminalActivity {
-  const plain = stripTerminalControl(replay);
-  const blockedAt = lastBlockedPromptIndex(provider, plain);
+  return markerTerminalActivity(provider, replayMarkerSource(replay));
+}
+
+/**
+ * The one activity decision, over whichever marker source the caller can afford.
+ */
+export function markerTerminalActivity(
+  provider: ProviderId,
+  markers: TerminalMarkerSource,
+): ProviderTerminalActivity {
+  const blockedAt = markers.blockedPromptIndex(provider);
 
   if (provider === "cursor") {
     if (blockedAt >= 0) return "needs-input";
-    const workingAt = Math.max(replay.lastIndexOf("Composing"), replay.lastIndexOf("ctrl+c to stop"));
+    const workingAt = Math.max(
+      markers.lastRawIndexOf("Composing"),
+      markers.lastRawIndexOf("ctrl+c to stop"),
+    );
     const waitingAt = Math.max(
-      replay.lastIndexOf("Cursor is waiting for you"),
-      replay.lastIndexOf("Add a follow-up"),
-      cursorModalOverlayIndex(replay),
+      markers.lastRawIndexOf("Cursor is waiting for you"),
+      markers.lastRawIndexOf("Add a follow-up"),
+      markers.lastRawIndexOf("No matches"),
+      markers.lastRawIndexOf("/run-everything"),
+      markers.lastRawIndexOf("/model [filter]"),
     );
     if (workingAt >= 0 || waitingAt >= 0) return waitingAt > workingAt ? "awaiting-input" : "working";
   }
 
 
   if (provider === "antigravity") {
-    const workingAt = lastBrailleIndex(plain);
+    const workingAt = markers.lastBrailleIndex();
     const waitingAt = Math.max(
-      plain.lastIndexOf("? for shortcuts"),
-      plain.lastIndexOf("> Plan mode:"),
+      markers.lastIndexOf("? for shortcuts"),
+      markers.lastIndexOf("> Plan mode:"),
     );
     if (blockedAt > Math.max(workingAt, waitingAt)) return "needs-input";
     if (workingAt >= 0 || waitingAt >= 0) return waitingAt > workingAt ? "awaiting-input" : "working";
   }
 
   const workingAt = Math.max(
-    plain.lastIndexOf("esc to interrupt"),
-    plain.lastIndexOf("Composing"),
-    plain.lastIndexOf("Working"),
+    markers.lastIndexOf("esc to interrupt"),
+    markers.lastIndexOf("Composing"),
+    markers.lastIndexOf("Working"),
   );
   const waitingAt = Math.max(
-    plain.lastIndexOf("Cursor is waiting for you"),
-    plain.lastIndexOf("Add a follow-up"),
-    plain.lastIndexOf("Write tests for"),
+    markers.lastIndexOf("Cursor is waiting for you"),
+    markers.lastIndexOf("Add a follow-up"),
+    markers.lastIndexOf("Write tests for"),
   );
   if (blockedAt > Math.max(workingAt, waitingAt)) return "needs-input";
 
-  const title = lastTerminalTitle(replay);
+  const title = markers.lastTitle();
   if (title !== undefined) return BRAILLE_SPINNER.test(title) ? "working" : "awaiting-input";
 
   if (workingAt >= 0 || waitingAt >= 0) return waitingAt > workingAt ? "awaiting-input" : "working";
   return "unknown";
+}
+
+/**
+ * A marker source backed by one whole replay string.
+ *
+ * Every reading costs a full strip of that replay, so this belongs to callers that hold a snapshot
+ * and ask once — the cockpit renderer, a test. The stripped text is computed at most once per
+ * source, because the decision above asks for several markers and each one used to pay for its own
+ * pass over the replay.
+ */
+export function replayMarkerSource(replay: string): TerminalMarkerSource {
+  let plain: string | undefined;
+  const stripped = (): string => (plain ??= stripTerminalControl(replay));
+  return {
+    lastIndexOf: (marker) => stripped().lastIndexOf(marker),
+    lastRawIndexOf: (marker) => replay.lastIndexOf(marker),
+    lastBrailleIndex: () => lastBrailleIndex(stripped()),
+    lastTitle: () => lastTerminalTitle(replay),
+    blockedPromptIndex: (provider) => {
+      const plainText = stripped();
+      const tailStart = Math.max(0, plainText.length - BLOCKED_PROMPT_TAIL_CHARS);
+      const index = blockedPromptIndexInTail(provider, plainText.slice(tailStart));
+      return index < 0 ? -1 : tailStart + index;
+    },
+  };
 }
 
 /**
@@ -70,8 +165,13 @@ export function plainTerminalText(replay: string): string {
 }
 
 export function terminalLines(replay: string): string[] {
+  return plainTerminalLines(plainTerminalText(replay));
+}
+
+/** {@link terminalLines} for a caller that already holds the normalized text. */
+export function plainTerminalLines(plain: string): string[] {
   const lines: string[] = [];
-  for (const raw of plainTerminalText(replay).split("\n")) {
+  for (const raw of plain.split("\n")) {
     const line = raw.replace(/\s+/g, " ").trim();
     if (line === "" || lines.at(-1) === line) continue;
     lines.push(line);
@@ -96,6 +196,26 @@ export function compactTerminalResult(replay: string, maxChars = 1_200): string 
   return truncateResult(terminalFallbackResult(replay), bounded);
 }
 
+/**
+ * {@link compactTerminalResult} for a caller that already holds the normalized current frame.
+ *
+ * The frame is the only part of the replay this ever read: `terminalFallbackResult` slices from the
+ * last clear-screen before it does anything else. Taking that slice as an argument lets the broker
+ * hand over the frame it already tracks instead of re-normalizing the whole replay to rediscover a
+ * boundary it knew the position of.
+ */
+export function compactFrameResult(frame: string, maxChars = 1_200): string {
+  const bounded = Math.max(200, Math.min(maxChars, 4_000));
+  return truncateResult(frameFallbackResult(frame), bounded);
+}
+
+/** {@link terminalFallbackResult} for a caller that already holds the normalized current frame. */
+export function frameFallbackResult(frame: string): string {
+  const meaningful = plainTerminalLines(frame).filter((line) => !isTerminalChrome(line));
+  const promptIndex = meaningful.findLastIndex(isUserPromptLine);
+  return meaningful.slice(promptIndex + 1).join("\n") || "No useful provider output yet";
+}
+
 export function terminalFallbackResult(replay: string): string {
   const lastClear = replay.lastIndexOf("\u001b[2J");
   const frame = lastClear < 0 ? replay : replay.slice(lastClear);
@@ -111,9 +231,19 @@ export function truncateResult(result: string, maxChars = 1_200): string {
   return `${result.slice(0, bounded - marker.length)}${marker}`;
 }
 
+/**
+ * Longest text a token counter can span, so an incremental reader knows how much of the previous
+ * segment to re-examine when a counter straddles two PTY chunks.
+ */
+export const TOKEN_COUNT_MAX_SPAN = 32;
+
 /** Last provider token counter rendered in the replay, normalized to whole tokens. */
 export function terminalTokenCount(replay: string): number | undefined {
-  const plain = plainTerminalText(replay);
+  return plainTokenCount(plainTerminalText(replay));
+}
+
+/** {@link terminalTokenCount} for a caller that already holds the normalized text. */
+export function plainTokenCount(plain: string): number | undefined {
   const pattern = /(\d[\d,]*(?:\.\d+)?)\s*([km]?)\s+tokens?\b/giu;
   let count: number | undefined;
   for (const match of plain.matchAll(pattern)) {
@@ -129,15 +259,22 @@ export function terminalTokenCount(replay: string): number | undefined {
   return count;
 }
 
-function lastTerminalTitle(replay: string): string | undefined {
+export function lastTerminalTitle(replay: string): string | undefined {
   let last: string | undefined;
   for (const match of replay.matchAll(OSC_TITLE)) last = match[1];
   return last;
 }
 
-function lastBlockedPromptIndex(provider: ProviderId, replay: string): number {
-  const tailStart = Math.max(0, replay.length - 8_000);
-  const tail = replay.slice(tailStart);
+/**
+ * Offset of the last blocked-prompt match within an already-bounded stripped tail.
+ *
+ * The window was always bounded — a modal is the last thing on the screen — but the bounding used
+ * to happen after stripping the entire replay. Taking the tail as an argument lets a caller that
+ * already keeps a rolling stripped tail hand it straight over, which is the difference between
+ * per-chunk work proportional to the chunk and proportional to everything the worker has ever
+ * printed.
+ */
+export function blockedPromptIndexInTail(provider: ProviderId, tail: string): number {
   const common = lastRegexIndex(
     tail,
     /Do you trust the contents of this project\?|workspace-trust|needs authentication|permission prompt/giu,
@@ -156,8 +293,7 @@ function lastBlockedPromptIndex(provider: ProviderId, replay: string): number {
           lastRegexIndex(tail, /Do you want to proceed\?[\s\S]{0,1600}?(?:Yes|Esc to cancel)/giu),
         )
       : -1;
-  const index = Math.max(common, providerPrompt);
-  return index < 0 ? -1 : tailStart + index;
+  return Math.max(common, providerPrompt);
 }
 
 function lastRegexIndex(value: string, pattern: RegExp): number {
@@ -166,7 +302,7 @@ function lastRegexIndex(value: string, pattern: RegExp): number {
   return index;
 }
 
-function lastBrailleIndex(value: string): number {
+export function lastBrailleIndex(value: string): number {
   let last = -1;
   for (let index = value.length - 1; index >= 0; index -= 1) {
     const code = value.charCodeAt(index);
@@ -176,14 +312,6 @@ function lastBrailleIndex(value: string): number {
     }
   }
   return last;
-}
-
-function cursorModalOverlayIndex(replay: string): number {
-  return Math.max(
-    replay.lastIndexOf("No matches"),
-    replay.lastIndexOf("/run-everything"),
-    replay.lastIndexOf("/model [filter]"),
-  );
 }
 
 function isTerminalChrome(line: string): boolean {
