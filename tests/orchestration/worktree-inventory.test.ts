@@ -7,6 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { GitWorktreeProvisioner } from "../../src/orchestration/git-worktree-provisioner.js";
 import {
   GitWorktreeInventory,
+  liveWorktreeCwds,
   parseWorktreeList,
   retentionVerdict,
   type ProvisionedWorktree,
@@ -38,13 +39,19 @@ async function repository(): Promise<string> {
   return realpath(root);
 }
 
-async function provision(root: string, branch: string): Promise<string> {
+async function provision(root: string, branch: string, baseRef = "main"): Promise<string> {
   const result = await new GitWorktreeProvisioner().provision({
-    workspace: { branch, baseRef: "main", provisioning: "cyberdeck-provisioned", writableRoots: [] },
+    workspace: { branch, baseRef, provisioning: "cyberdeck-provisioned", writableRoots: [] },
     cwd: root,
     sessionId: `session-${branch}`,
   });
   return result.workspace.worktreePath ?? "";
+}
+
+async function commit(worktreePath: string, name: string): Promise<void> {
+  await writeFile(join(worktreePath, name), "done\n", "utf8");
+  await git(worktreePath, ["add", "."]);
+  await git(worktreePath, ["commit", "-m", name]);
 }
 
 function candidate(overrides: Partial<ProvisionedWorktree> = {}): ProvisionedWorktree {
@@ -56,6 +63,7 @@ function candidate(overrides: Partial<ProvisionedWorktree> = {}): ProvisionedWor
       sessionId: "session",
       branch: "feature",
       baseRef: "main",
+      baseCommit: "0123456789abcdef0123456789abcdef01234567",
       repositoryPath: "/repo",
       worktreePath: "/repo-feature",
       createdAt: "2026-08-16T00:00:00.000Z",
@@ -144,14 +152,56 @@ describe("GitWorktreeInventory", () => {
   it("counts commits the base ref does not contain", async () => {
     const root = await repository();
     const provisioned = await provision(root, "cyberdeck/ahead");
-    await writeFile(join(provisioned, "work.txt"), "done\n", "utf8");
-    await git(provisioned, ["add", "."]);
-    await git(provisioned, ["commit", "-m", "work"]);
+    await commit(provisioned, "work.txt");
 
     const [worktree] = await new GitWorktreeInventory().list(root);
 
     expect(worktree?.commitsAheadOfBase).toBe(1);
     expect(worktree?.pushed).toBe(false);
+  });
+
+  it("counts against the commit a symbolic base named, not the name itself", async () => {
+    const root = await repository();
+    // `HEAD` is what a Fleet `/worktree on` start declares. Diffed as a name inside the worktree it
+    // is always the worktree's own tip, so unpublished work would read as nothing and be pruned.
+    const provisioned = await provision(root, "cyberdeck/head-based", "HEAD");
+    await commit(provisioned, "work.txt");
+
+    const [worktree] = await new GitWorktreeInventory().list(root);
+    if (worktree === undefined) throw new Error("expected one provisioned worktree");
+
+    expect(worktree.provenance.baseCommit).toMatch(/^[0-9a-f]{40}$/u);
+    expect(worktree.commitsAheadOfBase).toBe(1);
+    const verdict = retentionVerdict(worktree);
+    expect(verdict.keep).toBe(true);
+    expect(verdict.reason).toContain("not pushed");
+  });
+
+  it("keeps a clean worktree whose errored or cancelled session still has a process", async () => {
+    const root = await repository();
+    const errored = await provision(root, "cyberdeck/errored");
+    const stopping = await provision(root, "cyberdeck/stopping");
+    const spent = await provision(root, "cyberdeck/spent-here");
+    // An `errored` session keeps `exitCode: null` on purpose — its process is still there — and a
+    // `cancelled` one has been sent SIGTERM but has not reached its exit callback yet. Neither is
+    // `starting` or `active`, and both are sitting in a clean worktree.
+    const inventory = new GitWorktreeInventory({
+      liveSessions: liveWorktreeCwds([
+        { id: "session-errored", cwd: errored, exitCode: null },
+        { id: "session-stopping", cwd: stopping, exitCode: null },
+        { id: "session-exited", cwd: spent, exitCode: 0 },
+      ]),
+    });
+
+    const verdicts = new Map(
+      (await inventory.list(root)).map((worktree) => [worktree.path, retentionVerdict(worktree)]),
+    );
+
+    expect(verdicts.get(errored)).toMatchObject({ keep: true });
+    expect(verdicts.get(errored)?.reason).toContain("session-errored");
+    expect(verdicts.get(stopping)).toMatchObject({ keep: true });
+    expect(verdicts.get(stopping)?.reason).toContain("session-stopping");
+    expect(verdicts.get(spent)).toMatchObject({ keep: false });
   });
 
   it("attributes a live session to the worktree it is running in", async () => {

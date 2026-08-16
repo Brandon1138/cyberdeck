@@ -4157,9 +4157,11 @@ function groupThreads(snapshot: FleetSnapshot): FleetFolder[] {
  * The branch is named after the task because that is the only thing the operator has said, and it
  * goes under `cyberdeck/` so a repository's branch list keeps saying which branches a fleet made.
  * `HEAD` is the base because the composer starts work from the checkout the operator is looking at,
- * and no guess about a default branch is better than the branch they actually left it on. The path
- * is deliberately absent: naming the worktree is Cyberdeck's job, and the broker refuses loudly
- * rather than reusing a directory or a branch that already exists.
+ * and no guess about a default branch is better than the branch they actually left it on. It stays
+ * a declaration of intent: the provisioner resolves it to the commit it named and records *that*,
+ * because `HEAD` re-read inside the worktree later is the worktree's own tip. The path is
+ * deliberately absent: naming the worktree is Cyberdeck's job, and the broker refuses loudly rather
+ * than reusing a directory or a branch that already exists.
  */
 function composerWorkspace(instruction: string): StartSessionRequest["workspace"] {
   return {

@@ -30,7 +30,19 @@ export interface WorktreeProvenance {
   version: 1;
   sessionId: string;
   branch: string;
+  /** The base as the caller declared it, kept because it is the name the operator will recognise. */
   baseRef: string;
+  /**
+   * The commit `baseRef` named in the source repository at the moment the worktree was cut, and the
+   * only thing retention is allowed to diff against.
+   *
+   * A symbolic name is not a baseline. The composer declares `HEAD`, which inside the worktree
+   * resolves to the worktree's own tip, so `HEAD..HEAD` is empty however many commits a worker
+   * makes — a worktree full of unpublished work would read as holding nothing and be reclaimed by
+   * `worktree prune --yes`. Resolving here, once, is what makes the baseline mean the commit the
+   * branch was actually cut from.
+   */
+  baseCommit: string;
   repositoryPath: string;
   worktreePath: string;
   createdAt: string;
@@ -40,6 +52,7 @@ export class WorktreeProvisionError extends Error {
   constructor(
     readonly code:
       | "WORKTREE_REPOSITORY_UNRESOLVED"
+      | "WORKTREE_BASE_REF_UNRESOLVED"
       | "WORKTREE_CREATE_FAILED",
     message: string,
   ) {
@@ -91,6 +104,11 @@ export class GitWorktreeProvisioner implements WorktreeProvisioner {
       repositoryPath,
     };
 
+    // The base is resolved to a commit before anything is created, and that commit — not the name —
+    // is what the worktree is cut from and what provenance records. Resolving first also means a
+    // base that does not exist fails before a directory or a branch does.
+    const baseCommit = await this.resolveBase(repositoryPath, workspace.baseRef);
+
     // `git worktree add` creates the leaf, not an absent chain above it. Creating the parent first
     // keeps a worktree root under a directory the operator has not made yet from failing as though
     // the branch were the problem.
@@ -102,18 +120,18 @@ export class GitWorktreeProvisioner implements WorktreeProvisioner {
         "-b",
         workspace.branch,
         worktreePath,
-        workspace.baseRef,
+        baseCommit,
       ]);
     } catch (error) {
       throw new WorktreeProvisionError(
         "WORKTREE_CREATE_FAILED",
         `Could not create worktree ${worktreePath} for branch ${workspace.branch} from `
-        + `${workspace.baseRef}: ${gitFailure(error)}`,
+        + `${workspace.baseRef} (${baseCommit}): ${gitFailure(error)}`,
       );
     }
 
-    await this.writeProvenance(workspace, request.sessionId);
-    return { workspace, warnings: await this.warnings(workspace) };
+    await this.writeProvenance(workspace, baseCommit, request.sessionId);
+    return { workspace, baseCommit, warnings: await this.warnings(workspace) };
   }
 
   async discard(workspace: WorkerWorkspace): Promise<void> {
@@ -137,8 +155,33 @@ export class GitWorktreeProvisioner implements WorktreeProvisioner {
     return resolve(root);
   }
 
+  /**
+   * The commit `baseRef` names in the source repository, right now.
+   *
+   * `^{commit}` is appended rather than trusted from the caller: `RefNameSchema` refuses `^` in a
+   * declared ref, so the peel is unambiguously ours, and it makes an annotated tag answer with the
+   * commit it points at rather than the tag object.
+   */
+  private async resolveBase(repositoryPath: string, baseRef: string): Promise<string> {
+    const commit = await this
+      .git(repositoryPath, ["rev-parse", "--verify", "--quiet", `${baseRef}^{commit}`])
+      .catch(() => undefined);
+    if (commit === undefined) {
+      throw new WorktreeProvisionError(
+        "WORKTREE_BASE_REF_UNRESOLVED",
+        `Base ref ${baseRef} does not name a commit in ${repositoryPath}, so there is nothing to `
+        + "cut a worktree from",
+      );
+    }
+    return commit;
+  }
+
   /** Provenance failure is not a launch failure: the worktree exists and the worker can use it. */
-  private async writeProvenance(workspace: WorkerWorkspace, sessionId: string): Promise<void> {
+  private async writeProvenance(
+    workspace: WorkerWorkspace,
+    baseCommit: string,
+    sessionId: string,
+  ): Promise<void> {
     const worktreePath = workspace.worktreePath;
     const repositoryPath = workspace.repositoryPath;
     if (worktreePath === undefined || repositoryPath === undefined) return;
@@ -150,6 +193,7 @@ export class GitWorktreeProvisioner implements WorktreeProvisioner {
         sessionId,
         branch: workspace.branch,
         baseRef: workspace.baseRef,
+        baseCommit,
         repositoryPath,
         worktreePath,
         createdAt: this.now(),

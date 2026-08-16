@@ -38,9 +38,15 @@ the new worktree. `workspace.repositoryPath` records the repository it was cut f
 Fleet groups the thread under — so a sibling worktree appears under its project with the worktree
 name in the worktree column, not as a stray top-level folder.
 
-If the launch fails after provisioning, the registry discards the worktree it just made. That is
-the only automatic removal in the system, and it is not forced: `git worktree remove` and
+If anything fails after provisioning, the registry discards the worktree it just made. That is the
+only automatic removal in the system, and it is not forced: `git worktree remove` and
 `git branch -d`, both allowed to fail.
+
+"Anything" includes the `workspace.provisioned` journal append itself, which is why that append
+discards and rethrows rather than propagating: it runs before the `ProvisionedWorktree` reaches the
+caller, so the caller's own discard path cannot see a worktree the append failed behind. Left
+behind, the branch and the deterministic path would refuse the operator's immediate retry with
+`WORKSPACE_BRANCH_EXISTS` / `WORKSPACE_TARGET_EXISTS`.
 
 ## Naming policy
 
@@ -66,14 +72,24 @@ Three choices, each load-bearing:
 ## Provenance
 
 Each provisioned worktree gets a `cyberdeck-provenance.json` recording the session, branch, base
-ref, repository, and creation time. It is written into that worktree's own git admin directory
-(`git rev-parse --absolute-git-dir`), **not** into the working tree — a marker file in the working
-tree would appear in the worker's diff and in every PR it opens.
+ref, base commit, repository, and creation time. It is written into that worktree's own git admin
+directory (`git rev-parse --absolute-git-dir`), **not** into the working tree — a marker file in the
+working tree would appear in the worker's diff and in every PR it opens.
 
 Provenance is the only thing that makes a worktree eligible for reclamation. A worktree without it
-is not Cyberdeck's and is never touched, whatever it looks like.
+is not Cyberdeck's and is never touched, whatever it looks like. A provenance file with no
+`baseCommit` is in the same position: there is no baseline in it, and guessing one is exactly the
+failure `baseCommit` exists to prevent.
 
-The recorded `baseRef` is read by retention and by nothing else. In particular
+**The baseline is a commit, not a name.** `baseRef` is kept as the operator declared it, and the
+worktree is cut from `baseCommit` — `git rev-parse --verify <baseRef>^{commit}` in the source
+repository, at provisioning time. Retention diffs against `baseCommit` and only `baseCommit`. A
+symbolic base does not survive the worktree: Fleet's `/worktree on` declares `HEAD`, which read back
+inside the worktree names the worktree's own tip, so `HEAD..HEAD` is empty however many commits the
+worker made — a worktree full of unpublished work would report `commitsAheadOfBase: 0` and be
+removed by `worktree prune --yes` under a rule written to keep it.
+
+The recorded base is read by retention and by nothing else. In particular
 `src/nvim/worktree-changes.ts` still resolves its diff baseline from `refs/remotes/origin/HEAD`, and
 the deferred limitation in `CLAUDE.md` about a worktree with no `origin/HEAD` is unchanged: this
 feature records a base for the worktrees *it* creates, and deliberately does not widen the change
@@ -91,7 +107,12 @@ the command prints the plan and changes nothing.
 
 `retentionVerdict` in `src/orchestration/worktree-inventory.ts` is the whole policy, in order:
 
-1. **A live worker's worktree is kept.** Something has those files open.
+1. **A live worker's worktree is kept.** Something has those files open. "Live" means *no process
+   exit has been recorded* — `exitCode === null` — rather than a whitelist of execution states. An
+   `errored` session keeps `exitCode: null` deliberately, because its process is still there and
+   deleting the thread still requires stopping it; a `cancelled` session has been sent `SIGTERM` but
+   has the same gap until its exit callback lands. Both sit in a clean worktree, and both would be
+   read as unused by any rule that asked whether the session was `starting` or `active`.
 2. **A dirty worktree is kept.** Uncommitted work exists nowhere else.
 3. **A worktree with commits that are not in its base ref and not on any remote is kept.** That is
    unlanded work; removing the worktree would remove the only copy.

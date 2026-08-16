@@ -23,7 +23,7 @@ export interface ProvisionedWorktree {
   provenance: WorktreeProvenance;
   /** Uncommitted changes, tracked or untracked. */
   dirty: boolean;
-  /** Commits on this worktree's branch that the recorded base ref does not already contain. */
+  /** Commits on this worktree's branch that the recorded base *commit* does not already contain. */
   commitsAheadOfBase: number;
   /** Whether those commits also exist on a remote-tracking ref. */
   pushed: boolean;
@@ -65,16 +65,51 @@ export function retentionVerdict(worktree: ProvisionedWorktree): RetentionVerdic
     const commits = worktree.commitsAheadOfBase;
     return {
       keep: true,
-      reason: `${commits} commit${commits === 1 ? "" : "s"} not in ${worktree.provenance.baseRef} and not pushed`,
+      reason: `${commits} commit${commits === 1 ? "" : "s"} not in ${baseLabel(worktree.provenance)} and not pushed`,
     };
   }
   return {
     keep: false,
     removeBranch: worktree.commitsAheadOfBase === 0,
     reason: worktree.commitsAheadOfBase === 0
-      ? `nothing beyond ${worktree.provenance.baseRef}`
+      ? `nothing beyond ${baseLabel(worktree.provenance)}`
       : `${worktree.commitsAheadOfBase} commit(s) preserved on a remote`,
   };
+}
+
+/**
+ * How the baseline reads to an operator: the name they declared, and the commit it was pinned to.
+ * The commit is the half that decided the verdict, so a verdict that names only `HEAD` would be
+ * telling them the one thing that is not the reason.
+ */
+function baseLabel(provenance: WorktreeProvenance): string {
+  const short = provenance.baseCommit.slice(0, 12);
+  return provenance.baseRef === provenance.baseCommit ? short : `${provenance.baseRef} (${short})`;
+}
+
+/** The fields of a session record that decide whether its directory may be reclaimed. */
+export interface SessionLiveness {
+  id: string;
+  cwd: string;
+  exitCode: number | null;
+}
+
+/**
+ * Where a process may still be running, keyed by resolved cwd, so pruning never pulls a directory
+ * out from under one.
+ *
+ * The test is "no process exit has been recorded", not "the session is in a state that sounds
+ * busy". An `errored` session deliberately keeps `exitCode: null` *because* its process is still
+ * there and deleting the thread must still require stopping it; a `cancelled` session has been sent
+ * SIGTERM but has the same gap until its exit callback lands. Both are clean worktrees with a live
+ * process in them, and a whitelist of `starting`/`active` calls both of them unused.
+ */
+export function liveWorktreeCwds(sessions: readonly SessionLiveness[]): Map<string, string> {
+  const live = new Map<string, string>();
+  for (const session of sessions) {
+    if (session.exitCode === null) live.set(resolve(session.cwd), session.id);
+  }
+  return live;
 }
 
 /**
@@ -175,10 +210,10 @@ export class GitWorktreeInventory {
     provenance: WorktreeProvenance,
   ): Promise<number> {
     const count = await this
-      .git(worktreePath, ["rev-list", "--count", `${provenance.baseRef}..HEAD`])
+      .git(worktreePath, ["rev-list", "--count", `${provenance.baseCommit}..HEAD`])
       .catch(() => undefined);
-    // An unanswerable question is not an empty answer: a base ref that no longer resolves means the
-    // worktree is kept, which is what a large positive count produces.
+    // An unanswerable question is not an empty answer: a base commit that no longer resolves means
+    // the worktree is kept, which is what a large positive count produces.
     return count === undefined ? Number.MAX_SAFE_INTEGER : Number.parseInt(count, 10);
   }
 
@@ -201,10 +236,14 @@ export class GitWorktreeInventory {
 function isProvenance(value: unknown): value is WorktreeProvenance {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
+  // `baseCommit` is required rather than defaulted: without it there is no baseline, and guessing
+  // one is how a worktree holding unpublished commits gets read as holding nothing. A file that
+  // lacks it is not understood, so the worktree it describes is left alone entirely.
   return candidate.version === 1
     && typeof candidate.sessionId === "string"
     && typeof candidate.branch === "string"
     && typeof candidate.baseRef === "string"
+    && typeof candidate.baseCommit === "string"
     && typeof candidate.repositoryPath === "string"
     && typeof candidate.worktreePath === "string";
 }

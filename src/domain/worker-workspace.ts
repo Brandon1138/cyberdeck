@@ -159,6 +159,12 @@ export interface WorktreeProvisionRequest {
 export interface ProvisionedWorktree {
   /** The workspace as built, with `worktreePath` and `repositoryPath` populated. */
   workspace: WorkerWorkspace;
+  /**
+   * The commit `workspace.baseRef` named when the worktree was cut. Declared bases are symbolic —
+   * the composer says `HEAD` — and a symbolic name re-read inside the worktree later answers with
+   * the worktree's own tip, which is why the baseline has to be pinned to a commit here.
+   */
+  baseCommit: string;
   /** Things the worker's operator should know, e.g. that the worktree has no `node_modules`. */
   warnings: string[];
 }

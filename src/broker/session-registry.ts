@@ -1487,22 +1487,39 @@ export class SessionRegistry {
         + "pre-provisioned",
       );
     }
+    let provisioned: ProvisionedWorktree;
     try {
-      const provisioned = await provisioner.provision({ workspace, cwd: request.cwd, sessionId });
-      await this.appendEvent("workspace.provisioned", sessionId, {
-        worktreePath: provisioned.workspace.worktreePath ?? null,
-        repositoryPath: provisioned.workspace.repositoryPath ?? null,
-        branch: provisioned.workspace.branch,
-        baseRef: provisioned.workspace.baseRef,
-        warnings: provisioned.warnings,
-      });
-      return provisioned;
+      provisioned = await provisioner.provision({ workspace, cwd: request.cwd, sessionId });
     } catch (error) {
       throw new RegistryError(
         "WORKSPACE_PROVISION_FAILED",
         error instanceof Error ? error.message : String(error),
       );
     }
+    // Everything past this point has a worktree behind it, and throwing from here would return no
+    // `ProvisionedWorktree` for the caller's discard path to act on: the start would fail leaving
+    // the branch and the directory behind, and the deterministic naming means the retry that
+    // follows is refused with WORKSPACE_BRANCH_EXISTS. So this failure gives the worktree back
+    // itself — still non-forced, so anything that somehow landed in it survives.
+    try {
+      await this.appendEvent("workspace.provisioned", sessionId, {
+        worktreePath: provisioned.workspace.worktreePath ?? null,
+        repositoryPath: provisioned.workspace.repositoryPath ?? null,
+        branch: provisioned.workspace.branch,
+        baseRef: provisioned.workspace.baseRef,
+        baseCommit: provisioned.baseCommit,
+        warnings: provisioned.warnings,
+      });
+    } catch (error) {
+      await provisioner.discard(provisioned.workspace).catch(() => undefined);
+      throw new RegistryError(
+        "WORKSPACE_PROVISION_FAILED",
+        `Worktree ${provisioned.workspace.worktreePath ?? "(unnamed)"} was created and then given `
+        + `back because its provisioning could not be journaled: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return provisioned;
   }
 
   private updateAttachmentState(runtime: RuntimeSession): void {

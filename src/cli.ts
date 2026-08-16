@@ -22,7 +22,11 @@ import type {
   OrchestratorResetResult,
 } from "./orchestration/orchestrator-manager.js";
 import { ORCHESTRATOR_CATALOG } from "./orchestration/orchestrator-catalog.js";
-import { GitWorktreeInventory, retentionVerdict } from "./orchestration/worktree-inventory.js";
+import {
+  GitWorktreeInventory,
+  liveWorktreeCwds,
+  retentionVerdict,
+} from "./orchestration/worktree-inventory.js";
 import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
@@ -152,20 +156,15 @@ async function withClient<T>(operation: (client: RpcClient) => Promise<T>): Prom
 }
 
 /**
- * Where non-terminal sessions are running, so pruning never pulls a directory out from under a
- * worker. A broker that is not running answers with an empty map rather than an error: worktree
- * hygiene is useful on a machine with no live Cyberdeck, and the other retention rules still hold.
+ * Where a worker process may still be running, so pruning never pulls a directory out from under
+ * one. The rule itself lives in `liveWorktreeCwds`; this is only the broker call. A broker that is
+ * not running answers with an empty map rather than an error: worktree hygiene is useful on a
+ * machine with no live Cyberdeck, and the other retention rules still hold.
  */
 async function liveSessionCwds(): Promise<Map<string, string>> {
   const sessions = await withClient((client) => client.request<SessionRecord[]>("session.list", {}))
     .catch(() => [] as SessionRecord[]);
-  const live = new Map<string, string>();
-  for (const session of sessions) {
-    if (session.executionState === "starting" || session.executionState === "active") {
-      live.set(resolve(session.cwd), session.id);
-    }
-  }
-  return live;
+  return liveWorktreeCwds(sessions);
 }
 
 function projectRoot(): string {

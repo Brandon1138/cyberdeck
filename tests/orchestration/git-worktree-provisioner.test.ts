@@ -85,9 +85,47 @@ describe("GitWorktreeProvisioner", () => {
       sessionId: "session-2",
       branch: "feature/probe",
       baseRef: "main",
+      baseCommit: await git(root, ["rev-parse", "main"]),
       repositoryPath: root,
       createdAt: "2026-08-16T00:00:00.000Z",
     });
+  });
+
+  it("pins a symbolic base to the commit it named, so the baseline survives the worktree", async () => {
+    const root = await repository();
+    const head = await git(root, ["rev-parse", "HEAD"]);
+
+    // `HEAD` is what the composer declares. Read back inside the worktree it would answer with the
+    // worktree's own tip, so the recorded baseline has to be the commit, not the name.
+    const result = await new GitWorktreeProvisioner()
+      .provision({ workspace: workspace("feature/head", { baseRef: "HEAD" }), cwd: root, sessionId: "session-8" });
+    const worktreePath = result.workspace.worktreePath ?? "";
+    await writeFile(join(worktreePath, "work.txt"), "done\n", "utf8");
+    await git(worktreePath, ["add", "."]);
+    await git(worktreePath, ["commit", "-m", "work"]);
+
+    expect(result.baseCommit).toBe(head);
+    const adminDirectory = await git(worktreePath, ["rev-parse", "--absolute-git-dir"]);
+    const provenance = JSON.parse(
+      await readFile(join(adminDirectory, PROVENANCE_FILENAME), "utf8"),
+    ) as WorktreeProvenance;
+    expect(provenance.baseRef).toBe("HEAD");
+    expect(provenance.baseCommit).toBe(head);
+    expect(await git(worktreePath, ["rev-list", "--count", `${provenance.baseCommit}..HEAD`]))
+      .toBe("1");
+  });
+
+  it("refuses a base ref that names no commit before creating anything", async () => {
+    const root = await repository();
+
+    await expect(new GitWorktreeProvisioner().provision({
+      workspace: workspace("feature/no-base", { baseRef: "nonexistent" }),
+      cwd: root,
+      sessionId: "session-9",
+    })).rejects.toMatchObject({ code: "WORKTREE_BASE_REF_UNRESOLVED" });
+
+    expect(await git(root, ["branch", "--list", "feature/no-base"])).toBe("");
+    await expect(stat(join(dirname(root), "project-no-base"))).rejects.toThrow();
   });
 
   it("warns about missing node_modules instead of installing or symlinking one", async () => {
