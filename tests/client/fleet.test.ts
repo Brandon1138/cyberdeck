@@ -4407,6 +4407,31 @@ describe("fleet shell mode", () => {
       .toBeUndefined();
   });
 
+  // A deep checkout — a worktree under a worktrees directory — pushes this line past the terminal.
+  // The hint is what a `tail -f` that never returns is escaped with, so the path gives way first;
+  // dropping the tail would take the way out off the screen at the one moment it is needed.
+  it("keeps the way out of a running line on screen however long the cwd is", () => {
+    const deep = fleet({
+      record: session({
+        cwd: "/Users/brandon/code/personal/cyberdeck/worktrees/mik-78-composer-image-paste",
+      }),
+    });
+    const state = {
+      ...createFleetState(deep),
+      shellMode: { draft: "", running: true, transcript: [] },
+    };
+
+    const line = renderFleet(deep, state, { color: false, width: 120, height: 30, home: "/Users/brandon" })
+      .split("\n")
+      .find((row) => row.includes("cwd "))!;
+
+    expect(line).toContain("ctrl+g stops and leaves");
+    // The leaf still says which checkout this is; only the segments above it were spent.
+    expect(line).toContain("mik-78-composer-image-paste");
+    expect(line).toContain("…/");
+    expect(line.length).toBeLessThanOrEqual(120);
+  });
+
   it("runs the line where Fleet would spawn, and marks the mode with a red ! and nothing else", () => {
     let state = transitionFleet(createFleetState(shellSnapshot), shellSnapshot, "!", NOW_MS).state;
     for (const key of [..."ls -a"]) {
