@@ -920,8 +920,11 @@ export class AgentControlService {
     }
 
     const pending = this.openWait(request);
-    const startMs = this.now();
-    const remainingMs = Math.max(0, pending.wait.deadlineMs - startMs);
+    // The deadline was derived from `openWait`'s clock read, so the remaining budget is measured
+    // against that same read. A second `this.now()` here could straddle a millisecond tick and turn
+    // a fresh 30-second wait into a 29_999 ms segment — the budget the caller asked for, minus a
+    // scheduling artifact.
+    const remainingMs = Math.max(0, pending.wait.deadlineMs - pending.nowMs);
     let segmentMs = Math.min(remainingMs, this.segmentSeconds * 1_000);
     let outcome: Awaited<ReturnType<SessionRegistry["waitForWorkerResults"]>>;
     let intervention: WaitInterventionSummary | undefined;
@@ -1033,10 +1036,17 @@ export class AgentControlService {
     };
   }
 
-  /** Resolves the ticket for this call, expiring stale ones so a resume cannot inherit a dead clock. */
+  /**
+   * Resolves the ticket for this call, expiring stale ones so a resume cannot inherit a dead clock.
+   *
+   * Returns the clock read it made as `nowMs`. One read answers every time question this call has —
+   * which tickets are stale, when a fresh wait started, when it is due, and how much budget is left
+   * — so those answers cannot disagree with each other by a tick.
+   */
   private openWait(request: z.infer<typeof AgentWaitWorkersParamsSchema>): {
     wait: PendingWait;
     resumed: boolean;
+    nowMs: number;
   } {
     const now = this.now();
     for (const [waitId, wait] of this.pendingWaits) {
@@ -1051,7 +1061,7 @@ export class AgentControlService {
             `Wait ${request.waitId} belongs to another orchestrator`,
           );
         }
-        return { wait: existing, resumed: true };
+        return { wait: existing, resumed: true, nowMs: now };
       }
     }
     const wait: PendingWait = {
@@ -1062,7 +1072,7 @@ export class AgentControlService {
       timeoutSeconds: request.timeoutSeconds,
       settleOnIntervention: request.settleOnIntervention === true,
     };
-    return { wait, resumed: false };
+    return { wait, resumed: false, nowMs: now };
   }
 
   /**
