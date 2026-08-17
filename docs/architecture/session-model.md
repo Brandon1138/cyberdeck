@@ -50,12 +50,14 @@ the operator Fleet/CLI path, persists with the append-only binding, and disappea
 is reset or deleted. Disabling it blocks new Fable workers without stopping existing threads. Opus
 has no special broker restriction.
 
-Autonomous Cursor delegation carries the identically shaped `worker.start.cursor` grant, also default
-off, including when the bound orchestrator is itself Cursor. The two grants compose rather than
-substitute: a Cursor Fable slug (`claude-fable-5-high` and siblings) needs both, and the
-provider-level refusal is reported first so the operator is not sent after one grant at a time. The
-gate governs interactive workers; the Tier 1 Scout profile keeps its own permission model and is
-reached before these checks.
+Autonomous Cursor delegation carries no grant of its own. It did — a default-off `worker.start.cursor`
+shaped exactly like Fable's — and it was removed in MIK-96: the capability catalog serves Cursor's
+full model list to every orchestrator, so a gate the catalog never mentioned could only surface as a
+`CAPABILITY_DENIED` on a dispatch that followed what it was told. A Cursor Fable slug
+(`claude-fable-5-high` and siblings) is gated on `worker.start.fable` like any other Fable model, and
+the catalog's notes say so. The retired capability name still parses out of an existing binding as
+nothing, so a binding written while the toggle existed stays readable. The Tier 1 Scout profile keeps
+its own permission model and is reached before these checks.
 
 Cursor worker models carry the effort rung inside the slug, so its advertised catalog is one entry per
 model-and-effort pair and the separate `effort` field is refused rather than translated.
@@ -134,10 +136,9 @@ latest binding. Model strings remain opaque and provider-native: no alias transl
 performed.
 
 `/fable-workers status|on|off` in Fleet and `cyberdeck orchestrator fable-workers status|on|off`
-operate on the selected/bound orchestrator scope. `/cursor-workers` and
-`cyberdeck orchestrator cursor-workers` are the same command shape for the Cursor grant. The
-orchestrator MCP surface can observe both in the explicit provider catalog and request them only when
-granted; it has no tool for changing its own grants.
+operate on the selected/bound orchestrator scope, and are the only delegation-grant commands: there
+is no `/cursor-workers`. The orchestrator MCP surface can observe the Fable grant in the explicit
+provider catalog and request Fable only when granted; it has no tool for changing its own grants.
 
 `/caveman-workers status|on|off` and its `cyberdeck orchestrator caveman-workers` CLI equivalent
 manage a box-level worker preference independent of every orchestrator binding. It defaults off,

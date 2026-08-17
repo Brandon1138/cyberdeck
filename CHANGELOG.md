@@ -81,6 +81,21 @@ and persisted schemas remain under active alpha development.
   colourway is unchanged, so state still reads at a glance in color; with color
   off a row now says which pull request it has rather than what state it is in.
 
+### Removed
+
+- The Cursor worker gate is gone: `/cursor-workers`, `cyberdeck orchestrator
+  cursor-workers`, the `orchestrator.cursorWorkers` RPC, and the durable
+  `worker.start.cursor` capability behind them. Cursor is a first-class provider
+  whose full model list the capability catalog serves to every orchestrator, so a
+  dispatch that followed what was advertised could still come back
+  `CAPABILITY_DENIED` over a switch the catalog never mentioned. A fresh
+  orchestrator now starts a Cursor worker with no prior operator toggle. A Cursor
+  Fable slug is still gated on `worker.start.fable`, exactly like every other Fable
+  model, and the catalog's own notes say so. The retired capability name parses out
+  of an existing binding as nothing, so a binding written while the toggle existed
+  stays readable (MIK-96). This also retires the remedy `/cursor-workers on` that
+  the denial prescribed and Fleet refused to run (MIK-97).
+
 ## [0.1.0-alpha.2] - 2026-08-14
 
 ### Added

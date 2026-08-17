@@ -629,16 +629,12 @@ describe("BrokerServer", () => {
         enabled: true,
         sessionId: ensured.session.id,
       });
+      // MIK-96 retired the Cursor gate, so the broker no longer answers a toggle for it at all.
       await expect(client.request("orchestrator.cursorWorkers", {
         cwd: "/tmp/repo",
         scope: "fleet",
         enabled: true,
-      })).resolves.toMatchObject({
-        key: "fleet",
-        configured: true,
-        enabled: true,
-        sessionId: ensured.session.id,
-      });
+      })).rejects.toThrow(/orchestrator\.cursorWorkers/);
       await expect(client.request("orchestrator.cavemanWorkers", {
         enabled: true,
       })).resolves.toMatchObject({
@@ -647,7 +643,7 @@ describe("BrokerServer", () => {
       });
       await expect(orchestratorStore.get("fleet")).resolves.toMatchObject({
         grant: {
-          capabilities: expect.arrayContaining(["worker.start.fable", "worker.start.cursor"]),
+          capabilities: expect.arrayContaining(["worker.start.fable"]),
         },
       });
       await expect(workerPreferences.get()).resolves.toEqual({ caveman: true });

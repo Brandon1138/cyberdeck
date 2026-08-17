@@ -707,18 +707,9 @@ export class AgentControlService {
     if (request.profile === "scout") {
       return this.startScout(request);
     }
-    // Provider first, then model: a Cursor Fable worker needs both grants, and the operator should
-    // learn about the provider-level denial before being sent after the model-level one.
-    if (request.provider === "cursor" && !grantAllows(
-      binding.grant,
-      "worker.start.cursor",
-      { cwd: request.cwd },
-    )) {
-      throw new AgentControlError(
-        "CAPABILITY_DENIED",
-        "Cursor workers are disabled for this orchestrator; the operator can run /cursor-workers on",
-      );
-    }
+    // Provider is not gated here for anyone: the capability catalog serves every provider's model
+    // list to every orchestrator, so a dispatch that follows what was advertised must not bounce off
+    // a switch the catalog never mentioned (MIK-96). Only Fable is gated, and the catalog says so.
     if (isFableModel(request.model) && !grantAllows(
       binding.grant,
       "worker.start.fable",

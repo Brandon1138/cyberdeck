@@ -38,7 +38,6 @@ import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import {
   CavemanWorkersRequestSchema,
   CreateOrchestratorRequestSchema,
-  CursorWorkersRequestSchema,
   EnsureOrchestratorRequestSchema,
   FableWorkersRequestSchema,
   ResetOrchestratorRequestSchema,
@@ -314,10 +313,6 @@ export class BrokerServer {
       }
       case "orchestrator.fableWorkers":
         return this.requireOrchestrators().fableWorkers(FableWorkersRequestSchema.parse(frame.params));
-      case "orchestrator.cursorWorkers":
-        return this.requireOrchestrators().cursorWorkers(
-          CursorWorkersRequestSchema.parse(frame.params),
-        );
       case "orchestrator.cavemanWorkers":
         return this.requireOrchestrators().cavemanWorkers(CavemanWorkersRequestSchema.parse(frame.params));
       // The client resolved the nvim address from its own tmux pane and has already drawn the
