@@ -12,6 +12,15 @@ export interface AdmissionCandidate {
   model?: string;
 }
 
+/**
+ * A queued candidate plus the arrival order the scheduler itself observed. `sequence` is assigned by
+ * {@link AdmissionScheduler.enqueue} and is never supplied by a caller: it is the scheduler's own
+ * count of enqueues, so it cannot be spoofed and cannot be skewed by a clock.
+ */
+interface QueuedEntry extends AdmissionCandidate {
+  sequence: number;
+}
+
 /** Proof that exactly one concurrency slot is held for exactly one job. */
 export interface SlotReservation {
   reservationId: string;
@@ -51,8 +60,13 @@ export interface AdmissionSchedulerOptions {
 /**
  * Neutral admission control over durable jobs.
  *
- * **Ordering.** The queue is scanned in a total, deterministic order: ascending `enqueuedAt`, ties
- * broken by ascending `jobId`. That keeps a fake clock (identical timestamps) reproducible.
+ * **Ordering.** The queue is scanned in a total, deterministic order: ascending `enqueuedAt`, then
+ * ascending admission sequence — the scheduler's own monotonic count of enqueues — and only then
+ * ascending `jobId` as a defensive final fallback. The sequence is what makes the order *fair*
+ * rather than merely total: `enqueuedAt` is a wall clock with millisecond resolution, so two jobs
+ * submitted in the same millisecond tie, and tie-breaking those by `jobId` sorts random UUIDs, i.e.
+ * releases them in an order unrelated to the order they arrived in. Sequence is assigned at enqueue,
+ * so a tie always releases in arrival order, under a fake clock and a real one alike.
  *
  * **Starvation resistance.** `admitNext` returns the first *eligible* candidate in that order, so a
  * younger job may pass an older one — but only when the older one's own provider or repository
@@ -71,8 +85,17 @@ export interface AdmissionSchedulerOptions {
  * enforced at the operator/delegation boundary, not by concurrency admission.
  */
 export class AdmissionScheduler {
-  private readonly queue = new Map<string, AdmissionCandidate>();
+  private readonly queue = new Map<string, QueuedEntry>();
   private readonly reservations = new Map<string, SlotReservation>();
+  /**
+   * Monotonic enqueue counter backing the ordering tie-break. It is deliberately per-process and not
+   * persisted: the queue itself is in-memory only, and recovery interrupts every job that was still
+   * queued rather than re-enqueuing it (see `JobControlPlane.recover`), so a restart starts from an
+   * empty queue and has nothing whose arrival order a durable counter could preserve. If a queued
+   * job ever becomes recoverable, the recovered sequence must be restored with it — or, better, the
+   * counter seeded past the highest recovered value so a fresh enqueue never ties an old one.
+   */
+  private sequence = 0;
   /**
    * The startup gate. It begins **closed**, so persistence recovery and reconciliation must finish
    * (and explicitly open admission) before any job can be dispatched, and shutdown can stop new
@@ -98,10 +121,15 @@ export class AdmissionScheduler {
     this.open = false;
   }
 
-  /** Queue a candidate. Re-enqueuing a known job id is a no-op, so a retry cannot double-queue. */
+  /**
+   * Queue a candidate and stamp it with the next admission sequence. Re-enqueuing a known job id is
+   * a no-op, so a retry cannot double-queue and cannot move a waiting job to the back of its own
+   * timestamp tie by consuming a fresh sequence.
+   */
   enqueue(candidate: AdmissionCandidate): void {
     if (this.queue.has(candidate.jobId) || this.reservations.has(candidate.jobId)) return;
-    this.queue.set(candidate.jobId, { ...candidate });
+    this.sequence += 1;
+    this.queue.set(candidate.jobId, { ...candidate, sequence: this.sequence });
   }
 
   /** Reserve one slot for the oldest eligible candidate, or nothing when none is admissible. */
@@ -159,12 +187,17 @@ export class AdmissionScheduler {
     };
   }
 
-  private ordered(): AdmissionCandidate[] {
-    return [...this.queue.values()].sort((left, right) =>
-      left.enqueuedAt === right.enqueuedAt
-        ? left.jobId.localeCompare(right.jobId)
-        : left.enqueuedAt.localeCompare(right.enqueuedAt),
-    );
+  private ordered(): QueuedEntry[] {
+    return [...this.queue.values()].sort((left, right) => {
+      if (left.enqueuedAt !== right.enqueuedAt) {
+        return left.enqueuedAt.localeCompare(right.enqueuedAt);
+      }
+      // Same millisecond: arrival order decides, never the shape of a random job id.
+      if (left.sequence !== right.sequence) return left.sequence - right.sequence;
+      // Unreachable through `enqueue` (every entry holds a distinct sequence); kept so the
+      // comparator is a total order on any two entries rather than returning 0 for distinct jobs.
+      return left.jobId.localeCompare(right.jobId);
+    });
   }
 
   private blockReason(candidate: AdmissionCandidate): AdmissionBlockReason | undefined {

@@ -54,11 +54,12 @@ describe("admission scheduler", () => {
     expect(admission.snapshot().queued[0]?.blockedBy).toBe("MAX_CONCURRENT_JOBS");
   });
 
-  it("orders admission deterministically by enqueue time then job id", () => {
+  it("orders admission deterministically by enqueue time then admission sequence", () => {
     const admission = scheduler({ maxConcurrentJobs: 4 });
     admission.enqueue(candidate("z", { enqueuedAt: at(5) }));
+    // Identical timestamps are broken by the order they were enqueued in, not by job id: the
+    // ids here are deliberately not in the order the assertion expects.
     admission.enqueue(candidate("b", { enqueuedAt: at(1) }));
-    // Identical timestamps are broken by job id so a fake clock stays deterministic.
     admission.enqueue(candidate("c", { enqueuedAt: at(1) }));
     admission.enqueue(candidate("a", { enqueuedAt: at(1) }));
 
@@ -67,7 +68,45 @@ describe("admission scheduler", () => {
       admission.admitNext()?.jobId,
       admission.admitNext()?.jobId,
       admission.admitNext()?.jobId,
-    ]).toEqual(["a", "b", "c", "z"]);
+    ]).toEqual(["b", "c", "a", "z"]);
+  });
+
+  it("releases jobs sharing one millisecond in enqueue order, whatever their ids sort like", () => {
+    const admission = scheduler({ maxConcurrentJobs: 8 });
+    // Real submits carry random UUIDs and a millisecond-resolution clock, so a burst ties on
+    // `enqueuedAt`. Descending ids make a job-id tie-break produce exactly the reverse order.
+    const burst = ["h", "g", "f", "e", "d", "c", "b", "a"];
+    for (const jobId of burst) admission.enqueue(candidate(jobId, { enqueuedAt: at(7) }));
+
+    expect(admission.snapshot().queued.map((entry) => entry.jobId)).toEqual(burst);
+    const released = burst.map(() => admission.admitNext()?.jobId);
+    expect(released).toEqual(burst);
+    expect(admission.admitNext()).toBeUndefined();
+  });
+
+  it("keeps a re-enqueued job's place in its timestamp tie rather than restamping it", () => {
+    const admission = scheduler({ maxConcurrentJobs: 3 });
+    admission.enqueue(candidate("first", { enqueuedAt: at(2) }));
+    admission.enqueue(candidate("second", { enqueuedAt: at(2) }));
+    // A retried submit must not push the job it re-enqueues behind everything that arrived later.
+    admission.enqueue(candidate("first", { enqueuedAt: at(2) }));
+    admission.enqueue(candidate("third", { enqueuedAt: at(2) }));
+
+    expect([
+      admission.admitNext()?.jobId,
+      admission.admitNext()?.jobId,
+      admission.admitNext()?.jobId,
+    ]).toEqual(["first", "second", "third"]);
+  });
+
+  it("still orders strictly by enqueue time when a later arrival carries an older timestamp", () => {
+    const admission = scheduler({ maxConcurrentJobs: 2 });
+    admission.enqueue(candidate("later-arrival-older-stamp", { enqueuedAt: at(9) }));
+    admission.enqueue(candidate("earlier-stamp", { enqueuedAt: at(1) }));
+
+    // Sequence is the tie-break, never an override: a distinct earlier timestamp still wins.
+    expect(admission.admitNext()?.jobId).toBe("earlier-stamp");
+    expect(admission.admitNext()?.jobId).toBe("later-arrival-older-stamp");
   });
 
   it("passes over a saturated provider bucket without starving it or reordering within it", () => {
