@@ -21,7 +21,29 @@ and persisted schemas remain under active alpha development.
   with a reported status rather than guessing at the newest file in the directory
   (MIK-46).
 
+### Added
+
+- Fleet says which orchestrator owns a worker, in one monochrome glyph at the end
+  of the row. Each bound orchestrator gets a deterministic sigil — derived from its
+  durable controller identity, so it is the same across redraws, restarts, and
+  `--no-color`, with nothing allocated or persisted — and every worker its lease
+  currently holds wears the same shape. Ownership is read from the current lease
+  controller, so an adopted worker follows its new owner; a dispatched worker with
+  no holder gets `⊘` rather than the sigil of the orchestrator that created it; and
+  a worker the operator started themselves gets no sigil at all. Selecting an
+  orchestrator row also dims every worker it does not own until the selection moves
+  away, which adds no keybinding and hides nothing (MIK-85).
+
 ### Changed
+
+- The six broker-side lease custody hues are gone, along with the slot ledger, its
+  store, and the `fleet.custodyColors` RPC. A hue could say "these rows go
+  together" but never which orchestrator, since the only thing to match it against
+  was the same hue again, and six palette slots spent on provenance broke the rule
+  that color in the thread list carries state alone. Provenance is a shape now, and
+  the broker answers `fleet.orchestratorOwnership` with the controller identity each
+  bound session speaks for — derived from the binding, so there is nothing to
+  reconcile after a crash (MIK-85).
 
 - Thread rows no longer carry the `legacy`, `unowned`, or `adoptable` lease tags.
   They named a lease state an operator has no move to make about, sat on nearly

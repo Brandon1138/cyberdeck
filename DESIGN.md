@@ -219,9 +219,32 @@ At `80` to `99` columns, the same single-line structure is retained with narrowe
 ▌ · Create iPhoneDoctor…  Opus · high  Done       Shader background is ready…  2m
 ```
 
-Below `80` columns the row still yields, but the model does not. Columns give up width in a fixed order: the worktree name first — the folder heading above it already said where the thread lives — then the pull-request number, then title and preview down to their floors. Model and state are budgeted before any of them and survive the narrowest pane Fleet renders into. The row remains one line so multiplexing does not switch Fleet into a separate compact presentation.
+Below `80` columns the row still yields, but the model does not. Columns give up width in a fixed order: the worktree name first — the folder heading above it already said where the thread lives — then the pull-request number, then the lease badge, then title and preview down to their floors. Model, state, and the owner sigil are budgeted before any of them and survive the narrowest pane Fleet renders into. The row remains one line so multiplexing does not switch Fleet into a separate compact presentation.
 
 Lease custody is not a permanent column either. `legacy`, `unowned`, and `adoptable` describe a lease an operator has no move to make about, and nearly every worker carries one, so no unowned state prints on a row; a group that shares one still states it once on its section heading, and the full five-field breakdown stays behind `ctrl+l`. The only tag left on a row is `conflict` or `anomaly`, which says the broker is contradicting itself.
+
+### Owner Sigils
+
+Provenance is a shape, not a hue. Every orchestrator wears a deterministic one-cell sigil drawn from `◆ ◇ ▲ △ ■ □ ● ○`, and the same sigil closes every worker row that orchestrator's lease currently holds. The glyph is a pure function of the durable controller identity, so it is the same across redraws, across `--no-color`, and across broker restarts, with no ledger to allocate or reconcile. A ninth concurrent orchestrator falls back to letters rather than to a shape nobody can tell apart at a glance; a collision moves the junior party, never the orchestrator the operator has been reading all session.
+
+```text
+  ▾ ~/code/personal/cyberdeck
+▌ • Orc alpha                  Opus · high    Working      Dispatching wave two…              2m  ◆
+  · Worker one                 Sol · high     Working      Rewriting the projection…          1m  ◆
+  · Worker two                 Sol · high     Done          Tests pass…                       4m  ▲
+  · Worker three               Sol · high     Done          Branch pushed…                    9m  ⊘
+  · Worker four                Opus · high    Done          Scratch run…                     22m
+```
+
+Three states, not two:
+
+- A sigil means the lease substrate says that orchestrator holds this worker right now. Ownership is read from the current lease controller, never from the creator recorded at dispatch and never from the folder a row is grouped under — grouping is navigation, not authority. An adopted worker wears its new owner's sigil the moment the lease moves.
+- `⊘` means the worker was dispatched by an orchestrator and no controller holds it now. It is not the dead orchestrator's sigil, because nothing owns it, and it is not blank, because blank means something else.
+- No sigil at all means no controller ever held it: the operator started this one themselves. Absence is the mark, and there is no sigil for "you".
+
+Selection is also the ownership lens. While the selected row is an orchestrator, every worker row that orchestrator does not own drops to low intensity, and moving the selection off the row restores them. There is no mode, no keybinding, and no filtering of the navigation model — only intensity changes, so nothing the operator can act on is ever hidden. Roster rows never dim: the roster is what the sigil is being compared against. Under `--no-color` the lens is a deliberate no-op, since the sigils themselves are legible without it.
+
+Six broker-side custody hues shipped here first and were retired by this design. A hue can say "these rows go together" but never *which* orchestrator, because the only thing it could be matched against was the same hue again; and spending six palette slots on provenance broke the rule that color in this list carries state alone.
 
 ### Attention States
 

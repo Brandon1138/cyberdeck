@@ -1025,7 +1025,11 @@ describe("fleet presentation", () => {
       );
       const rendered = renderFleet(snapshot, createFleetState(snapshot), {
         color: false,
-        width: 61,
+        // 63, not the original 61: MIK-85's owner sigil is budgeted ahead of every optional
+        // column, and the contested worker's held lease earns it one, so the two cells it costs
+        // come off the top. The ordering this test guards — badge before pull request when only
+        // one of them fits — is unchanged; it just starts two columns later.
+        width: 63,
         height: 28,
         now: NOW_MS,
         home: "/Users/brandon",
@@ -1037,7 +1041,7 @@ describe("fleet presentation", () => {
       const badgeRow = rows.find((line) => line.includes("conflict"));
 
       expect(badgeRow).toBeDefined();
-      expect(badgeRow).toHaveLength(61);
+      expect(badgeRow).toHaveLength(63);
       expect(rows.some((line) => /#1\b/u.test(line))).toBe(false);
     });
   });
@@ -3304,44 +3308,39 @@ describe("collectFleetSnapshot", () => {
     });
   });
 
-  it("takes a worker's custody hue from the projection and an orc's from its binding", async () => {
+  it("takes an orc's controller identity from its binding and leaves workers to their lease", async () => {
     const orc = session();
     const workerRecord = session({
       id: "22222222-2222-4222-8222-222222222222",
       kind: "worker",
       role: "worker",
     });
-    const ownership = {
-      ...coordination(workerRecord.id, "released"),
-      custodyColor: { slot: 3, intensity: "faded" as const },
-    };
+    const ownership = coordination(workerRecord.id, "active");
     const request = vi.fn(async (method: string) => {
       if (method === "session.list") return [orc, workerRecord];
       if (method === "fleet.workerCoordination") return [ownership];
-      if (method === "fleet.custodyColors") return [{ sessionId: orc.id, slot: 1 }];
+      if (method === "fleet.orchestratorOwnership") {
+        return [{ sessionId: orc.id, controllerId: "orchestrator:workspace:/repo/one" }];
+      }
       if (method === "session.snapshot") return { data: Buffer.from("latest").toString("base64") };
       throw new Error(`unexpected ${method}`);
     });
 
     await expect(collectFleetSnapshot({ request } as never)).resolves.toEqual({
       threads: [
-        // An orchestrator wears its own slot, and is always live on it.
-        { record: orc, replay: "latest", custodyColor: { slot: 1, intensity: "active" } },
-        {
-          record: workerRecord,
-          replay: "latest",
-          coordination: ownership,
-          custodyColor: { slot: 3, intensity: "faded" },
-        },
+        { record: orc, replay: "latest", controllerId: "orchestrator:workspace:/repo/one" },
+        // The worker row carries no controller id of its own: its owner is whatever its lease
+        // currently names, which the coordination projection already said.
+        { record: workerRecord, replay: "latest", coordination: ownership },
       ],
     });
   });
 
-  it("leaves every row neutral when the broker cannot answer for custody colors", async () => {
+  it("leaves every orc unattributed when the broker cannot answer for ownership", async () => {
     const record = session();
     const request = vi.fn(async (method: string) => {
       if (method === "session.list") return [record];
-      if (method === "fleet.custodyColors") throw new Error("unknown method");
+      if (method === "fleet.orchestratorOwnership") throw new Error("unknown method");
       if (method === "session.snapshot") return { data: Buffer.from("latest").toString("base64") };
       throw new Error(`unexpected ${method}`);
     });

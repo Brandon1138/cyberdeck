@@ -4,7 +4,6 @@ import {
   CursorWorkersRequestSchema,
   EnsureOrchestratorRequestSchema,
   FableWorkersRequestSchema,
-  orchestratorControllerId,
   orchestratorKey,
   type CavemanWorkersRequest,
   type CavemanWorkersResult,
@@ -57,18 +56,11 @@ type BoundOrchestratorRequest = EnsureOrchestratorRequest & {
   provider: CreateOrchestratorRequest["provider"];
 };
 
-/** The custody-hue ledger, as much of it as binding lifecycle needs to touch. */
-export interface OrchestratorCustodyColors {
-  assign(controllerId: string): Promise<number | undefined>;
-  release(controllerId: string): Promise<void>;
-}
-
 export class OrchestratorManager {
   constructor(
     private readonly registry: SessionRegistry,
     private readonly store: OrchestratorStore,
     private readonly workerPreferences?: WorkerPreferenceStore,
-    private readonly custodyColors?: OrchestratorCustodyColors,
     private readonly providerPermissions?: ProviderPermissionPreferencePort,
   ) {}
 
@@ -213,7 +205,6 @@ export class OrchestratorManager {
     if (binding === undefined) {
       throw new Error(`Orchestrator session ${session.id} started without persisting its binding`);
     }
-    await this.assignCustodyColor(binding);
     return {
       binding,
       session,
@@ -248,21 +239,6 @@ export class OrchestratorManager {
     return resolution.value.application.kind === "post-launch-command"
       ? "auto"
       : resolution.value.application.value;
-  }
-
-  /**
-   * A hue is assigned once the binding is durable, so a binding that failed never burns a slot.
-   * Every bound orchestrator takes one, peers included: a peer is an orchestrator running
-   * alongside the scope's primary rather than a lesser kind of one, and it owns workers exactly
-   * as the primary does. Releasing has always treated the two alike; assigning now does too.
-   *
-   * Allocation failure is deliberately not fatal: the orchestrator is already spawned and bound,
-   * and refusing a working orchestrator over a cosmetic ledger would be the worse outcome. The
-   * orchestrator simply renders in the neutral tone until its next bind.
-   */
-  private async assignCustodyColor(binding: OrchestratorBinding): Promise<void> {
-    if (this.custodyColors === undefined) return;
-    await this.custodyColors.assign(orchestratorControllerId(binding.key)).catch(() => undefined);
   }
 
   async get(cwd: string, scopeKind: "workspace" | "fleet"): Promise<OrchestratorManagerResult | undefined> {
@@ -374,7 +350,6 @@ export class OrchestratorManager {
       );
     }
     await this.store.reset(key);
-    await this.releaseCustodyColor(key);
     return { key, reset: true, sessionId: binding.sessionId };
   }
 
@@ -383,17 +358,7 @@ export class OrchestratorManager {
     const binding = await this.store.findBySessionId(sessionId);
     if (binding === undefined) return { reset: false };
     await this.store.reset(binding.key);
-    await this.releaseCustodyColor(binding.key);
     return { reset: true, key: binding.key };
-  }
-
-  /**
-   * Releasing frees the slot for allocation but does not clear the hue: the orchestrator's
-   * former workers keep wearing it, faded, until they age out or the slot is evicted.
-   */
-  private async releaseCustodyColor(key: string): Promise<void> {
-    if (this.custodyColors === undefined) return;
-    await this.custodyColors.release(orchestratorControllerId(key)).catch(() => undefined);
   }
 
   private async resumeExisting(binding: OrchestratorBinding): Promise<SessionRecord | undefined> {

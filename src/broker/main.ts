@@ -46,8 +46,6 @@ import { selectExpiredThreads, type ThreadRetentionPolicy } from "../domain/thre
 import type { SessionRecord } from "../domain/session.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
 import { ScoutEgressGrantStore } from "../persistence/scout-egress-grant-store.js";
-import { CustodyColorStore } from "../persistence/custody-color-store.js";
-import { CustodyColorService } from "./custody-color-service.js";
 import { WorkerCoordinationRuntime } from "./worker-coordination-runtime.js";
 import { WorkerEventChannel } from "./worker-event-channel.js";
 import { BrokerWorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
@@ -172,18 +170,10 @@ export async function runBroker(
     orchestrators: orchestratorStore,
   });
   await workerCoordination.start();
-  // Custody hues read live subjects to decide which slots are still fading, so they are
-  // composed after coordination has replayed its durable state.
-  const custodyColors = new CustodyColorService({
-    store: new CustodyColorStore(stateDirectory),
-    subjects: workerCoordination.service,
-    orchestratorBindings: orchestratorStore,
-  });
   const orchestrators = new OrchestratorManager(
     registry,
     orchestratorStore,
     workerPreferences,
-    custodyColors,
     providerPermissions,
   );
   // One catalog, composed before anything that decides what may be launched: the launch boundary
@@ -278,7 +268,6 @@ export async function runBroker(
     workerPreferences,
     workerCapabilities,
     scoutEgress,
-    custodyColors,
     orchestratorBindings: orchestratorStore,
     workerCoordination: workerCoordination.service,
     workerControl,

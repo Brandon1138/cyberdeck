@@ -1,4 +1,3 @@
-import { custodyColor, type CustodyColor, type CustodyColorTable } from "../domain/custody-color.js";
 import { orchestratorControllerId, type OrchestratorBinding } from "../domain/orchestrator.js";
 import { TERMINAL_WORKER_LIFECYCLES, type LeaseState, type OwnershipSubject } from "../domain/worker-coordination.js";
 
@@ -21,28 +20,25 @@ export interface FleetWorkerCoordinationView {
   leaseHealth: LeaseState;
   orphaned: boolean;
   adoptable: boolean;
-  /** Which orchestrator this worker belongs to, in hue. Absent means the natural, uncolored row. */
-  custodyColor?: CustodyColor;
 }
 
-/** Which slot each bound orchestrator's own row wears. Peers hold no controller identity, so none. */
-export interface FleetOrchestratorCustodyColorView {
+/**
+ * The durable controller family each bound orchestrator session speaks for.
+ *
+ * This is the other half of a worker's `currentController`: Fleet joins the two to say which
+ * row on the roster owns which worker row. Sessions are named rather than bindings because a
+ * rebound scope moves the identity onto the new session, and a session only appears while it is
+ * the one its family's binding points at.
+ */
+export interface FleetOrchestratorOwnershipView {
   sessionId: string;
-  slot: number;
-}
-
-export interface FleetWorkerCoordinationViewOptions {
-  custodyColors?: CustodyColorTable;
-  now?: string;
+  controllerId: string;
 }
 
 /** Read-only Fleet projection. Lease tokens, hashes, and audit details stay broker-private. */
 export function fleetWorkerCoordinationView(
   subjects: readonly OwnershipSubject[],
-  options: FleetWorkerCoordinationViewOptions = {},
 ): FleetWorkerCoordinationView[] {
-  const custodyColors = options.custodyColors ?? [];
-  const now = options.now ?? new Date().toISOString();
   return subjects.flatMap((subject): FleetWorkerCoordinationView[] => {
     const sessionId = subject.resources.sessionId;
     if (subject.subjectKind !== "worker" || sessionId === undefined) return [];
@@ -56,7 +52,6 @@ export function fleetWorkerCoordinationView(
       subject.lease.state === "orphaned"
       || subject.lease.state === "expired"
     ) && !TERMINAL_WORKER_LIFECYCLES.has(subject.lifecycle);
-    const color = custodyColor(subject, custodyColors, now);
     return [{
       sessionId,
       subjectId: subject.subjectId,
@@ -82,25 +77,21 @@ export function fleetWorkerCoordinationView(
       leaseHealth: subject.lease.state,
       orphaned: subject.lease.state === "orphaned",
       adoptable,
-      ...(color === undefined ? {} : { custodyColor: color }),
     }];
   });
 }
 
 /**
- * The orchestrator side of the same projection. Slots are held by durable controller families,
- * and a session only appears here while it is the session its family's binding points at, so a
- * rebound scope moves the hue with the binding instead of leaving it on a dead row.
+ * The orchestrator side of the same projection: which session speaks for which durable controller
+ * family. Nothing is allocated or stored — the identity is derived from the binding key, so it is
+ * the same answer before and after a broker restart, and there is no ledger to reconcile when a
+ * binding dies without releasing anything.
  */
-export function fleetOrchestratorCustodyColors(
+export function fleetOrchestratorOwnership(
   bindings: readonly OrchestratorBinding[],
-  custodyColors: CustodyColorTable,
-): FleetOrchestratorCustodyColorView[] {
-  return bindings.flatMap((binding): FleetOrchestratorCustodyColorView[] => {
-    const assignment = custodyColors.find((entry) =>
-      entry.controllerId === orchestratorControllerId(binding.key));
-    return assignment === undefined
-      ? []
-      : [{ sessionId: binding.sessionId, slot: assignment.slot }];
-  });
+): FleetOrchestratorOwnershipView[] {
+  return bindings.map((binding) => ({
+    sessionId: binding.sessionId,
+    controllerId: orchestratorControllerId(binding.key),
+  }));
 }
