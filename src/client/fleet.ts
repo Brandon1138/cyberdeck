@@ -33,12 +33,19 @@ import {
   type ProviderPermissionPreferencePort,
   type ProviderPermissionPreferences,
 } from "../persistence/provider-permission-preference-store.js";
+import {
+  imageInputRefusal,
+  providerAcceptsImages,
+  providerAttachesImagesAtLaunch,
+  providerImageMechanism,
+} from "../providers/image-input.js";
 import { conversationPreview } from "../runtime/conversation-preview.js";
 import type { ShellCommandResult } from "../runtime/shell-command.js";
 import { providerTerminalActivity, stripTerminalControl } from "../runtime/terminal-replay.js";
 import { attachSession, type AttachTransport } from "./attach.js";
 import {
   capturePasteboardImage,
+  composerImageAttachments,
   draftWithImageReference,
   type PasteboardImageAttachment,
 } from "./clipboard-image.js";
@@ -1267,6 +1274,17 @@ export function transitionFleet(
   // path exists. The state is returned untouched — not even the notice is cleared — so a chord
   // pressed over a text-only pasteboard leaves the frame byte-identical.
   if (key === "ctrl+v") {
+    // The composer's target is known whenever the cwd has a launch profile, and a provider that
+    // cannot be handed a path is told so before a PNG is written rather than after: an image
+    // captured for a worker that will never open it is the silent drop, one step delayed. With no
+    // profile chosen there is no provider yet to judge, so the paste proceeds and the same refusal
+    // stands guard at the launch itself.
+    const target = state.launchProfiles[composerCwd(state, snapshot)]?.provider;
+    if (target !== undefined && !providerAcceptsImages(target)) {
+      return {
+        state: { ...state, notice: imageInputRefusal(target), noticeTone: "error" },
+      };
+    }
     return { state, action: { type: "attach-clipboard-image" } };
   }
   // Newline in the composer. Option+Enter is the convention operators arrive with, so it is bound
@@ -2310,10 +2328,25 @@ function renderFleetFooter(
     options,
   );
   const launchContext = state.shellMode !== undefined
-    ? `▶ ${shellName()} -lc${state.shellMode.running === true ? " · running" : ""} · cwd ${shortPath(cwd, options.home)} · enter runs · ${state.shellMode.running === true ? "ctrl+g stops and leaves" : "esc or ctrl+g leaves"}`
+    ? contextLine(
+      `▶ ${shellName()} -lc${state.shellMode.running === true ? " · running" : ""}`,
+      shortPath(cwd, options.home),
+      `enter runs · ${state.shellMode.running === true ? "ctrl+g stops and leaves" : "esc or ctrl+g leaves"}`,
+      options.width,
+    )
     : profile === undefined
-    ? `▶ /model required · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+s change`
-    : `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"} · cwd ${shortPath(cwd, options.home)} · ctrl+s change`;
+    ? contextLine(
+      `▶ /model required · ${selected?.record.sandbox ?? "read-only"}`,
+      shortPath(cwd, options.home),
+      "ctrl+s change",
+      options.width,
+    )
+    : contextLine(
+      `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"}`,
+      shortPath(cwd, options.home),
+      "ctrl+s change",
+      options.width,
+    );
   const helpLines = state.helpOpen === true
     ? shortcutHelp(options.width, terminal && stopAcknowledged ? "delete" : "stop")
     : [];
@@ -3559,12 +3592,33 @@ export async function runFleet(
         };
       } else if (action?.type === "attach-clipboard-image") {
         const image = await pasteboardImage();
-        if (image !== undefined) {
+        if (image.status === "captured") {
+          const target = state.launchProfiles[composerCwd(state, snapshot)]?.provider;
+          if (target !== undefined && !providerAcceptsImages(target)) {
+            // Only reachable when the profile changed between the chord and the capture. The file
+            // is on disk either way; what it must not do is enter a draft bound for a CLI that
+            // will read it as words.
+            state = { ...state, notice: imageInputRefusal(target), noticeTone: "error" };
+          } else {
+            // The notice names the mechanism, not just the file. A path Claude opens with its file
+            // reader and a path Codex attaches with `-i` are both honest deliveries and are not the
+            // same delivery, and the operator is the one who has to know which they just got.
+            state = {
+              ...state,
+              draft: draftWithImageReference(state.draft, image.path),
+              notice: `Attached ${basename(image.path)} — ${
+                target === undefined ? "worker not chosen yet" : providerImageMechanism(target)
+              }`,
+              noticeTone: "neutral",
+            };
+          }
+        } else if (image.status === "unavailable") {
+          // The pasteboard was never read, so whether it held a screenshot is unknown. Saying so is
+          // the whole point: the quiet branch below is for a pasteboard that answered "nothing".
           state = {
             ...state,
-            draft: draftWithImageReference(state.draft, image),
-            notice: `Attached ${basename(image)}`,
-            noticeTone: "neutral",
+            notice: `Could not read the clipboard: ${image.reason}`,
+            noticeTone: "error",
           };
         }
       } else if (action?.type === "project-add") {
@@ -4804,6 +4858,20 @@ function startTransition(
     return openWorkerPickerForCwd(state, cwd, draft);
   }
   const initialPrompt = draft;
+  // Read off the draft rather than out of a list held beside it, so what the operator can see is
+  // what launches. This is also the only gate a *typed* or dropped path passes through — a
+  // terminal drop types the path in and never touches ctrl+v — so the refusal lives here as well
+  // as on the chord, and neither surface can let an image through in silence.
+  const images = composerImageAttachments(initialPrompt);
+  if (images.length > 0 && !providerAcceptsImages(profile.provider)) {
+    return {
+      state: {
+        ...state,
+        notice: `${imageInputRefusal(profile.provider, images.length)} — remove the path or /model to a provider that can`,
+        noticeTone: "error",
+      },
+    };
+  }
   const sandbox = selected?.sandbox ?? "read-only";
   const policy = state.permissionPolicies[profile.provider] ?? "permissioned";
   const permission = resolveProviderPermission(profile.provider, policy, sandbox);
@@ -4834,6 +4902,12 @@ function startTransition(
         detached: true,
         name: taskName(initialPrompt),
         initialPrompt,
+        // Sent only to a provider whose CLI has a flag to carry them. The paths stay in the prompt
+        // regardless, so a provider that reads its images from the text is served by the text and
+        // is handed no list the launch would drop.
+        ...(images.length > 0 && providerAttachesImagesAtLaunch(profile.provider)
+          ? { imageAttachments: images }
+          : {}),
         ...(profile.isolation === "worktree" ? { workspace: composerWorkspace(initialPrompt) } : {}),
       },
       ...(permission.value.application.kind === "post-launch-command"
@@ -5253,6 +5327,51 @@ function clampRowWidth(value: string, width: number): string {
 function displayThreadName(name: string): string {
   const orchestrator = /^Cyberdeck orchestrator \((.+)\)$/u.exec(name);
   return orchestrator === null ? name : `cd-orc (${orchestrator[1]})`;
+}
+
+/**
+ * The composer's context line, fitted so its key hints outlive its path.
+ *
+ * `fit` drops the tail, and the tail is where the way out is written. A cwd long enough to push the
+ * line past the terminal takes `ctrl+g stops and leaves` off the screen with it — while the command
+ * that hint stops is still running, which is the one moment the operator most needs to read it. The
+ * path is the part with slack, so the path is the part that gives: leading segments go first and
+ * the leaf directory, the part that says *which* checkout this is, is the last to be dropped.
+ */
+function contextLine(prefix: string, path: string, hints: string, width: number): string {
+  const line = `${prefix} · cwd ${path} · ${hints}`;
+  if (displayWidth(line) <= width) return line;
+  const room = width - displayWidth(`${prefix} · cwd  · ${hints}`);
+  // No width even for a one-cell path: nothing to save, so cut the whole line the ordinary way.
+  if (room < 1) return fit(line, width);
+  return `${prefix} · cwd ${elideLeading(path, room)} · ${hints}`;
+}
+
+/** A path narrowed to `width` from the front, dropping whole segments while any remain to drop. */
+function elideLeading(path: string, width: number): string {
+  if (displayWidth(path) <= width) return path;
+  const segments = path.split("/");
+  for (let index = 1; index < segments.length; index += 1) {
+    const candidate = `…/${segments.slice(index).join("/")}`;
+    if (displayWidth(candidate) <= width) return candidate;
+  }
+  // The leaf alone is too wide: keep its end, since that is where a worktree's name is.
+  const leaf = segments.at(-1) ?? path;
+  return width <= 1 ? fit(leaf, width) : `…${cutToWidthFromEnd(leaf, width - 1)}`;
+}
+
+/** The last `width` cells of `value`, the mirror of {@link cutToWidth}. */
+function cutToWidthFromEnd(value: string, width: number): string {
+  if (width <= 0) return "";
+  let printed = 0;
+  let cut = "";
+  for (const cluster of [...graphemes(value)].reverse()) {
+    const cell = graphemeWidth(cluster);
+    if (printed + cell > width) break;
+    printed += cell;
+    cut = `${cluster}${cut}`;
+  }
+  return cut;
 }
 
 /** Plain text cut to `width` cells, with an ellipsis in the last one when anything was dropped. */

@@ -43,6 +43,12 @@ export const ThreadAttentionStateSchema = z.enum([
   "failed",
 ]);
 
+/**
+ * A prompt carries a handful of screenshots at most. The cap is here so a malformed caller cannot
+ * turn one launch into a command line of arbitrary length.
+ */
+export const MAX_IMAGE_ATTACHMENTS = 8;
+
 export const StartSessionRequestSchema = z.object({
   provider: ProviderIdSchema,
   cwd: z.string().refine(isAbsolute, "cwd must be an absolute path"),
@@ -64,6 +70,18 @@ export const StartSessionRequestSchema = z.object({
    * exists, and can grant the writable roots the declared provisioning mode actually needs.
    */
   workspace: WorkerWorkspaceSchema.optional(),
+  /**
+   * Images attached to the initial prompt through the provider CLI's own attachment flag.
+   *
+   * Only meaningful for a provider that advertises one — see `providerAttachesImagesAtLaunch`. A
+   * provider that reads images out of the prompt text carries them there and is refused an
+   * attachment list, because a field nothing consumes is a record claiming an attachment no launch
+   * argument ever made.
+   */
+  imageAttachments: z
+    .array(z.string().refine(isAbsolute, "image attachment must be an absolute path"))
+    .max(MAX_IMAGE_ATTACHMENTS)
+    .optional(),
   profile: WorkerProfileSchema.optional(),
   brief: ScoutBriefSchema.optional(),
   leasePolicy: WorkerLeasePolicySchema.optional(),

@@ -1126,6 +1126,47 @@ describe("SessionRegistry", () => {
     });
   });
 
+  // The composer refuses these first, but the broker is the boundary every caller crosses — an MCP
+  // orchestrator can build a start request the composer never saw.
+  it("refuses images for a provider whose CLI has no flag to carry them", async () => {
+    const { registry } = harness();
+    await expect(
+      registry.start(request({ provider: "cursor", imageAttachments: ["/tmp/shot.png"] })),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_NO_IMAGE_INPUT",
+      message:
+        "Cursor cannot be given an image: cursor-agent advertises no image flag and no path attachment",
+    });
+  });
+
+  // Claude's images travel in the prompt text. Accepting a list here would persist an attachment no
+  // launch argument ever made, so the caller is told where its paths already belong.
+  it("refuses an attachment list for a provider that reads its images out of the prompt", async () => {
+    const { registry } = harness();
+    await expect(
+      registry.start(request({ provider: "claude", imageAttachments: ["/tmp/a.png", "/tmp/b.png"] })),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_NO_IMAGE_INPUT",
+      message:
+        "Claude takes 2 images as path in prompt; Claude opens the file, not as a launch attachment",
+    });
+  });
+
+  it("carries the attachment paths into the record the adapter builds its launch from", async () => {
+    const { registry } = harness();
+    const record = await registry.start(
+      request({ provider: "codex", imageAttachments: ["/tmp/shot.png"] }),
+      "Why is this misaligned?",
+    );
+    expect(record.imageAttachments).toEqual(["/tmp/shot.png"]);
+  });
+
+  it("rejects a relative attachment path before any provider sees it", async () => {
+    const { registry } = harness();
+    await expect(registry.start(request({ imageAttachments: ["shot.png"] })))
+      .rejects.toThrow(/image attachment must be an absolute path/u);
+  });
+
   it("forwards an initial task to the provider without persisting it in the session record", async () => {
     const { registry, ptyFactory, transcripts } = harness();
     const record = await registry.start(request(), "Inspect the failure");
