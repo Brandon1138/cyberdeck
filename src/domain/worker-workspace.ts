@@ -129,6 +129,20 @@ export interface WorkspaceProbe {
   checkedOutBranch(path: string): Promise<string | undefined>;
   /** Whether `ref` resolves in the repository containing `path`. */
   refResolves(path: string, ref: string): Promise<boolean>;
+  /**
+   * Whether the repository whose git directory is `gitDir` is bare, or undefined if that can't be
+   * answered. The discriminator a common directory not named `.git` needs: bare and a non-bare
+   * repository relocated with `git init --separate-git-dir` both produce that shape, and only git
+   * itself can tell them apart.
+   */
+  isBareRepository(gitDir: string): Promise<boolean | undefined>;
+  /**
+   * The main worktree of the non-bare repository whose git directory is `gitDir`, or undefined when
+   * git has no bookkeeping that says where it is. That happens for a `git init --separate-git-dir`
+   * repository that never had `core.worktree` set: git only tracks *linked* worktrees, so nothing
+   * records the main one's location once it's no longer the parent of `gitDir` by convention.
+   */
+  primaryWorktree(gitDir: string): Promise<string | undefined>;
 }
 
 /**
@@ -334,7 +348,47 @@ export async function validateWorkerWorkspace(
       message: `Base ref ${workspace.baseRef} does not resolve in ${worktreePath}`,
     };
   }
-  return shape;
+  // A pre-provisioned worktree already exists, so its repository is knowable the same way git
+  // knows it, rather than left to whatever the caller happened to declare. Filling it in here is
+  // what lets a worktree Cyberdeck never provisioned still group under its repository's Fleet
+  // section instead of falling to Unregistered (MIK-90).
+  const repositoryPath = workspace.repositoryPath
+    ?? await repositoryPathFromWorktree(worktreePath, probe);
+  return {
+    ok: true,
+    value: repositoryPath === undefined ? workspace : { ...workspace, repositoryPath },
+  };
+}
+
+/**
+ * The repository a worktree belongs to, read from git's own bookkeeping rather than the path it
+ * happens to sit at.
+ *
+ * Every worktree of a repository — the primary checkout and every linked one — reports the same
+ * `--git-common-dir`. Its parent is the repository when that common dir is the ordinary `<root>/.git`
+ * layout: for the primary checkout that parent is the checkout itself, and for a linked worktree it
+ * is the sibling directory the worktree was cut from, whether or not that sibling is a
+ * Fleet-registered project root.
+ *
+ * A common directory not named `.git` doesn't settle it by itself. It's either a genuinely bare
+ * repository, which has no working tree to point at other than the worktree itself, or a non-bare
+ * repository relocated with `git init --separate-git-dir`, whose real working tree is a checkout
+ * elsewhere entirely. Path shape can't tell those apart — a `--separate-git-dir` target is just a
+ * directory somewhere, named however its caller liked — so this asks git directly: `isBareRepository`
+ * distinguishes the two. For the non-bare case, `primaryWorktree` can still come back undefined: a
+ * relocated git directory that never had `core.worktree` set carries no record of where its main
+ * worktree lives, so the honest answer is "unknowable", not the worktree that was actually declared.
+ */
+async function repositoryPathFromWorktree(
+  worktreePath: string,
+  probe: WorkspaceProbe,
+): Promise<string | undefined> {
+  const commonDir = await probe.gitCommonDirectory(worktreePath);
+  if (commonDir === undefined) return undefined;
+  if (basename(commonDir) === ".git") return dirname(commonDir);
+  const bare = await probe.isBareRepository(commonDir);
+  if (bare === undefined) return undefined;
+  return bare ? worktreePath : await probe.primaryWorktree(commonDir);
 }
 
 /**

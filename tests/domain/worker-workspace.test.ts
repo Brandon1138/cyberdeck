@@ -26,12 +26,16 @@ function probeFor(answers: {
   worktreeRoot?: string | undefined;
   checkedOutBranch?: string | undefined;
   refs?: string[];
+  isBareRepository?: boolean | undefined;
+  primaryWorktree?: string | undefined;
 }): WorkspaceProbe {
   return {
     gitCommonDirectory: async () => answers.gitCommonDirectory,
     worktreeRoot: async () => answers.worktreeRoot,
     checkedOutBranch: async () => answers.checkedOutBranch,
     refResolves: async (_path, ref) => (answers.refs ?? ["main"]).includes(ref),
+    isBareRepository: async () => answers.isBareRepository,
+    primaryWorktree: async () => answers.primaryWorktree,
   };
 }
 
@@ -185,6 +189,117 @@ describe("validateWorkerWorkspace, pre-provisioned", () => {
     expect(check.ok).toBe(false);
     if (check.ok) return;
     expect(check.code).toBe("WORKSPACE_BASE_REF_UNRESOLVED");
+  });
+
+  // MIK-90: a worker started with a pre-provisioned linked worktree fell into Fleet's
+  // "Unregistered" section, because the declared workspace carried no repositoryPath and nothing
+  // filled it in — unlike a cyberdeck-provisioned worktree, whose repositoryPath the provisioner
+  // resolves itself. `sectionPath` in the Fleet client groups a thread by `workspace.repositoryPath`
+  // when it is present, so resolving it here is what a linked worktree needs to group correctly.
+  it("resolves repositoryPath from the worktree's git-common-dir when the caller declared none", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace,
+      cwd: worktreePath,
+      sandbox: "workspace-write",
+      probe: probeFor({
+        worktreeRoot: worktreePath,
+        checkedOutBranch: "brandon/mik-70",
+        gitCommonDirectory: "/repo/.git",
+        refs: ["main"],
+      }),
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.value.repositoryPath).toBe("/repo");
+  });
+
+  it("keeps a repositoryPath the caller already declared rather than re-deriving it", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace: { ...workspace, repositoryPath: "/declared/repo" },
+      cwd: worktreePath,
+      sandbox: "workspace-write",
+      probe: probeFor({
+        worktreeRoot: worktreePath,
+        checkedOutBranch: "brandon/mik-70",
+        gitCommonDirectory: "/repo/.git",
+        refs: ["main"],
+      }),
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.value.repositoryPath).toBe("/declared/repo");
+  });
+
+  it("leaves repositoryPath undefined when the probe cannot answer, rather than failing the start", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace,
+      cwd: worktreePath,
+      sandbox: "workspace-write",
+      probe,
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.value.repositoryPath).toBeUndefined();
+  });
+
+  // A `--separate-git-dir` common directory has the same "not named .git" shape a bare repository's
+  // does, and the old code treated the two as one case: everything not named `.git` fell back to the
+  // worktree path itself. For a bare repository that's correct — there is no other working tree — but
+  // for a relocated non-bare repository it records the *linked* worktree as its own repository,
+  // reproducing the exact Unregistered regression this file exists to fix.
+  it("asks git whether an oddly-named common dir is bare before trusting the basename", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace,
+      cwd: worktreePath,
+      sandbox: "workspace-write",
+      probe: probeFor({
+        worktreeRoot: worktreePath,
+        checkedOutBranch: "brandon/mik-70",
+        gitCommonDirectory: "/metadata/repo.git",
+        refs: ["main"],
+        isBareRepository: false,
+        primaryWorktree: "/repo",
+      }),
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.value.repositoryPath).toBe("/repo");
+  });
+
+  it("keeps resolving to the worktree itself for a genuinely bare repository", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace,
+      cwd: worktreePath,
+      sandbox: "workspace-write",
+      probe: probeFor({
+        worktreeRoot: worktreePath,
+        checkedOutBranch: "brandon/mik-70",
+        gitCommonDirectory: "/bare/repo.git",
+        refs: ["main"],
+        isBareRepository: true,
+      }),
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.value.repositoryPath).toBe(worktreePath);
+  });
+
+  it("leaves repositoryPath undefined when the probe cannot say whether an odd common dir is bare", async () => {
+    const check = await validateWorkerWorkspace({
+      workspace,
+      cwd: worktreePath,
+      sandbox: "workspace-write",
+      probe: probeFor({
+        worktreeRoot: worktreePath,
+        checkedOutBranch: "brandon/mik-70",
+        gitCommonDirectory: "/metadata/repo.git",
+        refs: ["main"],
+        isBareRepository: undefined,
+      }),
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.value.repositoryPath).toBeUndefined();
   });
 });
 
