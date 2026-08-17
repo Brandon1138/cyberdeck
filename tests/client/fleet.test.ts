@@ -24,6 +24,7 @@ import {
   pixelArtWidth,
   renderPixelArt,
 } from "../../src/client/octopus.js";
+import type { PasteboardImageResult } from "../../src/client/clipboard-image.js";
 import { displayWidth } from "../../src/client/display-width.js";
 import type { PullRequestState, PullRequestSummary } from "../../src/client/pr-status.js";
 import type { FleetWorkerCoordinationView } from "../../src/broker/worker-coordination-view.js";
@@ -2109,6 +2110,42 @@ describe("fleet controls", () => {
     expect(transition.state).toEqual(state);
   });
 
+  // MIK-78. A provider with no way to open a path is told so before a PNG is written: capturing an
+  // image for a worker that will never read it is the silent drop, one step delayed.
+  it("refuses Ctrl+V out loud for a provider whose CLI takes no image, and reads no pasteboard", () => {
+    const snapshot = fleet({ record: session({ provider: "cursor", model: "composer" }) });
+    const state = {
+      ...createFleetState(snapshot),
+      draft: "Read",
+      launchProfiles: {
+        "/Users/brandon/code/personal/cyberdeck": { provider: "cursor", model: "composer" },
+      },
+    };
+
+    const transition = transitionFleet(state, snapshot, "ctrl+v", NOW_MS);
+
+    expect(transition.action).toBeUndefined();
+    expect(transition.state.draft).toBe("Read");
+    expect(transition.state.notice).toBe(
+      "Cursor cannot be given an image: cursor-agent advertises no image flag and no path attachment",
+    );
+    expect(transition.state.noticeTone).toBe("error");
+  });
+
+  it("asks for the pasteboard for a provider whose CLI does take an image", () => {
+    const snapshot = fleet({ record: session({ provider: "codex", model: "gpt-5.6-sol" }) });
+    const state = {
+      ...createFleetState(snapshot),
+      draft: "Read",
+      launchProfiles: {
+        "/Users/brandon/code/personal/cyberdeck": { provider: "codex", model: "gpt-5.6-sol" },
+      },
+    };
+
+    expect(transitionFleet(state, snapshot, "ctrl+v", NOW_MS).action)
+      .toEqual({ type: "attach-clipboard-image" });
+  });
+
   it("pages through rendered rows including folder headers, role headings, and group spacing", () => {
     const one = session({ cwd: "/repo/one", name: "One", displayOrder: 0 });
     const two = session({
@@ -2820,6 +2857,68 @@ describe("fleet controls", () => {
         initialPrompt: "Run the checks",
       },
     });
+  });
+
+  // MIK-78. Codex advertises `-i`, so the image travels as a launch argument and arrives as an
+  // attachment rather than as prose that happens to name a file. The path stays in the prompt too:
+  // the model is told what it is looking at.
+  it("attaches a pasted image to a Codex launch through the CLI's own image flag", () => {
+    const snapshot = fleet({ record: session({ provider: "codex", model: "gpt-5.6-sol" }) });
+    const state = {
+      ...createFleetState(snapshot),
+      draft: "Why is this row misaligned? \"/state/Application Support/Cyberdeck/pasted-images/paste-a.png\"",
+      launchProfiles: {
+        "/Users/brandon/code/personal/cyberdeck": { provider: "codex", model: "gpt-5.6-sol" },
+      },
+    };
+
+    expect(transitionFleet(state, snapshot, "enter", NOW_MS).action).toMatchObject({
+      type: "start",
+      request: {
+        provider: "codex",
+        imageAttachments: ["/state/Application Support/Cyberdeck/pasted-images/paste-a.png"],
+        initialPrompt: state.draft,
+      },
+    });
+  });
+
+  // Claude has no attachment flag and opens files named in its prompt, so the prompt is the whole
+  // delivery. An attachment list here would be a record claiming an argument no launch ever made.
+  it("hands Claude the path in the prompt and no launch attachment", () => {
+    const snapshot = fleet({ record: session({ provider: "claude", model: "sonnet" }) });
+    const state = {
+      ...createFleetState(snapshot),
+      draft: "Look at /tmp/shot.png",
+      launchProfiles: {
+        "/Users/brandon/code/personal/cyberdeck": { provider: "claude", model: "sonnet" },
+      },
+    };
+
+    const action = transitionFleet(state, snapshot, "enter", NOW_MS).action;
+    expect(action).toMatchObject({ type: "start", request: { initialPrompt: "Look at /tmp/shot.png" } });
+    expect((action as { request: Record<string, unknown> }).request).not.toHaveProperty("imageAttachments");
+  });
+
+  // A path typed or dropped in never passes the Ctrl+V gate — a terminal drop just types characters
+  // — so the launch is the second place the same refusal has to stand.
+  it("refuses to launch a provider that takes no image with an image path still in the prompt", () => {
+    const snapshot = fleet({ record: session({ provider: "cursor", model: "composer" }) });
+    const state = {
+      ...createFleetState(snapshot),
+      draft: "Look at /tmp/shot.png",
+      launchProfiles: {
+        "/Users/brandon/code/personal/cyberdeck": { provider: "cursor", model: "composer" },
+      },
+    };
+
+    const transition = transitionFleet(state, snapshot, "enter", NOW_MS);
+
+    expect(transition.action).toBeUndefined();
+    // The draft survives: a refusal that eats the prompt costs the operator the work twice.
+    expect(transition.state.draft).toBe("Look at /tmp/shot.png");
+    expect(transition.state.notice).toContain("Cursor cannot be given an image");
+    expect(transition.state.notice).toContain("/model to a provider that can");
+    expect(transition.state.noticeTone).toBe("error");
   });
 
   it("shows the model a session is running now, and marks a launch value as unverified", () => {
@@ -4155,7 +4254,10 @@ describe("runFleet", () => {
     };
     const input = new Input();
     const output = new Output();
-    let pasted: string | undefined = "/state/Application Support/Cyberdeck/pasted-images/paste-a.png";
+    let pasted: PasteboardImageResult = {
+      status: "captured",
+      path: "/state/Application Support/Cyberdeck/pasted-images/paste-a.png",
+    };
     const pasteboardImage = vi.fn(async () => pasted);
     const running = runFleet(
       transport as never,
@@ -4178,7 +4280,7 @@ describe("runFleet", () => {
 
     // A pasteboard holding text or nothing must not disturb the frame the operator is looking at.
     // A frame equal to the painted one is not written at all, so the pane keeps the bytes it has.
-    pasted = undefined;
+    pasted = { status: "no-image" };
     const beforeEmptyPaste = Buffer.concat(output.chunks).toString().split("\u001b[?25l\u001b[H").at(-1) ?? "";
     output.chunks.length = 0;
     input.emit("data", Buffer.from([0x16]));
@@ -4188,6 +4290,15 @@ describe("runFleet", () => {
       "Read \"/state/Application Support/Cyberdeck/pasted-images/paste-a.png\"",
     );
     expect(beforeEmptyPaste).toContain("Attached paste-a.png");
+
+    // A pasteboard that could not be read is a different event, and it is said out loud: silence
+    // there would be a screenshot dropped without a word.
+    pasted = { status: "unavailable", reason: "spawn osascript ENOENT" };
+    input.emit("data", Buffer.from([0x16]));
+    await vi.waitFor(() => {
+      const latestScreen = Buffer.concat(output.chunks).toString().split("[?25l[H").at(-1) ?? "";
+      expect(latestScreen).toContain("Could not read the clipboard: spawn osascript ENOENT");
+    });
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();

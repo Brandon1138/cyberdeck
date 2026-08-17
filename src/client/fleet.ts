@@ -33,12 +33,19 @@ import {
   type ProviderPermissionPreferencePort,
   type ProviderPermissionPreferences,
 } from "../persistence/provider-permission-preference-store.js";
+import {
+  imageInputRefusal,
+  providerAcceptsImages,
+  providerAttachesImagesAtLaunch,
+  providerImageMechanism,
+} from "../providers/image-input.js";
 import { conversationPreview } from "../runtime/conversation-preview.js";
 import type { ShellCommandResult } from "../runtime/shell-command.js";
 import { providerTerminalActivity, stripTerminalControl } from "../runtime/terminal-replay.js";
 import { attachSession, type AttachTransport } from "./attach.js";
 import {
   capturePasteboardImage,
+  composerImageAttachments,
   draftWithImageReference,
   type PasteboardImageAttachment,
 } from "./clipboard-image.js";
@@ -1267,6 +1274,17 @@ export function transitionFleet(
   // path exists. The state is returned untouched — not even the notice is cleared — so a chord
   // pressed over a text-only pasteboard leaves the frame byte-identical.
   if (key === "ctrl+v") {
+    // The composer's target is known whenever the cwd has a launch profile, and a provider that
+    // cannot be handed a path is told so before a PNG is written rather than after: an image
+    // captured for a worker that will never open it is the silent drop, one step delayed. With no
+    // profile chosen there is no provider yet to judge, so the paste proceeds and the same refusal
+    // stands guard at the launch itself.
+    const target = state.launchProfiles[composerCwd(state, snapshot)]?.provider;
+    if (target !== undefined && !providerAcceptsImages(target)) {
+      return {
+        state: { ...state, notice: imageInputRefusal(target), noticeTone: "error" },
+      };
+    }
     return { state, action: { type: "attach-clipboard-image" } };
   }
   // Newline in the composer. Option+Enter is the convention operators arrive with, so it is bound
@@ -3559,12 +3577,33 @@ export async function runFleet(
         };
       } else if (action?.type === "attach-clipboard-image") {
         const image = await pasteboardImage();
-        if (image !== undefined) {
+        if (image.status === "captured") {
+          const target = state.launchProfiles[composerCwd(state, snapshot)]?.provider;
+          if (target !== undefined && !providerAcceptsImages(target)) {
+            // Only reachable when the profile changed between the chord and the capture. The file
+            // is on disk either way; what it must not do is enter a draft bound for a CLI that
+            // will read it as words.
+            state = { ...state, notice: imageInputRefusal(target), noticeTone: "error" };
+          } else {
+            // The notice names the mechanism, not just the file. A path Claude opens with its file
+            // reader and a path Codex attaches with `-i` are both honest deliveries and are not the
+            // same delivery, and the operator is the one who has to know which they just got.
+            state = {
+              ...state,
+              draft: draftWithImageReference(state.draft, image.path),
+              notice: `Attached ${basename(image.path)} — ${
+                target === undefined ? "worker not chosen yet" : providerImageMechanism(target)
+              }`,
+              noticeTone: "neutral",
+            };
+          }
+        } else if (image.status === "unavailable") {
+          // The pasteboard was never read, so whether it held a screenshot is unknown. Saying so is
+          // the whole point: the quiet branch below is for a pasteboard that answered "nothing".
           state = {
             ...state,
-            draft: draftWithImageReference(state.draft, image),
-            notice: `Attached ${basename(image)}`,
-            noticeTone: "neutral",
+            notice: `Could not read the clipboard: ${image.reason}`,
+            noticeTone: "error",
           };
         }
       } else if (action?.type === "project-add") {
@@ -4804,6 +4843,20 @@ function startTransition(
     return openWorkerPickerForCwd(state, cwd, draft);
   }
   const initialPrompt = draft;
+  // Read off the draft rather than out of a list held beside it, so what the operator can see is
+  // what launches. This is also the only gate a *typed* or dropped path passes through — a
+  // terminal drop types the path in and never touches ctrl+v — so the refusal lives here as well
+  // as on the chord, and neither surface can let an image through in silence.
+  const images = composerImageAttachments(initialPrompt);
+  if (images.length > 0 && !providerAcceptsImages(profile.provider)) {
+    return {
+      state: {
+        ...state,
+        notice: `${imageInputRefusal(profile.provider, images.length)} — remove the path or /model to a provider that can`,
+        noticeTone: "error",
+      },
+    };
+  }
   const sandbox = selected?.sandbox ?? "read-only";
   const policy = state.permissionPolicies[profile.provider] ?? "permissioned";
   const permission = resolveProviderPermission(profile.provider, policy, sandbox);
@@ -4834,6 +4887,12 @@ function startTransition(
         detached: true,
         name: taskName(initialPrompt),
         initialPrompt,
+        // Sent only to a provider whose CLI has a flag to carry them. The paths stay in the prompt
+        // regardless, so a provider that reads its images from the text is served by the text and
+        // is handed no list the launch would drop.
+        ...(images.length > 0 && providerAttachesImagesAtLaunch(profile.provider)
+          ? { imageAttachments: images }
+          : {}),
         ...(profile.isolation === "worktree" ? { workspace: composerWorkspace(initialPrompt) } : {}),
       },
       ...(permission.value.application.kind === "post-launch-command"

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
 import type { SessionRecord } from "../domain/session.js";
+import { providerImageLaunchArgs } from "./image-input.js";
 import { sessionLaunchEnvironment } from "./launch-environment.js";
 import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
 import { workspaceWritableRoots } from "../domain/worker-workspace.js";
@@ -66,6 +67,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     this.addProviderInstructions(args, session);
     this.addCyberdeckMcp(args, session);
+    // `-i` attaches to the *initial* prompt, which is the only prompt a launch has. Resume takes no
+    // image because there is no initial prompt left to attach one to; a later image is the
+    // provider's own paste, not ours to forge.
+    args.push(...providerImageLaunchArgs(this.id, session.imageAttachments ?? []));
     if (initialPrompt !== undefined) {
       args.push("--", initialPrompt);
     }

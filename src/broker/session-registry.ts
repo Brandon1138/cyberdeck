@@ -15,6 +15,7 @@ import type {
   ProvisionedWorktree,
   WorktreeProvisioner,
 } from "../domain/worker-workspace.js";
+import { imageInputRefusal, providerAttachesImagesAtLaunch } from "../providers/image-input.js";
 import { resolvedLaunchRecord } from "../providers/launch-record.js";
 import type {
   ProviderAdapter,
@@ -449,6 +450,7 @@ export class RegistryError extends Error {
       | "PARENT_SESSION_NOT_ACTIVE"
       | "INVALID_SESSION_CWD"
       | "INVALID_WORKER_PROFILE"
+      | "PROVIDER_NO_IMAGE_INPUT"
       | "SCOUT_REPORT_STORE_UNAVAILABLE"
       | "SCOUT_LAUNCH_FAILED"
       | "WORKSPACE_PROVISIONER_UNAVAILABLE"
@@ -536,6 +538,20 @@ export class SessionRegistry {
     activate?: (record: SessionRecord) => Promise<void>,
   ): Promise<SessionRecord> {
     const validated = StartSessionRequestSchema.parse(request);
+    // The launch boundary is the only place that knows whether an attachment list will actually
+    // become launch arguments. A provider with no flag to carry them would drop the whole list
+    // without a word, so the start is refused rather than run as a text-only prompt that looks
+    // like it carried an image.
+    if (
+      validated.imageAttachments !== undefined
+      && validated.imageAttachments.length > 0
+      && !providerAttachesImagesAtLaunch(validated.provider)
+    ) {
+      throw new RegistryError(
+        "PROVIDER_NO_IMAGE_INPUT",
+        imageInputRefusal(validated.provider, validated.imageAttachments.length),
+      );
+    }
     if (validated.profile === "scout") {
       if (validated.brief === undefined) {
         throw new RegistryError("INVALID_WORKER_PROFILE", "Scout profile requires a structured brief");

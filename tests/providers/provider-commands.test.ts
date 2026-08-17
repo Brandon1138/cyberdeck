@@ -116,6 +116,53 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args.slice(-2)).toEqual(["--", "Inspect the failure\nthen fix it"]);
   });
 
+  // MIK-78. `-i` is what makes this an attachment rather than a prompt that names a file, and it
+  // attaches to the initial prompt, so the flags land before the `--` that ends the arguments.
+  it("attaches declared images with the CLI's own image flag, ahead of the initial prompt", () => {
+    const spec = new CodexProviderAdapter().buildLaunchSpec(
+      session({ imageAttachments: ["/state/pasted-images/paste-a.png", "/tmp/b.png"] }),
+      "Why is this misaligned?",
+    );
+    expect(spec.args.slice(-6)).toEqual([
+      "-i",
+      "/state/pasted-images/paste-a.png",
+      "-i",
+      "/tmp/b.png",
+      "--",
+      "Why is this misaligned?",
+    ]);
+  });
+
+  it("attaches nothing when the session declared no image", () => {
+    expect(new CodexProviderAdapter().buildLaunchSpec(session()).args).not.toContain("-i");
+  });
+
+  // A resume has no initial prompt left to attach to, and re-attaching a launch's image to every
+  // later turn would put an image in front of the model that the operator never sent again.
+  it("never re-attaches a launch image on resume", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-codex-resume-"));
+    const nativeId = "019f86e4-16e4-7c61-9ee7-76b8b83b1018";
+    const day = join(root, "2026", "07", "22");
+    await mkdir(day, { recursive: true });
+    await writeFile(join(day, `rollout-${nativeId}.jsonl`), `${JSON.stringify({
+      timestamp: "2026-07-21T22:55:22.866Z",
+      type: "session_meta",
+      payload: {
+        id: nativeId,
+        timestamp: "2026-07-21T22:55:22.866Z",
+        cwd: "/tmp/repo",
+        originator: "codex-tui",
+      },
+    })}\n`);
+
+    const spec = new CodexProviderAdapter({ sessionsDirectory: root }).buildResumeSpec(session({
+      createdAt: "2026-07-21T22:55:21.806Z",
+      imageAttachments: ["/state/pasted-images/paste-a.png"],
+    }));
+
+    expect(spec.args).not.toContain("-i");
+  });
+
   it("encodes one logical submit using Codex's negotiated terminal Enter key", () => {
     expect(new CodexProviderAdapter().submitInput("ping").toString("utf8"))
       .toBe("ping\u001b[13u");
