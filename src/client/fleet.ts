@@ -11,14 +11,13 @@ import type {
   OrchestratorGrantToggleResult,
 } from "../domain/orchestrator.js";
 import type {
-  FleetOrchestratorCustodyColorView,
+  FleetOrchestratorOwnershipView,
   FleetWorkerCoordinationView,
 } from "../broker/worker-coordination-view.js";
 import type {
   FleetProjectAddResult,
   FleetProjectRemoveResult,
 } from "../broker/fleet-project-service.js";
-import type { CustodyColor } from "../domain/custody-color.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
 import { provisionedWorktreeSlug } from "../domain/worker-workspace.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
@@ -52,7 +51,6 @@ import {
   renderPixelArt,
 } from "./octopus.js";
 import {
-  custodyColorTone,
   leaseCustody,
   leaseCustodyBadge,
   leaseCustodySummary,
@@ -60,6 +58,12 @@ import {
   type LeaseCustody,
   type LeaseCustodyBadge,
 } from "./lease-custody.js";
+import {
+  fleetOwnerSigils,
+  workerOwner,
+  workerOwnerSigil,
+  type OwnerSigils,
+} from "./owner-sigil.js";
 import {
   CONFIGURABLE_PERMISSION_PROVIDERS,
   permissionProviderLabel,
@@ -112,10 +116,11 @@ export interface FleetThread {
   replay: string;
   coordination?: FleetWorkerCoordinationView;
   /**
-   * Which orchestrator this row belongs to, in hue. A worker takes it from the broker's custody
-   * projection; an orchestrator wears its own slot, always at full intensity while it is bound.
+   * The durable controller family this orchestrator row speaks for, from its binding. Absent on
+   * worker rows, which name their owner through `coordination.currentController` instead — the
+   * lease, not the roster, is what says who owns a worker.
    */
-  custodyColor?: CustodyColor;
+  controllerId?: string;
 }
 
 export interface FleetSnapshot {
@@ -707,24 +712,10 @@ const ANSI = {
   /** Checks failing: the one pull request state that demands action. */
   prFailing: "\u001b[38;2;217;108;117m",
 
-  // Custody. Six hues, one per orchestrator, worn by the leading glyph alone.
-  //
-  // They sit away from every status hue above — no amber, no green, no ice, no red — so a
-  // custody hue can never be misread as a state. Each has a dimmed twin at the same hue angle
-  // for workers whose lease has ended: legibly the same orchestrator, visibly no longer live.
-
-  custody1: "\u001b[38;2;104;178;168m",
-  custody2: "\u001b[38;2;112;156;204m",
-  custody3: "\u001b[38;2;140;142;216m",
-  custody4: "\u001b[38;2;198;138;186m",
-  custody5: "\u001b[38;2;154;178;108m",
-  custody6: "\u001b[38;2;200;142;110m",
-  custody1Faded: "\u001b[38;2;62;107;101m",
-  custody2Faded: "\u001b[38;2;67;94;122m",
-  custody3Faded: "\u001b[38;2;84;85;130m",
-  custody4Faded: "\u001b[38;2;119;83;112m",
-  custody5Faded: "\u001b[38;2;92;107;65m",
-  custody6Faded: "\u001b[38;2;120;85;66m",
+  // Provenance takes no hue at all. Six custody hues shipped here, one per orchestrator, and
+  // failed: a hue can say "these rows go together" but never *which* orchestrator, because the
+  // only thing to match it against was the same hue again. Ownership is a shape now, and colour
+  // is back to carrying state alone — see `owner-sigil.ts`.
 } as const;
 
 /** Gutter cell that prefixes every navigable row; carries the selection rule. */
@@ -740,12 +731,13 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
   const coordinationBySession = new Map(
     coordination.map((entry) => [entry.sessionId, entry] as const),
   );
-  // Orchestrator hues come from the bindings, which the coordination projection does not carry.
-  // A broker too old to answer leaves every orc neutral rather than failing the snapshot.
-  const orchestratorColors = new Map(
-    (await client.request<FleetOrchestratorCustodyColorView[]>("fleet.custodyColors", {})
+  // An orc's controller identity comes from its binding, which the coordination projection does
+  // not carry. A broker too old to answer leaves every orc sigil-less rather than failing the
+  // snapshot: no sigils at all is a legible fleet, half of them is not.
+  const orchestratorOwnership = new Map(
+    (await client.request<FleetOrchestratorOwnershipView[]>("fleet.orchestratorOwnership", {})
       .catch(() => []))
-      .map((entry) => [entry.sessionId, entry.slot] as const),
+      .map((entry) => [entry.sessionId, entry.controllerId] as const),
   );
   // Undefined rather than empty when the broker has no registry: an empty list is an answer, and
   // grouping every thread under "Unregistered" is the wrong answer to a question nobody asked.
@@ -757,15 +749,12 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
         sessionId: record.id,
       });
       const workerCoordination = coordinationBySession.get(record.id);
-      const orchestratorSlot = orchestratorColors.get(record.id);
-      const color: CustodyColor | undefined = orchestratorSlot === undefined
-        ? workerCoordination?.custodyColor
-        : { slot: orchestratorSlot, intensity: "active" };
+      const controllerId = orchestratorOwnership.get(record.id);
       return {
         record,
         replay: Buffer.from(snapshot.data, "base64").toString("utf8"),
         ...(workerCoordination === undefined ? {} : { coordination: workerCoordination }),
-        ...(color === undefined ? {} : { custodyColor: color }),
+        ...(controllerId === undefined ? {} : { controllerId }),
       };
     } catch (error) {
       if (error instanceof RpcError && error.code === "SESSION_NOT_FOUND") return null;
@@ -2186,6 +2175,15 @@ function renderFleetList(
       : widest,
     0,
   );
+  // And again: a fleet the operator dispatched entirely by hand has no sigil to show, so the
+  // column is absent rather than a blank cell every row pays for. Measured with `displayWidth`
+  // because the lettered fallback grows past one cell once the glyph alphabet is spent.
+  const ownerSigilWidth = rows.reduce(
+    (widest, row) => row.kind === "thread" && row.ownerSigil !== undefined
+      ? Math.max(widest, displayWidth(row.ownerSigil))
+      : widest,
+    0,
+  );
   const viewportState = scrollFocusedRowIntoView(
     state,
     rows,
@@ -2240,6 +2238,9 @@ function renderFleetList(
             worktreeWidth,
             row.worktree,
             indicator,
+            ownerSigilWidth,
+            row.ownerSigil,
+            row.outsideLens ?? false,
           );
         }
         if (row.kind === "show-more") {
@@ -2844,6 +2845,9 @@ function renderThreadRow(
   worktreeWidth = 0,
   worktree?: string | undefined,
   scrollbar?: "track" | "thumb" | undefined,
+  ownerSigilWidth = 0,
+  ownerSigil?: string | undefined,
+  outsideLens = false,
 ): string {
   const selected = !threadFocusInert(state)
     && thread.record.id === state.selectedSessionId;
@@ -2859,11 +2863,12 @@ function renderThreadRow(
     pullRequestWidth,
     leaseBadgeWidth,
     worktreeWidth,
+    ownerSigilWidth,
   );
   const preview = threadPreview(thread, layout.preview);
-  return [
-    `${rowGutter(selected, options.color, scrollbar)}${statusMarker(status, selected, options.color, thread.custodyColor)}`,
-    titleCell(thread, pad(title, layout.title), selected, options.color),
+  const row = [
+    `${rowGutter(selected, options.color, scrollbar)}${statusMarker(status, selected, options.color)}`,
+    titleCell(pad(title, layout.title), selected, options.color),
     ...(layout.leaseBadge === 0
       ? []
       : [leaseBadgeCell(leaseBadge, layout.leaseBadge, options.color)]),
@@ -2879,7 +2884,12 @@ function renderThreadRow(
       ? []
       : [pullRequestCell(options.pullRequests.get(thread.record.id), layout.pullRequest, options.color)]),
     padStart(age, 5),
+    // Provenance closes the row, after when it last moved. Nothing to the right of it competes.
+    ...(layout.ownerSigil === 0
+      ? []
+      : [ownerSigilCell(ownerSigil, layout.ownerSigil, options.color)]),
   ].join(" ");
+  return outsideLens ? dimRow(row, options.color) : row;
 }
 
 /**
@@ -2887,7 +2897,9 @@ function renderThreadRow(
  *
  * The columns are not equals, and the order they yield in is the whole point of this function.
  * Model and state are what an operator reads a row *for* — which agent is on this, and is it
- * moving — so they are budgeted first and never yield, at any width the fleet supports. Title and
+ * moving — so they are budgeted first and never yield, at any width the fleet supports. The owner
+ * sigil joins them: one cell, and losing it does not shrink the row's meaning, it changes it into
+ * a claim that the operator dispatched this worker themselves. Title and
  * preview shrink to floors. Of the supplementary columns, the lease conflict/anomaly badge is
  * budgeted before the pull-request number: a contested worker with nowhere to show a badge is
  * invisible unless the operator already knows to open lease detail, and unrelated PR metadata must
@@ -2904,20 +2916,24 @@ function threadRowLayout(
   pullRequestWidth: number,
   leaseBadgeWidth: number,
   worktreeWidth: number,
+  ownerSigilWidth = 0,
 ): {
   title: number;
   identity: number;
   leaseBadge: number;
   worktree: number;
   pullRequest: number;
+  ownerSigil: number;
   preview: number;
 } {
   const wide = width >= WIDE_ROW_WIDTH;
   const identity = wide
     ? Math.min(20, Math.max(NARROW_IDENTITY_CELL_WIDTH, Math.floor(width * 0.15)))
     : NARROW_IDENTITY_CELL_WIDTH;
-  // Gutter, marker, age, and the separator between every one of the six cells a row always has.
-  const reserved = 13 + STATUS_CELL_WIDTH + identity;
+  // Gutter, marker, age, and the separator between every one of the six cells a row always has,
+  // plus the owner sigil and its separator when any row in the frame carries one.
+  const reserved = 13 + STATUS_CELL_WIDTH + identity
+    + (ownerSigilWidth === 0 ? 0 : ownerSigilWidth + 1);
   let optional = width - reserved - MIN_TITLE_CELL_WIDTH - MIN_PREVIEW_CELL_WIDTH;
   const affordable = (cell: number): number => {
     if (cell === 0 || optional < cell + 1) return 0;
@@ -2945,29 +2961,43 @@ function threadRowLayout(
     leaseBadge,
     worktree,
     pullRequest,
+    ownerSigil: ownerSigilWidth,
     preview: Math.max(1, remaining - title),
   };
 }
 
+/** The title cell. Weight is the only thing it varies: the focused row bolds, the rest recede. */
+function titleCell(title: string, selected: boolean, color: boolean): string {
+  return paint(title, selected ? "bold" : "muted", color);
+}
+
 /**
- * The title cell.
+ * The owner sigil, at the end of the row.
  *
- * An orchestrator wears its custody hue on its name as well as its glyph, because the name is
- * what its workers' glyphs have to be matched against. Workers keep the neutral title: hue on
- * both would read as a colored row, which is what the glyph-only rule exists to prevent.
+ * It is the last cell but the first one budgeted, so a narrowing pane takes the title and the
+ * preview down to their floors before it takes provenance away: a row that has lost its sigil is
+ * indistinguishable from one the operator dispatched by hand, which is the one confusion this
+ * column exists to end. Dim, never hued — colour in this list carries state.
  */
-function titleCell(
-  thread: FleetThread,
-  title: string,
-  selected: boolean,
-  color: boolean,
-): string {
-  const custody = thread.record.kind === "orchestrator" && thread.custodyColor !== undefined
-    ? custodyColorTone(thread.custodyColor)
-    : undefined;
-  if (custody === undefined) return paint(title, selected ? "bold" : "muted", color);
-  const painted = paint(title, custody, color);
-  return selected ? paint(painted, "bold", color) : painted;
+function ownerSigilCell(sigil: string | undefined, width: number, color: boolean): string {
+  if (sigil === undefined) return " ".repeat(width);
+  return paint(pad(sigil, width), "subtle", color);
+}
+
+/**
+ * Hold the whole row at low intensity while the ownership lens is on another Orc.
+ *
+ * The row is composed first and dimmed afterwards, so every cell keeps the tone it earned and
+ * only its weight changes. Each cell resets its own SGR state, and a reset clears dim along with
+ * the colour, so dim has to be re-asserted after each one rather than wrapped around the row.
+ *
+ * With `--no-color` the lens is a no-op, deliberately. Intensity is the only channel it uses, and
+ * the alternative — editing what the unselected rows say — would make the filter destructive. The
+ * sigils themselves are shapes and survive color-off, so provenance is still readable there.
+ */
+function dimRow(row: string, color: boolean): string {
+  if (!color) return row;
+  return `${ANSI.dim}${row.split(ANSI.reset).join(`${ANSI.reset}${ANSI.dim}`)}${ANSI.reset}`;
 }
 
 /**
@@ -3051,9 +3081,8 @@ function statusMarker(
   status: ThreadStatus,
   selected: boolean,
   color: boolean,
-  custody?: CustodyColor | undefined,
 ): string {
-  const statusTone = status === "Done"
+  const tone = status === "Done"
     ? "done"
     : status === "Needs input"
       ? "attention"
@@ -3062,9 +3091,6 @@ function statusMarker(
         : status === "Working"
           ? "working"
           : "muted";
-  // Custody outranks status on the glyph alone: the status hue survives in the status-text
-  // column, so nothing is lost, and the glyph is the one cell every row already has.
-  const tone = (custody === undefined ? undefined : custodyColorTone(custody)) ?? statusTone;
   // Both glyphs are one display column, so the marker never shifts the row.
   const glyph = status === "Working" ? "•" : "·";
   const painted = paint(glyph, tone, color);
@@ -4229,6 +4255,10 @@ type FleetRow =
     leaseBadge?: LeaseCustodyBadge;
     /** Where under its project the worker lives, when that is not the project root itself. */
     worktree?: string;
+    /** The owner's sigil. Absent on a worker nobody dispatched — the operator's own. */
+    ownerSigil?: string;
+    /** True while an Orc row is selected and this worker is not one of that Orc's. */
+    outsideLens?: boolean;
   }
   | {
     kind: "show-more";
@@ -4263,9 +4293,14 @@ function isExpanded(state: FleetState, cwd: string): boolean {
  */
 function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow[] {
   const orcs = orchestratorThreads(snapshot.threads);
+  // One assignment for the whole frame, so an Orc's row and its workers' rows cannot disagree.
+  const provenance: FleetProvenance = {
+    sigils: snapshotOwnerSigils(snapshot),
+    lens: ownershipLensControllerId(snapshot, state),
+  };
   const orcRows: FleetListRow[] = orcs.length === 0
     ? []
-    : orcSectionRows(orcs, state);
+    : orcSectionRows(orcs, state, provenance);
   const folderRows = groupThreads(snapshot).flatMap(({ cwd, label, threads }, groupIndex): FleetListRow[] => {
     const header: FleetRow = {
       kind: "folder",
@@ -4281,7 +4316,7 @@ function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow
     return [
       ...spacer,
       header,
-      ...sectionRows(WORKERS_SECTION_LABEL, visible, threads, state, cwd),
+      ...sectionRows(WORKERS_SECTION_LABEL, visible, threads, state, provenance, cwd),
       // The row survives expansion so the folder can be rolled back up from the same place.
       ...(threads.length > FOLDER_THREAD_CAP
         ? [{ kind: "show-more" as const, cwd, hiddenCount: threads.length - visible.length }]
@@ -4296,7 +4331,11 @@ function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow
  * project. A fleet accumulates orchestrators without bound, so the roster is capped the same
  * way too: an unbounded section would shove every folder below it down the screen.
  */
-function orcSectionRows(orcs: readonly FleetThread[], state: FleetState): FleetListRow[] {
+function orcSectionRows(
+  orcs: readonly FleetThread[],
+  state: FleetState,
+  provenance: FleetProvenance,
+): FleetListRow[] {
   const header: FleetRow = {
     kind: "folder",
     cwd: ORCS_SECTION_KEY,
@@ -4307,7 +4346,7 @@ function orcSectionRows(orcs: readonly FleetThread[], state: FleetState): FleetL
   const visible = isExpanded(state, ORCS_SECTION_KEY) ? orcs : orcs.slice(0, FOLDER_THREAD_CAP);
   return [
     header,
-    ...threadRows(visible, state, undefined),
+    ...threadRows(visible, state, undefined, provenance),
     ...(orcs.length > FOLDER_THREAD_CAP
       ? [{ kind: "show-more" as const, cwd: ORCS_SECTION_KEY, hiddenCount: orcs.length - visible.length }]
       : []),
@@ -4323,6 +4362,7 @@ function sectionRows(
   visible: readonly FleetThread[],
   all: readonly FleetThread[],
   state: FleetState,
+  provenance: FleetProvenance,
   root?: string | undefined,
 ): FleetListRow[] {
   // A section whose workers all share one custody says it once on the heading, and
@@ -4330,7 +4370,7 @@ function sectionRows(
   const rollup = uniformLeaseCustody(all.map(threadLeaseCustody));
   return [
     { kind: "section", label: sectionLabel(label, all.length, rollup) },
-    ...threadRows(visible, state, rollup, root),
+    ...threadRows(visible, state, rollup, provenance, root),
   ];
 }
 
@@ -4339,6 +4379,7 @@ function threadRows(
   visible: readonly FleetThread[],
   state: FleetState,
   rollup: LeaseCustody | undefined,
+  provenance: FleetProvenance,
   root?: string | undefined,
 ): FleetListRow[] {
   return visible.flatMap((thread): FleetListRow[] => {
@@ -4351,6 +4392,7 @@ function threadRows(
     const worktree = root === undefined || root.startsWith("/@")
       ? undefined
       : worktreeTag(thread, root);
+    const sigil = threadOwnerSigil(thread, provenance.sigils);
     return [
       {
         kind: "thread",
@@ -4358,6 +4400,8 @@ function threadRows(
         thread,
         ...(badge === undefined ? {} : { leaseBadge: badge }),
         ...(worktree === undefined ? {} : { worktree }),
+        ...(sigil === undefined ? {} : { ownerSigil: sigil }),
+        ...(outsideOwnershipLens(thread, provenance.lens) ? { outsideLens: true } : {}),
       },
       ...(state.leaseDetail === true && thread.coordination !== undefined
         && thread.record.kind !== "orchestrator"
@@ -4371,6 +4415,80 @@ function threadLeaseCustody(thread: FleetThread): LeaseCustody | undefined {
   return thread.record.kind === "orchestrator" || thread.coordination === undefined
     ? undefined
     : leaseCustody(thread.coordination);
+}
+
+/** One frame's provenance: who wears which sigil, and which Orc the lens is resting on. */
+interface FleetProvenance {
+  sigils: OwnerSigils;
+  /** The selected Orc's controller identity, or `undefined` when the lens is off. */
+  lens?: string | undefined;
+}
+
+/**
+ * The sigil assignment for one snapshot.
+ *
+ * Bound orchestrators are seeded from their own session's `createdAt`, which is the only
+ * seniority Fleet has locally and is enough for the property that matters: an Orc already on
+ * screen does not lose its glyph when another one spawns.
+ */
+function snapshotOwnerSigils(snapshot: FleetSnapshot): OwnerSigils {
+  return fleetOwnerSigils({
+    orchestrators: snapshot.threads.flatMap((thread) =>
+      thread.record.kind === "orchestrator" && thread.controllerId !== undefined
+        ? [{ controllerId: thread.controllerId, since: thread.record.createdAt }]
+        : []),
+    workers: snapshot.threads.flatMap((thread) =>
+      thread.record.kind === "orchestrator" || thread.coordination === undefined
+        ? []
+        : [thread.coordination]),
+  });
+}
+
+/**
+ * The sigil one row wears.
+ *
+ * An Orc wears the sigil of the family it is bound to; a worker wears whatever its lease says,
+ * which is the only authority on the question. A worker with no coordination record at all was
+ * never registered with a controller — the operator started it themselves — and wears nothing.
+ */
+function threadOwnerSigil(thread: FleetThread, sigils: OwnerSigils): string | undefined {
+  if (thread.record.kind === "orchestrator") {
+    return thread.controllerId === undefined ? undefined : sigils.get(thread.controllerId);
+  }
+  return thread.coordination === undefined
+    ? undefined
+    : workerOwnerSigil(thread.coordination, sigils);
+}
+
+/**
+ * The Orc the ownership lens is resting on, if any.
+ *
+ * Selection is the whole gesture: moving onto an Orc row filters, moving off restores. There is no
+ * mode to be in and no key to remember, so the feature costs nothing when it is not being used —
+ * which is the only reason a filter this broad is affordable in a list this dense.
+ */
+function ownershipLensControllerId(
+  snapshot: FleetSnapshot,
+  state: FleetState,
+): string | undefined {
+  if (threadFocusInert(state) || state.selectedSessionId === undefined) return undefined;
+  const selected = snapshot.threads.find(({ record }) => record.id === state.selectedSessionId);
+  return selected?.record.kind === "orchestrator" ? selected.controllerId : undefined;
+}
+
+/**
+ * True for a worker the lens is filtering out.
+ *
+ * Orc rows never dim: the roster is what the operator is reading the sigil against, and dimming
+ * the rest of it would hide the comparison the lens exists to make. An orphaned worker dims like
+ * any other row the selected Orc does not own, because it does not own it.
+ */
+function outsideOwnershipLens(thread: FleetThread, lens: string | undefined): boolean {
+  if (lens === undefined || thread.record.kind === "orchestrator") return false;
+  const owner = thread.coordination === undefined
+    ? undefined
+    : workerOwner(thread.coordination);
+  return owner?.kind !== "controlled" || owner.controllerId !== lens;
 }
 
 /**

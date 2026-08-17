@@ -77,10 +77,9 @@ import {
   type WorkerEventChannel,
 } from "./worker-event-channel.js";
 import {
-  fleetOrchestratorCustodyColors,
+  fleetOrchestratorOwnership,
   fleetWorkerCoordinationView,
 } from "./worker-coordination-view.js";
-import type { CustodyColorService } from "./custody-color-service.js";
 
 const SessionIdParamsSchema = z.object({ sessionId: z.uuid() });
 const SendParamsSchema = SessionIdParamsSchema.extend({ data: z.string() });
@@ -140,8 +139,6 @@ export interface BrokerServerOptions {
    */
   workerCapabilities?: WorkerCapabilityCatalog;
   scoutEgress?: Pick<ScoutEgressGrantStore, "set" | "status">;
-  /** Custody hues, and the bindings that say which orchestrator session wears each one. */
-  custodyColors?: CustodyColorService;
   orchestratorBindings?: OrchestratorStore;
   /** Internal domain substrate. Orchestrator access goes through workerControl, never directly. */
   workerCoordination?: WorkerCoordinationService;
@@ -478,16 +475,11 @@ export class BrokerServer {
         return this.requireWorkerCapabilities().resolve(provider);
       }
       case "fleet.workerCoordination":
-        return fleetWorkerCoordinationView(this.options.workerCoordination?.listSubjects() ?? [], {
-          custodyColors: await this.options.custodyColors?.table() ?? [],
-        });
-      case "fleet.custodyColors":
-        return this.options.custodyColors === undefined || this.options.orchestratorBindings === undefined
+        return fleetWorkerCoordinationView(this.options.workerCoordination?.listSubjects() ?? []);
+      case "fleet.orchestratorOwnership":
+        return this.options.orchestratorBindings === undefined
           ? []
-          : fleetOrchestratorCustodyColors(
-            await this.options.orchestratorBindings.list(),
-            await this.options.custodyColors.table(),
-          );
+          : fleetOrchestratorOwnership(await this.options.orchestratorBindings.list());
       case "fleet.reattach": {
         const { detachIdentity } = FleetReattachParamsSchema.parse(frame.params);
         const detachStore = this.requireFleetDetaches();
