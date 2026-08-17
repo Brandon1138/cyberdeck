@@ -1,15 +1,12 @@
 import {
   CavemanWorkersRequestSchema,
   CreateOrchestratorRequestSchema,
-  CursorWorkersRequestSchema,
   EnsureOrchestratorRequestSchema,
   FableWorkersRequestSchema,
   orchestratorKey,
   type CavemanWorkersRequest,
   type CavemanWorkersResult,
   type CreateOrchestratorRequest,
-  type CursorWorkersRequest,
-  type CursorWorkersResult,
   type EnsureOrchestratorRequest,
   type FableWorkersRequest,
   type FableWorkersResult,
@@ -254,14 +251,6 @@ export class OrchestratorManager {
     return this.toggleGrantCapability(
       "worker.start.fable",
       FableWorkersRequestSchema.parse(input),
-    );
-  }
-
-  /** Operator-owned durable control over whether this binding may start Cursor workers. */
-  async cursorWorkers(input: CursorWorkersRequest): Promise<CursorWorkersResult> {
-    return this.toggleGrantCapability(
-      "worker.start.cursor",
-      CursorWorkersRequestSchema.parse(input),
     );
   }
 

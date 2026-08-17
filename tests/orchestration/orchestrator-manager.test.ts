@@ -423,23 +423,21 @@ describe("OrchestratorManager", () => {
       {} as never,
       { get: vi.fn(async () => undefined) } as never,
     );
-    for (const toggle of ["fableWorkers", "cursorWorkers"] as const) {
-      await expect(manager[toggle]({ cwd: "/repo/one", scope: "workspace" })).resolves.toEqual({
-        key: "workspace:/repo/one",
-        configured: false,
-        enabled: false,
-      });
-    }
+    await expect(manager.fableWorkers({ cwd: "/repo/one", scope: "workspace" })).resolves.toEqual({
+      key: "workspace:/repo/one",
+      configured: false,
+      enabled: false,
+    });
   });
 
-  it("persists operator-controlled Cursor worker access independently of Fable's", async () => {
+  it("persists operator-controlled Fable worker access on the named binding", async () => {
     const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
     const manager = new OrchestratorManager(
       {} as never,
       { get: vi.fn(async () => binding), put } as never,
     );
 
-    await expect(manager.cursorWorkers({
+    await expect(manager.fableWorkers({
       cwd: "/repo/one",
       scope: "workspace",
       enabled: true,
@@ -451,9 +449,14 @@ describe("OrchestratorManager", () => {
     });
     expect(put).toHaveBeenCalledWith(expect.objectContaining({
       grant: expect.objectContaining({
-        capabilities: ["thread.list", "worker.start.cursor"],
+        capabilities: ["thread.list", "worker.start.fable"],
       }),
     }));
+  });
+
+  // MIK-96: the Cursor gate is gone outright, so the manager has no toggle to offer for it.
+  it("exposes no Cursor worker toggle", () => {
+    expect("cursorWorkers" in OrchestratorManager.prototype).toBe(false);
   });
 
   it("refuses to toggle a grant for a scope with no binding", async () => {
@@ -462,14 +465,14 @@ describe("OrchestratorManager", () => {
       { get: vi.fn(async () => undefined), put: vi.fn() } as never,
     );
 
-    await expect(manager.cursorWorkers({
+    await expect(manager.fableWorkers({
       cwd: "/repo/one",
       scope: "workspace",
       enabled: true,
     })).rejects.toMatchObject({ code: "ORCHESTRATOR_NOT_CONFIGURED" });
   });
 
-  it("leaves both delegation grants off when an orchestrator is created", async () => {
+  it("leaves the Fable delegation grant off when an orchestrator is created", async () => {
     const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
     const manager = new OrchestratorManager(
       { start: activatingStart(() => record), get: vi.fn(() => record) } as never,
@@ -485,7 +488,6 @@ describe("OrchestratorManager", () => {
 
     const created = put.mock.calls[0]![0] as OrchestratorBinding;
     expect(created.grant.capabilities).toContain("worker.start");
-    expect(created.grant.capabilities).not.toContain("worker.start.cursor");
     expect(created.grant.capabilities).not.toContain("worker.start.fable");
   });
 

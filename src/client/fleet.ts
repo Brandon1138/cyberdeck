@@ -4,8 +4,6 @@ import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
   CreateOrchestratorRequest,
-  CursorWorkersRequest,
-  CursorWorkersResult,
   FableWorkersRequest,
   FableWorkersResult,
   OrchestratorGrantToggleResult,
@@ -329,7 +327,6 @@ export type FleetAction =
     cockpitCwd: string;
   }
   | { type: "fable-workers"; request: FableWorkersRequest }
-  | { type: "cursor-workers"; request: CursorWorkersRequest }
   | { type: "caveman-workers"; request: CavemanWorkersRequest }
   | { type: "nvim-layout"; enabled: boolean }
   | { type: "open-worktree"; sessionId: string }
@@ -418,7 +415,6 @@ type SlashCommandName =
   | "/model"
   | "/permissions"
   | "/fable-workers"
-  | "/cursor-workers"
   | "/caveman-workers"
   | "/nvim-settings"
   | "/worktree";
@@ -556,15 +552,6 @@ const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
       { value: "status", description: "Show current Fable worker preference" },
       { value: "on", description: "Enable Fable workers" },
       { value: "off", description: "Disable Fable workers" },
-    ],
-  },
-  {
-    name: "/cursor-workers",
-    description: "Inspect or toggle Cursor workers",
-    values: [
-      { value: "status", description: "Show current Cursor worker grant" },
-      { value: "on", description: "Enable Cursor workers" },
-      { value: "off", description: "Disable Cursor workers" },
     ],
   },
   {
@@ -3516,16 +3503,6 @@ export async function runFleet(
           notice: grantToggleNotice("Fable workers", result),
           noticeTone: "neutral",
         };
-      } else if (action?.type === "cursor-workers") {
-        const result = await client.request<CursorWorkersResult>(
-          "orchestrator.cursorWorkers",
-          action.request,
-        );
-        state = {
-          ...state,
-          notice: grantToggleNotice("Cursor workers", result),
-          noticeTone: "neutral",
-        };
       } else if (action?.type === "caveman-workers") {
         const result = await client.request<CavemanWorkersResult>(
           "orchestrator.cavemanWorkers",
@@ -5044,7 +5021,7 @@ function grantToggleTransition(
   state: FleetState,
   snapshot: FleetSnapshot,
   command: string,
-  grant: { name: "/fable-workers" | "/cursor-workers"; action: "fable-workers" | "cursor-workers" },
+  grant: { name: "/fable-workers"; action: "fable-workers" },
 ): FleetTransition | undefined {
   if (!command.startsWith(grant.name)) return undefined;
   const match = new RegExp(`^${grant.name}(?:\\s+(status|on|off))?$`, "u").exec(command);
@@ -5222,10 +5199,6 @@ function workerPolicyTransition(
     name: "/fable-workers",
     action: "fable-workers",
   })
-    ?? grantToggleTransition(state, snapshot, command, {
-      name: "/cursor-workers",
-      action: "cursor-workers",
-    })
     ?? cavemanWorkersTransition(state, snapshot, command)
     ?? nvimLayoutTransition(state, command)
     ?? worktreeModeTransition(state, snapshot, command);

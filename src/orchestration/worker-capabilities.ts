@@ -100,8 +100,7 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
     modelIdRule:
       "Use the exact Cursor model slug; effort is encoded in the slug suffix and Cursor exposes no separate effort flag or bracket override.",
     notes: [
-      "Autonomous Cursor workers require the operator-controlled worker.start.cursor grant for delegation.",
-      "A Cursor Fable slug additionally requires worker.start.fable; both grants must be present.",
+      "A Cursor Fable slug requires the operator-controlled worker.start.fable grant; every other slug here needs no grant beyond worker.start.",
       "Read-only workers run in plan mode with Cursor sandboxing enabled.",
       "Standard interactive auto mode is verified post-launch through Composer /run-everything.",
       "Scout profile uses operator-granted one-shot --print stream-json transport; no effort flag.",

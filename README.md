@@ -93,9 +93,10 @@ Fleet controls:
 - Enter `/fable-workers status`, `/fable-workers on`, or `/fable-workers off` to inspect or change
   autonomous Fable access for the selected/bound orchestrator. The grant is durable with that
   binding; disabling it blocks new Fable workers without stopping existing threads.
-- Enter `/cursor-workers status`, `/cursor-workers on`, or `/cursor-workers off` for the same durable
-  control over autonomous Cursor workers. It is a separate grant from Fable's: a Cursor Fable slug
-  such as `claude-fable-5-high` requires both to be on.
+  Cursor has no equivalent command, because Cursor delegation is not gated: the capability catalog
+  advertises Cursor's whole model list to every orchestrator, so every one of those slugs dispatches
+  from a fresh binding. A Cursor Fable slug such as `claude-fable-5-high` is the one exception, and
+  it needs the same `/fable-workers on` grant every other Fable model does.
 - Enter `/caveman-workers status`, `/caveman-workers on`, or `/caveman-workers off` to control the
   durable, default-off box preference for orchestrator-spawned workers. Composer-launched workers
   (started from Fleet's bottom composer) always use normal mode, regardless of this preference. It
@@ -161,9 +162,6 @@ cyberdeck orchestrator reset
 cyberdeck orchestrator fable-workers status
 cyberdeck orchestrator fable-workers on
 cyberdeck orchestrator fable-workers off
-cyberdeck orchestrator cursor-workers status
-cyberdeck orchestrator cursor-workers on
-cyberdeck orchestrator cursor-workers off
 cyberdeck orchestrator caveman-workers status
 cyberdeck orchestrator caveman-workers on
 cyberdeck orchestrator caveman-workers off
@@ -440,10 +438,10 @@ cyberdeck delegate --parent PARENT_SESSION_ID --provider codex --cwd /absolute/p
 
 Cyberdeck does not infer a provider or model from the role. An explicit operator start may select
 Fable directly. Autonomous Fable workers are disabled by default and fail before launch unless the
-bound orchestrator has the durable `worker.start.fable` capability. Autonomous Cursor workers are
-gated the same way by `worker.start.cursor`, and a Cursor Fable slug needs both grants. Only the
-operator Fleet/CLI surface can change either grant; an orchestrator cannot enable itself. Opus has no
-special restriction.
+bound orchestrator has the durable `worker.start.fable` capability, and that is the only provider or
+model gate on delegation: Cursor workers need nothing beyond `worker.start`, and a Cursor Fable slug
+needs exactly the same Fable grant a Claude one does. Only the operator Fleet/CLI surface can change
+that grant; an orchestrator cannot enable itself. Opus has no special restriction.
 
 Cursor worker models are exact slugs with the effort rung inside the slug (`gpt-5.6-sol-high`,
 `claude-sonnet-5-xhigh`, `composer-2.5`); passing a separate effort is refused rather than folded in.

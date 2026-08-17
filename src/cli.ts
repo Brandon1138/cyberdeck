@@ -31,8 +31,6 @@ import type {
   CavemanWorkersRequest,
   CavemanWorkersResult,
   CreateOrchestratorRequest,
-  CursorWorkersRequest,
-  CursorWorkersResult,
   EnsureOrchestratorRequest,
   FableWorkersRequest,
   FableWorkersResult,
@@ -496,7 +494,6 @@ interface CreateProgramOptions {
   stopSession?: (sessionId: string) => Promise<void>;
   resetOrchestrator?: (request: ResetOrchestratorRequest) => Promise<OrchestratorResetResult>;
   fableWorkers?: (request: FableWorkersRequest) => Promise<FableWorkersResult>;
-  cursorWorkers?: (request: CursorWorkersRequest) => Promise<CursorWorkersResult>;
   cavemanWorkers?: (request: CavemanWorkersRequest) => Promise<CavemanWorkersResult>;
   pruneLegacyTranscript?: () => Promise<{ path: string; removed: boolean }>;
   /** Reads the SessionStart payload itself, so the command has no stdin of its own to stub. */
@@ -524,8 +521,6 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     withClient((client) => client.request<OrchestratorResetResult>("orchestrator.reset", request)));
   const fableWorkers = options.fableWorkers ?? ((request) =>
     withClient((client) => client.request<FableWorkersResult>("orchestrator.fableWorkers", request)));
-  const cursorWorkers = options.cursorWorkers ?? ((request) =>
-    withClient((client) => client.request<CursorWorkersResult>("orchestrator.cursorWorkers", request)));
   const cavemanWorkers = options.cavemanWorkers ?? ((request) =>
     withClient((client) => client.request<CavemanWorkersResult>("orchestrator.cavemanWorkers", request)));
   const pruneLegacyTranscript = options.pruneLegacyTranscript
@@ -566,7 +561,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     .addHelpText(
       "after",
       "\nExplicit operator-selected Fable starts are allowed. Autonomous Fable workers require the durable worker.start.fable grant."
-        + "\nAutonomous Cursor workers require the durable worker.start.cursor grant; a Cursor Fable slug requires both.\n",
+        + "\nA Cursor Fable slug requires that same grant; every other Cursor model needs none.\n",
     )
     .action(runDefault);
 
@@ -1004,29 +999,6 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
       }
       process.stdout.write(
         `Fable workers: ${result.enabled ? "ON" : "OFF"} · ${result.key} · ${result.sessionId}\n`,
-      );
-    });
-
-  orchestrator.command("cursor-workers")
-    .description("inspect or change delegated Cursor access for one orchestrator binding")
-    .argument("[mode]", "status, on, or off", "status")
-    .option("--cwd <absolute-path>", "workspace path (defaults to the current directory)")
-    .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("fleet"))
-    .action(async (mode: string, options: { cwd?: string; scope: "workspace" | "fleet" }) => {
-      if (mode !== "status" && mode !== "on" && mode !== "off") {
-        throw new Error("mode must be status, on, or off");
-      }
-      const result = await cursorWorkers({
-        cwd: resolve(options.cwd ?? process.cwd()),
-        scope: options.scope,
-        ...(mode === "status" ? {} : { enabled: mode === "on" }),
-      });
-      if (!result.configured) {
-        process.stdout.write(`Cursor workers: OFF · no orchestrator bound for ${result.key}\n`);
-        return;
-      }
-      process.stdout.write(
-        `Cursor workers: ${result.enabled ? "ON" : "OFF"} · ${result.key} · ${result.sessionId}\n`,
       );
     });
 

@@ -9,6 +9,11 @@ import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { renderScoutDecisionCard } from "../../src/domain/scout-output.js";
+import { isFableModel } from "../../src/domain/policy.js";
+import {
+  WORKER_PROVIDER_CAPABILITIES,
+  workerProviderCapability,
+} from "../../src/orchestration/worker-capabilities.js";
 import { CodexProviderAdapter } from "../../src/providers/codex.js";
 
 const ACTOR = "11111111-1111-4111-8111-111111111111";
@@ -671,7 +676,7 @@ describe("AgentControlService", () => {
     }));
     const service = new AgentControlService(
       { start } as never,
-      { findBySessionId: vi.fn(async () => granted("worker.start.cursor")) } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
       {} as never,
       undefined,
       {
@@ -801,8 +806,10 @@ describe("AgentControlService", () => {
     }), "Review the architecture");
   });
 
-  it("denies Cursor workers until the operator grant is enabled", async () => {
-    const start = vi.fn();
+  // MIK-96: the binding here is the one `ensure` writes for a brand-new orchestrator — no operator
+  // toggle has ever been run against it — and Cursor has to be dispatchable from exactly that.
+  it("starts a Cursor worker for a fresh binding with no operator toggle", async () => {
+    const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
     const service = new AgentControlService(
       { start } as never,
       { findBySessionId: vi.fn(async () => binding) } as never,
@@ -815,30 +822,55 @@ describe("AgentControlService", () => {
       model: "composer-2.5",
       cwd: "/repo/one",
       prompt: "Open the pull request",
-    })).rejects.toMatchObject({
-      code: "CAPABILITY_DENIED",
-      message: expect.stringContaining("/cursor-workers on"),
-    });
-    expect(start).not.toHaveBeenCalled();
+    })).resolves.toMatchObject({ provider: "cursor" });
+    expect(start).toHaveBeenCalled();
   });
 
-  it("double-gates a Cursor Fable worker on both grants, provider denial first", async () => {
+  /**
+   * The catalog is the contract: what it advertises to an orchestrator is what dispatch must accept.
+   * Every Cursor slug it lists launches from a fresh binding, and the one exception — a Fable slug —
+   * is the one its own notes name, so the two surfaces cannot disagree about Cursor.
+   */
+  it("dispatches every advertised Cursor model a fresh binding is offered", async () => {
+    const catalog = workerProviderCapability("cursor", WORKER_PROVIDER_CAPABILITIES)!;
     const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
-    const fableOnly = new AgentControlService(
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    for (const model of catalog.models) {
+      const attempt = service.startWorker({
+        actorSessionId: ACTOR,
+        provider: "cursor",
+        model,
+        cwd: "/repo/one",
+        prompt: "Open the pull request",
+      });
+      if (isFableModel(model)) {
+        await expect(attempt).rejects.toMatchObject({
+          code: "CAPABILITY_DENIED",
+          message: expect.stringContaining("/fable-workers on"),
+        });
+        continue;
+      }
+      await expect(attempt).resolves.toMatchObject({ provider: "cursor", model });
+    }
+    expect(catalog.notes.some((note) => note.includes("worker.start.fable"))).toBe(true);
+    expect(catalog.notes.some((note) => note.includes("worker.start.cursor"))).toBe(false);
+  });
+
+  it("gates a Cursor Fable slug on worker.start.fable and nothing else", async () => {
+    const start = vi.fn(async (request) => ({ ...worker, ...request, id: WORKER }));
+    const ungranted = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+    const fableGranted = new AgentControlService(
       { start } as never,
       { findBySessionId: vi.fn(async () => granted("worker.start.fable")) } as never,
-      {} as never,
-    );
-    const cursorOnly = new AgentControlService(
-      { start } as never,
-      { findBySessionId: vi.fn(async () => granted("worker.start.cursor")) } as never,
-      {} as never,
-    );
-    const both = new AgentControlService(
-      { start } as never,
-      {
-        findBySessionId: vi.fn(async () => granted("worker.start.cursor", "worker.start.fable")),
-      } as never,
       {} as never,
     );
     const fableWorker = {
@@ -849,15 +881,11 @@ describe("AgentControlService", () => {
       prompt: "Review the architecture",
     };
 
-    await expect(fableOnly.startWorker(fableWorker)).rejects.toMatchObject({
-      code: "CAPABILITY_DENIED",
-      message: expect.stringContaining("/cursor-workers on"),
-    });
-    await expect(cursorOnly.startWorker(fableWorker)).rejects.toMatchObject({
+    await expect(ungranted.startWorker(fableWorker)).rejects.toMatchObject({
       code: "CAPABILITY_DENIED",
       message: expect.stringContaining("/fable-workers on"),
     });
-    await expect(both.startWorker(fableWorker)).resolves.toMatchObject({ provider: "cursor" });
+    await expect(fableGranted.startWorker(fableWorker)).resolves.toMatchObject({ provider: "cursor" });
   });
 
   it("rejects guessed Codex aliases and unsupported effort before launch", async () => {
@@ -867,10 +895,9 @@ describe("AgentControlService", () => {
       { findBySessionId: vi.fn(async () => binding) } as never,
       {} as never,
     );
-    // Permission is decided before the catalog, so the effort refusal needs a granted binding.
     const permitted = new AgentControlService(
       { start } as never,
-      { findBySessionId: vi.fn(async () => granted("worker.start.cursor")) } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
       {} as never,
     );
 

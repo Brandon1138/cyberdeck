@@ -59,8 +59,6 @@ export const OrchestratorGrantToggleRequestSchema = ResetOrchestratorRequestSche
 
 export const FableWorkersRequestSchema = OrchestratorGrantToggleRequestSchema;
 
-export const CursorWorkersRequestSchema = OrchestratorGrantToggleRequestSchema;
-
 export const CavemanWorkersRequestSchema = z.object({
   enabled: z.boolean().optional(),
 });
@@ -78,7 +76,6 @@ export type CreateOrchestratorRequest = z.infer<typeof CreateOrchestratorRequest
 export type ResetOrchestratorRequest = z.infer<typeof ResetOrchestratorRequestSchema>;
 export type OrchestratorGrantToggleRequest = z.infer<typeof OrchestratorGrantToggleRequestSchema>;
 export type FableWorkersRequest = z.infer<typeof FableWorkersRequestSchema>;
-export type CursorWorkersRequest = z.infer<typeof CursorWorkersRequestSchema>;
 export type CavemanWorkersRequest = z.infer<typeof CavemanWorkersRequestSchema>;
 export type OrchestratorBindingReset = z.infer<typeof OrchestratorBindingResetSchema>;
 
@@ -90,8 +87,6 @@ export interface OrchestratorGrantToggleResult {
 }
 
 export type FableWorkersResult = OrchestratorGrantToggleResult;
-
-export type CursorWorkersResult = OrchestratorGrantToggleResult;
 
 export interface CavemanWorkersResult {
   scope: "box";

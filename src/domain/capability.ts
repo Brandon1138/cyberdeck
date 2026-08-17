@@ -6,15 +6,31 @@ export const CyberdeckCapabilitySchema = z.enum([
   "thread.enqueue",
   "worker.start",
   "worker.start.fable",
-  "worker.start.cursor",
   "orchestrator.inspect",
   "orchestrator.stop",
   "workflow.run",
 ]);
 
+/**
+ * Capability names this build no longer knows, dropped on read instead of refused.
+ *
+ * `worker.start.cursor` gated Cursor dispatch per orchestrator and defaulted off, which the
+ * capability catalog never said — it advertises Cursor's whole model list to everyone (MIK-96).
+ * The gate is gone, but bindings written while an operator had it switched on are still on disk in
+ * an append-only log, so the name has to keep parsing. It parses as nothing: a retired name grants
+ * nothing and denies nothing, and a binding carrying one stays readable.
+ */
+const RETIRED_CAPABILITIES = new Set<string>(["worker.start.cursor"]);
+
 export const CapabilityGrantSchema = z.object({
   subjectSessionId: z.uuid(),
-  capabilities: z.array(CyberdeckCapabilitySchema),
+  capabilities: z.preprocess(
+    (value) =>
+      Array.isArray(value)
+        ? value.filter((entry) => typeof entry !== "string" || !RETIRED_CAPABILITIES.has(entry))
+        : value,
+    z.array(CyberdeckCapabilitySchema),
+  ),
   scope: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("workspace"), cwd: z.string().min(1) }),
     z.object({ kind: z.literal("fleet") }),

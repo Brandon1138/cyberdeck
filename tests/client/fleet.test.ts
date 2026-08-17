@@ -2687,7 +2687,7 @@ describe("fleet controls", () => {
       width: 100,
       height: 24,
     });
-    expect(rendered).toContain("2-4 of 7");
+    expect(rendered).toContain("2-4 of 6");
     expect(rendered).not.toContain("/model  ");
 
     expect(transitionFleet(fourth.state, snapshot, "escape", NOW_MS).state)
@@ -3092,48 +3092,25 @@ describe("fleet controls", () => {
     });
   });
 
-  it("routes /cursor-workers to the bound orchestrator as its own grant", () => {
+  // MIK-96: `/cursor-workers` is gone, so the composer treats it as ordinary text rather than as a
+  // command — and MIK-97's unreachable remedy goes with it, because there is no remedy to reach.
+  it("does not offer or route /cursor-workers at all", () => {
     const orchestrator = session({
       kind: "orchestrator",
       provider: "cursor",
-      model: "claude-fable-5-thinking-high",
+      model: "composer-2.5",
       cwd: "/repo/one",
       orchestratorScope: "workspace",
     });
     const snapshot = fleet({ record: orchestrator });
+    const state = { ...createFleetState(snapshot), draft: "/cursor-workers on" };
+    const transition = transitionFleet(state, snapshot, "enter", NOW_MS);
 
-    expect(transitionFleet(
-      { ...createFleetState(snapshot), draft: "/cursor-workers on" },
-      snapshot,
-      "enter",
-      NOW_MS,
-    )).toMatchObject({
-      state: { draft: "" },
-      action: {
-        type: "cursor-workers",
-        request: { cwd: "/repo/one", scope: "workspace", enabled: true },
-      },
-    });
-    // Cursor and Fable are separate grants, so one command never stands in for the other.
-    expect(transitionFleet(
-      { ...createFleetState(snapshot), draft: "/cursor-workers off" },
-      snapshot,
-      "enter",
-      NOW_MS,
-    ).action).toMatchObject({ type: "cursor-workers", request: { enabled: false } });
-  });
-
-  it("reports the missing orchestrator instead of treating /cursor-workers as a task", () => {
-    const snapshot = fleet();
-    const transition = transitionFleet(
-      { ...createFleetState(snapshot), draft: "/cursor-workers status" },
-      snapshot,
-      "enter",
-      NOW_MS,
-    );
-
-    expect(transition.action).toBeUndefined();
-    expect(transition.state.notice).toContain("No orchestrator is bound");
+    expect(transition.action).not.toMatchObject({ type: "cursor-workers" });
+    expect(transition.state.notice).not.toContain("No orchestrator");
+    const palette = transitionFleet(createFleetState(snapshot), snapshot, "/", NOW_MS);
+    expect(renderFleet(snapshot, palette.state, { color: false, width: 100, height: 24 }))
+      .not.toContain("/cursor-workers");
   });
 
   it("routes /caveman-workers on to the box preference without an orchestrator", () => {
