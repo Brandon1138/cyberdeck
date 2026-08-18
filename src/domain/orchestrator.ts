@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { CapabilityGrantSchema, type CyberdeckCapability } from "./capability.js";
 import {
@@ -25,6 +26,10 @@ export const OrchestratorBindingKindSchema = z.enum(["primary", "peer"]);
 
 /** The marker a peer key carries between its scope's key and the peer session's own id. */
 const PEER_KEY_MARKER = ":peer:";
+const CONTROLLER_ID_PREFIX = "orchestrator:";
+const MAX_CONTROLLER_ID_LENGTH = 256;
+const HASH_SUFFIX_PREFIX = ":sha256:";
+const SHA256_HEX_LENGTH = 64;
 
 const OrchestratorBindingRecordSchema = z.object({
   key: z.string().min(1),
@@ -151,7 +156,7 @@ export function orchestratorKey(scope: OrchestratorScope): string {
 
 /** The durable controller id a binding proves, primary or peer. One key, one controller. */
 export function orchestratorControllerId(key: string): string {
-  return `orchestrator:${key}`;
+  return `${CONTROLLER_ID_PREFIX}${boundedControllerKey(key)}`;
 }
 
 /** The key of a peer bound alongside `primaryKey`, named by the peer session it belongs to. */
@@ -195,11 +200,21 @@ function peerPrimaryKey(key: string, expectedSessionId?: string): string | undef
  */
 export function orchestratorController(binding: OrchestratorBinding): ControllerIdentity {
   const primaryKey = binding.kind === "peer" ? primaryOrchestratorKey(binding.key) : binding.key;
+  const scopeId = boundedControllerKey(binding.key);
   return {
     controllerId: orchestratorControllerId(binding.key),
     familyId: orchestratorControllerId(primaryKey),
     scope: binding.scope.kind === "fleet"
-      ? { kind: "fleet", scopeId: binding.key }
-      : { kind: "worktree", scopeId: binding.key, worktreePath: binding.scope.cwd },
+      ? { kind: "fleet", scopeId }
+      : { kind: "worktree", scopeId, worktreePath: binding.scope.cwd },
   };
+}
+
+/** Preserve every existing short identity; hash only keys that would exceed controller cap. */
+function boundedControllerKey(key: string): string {
+  const maxKeyLength = MAX_CONTROLLER_ID_LENGTH - CONTROLLER_ID_PREFIX.length;
+  if (key.length <= maxKeyLength) return key;
+  const digest = createHash("sha256").update(key).digest("hex");
+  const readableLength = maxKeyLength - HASH_SUFFIX_PREFIX.length - SHA256_HEX_LENGTH;
+  return `${key.slice(0, readableLength)}${HASH_SUFFIX_PREFIX}${digest}`;
 }

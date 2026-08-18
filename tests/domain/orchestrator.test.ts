@@ -7,6 +7,7 @@ import {
   primaryOrchestratorKey,
   type OrchestratorBinding,
 } from "../../src/domain/orchestrator.js";
+import { ControllerIdentitySchema } from "../../src/domain/worker-coordination.js";
 
 const PRIMARY_SESSION = "11111111-1111-4111-8111-111111111111";
 const PEER_SESSION = "22222222-2222-4222-8222-222222222222";
@@ -118,6 +119,38 @@ describe("orchestratorController", () => {
       scopeId: "workspace:/repo/one",
       worktreePath: "/repo/one",
     });
+  });
+
+  it("bounds long workspace peer identities while preserving deterministic round-trips", () => {
+    const cwd = `/${"long-workspace-segment/".repeat(12)}repository`;
+    const primaryKey = `workspace:${cwd}`;
+    const peerKey = peerOrchestratorKey(primaryKey, PEER_SESSION);
+    const longPeer = OrchestratorBindingSchema.parse(record({
+      key: peerKey,
+      kind: "peer",
+      sessionId: PEER_SESSION,
+      cwd,
+      scope: { kind: "workspace", cwd },
+      grant: {
+        subjectSessionId: PEER_SESSION,
+        capabilities: [...ORCHESTRATOR_GRANT_CAPABILITIES],
+        scope: { kind: "workspace", cwd },
+      },
+    })) as OrchestratorBinding;
+
+    expect(`orchestrator:${peerKey}`.length).toBeGreaterThan(256);
+    const first = orchestratorController(longPeer);
+    const second = orchestratorController(longPeer);
+    expect(first).toEqual(second);
+    expect(first.controllerId.length).toBeLessThanOrEqual(256);
+    expect(first.familyId.length).toBeLessThanOrEqual(256);
+    expect(first.scope.scopeId.length).toBeLessThanOrEqual(256);
+    expect(ControllerIdentitySchema.parse(first)).toEqual(first);
+  });
+
+  it("keeps existing short controller ids byte-for-byte unchanged", () => {
+    expect(orchestratorController(primary).controllerId).toBe("orchestrator:fleet");
+    expect(orchestratorController(peer).controllerId).toBe(`orchestrator:${PEER_KEY}`);
   });
 
   /**

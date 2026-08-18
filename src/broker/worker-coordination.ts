@@ -556,7 +556,8 @@ export class WorkerCoordinationService {
   async handoffBatch(input: HandoffBatchInput): Promise<HandoffBatchResult> {
     return this.exclusive(async () => {
       this.assertReady();
-      const replay = this.replayHandoffBatch(input.mutationId);
+      const requestHash = hashHandoffRequest(input);
+      const replay = this.replayHandoffBatch(input.mutationId, requestHash);
       if (replay !== undefined) return replay;
       const actor = ControllerIdentitySchema.parse(input.actor);
       const recipient = ControllerIdentitySchema.parse(input.recipient);
@@ -608,9 +609,9 @@ export class WorkerCoordinationService {
             current,
             "NOT_ELIGIBLE",
             "directed handoff aborted because another batch member was ineligible",
-          ));
+        ));
         const result = this.handoffBatchResult(input.mutationId, false, outcomes);
-        await this.persistReceipt(input.mutationId, "handoff", result, {});
+        await this.persistReceipt(input.mutationId, "handoff", result, {}, requestHash);
         return result;
       }
 
@@ -670,7 +671,7 @@ export class WorkerCoordinationService {
         audits,
         liveness: [this.connectedObservation(recipient, now, "directed worker handoff")],
         handoffs: [handoff],
-      });
+      }, requestHash);
       return result;
     });
   }
@@ -1724,11 +1725,13 @@ export class WorkerCoordinationService {
     operation: OwnershipOperation,
     result: unknown,
     transaction: CoordinationTransaction,
+    requestHash?: string,
   ): Promise<void> {
     const receipt: MutationReceipt = {
       mutationId,
       operation,
       recordedAt: this.now(),
+      ...(requestHash === undefined ? {} : { requestHash }),
       result,
     };
     await this.commit({ ...transaction, receipts: [...(transaction.receipts ?? []), receipt] });
@@ -1843,10 +1846,19 @@ export class WorkerCoordinationService {
     };
   }
 
-  private replayHandoffBatch(mutationId: string): HandoffBatchResult | undefined {
+  private replayHandoffBatch(
+    mutationId: string,
+    requestHash: string,
+  ): HandoffBatchResult | undefined {
     const receipt = this.receipts.get(mutationId);
     if (receipt === undefined) return undefined;
     this.assertReceiptOperation(receipt, "handoff");
+    if (receipt.requestHash !== requestHash) {
+      throw new WorkerCoordinationError(
+        "MUTATION_ID_COLLISION",
+        `mutation ${mutationId} already used for a different handoff request`,
+      );
+    }
     if (
       typeof receipt.result !== "object"
       || receipt.result === null
@@ -1962,6 +1974,31 @@ function hashCheckpointRequest(input: {
     question: input.question ?? null,
     mode: input.mode,
   })).digest("hex");
+}
+
+function hashHandoffRequest(input: HandoffBatchInput): string {
+  const actor = ControllerIdentitySchema.parse(input.actor);
+  const recipient = ControllerIdentitySchema.parse(input.recipient);
+  return createHash("sha256").update(canonicalJson({
+    actor,
+    recipient,
+    recipientSessionId: input.recipientSessionId,
+    directive: input.directive,
+    members: input.members,
+    reason: input.reason,
+    handoffId: input.handoffId ?? null,
+  })).digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .filter((key) => object[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+    .join(",")}}`;
 }
 
 function checkpointKey(workerId: string, correlationId: string): string {

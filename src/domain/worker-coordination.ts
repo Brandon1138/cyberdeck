@@ -296,6 +296,8 @@ export const MutationReceiptSchema = z.object({
   mutationId: z.string().min(1).max(256),
   operation: OwnershipOperationSchema,
   recordedAt: z.iso.datetime(),
+  /** Optional so receipts written before payload-bound idempotency remain readable. */
+  requestHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   result: z.unknown(),
 });
 

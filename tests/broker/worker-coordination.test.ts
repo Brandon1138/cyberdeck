@@ -191,6 +191,48 @@ describe("WorkerCoordinationService ownership", () => {
     expect(service.getSubject(created.workerId)?.lease.controller).toEqual(newController);
   });
 
+  it("binds handoff mutation replays to complete request payloads across restarts", async () => {
+    const first = await harness();
+    const source = controller("handoff-source");
+    const recipient = controller("handoff-recipient");
+    const otherRecipient = controller("handoff-other-recipient");
+    const firstWorker = await register(first.service, { owner: source });
+    const secondWorker = await register(first.service, { owner: source });
+    const request = {
+      mutationId: "payload-bound-handoff",
+      actor: controller("handoff-operator"),
+      recipient,
+      recipientSessionId: "11111111-1111-4111-8111-111111111111",
+      directive: "Continue both workers",
+      members: [
+        { subjectId: firstWorker.workerId },
+        { subjectId: secondWorker.workerId },
+      ],
+      reason: "operator directed handoff",
+    };
+
+    const recorded = await first.service.handoffBatch(request);
+    const restarted = await harness({ directory: first.directory });
+    await expect(restarted.service.handoffBatch(request)).resolves.toEqual({
+      ...recorded,
+      idempotentReplay: true,
+    });
+
+    for (const changed of [
+      {
+        ...request,
+        recipient: otherRecipient,
+        recipientSessionId: "22222222-2222-4222-8222-222222222222",
+      },
+      { ...request, members: request.members.slice(0, 1) },
+      { ...request, directive: "Do something different" },
+    ]) {
+      await expect(restarted.service.handoffBatch(changed)).rejects.toMatchObject({
+        code: "MUTATION_ID_COLLISION",
+      });
+    }
+  });
+
   it("turns broker-observed abrupt death into orphan then allows adoption", async () => {
     const { service, advance } = await harness({ gracePeriodMs: 5_000, leaseDurationMs: 60_000 });
     const owner = controller("dead");
