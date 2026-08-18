@@ -80,7 +80,11 @@ This is the trigger model with the most existing substrate to build on:
 - **`DECISION_REQUEST` / `CHECKPOINT` events.** A worker or its orchestrator can raise a durable,
   correlation-idempotent checkpoint (`requestCheckpoint`, `src/broker/worker-coordination.ts:968`)
   answered through the normal event-submission path (`submitEvent`, `:644`). An event-triggered
-  iteration is naturally "the next thing that happens after this checkpoint is answered."
+  iteration is naturally "the next thing that happens after this checkpoint is answered." This
+  exchange is trigger substrate only. Its answer is a worker-attributed `CHECKPOINT` event, and the
+  subject's structured `decisionGate` has exactly one writer that clears it — `submitEvent`
+  (`:833-845`), reached only by that worker answer. The loop's own decision gate therefore cannot be
+  this exchange: §2.2 places it in the control plane and §6 gives it its own port.
 - **Instruction lifecycle transitions**, new since the first draft, are now a third candidate, but
   `completed` is not sufficient by itself. `InstructionLifecycleStateSchema`
   (`src/domain/worker-truth.ts:260-277`) runs
@@ -131,9 +135,11 @@ actively resists. The worker-facing MCP wrappers a worker actually gets are
 no `cyberdeck_worker_ctl` / `cyberdeck_lease` access; those are orchestrator-facing and require a
 **stable controller identity**, which a worker's own session can never hold for itself (a worker is a
 lease _subject_, never a lease _controller_). Concretely: nothing a worker's own process can call
-re-instructs that same worker. Continuation can only be driven by whatever already holds the
-controller lease — an orchestrator's durable binding, or a human controller — reading the worker's
-output and choosing to re-enqueue through the instruction queue
+re-instructs that same worker, and nothing it can call decides a loop's own gate either:
+`cyberdeck_respond_checkpoint` answers a worker checkpoint, which §2.2 excludes from that role.
+Continuation can only be driven by whatever already holds the controller lease — an orchestrator's
+durable binding, or a human controller — reading the worker's output and choosing to re-enqueue
+through the instruction queue
 (`SessionRegistry.submitInstruction`, which writes provider input without cancelling the active
 turn).
 
@@ -161,7 +167,7 @@ controller if it ignores graceful termination.
 | --------------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | Schedule                          | none                                                                             | a durable scheduler and a missed-tick policy, from scratch                                                                       |
 | Event — workflow wake             | `WorkflowRun` caps, `wake: true`                                                 | loosen or wrap caps for outer-loop use                                                                                           |
-| Event — checkpoint answered       | `requestCheckpoint` / `submitEvent`, correlation-idempotent                      | a controller that acts on the answer                                                                                             |
+| Event — checkpoint answered       | `requestCheckpoint` / `submitEvent`, correlation-idempotent — trigger only        | a controller that acts on the answer; the loop's own gate is `LoopGatePort`, never this exchange (§2.2)                          |
 | Event — `instruction → completed` | `InstructionLifecycleStateSchema`, completion provenance, canonical turn banking | a controller that joins the edge to a matching provider-transcript completion; unavailable where native transcript is impossible |
 | Self-continuation                 | instruction queue, controller-mediated only                                      | a bounded loop-controller role that _is_ the lease controller                                                                    |
 
@@ -263,6 +269,36 @@ actionable iteration and cannot be represented as an inert gate. The durable con
 the only release edge: rejection stops the run, while approval permits the next instruction. No
 provider execution-control mechanism is claimed or required at this boundary.
 
+**That release edge needs an operation that does not exist today, so the design names one.** The
+subject-level `decisionGate` is armed by a controller (`requestCheckpoint`,
+`src/broker/worker-coordination.ts:962-1046`) but cleared in exactly one place — inside `submitEvent`
+(`:833-845`), and only by a worker-attributed `CHECKPOINT` event carrying the matching
+`checkpointCorrelationId`. `resolveEvent` (`:860-916`) is controller-authenticated, but it resolves
+an _event_ and never touches `decisionGate`. A loop that armed the subject gate would therefore have
+only the forbidden worker exchange to release it. The loop gate consequently lives on the `LoopRun`
+aggregate rather than on `OwnershipSubject`, and is worked through `LoopGatePort` (§6):
+
+- **Open.** `LoopGatePort.open(loopRunId, iterationId, question)` writes `awaiting-controller` and an
+  immutable gate record — `gateId`, the question, the opened-at time, and the settlement evidence it
+  was raised against — to `LoopRunStore`. It arms no provider state and never calls
+  `deliverCheckpointPrompt` (`src/orchestration/worker-control-service.ts:895`). One open gate per
+  run, which is the same serialization the single-valued `decisionGate` forces above.
+- **Decide.** `LoopGatePort.decide(gateId, "approve" | "reject", actor, reason)` is durable and
+  idempotent by `gateId`: one decision per gate, and a repeat carrying a different decision is
+  refused rather than applied. It commits to `LoopRunStore` **before** any next-iteration enqueue
+  becomes visible, so an approval that did not persist cannot have released an iteration. Only that
+  run's loop-controller binding or operator authority may call it; there is no worker-facing wrapper
+  for it, and none may be added.
+- **Persist and observe.** `LoopRunStore` is authoritative for both the gate and its decision. For
+  operator visibility the adapter publishes a pinned `DECISION_REQUEST` worker event raised by the
+  loop-controller — a controller-authenticated `submitEvent` with no `checkpointCorrelationId`, so it
+  answers no checkpoint and touches no `decisionGate` — and closes it with `resolveEvent` when the
+  decision lands. Both are controller-side primitives that exist today and require nothing from the
+  worker. This is §3.1's push-shaped path, so a gate is never read at poll cadence.
+- **Bounded.** An open gate does not suspend the run's `maxWallClockMs` deadline (§2.3). A deadline
+  reached while a gate is still open stops the run fail-closed with `operatorActionRequired`;
+  `awaiting-controller` is a state something always leaves, not an indefinite resting place.
+
 ### 2.3 Spend, turn, and wall-clock limits — who enforces what
 
 This remains the sharpest finding in this document, with one part of it materially improved since the
@@ -345,11 +381,12 @@ terminal. `LoopRunStore` persists the `LoopRun` aggregate and its debit journal:
 snapshot, lifecycle, `startedAt`, current iteration ordinal and id, admitted and settled iteration
 ids, cumulative canonical-turn debit, cumulative reported token usage, unknown-usage count, deadline,
 last qualified trigger evidence, prompt-free per-iteration settlement/provenance summaries, the
-rolling-history cursor, and an immutable stop record (`stopId`, actor, reason, requested time, and
-terminal time). Admission and settlement are idempotent by
-`(loopRunId, iterationId)` and the store commits the aggregate transition and debit before an external
-enqueue or continuation becomes visible. `BudgetLedgerPort` reads and writes this durable state; an
-in-memory cache may project it but may never be its authority.
+rolling-history cursor, the open gate record and its durable decision (`gateId`, question, actor,
+`approve` / `reject`, reason, and `decidedAt` — or `voidedByStopId`), and an immutable stop record
+(`stopId`, actor, reason, requested time, and terminal time). Admission and settlement are
+idempotent by `(loopRunId, iterationId)` and the store commits the aggregate transition and debit
+before an external enqueue or continuation becomes visible. `BudgetLedgerPort` reads and writes this
+durable state; an in-memory cache may project it but may never be its authority.
 
 **The one budgeted autonomous worker-plane run today** is the Scout profile: a 15-minute wall-clock
 default enforced by settling in-flight output at cutoff and `SIGTERM`ing the process, with `maxTokens`
@@ -386,7 +423,10 @@ Two different freshness stories exist, and a loop design must not conflate them:
 
 - **Push-shaped.** A `DECISION_REQUEST` or pinned `CHECKPOINT` event is durable and stays pinned
   until explicitly resolved (`docs/architecture/worker-coordination.md`). An operator reading the
-  event stream sees this promptly; this path is unaffected by the poll cadence below.
+  event stream sees this promptly; this path is unaffected by the poll cadence below. A loop's
+  `awaiting-controller` gate is surfaced here, as a pinned `DECISION_REQUEST` raised by the
+  loop-controller (§2.2). The authoritative record is still the `LoopGatePort` gate in
+  `LoopRunStore`, and the subject's `decisionGate` field is deliberately not the loop gate.
 - **Poll-shaped.** Fleet's own view of ordinary progress is not. `waitForRefresh` is resumed only "by
   a key, by a chunk of `!` shell output, by `SIGWINCH`, by an attach transition, and by the transport
   closing — and by nothing else" (`BUGS.md:57`, still Open). A loop iteration that completes between
@@ -447,7 +487,9 @@ than a single provider conversation gets today.
 `hop`, alongside `renderedAt` / `submittedAt` / `completedAt` and an `expectedTurn` ordinal fixed at
 render time. Add an explicit `loopRunId` to `InstructionRecord`, carry it through every
 `InstructionStore.put` snapshot, and include the same id in the coordination-log transaction for the
-iteration boundary, checkpoint, lease action, and stop. This joins (2), (4), and (5) without treating
+iteration boundary, checkpoint, gate open and gate decision, lease action, and stop; a gate
+transaction additionally carries its `gateId`, so the decision joins the iteration it released or
+refused. This joins (2), (4), and (5) without treating
 `workflowRunId` as a loop id by convention; matching transcript events must carry both `loopRunId`
 and `iterationId` in their data so the join does not depend on timestamps. The completion snapshot
 must also carry the matched completion target and provenance required by §1.2. A stop-cancelled
@@ -572,8 +614,11 @@ action while `exitCode` remains `null`, and report process exit before enabling 
 `StopLoop` first crosses a durable linearization point in `LoopRunStore`: under a run-scoped exclusion
 shared with instruction delivery, it moves the run to non-runnable `stopping`, writes the immutable
 stop request, and atomically revokes delivery authorization for every instruction belonging to the
-run. `stopping` is deliberately not `stopped`; the stop record has `requestedAt`, but no `terminalAt`
-yet. `InstructionPort` then materializes every `accepted` / `queued` record as `cancelled`. The current
+run. If a `LoopGatePort` gate is open, the same transaction voids it with `voidedByStopId` and
+resolves its pinned `DECISION_REQUEST`; `LoopGatePort.decide` is refused for any non-runnable run, so
+a stop can never be waiting behind a decision, and no later approval can contradict it. `stopping`
+is deliberately not `stopped`; the stop record has `requestedAt`, but no `terminalAt` yet.
+`InstructionPort` then materializes every `accepted` / `queued` record as `cancelled`. The current
 instruction state machine already permits `accepted → cancelled` and `queued → cancelled`
 (`instructionTransitionAllowed`, `src/domain/worker-truth.ts:281-300`); those are exactly the records
 the current `InstructionQueue.flush` selects as pending. Each durable cancellation carries
@@ -671,6 +716,12 @@ self-continuing loops follow this same path from `LoopRunStore`; absence of a `L
 record gives them no fresh budget and no exemption. If the run or debit journal is missing or fails
 validation, reconciliation makes the run terminal with an unprovable-state finding.
 
+A persisted `awaiting-controller` run is neither interrupted nor redispatched. Reconciliation
+re-surfaces its durable gate record together with its pinned `DECISION_REQUEST`, and the run stays
+non-runnable until `LoopGatePort.decide` records a decision, its deadline passes, or it is stopped.
+A gate whose decision was committed but whose released iteration never started is an interrupted
+iteration by the rule above: the decision itself is durable and is never re-asked.
+
 A persisted `stopping` run is handled differently: reconciliation keeps delivery revoked and
 idempotently resumes the §4.1 cancellation, target-worker termination, instruction settlement, and
 controller termination sequence. It neither relabels the run `interrupted` nor makes it adoptable.
@@ -766,17 +817,20 @@ blocks. These are the same kind of rule as `projectWorkerTruth`'s ordering or
 `instructionTransitionAllowed`'s table — pure functions over observed state, no I/O, no clock, no
 provider knowledge. Concretely the domain owns: a `LoopPolicy` value (bounds and their units), a
 `LoopRun` aggregate with the durable fields named in §2.3 and its own state machine, a pure
-`evaluateLoopContinuation(policy, observed)` returning continue / gate / stop-with-reason, and the
-rule that a turn budget is denominated in `canonicalTurns`. **The domain must not know the transport
-that triggered an iteration** — a cron tick, a workflow message, and an instruction completion all
+`evaluateLoopContinuation(policy, observed)` returning continue / gate / stop-with-reason, the rule
+that a gate outcome is released only by a durable control-plane decision and never by worker output,
+and the rule that a turn budget is denominated in `canonicalTurns`. **The domain must not know the
+transport that triggered an iteration** — a cron tick, a workflow message, and an instruction completion all
 arrive as the same domain-level "iteration boundary observed" fact. That normalized fact still carries
 typed evidence. An instruction boundary is admissible only when its instruction ordinal, completion
 target, `provider-transcript` provenance, and canonical-turn increment agree (§1.2).
 
 **Application — one use case per verb, coordinating domain and ports.** `StartLoop`, `AdvanceLoop`
-(evaluate the policy and either enqueue the next iteration or settle), `StopLoop` (enter durable
-`stopping`, revoke delivery, cancel pending instructions, terminate iteration targets, durably settle
-their instructions, then terminate the controller), `ReconcileLoops` (the startup survey of §7.3), and
+(evaluate the policy and either enqueue the next iteration or settle), `DecideLoopGate` (open the
+control-plane gate once an iteration has settled, and record the controller's or operator's durable
+approve/reject — §2.2), `StopLoop` (enter durable `stopping`, revoke delivery, cancel pending
+instructions, terminate iteration targets, durably settle their instructions, then terminate the
+controller), `ReconcileLoops` (the startup survey of §7.3), and
 `RetainLoopHistory` (enforce the rolling settled-iteration window across transcript, instruction,
 workflow-message, and coordination-event history after each settlement, on the age sweep, and at
 reconciliation).
@@ -798,7 +852,8 @@ exists to prevent.
 | `ControllerLeasePort`   | acquire / renew / release / adopt, and the identity a loop-controller speaks as                                                | `src/broker/worker-coordination.ts`                                                                                       |
 | `InstructionPort`       | enqueue; cancel pending instructions; await durable terminal state for in-flight instructions; revalidate run state at delivery | `InstructionQueue.flush` / `applyState` + `SessionRegistry.submitInstruction`, adapted to consult `LoopRunStore`          |
 | `WorkerObservationPort` | `WorkerTruth`, matching completion-ledger provenance, and `canonicalTurns` delta for the iteration just finished               | `projectWorkerTruth` + `SessionRegistry.recordCompletion`                                                                 |
-| `CheckpointPort`        | request a decision gate, observe its answer                                                                                    | `requestCheckpoint` / `submitEvent`                                                                                       |
+| `CheckpointPort`        | observe a worker-raised or worker-answered checkpoint as an iteration boundary fact (§1.2 trigger only)                        | `requestCheckpoint` / `submitEvent`                                                                                       |
+| `LoopGatePort`          | open the loop's provider-independent gate after a settlement; record the controller's or operator's durable approve/reject; expose gate and decision for observation | `LoopRunStore` for the authoritative gate and decision, plus controller-side `submitEvent` (pinned `DECISION_REQUEST`, no `checkpointCorrelationId`) and `resolveEvent` for visibility — never the worker `CHECKPOINT` answer that clears `decisionGate`, and never `deliverCheckpointPrompt` |
 | `AuditPort`             | loop and stop identifiers written through instruction snapshots and coordination transactions, optionally other logs of §3.2   | `InstructionStore` + the coordination log; `Journal` scope remains a decision                                             |
 | `LoopHistoryPort`       | compact settled iterations across transcript, instruction, workflow-message, and coordination-event stores by rolling run window; expire finished history | `selectExpiredThreads` + new joined range-compaction/redaction APIs on transcript, `InstructionStore`, `WorkflowStore`, and worker-coordination persistence |
 | `WorkerTerminationPort` | graceful/force termination of iteration targets, exit observation, and stop-linked instruction settlement                      | worker-control path over `SessionRegistry.stop` / `forceStop` / `handleExit`                                              |
@@ -924,7 +979,15 @@ that nothing loop-shaped lands on the wrong one.
    `OwnershipSubject` is a single value, not a set (`src/domain/worker-coordination.ts:91-95`).
    "Continue past step 3?" and "spend the extra budget?" cannot both be open on one subject. Either
    loop policy serializes gates — the cheaper answer, and the one §2.2 recommends — or
-   `DecisionGateSchema` changes. The refactor should not discover this mid-implementation.
+   `DecisionGateSchema` changes. The refactor should not discover this mid-implementation. The same
+   item must also establish the control-plane gate-decision port itself: `LoopGatePort`, with gate
+   creation, a durable idempotent approve/reject by the run's loop-controller binding or by operator
+   authority, persistence in `LoopRunStore` committed before any released enqueue becomes visible,
+   and observation through a pinned `DECISION_REQUEST` closed by `resolveEvent`. This is not
+   optional polish: the only code path that clears a subject's `decisionGate` today is a
+   worker-attributed `CHECKPOINT` answer inside `submitEvent`
+   (`src/broker/worker-coordination.ts:833-845`), which §2.2 forbids as the loop's decision boundary,
+   so without this port a loop has no release edge that is not the forbidden exchange.
 
 9. **The durable, off-by-default, operator-only loop-start capability**, checked at loop-definition
    time _and_ at each iteration's launch, with the MIK-96 constraint attached: whatever surface
