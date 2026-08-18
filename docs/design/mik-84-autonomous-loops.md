@@ -241,23 +241,25 @@ worker's structured `decisionGate` state (`CheckpointRequestSchema.mode`,
   decision points outstanding on one worker — "should I continue past step 3, and separately should I
   spend the extra token budget" is not representable. Loop design must serialize decision points: one
   open gate, answered, closed, before the next opens.
-- **Checkpoints ride the instruction queue, so they inherit human-controller priority for free.**
-  `submitInstruction` never cancels an active turn, and `deliveryHold`
-  (`src/broker/session-registry.ts:1115-1127`) refuses to write while `runtime.controller !== undefined`
-  — the `human-controller` hold reason. A loop-controller answering its own checkpoints through the
-  same path is automatically outranked by an operator who attaches mid-loop. No new precedence rule
-  is needed.
+- **The current checkpoint prompt is not itself a pause.** `deliverCheckpointPrompt` submits another
+  provider instruction, and the worker may act during that turn. A correlated `CHECKPOINT` event
+  updates the structured gate but `SessionRegistry.deliveryHold` does not consult it, so neither the
+  prompt nor that event is an execution boundary. The loop substrate needs a durable
+  decision-pending hold, enforced before prompt delivery and before provider execution, which only
+  an explicit controller decision releases. Human-controller priority still outranks the loop, but
+  it is not a substitute for this hold.
 - **A decision gate is a pause, not a stop.** `mode: "decision-gate"` changes only the structured
   `decisionGate` field; it does not change the worker's lifecycle
   (`docs/architecture/worker-coordination.md`). A loop-controller reading state alone will not see a
   paused loop as different from a working one — it must read `decisionGate.state`, not
   `WorkerTruthState`.
 
-Recommended placement: put the decision gate **before** the instruction that would start the next
-iteration is enqueued, not after. The loop-controller requests a `decision-gate` checkpoint, waits
-for the answer, and only then enqueues the next turn. This keeps the worker inert — not mid-turn — at
-every point a human or a bounding check could veto the next cycle, and it matches the existing
-precedent that a checkpoint answer is what unblocks the instruction, not a side channel.
+Recommended placement: arm the enforced decision-pending hold **before** either a checkpoint prompt
+or the instruction that would start the next iteration can be delivered. The checkpoint request and
+its correlated `CHECKPOINT` event record the question and worker response, but neither may clear the
+hold. The durable controller decision is the only release edge; rejection stops the run, while
+approval permits the next iteration instruction to be enqueued and executed. That makes the worker
+actually inert at every point a human or bounding check could veto the next cycle.
 
 ### 2.3 Spend, turn, and wall-clock limits — who enforces what
 
@@ -894,15 +896,20 @@ that nothing loop-shaped lands on the wrong one.
    leaves `stopping` plus `operatorActionRequired` (§4.1).
 
 7. **A joined rolling loop-history policy**, distinct from `DEFAULT_THREAD_RETENTION_DAYS` (7) and
-   `DEFAULT_THREAD_RETENTION_COUNT` (200), covering thread events and
-   `orchestration/instructions.jsonl` while the worker thread is still active. Every policy must have
-   finite `maxRetainedIterations` and `maxRetainedAgeDays`; after each settlement, on a periodic age
-   sweep, and at reconciliation, range compaction removes full payloads for the first limit crossed by
-   `(loopRunId, iterationId)`. It preserves current/unsettled instructions, writes prompt-free audit
-   tombstones, and first verifies that canonical provenance is durable in `LoopRunStore`. Pinning may
-   preserve the finished run and its bounded tombstones, never bypass the rolling payload cap.
-   Finished-thread expiry later deletes the remaining bounded history from both stores together
-   (§3.2).
+   `DEFAULT_THREAD_RETENTION_COUNT` (200), covering thread events,
+   `orchestration/instructions.jsonl`, `workflow-messages.jsonl`, and
+   `worker-coordination-v1.jsonl` while the worker thread is still active. Workflow messages and
+   coordination events/checkpoint questions contain full trigger payloads, so retaining either log
+   unchanged would preserve loop content and disk growth outside the nominal bound. Every policy
+   must have finite `maxRetainedIterations` and `maxRetainedAgeDays`; after each settlement, on a
+   periodic age sweep, and at reconciliation, joined range compaction removes full payloads from all
+   four stores for the first limit crossed by `(loopRunId, iterationId)`. Where an append-only store
+   cannot safely compact a mixed transaction, it must persist only a bounded, prompt-free reference
+   to the durable run/iteration audit record instead of the trigger text. The policy preserves
+   current/unsettled instructions, writes prompt-free audit tombstones, and first verifies that
+   canonical provenance is durable in `LoopRunStore`. Pinning may preserve the finished run and its
+   bounded tombstones, never bypass the rolling payload cap. Finished-thread expiry later deletes the
+   remaining bounded history from every participating store together (§3.2).
 
 8. **A decision on how a loop gates on more than one concern per cycle.** `decisionGate` on
    `OwnershipSubject` is a single value, not a set (`src/domain/worker-coordination.ts:91-95`).
