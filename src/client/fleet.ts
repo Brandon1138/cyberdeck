@@ -17,6 +17,7 @@ import type {
   FleetProjectRemoveResult,
 } from "../broker/fleet-project-service.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
+import { HANDOFF_LIMITS } from "../domain/worker-handoff.js";
 import type { WorkerHandoffResult } from "../orchestration/worker-handoff-service.js";
 import { provisionedWorktreeSlug } from "../domain/worker-workspace.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
@@ -1064,6 +1065,16 @@ export function transitionFleet(
     }
     const marked = handoffMarks(state);
     const workerId = selected.record.id;
+    if (!marked.includes(workerId) && marked.length >= HANDOFF_LIMITS.manifestEntries) {
+      return {
+        state: {
+          ...state,
+          helpOpen: false,
+          notice: `A handoff can include at most ${HANDOFF_LIMITS.manifestEntries} workers`,
+          noticeTone: "warning",
+        },
+      };
+    }
     const next = marked.includes(workerId)
       ? marked.filter((id) => id !== workerId)
       : [...marked, workerId];

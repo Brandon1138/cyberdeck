@@ -5031,6 +5031,45 @@ describe("directed handoff", () => {
     expect(unmarked.state.handoffMarks).toEqual([WORKER_A]);
   });
 
+  it("keeps the 64-worker handoff cap while leaving the marked batch available", () => {
+    const workerIds = Array.from(
+      { length: 65 },
+      (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    );
+    const snapshot = fleet(
+      {
+        record: session({
+          id: ORC_ID,
+          kind: "orchestrator",
+          role: "orchestrator",
+          name: "Receiving orc",
+          cwd: "/repo/one",
+        }),
+      },
+      ...workerIds.map((id, index) => ({
+        record: session({
+          id,
+          kind: "worker",
+          role: "worker",
+          name: `Worker ${index + 1}`,
+          cwd: "/repo/one",
+        }),
+      })),
+    );
+    const marked = workerIds.slice(1);
+
+    const refused = transitionFleet(
+      { ...selecting(snapshot, workerIds[0]!), handoffMarks: marked },
+      snapshot,
+      "ctrl+d",
+      NOW_MS,
+    );
+
+    expect(refused.state.handoffMarks).toEqual(marked);
+    expect(refused.state.notice).toBe("A handoff can include at most 64 workers");
+    expect(refused.state.noticeTone).toBe("warning");
+  });
+
   it("refuses to mark an orchestrator, which receives handoffs rather than being one", () => {
     const snapshot = handoffFleet();
     const refused = transitionFleet(selecting(snapshot, ORC_ID), snapshot, "ctrl+d", NOW_MS);
