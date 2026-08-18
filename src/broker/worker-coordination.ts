@@ -2016,11 +2016,13 @@ function hashHandoffRequest(input: HandoffBatchInput): string {
     recipient,
     recipientSessionId: input.recipientSessionId,
     directive: input.directive,
-    // `register` is broker-derived bootstrap material for a manual worker, not part of the
-    // operator's stable handoff request. After the first transaction commits, the same retry is
-    // rebuilt from the now-present subject without `register`; including it here would turn a lost
-    // response into MUTATION_ID_COLLISION instead of replaying the receipt.
-    members: input.members.map(({ subjectId, name }) => ({ subjectId, name: name ?? null })),
+    // Members are hashed as bare subject ids. Everything else a member carries is broker-derived:
+    // `register` is bootstrap material for a manual worker, and `name` is the session registry's
+    // own mutable name, which a rename changes and a deregistration removes. Only the operator's
+    // request is stable across a retry, so only the operator's request may key one — hashing
+    // broker state would turn a lost response into MUTATION_ID_COLLISION instead of replaying the
+    // committed receipt. Both still travel in the batch and reach the manifest; neither keys it.
+    members: input.members.map(({ subjectId }) => subjectId),
     reason: input.reason,
     handoffId: input.handoffId ?? null,
   })).digest("hex");

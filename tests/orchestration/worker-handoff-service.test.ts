@@ -480,4 +480,33 @@ describe("WorkerHandoffService", () => {
     expect(second.handoffId).toBe(first.handoffId);
     expect(bench.coordination.getSubject(workerId)?.lease.version).toBe(2);
   });
+
+  it("replays a repeated mutation id after a member was renamed or left the registry", async () => {
+    const bench = await harness();
+    const renamed = bench.addSession({ name: "docs sweep" });
+    const departed = bench.addSession({ name: "test sweep" });
+    await bench.register({ workerId: renamed, controllerId: "orchestrator:workspace:/other" });
+    await bench.register({ workerId: departed, controllerId: "orchestrator:workspace:/other" });
+    const request = {
+      recipientSessionId: ORC,
+      workerIds: [renamed, departed],
+      directive: "take them once",
+      mutationId: "operator-handoff-renamed",
+    };
+
+    const first = await bench.handoff.handoff(request);
+    expect(first.committed).toBe(true);
+
+    // The retry answers a lost response, not a changed request: the operator named the same
+    // workers, and what moved underneath is the broker's own bookkeeping about them.
+    bench.sessions.set(renamed, { ...bench.sessions.get(renamed)!, name: "renamed sweep" });
+    bench.sessions.delete(departed);
+
+    const second = await bench.handoff.handoff(request);
+
+    expect(second.committed).toBe(true);
+    expect(second.handoffId).toBe(first.handoffId);
+    expect(bench.coordination.getSubject(renamed)?.lease.version).toBe(2);
+    expect(bench.coordination.listHandoffs()).toHaveLength(1);
+  });
 });

@@ -233,6 +233,45 @@ describe("WorkerCoordinationService ownership", () => {
     }
   });
 
+  it("replays a committed handoff when the broker's own name for a member changed", async () => {
+    const { service } = await harness();
+    const source = controller("renamed-source");
+    const recipient = controller("renamed-recipient");
+    const first = await register(service, { owner: source });
+    const second = await register(service, { owner: source });
+    const request = {
+      mutationId: "renamed-member-handoff",
+      actor: controller("handoff-operator"),
+      recipient,
+      recipientSessionId: "33333333-3333-4333-8333-333333333333",
+      directive: "Keep both going",
+      members: [
+        { subjectId: first.workerId, name: "docs sweep" },
+        { subjectId: second.workerId, name: "test sweep" },
+      ],
+      reason: "operator directed handoff",
+    };
+
+    const committed = await service.handoffBatch(request);
+    expect(committed.committed).toBe(true);
+
+    // A worker renamed after the first commit, and one that dropped out of the session registry
+    // altogether so the retry can no longer name it: neither is part of what the operator asked
+    // for, so neither may turn a retry of the same mutation into a collision.
+    for (const members of [
+      [
+        { subjectId: first.workerId, name: "renamed sweep" },
+        { subjectId: second.workerId, name: "test sweep" },
+      ],
+      [{ subjectId: first.workerId }, { subjectId: second.workerId }],
+    ]) {
+      await expect(service.handoffBatch({ ...request, members })).resolves.toEqual({
+        ...committed,
+        idempotentReplay: true,
+      });
+    }
+  });
+
   it("turns broker-observed abrupt death into orphan then allows adoption", async () => {
     const { service, advance } = await harness({ gracePeriodMs: 5_000, leaseDurationMs: 60_000 });
     const owner = controller("dead");
