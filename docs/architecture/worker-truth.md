@@ -112,10 +112,3 @@ Delivery claims are backed by a provider turn or reported as undelivered. There 
 
 They read the same `SessionRegistry.workerTruth`, which is what stops them contradicting each other.
 
-## Deferred
-
-Capability symmetry for `fleet:peer` bindings is not addressed here. A peer binding is currently
-allowed `thread.enqueue` while `worker_ctl` and `worker_events` refuse it with
-`NO_STABLE_CONTROLLER_IDENTITY`, so a worker's own `cyberdeck_signal_exception` can be rejected with
-`OWNERSHIP_LOST` while its orchestrator is still able to message it. That is an authorization
-decision, not a truth-projection one, and half-changing it is worse than leaving it visible.

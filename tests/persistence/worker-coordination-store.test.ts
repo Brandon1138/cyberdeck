@@ -52,6 +52,7 @@ describe("WorkerCoordinationStore and migration", () => {
     const parentSessionId = crypto.randomUUID();
     await orchestrators.put({
       key: "workspace:/tmp/repo",
+      kind: "primary",
       sessionId: parentSessionId,
       provider: "codex",
       model: "gpt-5.6-sol",

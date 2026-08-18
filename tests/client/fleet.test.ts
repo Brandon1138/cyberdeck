@@ -28,6 +28,7 @@ import type { PasteboardImageResult } from "../../src/client/clipboard-image.js"
 import { displayWidth } from "../../src/client/display-width.js";
 import type { PullRequestState, PullRequestSummary } from "../../src/client/pr-status.js";
 import type { FleetWorkerCoordinationView } from "../../src/broker/worker-coordination-view.js";
+import { HANDOFF_LIMITS } from "../../src/domain/worker-handoff.js";
 
 const NOW = "2026-07-22T10:00:00.000Z";
 const NOW_MS = Date.parse(NOW);
@@ -2687,7 +2688,7 @@ describe("fleet controls", () => {
       width: 100,
       height: 24,
     });
-    expect(rendered).toContain("2-4 of 6");
+    expect(rendered).toContain("2-4 of 7");
     expect(rendered).not.toContain("/model  ");
 
     expect(transitionFleet(fourth.state, snapshot, "escape", NOW_MS).state)
@@ -4962,6 +4963,708 @@ describe("fleet repaint", () => {
     }
     // Same cell in every frame: the streaming rows above the composer never shift it.
     expect(rows.size).toBe(1);
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+});
+
+describe("directed handoff", () => {
+  const ORC_ID = "99999999-0000-4000-8000-000000000001";
+  const WORKER_A = "00000000-0000-4000-8000-00000000000a";
+  const WORKER_B = "00000000-0000-4000-8000-00000000000b";
+
+  /** One live orc and two workers, with the first worker selected. */
+  function handoffFleet(overrides: Partial<SessionRecord> = {}): FleetSnapshot {
+    return fleet(
+      {
+        record: session({
+          id: ORC_ID,
+          kind: "orchestrator",
+          role: "orchestrator",
+          name: "Receiving orc",
+          cwd: "/repo/one",
+          ...overrides,
+        }),
+      },
+      {
+        record: session({
+          id: WORKER_A,
+          kind: "worker",
+          role: "worker",
+          name: "Alpha worker",
+          cwd: "/repo/one",
+        }),
+      },
+      {
+        record: session({
+          id: WORKER_B,
+          kind: "worker",
+          role: "worker",
+          name: "Bravo worker",
+          cwd: "/repo/one",
+        }),
+      },
+    );
+  }
+
+  /** The same fleet with one worker having exited under the operator. */
+  function exiting(snapshot: FleetSnapshot, sessionId: string): FleetSnapshot {
+    return fleet(...snapshot.threads.map(({ record }) => ({
+      record: record.id === sessionId
+        ? { ...record, executionState: "exited" as const, exitCode: 0 }
+        : record,
+    })));
+  }
+
+  function selecting(snapshot: FleetSnapshot, sessionId: string): FleetState {
+    return { ...createFleetState(snapshot), selectedSessionId: sessionId };
+  }
+
+  it("marks and unmarks the focused worker with ctrl+d", () => {
+    const snapshot = handoffFleet();
+    const marked = transitionFleet(selecting(snapshot, WORKER_A), snapshot, "ctrl+d", NOW_MS);
+
+    expect(marked.state.handoffMarks).toEqual([WORKER_A]);
+    expect(marked.state.notice).toBe("1 worker marked · /handoff to send");
+
+    const both = transitionFleet(
+      { ...marked.state, selectedSessionId: WORKER_B },
+      snapshot,
+      "ctrl+d",
+      NOW_MS,
+    );
+    expect(both.state.handoffMarks).toEqual([WORKER_A, WORKER_B]);
+    expect(both.state.notice).toBe("2 workers marked · /handoff to send");
+
+    const unmarked = transitionFleet(both.state, snapshot, "ctrl+d", NOW_MS);
+    expect(unmarked.state.handoffMarks).toEqual([WORKER_A]);
+  });
+
+  it("keeps the 64-worker handoff cap while leaving the marked batch available", () => {
+    const workerIds = Array.from(
+      { length: 65 },
+      (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    );
+    const snapshot = fleet(
+      {
+        record: session({
+          id: ORC_ID,
+          kind: "orchestrator",
+          role: "orchestrator",
+          name: "Receiving orc",
+          cwd: "/repo/one",
+        }),
+      },
+      ...workerIds.map((id, index) => ({
+        record: session({
+          id,
+          kind: "worker",
+          role: "worker",
+          name: `Worker ${index + 1}`,
+          cwd: "/repo/one",
+        }),
+      })),
+    );
+    const marked = workerIds.slice(1);
+
+    const refused = transitionFleet(
+      { ...selecting(snapshot, workerIds[0]!), handoffMarks: marked },
+      snapshot,
+      "ctrl+d",
+      NOW_MS,
+    );
+
+    expect(refused.state.handoffMarks).toEqual(marked);
+    expect(refused.state.notice).toBe("A handoff can include at most 64 workers");
+    expect(refused.state.noticeTone).toBe("warning");
+  });
+
+  it("refuses to mark an orchestrator, which receives handoffs rather than being one", () => {
+    const snapshot = handoffFleet();
+    const refused = transitionFleet(selecting(snapshot, ORC_ID), snapshot, "ctrl+d", NOW_MS);
+
+    expect(refused.state.handoffMarks).toBeUndefined();
+    expect(refused.state.notice).toBe("An orchestrator receives a handoff; it is not marked for one");
+  });
+
+  it("refuses to mark a terminal worker", () => {
+    const snapshot = handoffFleet();
+    const terminalSnapshot = fleet(...snapshot.threads.map(({ record }) => ({
+      record: record.id === WORKER_A
+        ? { ...record, executionState: "exited" as const, exitCode: 0 }
+        : record,
+    })));
+
+    const refused = transitionFleet(
+      selecting(terminalSnapshot, WORKER_A),
+      terminalSnapshot,
+      "ctrl+d",
+      NOW_MS,
+    );
+
+    expect(refused.state.handoffMarks).toBeUndefined();
+    expect(refused.state.notice).toBe("A terminal worker cannot be handed off");
+    expect(refused.state.noticeTone).toBe("warning");
+  });
+
+  it("shows the mark in the gutter without moving any column", () => {
+    const snapshot = handoffFleet();
+    const plain = renderFleet(snapshot, selecting(snapshot, WORKER_A), {
+      color: false, width: 150, height: 40, now: NOW_MS, home: "/Users/brandon",
+    });
+    const marked = renderFleet(
+      snapshot,
+      transitionFleet(selecting(snapshot, WORKER_A), snapshot, "ctrl+d", NOW_MS).state,
+      { color: false, width: 150, height: 40, now: NOW_MS, home: "/Users/brandon" },
+    );
+    const rowOf = (rendered: string) =>
+      rendered.split("\n").find((line) => line.includes("Alpha worker"))!;
+
+    expect(rowOf(marked)).toContain("✓");
+    expect(rowOf(plain)).not.toContain("✓");
+    // The mark rides in the gutter cell that was always blank, so the row is the same width and
+    // every column after it lands in the same place.
+    expect(displayWidth(rowOf(marked))).toBe(displayWidth(rowOf(plain)));
+    expect(rowOf(marked).indexOf("Alpha worker")).toBe(rowOf(plain).indexOf("Alpha worker"));
+  });
+
+  it("drops a mark whose worker has gone away", () => {
+    const snapshot = handoffFleet();
+    const marked = transitionFleet(selecting(snapshot, WORKER_A), snapshot, "ctrl+d", NOW_MS).state;
+    const withoutAlpha = fleet(
+      ...snapshot.threads.filter(({ record }) => record.id !== WORKER_A)
+        .map(({ record }) => ({ record })),
+    );
+
+    const after = transitionFleet(marked, withoutAlpha, "ctrl+l", NOW_MS);
+    expect(after.state.handoffMarks).toEqual([]);
+  });
+
+  it("drops a mark when a live worker becomes terminal", () => {
+    const snapshot = handoffFleet();
+    const marked = transitionFleet(selecting(snapshot, WORKER_A), snapshot, "ctrl+d", NOW_MS).state;
+    const terminalSnapshot = fleet(...snapshot.threads.map(({ record }) => ({
+      record: record.id === WORKER_A
+        ? { ...record, executionState: "exited" as const, exitCode: 0 }
+        : record,
+    })));
+
+    const after = transitionFleet(marked, terminalSnapshot, "ctrl+l", NOW_MS);
+    expect(after.state.handoffMarks).toEqual([]);
+  });
+
+  it("walks /handoff from the marked batch to a recipient and a directive", () => {
+    const snapshot = handoffFleet();
+    const marked = transitionFleet(selecting(snapshot, WORKER_A), snapshot, "ctrl+d", NOW_MS).state;
+    const opened = transitionFleet({ ...marked, draft: "/handoff" }, snapshot, "enter", NOW_MS);
+
+    expect(opened.state.handoffPicker).toEqual({
+      step: "recipient",
+      workerIds: [WORKER_A],
+      focusSessionId: ORC_ID,
+    });
+    expect(opened.state.draft).toBe("");
+
+    const rendered = renderFleet(snapshot, opened.state, {
+      color: false, width: 120, height: 30, now: NOW_MS, home: "/Users/brandon",
+    });
+    expect(rendered).toContain("Handoff  1 of 2");
+    expect(rendered).toContain("Workers (1)");
+    expect(rendered).toContain("Alpha worker");
+    expect(rendered).toContain("Receiving orc");
+
+    const chosen = transitionFleet(opened.state, snapshot, "enter", NOW_MS);
+    expect(chosen.state.handoffPicker).toEqual({
+      step: "directive",
+      workerIds: [WORKER_A],
+      recipientSessionId: ORC_ID,
+      draft: "",
+      mutationId: expect.any(String),
+    });
+    const mutationId = chosen.state.handoffPicker?.step === "directive"
+      ? chosen.state.handoffPicker.mutationId
+      : undefined;
+    expect(mutationId).toBeDefined();
+
+    let typing = chosen;
+    for (const character of "Rebase it") {
+      typing = transitionFleet(typing.state, snapshot, character, NOW_MS);
+    }
+    expect(renderFleet(snapshot, typing.state, {
+      color: false, width: 120, height: 30, now: NOW_MS, home: "/Users/brandon",
+    })).toContain("Directive for Receiving orc");
+
+    const sent = transitionFleet(typing.state, snapshot, "enter", NOW_MS);
+    expect(sent.action).toEqual({
+      type: "handoff",
+      workerIds: [WORKER_A],
+      recipientSessionId: ORC_ID,
+      directive: "Rebase it",
+      mutationId,
+    });
+    // The marks stay until the broker says the transfer committed.
+    expect(sent.state.handoffMarks).toEqual([WORKER_A]);
+    expect(sent.state.handoffPicker).toBeUndefined();
+  });
+
+  it("drops a worker that exits while the picker is open, keeping the directive typed", () => {
+    const snapshot = handoffFleet();
+    const first = transitionFleet(selecting(snapshot, WORKER_A), snapshot, "ctrl+d", NOW_MS).state;
+    const marked = transitionFleet(
+      { ...first, selectedSessionId: WORKER_B },
+      snapshot,
+      "ctrl+d",
+      NOW_MS,
+    ).state;
+    const opened = transitionFleet({ ...marked, draft: "/handoff" }, snapshot, "enter", NOW_MS);
+    const chosen = transitionFleet(opened.state, snapshot, "enter", NOW_MS);
+    let typing = chosen;
+    for (const character of "Rebase it") {
+      typing = transitionFleet(typing.state, snapshot, character, NOW_MS);
+    }
+
+    // Alpha exits with the directive already typed and the picker still open.
+    const exited = exiting(snapshot, WORKER_A);
+    const sent = transitionFleet(typing.state, exited, "enter", NOW_MS);
+
+    expect(sent.action).toMatchObject({
+      type: "handoff",
+      workerIds: [WORKER_B],
+      directive: "Rebase it",
+    });
+    expect(sent.state.notice).toBe("A terminal worker cannot be handed off; 1 dropped from this handoff");
+    expect(sent.state.noticeTone).toBe("warning");
+  });
+
+  it("closes the picker when every worker in the batch turns terminal", () => {
+    const snapshot = handoffFleet();
+    const opened = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+    const chosen = transitionFleet(opened.state, snapshot, "enter", NOW_MS);
+    let typing = chosen;
+    for (const character of "Rebase it") {
+      typing = transitionFleet(typing.state, snapshot, character, NOW_MS);
+    }
+
+    const exited = exiting(snapshot, WORKER_A);
+    const sent = transitionFleet(typing.state, exited, "enter", NOW_MS);
+
+    expect(sent.action).toBeUndefined();
+    expect(sent.state.handoffPicker).toBeUndefined();
+    expect(sent.state.notice).toBe("A terminal worker cannot be handed off");
+    expect(sent.state.noticeTone).toBe("warning");
+  });
+
+  it("closes the picker at recipient selection when the batch has gone terminal", () => {
+    const snapshot = handoffFleet();
+    const opened = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+    expect(opened.state.handoffPicker).toMatchObject({ step: "recipient" });
+
+    const exited = exiting(snapshot, WORKER_A);
+    const advanced = transitionFleet(opened.state, exited, "enter", NOW_MS);
+
+    expect(advanced.state.handoffPicker).toBeUndefined();
+    expect(advanced.state.notice).toBe("A terminal worker cannot be handed off");
+  });
+
+  it("falls back to the selected worker when nothing is marked", () => {
+    const snapshot = handoffFleet();
+    const opened = transitionFleet(
+      { ...selecting(snapshot, WORKER_B), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+    expect(opened.state.handoffPicker).toMatchObject({ workerIds: [WORKER_B] });
+  });
+
+  it("refuses /handoff with an orchestrator selected and nothing marked", () => {
+    const snapshot = handoffFleet();
+    const refused = transitionFleet(
+      { ...selecting(snapshot, ORC_ID), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+    expect(refused.state.handoffPicker).toBeUndefined();
+    expect(refused.state.notice).toBe("Mark workers with ctrl+d, or select one, before /handoff");
+  });
+
+  it("refuses /handoff falling back to a terminal worker, keeping the directive unasked", () => {
+    const snapshot = handoffFleet();
+    const terminalSnapshot = fleet(...snapshot.threads.map(({ record }) => ({
+      record: record.id === WORKER_A
+        ? { ...record, executionState: "exited" as const, exitCode: 0 }
+        : record,
+    })));
+
+    const refused = transitionFleet(
+      { ...selecting(terminalSnapshot, WORKER_A), draft: "/handoff" },
+      terminalSnapshot,
+      "enter",
+      NOW_MS,
+    );
+
+    expect(refused.state.handoffPicker).toBeUndefined();
+    // The same answer ctrl+d gives, rather than two picker steps and a typed directive the broker
+    // would then throw away.
+    expect(refused.state.notice).toBe("A terminal worker cannot be handed off");
+    expect(refused.state.noticeTone).toBe("warning");
+  });
+
+  it("refuses /handoff when no orchestrator is live to receive it", () => {
+    const snapshot = handoffFleet({ executionState: "exited", exitCode: 0 });
+    const refused = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+    expect(refused.state.handoffPicker).toBeUndefined();
+    expect(refused.state.notice).toBe("No live orchestrator to receive a handoff");
+  });
+
+  it("filters workspace-scoped recipients that do not cover every worker cwd", () => {
+    const snapshot = handoffFleet({
+      orchestratorScope: "workspace",
+      cwd: "/repo/two",
+    });
+    const refused = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+
+    expect(refused.state.handoffPicker).toBeUndefined();
+    expect(refused.state.notice).toBe("No live orchestrator covers every worker workspace");
+  });
+
+  it("offers a fleet-scoped recipient regardless of worker cwd", () => {
+    const snapshot = handoffFleet({
+      orchestratorScope: "fleet",
+      cwd: "/repo/two",
+    });
+    const opened = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+
+    expect(opened.state.handoffPicker).toMatchObject({ focusSessionId: ORC_ID });
+  });
+
+  it("refuses an empty directive and backs out one step at a time", () => {
+    const snapshot = handoffFleet();
+    const opened = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+    const directive = transitionFleet(opened.state, snapshot, "enter", NOW_MS);
+
+    const empty = transitionFleet(directive.state, snapshot, "enter", NOW_MS);
+    expect(empty.action).toBeUndefined();
+    expect(empty.state.notice).toBe("A handoff needs a directive");
+
+    const back = transitionFleet(empty.state, snapshot, "escape", NOW_MS);
+    expect(back.state.handoffPicker).toMatchObject({ step: "recipient", focusSessionId: ORC_ID });
+
+    const closed = transitionFleet(back.state, snapshot, "escape", NOW_MS);
+    expect(closed.state.handoffPicker).toBeUndefined();
+    // Backing out of the gesture never unmarks what the operator marked.
+    expect(closed.state.handoffMarks).toBeUndefined();
+  });
+
+  it("keeps an overlong directive in the picker for correction", () => {
+    const snapshot = handoffFleet();
+    const opened = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+    const directive = transitionFleet(opened.state, snapshot, "enter", NOW_MS);
+    const draft = "x".repeat(HANDOFF_LIMITS.directiveChars + 1);
+    const refused = transitionFleet({
+      ...directive.state,
+      handoffPicker: {
+        step: "directive",
+        workerIds: [WORKER_A],
+        recipientSessionId: ORC_ID,
+        draft,
+        mutationId: "handoff-overlong",
+      },
+    }, snapshot, "enter", NOW_MS);
+
+    expect(refused.action).toBeUndefined();
+    expect(refused.state.handoffPicker).toMatchObject({ step: "directive", draft });
+    expect(refused.state.notice).toBe(
+      `A handoff directive can contain at most ${HANDOFF_LIMITS.directiveChars} characters`,
+    );
+    expect(refused.state.noticeTone).toBe("error");
+  });
+
+  it("performs the handoff through the broker and clears the marks it committed", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    const snapshot = handoffFleet();
+    const records = snapshot.threads.map(({ record }) => record);
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return records;
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "fleet.preferences") return {};
+        if (method === "fleet.folderDispositions") return {};
+        if (method === "fleet.workerHandoff") {
+          return {
+            committed: true,
+            recipientSessionId: ORC_ID,
+            recipientControllerId: "orchestrator:fleet",
+            handoffId: "77777777-7777-4777-8777-777777777777",
+            directive: "Rebase it",
+            transferred: [{ workerId: WORKER_A, code: "TRANSFERRED" }],
+            blocked: [],
+            delivery: "delivered",
+          };
+        }
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose: vi.fn(() => () => undefined),
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport as never, input as never, output as never, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    // Focus starts on the orc row, so the mark chord has to walk down past the folder header.
+    input.emit("data", Buffer.from("\u001b[B"));
+    input.emit("data", Buffer.from("\u001b[B"));
+    input.emit("data", Buffer.from([0x04]));
+    await vi.waitFor(() => expect(
+      Buffer.concat(output.chunks).toString("utf8"),
+    ).toContain("1 worker marked"));
+
+    input.emit("data", Buffer.from("/handoff"));
+    input.emit("data", Buffer.from("\r"));
+    await vi.waitFor(() => expect(
+      Buffer.concat(output.chunks).toString("utf8"),
+    ).toContain("Handoff  1 of 2"));
+
+    input.emit("data", Buffer.from("\r"));
+    input.emit("data", Buffer.from("Rebase it"));
+    input.emit("data", Buffer.from("\r"));
+
+    await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("fleet.workerHandoff", {
+      recipientSessionId: ORC_ID,
+      workerIds: [WORKER_A],
+      directive: "Rebase it",
+      mutationId: expect.any(String),
+    }));
+    await vi.waitFor(() => {
+      const screen = Buffer.concat(output.chunks).toString("utf8");
+      expect(screen).toContain("1 worker handed off");
+      // The mark is spent with the transfer, so the row goes back to plain. The newest frame is
+      // the one that matters: every earlier one is still in the accumulated output.
+      expect(screen.split("\n").filter((line) => line.includes("Alpha worker")).at(-1))
+        .not.toContain("✓");
+    });
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("retries a transport-failed handoff with the same directive and mutation id", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    const snapshot = handoffFleet();
+    const records = snapshot.threads.map(({ record }) => record);
+    const handoffRequests: Array<Record<string, unknown>> = [];
+    const transport = {
+      request: vi.fn(async (method: string, params?: Record<string, unknown>) => {
+        if (method === "session.list") return records;
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "fleet.preferences") return {};
+        if (method === "fleet.folderDispositions") return {};
+        if (method === "fleet.workerHandoff") {
+          handoffRequests.push(params ?? {});
+          if (handoffRequests.length === 1) throw new Error("connection reset");
+          return {
+            committed: true,
+            recipientSessionId: ORC_ID,
+            recipientControllerId: "orchestrator:fleet",
+            handoffId: "77777777-7777-4777-8777-777777777777",
+            directive: "Rebase it",
+            transferred: [{ workerId: WORKER_A, code: "TRANSFERRED" }],
+            blocked: [],
+            delivery: "delivered",
+          };
+        }
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose: vi.fn(() => () => undefined),
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport as never, input as never, output as never, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("\u001b[B"));
+    input.emit("data", Buffer.from("\u001b[B"));
+    input.emit("data", Buffer.from([0x04]));
+    input.emit("data", Buffer.from("/handoff"));
+    input.emit("data", Buffer.from("\r"));
+    await vi.waitFor(() => expect(
+      Buffer.concat(output.chunks).toString("utf8"),
+    ).toContain("Handoff  1 of 2"));
+    input.emit("data", Buffer.from("\r"));
+    input.emit("data", Buffer.from("Rebase it"));
+    input.emit("data", Buffer.from("\r"));
+
+    await vi.waitFor(() => expect(handoffRequests).toHaveLength(1));
+    await vi.waitFor(() => expect(
+      Buffer.concat(output.chunks).toString("utf8"),
+    ).toContain("connection reset"));
+    input.emit("data", Buffer.from("\r"));
+
+    await vi.waitFor(() => expect(handoffRequests).toHaveLength(2));
+    expect(handoffRequests[1]).toEqual(handoffRequests[0]);
+    expect(handoffRequests[1]).toMatchObject({
+      recipientSessionId: ORC_ID,
+      workerIds: [WORKER_A],
+      directive: "Rebase it",
+      mutationId: expect.any(String),
+    });
+    await vi.waitFor(() => expect(
+      Buffer.concat(output.chunks).toString("utf8"),
+    ).toContain("1 worker handed off"));
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("keeps the marks and says why when the broker refuses the batch", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    const snapshot = handoffFleet();
+    const records = snapshot.threads.map(({ record }) => record);
+    const transport = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return records;
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "fleet.preferences") return {};
+        if (method === "fleet.folderDispositions") return {};
+        if (method === "fleet.workerHandoff") {
+          return {
+            committed: false,
+            recipientSessionId: ORC_ID,
+            directive: "Rebase it",
+            transferred: [],
+            blocked: [{
+              workerId: WORKER_A,
+              code: "WORKER_TERMINAL",
+              detail: "Worker already finished",
+            }],
+            delivery: "not-attempted",
+          };
+        }
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose: vi.fn(() => () => undefined),
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport as never, input as never, output as never, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("\u001b[B"));
+    input.emit("data", Buffer.from("\u001b[B"));
+    input.emit("data", Buffer.from([0x04]));
+    input.emit("data", Buffer.from("/handoff"));
+    input.emit("data", Buffer.from("\r"));
+    await vi.waitFor(() => expect(
+      Buffer.concat(output.chunks).toString("utf8"),
+    ).toContain("Handoff  1 of 2"));
+    input.emit("data", Buffer.from("\r"));
+    input.emit("data", Buffer.from("Rebase it"));
+    input.emit("data", Buffer.from("\r"));
+
+    await vi.waitFor(() => {
+      const screen = Buffer.concat(output.chunks).toString("utf8");
+      expect(screen).toContain("Handoff refused · Worker already finished");
+      // Nothing moved, so the operator still holds exactly the batch they marked.
+      expect(screen.split("\n").filter((line) => line.includes("Alpha worker")).at(-1))
+        .toContain("✓");
+    });
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();

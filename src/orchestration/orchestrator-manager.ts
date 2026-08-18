@@ -3,7 +3,9 @@ import {
   CreateOrchestratorRequestSchema,
   EnsureOrchestratorRequestSchema,
   FableWorkersRequestSchema,
+  ORCHESTRATOR_GRANT_CAPABILITIES,
   orchestratorKey,
+  peerOrchestratorKey,
   type CavemanWorkersRequest,
   type CavemanWorkersResult,
   type CreateOrchestratorRequest,
@@ -169,7 +171,8 @@ export class OrchestratorManager {
       }, undefined, async (started) => {
         const now = new Date().toISOString();
         binding = {
-          key: peer ? `${primaryKey}:peer:${started.id}` : primaryKey,
+          key: peer ? peerOrchestratorKey(primaryKey, started.id) : primaryKey,
+          kind: peer ? "peer" : "primary",
           sessionId: started.id,
           provider: request.provider,
           ...(request.model === undefined ? {} : { model: request.model }),
@@ -179,15 +182,7 @@ export class OrchestratorManager {
           scope,
           grant: {
             subjectSessionId: started.id,
-            capabilities: [
-              "thread.list",
-              "thread.read",
-              "thread.enqueue",
-              "worker.start",
-              "orchestrator.inspect",
-              "orchestrator.stop",
-              "workflow.run",
-            ],
+            capabilities: [...ORCHESTRATOR_GRANT_CAPABILITIES],
             scope,
           },
           createdAt: now,

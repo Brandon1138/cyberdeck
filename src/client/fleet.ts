@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type {
@@ -17,6 +18,8 @@ import type {
   FleetProjectRemoveResult,
 } from "../broker/fleet-project-service.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../domain/session.js";
+import { HANDOFF_LIMITS } from "../domain/worker-handoff.js";
+import type { WorkerHandoffResult } from "../orchestration/worker-handoff-service.js";
 import { provisionedWorktreeSlug } from "../domain/worker-workspace.js";
 import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
 import {
@@ -174,6 +177,25 @@ export type OrchestratorPickerState =
   }
   | { step: "effort"; modelIndex: number; effortIndex: number };
 
+/**
+ * The directed handoff, in the two answers it needs: which orchestrator receives the marked
+ * workers, and what it is told to do with them.
+ *
+ * The batch is held here rather than re-read from the marks at the moment of dispatch, so a worker
+ * finishing or a snapshot arriving while the operator is typing cannot quietly change what they
+ * are about to hand over. Both the recipient and the members are ids for the same reason the
+ * orchestrator picker's focus is: the list underneath re-sorts.
+ */
+export type HandoffPickerState =
+  | { step: "recipient"; workerIds: readonly string[]; focusSessionId?: string | undefined }
+  | {
+    step: "directive";
+    workerIds: readonly string[];
+    recipientSessionId: string;
+    draft: string;
+    mutationId: string;
+  };
+
 export interface LaunchProfile {
   provider: ProviderId;
   model: string;
@@ -281,6 +303,13 @@ export interface FleetState {
   deleteConfirmation?: DeleteConfirmation | undefined;
   quitConfirmation?: QuitConfirmation | undefined;
   orchestratorPicker?: OrchestratorPickerState | undefined;
+  /**
+   * Workers marked for a directed handoff, by session id. Membership survives snapshot churn and
+   * is dropped only when the session itself does, so a mark never names a worker the broker would
+   * have to refuse.
+   */
+  handoffMarks?: readonly string[] | undefined;
+  handoffPicker?: HandoffPickerState | undefined;
   workerPicker?: WorkerPickerState | undefined;
   commandPalette?: CommandPaletteState | undefined;
   permissionPicker?: PermissionPickerState | undefined;
@@ -336,6 +365,13 @@ export type FleetAction =
   | { type: "reorder"; sessionId: string; direction: "up" | "down" }
   | { type: "profile"; cwd: string; profile: LaunchProfile }
   | { type: "worker-capabilities" }
+  | {
+    type: "handoff";
+    workerIds: readonly string[];
+    recipientSessionId: string;
+    directive: string;
+    mutationId: string;
+  }
   | { type: "folder-disposition"; cwd: string; disposition: FolderDisposition }
   | {
     type: "permission-policy";
@@ -417,7 +453,8 @@ type SlashCommandName =
   | "/fable-workers"
   | "/caveman-workers"
   | "/nvim-settings"
-  | "/worktree";
+  | "/worktree"
+  | "/handoff";
 
 interface SlashCommandDefinition {
   name: SlashCommandName;
@@ -573,6 +610,10 @@ const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
     ],
   },
   {
+    name: "/handoff",
+    description: "Hand the marked workers to an orchestrator with a directive",
+  },
+  {
     name: "/worktree",
     description: "Inspect or toggle per-worker worktrees for this folder",
     values: [
@@ -714,6 +755,8 @@ const ANSI = {
 
 /** Gutter cell that prefixes every navigable row; carries the selection rule. */
 const SELECTION_RULE = "▌";
+/** One cell wide, so a marked row and an unmarked one still measure the same. */
+const HANDOFF_MARK = "✓";
 const ROW_GUTTER = "  ";
 
 export async function collectFleetSnapshot(client: FleetTransport): Promise<FleetSnapshot> {
@@ -921,6 +964,10 @@ export function transitionFleet(
     return transitionCommandPalette(state, snapshot, key);
   }
 
+  if (state.handoffPicker !== undefined) {
+    return transitionHandoffPicker(state, snapshot, key);
+  }
+
   if (key === "ctrl+o") {
     return {
       state: {
@@ -995,6 +1042,69 @@ export function transitionFleet(
         leaseDetail: state.leaseDetail !== true,
         helpOpen: false,
         notice: undefined,
+      },
+    };
+  }
+
+  // Ctrl+D, not the Ctrl+B a "batch" would suggest: Ctrl+B is tmux's own prefix, so a pane's
+  // application never sees the byte. Marking is deliberately a toggle on the focused row rather
+  // than a range gesture — the fleet list re-sorts under the operator, and a range would then mean
+  // something different one frame later.
+  if (key === "ctrl+d") {
+    if (selected === undefined) {
+      return {
+        state: {
+          ...state,
+          helpOpen: false,
+          notice: "Select a worker to mark it for handoff",
+          noticeTone: "warning",
+        },
+      };
+    }
+    if (selected.record.kind === "orchestrator") {
+      return {
+        state: {
+          ...state,
+          helpOpen: false,
+          notice: "An orchestrator receives a handoff; it is not marked for one",
+          noticeTone: "warning",
+        },
+      };
+    }
+    if (isTerminalSession(selected.record)) {
+      return {
+        state: {
+          ...state,
+          helpOpen: false,
+          notice: TERMINAL_HANDOFF_REFUSAL,
+          noticeTone: "warning",
+        },
+      };
+    }
+    const marked = handoffMarks(state);
+    const workerId = selected.record.id;
+    if (!marked.includes(workerId) && marked.length >= HANDOFF_LIMITS.manifestEntries) {
+      return {
+        state: {
+          ...state,
+          helpOpen: false,
+          notice: `A handoff can include at most ${HANDOFF_LIMITS.manifestEntries} workers`,
+          noticeTone: "warning",
+        },
+      };
+    }
+    const next = marked.includes(workerId)
+      ? marked.filter((id) => id !== workerId)
+      : [...marked, workerId];
+    return {
+      state: {
+        ...state,
+        handoffMarks: next,
+        helpOpen: false,
+        notice: next.length === 0
+          ? "No workers marked for handoff"
+          : `${next.length} worker${next.length === 1 ? "" : "s"} marked · /handoff to send`,
+        noticeTone: "neutral",
       },
     };
   }
@@ -1178,6 +1288,9 @@ export function transitionFleet(
     if (initialPrompt === "/permissions") {
       return openPermissionPicker(state, snapshot);
     }
+    if (initialPrompt === "/handoff") {
+      return openHandoffPicker(state, snapshot);
+    }
     if (initialPrompt === "") {
       return {
         state: { ...state, deleteConfirmation: undefined, notice: undefined },
@@ -1192,6 +1305,7 @@ export function transitionFleet(
     if (workerPolicy !== undefined) return workerPolicy;
     if (initialPrompt === "/model") return openWorkerPicker(state, snapshot, "");
     if (initialPrompt === "/permissions") return openPermissionPicker(state, snapshot);
+    if (initialPrompt === "/handoff") return openHandoffPicker(state, snapshot);
     return startTransition(state, undefined, initialPrompt);
   }
   if (
@@ -1332,6 +1446,9 @@ export function renderFleet(
   if (state.commandPalette !== undefined) {
     return renderCommandPalette(state, resolved);
   }
+  if (state.handoffPicker !== undefined) {
+    return renderHandoffPicker(snapshot, state, resolved);
+  }
   if (state.orchestratorPicker !== undefined) {
     return renderOrchestratorPicker(snapshot, state, resolved);
   }
@@ -1461,9 +1578,9 @@ function transitionCommandPalette(
         commandPalette: undefined,
         notice: undefined,
       };
-      return command.name === "/model"
-        ? openWorkerPicker(closed, snapshot, "")
-        : openPermissionPicker(closed, snapshot);
+      if (command.name === "/model") return openWorkerPicker(closed, snapshot, "");
+      if (command.name === "/handoff") return openHandoffPicker(closed, snapshot);
+      return openPermissionPicker(closed, snapshot);
     }
     const command = palette.command!;
     const value = (selected as SlashCommandValue).value;
@@ -2438,7 +2555,7 @@ function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
     "pgup/dn page", "alt+k/j half", "home/end", "shift+↑↓ reorder", "←→ fold project",
     "a add project", "d remove project", "ctrl+w switch views",
     "@ mention", "alt+1–9 open", "esc back/clear",
-    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim (folder: main checkout)", "! shell", "ctrl+s shell popup", "ctrl+t pin to top", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
+    "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim (folder: main checkout)", "! shell", "ctrl+s shell popup", "ctrl+t pin to top", "ctrl+d mark for handoff", "/handoff give marked to an orc", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
   ];
   // Wrapping by a count rather than fixed slices is what keeps the last row from silently
   // swallowing every entry added since: a new shortcut costs a row, never another key's visibility.
@@ -2448,6 +2565,366 @@ function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
     rows.push(entries.slice(index, index + perRow).join("   "));
   }
   return rows;
+}
+
+/**
+ * Why a worker cannot be handed off, wherever the operator names one.
+ *
+ * Ctrl+D and the /handoff fallback are the same claim about the same worker, so they answer it the
+ * same way rather than letting one gesture accept what the other refuses.
+ */
+const TERMINAL_HANDOFF_REFUSAL = "A terminal worker cannot be handed off";
+
+/** The marked set. Absent and empty mean the same thing everywhere this is read. */
+function handoffMarks(state: FleetState): readonly string[] {
+  return state.handoffMarks ?? [];
+}
+
+function isHandoffMarked(state: FleetState, sessionId: string): boolean {
+  return handoffMarks(state).includes(sessionId);
+}
+
+/**
+ * Whether this session is still something a handoff could move.
+ *
+ * One predicate for every place that claims a worker is handoff-able — the mark filter, the
+ * /handoff fallback, and the open picker — so a worker that goes away or exits stops being a
+ * target everywhere at once instead of surviving in whichever surface forgot to look again.
+ */
+function isHandoffEligible(threads: readonly FleetThread[], sessionId: string): boolean {
+  return threads.some(({ record }) =>
+    record.id === sessionId && record.kind !== "orchestrator" && !isTerminalSession(record));
+}
+
+/**
+ * What a handoff would move: the marked workers when there are any, otherwise the selected one.
+ *
+ * Marks win over the selection so the operator can mark a batch, move focus while reading the rest
+ * of the list, and still hand over what they marked rather than wherever the cursor came to rest.
+ * An orchestrator is never a target: it is a controller, not something one controls.
+ *
+ * The fallback is held to exactly what Ctrl+D would accept, and says so when it refuses. A terminal
+ * worker that opened the picker anyway would cost the operator both picker steps and the directive
+ * they typed, only for the broker to refuse the batch at the end of it.
+ */
+function handoffTargets(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+): { workerIds: string[]; refusal?: string } {
+  const marked = handoffMarks(state);
+  if (marked.length > 0) return { workerIds: [...marked] };
+  const selected = orderedThreads(snapshot).find(({ record }) => record.id === state.selectedSessionId);
+  if (selected === undefined || selected.record.kind === "orchestrator") return { workerIds: [] };
+  if (isTerminalSession(selected.record)) return { workerIds: [], refusal: TERMINAL_HANDOFF_REFUSAL };
+  return { workerIds: [selected.record.id] };
+}
+
+/**
+ * Orchestrators that could act on a handoff now.
+ *
+ * A stopped orchestrator would take the leases and never read the directive, so it is not offered
+ * — the broker refuses one anyway, and a picker that lists a choice the broker will reject is a
+ * worse way to learn that than not listing it.
+ */
+function liveOrchestrators(snapshot: FleetSnapshot): SessionRecord[] {
+  return existingOrchestrators(snapshot).filter((record) =>
+    record.executionState === "active" || record.executionState === "starting");
+}
+
+/** Picker hint only. Broker repeats scope validation against durable binding grant. */
+function handoffRecipients(snapshot: FleetSnapshot, workerIds: readonly string[]): SessionRecord[] {
+  const records = new Map(snapshot.threads.map(({ record }) => [record.id, record]));
+  return liveOrchestrators(snapshot).filter((recipient) =>
+    recipient.orchestratorScope === "fleet"
+    || workerIds.every((workerId) => records.get(workerId)?.cwd === recipient.cwd));
+}
+
+function openHandoffPicker(state: FleetState, snapshot: FleetSnapshot): FleetTransition {
+  const { workerIds, refusal } = handoffTargets(state, snapshot);
+  if (workerIds.length === 0) {
+    return {
+      state: {
+        ...state,
+        draft: "",
+        commandPalette: undefined,
+        notice: refusal ?? "Mark workers with ctrl+d, or select one, before /handoff",
+        noticeTone: "warning",
+      },
+    };
+  }
+  const recipients = handoffRecipients(snapshot, workerIds);
+  if (recipients.length === 0) {
+    const anyLive = liveOrchestrators(snapshot).length > 0;
+    return {
+      state: {
+        ...state,
+        draft: "",
+        commandPalette: undefined,
+        notice: anyLive
+          ? "No live orchestrator covers every worker workspace"
+          : "No live orchestrator to receive a handoff",
+        noticeTone: "warning",
+      },
+    };
+  }
+  return {
+    state: {
+      ...state,
+      draft: "",
+      commandPalette: undefined,
+      helpOpen: false,
+      notice: undefined,
+      handoffPicker: { step: "recipient", workerIds, focusSessionId: recipients[0]!.id },
+    },
+  };
+}
+
+/**
+ * Hold the open picker's batch to workers that can still be handed off.
+ *
+ * The operator agreed to a set of workers when they opened this, but a worker exiting is not the
+ * operator changing their mind — and the set outlives both picker steps, so without this a worker
+ * that dies mid-gesture reaches the broker, which refuses the whole batch and takes the typed
+ * directive with it. Newly ineligible members are dropped with the same answer ctrl+d gives, the
+ * draft and the recipient survive, and a batch with nothing left in it closes the picker.
+ */
+function transitionHandoffPicker(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  key: string,
+): FleetTransition {
+  const open = state.handoffPicker!;
+  const threads = orderedThreads(snapshot);
+  const workerIds = open.workerIds.filter((id) => isHandoffEligible(threads, id));
+  if (workerIds.length === 0) {
+    return {
+      state: {
+        ...state,
+        handoffPicker: undefined,
+        notice: TERMINAL_HANDOFF_REFUSAL,
+        noticeTone: "warning",
+      },
+    };
+  }
+  if (workerIds.length === open.workerIds.length) {
+    return transitionOpenHandoffPicker(state, snapshot, key);
+  }
+  const dropped = open.workerIds.length - workerIds.length;
+  const narrowed = { ...open, workerIds };
+  const transition = transitionOpenHandoffPicker({ ...state, handoffPicker: narrowed }, snapshot, key);
+  return {
+    ...transition,
+    state: {
+      ...transition.state,
+      // A notice the step itself raised — an empty directive, a closed picker — is the more
+      // specific answer and keeps precedence over the bookkeeping one.
+      ...(transition.state.notice === undefined
+        ? {
+          notice: `${TERMINAL_HANDOFF_REFUSAL}; ${dropped} dropped from this handoff`,
+          noticeTone: "warning" as const,
+        }
+        : {}),
+    },
+  };
+}
+
+/**
+ * The handoff picker's two steps: who receives, then what they are told.
+ *
+ * Escape backs out one step rather than the whole gesture, so correcting the recipient does not
+ * cost the directive already typed.
+ */
+function transitionOpenHandoffPicker(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  key: string,
+): FleetTransition {
+  const picker = state.handoffPicker!;
+  if (picker.step === "recipient") {
+    if (key === "escape") {
+      return { state: { ...state, handoffPicker: undefined, notice: undefined } };
+    }
+    const recipients = handoffRecipients(snapshot, picker.workerIds);
+    // The roster can empty while the picker is open — the recipient stopping is exactly the case
+    // this gesture must not paper over — so the picker closes rather than offering nothing.
+    if (recipients.length === 0) {
+      return {
+        state: {
+          ...state,
+          handoffPicker: undefined,
+          notice: liveOrchestrators(snapshot).length > 0
+            ? "No live orchestrator covers every worker workspace"
+            : "No live orchestrator to receive a handoff",
+          noticeTone: "warning",
+        },
+      };
+    }
+    const focusIndex = Math.max(
+      0,
+      recipients.findIndex((record) => record.id === picker.focusSessionId),
+    );
+    if (key === "up" || key === "down") {
+      const next = recipients[boundedIndex(focusIndex + (key === "up" ? -1 : 1), recipients.length)]!;
+      return { state: { ...state, handoffPicker: { ...picker, focusSessionId: next.id }, notice: undefined } };
+    }
+    if (key === "enter") {
+      return {
+        state: {
+          ...state,
+          handoffPicker: {
+            step: "directive",
+            workerIds: picker.workerIds,
+            recipientSessionId: recipients[focusIndex]!.id,
+            draft: "",
+            mutationId: randomUUID(),
+          },
+          notice: undefined,
+        },
+      };
+    }
+    return { state };
+  }
+  if (key === "escape") {
+    return {
+      state: {
+        ...state,
+        handoffPicker: {
+          step: "recipient",
+          workerIds: picker.workerIds,
+          focusSessionId: picker.recipientSessionId,
+        },
+        notice: undefined,
+      },
+    };
+  }
+  if (key === "backspace") {
+    return {
+      state: {
+        ...state,
+        handoffPicker: { ...picker, draft: [...picker.draft].slice(0, -1).join("") },
+        notice: undefined,
+      },
+    };
+  }
+  if (key === "enter") {
+    const directive = picker.draft.trim();
+    // The directive is the whole point of a directed handoff: leases without one are an adoption,
+    // which the orchestrator already has its own tool for.
+    if (directive === "") {
+      return { state: { ...state, notice: "A handoff needs a directive", noticeTone: "error" } };
+    }
+    if (directive.length > HANDOFF_LIMITS.directiveChars) {
+      return {
+        state: {
+          ...state,
+          notice: `A handoff directive can contain at most ${HANDOFF_LIMITS.directiveChars} characters`,
+          noticeTone: "error",
+        },
+      };
+    }
+    return {
+      state: { ...state, handoffPicker: undefined, notice: undefined },
+      action: {
+        type: "handoff",
+        workerIds: picker.workerIds,
+        recipientSessionId: picker.recipientSessionId,
+        directive,
+        mutationId: picker.mutationId,
+      },
+    };
+  }
+  if ([...key].length === 1 && key.charCodeAt(0) >= 0x20) {
+    return {
+      state: {
+        ...state,
+        handoffPicker: { ...picker, draft: `${picker.draft}${key}` },
+        notice: undefined,
+      },
+    };
+  }
+  return { state };
+}
+
+function renderHandoffPicker(
+  snapshot: FleetSnapshot,
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): string {
+  const picker = state.handoffPicker!;
+  const threads = orderedThreads(snapshot);
+  const lines = [
+    ...renderHeader(threads, state, options),
+    "",
+    paint(`Handoff  ${picker.step === "recipient" ? 1 : 2} of 2`, "dim", options.color),
+    "",
+    `Workers (${picker.workerIds.length})`,
+    "",
+    // A worker that disappeared between marking and sending is named as gone rather than dropped:
+    // the batch is all-or-nothing, so the operator should see the member that will refuse it.
+    ...picker.workerIds.map((workerId) => {
+      const record = threads.find(({ record: candidate }) => candidate.id === workerId)?.record;
+      const short = paint(workerId.slice(0, 8), "dim", options.color);
+      return record === undefined
+        ? `  ${short}  ${paint("gone", "alert", options.color)}`
+        : `  ${displayThreadName(record.name ?? `Untitled ${workerId.slice(0, 8)}`)}  ${short}`;
+    }),
+    "",
+  ];
+  if (picker.step === "recipient") {
+    const recipients = handoffRecipients(snapshot, picker.workerIds);
+    const focusIndex = Math.max(
+      0,
+      recipients.findIndex((record) => record.id === picker.focusSessionId),
+    );
+    lines.push("Recipient", "");
+    lines.push(...recipients.map((record, index) =>
+      pickerRow(existingOrchestratorLabel(record, options.color), index === focusIndex, options.color)));
+  } else {
+    const recipient = threads.find(({ record }) => record.id === picker.recipientSessionId)?.record;
+    lines.push(
+      `Directive for ${
+        recipient === undefined
+          ? picker.recipientSessionId.slice(0, 8)
+          : displayThreadName(recipient.name ?? "orchestrator")
+      }`,
+      "",
+      `${paint("›", "bold", options.color)} ${picker.draft}${paint(SELECTION_RULE, "selection", options.color)}`,
+    );
+  }
+  const footer = [
+    ...(state.notice === undefined
+      ? []
+      : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
+    paint("─".repeat(options.width), "dim", options.color),
+    paint(
+      fit(
+        picker.step === "recipient"
+          ? "↑↓ select · enter next · esc cancel"
+          : "enter hands the workers over · esc back",
+        options.width,
+      ),
+      "dim",
+      options.color,
+    ),
+  ];
+  const body = lines.slice(0, Math.max(0, options.height - footer.length));
+  while (body.length < options.height - footer.length) body.push("");
+  return [...body, ...footer].join("\n");
+}
+
+/** What the fleet list says about a handoff the broker has already answered. */
+function handoffNotice(result: WorkerHandoffResult): string {
+  if (!result.committed) {
+    const blocker = result.blocked[0];
+    return blocker === undefined ? "Handoff refused" : `Handoff refused · ${blocker.detail}`;
+  }
+  const count = result.transferred.length;
+  const moved = `${count} worker${count === 1 ? "" : "s"} handed off`;
+  // A committed transfer whose nudge failed is still a committed transfer, and says so: the
+  // orchestrator holds the leases and will read the directive on its next worker_events call.
+  return result.delivery === "failed" || result.delivery === "not-attempted"
+    ? `${moved} · ${result.deliveryDetail ?? "the orchestrator was not nudged"}`
+    : moved;
 }
 
 function transitionOrchestratorPicker(
@@ -2785,11 +3262,16 @@ function rowGutter(
   focused: boolean,
   color: boolean,
   scrollbar?: "track" | "thumb" | undefined,
+  marked = false,
 ): string {
-  if (focused) return `${paint(SELECTION_RULE, "selection", color)} `;
-  if (scrollbar === "thumb") return `${paint("┃", "subtle", color)} `;
-  if (scrollbar === "track") return `${paint("│", "dim", color)} `;
-  return ROW_GUTTER;
+  // The gutter's second cell is blank in every one of its states, which is what lets a handoff
+  // mark cost the row no width: no column yields for it, so a marked row and an unmarked one
+  // still line up.
+  const mark = marked ? paint(HANDOFF_MARK, "selection", color) : " ";
+  if (focused) return `${paint(SELECTION_RULE, "selection", color)}${mark}`;
+  if (scrollbar === "thumb") return `${paint("┃", "subtle", color)}${mark}`;
+  if (scrollbar === "track") return `${paint("│", "dim", color)}${mark}`;
+  return marked ? ` ${mark}` : ROW_GUTTER;
 }
 
 function threadListScrollbar(
@@ -2887,7 +3369,9 @@ function renderThreadRow(
   );
   const preview = threadPreview(thread, layout.preview);
   const row = [
-    `${rowGutter(selected, options.color, scrollbar)}${statusMarker(status, selected, options.color)}`,
+    `${
+      rowGutter(selected, options.color, scrollbar, isHandoffMarked(state, thread.record.id))
+    }${statusMarker(status, selected, options.color)}`,
     titleCell(pad(title, layout.title), selected, options.color),
     ...(layout.leaseBadge === 0
       ? []
@@ -3552,6 +4036,23 @@ export async function runFleet(
         });
       } else if (action?.type === "profile") {
         await client.request("fleet.preference.set", { cwd: action.cwd, profile: action.profile });
+      } else if (action?.type === "handoff") {
+        const result = await client.request<WorkerHandoffResult>("fleet.workerHandoff", {
+          recipientSessionId: action.recipientSessionId,
+          workerIds: action.workerIds,
+          directive: action.directive,
+          mutationId: action.mutationId,
+        });
+        state = {
+          ...state,
+          // Marks are cleared only by a transfer that actually happened. A refused batch leaves the
+          // operator holding exactly what they marked, to fix and retry or to unmark.
+          ...(result.committed ? { handoffMarks: [] } : {}),
+          notice: handoffNotice(result),
+          noticeTone: result.committed
+            ? result.delivery === "delivered" || result.delivery === "pending" ? "neutral" : "warning"
+            : "error",
+        };
       } else if (action?.type === "worker-capabilities") {
         state = adoptWorkerModels(state, await readWorkerModels(client));
       } else if (action?.type === "folder-disposition") {
@@ -3764,6 +4265,19 @@ export async function runFleet(
         ...(action?.type === "start" ? { draft: action.request.initialPrompt } : {}),
         // A rejected path is almost always a typo, so the prompt comes back with it still in hand.
         ...(action?.type === "project-add" ? { projectPrompt: { draft: action.path } } : {}),
+        // A transport failure is not a definitive handoff result. Restore the exact directive and
+        // mutation id so Enter retries the same durable broker mutation rather than duplicating it.
+        ...(action?.type === "handoff"
+          ? {
+              handoffPicker: {
+                step: "directive" as const,
+                workerIds: action.workerIds,
+                recipientSessionId: action.recipientSessionId,
+                draft: action.directive,
+                mutationId: action.mutationId,
+              },
+            }
+          : {}),
         // A shell that could not be run is still a shell the operator is standing in.
         ...(action?.type === "shell-run" && state.shellMode !== undefined
           ? { shellMode: { ...state.shellMode, running: false } }
@@ -3918,7 +4432,7 @@ function composerFocus(state: FleetState): { mode: ComposerMode; value: string }
   if (state.view !== "fleet") return undefined;
   if (state.workerPicker !== undefined || state.permissionPicker !== undefined) return undefined;
   if (state.commandPalette !== undefined) return { mode: "task", value: state.draft };
-  if (state.orchestratorPicker !== undefined) return undefined;
+  if (state.orchestratorPicker !== undefined || state.handoffPicker !== undefined) return undefined;
   if (state.rename !== undefined) return { mode: "rename", value: state.rename.draft };
   if (state.projectPrompt !== undefined) return { mode: "project", value: state.projectPrompt.draft };
   if (state.shellMode !== undefined) return { mode: "shell", value: state.shellMode.draft };
@@ -4189,6 +4703,9 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
   const quitConfirmation = state.quitConfirmation !== undefined && state.quitConfirmation.expiresAt > now
     ? state.quitConfirmation
     : undefined;
+  // A mark is a claim about a live worker. A session that has gone away takes its mark with it,
+  // rather than leaving a batch member the broker would have to refuse the whole handoff over.
+  const markedIds = handoffMarks(state).filter((id) => isHandoffEligible(threads, id));
   const confirmationExpired = (state.deleteConfirmation !== undefined && deleteConfirmation === undefined)
     || (state.quitConfirmation !== undefined && quitConfirmation === undefined);
   return {
@@ -4199,6 +4716,7 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
     stopAcknowledgement,
     deleteConfirmation,
     quitConfirmation,
+    ...(state.handoffMarks === undefined ? {} : { handoffMarks: markedIds }),
     ...(state.orchestratorPicker === undefined
       ? {}
       : { orchestratorPicker: normalizeOrchestratorPicker(state.orchestratorPicker, snapshot, now) }),

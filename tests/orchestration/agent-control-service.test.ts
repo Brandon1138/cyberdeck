@@ -35,6 +35,7 @@ const worker: SessionRecord = {
 };
 const binding: OrchestratorBinding = {
   key: "workspace:/repo/one",
+  kind: "primary",
   sessionId: ACTOR,
   provider: "codex",
   cwd: "/repo/one",
@@ -1636,6 +1637,7 @@ describe("AgentControlService Orc peer control", () => {
   const targetBinding: OrchestratorBinding = {
     ...controlBinding,
     key: `fleet:peer:${TARGET}`,
+    kind: "peer",
     sessionId: TARGET,
     grant: { ...controlBinding.grant, subjectSessionId: TARGET },
   };

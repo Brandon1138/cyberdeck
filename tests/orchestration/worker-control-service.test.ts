@@ -6,13 +6,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerCoordinationService } from "../../src/broker/worker-coordination.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { WorkerLifecycle } from "../../src/domain/worker-coordination.js";
-import { WorkerControlService, WorkerControlError } from "../../src/orchestration/worker-control-service.js";
+import { WorkerControlService } from "../../src/orchestration/worker-control-service.js";
 import { WorkerCoordinationStore } from "../../src/persistence/worker-coordination-store.js";
 
 const baseMs = Date.parse("2026-07-27T10:00:00.000Z");
 const ORC = "11111111-1111-4111-8111-111111111111";
 const OTHER_ORC = "33333333-3333-4333-8333-333333333333";
 const PEER = "44444444-4444-4444-8444-444444444444";
+const PEER_KEY = "fleet:peer:99999999-9999-4999-8999-999999999999";
+const PEER_CONTROLLER_ID = `orchestrator:${PEER_KEY}`;
+const UNBOUND = "66666666-6666-4666-8666-666666666666";
 const ELSEWHERE = "55555555-5555-4555-8555-555555555555";
 const directories: string[] = [];
 
@@ -26,6 +29,7 @@ function binding(sessionId: string, key: string, workspaceCwd?: string): Orchest
     : { kind: "workspace" as const, cwd: workspaceCwd };
   return {
     key,
+    kind: key.includes(":peer:") ? "peer" : "primary",
     sessionId,
     provider: "codex",
     cwd: "/repo",
@@ -72,7 +76,7 @@ async function harness(options: {
   const bindings = new Map<string, OrchestratorBinding>([
     [ORC, binding(ORC, "fleet")],
     [OTHER_ORC, binding(OTHER_ORC, "workspace:/other")],
-    [PEER, binding(PEER, "fleet:peer:99999999-9999-4999-8999-999999999999")],
+    [PEER, binding(PEER, PEER_KEY)],
     [ELSEWHERE, binding(ELSEWHERE, "workspace:/elsewhere", "/elsewhere")],
   ]);
   const stopped: string[] = [];
@@ -329,17 +333,54 @@ describe("WorkerControlService leases", () => {
     expect(bench.coordination.getSubject(workerId)?.lease.state).toBe("active");
   });
 
-  it("refuses to bind a lease to a peer binding", async () => {
+  it("binds a lease to a peer under its own id inside its scope's controller family", async () => {
     const bench = await harness();
     const workerId = bench.addSession();
     await bench.register({ workerId });
 
-    await expect(bench.control.lease({
+    const adopted = await bench.control.lease({
       actorSessionId: PEER, action: "adopt", scope: "worker", workerId, reason: "adopt",
-    })).rejects.toMatchObject({ code: "NO_STABLE_CONTROLLER_IDENTITY" });
+    });
+    expect(adopted.results[0]).toMatchObject({ workerId, code: "ACQUIRED" });
+    expect(adopted.controllerId).toBe(PEER_CONTROLLER_ID);
+
+    const controller = bench.coordination.getSubject(workerId)?.lease.controller;
+    // Its own controller id, so two peers of one scope can never take each other's leases; its
+    // scope's family id, so the workers belong to the orchestrator family, not to a conversation.
+    expect(controller).toMatchObject({
+      controllerId: PEER_CONTROLLER_ID,
+      familyId: "orchestrator:fleet",
+    });
   });
 
-  it("rejects a transfer to a session with no stable binding", async () => {
+  it("hands a lease to a peer through the same transfer path as a primary", async () => {
+    const bench = await harness();
+    const workerId = bench.addSession();
+    await bench.register({ workerId });
+    await bench.control.lease({
+      actorSessionId: ORC, action: "adopt", scope: "worker", workerId, reason: "adopt",
+    });
+
+    const transferred = await bench.control.lease({
+      actorSessionId: ORC,
+      action: "transfer",
+      scope: "worker",
+      workerId,
+      newControllerSessionId: PEER,
+      reason: "hand off",
+    });
+    expect(transferred.results[0]).toMatchObject({
+      code: "TRANSFERRED",
+      currentController: PEER_CONTROLLER_ID,
+    });
+
+    const renewed = await bench.control.lease({
+      actorSessionId: PEER, action: "renew", scope: "worker", workerId, reason: "keep control",
+    });
+    expect(renewed.results[0]?.code).toBe("ALREADY_CONTROLLED");
+  });
+
+  it("rejects a transfer to a session holding no binding at all", async () => {
     const bench = await harness();
     const workerId = bench.addSession();
     await bench.register({ workerId });
@@ -352,9 +393,173 @@ describe("WorkerControlService leases", () => {
       action: "transfer",
       scope: "worker",
       workerId,
-      newControllerSessionId: PEER,
+      newControllerSessionId: UNBOUND,
       reason: "hand off",
-    })).rejects.toBeInstanceOf(WorkerControlError);
+    })).rejects.toMatchObject({ code: "TRANSFER_TARGET_UNBOUND" });
+  });
+});
+
+/**
+ * MIK-98: one binding, one authority. A peer was once granted `thread.enqueue` and refused the
+ * lease that `worker_ctl` and `worker_events` prove authority with, so it could instruct a worker
+ * it could neither control nor observe. These exercise all three against the same worker.
+ */
+describe("WorkerControlService peer bindings", () => {
+  async function peerControlled() {
+    const bench = await harness();
+    const workerId = bench.addSession({ parentSessionId: PEER });
+    await bench.register({ workerId });
+    const adopted = await bench.control.lease({
+      actorSessionId: PEER, action: "adopt", scope: "worker", workerId, reason: "adopt",
+    });
+    expect(adopted.results[0]?.code).toBe("ACQUIRED");
+    return { bench, workerId };
+  }
+
+  it("enqueues an instruction to the worker it controls", async () => {
+    const { bench, workerId } = await peerControlled();
+
+    const result = await bench.control.control({
+      actorSessionId: PEER,
+      action: "redirect",
+      workerId,
+      instruction: "Stop refactoring; land the failing test fix only.",
+      reason: "priority change",
+    });
+
+    expect(result).toMatchObject({ code: "QUEUED", delivery: "queued" });
+    expect(bench.enqueued[0]?.targetSessionId).toBe(workerId);
+  });
+
+  it("controls that same worker", async () => {
+    const { bench, workerId } = await peerControlled();
+
+    const stopped = await bench.control.control({
+      actorSessionId: PEER, action: "stop", workerId, reason: "wrong branch",
+    });
+
+    expect(stopped.code).toBe("STOP_REQUESTED");
+    expect(bench.stopped).toContain(workerId);
+  });
+
+  it("observes that same worker", async () => {
+    const { bench, workerId } = await peerControlled();
+
+    const page = await bench.control.events({ actorSessionId: PEER });
+
+    expect(page.state[0]).toMatchObject({
+      workerId,
+      leaseState: "active",
+      controllerId: PEER_CONTROLLER_ID,
+    });
+  });
+});
+
+describe("WorkerControlService directed handoffs", () => {
+  const OPERATOR = {
+    controllerId: "cyberdeck-operator",
+    familyId: "cyberdeck-operator",
+    scope: { kind: "fleet" as const, scopeId: "local-broker" },
+  };
+
+  async function handedOff(bench: Awaited<ReturnType<typeof harness>>, recipientId: string) {
+    const workerId = bench.addSession();
+    await bench.register({ workerId });
+    const committed = await bench.coordination.handoffBatch({
+      mutationId: `handoff:${workerId}`,
+      actor: OPERATOR,
+      recipient: {
+        controllerId: recipientId,
+        familyId: "orchestrator:fleet",
+        scope: { kind: "fleet", scopeId: "fleet" },
+      },
+      recipientSessionId: randomUUID(),
+      directive: "Rebase onto main, then report",
+      members: [{ subjectId: workerId, name: "docs sweep" }],
+      reason: "operator directed handoff",
+    });
+    expect(committed.committed).toBe(true);
+    return { workerId, handoffId: committed.handoff!.handoffId };
+  }
+
+  it("replays a lost response until the recipient explicitly acknowledges the handoff", async () => {
+    const bench = await harness();
+    const { workerId, handoffId } = await handedOff(bench, "orchestrator:fleet");
+
+    const first = await bench.control.events({ actorSessionId: ORC });
+
+    expect(first.handoffs).toHaveLength(1);
+    expect(first.handoffs![0]).toMatchObject({ handoffId, directive: "Rebase onto main, then report" });
+    expect(first.handoffs![0]!.manifest.map((entry) => entry.workerId)).toEqual([workerId]);
+    expect(first.handoffs![0]!.briefing).toContain("Rebase onto main, then report");
+    expect(first.handoffs![0]!.briefing).toContain("docs sweep");
+    // The worker itself arrives in the ordinary projection, already the recipient's.
+    expect(first.state.find((entry) => entry.workerId === workerId)).toMatchObject({
+      controllerId: "orchestrator:fleet",
+      leaseState: "active",
+    });
+
+    // No acknowledgement models a response lost after the broker prepared it.
+    const second = await bench.control.events({ actorSessionId: ORC });
+    expect(second.handoffs).toEqual(first.handoffs);
+
+    const acknowledged = await bench.control.events({
+      actorSessionId: ORC,
+      acknowledgeHandoffIds: [handoffId],
+    });
+    expect(acknowledged.acknowledgedHandoffIds).toEqual([handoffId]);
+    expect(acknowledged.handoffs).toBeUndefined();
+
+    const afterAck = await bench.control.events({ actorSessionId: ORC });
+    expect(afterAck.handoffs).toBeUndefined();
+  });
+
+  it("delivers a peer's handoff to that peer and not to its primary", async () => {
+    const bench = await harness();
+    await handedOff(bench, PEER_CONTROLLER_ID);
+
+    const primary = await bench.control.events({ actorSessionId: ORC });
+    expect(primary.handoffs).toBeUndefined();
+
+    const peer = await bench.control.events({ actorSessionId: PEER });
+    expect(peer.handoffs).toHaveLength(1);
+    expect(peer.handoffs![0]!.directive).toBe("Rebase onto main, then report");
+  });
+
+  it("survives a broker restart with the handoff still waiting to be read", async () => {
+    const bench = await harness();
+    const { handoffId } = await handedOff(bench, "orchestrator:fleet");
+
+    const restarted = bench.rebuild();
+    const page = await restarted.events({ actorSessionId: ORC });
+
+    expect(page.handoffs?.map((notice) => notice.handoffId)).toEqual([handoffId]);
+  });
+
+  it("returns one handoff per page and leaves later handoffs pending", async () => {
+    const bench = await harness();
+    const firstHandoff = await handedOff(bench, "orchestrator:fleet");
+    const secondHandoff = await handedOff(bench, "orchestrator:fleet");
+
+    const first = await bench.control.events({ actorSessionId: ORC });
+    expect(first.handoffs?.map((notice) => notice.handoffId)).toEqual([firstHandoff.handoffId]);
+    expect(first.handoffsHaveMore).toBe(true);
+    expect(bench.coordination.listHandoffs({
+      controllerId: "orchestrator:fleet",
+      state: "pending",
+    })).toHaveLength(2);
+
+    const second = await bench.control.events({
+      actorSessionId: ORC,
+      acknowledgeHandoffIds: [firstHandoff.handoffId],
+    });
+    expect(second.acknowledgedHandoffIds).toEqual([firstHandoff.handoffId]);
+    expect(second.handoffs?.map((notice) => notice.handoffId)).toEqual([secondHandoff.handoffId]);
+    expect(second.handoffsHaveMore).toBeUndefined();
+    expect(bench.coordination.listHandoffs({
+      controllerId: "orchestrator:fleet",
+      state: "pending",
+    }).map((handoff) => handoff.handoffId)).toEqual([secondHandoff.handoffId]);
   });
 });
 

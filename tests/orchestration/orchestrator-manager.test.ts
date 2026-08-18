@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
 import {
@@ -5,6 +8,7 @@ import {
   EnsureOrchestratorRequestSchema,
   type OrchestratorBinding,
 } from "../../src/domain/orchestrator.js";
+import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
 import { CodexProviderAdapter } from "../../src/providers/codex.js";
@@ -53,6 +57,7 @@ function activatingStart<T extends SessionRecord>(
 
 const binding: OrchestratorBinding = {
   key: "workspace:/repo/one",
+  kind: "primary",
   sessionId: SESSION_ID,
   provider: "codex",
   model: "gpt-5.6-sol",
@@ -70,6 +75,38 @@ const binding: OrchestratorBinding = {
 };
 
 describe("OrchestratorManager", () => {
+  it("creates and round-trips a primary whose workspace path contains peer marker text", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-orchestrator-marker-path-"));
+    const cwd = "/tmp/repo:peer:archive";
+    const workspaceRecord = { ...record, cwd };
+    const store = new OrchestratorStore(directory);
+    const manager = new OrchestratorManager(
+      { start: activatingStart(() => workspaceRecord) } as never,
+      store,
+    );
+
+    try {
+      const result = await manager.ensure({
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        cwd,
+        scope: "workspace",
+      });
+
+      expect(result.binding).toMatchObject({
+        key: `workspace:${cwd}`,
+        kind: "primary",
+        scope: { kind: "workspace", cwd },
+      });
+      expect(await store.get(result.binding.key)).toMatchObject({
+        key: `workspace:${cwd}`,
+        kind: "primary",
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("creates an explicit scoped orchestrator with native provider instructions and reports ownership", async () => {
     const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
     const start = activatingStart(() => record);

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows, type CapabilityGrant, type CyberdeckCapability } from "../domain/capability.js";
-import type { OrchestratorBinding } from "../domain/orchestrator.js";
+import { orchestratorController, type OrchestratorBinding } from "../domain/orchestrator.js";
 import type { SessionRecord } from "../domain/session.js";
 import {
   TERMINAL_WORKER_LIFECYCLES,
@@ -12,6 +12,10 @@ import {
   type OwnershipSubject,
   type StoredWorkerEvent,
 } from "../domain/worker-coordination.js";
+import {
+  handoffBriefing,
+  type HandoffManifestEntry,
+} from "../domain/worker-handoff.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
 import type { WorkerCoordinationService } from "../broker/worker-coordination.js";
@@ -98,6 +102,8 @@ export const AgentWorkerControlParamsSchema = z.object({
 
 /** Hard page cap. An Orc reading events must never be able to ask for a transcript-sized page. */
 export const MAX_EVENT_PAGE = 50;
+/** Handoffs duplicate a bounded manifest plus briefing, so one delivery per poll is the safe cap. */
+export const MAX_HANDOFF_PAGE = 1;
 
 export const AgentWorkerEventsParamsSchema = z.object({
   actorSessionId: z.uuid(),
@@ -108,6 +114,7 @@ export const AgentWorkerEventsParamsSchema = z.object({
   kinds: z.array(WorkerEventKindSchema).min(1).max(5).optional(),
   severities: z.array(WorkerEventSeveritySchema).min(1).max(4).optional(),
   view: WorkerEventViewSchema.default("active"),
+  acknowledgeHandoffIds: z.array(z.uuid()).min(1).max(MAX_HANDOFF_PAGE).optional(),
 });
 
 /** Trim caps. These exist so an Orc's context cost per read stays predictable, not to hide data. */
@@ -229,6 +236,20 @@ export interface WorkerStateSummary {
   truth?: WorkerTruth;
 }
 
+/**
+ * A directed handoff, as the orchestrator that received it reads it back.
+ *
+ * `briefing` is the same prose the composer nudge carried, so an Orc that saw both is never told
+ * two different things. It repeats until a later poll explicitly acknowledges its `handoffId`.
+ */
+export interface WorkerHandoffNotice {
+  handoffId: string;
+  directive: string;
+  issuedAt: string;
+  manifest: HandoffManifestEntry[];
+  briefing: string;
+}
+
 export interface WorkerEventsResult {
   cursor: number;
   nextCursor: number;
@@ -236,6 +257,12 @@ export interface WorkerEventsResult {
   returned: number;
   view: z.infer<typeof WorkerEventViewSchema>;
   state: WorkerStateSummary[];
+  /** Oldest pending page. Repeated unchanged until a later call acknowledges its IDs. */
+  handoffs?: WorkerHandoffNotice[];
+  /** True when finite handoff page left older pending records for later polls. */
+  handoffsHaveMore?: boolean;
+  /** IDs this poll durably acknowledged before reading its next handoff page. */
+  acknowledgedHandoffIds?: string[];
   stateTruncated?: boolean;
   events: Array<Record<string, unknown>>;
 }
@@ -245,7 +272,6 @@ export class WorkerControlError extends Error {
     readonly code:
       | "ACTOR_NOT_AUTHORIZED"
       | "ACTOR_BINDING_ORPHANED"
-      | "NO_STABLE_CONTROLLER_IDENTITY"
       | "TRANSFER_TARGET_UNBOUND",
     message: string,
   ) {
@@ -344,7 +370,13 @@ export class WorkerControlService {
 
   async events(input: z.input<typeof AgentWorkerEventsParamsSchema>): Promise<WorkerEventsResult> {
     const request = AgentWorkerEventsParamsSchema.parse(input);
-    const { binding } = await this.requireController(request.actorSessionId);
+    const { binding, controller } = await this.requireController(request.actorSessionId);
+    const acknowledged = request.acknowledgeHandoffIds === undefined
+      ? []
+      : await this.options.coordination.acknowledgeHandoffs({
+          controllerId: controller.controllerId,
+          handoffIds: request.acknowledgeHandoffIds,
+        });
     const scoped = this.options.coordination.listSubjects().filter(
       (subject) => subject.subjectKind === "worker" && this.inGrant(subject, binding.grant, "thread.read"),
     );
@@ -367,6 +399,13 @@ export class WorkerControlService {
     const state = selected
       .slice(0, MAX_STATE_ENTRIES)
       .map((subject) => this.stateSummary(subject));
+    // Delivery is at-least-once. Reading never changes state; a later poll explicitly acknowledges
+    // the previous page. If this response is lost, the same oldest handoff is therefore replayed.
+    const pendingHandoffs = this.options.coordination.pendingHandoffs({
+      controllerId: controller.controllerId,
+      limit: MAX_HANDOFF_PAGE + 1,
+    });
+    const handoffs = pendingHandoffs.slice(0, MAX_HANDOFF_PAGE);
     return {
       cursor: request.cursor,
       nextCursor: projection.nextCursor,
@@ -375,6 +414,21 @@ export class WorkerControlService {
       view: request.view,
       state,
       ...(selected.length > state.length ? { stateTruncated: true } : {}),
+      ...(acknowledged.length === 0
+        ? {}
+        : { acknowledgedHandoffIds: acknowledged.map((handoff) => handoff.handoffId) }),
+      ...(pendingHandoffs.length > MAX_HANDOFF_PAGE ? { handoffsHaveMore: true } : {}),
+      ...(handoffs.length === 0
+        ? {}
+        : {
+            handoffs: handoffs.map((handoff) => ({
+              handoffId: handoff.handoffId,
+              directive: handoff.directive,
+              issuedAt: handoff.issuedAt,
+              manifest: handoff.manifest,
+              briefing: handoffBriefing(handoff),
+            })),
+          }),
       events: projection.events.map(compactEvent),
     };
   }
@@ -1136,6 +1190,12 @@ export class WorkerControlService {
     }
   }
 
+  /**
+   * A binding is the whole of the authority: holding one is holding a controller identity.
+   *
+   * Peer bindings included. They were once refused here while still being granted `thread.enqueue`,
+   * so a peer could instruct a worker it could neither control nor observe (MIK-98).
+   */
   private async requireController(actorSessionId: string): Promise<{
     binding: OrchestratorBinding;
     controller: ControllerIdentity;
@@ -1147,14 +1207,7 @@ export class WorkerControlService {
         `${actorSessionId} holds no Cyberdeck orchestrator binding, so it has no controller identity`,
       );
     }
-    const controller = stableController(binding);
-    if (controller === undefined) {
-      throw new WorkerControlError(
-        "NO_STABLE_CONTROLLER_IDENTITY",
-        `Binding ${binding.key} is a peer binding and cannot prove a durable controller family; worker leases are refused rather than tied to a conversation`,
-      );
-    }
-    return { binding, controller };
+    return { binding, controller: orchestratorController(binding) };
   }
 
   private async requireTransferTarget(sessionId: string): Promise<ControllerIdentity> {
@@ -1170,7 +1223,7 @@ export class WorkerControlService {
 
   private async controllerForSession(sessionId: string): Promise<ControllerIdentity | undefined> {
     const binding = await this.options.orchestrators.findBySessionId(sessionId);
-    return binding === undefined ? undefined : stableController(binding);
+    return binding === undefined ? undefined : orchestratorController(binding);
   }
 
   /** Plans and mutations are serialized so a survey cannot straddle another call's adoption. */
@@ -1179,18 +1232,6 @@ export class WorkerControlService {
     this.tail = run.then(() => undefined, () => undefined);
     return run;
   }
-}
-
-export function stableController(binding: OrchestratorBinding): ControllerIdentity | undefined {
-  if (binding.key.includes(":peer:")) return undefined;
-  const controllerId = `orchestrator:${binding.key}`;
-  return {
-    controllerId,
-    familyId: controllerId,
-    scope: binding.scope.kind === "fleet"
-      ? { kind: "fleet", scopeId: binding.key }
-      : { kind: "worktree", scopeId: binding.key, worktreePath: binding.scope.cwd },
-  };
 }
 
 function publicOutcome(outcome: OwnershipOutcome): LeaseSubjectResult {

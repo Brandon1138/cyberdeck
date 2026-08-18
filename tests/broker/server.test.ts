@@ -521,6 +521,7 @@ describe("BrokerServer", () => {
       await expect(orchestratorStore.findBySessionId(peer.session.id)).resolves.toMatchObject({
         sessionId: peer.session.id,
         key: `fleet:peer:${peer.session.id}`,
+        kind: "peer",
       });
     } finally {
       client.socket.destroy();

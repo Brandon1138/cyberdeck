@@ -32,7 +32,13 @@ async function tools(): Promise<Array<{
   name: string;
   description: string;
   inputSchema: {
-    properties?: Record<string, { enum?: string[]; maximum?: number; default?: unknown }>;
+    properties?: Record<string, {
+      enum?: string[];
+      maximum?: number;
+      maxItems?: number;
+      default?: unknown;
+      items?: { enum?: string[] };
+    }>;
     required?: string[];
     additionalProperties?: boolean;
   };
@@ -66,6 +72,7 @@ describe("orchestrator control-plane tools", () => {
     });
     // The page cap lives in the schema so an Orc cannot request a transcript-sized read.
     expect(events?.inputSchema.properties?.limit?.maximum).toBe(50);
+    expect(events?.inputSchema.properties?.acknowledgeHandoffIds?.maxItems).toBe(1);
     for (const tool of [lease, control, events]) {
       expect(tool?.inputSchema.additionalProperties).toBe(false);
       expect(tool?.description.length).toBeLessThan(720);
@@ -82,7 +89,11 @@ describe("orchestrator control-plane tools", () => {
     await call(transport, "cyberdeck_worker_ctl", {
       action: "stop", workerId: WORKER, reason: "scope changed",
     });
-    await call(transport, "cyberdeck_worker_events", { cursor: 12, view: "unresolved" });
+    await call(transport, "cyberdeck_worker_events", {
+      cursor: 12,
+      view: "unresolved",
+      acknowledgeHandoffIds: [WORKER],
+    });
 
     expect(request.mock.calls).toEqual([
       ["agent.lease.control", {
@@ -91,7 +102,12 @@ describe("orchestrator control-plane tools", () => {
       ["agent.worker.control", {
         actorSessionId: ACTOR, action: "stop", workerId: WORKER, reason: "scope changed",
       }],
-      ["agent.worker.events", { actorSessionId: ACTOR, cursor: 12, view: "unresolved" }],
+      ["agent.worker.events", {
+        actorSessionId: ACTOR,
+        cursor: 12,
+        view: "unresolved",
+        acknowledgeHandoffIds: [WORKER],
+      }],
     ]);
   });
 
@@ -121,22 +137,23 @@ describe("orchestrator control-plane tools", () => {
     });
   });
 
-  it("explains a peer binding refusal with an actionable remedy", async () => {
+  it("explains an unbound transfer target with an actionable remedy", async () => {
     const transport: McpBrokerTransport = {
       request: vi.fn(async () => {
-        throw Object.assign(new Error("peer bindings cannot hold leases"), {
-          code: "NO_STABLE_CONTROLLER_IDENTITY",
+        throw Object.assign(new Error("transfer target holds no binding"), {
+          code: "TRANSFER_TARGET_UNBOUND",
         });
       }) as never,
     };
 
     const result = await call(transport, "cyberdeck_lease", {
-      action: "adopt", scope: "worker", workerId: WORKER, reason: "adopt",
+      action: "transfer", scope: "worker", workerId: WORKER, reason: "hand off",
+      toSessionId: "44444444-4444-4444-8444-444444444444",
     });
     expect(result.error).toMatchObject({
-      code: "NO_STABLE_CONTROLLER_IDENTITY",
+      code: "TRANSFER_TARGET_UNBOUND",
       actorSessionId: ACTOR,
     });
-    expect((result.error as { remedy: string }).remedy).toContain("durable orchestrator identity");
+    expect((result.error as { remedy: string }).remedy).toContain("no stable orchestrator binding");
   });
 });

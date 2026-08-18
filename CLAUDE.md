@@ -112,23 +112,34 @@ the broker somewhere those CLIs are absent, or a provider changing its listing f
 row in `PROVIDER_MODEL_LISTING_COMMANDS` and a parser case, not widening the accepted line shapes
 until prose starts parsing as a model id.
 
-### A peer binding may message a worker but may not control or observe it
-
-`orchestrator-manager.ts` grants every binding — primary or `:peer:` — the same capability list,
-including `thread.enqueue`. `stableController` then refuses any `:peer:` key, so `cyberdeck_worker_ctl`
-and `cyberdeck_worker_events` answer `NO_STABLE_CONTROLLER_IDENTITY` for the very binding that was
-just allowed to enqueue. A worker reporting through that path can be rejected with `OWNERSHIP_LOST`
-while its orchestrator is still able to send it instructions. The asymmetry is real and was seen in
-the MIK-71 incident.
-
-It is not fixed here because it is an authorization decision, not a truth-projection one: the lease
-substrate refuses peer bindings deliberately, so closing the gap means either narrowing the peer grant
-or giving peers a durable controller family, and both change what a peer is allowed to do. Deferred
-because the operator's orchestrators are primary bindings. **Trigger:** a peer orchestrator that needs
-to observe or control its own workers. The fix is to decide what a peer binding is, in one place, and
-make the grant and the lease agree — not to special-case the tools that currently refuse it.
-
 ## Things that are not deferred
+
+- A peer binding is a controller, and its grant and its lease are derived from one place. MIK-98
+  settled what a `:peer:` binding is: a controller in its own right, holding its own `controllerId`
+  inside its primary's `familyId`, durable because its key is durable in the binding log. Every
+  binding the manager grants gets exactly `ORCHESTRATOR_GRANT_CAPABILITIES`, and
+  `orchestratorController()` in `src/domain/orchestrator.ts` is **total** over bindings — there is no
+  binding that can be granted a capability the lease substrate would then refuse. That totality is
+  the invariant, not an implementation detail: it is what stops `thread.enqueue`, `worker_ctl`, and
+  `worker_events` from ever again disagreeing about the same binding, which is what the MIK-71
+  incident was. Do not add a second derivation of a controller identity from a binding, and do not
+  re-introduce a per-tool refusal of peer keys; if peer authority should narrow, narrow the one
+  capability list.
+
+- A directed handoff is the operator's own authority, and it is atomic. Fleet's ctrl+d marks
+  workers and `/handoff` names a live Orc and a directive; the broker moves every named lease onto
+  that Orc's controller identity or moves none, in one fsynced append that also carries the durable
+  handoff record. There is no token in that call, deliberately: the previous holder may be dead or
+  unwilling, and what fences it out is the same thing that fences every other transfer —
+  `withNewController` bumps the lease version and replaces the token hash, so the old holder's next
+  authenticated call gets the ordinary stale-lease answer. A worker the substrate has never seen —
+  one the operator started by hand — is registered *inside* that same transaction rather than
+  before it, so an aborted batch leaves no half-created subject and no row Fleet would draw as
+  adoptable. The directive reaches the recipient twice over: a best-effort composer nudge, and the
+  pending record `worker_events` returns oldest-first, one per page, until a later poll explicitly
+  acknowledges that `handoffId`. Reading never consumes it: a lost response replays the same
+  directive, while a successful acknowledgement is durable across restart. Do not add a per-tool
+  refusal, a partial transfer path, or a second way to move a lease.
 
 - A thread's pull-request indicator is attributed to **the branch that thread's own work lands on**,
   never to the directory it runs in. A thread declares that branch through its `workspace`, or it

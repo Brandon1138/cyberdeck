@@ -37,6 +37,7 @@ function worker(): SessionRecord {
 function binding(): OrchestratorBinding {
   return {
     key: "fleet",
+    kind: "primary",
     sessionId: ORC_ID,
     provider: "codex",
     cwd: "/tmp/repo",

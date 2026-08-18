@@ -85,8 +85,6 @@ const REMEDIES: Record<string, string> = {
     "Continue from the nextByte cursor returned by the previous Scout artifact read.",
   SCOUT_EGRESS_NOT_GRANTED:
     "An operator must grant this exact Git repository root with `cyberdeck scout-egress on --root <repo>`; an Orc cannot grant itself source egress.",
-  NO_STABLE_CONTROLLER_IDENTITY:
-    "Worker leases are held by a durable orchestrator identity, never by a conversation. This session's binding is a peer binding, so it cannot hold or inherit a lease. Act through the orchestrator bound to this workspace or fleet.",
   TRANSFER_TARGET_UNBOUND:
     "The transfer target holds no stable orchestrator binding, so it cannot receive the lease. Bind it through Cyberdeck first, then retry the transfer.",
 };
@@ -451,7 +449,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_worker_events",
-    description: "Read bounded worker events after a cursor, plus current per-worker state. Kinds: EXCEPTION, PROGRESS, CHECKPOINT, RISK, DECISION_REQUEST. view active (default) shows live events, unresolved shows only events still needing intervention. Continue from nextCursor; never re-read from zero. Returns state and deltas, not transcripts.",
+    description: "Read bounded worker events after a cursor, plus current per-worker state. Also returns at most one oldest pending directed handoff. Handoffs replay until a later poll passes that handoffId in acknowledgeHandoffIds; acknowledge only after receiving it. A lost response therefore leaves its directive pending. Continue events from nextCursor; handoffsHaveMore means poll again after acknowledging the current handoff.",
     inputSchema: {
       type: "object",
       properties: {
@@ -468,6 +466,13 @@ const TOOLS = [
           items: { type: "string", enum: ["info", "warning", "error", "critical"] },
         },
         view: { type: "string", enum: ["active", "unresolved", "resolved", "all"], default: "active" },
+        acknowledgeHandoffIds: {
+          type: "array",
+          items: { type: "string", format: "uuid" },
+          minItems: 1,
+          maxItems: 1,
+          description: "Handoff IDs received on a prior poll and now durably acknowledged.",
+        },
       },
       additionalProperties: false,
     },

@@ -8,6 +8,20 @@ and persisted schemas remain under active alpha development.
 
 ### Fixed
 
+- A peer orchestrator binding is a controller. Every binding — primary or
+  `:peer:` — was granted the same capability list including `thread.enqueue`, but
+  the lease substrate refused peer keys, so `cyberdeck_worker_ctl` and
+  `cyberdeck_worker_events` answered `NO_STABLE_CONTROLLER_IDENTITY` for the very
+  binding just allowed to instruct that worker, and the worker's own report could
+  come back `OWNERSHIP_LOST`. A peer now proves a durable controller identity of
+  its own — its own `controllerId`, so two peers of a scope cannot take each
+  other's leases, inside its primary's `familyId`, so its workers belong to the
+  scope's orchestrator family. Grant and lease are derived from one place:
+  `ORCHESTRATOR_GRANT_CAPABILITIES` and a total `orchestratorController()`, which
+  replaced four divergent copies of the same rule. Bindings written before the
+  record carried a `kind` still load, reading primary or peer from the key's
+  `:peer:` marker (MIK-98).
+
 - A pinned thread stays at the top of its folder. Pins outrank last activity
   outright rather than breaking ties between equal timestamps, so a pinned thread
   no longer loses its place the moment a sibling reports newer work. Recency still

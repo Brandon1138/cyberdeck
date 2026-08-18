@@ -58,6 +58,7 @@ const claude: ProviderAdapter = {
 function binding(cwd: string): OrchestratorBinding {
   return {
     key: `workspace:${cwd}`,
+    kind: "primary",
     sessionId: ORCHESTRATOR,
     provider: "codex",
     cwd,

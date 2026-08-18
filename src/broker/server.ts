@@ -69,6 +69,10 @@ import {
   AgentWorkerEventsParamsSchema,
   type WorkerControlService,
 } from "../orchestration/worker-control-service.js";
+import {
+  WorkerHandoffParamsSchema,
+  type WorkerHandoffService,
+} from "../orchestration/worker-handoff-service.js";
 import type { WorkerCoordinationService } from "./worker-coordination.js";
 import {
   WorkerCheckpointRequestParamsSchema,
@@ -142,6 +146,8 @@ export interface BrokerServerOptions {
   /** Internal domain substrate. Orchestrator access goes through workerControl, never directly. */
   workerCoordination?: WorkerCoordinationService;
   workerControl?: WorkerControlService;
+  /** Operator-directed batch lease handoff. Fleet's surface, never an orchestrator's. */
+  workerHandoff?: WorkerHandoffService;
   workerEvents?: WorkerEventChannel;
   /** Which nvim is showing which worker's worktree. In memory only, by design. */
   nvimBindings?: NvimBindingService;
@@ -469,6 +475,10 @@ export class BrokerServer {
         const { provider } = WorkerCapabilitiesParamsSchema.parse(frame.params);
         return this.requireWorkerCapabilities().resolve(provider);
       }
+      // Fleet's own gesture, and deliberately not an MCP tool: moving another orchestrator's
+      // workers out from under it is the operator's call, not a peer's.
+      case "fleet.workerHandoff":
+        return this.requireWorkerHandoff().handoff(WorkerHandoffParamsSchema.parse(frame.params));
       case "fleet.workerCoordination":
         return fleetWorkerCoordinationView(this.options.workerCoordination?.listSubjects() ?? []);
       case "fleet.orchestratorOwnership":
@@ -701,6 +711,13 @@ export class BrokerServer {
       throw Object.assign(new Error("Worker control service is not available"), { code: "METHOD_NOT_FOUND" });
     }
     return this.options.workerControl;
+  }
+
+  private requireWorkerHandoff(): WorkerHandoffService {
+    if (this.options.workerHandoff === undefined) {
+      throw Object.assign(new Error("Worker handoff service is not available"), { code: "METHOD_NOT_FOUND" });
+    }
+    return this.options.workerHandoff;
   }
 
   private requireWorkflows(): WorkflowService {
