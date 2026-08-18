@@ -1,71 +1,103 @@
 # MIK-84: Autonomous loops inside Cyberdeck's bounded system
 
 Research only. No code changes accompany this document, and none should follow from it before the
-architecture refactor lands — see [Recommendation](#6-recommendation). Every claim below is checked
-against the code and docs on this branch (cut from `main` at `8576bcc`) as of 2026-08-16, not against
-what the feature is supposed to do.
+architecture refactor (MIK-94 / GitHub #51) lands — see [Recommendation](#8-recommendation). Every
+claim below is checked against the code and docs on `main` at `e22acbf`, as of **2026-08-18**, not
+against what the feature is supposed to do.
+
+> **Revision note.** The first draft of this document was written 2026-08-16 against `main` at
+> `8576bcc`. Eleven commits landed between then and now, four of which change load-bearing claims:
+> MIK-88/MIK-89 (`939bd29`) gave the worker plane a turn ledger with stated provenance and an
+> instruction lifecycle with a delivery-hold ladder; MIK-93 (`502c2fd`) made admission ordering fair
+> under a tie; MIK-85 (`5bc34bd`) gave the operator a lease-derived answer to "who owns this worker";
+> and MIK-96/MIK-97 (`e22acbf`) *removed* the `worker.start.cursor` capability the first draft cited
+> as precedent for a loop-start gate. §§2.3, 3.3, 4.3 and 7 are materially different as a result.
+> This revision also assumes MIK-98 (GitHub #55) resolves as **option 1** — peer bindings get a
+> durable controller family — which is being implemented in parallel and is treated here as given.
 
 ## 0. What "loop" means here
 
 MIK-84 asks about *autonomous loops*: runs that keep going — on a timer, in response to an event, or
 by continuing themselves — without an operator initiating each turn. Cyberdeck has no such primitive
-today. It has two substrates that a loop would have to be built from:
+today. It has two substrates a loop would have to be built from:
 
 - The **job plane** (`src/domain/job.ts`, `src/control-plane/**`): bounded, one-shot, headless work
   with an immutable request and a terminal result. It has real admission control, real budgets, and a
   real reconciler.
-- The **worker plane** (`src/domain/worker-coordination.ts`, `src/broker/worker-coordination.ts`):
-  durable, controller-owned, multi-turn interactive workers with leases, checkpoints, decision gates,
-  and an instruction queue. It has none of the job plane's budget or reconciliation machinery.
+- The **worker plane** (`src/domain/worker-coordination.ts`, `src/broker/worker-coordination.ts`,
+  `src/domain/worker-truth.ts`): durable, controller-owned, multi-turn interactive workers with
+  leases, checkpoints, decision gates, an instruction queue, and — since MIK-88/89 — an authoritative
+  per-worker state machine and a turn ledger. It still has none of the job plane's budget,
+  admission, or reconciliation machinery.
 
 The central fact this document keeps returning to: **a loop is shaped like a worker, not a job** — it
 needs turns, checkpoints, and steering — but **the enforcement machinery that already exists is built
 for jobs, not workers.** Closing that gap is most of what "post-refactor, loops become buildable"
-should mean. Section 5 makes this an explicit prerequisite list.
+should mean. §7 makes this an explicit prerequisite list; that list is this document's primary
+output.
+
+What changed since the first draft is *not* that gap. It is that the worker plane now has an
+honest **unit of account** it previously lacked. Before MIK-89, "one turn" was whatever the screen
+scrape happened to notice; a worker that finished behind a dialog banked nothing, and
+`workers_wait` on `completionTarget: 1` could never settle. A turn budget built on that number would
+have been a budget denominated in a quantity the broker could not reliably count. That is no longer
+true, and §2.3 rests on it.
 
 ## 1. Trigger model options
+
+The trigger is the answer to one question: **what starts a loop iteration.** Three shapes are
+available, with very different amounts of existing substrate under them.
 
 ### 1.1 Schedule (cron / interval)
 
 Nothing in the codebase schedules anything. A repo-wide search for a periodic dispatch primitive
-(`setInterval`, `cron`, a recurring-task table) turns up nothing beyond an internal 100ms socket-close
-timer (`src/broker/server.ts:185`) and the App Server adapter's request-timeout timers — neither is a
-scheduler. Building schedule-triggered loops means building a scheduler from nothing: a durable
-"when next" store, a broker-owned tick, and — critically — a decision about what happens when the
-broker was down across a missed tick (Cyberdeck's whole persistence story is "never resume, never
-redispatch automatically," so the honest answer is *report the missed tick, do not catch it up
-silently*, matching every other recovery path in this codebase).
+(`setInterval`, `cron`, a recurring-task table) turns up one hit outside tests — the App Server
+adapter's request-timeout timers (`src/app-server/dispatch-adapter.ts`) — plus an internal 100 ms
+socket-close timer in `src/broker/server.ts`. Neither is a scheduler. Building schedule-triggered
+loops means building one from nothing: a durable "when next" store, a broker-owned tick, and —
+critically — a decision about what happens when the broker was down across a missed tick.
+Cyberdeck's whole persistence story is "never resume, never redispatch automatically"
+(`docs/architecture/persistence-and-recovery.md`), so the only answer consistent with the rest of
+the system is *report the missed tick, never catch it up silently*.
 
-**Trade-off.** Cheapest to reason about (no dependency on anything else finishing first) and the
-easiest to bound (a schedule has an obvious off switch: stop enqueuing). But it is pure new surface —
-no existing broker component partially does this — and a schedule alone answers "when" and says
-nothing about "why now is safe," which is a separate question this document treats as a bounding
-control (§2), not a trigger property.
+**Trade-off.** Cheapest to reason about (it depends on nothing else finishing first) and the easiest
+to bound — a schedule has an obvious off switch, which is to stop enqueuing. But it is pure new
+surface: no existing broker component partially does this. And a schedule answers only "when"; it
+says nothing about "why now is safe," which this document treats as a bounding control (§2), not a
+trigger property.
 
 ### 1.2 Event (react to something Cyberdeck already observes)
 
 This is the trigger model with the most existing substrate to build on:
 
 - **Workflow messages** (`src/domain/workflow.ts`) are already a passive-by-default, bounded
-  inter-session mailbox: a `WorkflowMessage` is inert unless `wake: true`, and a `WorkflowRun` carries
-  durable `maxMessages` (100), `maxTurns` (20), and `maxHops` (8) ceilings
-  (`src/domain/workflow.ts:3-7`). "Wake another session on a message" is close to an event trigger
-  already, just not exposed as one — `docs/architecture/session-model.md` documents it as "Workflow
-  messages are passive mailbox entries unless `wake` is explicitly true," and cancellation is
-  explicitly noted not to stop participants already running.
-- **`DECISION_REQUEST` / `CHECKPOINT` events** are the other candidate. A worker (or its orchestrator)
-  can already raise a durable, correlation-idempotent checkpoint (`requestCheckpoint`,
-  `src/broker/worker-coordination.ts:968`) and have it answered through the normal event-submission
-  path (`submitEvent`, `src/broker/worker-coordination.ts:644`). An event-triggered loop iteration is
-  naturally "the next thing that happens after this checkpoint is answered."
+  inter-session mailbox: a `WorkflowMessage` is inert unless `wake: true`, and a `WorkflowRun`
+  carries durable `maxMessages` (100, hard max 1 000), `maxTurns` (20, hard max 200) and `maxHops`
+  (8, hard max 50) ceilings (`WorkflowLimitsSchema`, `src/domain/workflow.ts:3-7`). "Wake another
+  session on a message" is close to an event trigger already, just not exposed as one.
+  `docs/architecture/session-model.md` documents the passivity, and notes that cancelling a run does
+  not stop participants already running.
+- **`DECISION_REQUEST` / `CHECKPOINT` events.** A worker or its orchestrator can raise a durable,
+  correlation-idempotent checkpoint (`requestCheckpoint`, `src/broker/worker-coordination.ts:968`)
+  answered through the normal event-submission path (`submitEvent`, `:644`). An event-triggered
+  iteration is naturally "the next thing that happens after this checkpoint is answered."
+- **Instruction lifecycle transitions**, new since the first draft, are now a third candidate and a
+  better one than either. `InstructionLifecycleStateSchema` (`src/domain/worker-truth.ts:260-277`)
+  runs `accepted → queued → rendered → submitted → acknowledged → completed`, with `undelivered` and
+  `cancelled` as terminals, and `instructionTransitionAllowed` (`:296`) pins the legal moves. The
+  `completed` transition means *the canonical provider turn answering this instruction finished* —
+  which is exactly the edge a loop wants to fire its next iteration on, and it is durable, typed,
+  and already observed.
 
-**Trade-off.** Reuses machinery that is already durable, correlation-checked, and audited — no new
-persistence format needed. The cost is that both existing mechanisms were built for *bounded*
-fan-out (a workflow run has hard caps; a checkpoint answers exactly one correlation) and neither was
-built to be the outer trigger of an indefinitely recurring run. Reusing them for that purpose means
-either loosening those caps (risk: the caps are the only thing currently stopping a wake chain from
-running forever) or treating each loop "cycle" as a fresh, separately-admitted workflow run — the
-latter is safer and composes with §2's per-iteration bounding.
+**Trade-off.** Reuses machinery that is durable, correlation-checked, and audited — no new
+persistence format. The cost is that the first two mechanisms were built for *bounded* fan-out (a
+workflow run has hard caps; a checkpoint answers exactly one correlation), and neither was built to
+be the outer trigger of an indefinitely recurring run. Reusing them means either loosening those
+caps — risky, since the caps are the only thing currently stopping a wake chain from running forever
+— or treating each loop cycle as a fresh, separately-admitted run. The latter is safer and composes
+with §2's per-iteration bounding. Triggering on `instruction → completed` avoids the dilemma
+entirely: it observes an edge that already exists rather than widening a cap that exists to stop
+recursion.
 
 ### 1.3 Self-continuation
 
@@ -73,33 +105,37 @@ This is the option most people mean by "loop," and it is the one Cyberdeck's own
 actively resists. The worker-facing MCP wrappers a worker actually gets are
 `cyberdeck_signal_exception`, `cyberdeck_report_progress`, `cyberdeck_signal_risk`,
 `cyberdeck_request_decision`, and `cyberdeck_respond_checkpoint`
-(`docs/architecture/worker-coordination.md`) — report and answer-a-checkpoint tools. A worker holds no
-`cyberdeck_worker_ctl` / `cyberdeck_lease` access; those are the orchestrator-facing three tools, and
-they require a **stable controller identity**, which a worker's own session can never hold for itself
-(a worker is a lease *subject*, never a lease *controller*). Concretely: nothing a worker's own process
-can call re-instructs that same worker. Continuation can only be driven by whatever already holds the
-controller lease — today, that is an orchestrator's durable binding or a human controller — reading
-the worker's own `DECISION_REQUEST`/`CHECKPOINT` output and choosing to re-enqueue through the
-instruction queue (`SessionRegistry.submitInstruction`, which "writes provider input without
-cancelling the active turn," per `docs/architecture/worker-coordination.md`).
+(`docs/architecture/worker-coordination.md`) — report and answer-a-checkpoint tools. A worker holds
+no `cyberdeck_worker_ctl` / `cyberdeck_lease` access; those are orchestrator-facing and require a
+**stable controller identity**, which a worker's own session can never hold for itself (a worker is a
+lease *subject*, never a lease *controller*). Concretely: nothing a worker's own process can call
+re-instructs that same worker. Continuation can only be driven by whatever already holds the
+controller lease — an orchestrator's durable binding, or a human controller — reading the worker's
+output and choosing to re-enqueue through the instruction queue
+(`SessionRegistry.submitInstruction`, which writes provider input without cancelling the active
+turn).
 
-**Trade-off.** This is a feature, not a gap to route around. "Self-continuation" that is actually
-worker-mediated (the worker decides its own next turn with no external read of its output) has no
-natural stopping point and no natural audit seam — the only thing that could stop it is the worker
-itself, which is exactly the actor a runaway-loop kill-switch cannot trust. Controller-mediated
-continuation — a bounded loop-controller reads a checkpoint, evaluates it against the gates in §2, and
-either re-enqueues or stops — keeps the existing invariant "a human control attachment has absolute
-writer priority" (`docs/architecture/session-model.md`) intact, and keeps a real actor with a real
-lease accountable for every "again." **Recommendation:** build self-continuation only in this
-controller-mediated shape; do not add a worker-side auto-continue tool.
+**Trade-off.** This is a feature, not a gap to route around. "Self-continuation" that is genuinely
+worker-mediated — the worker decides its own next turn with no external read of its output — has no
+natural stopping point and no natural audit seam. The only thing that could stop it is the worker
+itself, which is exactly the actor a runaway-loop kill switch cannot trust. Controller-mediated
+continuation — a bounded loop-controller reads a checkpoint or an instruction completion, evaluates
+it against §2's gates, and either re-enqueues or stops — keeps the existing invariant that a human
+control attachment has absolute writer priority (`docs/architecture/session-model.md`), and keeps a
+real actor with a real lease accountable for every "again."
+
+**Recommendation:** build self-continuation only in this controller-mediated shape. Do not add a
+worker-side auto-continue tool.
 
 ### Summary
 
 | Trigger | Existing substrate | New surface required |
 | --- | --- | --- |
-| Schedule | none | a durable scheduler, from scratch |
-| Event | `WorkflowRun`/message wake, `CheckpointRequest`/decision gate | loosen or wrap existing caps for outer-loop use |
-| Self-continuation | instruction queue + checkpoint answer, controller-mediated | a bounded loop-controller role that *is* the controller |
+| Schedule | none | a durable scheduler and a missed-tick policy, from scratch |
+| Event — workflow wake | `WorkflowRun` caps, `wake: true` | loosen or wrap caps for outer-loop use |
+| Event — checkpoint answered | `requestCheckpoint` / `submitEvent`, correlation-idempotent | a controller that acts on the answer |
+| Event — `instruction → completed` | `InstructionLifecycleStateSchema` + canonical turn banking | a controller that subscribes to the edge |
+| Self-continuation | instruction queue, controller-mediated only | a bounded loop-controller role that *is* the lease controller |
 
 ## 2. Bounding controls
 
@@ -123,317 +159,597 @@ random, SHA-256-hashed at rest, bound to a *stable family* identity rather than 
 (`ControllerIdentitySchema` explicitly rejects a UUID as `controllerId`,
 `src/domain/worker-coordination.ts:21-28`), and fenced by a monotonic lease version. A loop iteration
 that outlives its watcher degrades exactly the way any unwatched worker degrades today: the lease
-ages past its TTL, gets swept to `orphaned`, and becomes adoptable — never silently reacquired
+ages past its TTL, is swept to `orphaned`, and becomes adoptable — never silently reacquired
 (`docs/architecture/worker-coordination.md`: "nothing is ever reacquired silently"). This part of the
 substrate is solid enough to build on as-is.
 
-**Two findings that change the risk picture, in the substrate's favor.** `BUGS.md`'s dated log
-currently lists two "Open" defects in exactly this machinery:
+**Two `BUGS.md` entries in this machinery are stale, in the substrate's favour.** Both are still
+listed "Open" as of this revision (`BUGS.md:74`, `:90`), and both read as already fixed:
 
 - *"a decision gate is cleared by an answer to any checkpoint, not the matching one"* (found
   2026-07-27). Current code checks the answered checkpoint's `correlationId` against the subject's
-  live `decisionGate.correlationId` before clearing it (`src/broker/worker-coordination.ts:836-845`),
-  and `tests/integration/worker-coordination-events.test.ts:404-429` pins the *fixed* behavior
-  (answering `gate:a` leaves `gate:b` open). This reads as resolved, most plausibly by the
-  MIK-64/MIK-71 "one authoritative worker state machine" work (`3cbc28f`).
-- *"`inactive-controller` adoption is unreachable for a controller that died silently"* (found the same
-  day). The current `select()` for that scope returns a subject whose lease is `orphaned`/`expired`
-  and past `expiresAt` regardless of whether a `disconnected` liveness observation was ever recorded
+  live `decisionGate.correlationId` before clearing it (`src/broker/worker-coordination.ts:838-843`),
+  and `tests/integration/worker-coordination-events.test.ts:404-429` pins the fixed behaviour
+  (answering `gate:a` leaves `gate:b` open). Most plausibly closed by the MIK-64/MIK-71 authoritative
+  state machine work (`3cbc28f`).
+- *"`inactive-controller` adoption is unreachable for a controller that died silently"* (same day).
+  `select()` for that scope returns a subject whose lease is `orphaned`/`expired` and past
+  `expiresAt` regardless of whether a `disconnected` liveness observation was ever recorded
   (`src/broker/worker-coordination.ts:1229-1237`), and
-  `tests/integration/worker-coordination-ownership.test.ts:295` ("adopts a silently expired controller
-  by inactive-controller without taking a live one") pins that behavior too.
+  `tests/integration/worker-coordination-ownership.test.ts:295` pins it ("adopts a silently expired
+  controller by inactive-controller without taking a live one").
 
-Neither fix is reflected in `BUGS.md`'s "Open" section — the document is stale on the two entries
-that matter most to "recovering a loop nobody is watching." That staleness is itself a finding worth
-the operator's attention (outside this document's scope to correct), and this design should not
-inherit a fear of gaps that no longer exist.
+Note that `BUGS.md`'s own preamble says the dated Open/Resolved log "may well be out of date" and
+that only the Standing constraints section is non-stale. That is exactly the case here. This design
+should not inherit a fear of gaps that no longer exist; the staleness itself is worth the operator's
+attention but is outside this document's scope to correct.
 
-**One finding that does not resolve in the substrate's favor.** `WorkerCoordinationService.expireLeases`
-(`src/broker/worker-coordination.ts:523-588`) is the only code path that proactively sweeps a subject
-from `active` to `expired`→`orphaned`. A repo-wide search for its callers outside of tests returns
-nothing — it is never invoked by broker composition (`src/broker/main.ts`,
-`src/broker/worker-coordination-runtime.ts`). Expiry is otherwise evaluated **lazily**, only inside an
-authenticated call (`isExpired`/`expiredCopy`, `src/broker/worker-coordination.ts:1240-1264): a
-subject's on-disk lease state does not become `orphaned` until *something* — a renew, an adopt survey,
-an event submission — touches it again. For a loop nobody is watching, "nobody is watching" and
-"nothing ever touches this subject again" are the same condition, so the lease can sit `active` on
-disk indefinitely past its real TTL. This is not a correctness bug (nothing can act on a stale token;
-`OWNERSHIP_LOST` still fires on the next real attempt), but it does mean an operator surveying "what's
-still running" via anything that reads raw lease state rather than calling through the service will
-see a false `active`. A loop design needs one of: (a) a real periodic sweep wired into broker startup,
-or (b) every observability surface routing through the service's lazy-expiry check rather than raw
-state — never both left undone.
+**One finding that does not resolve in the substrate's favour, and still holds.**
+`WorkerCoordinationService.expireLeases` (`src/broker/worker-coordination.ts:523-588`) is the only
+code path that proactively sweeps a subject from `active` to `expired` → `orphaned`. A repo-wide
+search for its callers returns **tests only** — re-verified at `e22acbf`. It is never invoked by
+broker composition (`src/broker/main.ts`, `src/broker/worker-coordination-runtime.ts`). Expiry is
+otherwise evaluated **lazily**, inside an authenticated call (`isExpired`/`expiredCopy`, `:1240-1264`):
+a subject's on-disk lease state does not become `orphaned` until *something* — a renew, an adopt
+survey, an event submission — touches it again. For a loop nobody is watching, "nobody is watching"
+and "nothing ever touches this subject again" are the same condition, so the lease can sit `active`
+on disk indefinitely past its real TTL.
 
-### 2.2 Checkpoint and decision-gate placement
+This is not a correctness bug — nothing can act on a stale token, and `OWNERSHIP_LOST` still fires on
+the next real attempt — but an operator surveying "what is still running" through any surface that
+reads raw lease state rather than calling through the service will see a false `active`. A loop
+design needs one of: (a) a real periodic sweep wired into broker startup, or (b) every observability
+surface routing through the service's lazy-expiry check. Never both left undone.
+
+### 2.2 Checkpoints and decision-gate placement
 
 Checkpoints are the natural bounding gate for a loop iteration: durable, correlation-idempotent, and
 already distinguishing non-blocking progress markers from `decision-gate` checkpoints that pause the
 worker's structured `decisionGate` state (`CheckpointRequestSchema.mode`,
-`src/domain/worker-coordination.ts:286`). Placement guidance, grounded in what the schema actually
-allows:
+`src/domain/worker-coordination.ts:286`). Placement guidance, grounded in what the schema allows:
 
 - **One decision gate per subject, always.** `decisionGate` on `OwnershipSubject` is a single value,
   not a set (`src/domain/worker-coordination.ts:91-95, 105`). A loop cannot have two concurrent
-  decision points outstanding on the same worker — a "should I continue past step 3, and also should I
-  spend the extra token budget" double-gate is not representable. Loop design must serialize decision
-  points: one open gate, answered, closed, before the next opens.
-- **Checkpoints ride the instruction queue, so they respect the human-controller-priority invariant for
-  free.** `SessionRegistry.submitInstruction` never cancels an active turn and defers to a human
-  control attachment (`docs/architecture/worker-coordination.md`, `docs/architecture/session-model.md`
-  "Worker steering... A human control attachment has absolute writer priority"). A loop-controller that
-  answers its own checkpoints through the same path inherits this for free: an operator who attaches
-  mid-loop automatically outranks the loop's own continuation logic.
+  decision points outstanding on one worker — "should I continue past step 3, and separately should I
+  spend the extra token budget" is not representable. Loop design must serialize decision points: one
+  open gate, answered, closed, before the next opens.
+- **Checkpoints ride the instruction queue, so they inherit human-controller priority for free.**
+  `submitInstruction` never cancels an active turn, and `deliveryHold`
+  (`src/broker/session-registry.ts:1115-1127`) refuses to write while `runtime.controller !== undefined`
+  — the `human-controller` hold reason. A loop-controller answering its own checkpoints through the
+  same path is automatically outranked by an operator who attaches mid-loop. No new precedence rule
+  is needed.
 - **A decision gate is a pause, not a stop.** `mode: "decision-gate"` changes only the structured
-  `decisionGate` field; it does not change `WorkerLifecycle`
-  (`docs/architecture/worker-coordination.md`: "decision-gate checkpoints change only structured
-  `decisionGate`"). A loop-controller reading lifecycle alone will not see a paused loop as different
-  from a working one — it must read `decisionGate.state`, not `lifecycle`, to know whether continuation
-  requires a decision first.
+  `decisionGate` field; it does not change the worker's lifecycle
+  (`docs/architecture/worker-coordination.md`). A loop-controller reading state alone will not see a
+  paused loop as different from a working one — it must read `decisionGate.state`, not
+  `WorkerTruthState`.
 
 Recommended placement: put the decision gate **before** the instruction that would start the next
-iteration is enqueued, not after — i.e., the loop-controller requests a `decision-gate` checkpoint,
-waits for the answer, and only then calls the equivalent of "enqueue the next turn." This keeps the
-worker itself inert (not mid-turn) at every point a human or a bounding check could veto the next
-cycle, and it matches the existing precedent that a checkpoint answer is what unblocks
-`submitInstruction`, not a side channel.
+iteration is enqueued, not after. The loop-controller requests a `decision-gate` checkpoint, waits
+for the answer, and only then enqueues the next turn. This keeps the worker inert — not mid-turn — at
+every point a human or a bounding check could veto the next cycle, and it matches the existing
+precedent that a checkpoint answer is what unblocks the instruction, not a side channel.
 
-### 2.3 Spend and turn limits — the enforcement gap
+### 2.3 Spend, turn, and wall-clock limits — who enforces what
 
-This is the sharpest finding in this document. Cyberdeck already has real budget enforcement — for
-the **wrong plane**.
+This remains the sharpest finding in this document, with one part of it materially improved since the
+first draft. Cyberdeck has real budget enforcement — for the **wrong plane** — but the worker plane
+now has a countable turn.
 
-`BudgetLedger` (`src/control-plane/budget-ledger.ts`) enforces `maxJobs`, `maxWallClockMs`,
-`maxTotalTokens`, and `maxArtifactBytes` per **job-tree** scope (root resolved by walking
-`parentJobId`), admission-time for count/time/already-known usage and post-run for
-tokens/bytes, and fails closed (`UNPROVABLE_TOKEN_USAGE`) when a token ceiling is declared but any
+**What exists, on the job plane.** `BudgetLedger` (`src/control-plane/budget-ledger.ts`) enforces
+`maxJobs`, `maxWallClockMs`, `maxTotalTokens`, and `maxArtifactBytes` per **job-tree** scope (root
+resolved by walking `parentJobId`), admission-time for count/time/already-known usage and post-run
+for tokens/bytes, and fails closed (`UNPROVABLE_TOKEN_USAGE`) when a token ceiling is declared but any
 settled job in scope reported no usage
 (`docs/architecture/concurrency-budgets-and-reconciliation.md`). `AdmissionScheduler`
-(`src/control-plane/admission-scheduler.ts:73`, `.enqueue()`:102, `.release()`:130) enforces
-concurrency ceilings the same way, deterministically and starvation-resistantly.
+(`src/control-plane/admission-scheduler.ts`) enforces concurrency ceilings the same way,
+deterministically and starvation-resistantly.
 
-None of it touches the worker plane. A grep for `budget`, `maxTokens`, `wallClock`, or `spendLimit`
-across `src/domain/worker-coordination.ts` and `src/broker/worker-coordination.ts` returns nothing.
-`src/control-plane/reconciler.ts` and `src/control-plane/runtime.ts` never reference
+**MIK-93 matters here more than it looks.** `AdmissionScheduler.ordered()` now sorts by ascending
+`enqueuedAt`, then by the scheduler's own **monotonic enqueue sequence**, and only then by `jobId` as
+a defensive final fallback. Before, ties on a millisecond-resolution wall clock were broken by
+`jobId.localeCompare` over random UUIDs — releasing same-millisecond submissions in an order unrelated
+to arrival. A loop is precisely the workload that produces same-millisecond ties: it submits
+repeatedly, mechanically, and from one caller. Two consequences a loop design must carry:
+
+- Loop iterations now release in arrival order under a tie, so a loop cannot reorder itself against
+  a concurrent human submission by luck of UUID. `enqueue()` is also a no-op for a known `jobId`, so
+  a retrying loop cannot double-queue or push its own waiting iteration to the back of its tie.
+- The sequence counter is **per-process and deliberately not persisted**, because the queue is
+  in-memory and recovery interrupts everything queued rather than re-enqueuing it. A loop must
+  therefore never treat "my next iteration is queued" as durable state. If a loop's queued iteration
+  must survive a restart, that durability is the loop's own to provide — and doing it by making
+  queued jobs recoverable would require seeding this counter past the highest recovered value, which
+  the code comment already calls out.
+
+**What does not exist, on the worker plane.** A grep for `budget`, `maxTokens`, `wallClock`, or
+`spendLimit` across `src/domain/worker-coordination.ts` and `src/broker/worker-coordination.ts`
+returns nothing. `src/control-plane/reconciler.ts` and `src/control-plane/runtime.ts` never reference
 `worker-coordination.ts` or `OwnershipSubject` at all. The two substrates are architecturally
-disjoint — confirmed, not inferred from the docs alone. `JobRequestSchema`
-(`src/domain/job.ts:22-34`) has no checkpoint or turn concept either
-(`docs/architecture/control-plane.md`: "Session is not job" is the whole point of the split). The
-interactive, steerable, checkpoint-bearing shape a loop needs is a worker; the budget machinery that
-already exists only ever looks at jobs.
+disjoint — confirmed against the code, not inferred from docs. `JobRequestSchema`
+(`src/domain/job.ts:22-34`) has no checkpoint or turn concept either; "session is not job" is the
+whole point of the split (`docs/architecture/control-plane.md`).
 
-The one place Cyberdeck *does* budget an autonomous worker-plane run today is the Scout profile: a
-15-minute wall-clock default, enforced by settling in-flight output at cutoff and `SIGTERM`ing the
-process, with `maxTokens` explicitly deprecated and ignored for termination
-(`docs/architecture/scout-profile.md` "Budgets and parallelism"). It is fixed to one tier, one
-provider, one model, read-only, and a single wall-clock dimension — a narrow, hand-built precedent, not
-a general mechanism. It is nonetheless the closest existing analog to "a bounded autonomous run with a
-hard kill at its edge," and its shape (a fixed profile carrying its own budget, verified on exit, with
-a deprecated-but-still-accepted legacy field left in place rather than silently repurposed) is a
-reasonable template for a loop profile's own literal.
+**What is new: a turn the broker can actually count.** `WorkerTruthInput` now carries
+`completedTurns` ("turns the broker has counted, canonical or replay-derived") *and* `canonicalTurns`
+("subset of `completedTurns` backed by a provider-native transcript turn")
+(`src/domain/worker-truth.ts:135-138`). MIK-89 added `reconcileCanonicalTurns`, which arms on every
+chunk, fires after 1.5 s of quiet, and reads the transcript the provider itself wrote — with
+`allowFallback: false` and a `provider-native` transport filter, so it is a record rather than a
+second guess at the screen. Double-banking is closed four ways, including a synchronously-claimed
+`turnCaptureOwner` (`src/broker/session-registry.ts:243`) that decides ownership between the screen
+path and the reconcile path rather than discovering it after the fact.
 
-**Implication for §5:** turn/spend limits for a loop cannot be bolted onto `BudgetLedger` by pointing
-it at a worker id instead of a job id — the ledger's scope resolution walks `parentJobId`, a field that
-does not exist on `OwnershipSubject`. Either the worker plane needs its own budget ledger with the same
-fail-closed posture (unknown usage is unknown, never zero), or every loop iteration needs to be
+This is the difference between a turn budget that is enforceable and one that is not. **A loop's turn
+budget must be denominated in `canonicalTurns`, not `completedTurns`.** `completedTurns` includes
+replay-derived turns — a scrape — and a budget that can be inflated by a spinner frame the broker
+misread is not a budget. Where a provider writes no native transcript (Cursor, Antigravity; see §5),
+`canonicalTurns` will not advance, and the honest consequence is that a turn-budgeted loop is **not
+available** for those providers rather than silently falling back to the scrape. That is the same
+posture as `UNPROVABLE_TOKEN_USAGE`: unknown usage is unknown, never zero.
+
+**The one budgeted autonomous worker-plane run today** is the Scout profile: a 15-minute wall-clock
+default enforced by settling in-flight output at cutoff and `SIGTERM`ing the process, with `maxTokens`
+explicitly deprecated and ignored for termination (`docs/architecture/scout-profile.md`). It is fixed
+to one tier, one provider, one model, read-only, and a single wall-clock dimension — a narrow,
+hand-built precedent, not a general mechanism. Its shape is nonetheless a reasonable template for a
+loop profile's own literal: a fixed profile carrying its own budget, verified at exit, with a
+deprecated-but-still-accepted legacy field left in place rather than silently repurposed.
+
+**Who enforces what, in the target design:**
+
+| Bound | Enforced by | Checked when | Failure mode |
+| --- | --- | --- | --- |
+| Iteration count | loop policy (domain rule), evaluated by the loop use case | before enqueuing iteration *n+1* | stop, terminal, operator-visible |
+| Turn budget | worker-plane budget ledger, denominated in `canonicalTurns` | at each iteration's admission and at settle | refuse next admission; unprovable ⇒ refuse |
+| Wall clock | worker-plane budget ledger, Scout-shaped | at admission and by a deadline the broker owns | settle in-flight output, then stop |
+| Token spend | worker-plane budget ledger, where the provider reports usage | post-iteration | fail closed on unprovable usage |
+| Concurrency | `AdmissionScheduler`, if iterations are jobs; otherwise a worker-plane equivalent | at admission | queue, never substitute |
+| Human override | `deliveryHold` `human-controller` | on every write attempt | hold the instruction, do not write |
+
+The row that does not exist yet is every row naming a worker-plane ledger. **This is the central
+architectural decision loops are blocked on**, and it has exactly two honest resolutions: either the
+worker plane grows its own ledger with the job plane's fail-closed posture, or every loop iteration is
 represented as a real job-tree entry so the existing ledger can see it — which reopens the question of
-how a bounded job (no mid-run steering, no checkpoints) hosts something that needs checkpoints. This is
-not a detail; it is the central architectural decision loops are blocked on.
+how a bounded job with no mid-run steering hosts something that needs checkpoints. Pointing
+`BudgetLedger` at a worker id is not a third option: its scope resolution walks `parentJobId`, a field
+`OwnershipSubject` does not have.
 
 ## 3. Observability
 
 ### 3.1 What the operator sees while a loop runs
 
-Two different freshness stories exist today, and a loop design should not conflate them:
+Two different freshness stories exist, and a loop design must not conflate them:
 
-- **Push-shaped:** a `DECISION_REQUEST` or pinned `CHECKPOINT` event is durable and stays pinned until
-  explicitly resolved (`docs/architecture/worker-coordination.md`: "Exceptions, decision requests, and
-  intervention-required events remain pinned until explicitly resolved"). An operator reading the event
-  stream, or a checkpoint answered through the instruction queue, sees this promptly — this path is not
-  affected by the poll-cadence problem below.
-- **Poll-shaped:** Fleet's own view of ordinary progress is not. `waitForRefresh` is resumed only "by a
-  key, by a chunk of `!` shell output, by `SIGWINCH`, by an attach transition, and by the transport
-  closing — and by nothing else" (`BUGS.md`, "Open: Fleet learns about provider progress only by
-  asking, every 500 ms"). A loop iteration that completes between two 500ms ticks is up to half a
-  second stale on screen, and nothing about a loop makes this worse in kind — but a loop is precisely
-  the kind of thread an operator is *not* actively attached to, so its state is read from this same
-  poll cadence at whatever moment the operator happens to glance over, not pushed to them. Worth
-  restating to the operator explicitly if a loop feature ships: "the fleet row is current as of the
-  last 500ms tick" is a true statement today and will remain true for a loop's row unless the
-  push-shaped event path is deliberately used for anything the operator must not miss.
-- Rendered status for a loop's own thread comes from the single `projectWorkerTruth` projection
-  (`src/domain/worker-truth.ts`, `docs/architecture/worker-truth.md`) the same way any worker's does —
-  `stalled`, `blocked-modal`, `blocked-composer`, and the terminal states are already meaningful for a
-  loop iteration with no new plumbing. This is a genuine asset: a loop does not need its own status
-  vocabulary.
+- **Push-shaped.** A `DECISION_REQUEST` or pinned `CHECKPOINT` event is durable and stays pinned
+  until explicitly resolved (`docs/architecture/worker-coordination.md`). An operator reading the
+  event stream sees this promptly; this path is unaffected by the poll cadence below.
+- **Poll-shaped.** Fleet's own view of ordinary progress is not. `waitForRefresh` is resumed only "by
+  a key, by a chunk of `!` shell output, by `SIGWINCH`, by an attach transition, and by the transport
+  closing — and by nothing else" (`BUGS.md:57`, still Open). A loop iteration that completes between
+  two 500 ms ticks is up to half a second stale on screen. Nothing about a loop makes this worse *in
+  kind* — but a loop is precisely the thread an operator is *not* attached to, so its state is read at
+  whatever moment they glance over. If a loop ships, "the fleet row is current as of the last 500 ms
+  tick" should be stated to the operator explicitly, and anything the operator must not miss should
+  deliberately use the push-shaped event path.
+- **State vocabulary is already sufficient.** A loop's thread renders from the single
+  `projectWorkerTruth` projection (`src/domain/worker-truth.ts`, `docs/architecture/worker-truth.md`)
+  the same way any worker's does. `starting`, `working`, `blocked-modal`, `blocked-composer`, `idle`,
+  `stalled`, `provider-limit`, `errored`, `stopped`, `exited`, `failed` are all already meaningful for
+  a loop iteration with no new plumbing. **A loop does not need its own status vocabulary**, and
+  inventing one would re-create the pre-MIK-64 situation where each surface answered "what is this
+  worker doing" from its own evidence.
+
+**MIK-88 removed a specific way an unwatched loop could lie.** Before it, `blockedPromptIndexInTail`
+enumerated dialog prose, so an onboarding wizard or a session-limit notice left `truth.modalOpen`
+false, the worker read `stalled`, and `cyberdeck_thread_message` returned `rendered` for a payload
+written into a surface that would never submit it. Detection now keys on the footer affordance — the
+one part of a dialog whose shape does not vary with its wording. For a loop this closes the worst
+unattended failure available: an iteration enqueued into a dead surface, reported as delivered, with
+nobody watching to notice. The enqueue now comes back `queued` with `holdReason: provider-modal`.
 
 ### 3.2 Auditability afterward
 
-Reconstructing "what did this loop actually do, and why did it stop" today means reading across
-**four separate durable logs**, none of which join to each other:
+Reconstructing "what did this loop do, and why did it stop" today means reading across **four
+separate durable logs**, none of which join to each other:
 
 1. `events.jsonl` — the diagnostic `Journal` (`src/broker/journal.ts`), typed by
-   `BrokerEventTypeSchema` (`src/domain/events.ts:3-34`). Session, scout, `orchestrator.stop.*`, and
-   job lifecycle events live here. There is no worker-event or checkpoint type in this enum at all.
+   `BrokerEventTypeSchema` (`src/domain/events.ts:3-34`). Session, scout, `orchestrator.stop.*` and
+   job lifecycle events live here. There is no worker-event or checkpoint type in that enum at all.
 2. `orchestration/worker-coordination-v1.jsonl` — the ownership/lease/checkpoint/event/audit
-   transaction log (`docs/architecture/worker-coordination.md`). This is where a loop's checkpoints,
-   decision gates, and lease transfers actually live.
-3. `control-plane/jobs.jsonl` + `control-plane/leases.jsonl` — job-plane state and worktree leases
-   (`docs/architecture/persistence-and-recovery.md`, `docs/architecture/app-server-and-worktree-leases.md`).
+   transaction log. This is where a loop's checkpoints, decision gates and lease transfers live.
+3. `control-plane/jobs.jsonl` + `control-plane/leases.jsonl` — job-plane state and worktree leases.
    Relevant only if a loop iteration is ever represented as a job.
-4. The durable per-thread transcript (`docs/architecture/session-model.md`, "Durable thread feed") —
-   prompts and provider output, monotonically cursored, user-only file permissions, deliberately
-   excluded from the metadata journal for privacy. This is the only place the actual prompt text a
-   loop sent itself lives.
+4. The durable per-thread transcript (`docs/architecture/session-model.md`) — prompts and provider
+   output, monotonically cursored, user-only file permissions, deliberately excluded from the
+   metadata journal for privacy. The only place the actual prompt text a loop sent itself lives.
 
-None of these four is wrong to keep separate — (4)'s privacy boundary and (2)'s fsynced-transaction
-guarantees exist for good, documented reasons — but nothing today stitches them into one "loop run"
-view. A design that ships loops without a joined audit view is asking the operator to hand-correlate
-four JSONL files by timestamp and worker id after the fact, which is a worse audit story than a single
-provider conversation gets today.
+None of the four is wrong to keep separate — (4)'s privacy boundary and (2)'s fsynced-transaction
+guarantees exist for documented reasons — but nothing stitches them into one "loop run" view. Shipping
+loops without a joined audit view asks the operator to hand-correlate four JSONL files by timestamp
+and worker id, which is a worse audit story than a single provider conversation gets today.
 
-**Retention actively works against this.** `selectExpiredThreads`
-(`src/domain/thread-retention.ts:45-78`) retires a finished thread record after `maxAgeDays` (7,
-default) or once it falls outside the newest `maxThreads` (200, default) window, whichever comes first,
-unless the thread is pinned (`isRetirableThread`, `thread-retention.ts:28-33`; `keepPinned`,
-`:18`). A loop that produces many short-lived worker threads across a week of scheduled or event-driven
-runs will silently age its own history out of the fleet view on the same clock as everything else,
-*unless* whatever creates each iteration's thread also pins it — and pinning every iteration of a
-frequent loop defeats the retention bound's whole purpose (an unbounded pinned set). Loop history needs
-its own retention story, not inheritance of the general-purpose default.
+**A partial join now exists and should be used.** The instruction record
+(`src/domain/instruction.ts:30-52`) already carries `workflowRunId`, `messageId`, `causationId` and
+`hop`, alongside `renderedAt` / `submittedAt` / `completedAt` and an `expectedTurn` ordinal fixed at
+render time. That is a correlation spine: an iteration's instruction can name the run it belongs to,
+the message that caused it, and the turn ordinal that answers it. A loop-run identifier threaded
+through the same fields would join (2) and (4) without inventing a new format. It would not reach (1)
+or (3), which is a decision to make explicitly rather than discover later.
 
-## 4. Failure and kill behavior
+**Retention actively works against loop history.** `selectExpiredThreads`
+(`src/domain/thread-retention.ts:45-78`) retires a finished thread after `maxAgeDays` (7 by default)
+or once it falls outside the newest `maxThreads` (200 by default) window, whichever comes first,
+unless pinned. A loop producing many short-lived threads across a week will silently age its own
+history out on the same clock as everything else — unless whatever creates each iteration's thread also
+pins it, and pinning every iteration of a frequent loop defeats the bound entirely (an unbounded
+pinned set). Loop history needs its own retention story, not inheritance of the general default.
+
+### 3.3 Provenance: who owns this unwatched run (new since MIK-85)
+
+The first draft had no answer to "at a glance, which orchestrator does this unwatched worker belong
+to." MIK-85 (`5bc34bd`) provides one, and it is close to purpose-built for loops.
+
+Each bound orchestrator gets a deterministic one-cell sigil from `◆ ◇ ▲ △ ■ □ ● ○`, hashed from its
+durable controller identity, and the same shape closes every worker row whose lease it currently
+holds (`src/client/owner-sigil.ts`). Three properties make this load-bearing here:
+
+- **Ownership is read from the current lease controller, never from the creator recorded at
+  dispatch.** That is precisely the question a loop poses: not "who started this" but "who is
+  accountable for it right now."
+- **Three states, not two.** A sigil for a held lease; `⊘` (`ORPHANED_OWNER_SIGIL`) for a worker that
+  *was* dispatched and now has no holder; nothing at all for a worker no controller ever held — the
+  operator's own. `⊘` is exactly the rendering of "a loop whose controller died," which is the state
+  §2.1 says an unwatched run degrades into. An operator scanning the fleet can now see it without
+  querying anything.
+- **Nothing is allocated and nothing is persisted.** The assignment is a pure function of the live
+  roster, so it survives redraws, `--no-color` and broker restarts with no ledger to reconcile. The
+  broker answers `fleet.orchestratorOwnership` with the controller identity each bound session speaks
+  for, *derived from the binding key* (`src/broker/server.ts:474`, read at
+  `src/client/fleet.ts:731-746`).
+
+Selection doubles as an ownership lens: while an orchestrator row is selected, every worker it does
+not own drops to low intensity. For a loop that spans many workers under one controller, that is a
+one-keystroke answer to "show me everything this loop owns."
+
+Two limits to record. The alphabet is eight glyphs; a ninth concurrent orchestrator falls back to a
+letter. A design that gives every loop its own binding therefore consumes sigil slots, and a fleet of
+loops would exhaust the legible alphabet — an argument for **one loop-controller binding driving many
+iterations** rather than one binding per loop. And because `⊘` follows the *lease*, the §2.1
+lazy-expiry finding leaks into this surface: a lease nothing has touched still reads `active`, so the
+worker shows its owner's sigil rather than `⊘`. The sweep prerequisite (§7.2) is what makes this
+display honest for a run nobody is watching.
+
+## 4. Failure and kill-switch behaviour
 
 ### 4.1 Kill-switch paths
 
 Two genuinely different kill paths exist, and they are not interchangeable:
 
-- **Operator-direct.** `session.stop` / `session.delete` are unconditional broker operations Fleet's
-  `Ctrl+X` drives directly (`docs/architecture/session-model.md`, "Stop and delete"). No capability
-  grant, no controller-lease check, no handoff requirement. This is the path that must remain able to
-  kill a loop regardless of what the loop's own controller thinks.
-- **Peer-mediated.** `stopOrchestrator` (`src/orchestration/agent-control-service.ts:440-562`) is what
-  a peer orchestrator or tool actually calls, and it refuses far more than it allows: it refuses a
-  target stopping itself ("cannot stop itself through the peer-control tool", line ~496), refuses a
-  target that still owns non-terminal workers ("`REQUIRES_HANDOFF`... MIK-55 handoff is required
-  before stopping it", line ~521), and — separately from the handoff check — refuses a **healthy live
-  or starting** target outright regardless of handoff state ("Healthy live orchestrators require
-  explicit operator authority", `APPROVAL_REQUIRED`, line ~535). Only past that gauntlet does the same
-  graceful-then-force escalation as a worker stop apply (`isStopRequested` must already be true,
-  `forceStopGraceMs` must have elapsed, only then `SIGKILL`). This mirrors the identical worker-level
-  escalation in `src/orchestration/worker-control-service.ts:751-778`.
+- **Operator-direct.** `session.stop` / `session.delete` are unconditional broker operations that
+  Fleet's `Ctrl+X` drives directly (`docs/architecture/session-model.md`). No capability grant, no
+  controller-lease check, no handoff requirement. This is the path that must remain able to kill a
+  loop regardless of what the loop's own controller thinks.
+- **Peer-mediated.** `stopOrchestrator` (`src/orchestration/agent-control-service.ts`) refuses far
+  more than it allows: a target stopping itself ("cannot stop itself through the peer-control tool"),
+  a target that still owns non-terminal workers (`REQUIRES_HANDOFF`, MIK-55 handoff required first),
+  and — separately from the handoff check — a **healthy live or starting** target outright
+  (`APPROVAL_REQUIRED`, "Healthy live orchestrators require explicit operator authority"). Only past
+  that gauntlet does the graceful-then-force escalation apply: `isStopRequested` must already be
+  true, `forceStopGraceMs` must have elapsed, and only then `SIGKILL`. The worker-level escalation in
+  `src/orchestration/worker-control-service.ts` mirrors it exactly.
 
-The practical read for a loop that is itself orchestrator-shaped (a chain of workers under one binding,
-per §1.3's controller-mediated recommendation): **nothing short of the operator's direct path can kill
-it while it is actively working.** A peer tool cannot; the loop cannot stop itself. This is the correct
-default — it prevents a rogue peer from silently killing a live loop — but it means the *only* kill
-switch a design can rely on for a live loop is the same one that already exists for every other
-orchestrator: the operator's `Ctrl+X`/`cyberdeck stop`. No new kill mechanism needs to be invented;
-what needs to be guaranteed is that a loop-controller's binding is always visible in Fleet as a normal
-orchestrator row, so that path stays reachable.
+For a loop that is itself orchestrator-shaped — a chain of workers under one binding, per §1.3 —
+**nothing short of the operator's direct path can kill it while it is actively working.** A peer tool
+cannot; the loop cannot stop itself. That is the correct default: it prevents a rogue peer from
+silently killing a live loop. It also means the only kill switch a design may rely on is the one
+that already exists for every orchestrator. No new kill mechanism needs inventing. What must be
+*guaranteed* is that a loop-controller's binding is always visible in Fleet as a normal orchestrator
+row — with a sigil, per §3.3 — so that path stays reachable. A loop whose controller is invisible in
+the fleet list is a loop with no kill switch.
+
+One consequence of assuming MIK-98 option 1: once peer bindings hold durable controller identities,
+a peer-bound loop-controller becomes a legal handoff target *and* a legal `stopOrchestrator` target
+subject to the same gauntlet. The `REQUIRES_HANDOFF` refusal then does real work for loops — a
+loop-controller that still owns non-terminal iteration workers cannot be stopped out from under them
+without an explicit handoff, which is the behaviour a loop wants.
 
 ### 4.2 Broker restart
 
 All three substrates fail closed the same way, independently:
 
-- **Job plane:** `queued`/`dispatched`/`running` → `interrupted` on restart, never resumed
-  (`docs/architecture/persistence-and-recovery.md` restart-mapping table). Recovery "never dispatches,
-  retries, resumes, routes, or delivers report-back."
-- **Worker plane:** in-memory lease tokens are lost on restart; leases age out (subject to the §2.1
-  lazy-expiry finding) and become adoptable — "the intended recovery path... nothing is ever reacquired
-  silently" (`docs/architecture/worker-coordination.md`).
+- **Job plane:** `queued` / `dispatched` / `running` → `interrupted` on restart, never resumed
+  (`docs/architecture/persistence-and-recovery.md`). Recovery "never dispatches, retries, resumes,
+  routes, or delivers report-back." Note the interaction with §2.3: the admission queue is in-memory,
+  so a restart starts from an empty queue and a loop's pending iteration is simply gone, not delayed.
+- **Worker plane:** in-memory lease tokens are lost; leases age out (subject to §2.1's lazy-expiry
+  finding) and become adoptable — "nothing is ever reacquired silently."
 - **Worktree leases:** a held, unexpired lease found at startup becomes a durable orphan because the
   previous owner cannot be verified; orphans block acquisition; recovery never runs Git cleanup, and
-  `assessOrphanCleanup` always assumes dirty by default
-  (`docs/architecture/app-server-and-worktree-leases.md`).
+  `assessOrphanCleanup` always assumes dirty by default.
 
 The consistent posture — nothing auto-resumes, nothing auto-deletes, every unverifiable thing becomes
-an operator-facing, non-destructive finding — is exactly what a loop needs after a broker restart mid
-cycle, and it requires no new invention. What is missing is the join: `ControlPlaneReconciler.reconcile()`
-(`src/control-plane/reconciler.ts:67-171`) only ever looks at jobs, worktree leases, and artifacts. It
+an operator-facing non-destructive finding — is exactly what a loop needs after a restart mid-cycle,
+and needs no new invention. What is missing is the **join**: `ControlPlaneReconciler.reconcile()`
+(`src/control-plane/reconciler.ts:70`) only ever looks at jobs, worktree leases and artifacts. It
 has no worker-plane equivalent — nothing surveys orphaned `OwnershipSubject`s at startup and reports
-them as a structured, `operatorActionRequired`, `destructive: false` finding the way job orphans are
-reported. An operator recovering from a broker restart mid-loop today has the job-plane reconciliation
-report and the raw worker-coordination log; they do not have a "here is every loop-shaped worker this
-broker can no longer verify" summary.
+them as a structured, `operatorActionRequired`, `destructive: false` finding the way job orphans are.
+An operator recovering from a restart mid-loop gets the job-plane reconciliation report and the raw
+worker-coordination log; they do not get "here is every loop-shaped worker this broker can no longer
+verify."
 
-### 4.3 Fail-closed defaults
+### 4.3 Fail-closed defaults, and the MIK-96 lesson
 
-Every relevant boundary in this codebase already defaults to refusal over guessing: an omitted or
-Fable Claude model at launch (`evaluateClaudeLaunchSafety`, re-checked again at admission —
-"defence in depth," `docs/architecture/concurrency-budgets-and-reconciliation.md`), autonomous Fable
-and Cursor delegation (`worker.start.fable`/`worker.start.cursor`, off by default, durable,
-operator-only-settable, `docs/architecture/session-model.md` and `src/domain/capability.ts:8-9`), an
+Every relevant boundary in this codebase defaults to refusal over guessing: an omitted or Fable Claude
+model at launch (`evaluateClaudeLaunchSafety`, re-checked at admission — "defence in depth"), an
 unprovable token ceiling (`UNPROVABLE_TOKEN_USAGE`), a dirty worktree at orphan cleanup
-(`assessOrphanCleanup` always `safeToDelete: false`). A loop-start capability belongs in this same
-family: a durable, off-by-default, operator-only capability bit on the controlling binding — not a
-runtime flag a loop-controller or worker could set for itself — checked again at the point each new
-iteration actually launches, the same way `evaluateClaudeLaunchSafety` is checked at both submit and
-admission rather than trusted from submit alone.
+(`assessOrphanCleanup` always `safeToDelete: false`), a modal or occupied composer at delivery
+(`deliveryHold`). A loop-start capability belongs in this family.
 
-## 5. Hosting loops post-refactor — explicit prerequisites
+**But the first draft's cited precedent for that bit was removed, and understanding why changes the
+recommendation.** It named `worker.start.cursor` — a durable, default-off, operator-only capability —
+as the template. MIK-96/MIK-97 (`e22acbf`) deleted it. `CyberdeckCapabilitySchema`
+(`src/domain/capability.ts:3-12`) now lists only `thread.list`, `thread.read`, `thread.enqueue`,
+`worker.start`, `worker.start.fable`, `orchestrator.inspect`, `orchestrator.stop`, `workflow.run`;
+`worker.start.cursor` survives solely in `RETIRED_CAPABILITIES`, filtered out on read so that
+append-only bindings written while the toggle was on stay parseable.
 
-A loop should not be its own third substrate. It is worker-shaped work (turns, checkpoints, steering)
-that needs job-plane-grade enforcement (admission, budget, reconciliation) it does not currently have.
-The refactor should close that gap, not paper over it. Concretely, before a loop is buildable, the
-post-refactor architecture must provide:
+The reason it was removed is the lesson: **the capability catalog advertised Cursor's whole model list
+to every orchestrator, and dispatch then refused the provider outright.** A dispatch that followed
+exactly what it was advertised came back `CAPABILITY_DENIED`, naming a remedy — `/cursor-workers on`
+— that Fleet refused to run in the very state the denial was raised from. The gate was removed, not
+the grant mechanism, precisely because a gate that disagrees with the surface advertising the
+capability is worse than no gate.
 
-1. **A worker-plane budget ledger with the job plane's exact fail-closed posture** — scoped per loop
-   run (not per job-tree, since `parentJobId` does not exist on `OwnershipSubject`), enforcing turns
-   and wall-clock at minimum, tokens where reported, and refusing further admission the moment usage
-   becomes unprovable rather than assuming zero. This is §2.3's central finding, restated as a
-   requirement.
+Applied to loops, that yields three requirements rather than one:
+
+1. A loop-start capability bit is still right: durable, off by default, operator-only-settable, never
+   settable at runtime by a loop-controller or a worker.
+2. It must be checked at **both** loop-definition time and at each iteration's actual launch — the
+   `evaluateClaudeLaunchSafety` pattern of checking at submit *and* at admission rather than trusting
+   submit alone.
+3. **Whatever surface advertises that loops are available must be derived from the same grant that
+   gates them.** If a capability catalog, an MCP tool description, or a Fleet affordance tells an
+   orchestrator it may start a loop, the gate must agree — and the remedy named in any denial must be
+   runnable from the state the denial was raised in. This is the MIK-96 failure, and a loop-start bit
+   is the exact shape that reproduces it.
+
+`worker.start.fable` is untouched by MIK-96 and remains the live precedent for a durable, default-off,
+operator-only grant.
+
+## 5. Deferred limitations a loop must respect
+
+`CLAUDE.md` records accepted, deliberate gaps. They are not bugs to fix on sight, and a loop design
+must not assume any of them is solved. Four bear directly on loops:
+
+- **A worktree with no `origin/HEAD` gets no baseline.** `src/nvim/worktree-changes.ts` diffs against
+  `merge-base(origin/HEAD, HEAD)`; without that ref the change list is untracked files only and the
+  title says `no baseline`. A loop that provisions a scratch repository per iteration — a plausible
+  shape for a self-testing loop — lands in exactly the triggering case. The stated fix is to ask the
+  operator for the base ref and record it, not to widen the guessing; a loop must therefore either
+  dispatch into clones that have `origin/HEAD` or carry a declared base ref per iteration.
+- **Cursor and Antigravity model columns are launch values only,** marked `~`, because neither writes
+  a native transcript. This compounds §2.3: those providers give a loop neither a verifiable running
+  model nor `canonicalTurns`. A turn-budgeted loop on those providers is not buildable honestly, and
+  the design should say so rather than degrade to the scrape.
+- **A provider's model list is only as current as its CLI on the broker's PATH.**
+  `WorkerCapabilityCatalog` caches `agent models` / `agy models` for five minutes and falls back to a
+  dated static catalog with `source: "fallback-catalog"` when the CLI is missing or times out. A loop
+  that re-selects a model per iteration can therefore dispatch against a stale or fallback list for
+  the life of the loop without an operator ever seeing the notice Fleet prints. A loop should resolve
+  its model **once, at definition**, and record it — not re-resolve per iteration.
+- **One socket namespace for all concurrent Cyberdecks.** `nvimServerAddress` keys on the tmux pane
+  index alone, so two Cyberdecks run by the same operator can collide. Loops raise the odds of a
+  long-lived instance sitting in the background while a second is started, which is the flagged
+  trigger. Not a blocker for loops; a reason not to treat a loop's longevity as free.
+
+Two non-deferred rules also constrain loops. A thread's pull-request indicator is attributed to the
+branch that thread's work lands on, declared via `workspace` — so **a loop that wants per-iteration PR
+visibility must dispatch each iteration with a declared `workspace`**, not rely on the directory. And
+nvim is driven with `--remote-expr`, never `--remote-send`: no loop may inject keystrokes.
+
+## 6. Hosting loops post-refactor: which layer owns what
+
+MIK-94 / GitHub #51 targets Clean Architecture boundaries with dependencies pointing inward:
+
+```text
+CLI/TUI → adapters → application/use-cases → domain ← ports ← infrastructure
+```
+
+The issue's own sequencing note says the refactor "should precede infrastructure expansion and
+autonomous-loop work so new behaviour lands on the intended boundaries rather than creating more
+coupling that must immediately be migrated." This section says where each piece of a loop belongs so
+that lands correctly.
+
+**Domain — loop policy lives here, and only here.** A loop is a set of invariants: what bounds exist,
+what a bound being exceeded means, when an iteration is permitted to start, what a decision gate
+blocks. These are the same kind of rule as `projectWorkerTruth`'s ordering or
+`instructionTransitionAllowed`'s table — pure functions over observed state, no I/O, no clock, no
+provider knowledge. Concretely the domain owns: a `LoopPolicy` value (bounds and their units), a
+`LoopRun` aggregate with its own state machine, a pure `evaluateLoopContinuation(policy, observed)`
+returning continue / gate / stop-with-reason, and the rule that a turn budget is denominated in
+`canonicalTurns`. **The domain must not know what triggered an iteration** — a cron tick, a workflow
+message, and an instruction completion must all arrive as the same domain-level "iteration boundary
+observed" fact.
+
+**Application — one use case per verb, coordinating domain and ports.** `StartLoop`, `AdvanceLoop`
+(evaluate the policy and either enqueue the next iteration or settle), `StopLoop`, `ReconcileLoops`
+(the startup survey of §7.3). These coordinate; they do not accumulate policy. The refactor issue is
+explicit that use cases "do not become miscellaneous service classes," and a loop is the single most
+likely place for that to happen — "the loop service" that quietly grows the scheduler, the budget
+arithmetic, the provider selection and the reporting is exactly the shady-logic outcome the refactor
+exists to prevent.
+
+**Ports the loop use cases need**, all defined inward and implemented outward:
+
+| Port | Why the loop needs it | Existing implementation to adapt |
+| --- | --- | --- |
+| `Clock` | wall-clock bounds and the scheduler tick, without importing timers into the core | the broker's existing `now()` injection (`AdmissionScheduler`, `agent-control-service`) |
+| `LoopScheduleStore` | durable "when next", and the missed-tick record | none — new, and the only genuinely new persistence a loop needs |
+| `BudgetLedgerPort` | turn / wall-clock / token accounting with fail-closed posture | `src/control-plane/budget-ledger.ts`, generalised off `parentJobId` |
+| `AdmissionPort` | one iteration at a time, fair under ties | `src/control-plane/admission-scheduler.ts` |
+| `ControllerLeasePort` | acquire / renew / release / adopt, and the identity a loop-controller speaks as | `src/broker/worker-coordination.ts` |
+| `InstructionPort` | enqueue the next iteration; surface `deliveryHold` reasons | `SessionRegistry.submitInstruction` |
+| `WorkerObservationPort` | `WorkerTruth` and `canonicalTurns` for the iteration just finished | `projectWorkerTruth` |
+| `CheckpointPort` | request a decision gate, observe its answer | `requestCheckpoint` / `submitEvent` |
+| `AuditPort` | one loop-run identifier written across the logs of §3.2 | `Journal` + the coordination log |
+| `CapabilityPort` | the loop-start grant of §4.3, checked twice | `src/domain/capability.ts` |
+
+**Adapters — trigger transports, and nothing else.** A cron adapter, a workflow-message adapter and
+an instruction-completion adapter each translate their own event into the one domain fact. This is
+the boundary that keeps §1's three trigger models from becoming three loop implementations. A
+controller may know a use case; the use case must never know which adapter woke it.
+
+**Infrastructure — timers, persistence, provider processes, tmux projection.** Unchanged by loops.
+The one thing that must not happen here is a loop's bounds being enforced by infrastructure — a
+`SIGTERM` at a deadline is an infrastructure *action*, but the deadline itself is domain policy. The
+Scout profile is the cautionary example: its 15-minute bound is real and works, but it lives in the
+profile's own implementation rather than in a rule anything else can reuse, which is why it is a
+precedent rather than a mechanism.
+
+**Where a loop must not land.** Not in the broker's `SessionRegistry`, which is a runtime; not in
+Fleet, which is a projection; not in an MCP tool handler, which is a controller. If loop policy ends
+up in any of the three, the refactor's dependency rule has been violated and the resulting behaviour
+migrates with the infrastructure it was written into — the exact outcome #51 names as the reason to
+sequence the refactor first.
+
+## 7. Prerequisites the MIK-94 refactor must provide before loops are buildable
+
+This is the primary output of this document. Each item is a boundary the refactor must establish, so
+that nothing loop-shaped lands on the wrong one.
+
+1. **A worker-plane budget ledger with the job plane's exact fail-closed posture**, exposed inward as
+   `BudgetLedgerPort`. Scoped per loop run rather than per job tree — `BudgetLedger`'s scope
+   resolution walks `parentJobId`, which `OwnershipSubject` does not have. It must enforce turns and
+   wall clock at minimum, tokens where the provider reports them, and refuse further admission the
+   moment usage becomes unprovable rather than assuming zero. **Turn budgets must be denominated in
+   `canonicalTurns`, never `completedTurns`** (§2.3): a replay-derived turn is a scrape, and a budget
+   inflated by a misread spinner frame is not a budget.
+
 2. **A real periodic lease-expiry sweep**, wired into broker startup/composition the way admission and
-   reconciliation already are — closing the §2.1 finding that `expireLeases` exists but is called
-   nowhere in production. A loop nobody is watching must not be able to sit `active` on disk
-   indefinitely because nothing happened to touch it.
-3. **A worker-plane reconciliation pass**, structurally parallel to `ControlPlaneReconciler`: at
-   startup, survey orphaned `OwnershipSubject`s the same non-destructive, `operatorActionRequired` way
-   job orphans are surveyed today. Without this, a broker restart mid-loop has no equivalent of the
-   job-plane's recovery report.
-4. **A resolved peer-binding capability model** — CLAUDE.md's own deferred item, and directly load-
-   bearing here: a controller-mediated loop-controller (§1.3) is exactly the kind of actor that needs
-   to both message *and* observe/control the workers it drives. Today a `:peer:` binding can enqueue
-   (`thread.enqueue`) but cannot hold a stable controller identity for `worker_ctl`/`worker_events`
-   (`stableController`, `src/orchestration/worker-control-service.ts:1184-1186`) — the exact MIK-71
-   asymmetry. A loop-controller built as a peer binding inherits this contradiction on day one.
-5. **A joined audit view across the four logs in §3.2** — or, more conservatively, a documented,
-   deliberate decision that a loop's audit trail is scoped to the worker-coordination log plus the
-   thread transcript only, with the job-plane logs explicitly out of scope unless a loop iteration is
-   represented as a job. Either answer is acceptable; no answer is not.
-6. **A loop-specific retention policy**, distinct from `DEFAULT_THREAD_RETENTION_DAYS`/`_COUNT`, so a
-   frequent loop's history does not either (a) silently age out on the general 7-day/200-thread clock
-   or (b) force pinning every iteration and defeat retention entirely.
-7. **A decision on where a loop's turn budget lives relative to the single-decision-gate-per-subject
-   limit** (§2.2): if a loop needs to gate on more than one concern per cycle (continue? spend more?),
-   that is currently unrepresentable on one `OwnershipSubject` and either needs sequential gates or a
-   schema change to `DecisionGateSchema`.
-8. **The durable, off-by-default, operator-only loop-start capability bit** described in §4.3, checked
-   at both loop-definition time and at each iteration's actual launch — never inferred from the
-   presence of a schedule or event trigger alone.
+   reconciliation already are — closing the finding that `expireLeases`
+   (`src/broker/worker-coordination.ts:523`) exists, is tested, and is called from nowhere in
+   production (re-verified at `e22acbf`). A loop nobody is watching must not sit `active` on disk
+   indefinitely because nothing happened to touch it. This is also what makes MIK-85's `⊘` honest for
+   an unwatched run (§3.3).
 
-None of these are large in isolation — most are "build the worker-plane equivalent of a job-plane
-component that already exists and is well understood." That is exactly why they belong in the refactor
-rather than bolted onto the current split: building them once, on the post-refactor architecture, is
-cheaper than building them twice (once now, shaped around the job/worker split; once again after the
-refactor removes that split).
+3. **A worker-plane reconciliation pass**, structurally parallel to `ControlPlaneReconciler`, behind
+   the same inward port: at startup, survey orphaned `OwnershipSubject`s the same non-destructive,
+   `operatorActionRequired`, `destructive: false` way job orphans are surveyed. Without it, a broker
+   restart mid-loop has no equivalent of the job-plane recovery report.
 
-## 6. Recommendation
+4. **A loop-controller that is a real lease controller, on MIK-98's option-1 outcome.** Taking option
+   1 as given (peer bindings get a durable controller family), the refactor must ensure the
+   loop-controller's identity is a stable controller family in the `ControllerIdentitySchema` sense —
+   never a conversation UUID — so that enqueue, observe and control agree for the same binding. The
+   invariant MIK-98 states is the one loops depend on: *every capability a binding is granted must be
+   honoured by the lease substrate for that binding.* Once that lands, the CLAUDE.md deferred entry
+   for the peer asymmetry retires and this prerequisite is satisfied by construction; until it lands,
+   a loop-controller built as a peer binding inherits a contradiction on day one.
 
-Do not build any loop primitive before the architecture refactor. This is not a hedge — it follows
-directly from §5: every prerequisite listed is a worker-plane component that either does not exist
-(budget ledger, reconciliation pass) or exists but is unreachable in production (the lease sweep) or is
-an open authorization question the operator has already deferred (the peer-binding asymmetry, per
-CLAUDE.md). Building a loop today means building all of §5 by hand, scoped to the current job/worker
-split, then re-doing the scoping the moment the refactor changes that split. That is the "shady logic
-migrates into the new architecture" outcome the issue explicitly warns against.
+5. **One loop-run identifier threaded through the correlation fields that already exist.**
+   `InstructionRecord` already carries `workflowRunId`, `messageId`, `causationId`, `hop`,
+   `expectedTurn`, and the render/submit/complete timestamps (`src/domain/instruction.ts:30-52`). A
+   loop-run id in the same spine joins the coordination log and the thread transcript without a new
+   format. The refactor must additionally decide, explicitly, whether the diagnostic journal
+   (`BrokerEventTypeSchema` has no worker-event or checkpoint type at all) and the job-plane logs are
+   in scope for a loop's audit trail. Either answer is acceptable; no answer is not.
 
-When the refactor does land, the order of operations that keeps loops honest is: (1) trigger model —
-build the **event** trigger first (§1.2), since it has the most existing substrate and forces the
-budget/lease questions to get answered by real checkpoint traffic rather than synthetic load; (2) once
-event-triggered loops are bounded, observable, and killable per §§2-4, add **self-continuation** in the
-controller-mediated shape recommended in §1.3 — never worker-side; (3) add **schedule** last, once a
-missed-tick-after-downtime policy has been exercised against real operator expectations by the other
-two trigger models first. Schedule is the cheapest trigger to build and the easiest to get wrong
-quietly (a scheduler that silently catches up missed ticks after an operator was away is precisely the
-kind of autonomy this whole system exists to make explicit and refuse by default), so it should be
-built last, informed by the other two, not first because it looks simplest.
+6. **A loop-specific retention policy**, distinct from `DEFAULT_THREAD_RETENTION_DAYS` (7) and
+   `DEFAULT_THREAD_RETENTION_COUNT` (200), so a frequent loop's history neither silently ages out on
+   the general clock nor forces pinning every iteration and defeats retention entirely.
+
+7. **A decision on how a loop gates on more than one concern per cycle.** `decisionGate` on
+   `OwnershipSubject` is a single value, not a set (`src/domain/worker-coordination.ts:91-95`).
+   "Continue past step 3?" and "spend the extra budget?" cannot both be open on one subject. Either
+   loop policy serializes gates — the cheaper answer, and the one §2.2 recommends — or
+   `DecisionGateSchema` changes. The refactor should not discover this mid-implementation.
+
+8. **The durable, off-by-default, operator-only loop-start capability**, checked at loop-definition
+   time *and* at each iteration's launch, with the MIK-96 constraint attached: whatever surface
+   advertises that loops are available must derive from the same grant that gates them, and any
+   denial must name a remedy runnable from the state the denial was raised in (§4.3). This is why
+   `worker.start.cursor` no longer exists, and a loop-start bit is the exact shape that reproduces
+   that failure.
+
+9. **A `Clock` port and a `LoopScheduleStore` port defined inward**, so that the schedule trigger —
+   the only trigger with no existing substrate — cannot pull timer or persistence knowledge into the
+   domain. The store must record a missed tick as a fact rather than a backlog: recovery never
+   redispatches, and a scheduler that silently catches up after downtime contradicts every other
+   recovery path in the system.
+
+10. **One domain-level "iteration boundary observed" fact, with per-trigger adapters translating into
+    it.** Schedule, workflow wake, checkpoint answered and `instruction → completed` must all arrive
+    at the same domain entry point. Without this, §1's three trigger models become three loop
+    implementations and the boundary the refactor establishes is undone by the first loop that ships.
+
+11. **A stated provider-capability rule for loops:** a bound denominated in a quantity a provider does
+    not report is refused, not approximated. Cursor and Antigravity write no native transcript, so
+    `canonicalTurns` does not advance for them (`CLAUDE.md`, deferred). A turn-budgeted loop must be
+    unavailable on those providers rather than fall back to the scrape — the same posture as
+    `UNPROVABLE_TOKEN_USAGE`. The refactor's provider-capability representation is where this belongs;
+    #51 explicitly requires provider-specific capabilities to remain representable without
+    contaminating the domain.
+
+12. **Loop bounds enforced from the domain, actuated by infrastructure.** A deadline is a domain rule;
+    the `SIGTERM` at that deadline is an infrastructure action. The Scout profile currently holds both
+    in one place, which is why its 15-minute bound is a precedent rather than a reusable mechanism.
+    The refactor must not reproduce that shape for loops.
+
+None of these is large in isolation — most are "build the worker-plane equivalent of a job-plane
+component that already exists and is well understood," or "define inward the port that a loop would
+otherwise reach around." That is exactly why they belong in the refactor rather than bolted onto the
+current split: building them once, on the post-refactor architecture, is cheaper than building them
+twice — once now, shaped around the job/worker split, and again after the refactor removes it.
+
+## 8. Recommendation
+
+### Options considered
+
+- **Option A — build loops on the job plane now.** Represent each iteration as a job so the existing
+  `BudgetLedger` and `AdmissionScheduler` apply unchanged. *Risk:* a job has no mid-run steering, no
+  checkpoints, and no instruction queue. Every loop that needs to be steered — which is every loop
+  worth building — would need a parallel worker beside its job, and the two would disagree about
+  state, which is the pre-MIK-64 failure the truth projection exists to prevent.
+- **Option B — build loops on the worker plane now, with hand-rolled bounds.** Follow the Scout
+  precedent: a fixed loop profile carrying its own wall-clock literal, enforced by the broker. *Risk:*
+  it works, and that is the problem. It produces a second one-off bound with no ledger behind it,
+  scoped to today's job/worker split, that must be rewritten the moment the refactor moves the
+  boundary — plus it needs items 2, 3 and 4 of §7 anyway to be safe when unwatched.
+- **Option C — build nothing until the refactor establishes the boundaries in §7, then build
+  event-triggered loops first.** *Risk:* loops are delayed by the refactor's timeline, and §7 grows if
+  the refactor's sequencing changes.
+
+### Recommended path: Option C
+
+Do not build any loop primitive before MIK-94 lands. This is not a hedge; it follows from §7. Every
+prerequisite listed is a worker-plane component that either does not exist (budget ledger,
+reconciliation pass, schedule store), or exists but is unreachable in production (the lease sweep), or
+is an authorization question being decided elsewhere right now (MIK-98). Building a loop today means
+building all of §7 by hand, scoped to the current split, then re-scoping it. That is the "shady logic
+migrates into the new architecture" outcome #51 explicitly sequences the refactor to prevent — the
+issue says so in its own words.
+
+**Order of operations once the refactor lands:**
+
+1. **Event trigger first**, specifically `instruction → completed` (§1.2). It has the most existing
+   substrate, it observes an edge that is already durable and typed rather than widening a cap that
+   exists to stop recursion, and it forces the budget and lease questions to be answered by real
+   traffic instead of synthetic load.
+2. **Self-continuation second**, once event-triggered loops are bounded, observable and killable per
+   §§2–4 — and only in the controller-mediated shape of §1.3. Never a worker-side auto-continue tool.
+3. **Schedule last.** It is the cheapest trigger to build and the easiest to get wrong quietly: a
+   scheduler that silently catches up missed ticks after an operator was away is precisely the kind
+   of autonomy this system exists to make explicit and refuse by default. Build it informed by the
+   other two, not first because it looks simplest.
+
+**Two guardrails to carry into whatever ships:**
+
+- One loop-controller binding driving many iterations, not one binding per loop. The sigil alphabet is
+  eight glyphs (§3.3), and a loop that is invisible in the fleet list is a loop with no kill switch
+  (§4.1).
+- A loop is a lease subject's *controller*, and the operator is the controller's controller. Nothing
+  in a loop design may weaken the rule that a human control attachment has absolute writer priority,
+  or that `session.stop` is unconditional. Those two are the whole safety story; every other bound in
+  §2 is a convenience by comparison.
