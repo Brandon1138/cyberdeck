@@ -241,28 +241,27 @@ worker's structured `decisionGate` state (`CheckpointRequestSchema.mode`,
   decision points outstanding on one worker — "should I continue past step 3, and separately should I
   spend the extra token budget" is not representable. Loop design must serialize decision points: one
   open gate, answered, closed, before the next opens.
-- **The current checkpoint prompt is not itself a pause.** `deliverCheckpointPrompt` submits another
-  provider instruction, and the worker may act during that turn. A correlated `CHECKPOINT` event
-  updates the structured gate but `SessionRegistry.deliveryHold` does not consult it, so neither the
-  prompt nor that event is an execution boundary. The loop substrate needs a durable phased gate:
-  it admits exactly the correlated checkpoint exchange while denying ordinary instructions and
-  mutation/tool execution, then becomes a decision-pending hold which only an explicit controller
-  decision releases. Human-controller priority still outranks the loop, but it is not a substitute
-  for this gate.
+- **The current checkpoint prompt is not a safe decision boundary.** `deliverCheckpointPrompt`
+  submits an actionable provider turn, and Cyberdeck has no mechanism that can allow only a
+  checkpoint response while intercepting the provider's built-in shell/file tools. A delivery hold
+  on later PTY writes cannot make that turn inert. A loop decision gate therefore must be raised by
+  the control plane outside the provider process, after the current iteration has settled; it must
+  not call `deliverCheckpointPrompt`. Human-controller priority still outranks the loop, but it is
+  not a substitute for this boundary.
 - **A decision gate is a pause, not a stop.** `mode: "decision-gate"` changes only the structured
   `decisionGate` field; it does not change the worker's lifecycle
   (`docs/architecture/worker-coordination.md`). A loop-controller reading state alone will not see a
   paused loop as different from a working one — it must read `decisionGate.state`, not
   `WorkerTruthState`.
 
-Recommended placement: arm a `checkpoint-exchange` phase **before** either a checkpoint prompt or the
-instruction that would start the next iteration can be delivered. That phase grants a one-shot
-exception for the correlated checkpoint prompt and response event, while the execution boundary
-rejects ordinary work and provider mutation/tool calls during that turn. Observing the matching
-`CHECKPOINT` advances the gate to `awaiting-controller`; it does not clear it. The durable controller
-decision is the only release edge from that phase: rejection stops the run, while approval permits
-the next iteration instruction to be enqueued and executed. This avoids deadlocking the question
-behind its own hold while keeping the worker inert with respect to loop work at every veto point.
+Recommended placement: after an iteration settles, arm `awaiting-controller` in durable loop state
+**before** the next iteration instruction can be enqueued or delivered. The controller/operator
+receives the decision question through a control-plane surface, not through the worker's provider
+composer. Any worker evidence needed for that decision must have been emitted by the just-settled
+iteration and correlated to its completion; asking the worker a new question is another bounded,
+actionable iteration and cannot be represented as an inert gate. The durable controller decision is
+the only release edge: rejection stops the run, while approval permits the next instruction. No
+provider execution-control mechanism is claimed or required at this boundary.
 
 ### 2.3 Spend, turn, and wall-clock limits — who enforces what
 
@@ -481,17 +480,20 @@ no unlimited value. `RetainLoopHistory` runs after every iteration settlement, o
 periodic sweep for the age bound, and at reconciliation. The first limit crossed removes full
 payloads for the oldest settled iterations even while the thread and run remain active or paused.
 
-That rolling operation is joined by `(loopRunId, iterationId)`: it compacts terminal instruction
-snapshots and the matching transcript prompt/output events in one retention transaction, rewrites
-each private JSONL atomically, and retains one prompt-free audit tombstone with ids, lifecycle result,
-stop disposition, completion target, and canonical provenance. Before deleting payloads, it requires
-the same provenance-qualified settlement to be durable in `LoopRunStore`; compaction can never erase
-the only proof that authorized a later iteration. The current iteration, an unsettled iteration, and any
+That rolling operation is joined by `(loopRunId, iterationId)`: in one retention transaction it
+compacts terminal instruction snapshots, matching transcript prompt/output events, workflow-message
+trigger text, and coordination-event/checkpoint payloads. Each participating private JSONL is
+rewritten atomically; where a mixed coordination transaction cannot be removed whole, its payload is
+replaced by the same bounded prompt-free reference required in prerequisite 7. The transaction
+retains one prompt-free audit tombstone with ids, lifecycle result, stop disposition, completion
+target, and canonical provenance. Before deleting any of the four payload copies, it requires the
+same provenance-qualified settlement to be durable in `LoopRunStore`; compaction can never erase the
+only proof that authorized a later iteration. The current iteration, an unsettled iteration, and any
 `accepted` / `queued` / `rendered` / `submitted` / `acknowledged` instruction are never eligible.
 Pinning exempts a finished loop from general thread expiry, but **does not exempt it from the rolling
 payload window**; otherwise pinning one active self-continuing thread recreates the unbounded history
 this policy exists to prevent. Finished-thread retention later removes the remaining bounded window
-and tombstones from both stores together.
+and tombstones from all four participating stores together.
 
 ### 3.3 Provenance: who owns this unwatched run (new since MIK-85)
 
