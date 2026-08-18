@@ -244,22 +244,25 @@ worker's structured `decisionGate` state (`CheckpointRequestSchema.mode`,
 - **The current checkpoint prompt is not itself a pause.** `deliverCheckpointPrompt` submits another
   provider instruction, and the worker may act during that turn. A correlated `CHECKPOINT` event
   updates the structured gate but `SessionRegistry.deliveryHold` does not consult it, so neither the
-  prompt nor that event is an execution boundary. The loop substrate needs a durable
-  decision-pending hold, enforced before prompt delivery and before provider execution, which only
-  an explicit controller decision releases. Human-controller priority still outranks the loop, but
-  it is not a substitute for this hold.
+  prompt nor that event is an execution boundary. The loop substrate needs a durable phased gate:
+  it admits exactly the correlated checkpoint exchange while denying ordinary instructions and
+  mutation/tool execution, then becomes a decision-pending hold which only an explicit controller
+  decision releases. Human-controller priority still outranks the loop, but it is not a substitute
+  for this gate.
 - **A decision gate is a pause, not a stop.** `mode: "decision-gate"` changes only the structured
   `decisionGate` field; it does not change the worker's lifecycle
   (`docs/architecture/worker-coordination.md`). A loop-controller reading state alone will not see a
   paused loop as different from a working one — it must read `decisionGate.state`, not
   `WorkerTruthState`.
 
-Recommended placement: arm the enforced decision-pending hold **before** either a checkpoint prompt
-or the instruction that would start the next iteration can be delivered. The checkpoint request and
-its correlated `CHECKPOINT` event record the question and worker response, but neither may clear the
-hold. The durable controller decision is the only release edge; rejection stops the run, while
-approval permits the next iteration instruction to be enqueued and executed. That makes the worker
-actually inert at every point a human or bounding check could veto the next cycle.
+Recommended placement: arm a `checkpoint-exchange` phase **before** either a checkpoint prompt or the
+instruction that would start the next iteration can be delivered. That phase grants a one-shot
+exception for the correlated checkpoint prompt and response event, while the execution boundary
+rejects ordinary work and provider mutation/tool calls during that turn. Observing the matching
+`CHECKPOINT` advances the gate to `awaiting-controller`; it does not clear it. The durable controller
+decision is the only release edge from that phase: rejection stops the run, while approval permits
+the next iteration instruction to be enqueued and executed. This avoids deadlocking the question
+behind its own hold while keeping the worker inert with respect to loop work at every veto point.
 
 ### 2.3 Spend, turn, and wall-clock limits — who enforces what
 
@@ -411,7 +414,7 @@ nobody watching to notice. The enqueue now comes back `queued` with `holdReason:
 
 ### 3.2 Auditability afterward
 
-Reconstructing "what did this loop do, and why did it stop" today means reading across **five
+Reconstructing "what did this loop do, and why did it stop" today means reading across **six
 separate durable locations**, none of which join all the way through:
 
 1. `events.jsonl` — the diagnostic `Journal` (`src/broker/journal.ts`), typed by
@@ -429,8 +432,11 @@ separate durable locations**, none of which join all the way through:
    plus actor, target, lifecycle, and correlation fields (`src/domain/instruction.ts:27-53`).
    `InstructionQueue.enqueue`, `applyState`, and `persistState` append again as the instruction moves
    through its lifecycle (`src/orchestration/instruction-queue.ts:61-95, 139-161, 210-222`).
+6. `orchestration/workflow-messages.jsonl` — append-only `WorkflowMessage` records written by
+   `WorkflowStore.putMessage` (`src/persistence/workflow-store.ts`). Each record retains the full
+   message text that can trigger another loop iteration.
 
-None of the five is wrong to keep separate — (4)'s privacy boundary and (2)'s fsynced-transaction
+None of the six is wrong to keep separate — (4)'s privacy boundary and (2)'s fsynced-transaction
 guarantees exist for documented reasons — but nothing stitches them into one "loop run" view. Prompt
 text lives in both (4) and (5), not only in the transcript, and retention or privacy analysis that
 accounts for one while ignoring the other is false. Shipping loops without a joined audit view asks
@@ -769,8 +775,9 @@ target, `provider-transcript` provenance, and canonical-turn increment agree (§
 (evaluate the policy and either enqueue the next iteration or settle), `StopLoop` (enter durable
 `stopping`, revoke delivery, cancel pending instructions, terminate iteration targets, durably settle
 their instructions, then terminate the controller), `ReconcileLoops` (the startup survey of §7.3), and
-`RetainLoopHistory` (enforce the rolling settled-iteration window across transcript and instruction
-history after each settlement, on the age sweep, and at reconciliation).
+`RetainLoopHistory` (enforce the rolling settled-iteration window across transcript, instruction,
+workflow-message, and coordination-event history after each settlement, on the age sweep, and at
+reconciliation).
 These coordinate; they do not accumulate policy. The refactor issue is
 explicit that use cases "do not become miscellaneous service classes," and a loop is the single most
 likely place for that to happen — "the loop service" that quietly grows the scheduler, the budget
@@ -791,7 +798,7 @@ exists to prevent.
 | `WorkerObservationPort` | `WorkerTruth`, matching completion-ledger provenance, and `canonicalTurns` delta for the iteration just finished               | `projectWorkerTruth` + `SessionRegistry.recordCompletion`                                                                 |
 | `CheckpointPort`        | request a decision gate, observe its answer                                                                                    | `requestCheckpoint` / `submitEvent`                                                                                       |
 | `AuditPort`             | loop and stop identifiers written through instruction snapshots and coordination transactions, optionally other logs of §3.2   | `InstructionStore` + the coordination log; `Journal` scope remains a decision                                             |
-| `LoopHistoryPort`       | compact settled iterations across transcript and instruction stores by rolling run window; expire finished history             | `selectExpiredThreads` + new range-compaction APIs on transcript and instruction stores                                   |
+| `LoopHistoryPort`       | compact settled iterations across transcript, instruction, workflow-message, and coordination-event stores by rolling run window; expire finished history | `selectExpiredThreads` + new joined range-compaction/redaction APIs on transcript, `InstructionStore`, `WorkflowStore`, and worker-coordination persistence |
 | `WorkerTerminationPort` | graceful/force termination of iteration targets, exit observation, and stop-linked instruction settlement                      | worker-control path over `SessionRegistry.stop` / `forceStop` / `handleExit`                                              |
 | `OperatorStopPort`      | graceful stop plus operator-reachable force escalation and exit observation for the controller                                 | `SessionRegistry.stop` / `forceStop`, exposed by new operator-only RPC                                                    |
 | `CapabilityPort`        | the loop-start grant of §4.3, checked twice                                                                                    | `src/domain/capability.ts`                                                                                                |
