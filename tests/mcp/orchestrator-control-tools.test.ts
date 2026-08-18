@@ -121,22 +121,23 @@ describe("orchestrator control-plane tools", () => {
     });
   });
 
-  it("explains a peer binding refusal with an actionable remedy", async () => {
+  it("explains an unbound transfer target with an actionable remedy", async () => {
     const transport: McpBrokerTransport = {
       request: vi.fn(async () => {
-        throw Object.assign(new Error("peer bindings cannot hold leases"), {
-          code: "NO_STABLE_CONTROLLER_IDENTITY",
+        throw Object.assign(new Error("transfer target holds no binding"), {
+          code: "TRANSFER_TARGET_UNBOUND",
         });
       }) as never,
     };
 
     const result = await call(transport, "cyberdeck_lease", {
-      action: "adopt", scope: "worker", workerId: WORKER, reason: "adopt",
+      action: "transfer", scope: "worker", workerId: WORKER, reason: "hand off",
+      toSessionId: "44444444-4444-4444-8444-444444444444",
     });
     expect(result.error).toMatchObject({
-      code: "NO_STABLE_CONTROLLER_IDENTITY",
+      code: "TRANSFER_TARGET_UNBOUND",
       actorSessionId: ACTOR,
     });
-    expect((result.error as { remedy: string }).remedy).toContain("durable orchestrator identity");
+    expect((result.error as { remedy: string }).remedy).toContain("no stable orchestrator binding");
   });
 });

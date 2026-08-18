@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows, type CapabilityGrant, type CyberdeckCapability } from "../domain/capability.js";
-import type { OrchestratorBinding } from "../domain/orchestrator.js";
+import { orchestratorController, type OrchestratorBinding } from "../domain/orchestrator.js";
 import type { SessionRecord } from "../domain/session.js";
 import {
   TERMINAL_WORKER_LIFECYCLES,
@@ -245,7 +245,6 @@ export class WorkerControlError extends Error {
     readonly code:
       | "ACTOR_NOT_AUTHORIZED"
       | "ACTOR_BINDING_ORPHANED"
-      | "NO_STABLE_CONTROLLER_IDENTITY"
       | "TRANSFER_TARGET_UNBOUND",
     message: string,
   ) {
@@ -1136,6 +1135,12 @@ export class WorkerControlService {
     }
   }
 
+  /**
+   * A binding is the whole of the authority: holding one is holding a controller identity.
+   *
+   * Peer bindings included. They were once refused here while still being granted `thread.enqueue`,
+   * so a peer could instruct a worker it could neither control nor observe (MIK-98).
+   */
   private async requireController(actorSessionId: string): Promise<{
     binding: OrchestratorBinding;
     controller: ControllerIdentity;
@@ -1147,14 +1152,7 @@ export class WorkerControlService {
         `${actorSessionId} holds no Cyberdeck orchestrator binding, so it has no controller identity`,
       );
     }
-    const controller = stableController(binding);
-    if (controller === undefined) {
-      throw new WorkerControlError(
-        "NO_STABLE_CONTROLLER_IDENTITY",
-        `Binding ${binding.key} is a peer binding and cannot prove a durable controller family; worker leases are refused rather than tied to a conversation`,
-      );
-    }
-    return { binding, controller };
+    return { binding, controller: orchestratorController(binding) };
   }
 
   private async requireTransferTarget(sessionId: string): Promise<ControllerIdentity> {
@@ -1170,7 +1168,7 @@ export class WorkerControlService {
 
   private async controllerForSession(sessionId: string): Promise<ControllerIdentity | undefined> {
     const binding = await this.options.orchestrators.findBySessionId(sessionId);
-    return binding === undefined ? undefined : stableController(binding);
+    return binding === undefined ? undefined : orchestratorController(binding);
   }
 
   /** Plans and mutations are serialized so a survey cannot straddle another call's adoption. */
@@ -1179,18 +1177,6 @@ export class WorkerControlService {
     this.tail = run.then(() => undefined, () => undefined);
     return run;
   }
-}
-
-export function stableController(binding: OrchestratorBinding): ControllerIdentity | undefined {
-  if (binding.key.includes(":peer:")) return undefined;
-  const controllerId = `orchestrator:${binding.key}`;
-  return {
-    controllerId,
-    familyId: controllerId,
-    scope: binding.scope.kind === "fleet"
-      ? { kind: "fleet", scopeId: binding.key }
-      : { kind: "worktree", scopeId: binding.key, worktreePath: binding.scope.cwd },
-  };
 }
 
 function publicOutcome(outcome: OwnershipOutcome): LeaseSubjectResult {

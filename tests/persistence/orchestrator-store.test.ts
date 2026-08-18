@@ -1,6 +1,6 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
@@ -16,6 +16,7 @@ function binding(sessionId: string, model: string): OrchestratorBinding {
   const scope = { kind: "workspace" as const, cwd: "/repo/one" };
   return {
     key: "workspace:/repo/one",
+    kind: "primary",
     sessionId,
     provider: "codex",
     model,
@@ -51,6 +52,36 @@ describe("OrchestratorStore", () => {
       recordType: "reset",
       key: stale.key,
       resetAt: "2026-07-22T12:01:00.000Z",
+    });
+  });
+
+  /**
+   * The log is append-only and predates MIK-98's `kind` field, so lines written by an older build
+   * are still the ones this build reads. A primary and a peer written before the field existed both
+   * load, and each reads back as what its key already said it was.
+   */
+  it("loads bindings written before the kind field existed", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-orchestrator-store-legacy-"));
+    directories.push(directory);
+    const store = new OrchestratorStore(directory);
+    const peerSession = "33333333-3333-4333-8333-333333333333";
+    const primary = binding("11111111-1111-4111-8111-111111111111", "gpt-5.6-sol");
+    const { kind: _primaryKind, ...legacyPrimary } = primary;
+    const { kind: _peerKind, ...legacyPeer } = {
+      ...binding(peerSession, "gpt-5.6-sol"),
+      key: `workspace:/repo/one:peer:${peerSession}`,
+    };
+    await mkdir(dirname(store.path), { recursive: true });
+    await writeFile(
+      store.path,
+      `${JSON.stringify(legacyPrimary)}\n${JSON.stringify(legacyPeer)}\n`,
+      "utf8",
+    );
+
+    expect(await store.get(primary.key)).toMatchObject({ key: primary.key, kind: "primary" });
+    expect(await store.findBySessionId(peerSession)).toMatchObject({
+      key: `workspace:/repo/one:peer:${peerSession}`,
+      kind: "peer",
     });
   });
 });

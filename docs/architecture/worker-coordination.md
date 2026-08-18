@@ -71,9 +71,9 @@ from one mutation. Replay keeps latest state, ignores only an unterminated crash
 closed on corrupt records, unsupported versions, or duplicate transaction IDs.
 
 Migration `0001-worker-coordination` reads existing worker `SessionRecord.parentSessionId`
-provenance. It resolves primary orchestrator bindings to stable scope keys. Missing or peer bindings
-cannot prove stable family identity, so their workers migrate as orphaned and adoptable rather than
-granting authority to a conversation UUID.
+provenance. It resolves any orchestrator binding — primary or peer — to the durable controller
+identity that binding proves. Only a parent holding no binding at all leaves nothing to resolve, and
+its workers migrate as orphaned and adoptable rather than granting authority to a conversation UUID.
 
 ## Orchestrator control plane
 
@@ -83,8 +83,13 @@ broker methods `agent.lease.control`, `agent.worker.control`, and `agent.worker.
 substrate itself gains no transport surface.
 
 Authority is proved by the caller's durable orchestrator binding, never by a conversation. The
-service derives the same `orchestrator:<binding key>` controller identity the migration uses, and
-peer bindings are refused with `NO_STABLE_CONTROLLER_IDENTITY`. Lease tokens stay inside the broker
+service derives the same `orchestrator:<binding key>` controller identity the migration uses, from
+the single `orchestratorController` in `src/domain/orchestrator.ts`. That function is total: every
+binding the manager grants capabilities to is a controller the lease substrate honours, peer
+bindings included, because a peer key is as durable in the binding log as a primary's. A peer holds
+its own `controllerId` — two peers of one scope can never take each other's leases — inside its
+primary's `familyId`, so its workers belong to the scope's orchestrator family. Lease tokens stay
+inside the broker
 and are stripped from every response. A broker restart therefore loses tokens, leases age out, and
 the workers become adoptable — the intended recovery path. A controller whose token is gone gets
 `OWNERSHIP_LOST` and must re-acquire explicitly; nothing is ever reacquired silently.

@@ -12,7 +12,7 @@ import {
   type StoredWorkerEvent,
   type WorkerEvent,
 } from "../domain/worker-coordination.js";
-import type { OrchestratorBinding } from "../domain/orchestrator.js";
+import { orchestratorController, type OrchestratorBinding } from "../domain/orchestrator.js";
 import type { InstructionQueue } from "../orchestration/instruction-queue.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -174,7 +174,7 @@ export class WorkerEventChannel {
       }
       await this.registerWorker(request.workerId);
       const credential = await this.credential(request.workerId);
-      const expected = controllerFor(binding, session);
+      const expected = orchestratorController(binding);
       if (credential.controller.controllerId !== expected.controllerId) {
         throw Object.assign(new Error("Worker coordination lease belongs to another controller"), {
           code: "OWNERSHIP_LOST",
@@ -210,7 +210,7 @@ export class WorkerEventChannel {
       : await this.controllers.findBySessionId(session.parentSessionId);
     const controller = binding === undefined
       ? fallbackController(workerId)
-      : controllerFor(binding, session);
+      : orchestratorController(binding);
     const result = await this.coordination.registerSubject({
       mutationId: `worker-reporting:register:${workerId}`,
       actor: controller,
@@ -360,21 +360,6 @@ function sameWorkerInput(
     continuation: request.continuation,
     checkpointCorrelationId: request.checkpointCorrelationId,
   });
-}
-
-function controllerFor(binding: OrchestratorBinding, worker: SessionRecord): ControllerIdentity {
-  const controllerId = `orchestrator:${binding.key}`;
-  return {
-    controllerId,
-    familyId: controllerId,
-    scope: binding.scope.kind === "fleet"
-      ? { kind: "fleet", scopeId: binding.key }
-      : {
-          kind: "worktree",
-          scopeId: binding.key,
-          worktreePath: worker.cwd,
-        },
-  };
 }
 
 function fallbackController(workerId: string): ControllerIdentity {

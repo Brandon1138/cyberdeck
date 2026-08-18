@@ -48,6 +48,7 @@ const adapter: ProviderAdapter = {
 
 const binding: OrchestratorBinding = {
   key: `workspace:${CWD}`,
+  kind: "primary",
   sessionId: ACTOR,
   provider: "codex",
   cwd: CWD,

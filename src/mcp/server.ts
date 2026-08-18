@@ -85,8 +85,6 @@ const REMEDIES: Record<string, string> = {
     "Continue from the nextByte cursor returned by the previous Scout artifact read.",
   SCOUT_EGRESS_NOT_GRANTED:
     "An operator must grant this exact Git repository root with `cyberdeck scout-egress on --root <repo>`; an Orc cannot grant itself source egress.",
-  NO_STABLE_CONTROLLER_IDENTITY:
-    "Worker leases are held by a durable orchestrator identity, never by a conversation. This session's binding is a peer binding, so it cannot hold or inherit a lease. Act through the orchestrator bound to this workspace or fleet.",
   TRANSFER_TARGET_UNBOUND:
     "The transfer target holds no stable orchestrator binding, so it cannot receive the lease. Bind it through Cyberdeck first, then retry the transfer.",
 };

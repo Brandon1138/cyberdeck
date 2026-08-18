@@ -34,6 +34,7 @@ function orchestratorResult(created: boolean): OrchestratorManagerResult {
     },
     binding: {
       key: `workspace:${cwd}`,
+      kind: "primary",
       sessionId,
       provider: "codex",
       model: "gpt-5.6-sol",

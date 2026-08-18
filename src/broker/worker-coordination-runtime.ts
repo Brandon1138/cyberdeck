@@ -1,5 +1,6 @@
 import type { SessionRecord } from "../domain/session.js";
 import type { ControllerIdentity } from "../domain/worker-coordination.js";
+import { orchestratorController } from "../domain/orchestrator.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import {
   migrateLegacyWorkerSessions,
@@ -37,8 +38,8 @@ export class WorkerCoordinationRuntime {
     this.migration = await migrateLegacyWorkerSessions({
       sessions: this.options.recoveredSessions ?? [],
       coordination: this.service,
-      resolveStableController: async (parentSessionId, worker) =>
-        this.resolveStableController(parentSessionId, worker),
+      resolveStableController: async (parentSessionId) =>
+        this.resolveStableController(parentSessionId),
     });
     return this.migration;
   }
@@ -47,23 +48,15 @@ export class WorkerCoordinationRuntime {
     return this.migration;
   }
 
+  /**
+   * A legacy worker's parent resolves to whatever durable identity its binding proves — peer
+   * bindings included, since MIK-98 gave them one. Only a parent with no binding at all is
+   * unresolved, and its worker still migrates as orphaned rather than crediting a conversation.
+   */
   private async resolveStableController(
     parentSessionId: string,
-    worker: SessionRecord,
   ): Promise<ControllerIdentity | undefined> {
     const binding = await this.options.orchestrators?.findBySessionId(parentSessionId);
-    if (binding === undefined || binding.key.includes(":peer:")) return undefined;
-    const controllerId = `orchestrator:${binding.key}`;
-    return {
-      controllerId,
-      familyId: controllerId,
-      scope: binding.scope.kind === "fleet"
-        ? { kind: "fleet", scopeId: binding.key }
-        : {
-            kind: "worktree",
-            scopeId: binding.key,
-            worktreePath: worker.cwd,
-          },
-    };
+    return binding === undefined ? undefined : orchestratorController(binding);
   }
 }

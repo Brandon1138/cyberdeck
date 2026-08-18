@@ -53,6 +53,7 @@ function activatingStart<T extends SessionRecord>(
 
 const binding: OrchestratorBinding = {
   key: "workspace:/repo/one",
+  kind: "primary",
   sessionId: SESSION_ID,
   provider: "codex",
   model: "gpt-5.6-sol",

@@ -7,6 +7,7 @@ const ACTOR = "11111111-1111-4111-8111-111111111111";
 const TARGET = "22222222-2222-4222-8222-222222222222";
 const binding: OrchestratorBinding = {
   key: "workspace:/repo",
+  kind: "primary",
   sessionId: ACTOR,
   provider: "codex",
   cwd: "/repo",
