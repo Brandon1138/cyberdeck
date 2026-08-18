@@ -323,8 +323,9 @@ The target design therefore chooses durable, resumable loop state rather than ma
 terminal. `LoopRunStore` persists the `LoopRun` aggregate and its debit journal: immutable policy
 snapshot, lifecycle, `startedAt`, current iteration ordinal and id, admitted and settled iteration
 ids, cumulative canonical-turn debit, cumulative reported token usage, unknown-usage count, deadline,
-last qualified trigger evidence, and an immutable stop record (`stopId`, actor, reason, requested
-time, and terminal time). Admission and settlement are idempotent by
+last qualified trigger evidence, prompt-free per-iteration settlement/provenance summaries, the
+rolling-history cursor, and an immutable stop record (`stopId`, actor, reason, requested time, and
+terminal time). Admission and settlement are idempotent by
 `(loopRunId, iterationId)` and the store commits the aggregate transition and debit before an external
 enqueue or continuation becomes visible. `BudgetLedgerPort` reads and writes this durable state; an
 in-memory cache may project it but may never be its authority.
@@ -423,13 +424,19 @@ than a single provider conversation gets today.
 render time. Add an explicit `loopRunId` to `InstructionRecord`, carry it through every
 `InstructionStore.put` snapshot, and include the same id in the coordination-log transaction for the
 iteration boundary, checkpoint, lease action, and stop. This joins (2), (4), and (5) without treating
-`workflowRunId` as a loop id by convention. The completion snapshot must also carry the matched
-completion target and provenance required by §1.2. A stop-cancelled instruction remains a terminal
-snapshot with `status: "cancelled"`, `cancelledAt`, and `cancelledByStopId`; that `stopId` names the
+`workflowRunId` as a loop id by convention; matching transcript events must carry both `loopRunId`
+and `iterationId` in their data so the join does not depend on timestamps. The completion snapshot
+must also carry the matched completion target and provenance required by §1.2. A stop-cancelled
+instruction remains a terminal snapshot with `status: "cancelled"`, `cancelledAt`, and
+`cancelledByStopId`; that `stopId` names the
 immutable stop record in `LoopRunStore` and the matching coordination-log transaction. It is not
-compacted into an anonymous terminal reason. Whether the diagnostic journal (1) and job-plane
-logs (3) also participate remains an explicit refactor decision; instruction history and the
-coordination log are mandatory participants, not part of that open question.
+compacted into an anonymous terminal reason. A stop-settled instruction that had already reached
+`rendered`, `submitted`, or `acknowledged` likewise carries `settledByStopId` and a disposition that
+distinguishes `undelivered-before-submission` from `interrupted-after-submission`; `submittedAt`
+remains proof that the latter may already have caused irreversible work. Whether the diagnostic
+journal (1) and job-plane logs (3) also participate remains an explicit refactor decision;
+instruction history and the coordination log are mandatory participants, not part of that open
+question.
 
 **Retention actively works against loop history.** `selectExpiredThreads`
 (`src/domain/thread-retention.ts:45-78`) retires a finished thread after `maxAgeDays` (7 by default)
@@ -440,13 +447,26 @@ pins it, and pinning every iteration of a frequent loop defeats the bound entire
 pinned set). That policy does nothing to (5): `InstructionStore.list` folds snapshots to the latest
 record per id in memory, but the file itself remains append-only and retains every full prompt and
 lifecycle transition (`src/persistence/instruction-store.ts:25-38`). Loop history therefore needs one
-joined retention policy, not inheritance of the general thread default. It must compact or delete
-terminal instruction snapshots by `loopRunId` when their corresponding thread history expires, never
-remove an accepted/queued/rendered/submitted/acknowledged instruction, retain a prompt-free audit
-tombstone with ids and terminal reason, and rewrite the private JSONL atomically. Pinning a loop
-exempts both stores; it must
-not leave instruction prompts unbounded after thread deletion or delete instructions while their
-thread remains retained.
+joined retention policy, not inheritance of the general thread default. Rotating workers would let
+finished-thread retention engage, but it conflicts with the recommended worker-shaped, multi-turn
+design and would make lease, model, and provenance continuity an iteration-boundary problem. This
+design instead chooses a **rolling per-run window on the same worker thread**. Every loop policy has
+finite `maxRetainedIterations` and `maxRetainedAgeDays` values, bounded by platform maxima; there is
+no unlimited value. `RetainLoopHistory` runs after every iteration settlement, on a broker-owned
+periodic sweep for the age bound, and at reconciliation. The first limit crossed removes full
+payloads for the oldest settled iterations even while the thread and run remain active or paused.
+
+That rolling operation is joined by `(loopRunId, iterationId)`: it compacts terminal instruction
+snapshots and the matching transcript prompt/output events in one retention transaction, rewrites
+each private JSONL atomically, and retains one prompt-free audit tombstone with ids, lifecycle result,
+stop disposition, completion target, and canonical provenance. Before deleting payloads, it requires
+the same provenance-qualified settlement to be durable in `LoopRunStore`; compaction can never erase
+the only proof that authorized a later iteration. The current iteration, an unsettled iteration, and any
+`accepted` / `queued` / `rendered` / `submitted` / `acknowledged` instruction are never eligible.
+Pinning exempts a finished loop from general thread expiry, but **does not exempt it from the rolling
+payload window**; otherwise pinning one active self-continuing thread recreates the unbounded history
+this policy exists to prevent. Finished-thread retention later removes the remaining bounded window
+and tombstones from both stores together.
 
 ### 3.3 Provenance: who owns this unwatched run (new since MIK-85)
 
@@ -521,20 +541,53 @@ handoff, or loop capability check: those checks would let the runaway controller
 switch. Fleet must keep the loop-controller visible as a normal orchestrator row, show the force
 action while `exitCode` remains `null`, and report process exit before enabling delete.
 
-**Stopping policy and stopping the process are one ordered operation, not two independent buttons.**
+**Stopping policy and stopping the processes are one ordered operation, not independent buttons.**
 `StopLoop` first crosses a durable linearization point in `LoopRunStore`: under a run-scoped exclusion
-shared with instruction delivery, it writes the terminal run transition and immutable stop record and
-atomically revokes delivery authorization for every held instruction belonging to the run.
-`InstructionPort` then materializes every `accepted` / `queued` record as `cancelled`; only after those
-snapshots are durable may `OperatorStopPort` signal the controller. The current instruction state
-machine already permits `accepted → cancelled` and `queued → cancelled`
-(`instructionTransitionAllowed`, `src/domain/worker-truth.ts:282-293`); those are exactly the records
-the current `InstructionQueue.flush` selects as pending. The cancellation snapshot carries
-`cancelledAt` and `cancelledByStopId`, so the audit answers which stop suppressed which iteration.
-`rendered` is not relabelled cancelled: bytes already written into a provider input surface cannot be
-unwritten, and the existing state machine deliberately allows it to move only to `submitted` or
-`undelivered`. It is in-flight work that the stop path must settle or terminate, never evidence that
-the pending-cancellation sweep failed.
+shared with instruction delivery, it moves the run to non-runnable `stopping`, writes the immutable
+stop request, and atomically revokes delivery authorization for every instruction belonging to the
+run. `stopping` is deliberately not `stopped`; the stop record has `requestedAt`, but no `terminalAt`
+yet. `InstructionPort` then materializes every `accepted` / `queued` record as `cancelled`. The current
+instruction state machine already permits `accepted → cancelled` and `queued → cancelled`
+(`instructionTransitionAllowed`, `src/domain/worker-truth.ts:281-300`); those are exactly the records
+the current `InstructionQueue.flush` selects as pending. Each durable cancellation carries
+`cancelledAt` and `cancelledByStopId`.
+
+`StopLoop` next snapshots every iteration target and its instruction state. A target with a
+`rendered`, `submitted`, or `acknowledged` instruction is in flight and must be terminated before the
+loop-controller: `rendered` means bytes are visible but unconsumed, `submitted` means the provider
+consumed them, and `acknowledged` means its turn started
+(`InstructionLifecycleStateSchema`, `src/domain/worker-truth.ts:260-277`). The
+`WorkerTerminationPort` adapter requests graceful termination through `SessionRegistry.stop`, waits
+for the session record to report `exitCode !== null`, escalates after the configured grace period
+through `SessionRegistry.forceStop`, and waits again. The real methods are signal operations, not
+settlement operations: `stop` records `stopRequestedAt` and sends `SIGTERM`, while `forceStop` requires
+that request and sends `SIGKILL` (`src/broker/session-registry.ts:1245-1296`). Neither method's return
+proves process exit.
+
+Exit observation is the settlement boundary. `SessionRegistry.handleExit` records the exit and calls
+`advanceRenderedInstructions(runtime, "undelivered")`
+(`src/broker/session-registry.ts:1800-1819`); that helper applies the real transition table and
+publishes the instruction update (`:2633-2670`). `StopLoop` must additionally wait until
+`InstructionQueue.applyState` has made that terminal update durable in `InstructionStore`; its
+listener is asynchronous today (`src/orchestration/instruction-queue.ts:139-166`). A
+rendered-but-unconsumed instruction therefore settles as stop-linked `undelivered` with disposition
+`undelivered-before-submission`, and the terminated worker can never consume it later. If it races to
+`submitted` or `acknowledged` first, the same existing table permits `undelivered`, but the audit
+disposition is `interrupted-after-submission` and preserves `submittedAt`; stopping cannot claim that
+already-started external work was undone. This distinction is required even though the enum comment
+describes `undelivered` as pre-consumption: the actual table permits both `submitted → undelivered`
+and `acknowledged → undelivered` (`src/domain/worker-truth.ts:273-290`), so terminal state alone cannot
+make that claim. If canonical completion wins the race, `completed` and its provenance-qualified
+settlement remain authoritative.
+
+Only after every target worker has exited and every owned instruction is durably `cancelled`,
+`undelivered`, or `completed` may `OperatorStopPort` stop the loop-controller, with the same
+graceful/force/exit-observation distinction. Once the controller is also terminal, `StopLoop` writes
+`terminalAt`, transitions `stopping → stopped`, and reports success. Failure to observe process exit
+or persist a terminal instruction leaves the run `stopping` with `operatorActionRequired`; it is
+never reported stopped. The stop audit consequently joins stop request, target-worker signal and
+exit, per-instruction disposition, controller escalation and exit, and final run transition by one
+`stopId`.
 
 Cancellation persistence and delivery must also fail closed across a crash between the loop-state
 commit and the instruction snapshots. Today `InstructionQueue.start` calls `flush` when
@@ -543,14 +596,15 @@ instruction reaches the provider (`src/orchestration/instruction-queue.ts:39-53,
 then selects every `accepted` / `queued` record and calls `tryDeliver`, with no owning-run check
 (`:98-123, 169-208`). The adapted flush must, under the same run-scoped exclusion as `StopLoop`, read
 the record's `loopRunId` and revalidate its durable `LoopRunStore` state immediately before
-`tryDeliver`. Missing, stopped, or otherwise non-runnable state persists `cancelled` with the run's
-`stopId` and never calls `SessionRegistry.submitInstruction`. Startup replay performs the same
-revalidation before opening delivery. Thus the terminal `LoopRunStore` transition is authoritative
-even if the broker dies before every cancellation snapshot is appended; detach or provider-modal
-clear cannot resurrect held work.
+`tryDeliver`. Missing, `stopping`, `stopped`, or otherwise non-runnable state persists `cancelled`
+with the run's `stopId` and never calls `SessionRegistry.submitInstruction`. Startup replay performs
+the same revalidation before opening delivery. Thus the non-runnable `LoopRunStore` transition is
+authoritative even if the broker dies before every cancellation snapshot is appended; detach or
+provider-modal clear cannot resurrect held work.
 
-A loop whose controller is invisible in Fleet, whose row cannot reach force escalation, or whose
-queued instructions can survive `StopLoop` has no kill switch and is not buildable.
+A loop whose controller is invisible in Fleet, whose row cannot reach force escalation, whose queued
+instructions can survive `StopLoop`, or whose iteration worker can outlive a stopped report has no
+kill switch and is not buildable.
 
 One consequence of assuming MIK-98 option 1: once peer bindings hold durable controller identities,
 a peer-bound loop-controller becomes a legal handoff target _and_ a legal `stopOrchestrator` target
@@ -589,6 +643,12 @@ enqueue a new iteration id. It cannot replay the interrupted one. Event-triggere
 self-continuing loops follow this same path from `LoopRunStore`; absence of a `LoopScheduleStore`
 record gives them no fresh budget and no exemption. If the run or debit journal is missing or fails
 validation, reconciliation makes the run terminal with an unprovable-state finding.
+
+A persisted `stopping` run is handled differently: reconciliation keeps delivery revoked and
+idempotently resumes the §4.1 cancellation, target-worker termination, instruction settlement, and
+controller termination sequence. It neither relabels the run `interrupted` nor makes it adoptable.
+Only observed process exits plus durable terminal instruction snapshots permit `stopping → stopped`;
+otherwise the run remains non-runnable with `operatorActionRequired`.
 
 ### 4.3 Fail-closed defaults, and the MIK-96 lesson
 
@@ -687,9 +747,11 @@ typed evidence. An instruction boundary is admissible only when its instruction 
 target, `provider-transcript` provenance, and canonical-turn increment agree (§1.2).
 
 **Application — one use case per verb, coordinating domain and ports.** `StartLoop`, `AdvanceLoop`
-(evaluate the policy and either enqueue the next iteration or settle), `StopLoop` (durably stop,
-revoke delivery, cancel pending instructions, then signal), `ReconcileLoops` (the startup survey of
-§7.3), and `RetainLoopHistory` (apply one retention decision to transcript and instruction history).
+(evaluate the policy and either enqueue the next iteration or settle), `StopLoop` (enter durable
+`stopping`, revoke delivery, cancel pending instructions, terminate iteration targets, durably settle
+their instructions, then terminate the controller), `ReconcileLoops` (the startup survey of §7.3), and
+`RetainLoopHistory` (enforce the rolling settled-iteration window across transcript and instruction
+history after each settlement, on the age sweep, and at reconciliation).
 These coordinate; they do not accumulate policy. The refactor issue is
 explicit that use cases "do not become miscellaneous service classes," and a loop is the single most
 likely place for that to happen — "the loop service" that quietly grows the scheduler, the budget
@@ -706,12 +768,13 @@ exists to prevent.
 | `BudgetLedgerPort`      | durable turn / wall-clock / token accounting with fail-closed posture                                                          | rules from `src/control-plane/budget-ledger.ts`, storage delegated to `LoopRunStore`, scope generalised off `parentJobId` |
 | `AdmissionPort`         | one iteration at a time, fair under ties                                                                                       | `src/control-plane/admission-scheduler.ts`                                                                                |
 | `ControllerLeasePort`   | acquire / renew / release / adopt, and the identity a loop-controller speaks as                                                | `src/broker/worker-coordination.ts`                                                                                       |
-| `InstructionPort`       | enqueue; cancel all `accepted` / `queued` instructions by `loopRunId` and `stopId`; revalidate durable run state before delivery | `InstructionQueue.flush` + `SessionRegistry.submitInstruction`, adapted to consult `LoopRunStore`                         |
+| `InstructionPort`       | enqueue; cancel pending instructions; await durable terminal state for in-flight instructions; revalidate run state at delivery | `InstructionQueue.flush` / `applyState` + `SessionRegistry.submitInstruction`, adapted to consult `LoopRunStore`          |
 | `WorkerObservationPort` | `WorkerTruth`, matching completion-ledger provenance, and `canonicalTurns` delta for the iteration just finished               | `projectWorkerTruth` + `SessionRegistry.recordCompletion`                                                                 |
 | `CheckpointPort`        | request a decision gate, observe its answer                                                                                    | `requestCheckpoint` / `submitEvent`                                                                                       |
 | `AuditPort`             | loop and stop identifiers written through instruction snapshots and coordination transactions, optionally other logs of §3.2   | `InstructionStore` + the coordination log; `Journal` scope remains a decision                                             |
-| `LoopHistoryPort`       | apply one retention decision to thread events and compact/delete terminal instruction snapshots                                | `selectExpiredThreads` + a new compaction API on `InstructionStore`                                                       |
-| `OperatorStopPort`      | graceful stop plus operator-reachable force escalation that the loop cannot veto                                               | `SessionRegistry.stop` / `forceStop`, exposed by new operator-only RPC                                                    |
+| `LoopHistoryPort`       | compact settled iterations across transcript and instruction stores by rolling run window; expire finished history             | `selectExpiredThreads` + new range-compaction APIs on transcript and instruction stores                                   |
+| `WorkerTerminationPort` | graceful/force termination of iteration targets, exit observation, and stop-linked instruction settlement                      | worker-control path over `SessionRegistry.stop` / `forceStop` / `handleExit`                                              |
+| `OperatorStopPort`      | graceful stop plus operator-reachable force escalation and exit observation for the controller                                 | `SessionRegistry.stop` / `forceStop`, exposed by new operator-only RPC                                                    |
 | `CapabilityPort`        | the loop-start grant of §4.3, checked twice                                                                                    | `src/domain/capability.ts`                                                                                                |
 
 **Adapters — trigger transports, and nothing else.** A cron adapter, a workflow-message adapter and
@@ -723,10 +786,10 @@ woke it.
 
 **Infrastructure — timers, persistence, provider processes, tmux projection.** It implements
 `LoopRunStore`, `LoopScheduleStore`, stop-aware `InstructionQueue` delivery, instruction-history
-compaction, and the operator signal actions; it does not decide policy. The one thing that must not
-happen here is a loop's bounds being enforced
-by infrastructure — a
-`SIGTERM` at a deadline is an infrastructure _action_, but the deadline itself is domain policy. The
+and transcript range compaction, and target/controller signal plus exit-observation actions; it does
+not decide policy. The one thing that must not happen here is a loop's bounds being enforced by
+infrastructure: a `SIGTERM` at a deadline is an infrastructure _action_, but the deadline itself is
+domain policy. The
 Scout profile is the cautionary example: its 15-minute bound is real and works, but it lives in the
 profile's own implementation rather than in a rule anything else can reuse, which is why it is a
 precedent rather than a mechanism.
@@ -767,7 +830,10 @@ that nothing loop-shaped lands on the wrong one.
    preserve committed debits, make missing settlements unprovable, and report
    `operatorActionRequired`, `destructive: false`. Adoption may continue only by evaluating durable
    state and creating a new iteration id; recovery never redispatches the interrupted iteration and
-   never treats reinitialized `completedTurns`/`canonicalTurns` as budget authority (§4.2).
+   never treats reinitialized `completedTurns`/`canonicalTurns` as budget authority. A persisted
+   `stopping` run instead resumes the idempotent stop sequence with delivery still revoked and cannot
+   become `stopped` until target/controller exits and terminal instruction snapshots are proven
+   (§4.2).
 
 4. **A loop-controller that is a real lease controller, on MIK-98's option-1 outcome.** Taking option
    1 as given (peer bindings get a durable controller family), the refactor must ensure the
@@ -784,31 +850,39 @@ that nothing loop-shaped lands on the wrong one.
    `loopRunId`, matching completion target, completion provenance, and stop-cancellation fields;
    persist them with the full message through every `InstructionStore.put` snapshot in
    `orchestration/instructions.jsonl`. The same `loopRunId` is mandatory on the coordination-log
-   transaction for every iteration boundary,
-   checkpoint, lease action, and stop, joining instruction history, thread transcript, and
-   coordination state. Every cancelled loop instruction must retain `cancelledAt` and
-   `cancelledByStopId`, naming the immutable `LoopRunStore` stop record and matching coordination
-   transaction. The refactor must additionally decide whether the diagnostic journal
+   transaction for every iteration boundary, checkpoint, lease action, and stop; matching transcript
+   events must carry `loopRunId` and `iterationId`, joining instruction history, thread transcript,
+   and coordination state without a timestamp guess. Every cancelled loop instruction must retain
+   `cancelledAt` and `cancelledByStopId`, naming the immutable `LoopRunStore` stop record and matching
+   coordination transaction. Every stop-settled `rendered` / `submitted` / `acknowledged` instruction
+   must retain `settledByStopId`, `submittedAt` when present, and a disposition distinguishing
+   undelivered before submission from interruption after submission. The refactor must additionally
+   decide whether the diagnostic journal
    (`BrokerEventTypeSchema` has no worker-event or checkpoint type) and job-plane logs are in scope.
    That open question cannot remove either mandatory participant.
 
-6. **A stop-aware `InstructionPort` with a delivery-time `LoopRunStore` gate.** `StopLoop` must use a
-   run-scoped exclusion shared with delivery, commit the terminal run transition and immutable
-   `stopId` before signalling any process, revoke delivery authorization, and cancel every
-   `accepted` / `queued` `InstructionRecord` for that `loopRunId`. The `InstructionQueue.flush` path
-   must re-read durable run state immediately before `tryDeliver`; terminal or missing state writes a
-   stop-linked `cancelled` snapshot and must not call `SessionRegistry.submitInstruction`. This check
-   is required on controller release, delivery-boundary reopening, provider-state follow-up, and
-   startup replay — all paths that can flush a held record. It closes both the ordinary detach race
-   and a crash after the stop commit but before cancellation snapshots finish (§4.1).
+6. **A stop-aware `InstructionPort` and target-worker termination path.** `StopLoop` must use a
+   run-scoped exclusion shared with delivery, commit non-runnable `stopping` plus immutable `stopId`,
+   revoke delivery, and cancel every `accepted` / `queued` record. The `InstructionQueue.flush` path
+   must re-read durable run state immediately before `tryDeliver`; non-runnable or missing state
+   writes a stop-linked `cancelled` snapshot and must not call `SessionRegistry.submitInstruction`.
+   This check applies on controller release, delivery-boundary reopening, provider-state follow-up,
+   and startup replay. For `rendered` / `submitted` / `acknowledged`, `WorkerTerminationPort` must call
+   the real `SessionRegistry.stop` / `forceStop` sequence, observe `exitCode !== null`, and await the
+   durable terminal instruction update produced from `handleExit`; a signal return is insufficient.
+   Only then may the controller be stopped and the run become `stopped`. Unproved exit or settlement
+   leaves `stopping` plus `operatorActionRequired` (§4.1).
 
-7. **A joined loop-specific retention policy**, distinct from `DEFAULT_THREAD_RETENTION_DAYS` (7) and
-   `DEFAULT_THREAD_RETENTION_COUNT` (200), covering both thread history and
-   `orchestration/instructions.jsonl`. It must add compaction/deletion to `InstructionStore`, remove
-   terminal snapshots by `loopRunId` when corresponding thread history expires, preserve live
-   instructions, and retain prompt-free audit tombstones. Pin and retention decisions apply to both
-   stores together, so deleting a thread cannot leave its repeated full-prompt lifecycle snapshots
-   unbounded (§3.2).
+7. **A joined rolling loop-history policy**, distinct from `DEFAULT_THREAD_RETENTION_DAYS` (7) and
+   `DEFAULT_THREAD_RETENTION_COUNT` (200), covering thread events and
+   `orchestration/instructions.jsonl` while the worker thread is still active. Every policy must have
+   finite `maxRetainedIterations` and `maxRetainedAgeDays`; after each settlement, on a periodic age
+   sweep, and at reconciliation, range compaction removes full payloads for the first limit crossed by
+   `(loopRunId, iterationId)`. It preserves current/unsettled instructions, writes prompt-free audit
+   tombstones, and first verifies that canonical provenance is durable in `LoopRunStore`. Pinning may
+   preserve the finished run and its bounded tombstones, never bypass the rolling payload cap.
+   Finished-thread expiry later deletes the remaining bounded history from both stores together
+   (§3.2).
 
 8. **A decision on how a loop gates on more than one concern per cycle.** `decisionGate` on
    `OwnershipSubject` is a single value, not a set (`src/domain/worker-coordination.ts:91-95`).
@@ -855,7 +929,9 @@ that nothing loop-shaped lands on the wrong one.
 14. **An operator-reachable force-stop path**, exposed inward as `OperatorStopPort` and outward through
     Fleet plus an operator-only `session.forceStopOne` RPC. After `session.stopOne` has remained
     pending for the grace period, it must call `SessionRegistry.forceStop` and audit the `SIGKILL`
-    escalation without consulting loop capability, controller lease, or handoff state. Delete remains
+    escalation without consulting loop capability, controller lease, or handoff state. The RPC must
+    observe process exit rather than equate `forceStop` return with termination, and `StopLoop` cannot
+    write `terminalAt` while either target workers or the controller remain live. Delete remains
     unavailable until process exit. Visibility without force escalation is not a loop kill switch
     (§4.1).
 
@@ -878,8 +954,8 @@ twice — once now, shaped around the job/worker split, and again after the refa
   precedent: a fixed loop profile carrying its own wall-clock literal, enforced by the broker. _Risk:_
   it works, and that is the problem. It produces a second one-off bound with no ledger behind it,
   scoped to today's job/worker split, that must be rewritten the moment the refactor moves the
-  boundary — plus it needs items 1–4, 6, and 14 of §7 anyway to be safe when unwatched, recoverable, and
-  killable.
+  boundary — plus it needs items 1–4, 6, 7, and 14 of §7 anyway to be safe when unwatched,
+  recoverable, killable, and bounded on one long-lived worker thread.
 - **Option C — build nothing until the refactor establishes the boundaries in §7, then build
   event-triggered loops first.** _Risk:_ loops are delayed by the refactor's timeline, and §7 grows if
   the refactor's sequencing changes.
@@ -918,6 +994,8 @@ issue says so in its own words.
 - A loop is a lease subject's _controller_, and the operator is the controller's controller. Nothing
   in a loop design may weaken the rule that a human control attachment has absolute writer priority,
   or that operator-direct `session.stopOne` plus `session.forceStopOne` bypass loop capability and
-  lease checks. Graceful-only stop is not a kill switch, and stopped-run instructions never flush
-  when a human detaches or a provider hold clears. Durable `LoopRunStore` bounds remain authoritative
-  across broker restart; recovered session counters never reset them.
+  lease checks. Graceful-only stop is not a kill switch; a run is not `stopped` until its iteration
+  workers, in-flight instructions, and controller are terminal, and stopped-run instructions never
+  flush when a human detaches or a provider hold clears. Rolling history bounds apply while the
+  worker thread is active and pinned. Durable `LoopRunStore` bounds remain authoritative across
+  broker restart; recovered session counters never reset them.
