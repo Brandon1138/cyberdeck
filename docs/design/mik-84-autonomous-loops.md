@@ -642,10 +642,16 @@ below could never become true. Four target shapes are reachable:
    It is terminated exactly like an in-flight target. Its disposition is `idle-at-stop`, and no
    instruction transition is required or expected: `handleExit`'s
    `advanceRenderedInstructions(runtime, "undelivered")` finds nothing rendered to advance.
-3. **Already exited** — the snapshot reads `exitCode !== null`. Nothing is signalled; this target's
-   instructions were advanced at its own exit, and the audit records `already-exited-at-stop`.
-4. **Never started** — an admitted iteration whose target process was never created. Nothing to
-   signal; it is recorded as such and counts as exited for the condition below.
+3. **Already exited** — the snapshot reads `exitCode !== null`. Nothing is signalled. This target's
+   instructions were advanced in memory at its own exit, but that update reaches `InstructionStore`
+   only through an asynchronous listener, so `StopLoop` reads durable state rather than assuming it:
+   any instruction still `rendered`, `submitted`, or `acknowledged` on disk is settled by the
+   synthesis step below, because the `handleExit` that would have settled it has already happened and
+   cannot recur. The audit records `already-exited-at-stop`.
+4. **Never started** — an admitted iteration whose target process was never created, or whose session
+   record no longer exists to signal or to observe. Nothing to signal, and no exit will ever arrive,
+   so any instruction the run owns for that target is likewise settled by the synthesis step below.
+   The target is recorded as such and counts as exited for the condition further down.
 
 For cases 1 and 2 the `WorkerTerminationPort` adapter requests graceful termination through
 `SessionRegistry.stop`, waits for the session record to report `exitCode !== null`, escalates after
@@ -657,9 +663,10 @@ are signal operations, not settlement operations: `stop` records `stopRequestedA
 Exit observation is the settlement boundary. `SessionRegistry.handleExit` records the exit and calls
 `advanceRenderedInstructions(runtime, "undelivered")`
 (`src/broker/session-registry.ts:1800-1819`); that helper applies the real transition table and
-publishes the instruction update (`:2633-2670`). `StopLoop` must additionally wait until
-`InstructionQueue.applyState` has made that terminal update durable in `InstructionStore`; its
-listener is asynchronous today (`src/orchestration/instruction-queue.ts:139-166`). A
+publishes the instruction update (`:2633-2670`). `StopLoop` must additionally require that terminal
+update to be durable in `InstructionStore` before it counts as settled; `InstructionQueue.applyState`'s
+listener is asynchronous today (`src/orchestration/instruction-queue.ts:139-166`), so that requirement
+is a bounded wait backed by the synthesis step below, never an open-ended one. A
 rendered-but-unconsumed instruction therefore settles as stop-linked `undelivered` with disposition
 `undelivered-before-submission`, and the terminated worker can never consume it later. If it races to
 `submitted` or `acknowledged` first, the same existing table permits `undelivered`, but the audit
@@ -671,11 +678,37 @@ make that claim. If canonical completion wins the race, `completed` and its prov
 settlement remain authoritative. A target terminated as `idle-at-stop` has no instruction to settle,
 so its observed exit alone completes it.
 
-Only after every target has an observed exit — or a recorded never-started — and every owned
-instruction is durably `cancelled`, `undelivered`, or `completed` may `OperatorStopPort` stop
-**that run's dedicated loop-controller**, with the same graceful/force/exit-observation distinction.
-Once the controller is also terminal, `StopLoop` writes `terminalAt`, transitions
-`stopping → stopped`, and reports success. Failure to observe process exit
+**Settlement synthesis, where no exit can settle an instruction.** Exit observation is not available
+for every in-flight instruction a run owns, and the earlier revision of this protocol wrongly assumed
+it was. A target that had already exited before `StopLoop` snapshotted it will not exit again, and its
+`handleExit` update reaches `InstructionStore` only through `InstructionQueue.applyState`'s
+asynchronous listener — which may not have run, or may have been lost to the crash this stop is
+resuming from. A target that never had a process will never produce the event at all. Waiting on
+either is waiting on something no actor will do, and the controller-stop precondition would never
+complete. `StopLoop` therefore settles those instructions itself, through `InstructionPort` and under
+the same run-scoped exclusion: it reads the durable record, and where that record is still `rendered`,
+`submitted`, or `acknowledged`, it writes the terminal snapshot directly. The write applies the same
+transition table the exit path applies — `instructionTransitionAllowed`
+(`src/domain/worker-truth.ts:281-300`) permits `rendered → undelivered`, `submitted → undelivered`,
+and `acknowledged → undelivered` — and carries the same `settledByStopId`, `submittedAt` where
+present, and `undelivered-before-submission` / `interrupted-after-submission` disposition. It
+additionally carries a `settlementSource`: `observed-exit` where a `handleExit` update produced the
+terminal state, `synthesized-at-stop` where `StopLoop` wrote it. The audit must never claim an exit
+was observed that was not.
+
+Synthesis is idempotent by `(stopId, instructionId)` and loses to a durable terminal snapshot that
+already exists: the transition table refuses a second terminal transition, so a late `applyState`
+cannot overwrite a synthesized record and synthesis cannot overwrite an observed one. The same rule
+bounds cases 1 and 2, where an exit does arrive: `StopLoop` waits a bounded interval for the
+`handleExit`-derived snapshot to become durable and, on expiry, synthesizes it with
+`settlementSource: synthesized-at-stop`. No branch of this protocol waits indefinitely on that
+asynchronous listener.
+
+Only after every target has an observed exit — or a recorded absent process — and every owned
+instruction is durably `cancelled`, `undelivered`, or `completed`, by observation or by synthesis,
+may `OperatorStopPort` stop **that run's dedicated loop-controller**, with the same
+graceful/force/exit-observation distinction. Once the controller is also terminal, `StopLoop` writes
+`terminalAt`, transitions `stopping → stopped`, and reports success. Failure to observe process exit
 or persist a terminal instruction leaves the run `stopping` with `operatorActionRequired`; it is
 never reported stopped. The stop audit consequently joins stop request, target-worker signal and
 exit, per-instruction disposition, controller escalation and exit, and final run transition by one
@@ -683,17 +716,31 @@ exit, per-instruction disposition, controller escalation and exit, and final run
 
 **Why no combination of target states stalls.** The reachable space is (process live | already
 exited | never started) × (no instruction | `accepted` / `queued` |
-`rendered` / `submitted` / `acknowledged` | terminal). The `accepted` / `queued` column collapses
-first: the cancellation step makes those records `cancelled`, and revoked delivery plus the flush
-revalidation below stops any of them being re-delivered, so no target can acquire a new in-flight
-instruction after the snapshot. Of the columns left, each instruction is already terminal or is
-driven terminal by an exit. Every live process is signalled — case 1 or case 2 — so no live target
-is left unsignalled by which column it happens to sit in, which is the gap this revision closes.
-Every condition `StopLoop` waits on is one some actor causes: an exit follows `SIGTERM` and then
-`SIGKILL` after the grace period, and the durable terminal snapshot follows `handleExit`. No branch
-waits on an action only the stopped worker could take, and none waits on a decision — an open gate is
-voided by the stop record (§2.2). The single outcome that is not `stopped` is an exit or a settlement
-that could not be observed even after force: that leaves the run `stopping` with
+`rendered` / `submitted` / `acknowledged` | `completed` | other terminal). Every cell names the step
+that terminates it:
+
+| Target process   | no instruction                                 | `accepted` / `queued`                                              | `rendered` / `submitted` / `acknowledged`                                                          | `completed`                                          | other terminal (`cancelled` / `undelivered`)         |
+| ---------------- | ---------------------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------- |
+| **Live**         | case 2 termination, `idle-at-stop`; exit observed | cancellation step writes `cancelled`; then case 2 termination and exit | case 1 termination; settled by observed exit, or synthesized when that snapshot misses the bounded interval | case 2 termination; instruction already terminal     | case 2 termination; instruction already terminal     |
+| **Already exited** | nothing to signal or settle; counts as exited  | cancellation step writes `cancelled`; no signal needed              | **synthesis at stop** — the `handleExit` that would settle it already happened and cannot recur    | already terminal; recorded `already-exited-at-stop`  | already terminal; recorded `already-exited-at-stop`  |
+| **Never started** | recorded absent; counts as exited              | cancellation step writes `cancelled`; no signal needed              | **synthesis at stop** — no exit will ever arrive for a process that never existed                 | already terminal; recorded absent                    | already terminal; recorded absent                    |
+
+Three families of step cover all fifteen cells, and each is an action `StopLoop` itself takes. The
+cancellation step clears the whole `accepted` / `queued` column durably, and revoked delivery plus
+the flush revalidation below stops any of those records being re-delivered, so no target can acquire
+a new in-flight instruction after the snapshot. Termination plus exit observation covers every live
+target, whichever column it sits in — that is the gap the previous revision left, since it signalled
+only the in-flight column. Stop-time synthesis covers the two cells where an exit cannot settle
+anything: the previous revision's claim that every nonterminal instruction is driven terminal by an
+exit was false for exactly those cells, and this walk replaces it rather than restating it.
+
+Every condition `StopLoop` waits on is therefore one some actor causes. An exit follows `SIGTERM`
+and then `SIGKILL` after the grace period. A durable terminal instruction snapshot follows either
+the `handleExit` listener within a bounded interval or `StopLoop`'s own synthesis write. No branch
+waits on an exit that has already happened, on an exit that will never happen, on an action only the
+stopped worker could take, or on a decision — an open gate is voided by the stop record (§2.2). The
+single outcome that is not `stopped` is a live target whose exit could not be observed even after
+force, or a settlement write that could not be persisted: that leaves the run `stopping` with
 `operatorActionRequired`, a non-runnable resting state an operator can see and act on rather than a
 silent wait, and §4.2 resumes the same sequence idempotently after a restart. Every reachable
 combination therefore ends in `stopped`, or in `stopping` plus `operatorActionRequired`.
@@ -762,7 +809,13 @@ iteration by the rule above: the decision itself is durable and is never re-aske
 A persisted `stopping` run is handled differently: reconciliation keeps delivery revoked and
 idempotently resumes the §4.1 cancellation, target-worker termination, instruction settlement, and
 controller termination sequence. It neither relabels the run `interrupted` nor makes it adoptable.
-Only observed process exits plus durable terminal instruction snapshots permit `stopping → stopped`;
+Recovery is where §4.1's synthesis step earns its place: a target that exited before the crash will
+not exit again, its `handleExit`-derived snapshot may have been lost with the process that was going
+to persist it, and a target whose session record did not survive will never produce an exit at all.
+Reconciliation must therefore settle any instruction still `rendered`, `submitted`, or `acknowledged`
+against such a target by synthesis, with `settlementSource: synthesized-at-stop`, rather than waiting
+for an event that cannot recur. Only observed process exits or recorded absent processes, plus
+durable terminal instruction snapshots — observed or synthesized — permit `stopping → stopped`;
 otherwise the run remains non-runnable with `operatorActionRequired`.
 
 ### 4.3 Fail-closed defaults, and the MIK-96 lesson
@@ -867,7 +920,8 @@ target, `provider-transcript` provenance, and canonical-turn increment agree (§
 control-plane gate once an iteration has settled, and record the controller's or operator's durable
 approve/reject — §2.2), `StopLoop` (enter durable `stopping`, revoke delivery, cancel pending
 instructions, terminate every iteration target whether in flight or idle, durably settle their
-instructions, then terminate the controller), `ReconcileLoops` (the startup survey of §7.3), and
+instructions by observation or by synthesis where no exit can arrive, then terminate the
+controller), `ReconcileLoops` (the startup survey of §7.3), and
 `RetainLoopHistory` (enforce the rolling settled-iteration window across transcript, instruction,
 workflow-message, and coordination-event history after each settlement, on the age sweep, and at
 reconciliation).
@@ -887,13 +941,13 @@ exists to prevent.
 | `BudgetLedgerPort`      | durable turn / wall-clock / token accounting with fail-closed posture                                                          | rules from `src/control-plane/budget-ledger.ts`, storage delegated to `LoopRunStore`, scope generalised off `parentJobId` |
 | `AdmissionPort`         | one iteration at a time, fair under ties                                                                                       | `src/control-plane/admission-scheduler.ts`                                                                                |
 | `ControllerLeasePort`   | acquire / renew / release / adopt, and the identity a loop-controller speaks as                                                | `src/broker/worker-coordination.ts`                                                                                       |
-| `InstructionPort`       | enqueue; cancel pending instructions; await durable terminal state for in-flight instructions; revalidate run state at delivery | `InstructionQueue.flush` / `applyState` + `SessionRegistry.submitInstruction`, adapted to consult `LoopRunStore`          |
+| `InstructionPort`       | enqueue; cancel pending instructions; await durable terminal state for in-flight instructions and synthesize it at stop where no exit can produce it; revalidate run state at delivery | `InstructionQueue.flush` / `applyState` + `SessionRegistry.submitInstruction`, adapted to consult `LoopRunStore`          |
 | `WorkerObservationPort` | `WorkerTruth`, matching completion-ledger provenance, and `canonicalTurns` delta for the iteration just finished               | `projectWorkerTruth` + `SessionRegistry.recordCompletion`                                                                 |
 | `CheckpointPort`        | observe a worker-raised or worker-answered checkpoint as an iteration boundary fact (§1.2 trigger only)                        | `requestCheckpoint` / `submitEvent`                                                                                       |
 | `LoopGatePort`          | open the loop's provider-independent gate after a settlement; record the controller's or operator's durable approve/reject; expose gate and decision for observation | `LoopRunStore` for the authoritative gate and decision, plus controller-side `submitEvent` (pinned `DECISION_REQUEST`, no `checkpointCorrelationId`) and `resolveEvent` for visibility — never the worker `CHECKPOINT` answer that clears `decisionGate`, and never `deliverCheckpointPrompt` |
 | `AuditPort`             | loop and stop identifiers written through instruction snapshots and coordination transactions, optionally other logs of §3.2   | `InstructionStore` + the coordination log; `Journal` scope remains a decision                                             |
 | `LoopHistoryPort`       | compact settled iterations across transcript, instruction, workflow-message, and coordination-event stores by rolling run window; expire finished history | `selectExpiredThreads` + new joined range-compaction/redaction APIs on transcript, `InstructionStore`, `WorkflowStore`, and worker-coordination persistence |
-| `WorkerTerminationPort` | graceful/force termination of every iteration target — in flight, idle, or instruction-free — exit observation, and stop-linked instruction settlement | worker-control path over `SessionRegistry.stop` / `forceStop` / `handleExit`                                              |
+| `WorkerTerminationPort` | graceful/force termination of every iteration target — in flight, idle, or instruction-free — exit observation, recording of already-exited and never-started targets, and stop-linked instruction settlement | worker-control path over `SessionRegistry.stop` / `forceStop` / `handleExit`                                              |
 | `OperatorStopPort`      | graceful stop plus operator-reachable force escalation and exit observation for the controller                                 | `SessionRegistry.stop` / `forceStop`, exposed by new operator-only RPC                                                    |
 | `CapabilityPort`        | the loop-start grant of §4.3, checked twice                                                                                    | `src/domain/capability.ts`                                                                                                |
 
@@ -997,8 +1051,13 @@ that nothing loop-shaped lands on the wrong one.
    unsignalled makes the all-target-exit condition unreachable. It must observe `exitCode !== null`
    for each, and await the durable terminal instruction update produced from `handleExit` where an
    instruction was in flight; a signal return is insufficient, and an idle target settles on its exit
-   alone. Only then may the controller be stopped and the run become `stopped`. Unproved exit or settlement
-   leaves `stopping` plus `operatorActionRequired` (§4.1).
+   alone. Where no exit can settle an in-flight instruction — the target had already exited when the
+   stop began, or no process ever existed — `InstructionPort` must synthesize the terminal snapshot
+   itself under the same exclusion, applying `instructionTransitionAllowed` and recording
+   `settlementSource: synthesized-at-stop` beside the `observed-exit` case, idempotent by
+   `(stopId, instructionId)`. Waiting on an exit that already happened or that never will is the
+   stall this closes. Only then may the controller be stopped and the run become `stopped`. Unproved
+   exit or settlement leaves `stopping` plus `operatorActionRequired` (§4.1).
 
 7. **A joined rolling loop-history policy**, distinct from `DEFAULT_THREAD_RETENTION_DAYS` (7) and
    `DEFAULT_THREAD_RETENTION_COUNT` (200), covering thread events,
@@ -1072,7 +1131,9 @@ that nothing loop-shaped lands on the wrong one.
     pending for the grace period, it must call `SessionRegistry.forceStop` and audit the `SIGKILL`
     escalation without consulting loop capability, controller lease, or handoff state. The RPC must
     observe process exit rather than equate `forceStop` return with termination, and `StopLoop` cannot
-    write `terminalAt` while either target workers or the controller remain live. Delete remains
+    write `terminalAt` while either target workers or the controller remain live, nor while any owned
+    instruction is still nonterminal on disk — settled by observation where an exit is coming, by
+    synthesis where none can. Delete remains
     unavailable until process exit. Visibility without force escalation is not a loop kill switch
     (§4.1).
 
