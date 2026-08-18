@@ -5222,6 +5222,28 @@ describe("directed handoff", () => {
     expect(refused.state.notice).toBe("Mark workers with ctrl+d, or select one, before /handoff");
   });
 
+  it("refuses /handoff falling back to a terminal worker, keeping the directive unasked", () => {
+    const snapshot = handoffFleet();
+    const terminalSnapshot = fleet(...snapshot.threads.map(({ record }) => ({
+      record: record.id === WORKER_A
+        ? { ...record, executionState: "exited" as const, exitCode: 0 }
+        : record,
+    })));
+
+    const refused = transitionFleet(
+      { ...selecting(terminalSnapshot, WORKER_A), draft: "/handoff" },
+      terminalSnapshot,
+      "enter",
+      NOW_MS,
+    );
+
+    expect(refused.state.handoffPicker).toBeUndefined();
+    // The same answer ctrl+d gives, rather than two picker steps and a typed directive the broker
+    // would then throw away.
+    expect(refused.state.notice).toBe("A terminal worker cannot be handed off");
+    expect(refused.state.noticeTone).toBe("warning");
+  });
+
   it("refuses /handoff when no orchestrator is live to receive it", () => {
     const snapshot = handoffFleet({ executionState: "exited", exitCode: 0 });
     const refused = transitionFleet(

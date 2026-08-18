@@ -1076,7 +1076,7 @@ export function transitionFleet(
         state: {
           ...state,
           helpOpen: false,
-          notice: "A terminal worker cannot be handed off",
+          notice: TERMINAL_HANDOFF_REFUSAL,
           noticeTone: "warning",
         },
       };
@@ -2567,6 +2567,14 @@ function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   return rows;
 }
 
+/**
+ * Why a worker cannot be handed off, wherever the operator names one.
+ *
+ * Ctrl+D and the /handoff fallback are the same claim about the same worker, so they answer it the
+ * same way rather than letting one gesture accept what the other refuses.
+ */
+const TERMINAL_HANDOFF_REFUSAL = "A terminal worker cannot be handed off";
+
 /** The marked set. Absent and empty mean the same thing everywhere this is read. */
 function handoffMarks(state: FleetState): readonly string[] {
   return state.handoffMarks ?? [];
@@ -2582,12 +2590,21 @@ function isHandoffMarked(state: FleetState, sessionId: string): boolean {
  * Marks win over the selection so the operator can mark a batch, move focus while reading the rest
  * of the list, and still hand over what they marked rather than wherever the cursor came to rest.
  * An orchestrator is never a target: it is a controller, not something one controls.
+ *
+ * The fallback is held to exactly what Ctrl+D would accept, and says so when it refuses. A terminal
+ * worker that opened the picker anyway would cost the operator both picker steps and the directive
+ * they typed, only for the broker to refuse the batch at the end of it.
  */
-function handoffTargets(state: FleetState, snapshot: FleetSnapshot): string[] {
+function handoffTargets(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+): { workerIds: string[]; refusal?: string } {
   const marked = handoffMarks(state);
-  if (marked.length > 0) return [...marked];
+  if (marked.length > 0) return { workerIds: [...marked] };
   const selected = orderedThreads(snapshot).find(({ record }) => record.id === state.selectedSessionId);
-  return selected === undefined || selected.record.kind === "orchestrator" ? [] : [selected.record.id];
+  if (selected === undefined || selected.record.kind === "orchestrator") return { workerIds: [] };
+  if (isTerminalSession(selected.record)) return { workerIds: [], refusal: TERMINAL_HANDOFF_REFUSAL };
+  return { workerIds: [selected.record.id] };
 }
 
 /**
@@ -2611,14 +2628,14 @@ function handoffRecipients(snapshot: FleetSnapshot, workerIds: readonly string[]
 }
 
 function openHandoffPicker(state: FleetState, snapshot: FleetSnapshot): FleetTransition {
-  const workerIds = handoffTargets(state, snapshot);
+  const { workerIds, refusal } = handoffTargets(state, snapshot);
   if (workerIds.length === 0) {
     return {
       state: {
         ...state,
         draft: "",
         commandPalette: undefined,
-        notice: "Mark workers with ctrl+d, or select one, before /handoff",
+        notice: refusal ?? "Mark workers with ctrl+d, or select one, before /handoff",
         noticeTone: "warning",
       },
     };
