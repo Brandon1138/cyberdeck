@@ -155,6 +155,18 @@ export interface HandoffBatchInput {
   members: readonly HandoffBatchMember[];
   reason: string;
   handoffId?: string;
+  /**
+   * What the broker's process bookkeeping says a member's lifecycle is, asked inside the
+   * transaction that commits the transfer.
+   *
+   * A subject's own lifecycle is only as fresh as the last thing that reconciled it, so a caller
+   * that checked the registry before building this batch can be overtaken by a worker exiting
+   * while the batch is assembled. This is the seam that lets the substrate ask again at the last
+   * moment it can still refuse. It may only escalate: a terminal answer aborts the batch, and a
+   * live one never overrides a subject the substrate already holds as terminal. It is not part of
+   * the request payload and never keys a mutation.
+   */
+  observeLifecycle?: (subjectId: string) => WorkerLifecycle | undefined;
 }
 
 export interface HandoffBatchResult extends OwnershipMutationResult {
@@ -603,7 +615,10 @@ export class WorkerCoordinationService {
           ));
           continue;
         }
-        if (TERMINAL_WORKER_LIFECYCLES.has(current.lifecycle)) {
+        const observed = input.observeLifecycle?.(member.subjectId);
+        const terminal = TERMINAL_WORKER_LIFECYCLES.has(current.lifecycle)
+          || (observed !== undefined && TERMINAL_WORKER_LIFECYCLES.has(observed));
+        if (terminal) {
           failures.set(member.subjectId, this.outcome(current, "WORKER_TERMINAL"));
         }
       }

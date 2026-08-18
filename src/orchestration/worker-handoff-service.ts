@@ -263,6 +263,13 @@ export class WorkerHandoffService {
       directive: request.directive,
       members,
       reason: request.reason,
+      // The check above reads the registry while the batch is being assembled; a worker can exit
+      // between that read and the append that moves its lease. Asking again inside the transaction
+      // is the last moment the substrate can still refuse the whole batch, so it is asked there.
+      observeLifecycle: (subjectId) => {
+        const current = this.sessionRecord(subjectId);
+        return current === undefined ? undefined : manualWorkerLifecycle(current);
+      },
     });
 
     if (!result.committed || result.handoff === undefined) {

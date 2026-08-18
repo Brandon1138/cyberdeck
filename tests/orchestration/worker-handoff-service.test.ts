@@ -61,7 +61,11 @@ interface FakeSession {
   parentSessionId?: string;
 }
 
-async function harness(options: { enqueue?: () => Promise<unknown> } = {}) {
+async function harness(options: {
+  enqueue?: () => Promise<unknown>;
+  /** Rewrite what each registry read returns, so a session can change between two reads. */
+  observeSession?: (record: FakeSession) => FakeSession;
+} = {}) {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-worker-handoff-"));
   directories.push(directory);
   const nowMs = baseMs;
@@ -120,7 +124,7 @@ async function harness(options: { enqueue?: () => Promise<unknown> } = {}) {
       if (record === undefined) {
         throw Object.assign(new Error(`No session ${sessionId}`), { code: "SESSION_NOT_FOUND" });
       }
-      return record;
+      return options.observeSession?.(record) ?? record;
     },
   };
 
@@ -442,6 +446,38 @@ describe("WorkerHandoffService", () => {
     // Nothing moved, and the stale bookkeeping was repaired rather than left to mislead the next
     // reader of the fleet list.
     expect(bench.coordination.getSubject(dead)?.lifecycle).toBe("failed");
+    expect(bench.coordination.getSubject(healthy)?.lease.version).toBe(1);
+    expect(bench.coordination.listHandoffs()).toEqual([]);
+    expect(bench.instructions.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("aborts when a member exits between the batch being built and the leases moving", async () => {
+    let dying = "";
+    let reads = 0;
+    const bench = await harness({
+      observeSession: (record) => {
+        if (record.id !== dying) return record;
+        reads += 1;
+        // Alive when the batch is assembled, gone by the time the transaction asks again.
+        return reads === 1
+          ? record
+          : { ...record, executionState: "exited", attentionState: "idle", exitCode: 1 };
+      },
+    });
+    const healthy = bench.addSession();
+    dying = bench.addSession();
+    await bench.register({ workerId: healthy });
+    await bench.register({ workerId: dying });
+
+    const result = await bench.handoff.handoff({
+      recipientSessionId: ORC,
+      workerIds: [healthy, dying],
+      directive: "take the wave",
+    });
+
+    expect(reads).toBeGreaterThan(1);
+    expect(result.committed).toBe(false);
+    expect(result.blocked.find((entry) => entry.workerId === dying)?.code).toBe("WORKER_TERMINAL");
     expect(bench.coordination.getSubject(healthy)?.lease.version).toBe(1);
     expect(bench.coordination.listHandoffs()).toEqual([]);
     expect(bench.instructions.enqueue).not.toHaveBeenCalled();

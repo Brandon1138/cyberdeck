@@ -112,6 +112,10 @@ async function register(
   };
 }
 
+function outcomeCodesOf(result: { outcomes: { subjectId: string; code: string }[] }): Map<string, string> {
+  return new Map(result.outcomes.map((outcome) => [outcome.subjectId, outcome.code]));
+}
+
 function event(
   workerId: string,
   leaseVersion: number,
@@ -365,6 +369,31 @@ describe("WorkerCoordinationService ownership", () => {
       ...request,
       directive: "Do something else",
     })).rejects.toMatchObject({ code: "MUTATION_ID_COLLISION" });
+  });
+
+  it("aborts a handoff when the process bookkeeping reports a member terminal at commit time", async () => {
+    const { service } = await harness();
+    const source = controller("racing-source");
+    const recipient = controller("racing-recipient");
+    const live = await register(service, { owner: source });
+    const dying = await register(service, { owner: source });
+
+    const result = await service.handoffBatch({
+      mutationId: "raced-handoff",
+      actor: controller("handoff-operator"),
+      recipient,
+      recipientSessionId: "77777777-7777-4777-8777-777777777777",
+      directive: "Take both",
+      members: [{ subjectId: live.workerId }, { subjectId: dying.workerId }],
+      reason: "operator directed handoff",
+      // Both subjects still read `working`; the process the broker watches has already gone.
+      observeLifecycle: (subjectId) => (subjectId === dying.workerId ? "failed" : "working"),
+    });
+
+    expect(result.committed).toBe(false);
+    expect(outcomeCodesOf(result).get(dying.workerId)).toBe("WORKER_TERMINAL");
+    expect(service.getSubject(live.workerId)?.lease.controller).toEqual(source);
+    expect(service.listHandoffs()).toEqual([]);
   });
 
   it("turns broker-observed abrupt death into orphan then allows adoption", async () => {
