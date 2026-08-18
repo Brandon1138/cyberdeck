@@ -38,6 +38,7 @@ import { GitWorktreeProvisioner } from "../orchestration/git-worktree-provisione
 import { WorkerCapabilityCatalog } from "../orchestration/worker-capability-catalog.js";
 import { InstructionQueue } from "../orchestration/instruction-queue.js";
 import { WorkerControlService } from "../orchestration/worker-control-service.js";
+import { WorkerHandoffService } from "../orchestration/worker-handoff-service.js";
 import { InstructionStore } from "../persistence/instruction-store.js";
 import { WorkflowStore } from "../persistence/workflow-store.js";
 import { WorkflowService } from "../orchestration/workflow-service.js";
@@ -204,6 +205,15 @@ export async function runBroker(
     orchestrators: orchestratorStore,
     instructions,
   });
+  // The same custodian the control service uses, so a handed-off lease is immediately usable by
+  // the orchestrator that received it rather than reporting OWNERSHIP_LOST on its next call.
+  const workerHandoff = new WorkerHandoffService({
+    coordination: workerCoordination.service,
+    credentials: workerLeaseCredentials,
+    registry,
+    orchestrators: orchestratorStore,
+    instructions,
+  });
   const workerEvents = new WorkerEventChannel(
     workerCoordination.service,
     registry,
@@ -271,6 +281,7 @@ export async function runBroker(
     orchestratorBindings: orchestratorStore,
     workerCoordination: workerCoordination.service,
     workerControl,
+    workerHandoff,
     workerEvents,
     nvimBindings,
     onShutdown: () => { void shutdown("request"); },

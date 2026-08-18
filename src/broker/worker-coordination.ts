@@ -27,6 +27,11 @@ import {
   type WorkerLifecycle,
 } from "../domain/worker-coordination.js";
 import {
+  WorkerHandoffSchema,
+  type HandoffManifestEntry,
+  type WorkerHandoff,
+} from "../domain/worker-handoff.js";
+import {
   WorkerCoordinationStore,
   type CoordinationTransaction,
 } from "../persistence/worker-coordination-store.js";
@@ -120,6 +125,43 @@ export interface AdoptBatchResult extends OwnershipMutationResult {
   committed: boolean;
 }
 
+/**
+ * One worker in a directed handoff.
+ *
+ * `register` is present exactly when the broker has never held a lease subject for this worker —
+ * the operator started it by hand. Registering it in a separate call first would leave an orphaned
+ * subject behind whenever the batch then aborts, which the fleet list renders as a claimable
+ * worker that nothing claimed. Carrying the spec here is what keeps that registration inside the
+ * same all-or-nothing transaction as the transfer it exists for.
+ */
+export interface HandoffBatchMember {
+  subjectId: string;
+  /** The recipient-facing thread name, when the caller knows one. */
+  name?: string;
+  register?: {
+    origin: OwnershipSubject["origin"];
+    lifecycle: WorkerLifecycle;
+    resources: OwnershipSubject["resources"];
+  };
+}
+
+export interface HandoffBatchInput {
+  mutationId: string;
+  actor: ControllerIdentity;
+  recipient: ControllerIdentity;
+  recipientSessionId: string;
+  directive: string;
+  members: readonly HandoffBatchMember[];
+  reason: string;
+  handoffId?: string;
+}
+
+export interface HandoffBatchResult extends OwnershipMutationResult {
+  committed: boolean;
+  /** Written only on a committed batch, in the same transaction as the leases it announces. */
+  handoff?: WorkerHandoff;
+}
+
 export interface EventSubmissionInput {
   mutationId: string;
   controller: ControllerIdentity;
@@ -184,6 +226,7 @@ export class WorkerCoordinationService {
   private readonly eventSummaries = new Map<string, WorkerEventSummary>();
   private readonly audits: OwnershipAuditRecord[] = [];
   private readonly liveness = new Map<string, ControllerLiveness>();
+  private readonly handoffs = new Map<string, WorkerHandoff>();
   private readonly receipts = new Map<string, MutationReceipt>();
   private initialized = false;
   private tail = Promise.resolve();
@@ -217,6 +260,7 @@ export class WorkerCoordinationService {
     }
     for (const audit of state.audits) this.audits.push(audit);
     for (const entry of state.liveness) this.liveness.set(entry.controller.controllerId, entry);
+    for (const handoff of state.handoffs) this.handoffs.set(handoff.handoffId, handoff);
     for (const receipt of state.receipts) this.receipts.set(receipt.mutationId, receipt);
     this.initialized = true;
   }
@@ -490,6 +534,178 @@ export class WorkerCoordinationService {
           : { liveness: [this.connectedObservation(newController, now, "atomic adopt call")] }),
       });
       return result;
+    });
+  }
+
+  /**
+   * Moves every named worker onto one controller, or moves none of them, and says why in one
+   * durable record.
+   *
+   * This is the operator's own authority, not a controller's: the workers may be held by a live
+   * orchestrator that neither consented nor is running, so there is no token to present and none
+   * is asked for. What makes that safe is the same thing that makes every other transfer safe —
+   * {@link withNewController} bumps the lease version and replaces the token hash, so the previous
+   * holder's next authenticated call fails with the ordinary stale-lease answer rather than
+   * silently continuing to drive a worker it no longer owns.
+   *
+   * A worker that has reached a terminal lifecycle, and anything that is not a worker, aborts the
+   * whole batch. Partial handoff is the one outcome this must never produce: half a wave under a
+   * new orchestrator and half under the old one is a fleet nobody can reason about, and the
+   * operator has no way to see it happened.
+   */
+  async handoffBatch(input: HandoffBatchInput): Promise<HandoffBatchResult> {
+    return this.exclusive(async () => {
+      this.assertReady();
+      const replay = this.replayHandoffBatch(input.mutationId);
+      if (replay !== undefined) return replay;
+      const actor = ControllerIdentitySchema.parse(input.actor);
+      const recipient = ControllerIdentitySchema.parse(input.recipient);
+      const now = this.now();
+      const seen = new Set<string>();
+      const candidates: Array<{
+        prior?: OwnershipSubject;
+        current: OwnershipSubject;
+        name?: string;
+      }> = [];
+      const failures = new Map<string, OwnershipOutcome>();
+
+      for (const member of input.members) {
+        if (seen.has(member.subjectId)) {
+          throw new Error(`Directed handoff batch contains duplicate subject ${member.subjectId}`);
+        }
+        seen.add(member.subjectId);
+        const existing = this.subjects.get(member.subjectId);
+        if (existing === undefined && member.register === undefined) {
+          throw new WorkerCoordinationError(
+            "SUBJECT_NOT_FOUND",
+            `Subject ${member.subjectId} has no lease record and the handoff carried no registration for it`,
+          );
+        }
+        const current = existing === undefined
+          ? this.unownedSubject(member.subjectId, member.register!, now)
+          : this.expiredCopy(existing, now);
+        candidates.push({
+          ...(existing === undefined ? {} : { prior: existing }),
+          current,
+          ...(member.name === undefined ? {} : { name: member.name }),
+        });
+        if (current.subjectKind !== "worker") {
+          failures.set(member.subjectId, this.outcome(
+            current,
+            "NOT_ELIGIBLE",
+            "only workers can be handed off; an orchestrator is a controller, not a subject of one",
+          ));
+          continue;
+        }
+        if (TERMINAL_WORKER_LIFECYCLES.has(current.lifecycle)) {
+          failures.set(member.subjectId, this.outcome(current, "WORKER_TERMINAL"));
+        }
+      }
+
+      if (failures.size > 0) {
+        const outcomes = candidates.map(({ current }) =>
+          failures.get(current.subjectId) ?? this.outcome(
+            current,
+            "NOT_ELIGIBLE",
+            "directed handoff aborted because another batch member was ineligible",
+          ));
+        const result = this.handoffBatchResult(input.mutationId, false, outcomes);
+        await this.persistReceipt(input.mutationId, "handoff", result, {});
+        return result;
+      }
+
+      const changed: OwnershipSubject[] = [];
+      const outcomes: OwnershipOutcome[] = [];
+      const audits: OwnershipAuditRecord[] = [];
+      const manifest: HandoffManifestEntry[] = [];
+      for (const { prior, current, name } of candidates) {
+        const code = prior === undefined
+          ? "ACQUIRED"
+          : current.lease.controller?.controllerId === recipient.controllerId
+            ? "ALREADY_CONTROLLED"
+            : "TRANSFERRED";
+        const next = this.withNewController(current, recipient, now, code);
+        changed.push(next.subject);
+        outcomes.push(next.outcome);
+        audits.push(this.audit(
+          input.mutationId,
+          "handoff",
+          next.subject,
+          actor,
+          input.reason,
+          prior?.lease.controller,
+          next.subject.lease.controller,
+          prior?.lease.state,
+          next.subject.lease.state,
+          next.outcome.code,
+        ));
+        manifest.push({
+          workerId: current.subjectId,
+          taskId: current.origin.taskId,
+          ...(current.origin.waveId === undefined ? {} : { waveId: current.origin.waveId }),
+          ...(name === undefined ? {} : { name }),
+          ...(current.resources.worktreePath === undefined
+            ? {}
+            : { worktreePath: current.resources.worktreePath }),
+          lifecycle: current.lifecycle,
+          ...(prior?.lease.controller === undefined
+            ? {}
+            : { priorControllerId: prior.lease.controller.controllerId }),
+        });
+      }
+      const handoff = WorkerHandoffSchema.parse({
+        schemaVersion: WORKER_COORDINATION_SCHEMA_VERSION,
+        handoffId: input.handoffId ?? this.id(),
+        recipient,
+        recipientSessionId: input.recipientSessionId,
+        issuedBy: actor,
+        directive: input.directive,
+        manifest,
+        issuedAt: now,
+        state: "pending",
+      });
+      const result = this.handoffBatchResult(input.mutationId, true, outcomes, handoff);
+      await this.persistReceipt(input.mutationId, "handoff", result, {
+        subjects: changed,
+        audits,
+        liveness: [this.connectedObservation(recipient, now, "directed worker handoff")],
+        handoffs: [handoff],
+      });
+      return result;
+    });
+  }
+
+  /** Every handoff the broker still holds, newest last, optionally narrowed to one recipient. */
+  listHandoffs(filter: { controllerId?: string; state?: WorkerHandoff["state"] } = {}): WorkerHandoff[] {
+    return [...this.handoffs.values()]
+      .filter((handoff) =>
+        (filter.controllerId === undefined || handoff.recipient.controllerId === filter.controllerId)
+        && (filter.state === undefined || handoff.state === filter.state))
+      .sort((left, right) => left.issuedAt.localeCompare(right.issuedAt));
+  }
+
+  /**
+   * Hands a controller its pending handoffs and marks them spent, in that order.
+   *
+   * The mark is durable and the read is not repeatable, which is the point: a handoff describes a
+   * lease movement that has already happened, so replaying it on every poll would have the
+   * recipient re-reading an instruction it has already acted on. Nothing is consumed unless the
+   * append succeeds, so a broker that dies mid-write hands the same records over again.
+   */
+  async consumeHandoffs(input: {
+    controllerId: string;
+    limit?: number;
+  }): Promise<WorkerHandoff[]> {
+    return this.exclusive(async () => {
+      this.assertReady();
+      const pending = this.listHandoffs({ controllerId: input.controllerId, state: "pending" })
+        .slice(0, input.limit ?? Number.MAX_SAFE_INTEGER);
+      if (pending.length === 0) return [];
+      const now = this.now();
+      const consumed = pending.map((handoff) =>
+        WorkerHandoffSchema.parse({ ...handoff, state: "consumed", consumedAt: now }));
+      await this.commit({ handoffs: consumed });
+      return pending;
     });
   }
 
@@ -1387,6 +1603,54 @@ export class WorkerCoordinationService {
     });
   }
 
+  /**
+   * A never-registered worker as an unowned subject, for {@link handoffBatch} alone.
+   *
+   * It is deliberately built without a controller. Handing it to one is {@link withNewController}'s
+   * job and nothing else's, so a handed-off manual worker gets its lease through exactly the path
+   * every other worker's lease comes through. Nothing observes this intermediate: it is never
+   * persisted, and the subject reaches disk already owned.
+   */
+  private unownedSubject(
+    subjectId: string,
+    register: NonNullable<HandoffBatchMember["register"]>,
+    now: string,
+  ): OwnershipSubject {
+    return OwnershipSubjectSchema.parse({
+      schemaVersion: WORKER_COORDINATION_SCHEMA_VERSION,
+      subjectId,
+      subjectKind: "worker",
+      origin: register.origin,
+      lifecycle: register.lifecycle,
+      resources: register.resources,
+      lease: {
+        leaseId: this.id(),
+        version: 1,
+        state: "orphaned",
+        issuedAt: now,
+        renewedAt: now,
+        expiresAt: now,
+        orphanedAt: now,
+        reason: "registered by directed handoff",
+      },
+      decisionGate: { state: "none" },
+      updatedAt: now,
+    });
+  }
+
+  private handoffBatchResult(
+    mutationId: string,
+    committed: boolean,
+    outcomes: OwnershipOutcome[],
+    handoff?: WorkerHandoff,
+  ): HandoffBatchResult {
+    return {
+      ...this.result(mutationId, "handoff", outcomes),
+      committed,
+      ...(handoff === undefined ? {} : { handoff }),
+    };
+  }
+
   private adoptBatchResult(
     mutationId: string,
     committed: boolean,
@@ -1481,6 +1745,9 @@ export class WorkerCoordinationService {
     for (const entry of transaction.liveness ?? []) {
       this.liveness.set(entry.controller.controllerId, entry);
     }
+    for (const handoff of transaction.handoffs ?? []) {
+      this.handoffs.set(handoff.handoffId, handoff);
+    }
     for (const receipt of transaction.receipts ?? []) this.receipts.set(receipt.mutationId, receipt);
   }
 
@@ -1572,6 +1839,32 @@ export class WorkerCoordinationService {
     return {
       ...OwnershipMutationResultSchema.parse(receipt.result),
       committed: receipt.result.committed,
+      idempotentReplay: true,
+    };
+  }
+
+  private replayHandoffBatch(mutationId: string): HandoffBatchResult | undefined {
+    const receipt = this.receipts.get(mutationId);
+    if (receipt === undefined) return undefined;
+    this.assertReceiptOperation(receipt, "handoff");
+    if (
+      typeof receipt.result !== "object"
+      || receipt.result === null
+      || !("committed" in receipt.result)
+      || typeof receipt.result.committed !== "boolean"
+    ) {
+      throw new WorkerCoordinationError(
+        "MUTATION_ID_COLLISION",
+        `mutation ${mutationId} already used for a non-handoff mutation`,
+      );
+    }
+    const handoff = "handoff" in receipt.result && receipt.result.handoff !== undefined
+      ? WorkerHandoffSchema.parse(receipt.result.handoff)
+      : undefined;
+    return {
+      ...OwnershipMutationResultSchema.parse(receipt.result),
+      committed: receipt.result.committed,
+      ...(handoff === undefined ? {} : { handoff }),
       idempotentReplay: true,
     };
   }

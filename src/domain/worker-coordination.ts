@@ -150,6 +150,8 @@ export const OwnershipOperationSchema = z.enum([
   "release",
   "transfer",
   "adopt",
+  /** Operator-directed batch transfer onto one orchestrator. See `handoffBatch`. */
+  "handoff",
   "expire",
   "lifecycle",
   "liveness",

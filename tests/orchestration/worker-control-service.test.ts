@@ -455,6 +455,77 @@ describe("WorkerControlService peer bindings", () => {
   });
 });
 
+describe("WorkerControlService directed handoffs", () => {
+  const OPERATOR = {
+    controllerId: "cyberdeck-operator",
+    familyId: "cyberdeck-operator",
+    scope: { kind: "fleet" as const, scopeId: "local-broker" },
+  };
+
+  async function handedOff(bench: Awaited<ReturnType<typeof harness>>, recipientId: string) {
+    const workerId = bench.addSession();
+    await bench.register({ workerId });
+    const committed = await bench.coordination.handoffBatch({
+      mutationId: `handoff:${workerId}`,
+      actor: OPERATOR,
+      recipient: {
+        controllerId: recipientId,
+        familyId: "orchestrator:fleet",
+        scope: { kind: "fleet", scopeId: "fleet" },
+      },
+      recipientSessionId: randomUUID(),
+      directive: "Rebase onto main, then report",
+      members: [{ subjectId: workerId, name: "docs sweep" }],
+      reason: "operator directed handoff",
+    });
+    expect(committed.committed).toBe(true);
+    return { workerId, handoffId: committed.handoff!.handoffId };
+  }
+
+  it("hands the recipient its directive and manifest once, and never again", async () => {
+    const bench = await harness();
+    const { workerId, handoffId } = await handedOff(bench, "orchestrator:fleet");
+
+    const first = await bench.control.events({ actorSessionId: ORC });
+
+    expect(first.handoffs).toHaveLength(1);
+    expect(first.handoffs![0]).toMatchObject({ handoffId, directive: "Rebase onto main, then report" });
+    expect(first.handoffs![0]!.manifest.map((entry) => entry.workerId)).toEqual([workerId]);
+    expect(first.handoffs![0]!.briefing).toContain("Rebase onto main, then report");
+    expect(first.handoffs![0]!.briefing).toContain("docs sweep");
+    // The worker itself arrives in the ordinary projection, already the recipient's.
+    expect(first.state.find((entry) => entry.workerId === workerId)).toMatchObject({
+      controllerId: "orchestrator:fleet",
+      leaseState: "active",
+    });
+
+    const second = await bench.control.events({ actorSessionId: ORC });
+    expect(second.handoffs).toBeUndefined();
+  });
+
+  it("delivers a peer's handoff to that peer and not to its primary", async () => {
+    const bench = await harness();
+    await handedOff(bench, PEER_CONTROLLER_ID);
+
+    const primary = await bench.control.events({ actorSessionId: ORC });
+    expect(primary.handoffs).toBeUndefined();
+
+    const peer = await bench.control.events({ actorSessionId: PEER });
+    expect(peer.handoffs).toHaveLength(1);
+    expect(peer.handoffs![0]!.directive).toBe("Rebase onto main, then report");
+  });
+
+  it("survives a broker restart with the handoff still waiting to be read", async () => {
+    const bench = await harness();
+    const { handoffId } = await handedOff(bench, "orchestrator:fleet");
+
+    const restarted = bench.rebuild();
+    const page = await restarted.events({ actorSessionId: ORC });
+
+    expect(page.handoffs?.map((notice) => notice.handoffId)).toEqual([handoffId]);
+  });
+});
+
 describe("WorkerControlService recovery", () => {
   it("previews the adoptable set and the blocked cases without mutating anything", async () => {
     const bench = await harness();

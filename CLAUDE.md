@@ -126,6 +126,19 @@ until prose starts parsing as a model id.
   re-introduce a per-tool refusal of peer keys; if peer authority should narrow, narrow the one
   capability list.
 
+- A directed handoff is the operator's own authority, and it is atomic. Fleet's ctrl+d marks
+  workers and `/handoff` names a live Orc and a directive; the broker moves every named lease onto
+  that Orc's controller identity or moves none, in one fsynced append that also carries the durable
+  handoff record. There is no token in that call, deliberately: the previous holder may be dead or
+  unwilling, and what fences it out is the same thing that fences every other transfer —
+  `withNewController` bumps the lease version and replaces the token hash, so the old holder's next
+  authenticated call gets the ordinary stale-lease answer. A worker the substrate has never seen —
+  one the operator started by hand — is registered *inside* that same transaction rather than
+  before it, so an aborted batch leaves no half-created subject and no row Fleet would draw as
+  adoptable. The directive reaches the recipient twice over: a best-effort composer nudge, and the
+  pending record `worker_events` returns and marks spent. Do not add a per-tool refusal, a partial
+  transfer path, or a second way to move a lease.
+
 - A thread's pull-request indicator is attributed to **the branch that thread's own work lands on**,
   never to the directory it runs in. A thread declares that branch through its `workspace`, or it
   inherits one by running in a linked worktree, which exists precisely because one piece of work

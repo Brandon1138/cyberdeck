@@ -12,6 +12,10 @@ import {
   type OwnershipSubject,
   type StoredWorkerEvent,
 } from "../domain/worker-coordination.js";
+import {
+  handoffBriefing,
+  type HandoffManifestEntry,
+} from "../domain/worker-handoff.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
 import type { WorkerCoordinationService } from "../broker/worker-coordination.js";
@@ -229,6 +233,20 @@ export interface WorkerStateSummary {
   truth?: WorkerTruth;
 }
 
+/**
+ * A directed handoff, as the orchestrator that received it reads it back.
+ *
+ * `briefing` is the same prose the composer nudge carried, so an Orc that saw both is never told
+ * two different things. It appears exactly once: collecting it is what marks it consumed.
+ */
+export interface WorkerHandoffNotice {
+  handoffId: string;
+  directive: string;
+  issuedAt: string;
+  manifest: HandoffManifestEntry[];
+  briefing: string;
+}
+
 export interface WorkerEventsResult {
   cursor: number;
   nextCursor: number;
@@ -236,6 +254,8 @@ export interface WorkerEventsResult {
   returned: number;
   view: z.infer<typeof WorkerEventViewSchema>;
   state: WorkerStateSummary[];
+  /** Present only when this call is the one that collected them. Never repeated. */
+  handoffs?: WorkerHandoffNotice[];
   stateTruncated?: boolean;
   events: Array<Record<string, unknown>>;
 }
@@ -343,7 +363,7 @@ export class WorkerControlService {
 
   async events(input: z.input<typeof AgentWorkerEventsParamsSchema>): Promise<WorkerEventsResult> {
     const request = AgentWorkerEventsParamsSchema.parse(input);
-    const { binding } = await this.requireController(request.actorSessionId);
+    const { binding, controller } = await this.requireController(request.actorSessionId);
     const scoped = this.options.coordination.listSubjects().filter(
       (subject) => subject.subjectKind === "worker" && this.inGrant(subject, binding.grant, "thread.read"),
     );
@@ -366,6 +386,12 @@ export class WorkerControlService {
     const state = selected
       .slice(0, MAX_STATE_ENTRIES)
       .map((subject) => this.stateSummary(subject));
+    // Durable delivery of the operator's directed handoffs. The composer nudge is best-effort and
+    // an orchestrator restart or a busy composer can eat it; this cannot be eaten, because the
+    // record stays pending on disk until the call that returns it also marks it spent.
+    const handoffs = await this.options.coordination.consumeHandoffs({
+      controllerId: controller.controllerId,
+    });
     return {
       cursor: request.cursor,
       nextCursor: projection.nextCursor,
@@ -374,6 +400,17 @@ export class WorkerControlService {
       view: request.view,
       state,
       ...(selected.length > state.length ? { stateTruncated: true } : {}),
+      ...(handoffs.length === 0
+        ? {}
+        : {
+            handoffs: handoffs.map((handoff) => ({
+              handoffId: handoff.handoffId,
+              directive: handoff.directive,
+              issuedAt: handoff.issuedAt,
+              manifest: handoff.manifest,
+              briefing: handoffBriefing(handoff),
+            })),
+          }),
       events: projection.events.map(compactEvent),
     };
   }

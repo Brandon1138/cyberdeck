@@ -17,6 +17,7 @@ import {
   type OwnershipSubject,
   type StoredWorkerEvent,
 } from "../domain/worker-coordination.js";
+import { WorkerHandoffSchema, type WorkerHandoff } from "../domain/worker-handoff.js";
 import { openPrivateAppendFile } from "./private-files.js";
 
 const CoordinationTransactionSchema = z.object({
@@ -29,6 +30,11 @@ const CoordinationTransactionSchema = z.object({
   checkpoints: z.array(CheckpointRequestSchema).default([]),
   audits: z.array(OwnershipAuditRecordSchema).default([]),
   liveness: z.array(ControllerLivenessSchema).default([]),
+  /**
+   * Directed handoffs. Defaulted, like every array here, so a log written before handoffs existed
+   * still parses — the field is absent on those lines, not empty, and the two must read alike.
+   */
+  handoffs: z.array(WorkerHandoffSchema).default([]),
   receipts: z.array(MutationReceiptSchema).default([]),
 });
 
@@ -38,6 +44,7 @@ export interface CoordinationTransaction {
   checkpoints?: CheckpointRequest[];
   audits?: OwnershipAuditRecord[];
   liveness?: ControllerLiveness[];
+  handoffs?: WorkerHandoff[];
   receipts?: MutationReceipt[];
 }
 
@@ -47,6 +54,7 @@ export interface WorkerCoordinationState {
   checkpoints: CheckpointRequest[];
   audits: OwnershipAuditRecord[];
   liveness: ControllerLiveness[];
+  handoffs: WorkerHandoff[];
   receipts: MutationReceipt[];
 }
 
@@ -95,6 +103,7 @@ export class WorkerCoordinationStore {
       checkpoints: transaction.checkpoints ?? [],
       audits: transaction.audits ?? [],
       liveness: transaction.liveness ?? [],
+      handoffs: transaction.handoffs ?? [],
       receipts: transaction.receipts ?? [],
     });
     assertSupportedVersions(envelope);
@@ -122,10 +131,19 @@ export class WorkerCoordinationStore {
     const events = new Map<string, StoredWorkerEvent>();
     const checkpoints = new Map<string, CheckpointRequest>();
     const liveness = new Map<string, ControllerLiveness>();
+    const handoffs = new Map<string, WorkerHandoff>();
     const receipts = new Map<string, MutationReceipt>();
     const audits: OwnershipAuditRecord[] = [];
     if (content.length === 0) {
-      return { subjects: [], events: [], checkpoints: [], audits, liveness: [], receipts: [] };
+      return {
+        subjects: [],
+        events: [],
+        checkpoints: [],
+        audits,
+        liveness: [],
+        handoffs: [],
+        receipts: [],
+      };
     }
 
     const lines = content.split("\n");
@@ -188,6 +206,7 @@ export class WorkerCoordinationStore {
       for (const entry of parsed.data.liveness) {
         liveness.set(entry.controller.controllerId, entry);
       }
+      for (const handoff of parsed.data.handoffs) handoffs.set(handoff.handoffId, handoff);
       for (const receipt of parsed.data.receipts) receipts.set(receipt.mutationId, receipt);
       audits.push(...parsed.data.audits);
     }
@@ -198,6 +217,7 @@ export class WorkerCoordinationStore {
       checkpoints: [...checkpoints.values()],
       audits,
       liveness: [...liveness.values()],
+      handoffs: [...handoffs.values()],
       receipts: [...receipts.values()],
     };
   }
