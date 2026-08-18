@@ -4,6 +4,7 @@ import type { WorkerCoordinationService } from "../broker/worker-coordination.js
 import type { WorkerLeaseCredentialCustodian } from "../broker/worker-lease-credential-custodian.js";
 import { BrokerWorkerLeaseCredentialCustodian } from "../broker/worker-lease-credential-custodian.js";
 import type { SessionRegistry } from "../broker/session-registry.js";
+import { grantAllows, type CapabilityGrant } from "../domain/capability.js";
 import { orchestratorController } from "../domain/orchestrator.js";
 import type { SessionRecord } from "../domain/session.js";
 import type {
@@ -71,8 +72,11 @@ export class WorkerHandoffError extends Error {
     readonly code:
       | "RECIPIENT_UNBOUND"
       | "RECIPIENT_NOT_LIVE"
-      | "RECIPIENT_IS_TARGET",
+      | "RECIPIENT_IS_TARGET"
+      | "RECIPIENT_SCOPE_VIOLATION",
     message: string,
+    readonly offendingWorkerIds?: readonly string[],
+    readonly recipientScope?: CapabilityGrant["scope"],
   ) {
     super(message);
     this.name = "WorkerHandoffError";
@@ -141,15 +145,22 @@ export class WorkerHandoffService {
       );
     }
     const recipient = orchestratorController(binding);
-    return this.exclusive(() => this.transfer(request, recipient, recipientRecord));
+    return this.exclusive(() => this.transfer(
+      request,
+      recipient,
+      recipientRecord,
+      binding.grant,
+    ));
   }
 
   private async transfer(
     request: z.output<typeof WorkerHandoffParamsSchema>,
     recipient: ControllerIdentity,
     recipientRecord: SessionRecord,
+    recipientGrant: CapabilityGrant,
   ): Promise<WorkerHandoffResult> {
     const refused: WorkerHandoffBlocker[] = [];
+    const outsideRecipientScope: string[] = [];
     const seen = new Set<string>();
     const members: Parameters<WorkerCoordinationService["handoffBatch"]>[0]["members"][number][] = [];
     for (const workerId of request.workerIds) {
@@ -176,6 +187,13 @@ export class WorkerHandoffService {
         });
         continue;
       }
+      const cwd = record?.cwd ?? subject?.resources.worktreePath;
+      if (!grantAllows(recipientGrant, "worker.start", {
+        sessionId: workerId,
+        ...(cwd === undefined ? {} : { cwd }),
+      })) {
+        outsideRecipientScope.push(workerId);
+      }
       members.push({
         subjectId: workerId,
         ...(record?.name === undefined ? {} : { name: record.name }),
@@ -185,6 +203,19 @@ export class WorkerHandoffService {
           ? { register: registrationFor(record) }
           : {}),
       });
+    }
+
+    // Scope authority is the same `grantAllows` predicate used by WorkerControlService. Settle
+    // every member before entering the ownership substrate: one bad cwd must not fence any prior
+    // controller or leave the recipient holding a worker it cannot control and observe.
+    if (outsideRecipientScope.length > 0) {
+      const scope = grantScopeLabel(recipientGrant.scope);
+      throw new WorkerHandoffError(
+        "RECIPIENT_SCOPE_VIOLATION",
+        `Workers ${outsideRecipientScope.join(", ")} are outside recipient grant scope ${scope}`,
+        outsideRecipientScope,
+        recipientGrant.scope,
+      );
     }
 
     // Refusals are settled before the substrate is touched at all: a batch that cannot succeed
@@ -311,6 +342,12 @@ export class WorkerHandoffService {
     this.tail = run.then(() => undefined, () => undefined);
     return run;
   }
+}
+
+function grantScopeLabel(scope: CapabilityGrant["scope"]): string {
+  if (scope.kind === "fleet") return "fleet";
+  if (scope.kind === "self") return "self";
+  return `workspace:${scope.cwd}`;
 }
 
 /** A live orchestrator: one that can still be handed something and read it. */

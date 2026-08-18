@@ -5155,6 +5155,37 @@ describe("directed handoff", () => {
     expect(refused.state.notice).toBe("No live orchestrator to receive a handoff");
   });
 
+  it("filters workspace-scoped recipients that do not cover every worker cwd", () => {
+    const snapshot = handoffFleet({
+      orchestratorScope: "workspace",
+      cwd: "/repo/two",
+    });
+    const refused = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+
+    expect(refused.state.handoffPicker).toBeUndefined();
+    expect(refused.state.notice).toBe("No live orchestrator covers every worker workspace");
+  });
+
+  it("offers a fleet-scoped recipient regardless of worker cwd", () => {
+    const snapshot = handoffFleet({
+      orchestratorScope: "fleet",
+      cwd: "/repo/two",
+    });
+    const opened = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+
+    expect(opened.state.handoffPicker).toMatchObject({ focusSessionId: ORC_ID });
+  });
+
   it("refuses an empty directive and backs out one step at a time", () => {
     const snapshot = handoffFleet();
     const opened = transitionFleet(

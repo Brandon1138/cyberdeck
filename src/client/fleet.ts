@@ -2573,6 +2573,14 @@ function liveOrchestrators(snapshot: FleetSnapshot): SessionRecord[] {
     record.executionState === "active" || record.executionState === "starting");
 }
 
+/** Picker hint only. Broker repeats scope validation against durable binding grant. */
+function handoffRecipients(snapshot: FleetSnapshot, workerIds: readonly string[]): SessionRecord[] {
+  const records = new Map(snapshot.threads.map(({ record }) => [record.id, record]));
+  return liveOrchestrators(snapshot).filter((recipient) =>
+    recipient.orchestratorScope === "fleet"
+    || workerIds.every((workerId) => records.get(workerId)?.cwd === recipient.cwd));
+}
+
 function openHandoffPicker(state: FleetState, snapshot: FleetSnapshot): FleetTransition {
   const workerIds = handoffTargets(state, snapshot);
   if (workerIds.length === 0) {
@@ -2586,14 +2594,17 @@ function openHandoffPicker(state: FleetState, snapshot: FleetSnapshot): FleetTra
       },
     };
   }
-  const recipients = liveOrchestrators(snapshot);
+  const recipients = handoffRecipients(snapshot, workerIds);
   if (recipients.length === 0) {
+    const anyLive = liveOrchestrators(snapshot).length > 0;
     return {
       state: {
         ...state,
         draft: "",
         commandPalette: undefined,
-        notice: "No live orchestrator to receive a handoff",
+        notice: anyLive
+          ? "No live orchestrator covers every worker workspace"
+          : "No live orchestrator to receive a handoff",
         noticeTone: "warning",
       },
     };
@@ -2627,7 +2638,7 @@ function transitionHandoffPicker(
     if (key === "escape") {
       return { state: { ...state, handoffPicker: undefined, notice: undefined } };
     }
-    const recipients = liveOrchestrators(snapshot);
+    const recipients = handoffRecipients(snapshot, picker.workerIds);
     // The roster can empty while the picker is open — the recipient stopping is exactly the case
     // this gesture must not paper over — so the picker closes rather than offering nothing.
     if (recipients.length === 0) {
@@ -2635,7 +2646,9 @@ function transitionHandoffPicker(
         state: {
           ...state,
           handoffPicker: undefined,
-          notice: "No live orchestrator to receive a handoff",
+          notice: liveOrchestrators(snapshot).length > 0
+            ? "No live orchestrator covers every worker workspace"
+            : "No live orchestrator to receive a handoff",
           noticeTone: "warning",
         },
       };
@@ -2741,7 +2754,7 @@ function renderHandoffPicker(
     "",
   ];
   if (picker.step === "recipient") {
-    const recipients = liveOrchestrators(snapshot);
+    const recipients = handoffRecipients(snapshot, picker.workerIds);
     const focusIndex = Math.max(
       0,
       recipients.findIndex((record) => record.id === picker.focusSessionId),

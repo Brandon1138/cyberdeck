@@ -18,6 +18,7 @@ const baseMs = Date.parse("2026-08-18T10:00:00.000Z");
 const ORC = "11111111-1111-4111-8111-111111111111";
 const PEER = "44444444-4444-4444-8444-444444444444";
 const PEER_KEY = "fleet:peer:99999999-9999-4999-8999-999999999999";
+const WORKSPACE_ORC = "77777777-7777-4777-8777-777777777777";
 const STOPPED_ORC = "22222222-2222-4222-8222-222222222222";
 const UNBOUND_ORC = "66666666-6666-4666-8666-666666666666";
 const directories: string[] = [];
@@ -26,7 +27,10 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-function binding(sessionId: string, key: string): OrchestratorBinding {
+function binding(sessionId: string, key: string, workspaceCwd?: string): OrchestratorBinding {
+  const scope = workspaceCwd === undefined
+    ? { kind: "fleet" as const }
+    : { kind: "workspace" as const, cwd: workspaceCwd };
   return {
     key,
     kind: key.includes(":peer:") ? "peer" : "primary",
@@ -34,11 +38,11 @@ function binding(sessionId: string, key: string): OrchestratorBinding {
     provider: "codex",
     cwd: "/repo",
     sandbox: "read-only",
-    scope: { kind: "fleet" },
+    scope,
     grant: {
       subjectSessionId: sessionId,
       capabilities: ["thread.read", "thread.enqueue", "worker.start"],
-      scope: { kind: "fleet" },
+      scope,
     },
     createdAt: new Date(baseMs).toISOString(),
     updatedAt: new Date(baseMs).toISOString(),
@@ -73,6 +77,7 @@ async function harness(options: { enqueue?: () => Promise<unknown> } = {}) {
   const bindings = new Map<string, OrchestratorBinding>([
     [ORC, binding(ORC, "fleet")],
     [PEER, binding(PEER, PEER_KEY)],
+    [WORKSPACE_ORC, binding(WORKSPACE_ORC, "workspace:/repo/in-scope", "/repo/in-scope")],
     [STOPPED_ORC, binding(STOPPED_ORC, "workspace:/stopped")],
   ]);
   const enqueued: Array<{ targetSessionId: string; message: string }> = [];
@@ -101,6 +106,12 @@ async function harness(options: { enqueue?: () => Promise<unknown> } = {}) {
   };
   addSession({ id: ORC, kind: "orchestrator", name: "primary orc" });
   addSession({ id: PEER, kind: "orchestrator", name: "peer orc" });
+  addSession({
+    id: WORKSPACE_ORC,
+    kind: "orchestrator",
+    name: "workspace orc",
+    cwd: "/repo/in-scope",
+  });
   addSession({ id: STOPPED_ORC, kind: "orchestrator", executionState: "exited", exitCode: 0 });
 
   const registry = {
@@ -218,6 +229,72 @@ describe("WorkerHandoffService", () => {
       familyId: "orchestrator:fleet",
       scope: { kind: "fleet", scopeId: PEER_KEY },
     });
+  });
+
+  it("rejects an out-of-scope member atomically before any lease is transferred", async () => {
+    const bench = await harness();
+    const inScope = bench.addSession({ cwd: "/repo/in-scope" });
+    const outOfScope = bench.addSession({ cwd: "/repo/out-of-scope" });
+    const priorControllerId = "orchestrator:workspace:/prior";
+    await bench.register({ workerId: inScope, controllerId: priorControllerId });
+    await bench.register({ workerId: outOfScope, controllerId: priorControllerId });
+
+    await expect(bench.handoff.handoff({
+      recipientSessionId: WORKSPACE_ORC,
+      workerIds: [inScope, outOfScope],
+      directive: "Take both or neither",
+    })).rejects.toMatchObject({
+      name: "WorkerHandoffError",
+      code: "RECIPIENT_SCOPE_VIOLATION",
+      offendingWorkerIds: [outOfScope],
+      recipientScope: { kind: "workspace", cwd: "/repo/in-scope" },
+    });
+
+    for (const workerId of [inScope, outOfScope]) {
+      const lease = bench.coordination.getSubject(workerId)?.lease;
+      expect(lease?.controller?.controllerId).toBe(priorControllerId);
+      expect(lease?.version).toBe(1);
+    }
+    expect(bench.coordination.listHandoffs()).toEqual([]);
+    expect(bench.instructions.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("hands a workspace-scoped recipient an all-in-scope batch", async () => {
+    const bench = await harness();
+    const first = bench.addSession({ cwd: "/repo/in-scope" });
+    const second = bench.addSession({ cwd: "/repo/in-scope" });
+    await bench.register({ workerId: first, controllerId: "orchestrator:workspace:/prior" });
+    await bench.register({ workerId: second, controllerId: "orchestrator:workspace:/prior" });
+
+    const result = await bench.handoff.handoff({
+      recipientSessionId: WORKSPACE_ORC,
+      workerIds: [first, second],
+      directive: "Take both",
+    });
+
+    expect(result.committed).toBe(true);
+    expect(result.transferred.map((entry) => entry.workerId)).toEqual([first, second]);
+    for (const workerId of [first, second]) {
+      expect(bench.coordination.getSubject(workerId)?.lease.controller?.controllerId)
+        .toBe("orchestrator:workspace:/repo/in-scope");
+    }
+  });
+
+  it("lets a fleet-scoped recipient accept workers from any workspace", async () => {
+    const bench = await harness();
+    const first = bench.addSession({ cwd: "/repo/one" });
+    const second = bench.addSession({ cwd: "/repo/two" });
+    await bench.register({ workerId: first });
+    await bench.register({ workerId: second });
+
+    const result = await bench.handoff.handoff({
+      recipientSessionId: ORC,
+      workerIds: [first, second],
+      directive: "Take cross-workspace batch",
+    });
+
+    expect(result.committed).toBe(true);
+    expect(result.transferred.map((entry) => entry.workerId)).toEqual([first, second]);
   });
 
   it("hands off a worker the operator started by hand, registering it in the same transaction", async () => {
