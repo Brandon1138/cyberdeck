@@ -5132,6 +5132,19 @@ describe("directed handoff", () => {
     expect(after.state.handoffMarks).toEqual([]);
   });
 
+  it("drops a mark when a live worker becomes terminal", () => {
+    const snapshot = handoffFleet();
+    const marked = transitionFleet(selecting(snapshot, WORKER_A), snapshot, "ctrl+d", NOW_MS).state;
+    const terminalSnapshot = fleet(...snapshot.threads.map(({ record }) => ({
+      record: record.id === WORKER_A
+        ? { ...record, executionState: "exited" as const, exitCode: 0 }
+        : record,
+    })));
+
+    const after = transitionFleet(marked, terminalSnapshot, "ctrl+l", NOW_MS);
+    expect(after.state.handoffMarks).toEqual([]);
+  });
+
   it("walks /handoff from the marked batch to a recipient and a directive", () => {
     const snapshot = handoffFleet();
     const marked = transitionFleet(selecting(snapshot, WORKER_A), snapshot, "ctrl+d", NOW_MS).state;
@@ -5158,7 +5171,12 @@ describe("directed handoff", () => {
       workerIds: [WORKER_A],
       recipientSessionId: ORC_ID,
       draft: "",
+      mutationId: expect.any(String),
     });
+    const mutationId = chosen.state.handoffPicker?.step === "directive"
+      ? chosen.state.handoffPicker.mutationId
+      : undefined;
+    expect(mutationId).toBeDefined();
 
     let typing = chosen;
     for (const character of "Rebase it") {
@@ -5174,6 +5192,7 @@ describe("directed handoff", () => {
       workerIds: [WORKER_A],
       recipientSessionId: ORC_ID,
       directive: "Rebase it",
+      mutationId,
     });
     // The marks stay until the broker says the transfer committed.
     expect(sent.state.handoffMarks).toEqual([WORKER_A]);
@@ -5286,6 +5305,7 @@ describe("directed handoff", () => {
         workerIds: [WORKER_A],
         recipientSessionId: ORC_ID,
         draft,
+        mutationId: "handoff-overlong",
       },
     }, snapshot, "enter", NOW_MS);
 
@@ -5370,6 +5390,7 @@ describe("directed handoff", () => {
       recipientSessionId: ORC_ID,
       workerIds: [WORKER_A],
       directive: "Rebase it",
+      mutationId: expect.any(String),
     }));
     await vi.waitFor(() => {
       const screen = Buffer.concat(output.chunks).toString("utf8");
@@ -5379,6 +5400,94 @@ describe("directed handoff", () => {
       expect(screen.split("\n").filter((line) => line.includes("Alpha worker")).at(-1))
         .not.toContain("✓");
     });
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("retries a transport-failed handoff with the same directive and mutation id", async () => {
+    class Input extends EventEmitter {
+      isTTY = true;
+      isRaw = false;
+      setRawMode(raw: boolean): this { this.isRaw = raw; return this; }
+      resume(): this { return this; }
+      pause(): this { return this; }
+    }
+    class Output {
+      isTTY = false;
+      columns = 120;
+      rows = 30;
+      chunks: Buffer[] = [];
+      write(chunk: string | Uint8Array): boolean {
+        this.chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk));
+        return true;
+      }
+    }
+
+    const snapshot = handoffFleet();
+    const records = snapshot.threads.map(({ record }) => record);
+    const handoffRequests: Array<Record<string, unknown>> = [];
+    const transport = {
+      request: vi.fn(async (method: string, params?: Record<string, unknown>) => {
+        if (method === "session.list") return records;
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "fleet.preferences") return {};
+        if (method === "fleet.folderDispositions") return {};
+        if (method === "fleet.workerHandoff") {
+          handoffRequests.push(params ?? {});
+          if (handoffRequests.length === 1) throw new Error("connection reset");
+          return {
+            committed: true,
+            recipientSessionId: ORC_ID,
+            recipientControllerId: "orchestrator:fleet",
+            handoffId: "77777777-7777-4777-8777-777777777777",
+            directive: "Rebase it",
+            transferred: [{ workerId: WORKER_A, code: "TRANSFERRED" }],
+            blocked: [],
+            delivery: "delivered",
+          };
+        }
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose: vi.fn(() => () => undefined),
+      close: vi.fn(),
+    };
+    const input = new Input();
+    const output = new Output();
+    const running = runFleet(transport as never, input as never, output as never, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("\u001b[B"));
+    input.emit("data", Buffer.from("\u001b[B"));
+    input.emit("data", Buffer.from([0x04]));
+    input.emit("data", Buffer.from("/handoff"));
+    input.emit("data", Buffer.from("\r"));
+    await vi.waitFor(() => expect(
+      Buffer.concat(output.chunks).toString("utf8"),
+    ).toContain("Handoff  1 of 2"));
+    input.emit("data", Buffer.from("\r"));
+    input.emit("data", Buffer.from("Rebase it"));
+    input.emit("data", Buffer.from("\r"));
+
+    await vi.waitFor(() => expect(handoffRequests).toHaveLength(1));
+    await vi.waitFor(() => expect(
+      Buffer.concat(output.chunks).toString("utf8"),
+    ).toContain("connection reset"));
+    input.emit("data", Buffer.from("\r"));
+
+    await vi.waitFor(() => expect(handoffRequests).toHaveLength(2));
+    expect(handoffRequests[1]).toEqual(handoffRequests[0]);
+    expect(handoffRequests[1]).toMatchObject({
+      recipientSessionId: ORC_ID,
+      workerIds: [WORKER_A],
+      directive: "Rebase it",
+      mutationId: expect.any(String),
+    });
+    await vi.waitFor(() => expect(
+      Buffer.concat(output.chunks).toString("utf8"),
+    ).toContain("1 worker handed off"));
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();

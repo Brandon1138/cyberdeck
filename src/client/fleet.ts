@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import type {
@@ -187,7 +188,13 @@ export type OrchestratorPickerState =
  */
 export type HandoffPickerState =
   | { step: "recipient"; workerIds: readonly string[]; focusSessionId?: string | undefined }
-  | { step: "directive"; workerIds: readonly string[]; recipientSessionId: string; draft: string };
+  | {
+    step: "directive";
+    workerIds: readonly string[];
+    recipientSessionId: string;
+    draft: string;
+    mutationId: string;
+  };
 
 export interface LaunchProfile {
   provider: ProviderId;
@@ -363,6 +370,7 @@ export type FleetAction =
     workerIds: readonly string[];
     recipientSessionId: string;
     directive: string;
+    mutationId: string;
   }
   | { type: "folder-disposition"; cwd: string; disposition: FolderDisposition }
   | {
@@ -2691,6 +2699,7 @@ function transitionHandoffPicker(
             workerIds: picker.workerIds,
             recipientSessionId: recipients[focusIndex]!.id,
             draft: "",
+            mutationId: randomUUID(),
           },
           notice: undefined,
         },
@@ -2743,6 +2752,7 @@ function transitionHandoffPicker(
         workerIds: picker.workerIds,
         recipientSessionId: picker.recipientSessionId,
         directive,
+        mutationId: picker.mutationId,
       },
     };
   }
@@ -3954,6 +3964,7 @@ export async function runFleet(
           recipientSessionId: action.recipientSessionId,
           workerIds: action.workerIds,
           directive: action.directive,
+          mutationId: action.mutationId,
         });
         state = {
           ...state,
@@ -4177,6 +4188,19 @@ export async function runFleet(
         ...(action?.type === "start" ? { draft: action.request.initialPrompt } : {}),
         // A rejected path is almost always a typo, so the prompt comes back with it still in hand.
         ...(action?.type === "project-add" ? { projectPrompt: { draft: action.path } } : {}),
+        // A transport failure is not a definitive handoff result. Restore the exact directive and
+        // mutation id so Enter retries the same durable broker mutation rather than duplicating it.
+        ...(action?.type === "handoff"
+          ? {
+              handoffPicker: {
+                step: "directive" as const,
+                workerIds: action.workerIds,
+                recipientSessionId: action.recipientSessionId,
+                draft: action.directive,
+                mutationId: action.mutationId,
+              },
+            }
+          : {}),
         // A shell that could not be run is still a shell the operator is standing in.
         ...(action?.type === "shell-run" && state.shellMode !== undefined
           ? { shellMode: { ...state.shellMode, running: false } }
@@ -4605,7 +4629,8 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
   // A mark is a claim about a live worker. A session that has gone away takes its mark with it,
   // rather than leaving a batch member the broker would have to refuse the whole handoff over.
   const markedIds = handoffMarks(state).filter((id) =>
-    threads.some(({ record }) => record.id === id && record.kind !== "orchestrator"));
+    threads.some(({ record }) =>
+      record.id === id && record.kind !== "orchestrator" && !isTerminalSession(record)));
   const confirmationExpired = (state.deleteConfirmation !== undefined && deleteConfirmation === undefined)
     || (state.quitConfirmation !== undefined && quitConfirmation === undefined);
   return {
