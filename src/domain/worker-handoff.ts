@@ -36,8 +36,8 @@ export const HandoffManifestEntrySchema = z.object({
  * context window and a restart, so a directive pushed into its composer can be missed, truncated,
  * or spent before the worker leases it describes matter. This record outlives all of that: it is
  * written in the same fsynced transaction as the lease transfer it announces, and it stays
- * `pending` until the recipient reads it back — after which the same log line records that it was
- * consumed exactly once.
+ * `pending` while `worker_events` replays it. Only an explicit acknowledgement from the recipient
+ * makes delivery irreversible, so losing the response that carried it cannot lose the directive.
  */
 export const WorkerHandoffSchema = z.object({
   schemaVersion: schemaVersionField,
@@ -51,7 +51,10 @@ export const WorkerHandoffSchema = z.object({
   directive: z.string().trim().min(1).max(HANDOFF_LIMITS.directiveChars),
   manifest: z.array(HandoffManifestEntrySchema).min(1).max(HANDOFF_LIMITS.manifestEntries),
   issuedAt: z.iso.datetime(),
-  state: z.enum(["pending", "consumed"]),
+  /** `consumed` parses records written by the pre-acknowledgement PR implementation. */
+  state: z.enum(["pending", "acknowledged", "consumed"]),
+  acknowledgedAt: z.iso.datetime().optional(),
+  /** Legacy terminal timestamp paired with legacy state `consumed`. */
   consumedAt: z.iso.datetime().optional(),
 });
 

@@ -50,6 +50,7 @@ export class WorkerCoordinationError extends Error {
       | "CHECKPOINT_NOT_FOUND"
       | "CHECKPOINT_IDENTITY_COLLISION"
       | "EVENT_NOT_FOUND"
+      | "HANDOFF_NOT_FOUND"
       | "INVALID_EVENT",
     message: string,
   ) {
@@ -686,27 +687,58 @@ export class WorkerCoordinationService {
   }
 
   /**
-   * Hands a controller its pending handoffs and marks them spent, in that order.
-   *
-   * The mark is durable and the read is not repeatable, which is the point: a handoff describes a
-   * lease movement that has already happened, so replaying it on every poll would have the
-   * recipient re-reading an instruction it has already acted on. Nothing is consumed unless the
-   * append succeeds, so a broker that dies mid-write hands the same records over again.
+   * Read one oldest-first page without changing delivery state. The caller supplies the finite
+   * limit; `worker_events` owns its public page cap. Repeating this read intentionally repeats the
+   * same handoffs until the recipient explicitly acknowledges them.
    */
-  async consumeHandoffs(input: {
+  pendingHandoffs(input: {
     controllerId: string;
-    limit?: number;
+    limit: number;
+  }): WorkerHandoff[] {
+    this.assertReady();
+    if (!Number.isInteger(input.limit) || input.limit < 1) {
+      throw new RangeError("Handoff page limit must be a positive integer");
+    }
+    return this.listHandoffs({ controllerId: input.controllerId, state: "pending" })
+      .slice(0, input.limit);
+  }
+
+  /**
+   * Durably acknowledge handoffs previously delivered to one controller.
+   *
+   * The operation is idempotent. A lost acknowledgement response is safe because the recipient
+   * already received the directive before it could name the handoff here; retrying returns the
+   * same terminal records without another append. Unknown and foreign IDs fail the whole batch.
+   */
+  async acknowledgeHandoffs(input: {
+    controllerId: string;
+    handoffIds: readonly string[];
   }): Promise<WorkerHandoff[]> {
     return this.exclusive(async () => {
       this.assertReady();
-      const pending = this.listHandoffs({ controllerId: input.controllerId, state: "pending" })
-        .slice(0, input.limit ?? Number.MAX_SAFE_INTEGER);
-      if (pending.length === 0) return [];
+      const handoffIds = [...new Set(input.handoffIds)];
+      if (handoffIds.length === 0) return [];
+      const records = handoffIds.map((handoffId) => {
+        const handoff = this.handoffs.get(handoffId);
+        if (handoff === undefined || handoff.recipient.controllerId !== input.controllerId) {
+          throw new WorkerCoordinationError(
+            "HANDOFF_NOT_FOUND",
+            `handoff ${handoffId} is not pending for controller ${input.controllerId}`,
+          );
+        }
+        return handoff;
+      });
       const now = this.now();
-      const consumed = pending.map((handoff) =>
-        WorkerHandoffSchema.parse({ ...handoff, state: "consumed", consumedAt: now }));
-      await this.commit({ handoffs: consumed });
-      return pending;
+      const changed = records
+        .filter((handoff) => handoff.state === "pending")
+        .map((handoff) => WorkerHandoffSchema.parse({
+          ...handoff,
+          state: "acknowledged",
+          acknowledgedAt: now,
+        }));
+      if (changed.length > 0) await this.commit({ handoffs: changed });
+      const changedById = new Map(changed.map((handoff) => [handoff.handoffId, handoff]));
+      return records.map((handoff) => changedById.get(handoff.handoffId) ?? handoff);
     });
   }
 

@@ -32,7 +32,13 @@ async function tools(): Promise<Array<{
   name: string;
   description: string;
   inputSchema: {
-    properties?: Record<string, { enum?: string[]; maximum?: number; default?: unknown }>;
+    properties?: Record<string, {
+      enum?: string[];
+      maximum?: number;
+      maxItems?: number;
+      default?: unknown;
+      items?: { enum?: string[] };
+    }>;
     required?: string[];
     additionalProperties?: boolean;
   };
@@ -66,6 +72,7 @@ describe("orchestrator control-plane tools", () => {
     });
     // The page cap lives in the schema so an Orc cannot request a transcript-sized read.
     expect(events?.inputSchema.properties?.limit?.maximum).toBe(50);
+    expect(events?.inputSchema.properties?.acknowledgeHandoffIds?.maxItems).toBe(1);
     for (const tool of [lease, control, events]) {
       expect(tool?.inputSchema.additionalProperties).toBe(false);
       expect(tool?.description.length).toBeLessThan(720);
@@ -82,7 +89,11 @@ describe("orchestrator control-plane tools", () => {
     await call(transport, "cyberdeck_worker_ctl", {
       action: "stop", workerId: WORKER, reason: "scope changed",
     });
-    await call(transport, "cyberdeck_worker_events", { cursor: 12, view: "unresolved" });
+    await call(transport, "cyberdeck_worker_events", {
+      cursor: 12,
+      view: "unresolved",
+      acknowledgeHandoffIds: [WORKER],
+    });
 
     expect(request.mock.calls).toEqual([
       ["agent.lease.control", {
@@ -91,7 +102,12 @@ describe("orchestrator control-plane tools", () => {
       ["agent.worker.control", {
         actorSessionId: ACTOR, action: "stop", workerId: WORKER, reason: "scope changed",
       }],
-      ["agent.worker.events", { actorSessionId: ACTOR, cursor: 12, view: "unresolved" }],
+      ["agent.worker.events", {
+        actorSessionId: ACTOR,
+        cursor: 12,
+        view: "unresolved",
+        acknowledgeHandoffIds: [WORKER],
+      }],
     ]);
   });
 

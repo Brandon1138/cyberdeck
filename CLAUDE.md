@@ -136,8 +136,10 @@ until prose starts parsing as a model id.
   one the operator started by hand — is registered *inside* that same transaction rather than
   before it, so an aborted batch leaves no half-created subject and no row Fleet would draw as
   adoptable. The directive reaches the recipient twice over: a best-effort composer nudge, and the
-  pending record `worker_events` returns and marks spent. Do not add a per-tool refusal, a partial
-  transfer path, or a second way to move a lease.
+  pending record `worker_events` returns oldest-first, one per page, until a later poll explicitly
+  acknowledges that `handoffId`. Reading never consumes it: a lost response replays the same
+  directive, while a successful acknowledgement is durable across restart. Do not add a per-tool
+  refusal, a partial transfer path, or a second way to move a lease.
 
 - A thread's pull-request indicator is attributed to **the branch that thread's own work lands on**,
   never to the directory it runs in. A thread declares that branch through its `workspace`, or it

@@ -58,6 +58,17 @@ describe("worker handoff record", () => {
     expect(() => handoff({ manifest: oversized })).toThrow();
   });
 
+  it("records explicit acknowledgement while still parsing legacy consumed records", () => {
+    expect(handoff({
+      state: "acknowledged",
+      acknowledgedAt: "2026-08-18T10:01:00.000Z",
+    }).state).toBe("acknowledged");
+    expect(handoff({
+      state: "consumed",
+      consumedAt: "2026-08-18T10:01:00.000Z",
+    }).state).toBe("consumed");
+  });
+
   it("names every adopted worker, its origin, and the directive in one briefing", () => {
     const record = handoff();
     const briefing = handoffBriefing(record);

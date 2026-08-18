@@ -50,7 +50,8 @@ export interface WorkerHandoffTransfer {
  * How the directive reached the recipient's composer.
  *
  * `pending` is not a failure: the durable handoff record is written either way, and an
- * orchestrator that never saw the nudge still collects the whole thing from `worker_events`.
+ * orchestrator that never saw the nudge still reads the whole thing from `worker_events`, where it
+ * replays until that recipient explicitly acknowledges the handoff ID.
  * Reporting the difference is what keeps the fleet's notice honest about which one happened.
  */
 export type WorkerHandoffDelivery = "delivered" | "pending" | "failed" | "not-attempted";
@@ -296,7 +297,7 @@ export class WorkerHandoffService {
    *
    * A failure here is deliberately not an error: the leases have already moved and the handoff
    * record is already durable, so throwing would report a transfer that did happen as one that did
-   * not. The recipient collects the same briefing from `worker_events` on its next poll.
+   * not. The recipient reads the same briefing from `worker_events` until it acknowledges the ID.
    */
   private async deliver(
     recipientSessionId: string,
@@ -318,7 +319,7 @@ export class WorkerHandoffService {
         ? { delivery: "delivered" }
         : {
             delivery: "pending",
-            deliveryDetail: `Instruction ${record.status}; the handoff is durable and will be collected from worker_events`,
+            deliveryDetail: `Instruction ${record.status}; the handoff is durable and will replay through worker_events until acknowledged`,
           };
     } catch (error) {
       return {

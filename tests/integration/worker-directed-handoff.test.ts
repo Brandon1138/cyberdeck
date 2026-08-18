@@ -258,7 +258,7 @@ describe("directed handoff: the operator moves workers onto one orchestrator", (
     expect(broker.service.getSubject(worker.workerId)?.lease.version).toBe(2);
   });
 
-  it("carries a pending handoff across a broker restart and hands it over exactly once", async () => {
+  it("replays a lost delivery response until explicit acknowledgement, durably across restart", async () => {
     const broker = await IntegrationBroker.open();
     const worker = await registerWorker(broker.service, { controller: controller("origin-orc") });
     const committed = await broker.service.handoffBatch({
@@ -274,19 +274,77 @@ describe("directed handoff: the operator moves workers onto one orchestrator", (
     await broker.restart();
     expect(broker.service.listHandoffs({ controllerId: RECIPIENT.controllerId, state: "pending" }))
       .toHaveLength(1);
-    // Another controller's poll must not consume a record addressed to the recipient.
-    expect(await broker.service.consumeHandoffs({ controllerId: "controller:someone-else" }))
+    // Another controller cannot see a record addressed to the recipient.
+    expect(broker.service.pendingHandoffs({ controllerId: "controller:someone-else", limit: 1 }))
       .toEqual([]);
 
-    const collected = await broker.service.consumeHandoffs({ controllerId: RECIPIENT.controllerId });
-    expect(collected.map((handoff) => handoff.handoffId)).toEqual([committed.handoff!.handoffId]);
-    expect(collected[0]!.directive).toBe("survive the restart");
-    expect(await broker.service.consumeHandoffs({ controllerId: RECIPIENT.controllerId })).toEqual([]);
+    const delivered = broker.service.pendingHandoffs({ controllerId: RECIPIENT.controllerId, limit: 1 });
+    expect(delivered.map((handoff) => handoff.handoffId)).toEqual([committed.handoff!.handoffId]);
+    expect(delivered[0]!.directive).toBe("survive the restart");
+    // Model a response lost after the read: no state changed, so the exact directive replays.
+    const replayed = broker.service.pendingHandoffs({ controllerId: RECIPIENT.controllerId, limit: 1 });
+    expect(replayed).toEqual(delivered);
 
-    // Consumption is durable, not in-memory bookkeeping.
+    await expect(broker.service.acknowledgeHandoffs({
+      controllerId: "controller:someone-else",
+      handoffIds: [committed.handoff!.handoffId],
+    })).rejects.toMatchObject({ code: "HANDOFF_NOT_FOUND" });
+
+    const acknowledged = await broker.service.acknowledgeHandoffs({
+      controllerId: RECIPIENT.controllerId,
+      handoffIds: [committed.handoff!.handoffId],
+    });
+    expect(acknowledged[0]).toMatchObject({
+      handoffId: committed.handoff!.handoffId,
+      state: "acknowledged",
+    });
+    expect(broker.service.pendingHandoffs({ controllerId: RECIPIENT.controllerId, limit: 1 }))
+      .toEqual([]);
+
+    // Acknowledgement is durable, and retry after a lost acknowledgement response is idempotent.
     await broker.restart();
-    expect(await broker.service.consumeHandoffs({ controllerId: RECIPIENT.controllerId })).toEqual([]);
+    expect(broker.service.pendingHandoffs({ controllerId: RECIPIENT.controllerId, limit: 1 }))
+      .toEqual([]);
+    expect((await broker.service.acknowledgeHandoffs({
+      controllerId: RECIPIENT.controllerId,
+      handoffIds: [committed.handoff!.handoffId],
+    }))[0]?.state).toBe("acknowledged");
     expect(broker.service.listHandoffs({ controllerId: RECIPIENT.controllerId })[0]?.state)
-      .toBe("consumed");
+      .toBe("acknowledged");
+  });
+
+  it("pages pending handoffs oldest-first and leaves the remainder pending", async () => {
+    const broker = await IntegrationBroker.open();
+    const handoffIds: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const worker = await registerWorker(broker.service, { controller: controller(`origin-${index}`) });
+      const result = await broker.service.handoffBatch({
+        mutationId: `handoff-page-${index}`,
+        actor: OPERATOR,
+        recipient: RECIPIENT,
+        recipientSessionId: randomUUID(),
+        directive: `page ${index}`,
+        members: [{ subjectId: worker.workerId }],
+        reason: "operator directed handoff",
+      });
+      handoffIds.push(result.handoff!.handoffId);
+    }
+
+    const firstPage = broker.service.pendingHandoffs({
+      controllerId: RECIPIENT.controllerId,
+      limit: 2,
+    });
+    expect(firstPage.map((handoff) => handoff.handoffId)).toEqual(handoffIds.slice(0, 2));
+    expect(broker.service.listHandoffs({ controllerId: RECIPIENT.controllerId, state: "pending" }))
+      .toHaveLength(3);
+
+    await broker.service.acknowledgeHandoffs({
+      controllerId: RECIPIENT.controllerId,
+      handoffIds: firstPage.map((handoff) => handoff.handoffId),
+    });
+    expect(broker.service.pendingHandoffs({ controllerId: RECIPIENT.controllerId, limit: 2 })
+      .map((handoff) => handoff.handoffId)).toEqual(handoffIds.slice(2));
+    expect(broker.service.listHandoffs({ controllerId: RECIPIENT.controllerId, state: "pending" }))
+      .toHaveLength(1);
   });
 });

@@ -482,7 +482,7 @@ describe("WorkerControlService directed handoffs", () => {
     return { workerId, handoffId: committed.handoff!.handoffId };
   }
 
-  it("hands the recipient its directive and manifest once, and never again", async () => {
+  it("replays a lost response until the recipient explicitly acknowledges the handoff", async () => {
     const bench = await harness();
     const { workerId, handoffId } = await handedOff(bench, "orchestrator:fleet");
 
@@ -499,8 +499,19 @@ describe("WorkerControlService directed handoffs", () => {
       leaseState: "active",
     });
 
+    // No acknowledgement models a response lost after the broker prepared it.
     const second = await bench.control.events({ actorSessionId: ORC });
-    expect(second.handoffs).toBeUndefined();
+    expect(second.handoffs).toEqual(first.handoffs);
+
+    const acknowledged = await bench.control.events({
+      actorSessionId: ORC,
+      acknowledgeHandoffIds: [handoffId],
+    });
+    expect(acknowledged.acknowledgedHandoffIds).toEqual([handoffId]);
+    expect(acknowledged.handoffs).toBeUndefined();
+
+    const afterAck = await bench.control.events({ actorSessionId: ORC });
+    expect(afterAck.handoffs).toBeUndefined();
   });
 
   it("delivers a peer's handoff to that peer and not to its primary", async () => {
@@ -523,6 +534,32 @@ describe("WorkerControlService directed handoffs", () => {
     const page = await restarted.events({ actorSessionId: ORC });
 
     expect(page.handoffs?.map((notice) => notice.handoffId)).toEqual([handoffId]);
+  });
+
+  it("returns one handoff per page and leaves later handoffs pending", async () => {
+    const bench = await harness();
+    const firstHandoff = await handedOff(bench, "orchestrator:fleet");
+    const secondHandoff = await handedOff(bench, "orchestrator:fleet");
+
+    const first = await bench.control.events({ actorSessionId: ORC });
+    expect(first.handoffs?.map((notice) => notice.handoffId)).toEqual([firstHandoff.handoffId]);
+    expect(first.handoffsHaveMore).toBe(true);
+    expect(bench.coordination.listHandoffs({
+      controllerId: "orchestrator:fleet",
+      state: "pending",
+    })).toHaveLength(2);
+
+    const second = await bench.control.events({
+      actorSessionId: ORC,
+      acknowledgeHandoffIds: [firstHandoff.handoffId],
+    });
+    expect(second.acknowledgedHandoffIds).toEqual([firstHandoff.handoffId]);
+    expect(second.handoffs?.map((notice) => notice.handoffId)).toEqual([secondHandoff.handoffId]);
+    expect(second.handoffsHaveMore).toBeUndefined();
+    expect(bench.coordination.listHandoffs({
+      controllerId: "orchestrator:fleet",
+      state: "pending",
+    }).map((handoff) => handoff.handoffId)).toEqual([secondHandoff.handoffId]);
   });
 });
 

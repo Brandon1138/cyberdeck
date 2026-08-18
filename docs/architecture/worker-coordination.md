@@ -109,6 +109,14 @@ planned subject fails, the already-adopted ones are released by compensating mut
 reports `ADOPTION_ABORTED` with zero net ownership change. Ambiguous subjects are never touched, so
 a recovery sweep cannot contest a live worker owned by someone else.
 
+Directed handoff delivery is at-least-once and explicitly acknowledged. `worker_events` returns at
+most one oldest pending handoff per poll and leaves every returned record pending. A later poll may
+pass that prior `handoffId` in `acknowledgeHandoffIds`; acknowledgement is bound to the caller's
+durable controller identity and fsynced before the next page is read. If a response carrying a new
+handoff is lost, no acknowledgement was possible and the same directive replays. If an
+acknowledgement response is lost, retry is idempotent because the recipient already received the
+directive. `handoffsHaveMore` reports that another pending page remains.
+
 ## Worker reporting channel
 
 All interactive workers receive one short CLI example in their launch prompt. The provider-neutral
