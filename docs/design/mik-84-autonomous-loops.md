@@ -117,8 +117,9 @@ Antigravity (`src/persistence/thread-transcript-store.ts:174-188`). A loop defin
 instruction completion or self-continuation must therefore be refused for those providers. A known
 incapable provider is not allowed to start and then wait forever; a temporarily missing native turn
 on a capable provider makes the current run terminal with an unprovable-completion finding. Such a
-provider may still participate in schedule-, workflow-, or checkpoint-triggered loops only when all
-declared bounds and the trigger itself remain provable without `canonicalTurns`.
+provider may still participate in schedule-, workflow-, or checkpoint-triggered loops only under the
+explicit independent-trigger contract in §2.3: finite iteration and wall-clock bounds are required,
+`maxCanonicalTurns` is absent, and no provider counter is approximated.
 
 ### 1.3 Self-continuation
 
@@ -147,7 +148,12 @@ control attachment has absolute writer priority (`docs/architecture/session-mode
 real actor with a real lease accountable for every "again."
 
 **Recommendation:** build self-continuation only in this controller-mediated shape. Do not add a
-worker-side auto-continue tool.
+worker-side auto-continue tool. Every active `LoopRun` gets one **dedicated** loop-controller binding
+for its full lifetime: it drives that run's sequential iterations, and no active controller may own a
+second `LoopRun`. Concurrent runs therefore use distinct controller bindings. This is deliberately
+one controller per run, not one per iteration and not a shared controller service: `StopLoop(runId)`
+can stop only that run's controller after settling its targets, while Fleet can force-stop that exact
+controller if it ignores graceful termination.
 
 ### Summary
 
@@ -311,6 +317,17 @@ misread is not a budget. Where a provider writes no native transcript (Cursor, A
 available** for those providers rather than silently falling back to the scrape. That is the same
 posture as `UNPROVABLE_TOKEN_USAGE`: unknown usage is unknown, never zero.
 
+**Supported-provider / trigger / budget contract.** Every loop policy, on every provider, declares
+finite `maxIterations` and `maxWallClockMs`; the former debits durable `LoopRun.iterationOrdinal`, not
+a provider turn counter. A provider with native transcript support (currently Claude or Codex) must
+also declare finite `maxCanonicalTurns`; it may use schedule, workflow wake, checkpoint, provenance-
+qualified instruction completion, or controller-mediated self-continuation. Cursor and Antigravity
+may use only schedule, workflow wake, or checkpoint triggers. They must not declare a turn budget,
+and their policy is rejected if it requests instruction-completion or self-continuation. Token limits
+remain optional, but any declared token limit fails closed when its provider cannot report usage.
+Thus an independent-trigger Cursor or Antigravity run is bounded by durable iteration and wall-clock
+limits, never by a fabricated zero, scrape-derived `completedTurns`, or a counter that cannot advance.
+
 **None of that accounting survives a broker restart today.** `BudgetLedger.scopes` is an in-memory
 `Map` (`src/control-plane/budget-ledger.ts:68-71`), and `ControlPlaneRuntime` constructs a fresh
 ledger on each start (`src/control-plane/runtime.ts:72-95`). Session recovery is equally unsuitable
@@ -343,7 +360,7 @@ deprecated-but-still-accepted legacy field left in place rather than silently re
 | Bound           | Enforced by                                                                       | Checked when                                   | Failure mode                               |
 | --------------- | --------------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------ |
 | Iteration count | loop policy over durable `LoopRun.iterationOrdinal`                               | before enqueuing iteration _n+1_               | stop, terminal, operator-visible           |
-| Turn budget     | durable worker-plane budget ledger, denominated in `canonicalTurns`               | at each iteration's admission and at settle    | refuse next admission; unprovable ⇒ refuse |
+| Turn budget     | durable worker-plane budget ledger, denominated in `canonicalTurns`               | native-transcript provider only; admission and settle | refuse next admission; unprovable ⇒ refuse |
 | Wall clock      | durable worker-plane budget ledger, Scout-shaped                                  | at admission and by a deadline the broker owns | settle in-flight output, then stop         |
 | Token spend     | durable worker-plane budget ledger, where the provider reports usage              | post-iteration                                 | fail closed on unprovable usage            |
 | Concurrency     | `AdmissionScheduler`, if iterations are jobs; otherwise a worker-plane equivalent | at admission                                   | queue, never substitute                    |
@@ -496,12 +513,12 @@ not own drops to low intensity. For a loop that spans many workers under one con
 one-keystroke answer to "show me everything this loop owns."
 
 Two limits to record. The alphabet is eight glyphs; a ninth concurrent orchestrator falls back to a
-letter. A design that gives every loop its own binding therefore consumes sigil slots, and a fleet of
-loops would exhaust the legible alphabet — an argument for **one loop-controller binding driving many
-iterations** rather than one binding per loop. And because `⊘` follows the _lease_, the §2.1
-lazy-expiry finding leaks into this surface: a lease nothing has touched still reads `active`, so the
-worker shows its owner's sigil rather than `⊘`. The sweep prerequisite (§7.2) is what makes this
-display honest for a run nobody is watching.
+letter. A loop controller is dedicated per active `LoopRun` (§1.3), so this capacity pressure must be
+visible rather than solved by sharing a controller whose stop action would cross run boundaries. One
+such binding drives all iterations of its own run, never one binding per iteration. And because `⊘`
+follows the _lease_, the §2.1 lazy-expiry finding leaks into this surface: a lease nothing has touched
+still reads `active`, so the worker shows its owner's sigil rather than `⊘`. The sweep prerequisite
+(§7.2) is what makes this display honest for a run nobody is watching.
 
 ## 4. Failure and kill-switch behaviour
 
@@ -581,7 +598,7 @@ make that claim. If canonical completion wins the race, `completed` and its prov
 settlement remain authoritative.
 
 Only after every target worker has exited and every owned instruction is durably `cancelled`,
-`undelivered`, or `completed` may `OperatorStopPort` stop the loop-controller, with the same
+`undelivered`, or `completed` may `OperatorStopPort` stop **that run's dedicated loop-controller**, with the same
 graceful/force/exit-observation distinction. Once the controller is also terminal, `StopLoop` writes
 `terminalAt`, transitions `stopping → stopped`, and reports success. Failure to observe process exit
 or persist a terminal instruction leaves the run `stopping` with `operatorActionRequired`; it is
@@ -812,10 +829,11 @@ that nothing loop-shaped lands on the wrong one.
    self-continuing runs. Budget scope is per loop run rather than per job tree — `BudgetLedger`'s scope
    resolution walks `parentJobId`, which `OwnershipSubject` does not have — and persisted rather than
    rebuilt from the current in-memory `BudgetLedger.scopes` or reset session counters. It must enforce
-   turns and wall clock at minimum, tokens where the provider reports them, and refuse further
-   admission the moment usage becomes unprovable rather than assuming zero. **Turn budgets must be
-   denominated in `canonicalTurns`, never `completedTurns`** (§2.3): a replay-derived turn is a scrape,
-   and a budget inflated by a misread spinner frame is not a budget.
+   finite iteration and wall-clock limits for every run; native-transcript providers additionally
+   require a finite turn limit, while Cursor and Antigravity must omit it and use only independent
+   triggers (§2.3, item 12). Tokens fail closed where declared but unprovable. **Turn budgets must be
+   denominated in `canonicalTurns`, never `completedTurns`**: a replay-derived turn is a scrape, and a
+   budget inflated by a misread spinner frame is not a budget.
 
 2. **A real periodic lease-expiry sweep**, wired into broker startup/composition the way admission and
    reconciliation already are — closing the finding that `expireLeases`
@@ -835,14 +853,16 @@ that nothing loop-shaped lands on the wrong one.
    become `stopped` until target/controller exits and terminal instruction snapshots are proven
    (§4.2).
 
-4. **A loop-controller that is a real lease controller, on MIK-98's option-1 outcome.** Taking option
-   1 as given (peer bindings get a durable controller family), the refactor must ensure the
-   loop-controller's identity is a stable controller family in the `ControllerIdentitySchema` sense —
-   never a conversation UUID — so that enqueue, observe and control agree for the same binding. The
-   invariant MIK-98 states is the one loops depend on: _every capability a binding is granted must be
-   honoured by the lease substrate for that binding._ Once that lands, the CLAUDE.md deferred entry
-   for the peer asymmetry retires and this prerequisite is satisfied by construction; until it lands,
-   a loop-controller built as a peer binding inherits a contradiction on day one.
+4. **A per-`LoopRun` controller that is a real lease controller, on MIK-98's option-1 outcome.** Taking
+   option 1 as given (peer bindings get a durable controller family), the refactor must ensure each
+   active run receives one stable controller-family binding in the `ControllerIdentitySchema` sense —
+   never a conversation UUID — and that no active binding controls two run ids. That binding remains
+   through its run's iterations, then `StopLoop` targets only it after its iteration targets settle.
+   Thus an operator can force-stop one runaway run without disrupting another. The invariant MIK-98
+   states is the one loops depend on: _every capability a binding is granted must be honoured by the
+   lease substrate for that binding._ Once that lands, the CLAUDE.md deferred entry for the peer
+   asymmetry retires and this prerequisite is satisfied by construction; until it lands, a
+   loop-controller built as a peer binding inherits a contradiction on day one.
 
 5. **One loop-run identifier threaded through every mandatory audit participant.**
    `InstructionRecord` already carries `workflowRunId`, `messageId`, `causationId`, `hop`,
@@ -911,15 +931,16 @@ that nothing loop-shaped lands on the wrong one.
     this normalized evidence, §1's trigger models become separate loop implementations or a terminal
     scrape becomes authority to recurse.
 
-12. **A stated provider-capability rule for loops:** a trigger or bound denominated in a quantity a
-    provider does not report is refused, not approximated. Cursor and Antigravity write no native
-    transcript, so `canonicalTurns` does not advance for them
-    (`ThreadTranscriptStore.captureProviderTurns`, `src/persistence/thread-transcript-store.ts:174-188`).
-    Instruction-completion/self-continuing and turn-budgeted loops must be unavailable on those
-    providers rather than fall back to the scrape — the same posture as `UNPROVABLE_TOKEN_USAGE`.
-    Independent triggers remain possible only when every declared bound is provable. The refactor's
-    provider-capability representation is where this belongs; #51 explicitly requires
-    provider-specific capabilities to remain representable without contaminating the domain.
+12. **A stated provider-capability rule for loops.** Every policy has finite `maxIterations` and
+    `maxWallClockMs`. Native-transcript providers require finite `maxCanonicalTurns` and may use all
+    triggers, subject to §1's provenance rules. Cursor and Antigravity have no canonical turns
+    (`ThreadTranscriptStore.captureProviderTurns`, `src/persistence/thread-transcript-store.ts:174-188`):
+    they may run only schedule, workflow-wake, or checkpoint-triggered policies; their policy must
+    omit `maxCanonicalTurns`, and instruction-completion/self-continuation is refused. A declared
+    token limit also requires reportable token usage. No rule substitutes `completedTurns`, a scrape,
+    zero, or an estimate for unsupported counters. The refactor's provider-capability representation
+    is where this belongs; #51 explicitly requires provider-specific capabilities to remain
+    representable without contaminating the domain.
 
 13. **Loop bounds enforced from the domain, actuated by infrastructure.** A deadline is a domain rule;
     the `SIGTERM` at that deadline is an infrastructure action. The Scout profile currently holds both
@@ -988,9 +1009,10 @@ issue says so in its own words.
 
 **Two guardrails to carry into whatever ships:**
 
-- One loop-controller binding driving many iterations, not one binding per loop. The sigil alphabet is
-  eight glyphs (§3.3), and a loop that is invisible in the fleet list is a loop with no kill switch
-  (§4.1).
+- One dedicated loop-controller binding per active `LoopRun`, driving that run's many iterations but
+  never shared with another active run. The sigil alphabet has eight glyphs (§3.3), so Fleet must
+  surface capacity pressure rather than trade away run-targetable force stop. A loop invisible in the
+  fleet list has no kill switch (§4.1).
 - A loop is a lease subject's _controller_, and the operator is the controller's controller. Nothing
   in a loop design may weaken the rule that a human control attachment has absolute writer priority,
   or that operator-direct `session.stopOne` plus `session.forceStopOne` bypass loop capability and
