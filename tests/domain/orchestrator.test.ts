@@ -37,21 +37,40 @@ describe("OrchestratorBindingSchema", () => {
    * Bindings are an append-only log, so every record written before MIK-98 named its peer-ness
    * only in the key. Those records keep parsing, and read back as exactly what they always were.
    */
-  it("reads a pre-MIK-98 record with no kind field, from its key", () => {
+  it("reads a pre-MIK-98 primary record with no kind field", () => {
     const { kind: _dropped, ...legacyPrimary } = record();
-    const { kind: _also, ...legacyPeer } = record({ key: PEER_KEY, sessionId: PEER_SESSION });
 
     expect(OrchestratorBindingSchema.parse(legacyPrimary).kind).toBe("primary");
+  });
+
+  it("still classifies a pre-MIK-98 peer from its exact session-id suffix", () => {
+    const { kind: _dropped, ...legacyPeer } = record({
+      key: PEER_KEY,
+      sessionId: PEER_SESSION,
+    });
+
     expect(OrchestratorBindingSchema.parse(legacyPeer).kind).toBe("peer");
   });
 
-  it("keeps an explicit kind on a record that carries one", () => {
-    const parsed = OrchestratorBindingSchema.parse(record({ key: PEER_KEY, kind: "peer" }));
-    expect(parsed.kind).toBe("peer");
+  it("does not mistake marker text in a legacy primary's cwd for a peer suffix", () => {
+    const { kind: _dropped, ...legacyPrimary } = record({
+      key: "workspace:/tmp/repo:peer:archive",
+    });
+
+    expect(OrchestratorBindingSchema.parse(legacyPrimary).kind).toBe("primary");
   });
 
-  it("refuses a record whose kind contradicts its key", () => {
-    expect(() => OrchestratorBindingSchema.parse(record({ key: PEER_KEY, kind: "primary" }))).toThrow();
+  it("treats an explicit persisted kind as authoritative", () => {
+    const explicitPrimary = OrchestratorBindingSchema.parse(record({
+      key: PEER_KEY,
+      kind: "primary",
+    }));
+
+    expect(explicitPrimary.kind).toBe("primary");
+    expect(orchestratorController(explicitPrimary).familyId).toBe(`orchestrator:${PEER_KEY}`);
+  });
+
+  it("refuses an explicit peer whose key lacks its structural session suffix", () => {
     expect(() => OrchestratorBindingSchema.parse(record({ key: "fleet", kind: "peer" }))).toThrow();
   });
 });
@@ -119,7 +138,11 @@ describe("peer keys", () => {
   it("round-trips a peer key back to the scope it was bound alongside", () => {
     expect(primaryOrchestratorKey(PEER_KEY)).toBe("fleet");
     expect(primaryOrchestratorKey("workspace:/repo/one")).toBe("workspace:/repo/one");
+    expect(primaryOrchestratorKey("workspace:/tmp/repo:peer:archive"))
+      .toBe("workspace:/tmp/repo:peer:archive");
     expect(peerOrchestratorKey("workspace:/repo/one", PEER_SESSION))
       .toBe(`workspace:/repo/one:peer:${PEER_SESSION}`);
+    const markerPathPeer = peerOrchestratorKey("workspace:/tmp/repo:peer:archive", PEER_SESSION);
+    expect(primaryOrchestratorKey(markerPathPeer)).toBe("workspace:/tmp/repo:peer:archive");
   });
 });

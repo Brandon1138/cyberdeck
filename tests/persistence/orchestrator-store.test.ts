@@ -71,10 +71,23 @@ describe("OrchestratorStore", () => {
       ...binding(peerSession, "gpt-5.6-sol"),
       key: `workspace:/repo/one:peer:${peerSession}`,
     };
+    const markerPathSession = "44444444-4444-4444-8444-444444444444";
+    const markerPathScope = { kind: "workspace" as const, cwd: "/tmp/repo:peer:archive" };
+    const { kind: _markerPathKind, ...legacyMarkerPathPrimary } = {
+      ...binding(markerPathSession, "gpt-5.6-sol"),
+      key: "workspace:/tmp/repo:peer:archive",
+      cwd: markerPathScope.cwd,
+      scope: markerPathScope,
+      grant: {
+        subjectSessionId: markerPathSession,
+        capabilities: ["thread.list" as const],
+        scope: markerPathScope,
+      },
+    };
     await mkdir(dirname(store.path), { recursive: true });
     await writeFile(
       store.path,
-      `${JSON.stringify(legacyPrimary)}\n${JSON.stringify(legacyPeer)}\n`,
+      `${JSON.stringify(legacyPrimary)}\n${JSON.stringify(legacyPeer)}\n${JSON.stringify(legacyMarkerPathPrimary)}\n`,
       "utf8",
     );
 
@@ -82,6 +95,10 @@ describe("OrchestratorStore", () => {
     expect(await store.findBySessionId(peerSession)).toMatchObject({
       key: `workspace:/repo/one:peer:${peerSession}`,
       kind: "peer",
+    });
+    expect(await store.get(legacyMarkerPathPrimary.key)).toMatchObject({
+      key: "workspace:/tmp/repo:peer:archive",
+      kind: "primary",
     });
   });
 });

@@ -30,8 +30,9 @@ const OrchestratorBindingRecordSchema = z.object({
   key: z.string().min(1),
   /**
    * Absent in every binding written before MIK-98. Those records are still on disk in an
-   * append-only log, so the field is optional on read and filled in from the key's `:peer:` marker,
-   * which is how peer-ness was recorded before it had a name. New records write it explicitly.
+   * append-only log, so the field is optional on read and filled in from a peer key's structural
+   * session-id suffix, which is how peer-ness was recorded before it had a name. New records write
+   * it explicitly, and that persisted value is authoritative.
    */
   kind: OrchestratorBindingKindSchema.optional(),
   sessionId: z.uuid(),
@@ -51,10 +52,14 @@ const OrchestratorBindingRecordSchema = z.object({
 });
 
 export const OrchestratorBindingSchema = OrchestratorBindingRecordSchema
-  .transform((record) => ({ ...record, kind: record.kind ?? bindingKindFromKey(record.key) }))
+  .transform((record) => ({
+    ...record,
+    kind: record.kind ?? bindingKindFromKey(record.key, record.sessionId),
+  }))
   .refine(
-    (binding) => binding.kind === bindingKindFromKey(binding.key),
-    "A binding's kind must agree with its key; a peer key is the only shape a peer is written as",
+    (binding) => binding.kind === "primary"
+      || peerPrimaryKey(binding.key, binding.sessionId) !== undefined,
+    "A peer binding's key must end with its :peer:<sessionId> suffix",
   );
 
 /**
@@ -156,12 +161,24 @@ export function peerOrchestratorKey(primaryKey: string, sessionId: string): stri
 
 /** The scope key a binding belongs to: its own for a primary, its primary's for a peer. */
 export function primaryOrchestratorKey(key: string): string {
-  const marker = key.indexOf(PEER_KEY_MARKER);
-  return marker === -1 ? key : key.slice(0, marker);
+  return peerPrimaryKey(key) ?? key;
 }
 
-function bindingKindFromKey(key: string): OrchestratorBindingKind {
-  return key.includes(PEER_KEY_MARKER) ? "peer" : "primary";
+function bindingKindFromKey(key: string, sessionId: string): OrchestratorBindingKind {
+  return peerPrimaryKey(key, sessionId) === undefined ? "primary" : "peer";
+}
+
+/** Parse only the suffix emitted by `peerOrchestratorKey`, never marker text inside a cwd. */
+function peerPrimaryKey(key: string, expectedSessionId?: string): string | undefined {
+  const marker = key.lastIndexOf(PEER_KEY_MARKER);
+  if (marker === -1) return undefined;
+  const sessionId = key.slice(marker + PEER_KEY_MARKER.length);
+  if (expectedSessionId === undefined) {
+    if (!z.uuid().safeParse(sessionId).success) return undefined;
+  } else if (sessionId !== expectedSessionId) {
+    return undefined;
+  }
+  return key.slice(0, marker);
 }
 
 /**
@@ -177,7 +194,7 @@ function bindingKindFromKey(key: string): OrchestratorBindingKind {
  * proves survives a broker restart exactly as a primary's does.
  */
 export function orchestratorController(binding: OrchestratorBinding): ControllerIdentity {
-  const primaryKey = primaryOrchestratorKey(binding.key);
+  const primaryKey = binding.kind === "peer" ? primaryOrchestratorKey(binding.key) : binding.key;
   return {
     controllerId: orchestratorControllerId(binding.key),
     familyId: orchestratorControllerId(primaryKey),
