@@ -624,17 +624,35 @@ instruction state machine already permits `accepted → cancelled` and `queued �
 the current `InstructionQueue.flush` selects as pending. Each durable cancellation carries
 `cancelledAt` and `cancelledByStopId`.
 
-`StopLoop` next snapshots every iteration target and its instruction state. A target with a
-`rendered`, `submitted`, or `acknowledged` instruction is in flight and must be terminated before the
-loop-controller: `rendered` means bytes are visible but unconsumed, `submitted` means the provider
-consumed them, and `acknowledged` means its turn started
-(`InstructionLifecycleStateSchema`, `src/domain/worker-truth.ts:260-277`). The
-`WorkerTerminationPort` adapter requests graceful termination through `SessionRegistry.stop`, waits
-for the session record to report `exitCode !== null`, escalates after the configured grace period
-through `SessionRegistry.forceStop`, and waits again. The real methods are signal operations, not
-settlement operations: `stop` records `stopRequestedAt` and sends `SIGTERM`, while `forceStop` requires
-that request and sends `SIGKILL` (`src/broker/session-registry.ts:1245-1296`). Neither method's return
-proves process exit.
+`StopLoop` next snapshots every iteration target the run owns. That set is fixed at the snapshot:
+the linearization point above already made the run non-runnable and revoked delivery, and admission
+revalidates run state, so no further target can join it. **Every target in that set is terminated
+before the loop-controller, whatever its instruction state.** Instruction state decides the audit
+disposition, not whether the process is signalled. Terminating only in-flight targets is not a
+narrower stop, it is a stop that never finishes: a target whose latest instruction already reached
+`completed` is typically idle but alive, nothing would end it, and the all-target-exit condition
+below could never become true. Four target shapes are reachable:
+
+1. **In flight** — a `rendered`, `submitted`, or `acknowledged` instruction. `rendered` means bytes
+   are visible but unconsumed, `submitted` means the provider consumed them, and `acknowledged` means
+   its turn started (`InstructionLifecycleStateSchema`, `src/domain/worker-truth.ts:260-277`). Its
+   disposition follows the settlement rules below.
+2. **Idle but alive** — the process is live and its latest instruction is already terminal
+   (`completed`, `cancelled` by the step above, or `undelivered`), or it never carried one at all.
+   It is terminated exactly like an in-flight target. Its disposition is `idle-at-stop`, and no
+   instruction transition is required or expected: `handleExit`'s
+   `advanceRenderedInstructions(runtime, "undelivered")` finds nothing rendered to advance.
+3. **Already exited** — the snapshot reads `exitCode !== null`. Nothing is signalled; this target's
+   instructions were advanced at its own exit, and the audit records `already-exited-at-stop`.
+4. **Never started** — an admitted iteration whose target process was never created. Nothing to
+   signal; it is recorded as such and counts as exited for the condition below.
+
+For cases 1 and 2 the `WorkerTerminationPort` adapter requests graceful termination through
+`SessionRegistry.stop`, waits for the session record to report `exitCode !== null`, escalates after
+the configured grace period through `SessionRegistry.forceStop`, and waits again. The real methods
+are signal operations, not settlement operations: `stop` records `stopRequestedAt` and sends
+`SIGTERM`, while `forceStop` requires that request and sends `SIGKILL`
+(`src/broker/session-registry.ts:1245-1296`). Neither method's return proves process exit.
 
 Exit observation is the settlement boundary. `SessionRegistry.handleExit` records the exit and calls
 `advanceRenderedInstructions(runtime, "undelivered")`
@@ -650,16 +668,35 @@ already-started external work was undone. This distinction is required even thou
 describes `undelivered` as pre-consumption: the actual table permits both `submitted → undelivered`
 and `acknowledged → undelivered` (`src/domain/worker-truth.ts:273-290`), so terminal state alone cannot
 make that claim. If canonical completion wins the race, `completed` and its provenance-qualified
-settlement remain authoritative.
+settlement remain authoritative. A target terminated as `idle-at-stop` has no instruction to settle,
+so its observed exit alone completes it.
 
-Only after every target worker has exited and every owned instruction is durably `cancelled`,
-`undelivered`, or `completed` may `OperatorStopPort` stop **that run's dedicated loop-controller**, with the same
-graceful/force/exit-observation distinction. Once the controller is also terminal, `StopLoop` writes
-`terminalAt`, transitions `stopping → stopped`, and reports success. Failure to observe process exit
+Only after every target has an observed exit — or a recorded never-started — and every owned
+instruction is durably `cancelled`, `undelivered`, or `completed` may `OperatorStopPort` stop
+**that run's dedicated loop-controller**, with the same graceful/force/exit-observation distinction.
+Once the controller is also terminal, `StopLoop` writes `terminalAt`, transitions
+`stopping → stopped`, and reports success. Failure to observe process exit
 or persist a terminal instruction leaves the run `stopping` with `operatorActionRequired`; it is
 never reported stopped. The stop audit consequently joins stop request, target-worker signal and
 exit, per-instruction disposition, controller escalation and exit, and final run transition by one
 `stopId`.
+
+**Why no combination of target states stalls.** The reachable space is (process live | already
+exited | never started) × (no instruction | `accepted` / `queued` |
+`rendered` / `submitted` / `acknowledged` | terminal). The `accepted` / `queued` column collapses
+first: the cancellation step makes those records `cancelled`, and revoked delivery plus the flush
+revalidation below stops any of them being re-delivered, so no target can acquire a new in-flight
+instruction after the snapshot. Of the columns left, each instruction is already terminal or is
+driven terminal by an exit. Every live process is signalled — case 1 or case 2 — so no live target
+is left unsignalled by which column it happens to sit in, which is the gap this revision closes.
+Every condition `StopLoop` waits on is one some actor causes: an exit follows `SIGTERM` and then
+`SIGKILL` after the grace period, and the durable terminal snapshot follows `handleExit`. No branch
+waits on an action only the stopped worker could take, and none waits on a decision — an open gate is
+voided by the stop record (§2.2). The single outcome that is not `stopped` is an exit or a settlement
+that could not be observed even after force: that leaves the run `stopping` with
+`operatorActionRequired`, a non-runnable resting state an operator can see and act on rather than a
+silent wait, and §4.2 resumes the same sequence idempotently after a restart. Every reachable
+combination therefore ends in `stopped`, or in `stopping` plus `operatorActionRequired`.
 
 Cancellation persistence and delivery must also fail closed across a crash between the loop-state
 commit and the instruction snapshots. Today `InstructionQueue.start` calls `flush` when
@@ -829,8 +866,8 @@ target, `provider-transcript` provenance, and canonical-turn increment agree (§
 (evaluate the policy and either enqueue the next iteration or settle), `DecideLoopGate` (open the
 control-plane gate once an iteration has settled, and record the controller's or operator's durable
 approve/reject — §2.2), `StopLoop` (enter durable `stopping`, revoke delivery, cancel pending
-instructions, terminate iteration targets, durably settle their instructions, then terminate the
-controller), `ReconcileLoops` (the startup survey of §7.3), and
+instructions, terminate every iteration target whether in flight or idle, durably settle their
+instructions, then terminate the controller), `ReconcileLoops` (the startup survey of §7.3), and
 `RetainLoopHistory` (enforce the rolling settled-iteration window across transcript, instruction,
 workflow-message, and coordination-event history after each settlement, on the age sweep, and at
 reconciliation).
@@ -856,7 +893,7 @@ exists to prevent.
 | `LoopGatePort`          | open the loop's provider-independent gate after a settlement; record the controller's or operator's durable approve/reject; expose gate and decision for observation | `LoopRunStore` for the authoritative gate and decision, plus controller-side `submitEvent` (pinned `DECISION_REQUEST`, no `checkpointCorrelationId`) and `resolveEvent` for visibility — never the worker `CHECKPOINT` answer that clears `decisionGate`, and never `deliverCheckpointPrompt` |
 | `AuditPort`             | loop and stop identifiers written through instruction snapshots and coordination transactions, optionally other logs of §3.2   | `InstructionStore` + the coordination log; `Journal` scope remains a decision                                             |
 | `LoopHistoryPort`       | compact settled iterations across transcript, instruction, workflow-message, and coordination-event stores by rolling run window; expire finished history | `selectExpiredThreads` + new joined range-compaction/redaction APIs on transcript, `InstructionStore`, `WorkflowStore`, and worker-coordination persistence |
-| `WorkerTerminationPort` | graceful/force termination of iteration targets, exit observation, and stop-linked instruction settlement                      | worker-control path over `SessionRegistry.stop` / `forceStop` / `handleExit`                                              |
+| `WorkerTerminationPort` | graceful/force termination of every iteration target — in flight, idle, or instruction-free — exit observation, and stop-linked instruction settlement | worker-control path over `SessionRegistry.stop` / `forceStop` / `handleExit`                                              |
 | `OperatorStopPort`      | graceful stop plus operator-reachable force escalation and exit observation for the controller                                 | `SessionRegistry.stop` / `forceStop`, exposed by new operator-only RPC                                                    |
 | `CapabilityPort`        | the loop-start grant of §4.3, checked twice                                                                                    | `src/domain/capability.ts`                                                                                                |
 
@@ -953,10 +990,14 @@ that nothing loop-shaped lands on the wrong one.
    must re-read durable run state immediately before `tryDeliver`; non-runnable or missing state
    writes a stop-linked `cancelled` snapshot and must not call `SessionRegistry.submitInstruction`.
    This check applies on controller release, delivery-boundary reopening, provider-state follow-up,
-   and startup replay. For `rendered` / `submitted` / `acknowledged`, `WorkerTerminationPort` must call
-   the real `SessionRegistry.stop` / `forceStop` sequence, observe `exitCode !== null`, and await the
-   durable terminal instruction update produced from `handleExit`; a signal return is insufficient.
-   Only then may the controller be stopped and the run become `stopped`. Unproved exit or settlement
+   and startup replay. `WorkerTerminationPort` must then call the real `SessionRegistry.stop` /
+   `forceStop` sequence for **every live target**, not only those holding a
+   `rendered` / `submitted` / `acknowledged` instruction: a target whose instruction already reached
+   `completed`, was cancelled by this stop, or never existed is idle but alive, and leaving it
+   unsignalled makes the all-target-exit condition unreachable. It must observe `exitCode !== null`
+   for each, and await the durable terminal instruction update produced from `handleExit` where an
+   instruction was in flight; a signal return is insufficient, and an idle target settles on its exit
+   alone. Only then may the controller be stopped and the run become `stopped`. Unproved exit or settlement
    leaves `stopping` plus `operatorActionRequired` (§4.1).
 
 7. **A joined rolling loop-history policy**, distinct from `DEFAULT_THREAD_RETENTION_DAYS` (7) and
@@ -1095,8 +1136,8 @@ issue says so in its own words.
 - A loop is a lease subject's _controller_, and the operator is the controller's controller. Nothing
   in a loop design may weaken the rule that a human control attachment has absolute writer priority,
   or that operator-direct `session.stopOne` plus `session.forceStopOne` bypass loop capability and
-  lease checks. Graceful-only stop is not a kill switch; a run is not `stopped` until its iteration
-  workers, in-flight instructions, and controller are terminal, and stopped-run instructions never
-  flush when a human detaches or a provider hold clears. Rolling history bounds apply while the
-  worker thread is active and pinned. Durable `LoopRunStore` bounds remain authoritative across
-  broker restart; recovered session counters never reset them.
+  lease checks. Graceful-only stop is not a kill switch; a run is not `stopped` until every iteration
+  worker it owns — in flight or idle — its in-flight instructions, and its controller are terminal,
+  and stopped-run instructions never flush when a human detaches or a provider hold clears. Rolling
+  history bounds apply while the worker thread is active and pinned. Durable `LoopRunStore` bounds
+  remain authoritative across broker restart; recovered session counters never reset them.
