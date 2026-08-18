@@ -558,7 +558,11 @@ export class WorkerCoordinationService {
     return this.exclusive(async () => {
       this.assertReady();
       const requestHash = hashHandoffRequest(input);
-      const replay = this.replayHandoffBatch(input.mutationId, requestHash);
+      const replay = this.replayHandoffBatch(
+        input.mutationId,
+        requestHash,
+        legacyHashHandoffRequest(input),
+      );
       if (replay !== undefined) return replay;
       const actor = ControllerIdentitySchema.parse(input.actor);
       const recipient = ControllerIdentitySchema.parse(input.recipient);
@@ -1881,11 +1885,13 @@ export class WorkerCoordinationService {
   private replayHandoffBatch(
     mutationId: string,
     requestHash: string,
+    legacyRequestHash: string,
   ): HandoffBatchResult | undefined {
     const receipt = this.receipts.get(mutationId);
     if (receipt === undefined) return undefined;
     this.assertReceiptOperation(receipt, "handoff");
-    if (receipt.requestHash !== requestHash) {
+    // A receipt from before `name` left the key still answers the same request it committed.
+    if (receipt.requestHash !== requestHash && receipt.requestHash !== legacyRequestHash) {
       throw new WorkerCoordinationError(
         "MUTATION_ID_COLLISION",
         `mutation ${mutationId} already used for a different handoff request`,
@@ -2008,7 +2014,37 @@ function hashCheckpointRequest(input: {
   })).digest("hex");
 }
 
+/**
+ * The idempotency key for a handoff: the operator's request and nothing else.
+ *
+ * Members are hashed as bare subject ids. Everything else a member carries is broker-derived:
+ * `register` is bootstrap material for a manual worker, and `name` is the session registry's own
+ * mutable name, which a rename changes and a deregistration removes. Only the operator's request is
+ * stable across a retry, so only the operator's request may key one — hashing broker state would
+ * turn a lost response into MUTATION_ID_COLLISION instead of replaying the committed receipt. Both
+ * still travel in the batch and reach the manifest; neither keys it.
+ */
 function hashHandoffRequest(input: HandoffBatchInput): string {
+  return hashHandoffPayload(input, input.members.map(({ subjectId }) => subjectId));
+}
+
+/**
+ * The member derivation this hash used before the review that removed `name` from it.
+ *
+ * Receipts written by that build are already on disk. An identical retry of one of them recomputes
+ * the stable hash, which cannot match what was stored, so a committed handoff would answer
+ * MUTATION_ID_COLLISION — the very failure removing `name` exists to prevent. A stored hash is
+ * therefore accepted against either derivation, and every hash written from here on is the stable
+ * one: this is read-side compatibility, not a second key.
+ */
+function legacyHashHandoffRequest(input: HandoffBatchInput): string {
+  return hashHandoffPayload(
+    input,
+    input.members.map(({ subjectId, name }) => ({ subjectId, name: name ?? null })),
+  );
+}
+
+function hashHandoffPayload(input: HandoffBatchInput, members: unknown): string {
   const actor = ControllerIdentitySchema.parse(input.actor);
   const recipient = ControllerIdentitySchema.parse(input.recipient);
   return createHash("sha256").update(canonicalJson({
@@ -2016,13 +2052,7 @@ function hashHandoffRequest(input: HandoffBatchInput): string {
     recipient,
     recipientSessionId: input.recipientSessionId,
     directive: input.directive,
-    // Members are hashed as bare subject ids. Everything else a member carries is broker-derived:
-    // `register` is bootstrap material for a manual worker, and `name` is the session registry's
-    // own mutable name, which a rename changes and a deregistration removes. Only the operator's
-    // request is stable across a retry, so only the operator's request may key one — hashing
-    // broker state would turn a lost response into MUTATION_ID_COLLISION instead of replaying the
-    // committed receipt. Both still travel in the batch and reach the manifest; neither keys it.
-    members: input.members.map(({ subjectId }) => subjectId),
+    members,
     reason: input.reason,
     handoffId: input.handoffId ?? null,
   })).digest("hex");

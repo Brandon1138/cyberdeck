@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -137,6 +137,63 @@ function event(
   };
 }
 
+/**
+ * The handoff request digest exactly as the broker wrote it before `name` left the key.
+ *
+ * Kept here rather than exported from the broker: production has one derivation for new receipts,
+ * and this is the shape of the receipts already on disk that an upgrade has to keep replaying.
+ */
+function legacyHandoffRequestHash(request: {
+  actor: ControllerIdentity;
+  recipient: ControllerIdentity;
+  recipientSessionId: string;
+  directive: string;
+  members: readonly { subjectId: string; name?: string }[];
+  reason: string;
+}): string {
+  const canonical = (value: unknown): string => {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object)
+      .filter((key) => object[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`)
+      .join(",")}}`;
+  };
+  return createHash("sha256").update(canonical({
+    actor: request.actor,
+    recipient: request.recipient,
+    recipientSessionId: request.recipientSessionId,
+    directive: request.directive,
+    members: request.members.map(({ subjectId, name }) => ({ subjectId, name: name ?? null })),
+    reason: request.reason,
+    handoffId: null,
+  })).digest("hex");
+}
+
+/** Rewrite one receipt's stored hash in place, as an older broker build would have written it. */
+async function rewriteStoredRequestHash(
+  storePath: string,
+  mutationId: string,
+  requestHash: string,
+): Promise<number> {
+  const lines = (await readFile(storePath, "utf8")).split("\n");
+  let rewritten = 0;
+  const patched = lines.map((line) => {
+    if (line.trim() === "") return line;
+    const entry = JSON.parse(line) as { receipts?: { mutationId: string; requestHash?: string }[] };
+    for (const receipt of entry.receipts ?? []) {
+      if (receipt.mutationId !== mutationId) continue;
+      receipt.requestHash = requestHash;
+      rewritten += 1;
+    }
+    return JSON.stringify(entry);
+  });
+  await writeFile(storePath, patched.join("\n"));
+  return rewritten;
+}
+
 describe("WorkerCoordinationService ownership", () => {
   it("rejects conversation UUIDs as stable controller identities", () => {
     expect(() => ControllerIdentitySchema.parse({
@@ -270,6 +327,44 @@ describe("WorkerCoordinationService ownership", () => {
         idempotentReplay: true,
       });
     }
+  });
+
+  it("replays a handoff receipt whose stored hash predates the stable derivation", async () => {
+    const first = await harness();
+    const source = controller("legacy-source");
+    const worker = await register(first.service, { owner: source });
+    const request = {
+      mutationId: "legacy-hash-handoff",
+      actor: controller("handoff-operator"),
+      recipient: controller("legacy-recipient"),
+      recipientSessionId: "55555555-5555-4555-8555-555555555555",
+      directive: "Pick this up",
+      members: [{ subjectId: worker.workerId, name: "docs sweep" }],
+      reason: "operator directed handoff",
+    };
+    const committed = await first.service.handoffBatch(request);
+    expect(committed.committed).toBe(true);
+
+    // What an upgrade actually finds on disk: a receipt keyed the old way, for a handoff that
+    // committed. The identical retry must still be answered with it.
+    expect(await rewriteStoredRequestHash(
+      first.store.path,
+      request.mutationId,
+      legacyHandoffRequestHash(request),
+    )).toBe(1);
+
+    const upgraded = await harness({ directory: first.directory });
+    await expect(upgraded.service.handoffBatch(request)).resolves.toEqual({
+      ...committed,
+      idempotentReplay: true,
+    });
+
+    // Compatibility is not a blanket accept: a different request under that mutation id still
+    // collides, against the legacy derivation just as against the stable one.
+    await expect(upgraded.service.handoffBatch({
+      ...request,
+      directive: "Do something else",
+    })).rejects.toMatchObject({ code: "MUTATION_ID_COLLISION" });
   });
 
   it("turns broker-observed abrupt death into orphan then allows adoption", async () => {
