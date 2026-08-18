@@ -2585,6 +2585,18 @@ function isHandoffMarked(state: FleetState, sessionId: string): boolean {
 }
 
 /**
+ * Whether this session is still something a handoff could move.
+ *
+ * One predicate for every place that claims a worker is handoff-able — the mark filter, the
+ * /handoff fallback, and the open picker — so a worker that goes away or exits stops being a
+ * target everywhere at once instead of surviving in whichever surface forgot to look again.
+ */
+function isHandoffEligible(threads: readonly FleetThread[], sessionId: string): boolean {
+  return threads.some(({ record }) =>
+    record.id === sessionId && record.kind !== "orchestrator" && !isTerminalSession(record));
+}
+
+/**
  * What a handoff would move: the marked workers when there are any, otherwise the selected one.
  *
  * Marks win over the selection so the operator can mark a batch, move focus while reading the rest
@@ -2668,13 +2680,61 @@ function openHandoffPicker(state: FleetState, snapshot: FleetSnapshot): FleetTra
 }
 
 /**
+ * Hold the open picker's batch to workers that can still be handed off.
+ *
+ * The operator agreed to a set of workers when they opened this, but a worker exiting is not the
+ * operator changing their mind — and the set outlives both picker steps, so without this a worker
+ * that dies mid-gesture reaches the broker, which refuses the whole batch and takes the typed
+ * directive with it. Newly ineligible members are dropped with the same answer ctrl+d gives, the
+ * draft and the recipient survive, and a batch with nothing left in it closes the picker.
+ */
+function transitionHandoffPicker(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  key: string,
+): FleetTransition {
+  const open = state.handoffPicker!;
+  const threads = orderedThreads(snapshot);
+  const workerIds = open.workerIds.filter((id) => isHandoffEligible(threads, id));
+  if (workerIds.length === 0) {
+    return {
+      state: {
+        ...state,
+        handoffPicker: undefined,
+        notice: TERMINAL_HANDOFF_REFUSAL,
+        noticeTone: "warning",
+      },
+    };
+  }
+  if (workerIds.length === open.workerIds.length) {
+    return transitionOpenHandoffPicker(state, snapshot, key);
+  }
+  const dropped = open.workerIds.length - workerIds.length;
+  const narrowed = { ...open, workerIds };
+  const transition = transitionOpenHandoffPicker({ ...state, handoffPicker: narrowed }, snapshot, key);
+  return {
+    ...transition,
+    state: {
+      ...transition.state,
+      // A notice the step itself raised — an empty directive, a closed picker — is the more
+      // specific answer and keeps precedence over the bookkeeping one.
+      ...(transition.state.notice === undefined
+        ? {
+          notice: `${TERMINAL_HANDOFF_REFUSAL}; ${dropped} dropped from this handoff`,
+          noticeTone: "warning" as const,
+        }
+        : {}),
+    },
+  };
+}
+
+/**
  * The handoff picker's two steps: who receives, then what they are told.
  *
  * Escape backs out one step rather than the whole gesture, so correcting the recipient does not
- * cost the directive already typed. The batch travels in the picker state untouched: nothing here
- * re-reads the marks, because the operator agreed to a set of workers when they opened this.
+ * cost the directive already typed.
  */
-function transitionHandoffPicker(
+function transitionOpenHandoffPicker(
   state: FleetState,
   snapshot: FleetSnapshot,
   key: string,
@@ -4645,9 +4705,7 @@ function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number)
     : undefined;
   // A mark is a claim about a live worker. A session that has gone away takes its mark with it,
   // rather than leaving a batch member the broker would have to refuse the whole handoff over.
-  const markedIds = handoffMarks(state).filter((id) =>
-    threads.some(({ record }) =>
-      record.id === id && record.kind !== "orchestrator" && !isTerminalSession(record)));
+  const markedIds = handoffMarks(state).filter((id) => isHandoffEligible(threads, id));
   const confirmationExpired = (state.deleteConfirmation !== undefined && deleteConfirmation === undefined)
     || (state.quitConfirmation !== undefined && quitConfirmation === undefined);
   return {

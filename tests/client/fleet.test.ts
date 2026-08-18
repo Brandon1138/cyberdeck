@@ -5008,6 +5008,15 @@ describe("directed handoff", () => {
     );
   }
 
+  /** The same fleet with one worker having exited under the operator. */
+  function exiting(snapshot: FleetSnapshot, sessionId: string): FleetSnapshot {
+    return fleet(...snapshot.threads.map(({ record }) => ({
+      record: record.id === sessionId
+        ? { ...record, executionState: "exited" as const, exitCode: 0 }
+        : record,
+    })));
+  }
+
   function selecting(snapshot: FleetSnapshot, sessionId: string): FleetState {
     return { ...createFleetState(snapshot), selectedSessionId: sessionId };
   }
@@ -5197,6 +5206,75 @@ describe("directed handoff", () => {
     // The marks stay until the broker says the transfer committed.
     expect(sent.state.handoffMarks).toEqual([WORKER_A]);
     expect(sent.state.handoffPicker).toBeUndefined();
+  });
+
+  it("drops a worker that exits while the picker is open, keeping the directive typed", () => {
+    const snapshot = handoffFleet();
+    const first = transitionFleet(selecting(snapshot, WORKER_A), snapshot, "ctrl+d", NOW_MS).state;
+    const marked = transitionFleet(
+      { ...first, selectedSessionId: WORKER_B },
+      snapshot,
+      "ctrl+d",
+      NOW_MS,
+    ).state;
+    const opened = transitionFleet({ ...marked, draft: "/handoff" }, snapshot, "enter", NOW_MS);
+    const chosen = transitionFleet(opened.state, snapshot, "enter", NOW_MS);
+    let typing = chosen;
+    for (const character of "Rebase it") {
+      typing = transitionFleet(typing.state, snapshot, character, NOW_MS);
+    }
+
+    // Alpha exits with the directive already typed and the picker still open.
+    const exited = exiting(snapshot, WORKER_A);
+    const sent = transitionFleet(typing.state, exited, "enter", NOW_MS);
+
+    expect(sent.action).toMatchObject({
+      type: "handoff",
+      workerIds: [WORKER_B],
+      directive: "Rebase it",
+    });
+    expect(sent.state.notice).toBe("A terminal worker cannot be handed off; 1 dropped from this handoff");
+    expect(sent.state.noticeTone).toBe("warning");
+  });
+
+  it("closes the picker when every worker in the batch turns terminal", () => {
+    const snapshot = handoffFleet();
+    const opened = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+    const chosen = transitionFleet(opened.state, snapshot, "enter", NOW_MS);
+    let typing = chosen;
+    for (const character of "Rebase it") {
+      typing = transitionFleet(typing.state, snapshot, character, NOW_MS);
+    }
+
+    const exited = exiting(snapshot, WORKER_A);
+    const sent = transitionFleet(typing.state, exited, "enter", NOW_MS);
+
+    expect(sent.action).toBeUndefined();
+    expect(sent.state.handoffPicker).toBeUndefined();
+    expect(sent.state.notice).toBe("A terminal worker cannot be handed off");
+    expect(sent.state.noticeTone).toBe("warning");
+  });
+
+  it("closes the picker at recipient selection when the batch has gone terminal", () => {
+    const snapshot = handoffFleet();
+    const opened = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+    expect(opened.state.handoffPicker).toMatchObject({ step: "recipient" });
+
+    const exited = exiting(snapshot, WORKER_A);
+    const advanced = transitionFleet(opened.state, exited, "enter", NOW_MS);
+
+    expect(advanced.state.handoffPicker).toBeUndefined();
+    expect(advanced.state.notice).toBe("A terminal worker cannot be handed off");
   });
 
   it("falls back to the selected worker when nothing is marked", () => {
