@@ -1,151 +1,178 @@
 /**
- * The Cyberdeck octopus, and the half-block renderer that puts it in a terminal.
+ * The Cyberdeck octopus, drawn in ASCII, and the renderer that tones it.
  *
- * The art is stored as a grid of palette indices rather than as pre-composed glyphs, because a
- * terminal has no square pixel: the renderer pairs two grid rows into one text row using `▀`, with
- * the upper pixel as the foreground and the lower one as the background. That is what makes a cell
- * roughly square, and it is why every grid here has an even-ish row count — the art's height in
- * *pixels* is twice its height in rows on screen.
+ * The art is plain text — one art row is one terminal row, and what you read in this file is what
+ * the terminal shows. That is the whole argument for the idiom: a density ramp carries the volume
+ * (`.:-` recede, `=+*` sit mid, `#%@` catch the light), so the shape survives a terminal with no
+ * colour at all rather than collapsing into a violet blob the way stacked half-blocks do.
  *
- * `.` is the ground. It paints nothing at all, not white: the octopus sits on whatever background
- * the operator's terminal has, so the same grid reads on a light and a dark theme.
+ * Colour is therefore derived from the glyph rather than stored beside it. There is no parallel
+ * palette grid and no `<c>` markup to keep in sync with the drawing: to edit the animal you edit
+ * the animal, and the tone follows. A space paints nothing — never a background — so the octopus
+ * sits on whatever the operator's terminal has and reads on a light theme and a dark one.
  */
 
 /**
- * The reference artwork's own purples, sampled from it rather than chosen here.
+ * Three tones of the logo's violet, in the ramp's own order.
  *
- * These are the logo's palette and no state may borrow them, the same reservation `ANSI.brand`
- * carries in `fleet.ts` — a status hue that happened to match the octopus would read as the octopus
- * meaning something.
+ * These are the mark's hues and no state may borrow them, the same reservation `ANSI.brand` used to
+ * carry in `fleet.ts` — a status colour that happened to match the octopus would read as the
+ * octopus meaning something.
+ *
+ * All three are legible standing alone. That is a real constraint the half-block art did not have:
+ * there, the near-black outline was always adjacent to a lit pixel and read as an edge, but an
+ * ASCII glyph sits by itself on the terminal's own background, where a near-black violet is simply
+ * gone on a dark theme.
  */
-const PALETTE: Readonly<Record<string, readonly [number, number, number]>> = {
-  /** Outline and the deep shadow inside every tentacle. */
-  "1": [35, 9, 69],
-  /** The body's mid tone. */
-  "2": [108, 52, 140],
-  /** Lit tentacle and the dome's body. */
-  "3": [158, 84, 196],
-  /** The dome's highlight, and the only near-pink in the piece. */
-  "4": [196, 130, 232],
+const TONES = {
+  /** Recessed: the mantle's rim, the shadow under the arms, and the eyes. */
+  shade: [124, 66, 158],
+  /** The body's mid tone, and every structural stroke that draws an edge. */
+  body: [158, 96, 208],
+  /** Lit: the top of the mantle and the fill that catches the light. Octo Violet. */
+  lit: [182, 158, 255],
+} as const satisfies Record<string, readonly [number, number, number]>;
+
+/**
+ * Which tone each glyph carries.
+ *
+ * The ramp is ordered by ink, so the mapping is a ramp too. Structural strokes take the mid tone
+ * because they are the drawing's edges, and `o` — the eye — takes the deepest so it reads as a
+ * socket in a lit head rather than as another highlight.
+ */
+const GLYPH_TONE: Readonly<Record<string, keyof typeof TONES>> = {
+  ".": "shade", ":": "shade", "-": "shade", "'": "shade", ",": "shade", "`": "shade",
+  o: "shade",
+  "=": "body", "+": "body", "*": "body",
+  "(": "body", ")": "body", "{": "body", "}": "body",
+  "/": "body", "\\": "body", "|": "body", _: "body",
+  "#": "lit", "%": "lit", "@": "lit",
 };
 
 const RESET = "\u001b[0m";
-/** Ground as a *background* is the terminal's own, never an explicit colour. */
-const DEFAULT_BACKGROUND = "\u001b[49m";
 
 /**
- * The full octopus, at the size below which it stops being itself.
+ * How long one frame of the mark holds, in milliseconds.
  *
- * Derived from the reference by snapping it to the palette above at full resolution and then taking
- * the most common ink per cell — averaging instead loses the one-pixel outlines that separate the
- * tentacles, and the whole animal collapses into a purple blob. Narrower than about 24 columns it
- * collapses anyway, which is why this is the splash and not the header mark.
+ * 500 ms is Fleet's own idle cadence — the loop already wakes that often and already declines to
+ * write a frame identical to the one on screen, so an animation on this beat costs one repaint per
+ * tick and needs no timer of its own. It also sets the tempo: at two frames a second the arms make
+ * a deliberate two-second curl, which is a movement 2 FPS flatters. Anything faster would only
+ * expose the cadence as stutter.
+ */
+export const MARK_FRAME_INTERVAL_MS = 500;
+
+/**
+ * The header mark: four frames of the same octopus, 8 columns by 3 rows.
+ *
+ * Eight by three is the bay `DESIGN.md` has reserved all along. At that size the animal is a domed
+ * mantle, two eyes, and eight arms, and nothing else fits — which is why the mantle and the eyes
+ * are byte-identical across all four frames and only the arm row moves. A head that shifted even
+ * one cell between frames would read as the header jittering rather than as an octopus swimming.
+ *
+ * The cycle is a four-beat paddle: neutral, arms flared out, neutral, arms tucked in. Frame 0 is
+ * the rest pose, and it is what the mark holds whenever no thread is working.
+ */
+export const OCTOPUS_MARK_FRAMES: readonly (readonly string[])[] = [
+  [
+    " .-==-. ",
+    "(o%##%o)",
+    ")}{}{}{(",
+  ],
+  [
+    " .-==-. ",
+    "(o%##%o)",
+    "\\{}{}{}/",
+  ],
+  [
+    " .-==-. ",
+    "(o%##%o)",
+    ")}{}{}{(",
+  ],
+  [
+    " .-==-. ",
+    "(o%##%o)",
+    "/{}{}{}\\",
+  ],
+];
+
+/**
+ * The empty fleet's octopus: the same animal with room to be drawn properly.
+ *
+ * This one does not animate, and that is not an omission. The splash renders only when the fleet is
+ * empty, and an empty fleet has no thread that could be working — there is no state here for motion
+ * to mean. Spending nothing on frames is what buys the drawing its size.
  */
 export const OCTOPUS_SPLASH: readonly string[] = [
-  ".............111111.............",
-  "...........1133333211...........",
-  "..........113333333311..........",
-  "....111...122333333221...111....",
-  "...133211.123233332221.113331...",
-  "..1322331.122223322211.1332231..",
-  "..1111231.111222222111.3311111..",
-  "...1..1221.1111221111.1321..1...",
-  ".....1123111121221211112211.....",
-  ".....1122111111221111122211.....",
-  ".1111.11222112222221122211.1111.",
-  "123331.111112222222211111.133321",
-  "12123311111223211222221111332121",
-  "11112332332133211231133323321111",
-  "11.11223211132111123112232211.11",
-  "....111111132111111231111111....",
-  "......11113221111112231111......",
-  "....11111223111..11132211111....",
-  "..113221122211....11132111231...",
-  "..13211.12211......11321111231..",
-  "..1311..112211....112211..1111..",
-  "..1121...122111..111221...1211..",
-  "...11111.111211..11211..11111...",
-  "....111....1121111211....111....",
-  "........11.1131111311.11........",
-  "........1111111..1111111........",
-  ".........11111....1111..........",
+  "        .:-=+***+=-:.        ",
+  "     .:+*#%@@@@@@@%#*+:.     ",
+  "    :*#%@@@@@@@@@@@@@%#*:    ",
+  "   .#%@@@(o)@@@@@(o)@@@%#.   ",
+  "   :*%@@@@@@@@@@@@@@@@@%*:   ",
+  "    '+*#%@@@@@@@@@@@%#*+'    ",
+  "   .:)}{*#%@@@@@@@%#*}{(:.   ",
+  "  /}{}{)   '=+*+='   (}{}{\\  ",
+  " (  }{  '           '  }{  ) ",
+  "  '  '                 '  '  ",
 ];
 
-/**
- * The header mark: the same animal, drawn small.
- *
- * This one is hand-drawn rather than downsampled. Below eight pixels of height the reference's
- * tentacles have nowhere to hang and every mechanical reduction reads as a space invader — a flat
- * head over a stubby fringe. What survives at this size is the silhouette, so that is what this
- * keeps: the domed mantle, arms thrown wide, and the notch of open ground between the front pair.
- */
-export const OCTOPUS_MARK: readonly string[] = [
-  "....3443....",
-  "..13444431..",
-  "111344443111",
-  "131222222131",
-  "113122221311",
-  "31122..22113",
-  "1.11....11.1",
-  "..11....11..",
-];
-
-/** Width in terminal columns, which is the grid's width — one column per pixel. */
-export function pixelArtWidth(art: readonly string[]): number {
+/** Width in terminal columns, which is the art's own width — one glyph per column. */
+export function asciiArtWidth(art: readonly string[]): number {
   return art.reduce((widest, row) => Math.max(widest, row.length), 0);
 }
 
-/** Height in terminal rows, which is half the grid's — two pixels share one row. */
-export function pixelArtHeight(art: readonly string[]): number {
-  return Math.ceil(art.length / 2);
+/** Height in terminal rows, which is the art's own height — one art row per row. */
+export function asciiArtHeight(art: readonly string[]): number {
+  return art.length;
 }
 
 /**
- * Renders a grid into terminal rows, each exactly `pixelArtWidth` columns wide.
+ * Which frame of the mark is showing at `now`.
  *
- * Without colour the palette is gone but the shape is not, so the glyph alone carries it: a cell
- * with ink above and below is full, one with ink on a single side is that half. The rows are still
- * the right width, which is what lets the caller lay text out beside them either way.
+ * The phase is taken from the wall clock rather than from a counter Fleet would have to hold and
+ * advance, which is what keeps rendering a pure function of its inputs: the same `now` always draws
+ * the same frame, in Fleet and in a test alike. Paints do not land exactly on the interval, so a
+ * frame is occasionally held or skipped by one — invisible inside a two-second curl, and the price
+ * of not inventing a clock.
+ *
+ * `animated` false pins the rest pose. Successive frames are then byte-identical, so Fleet's
+ * repaint declines to write them and an idle fleet costs exactly what it did before.
  */
-export function renderPixelArt(art: readonly string[], color: boolean): string[] {
-  const width = pixelArtWidth(art);
-  const lines: string[] = [];
-  for (let row = 0; row < art.length; row += 2) {
+export function octopusMarkFrame(options: { now: number; animated: boolean }): readonly string[] {
+  if (!options.animated) return OCTOPUS_MARK_FRAMES[0]!;
+  const phase = Math.floor(options.now / MARK_FRAME_INTERVAL_MS);
+  const index = ((phase % OCTOPUS_MARK_FRAMES.length) + OCTOPUS_MARK_FRAMES.length)
+    % OCTOPUS_MARK_FRAMES.length;
+  return OCTOPUS_MARK_FRAMES[index]!;
+}
+
+/**
+ * Renders art into terminal rows, each exactly `asciiArtWidth` columns wide.
+ *
+ * Without colour the art is returned as it stands — the glyphs were always the drawing, so there is
+ * nothing to fall back to. With colour, a run of like-toned glyphs shares one escape rather than
+ * paying for one per cell, and every row is closed with a reset: a row that let its tone run on
+ * would tint the header text laid out beside it.
+ */
+export function renderAsciiArt(art: readonly string[], color: boolean): string[] {
+  const width = asciiArtWidth(art);
+  return art.map((row) => {
+    const padded = row.padEnd(width, " ");
+    if (!color) return padded;
     let line = "";
-    for (let column = 0; column < width; column += 1) {
-      line += renderCell(art[row]?.[column], art[row + 1]?.[column], color);
+    let open: keyof typeof TONES | undefined;
+    for (const glyph of padded) {
+      const tone = GLYPH_TONE[glyph];
+      if (tone !== open) {
+        line += tone === undefined ? RESET : foreground(TONES[tone]);
+        open = tone;
+      }
+      line += glyph;
     }
-    lines.push(color ? `${line}${RESET}` : line);
-  }
-  return lines;
-}
-
-/**
- * One text cell, from the two pixels stacked inside it.
- *
- * Every coloured cell re-states both of its own attributes after a reset rather than trusting what
- * the previous cell left set. A ground cell emits no colour at all, and inheriting the neighbour's
- * background would paint it — a trail of purple behind the tentacles.
- */
-function renderCell(upper: string | undefined, lower: string | undefined, color: boolean): string {
-  const above = PALETTE[upper ?? ""];
-  const below = PALETTE[lower ?? ""];
-  if (!color) {
-    if (above !== undefined && below !== undefined) return "█";
-    if (above !== undefined) return "▀";
-    if (below !== undefined) return "▄";
-    return " ";
-  }
-  if (above === undefined && below === undefined) return `${RESET} `;
-  if (above === undefined) return `${RESET}${foreground(below!)}${DEFAULT_BACKGROUND}▄`;
-  if (below === undefined) return `${RESET}${foreground(above)}${DEFAULT_BACKGROUND}▀`;
-  return `${RESET}${foreground(above)}${background(below)}▀`;
+    return `${line}${RESET}`;
+  });
 }
 
 function foreground([red, green, blue]: readonly [number, number, number]): string {
   return `\u001b[38;2;${red};${green};${blue}m`;
-}
-
-function background([red, green, blue]: readonly [number, number, number]): string {
-  return `\u001b[48;2;${red};${green};${blue}m`;
 }

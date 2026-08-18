@@ -98,7 +98,7 @@ The interface is keyboard-first and structurally simple: one header, project gro
 - Durable project and thread grouping that survives Fleet and broker restarts.
 - Attention states that describe what the user must do, not merely whether a PTY exists.
 - Compact model, effort, status, assistant preview, and age information.
-- A fixed upper-left logo bay for a later 8-bit Cyberdeck mark.
+- A fixed upper-left logo bay for the ASCII Cyberdeck mark.
 - Explicit model selection through `/model`, followed only by effort.
 - Familiar terminal controls with complete text labels and reduced-color fallbacks.
 
@@ -113,7 +113,7 @@ The palette is cool graphite. Color is reserved for state that demands action, p
 ### Primary
 
 - **Signal Blue** (`#9EB6FF`): held in reserve. It no longer paints project paths or selected markers, and nothing in Fleet may claim it without a written decision here first.
-- **Octo Violet** (`#B69EFF`): the 8-bit octopus logo mark in the header bay, and nothing else. It carries no state meaning and never appears in rows, pickers, or copy. No state may borrow the brand hue — a merged pull request uses Merge Violet instead.
+- **Octo Violet** (`#B69EFF`): the ASCII octopus logo mark in the header bay, and nothing else. The mark is drawn in three tones of it — recessed, body, and lit — and all three are reserved with it. It carries no state meaning and never appears in rows, pickers, or copy. No state may borrow the brand hue — a merged pull request uses Merge Violet instead.
 
 ### Neutral
 
@@ -158,7 +158,7 @@ The pull-request cell is the one deliberate exception, and it is bounded: it pri
 
 Title case is the default. `Cyberdeck`, `Needs input`, and friendly model labels are not rendered as shouting uppercase. Canonical provider model IDs may appear in the picker detail line when they prevent ambiguity, but compact rows use stable friendly labels such as `Codex Sol`, `Claude Opus`, or `Gemini Flash`.
 
-**The Fixed Grid Rule.** Do not fake typographic scale with multi-cell glyph art. The 8-bit identity belongs only in the reserved logo bay; operational text stays on the terminal grid.
+**The Fixed Grid Rule.** Do not fake typographic scale with multi-cell glyph art. The mascot belongs only in the reserved logo bay and the empty-fleet splash; operational text stays on the terminal grid.
 
 **The Preview Voice Rule.** Preview copy is the first rendered line of the final substantive paragraph in the latest assistant message. It is not the last terminal line, a cogitation footer, a tool spinner, provider chrome, or `Worked for ...` text.
 
@@ -170,7 +170,9 @@ The footer uses one dim horizontal separator above the composer and a second sep
 
 **The Flat Register Rule.** If a section looks like a card, remove the container and restore alignment, whitespace, and a single hairline where separation is necessary.
 
-**The Stable Frame Rule.** State refreshes may replace text in place, but layout does not pulse, animate, or shift for decoration. Cursor behavior and provider output are the only motion.
+**The Stable Frame Rule.** State refreshes may replace text in place, but layout does not pulse, animate, or shift for decoration. Cursor behavior, provider output, and the logo mark's arms are the only motion.
+
+The mark is the one bounded exception, and it is bounded because it is not decoration: the arms move only while at least one thread is `Working`, so motion in the bay means a worker is live and stillness means none is — the same argument that earns Live Ice its place as the only non-actionable hue. The exception carries its own limits. Motion is confined to the logo bay, and within it to the arm row alone: the mantle, the eyes, and every dimension of the bay are byte-identical across frames, so no cell of operational text ever shifts. It runs at Fleet's existing refresh cadence rather than a faster one of its own. Nothing else in the interface may animate on this precedent — a second animated element would put the bay's meaning back into question.
 
 ## Components
 
@@ -179,17 +181,21 @@ The footer uses one dim horizontal separator above the composer and a second sep
 The header occupies the upper-left of Fleet and establishes identity, current orchestration context, and attention counts.
 
 ```text
- ▄████▄   Cyberdeck
-▟█▄██▄█▙  Codex Sol · high · ~/code/personal/mikoshi
-▌▌▌▌▐▐▐▐  18 agents · 1 needs input · 2 working · 14 done · 1 failed
+ .-==-.   Cyberdeck
+(o%##%o)  Codex Sol · high · ~/code/personal/mikoshi
+)}{}{}{(  18 agents · 1 needs input · 2 working · 14 done · 1 failed
+
+          the arm row while a thread is working:
+)}{}{}{(  \{}{}{}/  )}{}{}{(  /{}{}{}\
 ```
 
-- Reserve an `8ch` by `3-row` logo bay with a `2ch` gap before text. The final 8-bit Cyberdeck logo must fit this box without moving the metadata column.
-- The mark is the 8-bit Cyberdeck octopus above, rendered in Octo Violet from half-block and quadrant glyphs: a domed mantle, two notch eyes, and eight one-pixel tentacles. It is the only 8-bit artwork in the interface.
+- Reserve an `8ch` by `3-row` logo bay with a `2ch` gap before text. The Cyberdeck logo must fit this box without moving the metadata column.
+- The mark is the ASCII Cyberdeck octopus above: a domed mantle, two eyes, and eight arms, drawn from a density ramp (`.:-` recede, `=+*` sit mid, `#%@` catch the light) and toned in Octo Violet. Because the glyphs are the drawing, the shape survives a terminal with no color at all. It is the only artwork in the interface apart from the empty-fleet splash, which is the same animal with room to be drawn properly.
+- While at least one thread is `Working`, the arms swing through a four-frame paddle at Fleet's own refresh cadence; otherwise the mark holds its rest pose. The mantle, the eyes, and the bay's dimensions never change, so the header text never moves. See the Stable Frame Rule.
 - Render `Cyberdeck` in strong bold text.
 - The second line shows the bound orchestrator's friendly model, effort, and scope. The normal global binding is labeled `fleet`; an explicitly isolated workspace binding shows its shortened path. If none exists, show `No orchestrator · ctrl+o to choose` without implying a model default.
 - The third line shows total threads plus nonzero attention counts. `Stopped`, `Interrupted`, and `Failed` are never folded into `done`.
-- Keep the full logo bay in regular and half-width cockpit panes. Below `64` columns, omit the logo pixels but retain the same header text order.
+- Keep the full logo bay in regular and half-width cockpit panes. Below `64` columns, omit the mark but retain the same header text order.
 
 ### Project Groups and Thread Rows
 
@@ -334,7 +340,7 @@ Failure copy keeps the thread visible, preserves its last assistant preview, and
 
 ### Do:
 
-- **Do** reserve the `8ch` by `3-row` upper-left bay for the 8-bit octopus mark and render it only in Octo Violet.
+- **Do** reserve the `8ch` by `3-row` upper-left bay for the ASCII octopus mark and render it only in the tones of Octo Violet.
 - **Do** keep task, friendly model and effort, truthful state, assistant preview, and age visually adjacent.
 - **Do** show `Done` when an active provider has completed its turn and awaits an ordinary next prompt.
 - **Do** reserve `Needs input` for a concrete blocking intervention and preserve its literal text in reduced-color terminals.
@@ -354,5 +360,5 @@ Failure copy keeps the thread visible, preserves its last assistant preview, and
 - **Don't** delete thread rows when the broker restarts or a PTY cannot be proven alive.
 - **Don't** use the last PTY line as preview text, especially when it is a timer, spinner, shortcut, or provider status footer.
 - **Don't** spend permanent columns on raw provider IDs, opaque roles, UUIDs, or a `31ch` status field.
-- **Don't** use cards, background slabs, gradients, shadows, glass effects, side stripes, animated ornaments, or faux CRT styling.
+- **Don't** use cards, background slabs, gradients, shadows, glass effects, side stripes, animated ornaments, or faux CRT styling. The logo mark's arms are not an ornament — they report that a worker is live, and they are the only animation in the interface.
 - **Don't** require mouse, hover, or pointer precision for the current Fleet implementation.

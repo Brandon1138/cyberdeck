@@ -49,11 +49,11 @@ import {
 import { collectDashboardSnapshot, renderDashboard } from "./dashboard.js";
 import { displayWidth, graphemeWidth, graphemes } from "./display-width.js";
 import {
-  OCTOPUS_MARK,
   OCTOPUS_SPLASH,
-  pixelArtHeight,
-  pixelArtWidth,
-  renderPixelArt,
+  asciiArtHeight,
+  asciiArtWidth,
+  octopusMarkFrame,
+  renderAsciiArt,
 } from "./octopus.js";
 import {
   leaseCustody,
@@ -2369,15 +2369,15 @@ function renderEmptyFleet(
   options: ResolvedFleetRenderOptions,
 ): string[] {
   const caption = "No durable agent threads yet.";
-  const width = pixelArtWidth(OCTOPUS_SPLASH);
-  const height = pixelArtHeight(OCTOPUS_SPLASH);
+  const width = asciiArtWidth(OCTOPUS_SPLASH);
+  const height = asciiArtHeight(OCTOPUS_SPLASH);
   if (viewportHeight < height + 2 || options.width < width) {
     return [caption].slice(0, viewportHeight);
   }
   const center = (span: number) => " ".repeat(Math.max(0, Math.floor((options.width - span) / 2)));
   const indent = center(width);
   return [
-    ...renderPixelArt(OCTOPUS_SPLASH, options.color).map((line) => `${indent}${line}`),
+    ...renderAsciiArt(OCTOPUS_SPLASH, options.color).map((line) => `${indent}${line}`),
     "",
     `${center(caption.length)}${paint(caption, "dim", options.color)}`,
   ];
@@ -2414,11 +2414,16 @@ function renderHeader(
   const context = orchestrator === undefined
     ? `No orchestrator · ctrl+o to choose · ${shortPath(state.fallbackCwd, options.home)}`
     : `${friendlyModel(orchestrator.provider, orchestrator.model)} · ${friendlyEffort(orchestrator.effort ?? "provider-managed")} · ${scope}`;
-  // The mark is taller than the three lines of text beside it. Eight pixel rows is the floor at
-  // which the octopus is still the octopus — below it the tentacles have nowhere to hang and the
-  // silhouette reads as a space invader — so the header is as tall as the animal, not the copy.
+  // The mark is exactly as tall as the three lines of text beside it, which is the bay `DESIGN.md`
+  // reserved for it and the smallest an octopus can be drawn and still read as one: a domed mantle,
+  // two eyes, and a row of arms. Below 64 columns the copy needs the whole width and the mark goes.
   const showsMark = options.width >= 64;
-  const markWidth = pixelArtWidth(OCTOPUS_MARK);
+  // Motion here is a state indicator, not decoration — the arms move while a thread is working and
+  // are still otherwise, so a glance at the mark answers "is anything live". `count("Working")` is
+  // already computed above, and the frame is a pure function of `options.now`, so nothing is held
+  // between renders and an idle fleet paints the identical frame Fleet's repaint declines to write.
+  const markFrame = octopusMarkFrame({ now: options.now, animated: count("Working") > 0 });
+  const markWidth = asciiArtWidth(markFrame);
   const textWidth = Math.max(1, options.width - (showsMark ? markWidth + 2 : 0));
   const textLines = [
     paint("Cyberdeck", "bold", options.color),
@@ -2426,7 +2431,7 @@ function renderHeader(
     paint(fit(counts, textWidth), "dim", options.color),
   ];
   if (!showsMark) return textLines;
-  const mark = renderPixelArt(OCTOPUS_MARK, options.color);
+  const mark = renderAsciiArt(markFrame, options.color);
   return Array.from(
     { length: Math.max(mark.length, textLines.length) },
     (_, index) => `${mark[index] ?? " ".repeat(markWidth)}  ${textLines[index] ?? ""}`,

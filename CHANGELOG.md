@@ -36,6 +36,16 @@ and persisted schemas remain under active alpha development.
 
 ### Changed
 
+- The octopus is drawn in ASCII. The header mark and the empty-fleet splash were a
+  grid of palette indices rendered as half-blocks, which lost their shape entirely
+  on a terminal without color; they are now a density ramp, where the glyphs are
+  the drawing and the tone follows from them. The mark returns to the `8ch` by
+  `3-row` bay `DESIGN.md` always reserved for it, and while at least one thread is
+  `Working` its arms swing through a four-frame paddle on Fleet's existing refresh
+  cadence — motion in the bay means a worker is live, and the mantle, the eyes, and
+  every dimension of the bay hold still so no header text moves. An idle fleet
+  renders the byte-identical frame it did before and costs nothing.
+
 - The six broker-side lease custody hues are gone, along with the slot ledger, its
   store, and the `fleet.custodyColors` RPC. A hue could say "these rows go
   together" but never which orchestrator, since the only thing to match it against

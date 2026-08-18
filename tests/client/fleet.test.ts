@@ -19,10 +19,12 @@ import {
   type FleetState,
 } from "../../src/client/fleet.js";
 import {
-  OCTOPUS_MARK,
+  MARK_FRAME_INTERVAL_MS,
+  OCTOPUS_MARK_FRAMES,
   OCTOPUS_SPLASH,
-  pixelArtWidth,
-  renderPixelArt,
+  asciiArtWidth,
+  octopusMarkFrame,
+  renderAsciiArt,
 } from "../../src/client/octopus.js";
 import type { PasteboardImageResult } from "../../src/client/clipboard-image.js";
 import { displayWidth } from "../../src/client/display-width.js";
@@ -1357,7 +1359,7 @@ describe("fleet presentation", () => {
   it("gives an empty fleet the whole octopus, and drops it whole when the pane is short", () => {
     const snapshot = fleet();
     const state = createFleetState(snapshot);
-    const splash = renderPixelArt(OCTOPUS_SPLASH, false);
+    const splash = renderAsciiArt(OCTOPUS_SPLASH, false);
 
     const tall = renderFleet(snapshot, state, {
       color: false, width: 100, height: 40, now: NOW_MS,
@@ -1377,22 +1379,62 @@ describe("fleet presentation", () => {
   it("stands the header mark beside the header text, and drops it in a narrow pane", () => {
     const snapshot = fleet({ record: session({ cwd: "/repo/one" }) });
     const state = createFleetState(snapshot);
-    const mark = renderPixelArt(OCTOPUS_MARK, false);
+    const mark = renderAsciiArt(OCTOPUS_MARK_FRAMES[0]!, false);
+    const markWidth = asciiArtWidth(OCTOPUS_MARK_FRAMES[0]!);
 
     const lines = renderFleet(snapshot, state, {
       color: false, width: 100, height: 30, now: NOW_MS,
     }).split("\n");
-    expect(lines.slice(0, mark.length).map((line) => line.slice(0, pixelArtWidth(OCTOPUS_MARK))))
+    expect(lines.slice(0, mark.length).map((line) => line.slice(0, markWidth)))
       .toEqual(mark);
     expect(lines[0]).toContain("Cyberdeck");
 
-    // The mark is four rows to the text's three, so the header is as tall as the animal.
-    expect(lines[mark.length - 1]?.trim()).toBe(mark.at(-1)?.trim());
+    // The mark is exactly the three rows of copy beside it, so the header spends no row on the
+    // animal alone: the arms and the last line of counts end together.
+    expect(mark).toHaveLength(3);
+    expect(lines[mark.length - 1]).toContain("working");
 
     const narrow = renderFleet(snapshot, state, {
       color: false, width: 60, height: 30, now: NOW_MS,
     });
     expect(narrow.split("\n")[0]).toBe("Cyberdeck");
+  });
+
+  it("keeps the header text on one column through every frame of the mark", () => {
+    // The arms move; the text beside them must not. This is the jitter guard at the level that
+    // matters — not the art's own dimensions, but where the copy actually lands.
+    const snapshot = fleet({ record: session({ cwd: "/repo/one", attentionState: "working" }) });
+    const state = createFleetState(snapshot);
+    const columns = new Set(
+      OCTOPUS_MARK_FRAMES.map((_, frame) => {
+        const lines = renderFleet(snapshot, state, {
+          color: false,
+          width: 100,
+          height: 30,
+          now: NOW_MS + frame * MARK_FRAME_INTERVAL_MS,
+        }).split("\n");
+        return lines[0]?.indexOf("Cyberdeck");
+      }),
+    );
+    expect(columns.size).toBe(1);
+    expect([...columns][0]).toBeGreaterThan(0);
+  });
+
+  it("moves the mark only while a thread is working, and holds it still otherwise", () => {
+    // Motion means a worker is live. With nothing working the two renders are byte-identical, which
+    // is also what lets Fleet's repaint decline to write the second one at all.
+    const idle = fleet({ record: session({ cwd: "/repo/one", attentionState: "done" }) });
+    const idleState = createFleetState(idle);
+    const render = (snapshot: FleetSnapshot, state: FleetState, now: number) =>
+      renderFleet(snapshot, state, { color: false, width: 100, height: 30, now });
+
+    expect(render(idle, idleState, NOW_MS))
+      .toBe(render(idle, idleState, NOW_MS + MARK_FRAME_INTERVAL_MS));
+
+    const busy = fleet({ record: session({ cwd: "/repo/one", attentionState: "working" }) });
+    const busyState = createFleetState(busy);
+    expect(render(busy, busyState, NOW_MS))
+      .not.toBe(render(busy, busyState, NOW_MS + MARK_FRAME_INTERVAL_MS));
   });
 
   it("reorders orcs as their activity changes while folder groups stay put", () => {
