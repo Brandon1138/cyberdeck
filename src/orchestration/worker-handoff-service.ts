@@ -188,6 +188,28 @@ export class WorkerHandoffService {
         });
         continue;
       }
+      // Registry exits are reconciled lazily, the same way WorkerControlService does it: nothing
+      // walks the substrate marking subjects terminal when a process dies, so a coordination
+      // subject can still read `working` for a worker the registry has already watched exit.
+      // Handing that one over would move a lease and brief the recipient on a dead process, so the
+      // durable lifecycle is repaired here and the worker is refused before the batch is built.
+      if (record !== undefined && record.exitCode !== null) {
+        const observed = manualWorkerLifecycle(record);
+        if (subject !== undefined && subject.lifecycle !== observed) {
+          await this.options.coordination.reconcileLifecycle({
+            mutationId: `handoff:lifecycle:${workerId}:${randomUUID()}`,
+            subjectId: workerId,
+            lifecycle: observed,
+            reason: `broker registry observed process exit ${record.exitCode}`,
+          });
+        }
+        refused.push({
+          workerId,
+          code: "WORKER_TERMINAL",
+          detail: `The broker registry observed this worker exit with code ${record.exitCode}`,
+        });
+        continue;
+      }
       const cwd = record?.cwd ?? subject?.resources.worktreePath;
       if (!grantAllows(recipientGrant, "worker.start", {
         sessionId: workerId,
@@ -385,7 +407,8 @@ function registrationFor(record: SessionRecord): {
 }
 
 /**
- * The lifecycle a manual worker is registered at.
+ * What the session registry says a worker's lifecycle is: the state a manual worker is registered
+ * at, and the state a stale coordination subject is reconciled to once the registry sees an exit.
  *
  * It matters here in a way it does not elsewhere: a terminal lifecycle aborts the whole batch, so
  * reading a live worker as stopped would refuse a handoff the operator can plainly see is valid.

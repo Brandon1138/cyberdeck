@@ -419,6 +419,34 @@ describe("WorkerHandoffService", () => {
     expect(bench.instructions.enqueue).not.toHaveBeenCalled();
   });
 
+  it("refuses a worker the registry watched exit while its subject still reads working", async () => {
+    const bench = await harness();
+    const healthy = bench.addSession();
+    const dead = bench.addSession({ executionState: "exited", attentionState: "idle", exitCode: 1 });
+    await bench.register({ workerId: healthy });
+    // The subject the substrate holds is stale: nothing marked it terminal when the process died.
+    await bench.register({ workerId: dead, lifecycle: "working" });
+
+    const result = await bench.handoff.handoff({
+      recipientSessionId: ORC,
+      workerIds: [healthy, dead],
+      directive: "take the wave",
+    });
+
+    expect(result.committed).toBe(false);
+    expect(result.blocked).toEqual([{
+      workerId: dead,
+      code: "WORKER_TERMINAL",
+      detail: "The broker registry observed this worker exit with code 1",
+    }]);
+    // Nothing moved, and the stale bookkeeping was repaired rather than left to mislead the next
+    // reader of the fleet list.
+    expect(bench.coordination.getSubject(dead)?.lifecycle).toBe("failed");
+    expect(bench.coordination.getSubject(healthy)?.lease.version).toBe(1);
+    expect(bench.coordination.listHandoffs()).toEqual([]);
+    expect(bench.instructions.enqueue).not.toHaveBeenCalled();
+  });
+
   it("blocks a batch that names one worker twice before any lease moves", async () => {
     const bench = await harness();
     const workerId = bench.addSession();
