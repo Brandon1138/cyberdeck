@@ -1063,6 +1063,16 @@ export function transitionFleet(
         },
       };
     }
+    if (isTerminalSession(selected.record)) {
+      return {
+        state: {
+          ...state,
+          helpOpen: false,
+          notice: "A terminal worker cannot be handed off",
+          noticeTone: "warning",
+        },
+      };
+    }
     const marked = handoffMarks(state);
     const workerId = selected.record.id;
     if (!marked.includes(workerId) && marked.length >= HANDOFF_LIMITS.manifestEntries) {
@@ -2716,6 +2726,15 @@ function transitionHandoffPicker(
     // which the orchestrator already has its own tool for.
     if (directive === "") {
       return { state: { ...state, notice: "A handoff needs a directive", noticeTone: "error" } };
+    }
+    if (directive.length > HANDOFF_LIMITS.directiveChars) {
+      return {
+        state: {
+          ...state,
+          notice: `A handoff directive can contain at most ${HANDOFF_LIMITS.directiveChars} characters`,
+          noticeTone: "error",
+        },
+      };
     }
     return {
       state: { ...state, handoffPicker: undefined, notice: undefined },

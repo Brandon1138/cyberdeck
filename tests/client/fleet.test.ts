@@ -28,6 +28,7 @@ import type { PasteboardImageResult } from "../../src/client/clipboard-image.js"
 import { displayWidth } from "../../src/client/display-width.js";
 import type { PullRequestState, PullRequestSummary } from "../../src/client/pr-status.js";
 import type { FleetWorkerCoordinationView } from "../../src/broker/worker-coordination-view.js";
+import { HANDOFF_LIMITS } from "../../src/domain/worker-handoff.js";
 
 const NOW = "2026-07-22T10:00:00.000Z";
 const NOW_MS = Date.parse(NOW);
@@ -5078,6 +5079,26 @@ describe("directed handoff", () => {
     expect(refused.state.notice).toBe("An orchestrator receives a handoff; it is not marked for one");
   });
 
+  it("refuses to mark a terminal worker", () => {
+    const snapshot = handoffFleet();
+    const terminalSnapshot = fleet(...snapshot.threads.map(({ record }) => ({
+      record: record.id === WORKER_A
+        ? { ...record, executionState: "exited" as const, exitCode: 0 }
+        : record,
+    })));
+
+    const refused = transitionFleet(
+      selecting(terminalSnapshot, WORKER_A),
+      terminalSnapshot,
+      "ctrl+d",
+      NOW_MS,
+    );
+
+    expect(refused.state.handoffMarks).toBeUndefined();
+    expect(refused.state.notice).toBe("A terminal worker cannot be handed off");
+    expect(refused.state.noticeTone).toBe("warning");
+  });
+
   it("shows the mark in the gutter without moving any column", () => {
     const snapshot = handoffFleet();
     const plain = renderFleet(snapshot, selecting(snapshot, WORKER_A), {
@@ -5246,6 +5267,34 @@ describe("directed handoff", () => {
     expect(closed.state.handoffPicker).toBeUndefined();
     // Backing out of the gesture never unmarks what the operator marked.
     expect(closed.state.handoffMarks).toBeUndefined();
+  });
+
+  it("keeps an overlong directive in the picker for correction", () => {
+    const snapshot = handoffFleet();
+    const opened = transitionFleet(
+      { ...selecting(snapshot, WORKER_A), draft: "/handoff" },
+      snapshot,
+      "enter",
+      NOW_MS,
+    );
+    const directive = transitionFleet(opened.state, snapshot, "enter", NOW_MS);
+    const draft = "x".repeat(HANDOFF_LIMITS.directiveChars + 1);
+    const refused = transitionFleet({
+      ...directive.state,
+      handoffPicker: {
+        step: "directive",
+        workerIds: [WORKER_A],
+        recipientSessionId: ORC_ID,
+        draft,
+      },
+    }, snapshot, "enter", NOW_MS);
+
+    expect(refused.action).toBeUndefined();
+    expect(refused.state.handoffPicker).toMatchObject({ step: "directive", draft });
+    expect(refused.state.notice).toBe(
+      `A handoff directive can contain at most ${HANDOFF_LIMITS.directiveChars} characters`,
+    );
+    expect(refused.state.noticeTone).toBe("error");
   });
 
   it("performs the handoff through the broker and clears the marks it committed", async () => {

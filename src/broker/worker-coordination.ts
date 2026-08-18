@@ -2016,7 +2016,11 @@ function hashHandoffRequest(input: HandoffBatchInput): string {
     recipient,
     recipientSessionId: input.recipientSessionId,
     directive: input.directive,
-    members: input.members,
+    // `register` is broker-derived bootstrap material for a manual worker, not part of the
+    // operator's stable handoff request. After the first transaction commits, the same retry is
+    // rebuilt from the now-present subject without `register`; including it here would turn a lost
+    // response into MUTATION_ID_COLLISION instead of replaying the receipt.
+    members: input.members.map(({ subjectId, name }) => ({ subjectId, name: name ?? null })),
     reason: input.reason,
     handoffId: input.handoffId ?? null,
   })).digest("hex");

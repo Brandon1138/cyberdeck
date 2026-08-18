@@ -112,12 +112,13 @@ describe("directed handoff: the operator moves workers onto one orchestrator", (
   it("registers a worker the substrate has never seen inside the same transaction", async () => {
     const broker = await IntegrationBroker.open();
     const manual = randomUUID();
+    const recipientSessionId = randomUUID();
 
     const result = await broker.service.handoffBatch({
       mutationId: "handoff-manual",
       actor: OPERATOR,
       recipient: RECIPIENT,
-      recipientSessionId: randomUUID(),
+      recipientSessionId,
       directive: "pick up the worker I started by hand",
       members: [{ subjectId: manual, name: "hand-started", register: manualRegistration(manual) }],
       reason: "operator directed handoff",
@@ -131,6 +132,23 @@ describe("directed handoff: the operator moves workers onto one orchestrator", (
     expect(subject.lease.controller).toEqual(RECIPIENT);
     expect(subject.origin.creatorControllerId).toBe("legacy-unresolved");
     expect(subject.resources.worktreePath).toBe(`/tmp/manual/${manual}`);
+    const committedLeaseVersion = subject.lease.version;
+
+    // A service-level retry rebuilds this member from the subject that now exists, so it no longer
+    // carries the one-time registration spec. That is still the same operator request and must
+    // replay the committed receipt rather than collide with it.
+    const replay = await broker.service.handoffBatch({
+      mutationId: "handoff-manual",
+      actor: OPERATOR,
+      recipient: RECIPIENT,
+      recipientSessionId,
+      directive: "pick up the worker I started by hand",
+      members: [{ subjectId: manual, name: "hand-started" }],
+      reason: "operator directed handoff",
+    });
+    expect(replay.committed).toBe(true);
+    expect(replay.handoff?.handoffId).toBe(result.handoff?.handoffId);
+    expect(broker.service.getSubject(manual)?.lease.version).toBe(committedLeaseVersion);
   });
 
   it("aborts the whole batch when one member is terminal, leaving no lease moved", async () => {
