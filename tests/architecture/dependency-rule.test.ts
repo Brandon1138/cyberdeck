@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse } from "es-module-lexer/js";
 import { describe, expect, it } from "vitest";
 
 type Layer = "delivery" | "application" | "domain" | "infrastructure";
@@ -557,72 +558,41 @@ function skipTypeScriptPostfixAssertions(source: string, start: number): number 
   return skipTypeScriptAssertion(source, cursor);
 }
 
-function dynamicModuleSpecifiersFromSource(source: string): string[] {
-  const specifiers: string[] = [];
-
-  scan: for (let index = 0; index < source.length; index += 1) {
-    const quote = source[index];
-    if (quote === "'" || quote === "\"" || quote === "`") {
-      for (index += 1; index < source.length; index += 1) {
-        if (source[index] === "\\") index += 1;
-        else if (source[index] === quote) break;
-      }
-      continue;
-    }
-
-    let previousIndex = index - 1;
-    while (/\s/.test(source[previousIndex] ?? "")) previousIndex -= 1;
-
-    if (
-      !source.startsWith("import", index)
-      || /[\w$]/.test(source[index - 1] ?? "")
-      || (
-        source[previousIndex] === "."
-        && source.slice(Math.max(0, previousIndex - 2), previousIndex + 1) !== "..."
-      )
-      || /[\w$]/.test(source[index + "import".length] ?? "")
-    ) {
-      continue;
-    }
-
-    let cursor = index + "import".length;
-    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-    if (source[cursor] !== "(") continue;
+function dynamicModuleSpecifierAt(source: string, start: number): string | undefined {
+  let cursor = start;
+  while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+  let wrapperParentheses = 0;
+  while (source[cursor] === "(") {
+    wrapperParentheses += 1;
     cursor += 1;
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-    let wrapperParentheses = 0;
-    while (source[cursor] === "(") {
-      wrapperParentheses += 1;
-      cursor += 1;
-      while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-    }
-
-    const specifierQuote = source[cursor];
-    if (specifierQuote !== "'" && specifierQuote !== "\"" && specifierQuote !== "`") continue;
-    const specifierStart = cursor + 1;
-    cursor = specifierStart;
-    while (cursor < source.length && source[cursor] !== specifierQuote) {
-      if (source[cursor] === "\\") cursor += 1;
-      cursor += 1;
-    }
-    if (source[cursor] !== specifierQuote) continue;
-
-    const specifier = decodeModuleSpecifier(source.slice(specifierStart, cursor));
-    if (specifier === undefined) continue;
-    cursor += 1;
-    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-    cursor = skipTypeScriptPostfixAssertions(source, cursor);
-    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-    while (wrapperParentheses > 0) {
-      if (source[cursor] !== ")") continue scan;
-      wrapperParentheses -= 1;
-      cursor += 1;
-      while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-    }
-    if (source[cursor] === ")" || source[cursor] === ",") specifiers.push(specifier);
   }
 
-  return specifiers;
+  const specifierQuote = source[cursor];
+  if (specifierQuote !== "'" && specifierQuote !== "\"" && specifierQuote !== "`") {
+    return undefined;
+  }
+  const specifierStart = cursor + 1;
+  cursor = specifierStart;
+  while (cursor < source.length && source[cursor] !== specifierQuote) {
+    if (source[cursor] === "\\") cursor += 1;
+    cursor += 1;
+  }
+  if (source[cursor] !== specifierQuote) return undefined;
+
+  const specifier = decodeModuleSpecifier(source.slice(specifierStart, cursor));
+  if (specifier === undefined) return undefined;
+  cursor += 1;
+  while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+  cursor = skipTypeScriptPostfixAssertions(source, cursor);
+  while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+  while (wrapperParentheses > 0) {
+    if (source[cursor] !== ")") return undefined;
+    wrapperParentheses -= 1;
+    cursor += 1;
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+  }
+  return source[cursor] === ")" || source[cursor] === "," ? specifier : undefined;
 }
 
 function quotedLiteralEnd(source: string, start: number): number | undefined {
@@ -730,14 +700,36 @@ function declarationModuleSpecifiersFromSource(source: string): {
 
 function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
   const source = withoutCommentsAndTemplates(unprocessedSource);
-  const declarations = declarationModuleSpecifiersFromSource(source);
+  const importEquals = declarationModuleSpecifiersFromSource(source).importEquals;
+  const sideEffectImports: string[] = [];
+  const importsFrom: string[] = [];
+  const exportsFrom: string[] = [];
+  const dynamicImports: string[] = [];
+
+  for (const imported of parse(unprocessedSource)[0]) {
+    if (imported.d >= 0) {
+      const specifier = imported.n ?? dynamicModuleSpecifierAt(unprocessedSource, imported.s);
+      if (specifier !== undefined) dynamicImports.push(specifier);
+      continue;
+    }
+    if (imported.d !== -1 || imported.n === undefined) continue;
+
+    const statement = unprocessedSource.slice(imported.ss, imported.se);
+    if (/^\s*export\b/.test(statement)) {
+      exportsFrom.push(imported.n);
+    } else if (/^\s*import\s*["'`]/.test(statement)) {
+      sideEffectImports.push(imported.n);
+    } else {
+      importsFrom.push(imported.n);
+    }
+  }
 
   return [
-    ...declarations.sideEffectImports,
-    ...declarations.importsFrom,
-    ...declarations.importEquals,
-    ...declarations.exportsFrom,
-    ...dynamicModuleSpecifiersFromSource(source),
+    ...sideEffectImports,
+    ...importsFrom,
+    ...importEquals,
+    ...exportsFrom,
+    ...dynamicImports,
   ];
 }
 
