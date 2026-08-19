@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
-import { PtyProcess } from "../../src/runtime/pty-process.js";
+import { PtyProcess, PtyReplayBuffer } from "../../src/runtime/pty-process.js";
 
 const fixturePath = fileURLToPath(new URL("../fixtures/fake-agent.mjs", import.meta.url));
 
@@ -24,8 +24,58 @@ function waitForOutput(process: SessionRuntime, expected: string): Promise<strin
 }
 
 describe("PtyProcess", () => {
+  it("retains byte-identical replay across partial and whole-chunk trims", () => {
+    const chunks = [
+      Buffer.from("first"),
+      Buffer.from("\u754c", "utf8"),
+      Buffer.from([0, 1, 2, 255]),
+      Buffer.from("trailing output"),
+    ];
+
+    for (const capacity of [0, 1, 4, 8, 16, 1_024]) {
+      const replay = new PtyReplayBuffer(capacity);
+      let previous = Buffer.alloc(0);
+      for (const chunk of chunks) {
+        replay.append(chunk);
+        previous = Buffer.concat([previous, chunk]);
+        if (previous.length > capacity) {
+          previous = previous.subarray(previous.length - capacity);
+        }
+        expect(replay.snapshot()).toEqual(previous);
+      }
+      const callerCopy = replay.snapshot();
+      callerCopy.fill(0);
+      expect(replay.snapshot()).toEqual(previous);
+    }
+  });
+
+  it("keeps append cost flat as retained replay grows", () => {
+    const chunk = Buffer.alloc(4 * 1024, 0x61);
+    const measure = (capacity: number): number => {
+      const replay = new PtyReplayBuffer(capacity);
+      for (let retained = 0; retained < capacity; retained += chunk.length) {
+        replay.append(chunk);
+      }
+      const started = process.hrtime.bigint();
+      for (let index = 0; index < 1_000; index += 1) replay.append(chunk);
+      return Number(process.hrtime.bigint() - started) / 1_000;
+    };
+
+    const bestOfFive = (capacity: number): number => Math.min(
+      ...Array.from({ length: 5 }, () => measure(capacity)),
+    );
+    const smallReplayNs = bestOfFive(100 * 1024);
+    const largeReplayNs = bestOfFive(10 * 1024 * 1024);
+
+    console.info(
+      `PTY replay append: 100 KiB ${smallReplayNs.toFixed(0)} ns/chunk; `
+      + `10 MiB ${largeReplayNs.toFixed(0)} ns/chunk`,
+    );
+    expect(largeReplayNs).toBeLessThan(Math.max(smallReplayNs * 8, 5_000));
+  });
+
   it("keeps working without listeners and retains replay output", async () => {
-    const process: SessionRuntime = new PtyProcess(
+    const process = new PtyProcess(
       {
         executable: globalThis.process.execPath,
         args: [fixturePath],
