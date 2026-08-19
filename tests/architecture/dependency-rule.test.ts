@@ -120,6 +120,22 @@ function withoutCommentsAndTemplates(source: string): string {
     return /^[A-Za-z_$]/.test(token) ? token : undefined;
   }
 
+  function closesFunctionExpression(index: number): boolean {
+    const recentPrefix = result.slice(Math.max(0, index - 256), index);
+    const header = /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\([^{};]*\)\s*$/.exec(
+      recentPrefix,
+    );
+    if (header === null) return false;
+
+    let context = recentPrefix.slice(0, header.index).trimEnd();
+    if (/\basync$/.test(context)) context = context.slice(0, -"async".length).trimEnd();
+    if (header[1] === undefined) return !/\bexport\s+default$/.test(context);
+    if (/\b(?:declare|export(?:\s+default)?)$/.test(context)) return false;
+
+    const previousCharacter = context.at(-1);
+    return previousCharacter !== undefined && !";{}".includes(previousCharacter);
+  }
+
   function opensBlock(index: number): boolean {
     const previousIndex = previousSignificantIndex(index);
     const previousCharacter = previousIndex === undefined ? undefined : result[previousIndex];
@@ -129,7 +145,7 @@ function withoutCommentsAndTemplates(source: string): string {
     return previousCharacter === undefined
       || previousCharacter === ";"
       || previousCharacter === "}"
-      || previousCharacter === ")"
+      || (previousCharacter === ")" && !closesFunctionExpression(index))
       || /=>\s*$/.test(recentPrefix)
       || ["do", "else", "finally", "try"].includes(token ?? "")
       || /\b(?:class|enum|interface|module|namespace)\b[^{}]*$/.test(recentPrefix);
@@ -455,6 +471,15 @@ function skipTypeScriptAssertion(source: string, start: number): number {
   return start;
 }
 
+function skipTypeScriptPostfixAssertions(source: string, start: number): number {
+  let cursor = start;
+  while (source[cursor] === "!") {
+    cursor += 1;
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+  }
+  return skipTypeScriptAssertion(source, cursor);
+}
+
 function dynamicModuleSpecifiersFromSource(source: string): string[] {
   const specifiers: string[] = [];
 
@@ -509,7 +534,7 @@ function dynamicModuleSpecifiersFromSource(source: string): string[] {
     if (specifier === undefined) continue;
     cursor += 1;
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-    cursor = skipTypeScriptAssertion(source, cursor);
+    cursor = skipTypeScriptPostfixAssertions(source, cursor);
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
     while (wrapperParentheses > 0) {
       if (source[cursor] !== ")") continue scan;
