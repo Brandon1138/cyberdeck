@@ -133,10 +133,38 @@ function withoutCommentsAndTemplates(source: string): string {
     const recentPrefix = result.slice(prefixStart, index);
     if (/=>\s*$/.test(recentPrefix)) return true;
 
-    const header = /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\([^{};]*\)\s*$/.exec(
-      recentPrefix,
-    );
-    if (header === null) return false;
+    const headerPattern = /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\(/g;
+    let header: RegExpExecArray | undefined;
+    for (
+      let candidate = headerPattern.exec(recentPrefix);
+      candidate !== null;
+      candidate = headerPattern.exec(recentPrefix)
+    ) {
+      let depth = 0;
+      let quote: "'" | "\"" | undefined;
+      for (
+        let cursor = candidate.index + candidate[0].length - 1;
+        cursor < recentPrefix.length;
+        cursor += 1
+      ) {
+        const character = recentPrefix[cursor]!;
+        if (quote !== undefined) {
+          if (character === "\\") cursor += 1;
+          else if (character === quote) quote = undefined;
+        } else if (character === "'" || character === "\"") {
+          quote = character;
+        } else if (character === "(") {
+          depth += 1;
+        } else if (character === ")") {
+          depth -= 1;
+          if (depth === 0 && /^\s*$/.test(recentPrefix.slice(cursor + 1))) {
+            header = candidate;
+            break;
+          }
+        }
+      }
+    }
+    if (header === undefined) return false;
 
     const beforeFunction = recentPrefix.slice(0, header.index);
     const hasLineBreak = /[\r\n]/.test(/\s*$/.exec(beforeFunction)?.[0] ?? "");
@@ -950,6 +978,7 @@ describe("architecture dependency rule", () => {
       const nonNullQuotient = value! / (await import("./after-non-null.js")).value;
       const templateQuotient = <any>\`2\` / (await import("./after-template.js")).value;
       const functionQuotient = <any>function () {} / (await import("./after-function.js")).value;
+      const structuredFunctionQuotient = <any>function ({ value }: { value: number }) {} / (await import("./after-structured-function.js")).value;
       const defaultProperty = { default: function named() {} / (await import("./after-default-property.js")).value };
     `;
 
@@ -961,6 +990,7 @@ describe("architecture dependency rule", () => {
       "./after-non-null.js",
       "./after-template.js",
       "./after-function.js",
+      "./after-structured-function.js",
       "./after-default-property.js",
     ]);
   });
