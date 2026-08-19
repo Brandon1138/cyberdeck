@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
+import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 type Layer = "delivery" | "application" | "domain" | "infrastructure";
