@@ -868,6 +868,10 @@ describe("architecture dependency rule", () => {
       function asiDeclared() {} /import ("node:fs")/.test(text);
       asiMarker++
       function postfixDeclared() {} /import ("node:fs")/.test(text);
+      asiMarker!
+      function nonNullDeclared() {} /import ("node:fs")/.test(text);
+      value = async
+      function afterAsyncIdentifier() {} /import ("node:fs")/.test(text);
       const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
       const objectQuotient = {} / import("./after-object.js") / divisor;
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
