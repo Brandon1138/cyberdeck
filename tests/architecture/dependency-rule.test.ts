@@ -156,6 +156,7 @@ function withoutCommentsAndTemplates(source: string): string {
       && [
         "await",
         "case",
+        "default",
         "delete",
         "do",
         "else",
