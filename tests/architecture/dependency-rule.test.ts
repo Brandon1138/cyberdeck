@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 type Layer = "delivery" | "application" | "domain" | "infrastructure";
@@ -87,6 +88,33 @@ function layerFor(path: string): Layer {
   }
 }
 
+function expressionBodyStarts(source: string): ReadonlySet<number> {
+  const sourceFile = ts.createSourceFile(
+    "dependency-rule-source.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const starts = new Set<number>();
+
+  function visit(node: ts.Node): void {
+    if (
+      (ts.isFunctionExpression(node) || ts.isArrowFunction(node))
+      && ts.isBlock(node.body)
+    ) {
+      starts.add(node.body.getStart(sourceFile));
+    } else if (ts.isClassExpression(node)) {
+      const openingBrace = source.lastIndexOf("{", node.members.pos);
+      if (openingBrace >= node.getStart(sourceFile)) starts.add(openingBrace);
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return starts;
+}
+
 function withoutCommentsAndTemplates(source: string): string {
   let result = "";
   let state:
@@ -103,6 +131,7 @@ function withoutCommentsAndTemplates(source: string): string {
   const parenthesisContexts: Array<"expression" | "statement"> = [];
   const braceContexts: boolean[] = [];
   const regexAfterDelimiter = new Set<number>();
+  const expressionBodies = expressionBodyStarts(source);
 
   function previousSignificantIndex(index: number): number | undefined {
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
@@ -120,24 +149,9 @@ function withoutCommentsAndTemplates(source: string): string {
     return /^[A-Za-z_$]/.test(token) ? token : undefined;
   }
 
-  function closesFunctionExpression(index: number): boolean {
-    const recentPrefix = result.slice(Math.max(0, index - 256), index);
-    const header = /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\([^{};]*\)\s*$/.exec(
-      recentPrefix,
-    );
-    if (header === null) return false;
-
-    let context = recentPrefix.slice(0, header.index).trimEnd();
-    if (/\basync$/.test(context)) context = context.slice(0, -"async".length).trimEnd();
-    if (header[1] === undefined) return !/\bexport\s+default$/.test(context);
-    if (/\b(?:declare|export(?:\s+default)?)$/.test(context)) return false;
-    if (/\b(?:case\b[\s\S]*|default)\s*:$/.test(context)) return false;
-
-    const previousCharacter = context.at(-1);
-    return previousCharacter !== undefined && !";{}".includes(previousCharacter);
-  }
-
   function opensBlock(index: number): boolean {
+    if (expressionBodies.has(index)) return false;
+
     const previousIndex = previousSignificantIndex(index);
     const previousCharacter = previousIndex === undefined ? undefined : result[previousIndex];
     const token = previousToken(index);
@@ -146,7 +160,7 @@ function withoutCommentsAndTemplates(source: string): string {
     return previousCharacter === undefined
       || previousCharacter === ";"
       || previousCharacter === "}"
-      || (previousCharacter === ")" && !closesFunctionExpression(index))
+      || previousCharacter === ")"
       || /=>\s*$/.test(recentPrefix)
       || ["do", "else", "finally", "try"].includes(token ?? "")
       || /\b(?:class|enum|interface|module|namespace)\b[^{}]*$/.test(recentPrefix);
