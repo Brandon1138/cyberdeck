@@ -175,7 +175,10 @@ function withoutCommentsAndTemplates(source: string): string {
     const previousIndex = previousSignificantIndex(index);
     if (previousIndex !== undefined && regexAfterDelimiter.has(previousIndex)) return true;
     const previousCharacter = previousIndex === undefined ? undefined : result[previousIndex];
-    if (previousCharacter === "+" || previousCharacter === "-") {
+    if (
+      previousIndex !== undefined
+      && (previousCharacter === "+" || previousCharacter === "-")
+    ) {
       const firstOperatorIndex = previousSignificantIndex(previousIndex);
       const operandIndex = firstOperatorIndex === undefined
         ? undefined
