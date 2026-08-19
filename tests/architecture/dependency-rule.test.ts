@@ -702,6 +702,7 @@ describe("architecture dependency rule", () => {
     const source = `
       if (enabled) /import ("node:fs")/.test(text);
       if (enabled) {} /import ("node:child_process")/.test(text);
+      export default /import ("node:worker_threads")/;
       const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
       const objectQuotient = {} / import("./after-object.js") / divisor;
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
