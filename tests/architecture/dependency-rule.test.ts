@@ -100,9 +100,17 @@ function withoutCommentsAndTemplates(source: string): string {
     | "block" = "code";
   let regexCharacterClass = false;
   const templateExpressionDepths: number[] = [];
-  const parenthesisContexts: Array<"expression" | "statement"> = [];
-  const braceContexts: boolean[] = [];
+  const parenthesisContexts: Array<"expression" | "statement" | "switch"> = [];
+  const braceContexts: Array<{
+    opensRegexAfter: boolean;
+    switchBody: boolean;
+    pendingSwitchLabel: boolean;
+    switchLabelParenthesisDepth: number;
+    switchTernaryDepth: number;
+  }> = [];
   const regexAfterDelimiter = new Set<number>();
+  const switchHeaderClosers = new Set<number>();
+  const switchLabelColons = new Set<number>();
 
   function previousSignificantIndex(index: number): number | undefined {
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
@@ -120,7 +128,114 @@ function withoutCommentsAndTemplates(source: string): string {
     return /^[A-Za-z_$]/.test(token) ? token : undefined;
   }
 
+  function closesFunctionExpression(index: number): boolean {
+    if (/=>\s*$/.test(result.slice(Math.max(0, index - 256), index))) return true;
+
+    const previousIndex = previousSignificantIndex(index);
+    if (
+      previousIndex === undefined
+      || result[previousIndex] !== ")"
+      || regexAfterDelimiter.has(previousIndex)
+    ) {
+      return false;
+    }
+
+    let header: { index: number; name: string | undefined } | undefined;
+    for (
+      let candidateIndex = result.lastIndexOf("function", index);
+      candidateIndex >= 0;
+      candidateIndex = candidateIndex === 0
+        ? -1
+        : result.lastIndexOf("function", candidateIndex - 1)
+    ) {
+      if (
+        /[\w$]/.test(result[candidateIndex - 1] ?? "")
+        || /[\w$]/.test(result[candidateIndex + "function".length] ?? "")
+      ) {
+        continue;
+      }
+      const candidate = /^function\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\(/.exec(
+        result.slice(candidateIndex, index),
+      );
+      if (candidate === null) continue;
+
+      let depth = 0;
+      let quote: "'" | "\"" | undefined;
+      for (
+        let cursor = candidateIndex + candidate[0].length - 1;
+        cursor < index;
+        cursor += 1
+      ) {
+        const character = result[cursor]!;
+        if (quote !== undefined) {
+          if (character === "\\") cursor += 1;
+          else if (character === quote) quote = undefined;
+        } else if (character === "'" || character === "\"") {
+          quote = character;
+        } else if (character === "(") {
+          depth += 1;
+        } else if (character === ")") {
+          depth -= 1;
+          if (depth === 0 && /^\s*$/.test(result.slice(cursor + 1, index))) {
+            header = { index: candidateIndex, name: candidate[1] };
+            break;
+          }
+        }
+      }
+      if (header !== undefined) break;
+    }
+    if (header === undefined) return false;
+
+    const contextStart = Math.max(0, header.index - 256);
+    const beforeFunction = result.slice(contextStart, header.index);
+    const hasLineBreak = /[\r\n]/.test(/\s*$/.exec(beforeFunction)?.[0] ?? "");
+    let context = beforeFunction.trimEnd();
+    let functionStart = header.index;
+    const asyncModifier = /\basync\s*$/.exec(beforeFunction);
+    if (!hasLineBreak && asyncModifier !== null) {
+      context = context.slice(0, context.length - "async".length).trimEnd();
+      functionStart = contextStart + asyncModifier.index;
+    }
+    if (header.name === undefined) return !/\bexport\s+default$/.test(context);
+    if (/\b(?:declare|export(?:\s+default)?)$/.test(context)) return false;
+    const beforeFunctionIndex = previousSignificantIndex(functionStart);
+    if (
+      beforeFunctionIndex !== undefined
+      && (
+        switchLabelColons.has(beforeFunctionIndex)
+        || regexAfterDelimiter.has(beforeFunctionIndex)
+      )
+    ) {
+      return false;
+    }
+
+    const previousCharacter = context.at(-1);
+    if (hasLineBreak) {
+      if (/(?:\+\+|--|[\w$)\]}]!+)$/.test(context)) return false;
+      if (/\d\.$/.test(context)) return false;
+      if (previousCharacter === ">") {
+        let depth = 0;
+        for (let cursor = context.length - 1; cursor >= 0; cursor -= 1) {
+          if (context[cursor] === ">") {
+            depth += 1;
+          } else if (context[cursor] === "<") {
+            depth -= 1;
+            if (depth === 0) {
+              const operand = context.slice(0, cursor).trimEnd().at(-1);
+              if (operand !== undefined && /[\w$)\]}]/.test(operand)) return false;
+              break;
+            }
+          }
+        }
+      }
+      return previousCharacter !== undefined && "=([{,:!?&|+-*%^~<>.".includes(previousCharacter);
+    }
+    return previousCharacter !== undefined && !";{}".includes(previousCharacter);
+  }
+
   function opensBlock(index: number): boolean {
+    if (closesFunctionExpression(index)) return false;
+
     const previousIndex = previousSignificantIndex(index);
     const previousCharacter = previousIndex === undefined ? undefined : result[previousIndex];
     const token = previousToken(index);
@@ -130,7 +245,6 @@ function withoutCommentsAndTemplates(source: string): string {
       || previousCharacter === ";"
       || previousCharacter === "}"
       || previousCharacter === ")"
-      || /=>\s*$/.test(recentPrefix)
       || ["do", "else", "finally", "try"].includes(token ?? "")
       || /\b(?:class|enum|interface|module|namespace)\b[^{}]*$/.test(recentPrefix);
   }
@@ -268,7 +382,7 @@ function withoutCommentsAndTemplates(source: string): string {
         result += " ";
         regexCharacterClass = false;
       } else if (character === "/" && !regexCharacterClass) {
-        result += " ";
+        result += "0";
         while (/[A-Za-z]/.test(source[index + 1] ?? "")) {
           result += " ";
           index += 1;
@@ -319,22 +433,39 @@ function withoutCommentsAndTemplates(source: string): string {
       }
     } else if (character === "(") {
       result += character;
-      parenthesisContexts.push(
-        ["catch", "for", "if", "switch", "while", "with"].includes(previousToken(index) ?? "")
+      const token = previousToken(index);
+      parenthesisContexts.push(token === "switch"
+        ? "switch"
+        : ["catch", "for", "if", "while", "with"].includes(token ?? "")
           ? "statement"
-          : "expression",
-      );
+          : "expression");
     } else if (character === ")") {
       result += character;
-      if (parenthesisContexts.pop() === "statement") regexAfterDelimiter.add(index);
+      const context = parenthesisContexts.pop();
+      if (context === "statement" || context === "switch") regexAfterDelimiter.add(index);
+      if (context === "switch") switchHeaderClosers.add(index);
     } else if (character === "{" && templateExpressionDepths.length > 0) {
       result += character;
       const expressionIndex = templateExpressionDepths.length - 1;
       templateExpressionDepths[expressionIndex] = templateExpressionDepths[expressionIndex]! + 1;
-      braceContexts.push(opensBlock(index));
+      const previousIndex = previousSignificantIndex(index);
+      braceContexts.push({
+        opensRegexAfter: opensBlock(index),
+        switchBody: previousIndex !== undefined && switchHeaderClosers.has(previousIndex),
+        pendingSwitchLabel: false,
+        switchLabelParenthesisDepth: 0,
+        switchTernaryDepth: 0,
+      });
     } else if (character === "{") {
       result += character;
-      braceContexts.push(opensBlock(index));
+      const previousIndex = previousSignificantIndex(index);
+      braceContexts.push({
+        opensRegexAfter: opensBlock(index),
+        switchBody: previousIndex !== undefined && switchHeaderClosers.has(previousIndex),
+        pendingSwitchLabel: false,
+        switchLabelParenthesisDepth: 0,
+        switchTernaryDepth: 0,
+      });
     } else if (character === "}" && templateExpressionDepths.length > 0) {
       const expressionIndex = templateExpressionDepths.length - 1;
       if (templateExpressionDepths[expressionIndex] === 0) {
@@ -344,11 +475,62 @@ function withoutCommentsAndTemplates(source: string): string {
       } else {
         result += character;
         templateExpressionDepths[expressionIndex] = templateExpressionDepths[expressionIndex]! - 1;
-        if (braceContexts.pop() === true) regexAfterDelimiter.add(index);
+        if (braceContexts.pop()?.opensRegexAfter === true) regexAfterDelimiter.add(index);
       }
     } else if (character === "}") {
       result += character;
-      if (braceContexts.pop() === true) regexAfterDelimiter.add(index);
+      if (braceContexts.pop()?.opensRegexAfter === true) regexAfterDelimiter.add(index);
+    } else if (
+      source.startsWith("case", index)
+      && !/[\w$.]/.test(source[index - 1] ?? "")
+      && !/[\w$]/.test(source[index + "case".length] ?? "")
+      && braceContexts.at(-1)?.switchBody === true
+    ) {
+      const switchContext = braceContexts.at(-1)!;
+      switchContext.pendingSwitchLabel = true;
+      switchContext.switchLabelParenthesisDepth = parenthesisContexts.length;
+      switchContext.switchTernaryDepth = 0;
+      result += character;
+    } else if (
+      source.startsWith("default", index)
+      && !/[\w$.]/.test(source[index - 1] ?? "")
+      && !/[\w$]/.test(source[index + "default".length] ?? "")
+      && braceContexts.at(-1)?.switchBody === true
+      && braceContexts.at(-1)?.pendingSwitchLabel === false
+    ) {
+      let cursor = index + "default".length;
+      while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+      if (source[cursor] === ":") {
+        const switchContext = braceContexts.at(-1)!;
+        switchContext.pendingSwitchLabel = true;
+        switchContext.switchLabelParenthesisDepth = parenthesisContexts.length;
+      }
+      result += character;
+    } else if (
+      character === "?"
+      && source[index - 1] !== "?"
+      && next !== "."
+      && next !== "?"
+      && braceContexts.at(-1)?.pendingSwitchLabel === true
+      && parenthesisContexts.length
+        === braceContexts.at(-1)?.switchLabelParenthesisDepth
+    ) {
+      braceContexts.at(-1)!.switchTernaryDepth += 1;
+      result += character;
+    } else if (
+      character === ":"
+      && braceContexts.at(-1)?.pendingSwitchLabel === true
+      && parenthesisContexts.length
+        === braceContexts.at(-1)?.switchLabelParenthesisDepth
+    ) {
+      const switchContext = braceContexts.at(-1)!;
+      if (switchContext.switchTernaryDepth > 0) {
+        switchContext.switchTernaryDepth -= 1;
+      } else {
+        switchContext.pendingSwitchLabel = false;
+        switchLabelColons.add(index);
+      }
+      result += character;
     } else if (character === "/" && canStartRegexLiteral(index)) {
       result += " ";
       regexCharacterClass = false;
@@ -455,6 +637,15 @@ function skipTypeScriptAssertion(source: string, start: number): number {
   return start;
 }
 
+function skipTypeScriptPostfixAssertions(source: string, start: number): number {
+  let cursor = start;
+  while (source[cursor] === "!") {
+    cursor += 1;
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+  }
+  return skipTypeScriptAssertion(source, cursor);
+}
+
 function dynamicModuleSpecifiersFromSource(source: string): string[] {
   const specifiers: string[] = [];
 
@@ -509,7 +700,7 @@ function dynamicModuleSpecifiersFromSource(source: string): string[] {
     if (specifier === undefined) continue;
     cursor += 1;
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-    cursor = skipTypeScriptAssertion(source, cursor);
+    cursor = skipTypeScriptPostfixAssertions(source, cursor);
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
     while (wrapperParentheses > 0) {
       if (source[cursor] !== ")") continue scan;
@@ -743,6 +934,7 @@ describe("architecture dependency rule", () => {
       await import(\`./template-\${variableSpecifier}.js\`);
       await import((("./parenthesized.js")));
       await import("./asserted.js" as string);
+      await import("./non-null-asserted.js"!);
       const spread = { ... import("./spread.js") };
       const commentedSpread = { ... /* gap */ import("./commented-spread.js") };
       loader . import("./spaced-property.js");
@@ -755,6 +947,7 @@ describe("architecture dependency rule", () => {
       "./template-specifier.js",
       "./parenthesized.js",
       "./asserted.js",
+      "./non-null-asserted.js",
       "./spread.js",
       "./commented-spread.js",
     ]);
@@ -803,23 +996,65 @@ describe("architecture dependency rule", () => {
     const source = `
       if (enabled) /import ("node:fs")/.test(text);
       if (enabled) {} /import ("node:child_process")/.test(text);
+      if (enabled) function declaredAfterIf() {} /import ("node:fs")/.test(text);
       export default /import ("node:worker_threads")/;
       interface Marker {} /import ("node:fs")/.test(text);
       enum Markers {} /import ("node:child_process")/.test(text);
       namespace MarkerSpace {} /import ("node:worker_threads")/.test(text);
+      switch (marker) { case 1: function declared() {} /import ("node:fs")/.test(text); }
+      switch (marker) { case 2: async function declaredAsync() {} /import ("node:fs")/.test(text); }
+      switch (marker) { case ((value: number) => value)(3): function declaredAfterTypedCase() {} /import ("node:fs")/.test(text); }
+      switch (marker) { case select(marker.case): function declaredAfterMemberCase() {} /import ("node:fs")/.test(text); }
+      switch (marker) { case 4: const ternary = marker ? 1 : function named() {} / (await import("./after-switch-ternary.js")).value; }
+      const asiMarker = 1
+      function asiDeclared() {} /import ("node:fs")/.test(text);
+      asiMarker++
+      function postfixDeclared() {} /import ("node:fs")/.test(text);
+      asiMarker!
+      function nonNullDeclared() {} /import ("node:fs")/.test(text);
+      value = async
+      function afterAsyncIdentifier() {} /import ("node:fs")/.test(text);
+      const decimalAsiMarker = 1.
+      function afterDecimal() {} /import ("node:fs")/.test(text);
+      const regexAsiMarker = /done/
+      function afterRegex() {} /import ("node:fs")/.test(text);
+      generic<string>
+      function afterInstantiation() {} /import ("node:fs")/.test(text);
       const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
       const objectQuotient = {} / import("./after-object.js") / divisor;
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
       const nonNullQuotient = value! / (await import("./after-non-null.js")).value;
       const templateQuotient = <any>\`2\` / (await import("./after-template.js")).value;
+      const functionQuotient = <any>function () {} / (await import("./after-function.js")).value;
+      const structuredFunctionQuotient = <any>function ({ value }: { value: number }) {} / (await import("./after-structured-function.js")).value;
+      const defaultProperty = { default: function named() {} / (await import("./after-default-property.js")).value };
     `;
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
+      "./after-switch-ternary.js",
       "./after-parenthesis.js",
       "./after-object.js",
       "./after-postfix.js",
       "./after-non-null.js",
       "./after-template.js",
+      "./after-function.js",
+      "./after-structured-function.js",
+      "./after-default-property.js",
+    ]);
+  });
+
+  it("finds imports after function-expression headers longer than the lookback context", () => {
+    const fields = Array.from(
+      { length: 32 },
+      (_, index) => `field${index}: number`,
+    ).join("; ");
+    const source = `
+      const quotient = function (value: { ${fields} }) {}
+        / (await import("./after-long-function.js")).value;
+    `;
+
+    expect(staticModuleSpecifiersFromSource(source)).toEqual([
+      "./after-long-function.js",
     ]);
   });
 
