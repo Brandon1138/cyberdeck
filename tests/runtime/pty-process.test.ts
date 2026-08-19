@@ -74,6 +74,60 @@ describe("PtyProcess", () => {
     expect(largeReplayNs).toBeLessThan(Math.max(smallReplayNs * 8, 5_000));
   });
 
+  it("isolates replay from synchronous listener mutation", async () => {
+    const process = new PtyProcess(
+      {
+        executable: globalThis.process.execPath,
+        args: [fixturePath],
+        cwd: "/tmp",
+        env: { ...globalThis.process.env },
+      },
+      16 * 1024,
+    );
+
+    try {
+      await waitForOutput(process, "READY");
+      const echo = waitForOutput(process, "ECHO:mutate-now");
+      const unsubscribe = process.onOutput((chunk) => chunk.fill(0));
+      process.write(Buffer.from("mutate-now\n"));
+      await echo;
+      unsubscribe();
+
+      expect(process.snapshot().toString("utf8")).toContain("ECHO:mutate-now");
+    } finally {
+      process.kill();
+    }
+  });
+
+  it("isolates replay from later mutation of listener-retained buffers", async () => {
+    const process = new PtyProcess(
+      {
+        executable: globalThis.process.execPath,
+        args: [fixturePath],
+        cwd: "/tmp",
+        env: { ...globalThis.process.env },
+      },
+      16 * 1024,
+    );
+
+    try {
+      await waitForOutput(process, "READY");
+      const retained: Buffer[] = [];
+      const echo = waitForOutput(process, "ECHO:mutate-later");
+      const unsubscribe = process.onOutput((chunk) => retained.push(chunk));
+      process.write(Buffer.from("mutate-later\n"));
+      await echo;
+      unsubscribe();
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      for (const chunk of retained) chunk.fill(0);
+
+      expect(process.snapshot().toString("utf8")).toContain("ECHO:mutate-later");
+    } finally {
+      process.kill();
+    }
+  });
+
   it("keeps working without listeners and retains replay output", async () => {
     const process = new PtyProcess(
       {

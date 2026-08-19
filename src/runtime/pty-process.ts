@@ -22,7 +22,7 @@ export class PtyReplayBuffer {
   append(data: Buffer): void {
     if (data.length === 0 || this.capacity <= 0) return;
 
-    const chunk: ReplayChunk = { data };
+    const chunk: ReplayChunk = { data: Buffer.from(data) };
     if (this.tail) {
       this.tail.next = chunk;
     } else {
