@@ -703,11 +703,13 @@ describe("architecture dependency rule", () => {
     const source = [
       'const marker = 1; import "../runtime/side-effect.js";',
       'const lookalike = \'; import "node:fs";\';',
+      'import { "a;b" as named } from "../runtime/string-named.js";',
       'function marker() {} export { marker } from "../runtime/exported.js";',
     ].join("\n");
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
       "../runtime/side-effect.js",
+      "../runtime/string-named.js",
       "../runtime/exported.js",
     ]);
   });
@@ -744,12 +746,14 @@ describe("architecture dependency rule", () => {
       const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
       const objectQuotient = {} / import("./after-object.js") / divisor;
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
+      const nonNullQuotient = value! / (await import("./after-non-null.js")).value;
     `;
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
       "./after-parenthesis.js",
       "./after-object.js",
       "./after-postfix.js",
+      "./after-non-null.js",
     ]);
   });
 
