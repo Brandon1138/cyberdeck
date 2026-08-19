@@ -199,7 +199,15 @@ function withoutCommentsAndTemplates(source: string): string {
     if (header.name === undefined) return !/\bexport\s+default$/.test(context);
     if (/\b(?:declare|export(?:\s+default)?)$/.test(context)) return false;
     const beforeFunctionIndex = previousSignificantIndex(functionStart);
-    if (beforeFunctionIndex !== undefined && switchLabelColons.has(beforeFunctionIndex)) return false;
+    if (
+      beforeFunctionIndex !== undefined
+      && (
+        switchLabelColons.has(beforeFunctionIndex)
+        || regexAfterDelimiter.has(beforeFunctionIndex)
+      )
+    ) {
+      return false;
+    }
 
     const previousCharacter = context.at(-1);
     if (hasLineBreak) {
@@ -988,6 +996,7 @@ describe("architecture dependency rule", () => {
     const source = `
       if (enabled) /import ("node:fs")/.test(text);
       if (enabled) {} /import ("node:child_process")/.test(text);
+      if (enabled) function declaredAfterIf() {} /import ("node:fs")/.test(text);
       export default /import ("node:worker_threads")/;
       interface Marker {} /import ("node:fs")/.test(text);
       enum Markers {} /import ("node:child_process")/.test(text);
