@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 type Layer = "delivery" | "application" | "domain" | "infrastructure";
@@ -87,202 +88,57 @@ function layerFor(path: string): Layer {
   }
 }
 
-function withoutCommentsAndTemplates(source: string): string {
-  let result = "";
-  let state: "code" | "single" | "double" | "template" | "regex" | "line" | "block" = "code";
-  let regexCharacterClass = false;
+function staticModuleSpecifiersFromSource(source: string): string[] {
+  const sourceFile = ts.createSourceFile(
+    "dependency-rule-source.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const sideEffectImports: string[] = [];
+  const importsFrom: string[] = [];
+  const importEquals: string[] = [];
+  const exportsFrom: string[] = [];
+  const dynamicImports: string[] = [];
 
-  function canStartRegexLiteral(index: number): boolean {
-    const prefix = source.slice(0, index);
-    const previousToken = prefix.match(/(?:^|\s)([A-Za-z_$][\w$]*)\s*$/)?.[1];
-    if (
-      previousToken
-      && [
-        "await",
-        "case",
-        "delete",
-        "do",
-        "else",
-        "in",
-        "instanceof",
-        "of",
-        "return",
-        "throw",
-        "typeof",
-        "void",
-        "yield",
-      ].includes(previousToken)
+  function stringLiteralText(node: ts.Node | undefined): string | undefined {
+    return node !== undefined && ts.isStringLiteralLike(node) ? node.text : undefined;
+  }
+
+  function visit(node: ts.Node): void {
+    if (ts.isImportDeclaration(node)) {
+      const specifier = stringLiteralText(node.moduleSpecifier);
+      if (specifier !== undefined) {
+        (node.importClause === undefined ? sideEffectImports : importsFrom).push(specifier);
+      }
+    } else if (
+      ts.isImportEqualsDeclaration(node)
+      && ts.isExternalModuleReference(node.moduleReference)
     ) {
-      return true;
-    }
-
-    const previousCharacter = prefix.match(/\S\s*$/)?.[0].trim();
-    return previousCharacter === undefined || "([{:;,=!?&|+-*%^~<>".includes(previousCharacter);
-  }
-
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index]!;
-    const next = source[index + 1];
-
-    if (state === "line") {
-      if (character === "\n") {
-        result += character;
-        state = "code";
-      } else {
-        result += " ";
-      }
-      continue;
-    }
-
-    if (state === "block") {
-      if (character === "*" && next === "/") {
-        result += "  ";
-        index += 1;
-        state = "code";
-      } else {
-        result += character === "\n" ? "\n" : " ";
-      }
-      continue;
-    }
-
-    if (state === "template") {
-      if (character === "\\" && next !== undefined) {
-        result += next === "\n" ? " \n" : "  ";
-        index += 1;
-      } else if (character === "`") {
-        result += " ";
-        state = "code";
-      } else {
-        result += character === "\n" ? "\n" : " ";
-      }
-      continue;
-    }
-
-    if (state === "regex") {
-      if (character === "\\" && next !== undefined) {
-        result += next === "\n" ? " \n" : "  ";
-        index += 1;
-      } else if (character === "[") {
-        result += " ";
-        regexCharacterClass = true;
-      } else if (character === "]") {
-        result += " ";
-        regexCharacterClass = false;
-      } else if (character === "/" && !regexCharacterClass) {
-        result += " ";
-        while (/[A-Za-z]/.test(source[index + 1] ?? "")) {
-          result += " ";
-          index += 1;
-        }
-        state = "code";
-      } else {
-        result += character === "\n" ? "\n" : " ";
-        if (character === "\n") state = "code";
-      }
-      continue;
-    }
-
-    if (state === "single" || state === "double") {
-      result += character;
-      if (character === "\\" && next !== undefined) {
-        result += next;
-        index += 1;
-      } else if (
-        (state === "single" && character === "'")
-        || (state === "double" && character === "\"")
-      ) {
-        state = "code";
-      }
-      continue;
-    }
-
-    if (character === "/" && next === "/") {
-      result += "  ";
-      index += 1;
-      state = "line";
-    } else if (character === "/" && next === "*") {
-      result += "  ";
-      index += 1;
-      state = "block";
-    } else if (character === "'") {
-      result += character;
-      state = "single";
-    } else if (character === "\"") {
-      result += character;
-      state = "double";
-    } else if (character === "`") {
-      result += " ";
-      state = "template";
-    } else if (character === "/" && canStartRegexLiteral(index)) {
-      result += " ";
-      regexCharacterClass = false;
-      state = "regex";
-    } else {
-      result += character;
-    }
-  }
-
-  return result;
-}
-
-function dynamicModuleSpecifiersFromSource(source: string): string[] {
-  const specifiers: string[] = [];
-
-  for (let index = 0; index < source.length; index += 1) {
-    const quote = source[index];
-    if (quote === "'" || quote === "\"") {
-      for (index += 1; index < source.length; index += 1) {
-        if (source[index] === "\\") index += 1;
-        else if (source[index] === quote) break;
-      }
-      continue;
-    }
-
-    if (
-      !source.startsWith("import", index)
-      || /[\w$.]/.test(source[index - 1] ?? "")
-      || /[\w$]/.test(source[index + "import".length] ?? "")
+      const specifier = stringLiteralText(node.moduleReference.expression);
+      if (specifier !== undefined) importEquals.push(specifier);
+    } else if (ts.isExportDeclaration(node)) {
+      const specifier = stringLiteralText(node.moduleSpecifier);
+      if (specifier !== undefined) exportsFrom.push(specifier);
+    } else if (
+      ts.isCallExpression(node)
+      && node.expression.kind === ts.SyntaxKind.ImportKeyword
     ) {
-      continue;
+      const specifier = stringLiteralText(node.arguments[0]);
+      if (specifier !== undefined) dynamicImports.push(specifier);
     }
 
-    let cursor = index + "import".length;
-    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-    if (source[cursor] !== "(") continue;
-    cursor += 1;
-    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-
-    const specifierQuote = source[cursor];
-    if (specifierQuote !== "'" && specifierQuote !== "\"") continue;
-    const specifierStart = cursor + 1;
-    cursor = specifierStart;
-    while (cursor < source.length && source[cursor] !== specifierQuote) {
-      if (source[cursor] === "\\") cursor += 1;
-      cursor += 1;
-    }
-    if (source[cursor] !== specifierQuote) continue;
-
-    const specifier = source.slice(specifierStart, cursor);
-    cursor += 1;
-    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-    if (source[cursor] === ")") specifiers.push(specifier);
+    ts.forEachChild(node, visit);
   }
 
-  return specifiers;
-}
-
-function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
-  const source = withoutCommentsAndTemplates(unprocessedSource);
-  const patterns = [
-    /^[ \t]*import\s*["']([^"'\r\n]+)["']/gm,
-    /^[ \t]*import\s+(?:type\s+)?[^;]*?\s+from\s*["']([^"'\r\n]+)["']/gm,
-    /^[ \t]*import\s+[^;]*?=\s*require\s*\(\s*["']([^"'\r\n]+)["']/gm,
-    /^[ \t]*export\s+(?:type\s+)?(?:\*|\{)[^;]*?\s+from\s*["']([^"'\r\n]+)["']/gm,
-  ];
-
+  visit(sourceFile);
   return [
-    ...patterns.flatMap((pattern) => [...source.matchAll(pattern)].map((match) => match[1]!)),
-    ...dynamicModuleSpecifiersFromSource(source),
+    ...sideEffectImports,
+    ...importsFrom,
+    ...importEquals,
+    ...exportsFrom,
+    ...dynamicImports,
   ];
 }
 
