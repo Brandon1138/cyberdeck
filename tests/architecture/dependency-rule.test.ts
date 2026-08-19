@@ -609,7 +609,9 @@ function declarationModuleSpecifiersFromSource(source: string): {
 function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
   const source = withoutCommentsAndTemplates(unprocessedSource);
   const importEquals = declarationModuleSpecifiersFromSource(source).importEquals;
-  const lexedSource = stripTypeScriptTypes(unprocessedSource, { mode: "transform" });
+  const lexedSource = stripTypeScriptTypes(unprocessedSource, {
+    mode: "transform" as "strip",
+  });
   const sideEffectImports: string[] = [];
   const importsFrom: string[] = [];
   const exportsFrom: string[] = [];
