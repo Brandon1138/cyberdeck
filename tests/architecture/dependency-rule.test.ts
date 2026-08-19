@@ -1,7 +1,6 @@
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 type Layer = "delivery" | "application" | "domain" | "infrastructure";
@@ -88,33 +87,6 @@ function layerFor(path: string): Layer {
   }
 }
 
-function expressionBodyStarts(source: string): ReadonlySet<number> {
-  const sourceFile = ts.createSourceFile(
-    "dependency-rule-source.ts",
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  const starts = new Set<number>();
-
-  function visit(node: ts.Node): void {
-    if (
-      (ts.isFunctionExpression(node) || ts.isArrowFunction(node))
-      && ts.isBlock(node.body)
-    ) {
-      starts.add(node.body.getStart(sourceFile));
-    } else if (ts.isClassExpression(node)) {
-      const openingBrace = source.lastIndexOf("{", node.members.pos);
-      if (openingBrace >= node.getStart(sourceFile)) starts.add(openingBrace);
-    }
-    ts.forEachChild(node, visit);
-  }
-
-  visit(sourceFile);
-  return starts;
-}
-
 function withoutCommentsAndTemplates(source: string): string {
   let result = "";
   let state:
@@ -128,10 +100,10 @@ function withoutCommentsAndTemplates(source: string): string {
     | "block" = "code";
   let regexCharacterClass = false;
   const templateExpressionDepths: number[] = [];
-  const parenthesisContexts: Array<"expression" | "statement"> = [];
-  const braceContexts: boolean[] = [];
+  const parenthesisContexts: Array<"expression" | "statement" | "switch"> = [];
+  const braceContexts: Array<{ opensRegexAfter: boolean; switchBody: boolean }> = [];
   const regexAfterDelimiter = new Set<number>();
-  const expressionBodies = expressionBodyStarts(source);
+  const switchHeaderClosers = new Set<number>();
 
   function previousSignificantIndex(index: number): number | undefined {
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
@@ -149,8 +121,39 @@ function withoutCommentsAndTemplates(source: string): string {
     return /^[A-Za-z_$]/.test(token) ? token : undefined;
   }
 
+  function closesFunctionExpression(index: number): boolean {
+    const recentPrefix = result.slice(Math.max(0, index - 256), index);
+    if (/=>\s*$/.test(recentPrefix)) return true;
+
+    const header = /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\([^{};]*\)\s*$/.exec(
+      recentPrefix,
+    );
+    if (header === null) return false;
+
+    const beforeFunction = recentPrefix.slice(0, header.index);
+    const hasLineBreak = /[\r\n]/.test(/\s*$/.exec(beforeFunction)?.[0] ?? "");
+    let context = beforeFunction.trimEnd();
+    if (/\basync$/.test(context)) {
+      context = context.slice(0, context.length - "async".length).trimEnd();
+    }
+    if (header[1] === undefined) return !/\bexport\s+default$/.test(context);
+    if (/\b(?:declare|export(?:\s+default)?)$/.test(context)) return false;
+    if (
+      braceContexts.at(-1)?.switchBody === true
+      && /\b(?:case\b[\s\S]*|default)\s*:$/.test(context)
+    ) {
+      return false;
+    }
+
+    const previousCharacter = context.at(-1);
+    if (hasLineBreak) {
+      return previousCharacter !== undefined && "=([{,:!?&|+-*%^~<>.".includes(previousCharacter);
+    }
+    return previousCharacter !== undefined && !";{}".includes(previousCharacter);
+  }
+
   function opensBlock(index: number): boolean {
-    if (expressionBodies.has(index)) return false;
+    if (closesFunctionExpression(index)) return false;
 
     const previousIndex = previousSignificantIndex(index);
     const previousCharacter = previousIndex === undefined ? undefined : result[previousIndex];
@@ -161,7 +164,6 @@ function withoutCommentsAndTemplates(source: string): string {
       || previousCharacter === ";"
       || previousCharacter === "}"
       || previousCharacter === ")"
-      || /=>\s*$/.test(recentPrefix)
       || ["do", "else", "finally", "try"].includes(token ?? "")
       || /\b(?:class|enum|interface|module|namespace)\b[^{}]*$/.test(recentPrefix);
   }
@@ -350,22 +352,33 @@ function withoutCommentsAndTemplates(source: string): string {
       }
     } else if (character === "(") {
       result += character;
-      parenthesisContexts.push(
-        ["catch", "for", "if", "switch", "while", "with"].includes(previousToken(index) ?? "")
+      const token = previousToken(index);
+      parenthesisContexts.push(token === "switch"
+        ? "switch"
+        : ["catch", "for", "if", "while", "with"].includes(token ?? "")
           ? "statement"
-          : "expression",
-      );
+          : "expression");
     } else if (character === ")") {
       result += character;
-      if (parenthesisContexts.pop() === "statement") regexAfterDelimiter.add(index);
+      const context = parenthesisContexts.pop();
+      if (context === "statement" || context === "switch") regexAfterDelimiter.add(index);
+      if (context === "switch") switchHeaderClosers.add(index);
     } else if (character === "{" && templateExpressionDepths.length > 0) {
       result += character;
       const expressionIndex = templateExpressionDepths.length - 1;
       templateExpressionDepths[expressionIndex] = templateExpressionDepths[expressionIndex]! + 1;
-      braceContexts.push(opensBlock(index));
+      const previousIndex = previousSignificantIndex(index);
+      braceContexts.push({
+        opensRegexAfter: opensBlock(index),
+        switchBody: previousIndex !== undefined && switchHeaderClosers.has(previousIndex),
+      });
     } else if (character === "{") {
       result += character;
-      braceContexts.push(opensBlock(index));
+      const previousIndex = previousSignificantIndex(index);
+      braceContexts.push({
+        opensRegexAfter: opensBlock(index),
+        switchBody: previousIndex !== undefined && switchHeaderClosers.has(previousIndex),
+      });
     } else if (character === "}" && templateExpressionDepths.length > 0) {
       const expressionIndex = templateExpressionDepths.length - 1;
       if (templateExpressionDepths[expressionIndex] === 0) {
@@ -375,11 +388,11 @@ function withoutCommentsAndTemplates(source: string): string {
       } else {
         result += character;
         templateExpressionDepths[expressionIndex] = templateExpressionDepths[expressionIndex]! - 1;
-        if (braceContexts.pop() === true) regexAfterDelimiter.add(index);
+        if (braceContexts.pop()?.opensRegexAfter === true) regexAfterDelimiter.add(index);
       }
     } else if (character === "}") {
       result += character;
-      if (braceContexts.pop() === true) regexAfterDelimiter.add(index);
+      if (braceContexts.pop()?.opensRegexAfter === true) regexAfterDelimiter.add(index);
     } else if (character === "/" && canStartRegexLiteral(index)) {
       result += " ";
       regexCharacterClass = false;
