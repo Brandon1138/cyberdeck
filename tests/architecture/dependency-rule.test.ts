@@ -740,6 +740,8 @@ describe("architecture dependency rule", () => {
       await import(\`./template-\${variableSpecifier}.js\`);
       await import((("./parenthesized.js")));
       await import("./asserted.js" as string);
+      const spread = { ... import("./spread.js") };
+      const commentedSpread = { ... /* gap */ import("./commented-spread.js") };
       loader . import("./spaced-property.js");
       loader./* gap */import("./commented-property.js");
     `;
@@ -750,6 +752,8 @@ describe("architecture dependency rule", () => {
       "./template-specifier.js",
       "./parenthesized.js",
       "./asserted.js",
+      "./spread.js",
+      "./commented-spread.js",
     ]);
   });
 
