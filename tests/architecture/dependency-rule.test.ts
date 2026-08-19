@@ -101,9 +101,15 @@ function withoutCommentsAndTemplates(source: string): string {
   let regexCharacterClass = false;
   const templateExpressionDepths: number[] = [];
   const parenthesisContexts: Array<"expression" | "statement" | "switch"> = [];
-  const braceContexts: Array<{ opensRegexAfter: boolean; switchBody: boolean }> = [];
+  const braceContexts: Array<{
+    opensRegexAfter: boolean;
+    switchBody: boolean;
+    pendingSwitchLabel: boolean;
+    switchTernaryDepth: number;
+  }> = [];
   const regexAfterDelimiter = new Set<number>();
   const switchHeaderClosers = new Set<number>();
+  const switchLabelColons = new Set<number>();
 
   function previousSignificantIndex(index: number): number | undefined {
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
@@ -138,16 +144,15 @@ function withoutCommentsAndTemplates(source: string): string {
     }
     if (header[1] === undefined) return !/\bexport\s+default$/.test(context);
     if (/\b(?:declare|export(?:\s+default)?)$/.test(context)) return false;
-    if (
-      braceContexts.at(-1)?.switchBody === true
-      && /\b(?:case\b[\s\S]*|default)\s*:$/.test(context)
-    ) {
-      return false;
-    }
+    const prefixStart = Math.max(0, index - 256);
+    const functionIndex = prefixStart + header.index;
+    const beforeFunctionIndex = previousSignificantIndex(functionIndex);
+    if (beforeFunctionIndex !== undefined && switchLabelColons.has(beforeFunctionIndex)) return false;
 
     const previousCharacter = context.at(-1);
     if (hasLineBreak) {
       if (/(?:\+\+|--|[\w$)\]}]!+)$/.test(context)) return false;
+      if (/\d\.$/.test(context)) return false;
       return previousCharacter !== undefined && "=([{,:!?&|+-*%^~<>.".includes(previousCharacter);
     }
     return previousCharacter !== undefined && !";{}".includes(previousCharacter);
@@ -372,6 +377,8 @@ function withoutCommentsAndTemplates(source: string): string {
       braceContexts.push({
         opensRegexAfter: opensBlock(index),
         switchBody: previousIndex !== undefined && switchHeaderClosers.has(previousIndex),
+        pendingSwitchLabel: false,
+        switchTernaryDepth: 0,
       });
     } else if (character === "{") {
       result += character;
@@ -379,6 +386,8 @@ function withoutCommentsAndTemplates(source: string): string {
       braceContexts.push({
         opensRegexAfter: opensBlock(index),
         switchBody: previousIndex !== undefined && switchHeaderClosers.has(previousIndex),
+        pendingSwitchLabel: false,
+        switchTernaryDepth: 0,
       });
     } else if (character === "}" && templateExpressionDepths.length > 0) {
       const expressionIndex = templateExpressionDepths.length - 1;
@@ -394,6 +403,45 @@ function withoutCommentsAndTemplates(source: string): string {
     } else if (character === "}") {
       result += character;
       if (braceContexts.pop()?.opensRegexAfter === true) regexAfterDelimiter.add(index);
+    } else if (
+      source.startsWith("case", index)
+      && !/[\w$]/.test(source[index - 1] ?? "")
+      && !/[\w$]/.test(source[index + "case".length] ?? "")
+      && braceContexts.at(-1)?.switchBody === true
+    ) {
+      const switchContext = braceContexts.at(-1)!;
+      switchContext.pendingSwitchLabel = true;
+      switchContext.switchTernaryDepth = 0;
+      result += character;
+    } else if (
+      source.startsWith("default", index)
+      && !/[\w$.]/.test(source[index - 1] ?? "")
+      && !/[\w$]/.test(source[index + "default".length] ?? "")
+      && braceContexts.at(-1)?.switchBody === true
+      && braceContexts.at(-1)?.pendingSwitchLabel === false
+    ) {
+      let cursor = index + "default".length;
+      while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+      if (source[cursor] === ":") braceContexts.at(-1)!.pendingSwitchLabel = true;
+      result += character;
+    } else if (
+      character === "?"
+      && source[index - 1] !== "?"
+      && next !== "."
+      && next !== "?"
+      && braceContexts.at(-1)?.pendingSwitchLabel === true
+    ) {
+      braceContexts.at(-1)!.switchTernaryDepth += 1;
+      result += character;
+    } else if (character === ":" && braceContexts.at(-1)?.pendingSwitchLabel === true) {
+      const switchContext = braceContexts.at(-1)!;
+      if (switchContext.switchTernaryDepth > 0) {
+        switchContext.switchTernaryDepth -= 1;
+      } else {
+        switchContext.pendingSwitchLabel = false;
+        switchLabelColons.add(index);
+      }
+      result += character;
     } else if (character === "/" && canStartRegexLiteral(index)) {
       result += " ";
       regexCharacterClass = false;
