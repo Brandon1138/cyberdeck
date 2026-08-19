@@ -609,11 +609,7 @@ function declarationModuleSpecifiersFromSource(source: string): {
 function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
   const source = withoutCommentsAndTemplates(unprocessedSource);
   const importEquals = declarationModuleSpecifiersFromSource(source).importEquals;
-  const erasableSource = unprocessedSource.replace(
-    /^(\s*(?:(?:export|declare)\s+)*)(enum|module|namespace)\b/gm,
-    (_match, prefix: string, keyword: string) => `${prefix}${"class".padEnd(keyword.length)}`,
-  );
-  const lexedSource = stripTypeScriptTypes(erasableSource, { mode: "strip" });
+  const lexedSource = stripTypeScriptTypes(unprocessedSource, { mode: "transform" });
   const sideEffectImports: string[] = [];
   const importsFrom: string[] = [];
   const exportsFrom: string[] = [];
@@ -621,15 +617,15 @@ function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
 
   for (const imported of parse(lexedSource)[0]) {
     if (imported.d >= 0) {
-      const importExpression = unprocessedSource.slice(imported.ss, imported.se);
+      const importExpression = lexedSource.slice(imported.ss, imported.se);
       if (importExpression.includes("`") && importExpression.includes("${")) continue;
-      const specifier = imported.n ?? dynamicModuleSpecifierAt(unprocessedSource, imported.s);
+      const specifier = imported.n ?? dynamicModuleSpecifierAt(lexedSource, imported.s);
       if (specifier !== undefined) dynamicImports.push({ index: imported.ss, specifier });
       continue;
     }
     if (imported.d !== -1 || imported.n === undefined) continue;
 
-    const statement = unprocessedSource.slice(imported.ss, imported.se);
+    const statement = lexedSource.slice(imported.ss, imported.se);
     if (/^\s*export\b/.test(statement)) {
       exportsFrom.push(imported.n);
     } else if (/^\s*import\s*["'`]/.test(statement)) {
@@ -640,10 +636,16 @@ function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
   }
 
   const spreadImport = /\.\.\.\s*import\s*\(/g;
-  for (let match = spreadImport.exec(source); match !== null; match = spreadImport.exec(source)) {
-    const specifier = dynamicModuleSpecifierAt(unprocessedSource, match.index + match[0].length);
-    if (specifier !== undefined && !dynamicImports.some((entry) => entry.index === match.index)) {
-      dynamicImports.push({ index: match.index, specifier });
+  for (let match = spreadImport.exec(lexedSource); match !== null; match = spreadImport.exec(lexedSource)) {
+    const specifier = dynamicModuleSpecifierAt(lexedSource, match.index + match[0].length);
+    const importIndex = match.index + match[0].lastIndexOf("import");
+    if (
+      specifier !== undefined
+      && !dynamicImports.some(
+        (entry) => entry.index === importIndex && entry.specifier === specifier,
+      )
+    ) {
+      dynamicImports.push({ index: importIndex, specifier });
     }
   }
 
