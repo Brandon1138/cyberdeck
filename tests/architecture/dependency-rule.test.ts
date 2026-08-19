@@ -193,6 +193,13 @@ function withoutCommentsAndTemplates(source: string): string {
         return false;
       }
     }
+    if (previousIndex !== undefined && previousCharacter === "!") {
+      let operandIndex = previousSignificantIndex(previousIndex);
+      while (operandIndex !== undefined && result[operandIndex] === "!") {
+        operandIndex = previousSignificantIndex(operandIndex);
+      }
+      if (operandIndex !== undefined && /[\w$)\]}]/.test(result[operandIndex]!)) return false;
+    }
     return previousCharacter === undefined || "([{:;,=!?&|+-*%^~<>".includes(previousCharacter);
   }
 
@@ -509,6 +516,46 @@ function dynamicModuleSpecifiersFromSource(source: string): string[] {
   return specifiers;
 }
 
+function quotedLiteralEnd(source: string, start: number): number | undefined {
+  const quote = source[start];
+  if (quote !== "'" && quote !== "\"") return undefined;
+
+  for (let cursor = start + 1; cursor < source.length; cursor += 1) {
+    if (source[cursor] === "\\") cursor += 1;
+    else if (source[cursor] === quote) return cursor;
+    else if (source[cursor] === "\n" || source[cursor] === "\r") return undefined;
+  }
+  return undefined;
+}
+
+function quotedModuleSpecifierAt(source: string, start: number): string | undefined {
+  const end = quotedLiteralEnd(source, start);
+  return end === undefined
+    ? undefined
+    : decodeModuleSpecifier(source.slice(start + 1, end));
+}
+
+function moduleSpecifierAfterFrom(source: string, start: number): string | undefined {
+  for (let cursor = start; cursor < source.length; cursor += 1) {
+    const quoteEnd = quotedLiteralEnd(source, cursor);
+    if (quoteEnd !== undefined) {
+      cursor = quoteEnd;
+      continue;
+    }
+    if (source[cursor] === ";") return undefined;
+    if (
+      source.startsWith("from", cursor)
+      && !/[\w$]/.test(source[cursor - 1] ?? "")
+      && !/[\w$]/.test(source[cursor + "from".length] ?? "")
+    ) {
+      cursor += "from".length;
+      while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+      return quotedModuleSpecifierAt(source, cursor);
+    }
+  }
+  return undefined;
+}
+
 function declarationModuleSpecifiersFromSource(source: string): {
   sideEffectImports: string[];
   importsFrom: string[];
@@ -537,20 +584,23 @@ function declarationModuleSpecifiersFromSource(source: string): {
       && !/[\w$]/.test(source[index + "import".length] ?? "")
     ) {
       const candidate = source.slice(index);
-      const matches = [
-        candidate.match(/^import\s*(["'])((?:\\(?:\r\n|[\s\S])|(?!\1)[^\\\r\n])*)\1/),
-        candidate.match(
-          /^import\s+(?:type\s+)?[^;]*?\s+from\s*(["'])((?:\\(?:\r\n|[\s\S])|(?!\1)[^\\\r\n])*)\1/,
-        ),
-        candidate.match(
-          /^import\s+[^;]*?=\s*require\s*\(\s*(["'])((?:\\(?:\r\n|[\s\S])|(?!\1)[^\\\r\n])*)\1/,
-        ),
-      ];
-      const target = matches.findIndex((match) => match !== null);
-      if (target !== -1) {
-        const specifier = decodeModuleSpecifier(matches[target]![2]!);
-        if (specifier !== undefined) {
-          [sideEffectImports, importsFrom, importEquals][target]!.push(specifier);
+      let cursor = index + "import".length;
+      while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+      const sideEffectSpecifier = quotedModuleSpecifierAt(source, cursor);
+      if (sideEffectSpecifier !== undefined) {
+        sideEffectImports.push(sideEffectSpecifier);
+      } else {
+        const fromSpecifier = moduleSpecifierAfterFrom(source, cursor);
+        if (fromSpecifier !== undefined) {
+          importsFrom.push(fromSpecifier);
+        } else {
+          const match = candidate.match(
+            /^import\s+[^;]*?=\s*require\s*\(\s*(["'])((?:\\(?:\r\n|[\s\S])|(?!\1)[^\\\r\n])*)\1/,
+          );
+          if (match !== null) {
+            const specifier = decodeModuleSpecifier(match[2]!);
+            if (specifier !== undefined) importEquals.push(specifier);
+          }
         }
       }
     } else if (
@@ -558,11 +608,9 @@ function declarationModuleSpecifiersFromSource(source: string): {
       && !/[\w$.]/.test(previous)
       && !/[\w$]/.test(source[index + "export".length] ?? "")
     ) {
-      const match = source.slice(index).match(
-        /^export\s+(?:type\s+)?(?:\*|\{)[^;]*?\s+from\s*(["'])((?:\\(?:\r\n|[\s\S])|(?!\1)[^\\\r\n])*)\1/,
-      );
-      if (match !== null) {
-        const specifier = decodeModuleSpecifier(match[2]!);
+      const candidate = source.slice(index);
+      if (/^export\s+(?:type\s+)?(?:\*|\{)/.test(candidate)) {
+        const specifier = moduleSpecifierAfterFrom(source, index + "export".length);
         if (specifier !== undefined) exportsFrom.push(specifier);
       }
     }
