@@ -104,27 +104,31 @@ function withoutCommentsAndTemplates(source: string): string {
   }
 
   function previousToken(index: number): string | undefined {
-    return result.slice(0, index).match(/([A-Za-z_$][\w$]*)\s*$/)?.[1];
+    let cursor = previousSignificantIndex(index);
+    if (cursor === undefined || !/[\w$]/.test(result[cursor]!)) return undefined;
+    const end = cursor + 1;
+    while (cursor >= 0 && /[\w$]/.test(result[cursor]!)) cursor -= 1;
+    const token = result.slice(cursor + 1, end);
+    return /^[A-Za-z_$]/.test(token) ? token : undefined;
   }
 
   function opensBlock(index: number): boolean {
     const previousIndex = previousSignificantIndex(index);
     const previousCharacter = previousIndex === undefined ? undefined : result[previousIndex];
     const token = previousToken(index);
-    const prefix = result.slice(0, index);
+    const recentPrefix = result.slice(Math.max(0, index - 256), index);
 
     return previousCharacter === undefined
       || previousCharacter === ";"
       || previousCharacter === "}"
       || previousCharacter === ")"
-      || /=>\s*$/.test(prefix)
+      || /=>\s*$/.test(recentPrefix)
       || ["do", "else", "finally", "try"].includes(token ?? "")
-      || /\bclass(?:\s+[A-Za-z_$][\w$]*)?(?:\s+extends\s+[^{}]+)?\s*$/.test(prefix);
+      || /\bclass(?:\s+[A-Za-z_$][\w$]*)?(?:\s+extends\s+[^{}]+)?\s*$/.test(recentPrefix);
   }
 
   function canStartRegexLiteral(index: number): boolean {
-    const prefix = result.slice(0, index);
-    const token = prefix.match(/(?:^|\s)([A-Za-z_$][\w$]*)\s*$/)?.[1];
+    const token = previousToken(index);
     if (
       token
       && [
@@ -148,7 +152,7 @@ function withoutCommentsAndTemplates(source: string): string {
 
     const previousIndex = previousSignificantIndex(index);
     if (previousIndex !== undefined && regexAfterDelimiter.has(previousIndex)) return true;
-    const previousCharacter = prefix.match(/\S\s*$/)?.[0].trim();
+    const previousCharacter = previousIndex === undefined ? undefined : result[previousIndex];
     return previousCharacter === undefined || "([{:;,=!?&|+-*%^~<>".includes(previousCharacter);
   }
 
