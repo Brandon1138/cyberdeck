@@ -26,8 +26,9 @@ class FakePty implements SessionRuntime {
   readonly pid = 9001;
   readonly writes: Buffer[] = [];
   readonly kills: Array<string | undefined> = [];
-  private replay = "";
+  private replay = Buffer.alloc(0);
   private exited = false;
+  private exitCode = 0;
   private readonly outputs = new Set<(chunk: Buffer) => void>();
   private readonly exits = new Set<(code: number, signal?: number) => void>();
   constructor(private readonly killExitCode = 0) {}
@@ -41,20 +42,27 @@ class FakePty implements SessionRuntime {
   }
   onOutput(listener: (chunk: Buffer) => void): () => void {
     this.outputs.add(listener);
+    if (this.replay.length > 0) listener(Buffer.from(this.replay));
     return () => this.outputs.delete(listener);
   }
   onExit(listener: (code: number, signal?: number) => void): () => void {
+    if (this.exited) {
+      queueMicrotask(() => listener(this.exitCode));
+      return () => {};
+    }
     this.exits.add(listener);
     return () => this.exits.delete(listener);
   }
   emit(text: string): void {
-    this.replay += text;
-    for (const listener of this.outputs) listener(Buffer.from(text));
+    const chunk = Buffer.from(text);
+    this.replay = Buffer.concat([this.replay, chunk]);
+    for (const listener of this.outputs) listener(chunk);
   }
   exit(code = 0): void {
     if (this.exited) return;
     this.exited = true;
-    for (const listener of this.exits) listener(code);
+    this.exitCode = code;
+    for (const listener of this.exits) listener(this.exitCode);
   }
 }
 
