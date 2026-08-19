@@ -743,6 +743,7 @@ describe("architecture dependency rule", () => {
       await import(\`./template-\${variableSpecifier}.js\`);
       await import((("./parenthesized.js")));
       await import("./asserted.js" as string);
+      await import("./non-null-asserted.js"!);
       const spread = { ... import("./spread.js") };
       const commentedSpread = { ... /* gap */ import("./commented-spread.js") };
       loader . import("./spaced-property.js");
@@ -755,6 +756,7 @@ describe("architecture dependency rule", () => {
       "./template-specifier.js",
       "./parenthesized.js",
       "./asserted.js",
+      "./non-null-asserted.js",
       "./spread.js",
       "./commented-spread.js",
     ]);
@@ -812,6 +814,7 @@ describe("architecture dependency rule", () => {
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
       const nonNullQuotient = value! / (await import("./after-non-null.js")).value;
       const templateQuotient = <any>\`2\` / (await import("./after-template.js")).value;
+      const functionQuotient = <any>function () {} / (await import("./after-function.js")).value;
     `;
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
@@ -820,6 +823,7 @@ describe("architecture dependency rule", () => {
       "./after-postfix.js",
       "./after-non-null.js",
       "./after-template.js",
+      "./after-function.js",
     ]);
   });
 
