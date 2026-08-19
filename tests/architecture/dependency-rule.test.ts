@@ -131,6 +131,15 @@ function withoutCommentsAndTemplates(source: string): string {
   function closesFunctionExpression(index: number): boolean {
     if (/=>\s*$/.test(result.slice(Math.max(0, index - 256), index))) return true;
 
+    const previousIndex = previousSignificantIndex(index);
+    if (
+      previousIndex === undefined
+      || result[previousIndex] !== ")"
+      || regexAfterDelimiter.has(previousIndex)
+    ) {
+      return false;
+    }
+
     let header: { index: number; name: string | undefined } | undefined;
     for (
       let candidateIndex = result.lastIndexOf("function", index);
