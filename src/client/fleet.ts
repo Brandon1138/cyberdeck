@@ -90,6 +90,7 @@ import {
   type PullRequestSummary,
 } from "./pr-status.js";
 import { RpcError } from "./rpc-client.js";
+import type { SessionSnapshotResult } from "../protocol/session-snapshot.js";
 
 export interface FleetTransport {
   request<T = unknown>(method: string, params: unknown): Promise<T>;
@@ -141,6 +142,14 @@ export interface FleetSnapshot {
    */
   projects?: readonly string[] | undefined;
 }
+
+interface FleetReplayCacheEntry {
+  replay: string;
+  cursor?: number;
+  terminal: boolean;
+}
+
+const fleetReplayCaches = new WeakMap<FleetTransport, Map<string, FleetReplayCacheEntry>>();
 
 export interface DeleteConfirmation {
   sessionId: string;
@@ -761,6 +770,15 @@ const ROW_GUTTER = "  ";
 
 export async function collectFleetSnapshot(client: FleetTransport): Promise<FleetSnapshot> {
   const sessions = await client.request<SessionRecord[]>("session.list", {});
+  let replayCache = fleetReplayCaches.get(client);
+  if (replayCache === undefined) {
+    replayCache = new Map();
+    fleetReplayCaches.set(client, replayCache);
+  }
+  const listedSessionIds = new Set(sessions.map(({ id }) => id));
+  for (const sessionId of replayCache.keys()) {
+    if (!listedSessionIds.has(sessionId)) replayCache.delete(sessionId);
+  }
   const coordination = await client.request<FleetWorkerCoordinationView[]>(
     "fleet.workerCoordination",
     {},
@@ -782,14 +800,36 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
     .then((roots) => roots as readonly string[] | undefined, () => undefined);
   const threads = await Promise.all(sessions.map(async (record): Promise<FleetThread | null> => {
     try {
-      const snapshot = await client.request<{ data: string }>("session.snapshot", {
-        sessionId: record.id,
-      });
+      const cached = replayCache.get(record.id);
       const workerCoordination = coordinationBySession.get(record.id);
       const controllerId = orchestratorOwnership.get(record.id);
+      const terminal = record.executionState !== "active" && record.executionState !== "starting";
+      if (terminal && cached?.terminal === true) {
+        return {
+          record,
+          replay: cached.replay,
+          ...(workerCoordination === undefined ? {} : { coordination: workerCoordination }),
+          ...(controllerId === undefined ? {} : { controllerId }),
+        };
+      }
+      const snapshot = await client.request<SessionSnapshotResult>("session.snapshot", {
+        sessionId: record.id,
+        cursor: cached?.cursor ?? 0,
+      });
+      const replay = "notModified" in snapshot
+        ? cached?.replay
+        : Buffer.from(snapshot.data, "base64").toString("utf8");
+      if (replay === undefined) {
+        throw new Error(`Broker returned not-modified before Fleet cached session ${record.id}`);
+      }
+      replayCache.set(record.id, {
+        replay,
+        ...(snapshot.cursor === undefined ? {} : { cursor: snapshot.cursor }),
+        terminal,
+      });
       return {
         record,
-        replay: Buffer.from(snapshot.data, "base64").toString("utf8"),
+        replay,
         ...(workerCoordination === undefined ? {} : { coordination: workerCoordination }),
         ...(controllerId === undefined ? {} : { controllerId }),
       };

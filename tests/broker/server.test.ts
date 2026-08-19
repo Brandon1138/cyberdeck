@@ -214,6 +214,57 @@ async function harness(options: { workerCapabilities?: WorkerCapabilityCatalog }
 }
 
 describe("BrokerServer", () => {
+  it("returns no replay payload for an unchanged cursor-aware snapshot", async () => {
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    const snapshot = vi.fn(() => Buffer.from("READY\r\n"));
+    let announceUpdate: ((sessionId: string) => void) | undefined;
+    const registry = {
+      get: vi.fn(() => ({ id: sessionId })),
+      snapshot,
+      onSessionUpdate: vi.fn((listener: (sessionId: string) => void) => {
+        announceUpdate = listener;
+        return () => {};
+      }),
+    } as unknown as SessionRegistry;
+    const server = new BrokerServer({ socketPath: "/tmp/unused-broker.sock", registry });
+    const routeRequest = (
+      server as unknown as {
+        routeRequest(context: unknown, frame: {
+          type: "request";
+          id: number;
+          method: string;
+          params: unknown;
+        }): Promise<unknown>;
+      }
+    ).routeRequest.bind(server);
+    const request = (params: unknown) => routeRequest({}, {
+      type: "request",
+      id: 1,
+      method: "session.snapshot",
+      params,
+    });
+
+    await expect(request({ sessionId })).resolves.toEqual({
+      data: Buffer.from("READY\r\n").toString("base64"),
+    });
+    const first = await request({ sessionId, cursor: 0 }) as { data: string; cursor: number };
+    expect(first).toEqual({
+      data: Buffer.from("READY\r\n").toString("base64"),
+      cursor: 1,
+    });
+
+    const unchanged = await request({ sessionId, cursor: first.cursor }) as Record<string, unknown>;
+    expect(unchanged).toEqual({ cursor: first.cursor, notModified: true });
+    expect(unchanged).not.toHaveProperty("data");
+    expect(snapshot).toHaveBeenCalledTimes(2);
+
+    announceUpdate?.(sessionId);
+    await expect(request({ sessionId, cursor: first.cursor })).resolves.toEqual({
+      data: Buffer.from("READY\r\n").toString("base64"),
+      cursor: 2,
+    });
+  });
+
   it("exposes durable Scout egress mutation only on the operator broker route", async () => {
     const { server, socketPath, scoutEgress } = await harness();
     const client = await TestClient.open(socketPath);

@@ -3253,7 +3253,7 @@ describe("fleet controls", () => {
 });
 
 describe("collectFleetSnapshot", () => {
-  it("loads replay for every durable session", async () => {
+  it("loads replay for every durable session on first observation", async () => {
     const record = session();
     const request = vi.fn(async (method: string) => {
       if (method === "session.list") return [record];
@@ -3264,7 +3264,33 @@ describe("collectFleetSnapshot", () => {
     await expect(collectFleetSnapshot({ request } as never)).resolves.toEqual({
       threads: [{ record, replay: "latest" }],
     });
-    expect(request).toHaveBeenCalledWith("session.snapshot", { sessionId: record.id });
+    expect(request).toHaveBeenCalledWith("session.snapshot", { sessionId: record.id, cursor: 0 });
+  });
+
+  it("polls only active sessions after warming a 170-session catalog", async () => {
+    const records = Array.from({ length: 170 }, (_, index) => session({
+      id: `11111111-1111-4111-8111-${String(index + 1).padStart(12, "0")}`,
+      executionState: index < 14 ? "active" : "exited",
+      exitCode: index < 14 ? null : 0,
+    }));
+    let snapshotRequests = 0;
+    const request = vi.fn(async (method: string, params?: { cursor?: number }) => {
+      if (method === "session.list") return records;
+      if (method === "session.snapshot") {
+        snapshotRequests += 1;
+        if (params?.cursor === 1) return { cursor: 1, notModified: true };
+        return { data: Buffer.from("latest").toString("base64"), cursor: 1 };
+      }
+      throw new Error(`unexpected ${method}`);
+    });
+    const client = { request } as never;
+
+    await collectFleetSnapshot(client);
+    expect(snapshotRequests).toBe(170);
+
+    snapshotRequests = 0;
+    await expect(collectFleetSnapshot(client)).resolves.toHaveProperty("threads.length", 170);
+    expect(snapshotRequests).toBe(14);
   });
 
   it("joins broker lease projection onto matching worker sessions", async () => {
