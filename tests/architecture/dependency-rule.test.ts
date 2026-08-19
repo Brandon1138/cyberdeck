@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -371,6 +371,34 @@ describe("architecture dependency rule", () => {
       "./dynamic.js",
       "../dynamic-single.js",
     ]);
+  });
+
+  it("rejects bare aliases for forbidden Node built-ins", () => {
+    const regressionFile = resolve(
+      SOURCE_ROOT,
+      "domain/dependency-rule-bare-builtins-regression.ts",
+    );
+    writeFileSync(regressionFile, [
+      'import "fs";',
+      'import "fs/promises";',
+      'import "child_process";',
+      'import "cluster";',
+      'import "worker_threads";',
+    ].join("\n"));
+
+    try {
+      expect(
+        currentViolations().filter((violation) => violation.from === sourcePath(regressionFile)),
+      ).toEqual([
+        { from: sourcePath(regressionFile), to: "node:child_process" },
+        { from: sourcePath(regressionFile), to: "node:cluster" },
+        { from: sourcePath(regressionFile), to: "node:fs" },
+        { from: sourcePath(regressionFile), to: "node:fs/promises" },
+        { from: sourcePath(regressionFile), to: "node:worker_threads" },
+      ]);
+    } finally {
+      rmSync(regressionFile, { force: true });
+    }
   });
 
   it("keeps baseline sorted and unique", () => {
