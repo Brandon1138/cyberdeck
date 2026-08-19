@@ -1284,7 +1284,11 @@ describe("SessionRegistry", () => {
   it("replaces a terminal PTY with the provider's exact resume command", async () => {
     const { registry, ptys, ptyFactory, events } = harness();
     const record = await registry.start(request());
+    const sessionUpdate = vi.fn();
+    const unsubscribe = registry.onSessionUpdate(sessionUpdate);
     await registry.stop(record.id);
+    await vi.waitFor(() => expect(sessionUpdate).toHaveBeenCalledWith(record.id));
+    sessionUpdate.mockClear();
 
     const resumed = await registry.resume(record.id);
 
@@ -1298,6 +1302,8 @@ describe("SessionRegistry", () => {
     expect(ptys).toHaveLength(2);
     expect(ptyFactory.mock.calls[1]?.[0]).toMatchObject({ args: ["resume", record.id] });
     expect(events.at(-1)).toMatchObject({ type: "session.resumed", sessionId: record.id });
+    expect(sessionUpdate).toHaveBeenCalledWith(record.id);
+    unsubscribe();
   });
 
   it("lets a replaced PTY's late exit fall on the floor rather than on the resumed session", async () => {
