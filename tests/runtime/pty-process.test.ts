@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import { PtyProcess, PtyReplayBuffer } from "../../src/runtime/pty-process.js";
 
@@ -47,6 +47,26 @@ describe("PtyProcess", () => {
       callerCopy.fill(0);
       expect(replay.snapshot()).toEqual(previous);
     }
+  });
+
+  it("coalesces one-byte appends into fixed-size retained blocks", () => {
+    const capacity = 128 * 1024;
+    const replay = new PtyReplayBuffer(capacity);
+    const byte = Buffer.alloc(1, 0x61);
+    const allocation = vi.spyOn(Buffer, "allocUnsafe");
+
+    try {
+      for (let index = 0; index < capacity; index += 1) replay.append(byte);
+      byte[0] = 0x62;
+      for (let index = 0; index < capacity; index += 1) replay.append(byte);
+
+      expect(allocation).toHaveBeenCalledTimes(16);
+      expect(allocation.mock.calls.every(([size]) => size === 16 * 1024)).toBe(true);
+    } finally {
+      allocation.mockRestore();
+    }
+
+    expect(replay.snapshot()).toEqual(Buffer.alloc(capacity, 0x62));
   });
 
   it("keeps append cost flat as retained replay grows", () => {

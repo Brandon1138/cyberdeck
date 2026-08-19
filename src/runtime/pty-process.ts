@@ -6,8 +6,11 @@ import type { ProviderLaunchSpec } from "../providers/provider.js";
 type OutputListener = (chunk: Buffer) => void;
 type ExitListener = (exitCode: number, signal?: number) => void;
 
+const REPLAY_BLOCK_BYTES = 16 * 1024;
+
 interface ReplayChunk {
   readonly data: Buffer;
+  length: number;
   next?: ReplayChunk;
 }
 
@@ -22,18 +25,36 @@ export class PtyReplayBuffer {
   append(data: Buffer): void {
     if (data.length === 0 || this.capacity <= 0) return;
 
-    const chunk: ReplayChunk = { data: Buffer.from(data) };
-    if (this.tail) {
-      this.tail.next = chunk;
-    } else {
-      this.head = chunk;
+    let offset = 0;
+    while (offset < data.length) {
+      if (!this.tail || this.tail.length === this.tail.data.length) {
+        const chunk: ReplayChunk = {
+          data: Buffer.allocUnsafe(Math.min(REPLAY_BLOCK_BYTES, this.capacity)),
+          length: 0,
+        };
+        if (this.tail) {
+          this.tail.next = chunk;
+        } else {
+          this.head = chunk;
+        }
+        this.tail = chunk;
+      }
+
+      const available = this.tail.data.length - this.tail.length;
+      const copied = data.copy(
+        this.tail.data,
+        this.tail.length,
+        offset,
+        Math.min(offset + available, data.length),
+      );
+      this.tail.length += copied;
+      this.retainedBytes += copied;
+      offset += copied;
     }
-    this.tail = chunk;
-    this.retainedBytes += data.length;
 
     let overflow = this.retainedBytes - this.capacity;
     while (this.head && overflow > 0) {
-      const available = this.head.data.length - this.headOffset;
+      const available = this.head.length - this.headOffset;
       if (overflow < available) {
         this.headOffset += overflow;
         this.retainedBytes -= overflow;
@@ -53,7 +74,7 @@ export class PtyReplayBuffer {
     let chunk = this.head;
     while (chunk) {
       const start = chunk === this.head ? this.headOffset : 0;
-      offset += chunk.data.copy(replay, offset, start);
+      offset += chunk.data.copy(replay, offset, start, chunk.length);
       chunk = chunk.next;
     }
     return replay;
