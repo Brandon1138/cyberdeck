@@ -459,7 +459,7 @@ function withoutCommentsAndTemplates(source: string): string {
       if (braceContexts.pop()?.opensRegexAfter === true) regexAfterDelimiter.add(index);
     } else if (
       source.startsWith("case", index)
-      && !/[\w$]/.test(source[index - 1] ?? "")
+      && !/[\w$.]/.test(source[index - 1] ?? "")
       && !/[\w$]/.test(source[index + "case".length] ?? "")
       && braceContexts.at(-1)?.switchBody === true
     ) {
@@ -980,6 +980,7 @@ describe("architecture dependency rule", () => {
       switch (marker) { case 1: function declared() {} /import ("node:fs")/.test(text); }
       switch (marker) { case 2: async function declaredAsync() {} /import ("node:fs")/.test(text); }
       switch (marker) { case ((value: number) => value)(3): function declaredAfterTypedCase() {} /import ("node:fs")/.test(text); }
+      switch (marker) { case select(marker.case): function declaredAfterMemberCase() {} /import ("node:fs")/.test(text); }
       switch (marker) { case 4: const ternary = marker ? 1 : function named() {} / (await import("./after-switch-ternary.js")).value; }
       const asiMarker = 1
       function asiDeclared() {} /import ("node:fs")/.test(text);
