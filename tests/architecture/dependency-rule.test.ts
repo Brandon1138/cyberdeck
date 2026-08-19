@@ -687,11 +687,13 @@ describe("architecture dependency rule", () => {
       if (enabled) {} /import ("node:child_process")/.test(text);
       const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
       const objectQuotient = {} / import("./after-object.js") / divisor;
+      const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
     `;
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
       "./after-parenthesis.js",
       "./after-object.js",
+      "./after-postfix.js",
     ]);
   });
 
