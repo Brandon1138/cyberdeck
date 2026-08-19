@@ -147,6 +147,7 @@ function withoutCommentsAndTemplates(source: string): string {
 
     const previousCharacter = context.at(-1);
     if (hasLineBreak) {
+      if (/(?:\+\+|--)$/.test(context)) return false;
       return previousCharacter !== undefined && "=([{,:!?&|+-*%^~<>.".includes(previousCharacter);
     }
     return previousCharacter !== undefined && !";{}".includes(previousCharacter);
