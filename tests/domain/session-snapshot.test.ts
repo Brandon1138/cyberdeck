@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   SessionSnapshotParamsSchema,
   SessionSnapshotResultSchema,
-} from "../../src/protocol/session-snapshot.js";
+} from "../../src/domain/session-snapshot.js";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 

@@ -90,7 +90,7 @@ import {
   type PullRequestSummary,
 } from "./pr-status.js";
 import { RpcError } from "./rpc-client.js";
-import type { SessionSnapshotResult } from "../protocol/session-snapshot.js";
+import type { SessionSnapshotResult } from "../domain/session-snapshot.js";
 
 export interface FleetTransport {
   request<T = unknown>(method: string, params: unknown): Promise<T>;
@@ -146,7 +146,8 @@ export interface FleetSnapshot {
 interface FleetReplayCacheEntry {
   replay: string;
   cursor?: number;
-  terminal: boolean;
+  /** True only once the session can no longer produce output: terminal state AND its process gone. */
+  settled: boolean;
 }
 
 const fleetReplayCaches = new WeakMap<FleetTransport, Map<string, FleetReplayCacheEntry>>();
@@ -803,8 +804,13 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
       const cached = replayCache.get(record.id);
       const workerCoordination = coordinationBySession.get(record.id);
       const controllerId = orchestratorOwnership.get(record.id);
+      // A terminal executionState alone is not enough to stop polling: session.stop marks a
+      // session cancelled before signalling it, so the process can still be flushing output.
+      // Only a settled session — terminal AND with no live process (exited, or never launched)
+      // — is safe to freeze in the cache.
       const terminal = record.executionState !== "active" && record.executionState !== "starting";
-      if (terminal && cached?.terminal === true) {
+      const settled = terminal && (record.exitCode !== null || record.pid === 0);
+      if (settled && cached?.settled === true) {
         return {
           record,
           replay: cached.replay,
@@ -825,7 +831,7 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
       replayCache.set(record.id, {
         replay,
         ...(snapshot.cursor === undefined ? {} : { cursor: snapshot.cursor }),
-        terminal,
+        settled,
       });
       return {
         record,

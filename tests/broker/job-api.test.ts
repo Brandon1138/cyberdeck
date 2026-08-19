@@ -84,7 +84,10 @@ async function harness(workerMode?: "caveman") {
   const socketPath = join(directory, "broker.sock");
   const controlPlane = new JobControlPlane({ registry: defaultProviderRegistry(), now: () => NOW });
   controlPlane.registerAdapter(acceptingAdapter("codex"));
-  const registry = { releaseClient: async () => {} } as unknown as SessionRegistry;
+  const registry = {
+    releaseClient: async () => {},
+    onSessionUpdate: () => () => {},
+  } as unknown as SessionRegistry;
   const workerPreferences = new WorkerPreferenceStore(directory);
   if (workerMode === "caveman") await workerPreferences.set({ caveman: true });
   const server = new BrokerServer({
@@ -108,7 +111,10 @@ async function composedHarness() {
     now: () => NOW,
   });
   await runtime.start();
-  const registry = { releaseClient: async () => {} } as unknown as SessionRegistry;
+  const registry = {
+    releaseClient: async () => {},
+    onSessionUpdate: () => () => {},
+  } as unknown as SessionRegistry;
   const server = new BrokerServer({
     socketPath,
     registry,

@@ -3293,6 +3293,41 @@ describe("collectFleetSnapshot", () => {
     expect(snapshotRequests).toBe(14);
   });
 
+  it("keeps polling a cancelled session until its process has exited", async () => {
+    // session.stop marks a session cancelled before signalling its process, so output can
+    // still arrive after the state turns terminal. Freezing the cache on state alone loses it.
+    const record = session({ executionState: "cancelled", exitCode: null });
+    let revision = 1;
+    let replay = "dying output";
+    const request = vi.fn(async (method: string, params?: { cursor?: number }) => {
+      if (method === "session.list") return [record];
+      if (method === "session.snapshot") {
+        if (params?.cursor === revision) return { cursor: revision, notModified: true };
+        return { data: Buffer.from(replay).toString("base64"), cursor: revision };
+      }
+      throw new Error(`unexpected ${method}`);
+    });
+    const client = { request } as never;
+
+    await expect(collectFleetSnapshot(client)).resolves.toEqual({
+      threads: [{ record, replay: "dying output" }],
+    });
+
+    revision = 2;
+    replay = "dying output plus a late flush";
+    await expect(collectFleetSnapshot(client)).resolves.toEqual({
+      threads: [{ record, replay: "dying output plus a late flush" }],
+    });
+
+    record.exitCode = 143;
+    await collectFleetSnapshot(client);
+    const fetchesBeforeFreeze = request.mock.calls.filter(([method]) => method === "session.snapshot").length;
+    await collectFleetSnapshot(client);
+    const fetchesAfterFreeze = request.mock.calls.filter(([method]) => method === "session.snapshot").length;
+    expect(fetchesBeforeFreeze).toBe(3);
+    expect(fetchesAfterFreeze).toBe(3);
+  });
+
   it("joins broker lease projection onto matching worker sessions", async () => {
     const record = session({
       id: "22222222-2222-4222-8222-222222222222",

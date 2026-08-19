@@ -26,7 +26,7 @@ import {
 import type { FleetProjectService } from "./fleet-project-service.js";
 import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type RequestFrame } from "../protocol/frames.js";
 import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
-import { SessionSnapshotParamsSchema } from "../protocol/session-snapshot.js";
+import { SessionSnapshotParamsSchema } from "../domain/session-snapshot.js";
 import { NvimBindParamsSchema, type NvimBindingService } from "./nvim-binding-service.js";
 import { RegistryError, type AttachmentMode, type SessionRegistry } from "./session-registry.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
