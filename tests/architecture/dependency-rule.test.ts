@@ -933,6 +933,7 @@ describe("architecture dependency rule", () => {
     `;
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
+      "./after-switch-ternary.js",
       "./after-parenthesis.js",
       "./after-object.js",
       "./after-postfix.js",
@@ -940,7 +941,6 @@ describe("architecture dependency rule", () => {
       "./after-template.js",
       "./after-function.js",
       "./after-default-property.js",
-      "./after-switch-ternary.js",
     ]);
   });
 
