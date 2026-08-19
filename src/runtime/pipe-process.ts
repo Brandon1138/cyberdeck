@@ -1,14 +1,14 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
+import type { SessionRuntime } from "../domain/session-runtime.js";
 import type { ProviderLaunchSpec } from "../providers/provider.js";
-import type { PtyHandle } from "../broker/session-registry.js";
 
 /**
  * Bounded pipe-backed process handle for provider noninteractive transports. It intentionally
  * implements the existing session runtime port so a Scout remains a normal Cyberdeck Worker while
  * avoiding a terminal emulator, prompt scraping, and synthetic keypresses.
  */
-export class PipeProcess implements PtyHandle {
+export class PipeProcess implements SessionRuntime {
   private readonly child: ChildProcessByStdio<null, Readable, Readable>;
   private readonly outputListeners = new Set<(chunk: Buffer) => void>();
   private readonly exitListeners = new Set<(exitCode: number, signal?: number) => void>();

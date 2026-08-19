@@ -1,10 +1,11 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import { PtyProcess } from "../../src/runtime/pty-process.js";
 
 const fixturePath = fileURLToPath(new URL("../fixtures/fake-agent.mjs", import.meta.url));
 
-function waitForOutput(process: PtyProcess, expected: string): Promise<string> {
+function waitForOutput(process: SessionRuntime, expected: string): Promise<string> {
   return new Promise((resolve, reject) => {
     let output = "";
     const timer = setTimeout(() => {
@@ -24,7 +25,7 @@ function waitForOutput(process: PtyProcess, expected: string): Promise<string> {
 
 describe("PtyProcess", () => {
   it("keeps working without listeners and retains replay output", async () => {
-    const process = new PtyProcess(
+    const process: SessionRuntime = new PtyProcess(
       {
         executable: globalThis.process.execPath,
         args: [fixturePath],

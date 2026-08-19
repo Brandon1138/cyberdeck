@@ -4,6 +4,10 @@ import type { BrokerRuntimeConfig } from "../config.js";
 import { MAX_WAIT_SECONDS } from "../limits.js";
 import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
 import { evaluateStart, type SessionAncestryEntry, type StartPolicyCode } from "../domain/policy.js";
+import type {
+  SessionRuntime,
+  SessionRuntimeFactory,
+} from "../domain/session-runtime.js";
 import {
   StartSessionRequestSchema,
   type ResolvedLaunchRecord,
@@ -82,17 +86,6 @@ import type {
 } from "../persistence/scout-report-store.js";
 import { captureScoutWorkspaceStateHash } from "../providers/cursor/workspace-state.js";
 
-export interface PtyHandle {
-  readonly pid: number;
-  write(data: Buffer): void;
-  resize(cols: number, rows: number): void;
-  snapshot(): Buffer;
-  kill(signal?: string): void;
-  onOutput(listener: (chunk: Buffer) => void): () => void;
-  onExit(listener: (exitCode: number, signal?: number) => void): () => void;
-}
-
-export type PtyFactory = (spec: ProviderLaunchSpec, replayBytes: number) => PtyHandle;
 export type AttachmentMode = "control" | "watch";
 export type OutputSink = (chunk: Buffer) => void;
 export type ExitSink = (exitCode: number) => void;
@@ -184,11 +177,11 @@ export interface InstructionStateUpdate {
 
 interface RuntimeSession {
   record: SessionRecord;
-  pty?: PtyHandle;
+  sessionRuntime?: SessionRuntime;
   /**
    * Everything the broker reads out of this session's output, folded in one chunk at a time.
    *
-   * The PTY handle still owns the raw replay — that is what an attaching client is handed. What
+   * The session runtime still owns the raw replay — that is what an attaching client is handed. What
    * lives here is the reading of it: the broker used to re-derive activity, composer state, token
    * count and liveness by re-scanning that whole buffer on every chunk, which is what pinned a core
    * in MIK-87.
@@ -262,7 +255,7 @@ interface RuntimeSession {
   };
   /** Serializes provider launch-artifact work so a pending cleanup cannot delete a fresh resume. */
   launchTail: Promise<void>;
-  /** Serializes framed drop-box capture so older PTY snapshots cannot overwrite newer ones. */
+  /** Serializes framed drop-box capture so older runtime snapshots cannot overwrite newer ones. */
   scoutCaptureTail?: Promise<void>;
   /** Serializes the full provider stream into the durable trace artifact. */
   scoutTraceTail?: Promise<void>;
@@ -412,7 +405,7 @@ export type ReattachTarget =
 
 export interface SessionRegistryOptions {
   adapters: Record<string, ProviderAdapter>;
-  ptyFactory: PtyFactory;
+  sessionRuntimeFactory: SessionRuntimeFactory<ProviderLaunchSpec>;
   journal: JournalLike;
   transcripts?: ThreadTranscriptStore | TranscriptLike;
   store?: SessionStoreLike;
@@ -484,7 +477,7 @@ export class SessionRegistry {
     for (const stored of options.recoveredSessions ?? []) {
       const record = this.recoverRecord(stored);
       // A provider limit is the one piece of runtime truth that survives the process that observed
-      // it, because the cap belongs to the account rather than to the PTY. Recovery folds `errored`
+      // it, because the cap belongs to the account rather than to the runtime. Recovery folds `errored`
       // into `failed`, so without rehydrating this the operator is told the worker crashed when it
       // was actually told to come back at 3:00pm.
       const providerLimit = providerLimitFromTermination(record.termination);
@@ -650,7 +643,7 @@ export class SessionRegistry {
     let preparedInitialPrompt: string | undefined;
     let deferredInitialPrompt: boolean;
     let launchSpec: ProviderLaunchSpec | undefined;
-    let pty: PtyHandle;
+    let sessionRuntime: SessionRuntime;
     let scoutLaunchPhase: NonNullable<ScoutRuntimeState["launchFailure"]>["phase"] = "prepare";
     try {
       if (provisional.profile === "scout" && provisional.scout !== undefined) {
@@ -677,7 +670,7 @@ export class SessionRegistry {
           ? undefined
           : preparedInitialPrompt,
       );
-      pty = await this.spawnPreparedLaunch(
+      sessionRuntime = await this.spawnPreparedLaunch(
         adapter,
         provisional,
         launchSpec,
@@ -717,14 +710,14 @@ export class SessionRegistry {
     }
     const record: SessionRecord = {
       ...provisional,
-      pid: pty.pid,
+      pid: sessionRuntime.pid,
       executionState: "active",
       updatedAt: new Date().toISOString(),
       launchRecord: resolvedLaunchRecord(launchSpec, "launch"),
     };
     const runtime: RuntimeSession = {
       record,
-      pty,
+      sessionRuntime,
       watchers: new Map(),
       stopRequested: false,
       activity: "unknown",
@@ -737,7 +730,7 @@ export class SessionRegistry {
     };
     this.sessions.set(id, runtime);
     releaseReservation();
-    this.adoptPty(runtime, pty);
+    this.adoptSessionRuntime(runtime, sessionRuntime);
 
     if (record.profile === "scout") {
       try {
@@ -750,8 +743,8 @@ export class SessionRegistry {
 
     try {
       const sessionTerminal: ProviderSessionTerminal = {
-        snapshot: () => pty.snapshot(),
-        write: (data) => pty.write(data),
+        snapshot: () => sessionRuntime.snapshot(),
+        write: (data) => sessionRuntime.write(data),
         wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
       };
       // Before initialization, because initialization is where a message-instructed provider takes
@@ -790,7 +783,7 @@ export class SessionRegistry {
         } else {
           const data = adapter.submitInput?.(preparedInitialPrompt)
             ?? Buffer.from(`${preparedInitialPrompt}\n`);
-          pty.write(data);
+          sessionRuntime.write(data);
         }
       } else {
         this.armScoutBudget(runtime);
@@ -801,8 +794,8 @@ export class SessionRegistry {
         throw this.scoutLaunchError(record.id, error);
       }
       this.clearTurnTimers(runtime);
-      if (runtime.pty === pty) delete runtime.pty;
-      pty.kill();
+      if (runtime.sessionRuntime === sessionRuntime) delete runtime.sessionRuntime;
+      sessionRuntime.kill();
       this.sessions.delete(id);
       await this.cleanupLaunchArtifacts(record, "initialization-failed");
       throw error;
@@ -812,7 +805,7 @@ export class SessionRegistry {
       try {
         await this.registerSession(runtime);
       } catch (error) {
-        pty.kill();
+        sessionRuntime.kill();
         this.sessions.delete(id);
         await this.cleanupLaunchArtifacts(record, "launch-failed");
         throw error;
@@ -974,7 +967,7 @@ export class SessionRegistry {
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active; resume it before attaching");
     }
-    const pty = this.requirePty(runtime);
+    const sessionRuntime = this.requireSessionRuntime(runtime);
     if (mode === "control") {
       if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
         throw new RegistryError("SESSION_ALREADY_CONTROLLED", "Session already has a controller");
@@ -993,7 +986,7 @@ export class SessionRegistry {
       this.updateAttachmentState(runtime);
       throw error;
     }
-    return pty.snapshot();
+    return sessionRuntime.snapshot();
   }
 
   async detach(sessionId: string, clientId: string): Promise<void> {
@@ -1031,7 +1024,7 @@ export class SessionRegistry {
     if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
       throw new RegistryError("NOT_SESSION_CONTROLLER", "Another client controls this session");
     }
-    this.requirePty(runtime).write(data);
+    this.requireSessionRuntime(runtime).write(data);
     await this.appendEvent("session.input", sessionId, { bytes: data.length });
   }
 
@@ -1049,7 +1042,7 @@ export class SessionRegistry {
   /**
    * Put one instruction in front of a worker, and report only what actually happened.
    *
-   * The old contract wrote the payload at the PTY unconditionally and let the caller record
+   * The old contract wrote the payload to the runtime unconditionally and let the caller record
    * `delivered`. Bytes written at a terminal are not delivery: a worker sitting at a permission
    * modal is not reading its composer, so the entire instruction stayed there unsent while the
    * orchestrator had been told it landed, and the worker's next turn — a stale one — settled the
@@ -1082,7 +1075,7 @@ export class SessionRegistry {
     if (hold !== undefined) return this.holdInstruction(runtime, hold, source, instructionId);
     const adapter = this.requireAdapter(runtime.record.provider);
     const encoded = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
-    const pty = this.requirePty(runtime);
+    const sessionRuntime = this.requireSessionRuntime(runtime);
     delete runtime.stallObservation;
     const at = new Date().toISOString();
     const expectedTurn = runtime.completedTurns + 1;
@@ -1093,7 +1086,7 @@ export class SessionRegistry {
     if (instructionId !== undefined) {
       runtime.rendered.push({ instructionId, expectedTurn, renderedAt: at, state: "rendered" });
     }
-    pty.write(encoded);
+    sessionRuntime.write(encoded);
     await this.appendTranscript(sessionId, "instruction", source, message, {
       ...metadata,
       instructionState: "rendered" satisfies InstructionLifecycleState,
@@ -1231,15 +1224,15 @@ export class SessionRegistry {
     if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
       throw new RegistryError("NOT_SESSION_CONTROLLER", "Another client controls this session");
     }
-    this.requirePty(runtime).resize(cols, rows);
+    this.requireSessionRuntime(runtime).resize(cols, rows);
   }
 
   snapshot(sessionId: string): Buffer {
-    return this.requireRuntime(sessionId).pty?.snapshot() ?? Buffer.alloc(0);
+    return this.requireRuntime(sessionId).sessionRuntime?.snapshot() ?? Buffer.alloc(0);
   }
 
   ownsProcess(sessionId: string): boolean {
-    return this.requireRuntime(sessionId).pty !== undefined;
+    return this.requireRuntime(sessionId).sessionRuntime !== undefined;
   }
 
   isStopRequested(sessionId: string): boolean {
@@ -1280,7 +1273,7 @@ export class SessionRegistry {
     // as Stopped. An operator-initiated stop still reads as Stopped — that is their action.
     runtime.outcomePreserved = this.shuttingDown && runtime.record.attentionState === "done";
     if (runtime.outcomePreserved !== true) await this.setAttention(runtime, "stopping", true);
-    this.requirePty(runtime).kill("SIGTERM");
+    this.requireSessionRuntime(runtime).kill("SIGTERM");
     await this.appendEvent("session.stopped", sessionId, {});
     await this.appendTranscript(sessionId, "lifecycle", "broker", "session stopped", {});
   }
@@ -1292,7 +1285,7 @@ export class SessionRegistry {
     if (!runtime.stopRequested) {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Graceful stop must be requested before force");
     }
-    this.requirePty(runtime).kill("SIGKILL");
+    this.requireSessionRuntime(runtime).kill("SIGKILL");
   }
 
   async stopTree(sessionId: string): Promise<SessionTreeProgress> {
@@ -1324,16 +1317,16 @@ export class SessionRegistry {
       throw new RegistryError("SESSION_ALREADY_ACTIVE", "Session is already active");
     }
 
-    // The outgoing PTY stops speaking for this session here, before anything is awaited. A kill is
+    // The outgoing runtime stops speaking for this session here, before anything is awaited. A kill is
     // acknowledged asynchronously, so its exit would otherwise land in the middle of the respawn
     // and tear down the session it was replaced by — rewriting executionState, dropping the new
     // controller and watchers, and queueing a launch-artifact cleanup onto the fresh resume.
-    const previousPty = runtime.pty;
-    delete runtime.pty;
+    const previousRuntime = runtime.sessionRuntime;
+    delete runtime.sessionRuntime;
 
     // An errored session's process outlived its provider session. Resuming would otherwise leave
     // that orphan running alongside the replacement, so it is killed before the respawn.
-    if (runtime.record.executionState === "errored") previousPty?.kill();
+    if (runtime.record.executionState === "errored") previousRuntime?.kill();
 
     const adapter = this.requireAdapter(runtime.record.provider);
     const record = this.cloneRecord(runtime.record);
@@ -1341,12 +1334,18 @@ export class SessionRegistry {
     // A resume spec can name provider-owned artifacts (Claude's payload files) that the previous
     // exit removed, so wait for any in-flight cleanup and then rebuild them before the spawn.
     await runtime.launchTail;
-    const pty = await this.resumePty(runtime, adapter, record, resumeSpec, previousPty);
+    const sessionRuntime = await this.resumeSessionRuntime(
+      runtime,
+      adapter,
+      record,
+      resumeSpec,
+      previousRuntime,
+    );
     runtime.stopRequested = false;
     delete runtime.stopRequestedAt;
     delete runtime.controller;
     runtime.watchers.clear();
-    runtime.record.pid = pty.pid;
+    runtime.record.pid = sessionRuntime.pid;
     runtime.record.generation = (runtime.record.generation ?? 1) + 1;
     runtime.record.executionState = "active";
     runtime.record.attachmentState = "detached";
@@ -1364,7 +1363,7 @@ export class SessionRegistry {
     delete runtime.record.termination;
     delete runtime.stallObservation;
     this.clearTurnTimers(runtime);
-    this.adoptPty(runtime, pty);
+    this.adoptSessionRuntime(runtime, sessionRuntime);
     await this.appendEvent("session.resumed", sessionId, {
       provider: runtime.record.provider,
       model: runtime.record.model ?? null,
@@ -1650,12 +1649,12 @@ export class SessionRegistry {
 
   private broadcast(runtime: RuntimeSession, chunk: Buffer): void {
     runtime.record.updatedAt = new Date().toISOString();
-    const pty = runtime.pty;
-    if (pty === undefined) return;
+    const sessionRuntime = runtime.sessionRuntime;
+    if (sessionRuntime === undefined) return;
     // The raw replay is read lazily, and by the two readers that genuinely need every byte: a
     // scout's drop-box capture and a preview refresh. Materializing it here cost a 128 KiB copy and
     // decode on every chunk of provider output, for readers that were about to look at one screen.
-    const rawReplay = (): string => pty.snapshot().toString("utf8");
+    const rawReplay = (): string => sessionRuntime.snapshot().toString("utf8");
     if (runtime.record.scout?.transport === "headless-stream-json") {
       this.appendScoutTrace(runtime, chunk);
       this.captureScoutReport(runtime, rawReplay);
@@ -1740,7 +1739,7 @@ export class SessionRegistry {
    * Detect a session that has died inside a process that is still running, and move it to a
    * terminal state.
    *
-   * Liveness used to be inferred from the PTY being open, which is not evidence of anything: a
+   * Liveness used to be inferred from the runtime being open, which is not evidence of anything: a
    * worker killed by an unrecoverable API 4xx keeps its process, so it reported `active` with a
    * null exit code, consumed a worker slot forever, and could even show `needs-input` — inviting
    * the operator to type at a session that can never read it again. The verdict comes from the
@@ -1874,7 +1873,10 @@ export class SessionRegistry {
       return;
     }
 
-    this.captureScoutReport(runtime, () => runtime.pty?.snapshot().toString("utf8") ?? "");
+    this.captureScoutReport(
+      runtime,
+      () => runtime.sessionRuntime?.snapshot().toString("utf8") ?? "",
+    );
     await runtime.scoutCaptureTail?.catch(() => undefined);
     await runtime.scoutTraceTail?.catch(() => undefined);
 
@@ -2041,25 +2043,25 @@ export class SessionRegistry {
   }
 
   /**
-   * Bind a PTY's callbacks to that PTY, not merely to the session it currently drives.
+   * Bind a runtime's callbacks to that runtime, not merely to the session it currently drives.
    *
    * A session outlives its processes: a resume replaces the handle, and the outgoing one keeps
    * reporting output and its exit long after it has stopped representing the session. Every
    * callback therefore checks that it is still the adopted handle before it is allowed to touch
    * shared state.
    */
-  private adoptPty(runtime: RuntimeSession, pty: PtyHandle): void {
-    runtime.pty = pty;
+  private adoptSessionRuntime(runtime: RuntimeSession, sessionRuntime: SessionRuntime): void {
+    runtime.sessionRuntime = sessionRuntime;
     // A resumed session inherits whatever the new handle already replayed, and starts its reading
     // over: the old process's markers describe a process that is gone.
-    runtime.replay.reset(pty.snapshot().toString("utf8"));
-    pty.onOutput((chunk) => {
-      if (runtime.pty !== pty) return;
+    runtime.replay.reset(sessionRuntime.snapshot().toString("utf8"));
+    sessionRuntime.onOutput((chunk) => {
+      if (runtime.sessionRuntime !== sessionRuntime) return;
       runtime.replay.appendBytes(chunk);
       this.broadcast(runtime, chunk);
     });
-    pty.onExit((exitCode, signal) => {
-      if (runtime.pty !== pty) return;
+    sessionRuntime.onExit((exitCode, signal) => {
+      if (runtime.sessionRuntime !== sessionRuntime) return;
       if (runtime.record.scout?.transport === "headless-stream-json") {
         void this.finalizeHeadlessScout(runtime, exitCode, signal);
       } else {
@@ -2069,33 +2071,35 @@ export class SessionRegistry {
   }
 
   /**
-   * Spawn the replacement PTY for a resume, restoring the outgoing handle if the spawn fails.
+   * Spawn the replacement runtime for a resume, restoring the outgoing handle if the spawn fails.
    *
    * `resume` releases the old handle up front so its exit cannot land on the new session. When no
    * new handle arrives, the session is left exactly as the resume found it, so an operator can
    * still stop the process the failed resume did not replace.
    */
-  private async resumePty(
+  private async resumeSessionRuntime(
     runtime: RuntimeSession,
     adapter: ProviderAdapter,
     record: SessionRecord,
     spec: ProviderLaunchSpec,
-    previousPty: PtyHandle | undefined,
-  ): Promise<PtyHandle> {
+    previousRuntime: SessionRuntime | undefined,
+  ): Promise<SessionRuntime> {
     try {
       return await this.spawnPreparedLaunch(adapter, record, spec);
     } catch (error) {
-      if (runtime.pty === undefined && previousPty !== undefined) runtime.pty = previousPty;
+      if (runtime.sessionRuntime === undefined && previousRuntime !== undefined) {
+        runtime.sessionRuntime = previousRuntime;
+      }
       throw error;
     }
   }
 
   /**
-   * Provider launch artifacts belong to the prepared launch until a live PTY takes them over, so
+   * Provider launch artifacts belong to the prepared launch until a live runtime takes them over, so
    * any failure before that hand-off has to remove them itself — nothing downstream will.
    */
   /**
-   * The replay window this session's PTY keeps.
+   * The replay window this session runtime keeps.
    *
    * Read twice: the handle is bounded by it, and the digest ages its window title against it. Those
    * two have to be the same number — a title the replay has already forgotten must stop deciding the
@@ -2113,14 +2117,14 @@ export class SessionRegistry {
     spec: ProviderLaunchSpec,
     beforeSpawn?: () => Promise<void>,
     onPhase?: (phase: "prepare" | "spawn") => void,
-  ): Promise<PtyHandle> {
+  ): Promise<SessionRuntime> {
     try {
       onPhase?.("prepare");
       if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
       await beforeSpawn?.();
       const replayBytes = this.replayBytesFor(record);
       onPhase?.("spawn");
-      return this.options.ptyFactory(spec, replayBytes);
+      return this.options.sessionRuntimeFactory(spec, replayBytes);
     } catch (error) {
       await this.cleanupLaunchArtifacts(record, "launch-failed");
       throw error;
@@ -2300,7 +2304,7 @@ export class SessionRegistry {
     ).catch(() => undefined);
     await this.persist(runtime).catch(() => undefined);
     this.notifySessionUpdate(runtime.record.id);
-    runtime.pty?.kill("SIGTERM");
+    runtime.sessionRuntime?.kill("SIGTERM");
   }
 
   private scoutLaunchError(sessionId: string, error: unknown): RegistryError {
@@ -2427,11 +2431,11 @@ export class SessionRegistry {
    *
    * The current frame is all `compactTerminalResult` ever read — it slices from the last
    * clear-screen before doing anything else — so the digest's frame is the same reading without the
-   * re-normalization of everything before it. A session with no PTY has no frame, and falls back to
+   * re-normalization of everything before it. A session with no runtime has no frame, and falls back to
    * the preview that outlived its process.
    */
   private fallbackResult(runtime: RuntimeSession, maxResultChars: number): string {
-    return runtime.pty === undefined
+    return runtime.sessionRuntime === undefined
       ? compactTerminalResult(runtime.record.latestPreview ?? "", maxResultChars)
       : compactFrameResult(runtime.replay.frameText(), maxResultChars);
   }
@@ -2589,7 +2593,7 @@ export class SessionRegistry {
    * whole change exists to stop.
    */
   private observeComposer(runtime: RuntimeSession): ComposerObservation {
-    if (runtime.pty === undefined) return runtime.composer;
+    if (runtime.sessionRuntime === undefined) return runtime.composer;
     runtime.composer = frameComposerState(runtime.record.provider, runtime.replay.frameText(), {
       modalOpen: runtime.activity === "needs-input",
     });
@@ -2712,7 +2716,7 @@ export class SessionRegistry {
         }
       }
     } catch {
-      // Native transcript can lag its TUI frame. Keep worker completion usable without persisting PTY bytes.
+      // Native transcript can lag its TUI frame. Keep worker completion usable without persisting runtime bytes.
     }
     // `completedTurns` already counts the turn that just ended, so it names the last turn the
     // native transcript describes. Ledger each captured turn under the completionTarget a waiter
@@ -2835,9 +2839,9 @@ export class SessionRegistry {
     if (runtime.turnCaptureOwner === "reconcile") delete runtime.turnCaptureOwner;
     if (runtime.screenTurnDeferred !== true) return;
     delete runtime.screenTurnDeferred;
-    const pty = runtime.pty;
-    if (pty === undefined) return;
-    this.armScreenTurnBank(runtime, () => pty.snapshot().toString("utf8"));
+    const sessionRuntime = runtime.sessionRuntime;
+    if (sessionRuntime === undefined) return;
+    this.armScreenTurnBank(runtime, () => sessionRuntime.snapshot().toString("utf8"));
   }
 
   /**
@@ -2980,7 +2984,7 @@ export class SessionRegistry {
     ).catch(() => undefined);
     await this.refreshPreview(
       runtime,
-      runtime.pty?.snapshot().toString("utf8") ?? "",
+      runtime.sessionRuntime?.snapshot().toString("utf8") ?? "",
       native.map((turn): TranscriptMessage => ({ role: "assistant", text: turn.text ?? "" })),
     ).catch(() => undefined);
     await this.refreshObservedModel(runtime).catch(() => undefined);
@@ -3066,11 +3070,11 @@ export class SessionRegistry {
     });
   }
 
-  private requirePty(runtime: RuntimeSession): PtyHandle {
-    if (runtime.pty === undefined) {
+  private requireSessionRuntime(runtime: RuntimeSession): SessionRuntime {
+    if (runtime.sessionRuntime === undefined) {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session runtime is not active; resume it before use");
     }
-    return runtime.pty;
+    return runtime.sessionRuntime;
   }
 
   private requireInteractiveInput(runtime: RuntimeSession): void {
@@ -3160,7 +3164,7 @@ export class SessionRegistry {
     ) {
       runtime.scoutAcceptedCardStopRequested = true;
       runtime.scoutExpectedSuccessfulStop = true;
-      runtime.pty?.kill("SIGTERM");
+      runtime.sessionRuntime?.kill("SIGTERM");
     }
   }
 
@@ -3199,7 +3203,7 @@ export class SessionRegistry {
       runtime.scoutExpectedSuccessfulStop = true;
       if (runtime.scoutAcceptedCardStopRequested !== true) {
         runtime.scoutAcceptedCardStopRequested = true;
-        runtime.pty?.kill("SIGTERM");
+        runtime.sessionRuntime?.kill("SIGTERM");
       }
       runtime.scoutBudgetExhausting = false;
       this.notifySessionUpdate(runtime.record.id);
@@ -3213,7 +3217,7 @@ export class SessionRegistry {
     try {
       // Persist cutoff before stopping provider. Later output cannot promote this terminal result.
       await this.persist(runtime);
-      runtime.pty?.kill("SIGTERM");
+      runtime.sessionRuntime?.kill("SIGTERM");
       await this.appendEvent("scout.budget.exhausted", runtime.record.id, {
         dimension,
         observed,
@@ -3229,7 +3233,7 @@ export class SessionRegistry {
       );
     } catch (error) {
       // A persistence failure must not leave an over-budget provider running indefinitely.
-      runtime.pty?.kill("SIGTERM");
+      runtime.sessionRuntime?.kill("SIGTERM");
       throw error;
     } finally {
       runtime.scoutBudgetExhausting = false;
@@ -3293,7 +3297,7 @@ export class SessionRegistry {
   /**
    * Rebuild a durable record into a runtime one after a restart.
    *
-   * The broker cannot inherit a PTY it did not spawn, so nothing that was live before the restart
+   * The broker cannot inherit a runtime it did not spawn, so nothing that was live before the restart
    * is live now. What survives is the *outcome*: a thread whose last observed state was `done` had
    * already finished its task, and losing the process loses nothing of it — it rehydrates as a
    * finished thread. Only a thread that was mid-turn (working, needs-input, stopping) actually had

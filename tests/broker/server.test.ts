@@ -5,9 +5,10 @@ import { connect, type Socket } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import { BrokerServer } from "../../src/broker/server.js";
-import { SessionRegistry, type PtyHandle } from "../../src/broker/session-registry.js";
+import { SessionRegistry } from "../../src/broker/session-registry.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord } from "../../src/domain/session.js";
+import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import { ServerFrameSchema, type ServerFrame, type WireFrame } from "../../src/protocol/frames.js";
 import { JsonlDecoder, encodeFrame } from "../../src/protocol/jsonl.js";
@@ -19,7 +20,7 @@ import { WorkerPreferenceStore } from "../../src/persistence/worker-preference-s
 import { FleetDetachStore } from "../../src/persistence/fleet-detach-store.js";
 import { AgentControlService } from "../../src/orchestration/agent-control-service.js";
 
-class FakePty implements PtyHandle {
+class FakePty implements SessionRuntime {
   readonly pid: number;
   private readonly output = new Set<(chunk: Buffer) => void>();
   private readonly exits = new Set<(exitCode: number, signal?: number) => void>();
@@ -145,7 +146,7 @@ async function harness(options: { workerCapabilities?: WorkerCapabilityCatalog }
   const journal = { append: async (event: BrokerEvent) => { brokerEvents.push(event); } };
   const registry = new SessionRegistry({
     adapters,
-    ptyFactory,
+    sessionRuntimeFactory: ptyFactory,
     journal,
     transcripts,
     store: {

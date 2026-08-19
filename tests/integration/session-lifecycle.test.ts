@@ -56,7 +56,7 @@ describe("complete session lifecycle", () => {
       const ptyFactory = vi.fn((spec, replayBytes: number) => new PtyProcess(spec, replayBytes));
       const registry = new SessionRegistry({
         adapters: { codex: fakeAdapter("codex"), claude: fakeAdapter("claude") },
-        ptyFactory,
+        sessionRuntimeFactory: ptyFactory,
         journal: { append: async () => {} },
         config: BrokerRuntimeConfigSchema.parse({ maxConcurrentWorkers: 8 }),
       });

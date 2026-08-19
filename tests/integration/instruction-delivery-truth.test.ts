@@ -2,9 +2,10 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { SessionRegistry, type PtyHandle } from "../../src/broker/session-registry.js";
+import { SessionRegistry } from "../../src/broker/session-registry.js";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
+import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import type { ProviderAdapter } from "../../src/providers/provider.js";
 import { InstructionStore } from "../../src/persistence/instruction-store.js";
 import { InstructionQueue } from "../../src/orchestration/instruction-queue.js";
@@ -21,7 +22,7 @@ import { InstructionQueue } from "../../src/orchestration/instruction-queue.js";
 
 const ORCHESTRATOR = "11111111-1111-4111-8111-111111111111";
 
-class FakePty implements PtyHandle {
+class FakePty implements SessionRuntime {
   readonly pid = 4242;
   readonly writes: Buffer[] = [];
   private readonly outputListeners = new Set<(chunk: Buffer) => void>();
@@ -80,7 +81,7 @@ async function harness() {
   const pty = new FakePty();
   const registry = new SessionRegistry({
     adapters: { claude },
-    ptyFactory: () => pty,
+    sessionRuntimeFactory: () => pty,
     journal: { append: async () => {} },
     validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({}),
