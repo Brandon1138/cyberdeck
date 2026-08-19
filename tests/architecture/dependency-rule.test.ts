@@ -494,6 +494,20 @@ describe("architecture dependency rule", () => {
     ]);
   });
 
+  it("ignores regex literals after statement headers and blocks", () => {
+    const source = `
+      if (enabled) /import\\s*\\("node:fs"\\)/.test(text);
+      if (enabled) {} /import\\s*\\("node:child_process"\\)/.test(text);
+      const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
+      const objectQuotient = {} / import("./after-object.js") / divisor;
+    `;
+
+    expect(staticModuleSpecifiersFromSource(source)).toEqual([
+      "./after-parenthesis.js",
+      "./after-object.js",
+    ]);
+  });
+
   it("rejects bare aliases for forbidden Node built-ins", () => {
     const regressionFile = resolve(
       SOURCE_ROOT,
