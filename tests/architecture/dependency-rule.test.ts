@@ -132,7 +132,7 @@ function withoutCommentsAndTemplates(source: string): string {
       || previousCharacter === ")"
       || /=>\s*$/.test(recentPrefix)
       || ["do", "else", "finally", "try"].includes(token ?? "")
-      || /\bclass(?:\s+[A-Za-z_$][\w$]*)?(?:\s+extends\s+[^{}]+)?\s*$/.test(recentPrefix);
+      || /\b(?:class|enum|interface|module|namespace)\b[^{}]*$/.test(recentPrefix);
   }
 
   function startsStaticTemplateSpecifier(index: number): boolean {
