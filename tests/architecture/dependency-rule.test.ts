@@ -415,6 +415,39 @@ function decodeModuleSpecifier(specifier: string): string | undefined {
   return decoded;
 }
 
+function skipTypeScriptAssertion(source: string, start: number): number {
+  const assertion = /^(?:as|satisfies)\b/.exec(source.slice(start));
+  if (assertion === null) return start;
+
+  let cursor = start + assertion[0].length;
+  if (!/\s/.test(source[cursor] ?? "")) return start;
+  while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+
+  const delimiters: Record<string, string> = { "(": ")", "[": "]", "{": "}", "<": ">" };
+  const expectedClosers: string[] = [];
+  for (; cursor < source.length; cursor += 1) {
+    const character = source[cursor]!;
+    if (character === "'" || character === "\"" || character === "`") {
+      for (cursor += 1; cursor < source.length; cursor += 1) {
+        if (source[cursor] === "\\") cursor += 1;
+        else if (source[cursor] === character) break;
+      }
+      continue;
+    }
+
+    const closer = delimiters[character];
+    if (closer !== undefined) {
+      expectedClosers.push(closer);
+    } else if (expectedClosers.at(-1) === character) {
+      expectedClosers.pop();
+    } else if (expectedClosers.length === 0 && (character === ")" || character === ",")) {
+      return cursor;
+    }
+  }
+
+  return start;
+}
+
 function dynamicModuleSpecifiersFromSource(source: string): string[] {
   const specifiers: string[] = [];
 
@@ -461,6 +494,8 @@ function dynamicModuleSpecifiersFromSource(source: string): string[] {
     const specifier = decodeModuleSpecifier(source.slice(specifierStart, cursor));
     if (specifier === undefined) continue;
     cursor += 1;
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+    cursor = skipTypeScriptAssertion(source, cursor);
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
     while (wrapperParentheses > 0) {
       if (source[cursor] !== ")") continue scan;
