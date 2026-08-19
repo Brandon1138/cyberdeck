@@ -617,12 +617,14 @@ describe("architecture dependency rule", () => {
       await import("./with-options.js", { with: { type: "json" } });
       await import(\`./template-specifier.js\`);
       await import(\`./template-\${variableSpecifier}.js\`);
+      await import((("./parenthesized.js")));
     `;
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
       "./template-substitution.js",
       "./with-options.js",
       "./template-specifier.js",
+      "./parenthesized.js",
     ]);
   });
 
@@ -636,6 +638,14 @@ describe("architecture dependency rule", () => {
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
       "../runtime/side-effect.js",
       "../runtime/exported.js",
+    ]);
+  });
+
+  it("accepts line continuations in static module specifiers", () => {
+    const source = ['import "\\', '../runtime/continued.js";'].join("\n");
+
+    expect(staticModuleSpecifiersFromSource(source)).toEqual([
+      "../runtime/continued.js",
     ]);
   });
 
