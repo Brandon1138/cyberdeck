@@ -175,6 +175,20 @@ function withoutCommentsAndTemplates(source: string): string {
     const previousIndex = previousSignificantIndex(index);
     if (previousIndex !== undefined && regexAfterDelimiter.has(previousIndex)) return true;
     const previousCharacter = previousIndex === undefined ? undefined : result[previousIndex];
+    if (previousCharacter === "+" || previousCharacter === "-") {
+      const firstOperatorIndex = previousSignificantIndex(previousIndex);
+      const operandIndex = firstOperatorIndex === undefined
+        ? undefined
+        : previousSignificantIndex(firstOperatorIndex);
+      if (
+        firstOperatorIndex === previousIndex - 1
+        && result[firstOperatorIndex] === previousCharacter
+        && operandIndex !== undefined
+        && /[\w$)\]}]/.test(result[operandIndex]!)
+      ) {
+        return false;
+      }
+    }
     return previousCharacter === undefined || "([{:;,=!?&|+-*%^~<>".includes(previousCharacter);
   }
 
