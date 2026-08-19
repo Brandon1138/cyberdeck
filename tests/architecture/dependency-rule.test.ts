@@ -414,6 +414,22 @@ describe("architecture dependency rule", () => {
     ]);
   });
 
+  it("decodes escaped static and dynamic module specifiers", () => {
+    const source = String.raw`
+      import "node:f\x73";
+      export * from "\x2e\x2e/runtime/exported.js";
+      await import("node:f\u0073");
+      await import('\x2e\x2e/runtime/dynamic.js');
+    `;
+
+    expect(staticModuleSpecifiersFromSource(source)).toEqual([
+      "node:fs",
+      "../runtime/exported.js",
+      "node:fs",
+      "../runtime/dynamic.js",
+    ]);
+  });
+
   it("rejects bare aliases for forbidden Node built-ins", () => {
     const regressionFile = resolve(
       SOURCE_ROOT,
