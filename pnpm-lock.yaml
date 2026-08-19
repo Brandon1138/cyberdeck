@@ -21,9 +21,6 @@ importers:
       '@types/node':
         specifier: ^26.1.1
         version: 26.2.0
-      es-module-lexer:
-        specifier: ^2.3.1
-        version: 2.3.1
       tsx:
         specifier: ^4.23.1
         version: 4.23.11
