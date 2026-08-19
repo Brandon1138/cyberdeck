@@ -205,6 +205,21 @@ function withoutCommentsAndTemplates(source: string): string {
     if (hasLineBreak) {
       if (/(?:\+\+|--|[\w$)\]}]!+)$/.test(context)) return false;
       if (/\d\.$/.test(context)) return false;
+      if (previousCharacter === ">") {
+        let depth = 0;
+        for (let cursor = context.length - 1; cursor >= 0; cursor -= 1) {
+          if (context[cursor] === ">") {
+            depth += 1;
+          } else if (context[cursor] === "<") {
+            depth -= 1;
+            if (depth === 0) {
+              const operand = context.slice(0, cursor).trimEnd().at(-1);
+              if (operand !== undefined && /[\w$)\]}]/.test(operand)) return false;
+              break;
+            }
+          }
+        }
+      }
       return previousCharacter !== undefined && "=([{,:!?&|+-*%^~<>.".includes(previousCharacter);
     }
     return previousCharacter !== undefined && !";{}".includes(previousCharacter);
@@ -994,6 +1009,8 @@ describe("architecture dependency rule", () => {
       function afterDecimal() {} /import ("node:fs")/.test(text);
       const regexAsiMarker = /done/
       function afterRegex() {} /import ("node:fs")/.test(text);
+      generic<string>
+      function afterInstantiation() {} /import ("node:fs")/.test(text);
       const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
       const objectQuotient = {} / import("./after-object.js") / divisor;
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
