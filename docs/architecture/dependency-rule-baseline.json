@@ -126,11 +126,7 @@
     },
     {
       "from": "src/broker/main.ts",
-      "to": "src/runtime/pipe-process.ts"
-    },
-    {
-      "from": "src/broker/main.ts",
-      "to": "src/runtime/pty-process.ts"
+      "to": "src/runtime/session-runtime-adapter.ts"
     },
     {
       "from": "src/broker/nvim-binding-service.ts",
