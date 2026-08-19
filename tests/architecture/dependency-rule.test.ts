@@ -310,7 +310,7 @@ function withoutCommentsAndTemplates(source: string): string {
         result += " ";
         regexCharacterClass = false;
       } else if (character === "/" && !regexCharacterClass) {
-        result += " ";
+        result += "0";
         while (/[A-Za-z]/.test(source[index + 1] ?? "")) {
           result += " ";
           index += 1;
@@ -942,6 +942,8 @@ describe("architecture dependency rule", () => {
       function afterAsyncIdentifier() {} /import ("node:fs")/.test(text);
       const decimalAsiMarker = 1.
       function afterDecimal() {} /import ("node:fs")/.test(text);
+      const regexAsiMarker = /done/
+      function afterRegex() {} /import ("node:fs")/.test(text);
       const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
       const objectQuotient = {} / import("./after-object.js") / divisor;
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
