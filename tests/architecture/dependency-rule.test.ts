@@ -865,6 +865,8 @@ describe("architecture dependency rule", () => {
       switch (marker) { case 1: function declared() {} /import ("node:fs")/.test(text); }
       const asiMarker = 1
       function asiDeclared() {} /import ("node:fs")/.test(text);
+      asiMarker++
+      function postfixDeclared() {} /import ("node:fs")/.test(text);
       const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
       const objectQuotient = {} / import("./after-object.js") / divisor;
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
