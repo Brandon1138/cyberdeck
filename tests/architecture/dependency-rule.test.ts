@@ -83,7 +83,36 @@ function layerFor(path: string): Layer {
 
 function withoutCommentsAndTemplates(source: string): string {
   let result = "";
-  let state: "code" | "single" | "double" | "template" | "line" | "block" = "code";
+  let state: "code" | "single" | "double" | "template" | "regex" | "line" | "block" = "code";
+  let regexCharacterClass = false;
+
+  function canStartRegexLiteral(index: number): boolean {
+    const prefix = source.slice(0, index);
+    const previousToken = prefix.match(/(?:^|\s)([A-Za-z_$][\w$]*)\s*$/)?.[1];
+    if (
+      previousToken
+      && [
+        "await",
+        "case",
+        "delete",
+        "do",
+        "else",
+        "in",
+        "instanceof",
+        "of",
+        "return",
+        "throw",
+        "typeof",
+        "void",
+        "yield",
+      ].includes(previousToken)
+    ) {
+      return true;
+    }
+
+    const previousCharacter = prefix.match(/\S\s*$/)?.[0].trim();
+    return previousCharacter === undefined || "([{:;,=!?&|+-*%^~<>".includes(previousCharacter);
+  }
 
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index]!;
@@ -123,6 +152,30 @@ function withoutCommentsAndTemplates(source: string): string {
       continue;
     }
 
+    if (state === "regex") {
+      if (character === "\\" && next !== undefined) {
+        result += next === "\n" ? " \n" : "  ";
+        index += 1;
+      } else if (character === "[") {
+        result += " ";
+        regexCharacterClass = true;
+      } else if (character === "]") {
+        result += " ";
+        regexCharacterClass = false;
+      } else if (character === "/" && !regexCharacterClass) {
+        result += " ";
+        while (/[A-Za-z]/.test(source[index + 1] ?? "")) {
+          result += " ";
+          index += 1;
+        }
+        state = "code";
+      } else {
+        result += character === "\n" ? "\n" : " ";
+        if (character === "\n") state = "code";
+      }
+      continue;
+    }
+
     if (state === "single" || state === "double") {
       result += character;
       if (character === "\\" && next !== undefined) {
@@ -154,12 +207,62 @@ function withoutCommentsAndTemplates(source: string): string {
     } else if (character === "`") {
       result += " ";
       state = "template";
+    } else if (character === "/" && canStartRegexLiteral(index)) {
+      result += " ";
+      regexCharacterClass = false;
+      state = "regex";
     } else {
       result += character;
     }
   }
 
   return result;
+}
+
+function dynamicModuleSpecifiersFromSource(source: string): string[] {
+  const specifiers: string[] = [];
+
+  for (let index = 0; index < source.length; index += 1) {
+    const quote = source[index];
+    if (quote === "'" || quote === "\"") {
+      for (index += 1; index < source.length; index += 1) {
+        if (source[index] === "\\") index += 1;
+        else if (source[index] === quote) break;
+      }
+      continue;
+    }
+
+    if (
+      !source.startsWith("import", index)
+      || /[\w$.]/.test(source[index - 1] ?? "")
+      || /[\w$]/.test(source[index + "import".length] ?? "")
+    ) {
+      continue;
+    }
+
+    let cursor = index + "import".length;
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+    if (source[cursor] !== "(") continue;
+    cursor += 1;
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+
+    const specifierQuote = source[cursor];
+    if (specifierQuote !== "'" && specifierQuote !== "\"") continue;
+    const specifierStart = cursor + 1;
+    cursor = specifierStart;
+    while (cursor < source.length && source[cursor] !== specifierQuote) {
+      if (source[cursor] === "\\") cursor += 1;
+      cursor += 1;
+    }
+    if (source[cursor] !== specifierQuote) continue;
+
+    const specifier = source.slice(specifierStart, cursor);
+    cursor += 1;
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+    if (source[cursor] === ")") specifiers.push(specifier);
+  }
+
+  return specifiers;
 }
 
 function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
@@ -171,7 +274,10 @@ function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
     /^[ \t]*export\s+(?:type\s+)?(?:\*|\{)[^;]*?\s+from\s*["']([^"'\r\n]+)["']/gm,
   ];
 
-  return patterns.flatMap((pattern) => [...source.matchAll(pattern)].map((match) => match[1]!));
+  return [
+    ...patterns.flatMap((pattern) => [...source.matchAll(pattern)].map((match) => match[1]!)),
+    ...dynamicModuleSpecifiersFromSource(source),
+  ];
 }
 
 function staticModuleSpecifiers(path: string): string[] {
@@ -250,6 +356,11 @@ describe("architecture dependency rule", () => {
         visible,
       } from "./exported.js";
       const example = \`import "./template-text.js"\`;
+      const stringExample = 'import("./string-text.js")';
+      const marker = /[/*]/;
+      await import("./dynamic.js");
+      await import('../dynamic-single.js');
+      await import(variableSpecifier);
       import "./side-effect.js";
     `;
 
@@ -257,6 +368,8 @@ describe("architecture dependency rule", () => {
       "./side-effect.js",
       "./multiline.js",
       "./exported.js",
+      "./dynamic.js",
+      "../dynamic-single.js",
     ]);
   });
 
