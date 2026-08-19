@@ -133,7 +133,7 @@ function withoutCommentsAndTemplates(source: string): string {
     const beforeFunction = recentPrefix.slice(0, header.index);
     const hasLineBreak = /[\r\n]/.test(/\s*$/.exec(beforeFunction)?.[0] ?? "");
     let context = beforeFunction.trimEnd();
-    if (/\basync$/.test(context)) {
+    if (!hasLineBreak && /\basync$/.test(context)) {
       context = context.slice(0, context.length - "async".length).trimEnd();
     }
     if (header[1] === undefined) return !/\bexport\s+default$/.test(context);
@@ -147,7 +147,7 @@ function withoutCommentsAndTemplates(source: string): string {
 
     const previousCharacter = context.at(-1);
     if (hasLineBreak) {
-      if (/(?:\+\+|--)$/.test(context)) return false;
+      if (/(?:\+\+|--|[\w$)\]}]!+)$/.test(context)) return false;
       return previousCharacter !== undefined && "=([{,:!?&|+-*%^~<>.".includes(previousCharacter);
     }
     return previousCharacter !== undefined && !";{}".includes(previousCharacter);
