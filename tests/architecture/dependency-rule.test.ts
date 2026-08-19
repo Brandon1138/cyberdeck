@@ -652,6 +652,7 @@ describe("architecture dependency rule", () => {
       await import(\`./template-specifier.js\`);
       await import(\`./template-\${variableSpecifier}.js\`);
       await import((("./parenthesized.js")));
+      await import("./asserted.js" as string);
     `;
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
@@ -659,6 +660,7 @@ describe("architecture dependency rule", () => {
       "./with-options.js",
       "./template-specifier.js",
       "./parenthesized.js",
+      "./asserted.js",
     ]);
   });
 
