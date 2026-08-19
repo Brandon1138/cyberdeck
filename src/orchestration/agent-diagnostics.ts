@@ -13,6 +13,44 @@ export interface InspectAgentDiagnosticStateInput {
   describeActor?: (actorSessionId: string) => Promise<unknown>;
 }
 
+export interface DiagnoseAgentInput extends InspectAgentDiagnosticStateInput {
+  conversationDrifted: boolean;
+}
+
+export interface AgentDiagnostic extends AgentDiagnosticState {
+  remedy: string;
+  status: string;
+}
+
+const BROKER_UNREACHABLE_REMEDY =
+  "The Cyberdeck broker is not accepting connections. Start it with `cyberdeck up`, then reconnect this server with /mcp.";
+const BROKER_OUTDATED_REMEDY =
+  "The running broker is older than this MCP server and does not implement the method it called. Rebuild, then `cyberdeck restart` — the broker runs compiled output, so a restart without a rebuild silently keeps the old build.";
+const DEFAULT_REMEDY =
+  "Cyberdeck tools are resolvable. If a cyberdeck_* tool still looks missing, the harness tool index is at fault, not this server.";
+
+export async function diagnoseAgent(input: DiagnoseAgentInput): Promise<AgentDiagnostic> {
+  const state = await inspectAgentDiagnosticState(input);
+  const { actor, actorStatus, brokerError, brokerStatus } = state;
+  const status = brokerStatus === "unreachable" && brokerError !== undefined
+    ? "broker-unreachable"
+    : brokerStatus === "outdated"
+      ? "broker-outdated"
+      : actorStatus === undefined
+        ? "unknown"
+        : actorStatus === "bound"
+          ? (input.conversationDrifted ? "conversation-drifted" : "healthy")
+          : actorStatus;
+  const remedy = brokerStatus === "outdated"
+    ? BROKER_OUTDATED_REMEDY
+    : brokerError !== undefined
+      ? BROKER_UNREACHABLE_REMEDY
+      : isRecord(actor) && typeof actor.remedy === "string"
+        ? actor.remedy
+        : DEFAULT_REMEDY;
+  return { ...state, status, remedy };
+}
+
 /**
  * Reads actor binding and classifies broker reachability for diagnostic presentation.
  *

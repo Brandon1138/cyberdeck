@@ -9,7 +9,7 @@ import {
 } from "../limits.js";
 import type { Readable, Writable } from "node:stream";
 import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
-import { inspectAgentDiagnosticState } from "../orchestration/agent-diagnostics.js";
+import { diagnoseAgent } from "../orchestration/agent-diagnostics.js";
 import { readWorkerCapabilities } from "../orchestration/worker-capabilities.js";
 import { CYBERDECK_VERSION } from "../version.js";
 
@@ -72,8 +72,6 @@ export class McpToolError extends Error {
 const REMEDIES: Record<string, string> = {
   CYBERDECK_BROKER_UNREACHABLE:
     "The Cyberdeck broker is not accepting connections. Start it with `cyberdeck up`, then reconnect this server with /mcp.",
-  CYBERDECK_BROKER_OUTDATED:
-    "The running broker is older than this MCP server and does not implement the method it called. Rebuild, then `cyberdeck restart` — the broker runs compiled output, so a restart without a rebuild silently keeps the old build.",
   ACTOR_NOT_AUTHORIZED:
     "This session holds no Cyberdeck orchestrator binding. Call cyberdeck_diagnose for the exact state, or relaunch the orchestrator through Cyberdeck.",
   ACTOR_BINDING_ORPHANED:
@@ -762,8 +760,9 @@ async function diagnose(context: McpServerContext): Promise<Record<string, unkno
   const { identity } = context;
   const drift = conversationDrift(identity);
   const transport = context.transport;
-  const { actor, actorStatus, brokerError, brokerStatus } = await inspectAgentDiagnosticState({
+  const { actor, brokerError, brokerStatus, remedy, status } = await diagnoseAgent({
     actorSessionId: identity.actorSessionId,
+    conversationDrifted: drift !== undefined,
     ...(context.brokerUnavailable === undefined
       ? {}
       : { brokerUnavailable: context.brokerUnavailable }),
@@ -775,15 +774,6 @@ async function diagnose(context: McpServerContext): Promise<Record<string, unkno
         }),
       }),
   });
-  const status = brokerStatus === "unreachable" && brokerError !== undefined
-    ? "broker-unreachable"
-    : brokerStatus === "outdated"
-      ? "broker-outdated"
-      : actorStatus === undefined
-        ? "unknown"
-        : actorStatus === "bound"
-          ? (drift === undefined ? "healthy" : "conversation-drifted")
-          : actorStatus;
   return {
     server: { name: "cyberdeck", version: CYBERDECK_VERSION, pid: process.pid },
     status,
@@ -800,13 +790,7 @@ async function diagnose(context: McpServerContext): Promise<Record<string, unkno
       ...(brokerError === undefined ? {} : { error: brokerError }),
     },
     actor: actor ?? null,
-    remedy: brokerStatus === "outdated"
-      ? REMEDIES.CYBERDECK_BROKER_OUTDATED
-      : brokerError !== undefined
-        ? REMEDIES.CYBERDECK_BROKER_UNREACHABLE
-        : isRecord(actor) && typeof actor.remedy === "string"
-          ? actor.remedy
-          : "Cyberdeck tools are resolvable. If a cyberdeck_* tool still looks missing, the harness tool index is at fault, not this server.",
+    remedy,
   };
 }
 
