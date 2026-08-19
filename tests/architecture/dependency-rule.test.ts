@@ -89,7 +89,15 @@ function layerFor(path: string): Layer {
 
 function withoutCommentsAndTemplates(source: string): string {
   let result = "";
-  let state: "code" | "single" | "double" | "template" | "regex" | "line" | "block" = "code";
+  let state:
+    | "code"
+    | "single"
+    | "double"
+    | "template"
+    | "static-template"
+    | "regex"
+    | "line"
+    | "block" = "code";
   let regexCharacterClass = false;
   const templateExpressionDepths: number[] = [];
   const parenthesisContexts: Array<"expression" | "statement"> = [];
@@ -125,6 +133,20 @@ function withoutCommentsAndTemplates(source: string): string {
       || /=>\s*$/.test(recentPrefix)
       || ["do", "else", "finally", "try"].includes(token ?? "")
       || /\bclass(?:\s+[A-Za-z_$][\w$]*)?(?:\s+extends\s+[^{}]+)?\s*$/.test(recentPrefix);
+  }
+
+  function startsStaticTemplateSpecifier(index: number): boolean {
+    const recentPrefix = result.slice(Math.max(0, index - 128), index);
+    return /(?:^|[^\w$.])import\s*\(\s*$/.test(recentPrefix);
+  }
+
+  function templateHasSubstitution(index: number): boolean {
+    for (let cursor = index + 1; cursor < source.length; cursor += 1) {
+      if (source[cursor] === "\\") cursor += 1;
+      else if (source[cursor] === "$" && source[cursor + 1] === "{") return true;
+      else if (source[cursor] === "`") return false;
+    }
+    return true;
   }
 
   function canStartRegexLiteral(index: number): boolean {
@@ -199,6 +221,17 @@ function withoutCommentsAndTemplates(source: string): string {
       continue;
     }
 
+    if (state === "static-template") {
+      result += character;
+      if (character === "\\" && next !== undefined) {
+        result += next;
+        index += 1;
+      } else if (character === "`") {
+        state = "code";
+      }
+      continue;
+    }
+
     if (state === "regex") {
       if (character === "\\" && next !== undefined) {
         result += next === "\n" ? " \n" : "  ";
@@ -252,8 +285,13 @@ function withoutCommentsAndTemplates(source: string): string {
       result += character;
       state = "double";
     } else if (character === "`") {
-      result += " ";
-      state = "template";
+      if (startsStaticTemplateSpecifier(index) && !templateHasSubstitution(index)) {
+        result += character;
+        state = "static-template";
+      } else {
+        result += " ";
+        state = "template";
+      }
     } else if (character === "(") {
       result += character;
       parenthesisContexts.push(
@@ -364,7 +402,7 @@ function dynamicModuleSpecifiersFromSource(source: string): string[] {
 
   for (let index = 0; index < source.length; index += 1) {
     const quote = source[index];
-    if (quote === "'" || quote === "\"") {
+    if (quote === "'" || quote === "\"" || quote === "`") {
       for (index += 1; index < source.length; index += 1) {
         if (source[index] === "\\") index += 1;
         else if (source[index] === quote) break;
@@ -387,7 +425,7 @@ function dynamicModuleSpecifiersFromSource(source: string): string[] {
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
 
     const specifierQuote = source[cursor];
-    if (specifierQuote !== "'" && specifierQuote !== "\"") continue;
+    if (specifierQuote !== "'" && specifierQuote !== "\"" && specifierQuote !== "`") continue;
     const specifierStart = cursor + 1;
     cursor = specifierStart;
     while (cursor < source.length && source[cursor] !== specifierQuote) {
@@ -406,19 +444,73 @@ function dynamicModuleSpecifiersFromSource(source: string): string[] {
   return specifiers;
 }
 
+function declarationModuleSpecifiersFromSource(source: string): {
+  sideEffectImports: string[];
+  importsFrom: string[];
+  importEquals: string[];
+  exportsFrom: string[];
+} {
+  const sideEffectImports: string[] = [];
+  const importsFrom: string[] = [];
+  const importEquals: string[] = [];
+  const exportsFrom: string[] = [];
+
+  for (let index = 0; index < source.length; index += 1) {
+    const quote = source[index];
+    if (quote === "'" || quote === "\"" || quote === "`") {
+      for (index += 1; index < source.length; index += 1) {
+        if (source[index] === "\\") index += 1;
+        else if (source[index] === quote) break;
+      }
+      continue;
+    }
+
+    const previous = source[index - 1] ?? "";
+    if (
+      source.startsWith("import", index)
+      && !/[\w$.]/.test(previous)
+      && !/[\w$]/.test(source[index + "import".length] ?? "")
+    ) {
+      const candidate = source.slice(index);
+      const matches = [
+        candidate.match(/^import\s*["']([^"'\r\n]+)["']/),
+        candidate.match(/^import\s+(?:type\s+)?[^;]*?\s+from\s*["']([^"'\r\n]+)["']/),
+        candidate.match(/^import\s+[^;]*?=\s*require\s*\(\s*["']([^"'\r\n]+)["']/),
+      ];
+      const target = matches.findIndex((match) => match !== null);
+      if (target !== -1) {
+        const specifier = decodeModuleSpecifier(matches[target]![1]!);
+        if (specifier !== undefined) {
+          [sideEffectImports, importsFrom, importEquals][target]!.push(specifier);
+        }
+      }
+    } else if (
+      source.startsWith("export", index)
+      && !/[\w$.]/.test(previous)
+      && !/[\w$]/.test(source[index + "export".length] ?? "")
+    ) {
+      const match = source.slice(index).match(
+        /^export\s+(?:type\s+)?(?:\*|\{)[^;]*?\s+from\s*["']([^"'\r\n]+)["']/,
+      );
+      if (match !== null) {
+        const specifier = decodeModuleSpecifier(match[1]!);
+        if (specifier !== undefined) exportsFrom.push(specifier);
+      }
+    }
+  }
+
+  return { sideEffectImports, importsFrom, importEquals, exportsFrom };
+}
+
 function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
   const source = withoutCommentsAndTemplates(unprocessedSource);
-  const patterns = [
-    /^[ \t]*import\s*["']([^"'\r\n]+)["']/gm,
-    /^[ \t]*import\s+(?:type\s+)?[^;]*?\s+from\s*["']([^"'\r\n]+)["']/gm,
-    /^[ \t]*import\s+[^;]*?=\s*require\s*\(\s*["']([^"'\r\n]+)["']/gm,
-    /^[ \t]*export\s+(?:type\s+)?(?:\*|\{)[^;]*?\s+from\s*["']([^"'\r\n]+)["']/gm,
-  ];
+  const declarations = declarationModuleSpecifiersFromSource(source);
 
   return [
-    ...patterns.flatMap((pattern) => [...source.matchAll(pattern)]
-      .map((match) => decodeModuleSpecifier(match[1]!))
-      .filter((specifier): specifier is string => specifier !== undefined)),
+    ...declarations.sideEffectImports,
+    ...declarations.importsFrom,
+    ...declarations.importEquals,
+    ...declarations.exportsFrom,
     ...dynamicModuleSpecifiersFromSource(source),
   ];
 }
