@@ -523,11 +523,27 @@ describe("architecture dependency rule", () => {
     const source = `
       const rendered = \`literal \${await import("./template-substitution.js")}\`;
       await import("./with-options.js", { with: { type: "json" } });
+      await import(\`./template-specifier.js\`);
+      await import(\`./template-\${variableSpecifier}.js\`);
     `;
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
       "./template-substitution.js",
       "./with-options.js",
+      "./template-specifier.js",
+    ]);
+  });
+
+  it("finds static declarations after other same-line module items", () => {
+    const source = [
+      'const marker = 1; import "../runtime/side-effect.js";',
+      'const lookalike = \'; import "node:fs";\';',
+      'function marker() {} export { marker } from "../runtime/exported.js";',
+    ].join("\n");
+
+    expect(staticModuleSpecifiersFromSource(source)).toEqual([
+      "../runtime/side-effect.js",
+      "../runtime/exported.js",
     ]);
   });
 
