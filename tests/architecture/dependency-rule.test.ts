@@ -864,6 +864,7 @@ describe("architecture dependency rule", () => {
       enum Markers {} /import ("node:child_process")/.test(text);
       namespace MarkerSpace {} /import ("node:worker_threads")/.test(text);
       switch (marker) { case 1: function declared() {} /import ("node:fs")/.test(text); }
+      switch (marker) { case 2: const ternary = marker ? 1 : function named() {} / (await import("./after-switch-ternary.js")).value; }
       const asiMarker = 1
       function asiDeclared() {} /import ("node:fs")/.test(text);
       asiMarker++
@@ -872,6 +873,8 @@ describe("architecture dependency rule", () => {
       function nonNullDeclared() {} /import ("node:fs")/.test(text);
       value = async
       function afterAsyncIdentifier() {} /import ("node:fs")/.test(text);
+      const decimalAsiMarker = 1.
+      function afterDecimal() {} /import ("node:fs")/.test(text);
       const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
       const objectQuotient = {} / import("./after-object.js") / divisor;
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
@@ -889,6 +892,7 @@ describe("architecture dependency rule", () => {
       "./after-template.js",
       "./after-function.js",
       "./after-default-property.js",
+      "./after-switch-ternary.js",
     ]);
   });
 
