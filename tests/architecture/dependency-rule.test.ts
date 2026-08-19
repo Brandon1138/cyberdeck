@@ -37,6 +37,12 @@ const FORBIDDEN_DOMAIN_MODULES = new Set([
   "node-pty",
 ]);
 
+function forbiddenDomainModule(specifier: string): string | undefined {
+  const canonical = specifier.startsWith("node:") ? specifier : `node:${specifier}`;
+  if (FORBIDDEN_DOMAIN_MODULES.has(canonical)) return canonical;
+  return FORBIDDEN_DOMAIN_MODULES.has(specifier) ? specifier : undefined;
+}
+
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true })
     .flatMap((entry) => {
@@ -322,8 +328,11 @@ function currentViolations(): Violation[] {
     const importerLayer = layerFor(importer);
 
     for (const specifier of staticModuleSpecifiers(importer)) {
-      if (importerLayer === "domain" && FORBIDDEN_DOMAIN_MODULES.has(specifier)) {
-        const violation = { from: sourcePath(importer), to: specifier };
+      const forbidden = importerLayer === "domain"
+        ? forbiddenDomainModule(specifier)
+        : undefined;
+      if (forbidden !== undefined) {
+        const violation = { from: sourcePath(importer), to: forbidden };
         violations.set(violationKey(violation), violation);
         continue;
       }
