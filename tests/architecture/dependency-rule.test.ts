@@ -245,6 +245,67 @@ function withoutCommentsAndTemplates(source: string): string {
   return result;
 }
 
+function decodeModuleSpecifier(specifier: string): string | undefined {
+  const simpleEscapes: Readonly<Record<string, string>> = {
+    "'": "'",
+    "\"": "\"",
+    "\\": "\\",
+    b: "\b",
+    f: "\f",
+    n: "\n",
+    r: "\r",
+    t: "\t",
+    v: "\v",
+  };
+  let decoded = "";
+
+  for (let index = 0; index < specifier.length; index += 1) {
+    const character = specifier[index]!;
+    if (character !== "\\") {
+      decoded += character;
+      continue;
+    }
+
+    const escaped = specifier[index + 1];
+    if (escaped === undefined) return undefined;
+    index += 1;
+
+    const simpleEscape = simpleEscapes[escaped];
+    if (simpleEscape !== undefined) {
+      decoded += simpleEscape;
+    } else if (escaped === "0" && !/[0-9]/.test(specifier[index + 1] ?? "")) {
+      decoded += "\0";
+    } else if (escaped === "x") {
+      const digits = specifier.slice(index + 1, index + 3);
+      if (!/^[0-9A-Fa-f]{2}$/.test(digits)) return undefined;
+      decoded += String.fromCharCode(Number.parseInt(digits, 16));
+      index += 2;
+    } else if (escaped === "u" && specifier[index + 1] === "{") {
+      const closingBrace = specifier.indexOf("}", index + 2);
+      if (closingBrace === -1) return undefined;
+      const digits = specifier.slice(index + 2, closingBrace);
+      if (!/^[0-9A-Fa-f]{1,6}$/.test(digits)) return undefined;
+      const codePoint = Number.parseInt(digits, 16);
+      if (codePoint > 0x10ffff) return undefined;
+      decoded += String.fromCodePoint(codePoint);
+      index = closingBrace;
+    } else if (escaped === "u") {
+      const digits = specifier.slice(index + 1, index + 5);
+      if (!/^[0-9A-Fa-f]{4}$/.test(digits)) return undefined;
+      decoded += String.fromCharCode(Number.parseInt(digits, 16));
+      index += 4;
+    } else if (escaped === "\n") {
+      continue;
+    } else if (escaped === "\r") {
+      if (specifier[index + 1] === "\n") index += 1;
+    } else {
+      decoded += escaped;
+    }
+  }
+
+  return decoded;
+}
+
 function dynamicModuleSpecifiersFromSource(source: string): string[] {
   const specifiers: string[] = [];
 
@@ -282,7 +343,8 @@ function dynamicModuleSpecifiersFromSource(source: string): string[] {
     }
     if (source[cursor] !== specifierQuote) continue;
 
-    const specifier = source.slice(specifierStart, cursor);
+    const specifier = decodeModuleSpecifier(source.slice(specifierStart, cursor));
+    if (specifier === undefined) continue;
     cursor += 1;
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
     if (source[cursor] === ")" || source[cursor] === ",") specifiers.push(specifier);
@@ -301,7 +363,9 @@ function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
   ];
 
   return [
-    ...patterns.flatMap((pattern) => [...source.matchAll(pattern)].map((match) => match[1]!)),
+    ...patterns.flatMap((pattern) => [...source.matchAll(pattern)]
+      .map((match) => decodeModuleSpecifier(match[1]!))
+      .filter((specifier): specifier is string => specifier !== undefined)),
     ...dynamicModuleSpecifiersFromSource(source),
   ];
 }
