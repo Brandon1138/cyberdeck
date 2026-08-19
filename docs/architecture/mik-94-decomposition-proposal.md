@@ -12,8 +12,9 @@ dependency map records static imports/exports; runtime-only construction is call
 Cyberdeck already has strong domain contracts, but physical boundaries do not match its stated
 dependency rule. Most use cases live in `src/orchestration/`, yet they import the broker runtime,
 concrete JSONL stores, and a client policy module. Several application services live in
-`src/broker/`. `SessionRegistry` is the largest knot: one 3,408-line class owns session lifecycle,
-provider selection, provider launch preparation, PTY/pipe control, replay interpretation,
+`src/broker/`. `SessionRegistry` is the largest knot: its 3,408-line file contains a
+~2,922-line class that owns session lifecycle, provider selection, provider launch preparation,
+PTY/pipe control, replay interpretation,
 instruction truth, Scout verification, transcript capture, persistence, worktree provisioning, and
 filesystem validation (`src/broker/session-registry.ts:1-83`,
 `src/broker/session-registry.ts:185-225`, `src/broker/session-registry.ts:413-435`).
