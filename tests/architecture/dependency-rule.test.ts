@@ -238,7 +238,7 @@ function withoutCommentsAndTemplates(source: string): string {
         templateExpressionDepths.push(0);
         state = "code";
       } else if (character === "`") {
-        result += " ";
+        result += "0";
         state = "code";
       } else {
         result += character === "\n" ? "\n" : " ";
@@ -468,9 +468,12 @@ function dynamicModuleSpecifiersFromSource(source: string): string[] {
       continue;
     }
 
+    let previousIndex = index - 1;
+    while (/\s/.test(source[previousIndex] ?? "")) previousIndex -= 1;
+
     if (
       !source.startsWith("import", index)
-      || /[\w$.]/.test(source[index - 1] ?? "")
+      || /[\w$.]/.test(source[previousIndex] ?? "")
       || /[\w$]/.test(source[index + "import".length] ?? "")
     ) {
       continue;
