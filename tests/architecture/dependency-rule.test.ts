@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { stripTypeScriptTypes } from "node:module";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "es-module-lexer/js";
@@ -101,16 +102,9 @@ function withoutCommentsAndTemplates(source: string): string {
     | "block" = "code";
   let regexCharacterClass = false;
   const templateExpressionDepths: number[] = [];
-  const parenthesisContexts: Array<"expression" | "statement" | "switch"> = [];
-  const braceContexts: Array<{
-    opensRegexAfter: boolean;
-    switchBody: boolean;
-    pendingSwitchLabel: boolean;
-    switchTernaryDepth: number;
-  }> = [];
+  const parenthesisContexts: Array<"expression" | "statement"> = [];
+  const braceContexts: boolean[] = [];
   const regexAfterDelimiter = new Set<number>();
-  const switchHeaderClosers = new Set<number>();
-  const switchLabelColons = new Set<number>();
 
   function previousSignificantIndex(index: number): number | undefined {
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
@@ -128,40 +122,7 @@ function withoutCommentsAndTemplates(source: string): string {
     return /^[A-Za-z_$]/.test(token) ? token : undefined;
   }
 
-  function closesFunctionExpression(index: number): boolean {
-    const recentPrefix = result.slice(Math.max(0, index - 256), index);
-    if (/=>\s*$/.test(recentPrefix)) return true;
-
-    const header = /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\([^{};]*\)\s*$/.exec(
-      recentPrefix,
-    );
-    if (header === null) return false;
-
-    const beforeFunction = recentPrefix.slice(0, header.index);
-    const hasLineBreak = /[\r\n]/.test(/\s*$/.exec(beforeFunction)?.[0] ?? "");
-    let context = beforeFunction.trimEnd();
-    if (!hasLineBreak && /\basync$/.test(context)) {
-      context = context.slice(0, context.length - "async".length).trimEnd();
-    }
-    if (header[1] === undefined) return !/\bexport\s+default$/.test(context);
-    if (/\b(?:declare|export(?:\s+default)?)$/.test(context)) return false;
-    const prefixStart = Math.max(0, index - 256);
-    const functionIndex = prefixStart + header.index;
-    const beforeFunctionIndex = previousSignificantIndex(functionIndex);
-    if (beforeFunctionIndex !== undefined && switchLabelColons.has(beforeFunctionIndex)) return false;
-
-    const previousCharacter = context.at(-1);
-    if (hasLineBreak) {
-      if (/(?:\+\+|--|[\w$)\]}]!+)$/.test(context)) return false;
-      if (/\d\.$/.test(context)) return false;
-      return previousCharacter !== undefined && "=([{,:!?&|+-*%^~<>.".includes(previousCharacter);
-    }
-    return previousCharacter !== undefined && !";{}".includes(previousCharacter);
-  }
-
   function opensBlock(index: number): boolean {
-    if (closesFunctionExpression(index)) return false;
-
     const previousIndex = previousSignificantIndex(index);
     const previousCharacter = previousIndex === undefined ? undefined : result[previousIndex];
     const token = previousToken(index);
@@ -171,6 +132,7 @@ function withoutCommentsAndTemplates(source: string): string {
       || previousCharacter === ";"
       || previousCharacter === "}"
       || previousCharacter === ")"
+      || /=>\s*$/.test(recentPrefix)
       || ["do", "else", "finally", "try"].includes(token ?? "")
       || /\b(?:class|enum|interface|module|namespace)\b[^{}]*$/.test(recentPrefix);
   }
@@ -359,37 +321,22 @@ function withoutCommentsAndTemplates(source: string): string {
       }
     } else if (character === "(") {
       result += character;
-      const token = previousToken(index);
-      parenthesisContexts.push(token === "switch"
-        ? "switch"
-        : ["catch", "for", "if", "while", "with"].includes(token ?? "")
+      parenthesisContexts.push(
+        ["catch", "for", "if", "switch", "while", "with"].includes(previousToken(index) ?? "")
           ? "statement"
-          : "expression");
+          : "expression",
+      );
     } else if (character === ")") {
       result += character;
-      const context = parenthesisContexts.pop();
-      if (context === "statement" || context === "switch") regexAfterDelimiter.add(index);
-      if (context === "switch") switchHeaderClosers.add(index);
+      if (parenthesisContexts.pop() === "statement") regexAfterDelimiter.add(index);
     } else if (character === "{" && templateExpressionDepths.length > 0) {
       result += character;
       const expressionIndex = templateExpressionDepths.length - 1;
       templateExpressionDepths[expressionIndex] = templateExpressionDepths[expressionIndex]! + 1;
-      const previousIndex = previousSignificantIndex(index);
-      braceContexts.push({
-        opensRegexAfter: opensBlock(index),
-        switchBody: previousIndex !== undefined && switchHeaderClosers.has(previousIndex),
-        pendingSwitchLabel: false,
-        switchTernaryDepth: 0,
-      });
+      braceContexts.push(opensBlock(index));
     } else if (character === "{") {
       result += character;
-      const previousIndex = previousSignificantIndex(index);
-      braceContexts.push({
-        opensRegexAfter: opensBlock(index),
-        switchBody: previousIndex !== undefined && switchHeaderClosers.has(previousIndex),
-        pendingSwitchLabel: false,
-        switchTernaryDepth: 0,
-      });
+      braceContexts.push(opensBlock(index));
     } else if (character === "}" && templateExpressionDepths.length > 0) {
       const expressionIndex = templateExpressionDepths.length - 1;
       if (templateExpressionDepths[expressionIndex] === 0) {
@@ -399,50 +346,11 @@ function withoutCommentsAndTemplates(source: string): string {
       } else {
         result += character;
         templateExpressionDepths[expressionIndex] = templateExpressionDepths[expressionIndex]! - 1;
-        if (braceContexts.pop()?.opensRegexAfter === true) regexAfterDelimiter.add(index);
+        if (braceContexts.pop() === true) regexAfterDelimiter.add(index);
       }
     } else if (character === "}") {
       result += character;
-      if (braceContexts.pop()?.opensRegexAfter === true) regexAfterDelimiter.add(index);
-    } else if (
-      source.startsWith("case", index)
-      && !/[\w$]/.test(source[index - 1] ?? "")
-      && !/[\w$]/.test(source[index + "case".length] ?? "")
-      && braceContexts.at(-1)?.switchBody === true
-    ) {
-      const switchContext = braceContexts.at(-1)!;
-      switchContext.pendingSwitchLabel = true;
-      switchContext.switchTernaryDepth = 0;
-      result += character;
-    } else if (
-      source.startsWith("default", index)
-      && !/[\w$.]/.test(source[index - 1] ?? "")
-      && !/[\w$]/.test(source[index + "default".length] ?? "")
-      && braceContexts.at(-1)?.switchBody === true
-      && braceContexts.at(-1)?.pendingSwitchLabel === false
-    ) {
-      let cursor = index + "default".length;
-      while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-      if (source[cursor] === ":") braceContexts.at(-1)!.pendingSwitchLabel = true;
-      result += character;
-    } else if (
-      character === "?"
-      && source[index - 1] !== "?"
-      && next !== "."
-      && next !== "?"
-      && braceContexts.at(-1)?.pendingSwitchLabel === true
-    ) {
-      braceContexts.at(-1)!.switchTernaryDepth += 1;
-      result += character;
-    } else if (character === ":" && braceContexts.at(-1)?.pendingSwitchLabel === true) {
-      const switchContext = braceContexts.at(-1)!;
-      if (switchContext.switchTernaryDepth > 0) {
-        switchContext.switchTernaryDepth -= 1;
-      } else {
-        switchContext.pendingSwitchLabel = false;
-        switchLabelColons.add(index);
-      }
-      result += character;
+      if (braceContexts.pop() === true) regexAfterDelimiter.add(index);
     } else if (character === "/" && canStartRegexLiteral(index)) {
       result += " ";
       regexCharacterClass = false;
@@ -701,15 +609,22 @@ function declarationModuleSpecifiersFromSource(source: string): {
 function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
   const source = withoutCommentsAndTemplates(unprocessedSource);
   const importEquals = declarationModuleSpecifiersFromSource(source).importEquals;
+  const erasableSource = unprocessedSource.replace(
+    /^(\s*(?:(?:export|declare)\s+)*)(enum|module|namespace)\b/gm,
+    (_match, prefix: string, keyword: string) => `${prefix}${"class".padEnd(keyword.length)}`,
+  );
+  const lexedSource = stripTypeScriptTypes(erasableSource, { mode: "strip" });
   const sideEffectImports: string[] = [];
   const importsFrom: string[] = [];
   const exportsFrom: string[] = [];
-  const dynamicImports: string[] = [];
+  const dynamicImports: Array<{ index: number; specifier: string }> = [];
 
-  for (const imported of parse(unprocessedSource)[0]) {
+  for (const imported of parse(lexedSource)[0]) {
     if (imported.d >= 0) {
+      const importExpression = unprocessedSource.slice(imported.ss, imported.se);
+      if (importExpression.includes("`") && importExpression.includes("${")) continue;
       const specifier = imported.n ?? dynamicModuleSpecifierAt(unprocessedSource, imported.s);
-      if (specifier !== undefined) dynamicImports.push(specifier);
+      if (specifier !== undefined) dynamicImports.push({ index: imported.ss, specifier });
       continue;
     }
     if (imported.d !== -1 || imported.n === undefined) continue;
@@ -724,12 +639,20 @@ function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
     }
   }
 
+  const spreadImport = /\.\.\.\s*import\s*\(/g;
+  for (let match = spreadImport.exec(source); match !== null; match = spreadImport.exec(source)) {
+    const specifier = dynamicModuleSpecifierAt(unprocessedSource, match.index + match[0].length);
+    if (specifier !== undefined && !dynamicImports.some((entry) => entry.index === match.index)) {
+      dynamicImports.push({ index: match.index, specifier });
+    }
+  }
+
   return [
     ...sideEffectImports,
     ...importsFrom,
     ...importEquals,
     ...exportsFrom,
-    ...dynamicImports,
+    ...dynamicImports.sort((left, right) => left.index - right.index).map((entry) => entry.specifier),
   ];
 }
 
