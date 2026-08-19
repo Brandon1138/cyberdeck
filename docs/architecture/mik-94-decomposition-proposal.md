@@ -308,6 +308,37 @@ beyond the first MCP example; Fleet/CLI presenter splits; nvim project/binding a
 transcript/Scout store separation; and provider-port inversion. Those should be planned from the
 now-stable ports, not bundled into Wave 1.
 
+### MIK-84 dependency reconciliation
+
+Wave 1 establishes the first architectural seams. It does not complete MIK-94 and does not unblock
+MIK-84. Before MIK-94 may be considered complete, the refactor must provide or explicitly re-scope
+every prerequisite defined in `docs/design/mik-84-autonomous-loops.md` section 7:
+
+1. a durable `LoopRunStore` and worker-plane budget ledger with fail-closed accounting;
+2. a production-wired periodic lease-expiry sweep;
+3. worker-plane and loop-run startup reconciliation before admission opens;
+4. one stable controller-family binding per active run, preserving MIK-98's settled grant/lease
+   invariant;
+5. `loopRunId`, iteration identity, completion provenance, and stop-settlement identity across
+   instructions, transcripts, and coordination audit;
+6. a stop-aware `InstructionPort` plus graceful/force termination and observed exit for every target;
+7. joined rolling retention across transcript, instruction, workflow-message, and worker-coordination
+   stores;
+8. an explicit multi-gate policy and inward `LoopGatePort` with durable operator/controller decisions;
+9. a durable, off-by-default, operator-only loop-start capability checked at definition and launch;
+10. inward `Clock` and `LoopScheduleStore` ports with missed ticks recorded as facts, never backlog;
+11. one domain-level iteration-boundary fact with per-trigger adapters and provenance-qualified
+    completion evidence;
+12. provider-specific loop capability representation, including canonical-turn and trigger limits;
+13. domain-owned loop bounds actuated, but not decided, by infrastructure; and
+14. an operator-reachable graceful and force-stop path that observes process exit and durable
+    instruction settlement.
+
+These are part of the post-Wave-1 MIK-94 completion horizon, not optional downstream loop work.
+MIK-84 remains blocked until they land, or until both documents are reconciled through an
+operator-approved scope decision. Naming them here does not authorise a Wave 1 slice to change their
+underlying runtime, ownership, persistence, or public semantics.
+
 ## Requires operator approval
 
 MIK-94 consultation gate applies before any item below changes. Default for every slice is “retain
