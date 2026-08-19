@@ -15,8 +15,7 @@ import { ClaudeJobDispatchAdapter } from "../providers/claude/dispatch-adapter.j
 import { CodexProviderAdapter } from "../providers/codex.js";
 import { CursorJobDispatchAdapter } from "../providers/cursor/dispatch-adapter.js";
 import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
-import { PtyProcess } from "../runtime/pty-process.js";
-import { PipeProcess } from "../runtime/pipe-process.js";
+import { createSessionRuntime } from "../runtime/session-runtime-adapter.js";
 import { Journal } from "./journal.js";
 import { NvimBindingService } from "./nvim-binding-service.js";
 import { BrokerServer } from "./server.js";
@@ -145,9 +144,7 @@ export async function runBroker(
       cursor: new CursorProviderAdapter({ mcp }),
       antigravity: new AntigravityProviderAdapter(),
     },
-    ptyFactory: (spec, replayBytes) => spec.transport === "pipe"
-      ? new PipeProcess(spec, replayBytes)
-      : new PtyProcess(spec, replayBytes),
+    sessionRuntimeFactory: createSessionRuntime,
     journal,
     transcripts,
     store: sessionStore,

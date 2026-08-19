@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
-import type { PtyHandle } from "../../src/broker/session-registry.js";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
+import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import { AgentControlService } from "../../src/orchestration/agent-control-service.js";
 
@@ -16,7 +16,7 @@ const CWD = "/tmp/repo";
 const SEGMENT_SECONDS = 1;
 const TIMEOUT_SECONDS = 5;
 
-class FakePty implements PtyHandle {
+class FakePty implements SessionRuntime {
   readonly pid = 4242;
   private replay = "";
   private readonly outputListeners = new Set<(chunk: Buffer) => void>();
@@ -72,7 +72,7 @@ function harness() {
   });
   const registry = new SessionRegistry({
     adapters: { codex: adapter },
-    ptyFactory,
+    sessionRuntimeFactory: ptyFactory,
     journal: { append: async () => {} },
     validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({}),

@@ -1,10 +1,11 @@
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
+import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import { PipeProcess } from "../../src/runtime/pipe-process.js";
 
 describe("PipeProcess", () => {
   it("captures stdout and stderr and settles only after the one-shot process closes", async () => {
-    const processHandle = new PipeProcess({
+    const processHandle: SessionRuntime = new PipeProcess({
       executable: process.execPath,
       args: [
         "-e",

@@ -2,9 +2,10 @@ import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SessionRegistry, type PtyHandle } from "../../src/broker/session-registry.js";
+import { SessionRegistry } from "../../src/broker/session-registry.js";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
+import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import { MIN_SCOUT_REPLAY_BYTES } from "../../src/domain/worker-profile.js";
 import { ScoutReportStore } from "../../src/persistence/scout-report-store.js";
 import type {
@@ -21,7 +22,7 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-class FakePty implements PtyHandle {
+class FakePty implements SessionRuntime {
   readonly pid = 9001;
   readonly writes: Buffer[] = [];
   readonly kills: Array<string | undefined> = [];
@@ -127,7 +128,7 @@ async function harness(options: {
   const reportStore = new ScoutReportStore(state);
   const registry = new SessionRegistry({
     adapters: { cursor },
-    ptyFactory,
+    sessionRuntimeFactory: ptyFactory,
     journal: { append: async () => {} },
     validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({}),
@@ -399,7 +400,7 @@ describe("Scout session lifecycle", () => {
 
     const recovered = new SessionRegistry({
       adapters: { cursor },
-      ptyFactory: () => { throw new Error("recovery must not spawn"); },
+      sessionRuntimeFactory: () => { throw new Error("recovery must not spawn"); },
       journal: { append: async () => {} },
       recoveredSessions: [storedBeforeCapture],
       validateCwd: async () => undefined,
