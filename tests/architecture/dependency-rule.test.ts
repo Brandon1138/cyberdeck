@@ -131,6 +131,7 @@ function withoutCommentsAndTemplates(source: string): string {
     if (/\basync$/.test(context)) context = context.slice(0, -"async".length).trimEnd();
     if (header[1] === undefined) return !/\bexport\s+default$/.test(context);
     if (/\b(?:declare|export(?:\s+default)?)$/.test(context)) return false;
+    if (/\b(?:case\b[\s\S]*|default)\s*:$/.test(context)) return false;
 
     const previousCharacter = context.at(-1);
     return previousCharacter !== undefined && !";{}".includes(previousCharacter);
