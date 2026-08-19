@@ -147,6 +147,36 @@ export function fallbackWorkerCapabilities(
     .map((entry) => ({ ...entry, source: "fallback-catalog", fallbackReason: reason }));
 }
 
+export interface ReadWorkerCapabilitiesInput {
+  provider?: string;
+  brokerUnavailable?: string;
+  requestCapabilities?: (provider?: string) => Promise<ResolvedWorkerCapability[]>;
+}
+
+/**
+ * Reads live worker capabilities when available and names the stored catalog as fallback when not.
+ * Caller supplies capability reader as a callback; this use case has no transport dependency.
+ */
+export async function readWorkerCapabilities(
+  input: ReadWorkerCapabilitiesInput,
+): Promise<ResolvedWorkerCapability[]> {
+  if (input.requestCapabilities === undefined) {
+    return fallbackWorkerCapabilities(
+      input.brokerUnavailable
+        ?? "the Cyberdeck broker is unreachable, so the provider CLIs could not be queried",
+      input.provider,
+    );
+  }
+  try {
+    return await input.requestCapabilities(input.provider);
+  } catch (error) {
+    return fallbackWorkerCapabilities(
+      `the broker could not serve provider capabilities: ${error instanceof Error ? error.message : String(error)}`,
+      input.provider,
+    );
+  }
+}
+
 /**
  * The efforts a specific model may be launched with.
  *

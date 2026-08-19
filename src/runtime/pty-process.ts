@@ -1,11 +1,12 @@
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
+import type { SessionRuntime } from "../domain/session-runtime.js";
 import type { ProviderLaunchSpec } from "../providers/provider.js";
 
 type OutputListener = (chunk: Buffer) => void;
 type ExitListener = (exitCode: number, signal?: number) => void;
 
-export class PtyProcess {
+export class PtyProcess implements SessionRuntime {
   private readonly terminal: IPty;
   private readonly outputListeners = new Set<OutputListener>();
   private readonly exitListeners = new Set<ExitListener>();

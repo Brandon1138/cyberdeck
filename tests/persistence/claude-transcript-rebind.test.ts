@@ -162,7 +162,7 @@ function registryFor(
 ): SessionRegistry {
   return new SessionRegistry({
     adapters: { claude: claudeAdapter },
-    ptyFactory: () => { throw new Error("no session is launched in these tests"); },
+    sessionRuntimeFactory: () => { throw new Error("no session is launched in these tests"); },
     journal: { append: async () => undefined },
     transcripts,
     recoveredSessions,

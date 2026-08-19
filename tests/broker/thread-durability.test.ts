@@ -2,14 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
-import { SessionRegistry, type PtyHandle } from "../../src/broker/session-registry.js";
+import type { SessionRuntime } from "../../src/domain/session-runtime.js";
+import { SessionRegistry } from "../../src/broker/session-registry.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import type { AppendThreadEvent } from "../../src/persistence/thread-transcript-store.js";
 
 const NOW = "2026-07-26T12:00:00.000Z";
 const NOW_MS = Date.parse(NOW);
 
-class FakePty implements PtyHandle {
+class FakePty implements SessionRuntime {
   killCount = 0;
   private readonly outputListeners = new Set<(chunk: Buffer) => void>();
   private readonly exitListeners = new Set<(exitCode: number, signal?: number) => void>();
@@ -88,7 +89,7 @@ function harness(options: HarnessOptions = {}) {
   const deleted: string[] = [];
   const registry = new SessionRegistry({
     adapters: { codex: adapter },
-    ptyFactory: vi.fn((_spec: ProviderLaunchSpec) => {
+    sessionRuntimeFactory: vi.fn((_spec: ProviderLaunchSpec) => {
       const pty = new FakePty(1000 + ptys.length, options.exitOnKill ?? true);
       ptys.push(pty);
       return pty;

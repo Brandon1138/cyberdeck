@@ -21,13 +21,14 @@ import type {
   ProviderLaunchSpec,
   ProviderSessionTerminal,
 } from "../../src/providers/provider.js";
-import type { InstructionStateUpdate, PtyHandle } from "../../src/broker/session-registry.js";
+import type { InstructionStateUpdate } from "../../src/broker/session-registry.js";
+import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import {
   ThreadTranscriptStore,
   type AppendThreadEvent,
 } from "../../src/persistence/thread-transcript-store.js";
 
-class FakePty implements PtyHandle {
+class FakePty implements SessionRuntime {
   readonly pid: number;
   killCount = 0;
   readonly killSignals: Array<string | undefined> = [];
@@ -162,7 +163,7 @@ function harness(options: {
   });
   const registry = new SessionRegistry({
     adapters: options.adapters ?? adapters,
-    ptyFactory,
+    sessionRuntimeFactory: ptyFactory,
     journal: { append: async (event) => {
       if (options.failAttachJournal === true && event.type === "session.attached") {
         throw new Error("journal unavailable");
@@ -398,7 +399,7 @@ describe("SessionRegistry", () => {
         put: async (value) => { puts.push(value); },
         delete: async () => {},
       },
-      ptyFactory: vi.fn(() => {
+      sessionRuntimeFactory: vi.fn(() => {
         const pty = new FakePty(9001);
         ptys.push(pty);
         return pty;
@@ -450,7 +451,7 @@ describe("SessionRegistry", () => {
         put: async () => {},
         delete: async () => {},
       },
-      ptyFactory,
+      sessionRuntimeFactory: ptyFactory,
       journal: { append: async () => {} },
       validateCwd: async () => undefined,
       config: BrokerRuntimeConfigSchema.parse({}),
@@ -481,7 +482,7 @@ describe("SessionRegistry", () => {
     const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(1000));
     const registry = new SessionRegistry({
       adapters: { codex: { ...adapters.codex, prepareLaunch } },
-      ptyFactory,
+      sessionRuntimeFactory: ptyFactory,
       journal: { append: async () => {} },
       validateCwd: async () => undefined,
       config: BrokerRuntimeConfigSchema.parse({}),
@@ -879,7 +880,7 @@ describe("SessionRegistry", () => {
     const ptys: FakePty[] = [];
     const registry = new SessionRegistry({
       adapters,
-      ptyFactory: () => {
+      sessionRuntimeFactory: () => {
         const pty = new FakePty(2000 + ptys.length);
         ptys.push(pty);
         return pty;
@@ -951,7 +952,7 @@ describe("SessionRegistry", () => {
     const ptys: FakePty[] = [];
     const registry = new SessionRegistry({
       adapters,
-      ptyFactory: () => {
+      sessionRuntimeFactory: () => {
         const pty = new FakePty(2000 + ptys.length);
         ptys.push(pty);
         return pty;
@@ -1064,7 +1065,7 @@ describe("SessionRegistry", () => {
     const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(1000));
     const registry = new SessionRegistry({
       adapters,
-      ptyFactory,
+      sessionRuntimeFactory: ptyFactory,
       journal: { append: async () => {} },
       config: BrokerRuntimeConfigSchema.parse({}),
     });
@@ -1340,7 +1341,7 @@ describe("SessionRegistry", () => {
     });
     const registry = new SessionRegistry({
       adapters,
-      ptyFactory,
+      sessionRuntimeFactory: ptyFactory,
       journal: { append: async () => {} },
       validateCwd: async () => undefined,
       config: BrokerRuntimeConfigSchema.parse({}),
@@ -1769,7 +1770,7 @@ describe("SessionRegistry", () => {
       adapters,
       recoveredSessions: [persisted],
       store: { put: async () => {}, delete: async () => {} },
-      ptyFactory: vi.fn(() => new FakePty(9100)),
+      sessionRuntimeFactory: vi.fn(() => new FakePty(9100)),
       journal: { append: async () => {} },
       validateCwd: async () => undefined,
       config: BrokerRuntimeConfigSchema.parse({}),
@@ -1856,7 +1857,7 @@ describe("SessionRegistry", () => {
     const ptys: FakePty[] = [];
     const registry = new SessionRegistry({
       adapters,
-      ptyFactory: () => {
+      sessionRuntimeFactory: () => {
         const pty = new FakePty(3000 + ptys.length);
         ptys.push(pty);
         return pty;
@@ -2085,7 +2086,7 @@ function claudeHarness(options: { failSpawn?: boolean } = {}) {
   });
   const registry = new SessionRegistry({
     adapters: { claude: adapter },
-    ptyFactory,
+    sessionRuntimeFactory: ptyFactory,
     journal: { append: async () => {} },
     transcripts: { append: async (event: AppendThreadEvent) => {
       transcripts.push(event);
@@ -2170,7 +2171,7 @@ describe("SessionRegistry provider launch artifacts", () => {
     };
     const registry = new SessionRegistry({
       adapters: { claude: adapter },
-      ptyFactory: () => {
+      sessionRuntimeFactory: () => {
         const pty = new FakePty(4000 + ptys.length);
         ptys.push(pty);
         return pty;
@@ -2224,7 +2225,7 @@ describe("SessionRegistry resolved launch records", () => {
     };
     const registry = new SessionRegistry({
       adapters: { claude: adapter },
-      ptyFactory: (spec: ProviderLaunchSpec) => {
+      sessionRuntimeFactory: (spec: ProviderLaunchSpec) => {
         specs.push(spec);
         const pty = new FakePty(5000 + ptys.length);
         ptys.push(pty);
@@ -2341,7 +2342,7 @@ describe("SessionRegistry resolved launch records", () => {
     };
     const registry = new SessionRegistry({
       adapters: { cursor: adapter },
-      ptyFactory: (spec: ProviderLaunchSpec) => {
+      sessionRuntimeFactory: (spec: ProviderLaunchSpec) => {
         specs.push(spec);
         return new FakePty(6000);
       },
