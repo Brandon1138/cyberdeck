@@ -3,6 +3,7 @@ import {
   WORKER_PROVIDER_CAPABILITIES,
   capabilityModelEfforts,
   fallbackWorkerCapabilities,
+  readWorkerCapabilities,
   validateWorkerSelection,
   workerProviderCapability,
 } from "../../src/orchestration/worker-capabilities.js";
@@ -167,6 +168,21 @@ describe("worker provider capabilities", () => {
         provider: "claude",
         source: "fallback-catalog",
         fallbackReason: "the broker is unreachable",
+      }),
+    ]);
+  });
+
+  it("falls back with the broker failure when live capability read fails", async () => {
+    await expect(readWorkerCapabilities({
+      provider: "codex",
+      requestCapabilities: async () => {
+        throw new Error("connection closed");
+      },
+    })).resolves.toEqual([
+      expect.objectContaining({
+        provider: "codex",
+        source: "fallback-catalog",
+        fallbackReason: "the broker could not serve provider capabilities: connection closed",
       }),
     ]);
   });
