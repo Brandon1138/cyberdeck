@@ -474,7 +474,10 @@ function dynamicModuleSpecifiersFromSource(source: string): string[] {
     if (
       !source.startsWith("import", index)
       || /[\w$]/.test(source[index - 1] ?? "")
-      || source[previousIndex] === "."
+      || (
+        source[previousIndex] === "."
+        && source.slice(Math.max(0, previousIndex - 2), previousIndex + 1) !== "..."
+      )
       || /[\w$]/.test(source[index + "import".length] ?? "")
     ) {
       continue;
