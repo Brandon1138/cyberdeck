@@ -836,12 +836,15 @@ describe("architecture dependency rule", () => {
       enum Markers {} /import ("node:child_process")/.test(text);
       namespace MarkerSpace {} /import ("node:worker_threads")/.test(text);
       switch (marker) { case 1: function declared() {} /import ("node:fs")/.test(text); }
+      const asiMarker = 1
+      function asiDeclared() {} /import ("node:fs")/.test(text);
       const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
       const objectQuotient = {} / import("./after-object.js") / divisor;
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
       const nonNullQuotient = value! / (await import("./after-non-null.js")).value;
       const templateQuotient = <any>\`2\` / (await import("./after-template.js")).value;
       const functionQuotient = <any>function () {} / (await import("./after-function.js")).value;
+      const defaultProperty = { default: function named() {} / (await import("./after-default-property.js")).value };
     `;
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
@@ -851,6 +854,7 @@ describe("architecture dependency rule", () => {
       "./after-non-null.js",
       "./after-template.js",
       "./after-function.js",
+      "./after-default-property.js",
     ]);
   });
 
