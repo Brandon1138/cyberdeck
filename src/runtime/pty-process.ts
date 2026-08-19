@@ -25,7 +25,9 @@ export class PtyReplayBuffer {
   append(data: Buffer): void {
     if (data.length === 0 || this.capacity <= 0) return;
 
-    let offset = 0;
+    // Bytes before the final capacity cannot survive this append. Skip them before allocating
+    // blocks so a tiny replay cap cannot amplify one large callback into transient allocations.
+    let offset = Math.max(0, data.length - this.capacity);
     while (offset < data.length) {
       if (!this.tail || this.tail.length === this.tail.data.length) {
         const chunk: ReplayChunk = {

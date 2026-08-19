@@ -69,6 +69,23 @@ describe("PtyProcess", () => {
     expect(replay.snapshot()).toEqual(Buffer.alloc(capacity, 0x62));
   });
 
+  it("skips an oversized input prefix before allocating replay blocks", () => {
+    const replay = new PtyReplayBuffer(1);
+    const input = Buffer.alloc(128 * 1024, 0x61);
+    input[input.length - 1] = 0x7a;
+    const allocation = vi.spyOn(Buffer, "allocUnsafe");
+
+    try {
+      replay.append(input);
+      expect(allocation).toHaveBeenCalledOnce();
+      expect(allocation).toHaveBeenCalledWith(1);
+    } finally {
+      allocation.mockRestore();
+    }
+
+    expect(replay.snapshot()).toEqual(Buffer.from("z"));
+  });
+
   it("keeps append cost flat as retained replay grows", () => {
     const chunk = Buffer.alloc(4 * 1024, 0x61);
     const measure = (capacity: number): number => {
