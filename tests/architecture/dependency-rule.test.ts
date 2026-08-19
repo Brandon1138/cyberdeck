@@ -1,7 +1,6 @@
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 type Layer = "delivery" | "application" | "domain" | "infrastructure";
@@ -101,9 +100,17 @@ function withoutCommentsAndTemplates(source: string): string {
     | "block" = "code";
   let regexCharacterClass = false;
   const templateExpressionDepths: number[] = [];
-  const parenthesisContexts: Array<"expression" | "statement"> = [];
-  const braceContexts: boolean[] = [];
+  const parenthesisContexts: Array<"expression" | "statement" | "switch"> = [];
+  const braceContexts: Array<{
+    opensRegexAfter: boolean;
+    switchBody: boolean;
+    pendingSwitchLabel: boolean;
+    switchLabelParenthesisDepth: number;
+    switchTernaryDepth: number;
+  }> = [];
   const regexAfterDelimiter = new Set<number>();
+  const switchHeaderClosers = new Set<number>();
+  const switchLabelColons = new Set<number>();
 
   function previousSignificantIndex(index: number): number | undefined {
     for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
@@ -121,7 +128,42 @@ function withoutCommentsAndTemplates(source: string): string {
     return /^[A-Za-z_$]/.test(token) ? token : undefined;
   }
 
+  function closesFunctionExpression(index: number): boolean {
+    const prefixStart = Math.max(0, index - 256);
+    const recentPrefix = result.slice(prefixStart, index);
+    if (/=>\s*$/.test(recentPrefix)) return true;
+
+    const header = /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\([^{};]*\)\s*$/.exec(
+      recentPrefix,
+    );
+    if (header === null) return false;
+
+    const beforeFunction = recentPrefix.slice(0, header.index);
+    const hasLineBreak = /[\r\n]/.test(/\s*$/.exec(beforeFunction)?.[0] ?? "");
+    let context = beforeFunction.trimEnd();
+    let functionStart = prefixStart + header.index;
+    const asyncModifier = /\basync\s*$/.exec(beforeFunction);
+    if (!hasLineBreak && asyncModifier !== null) {
+      context = context.slice(0, context.length - "async".length).trimEnd();
+      functionStart = prefixStart + asyncModifier.index;
+    }
+    if (header[1] === undefined) return !/\bexport\s+default$/.test(context);
+    if (/\b(?:declare|export(?:\s+default)?)$/.test(context)) return false;
+    const beforeFunctionIndex = previousSignificantIndex(functionStart);
+    if (beforeFunctionIndex !== undefined && switchLabelColons.has(beforeFunctionIndex)) return false;
+
+    const previousCharacter = context.at(-1);
+    if (hasLineBreak) {
+      if (/(?:\+\+|--|[\w$)\]}]!+)$/.test(context)) return false;
+      if (/\d\.$/.test(context)) return false;
+      return previousCharacter !== undefined && "=([{,:!?&|+-*%^~<>.".includes(previousCharacter);
+    }
+    return previousCharacter !== undefined && !";{}".includes(previousCharacter);
+  }
+
   function opensBlock(index: number): boolean {
+    if (closesFunctionExpression(index)) return false;
+
     const previousIndex = previousSignificantIndex(index);
     const previousCharacter = previousIndex === undefined ? undefined : result[previousIndex];
     const token = previousToken(index);
@@ -131,7 +173,6 @@ function withoutCommentsAndTemplates(source: string): string {
       || previousCharacter === ";"
       || previousCharacter === "}"
       || previousCharacter === ")"
-      || /=>\s*$/.test(recentPrefix)
       || ["do", "else", "finally", "try"].includes(token ?? "")
       || /\b(?:class|enum|interface|module|namespace)\b[^{}]*$/.test(recentPrefix);
   }
@@ -320,22 +361,39 @@ function withoutCommentsAndTemplates(source: string): string {
       }
     } else if (character === "(") {
       result += character;
-      parenthesisContexts.push(
-        ["catch", "for", "if", "switch", "while", "with"].includes(previousToken(index) ?? "")
+      const token = previousToken(index);
+      parenthesisContexts.push(token === "switch"
+        ? "switch"
+        : ["catch", "for", "if", "while", "with"].includes(token ?? "")
           ? "statement"
-          : "expression",
-      );
+          : "expression");
     } else if (character === ")") {
       result += character;
-      if (parenthesisContexts.pop() === "statement") regexAfterDelimiter.add(index);
+      const context = parenthesisContexts.pop();
+      if (context === "statement" || context === "switch") regexAfterDelimiter.add(index);
+      if (context === "switch") switchHeaderClosers.add(index);
     } else if (character === "{" && templateExpressionDepths.length > 0) {
       result += character;
       const expressionIndex = templateExpressionDepths.length - 1;
       templateExpressionDepths[expressionIndex] = templateExpressionDepths[expressionIndex]! + 1;
-      braceContexts.push(opensBlock(index));
+      const previousIndex = previousSignificantIndex(index);
+      braceContexts.push({
+        opensRegexAfter: opensBlock(index),
+        switchBody: previousIndex !== undefined && switchHeaderClosers.has(previousIndex),
+        pendingSwitchLabel: false,
+        switchLabelParenthesisDepth: 0,
+        switchTernaryDepth: 0,
+      });
     } else if (character === "{") {
       result += character;
-      braceContexts.push(opensBlock(index));
+      const previousIndex = previousSignificantIndex(index);
+      braceContexts.push({
+        opensRegexAfter: opensBlock(index),
+        switchBody: previousIndex !== undefined && switchHeaderClosers.has(previousIndex),
+        pendingSwitchLabel: false,
+        switchLabelParenthesisDepth: 0,
+        switchTernaryDepth: 0,
+      });
     } else if (character === "}" && templateExpressionDepths.length > 0) {
       const expressionIndex = templateExpressionDepths.length - 1;
       if (templateExpressionDepths[expressionIndex] === 0) {
@@ -345,11 +403,62 @@ function withoutCommentsAndTemplates(source: string): string {
       } else {
         result += character;
         templateExpressionDepths[expressionIndex] = templateExpressionDepths[expressionIndex]! - 1;
-        if (braceContexts.pop() === true) regexAfterDelimiter.add(index);
+        if (braceContexts.pop()?.opensRegexAfter === true) regexAfterDelimiter.add(index);
       }
     } else if (character === "}") {
       result += character;
-      if (braceContexts.pop() === true) regexAfterDelimiter.add(index);
+      if (braceContexts.pop()?.opensRegexAfter === true) regexAfterDelimiter.add(index);
+    } else if (
+      source.startsWith("case", index)
+      && !/[\w$]/.test(source[index - 1] ?? "")
+      && !/[\w$]/.test(source[index + "case".length] ?? "")
+      && braceContexts.at(-1)?.switchBody === true
+    ) {
+      const switchContext = braceContexts.at(-1)!;
+      switchContext.pendingSwitchLabel = true;
+      switchContext.switchLabelParenthesisDepth = parenthesisContexts.length;
+      switchContext.switchTernaryDepth = 0;
+      result += character;
+    } else if (
+      source.startsWith("default", index)
+      && !/[\w$.]/.test(source[index - 1] ?? "")
+      && !/[\w$]/.test(source[index + "default".length] ?? "")
+      && braceContexts.at(-1)?.switchBody === true
+      && braceContexts.at(-1)?.pendingSwitchLabel === false
+    ) {
+      let cursor = index + "default".length;
+      while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+      if (source[cursor] === ":") {
+        const switchContext = braceContexts.at(-1)!;
+        switchContext.pendingSwitchLabel = true;
+        switchContext.switchLabelParenthesisDepth = parenthesisContexts.length;
+      }
+      result += character;
+    } else if (
+      character === "?"
+      && source[index - 1] !== "?"
+      && next !== "."
+      && next !== "?"
+      && braceContexts.at(-1)?.pendingSwitchLabel === true
+      && parenthesisContexts.length
+        === braceContexts.at(-1)?.switchLabelParenthesisDepth
+    ) {
+      braceContexts.at(-1)!.switchTernaryDepth += 1;
+      result += character;
+    } else if (
+      character === ":"
+      && braceContexts.at(-1)?.pendingSwitchLabel === true
+      && parenthesisContexts.length
+        === braceContexts.at(-1)?.switchLabelParenthesisDepth
+    ) {
+      const switchContext = braceContexts.at(-1)!;
+      if (switchContext.switchTernaryDepth > 0) {
+        switchContext.switchTernaryDepth -= 1;
+      } else {
+        switchContext.pendingSwitchLabel = false;
+        switchLabelColons.add(index);
+      }
+      result += character;
     } else if (character === "/" && canStartRegexLiteral(index)) {
       result += " ";
       regexCharacterClass = false;
@@ -465,41 +574,72 @@ function skipTypeScriptPostfixAssertions(source: string, start: number): number 
   return skipTypeScriptAssertion(source, cursor);
 }
 
-function dynamicModuleSpecifierAt(source: string, start: number): string | undefined {
-  let cursor = start;
-  while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-  let wrapperParentheses = 0;
-  while (source[cursor] === "(") {
-    wrapperParentheses += 1;
+function dynamicModuleSpecifiersFromSource(source: string): string[] {
+  const specifiers: string[] = [];
+
+  scan: for (let index = 0; index < source.length; index += 1) {
+    const quote = source[index];
+    if (quote === "'" || quote === "\"" || quote === "`") {
+      for (index += 1; index < source.length; index += 1) {
+        if (source[index] === "\\") index += 1;
+        else if (source[index] === quote) break;
+      }
+      continue;
+    }
+
+    let previousIndex = index - 1;
+    while (/\s/.test(source[previousIndex] ?? "")) previousIndex -= 1;
+
+    if (
+      !source.startsWith("import", index)
+      || /[\w$]/.test(source[index - 1] ?? "")
+      || (
+        source[previousIndex] === "."
+        && source.slice(Math.max(0, previousIndex - 2), previousIndex + 1) !== "..."
+      )
+      || /[\w$]/.test(source[index + "import".length] ?? "")
+    ) {
+      continue;
+    }
+
+    let cursor = index + "import".length;
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+    if (source[cursor] !== "(") continue;
     cursor += 1;
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-  }
+    let wrapperParentheses = 0;
+    while (source[cursor] === "(") {
+      wrapperParentheses += 1;
+      cursor += 1;
+      while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+    }
 
-  const specifierQuote = source[cursor];
-  if (specifierQuote !== "'" && specifierQuote !== "\"" && specifierQuote !== "`") {
-    return undefined;
-  }
-  const specifierStart = cursor + 1;
-  cursor = specifierStart;
-  while (cursor < source.length && source[cursor] !== specifierQuote) {
-    if (source[cursor] === "\\") cursor += 1;
-    cursor += 1;
-  }
-  if (source[cursor] !== specifierQuote) return undefined;
+    const specifierQuote = source[cursor];
+    if (specifierQuote !== "'" && specifierQuote !== "\"" && specifierQuote !== "`") continue;
+    const specifierStart = cursor + 1;
+    cursor = specifierStart;
+    while (cursor < source.length && source[cursor] !== specifierQuote) {
+      if (source[cursor] === "\\") cursor += 1;
+      cursor += 1;
+    }
+    if (source[cursor] !== specifierQuote) continue;
 
-  const specifier = decodeModuleSpecifier(source.slice(specifierStart, cursor));
-  if (specifier === undefined) return undefined;
-  cursor += 1;
-  while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-  cursor = skipTypeScriptPostfixAssertions(source, cursor);
-  while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-  while (wrapperParentheses > 0) {
-    if (source[cursor] !== ")") return undefined;
-    wrapperParentheses -= 1;
+    const specifier = decodeModuleSpecifier(source.slice(specifierStart, cursor));
+    if (specifier === undefined) continue;
     cursor += 1;
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+    cursor = skipTypeScriptPostfixAssertions(source, cursor);
+    while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+    while (wrapperParentheses > 0) {
+      if (source[cursor] !== ")") continue scan;
+      wrapperParentheses -= 1;
+      cursor += 1;
+      while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+    }
+    if (source[cursor] === ")" || source[cursor] === ",") specifiers.push(specifier);
   }
-  return source[cursor] === ")" || source[cursor] === "," ? specifier : undefined;
+
+  return specifiers;
 }
 
 function quotedLiteralEnd(source: string, start: number): number | undefined {
@@ -606,80 +746,15 @@ function declarationModuleSpecifiersFromSource(source: string): {
 }
 
 function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
-  const sourceFile = ts.createSourceFile(
-    "dependency-rule-input.ts",
-    unprocessedSource,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  const sideEffectImports: string[] = [];
-  const importsFrom: string[] = [];
-  const importEquals: string[] = [];
-  const exportsFrom: string[] = [];
-  const dynamicImports: Array<{ index: number; specifier: string }> = [];
-
-  const literalModuleSpecifier = (expression: ts.Expression | undefined): string | undefined => {
-    while (
-      expression !== undefined
-      && (
-        ts.isParenthesizedExpression(expression)
-        || ts.isAsExpression(expression)
-        || ts.isTypeAssertionExpression(expression)
-        || ts.isNonNullExpression(expression)
-        || ts.isSatisfiesExpression(expression)
-      )
-    ) {
-      expression = expression.expression;
-    }
-    return expression !== undefined
-      && (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression))
-      ? expression.text
-      : undefined;
-  };
-
-  for (const statement of sourceFile.statements) {
-    if (ts.isImportDeclaration(statement)) {
-      const specifier = literalModuleSpecifier(statement.moduleSpecifier);
-      if (specifier === undefined) continue;
-      if (statement.importClause === undefined) {
-        sideEffectImports.push(specifier);
-      } else {
-        importsFrom.push(specifier);
-      }
-      continue;
-    }
-    if (
-      ts.isImportEqualsDeclaration(statement)
-      && ts.isExternalModuleReference(statement.moduleReference)
-    ) {
-      const specifier = literalModuleSpecifier(statement.moduleReference.expression);
-      if (specifier !== undefined) importEquals.push(specifier);
-      continue;
-    }
-    if (ts.isExportDeclaration(statement)) {
-      const specifier = literalModuleSpecifier(statement.moduleSpecifier);
-      if (specifier !== undefined) exportsFrom.push(specifier);
-    }
-  }
-
-  const collectDynamicImports = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-      const specifier = literalModuleSpecifier(node.arguments[0]);
-      if (specifier !== undefined) {
-        dynamicImports.push({ index: node.getStart(sourceFile), specifier });
-      }
-    }
-    ts.forEachChild(node, collectDynamicImports);
-  };
-  collectDynamicImports(sourceFile);
+  const source = withoutCommentsAndTemplates(unprocessedSource);
+  const declarations = declarationModuleSpecifiersFromSource(source);
 
   return [
-    ...sideEffectImports,
-    ...importsFrom,
-    ...importEquals,
-    ...exportsFrom,
-    ...dynamicImports.sort((left, right) => left.index - right.index).map((entry) => entry.specifier),
+    ...declarations.sideEffectImports,
+    ...declarations.importsFrom,
+    ...declarations.importEquals,
+    ...declarations.exportsFrom,
+    ...dynamicModuleSpecifiersFromSource(source),
   ];
 }
 
@@ -854,7 +929,9 @@ describe("architecture dependency rule", () => {
       enum Markers {} /import ("node:child_process")/.test(text);
       namespace MarkerSpace {} /import ("node:worker_threads")/.test(text);
       switch (marker) { case 1: function declared() {} /import ("node:fs")/.test(text); }
-      switch (marker) { case 2: const ternary = marker ? 1 : function named() {} / (await import("./after-switch-ternary.js")).value; }
+      switch (marker) { case 2: async function declaredAsync() {} /import ("node:fs")/.test(text); }
+      switch (marker) { case ((value: number) => value)(3): function declaredAfterTypedCase() {} /import ("node:fs")/.test(text); }
+      switch (marker) { case 4: const ternary = marker ? 1 : function named() {} / (await import("./after-switch-ternary.js")).value; }
       const asiMarker = 1
       function asiDeclared() {} /import ("node:fs")/.test(text);
       asiMarker++
