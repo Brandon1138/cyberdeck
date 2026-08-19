@@ -129,25 +129,35 @@ function withoutCommentsAndTemplates(source: string): string {
   }
 
   function closesFunctionExpression(index: number): boolean {
-    const prefixStart = Math.max(0, index - 256);
-    const recentPrefix = result.slice(prefixStart, index);
-    if (/=>\s*$/.test(recentPrefix)) return true;
+    if (/=>\s*$/.test(result.slice(Math.max(0, index - 256), index))) return true;
 
-    const headerPattern = /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\(/g;
-    let header: RegExpExecArray | undefined;
+    let header: { index: number; name: string | undefined } | undefined;
     for (
-      let candidate = headerPattern.exec(recentPrefix);
-      candidate !== null;
-      candidate = headerPattern.exec(recentPrefix)
+      let candidateIndex = result.lastIndexOf("function", index);
+      candidateIndex >= 0;
+      candidateIndex = candidateIndex === 0
+        ? -1
+        : result.lastIndexOf("function", candidateIndex - 1)
     ) {
+      if (
+        /[\w$]/.test(result[candidateIndex - 1] ?? "")
+        || /[\w$]/.test(result[candidateIndex + "function".length] ?? "")
+      ) {
+        continue;
+      }
+      const candidate = /^function\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\(/.exec(
+        result.slice(candidateIndex, index),
+      );
+      if (candidate === null) continue;
+
       let depth = 0;
       let quote: "'" | "\"" | undefined;
       for (
-        let cursor = candidate.index + candidate[0].length - 1;
-        cursor < recentPrefix.length;
+        let cursor = candidateIndex + candidate[0].length - 1;
+        cursor < index;
         cursor += 1
       ) {
-        const character = recentPrefix[cursor]!;
+        const character = result[cursor]!;
         if (quote !== undefined) {
           if (character === "\\") cursor += 1;
           else if (character === quote) quote = undefined;
@@ -157,25 +167,27 @@ function withoutCommentsAndTemplates(source: string): string {
           depth += 1;
         } else if (character === ")") {
           depth -= 1;
-          if (depth === 0 && /^\s*$/.test(recentPrefix.slice(cursor + 1))) {
-            header = candidate;
+          if (depth === 0 && /^\s*$/.test(result.slice(cursor + 1, index))) {
+            header = { index: candidateIndex, name: candidate[1] };
             break;
           }
         }
       }
+      if (header !== undefined) break;
     }
     if (header === undefined) return false;
 
-    const beforeFunction = recentPrefix.slice(0, header.index);
+    const contextStart = Math.max(0, header.index - 256);
+    const beforeFunction = result.slice(contextStart, header.index);
     const hasLineBreak = /[\r\n]/.test(/\s*$/.exec(beforeFunction)?.[0] ?? "");
     let context = beforeFunction.trimEnd();
-    let functionStart = prefixStart + header.index;
+    let functionStart = header.index;
     const asyncModifier = /\basync\s*$/.exec(beforeFunction);
     if (!hasLineBreak && asyncModifier !== null) {
       context = context.slice(0, context.length - "async".length).trimEnd();
-      functionStart = prefixStart + asyncModifier.index;
+      functionStart = contextStart + asyncModifier.index;
     }
-    if (header[1] === undefined) return !/\bexport\s+default$/.test(context);
+    if (header.name === undefined) return !/\bexport\s+default$/.test(context);
     if (/\b(?:declare|export(?:\s+default)?)$/.test(context)) return false;
     const beforeFunctionIndex = previousSignificantIndex(functionStart);
     if (beforeFunctionIndex !== undefined && switchLabelColons.has(beforeFunctionIndex)) return false;
@@ -992,6 +1004,21 @@ describe("architecture dependency rule", () => {
       "./after-function.js",
       "./after-structured-function.js",
       "./after-default-property.js",
+    ]);
+  });
+
+  it("finds imports after function-expression headers longer than the lookback context", () => {
+    const fields = Array.from(
+      { length: 32 },
+      (_, index) => `field${index}: number`,
+    ).join("; ");
+    const source = `
+      const quotient = function (value: { ${fields} }) {}
+        / (await import("./after-long-function.js")).value;
+    `;
+
+    expect(staticModuleSpecifiersFromSource(source)).toEqual([
+      "./after-long-function.js",
     ]);
   });
 
