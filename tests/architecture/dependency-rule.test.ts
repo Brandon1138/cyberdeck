@@ -1,8 +1,7 @@
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { stripTypeScriptTypes } from "node:module";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse } from "es-module-lexer/js";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 type Layer = "delivery" | "application" | "domain" | "infrastructure";
@@ -607,49 +606,73 @@ function declarationModuleSpecifiersFromSource(source: string): {
 }
 
 function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
-  const source = withoutCommentsAndTemplates(unprocessedSource);
-  const importEquals = declarationModuleSpecifiersFromSource(source).importEquals;
-  const lexedSource = stripTypeScriptTypes(unprocessedSource, {
-    mode: "transform" as "strip",
-  });
+  const sourceFile = ts.createSourceFile(
+    "dependency-rule-input.ts",
+    unprocessedSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
   const sideEffectImports: string[] = [];
   const importsFrom: string[] = [];
+  const importEquals: string[] = [];
   const exportsFrom: string[] = [];
   const dynamicImports: Array<{ index: number; specifier: string }> = [];
 
-  for (const imported of parse(lexedSource)[0]) {
-    if (imported.d >= 0) {
-      const importExpression = lexedSource.slice(imported.ss, imported.se);
-      if (importExpression.includes("`") && importExpression.includes("${")) continue;
-      const specifier = imported.n ?? dynamicModuleSpecifierAt(lexedSource, imported.s);
-      if (specifier !== undefined) dynamicImports.push({ index: imported.ss, specifier });
-      continue;
-    }
-    if (imported.d !== -1 || imported.n === undefined) continue;
-
-    const statement = lexedSource.slice(imported.ss, imported.se);
-    if (/^\s*export\b/.test(statement)) {
-      exportsFrom.push(imported.n);
-    } else if (/^\s*import\s*["'`]/.test(statement)) {
-      sideEffectImports.push(imported.n);
-    } else {
-      importsFrom.push(imported.n);
-    }
-  }
-
-  const spreadImport = /\.\.\.\s*import\s*\(/g;
-  for (let match = spreadImport.exec(lexedSource); match !== null; match = spreadImport.exec(lexedSource)) {
-    const specifier = dynamicModuleSpecifierAt(lexedSource, match.index + match[0].length);
-    const importIndex = match.index + match[0].lastIndexOf("import");
-    if (
-      specifier !== undefined
-      && !dynamicImports.some(
-        (entry) => entry.index === importIndex && entry.specifier === specifier,
+  const literalModuleSpecifier = (expression: ts.Expression | undefined): string | undefined => {
+    while (
+      expression !== undefined
+      && (
+        ts.isParenthesizedExpression(expression)
+        || ts.isAsExpression(expression)
+        || ts.isTypeAssertionExpression(expression)
+        || ts.isNonNullExpression(expression)
+        || ts.isSatisfiesExpression(expression)
       )
     ) {
-      dynamicImports.push({ index: importIndex, specifier });
+      expression = expression.expression;
+    }
+    return expression !== undefined
+      && (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression))
+      ? expression.text
+      : undefined;
+  };
+
+  for (const statement of sourceFile.statements) {
+    if (ts.isImportDeclaration(statement)) {
+      const specifier = literalModuleSpecifier(statement.moduleSpecifier);
+      if (specifier === undefined) continue;
+      if (statement.importClause === undefined) {
+        sideEffectImports.push(specifier);
+      } else {
+        importsFrom.push(specifier);
+      }
+      continue;
+    }
+    if (
+      ts.isImportEqualsDeclaration(statement)
+      && ts.isExternalModuleReference(statement.moduleReference)
+    ) {
+      const specifier = literalModuleSpecifier(statement.moduleReference.expression);
+      if (specifier !== undefined) importEquals.push(specifier);
+      continue;
+    }
+    if (ts.isExportDeclaration(statement)) {
+      const specifier = literalModuleSpecifier(statement.moduleSpecifier);
+      if (specifier !== undefined) exportsFrom.push(specifier);
     }
   }
+
+  const collectDynamicImports = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const specifier = literalModuleSpecifier(node.arguments[0]);
+      if (specifier !== undefined) {
+        dynamicImports.push({ index: node.getStart(sourceFile), specifier });
+      }
+    }
+    ts.forEachChild(node, collectDynamicImports);
+  };
+  collectDynamicImports(sourceFile);
 
   return [
     ...sideEffectImports,
