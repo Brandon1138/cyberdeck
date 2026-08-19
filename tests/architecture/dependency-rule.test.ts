@@ -382,6 +382,18 @@ describe("architecture dependency rule", () => {
     ]);
   });
 
+  it("finds dynamic imports in template substitutions and with import options", () => {
+    const source = `
+      const rendered = \`literal \${await import("./template-substitution.js")}\`;
+      await import("./with-options.js", { with: { type: "json" } });
+    `;
+
+    expect(staticModuleSpecifiersFromSource(source)).toEqual([
+      "./template-substitution.js",
+      "./with-options.js",
+    ]);
+  });
+
   it("rejects bare aliases for forbidden Node built-ins", () => {
     const regressionFile = resolve(
       SOURCE_ROOT,
