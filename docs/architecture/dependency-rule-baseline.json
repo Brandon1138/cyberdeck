@@ -1,0 +1,420 @@
+{
+  "violations": [
+    {
+      "from": "src/app-server/dispatch-adapter.ts",
+      "to": "src/persistence/artifact-store.ts"
+    },
+    {
+      "from": "src/app-server/dispatch-adapter.ts",
+      "to": "src/providers/launch-environment.ts"
+    },
+    {
+      "from": "src/app-server/dispatch-adapter.ts",
+      "to": "src/providers/worker-mode.ts"
+    },
+    {
+      "from": "src/app-server/dispatch-adapter.ts",
+      "to": "src/version.ts"
+    },
+    {
+      "from": "src/broker/fleet-project-service.ts",
+      "to": "src/nvim/worktree-changes.ts"
+    },
+    {
+      "from": "src/broker/fleet-project-service.ts",
+      "to": "src/persistence/fleet-preference-store.ts"
+    },
+    {
+      "from": "src/broker/journal.ts",
+      "to": "src/persistence/private-files.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/app-server/dispatch-adapter.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/paths.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/artifact-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/claude-conversation-bindings.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/fleet-detach-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/fleet-preference-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/instruction-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/orchestrator-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/private-files.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/provider-permission-preference-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/scout-egress-grant-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/scout-report-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/session-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/thread-transcript-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/worker-preference-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/persistence/workflow-store.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/providers/antigravity/dispatch-adapter.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/providers/antigravity/session-adapter.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/providers/claude.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/providers/claude/dispatch-adapter.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/providers/codex.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/providers/cursor/dispatch-adapter.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/providers/cursor/session-adapter.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/runtime-config.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/runtime/pipe-process.ts"
+    },
+    {
+      "from": "src/broker/main.ts",
+      "to": "src/runtime/pty-process.ts"
+    },
+    {
+      "from": "src/broker/nvim-binding-service.ts",
+      "to": "src/nvim/bridge.ts"
+    },
+    {
+      "from": "src/broker/nvim-binding-service.ts",
+      "to": "src/nvim/open-worktree.ts"
+    },
+    {
+      "from": "src/broker/nvim-binding-service.ts",
+      "to": "src/nvim/quickfix.ts"
+    },
+    {
+      "from": "src/broker/nvim-binding-service.ts",
+      "to": "src/nvim/worktree-changes.ts"
+    },
+    {
+      "from": "src/broker/server.ts",
+      "to": "src/persistence/fleet-detach-store.ts"
+    },
+    {
+      "from": "src/broker/server.ts",
+      "to": "src/persistence/fleet-preference-store.ts"
+    },
+    {
+      "from": "src/broker/server.ts",
+      "to": "src/persistence/orchestrator-store.ts"
+    },
+    {
+      "from": "src/broker/server.ts",
+      "to": "src/persistence/scout-egress-grant-store.ts"
+    },
+    {
+      "from": "src/broker/server.ts",
+      "to": "src/persistence/thread-transcript-store.ts"
+    },
+    {
+      "from": "src/broker/server.ts",
+      "to": "src/persistence/worker-preference-store.ts"
+    },
+    {
+      "from": "src/broker/server.ts",
+      "to": "src/protocol/frames.ts"
+    },
+    {
+      "from": "src/broker/server.ts",
+      "to": "src/protocol/jsonl.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/persistence/scout-report-store.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/persistence/thread-transcript-store.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/providers/cursor/workspace-state.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/providers/image-input.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/providers/launch-record.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/providers/provider.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/providers/worker-mode.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/providers/worker-reporting.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/runtime/composer-state.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/runtime/conversation-preview.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/runtime/observed-model.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/runtime/replay-digest.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/runtime/session-liveness.ts"
+    },
+    {
+      "from": "src/broker/session-registry.ts",
+      "to": "src/runtime/terminal-replay.ts"
+    },
+    {
+      "from": "src/broker/worker-coordination-runtime.ts",
+      "to": "src/persistence/migrations/0001-worker-coordination.ts"
+    },
+    {
+      "from": "src/broker/worker-coordination-runtime.ts",
+      "to": "src/persistence/orchestrator-store.ts"
+    },
+    {
+      "from": "src/broker/worker-coordination-runtime.ts",
+      "to": "src/persistence/worker-coordination-store.ts"
+    },
+    {
+      "from": "src/broker/worker-coordination.ts",
+      "to": "src/persistence/worker-coordination-store.ts"
+    },
+    {
+      "from": "src/broker/worker-event-channel.ts",
+      "to": "src/persistence/orchestrator-store.ts"
+    },
+    {
+      "from": "src/cli.ts",
+      "to": "src/nvim/layout-hook.ts"
+    },
+    {
+      "from": "src/cli.ts",
+      "to": "src/nvim/open-worktree.ts"
+    },
+    {
+      "from": "src/cli.ts",
+      "to": "src/paths.ts"
+    },
+    {
+      "from": "src/cli.ts",
+      "to": "src/persistence/claude-conversation-bindings.ts"
+    },
+    {
+      "from": "src/cli.ts",
+      "to": "src/persistence/scout-egress-grant-store.ts"
+    },
+    {
+      "from": "src/cli.ts",
+      "to": "src/persistence/thread-transcript-store.ts"
+    },
+    {
+      "from": "src/cli.ts",
+      "to": "src/providers/claude/transcript-hook.ts"
+    },
+    {
+      "from": "src/cli.ts",
+      "to": "src/runtime/shell-command.ts"
+    },
+    {
+      "from": "src/cli.ts",
+      "to": "src/tmux/cockpit.ts"
+    },
+    {
+      "from": "src/cli.ts",
+      "to": "src/tmux/interactive-shell.ts"
+    },
+    {
+      "from": "src/cli.ts",
+      "to": "src/version.ts"
+    },
+    {
+      "from": "src/client/fleet.ts",
+      "to": "src/paths.ts"
+    },
+    {
+      "from": "src/client/fleet.ts",
+      "to": "src/persistence/provider-permission-preference-store.ts"
+    },
+    {
+      "from": "src/client/fleet.ts",
+      "to": "src/providers/image-input.ts"
+    },
+    {
+      "from": "src/client/fleet.ts",
+      "to": "src/runtime/conversation-preview.ts"
+    },
+    {
+      "from": "src/client/fleet.ts",
+      "to": "src/runtime/shell-command.ts"
+    },
+    {
+      "from": "src/client/fleet.ts",
+      "to": "src/runtime/terminal-replay.ts"
+    },
+    {
+      "from": "src/client/provider-capability-view.ts",
+      "to": "src/providers/antigravity/capabilities.ts"
+    },
+    {
+      "from": "src/control-plane/runtime.ts",
+      "to": "src/persistence/artifact-store.ts"
+    },
+    {
+      "from": "src/control-plane/runtime.ts",
+      "to": "src/persistence/job-store.ts"
+    },
+    {
+      "from": "src/control-plane/runtime.ts",
+      "to": "src/persistence/lease-store.ts"
+    },
+    {
+      "from": "src/control-plane/worktree-lease-manager.ts",
+      "to": "src/persistence/lease-store.ts"
+    },
+    {
+      "from": "src/domain/policy.ts",
+      "to": "src/limits.ts"
+    },
+    {
+      "from": "src/mcp/server.ts",
+      "to": "src/version.ts"
+    },
+    {
+      "from": "src/orchestration/agent-control-service.ts",
+      "to": "src/client/permission-policy.ts"
+    },
+    {
+      "from": "src/orchestration/agent-control-service.ts",
+      "to": "src/persistence/orchestrator-store.ts"
+    },
+    {
+      "from": "src/orchestration/agent-control-service.ts",
+      "to": "src/persistence/provider-permission-preference-store.ts"
+    },
+    {
+      "from": "src/orchestration/agent-control-service.ts",
+      "to": "src/persistence/thread-transcript-store.ts"
+    },
+    {
+      "from": "src/orchestration/agent-control-service.ts",
+      "to": "src/persistence/worker-preference-store.ts"
+    },
+    {
+      "from": "src/orchestration/instruction-queue.ts",
+      "to": "src/persistence/instruction-store.ts"
+    },
+    {
+      "from": "src/orchestration/instruction-queue.ts",
+      "to": "src/persistence/orchestrator-store.ts"
+    },
+    {
+      "from": "src/orchestration/orchestrator-manager.ts",
+      "to": "src/client/permission-policy.ts"
+    },
+    {
+      "from": "src/orchestration/orchestrator-manager.ts",
+      "to": "src/persistence/orchestrator-store.ts"
+    },
+    {
+      "from": "src/orchestration/orchestrator-manager.ts",
+      "to": "src/persistence/provider-permission-preference-store.ts"
+    },
+    {
+      "from": "src/orchestration/orchestrator-manager.ts",
+      "to": "src/persistence/worker-preference-store.ts"
+    },
+    {
+      "from": "src/orchestration/worker-control-service.ts",
+      "to": "src/persistence/orchestrator-store.ts"
+    },
+    {
+      "from": "src/orchestration/worker-handoff-service.ts",
+      "to": "src/persistence/orchestrator-store.ts"
+    },
+    {
+      "from": "src/orchestration/workflow-service.ts",
+      "to": "src/persistence/orchestrator-store.ts"
+    },
+    {
+      "from": "src/orchestration/workflow-service.ts",
+      "to": "src/persistence/workflow-store.ts"
+    },
+    {
+      "from": "src/persistence/provider-permission-preference-store.ts",
+      "to": "src/client/permission-policy.ts"
+    }
+  ]
+}
