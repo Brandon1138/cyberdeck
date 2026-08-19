@@ -9,7 +9,8 @@ import {
 } from "../limits.js";
 import type { Readable, Writable } from "node:stream";
 import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
-import { fallbackWorkerCapabilities } from "../orchestration/worker-capabilities.js";
+import { inspectAgentDiagnosticState } from "../orchestration/agent-diagnostics.js";
+import { readWorkerCapabilities } from "../orchestration/worker-capabilities.js";
 import { CYBERDECK_VERSION } from "../version.js";
 
 export interface McpBrokerTransport {
@@ -760,22 +761,20 @@ function conversationDrift(
 async function diagnose(context: McpServerContext): Promise<Record<string, unknown>> {
   const { identity } = context;
   const drift = conversationDrift(identity);
-  let actor: unknown;
-  let brokerError = context.brokerUnavailable;
-  // A broker that answers but does not know this method is a version skew, not an outage. They
-  // need different remedies, so the diagnosis has to keep them apart.
-  let brokerStatus = context.brokerUnavailable === undefined ? "reachable" : "unreachable";
-  if (context.transport !== undefined) {
-    try {
-      actor = await context.transport.request("agent.actor.describe", {
-        actorSessionId: identity.actorSessionId,
-      });
-    } catch (error) {
-      brokerError = error instanceof Error ? error.message : String(error);
-      brokerStatus = failureCode(error) === "METHOD_NOT_FOUND" ? "outdated" : "unreachable";
-    }
-  }
-  const actorStatus = isRecord(actor) && typeof actor.status === "string" ? actor.status : undefined;
+  const transport = context.transport;
+  const { actor, actorStatus, brokerError, brokerStatus } = await inspectAgentDiagnosticState({
+    actorSessionId: identity.actorSessionId,
+    ...(context.brokerUnavailable === undefined
+      ? {}
+      : { brokerUnavailable: context.brokerUnavailable }),
+    ...(transport === undefined
+      ? {}
+      : {
+        describeActor: (actorSessionId: string) => transport.request("agent.actor.describe", {
+          actorSessionId,
+        }),
+      }),
+  });
   const status = brokerStatus === "unreachable" && brokerError !== undefined
     ? "broker-unreachable"
     : brokerStatus === "outdated"
@@ -848,25 +847,21 @@ async function callTool(
   // the stand-in it is rather than as the providers' present tense.
   if (name === "cyberdeck_provider_capabilities") {
     const provider = typeof args.provider === "string" ? args.provider : undefined;
-    if (context.transport === undefined) {
-      return fallbackWorkerCapabilities(
-        context.brokerUnavailable
-          ?? "the Cyberdeck broker is unreachable, so the provider CLIs could not be queried",
-        provider,
-      );
-    }
-    try {
-      return await context.transport.request("worker.capabilities", {
-        ...(provider === undefined ? {} : { provider }),
-      });
-    } catch (error) {
-      // A broker too old to serve the route, or one that failed mid-probe, still gets a named
-      // answer: silence here would read as "this provider offers nothing".
-      return fallbackWorkerCapabilities(
-        `the broker could not serve provider capabilities: ${error instanceof Error ? error.message : String(error)}`,
-        provider,
-      );
-    }
+    const transport = context.transport;
+    return readWorkerCapabilities({
+      ...(provider === undefined ? {} : { provider }),
+      ...(context.brokerUnavailable === undefined
+        ? {}
+        : { brokerUnavailable: context.brokerUnavailable }),
+      ...(transport === undefined
+        ? {}
+        : {
+          requestCapabilities: (requestedProvider?: string) => transport.request(
+            "worker.capabilities",
+            { ...(requestedProvider === undefined ? {} : { provider: requestedProvider }) },
+          ),
+        }),
+    });
   }
   const transport = context.transport;
   if (transport === undefined) {
