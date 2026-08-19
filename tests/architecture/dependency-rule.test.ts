@@ -92,12 +92,41 @@ function withoutCommentsAndTemplates(source: string): string {
   let state: "code" | "single" | "double" | "template" | "regex" | "line" | "block" = "code";
   let regexCharacterClass = false;
   const templateExpressionDepths: number[] = [];
+  const parenthesisContexts: Array<"expression" | "statement"> = [];
+  const braceContexts: boolean[] = [];
+  const regexAfterDelimiter = new Set<number>();
+
+  function previousSignificantIndex(index: number): number | undefined {
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      if (!/\s/.test(result[cursor]!)) return cursor;
+    }
+    return undefined;
+  }
+
+  function previousToken(index: number): string | undefined {
+    return result.slice(0, index).match(/([A-Za-z_$][\w$]*)\s*$/)?.[1];
+  }
+
+  function opensBlock(index: number): boolean {
+    const previousIndex = previousSignificantIndex(index);
+    const previousCharacter = previousIndex === undefined ? undefined : result[previousIndex];
+    const token = previousToken(index);
+    const prefix = result.slice(0, index);
+
+    return previousCharacter === undefined
+      || previousCharacter === ";"
+      || previousCharacter === "}"
+      || previousCharacter === ")"
+      || /=>\s*$/.test(prefix)
+      || ["do", "else", "finally", "try"].includes(token ?? "")
+      || /\bclass(?:\s+[A-Za-z_$][\w$]*)?(?:\s+extends\s+[^{}]+)?\s*$/.test(prefix);
+  }
 
   function canStartRegexLiteral(index: number): boolean {
-    const prefix = source.slice(0, index);
-    const previousToken = prefix.match(/(?:^|\s)([A-Za-z_$][\w$]*)\s*$/)?.[1];
+    const prefix = result.slice(0, index);
+    const token = prefix.match(/(?:^|\s)([A-Za-z_$][\w$]*)\s*$/)?.[1];
     if (
-      previousToken
+      token
       && [
         "await",
         "case",
@@ -112,11 +141,13 @@ function withoutCommentsAndTemplates(source: string): string {
         "typeof",
         "void",
         "yield",
-      ].includes(previousToken)
+      ].includes(token)
     ) {
       return true;
     }
 
+    const previousIndex = previousSignificantIndex(index);
+    if (previousIndex !== undefined && regexAfterDelimiter.has(previousIndex)) return true;
     const previousCharacter = prefix.match(/\S\s*$/)?.[0].trim();
     return previousCharacter === undefined || "([{:;,=!?&|+-*%^~<>".includes(previousCharacter);
   }
@@ -219,10 +250,24 @@ function withoutCommentsAndTemplates(source: string): string {
     } else if (character === "`") {
       result += " ";
       state = "template";
+    } else if (character === "(") {
+      result += character;
+      parenthesisContexts.push(
+        ["catch", "for", "if", "switch", "while", "with"].includes(previousToken(index) ?? "")
+          ? "statement"
+          : "expression",
+      );
+    } else if (character === ")") {
+      result += character;
+      if (parenthesisContexts.pop() === "statement") regexAfterDelimiter.add(index);
     } else if (character === "{" && templateExpressionDepths.length > 0) {
       result += character;
       const expressionIndex = templateExpressionDepths.length - 1;
       templateExpressionDepths[expressionIndex] = templateExpressionDepths[expressionIndex]! + 1;
+      braceContexts.push(opensBlock(index));
+    } else if (character === "{") {
+      result += character;
+      braceContexts.push(opensBlock(index));
     } else if (character === "}" && templateExpressionDepths.length > 0) {
       const expressionIndex = templateExpressionDepths.length - 1;
       if (templateExpressionDepths[expressionIndex] === 0) {
@@ -232,7 +277,11 @@ function withoutCommentsAndTemplates(source: string): string {
       } else {
         result += character;
         templateExpressionDepths[expressionIndex] = templateExpressionDepths[expressionIndex]! - 1;
+        if (braceContexts.pop() === true) regexAfterDelimiter.add(index);
       }
+    } else if (character === "}") {
+      result += character;
+      if (braceContexts.pop() === true) regexAfterDelimiter.add(index);
     } else if (character === "/" && canStartRegexLiteral(index)) {
       result += " ";
       regexCharacterClass = false;
