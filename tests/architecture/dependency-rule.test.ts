@@ -238,7 +238,7 @@ function withoutCommentsAndTemplates(source: string): string {
         templateExpressionDepths.push(0);
         state = "code";
       } else if (character === "`") {
-        result += " ";
+        result += "0";
         state = "code";
       } else {
         result += character === "\n" ? "\n" : " ";
@@ -468,9 +468,16 @@ function dynamicModuleSpecifiersFromSource(source: string): string[] {
       continue;
     }
 
+    let previousIndex = index - 1;
+    while (/\s/.test(source[previousIndex] ?? "")) previousIndex -= 1;
+
     if (
       !source.startsWith("import", index)
-      || /[\w$.]/.test(source[index - 1] ?? "")
+      || /[\w$]/.test(source[index - 1] ?? "")
+      || (
+        source[previousIndex] === "."
+        && source.slice(Math.max(0, previousIndex - 2), previousIndex + 1) !== "..."
+      )
       || /[\w$]/.test(source[index + "import".length] ?? "")
     ) {
       continue;
@@ -736,6 +743,10 @@ describe("architecture dependency rule", () => {
       await import(\`./template-\${variableSpecifier}.js\`);
       await import((("./parenthesized.js")));
       await import("./asserted.js" as string);
+      const spread = { ... import("./spread.js") };
+      const commentedSpread = { ... /* gap */ import("./commented-spread.js") };
+      loader . import("./spaced-property.js");
+      loader./* gap */import("./commented-property.js");
     `;
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
@@ -744,6 +755,8 @@ describe("architecture dependency rule", () => {
       "./template-specifier.js",
       "./parenthesized.js",
       "./asserted.js",
+      "./spread.js",
+      "./commented-spread.js",
     ]);
   });
 
@@ -798,6 +811,7 @@ describe("architecture dependency rule", () => {
       const objectQuotient = {} / import("./after-object.js") / divisor;
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
       const nonNullQuotient = value! / (await import("./after-non-null.js")).value;
+      const templateQuotient = <any>\`2\` / (await import("./after-template.js")).value;
     `;
 
     expect(staticModuleSpecifiersFromSource(source)).toEqual([
@@ -805,6 +819,7 @@ describe("architecture dependency rule", () => {
       "./after-object.js",
       "./after-postfix.js",
       "./after-non-null.js",
+      "./after-template.js",
     ]);
   });
 
