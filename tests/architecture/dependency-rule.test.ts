@@ -834,6 +834,7 @@ describe("architecture dependency rule", () => {
       interface Marker {} /import ("node:fs")/.test(text);
       enum Markers {} /import ("node:child_process")/.test(text);
       namespace MarkerSpace {} /import ("node:worker_threads")/.test(text);
+      switch (marker) { case 1: function declared() {} /import ("node:fs")/.test(text); }
       const quotient = (dividend) / import("./after-parenthesis.js") / divisor;
       const objectQuotient = {} / import("./after-object.js") / divisor;
       const postfixQuotient = value++ / (await import("./after-postfix.js")).value;
