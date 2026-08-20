@@ -13,7 +13,7 @@ describe("worker provider capabilities", () => {
     expect(WORKER_PROVIDER_CAPABILITIES).toEqual([
       expect.objectContaining({
         provider: "codex",
-        models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+        models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.3-codex-spark"],
         efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
         approvalModes: ["prompt", "auto"],
       }),
@@ -116,6 +116,42 @@ describe("worker provider capabilities", () => {
     })).toEqual({ ok: true });
   });
 
+  it("holds a model to its own effort range, not the provider's whole line-up", () => {
+    // codex reaches ultra; gpt-5.3-codex-spark does not, so the pairing is refused here rather
+    // than at the CLI, and the refusal names what Spark itself accepts.
+    const refused = validateWorkerSelection({
+      provider: "codex",
+      model: "gpt-5.3-codex-spark",
+      effort: "ultra",
+    });
+    expect(refused).toEqual(expect.objectContaining({ ok: false, code: "MODEL_EFFORT_MISMATCH" }));
+    expect(refused.ok === false && refused.message).toContain("low, medium, high, xhigh");
+
+    expect(validateWorkerSelection({
+      provider: "codex",
+      model: "gpt-5.3-codex-spark",
+      effort: "xhigh",
+    })).toEqual({ ok: true });
+    // Spark launches with no effort at all, and with the provider default.
+    expect(validateWorkerSelection({ provider: "codex", model: "gpt-5.3-codex-spark" }))
+      .toEqual({ ok: true });
+    // A model the catalog left unpinned still gets the provider's full range.
+    expect(validateWorkerSelection({ provider: "codex", model: "gpt-5.6-sol", effort: "ultra" }))
+      .toEqual({ ok: true });
+    // And an effort the provider does not have at all is still the provider-wide refusal.
+    expect(validateWorkerSelection({ provider: "antigravity", model: "gemini-3.6-flash-low", effort: "ultra" }))
+      .toEqual(expect.objectContaining({ ok: false, code: "EFFORT_NOT_SUPPORTED" }));
+  });
+
+  it("refuses the Spark label as a launch ID rather than translating it", () => {
+    expect(validateWorkerSelection({ provider: "codex", model: "spark" }))
+      .toEqual(expect.objectContaining({
+        ok: false,
+        code: "MODEL_ID_NOT_CANONICAL",
+        message: expect.stringContaining("gpt-5.3-codex-spark"),
+      }));
+  });
+
   it("judges a selection against what the providers advertise now, not the stored catalog", () => {
     const listed = [{
       provider: "cursor" as const,
@@ -158,6 +194,9 @@ describe("worker provider capabilities", () => {
     const cursor = workerProviderCapability("cursor")!;
 
     expect(capabilityModelEfforts(codex, "gpt-5.6-sol")).toEqual(codex.efforts);
+    // Spark's slug names no effort; the catalog's own range for it answers instead.
+    expect(capabilityModelEfforts(codex, "gpt-5.3-codex-spark"))
+      .toEqual(["low", "medium", "high", "xhigh"]);
     expect(capabilityModelEfforts(antigravity, "gemini-3.6-flash-high")).toEqual(["high"]);
     expect(capabilityModelEfforts(cursor, "claude-opus-5-high")).toEqual([]);
   });

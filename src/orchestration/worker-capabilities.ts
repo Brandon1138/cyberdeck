@@ -9,6 +9,14 @@ export interface WorkerProviderCapability {
   notes: readonly string[];
   /** The provider's own display name per model id, when its listing printed one. */
   modelLabels?: Readonly<Record<string, string>>;
+  /**
+   * The efforts one model id alone accepts, where that is narrower than `efforts`.
+   *
+   * `efforts` is what the provider supports across its whole line-up; this is what a single model
+   * within it supports. A model absent from this map is unconstrained beyond `efforts` — absence
+   * never means "no efforts", which is what an empty array here would mean.
+   */
+  modelEfforts?: Readonly<Record<string, readonly ReasoningEffort[]>>;
 }
 
 /**
@@ -45,11 +53,22 @@ export interface ResolvedWorkerCapability extends WorkerProviderCapability {
 export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] = [
   {
     provider: "codex",
-    models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+    models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.3-codex-spark"],
     efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    // Read from `codex debug models` on 2026-08-20. Only the models whose range is narrower than
+    // the provider's own are pinned: sol and terra printed all six rungs, so pinning them would
+    // turn a snapshot into a ceiling the day the provider adds one.
+    modelEfforts: {
+      "gpt-5.3-codex-spark": ["low", "medium", "high", "xhigh"],
+      "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+    },
     approvalModes: ["prompt", "auto"],
-    modelIdRule: "Use the complete gpt-5.6-* identifier; luna, terra, and sol are labels, not launch IDs.",
-    notes: ["Omitting model uses the provider-native default."],
+    modelIdRule:
+      "Use the complete provider-native identifier; luna, terra, sol, and spark are labels, not launch IDs.",
+    notes: [
+      "Omitting model uses the provider-native default.",
+      "Per-model effort ranges are a 2026-08-20 snapshot of `codex debug models`; a live listing replaces them.",
+    ],
   },
   {
     provider: "claude",
@@ -189,6 +208,10 @@ export function capabilityModelEfforts(
   capability: WorkerProviderCapability,
   model: string,
 ): readonly ReasoningEffort[] {
+  // A provider that named this model's own range answered the question outright, so it is preferred
+  // over reading the range back out of the slug — `gpt-5.3-codex-spark` spells no effort at all.
+  const named = capability.modelEfforts?.[model];
+  if (named !== undefined) return named;
   const suffix = capability.efforts.find((effort) => model.endsWith(`-${effort}`));
   return suffix === undefined ? capability.efforts : [suffix];
 }
@@ -233,7 +256,8 @@ export function validateWorkerSelection(input: {
       luna: "gpt-5.6-luna",
       terra: "gpt-5.6-terra",
       sol: "gpt-5.6-sol",
-    } as const)[input.model as "luna" | "terra" | "sol"];
+      spark: "gpt-5.3-codex-spark",
+    } as const)[input.model as "luna" | "terra" | "sol" | "spark"];
     if (canonical !== undefined) {
       return {
         ok: false,
@@ -274,6 +298,26 @@ export function validateWorkerSelection(input: {
       code: "APPROVAL_MODE_NOT_SUPPORTED",
       message: `${input.provider} does not support worker approval mode ${input.approvalMode}; supported: ${capability.approvalModes.join(", ")}`,
     };
+  }
+
+  // A model the provider gave its own effort range is judged against that range, not the provider's
+  // whole line-up: codex reaches ultra, gpt-5.3-codex-spark stops at xhigh, and offering the model
+  // while accepting an effort it does not have is a launch that fails at the CLI instead of here.
+  if (input.model !== undefined && input.effort !== undefined) {
+    const modelEfforts = capability.modelEfforts?.[input.model];
+    if (modelEfforts !== undefined && !modelEfforts.includes(input.effort)) {
+      return modelEfforts.length === 0
+        ? {
+          ok: false,
+          code: "EFFORT_NOT_SUPPORTED",
+          message: `${input.provider} model ${input.model} supports no separate effort values`,
+        }
+        : {
+          ok: false,
+          code: "MODEL_EFFORT_MISMATCH",
+          message: `${input.provider} model ${input.model} does not support effort ${input.effort}; ${input.model} supports: ${modelEfforts.join(", ")}`,
+        };
+    }
   }
 
   // A slug that names its own effort has already chosen one, so a second, different effort is a
