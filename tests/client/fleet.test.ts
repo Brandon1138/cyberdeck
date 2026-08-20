@@ -5034,7 +5034,10 @@ describe("fleet repaint", () => {
       expect(Buffer.concat(output.chunks).toString()).toContain("CYBERDECK COCKPIT"));
 
     output.chunks.length = 0;
-    records = [session({ name: "New diagnostics session" })];
+    records = [session({
+      name: "New diagnostics session",
+      cwd: `/repo/${"long-path/".repeat(20)}`,
+    })];
     await vi.waitFor(
       () => expect(Buffer.concat(output.chunks).toString()).toContain("11111111"),
       { timeout: 2_000, interval: 10 },
@@ -5043,6 +5046,15 @@ describe("fleet repaint", () => {
     expect(diagnosticsTopology.startsWith("\u001b[?25l\u001b[H")).toBe(true);
     expect(diagnosticsTopology).toContain("\n");
     expect(diagnosticsTopology).not.toContain("\u001b[2J");
+    // Dashboard tables contain tabs and unbounded broker values. The frame-writing boundary
+    // expands those tabs and clamps the long path, so each logical diagnostics row remains one
+    // physical terminal row and later CUP damage still addresses the intended row.
+    const diagnosticsRows = diagnosticsTopology
+      .replaceAll(/\u001b\[[?0-9;]*[A-Za-z]/gu, "")
+      .split("\n");
+    expect(diagnosticsTopology).not.toContain(records[0]!.cwd);
+    expect(diagnosticsRows.every((row) => !row.includes("\t"))).toBe(true);
+    expect(diagnosticsRows.every((row) => displayWidth(row) <= output.columns)).toBe(true);
 
     signals.emit("SIGTERM");
     await running;
@@ -5833,15 +5845,25 @@ describe("directed handoff", () => {
     ).toContain("Handoff  1 of 2"));
 
     input.emit("data", Buffer.from("\r"));
-    input.emit("data", Buffer.from("Rebase it"));
+    const directive = `Rebase ${"x".repeat(output.columns * 2)}`;
+    const firstDirectiveChunk = output.chunks.length;
+    input.emit("data", Buffer.from(directive));
     input.emit("data", Buffer.from("\r"));
 
     await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("fleet.workerHandoff", {
       recipientSessionId: ORC_ID,
       workerIds: [WORKER_A],
-      directive: "Rebase it",
+      directive,
       mutationId: expect.any(String),
     }));
+    const directiveRows = output.chunks.slice(firstDirectiveChunk)
+      .flatMap((chunk) => chunk.toString("utf8").split(/\n|\u001b\[\d+;\d+H/gu))
+      .map((row) => row.replaceAll(/\u001b\[[?0-9;]*[A-Za-z]/gu, ""))
+      .filter((row) => row.startsWith("› ") && row.endsWith("▌"));
+    expect(directiveRows.length).toBeGreaterThan(0);
+    expect(directiveRows.every((row) => displayWidth(row) <= output.columns)).toBe(true);
+    expect(directiveRows.at(-1)).toMatch(/^› …/u);
+    expect(directiveRows.at(-1)).toMatch(new RegExp(`${directive.slice(-20)}▌$`, "u"));
     await vi.waitFor(() => {
       const screen = Buffer.concat(output.chunks).toString("utf8");
       expect(screen).toContain("1 worker handed off");

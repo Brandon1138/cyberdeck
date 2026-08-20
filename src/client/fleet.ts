@@ -2897,6 +2897,22 @@ function transitionOpenHandoffPicker(
   return { state };
 }
 
+function renderHandoffDirective(
+  draft: string,
+  options: ResolvedFleetRenderOptions,
+): string {
+  const prefix = `${paint("›", "bold", options.color)} `;
+  const marker = paint(SELECTION_RULE, "selection", options.color);
+  const draftWidth = Math.max(
+    0,
+    options.width - displayWidth("› ") - displayWidth(SELECTION_RULE),
+  );
+  const visibleDraft = displayWidth(draft) <= draftWidth
+    ? draft
+    : `…${cutToWidthFromEnd(draft, Math.max(0, draftWidth - 1))}`;
+  return `${prefix}${visibleDraft}${marker}`;
+}
+
 function renderHandoffPicker(
   snapshot: FleetSnapshot,
   state: FleetState,
@@ -2940,7 +2956,9 @@ function renderHandoffPicker(
           : displayThreadName(recipient.name ?? "orchestrator")
       }`,
       "",
-      `${paint("›", "bold", options.color)} ${picker.draft}${paint(SELECTION_RULE, "selection", options.color)}`,
+      // Keep the insertion edge and newest text visible after the directive fills the row. Prefix
+      // clamping would freeze the retained row, making later direct keystrokes produce no repaint.
+      renderHandoffDirective(picker.draft, options),
     );
   }
   const footer = [
@@ -3958,7 +3976,11 @@ export async function runFleet(
     cursor: { row: number; column: number } | undefined,
     layout: FleetFrameLayout,
   ) => {
-    const rows = body.split("\n");
+    // Absolute row addressing is sound only when one logical row occupies one physical terminal
+    // row. Most Fleet surfaces already fit their content, but picker drafts and dashboard fields
+    // can contain arbitrary-width values; clamp at the write boundary so none can soft-wrap behind
+    // the damage renderer's retained geometry.
+    const rows = body.split("\n").map((row) => clampRowWidth(row, layout.width));
     const previous = paintedFrame;
     const dimensionsChanged = previous !== undefined
       && (previous.width !== layout.width || previous.height !== layout.height);
@@ -6166,14 +6188,17 @@ function clampRowWidth(value: string, width: number): string {
       painted = part !== ANSI.reset;
       continue;
     }
-    const cells = displayWidth(part);
-    if (printed + cells <= width) {
-      clamped += part;
+    for (const cluster of graphemes(part)) {
+      // Dashboard tables use tabs. A terminal advances those to the next eight-cell stop, whereas
+      // displayWidth correctly counts generic control bytes as zero; expand them here so the row's
+      // retained width is the width the terminal will actually occupy.
+      const cells = cluster === "\t" ? 8 - (printed % 8) : graphemeWidth(cluster);
+      if (printed + cells > width) {
+        return painted ? `${clamped}${ANSI.reset}` : clamped;
+      }
+      clamped += cluster === "\t" ? " ".repeat(cells) : cluster;
       printed += cells;
-      continue;
     }
-    clamped += cutToWidth(part, width - printed);
-    return painted ? `${clamped}${ANSI.reset}` : clamped;
   }
   return clamped;
 }
