@@ -3,7 +3,6 @@ import { z } from "zod";
 import type { WorkerCoordinationService } from "../broker/worker-coordination.js";
 import type { WorkerLeaseCredentialCustodian } from "../broker/worker-lease-credential-custodian.js";
 import { BrokerWorkerLeaseCredentialCustodian } from "../broker/worker-lease-credential-custodian.js";
-import type { SessionRegistry } from "../broker/session-registry.js";
 import { grantAllows, type CapabilityGrant } from "../domain/capability.js";
 import { orchestratorController } from "../domain/orchestrator.js";
 import type { SessionRecord } from "../domain/session.js";
@@ -13,8 +12,9 @@ import type {
   WorkerLifecycle,
 } from "../domain/worker-coordination.js";
 import { HANDOFF_LIMITS, handoffBriefing } from "../domain/worker-handoff.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { InstructionQueue } from "./instruction-queue.js";
+import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import type { SessionLookupPort } from "./session/session-ports.js";
 
 export const WorkerHandoffParamsSchema = z.object({
   recipientSessionId: z.uuid(),
@@ -86,7 +86,7 @@ export class WorkerHandoffError extends Error {
 
 export interface WorkerHandoffOptions {
   coordination: WorkerCoordinationService;
-  registry: SessionRegistry;
+  registry: SessionLookupPort;
   orchestrators: OrchestratorStore;
   instructions?: InstructionQueue;
   credentials?: WorkerLeaseCredentialCustodian;

@@ -930,6 +930,15 @@ describe("architecture dependency rule", () => {
     ).toEqual([]);
   });
 
+  it("keeps InstructionQueue independent of broker and persistence implementations", () => {
+    const path = resolve(SOURCE_ROOT, "orchestration/instruction-queue.ts");
+    expect(
+      staticModuleSpecifiers(path).filter((specifier) =>
+        specifier.includes("/broker/") || specifier.includes("/persistence/")
+      ),
+    ).toEqual([]);
+  });
+
   it("parses multiline declarations while ignoring comments and template text", () => {
     const source = `
       // import "./commented.js";

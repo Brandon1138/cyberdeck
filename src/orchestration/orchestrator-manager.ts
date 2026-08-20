@@ -23,10 +23,14 @@ import type { ApprovalMode, ProviderId, SessionRecord } from "../domain/session.
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { ProviderPermissionPreferencePort } from "../persistence/provider-permission-preference-store.js";
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
-import type { SessionRegistry } from "../broker/session-registry.js";
 import { resolveProviderPermission } from "../client/permission-policy.js";
 import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
 import { ORCHESTRATOR_CATALOG } from "./orchestrator-catalog.js";
+import type {
+  SessionLookupPort,
+  SessionResumePort,
+  SessionStartPort,
+} from "./session/session-ports.js";
 
 export interface OrchestratorManagerResult {
   binding: OrchestratorBinding;
@@ -57,7 +61,7 @@ type BoundOrchestratorRequest = EnsureOrchestratorRequest & {
 
 export class OrchestratorManager {
   constructor(
-    private readonly registry: SessionRegistry,
+    private readonly registry: SessionLookupPort & SessionStartPort & SessionResumePort,
     private readonly store: OrchestratorStore,
     private readonly workerPreferences?: WorkerPreferenceStore,
     private readonly providerPermissions?: ProviderPermissionPreferencePort,

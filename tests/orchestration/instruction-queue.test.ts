@@ -2,6 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { InstructionQueue } from "../../src/orchestration/instruction-queue.js";
 import type { InstructionRecord } from "../../src/domain/instruction.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
+import type { SessionRecord } from "../../src/domain/session.js";
+import type {
+  InstructionRepository,
+  OrchestratorBindingReader,
+  SessionInstructionPort,
+} from "../../src/orchestration/session/session-ports.js";
 
 const ACTOR = "11111111-1111-4111-8111-111111111111";
 const TARGET = "22222222-2222-4222-8222-222222222222";
@@ -27,26 +33,28 @@ describe("InstructionQueue", () => {
     let available: ((sessionId: string) => void) | undefined;
     let busy = true;
     const records = new Map<string, InstructionRecord>();
-    const submitInstruction = vi.fn(async () => {
+    const sessions = {
+      get: vi.fn(),
+      onControllerReleased: vi.fn((listener: (sessionId: string) => void) => {
+        available = listener;
+        return () => { available = undefined; };
+      }),
+      onDeliveryBoundary: vi.fn(() => () => undefined),
+      onInstructionState: vi.fn(() => () => undefined),
+      submitInstruction: vi.fn(),
+    } satisfies SessionInstructionPort;
+    sessions.get.mockReturnValue({ id: TARGET, cwd: "/repo" } as SessionRecord);
+    sessions.submitInstruction.mockImplementation(async () => {
       if (busy) throw Object.assign(new Error("busy"), { code: "SESSION_BUSY" });
       return { state: "rendered", expectedTurn: 1, at: new Date().toISOString() };
     });
     const queue = new InstructionQueue(
-      {
-        get: () => ({ id: TARGET, cwd: "/repo" }),
-        submitInstruction,
-        onControllerReleased: (listener: (sessionId: string) => void) => {
-          available = listener;
-          return () => { available = undefined; };
-        },
-        onDeliveryBoundary: () => () => undefined,
-        onInstructionState: () => () => undefined,
-      } as never,
-      { findBySessionId: vi.fn(async () => binding) } as never,
+      sessions,
+      { findBySessionId: vi.fn(async () => binding) } satisfies OrchestratorBindingReader,
       {
         put: vi.fn(async (record: InstructionRecord) => { records.set(record.id, record); }),
         list: vi.fn(async (target?: string) => [...records.values()].filter((record) => target === undefined || record.targetSessionId === target)),
-      } as never,
+      } satisfies InstructionRepository,
     );
     queue.start();
 
@@ -57,19 +65,28 @@ describe("InstructionQueue", () => {
     available?.(TARGET);
     // `rendered`, not `delivered`: the queue may only report what the broker actually observed.
     await vi.waitFor(async () => expect((await queue.list(TARGET))[0]?.status).toBe("rendered"));
-    expect(submitInstruction).toHaveBeenCalledTimes(2);
+    expect(sessions.submitInstruction).toHaveBeenCalledTimes(2);
   });
 
   it("deduplicates retries by message id", async () => {
     const messageId = crypto.randomUUID();
     const existing = { id: crypto.randomUUID(), messageId, status: "rendered" } as InstructionRecord;
+    const sessions = {
+      get: vi.fn(() => ({ id: TARGET, cwd: "/repo" } as SessionRecord)),
+      onControllerReleased: vi.fn(() => () => undefined),
+      onDeliveryBoundary: vi.fn(() => () => undefined),
+      onInstructionState: vi.fn(() => () => undefined),
+      submitInstruction: vi.fn(),
+    } satisfies SessionInstructionPort;
     const queue = new InstructionQueue(
-      { get: () => ({ cwd: "/repo" }) } as never,
-      { findBySessionId: vi.fn(async () => binding) } as never,
-      { list: vi.fn(async () => [existing]) } as never,
+      sessions,
+      { findBySessionId: vi.fn(async () => binding) } satisfies OrchestratorBindingReader,
+      {
+        list: vi.fn(async () => [existing]),
+        put: vi.fn(),
+      } satisfies InstructionRepository,
     );
     await expect(queue.enqueue({ actorSessionId: ACTOR, targetSessionId: TARGET, message: "Again", messageId }))
       .resolves.toBe(existing);
   });
 });
-
