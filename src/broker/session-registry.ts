@@ -1364,6 +1364,9 @@ export class SessionRegistry {
     delete runtime.stallObservation;
     this.clearTurnTimers(runtime);
     this.adoptSessionRuntime(runtime, sessionRuntime);
+    // Replacing the runtime also replaces its replay. Advance every derived cursor now so a
+    // silent resumed process cannot leave clients displaying the previous generation forever.
+    this.notifySessionUpdate(sessionId);
     await this.appendEvent("session.resumed", sessionId, {
       provider: runtime.record.provider,
       model: runtime.record.model ?? null,

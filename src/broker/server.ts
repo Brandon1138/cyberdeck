@@ -26,6 +26,7 @@ import {
 import type { FleetProjectService } from "./fleet-project-service.js";
 import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type RequestFrame } from "../protocol/frames.js";
 import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
+import { SessionSnapshotParamsSchema } from "../domain/session-snapshot.js";
 import { NvimBindParamsSchema, type NvimBindingService } from "./nvim-binding-service.js";
 import { RegistryError, type AttachmentMode, type SessionRegistry } from "./session-registry.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
@@ -157,11 +158,15 @@ export interface BrokerServerOptions {
 export class BrokerServer {
   private readonly server: Server;
   private readonly sockets = new Set<Socket>();
+  private readonly snapshotCursors = new Map<string, number>();
   private listening = false;
   private closePromise: Promise<void> | undefined;
 
   constructor(private readonly options: BrokerServerOptions) {
     this.server = createServer((socket) => this.accept(socket));
+    options.registry.onSessionUpdate((sessionId) => {
+      this.snapshotCursors.set(sessionId, this.snapshotCursor(sessionId) + 1);
+    });
   }
 
   async listen(): Promise<void> {
@@ -425,8 +430,17 @@ export class BrokerServer {
         };
       }
       case "session.snapshot": {
-        const { sessionId } = SessionIdParamsSchema.parse(frame.params);
-        return { data: this.options.registry.snapshot(sessionId).toString("base64") };
+        const { sessionId, cursor } = SessionSnapshotParamsSchema.parse(frame.params);
+        if (cursor === undefined) {
+          return { data: this.options.registry.snapshot(sessionId).toString("base64") };
+        }
+        this.options.registry.get(sessionId);
+        const currentCursor = this.snapshotCursor(sessionId);
+        if (cursor === currentCursor) return { cursor: currentCursor, notModified: true };
+        return {
+          data: this.options.registry.snapshot(sessionId).toString("base64"),
+          cursor: currentCursor,
+        };
       }
       case "session.stop": {
         const { sessionId } = SessionIdParamsSchema.parse(frame.params);
@@ -629,6 +643,10 @@ export class BrokerServer {
       default:
         throw Object.assign(new Error(`Unknown method ${frame.method}`), { code: "METHOD_NOT_FOUND" });
     }
+  }
+
+  private snapshotCursor(sessionId: string): number {
+    return this.snapshotCursors.get(sessionId) ?? 1;
   }
 
   private requireControlPlane(): JobControlPlane {
