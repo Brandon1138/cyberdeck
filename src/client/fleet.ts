@@ -1479,7 +1479,7 @@ export function renderFleet(
   // automatic three-pane layout; pretending it is 50 columns lets logical rows soft-wrap and
   // invalidates the damage renderer's absolute row addresses.
   const width = Math.max(1, options.width ?? 120);
-  const height = Math.max(16, options.height ?? 32);
+  const height = Math.max(1, options.height ?? 32);
   const now = options.now ?? Date.now();
   const color = options.color ?? true;
   const home = options.home ?? homedir();
@@ -1927,9 +1927,12 @@ function renderPermissionPicker(
       options.color,
     ),
   ];
-  const body = lines.slice(0, Math.max(0, options.height - footer.length));
-  while (body.length < options.height - footer.length) body.push("");
-  return [...body, ...footer].join("\n");
+  return renderCursorlessPickerFrame(
+    lines,
+    footer,
+    options.height,
+    state.notice === undefined ? 0 : 1,
+  );
 }
 
 function permissionPolicy(
@@ -2296,9 +2299,7 @@ function renderWorkerPicker(state: FleetState, options: ResolvedFleetRenderOptio
       options.color,
     ),
   ];
-  const body = lines.slice(0, Math.max(0, options.height - footer.length));
-  while (body.length < options.height - footer.length) body.push("");
-  return [...body, ...footer].join("\n");
+  return renderCursorlessPickerFrame(lines, footer, options.height);
 }
 
 function renderFleetList(
@@ -2510,8 +2511,11 @@ function renderFleetFooter(
   const helpLines = state.helpOpen === true
     ? shortcutHelp(options.width, terminal && stopAcknowledged ? "delete" : "stop")
     : [];
+  const notice = state.notice === undefined
+    ? undefined
+    : renderNotice(state.notice, state.noticeTone, options.width, options.color);
   const footer = [
-    ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
+    ...(notice === undefined ? [] : [notice]),
     paint("─".repeat(options.width), "dim", options.color),
     ...composerLines,
     paint("─".repeat(options.width), "dim", options.color),
@@ -2519,7 +2523,16 @@ function renderFleetFooter(
     paint(fit(launchContext, options.width), "dim", options.color),
     paint(fit(`↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
   ];
-  return footer;
+  if (footer.length <= options.height) return footer;
+
+  // In a pane shorter than the fixed footer, interaction content outranks its chrome and hints.
+  // The active composer always owns one row. A fresh notice owns the next row when one exists;
+  // height one deliberately keeps the editor because hiding it would make typed interaction blind.
+  const noticeRows = notice === undefined || options.height === 1 ? [] : [notice];
+  const visibleComposerRows = composerLines.slice(
+    -Math.max(1, options.height - noticeRows.length),
+  );
+  return [...noticeRows, ...visibleComposerRows].slice(-options.height);
 }
 
 /** What `!` mode runs the operator's lines through, named so the footer is never a guess. */
@@ -2980,9 +2993,12 @@ function renderHandoffPicker(
       options.color,
     ),
   ];
-  const body = lines.slice(0, Math.max(0, options.height - footer.length));
-  while (body.length < options.height - footer.length) body.push("");
-  return [...body, ...footer].join("\n");
+  return renderCursorlessPickerFrame(
+    lines,
+    footer,
+    options.height,
+    state.notice === undefined ? 0 : 1,
+  );
 }
 
 /** What the fleet list says about a handoff the broker has already answered. */
@@ -3237,9 +3253,12 @@ function renderOrchestratorPicker(
       options.color,
     ),
   ];
-  const body = lines.slice(0, Math.max(0, options.height - footer.length));
-  while (body.length < options.height - footer.length) body.push("");
-  return [...body, ...footer].join("\n");
+  return renderCursorlessPickerFrame(
+    lines,
+    footer,
+    options.height,
+    state.notice === undefined ? 0 : 1,
+  );
 }
 
 function orchestratorSelection(picker: Extract<OrchestratorPickerState, { step: "effort" }>) {
@@ -3321,6 +3340,47 @@ function terminalOrchestratorState(record: SessionRecord): string {
 
 function pickerRow(value: string, selected: boolean, color: boolean): string {
   return `${paint(selected ? "›" : "·", selected ? "bold" : "dim", color)} ${selected ? paint(value, "bold", color) : value}`;
+}
+
+/**
+ * A cursorless picker still needs a visible interaction anchor in a very short pane.
+ *
+ * Every selected picker row — including the directed-handoff draft — starts with `›`. Keep that
+ * row inside the body window, and when the footer itself would consume the pane, spend the first
+ * physical row on the selection before retaining as many trailing hints as still fit. This is a
+ * visual anchor only; it never turns a picker into a terminal caret owner.
+ */
+function renderCursorlessPickerFrame(
+  lines: readonly string[],
+  footer: readonly string[],
+  height: number,
+  priorityFooterRows = 0,
+): string {
+  const frameHeight = Math.max(1, height);
+  const selectedIndex = lines.findLastIndex((line) =>
+    stripTerminalControl(line).startsWith("› "));
+  const fallbackIndex = lines.findLastIndex((line) => stripTerminalControl(line).trim() !== "");
+  const anchorIndex = Math.max(0, selectedIndex === -1 ? fallbackIndex : selectedIndex);
+
+  if (frameHeight <= footer.length) {
+    const footerCapacity = frameHeight - 1;
+    const priorityFooter = footer.slice(0, Math.min(priorityFooterRows, footerCapacity));
+    const trailingCapacity = footerCapacity - priorityFooter.length;
+    const trailingFooter = trailingCapacity === 0
+      ? []
+      : footer.slice(priorityFooterRows).slice(-trailingCapacity);
+    const visibleFooter = [...priorityFooter, ...trailingFooter];
+    return [lines[anchorIndex] ?? footer.at(-1) ?? "", ...visibleFooter].join("\n");
+  }
+
+  const bodyHeight = frameHeight - footer.length;
+  const firstBodyRow = Math.max(
+    0,
+    Math.min(anchorIndex - bodyHeight + 1, lines.length - bodyHeight),
+  );
+  const body = lines.slice(firstBodyRow, firstBodyRow + bodyHeight);
+  while (body.length < bodyHeight) body.push("");
+  return [...body, ...footer].join("\n");
 }
 
 function boundedIndex(value: number, length: number): number {
@@ -3982,32 +4042,54 @@ export async function runFleet(
     // Absolute row addressing is sound only when one logical row occupies one physical terminal
     // row. Most Fleet surfaces already fit their content, but picker drafts and dashboard fields
     // can contain arbitrary-width values; clamp at the write boundary so none can soft-wrap behind
-    // the damage renderer's retained geometry.
-    const rows = body.split("\n").map((row) => clampRowWidth(row, layout.width));
+    // the damage renderer's retained geometry. In a pane shorter than a surface's fixed footer,
+    // retain only one physical-height window, keeping the active composer cursor in view.
+    const renderedRows = body.split("\n");
+    const maximumFirstRow = Math.max(0, renderedRows.length - layout.height);
+    const firstRow = cursor === undefined
+      ? 0
+      : Math.min(maximumFirstRow, Math.max(0, cursor.row - layout.height));
+    const rows = renderedRows
+      .slice(firstRow, firstRow + layout.height)
+      .map((row) => clampRowWidth(row, layout.width));
+    const frameCursor = cursor !== undefined
+      && cursor.row > firstRow
+      && cursor.row <= firstRow + rows.length
+      ? {
+          row: cursor.row - firstRow,
+          column: Math.max(1, Math.min(cursor.column, layout.width)),
+        }
+      : undefined;
+    const retainedLayout = {
+      ...layout,
+      // The tiny-pane row window is a viewport offset too. If it moves, take the same mandatory
+      // full-repaint path as every other scroll offset instead of treating shifted rows as damage.
+      scrollOffset: JSON.stringify([layout.scrollOffset, firstRow]),
+    };
     const previous = paintedFrame;
     const dimensionsChanged = previous !== undefined
-      && (previous.width !== layout.width || previous.height !== layout.height);
+      && (previous.width !== retainedLayout.width || previous.height !== retainedLayout.height);
     const fullRepaint = previous === undefined
       || dimensionsChanged
-      || previous.topology !== layout.topology
-      || previous.scrollOffset !== layout.scrollOffset
+      || previous.topology !== retainedLayout.topology
+      || previous.scrollOffset !== retainedLayout.scrollOffset
       || previous.rows.length !== rows.length;
     const dirtyRows = fullRepaint
       ? rows.map((_, index) => index)
       : rows.flatMap((row, index) => row === previous.rows[index] ? [] : [index]);
-    const cursorUnchanged = previous?.cursor?.row === cursor?.row
-      && previous?.cursor?.column === cursor?.column;
+    const cursorUnchanged = previous?.cursor?.row === frameCursor?.row
+      && previous?.cursor?.column === frameCursor?.column;
     if (dirtyRows.length === 0 && cursorUnchanged) return;
 
-    const caret = cursor === undefined
+    const caret = frameCursor === undefined
       ? ""
-      : `\u001b[${cursor.row};${cursor.column}H\u001b[?25h`;
+      : `\u001b[${frameCursor.row};${frameCursor.column}H\u001b[?25h`;
     const paintRow = (row: string) =>
       printedWidth(row) < layout.width ? `${row}\u001b[K` : row;
     let damage: string;
     if (fullRepaint) {
       const clear = previous === undefined || dimensionsChanged ? "\u001b[2J" : "";
-      const below = previous !== undefined && previous.rows.length > rows.length
+      const below = !dimensionsChanged && previous !== undefined && previous.rows.length > rows.length
         ? `\u001b[${rows.length + 1};1H\u001b[0J`
         : "";
       damage = `${clear}\u001b[H${rows.map(paintRow).join("\n")}${below}`;
@@ -4017,7 +4099,7 @@ export async function runFleet(
         .join("");
     }
     output.write(`\u001b[?25l${damage}${caret}`);
-    paintedFrame = { ...layout, rows, cursor };
+    paintedFrame = { ...retainedLayout, rows, cursor: frameCursor };
   };
   let stopped = false;
   let attaching = false;
@@ -4126,7 +4208,7 @@ export async function runFleet(
 
   const perform = async (key: string) => {
     const width = Math.max(1, output.columns ?? 120);
-    const height = Math.max(16, output.rows ?? 32);
+    const height = Math.max(1, output.rows ?? 32);
     const renderOptions: ResolvedFleetRenderOptions = {
       color: output.isTTY === true,
       width,
@@ -4601,7 +4683,7 @@ export async function runFleet(
         cwd: record.cwd,
         ...(record.workspace?.branch === undefined ? {} : { branch: record.workspace.branch }),
       })));
-      const height = Math.max(16, output.rows ?? 32);
+      const height = Math.max(1, output.rows ?? 32);
       const width = Math.max(1, output.columns ?? 120);
       if (state.view === "diagnostics") {
         const dashboard = await collectDashboardSnapshot(client);
@@ -4729,10 +4811,19 @@ export function composerCursor(
   const focus = composerFocus(state);
   if (focus === undefined) return undefined;
   const lines = rendered.split("\n");
-  const divider = "─".repeat(width);
-  const lowerDividerIndex = lines.findLastIndex((line) => stripTerminalControl(line) === divider);
-  if (lowerDividerIndex <= 0) return undefined;
-  const rowIndex = lowerDividerIndex - 1;
+  const expectedComposerRow = renderComposerLines(focus.value, focus.mode, {
+    width,
+    height: lines.length,
+    now: 0,
+    color: false,
+    home: "",
+    pullRequests: new Map(),
+  }).at(-1);
+  const rowIndex = expectedComposerRow === undefined
+    ? -1
+    : lines.findLastIndex((line) =>
+        stripTerminalControl(line) === stripTerminalControl(expectedComposerRow));
+  if (rowIndex === -1) return undefined;
   const visibleLine = stripTerminalControl(lines[rowIndex] ?? "");
   // An empty draft shows its placeholder, so the caret is placed off the prompt the composer wears
   // rather than off the end of copy the operator did not type.

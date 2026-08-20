@@ -4774,6 +4774,112 @@ describe("composer caret", () => {
   });
 });
 
+describe("tiny picker presentation", () => {
+  it("keeps every cursorless picker selection and handoff typing visible in one row", () => {
+    const receiver = session({
+      id: "77777777-7777-4777-8777-777777777777",
+      kind: "orchestrator",
+      role: "orchestrator",
+      name: "Receiving orc",
+    });
+    const worker = session({
+      id: "88888888-8888-4888-8888-888888888888",
+      kind: "worker",
+      role: "worker",
+      name: "Tiny worker",
+    });
+    const snapshot = fleet({ record: receiver }, { record: worker });
+    const base = createFleetState(snapshot);
+    const render = (state: FleetState, height = 1) => renderFleet(snapshot, state, {
+      color: false,
+      width: 60,
+      height,
+      now: NOW_MS,
+    });
+    const workerPicker: FleetState = {
+      ...base,
+      workerPicker: {
+        step: "model",
+        modelIndex: 0,
+        effortIndex: 0,
+        cwd: worker.cwd,
+        returnDraft: "",
+        filter: "",
+      },
+    };
+    const permissionPicker: FleetState = {
+      ...base,
+      permissionPicker: { step: "provider", providerIndex: 0, policyIndex: 0 },
+    };
+    const orchestratorPicker: FleetState = {
+      ...base,
+      orchestratorPicker: { step: "target", focus: { kind: "profile", modelIndex: 0 } },
+    };
+    const handoffPicker: FleetState = {
+      ...base,
+      handoffPicker: {
+        step: "directive",
+        workerIds: [worker.id],
+        recipientSessionId: receiver.id,
+        draft: "keep moving",
+        mutationId: "tiny-handoff",
+      },
+    };
+
+    for (const state of [workerPicker, permissionPicker, orchestratorPicker, handoffPicker]) {
+      const rendered = render(state);
+      expect(rendered.split("\n")).toHaveLength(1);
+      expect(rendered).toMatch(/^› /u);
+    }
+
+    expect(render({
+      ...permissionPicker,
+      permissionPicker: { step: "provider", providerIndex: 1, policyIndex: 0 },
+    })).not.toBe(render(permissionPicker));
+    expect(render({
+      ...handoffPicker,
+      handoffPicker: {
+        step: "directive",
+        workerIds: [worker.id],
+        recipientSessionId: receiver.id,
+        draft: "latest directive",
+        mutationId: "tiny-handoff",
+      },
+    })).toContain("latest directive▌");
+
+    const emptyHandoff: FleetState = {
+      ...handoffPicker,
+      handoffPicker: {
+        step: "directive",
+        workerIds: [worker.id],
+        recipientSessionId: receiver.id,
+        draft: "",
+        mutationId: "tiny-handoff",
+      },
+    };
+    const refused = transitionFleet(emptyHandoff, snapshot, "enter", NOW_MS).state;
+    expect(render(refused, 2)).not.toBe(render(emptyHandoff, 2));
+    expect(render(refused, 2)).toContain("A handoff needs a directive");
+  });
+
+  it("keeps a direct-action notice beside the main composer in a two-row pane", () => {
+    const snapshot = fleet();
+    const initial = createFleetState(snapshot);
+    const refused = transitionFleet(initial, snapshot, "ctrl+n", NOW_MS).state;
+    const options = { color: false, width: 60, height: 2, now: NOW_MS };
+
+    const before = renderFleet(snapshot, initial, options);
+    const after = renderFleet(snapshot, refused, options);
+
+    expect(after).not.toBe(before);
+    expect(after.split("\n")).toEqual([
+      "Select a worker to open its worktree in nvim",
+      "› Describe a task for a new session",
+    ]);
+    expect(composerCursor(after, refused, options.width)).toEqual({ row: 2, column: 3 });
+  });
+});
+
 describe("fleet repaint", () => {
   class Input extends EventEmitter {
     isTTY = true;
@@ -4990,6 +5096,8 @@ describe("fleet repaint", () => {
     expect(damage).toMatch(/^\u001b\[\?25l\u001b\[\d+;1H/u);
     expect(damage).not.toContain("\n");
     expect(printableRows(damage).every((row) => displayWidth(row) <= output.columns)).toBe(true);
+    const caretColumn = /\u001b\[\d+;(\d+)H\u001b\[\?25h$/u.exec(damage)?.[1];
+    expect(Number(caretColumn)).toBeLessThanOrEqual(output.columns);
 
     // Width changes below the old synthetic floor are still geometry changes. Even without a
     // SIGWINCH in this test double, the next frame detects the new physical width and clears.
@@ -5002,6 +5110,46 @@ describe("fleet repaint", () => {
     expect(Buffer.concat(output.chunks).toString().startsWith(
       "\u001b[?25l\u001b[2J\u001b[H",
     )).toBe(true);
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("addresses damage at the physical pane height below the 16-row layout breakpoint", async () => {
+    const input = new Input();
+    const output = new Output();
+    output.rows = 10;
+    const running = runFleet(transport() as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+    await vi.waitFor(() => expect(output.chunks.length).toBeGreaterThan(0));
+
+    const first = output.chunks.find((chunk) => chunk.toString().includes("\u001b[H"))?.toString()
+      ?? "";
+    expect(first.split("\n")).toHaveLength(output.rows);
+
+    output.chunks.length = 0;
+    input.emit("data", Buffer.from("x"));
+    await vi.waitFor(() => expect(output.chunks.length).toBeGreaterThan(0));
+    const damage = Buffer.concat(output.chunks).toString();
+    const damageRow = /^\u001b\[\?25l\u001b\[(\d+);1H/u.exec(damage)?.[1];
+    expect(Number(damageRow)).toBeLessThanOrEqual(output.rows);
+    expect(damage).not.toContain("\n");
+
+    // A footer can be taller than an extremely short pane. The frame boundary windows it to the
+    // physical height, shifts the composer caret with that window, and detects the resize even
+    // when this test double omits SIGWINCH.
+    output.chunks.length = 0;
+    output.rows = 4;
+    await vi.waitFor(
+      () => expect(output.chunks.length).toBeGreaterThan(0),
+      { timeout: 2_000, interval: 10 },
+    );
+    const resized = Buffer.concat(output.chunks).toString();
+    expect(resized.startsWith("\u001b[?25l\u001b[2J\u001b[H")).toBe(true);
+    expect(resized.split("\n")).toHaveLength(output.rows);
+    expect(resized).not.toContain("\u001b[0J");
+    const caretRow = /\u001b\[(\d+);\d+H\u001b\[\?25h$/u.exec(resized)?.[1];
+    expect(Number(caretRow)).toBeLessThanOrEqual(output.rows);
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
