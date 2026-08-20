@@ -155,7 +155,6 @@ Move `retainThreads` and its expired-record policy out of `main.ts`; preserve se
 cleanup, cross-record `Promise.allSettled`, rejection behavior, post-settlement compaction, and
 original catalog order. `main.ts` constructs the concrete stores and wires the ports. Update the
 architecture regression to assign the orchestration module to application with zero violations.
-Delete the old broker module/test paths using `apply_patch` add/delete edits.
 
 - [ ] **Step 6: Align the architecture documents**
 

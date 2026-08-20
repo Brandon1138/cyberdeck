@@ -139,8 +139,10 @@ describe("startup thread retention", () => {
     expect(operations).toEqual(["load", "binding:start:first-old", "binding:start:second-old"]);
     expect(operations).not.toContain("compact:");
     releaseFirst();
-    releaseSecond();
     await rejectedFirst.catch(() => undefined);
+    expect(operations).not.toContain("binding:done:second-old");
+    expect(operations).not.toContain("compact:");
+    releaseSecond();
     await expect(retention).resolves.toEqual([]);
     expect(operations).toEqual([
       "load",
