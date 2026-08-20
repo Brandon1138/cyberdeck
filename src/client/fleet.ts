@@ -1475,7 +1475,10 @@ export function renderFleet(
   current: FleetState,
   options: FleetRenderOptions = {},
 ): string {
-  const width = Math.max(50, options.width ?? 120);
+  // The renderer must use the physical pane width. Fleet can occupy a sub-50-column pane in the
+  // automatic three-pane layout; pretending it is 50 columns lets logical rows soft-wrap and
+  // invalidates the damage renderer's absolute row addresses.
+  const width = Math.max(1, options.width ?? 120);
   const height = Math.max(16, options.height ?? 32);
   const now = options.now ?? Date.now();
   const color = options.color ?? true;
@@ -4122,7 +4125,7 @@ export async function runFleet(
   };
 
   const perform = async (key: string) => {
-    const width = Math.max(50, output.columns ?? 120);
+    const width = Math.max(1, output.columns ?? 120);
     const height = Math.max(16, output.rows ?? 32);
     const renderOptions: ResolvedFleetRenderOptions = {
       color: output.isTTY === true,
@@ -4599,7 +4602,7 @@ export async function runFleet(
         ...(record.workspace?.branch === undefined ? {} : { branch: record.workspace.branch }),
       })));
       const height = Math.max(16, output.rows ?? 32);
-      const width = Math.max(50, output.columns ?? 120);
+      const width = Math.max(1, output.columns ?? 120);
       if (state.view === "diagnostics") {
         const dashboard = await collectDashboardSnapshot(client);
         const diagnostics = renderDashboard(dashboard).split("\n");

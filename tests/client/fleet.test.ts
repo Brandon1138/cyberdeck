@@ -890,7 +890,7 @@ describe("fleet presentation", () => {
     expect(wide).toContain("repo-mik-76");
     expect(wide).toContain("Done");
 
-    // 50 columns is a Fleet pane split twice over — the narrowest the list is expected to render.
+    // At the 50-column dense-layout breakpoint, model and state still outrank worktree metadata.
     const narrow = rowAt(50);
     expect(narrow).not.toContain("repo-mik-76");
     expect(narrow).toContain("Done");
@@ -4962,6 +4962,46 @@ describe("fleet repaint", () => {
     expect(pickerTopology.startsWith("\u001b[?25l\u001b[H")).toBe(true);
     expect(pickerTopology).toContain("\n");
     expect(pickerTopology).not.toContain("\u001b[2J");
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("addresses damage at the physical pane width below the 50-column layout breakpoint", async () => {
+    const input = new Input();
+    const output = new Output();
+    output.columns = 33;
+    const running = runFleet(transport() as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+    await vi.waitFor(() => expect(output.chunks.length).toBeGreaterThan(0));
+
+    const printableRows = (frame: string) => frame
+      .replaceAll(/\u001b\[[?0-9;]*[A-Za-z]/gu, "")
+      .split("\n");
+    const first = output.chunks.find((chunk) => chunk.toString().includes("\u001b[H"))?.toString()
+      ?? "";
+    expect(first.startsWith("\u001b[?25l\u001b[2J\u001b[H")).toBe(true);
+    expect(printableRows(first).every((row) => displayWidth(row) <= output.columns)).toBe(true);
+
+    output.chunks.length = 0;
+    input.emit("data", Buffer.from("x"));
+    await vi.waitFor(() => expect(output.chunks.length).toBeGreaterThan(0));
+    const damage = Buffer.concat(output.chunks).toString();
+    expect(damage).toMatch(/^\u001b\[\?25l\u001b\[\d+;1H/u);
+    expect(damage).not.toContain("\n");
+    expect(printableRows(damage).every((row) => displayWidth(row) <= output.columns)).toBe(true);
+
+    // Width changes below the old synthetic floor are still geometry changes. Even without a
+    // SIGWINCH in this test double, the next frame detects the new physical width and clears.
+    output.chunks.length = 0;
+    output.columns = 40;
+    await vi.waitFor(
+      () => expect(output.chunks.length).toBeGreaterThan(0),
+      { timeout: 2_000, interval: 10 },
+    );
+    expect(Buffer.concat(output.chunks).toString().startsWith(
+      "\u001b[?25l\u001b[2J\u001b[H",
+    )).toBe(true);
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
