@@ -18,7 +18,7 @@
 - `src/client/**` must gain no import from broker/runtime internals.
 - The architecture dependency baseline starts at exactly 103 entries on `4318b2d33f4691d6b54a8133cce81bb099190b8a`; every slice must keep it flat or reduce it, and no removed violation may remain stale in the baseline.
 - Do not run `pnpm install` or any package-manager install/prune command; use the shared `node_modules`.
-- Use `./node_modules/.bin/vitest run --configLoader runner` and `./node_modules/.bin/tsc -p tsconfig.json --noEmit`.
+- For linked worktrees under `worktrees/*`, invoke shared tools via `../../node_modules/.bin` (for example, `../../node_modules/.bin/vitest` and `../../node_modules/.bin/tsc`); do not install dependencies.
 - Treat `tests/runtime/shell-command.test.ts` `streams output as it arrives` as a known load-sensitive flake only after it passes in isolation.
 - Use isolated worktrees, conventional commits with the slice's Linear identifier, normal GitHub review, exact-head `verify`, zero live unresolved findings, and merge commits.
 - Do not update the baseline by replacing one violation with a differently located violation. New application components import only application/domain contracts.
@@ -88,7 +88,7 @@ it("treats only broker/main.ts as the composition root", () => {
 Run:
 
 ```bash
-./node_modules/.bin/vitest run --configLoader runner tests/architecture/dependency-rule.test.ts
+../../node_modules/.bin/vitest run --configLoader runner tests/architecture/dependency-rule.test.ts
 ```
 
 Expected: FAIL because `layerFor(.../broker/main.ts)` is `application` and 25 current violations originate there.
@@ -141,9 +141,9 @@ Change the dependency-rule status from provisional to enforced, document the one
 Run:
 
 ```bash
-./node_modules/.bin/vitest run --configLoader runner tests/architecture/dependency-rule.test.ts
-./node_modules/.bin/tsc -p tsconfig.json --noEmit
-./node_modules/.bin/vitest run --configLoader runner
+../../node_modules/.bin/vitest run --configLoader runner tests/architecture/dependency-rule.test.ts
+../../node_modules/.bin/tsc -p tsconfig.json --noEmit
+../../node_modules/.bin/vitest run --configLoader runner
 ```
 
 Expected: architecture 11/11 or greater, full suite green, typecheck clean, baseline exactly 78, no production file changed.
@@ -212,8 +212,8 @@ Add an architecture regression asserting `instruction-queue.ts` has no static im
 Run:
 
 ```bash
-./node_modules/.bin/vitest run --configLoader runner tests/orchestration/instruction-queue.test.ts tests/architecture/dependency-rule.test.ts
-./node_modules/.bin/tsc -p tsconfig.json --noEmit
+../../node_modules/.bin/vitest run --configLoader runner tests/orchestration/instruction-queue.test.ts tests/architecture/dependency-rule.test.ts
+../../node_modules/.bin/tsc -p tsconfig.json --noEmit
 ```
 
 Expected: FAIL because the ports do not exist and `InstructionQueue` still imports broker/persistence implementations.
@@ -572,10 +572,10 @@ Mark each slice issue Done only after its merge commit is on `main`; link the sl
 - [ ] **Step 4: Run final verification from fresh `main`**
 
 ```bash
-./node_modules/.bin/tsc -p tsconfig.json --noEmit
-./node_modules/.bin/vitest run --configLoader runner tests/architecture/dependency-rule.test.ts
-./node_modules/.bin/vitest run --configLoader runner tests/orchestration tests/broker tests/integration
-./node_modules/.bin/vitest run --configLoader runner
+../../node_modules/.bin/tsc -p tsconfig.json --noEmit
+../../node_modules/.bin/vitest run --configLoader runner tests/architecture/dependency-rule.test.ts
+../../node_modules/.bin/vitest run --configLoader runner tests/orchestration tests/broker tests/integration
+../../node_modules/.bin/vitest run --configLoader runner
 ```
 
 If the known shell-stream test fails under load, run only that test once and report both results. No other failure is waived.
