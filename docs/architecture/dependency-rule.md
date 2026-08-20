@@ -46,6 +46,6 @@ Baseline records all violations present when this rule was introduced. Test fail
 - a new prohibited edge appears;
 - a baseline edge disappears but remains listed;
 - baseline contains duplicates or is not sorted; or
-- a source file has no provisional layer assignment.
+- a source file has no layer assignment.
 
 Removing an existing violation therefore requires removing its baseline entry in same change. Adding or preserving a new violation is not allowed.
