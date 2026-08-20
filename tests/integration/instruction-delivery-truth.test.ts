@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
@@ -80,6 +81,7 @@ async function harness() {
   const state = await mkdtemp(join(tmpdir(), "cyberdeck-delivery-state-"));
   const pty = new FakePty();
   const registry = new SessionRegistry({
+    workerTurnObservation: new WorkerTurnObservationAdapter(),
     adapters: { claude },
     sessionRuntimeFactory: () => pty,
     journal: { append: async () => {} },

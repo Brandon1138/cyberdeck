@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
@@ -71,6 +72,7 @@ function harness() {
     return pty;
   });
   const registry = new SessionRegistry({
+    workerTurnObservation: new WorkerTurnObservationAdapter(),
     adapters: { codex: adapter },
     sessionRuntimeFactory: ptyFactory,
     journal: { append: async () => {} },

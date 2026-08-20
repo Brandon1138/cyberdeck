@@ -82,10 +82,6 @@
     },
     {
       "from": "src/broker/session-registry.ts",
-      "to": "src/persistence/thread-transcript-store.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
       "to": "src/providers/cursor/workspace-state.ts"
     },
     {
@@ -107,30 +103,6 @@
     {
       "from": "src/broker/session-registry.ts",
       "to": "src/providers/worker-reporting.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
-      "to": "src/runtime/composer-state.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
-      "to": "src/runtime/conversation-preview.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
-      "to": "src/runtime/observed-model.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
-      "to": "src/runtime/replay-digest.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
-      "to": "src/runtime/session-liveness.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
-      "to": "src/runtime/terminal-replay.ts"
     },
     {
       "from": "src/broker/worker-coordination-runtime.ts",

@@ -9,6 +9,7 @@ import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import type {
   WorkerWorkspace,
   WorktreeProvisionRequest,
@@ -23,6 +24,10 @@ import type {
 } from "../../src/providers/provider.js";
 import type { InstructionStateUpdate } from "../../src/broker/session-registry.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
+import type {
+  WorkerTurnObservation,
+  WorkerTurnTranscript,
+} from "../../src/orchestration/session/worker-turn-ports.js";
 import {
   ThreadTranscriptStore,
   type AppendThreadEvent,
@@ -124,44 +129,90 @@ function harness(options: {
   adapters?: Record<string, ProviderAdapter>;
   worktreeProvisioner?: WorktreeProvisioner;
   failJournal?: (event: BrokerEvent) => boolean;
-  /**
-   * Provider-native turns a transcript read will find, keyed by the provider's own turn id.
-   *
-   * Handed out once each, the way {@link ThreadTranscriptStore.captureProviderTurns} does: the
-   * store remembers every semantic turn id it has appended, and that deduplication is the whole
-   * reason two banking paths cannot count the same turn twice.
-   */
+  /** Provider-native turns a side-effect-free observation can find. */
   providerTurns?: readonly { id: string; text: string }[];
-  /**
-   * Held open in the middle of a transcript read, after it has consumed the turns it found.
-   *
-   * The store consumes on read, so "in flight" is the window where the native turns are already
-   * spent and no path has banked them yet. A test that wants to interleave the screen path with a
-   * reconcile has to be able to stand inside that window.
-   */
+  /** Held open after side-effect-free observation, before the engine can enqueue its commit. */
   onProviderTurnsRead?: () => Promise<void>;
+  /** Held inside the serialized durable commit after the engine has reserved its ordinals. */
+  onProviderTurnsCommit?: () => Promise<void>;
+  /** Real persistence boundary for end-to-end ordinal/transcript integration cases. */
+  transcriptStore?: ThreadTranscriptStore;
 } = {}) {
   const ptys: FakePty[] = [];
   const events: BrokerEvent[] = [];
   const transcripts: AppendThreadEvent[] = [];
   const captured = new Set<string>();
   const captureCalls: string[] = [];
-  const captureProviderTurns = async (input: { allowFallback?: boolean }) => {
+  const commitCalls: WorkerTurnObservation[] = [];
+  const observeProviderTurns = async (input: {
+    sessionId: string;
+    provider: string;
+    turnNumber: number;
+    fallbackText?: string;
+    allowFallback?: boolean;
+  }): Promise<WorkerTurnObservation> => {
     const pending = (options.providerTurns ?? []).filter((turn) => !captured.has(turn.id));
-    for (const turn of pending) captured.add(turn.id);
     captureCalls.push(input.allowFallback === true ? "fallback-allowed" : "native-only");
     await options.onProviderTurnsRead?.();
-    if (pending.length > 0) {
-      return pending.map((turn) => ({ text: turn.text, data: { transport: "provider-native" } }));
-    }
-    return input.allowFallback === true ? [{ text: "", data: { transport: "terminal-replay-fallback" } }] : [];
+    const observed = pending.length > 0
+      ? pending.map((turn) => ({
+          providerTurnId: turn.id,
+          providerOccurredAt: "2026-08-20T09:00:00.000Z",
+          text: turn.text,
+          transport: "provider-native" as const,
+        }))
+      : input.allowFallback === true
+        ? [{
+            providerTurnId: `fallback:${input.turnNumber}`,
+            providerOccurredAt: "2026-08-20T09:00:00.000Z",
+            text: input.fallbackText ?? "",
+            transport: "terminal-replay-fallback" as const,
+          }]
+        : [];
+    return {
+      sessionId: input.sessionId,
+      provider: input.provider,
+      turnNumber: input.turnNumber,
+      turns: observed,
+    };
+  };
+  let commitTail = Promise.resolve();
+  const commitProviderTurns = (observation: WorkerTurnObservation): Promise<WorkerTurnTranscript[]> => {
+    commitCalls.push(observation);
+    const committed = commitTail.then(async () => {
+      await options.onProviderTurnsCommit?.();
+      const turns: WorkerTurnTranscript[] = [];
+      for (const turn of observation.turns) {
+        if (captured.has(turn.providerTurnId)) continue;
+        captured.add(turn.providerTurnId);
+        turns.push({
+          text: turn.text,
+          data: { ...(turn.data ?? {}), transport: turn.transport },
+        });
+      }
+      return turns;
+    });
+    commitTail = committed.then(() => undefined, () => undefined);
+    return committed;
   };
   const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => {
     const pty = new FakePty(1000 + ptys.length, options.exitOnKill ?? true);
     ptys.push(pty);
     return pty;
   });
+  const transcriptPort = options.transcriptStore ?? {
+    append: async (event: AppendThreadEvent) => {
+      transcripts.push(event);
+      return {} as never;
+    },
+    // Only supplied when a test says what the provider transcript holds. A registry with no
+    // capture at all is the shape every other test in this file runs under.
+    ...(options.providerTurns === undefined
+      ? {}
+      : { observeProviderTurns, commitProviderTurns }),
+  };
   const registry = new SessionRegistry({
+    workerTurnObservation: new WorkerTurnObservationAdapter(),
     adapters: options.adapters ?? adapters,
     sessionRuntimeFactory: ptyFactory,
     journal: { append: async (event) => {
@@ -171,15 +222,7 @@ function harness(options: {
       if (options.failJournal?.(event) === true) throw new Error("journal unavailable");
       events.push(event);
     } },
-    transcripts: {
-      append: async (event: AppendThreadEvent) => {
-        transcripts.push(event);
-        return {} as never;
-      },
-      // Only supplied when a test says what the provider transcript holds. A registry with no
-      // capture at all is the shape every other test in this file runs under.
-      ...(options.providerTurns === undefined ? {} : { captureProviderTurns }),
-    } as never,
+    transcripts: transcriptPort as never,
     validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({
       ...(options.maxConcurrentWorkers === undefined
@@ -194,7 +237,21 @@ function harness(options: {
       ? {}
       : { worktreeProvisioner: options.worktreeProvisioner }),
   });
-  return { registry, ptys, events, transcripts, ptyFactory, captureCalls };
+  return { registry, ptys, events, transcripts, ptyFactory, captureCalls, commitCalls };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, reject, resolve };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
 }
 
 /** A provisioner that records what it was asked to do and touches no disk. */
@@ -349,6 +406,38 @@ describe("SessionRegistry worktree provisioning", () => {
 });
 
 describe("SessionRegistry", () => {
+  it("requires the worker-turn observation boundary before recovery can start", () => {
+    const recovered: SessionRecord = {
+      id: "44444444-4444-4444-8444-444444444444",
+      provider: "codex",
+      cwd: "/tmp/repo",
+      detached: true,
+      sandbox: "read-only",
+      createdAt: "2026-08-20T09:00:00.000Z",
+      updatedAt: "2026-08-20T09:01:00.000Z",
+      executionState: "active",
+      attachmentState: "detached",
+      pid: 4242,
+      exitCode: null,
+      childIds: [],
+      attentionState: "working",
+    };
+    const put = vi.fn(async () => undefined);
+    const sessionRuntimeFactory = vi.fn(() => new FakePty(1000));
+
+    expect(() => new SessionRegistry({
+      workerTurnObservation: undefined as never,
+      adapters,
+      recoveredSessions: [recovered],
+      store: { put, delete: async () => undefined },
+      sessionRuntimeFactory,
+      journal: { append: async () => undefined },
+      config: BrokerRuntimeConfigSchema.parse({}),
+    })).toThrow(new TypeError("SessionRegistry requires workerTurnObservation"));
+    expect(put).not.toHaveBeenCalled();
+    expect(sessionRuntimeFactory).not.toHaveBeenCalled();
+  });
+
   it("records provider, optional model, opaque role, and PID", async () => {
     const { registry } = harness();
     const record = await registry.start(request({ provider: "claude", model: "opus", role: "writer" }));
@@ -393,6 +482,7 @@ describe("SessionRegistry", () => {
     const ptys: FakePty[] = [];
     const puts: unknown[] = [];
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters,
       recoveredSessions: [persisted],
       store: {
@@ -445,6 +535,7 @@ describe("SessionRegistry", () => {
     };
     const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(9002));
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters: { claude: new ClaudeProviderAdapter() },
       recoveredSessions: [persisted],
       store: {
@@ -481,6 +572,7 @@ describe("SessionRegistry", () => {
     const prepareLaunch = vi.fn(async () => undefined);
     const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(1000));
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters: { codex: { ...adapters.codex, prepareLaunch } },
       sessionRuntimeFactory: ptyFactory,
       journal: { append: async () => {} },
@@ -879,6 +971,7 @@ describe("SessionRegistry", () => {
     });
     const ptys: FakePty[] = [];
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters,
       sessionRuntimeFactory: () => {
         const pty = new FakePty(2000 + ptys.length);
@@ -951,6 +1044,7 @@ describe("SessionRegistry", () => {
     });
     const ptys: FakePty[] = [];
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters,
       sessionRuntimeFactory: () => {
         const pty = new FakePty(2000 + ptys.length);
@@ -1064,6 +1158,7 @@ describe("SessionRegistry", () => {
   it("rejects an invalid cwd before constructing a provider process", async () => {
     const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => new FakePty(1000));
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters,
       sessionRuntimeFactory: ptyFactory,
       journal: { append: async () => {} },
@@ -1337,6 +1432,587 @@ describe("SessionRegistry", () => {
     expect(delivered).toContain("resumed and working\n");
   });
 
+  it("quiesces old native truth before resume exposes a reusable ordinal", async () => {
+    const oldCaptureGate = deferred<void>();
+    const oldCaptureStarted = deferred<void>();
+    const oldCaptureReturned = deferred<void>();
+    const resumeLaunchGate = deferred<void>();
+    const resumeLaunchStarted = deferred<void>();
+    const providerTurns = [{ id: "old-turn", text: "stale old-generation answer" }];
+    const gatedCodex: ProviderAdapter = {
+      ...adapters.codex,
+      prepareLaunch: async (_record, spec) => {
+        if (spec.args[0] !== "resume") return;
+        resumeLaunchStarted.resolve();
+        await resumeLaunchGate.promise;
+      },
+    };
+    const { registry, ptys, captureCalls, commitCalls } = harness({
+      adapters: { ...adapters, codex: gatedCodex },
+      exitOnKill: false,
+      providerTurns,
+      onProviderTurnsRead: async () => {
+        oldCaptureStarted.resolve();
+        await oldCaptureGate.promise;
+        oldCaptureReturned.resolve();
+      },
+    });
+    const record = await registry.start(request({ name: "resume-capture-race" }));
+    const instructionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const states: InstructionStateUpdate[] = [];
+    registry.onInstructionState((update) => states.push(update));
+    await expect(registry.submitInstruction(
+      record.id,
+      "old generation task",
+      "orchestrator",
+      {},
+      instructionId,
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+
+    ptys[0]!.emitOutput(
+      "\u001b]0;\u2839 resume-capture-race\u0007\u001b[2JWorking\r\nesc to interrupt",
+    );
+    ptys[0]!.emitOutput(
+      "\u001b[2Jstale old-generation answer\r\n\u001b]0;resume-capture-race\u0007",
+    );
+    await oldCaptureStarted.promise;
+
+    await registry.stop(record.id);
+    expect(ptys[0]!.killSignals).toEqual(["SIGTERM"]);
+    const resume = registry.resume(record.id);
+    await flushMicrotasks();
+    expect(ptys).toHaveLength(1);
+    expect(commitCalls).toEqual([]);
+
+    oldCaptureGate.resolve();
+    await oldCaptureReturned.promise;
+    await resumeLaunchStarted.promise;
+
+    // The stale read itself did not commit. The resume barrier freshly observed and durably adopted
+    // the old native ID before provider launch could advance the generation.
+    expect(captureCalls).toEqual(["native-only", "native-only"]);
+    expect(commitCalls).toHaveLength(1);
+    expect(commitCalls[0]).toMatchObject({
+      turnNumber: 1,
+      turns: [{ providerTurnId: "old-turn", text: "stale old-generation answer" }],
+    });
+    expect(registry.workerTruth(record.id)).toMatchObject({ completedTurns: 1, canonicalTurns: 1 });
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "cancelled",
+      attentionState: "stopping",
+    });
+    expect(states.filter(({ state }) => state === "completed")).toEqual([]);
+
+    resumeLaunchGate.resolve();
+    const resumed = await resume;
+
+    expect(resumed).toMatchObject({
+      executionState: "active",
+      generation: 2,
+      pid: 1001,
+    });
+    expect(registry.workerTruth(record.id)).toMatchObject({ completedTurns: 1, canonicalTurns: 1 });
+    expect(states.filter(({ state }) => state === "completed")).toEqual([]);
+
+    const resumedInstructionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    await expect(registry.submitInstruction(
+      record.id,
+      "new generation task",
+      "orchestrator",
+      {},
+      resumedInstructionId,
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    providerTurns.push({ id: "new-turn", text: "new generation answer" });
+
+    ptys[1]!.emitOutput(
+      "\u001b]0;\u2839 resume-capture-race\u0007\u001b[2JWorking\r\nesc to interrupt",
+    );
+    ptys[1]!.emitOutput(
+      "\u001b[2Jnew generation answer\r\n\u001b]0;resume-capture-race\u0007",
+    );
+    const result = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 2 },
+    ], 5_000, 300);
+
+    expect(result).toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "completed",
+        text: "new generation answer",
+        provenance: "provider-transcript",
+      }],
+    });
+    expect(commitCalls).toHaveLength(2);
+    expect(commitCalls[1]).toMatchObject({
+      turnNumber: 2,
+      turns: [{ providerTurnId: "new-turn", text: "new generation answer" }],
+    });
+    expect(states).toContainEqual(expect.objectContaining({
+      instructionId: resumedInstructionId,
+      state: "completed",
+      turn: 2,
+    }));
+    expect(states).not.toContainEqual(expect.objectContaining({
+      instructionId,
+      state: "completed",
+    }));
+  });
+
+  it("commits a frozen Codex screen fallback before a fast stop and resume advances ordinals", async () => {
+    const { registry, ptys, captureCalls, commitCalls, events } = harness({
+      exitOnKill: false,
+      providerTurns: [],
+    });
+    const record = await registry.start(request({ name: "fast-screen-resume" }));
+    ptys[0]!.emitOutput(
+      "\u001b]0;\u2839 fast-screen-resume\u0007\u001b[2JWorking\r\nesc to interrupt",
+    );
+    ptys[0]!.emitOutput(
+      "\u001b[2Jexact frozen answer before resume\r\n\u001b]0;fast-screen-resume\u0007",
+    );
+    const frozenReplay = ptys[0]!.snapshot().toString("utf8");
+    const expectedFallback = new WorkerTurnObservationAdapter().fallbackTerminal(frozenReplay);
+    expect(captureCalls).toEqual([]);
+
+    // Stop and process exit both beat the 200 ms screen bank. The exit boundary freezes the old raw
+    // replay, and resume must durably account that proven screen before generation 2 can launch.
+    await registry.stop(record.id);
+    expect(ptys[0]!.killSignals).toEqual(["SIGTERM"]);
+    ptys[0]!.emitExit(0);
+    const resumed = await registry.resume(record.id);
+
+    expect(resumed).toMatchObject({ executionState: "active", generation: 2, pid: 1001 });
+    expect(captureCalls).toEqual([
+      "native-only",
+      "native-only",
+      "native-only",
+      "fallback-allowed",
+    ]);
+    expect(commitCalls).toEqual([expect.objectContaining({
+      turnNumber: 1,
+      turns: [expect.objectContaining({
+        providerTurnId: "fallback:1",
+        text: expectedFallback,
+        transport: "terminal-replay-fallback",
+      })],
+    })]);
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      completedTurns: 1,
+      canonicalTurns: 0,
+    });
+    expect(events.filter(({ type }) => type === "session.turn_reconciled")).toEqual([]);
+
+    await expect(registry.submitInstruction(
+      record.id,
+      "new generation task",
+      "orchestrator",
+      {},
+      "fffffff0-ffff-4fff-8fff-fffffffffff0",
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    expect(ptys[1]!.writes.at(-1)?.toString()).toBe("new generation task\n");
+  });
+
+  it("waits for a pending commit and drains deferred old high-water before resume", async () => {
+    const commitGate = deferred<void>();
+    const providerTurns = [{ id: "old-one", text: "old first answer" }];
+    const { registry, ptys, commitCalls } = harness({
+      exitOnKill: false,
+      providerTurns,
+      onProviderTurnsCommit: () => commitGate.promise,
+    });
+    const record = await registry.start(request({ name: "resume-commit-barrier" }));
+    const oldFirstInstruction = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const oldSecondInstruction = "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const states: InstructionStateUpdate[] = [];
+    registry.onInstructionState((update) => states.push(update));
+
+    await expect(registry.submitInstruction(
+      record.id,
+      "old first task",
+      "orchestrator",
+      {},
+      oldFirstInstruction,
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+    ptys[0]!.emitOutput(
+      "\u001b]0;\u2839 resume-commit-barrier\u0007\u001b[2JWorking\r\nesc to interrupt",
+    );
+    ptys[0]!.emitOutput(
+      "\u001b[2Jold first answer\r\n\u001b]0;resume-commit-barrier\u0007",
+    );
+    await vi.waitFor(() => expect(commitCalls).toHaveLength(1));
+
+    await expect(registry.submitInstruction(
+      record.id,
+      "old second task",
+      "orchestrator",
+      {},
+      oldSecondInstruction,
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    providerTurns.push({ id: "old-two", text: "old deferred second answer" });
+    ptys[0]!.emitOutput(
+      "\u001b]0;\u2839 resume-commit-barrier\u0007\u001b[2JWorking again\r\nesc to interrupt",
+    );
+    ptys[0]!.emitOutput(
+      "\u001b[2Jold deferred second answer\r\n\u001b]0;resume-commit-barrier\u0007",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(commitCalls).toHaveLength(1);
+
+    await registry.stop(record.id);
+    let resumeSettled = false;
+    const resume = registry.resume(record.id).then((resumed) => {
+      resumeSettled = true;
+      return resumed;
+    });
+    await flushMicrotasks();
+    expect(resumeSettled).toBe(false);
+    expect(ptys).toHaveLength(1);
+
+    commitGate.resolve();
+    const resumed = await resume;
+
+    expect(resumed).toMatchObject({ executionState: "active", generation: 2, pid: 1001 });
+    expect(commitCalls).toHaveLength(2);
+    expect(commitCalls.map((observation) => observation.turnNumber)).toEqual([1, 2]);
+    expect(commitCalls[1]).toMatchObject({
+      turns: [{ providerTurnId: "old-two", text: "old deferred second answer" }],
+    });
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      completedTurns: 2,
+      canonicalTurns: 2,
+      pendingInstructions: 0,
+    });
+    expect(states).toContainEqual(expect.objectContaining({
+      instructionId: oldFirstInstruction,
+      state: "undelivered",
+    }));
+    expect(states).toContainEqual(expect.objectContaining({
+      instructionId: oldSecondInstruction,
+      state: "undelivered",
+    }));
+    expect(states.filter(({ state }) => state === "completed")).toEqual([]);
+
+    const resumedInstruction = "33333333-cccc-4ccc-8ccc-cccccccccccc";
+    await expect(registry.submitInstruction(
+      record.id,
+      "new generation task",
+      "orchestrator",
+      {},
+      resumedInstruction,
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 3 });
+
+    // The replaced process may acknowledge its earlier SIGTERM after generation 2 is already live.
+    ptys[0]!.emitExit(0);
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "active",
+      generation: 2,
+      pid: 1001,
+    });
+  });
+
+  it("restores the outgoing handle when a pending durable commit rejects during resume", async () => {
+    const commitGate = deferred<void>();
+    const failure = new Error("durable transcript write failed after enqueue");
+    const { registry, ptys, commitCalls } = harness({
+      exitOnKill: false,
+      providerTurns: [{ id: "indeterminate-old", text: "possibly durable old answer" }],
+      onProviderTurnsCommit: () => commitGate.promise,
+    });
+    const record = await registry.start(request({ name: "resume-commit-rejection" }));
+    await registry.submitInstruction(
+      record.id,
+      "old task",
+      "orchestrator",
+      {},
+      "88888888-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    );
+    ptys[0]!.emitOutput(
+      "\u001b]0;\u2839 resume-commit-rejection\u0007\u001b[2JWorking\r\nesc to interrupt",
+    );
+    ptys[0]!.emitOutput(
+      "\u001b[2Jpossibly durable old answer\r\n\u001b]0;resume-commit-rejection\u0007",
+    );
+    await vi.waitFor(() => expect(commitCalls).toHaveLength(1));
+
+    await registry.stop(record.id);
+    const resume = registry.resume(record.id);
+    await flushMicrotasks();
+    expect(ptys).toHaveLength(1);
+
+    commitGate.reject(failure);
+    await expect(resume).rejects.toBe(failure);
+
+    expect(ptys).toHaveLength(1);
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "cancelled",
+      generation: 1,
+      pid: 1000,
+    });
+    expect(registry.workerTruth(record.id)).toMatchObject({ completedTurns: 0 });
+    registry.forceStop(record.id);
+    expect(ptys[0]!.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  it("keeps real-store native transcript ordinals aligned across resume", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-resume-native-store-"));
+    temporaryDirectories.push(root);
+    const codexRoot = join(root, "codex-sessions");
+    const day = join(codexRoot, "2026", "08", "20");
+    await mkdir(day, { recursive: true });
+    const rolloutPath = join(day, "rollout.jsonl");
+    const store = new ThreadTranscriptStore(root, { codexSessionsDirectory: codexRoot });
+    const { registry, ptys } = harness({ transcriptStore: store });
+    const record = await registry.start(request({ name: "real-store-resume" }));
+    const sessionMeta = JSON.stringify({
+      type: "session_meta",
+      timestamp: record.createdAt,
+      payload: {
+        id: "019f0000-0000-7000-8000-000000000101",
+        timestamp: record.createdAt,
+        cwd: record.cwd,
+        originator: "codex-tui",
+      },
+    });
+    const nativeTurn = (turnId: string, text: string) => JSON.stringify({
+      type: "event_msg",
+      timestamp: new Date(Date.parse(record.createdAt) + 1_000).toISOString(),
+      payload: { type: "task_complete", turn_id: turnId, last_agent_message: text },
+    });
+    await writeFile(rolloutPath, [
+      sessionMeta,
+      nativeTurn("019f0000-0000-7000-8000-000000000102", "old native answer"),
+      "",
+    ].join("\n"));
+
+    const oldInstruction = "44444444-dddd-4ddd-8ddd-dddddddddddd";
+    await expect(registry.submitInstruction(
+      record.id,
+      "old native task",
+      "orchestrator",
+      {},
+      oldInstruction,
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+    ptys[0]!.emitOutput(
+      "\u001b]0;\u2839 real-store-resume\u0007\u001b[2JWorking\r\nesc to interrupt",
+    );
+    ptys[0]!.emitOutput(
+      "\u001b[2Jold native answer\r\n\u001b]0;real-store-resume\u0007",
+    );
+    const oldResult = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
+    expect(oldResult).toMatchObject({
+      timedOut: false,
+      results: [{ status: "completed", text: "old native answer", retrieval: "fresh" }],
+    });
+
+    await registry.stop(record.id);
+    const resumed = await registry.resume(record.id);
+    expect(resumed).toMatchObject({ executionState: "active", generation: 2, pid: 1001 });
+
+    const newInstruction = "55555555-eeee-4eee-8eee-eeeeeeeeeeee";
+    await expect(registry.submitInstruction(
+      record.id,
+      "new native task",
+      "orchestrator",
+      {},
+      newInstruction,
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    await appendFile(
+      rolloutPath,
+      `${nativeTurn("019f0000-0000-7000-8000-000000000103", "new native answer")}\n`,
+      "utf8",
+    );
+    ptys[1]!.emitOutput(
+      "\u001b]0;\u2839 real-store-resume\u0007\u001b[2JWorking\r\nesc to interrupt",
+    );
+    ptys[1]!.emitOutput(
+      "\u001b[2Jnew native answer\r\n\u001b]0;real-store-resume\u0007",
+    );
+    const newResult = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 2 },
+    ], 5_000, 300);
+    expect(newResult).toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "completed",
+        text: "new native answer",
+        provenance: "provider-transcript",
+      }],
+    });
+
+    const semanticTurns = (await store.read(record.id)).events.filter(({ kind }) => kind === "turn");
+    expect(semanticTurns).toMatchObject([
+      {
+        text: "old native answer",
+        data: {
+          semanticTurnId: "codex:019f0000-0000-7000-8000-000000000102",
+          turnNumber: 1,
+        },
+      },
+      {
+        text: "new native answer",
+        data: {
+          semanticTurnId: "codex:019f0000-0000-7000-8000-000000000103",
+          turnNumber: 2,
+        },
+      },
+    ]);
+    const replayedOld = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
+    expect(replayedOld.results[0]).toMatchObject({
+      status: "completed",
+      retrieval: "replay",
+      text: "old native answer",
+    });
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      completedTurns: 2,
+      canonicalTurns: 2,
+      pendingInstructions: 0,
+    });
+  });
+
+  it("keeps real-store Cursor fallback ordinals aligned across resume", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-resume-cursor-store-"));
+    temporaryDirectories.push(root);
+    const store = new ThreadTranscriptStore(root, {
+      now: () => "2026-08-20T11:00:00.000Z",
+    });
+    const cursor: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session) => ({
+        executable: "fake",
+        args: ["cursor"],
+        cwd: session.cwd,
+        env: {},
+      }),
+      buildResumeSpec: (session) => ({
+        executable: "fake",
+        args: ["resume", session.id],
+        cwd: session.cwd,
+        env: {},
+      }),
+    };
+    const { registry, ptys } = harness({
+      adapters: { ...adapters, cursor },
+      transcriptStore: store,
+    });
+    const record = await registry.start(request({
+      provider: "cursor",
+      model: "composer",
+      approvalMode: "auto",
+      name: "cursor-store-resume",
+    }));
+
+    await expect(registry.submitInstruction(
+      record.id,
+      "old Cursor task",
+      "orchestrator",
+      {},
+      "66666666-ffff-4fff-8fff-ffffffffffff",
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+    ptys[0]!.emitOutput("\u001b]0;Cursor Agent\u0007 Composing ctrl+c to stop");
+    ptys[0]!.emitOutput(
+      "\nold Cursor answer\n\u001b]777;notify;Cursor;Cursor is waiting for you\u0007",
+    );
+    const oldResult = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
+    expect(oldResult.results[0]).toMatchObject({
+      status: "completed",
+      provenance: "terminal-replay",
+    });
+    expect(oldResult.results[0]?.text).toContain("old Cursor answer");
+
+    await registry.stop(record.id);
+    await expect(registry.resume(record.id)).resolves.toMatchObject({
+      executionState: "active",
+      generation: 2,
+      pid: 1001,
+    });
+    await expect(registry.submitInstruction(
+      record.id,
+      "new Cursor task",
+      "orchestrator",
+      {},
+      "77777777-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    ptys[1]!.emitOutput("\u001b]0;Cursor Agent\u0007 Composing ctrl+c to stop");
+    ptys[1]!.emitOutput(
+      "\nnew Cursor answer\n\u001b]777;notify;Cursor;Cursor is waiting for you\u0007",
+    );
+    const newResult = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 2 },
+    ], 5_000, 300);
+    expect(newResult.results[0]).toMatchObject({
+      status: "completed",
+      provenance: "terminal-replay",
+    });
+    expect(newResult.results[0]?.text).toContain("new Cursor answer");
+
+    const semanticTurns = (await store.read(record.id)).events.filter(({ kind }) => kind === "turn");
+    expect(semanticTurns).toMatchObject([
+      { data: { semanticTurnId: "cursor:fallback:1", turnNumber: 1 } },
+      { data: { semanticTurnId: "cursor:fallback:2", turnNumber: 2 } },
+    ]);
+    expect(semanticTurns[0]?.text).toContain("old Cursor answer");
+    expect(semanticTurns[1]?.text).toContain("new Cursor answer");
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      completedTurns: 2,
+      canonicalTurns: 0,
+      pendingInstructions: 0,
+    });
+  });
+
+  it("publishes fatal truth before attached callbacks observe the failure", async () => {
+    const { registry, ptys, events, transcripts } = harness();
+    const record = await registry.start(request());
+    const observations: Array<{
+      callback: "output" | "failed";
+      attention: SessionRecord["attentionState"];
+      eventStarted: boolean;
+      transcriptStarted: boolean;
+    }> = [];
+    const observe = (callback: "output" | "failed") => {
+      observations.push({
+        callback,
+        attention: registry.get(record.id).attentionState,
+        eventStarted: events.some((event) =>
+          event.type === "session.errored" && event.sessionId === record.id),
+        transcriptStarted: transcripts.some((event) =>
+          event.kind === "lifecycle"
+          && event.sessionId === record.id
+          && event.text === "session errored"),
+      });
+    };
+    await registry.attach(
+      record.id,
+      "human",
+      "control",
+      () => observe("output"),
+      undefined,
+      () => observe("failed"),
+    );
+
+    ptys[0]!.emitOutput("API Error: 401 authentication_error\n");
+
+    expect(observations).toEqual([
+      {
+        callback: "output",
+        attention: "failed",
+        eventStarted: true,
+        transcriptStarted: true,
+      },
+      {
+        callback: "failed",
+        attention: "failed",
+        eventStarted: true,
+        transcriptStarted: true,
+      },
+    ]);
+  });
+
   it("keeps the outgoing PTY when the resume spawn fails, so the process can still be stopped", async () => {
     const ptys: FakePty[] = [];
     const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => {
@@ -1346,6 +2022,7 @@ describe("SessionRegistry", () => {
       return pty;
     });
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters,
       sessionRuntimeFactory: ptyFactory,
       journal: { append: async () => {} },
@@ -1773,6 +2450,7 @@ describe("SessionRegistry", () => {
       },
     };
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters,
       recoveredSessions: [persisted],
       store: { put: async () => {}, delete: async () => {} },
@@ -1862,6 +2540,7 @@ describe("SessionRegistry", () => {
     });
     const ptys: FakePty[] = [];
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters,
       sessionRuntimeFactory: () => {
         const pty = new FakePty(3000 + ptys.length);
@@ -2091,6 +2770,7 @@ function claudeHarness(options: { failSpawn?: boolean } = {}) {
     return pty;
   });
   const registry = new SessionRegistry({
+    workerTurnObservation: new WorkerTurnObservationAdapter(),
     adapters: { claude: adapter },
     sessionRuntimeFactory: ptyFactory,
     journal: { append: async () => {} },
@@ -2176,6 +2856,7 @@ describe("SessionRegistry provider launch artifacts", () => {
       cleanupLaunch: async () => { throw new Error("artifact directory is busy"); },
     };
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters: { claude: adapter },
       sessionRuntimeFactory: () => {
         const pty = new FakePty(4000 + ptys.length);
@@ -2230,6 +2911,7 @@ describe("SessionRegistry resolved launch records", () => {
       prepareLaunch: vi.fn(async () => undefined),
     };
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters: { claude: adapter },
       sessionRuntimeFactory: (spec: ProviderLaunchSpec) => {
         specs.push(spec);
@@ -2347,6 +3029,7 @@ describe("SessionRegistry resolved launch records", () => {
       }),
     };
     const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters: { cursor: adapter },
       sessionRuntimeFactory: (spec: ProviderLaunchSpec) => {
         specs.push(spec);

@@ -4,6 +4,7 @@ import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
 import type { AppendThreadEvent } from "../../src/persistence/thread-transcript-store.js";
 
@@ -88,6 +89,7 @@ function harness(options: HarnessOptions = {}) {
   const stored = new Map<string, SessionRecord>();
   const deleted: string[] = [];
   const registry = new SessionRegistry({
+    workerTurnObservation: new WorkerTurnObservationAdapter(),
     adapters: { codex: adapter },
     sessionRuntimeFactory: vi.fn((_spec: ProviderLaunchSpec) => {
       const pty = new FakePty(1000 + ptys.length, options.exitOnKill ?? true);

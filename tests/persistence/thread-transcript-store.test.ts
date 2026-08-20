@@ -65,6 +65,139 @@ describe("ThreadTranscriptStore", () => {
     expect(store.path).toBe(join(threads, "semantic-transcript.jsonl"));
   });
 
+  it("observes provider-turn candidates without writing semantic transcript truth", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const store = new ThreadTranscriptStore(root, {
+      now: () => "2026-08-20T12:00:00.000Z",
+    });
+
+    await expect(store.observeProviderTurns({
+      sessionId: SESSION_ONE,
+      provider: "cursor",
+      cwd: "/tmp/repo",
+      createdAt: "2026-08-20T11:59:00.000Z",
+      turnNumber: 3,
+      fallbackText: "candidate only",
+    })).resolves.toEqual({
+      sessionId: SESSION_ONE,
+      provider: "cursor",
+      turnNumber: 3,
+      turns: [{
+        providerTurnId: "fallback:3",
+        providerOccurredAt: "2026-08-20T12:00:00.000Z",
+        text: "candidate only",
+        transport: "terminal-replay-fallback",
+      }],
+    });
+    await expect(store.read(SESSION_ONE)).resolves.toEqual({ events: [], nextCursor: 0 });
+  });
+
+  it("commits an observed provider turn with the existing semantic event shape", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const store = new ThreadTranscriptStore(root, {
+      now: () => "2026-08-20T12:00:00.000Z",
+      idFactory: () => "00000001-0000-4000-8000-000000000000",
+    });
+    const observation = await store.observeProviderTurns({
+      sessionId: SESSION_ONE,
+      provider: "cursor",
+      cwd: "/tmp/repo",
+      createdAt: "2026-08-20T11:59:00.000Z",
+      turnNumber: 3,
+      fallbackText: "committed result",
+    });
+
+    await expect(store.commitProviderTurns(observation)).resolves.toEqual([{
+      id: "00000001-0000-4000-8000-000000000000",
+      cursor: 1,
+      sessionId: SESSION_ONE,
+      occurredAt: "2026-08-20T12:00:00.000Z",
+      kind: "turn",
+      source: "provider",
+      text: "committed result",
+      data: {
+        semantic: true,
+        semanticTurnId: "cursor:fallback:3",
+        provider: "cursor",
+        transport: "terminal-replay-fallback",
+        originalLength: 16,
+        turnNumber: 3,
+        providerOccurredAt: "2026-08-20T12:00:00.000Z",
+      },
+    }]);
+    await expect(store.read(SESSION_ONE)).resolves.toMatchObject({
+      events: [{ text: "committed result", data: { semanticTurnId: "cursor:fallback:3" } }],
+    });
+    await expect(store.observeProviderTurns({
+      sessionId: SESSION_ONE,
+      provider: "cursor",
+      cwd: "/tmp/repo",
+      createdAt: "2026-08-20T11:59:00.000Z",
+      turnNumber: 3,
+      fallbackText: "must be deduplicated",
+    })).resolves.toMatchObject({ turns: [] });
+  });
+
+  it("serializes concurrent commits and appends one event for a semantic turn", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    let id = 0;
+    const store = new ThreadTranscriptStore(root, {
+      now: () => "2026-08-20T12:00:00.000Z",
+      idFactory: () => `${String(++id).padStart(8, "0")}-0000-4000-8000-000000000000`,
+    });
+    const input = {
+      sessionId: SESSION_ONE,
+      provider: "cursor",
+      cwd: "/tmp/repo",
+      createdAt: "2026-08-20T11:59:00.000Z",
+      turnNumber: 1,
+      fallbackText: "one durable result",
+    };
+    const [first, second] = await Promise.all([
+      store.observeProviderTurns(input),
+      store.observeProviderTurns(input),
+    ]);
+
+    const committed = await Promise.all([
+      store.commitProviderTurns(first),
+      store.commitProviderTurns(second),
+    ]);
+
+    expect(committed.map((events) => events.length)).toEqual([1, 0]);
+    await expect(store.read(SESSION_ONE)).resolves.toMatchObject({
+      events: [{ text: "one durable result", data: { semanticTurnId: "cursor:fallback:1" } }],
+      nextCursor: 1,
+    });
+  });
+
+  it("keeps captureProviderTurns as observe-then-commit compatibility", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const store = new ThreadTranscriptStore(root, {
+      now: () => "2026-08-20T12:00:00.000Z",
+    });
+
+    await expect(store.captureProviderTurns({
+      sessionId: SESSION_ONE,
+      provider: "antigravity",
+      cwd: "/tmp/repo",
+      createdAt: "2026-08-20T11:59:00.000Z",
+      turnNumber: 2,
+      fallbackText: "compatibility result",
+    })).resolves.toMatchObject([{
+      kind: "turn",
+      source: "provider",
+      text: "compatibility result",
+      data: {
+        semanticTurnId: "antigravity:fallback:2",
+        turnNumber: 2,
+        transport: "terminal-replay-fallback",
+      },
+    }]);
+    await expect(store.read(SESSION_ONE)).resolves.toMatchObject({
+      events: [{ text: "compatibility result" }],
+    });
+  });
+
   it("rotates bounded semantic segments and paginates retained events exactly once", async () => {
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
     const store = new ThreadTranscriptStore(root, {

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
@@ -135,6 +136,7 @@ async function harness(options: {
   const states = [...(options.workspaceStates ?? ["a".repeat(64), "a".repeat(64)])];
   const reportStore = new ScoutReportStore(state);
   const registry = new SessionRegistry({
+    workerTurnObservation: new WorkerTurnObservationAdapter(),
     adapters: { cursor },
     sessionRuntimeFactory: ptyFactory,
     journal: { append: async () => {} },
@@ -407,6 +409,7 @@ describe("Scout session lifecycle", () => {
     const storedBeforeCapture = registry.get(started.id);
 
     const recovered = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters: { cursor },
       sessionRuntimeFactory: () => { throw new Error("recovery must not spawn"); },
       journal: { append: async () => {} },
