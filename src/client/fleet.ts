@@ -1475,8 +1475,11 @@ export function renderFleet(
   current: FleetState,
   options: FleetRenderOptions = {},
 ): string {
-  const width = Math.max(50, options.width ?? 120);
-  const height = Math.max(16, options.height ?? 32);
+  // The renderer must use the physical pane width. Fleet can occupy a sub-50-column pane in the
+  // automatic three-pane layout; pretending it is 50 columns lets logical rows soft-wrap and
+  // invalidates the damage renderer's absolute row addresses.
+  const width = Math.max(1, options.width ?? 120);
+  const height = Math.max(1, options.height ?? 32);
   const now = options.now ?? Date.now();
   const color = options.color ?? true;
   const home = options.home ?? homedir();
@@ -1924,9 +1927,12 @@ function renderPermissionPicker(
       options.color,
     ),
   ];
-  const body = lines.slice(0, Math.max(0, options.height - footer.length));
-  while (body.length < options.height - footer.length) body.push("");
-  return [...body, ...footer].join("\n");
+  return renderCursorlessPickerFrame(
+    lines,
+    footer,
+    options.height,
+    state.notice === undefined ? 0 : 1,
+  );
 }
 
 function permissionPolicy(
@@ -2293,9 +2299,7 @@ function renderWorkerPicker(state: FleetState, options: ResolvedFleetRenderOptio
       options.color,
     ),
   ];
-  const body = lines.slice(0, Math.max(0, options.height - footer.length));
-  while (body.length < options.height - footer.length) body.push("");
-  return [...body, ...footer].join("\n");
+  return renderCursorlessPickerFrame(lines, footer, options.height);
 }
 
 function renderFleetList(
@@ -2456,6 +2460,12 @@ function renderShellTranscript(
     ));
 }
 
+/** The first transcript row visible in the bottom-anchored shell viewport. */
+function shellTranscriptScrollOffset(shell: ShellModeState, viewportHeight: number): number {
+  const lineCount = shell.transcript.length - (shell.transcript.at(-1) === "" ? 1 : 0);
+  return Math.max(0, lineCount - Math.max(0, viewportHeight));
+}
+
 function renderFleetFooter(
   snapshot: FleetSnapshot,
   state: FleetState,
@@ -2501,8 +2511,11 @@ function renderFleetFooter(
   const helpLines = state.helpOpen === true
     ? shortcutHelp(options.width, terminal && stopAcknowledged ? "delete" : "stop")
     : [];
+  const notice = state.notice === undefined
+    ? undefined
+    : renderNotice(state.notice, state.noticeTone, options.width, options.color);
   const footer = [
-    ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
+    ...(notice === undefined ? [] : [notice]),
     paint("─".repeat(options.width), "dim", options.color),
     ...composerLines,
     paint("─".repeat(options.width), "dim", options.color),
@@ -2510,7 +2523,16 @@ function renderFleetFooter(
     paint(fit(launchContext, options.width), "dim", options.color),
     paint(fit(`↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
   ];
-  return footer;
+  if (footer.length <= options.height) return footer;
+
+  // In a pane shorter than the fixed footer, interaction content outranks its chrome and hints.
+  // The active composer always owns one row. A fresh notice owns the next row when one exists;
+  // height one deliberately keeps the editor because hiding it would make typed interaction blind.
+  const noticeRows = notice === undefined || options.height === 1 ? [] : [notice];
+  const visibleComposerRows = composerLines.slice(
+    -Math.max(1, options.height - noticeRows.length),
+  );
+  return [...noticeRows, ...visibleComposerRows].slice(-options.height);
 }
 
 /** What `!` mode runs the operator's lines through, named so the footer is never a guess. */
@@ -2891,6 +2913,22 @@ function transitionOpenHandoffPicker(
   return { state };
 }
 
+function renderHandoffDirective(
+  draft: string,
+  options: ResolvedFleetRenderOptions,
+): string {
+  const prefix = `${paint("›", "bold", options.color)} `;
+  const marker = paint(SELECTION_RULE, "selection", options.color);
+  const draftWidth = Math.max(
+    0,
+    options.width - displayWidth("› ") - displayWidth(SELECTION_RULE),
+  );
+  const visibleDraft = displayWidth(draft) <= draftWidth
+    ? draft
+    : `…${cutToWidthFromEnd(draft, Math.max(0, draftWidth - 1))}`;
+  return `${prefix}${visibleDraft}${marker}`;
+}
+
 function renderHandoffPicker(
   snapshot: FleetSnapshot,
   state: FleetState,
@@ -2934,7 +2972,9 @@ function renderHandoffPicker(
           : displayThreadName(recipient.name ?? "orchestrator")
       }`,
       "",
-      `${paint("›", "bold", options.color)} ${picker.draft}${paint(SELECTION_RULE, "selection", options.color)}`,
+      // Keep the insertion edge and newest text visible after the directive fills the row. Prefix
+      // clamping would freeze the retained row, making later direct keystrokes produce no repaint.
+      renderHandoffDirective(picker.draft, options),
     );
   }
   const footer = [
@@ -2953,9 +2993,12 @@ function renderHandoffPicker(
       options.color,
     ),
   ];
-  const body = lines.slice(0, Math.max(0, options.height - footer.length));
-  while (body.length < options.height - footer.length) body.push("");
-  return [...body, ...footer].join("\n");
+  return renderCursorlessPickerFrame(
+    lines,
+    footer,
+    options.height,
+    state.notice === undefined ? 0 : 1,
+  );
 }
 
 /** What the fleet list says about a handoff the broker has already answered. */
@@ -3210,9 +3253,12 @@ function renderOrchestratorPicker(
       options.color,
     ),
   ];
-  const body = lines.slice(0, Math.max(0, options.height - footer.length));
-  while (body.length < options.height - footer.length) body.push("");
-  return [...body, ...footer].join("\n");
+  return renderCursorlessPickerFrame(
+    lines,
+    footer,
+    options.height,
+    state.notice === undefined ? 0 : 1,
+  );
 }
 
 function orchestratorSelection(picker: Extract<OrchestratorPickerState, { step: "effort" }>) {
@@ -3294,6 +3340,47 @@ function terminalOrchestratorState(record: SessionRecord): string {
 
 function pickerRow(value: string, selected: boolean, color: boolean): string {
   return `${paint(selected ? "›" : "·", selected ? "bold" : "dim", color)} ${selected ? paint(value, "bold", color) : value}`;
+}
+
+/**
+ * A cursorless picker still needs a visible interaction anchor in a very short pane.
+ *
+ * Every selected picker row — including the directed-handoff draft — starts with `›`. Keep that
+ * row inside the body window, and when the footer itself would consume the pane, spend the first
+ * physical row on the selection before retaining as many trailing hints as still fit. This is a
+ * visual anchor only; it never turns a picker into a terminal caret owner.
+ */
+function renderCursorlessPickerFrame(
+  lines: readonly string[],
+  footer: readonly string[],
+  height: number,
+  priorityFooterRows = 0,
+): string {
+  const frameHeight = Math.max(1, height);
+  const selectedIndex = lines.findLastIndex((line) =>
+    stripTerminalControl(line).startsWith("› "));
+  const fallbackIndex = lines.findLastIndex((line) => stripTerminalControl(line).trim() !== "");
+  const anchorIndex = Math.max(0, selectedIndex === -1 ? fallbackIndex : selectedIndex);
+
+  if (frameHeight <= footer.length) {
+    const footerCapacity = frameHeight - 1;
+    const priorityFooter = footer.slice(0, Math.min(priorityFooterRows, footerCapacity));
+    const trailingCapacity = footerCapacity - priorityFooter.length;
+    const trailingFooter = trailingCapacity === 0
+      ? []
+      : footer.slice(priorityFooterRows).slice(-trailingCapacity);
+    const visibleFooter = [...priorityFooter, ...trailingFooter];
+    return [lines[anchorIndex] ?? footer.at(-1) ?? "", ...visibleFooter].join("\n");
+  }
+
+  const bodyHeight = frameHeight - footer.length;
+  const firstBodyRow = Math.max(
+    0,
+    Math.min(anchorIndex - bodyHeight + 1, lines.length - bodyHeight),
+  );
+  const body = lines.slice(firstBodyRow, firstBodyRow + bodyHeight);
+  while (body.length < bodyHeight) body.push("");
+  return [...body, ...footer].join("\n");
 }
 
 function boundedIndex(value: number, length: number): number {
@@ -3680,6 +3767,153 @@ async function readWorkerModels(client: InteractiveFleetTransport): Promise<Work
   }
 }
 
+/** Preview polling is the only background repaint source; one sample per interval coalesces it. */
+const PREVIEW_REPAINT_INTERVAL_MS = 100;
+
+interface FleetFrameLayout {
+  width: number;
+  height: number;
+  /** Names the viewport position independently of the rows currently occupying it. */
+  scrollOffset: string;
+  /** Stable while the same kinds of rows occupy the same terminal positions. */
+  topology: string;
+}
+
+interface RetainedFleetFrame extends FleetFrameLayout {
+  rows: readonly string[];
+  cursor: { row: number; column: number } | undefined;
+}
+
+/**
+ * Structural identity for the rendered Fleet surface.
+ *
+ * Content such as a preview, age, status, selection, or draft is deliberately absent: those are
+ * row damage. Row insertion/reordering, footer growth, picker changes, or a column appearing alter
+ * where later content lives and therefore force a complete in-place repaint.
+ */
+function fleetFrameLayout(
+  snapshot: FleetSnapshot,
+  state: FleetState,
+  options: ResolvedFleetRenderOptions,
+): FleetFrameLayout {
+  const frame = (topology: unknown, scrollOffset: string): FleetFrameLayout => ({
+    width: options.width,
+    height: options.height,
+    scrollOffset,
+    topology: JSON.stringify(topology),
+  });
+  const sessionIds = orderedThreads(snapshot).map(({ record }) => record.id);
+  const noticeRows = state.notice === undefined ? 0 : 1;
+
+  if (state.workerPicker !== undefined) {
+    const picker = state.workerPicker;
+    const choices = pickerModelChoices(state);
+    const fallbackRows = state.workerModels.fallbacks.length
+      + (state.workerModels.fallbacks.length === 0 ? 0 : 1);
+    const modelPreludeRows = renderHeader([], state, options).length + 3 + fallbackRows;
+    const visibleModelRows = Math.max(1, options.height - 3 - modelPreludeRows);
+    const modelScrollOffset = picker.step === "model"
+      ? pickerScrollOffset(picker.modelIndex, choices.length, visibleModelRows)
+      : 0;
+    return frame({
+      surface: "worker-picker",
+      step: picker.step,
+      sessions: sessionIds,
+      choices: choices.map(({ provider, model }) => `${provider}:${model}`),
+      fallbackCount: state.workerModels.fallbacks.length,
+      preludeRows: modelPreludeRows,
+      footerRows: 3,
+    }, `worker-picker:${picker.step}:${modelScrollOffset}`);
+  }
+  if (state.permissionPicker !== undefined) {
+    return frame({
+      surface: "permission-picker",
+      step: state.permissionPicker.step,
+      sessions: sessionIds,
+      footerRows: 2 + noticeRows,
+    }, `permission-picker:${state.permissionPicker.step}`);
+  }
+  if (state.commandPalette !== undefined) {
+    const composerRows = renderComposerLines(state.draft, "task", options).length;
+    return frame({
+      surface: "command-palette",
+      level: state.commandPalette.level,
+      candidates: commandPaletteCandidates(state),
+      footerRows: composerRows + 3,
+    }, `command-palette:${state.commandPalette.scrollOffset}`);
+  }
+  if (state.handoffPicker !== undefined) {
+    return frame({
+      surface: "handoff-picker",
+      step: state.handoffPicker.step,
+      workers: state.handoffPicker.workerIds,
+      recipients: handoffRecipients(snapshot, state.handoffPicker.workerIds).map(({ id }) => id),
+      footerRows: 2 + noticeRows,
+    }, `handoff-picker:${state.handoffPicker.step}`);
+  }
+  if (state.orchestratorPicker !== undefined) {
+    return frame({
+      surface: "orchestrator-picker",
+      step: state.orchestratorPicker.step,
+      sessions: existingOrchestrators(snapshot).map(({ id }) => id),
+      footerRows: 2 + noticeRows + (state.orchestratorPicker.step === "effort" ? 1 : 0),
+    }, `orchestrator-picker:${state.orchestratorPicker.step}`);
+  }
+
+  const threads = orderedThreads(snapshot);
+  const rows = fleetListRows(snapshot, state);
+  const pullRequestWidth = threads.reduce((widest, { record }) => {
+    const summary = options.pullRequests.get(record.id);
+    return summary === undefined
+      ? widest
+      : Math.max(widest, Math.min(PULL_REQUEST_CELL_WIDTH, pullRequestLabel(summary).length));
+  }, 0);
+  const leaseBadgeWidth = rows.reduce(
+    (widest, row) => row.kind === "thread" && row.leaseBadge !== undefined
+      ? Math.max(widest, row.leaseBadge.label.length)
+      : widest,
+    0,
+  );
+  const worktreeWidth = rows.reduce(
+    (widest, row) => row.kind === "thread" && row.worktree !== undefined
+      ? Math.max(widest, Math.min(WORKTREE_TAG_WIDTH, row.worktree.length))
+      : widest,
+    0,
+  );
+  const ownerSigilWidth = rows.reduce(
+    (widest, row) => row.kind === "thread" && row.ownerSigil !== undefined
+      ? Math.max(widest, displayWidth(row.ownerSigil))
+      : widest,
+    0,
+  );
+  const footerHeight = renderFleetFooter(snapshot, state, options).length;
+  const headerHeight = renderHeader(threads, state, options).length + 1;
+  const bodyHeight = Math.max(0, options.height - footerHeight);
+  const viewportHeight = Math.max(0, bodyHeight - headerHeight);
+  const shellTranscript = state.shellMode === undefined
+    ? undefined
+    : renderShellTranscript(state.shellMode, viewportHeight, options);
+  const rowKeys = state.shellMode === undefined
+    ? rows.map((row) => {
+        if (row.kind === "folder") return `folder:${row.cwd}`;
+        if (row.kind === "thread") return `thread:${row.thread.record.id}`;
+        if (row.kind === "show-more") return `show-more:${row.cwd}`;
+        if (row.kind === "ownership") return `ownership:${row.coordination.sessionId}`;
+        return row.kind;
+      })
+    : [`shell:${shellTranscript!.length}`];
+
+  return frame({
+    surface: state.shellMode === undefined ? "fleet-list" : "shell",
+    headerHeight,
+    footerHeight,
+    rows: rowKeys,
+    columns: [pullRequestWidth, leaseBadgeWidth, worktreeWidth, ownerSigilWidth],
+  }, state.shellMode === undefined
+    ? `fleet-list:${state.threadListScrollOffset}`
+    : `shell:${shellTranscriptScrollOffset(state.shellMode, viewportHeight)}`);
+}
+
 export async function runFleet(
   client: InteractiveFleetTransport,
   input: FleetInput = process.stdin,
@@ -3781,74 +4015,121 @@ export async function runFleet(
 
   const previousRawMode = input.isRaw === true;
   /**
-   * The last frame written to the pane, caret sequence included, or nothing when the pane's
-   * contents are unknown — before the first frame, after any excursion off the alternate screen,
-   * and after a resize reflowed whatever was on it. A frame equal to this one would repaint the
-   * pane exactly as it stands, which at the idle cadence is bytes several times a second for no
-   * change at all. Unset is also what tells `writeFrame` there is no geometry to overwrite in
-   * place, so the next frame clears first.
+   * The visible rows last written to the pane, separate from the caret that was parked over them.
+   * Keeping rows as rows is what makes a preview delta cost one addressed row instead of the whole
+   * pane. Undefined means the terminal's contents or geometry are unknown — before the first
+   * frame, after an excursion off the alternate screen, and after a resize reflowed it.
    */
-  let paintedFrame: string | undefined;
+  let paintedFrame: RetainedFleetFrame | undefined;
   const enterFleetScreen = () => {
     output.write(ENTER_FLEET_SCREEN);
     paintedFrame = undefined;
   };
   /**
-   * Paint one frame, caret hidden for the whole of it.
+   * Paint one visible frame, caret hidden for the whole write.
    *
-   * The repaint overwrites the pane in place instead of clearing it first. A cleared pane is a
-   * state the terminal is free to put on screen, so a clear followed by a paint — however few bytes
-   * apart — can be shown as a black frame, and every legitimate repaint was a chance at one: a
-   * handful a second while a worker streams. Home, then each row written over the row it replaces
-   * with `ESC[K` erasing whatever of the old row ran past the new one. At no point in that
-   * sequence is the pane empty.
-   *
-   * A row that fills the terminal exactly gets no erase. The caret stops on that row's last cell
-   * with the wrap pending rather than moving past it, and `ESC[K` erases from the caret inclusive
-   * — it would take the glyph just written, which on a full-width divider is a visible notch. Such
-   * a row has no stale tail to erase either, so skipping it is both necessary and sufficient. The
-   * same cell is why the erase for the rows a previously taller frame left below is addressed
-   * absolutely rather than emitted from wherever the last row ended, and why it is emitted at all
-   * only when there are such rows.
-   *
-   * A clear is still right where there is no old geometry to overwrite — the first frame on a
-   * screen, and the first after a resize — and both arrive with `paintedFrame` unset.
-   *
-   * Every line of the repaint moves the caret, and a caret left visible walks all of them in front
-   * of the operator. It is hidden before the first byte, moved to where it belongs once the frame
-   * is on screen, and shown again only when a composer owns it.
+   * Stable geometry takes the damage path: compare retained rows, address each changed row
+   * absolutely, and rewrite only that row. `ESC[K` removes a longer predecessor's tail, except on
+   * an exact-width row where the terminal's pending wrap leaves the caret on the last glyph and an
+   * erase would remove it. Geometry, scroll, and layout-topology changes repaint every row; only
+   * unknown geometry clears first, preserving the no-black-frame behaviour of in-place repainting.
    */
-  const writeFrame = (body: string, cursor: { row: number; column: number } | undefined) => {
-    const caret = cursor === undefined
+  const writeFrame = (
+    body: string,
+    cursor: { row: number; column: number } | undefined,
+    layout: FleetFrameLayout,
+  ) => {
+    // Absolute row addressing is sound only when one logical row occupies one physical terminal
+    // row. Most Fleet surfaces already fit their content, but picker drafts and dashboard fields
+    // can contain arbitrary-width values; clamp at the write boundary so none can soft-wrap behind
+    // the damage renderer's retained geometry. In a pane shorter than a surface's fixed footer,
+    // retain only one physical-height window, keeping the active composer cursor in view.
+    const renderedRows = body.split("\n");
+    const maximumFirstRow = Math.max(0, renderedRows.length - layout.height);
+    const firstRow = cursor === undefined
+      ? 0
+      : Math.min(maximumFirstRow, Math.max(0, cursor.row - layout.height));
+    const rows = renderedRows
+      .slice(firstRow, firstRow + layout.height)
+      .map((row) => clampRowWidth(row, layout.width));
+    const frameCursor = cursor !== undefined
+      && cursor.row > firstRow
+      && cursor.row <= firstRow + rows.length
+      ? {
+          row: cursor.row - firstRow,
+          column: Math.max(1, Math.min(cursor.column, layout.width)),
+        }
+      : undefined;
+    const retainedLayout = {
+      ...layout,
+      // The tiny-pane row window is a viewport offset too. If it moves, take the same mandatory
+      // full-repaint path as every other scroll offset instead of treating shifted rows as damage.
+      scrollOffset: JSON.stringify([layout.scrollOffset, firstRow]),
+    };
+    const previous = paintedFrame;
+    const dimensionsChanged = previous !== undefined
+      && (previous.width !== retainedLayout.width || previous.height !== retainedLayout.height);
+    const fullRepaint = previous === undefined
+      || dimensionsChanged
+      || previous.topology !== retainedLayout.topology
+      || previous.scrollOffset !== retainedLayout.scrollOffset
+      || previous.rows.length !== rows.length;
+    const dirtyRows = fullRepaint
+      ? rows.map((_, index) => index)
+      : rows.flatMap((row, index) => row === previous.rows[index] ? [] : [index]);
+    const cursorUnchanged = previous?.cursor?.row === frameCursor?.row
+      && previous?.cursor?.column === frameCursor?.column;
+    if (dirtyRows.length === 0 && cursorUnchanged) return;
+
+    const caret = frameCursor === undefined
       ? ""
-      : `\u001b[${cursor.row};${cursor.column}H\u001b[?25h`;
-    const frame = `${body}${caret}`;
-    if (frame === paintedFrame) return;
-    const clear = paintedFrame === undefined ? "\u001b[2J" : "";
-    // The caret sequence carries no newline, so the painted frame's rows are its lines.
-    const paintedRows = paintedFrame?.split("\n").length;
-    paintedFrame = frame;
-    const columns = output.columns ?? Number.POSITIVE_INFINITY;
-    const rows = body.split("\n");
-    const painted = rows
-      .map((row) => (printedWidth(row) < columns ? `${row}\u001b[K` : row))
-      .join("\n");
-    // Only where a taller frame left rows below this one, and from a cell the caret is definitely
-    // on: a row was painted there, so addressing it cannot scroll the pane.
-    const below = paintedRows !== undefined && paintedRows > rows.length
-      ? `\u001b[${rows.length + 1};1H\u001b[0J`
-      : "";
-    output.write(`\u001b[?25l${clear}\u001b[H${painted}${below}${caret}`);
+      : `\u001b[${frameCursor.row};${frameCursor.column}H\u001b[?25h`;
+    const paintRow = (row: string) =>
+      printedWidth(row) < layout.width ? `${row}\u001b[K` : row;
+    let damage: string;
+    if (fullRepaint) {
+      const clear = previous === undefined || dimensionsChanged ? "\u001b[2J" : "";
+      const below = !dimensionsChanged && previous !== undefined && previous.rows.length > rows.length
+        ? `\u001b[${rows.length + 1};1H\u001b[0J`
+        : "";
+      damage = `${clear}\u001b[H${rows.map(paintRow).join("\n")}${below}`;
+    } else {
+      damage = dirtyRows
+        .map((index) => `\u001b[${index + 1};1H${paintRow(rows[index]!)}`)
+        .join("");
+    }
+    output.write(`\u001b[?25l${damage}${caret}`);
+    paintedFrame = { ...retainedLayout, rows, cursor: frameCursor };
   };
   let stopped = false;
   let attaching = false;
   let wake: (() => void) | undefined;
+  // A key/action can finish in the narrow gap between painting and registering the next waiter.
+  // Remember that wake so direct interaction never falls through to the preview sampling timer.
+  let wakePending = false;
   let inputQueue = Promise.resolve();
   const keyDecoder = new FleetKeyDecoder();
   let decoderFlushTimer: ReturnType<typeof setTimeout> | undefined;
   /** Set while a `!` line is running, so the key that leaves the shell can reach it. */
   let shellInterrupt: AbortController | undefined;
-  const notify = () => { wake?.(); };
+  const notify = () => {
+    if (wake === undefined) {
+      wakePending = true;
+      return;
+    }
+    wake();
+  };
+  const waitForNextFrame = () => waitForRefresh(
+    (resume) => {
+      if (wakePending) {
+        wakePending = false;
+        resume();
+      } else {
+        wake = resume;
+      }
+    },
+    () => { wake = undefined; },
+  );
   const stop = () => {
     stopped = true;
     if (attaching) client.close();
@@ -3926,8 +4207,8 @@ export async function runFleet(
   };
 
   const perform = async (key: string) => {
-    const width = Math.max(50, output.columns ?? 120);
-    const height = Math.max(16, output.rows ?? 32);
+    const width = Math.max(1, output.columns ?? 120);
+    const height = Math.max(1, output.rows ?? 32);
     const renderOptions: ResolvedFleetRenderOptions = {
       color: output.isTTY === true,
       width,
@@ -4388,7 +4669,7 @@ export async function runFleet(
   try {
     while (!stopped) {
       if (attaching) {
-        await waitForRefresh((resume) => { wake = resume; }, () => { wake = undefined; });
+        await waitForNextFrame();
         continue;
       }
       snapshot = await collectFleetSnapshot(client);
@@ -4402,10 +4683,11 @@ export async function runFleet(
         cwd: record.cwd,
         ...(record.workspace?.branch === undefined ? {} : { branch: record.workspace.branch }),
       })));
-      const height = Math.max(16, output.rows ?? 32);
-      const width = Math.max(50, output.columns ?? 120);
+      const height = Math.max(1, output.rows ?? 32);
+      const width = Math.max(1, output.columns ?? 120);
       if (state.view === "diagnostics") {
-        const diagnostics = renderDashboard(await collectDashboardSnapshot(client)).split("\n");
+        const dashboard = await collectDashboardSnapshot(client);
+        const diagnostics = renderDashboard(dashboard).split("\n");
         const footer = [
           ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, width, output.isTTY === true)]),
           paint("─".repeat(width), "dim", output.isTTY === true),
@@ -4413,23 +4695,52 @@ export async function runFleet(
         ];
         const body = diagnostics.slice(0, Math.max(0, height - footer.length));
         while (body.length < height - footer.length) body.push("");
-        writeFrame([...body, ...footer].join("\n"), undefined);
+        writeFrame([...body, ...footer].join("\n"), undefined, {
+          width,
+          height,
+          scrollOffset: "diagnostics",
+          topology: JSON.stringify({
+            surface: "diagnostics",
+            footerRows: footer.length,
+            sourceRows: Math.min(diagnostics.length, body.length),
+            sessions: dashboard.sessions.map(({ id }) => id),
+            jobs: dashboard.jobs.map(({ record }) => record.id),
+            queue: dashboard.queue === null
+              ? null
+              : dashboard.queue.queued.map(({ jobId }) => jobId),
+            budget: dashboard.budget === null
+              ? null
+              : dashboard.budget.scopes.map(({ scopeId, usage }) => [
+                  scopeId,
+                  usage.jobsWithUnknownUsage > 0,
+                ]),
+            reconciliation: dashboard.reconciliation === null
+              ? null
+              : {
+                  ran: dashboard.reconciliation.reconciledAt !== null,
+                  findings: dashboard.reconciliation.findings.map(({ kind, subject }) =>
+                    `${kind}:${subject}`),
+                },
+          }),
+        });
       } else {
-        const renderOptions = {
+        const renderOptions: ResolvedFleetRenderOptions = {
           color: output.isTTY === true,
           width,
           height,
-          pullRequests: pullRequestStatus.states(),
-        };
-        state = normalizeThreadListViewport(snapshot, state, {
-          ...renderOptions,
           now: Date.now(),
           home: homedir(),
-        });
+          pullRequests: pullRequestStatus.states(),
+        };
+        state = normalizeThreadListViewport(snapshot, state, renderOptions);
         const rendered = renderFleet(snapshot, state, renderOptions);
-        writeFrame(rendered, composerCursor(rendered, state, width));
+        writeFrame(
+          rendered,
+          composerCursor(rendered, state, width),
+          fleetFrameLayout(snapshot, state, renderOptions),
+        );
       }
-      await waitForRefresh((resume) => { wake = resume; }, () => { wake = undefined; });
+      await waitForNextFrame();
     }
     await inputQueue;
   } finally {
@@ -4458,7 +4769,7 @@ function waitForRefresh(register: (wake: () => void) => void, clear: () => void)
     const timer = setTimeout(() => {
       clear();
       resolve();
-    }, 500);
+    }, PREVIEW_REPAINT_INTERVAL_MS);
     register(() => {
       clearTimeout(timer);
       clear();
@@ -4500,10 +4811,19 @@ export function composerCursor(
   const focus = composerFocus(state);
   if (focus === undefined) return undefined;
   const lines = rendered.split("\n");
-  const divider = "─".repeat(width);
-  const lowerDividerIndex = lines.findLastIndex((line) => stripTerminalControl(line) === divider);
-  if (lowerDividerIndex <= 0) return undefined;
-  const rowIndex = lowerDividerIndex - 1;
+  const expectedComposerRow = renderComposerLines(focus.value, focus.mode, {
+    width,
+    height: lines.length,
+    now: 0,
+    color: false,
+    home: "",
+    pullRequests: new Map(),
+  }).at(-1);
+  const rowIndex = expectedComposerRow === undefined
+    ? -1
+    : lines.findLastIndex((line) =>
+        stripTerminalControl(line) === stripTerminalControl(expectedComposerRow));
+  if (rowIndex === -1) return undefined;
   const visibleLine = stripTerminalControl(lines[rowIndex] ?? "");
   // An empty draft shows its placeholder, so the caret is placed off the prompt the composer wears
   // rather than off the end of copy the operator did not type.
@@ -5962,14 +6282,17 @@ function clampRowWidth(value: string, width: number): string {
       painted = part !== ANSI.reset;
       continue;
     }
-    const cells = displayWidth(part);
-    if (printed + cells <= width) {
-      clamped += part;
+    for (const cluster of graphemes(part)) {
+      // Dashboard tables use tabs. A terminal advances those to the next eight-cell stop, whereas
+      // displayWidth correctly counts generic control bytes as zero; expand them here so the row's
+      // retained width is the width the terminal will actually occupy.
+      const cells = cluster === "\t" ? 8 - (printed % 8) : graphemeWidth(cluster);
+      if (printed + cells > width) {
+        return painted ? `${clamped}${ANSI.reset}` : clamped;
+      }
+      clamped += cluster === "\t" ? " ".repeat(cells) : cluster;
       printed += cells;
-      continue;
     }
-    clamped += cutToWidth(part, width - printed);
-    return painted ? `${clamped}${ANSI.reset}` : clamped;
   }
   return clamped;
 }

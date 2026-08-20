@@ -890,7 +890,7 @@ describe("fleet presentation", () => {
     expect(wide).toContain("repo-mik-76");
     expect(wide).toContain("Done");
 
-    // 50 columns is a Fleet pane split twice over — the narrowest the list is expected to render.
+    // At the 50-column dense-layout breakpoint, model and state still outrank worktree metadata.
     const narrow = rowAt(50);
     expect(narrow).not.toContain("repo-mik-76");
     expect(narrow).toContain("Done");
@@ -3884,11 +3884,13 @@ describe("runFleet", () => {
 
     input.emit("data", Buffer.from(`${"a".repeat(47)}${"b".repeat(13)}`));
     await vi.waitFor(() => {
-      // Every row ends with the erase that takes the old row's tail with it. What is asserted here
-      // is where the draft wraps, so the erases come out first.
-      const screen = Buffer.concat(output.chunks).toString().replaceAll("\u001b[K", "");
-      expect(screen).toContain(`› ${"a".repeat(47)}\n  ${"b".repeat(13)}`);
-      expect(screen).toContain("\u001b[27;16H\u001b[?25h");
+      // The wrap changes layout and repaints in full once. Later characters damage only the final
+      // composer row, so the retained first row is intentionally absent from the last write.
+      const writes = output.chunks.map((chunk) => chunk.toString());
+      expect(writes.some((write) =>
+        write.replaceAll("\u001b[K", "").includes(`› ${"a".repeat(47)}\n  b`))).toBe(true);
+      expect(writes.at(-1)).toContain(`\u001b[27;1H  ${"b".repeat(13)}\u001b[K`);
+      expect(writes.at(-1)).toContain("\u001b[27;16H\u001b[?25h");
     });
 
     input.emit("data", Buffer.from([0x03, 0x03]));
@@ -4162,7 +4164,8 @@ describe("runFleet", () => {
     input.emit("data", Buffer.from([0x18]));
     await vi.waitFor(() => {
       expect(transport.request).toHaveBeenCalledWith("session.stopOne", { sessionId: orc.id });
-      expect(screen().split("\n").find((line) => line.includes("Live orc"))).toContain("stopped");
+      const latest = screen();
+      expect(latest.slice(latest.lastIndexOf("Live orc")).split("\n")[0]).toContain("stopped");
     });
 
     input.emit("data", Buffer.from([0x18]));
@@ -4771,6 +4774,112 @@ describe("composer caret", () => {
   });
 });
 
+describe("tiny picker presentation", () => {
+  it("keeps every cursorless picker selection and handoff typing visible in one row", () => {
+    const receiver = session({
+      id: "77777777-7777-4777-8777-777777777777",
+      kind: "orchestrator",
+      role: "orchestrator",
+      name: "Receiving orc",
+    });
+    const worker = session({
+      id: "88888888-8888-4888-8888-888888888888",
+      kind: "worker",
+      role: "worker",
+      name: "Tiny worker",
+    });
+    const snapshot = fleet({ record: receiver }, { record: worker });
+    const base = createFleetState(snapshot);
+    const render = (state: FleetState, height = 1) => renderFleet(snapshot, state, {
+      color: false,
+      width: 60,
+      height,
+      now: NOW_MS,
+    });
+    const workerPicker: FleetState = {
+      ...base,
+      workerPicker: {
+        step: "model",
+        modelIndex: 0,
+        effortIndex: 0,
+        cwd: worker.cwd,
+        returnDraft: "",
+        filter: "",
+      },
+    };
+    const permissionPicker: FleetState = {
+      ...base,
+      permissionPicker: { step: "provider", providerIndex: 0, policyIndex: 0 },
+    };
+    const orchestratorPicker: FleetState = {
+      ...base,
+      orchestratorPicker: { step: "target", focus: { kind: "profile", modelIndex: 0 } },
+    };
+    const handoffPicker: FleetState = {
+      ...base,
+      handoffPicker: {
+        step: "directive",
+        workerIds: [worker.id],
+        recipientSessionId: receiver.id,
+        draft: "keep moving",
+        mutationId: "tiny-handoff",
+      },
+    };
+
+    for (const state of [workerPicker, permissionPicker, orchestratorPicker, handoffPicker]) {
+      const rendered = render(state);
+      expect(rendered.split("\n")).toHaveLength(1);
+      expect(rendered).toMatch(/^› /u);
+    }
+
+    expect(render({
+      ...permissionPicker,
+      permissionPicker: { step: "provider", providerIndex: 1, policyIndex: 0 },
+    })).not.toBe(render(permissionPicker));
+    expect(render({
+      ...handoffPicker,
+      handoffPicker: {
+        step: "directive",
+        workerIds: [worker.id],
+        recipientSessionId: receiver.id,
+        draft: "latest directive",
+        mutationId: "tiny-handoff",
+      },
+    })).toContain("latest directive▌");
+
+    const emptyHandoff: FleetState = {
+      ...handoffPicker,
+      handoffPicker: {
+        step: "directive",
+        workerIds: [worker.id],
+        recipientSessionId: receiver.id,
+        draft: "",
+        mutationId: "tiny-handoff",
+      },
+    };
+    const refused = transitionFleet(emptyHandoff, snapshot, "enter", NOW_MS).state;
+    expect(render(refused, 2)).not.toBe(render(emptyHandoff, 2));
+    expect(render(refused, 2)).toContain("A handoff needs a directive");
+  });
+
+  it("keeps a direct-action notice beside the main composer in a two-row pane", () => {
+    const snapshot = fleet();
+    const initial = createFleetState(snapshot);
+    const refused = transitionFleet(initial, snapshot, "ctrl+n", NOW_MS).state;
+    const options = { color: false, width: 60, height: 2, now: NOW_MS };
+
+    const before = renderFleet(snapshot, initial, options);
+    const after = renderFleet(snapshot, refused, options);
+
+    expect(after).not.toBe(before);
+    expect(after.split("\n")).toEqual([
+      "Select a worker to open its worktree in nvim",
+      "› Describe a task for a new session",
+    ]);
+    expect(composerCursor(after, refused, options.width)).toEqual({ row: 2, column: 3 });
+  });
+});
+
 describe("fleet repaint", () => {
   class Input extends EventEmitter {
     isTTY = true;
@@ -4819,17 +4928,18 @@ describe("fleet repaint", () => {
     await vi.waitFor(() =>
       expect(Buffer.concat(output.chunks).toString()).toContain("› build it"));
 
-    // A frame is one write, and the only write that homes the caret. The first clears, because
-    // there is no geometry under it yet; every one after it overwrites the pane in place.
+    // A frame is one write. The first clears and homes because there is no retained geometry;
+    // later writes address only damaged rows.
     const frames = output.chunks
       .map((chunk) => chunk.toString())
-      .filter((chunk) => chunk.includes("\u001b[H"));
+      .filter((chunk) => chunk.startsWith("\u001b[?25l"));
     expect(frames.length).toBeGreaterThan(1);
     // Nothing repaints with the caret showing: the hide is the first byte of every frame.
     expect(frames[0]!.startsWith("\u001b[?25l\u001b[2J\u001b[H")).toBe(true);
     for (const frame of frames.slice(1)) {
-      expect(frame.startsWith("\u001b[?25l\u001b[H")).toBe(true);
+      expect(frame).toMatch(/^\u001b\[\?25l\u001b\[\d+;1H/u);
       expect(frame).not.toContain("\u001b[2J");
+      expect(frame).not.toContain("\u001b[H");
     }
     const painted = frames.at(-1) ?? "";
     expect(painted.match(/\u001b\[\?25h/gu) ?? []).toHaveLength(1);
@@ -4854,9 +4964,8 @@ describe("fleet repaint", () => {
       .find((chunk) => chunk.includes("\u001b[H")) ?? "";
     expect(first.startsWith("\u001b[?25l\u001b[2J\u001b[H")).toBe(true);
 
-    // Every frame after it does not. A clear is a state the terminal may put on screen before the
-    // paint that follows it lands, and an empty pane shown for a frame is the black flash — so a
-    // repaint homes the caret and writes each row over the row it replaces instead.
+    // Every frame after it does not. A stable-layout update addresses just the changed composer
+    // row; a clear is a state the terminal may put on screen before the paint that follows lands.
     output.chunks.length = 0;
     input.emit("data", Buffer.from("build it"));
     await vi.waitFor(() =>
@@ -4865,10 +4974,11 @@ describe("fleet repaint", () => {
     expect(repaints.length).toBeGreaterThan(0);
     for (const frame of repaints) {
       expect(frame).not.toContain("\u001b[2J");
-      expect(frame.startsWith("\u001b[?25l\u001b[H")).toBe(true);
-      // Each row takes the tail of the row it replaced with it. Nothing is left below a frame the
-      // same height as the one it replaces, so nothing erases below it either.
-      expect(frame).toContain("\u001b[K\n");
+      expect(frame).toMatch(/^\u001b\[\?25l\u001b\[\d+;1H/u);
+      expect(frame).not.toContain("\u001b[H");
+      // The dirty row takes the tail of the row it replaced with it. No other row is rewritten.
+      expect(frame).toContain("\u001b[K");
+      expect(frame).not.toContain("\n");
       expect(frame).not.toContain("\u001b[0J");
     }
 
@@ -4888,45 +4998,423 @@ describe("fleet repaint", () => {
     await expect(running).resolves.toBeUndefined();
   });
 
-  it("erases the tail of a short row and leaves a full-width row its last cell", async () => {
+  it("repaints every row when scroll, layout topology, or dimensions change", async () => {
     const input = new Input();
     const output = new Output();
-    const running = runFleet(transport() as never, input, output, new EventEmitter());
+    output.rows = 16;
+    let records = threadFleet(8).threads.map(({ record }) => record);
+    const running = runFleet(
+      transport(() => records) as never,
+      input,
+      output,
+      new EventEmitter(),
+    );
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
-
-    input.emit("data", Buffer.from("build it"));
     await vi.waitFor(() =>
-      expect(Buffer.concat(output.chunks).toString()).toContain("› build it"));
+      expect(output.chunks.some((chunk) => chunk.toString().includes("Thread 1"))).toBe(true));
 
-    const frame = output.chunks
-      .map((chunk) => chunk.toString())
-      .filter((chunk) => chunk.includes("\u001b[H"))
-      .at(-1) ?? "";
-    const caretSequence = /\u001b\[\d+;\d+H\u001b\[\?25h$/u.exec(frame)?.[0] ?? "";
-    const body = frame.slice("\u001b[?25l\u001b[H".length, frame.length - caretSequence.length);
-    // Escape sequences steer the terminal rather than filling it, so the cells a row prints are
-    // not its byte length.
-    const cells = (row: string) => displayWidth(row.replaceAll(/\u001b\[[0-9;]*m/gu, ""));
+    // Page movement changes the retained viewport even though its dimensions and row identities
+    // are stable. The interaction wakes immediately and repaints in place without clearing.
+    output.chunks.length = 0;
+    input.emit("data", Buffer.from("\u001b[6~"));
+    await vi.waitFor(() => expect(output.chunks.length).toBeGreaterThan(0));
+    const scrolled = Buffer.concat(output.chunks).toString();
+    expect(scrolled.startsWith("\u001b[?25l\u001b[H")).toBe(true);
+    expect(scrolled).toContain("\n");
+    expect(scrolled).not.toContain("\u001b[2J");
 
-    const rows = body.split("\n").map((row) => ({
-      erased: row.endsWith("\u001b[K"),
-      width: cells(row.replace(/\u001b\[K$/u, "")),
-    }));
-    // A row narrower than the pane may have a stale tail behind it, and the erase takes it.
-    const short = rows.filter((row) => row.width < output.columns);
-    expect(short.length).toBeGreaterThan(0);
-    expect(short.every((row) => row.erased)).toBe(true);
-    // A row that fills the pane exactly — the dividers do — has none, and the caret is still on its
-    // last cell with the wrap pending. `ESC[K` erases from that cell inclusive, so an erase here
-    // would rub out the glyph just written.
-    const full = rows.filter((row) => row.width === output.columns);
-    expect(full.length).toBeGreaterThan(0);
-    expect(full.some((row) => row.erased)).toBe(false);
-    // Nothing prints past the pane, so those are the only two kinds of row in the frame.
-    expect(short.length + full.length).toBe(rows.length);
+    // A new folder inserts structural rows. Even when it lands beyond the viewport, the topology
+    // is no longer the one whose absolute row positions were retained.
+    output.chunks.length = 0;
+    records = [...records, session({
+      id: "99999999-9999-4999-8999-999999999999",
+      kind: "worker",
+      role: "worker",
+      cwd: "/repo/zulu",
+      name: "Topology worker",
+    })];
+    await vi.waitFor(
+      () => expect(output.chunks.length).toBeGreaterThan(0),
+      { timeout: 2_000, interval: 10 },
+    );
+    const topology = Buffer.concat(output.chunks).toString();
+    expect(topology.startsWith("\u001b[?25l\u001b[H")).toBe(true);
+    expect(topology).toContain("\n");
+    expect(topology).not.toContain("\u001b[2J");
+
+    // Dimension drift is detected even if a test transport omits SIGWINCH. Geometry is unknown at
+    // the new width, so this full repaint also clears before homing.
+    output.chunks.length = 0;
+    output.columns = 70;
+    await vi.waitFor(
+      () => expect(output.chunks.length).toBeGreaterThan(0),
+      { timeout: 2_000, interval: 10 },
+    );
+    expect(Buffer.concat(output.chunks).toString().startsWith(
+      "\u001b[?25l\u001b[2J\u001b[H",
+    )).toBe(true);
+
+    // A picker footer changing height moves the body/footer boundary even though the terminal and
+    // palette viewport do not move. Crossing the command-composer wrap boundary therefore forces
+    // a complete in-place repaint rather than addressing rows retained under the old boundary.
+    const oneRowQuery = "z".repeat(output.columns - 4);
+    input.emit("data", Buffer.from(`/${oneRowQuery}`));
+    await vi.waitFor(() =>
+      expect(output.chunks.at(-1)?.toString()).toContain(`› /${oneRowQuery}`));
+    output.chunks.length = 0;
+    input.emit("data", Buffer.from("z"));
+    await vi.waitFor(() => expect(output.chunks.length).toBeGreaterThan(0));
+    const pickerTopology = Buffer.concat(output.chunks).toString();
+    expect(pickerTopology.startsWith("\u001b[?25l\u001b[H")).toBe(true);
+    expect(pickerTopology).toContain("\n");
+    expect(pickerTopology).not.toContain("\u001b[2J");
 
     input.emit("data", Buffer.from([0x03, 0x03]));
     await expect(running).resolves.toBeUndefined();
+  });
+
+  it("addresses damage at the physical pane width below the 50-column layout breakpoint", async () => {
+    const input = new Input();
+    const output = new Output();
+    output.columns = 33;
+    const running = runFleet(transport() as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+    await vi.waitFor(() => expect(output.chunks.length).toBeGreaterThan(0));
+
+    const printableRows = (frame: string) => frame
+      .replaceAll(/\u001b\[[?0-9;]*[A-Za-z]/gu, "")
+      .split("\n");
+    const first = output.chunks.find((chunk) => chunk.toString().includes("\u001b[H"))?.toString()
+      ?? "";
+    expect(first.startsWith("\u001b[?25l\u001b[2J\u001b[H")).toBe(true);
+    expect(printableRows(first).every((row) => displayWidth(row) <= output.columns)).toBe(true);
+
+    output.chunks.length = 0;
+    input.emit("data", Buffer.from("x"));
+    await vi.waitFor(() => expect(output.chunks.length).toBeGreaterThan(0));
+    const damage = Buffer.concat(output.chunks).toString();
+    expect(damage).toMatch(/^\u001b\[\?25l\u001b\[\d+;1H/u);
+    expect(damage).not.toContain("\n");
+    expect(printableRows(damage).every((row) => displayWidth(row) <= output.columns)).toBe(true);
+    const caretColumn = /\u001b\[\d+;(\d+)H\u001b\[\?25h$/u.exec(damage)?.[1];
+    expect(Number(caretColumn)).toBeLessThanOrEqual(output.columns);
+
+    // Width changes below the old synthetic floor are still geometry changes. Even without a
+    // SIGWINCH in this test double, the next frame detects the new physical width and clears.
+    output.chunks.length = 0;
+    output.columns = 40;
+    await vi.waitFor(
+      () => expect(output.chunks.length).toBeGreaterThan(0),
+      { timeout: 2_000, interval: 10 },
+    );
+    expect(Buffer.concat(output.chunks).toString().startsWith(
+      "\u001b[?25l\u001b[2J\u001b[H",
+    )).toBe(true);
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("addresses damage at the physical pane height below the 16-row layout breakpoint", async () => {
+    const input = new Input();
+    const output = new Output();
+    output.rows = 10;
+    const running = runFleet(transport() as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+    await vi.waitFor(() => expect(output.chunks.length).toBeGreaterThan(0));
+
+    const first = output.chunks.find((chunk) => chunk.toString().includes("\u001b[H"))?.toString()
+      ?? "";
+    expect(first.split("\n")).toHaveLength(output.rows);
+
+    output.chunks.length = 0;
+    input.emit("data", Buffer.from("x"));
+    await vi.waitFor(() => expect(output.chunks.length).toBeGreaterThan(0));
+    const damage = Buffer.concat(output.chunks).toString();
+    const damageRow = /^\u001b\[\?25l\u001b\[(\d+);1H/u.exec(damage)?.[1];
+    expect(Number(damageRow)).toBeLessThanOrEqual(output.rows);
+    expect(damage).not.toContain("\n");
+
+    // A footer can be taller than an extremely short pane. The frame boundary windows it to the
+    // physical height, shifts the composer caret with that window, and detects the resize even
+    // when this test double omits SIGWINCH.
+    output.chunks.length = 0;
+    output.rows = 4;
+    await vi.waitFor(
+      () => expect(output.chunks.length).toBeGreaterThan(0),
+      { timeout: 2_000, interval: 10 },
+    );
+    const resized = Buffer.concat(output.chunks).toString();
+    expect(resized.startsWith("\u001b[?25l\u001b[2J\u001b[H")).toBe(true);
+    expect(resized.split("\n")).toHaveLength(output.rows);
+    expect(resized).not.toContain("\u001b[0J");
+    const caretRow = /\u001b\[(\d+);\d+H\u001b\[\?25h$/u.exec(resized)?.[1];
+    expect(Number(caretRow)).toBeLessThanOrEqual(output.rows);
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("fully repaints when a shell tail or diagnostics topology advances", async () => {
+    const input = new Input();
+    const output = new Output();
+    output.rows = 60;
+    const signals = new EventEmitter();
+    let records: SessionRecord[] = [];
+    let shellOutput: ((chunk: string) => void) | undefined;
+    let finishShell: ((result: { exitStatus: number }) => void) | undefined;
+    const client = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return records;
+        if (method === "fleet.preferences") return {};
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "job.list") return [];
+        if (method === "control.queue") {
+          return { limits: {}, admissionOpen: true, reservations: [], queued: [] };
+        }
+        if (method === "control.budget") return { declaration: {}, scopes: [] };
+        if (method === "control.reconciliation") {
+          return { reconciledAt: null, findings: [], quarantinedJobIds: [] };
+        }
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose: vi.fn(() => () => undefined),
+      close: vi.fn(),
+    };
+    const runShellCommand = vi.fn((
+      request: { onOutput: (chunk: string) => void },
+    ) => new Promise<{ exitStatus: number }>((resolve) => {
+      shellOutput = request.onOutput;
+      finishShell = resolve;
+    }));
+    const running = runFleet(
+      client as never,
+      input,
+      output,
+      signals,
+      { runShellCommand },
+    );
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    input.emit("data", Buffer.from("!tail -f log\r"));
+    await vi.waitFor(() => expect(shellOutput).toBeDefined());
+    const initialLines = Array.from({ length: 55 }, (_, index) => `line ${index + 1}`);
+    shellOutput!(`${initialLines.join("\n")}\n`);
+    await vi.waitFor(() =>
+      expect(Buffer.concat(output.chunks).toString()).toContain("line 55"));
+
+    output.chunks.length = 0;
+    shellOutput!("line 56\n");
+    await vi.waitFor(() => expect(output.chunks.length).toBeGreaterThan(0));
+    const shellScroll = Buffer.concat(output.chunks).toString();
+    expect(shellScroll.startsWith("\u001b[?25l\u001b[H")).toBe(true);
+    expect(shellScroll).toContain("\n");
+    expect(shellScroll).not.toContain("\u001b[2J");
+
+    finishShell!({ exitStatus: 0 });
+    input.emit("data", Buffer.from([0x1b]));
+    await vi.waitFor(() =>
+      expect(output.chunks.at(-1)?.toString()).toContain("ctrl+s change"));
+    input.emit("data", Buffer.from([0x17]));
+    await vi.waitFor(() =>
+      expect(Buffer.concat(output.chunks).toString()).toContain("CYBERDECK COCKPIT"));
+
+    output.chunks.length = 0;
+    records = [session({
+      name: "New diagnostics session",
+      cwd: `/repo/${"long-path/".repeat(20)}`,
+    })];
+    await vi.waitFor(
+      () => expect(Buffer.concat(output.chunks).toString()).toContain("11111111"),
+      { timeout: 2_000, interval: 10 },
+    );
+    const diagnosticsTopology = Buffer.concat(output.chunks).toString();
+    expect(diagnosticsTopology.startsWith("\u001b[?25l\u001b[H")).toBe(true);
+    expect(diagnosticsTopology).toContain("\n");
+    expect(diagnosticsTopology).not.toContain("\u001b[2J");
+    // Dashboard tables contain tabs and unbounded broker values. The frame-writing boundary
+    // expands those tabs and clamps the long path, so each logical diagnostics row remains one
+    // physical terminal row and later CUP damage still addresses the intended row.
+    const diagnosticsRows = diagnosticsTopology
+      .replaceAll(/\u001b\[[?0-9;]*[A-Za-z]/gu, "")
+      .split("\n");
+    expect(diagnosticsTopology).not.toContain(records[0]!.cwd);
+    expect(diagnosticsRows.every((row) => !row.includes("\t"))).toBe(true);
+    expect(diagnosticsRows.every((row) => displayWidth(row) <= output.columns)).toBe(true);
+
+    signals.emit("SIGTERM");
+    await running;
+  });
+
+  it("erases a shortened dirty row without erasing an exact-width dirty row", async () => {
+    const input = new Input();
+    const output = new Output();
+    const record = session();
+    let refusal = "x".repeat(output.columns);
+    const client = {
+      request: vi.fn(async (method: string) => {
+        if (method === "session.list") return [record];
+        if (method === "fleet.preferences") return {};
+        if (method === "session.snapshot") return { data: "" };
+        if (method === "session.stopOne") throw new Error(refusal);
+        throw new Error(`unexpected ${method}`);
+      }),
+      sendFrame: vi.fn(),
+      onFrame: vi.fn(() => () => undefined),
+      onClose: vi.fn(() => () => undefined),
+      close: vi.fn(),
+    };
+    const running = runFleet(client as never, input, output, new EventEmitter());
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+
+    // Establish a notice row first. Its arrival grows the footer and therefore correctly takes
+    // the full-repaint path; the next two same-topology writes exercise row damage itself.
+    input.emit("data", Buffer.from([0x18]));
+    await vi.waitFor(() =>
+      expect(Buffer.concat(output.chunks).toString()).toContain(refusal));
+
+    output.chunks.length = 0;
+    refusal = "y".repeat(output.columns);
+    input.emit("data", Buffer.from([0x18]));
+    await vi.waitFor(() =>
+      expect(Buffer.concat(output.chunks).toString()).toContain(refusal));
+    const exactWidthDamage = Buffer.concat(output.chunks).toString();
+    expect(exactWidthDamage).toMatch(/^\u001b\[\?25l\u001b\[\d+;1H/u);
+    expect(exactWidthDamage).not.toContain(`${refusal}\u001b[K`);
+    expect(exactWidthDamage).not.toContain("\u001b[H");
+    expect(exactWidthDamage).not.toContain("\n");
+
+    output.chunks.length = 0;
+    refusal = "short";
+    input.emit("data", Buffer.from([0x18]));
+    await vi.waitFor(() =>
+      expect(Buffer.concat(output.chunks).toString()).toContain(refusal));
+    const shortenedDamage = Buffer.concat(output.chunks).toString();
+    expect(shortenedDamage).toContain(`${refusal}\u001b[K`);
+    expect(shortenedDamage).not.toContain("\n");
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("coalesces a localized preview update into one small row-damage write", async () => {
+    const input = new Input();
+    const output = new Output();
+    let preview = "old";
+    const record = () => session({
+      kind: "orchestrator",
+      role: "orchestrator",
+      orchestratorScope: "fleet",
+      cwd: "/repo/damage",
+      name: "Damage orc",
+      latestPreview: preview,
+    });
+    const running = runFleet(
+      transport(() => [record()]) as never,
+      input,
+      output,
+      new EventEmitter(),
+    );
+    await vi.waitFor(() => expect(input.isRaw).toBe(true));
+    await vi.waitFor(() =>
+      expect(Buffer.concat(output.chunks).toString()).toContain(preview));
+
+    output.chunks.length = 0;
+    // All three values land inside one background sampling interval. Only the newest visible
+    // preview is painted, and it changes neither row identity nor layout columns.
+    preview = "mid1";
+    preview = "mid2";
+    preview = "new";
+    await vi.waitFor(
+      () => expect(Buffer.concat(output.chunks).toString()).toContain(preview),
+      { timeout: 2_000, interval: 10 },
+    );
+
+    const writes = output.chunks.map((chunk) => chunk.toString());
+    expect(writes).toHaveLength(1);
+    const damage = writes[0]!;
+    expect(damage).toContain("new");
+    expect(damage).not.toContain("mid1");
+    expect(damage).not.toContain("mid2");
+    expect(damage).not.toContain("Cyberdeck");
+    expect(damage).not.toContain("\n");
+    expect(damage.match(/\u001b\[\d+;1H/gu) ?? []).toHaveLength(1);
+
+    // Deterministic byte evidence for the same rendered state: the old steady-state path would
+    // rewrite every row, while the production write above contains the single dirty row.
+    const snapshot = fleet({ record: record() });
+    const state = createFleetState(snapshot);
+    const body = renderFleet(snapshot, state, {
+      color: false,
+      width: output.columns,
+      height: output.rows,
+      now: Date.now(),
+    });
+    const cursor = composerCursor(body, state, output.columns)!;
+    const wholeFrame = `\u001b[?25l\u001b[H${body.split("\n")
+      .map((row) => displayWidth(row) < output.columns ? `${row}\u001b[K` : row)
+      .join("\n")}\u001b[${cursor.row};${cursor.column}H\u001b[?25h`;
+    const bytes = {
+      wholeFrame: Buffer.byteLength(wholeFrame),
+      rowDamage: Buffer.byteLength(damage),
+    };
+    expect(bytes).toEqual({ wholeFrame: 850, rowDamage: 90 });
+    expect(bytes.rowDamage).toBeLessThan(bytes.wholeFrame / 8);
+
+    input.emit("data", Buffer.from([0x03, 0x03]));
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("samples preview repaint at 100ms while a movement key wakes immediately", async () => {
+    vi.useFakeTimers();
+    const input = new Input();
+    const output = new Output();
+    const signals = new EventEmitter();
+    let preview = "old";
+    const record = () => session({
+      kind: "worker",
+      role: "worker",
+      cwd: "/repo/rate",
+      latestPreview: preview,
+    });
+    const running = runFleet(
+      transport(() => [record()]) as never,
+      input,
+      output,
+      signals,
+      {
+        permissionPreferences: {
+          list: async () => ({}),
+          set: async () => {},
+        },
+      },
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(input.isRaw).toBe(true);
+      expect(Buffer.concat(output.chunks).toString()).toContain("old");
+
+      output.chunks.length = 0;
+      preview = "new";
+      await vi.advanceTimersByTimeAsync(99);
+      expect(output.chunks).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(output.chunks).toHaveLength(1);
+      expect(output.chunks[0]!.toString()).toContain("new");
+
+      output.chunks.length = 0;
+      input.emit("data", Buffer.from("\u001b[A"));
+      // Flush promises without advancing the fake clock: the key bypasses the 100ms preview gate.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(output.chunks.length).toBeGreaterThan(0);
+    } finally {
+      signals.emit("SIGTERM");
+      await vi.advanceTimersByTimeAsync(0);
+      await running;
+      vi.useRealTimers();
+    }
   });
 
   it("leaves the pane alone when the next frame is the painted one", async () => {
@@ -4937,7 +5425,7 @@ describe("fleet repaint", () => {
     await vi.waitFor(() =>
       expect(Buffer.concat(output.chunks).toString()).toContain("Describe a task"));
 
-    // The idle cadence collects a snapshot twice a second. An unchanged frame that cleared and
+    // The idle cadence collects a snapshot about ten times a second. An unchanged frame that
     // repainted anyway is a flash the operator sees for no change at all.
     output.chunks.length = 0;
     await new Promise((resolve) => { setTimeout(resolve, 1_200); });
@@ -4996,31 +5484,32 @@ describe("fleet repaint", () => {
       );
     }
 
-    // One write per frame, so a chunk is a frame. The caret is addressed exactly once in each —
-    // last, after the whole body is on screen — and shown exactly once, there. A frame that moved
-    // a visible caret would carry more than one of either.
+    // One write per frame, so a chunk is a frame. Each one addresses the preview row and then the
+    // retained composer's caret — last, after the damage is on screen — without rewriting it.
     const frames = output.chunks.map((chunk) => chunk.toString());
     expect(frames.length).toBeGreaterThanOrEqual(3);
     const rows = new Set<string>();
     for (const frame of frames) {
-      expect(frame.startsWith("\u001b[?25l\u001b[H")).toBe(true);
+      expect(frame).toMatch(/^\u001b\[\?25l\u001b\[\d+;1H/u);
+      expect(frame).not.toContain("\u001b[H");
+      expect(frame).not.toContain("\n");
       expect(frame.match(/\u001b\[\?25h/gu) ?? []).toHaveLength(1);
       expect(frame.match(/\u001b\[\?25l/gu) ?? []).toHaveLength(1);
       const addresses = frame.match(/\u001b\[\d+;\d+H/gu) ?? [];
-      expect(addresses).toHaveLength(1);
-      expect(frame.endsWith(`${addresses[0]}\u001b[?25h`)).toBe(true);
-      expect(addresses[0]).toMatch(new RegExp(`^\u001b\\[\\d+;${column}H$`, "u"));
-      rows.add(addresses[0]!);
-      expect(frame).toContain(`› ${draft}`);
-      // No row is wider than the pane, so the terminal never soft-wraps one and the row the caret
-      // was addressed to is the row the composer is actually printed on.
-      const caretSequence = `${addresses[0]}\u001b[?25h`;
-      const body = frame.slice("\u001b[?25l\u001b[H".length, frame.length - caretSequence.length);
-      for (const line of body.split("\n")) {
-        // Each row carries the erase that takes the old row's tail with it; the row itself is
-        // what has to fit the pane.
-        expect(displayWidth(line.replace(/\u001b\[K$/u, ""))).toBeLessThanOrEqual(output.columns);
-      }
+      expect(addresses).toHaveLength(2);
+      const caretAddress = addresses.at(-1)!;
+      expect(frame.endsWith(`${caretAddress}\u001b[?25h`)).toBe(true);
+      expect(caretAddress).toMatch(new RegExp(`^\u001b\\[\\d+;${column}H$`, "u"));
+      rows.add(caretAddress);
+      expect(frame).not.toContain(`› ${draft}`);
+      // Escape sequences steer rather than print. Removing the address and tail erase leaves the
+      // one damaged row, which still fits without a terminal soft-wrap.
+      const caretSequence = `${caretAddress}\u001b[?25h`;
+      const damage = frame.slice(
+        `\u001b[?25l${addresses[0]}`.length,
+        frame.length - caretSequence.length,
+      );
+      expect(displayWidth(damage.replace(/\u001b\[K$/u, ""))).toBeLessThanOrEqual(output.columns);
     }
     // Same cell in every frame: the streaming rows above the composer never shift it.
     expect(rows.size).toBe(1);
@@ -5544,15 +6033,25 @@ describe("directed handoff", () => {
     ).toContain("Handoff  1 of 2"));
 
     input.emit("data", Buffer.from("\r"));
-    input.emit("data", Buffer.from("Rebase it"));
+    const directive = `Rebase ${"x".repeat(output.columns * 2)}`;
+    const firstDirectiveChunk = output.chunks.length;
+    input.emit("data", Buffer.from(directive));
     input.emit("data", Buffer.from("\r"));
 
     await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("fleet.workerHandoff", {
       recipientSessionId: ORC_ID,
       workerIds: [WORKER_A],
-      directive: "Rebase it",
+      directive,
       mutationId: expect.any(String),
     }));
+    const directiveRows = output.chunks.slice(firstDirectiveChunk)
+      .flatMap((chunk) => chunk.toString("utf8").split(/\n|\u001b\[\d+;\d+H/gu))
+      .map((row) => row.replaceAll(/\u001b\[[?0-9;]*[A-Za-z]/gu, ""))
+      .filter((row) => row.startsWith("› ") && row.endsWith("▌"));
+    expect(directiveRows.length).toBeGreaterThan(0);
+    expect(directiveRows.every((row) => displayWidth(row) <= output.columns)).toBe(true);
+    expect(directiveRows.at(-1)).toMatch(/^› …/u);
+    expect(directiveRows.at(-1)).toMatch(new RegExp(`${directive.slice(-20)}▌$`, "u"));
     await vi.waitFor(() => {
       const screen = Buffer.concat(output.chunks).toString("utf8");
       expect(screen).toContain("1 worker handed off");
