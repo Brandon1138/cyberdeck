@@ -3,7 +3,7 @@ import {
   parseStoredScoutDecisionCard,
   type ScoutDecisionCard,
 } from "../domain/scout-output.js";
-import type { WorkerResultSnapshot } from "../broker/session-registry.js";
+import type { WorkerResultSnapshot } from "./session/session-ports.js";
 
 export interface ScoutWaveDigestEntry {
   sessionId: string;

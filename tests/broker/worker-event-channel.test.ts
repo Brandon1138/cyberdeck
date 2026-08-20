@@ -7,7 +7,16 @@ import { WorkerCoordinationService } from "../../src/broker/worker-coordination.
 import { createProgram } from "../../src/cli.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
-import { WorkerControlService } from "../../src/orchestration/worker-control-service.js";
+import type { InstructionQueue } from "../../src/orchestration/instruction-queue.js";
+import type {
+  OrchestratorBindingReader,
+  SessionLookupPort,
+} from "../../src/orchestration/session/session-ports.js";
+import {
+  WorkerControlService,
+  type WorkerControlOptions,
+} from "../../src/orchestration/worker-control-service.js";
+import type { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 import { WorkerCoordinationStore } from "../../src/persistence/worker-coordination-store.js";
 
 const WORKER_ID = "11111111-1111-4111-8111-111111111111";
@@ -95,9 +104,11 @@ async function harness(options: {
   }));
   const channel = new WorkerEventChannel(
     coordination,
-    { get: () => worker() },
-    { findBySessionId: async (sessionId) => sessionId === ORC_ID ? binding() : undefined },
-    { enqueue },
+    { get: () => worker() } satisfies SessionLookupPort,
+    {
+      findBySessionId: async (sessionId) => sessionId === ORC_ID ? binding() : undefined,
+    } satisfies OrchestratorBindingReader,
+    { enqueue } satisfies Pick<InstructionQueue, "enqueue">,
     currentTime,
     options.credentials,
   );
@@ -111,11 +122,12 @@ async function harness(options: {
       onSessionUpdate: () => () => undefined,
       stop: async () => undefined,
       forceStop: () => undefined,
-    } as never,
+      workerTruth: vi.fn(),
+    } satisfies WorkerControlOptions["registry"],
     orchestrators: {
       findBySessionId: async (sessionId: string) => sessionId === ORC_ID ? binding() : undefined,
-    } as never,
-    instructions: { enqueue } as never,
+    } satisfies Pick<OrchestratorStore, "findBySessionId">,
+    instructions: { enqueue } satisfies Pick<InstructionQueue, "enqueue">,
     now: () => Date.parse(currentTime()),
     ...(options.credentials === undefined ? {} : { credentials: options.credentials }),
   });

@@ -1,5 +1,9 @@
 import { z } from "zod";
 import type { SessionRecord } from "../domain/session.js";
+import type {
+  SessionLookupPort,
+  SessionUpdatePort,
+} from "../orchestration/session/session-ports.js";
 import { callNvim, type NvimEntryPoint } from "../nvim/bridge.js";
 import { isWorkerLive, worktreeSubject } from "../nvim/open-worktree.js";
 import { worktreeRequest, type NvimWorktreeRequest } from "../nvim/quickfix.js";
@@ -27,13 +31,9 @@ export interface NvimBinding {
   worktree: string;
 }
 
-interface SessionCatalog {
-  get(sessionId: string): SessionRecord;
-}
-
 export interface NvimBindingServiceOptions {
-  sessions: SessionCatalog;
-  onSessionUpdate: (listener: (sessionId: string) => void) => () => void;
+  sessions: SessionLookupPort;
+  onSessionUpdate: SessionUpdatePort["onSessionUpdate"];
   changes?: ((cwd: string) => Promise<WorktreeChangeSet>) | undefined;
   notify?: ((options: {
     address: string;

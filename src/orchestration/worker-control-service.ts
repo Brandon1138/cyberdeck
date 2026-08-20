@@ -16,15 +16,20 @@ import {
   handoffBriefing,
   type HandoffManifestEntry,
 } from "../domain/worker-handoff.js";
-import type { SessionRegistry } from "../broker/session-registry.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
 import type { WorkerCoordinationService } from "../broker/worker-coordination.js";
 import {
   BrokerWorkerLeaseCredentialCustodian,
   type WorkerLeaseCredentialCustodian,
 } from "../broker/worker-lease-credential-custodian.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { InstructionQueue } from "./instruction-queue.js";
+import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import type {
+  SessionLookupPort,
+  SessionProcessControlPort,
+  SessionUpdatePort,
+  WorkerTruthQueryPort,
+} from "./session/session-ports.js";
 
 /**
  * Orchestrator-facing control plane over the MIK-55 Wave 1 lease/event substrate.
@@ -283,9 +288,12 @@ export class WorkerControlError extends Error {
 export interface WorkerControlOptions {
   coordination: WorkerCoordinationService;
   credentials?: WorkerLeaseCredentialCustodian;
-  registry: SessionRegistry;
-  orchestrators: OrchestratorStore;
-  instructions?: InstructionQueue;
+  registry: SessionLookupPort
+    & SessionProcessControlPort
+    & SessionUpdatePort
+    & Pick<WorkerTruthQueryPort, "workerTruth">;
+  orchestrators: Pick<OrchestratorStore, "findBySessionId">;
+  instructions?: Pick<InstructionQueue, "enqueue">;
   now?: () => number;
   /** Minimum time a graceful worker stop must stay pending before force escalation is allowed. */
   forceStopGraceMs?: number;

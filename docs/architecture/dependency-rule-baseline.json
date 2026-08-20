@@ -269,14 +269,6 @@
       "to": "src/persistence/worker-preference-store.ts"
     },
     {
-      "from": "src/orchestration/instruction-queue.ts",
-      "to": "src/persistence/instruction-store.ts"
-    },
-    {
-      "from": "src/orchestration/instruction-queue.ts",
-      "to": "src/persistence/orchestrator-store.ts"
-    },
-    {
       "from": "src/orchestration/orchestrator-manager.ts",
       "to": "src/client/permission-policy.ts"
     },

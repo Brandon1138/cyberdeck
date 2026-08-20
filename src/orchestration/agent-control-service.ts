@@ -27,9 +27,8 @@ import {
 } from "../domain/session.js";
 import type { ThreadReadResult } from "../domain/thread.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
-import type { SessionRegistry } from "../broker/session-registry.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
+import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
 import type { ProviderPermissionPreferencePort } from "../persistence/provider-permission-preference-store.js";
 import { resolveProviderPermission } from "../client/permission-policy.js";
@@ -66,6 +65,13 @@ import {
   type ScoutArtifactHandles,
   type ScoutWaveDigest,
 } from "./scout-wave-digest.js";
+import type {
+  ScoutArtifactQueryPort,
+  SessionLookupPort,
+  SessionProcessControlPort,
+  SessionStartPort,
+  WorkerTruthQueryPort,
+} from "./session/session-ports.js";
 
 export const AgentActorParamsSchema = z.object({ actorSessionId: z.uuid() });
 export const AgentReadParamsSchema = AgentActorParamsSchema.extend({
@@ -363,7 +369,11 @@ export class AgentControlService {
   private readonly workerCapabilities: WorkerCapabilityCatalog | undefined;
 
   constructor(
-    private readonly registry: SessionRegistry,
+    private readonly registry: SessionLookupPort
+      & SessionStartPort
+      & SessionProcessControlPort
+      & WorkerTruthQueryPort
+      & ScoutArtifactQueryPort,
     private readonly orchestrators: OrchestratorStore,
     private readonly transcripts: ThreadTranscriptStore,
     private readonly workerPreferences?: WorkerPreferenceStore,
@@ -898,7 +908,7 @@ export class AgentControlService {
    */
   async waitForWorkers(input: z.input<typeof AgentWaitWorkersParamsSchema>): Promise<{
     timedOut: boolean;
-    results: Awaited<ReturnType<SessionRegistry["waitForWorkerResults"]>>["results"];
+    results: Awaited<ReturnType<WorkerTruthQueryPort["waitForWorkerResults"]>>["results"];
     wait: WaitEnvelope;
     intervention?: WaitInterventionSummary;
     scoutWave?: ScoutWaveDigest;
@@ -917,7 +927,7 @@ export class AgentControlService {
     // scheduling artifact.
     const remainingMs = Math.max(0, pending.wait.deadlineMs - pending.nowMs);
     let segmentMs = Math.min(remainingMs, this.segmentSeconds * 1_000);
-    let outcome: Awaited<ReturnType<SessionRegistry["waitForWorkerResults"]>>;
+    let outcome: Awaited<ReturnType<WorkerTruthQueryPort["waitForWorkerResults"]>>;
     let intervention: WaitInterventionSummary | undefined;
     if (
       pending.wait.settleOnIntervention

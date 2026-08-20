@@ -22,7 +22,10 @@ import {
   SCOUT_REPORT_BEGIN,
   SCOUT_REPORT_END,
 } from "../orchestration/worker-profiles.js";
+import type { ScoutArtifactRead } from "../orchestration/session/session-ports.js";
 import { ensurePrivateDirectory } from "./private-files.js";
+
+export type { ScoutArtifactRead } from "../orchestration/session/session-ports.js";
 
 const PARTIAL_REPORT_PREFIX = "CYBERDECK_SCOUT_PARTIAL\n";
 const INVALID_REPORT_PREFIX = "CYBERDECK_SCOUT_INVALID\n";
@@ -44,15 +47,6 @@ export type ScoutReportCapture =
       evidenceText?: string;
     }
   | { state: "complete"; text: string; report: ScoutReport };
-
-export interface ScoutArtifactRead {
-  artifact: ScoutArtifactKind;
-  text: string;
-  afterByte: number;
-  nextByte: number;
-  totalBytes: number;
-  complete: boolean;
-}
 
 /**
  * Broker-owned Scout drop box. Composer never receives a repository write exception: it emits one

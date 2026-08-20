@@ -8,10 +8,10 @@ import {
   type WorkflowMessage,
   type WorkflowRun,
 } from "../domain/workflow.js";
-import type { SessionRegistry } from "../broker/session-registry.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { WorkflowStore } from "../persistence/workflow-store.js";
+import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { InstructionQueue } from "./instruction-queue.js";
+import type { SessionLookupPort } from "./session/session-ports.js";
 
 export const CreateWorkflowParamsSchema = z.object({
   actorSessionId: z.uuid(),
@@ -34,10 +34,13 @@ export const WorkflowChangesParamsSchema = WorkflowRunActorParamsSchema.extend({
 
 export class WorkflowService {
   constructor(
-    private readonly registry: SessionRegistry,
-    private readonly orchestrators: OrchestratorStore,
-    private readonly store: WorkflowStore,
-    private readonly instructions: InstructionQueue,
+    private readonly registry: SessionLookupPort,
+    private readonly orchestrators: Pick<OrchestratorStore, "findBySessionId">,
+    private readonly store: Pick<
+      WorkflowStore,
+      "putRun" | "listRuns" | "getRun" | "putMessage" | "listMessages"
+    >,
+    private readonly instructions: Pick<InstructionQueue, "enqueue">,
   ) {}
 
   async create(input: z.input<typeof CreateWorkflowParamsSchema>): Promise<WorkflowRun> {

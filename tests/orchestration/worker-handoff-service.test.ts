@@ -7,11 +7,16 @@ import { WorkerCoordinationService } from "../../src/broker/worker-coordination.
 import { BrokerWorkerLeaseCredentialCustodian } from "../../src/broker/worker-lease-credential-custodian.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import { orchestratorController } from "../../src/domain/orchestrator.js";
+import type { InstructionRecord } from "../../src/domain/instruction.js";
+import type { SessionRecord } from "../../src/domain/session.js";
 import type { WorkerLifecycle } from "../../src/domain/worker-coordination.js";
+import type { InstructionQueue } from "../../src/orchestration/instruction-queue.js";
+import type { SessionLookupPort } from "../../src/orchestration/session/session-ports.js";
 import {
   WorkerHandoffError,
   WorkerHandoffService,
 } from "../../src/orchestration/worker-handoff-service.js";
+import type { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 import { WorkerCoordinationStore } from "../../src/persistence/worker-coordination-store.js";
 
 const baseMs = Date.parse("2026-08-18T10:00:00.000Z");
@@ -49,20 +54,10 @@ function binding(sessionId: string, key: string, workspaceCwd?: string): Orchest
   };
 }
 
-interface FakeSession {
-  id: string;
-  kind: "worker" | "orchestrator";
-  name?: string;
-  cwd: string;
-  createdAt: string;
-  executionState: string;
-  attentionState?: string;
-  exitCode: number | null;
-  parentSessionId?: string;
-}
+type FakeSession = SessionRecord;
 
 async function harness(options: {
-  enqueue?: () => Promise<unknown>;
+  enqueue?: () => Promise<InstructionRecord>;
   /** Rewrite what each registry read returns, so a session can change between two reads. */
   observeSession?: (record: FakeSession) => FakeSession;
 } = {}) {
@@ -86,24 +81,43 @@ async function harness(options: {
   ]);
   const enqueued: Array<{ targetSessionId: string; message: string }> = [];
   const instructions = {
-    enqueue: vi.fn(async (input: { targetSessionId: string; message: string }) => {
-      if (options.enqueue !== undefined) return options.enqueue() as never;
+    enqueue: vi.fn(async (
+      input: Parameters<InstructionQueue["enqueue"]>[0],
+    ): Promise<InstructionRecord> => {
+      if (options.enqueue !== undefined) return options.enqueue();
       enqueued.push({ targetSessionId: input.targetSessionId, message: input.message });
-      return { id: randomUUID(), status: "queued" };
+      return {
+        id: randomUUID(),
+        actorSessionId: input.actorSessionId,
+        targetSessionId: input.targetSessionId,
+        message: input.message,
+        status: "queued",
+        createdAt: new Date(baseMs).toISOString(),
+        updatedAt: new Date(baseMs).toISOString(),
+        messageId: input.messageId ?? randomUUID(),
+        hop: input.hop ?? 0,
+      };
     }),
-  };
+  } satisfies Pick<InstructionQueue, "enqueue">;
   const credentials = new BrokerWorkerLeaseCredentialCustodian();
 
   const addSession = (input: Partial<FakeSession> = {}): string => {
     const id = input.id ?? randomUUID();
     sessions.set(id, {
       id,
+      provider: "codex",
       kind: "worker",
       cwd: "/repo/worktrees/w",
+      detached: true,
+      sandbox: "workspace-write",
       createdAt: new Date(baseMs).toISOString(),
+      updatedAt: new Date(baseMs).toISOString(),
       executionState: "active",
+      attachmentState: "detached",
       attentionState: "working",
+      pid: 123,
       exitCode: null,
+      childIds: [],
       ...input,
     });
     return id;
@@ -126,7 +140,7 @@ async function harness(options: {
       }
       return options.observeSession?.(record) ?? record;
     },
-  };
+  } satisfies SessionLookupPort;
 
   return {
     coordination,
@@ -137,9 +151,11 @@ async function harness(options: {
     addSession,
     handoff: new WorkerHandoffService({
       coordination,
-      registry: registry as never,
-      orchestrators: { findBySessionId: async (id: string) => bindings.get(id) } as never,
-      instructions: instructions as never,
+      registry,
+      orchestrators: {
+        findBySessionId: async (id: string) => bindings.get(id),
+      } satisfies Pick<OrchestratorStore, "findBySessionId">,
+      instructions,
       credentials,
     }),
     async register(input: {
@@ -426,7 +442,7 @@ describe("WorkerHandoffService", () => {
   it("refuses a worker the registry watched exit while its subject still reads working", async () => {
     const bench = await harness();
     const healthy = bench.addSession();
-    const dead = bench.addSession({ executionState: "exited", attentionState: "idle", exitCode: 1 });
+    const dead = bench.addSession({ executionState: "exited", attentionState: "failed", exitCode: 1 });
     await bench.register({ workerId: healthy });
     // The subject the substrate holds is stale: nothing marked it terminal when the process died.
     await bench.register({ workerId: dead, lifecycle: "working" });
@@ -461,7 +477,7 @@ describe("WorkerHandoffService", () => {
         // Alive when the batch is assembled, gone by the time the transaction asks again.
         return reads === 1
           ? record
-          : { ...record, executionState: "exited", attentionState: "idle", exitCode: 1 };
+          : { ...record, executionState: "exited", attentionState: "failed", exitCode: 1 };
       },
     });
     const healthy = bench.addSession();

@@ -3,9 +3,12 @@ import { z } from "zod";
 import { grantAllows } from "../domain/capability.js";
 import { InstructionRecordSchema, type InstructionRecord } from "../domain/instruction.js";
 import { instructionReachedProvider, type InstructionLifecycleState } from "../domain/worker-truth.js";
-import type { InstructionStateUpdate, SessionRegistry } from "../broker/session-registry.js";
-import type { InstructionStore } from "../persistence/instruction-store.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import type {
+  InstructionRepository,
+  InstructionStateUpdate,
+  OrchestratorBindingReader,
+  SessionInstructionPort,
+} from "./session/session-ports.js";
 
 export const EnqueueInstructionParamsSchema = z.object({
   actorSessionId: z.uuid(),
@@ -31,9 +34,9 @@ export class InstructionQueue {
   private readonly writers = new Map<string, Promise<unknown>>();
 
   constructor(
-    private readonly registry: SessionRegistry,
-    private readonly orchestrators: OrchestratorStore,
-    private readonly store: InstructionStore,
+    private readonly registry: SessionInstructionPort,
+    private readonly orchestrators: OrchestratorBindingReader,
+    private readonly store: InstructionRepository,
   ) {}
 
   start(): void {
