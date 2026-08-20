@@ -47,9 +47,9 @@
 
 **Current responsibility:** `src/broker/main.ts` already constructs providers, runtimes, stores, and use cases, but the ratchet classifies it as ordinary application code and carries 25 false-positive baseline entries.
 
-**Destination boundary:** A dedicated `composition` layer used only by `src/broker/main.ts`. Composition may import all layers; no other broker module receives that privilege.
+**Destination boundary:** A dedicated `composition` layer used only by `src/broker/main.ts`. Composition may import all layers; no other broker module receives that privilege. The exact executable bootstrap edge `src/cli.ts -> src/broker/main.ts` may enter the composition root; no other source may import composition.
 
-**Allowed dependency direction:** `composition -> delivery | infrastructure | application | domain`; all existing delivery/application/domain/infrastructure directions remain unchanged.
+**Allowed dependency direction:** `composition -> delivery | infrastructure | application | domain`, plus the one source-aware `cli.ts -> broker/main.ts` boot edge; all existing delivery/application/domain/infrastructure directions remain unchanged.
 
 **Files:**
 - Modify: `tests/architecture/dependency-rule.test.ts`
@@ -59,7 +59,7 @@
 
 **Interfaces:**
 - Consumes: existing `Layer`, `ALLOWED_IMPORTS`, `layerFor`, and exact baseline comparison.
-- Produces: `Layer = "composition" | "delivery" | "application" | "domain" | "infrastructure"`; the exact `broker/main.ts` path maps to `composition`; baseline count becomes 78.
+- Produces: `Layer = "composition" | "delivery" | "application" | "domain" | "infrastructure"`; the exact `broker/main.ts` path maps to `composition`; source-aware import allowance admits only `cli.ts -> broker/main.ts`; baseline count becomes 78.
 
 - [ ] **Step 1: Add the failing composition-root regression**
 
@@ -69,6 +69,14 @@ Add next to the current layer-assignment tests:
 it("treats only broker/main.ts as the composition root", () => {
   expect(layerFor(resolve(SOURCE_ROOT, "broker/main.ts"))).toBe("composition");
   expect(layerFor(resolve(SOURCE_ROOT, "broker/server.ts"))).toBe("application");
+  expect(isAllowedLocalImport(
+    resolve(SOURCE_ROOT, "cli.ts"),
+    resolve(SOURCE_ROOT, "broker/main.ts"),
+  )).toBe(true);
+  expect(isAllowedLocalImport(
+    resolve(SOURCE_ROOT, "client/fleet.ts"),
+    resolve(SOURCE_ROOT, "broker/main.ts"),
+  )).toBe(false);
   expect(
     currentViolations().filter(({ from }) => from === "src/broker/main.ts"),
   ).toEqual([]);
@@ -106,11 +114,27 @@ function layerFor(path: string): Layer {
   // Preserve every remaining assignment exactly.
 ```
 
+Apply the layer matrix through a source-aware predicate so the executable can enter the root without allowing all delivery code to depend on composition:
+
+```ts
+const CLI_ENTRYPOINT = resolve(SOURCE_ROOT, "cli.ts");
+const BROKER_COMPOSITION_ROOT = resolve(SOURCE_ROOT, "broker/main.ts");
+
+function isAllowedLocalImport(importer: string, target: string): boolean {
+  if (layerFor(target) === "composition") {
+    return importer === CLI_ENTRYPOINT && target === BROKER_COMPOSITION_ROOT;
+  }
+  return ALLOWED_IMPORTS[layerFor(importer)].has(layerFor(target));
+}
+```
+
+Use `isAllowedLocalImport(importer, target)` inside `currentViolations()`.
+
 Delete all 25 sorted baseline entries whose `from` is `src/broker/main.ts`; do not add replacement entries.
 
 - [ ] **Step 4: Align the architecture documents**
 
-Change the dependency-rule status from provisional to enforced, document the one exact composition path, and mark proposal rows 0A-0C landed. Record that composition is construction only: application policy must not move into `main.ts`.
+Change the dependency-rule status from provisional to enforced, document the one exact composition path and its sole CLI bootstrap importer, and mark proposal rows 0A-0C landed. Record that composition is construction only: application policy must not move into `main.ts`.
 
 - [ ] **Step 5: Verify the slice**
 

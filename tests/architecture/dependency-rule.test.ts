@@ -3,7 +3,7 @@ import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-type Layer = "delivery" | "application" | "domain" | "infrastructure";
+type Layer = "composition" | "delivery" | "application" | "domain" | "infrastructure";
 
 interface Violation {
   from: string;
@@ -20,8 +20,11 @@ const BASELINE_PATH = resolve(
   REPOSITORY_ROOT,
   "docs/architecture/dependency-rule-baseline.json",
 );
+const CLI_ENTRYPOINT = resolve(SOURCE_ROOT, "cli.ts");
+const BROKER_COMPOSITION_ROOT = resolve(SOURCE_ROOT, "broker/main.ts");
 
 const ALLOWED_IMPORTS: Readonly<Record<Layer, ReadonlySet<Layer>>> = {
+  composition: new Set(["composition", "delivery", "application", "domain", "infrastructure"]),
   delivery: new Set(["delivery", "application", "domain"]),
   application: new Set(["application", "domain"]),
   domain: new Set(["domain"]),
@@ -61,6 +64,8 @@ function layerFor(path: string): Layer {
   const relativePath = relative(SOURCE_ROOT, path).split(sep).join("/");
   const topLevel = relativePath.split("/", 1)[0];
 
+  if (relativePath === "broker/main.ts") return "composition";
+
   if (["mcp", "app-server", "client", "protocol"].includes(topLevel ?? "")) {
     return "delivery";
   }
@@ -85,6 +90,13 @@ function layerFor(path: string): Layer {
     default:
       throw new Error(`No dependency layer assigned to ${sourcePath(path)}`);
   }
+}
+
+function isAllowedLocalImport(importer: string, target: string): boolean {
+  if (layerFor(target) === "composition") {
+    return importer === CLI_ENTRYPOINT && target === BROKER_COMPOSITION_ROOT;
+  }
+  return ALLOWED_IMPORTS[layerFor(importer)].has(layerFor(target));
 }
 
 function withoutCommentsAndTemplates(source: string): string {
@@ -882,7 +894,7 @@ function currentViolations(): Violation[] {
       }
 
       const target = resolveSourceImport(importer, specifier);
-      if (!target || ALLOWED_IMPORTS[importerLayer].has(layerFor(target))) continue;
+      if (!target || isAllowedLocalImport(importer, target)) continue;
 
       const violation = { from: sourcePath(importer), to: sourcePath(target) };
       violations.set(violationKey(violation), violation);
@@ -897,6 +909,22 @@ function baseline(): Baseline {
 }
 
 describe("architecture dependency rule", () => {
+  it("treats only broker/main.ts as the composition root", () => {
+    expect(layerFor(resolve(SOURCE_ROOT, "broker/main.ts"))).toBe("composition");
+    expect(layerFor(resolve(SOURCE_ROOT, "broker/server.ts"))).toBe("application");
+    expect(isAllowedLocalImport(
+      resolve(SOURCE_ROOT, "cli.ts"),
+      resolve(SOURCE_ROOT, "broker/main.ts"),
+    )).toBe(true);
+    expect(isAllowedLocalImport(
+      resolve(SOURCE_ROOT, "client/fleet.ts"),
+      resolve(SOURCE_ROOT, "broker/main.ts"),
+    )).toBe(false);
+    expect(
+      currentViolations().filter(({ from }) => from === "src/broker/main.ts"),
+    ).toEqual([]);
+  });
+
   it("parses multiline declarations while ignoring comments and template text", () => {
     const source = `
       // import "./commented.js";
