@@ -1568,6 +1568,22 @@ describe("SessionRegistry", () => {
       instructionId,
       state: "completed",
     }));
+
+    const resumed = await registry.resume(record.id);
+    expect(resumed).toMatchObject({ executionState: "active", generation: 2, pid: 1001 });
+    expect(captureCalls).toEqual([]);
+    expect(commitCalls).toEqual([]);
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      completedTurns: 0,
+      canonicalTurns: 0,
+    });
+    await expect(registry.submitInstruction(
+      record.id,
+      "first task after stopped generation",
+      "orchestrator",
+      {},
+      "11111111-1111-4111-8111-111111111118",
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
   });
 
   it("keeps provider-limit authority over an armed final screen and process exit", async () => {
@@ -1621,6 +1637,22 @@ describe("SessionRegistry", () => {
       instructionId,
       state: "completed",
     }));
+
+    const resumed = await registry.resume(record.id);
+    expect(resumed).toMatchObject({ executionState: "active", generation: 2, pid: 1001 });
+    expect(captureCalls).toEqual([]);
+    expect(commitCalls).toEqual([]);
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      completedTurns: 0,
+      canonicalTurns: 0,
+    });
+    await expect(registry.submitInstruction(
+      record.id,
+      "first task after provider-limit generation",
+      "orchestrator",
+      {},
+      "11111111-1111-4111-8111-111111111119",
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
   });
 
   it("rolls back a controller claim when attachment journaling fails", async () => {
@@ -1852,7 +1884,7 @@ describe("SessionRegistry", () => {
     }));
   });
 
-  it("commits a frozen Codex screen fallback before a fast stop and resume advances ordinals", async () => {
+  it("discards a frozen Codex screen when an explicit stop wins before the bank", async () => {
     const { registry, ptys, captureCalls, commitCalls, events } = harness({
       exitOnKill: false,
       providerTurns: [],
@@ -1864,34 +1896,20 @@ describe("SessionRegistry", () => {
     ptys[0]!.emitOutput(
       "\u001b[2Jexact frozen answer before resume\r\n\u001b]0;fast-screen-resume\u0007",
     );
-    const frozenReplay = ptys[0]!.snapshot().toString("utf8");
-    const expectedFallback = new WorkerTurnObservationAdapter().fallbackTerminal(frozenReplay);
     expect(captureCalls).toEqual([]);
 
-    // Stop and process exit both beat the 200 ms screen bank. The exit boundary freezes the old raw
-    // replay, and resume must durably account that proven screen before generation 2 can launch.
+    // Stop authority beats the 200 ms screen bank. Resume must not reinterpret the rejected screen
+    // as a completion or reserve its ordinal for the new generation.
     await registry.stop(record.id);
     expect(ptys[0]!.killSignals).toEqual(["SIGTERM"]);
     ptys[0]!.emitExit(0);
     const resumed = await registry.resume(record.id);
 
     expect(resumed).toMatchObject({ executionState: "active", generation: 2, pid: 1001 });
-    expect(captureCalls).toEqual([
-      "native-only",
-      "native-only",
-      "native-only",
-      "fallback-allowed",
-    ]);
-    expect(commitCalls).toEqual([expect.objectContaining({
-      turnNumber: 1,
-      turns: [expect.objectContaining({
-        providerTurnId: "fallback:1",
-        text: expectedFallback,
-        transport: "terminal-replay-fallback",
-      })],
-    })]);
+    expect(captureCalls).toEqual([]);
+    expect(commitCalls).toEqual([]);
     expect(registry.workerTruth(record.id)).toMatchObject({
-      completedTurns: 1,
+      completedTurns: 0,
       canonicalTurns: 0,
     });
     expect(events.filter(({ type }) => type === "session.turn_reconciled")).toEqual([]);
@@ -1902,11 +1920,11 @@ describe("SessionRegistry", () => {
       "orchestrator",
       {},
       "fffffff0-ffff-4fff-8fff-fffffffffff0",
-    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
     expect(ptys[1]!.writes.at(-1)?.toString()).toBe("new generation task\n");
   });
 
-  it("waits for a pending commit and drains deferred old high-water before resume", async () => {
+  it("waits for a native pending commit but discards the deferred stopped screen", async () => {
     const commitGate = deferred<void>();
     const providerTurns = [{ id: "old-one", text: "old first answer" }];
     const { registry, ptys, commitCalls } = harness({
@@ -1966,14 +1984,11 @@ describe("SessionRegistry", () => {
     const resumed = await resume;
 
     expect(resumed).toMatchObject({ executionState: "active", generation: 2, pid: 1001 });
-    expect(commitCalls).toHaveLength(2);
-    expect(commitCalls.map((observation) => observation.turnNumber)).toEqual([1, 2]);
-    expect(commitCalls[1]).toMatchObject({
-      turns: [{ providerTurnId: "old-two", text: "old deferred second answer" }],
-    });
+    expect(commitCalls).toHaveLength(1);
+    expect(commitCalls.map((observation) => observation.turnNumber)).toEqual([1]);
     expect(registry.workerTruth(record.id)).toMatchObject({
-      completedTurns: 2,
-      canonicalTurns: 2,
+      completedTurns: 1,
+      canonicalTurns: 1,
       pendingInstructions: 0,
     });
     expect(states).toContainEqual(expect.objectContaining({
@@ -1993,7 +2008,7 @@ describe("SessionRegistry", () => {
       "orchestrator",
       {},
       resumedInstruction,
-    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 3 });
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
 
     // The replaced process may acknowledge its earlier SIGTERM after generation 2 is already live.
     ptys[0]!.emitExit(0);

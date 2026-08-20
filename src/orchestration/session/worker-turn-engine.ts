@@ -75,6 +75,7 @@ interface PendingTurnCommit {
   reservationThrough: number;
   settlement: Promise<void>;
   poisoned: boolean;
+  providerNative: boolean;
 }
 
 interface ScreenCompletionEvidence {
@@ -145,6 +146,10 @@ export class WorkerTurnEngine {
   private canonicalReconcileTimer?: ReturnType<typeof setTimeout>;
   /** Fences every asynchronous observation against terminal release and process replacement. */
   private observationEpoch = 0;
+  /** Latest process epoch whose screen/fallback work was rejected by terminal authority. */
+  private discardedScreenObservationEpoch = -1;
+  /** Prevents a stopped/fatal generation from arming new screen work before its process exits. */
+  private terminalScreenReservationsDiscarded = false;
   /** Changes on every capture acquisition/release so an owner-free async read cannot ABA. */
   private observationRevision = 0;
   /** Changes whenever newer terminal or instruction activity can make completion UI effects stale. */
@@ -222,6 +227,7 @@ export class WorkerTurnEngine {
     this.currentProviderLimit = undefined;
     delete this.stallObservation;
     this.releaseTimers();
+    this.terminalScreenReservationsDiscarded = false;
   }
 
   setLatestResult(result: string | undefined): void {
@@ -250,8 +256,9 @@ export class WorkerTurnEngine {
       };
     }
     this.activityRevision += 1;
-    const termination = this.observeFatalTermination(rawReplay);
+    const termination = this.observeFatalTermination();
     if (termination !== undefined) return { fatal: true, termination };
+    if (this.terminalScreenReservationsDiscarded) return { fatal: false };
 
     const activity = this.options.observations.activity(this.record.provider, this.replay);
     if (activity === "working") {
@@ -543,6 +550,35 @@ export class WorkerTurnEngine {
   }
 
   /**
+   * Reject every unbanked screen/fallback claim owned by the current process generation.
+   *
+   * Explicit stop, fatal/provider-limit truth, and Scout completion are already authoritative.
+   * Their armed screens and fallback receipts must never survive into resume as completions.
+   * Provider-native observations/commits remain durable truth and still settle through the ordinal
+   * barrier; only terminal-replay evidence from the rejected screen becomes inert.
+   */
+  discardPendingScreenTurns(): void {
+    if (!this.terminalScreenReservationsDiscarded) {
+      // Any pre-existing floor in this epoch came from screen claims/evidence. Actual native
+      // observations which return after the fence may raise it again through reserveFencedObservation.
+      this.completionBarrierFloor = this.completedTurnCount;
+    }
+    this.discardedScreenObservationEpoch = Math.max(
+      this.discardedScreenObservationEpoch,
+      this.observationEpoch,
+    );
+    this.terminalScreenReservationsDiscarded = true;
+    if (this.pendingTurnCommit?.providerNative === false) {
+      if (this.turnCaptureOwner !== undefined) {
+        this.pendingTurnCaptures.delete(this.turnCaptureOwner.settlement);
+      }
+      delete this.pendingTurnCommit;
+    }
+    this.releaseTimers();
+    this.screenCompletionEvidence.clear();
+  }
+
+  /**
    * Fence the outgoing process generation and account every ordinal it could already own.
    *
    * The synchronous `releaseTimers()` call happens before this method's first await. Resume may not
@@ -564,7 +600,8 @@ export class WorkerTurnEngine {
 
   releaseTimers(frozenOutgoingReplay?: string): void {
     const claim = this.turnCaptureOwner;
-    const screenTurnsAreSemantic = this.screenTurnsAreSemantic();
+    const screenTurnsAreSemantic = !this.terminalScreenReservationsDiscarded
+      && this.screenTurnsAreSemantic();
     const armedScreenTarget = screenTurnsAreSemantic
       ? this.armedScreenReservationTarget(claim)
       : 0;
@@ -590,7 +627,9 @@ export class WorkerTurnEngine {
       screenClaimTarget,
       claim?.bankedThrough ?? 0,
       deferredScreenTarget,
-      this.pendingTurnCommit?.reservationThrough ?? 0,
+      this.pendingTurnCommit?.providerNative === true
+        ? this.pendingTurnCommit.reservationThrough
+        : 0,
       armedScreenTarget,
     );
     this.observationEpoch += 1;
@@ -653,7 +692,7 @@ export class WorkerTurnEngine {
     }
   }
 
-  private observeFatalTermination(rawReplay: () => string): SessionTermination | undefined {
+  private observeFatalTermination(): SessionTermination | undefined {
     if (this.fatalReported || this.record.executionState !== "active") return undefined;
     const at = new Date().toISOString();
     const termination = this.options.observations.fatalTermination(
@@ -664,7 +703,7 @@ export class WorkerTurnEngine {
     this.currentProviderLimit = providerLimitFromTermination(termination);
     this.stopPendingInstructions();
     this.fatalReported = true;
-    this.releaseTimers(rawReplay());
+    this.discardPendingScreenTurns();
     this.activity = "unknown";
     this.observedWorking = false;
     this.currentLatestResult = termination.detail;
@@ -994,6 +1033,7 @@ export class WorkerTurnEngine {
       reservationThrough: claim.completionTarget + observation.turns.length - 1,
       settlement,
       poisoned: false,
+      providerNative: observation.turns.every((turn) => turn.transport === "provider-native"),
     };
     this.pendingTurnCommit = pending;
 
@@ -1009,6 +1049,14 @@ export class WorkerTurnEngine {
 
     return receipt.then((turns): TurnCommitOutcome => {
       try {
+        if (
+          claim.epoch <= this.discardedScreenObservationEpoch
+          && !pending.providerNative
+        ) {
+          if (this.pendingTurnCommit === pending) delete this.pendingTurnCommit;
+          resolveSettlement();
+          return { status: "failed" };
+        }
         const banked = this.bankTurnReceipt(turns, claim);
         if (turns.length !== observation.turns.length || banked === undefined) {
           throw new Error(
@@ -1030,6 +1078,14 @@ export class WorkerTurnEngine {
         throw error;
       }
     }, (error: unknown) => {
+      if (
+        claim.epoch <= this.discardedScreenObservationEpoch
+        && !pending.providerNative
+      ) {
+        if (this.pendingTurnCommit === pending) delete this.pendingTurnCommit;
+        resolveSettlement();
+        return { status: "failed" };
+      }
       // A rejected asynchronous write can have persisted a multi-turn prefix. Keep the reservation
       // and make resume fail closed rather than assigning those possibly durable ordinals again.
       pending.poisoned = true;
@@ -1252,10 +1308,13 @@ export class WorkerTurnEngine {
     claim: TurnCaptureClaim,
     observation: WorkerTurnObservation,
   ): void {
-    if (observation.turns.length === 0) return;
+    const turns = claim.epoch <= this.discardedScreenObservationEpoch
+      ? observation.turns.filter((turn) => turn.transport === "provider-native")
+      : observation.turns;
+    if (turns.length === 0) return;
     this.completionBarrierFloor = Math.max(
       this.completionBarrierFloor,
-      claim.completionTarget + observation.turns.length - 1,
+      claim.completionTarget + turns.length - 1,
     );
   }
 

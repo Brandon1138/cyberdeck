@@ -256,8 +256,10 @@ describe("WorkerTurnEngine", () => {
       engine,
       observations,
       captureProviderTurns,
+      commitProviderTurns,
       effects,
       fatalTermination,
+      record,
       replay,
     } = harness();
 
@@ -297,9 +299,69 @@ describe("WorkerTurnEngine", () => {
 
     await vi.runAllTimersAsync();
     expect(captureProviderTurns).not.toHaveBeenCalled();
+    expect(commitProviderTurns).not.toHaveBeenCalled();
     expect(engine.completedTurns).toBe(0);
     expect(engine.canonicalTurns).toBe(0);
     expect(engine.waitResult(1).status).not.toBe("completed");
+
+    record.executionState = "failed";
+    await expect(engine.settleForResume(replay())).resolves.toBeUndefined();
+    record.executionState = "active";
+    engine.resetForResume();
+    observations.composer = { modalOpen: false, occupied: false };
+    await expect(engine.submitInstruction({
+      message: "work after fatal resume",
+      encoded: Buffer.from("work after fatal resume\n"),
+      source: "orchestrator",
+      instructionId: "post-fatal-resume",
+    })).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+  });
+
+  it("makes a late fallback commit inert after terminal authority rejects its screen", async () => {
+    vi.useFakeTimers();
+    const lateCommit = deferred<WorkerTurnTranscript[]>();
+    const {
+      engine,
+      observations,
+      captureProviderTurns,
+      commitProviderTurns,
+      record,
+      replay,
+    } = harness();
+    captureProviderTurns.mockResolvedValueOnce([{
+      text: "turn rejected by terminal authority",
+      data: { transport: "terminal-replay-fallback" },
+    }]);
+    commitProviderTurns.mockReturnValueOnce(lateCommit.promise);
+
+    observations.activity = "working";
+    engine.appendOutput(Buffer.from("working"), replay);
+    observations.activity = "awaiting-input";
+    engine.appendOutput(Buffer.from("finished screen"), replay);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(commitProviderTurns).toHaveBeenCalledOnce();
+
+    engine.discardPendingScreenTurns();
+    record.executionState = "failed";
+    await expect(engine.settleForResume(replay())).resolves.toBeUndefined();
+    record.executionState = "active";
+    engine.resetForResume();
+    await expect(engine.submitInstruction({
+      message: "new generation work",
+      encoded: Buffer.from("new generation work\n"),
+      source: "orchestrator",
+      instructionId: "after-discarded-commit",
+    })).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+
+    lateCommit.resolve([{
+      text: "turn rejected by terminal authority",
+      data: { transport: "terminal-replay-fallback" },
+    }]);
+    await flushMicrotasks();
+
+    expect(engine.completedTurns).toBe(0);
+    expect(engine.canonicalTurns).toBe(0);
+    expect(engine.waitResult(1)).toMatchObject({ completedTurns: 0 });
   });
 
   it("quiesces a stale native observation before a resumed instruction can reuse its ordinal", async () => {

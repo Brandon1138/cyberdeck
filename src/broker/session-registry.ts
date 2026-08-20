@@ -927,6 +927,9 @@ export class SessionRegistry {
     // finished its task keeps that outcome through the kill, so it rehydrates as Done rather than
     // as Stopped. An operator-initiated stop still reads as Stopped — that is their action.
     runtime.outcomePreserved = this.shuttingDown && runtime.record.attentionState === "done";
+    // Stop authority rejects any unbanked screen synchronously, before journaling or process kill
+    // can yield long enough for the 200 ms bank to reinterpret it as a completed turn.
+    runtime.turns.discardPendingScreenTurns();
     if (runtime.outcomePreserved !== true) await this.setAttention(runtime, "stopping", true);
     this.requireSessionRuntime(runtime).kill("SIGTERM");
     await this.appendEvent("session.stopped", sessionId, {});
@@ -1461,7 +1464,7 @@ export class SessionRegistry {
       // semantics. They must not reinterpret a previously frozen screen as a normal turn. A bare
       // non-zero process exit has no such semantic authority: it still settles an exact receipt
       // before the process outcome is published as failed.
-      runtime.turns.releaseTimers();
+      runtime.turns.discardPendingScreenTurns();
       this.publishTerminalExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
