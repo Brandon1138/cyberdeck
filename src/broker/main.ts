@@ -42,8 +42,7 @@ import { InstructionStore } from "../persistence/instruction-store.js";
 import { WorkflowStore } from "../persistence/workflow-store.js";
 import { WorkflowService } from "../orchestration/workflow-service.js";
 import { loadBrokerRuntimeConfig } from "../runtime-config.js";
-import { selectExpiredThreads, type ThreadRetentionPolicy } from "../domain/thread-retention.js";
-import type { SessionRecord } from "../domain/session.js";
+import { retainStartupThreads } from "../orchestration/startup-thread-retention.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
 import { ScoutEgressGrantStore } from "../persistence/scout-egress-grant-store.js";
 import { WorkerCoordinationRuntime } from "./worker-coordination-runtime.js";
@@ -80,32 +79,6 @@ export function composeJobDispatchAdapters(context: {
   ];
 }
 
-/**
- * Load the durable thread catalog and apply the retention policy before anything else reads it.
- *
- * Doing this at startup rather than only while running means an operator who left the broker down
- * for a week does not come back to an unbounded catalog. Compaction is what makes retention real
- * on disk: deletions are tombstones, so the file only shrinks when it is rewritten.
- */
-export async function retainThreads(
-  store: SessionStore,
-  policy: ThreadRetentionPolicy,
-  now: number = Date.now(),
-  onExpired?: (record: SessionRecord) => Promise<void>,
-): Promise<SessionRecord[]> {
-  const loaded = await store.load();
-  const expired = new Set(selectExpiredThreads(loaded, policy, now));
-  if (expired.size === 0) return loaded;
-  if (onExpired !== undefined) {
-    await Promise.allSettled(
-      loaded.filter((record) => expired.has(record.id)).map((record) => onExpired(record)),
-    );
-  }
-  const retained = loaded.filter((record) => !expired.has(record.id));
-  await store.compact(retained);
-  return retained;
-}
-
 export async function runBroker(
   socketPath = brokerSocketPath,
   stateDirectory = appStateDirectory,
@@ -126,16 +99,14 @@ export async function runBroker(
   const providerPermissions = new ProviderPermissionPreferenceStore(stateDirectory);
   const scoutReports = new ScoutReportStore(stateDirectory);
   const scoutEgress = new ScoutEgressGrantStore(stateDirectory);
-  const recoveredSessions = await retainThreads(
-    sessionStore,
+  const recoveredSessions = await retainStartupThreads(
+    {
+      catalog: sessionStore,
+      scoutReports,
+      claudeBindings: transcripts,
+    },
     config.threadRetention,
     Date.now(),
-    async (record) => {
-      if (record.profile === "scout") await scoutReports.remove(record.id);
-      // The same drop the runtime deletion paths use, so a binding is retired identically whether
-      // its thread expired while the broker was down or was deleted while it was up.
-      await transcripts.dropClaudeBinding(record.id);
-    },
   );
   const registry = new SessionRegistry({
     adapters: {

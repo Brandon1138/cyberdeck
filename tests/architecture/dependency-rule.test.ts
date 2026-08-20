@@ -920,8 +920,13 @@ describe("architecture dependency rule", () => {
       resolve(SOURCE_ROOT, "client/fleet.ts"),
       resolve(SOURCE_ROOT, "broker/main.ts"),
     )).toBe(false);
+  });
+
+  it("keeps startup thread retention in the application layer", () => {
+    expect(layerFor(resolve(SOURCE_ROOT, "orchestration/startup-thread-retention.ts")))
+      .toBe("application");
     expect(
-      currentViolations().filter(({ from }) => from === "src/broker/main.ts"),
+      currentViolations().filter(({ from }) => from === "src/orchestration/startup-thread-retention.ts"),
     ).toEqual([]);
   });
 

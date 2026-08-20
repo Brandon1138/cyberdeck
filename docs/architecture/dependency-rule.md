@@ -16,7 +16,7 @@ Imports point down this diagram, never up or sideways between the two outer peer
 
 ## Layer assignment
 
-- **Composition:** exactly `src/broker/main.ts`, the construction-only composition root. It may import every layer to assemble concrete implementations; the sole importer is the executable bootstrap edge `src/cli.ts -> src/broker/main.ts`; application policy must not move into `main.ts`.
+- **Composition:** exactly `src/broker/main.ts`, the construction-only composition root. It may import every layer to assemble concrete implementations; the sole importer is the executable bootstrap edge `src/cli.ts -> src/broker/main.ts`; startup retention is application-owned and `main.ts` only wires it.
 
 - **Delivery:** `src/mcp/**`, `src/app-server/**`, `src/client/**`, `src/protocol/**`, and `src/cli.ts`. These are MCP, app-server, wire-protocol, CLI, and interactive client entry points.
 - **Adapters/application:** `src/orchestration/**`, `src/control-plane/**`, `src/broker/**`, `src/config.ts`, and `src/limits.ts`. This conservatively keeps orchestration, control-plane, and broker code together as currently situated, along with application policy/configuration.

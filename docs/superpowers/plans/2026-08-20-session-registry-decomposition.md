@@ -56,10 +56,12 @@
 - Modify: `docs/architecture/dependency-rule-baseline.json`
 - Modify: `docs/architecture/dependency-rule.md`
 - Modify: `docs/architecture/mik-94-decomposition-proposal.md`
+- Create: `src/orchestration/startup-thread-retention.ts`, `tests/orchestration/startup-thread-retention.test.ts`
+- Modify: `src/broker/main.ts`
 
 **Interfaces:**
 - Consumes: existing `Layer`, `ALLOWED_IMPORTS`, `layerFor`, and exact baseline comparison.
-- Produces: `Layer = "composition" | "delivery" | "application" | "domain" | "infrastructure"`; the exact `broker/main.ts` path maps to `composition`; source-aware import allowance admits only `cli.ts -> broker/main.ts`; baseline count becomes 78.
+- Produces: `Layer = "composition" | "delivery" | "application" | "domain" | "infrastructure"`; the exact `broker/main.ts` path maps to `composition`; source-aware import allowance admits only `cli.ts -> broker/main.ts`; baseline count becomes 78. The application-owned `src/orchestration/startup-thread-retention.ts` owns structural ports for session catalog load/compact, Scout report removal, and Claude binding removal.
 
 - [ ] **Step 1: Add the failing composition-root regression**
 
@@ -77,9 +79,6 @@ it("treats only broker/main.ts as the composition root", () => {
     resolve(SOURCE_ROOT, "client/fleet.ts"),
     resolve(SOURCE_ROOT, "broker/main.ts"),
   )).toBe(false);
-  expect(
-    currentViolations().filter(({ from }) => from === "src/broker/main.ts"),
-  ).toEqual([]);
 });
 ```
 
@@ -93,7 +92,23 @@ Run:
 
 Expected: FAIL because `layerFor(.../broker/main.ts)` is `application` and 25 current violations originate there.
 
-- [ ] **Step 3: Add the exact composition layer**
+- [ ] **Step 3: Add the startup-retention tests first and capture RED**
+
+Create `tests/orchestration/startup-thread-retention.test.ts` importing the desired orchestration
+module path before the module exists. Use recording in-memory ports and assert no-op retention,
+interleaved survivor order in both the returned and compacted arrays, Scout-only cleanup, cleanup
+rejection settlement, Scout-rejection binding skip, and deferred cross-record cleanup where the
+second record starts before the first settles and compaction waits for both.
+
+Run:
+
+```bash
+../../node_modules/.bin/vitest run --configLoader runner tests/orchestration/startup-thread-retention.test.ts tests/architecture/dependency-rule.test.ts
+```
+
+Expected: RED from the missing `src/orchestration/startup-thread-retention.ts` module while the existing architecture tests remain green.
+
+- [ ] **Step 4: Add the exact composition layer**
 
 Implement the explicit layer before the top-level `broker` classification:
 
@@ -132,27 +147,38 @@ Use `isAllowedLocalImport(importer, target)` inside `currentViolations()`.
 
 Delete all 25 sorted baseline entries whose `from` is `src/broker/main.ts`; do not add replacement entries.
 
-- [ ] **Step 4: Align the architecture documents**
+- [ ] **Step 5: Move startup retention into the application layer**
 
-Change the dependency-rule status from provisional to enforced, document the one exact composition path and its sole CLI bootstrap importer, and mark proposal rows 0A-0C landed. Record that composition is construction only: application policy must not move into `main.ts`.
+Create `src/orchestration/startup-thread-retention.ts` with only domain imports and three narrow
+structural ports: catalog `load`/`compact`, Scout `remove`, and Claude `dropClaudeBinding`.
+Move `retainThreads` and its expired-record policy out of `main.ts`; preserve sequential per-record
+cleanup, cross-record `Promise.allSettled`, rejection behavior, post-settlement compaction, and
+original catalog order. `main.ts` constructs the concrete stores and wires the ports. Update the
+architecture regression to assign the orchestration module to application with zero violations.
+Delete the old broker module/test paths using `apply_patch` add/delete edits.
 
-- [ ] **Step 5: Verify the slice**
+- [ ] **Step 6: Align the architecture documents**
+
+Change the dependency-rule status from provisional to enforced, document the one exact composition path and its sole CLI bootstrap importer, and record that startup retention is application-owned. Mark proposal row 0A landed with the orchestration production/test paths. Record that composition is construction only: application policy must not move into `main.ts`.
+
+- [ ] **Step 7: Verify the slice**
 
 Run:
 
 ```bash
-../../node_modules/.bin/vitest run --configLoader runner tests/architecture/dependency-rule.test.ts
+../../node_modules/.bin/vitest run --configLoader runner tests/orchestration/startup-thread-retention.test.ts tests/architecture/dependency-rule.test.ts
 ../../node_modules/.bin/tsc -p tsconfig.json --noEmit
+../../node_modules/.bin/vitest run --configLoader runner tests/domain/thread-retention.test.ts tests/broker/thread-durability.test.ts tests/integration/broker-recovery.test.ts tests/persistence/claude-transcript-rebind.test.ts
 ../../node_modules/.bin/vitest run --configLoader runner
 ```
 
-Expected: architecture 11/11 or greater, full suite green, typecheck clean, baseline exactly 78, no production file changed.
+Expected: focused architecture/retention tests green, parity and typecheck clean, full suite green, baseline exactly 78, with startup retention policy extracted from the composition root.
 
-- [ ] **Step 6: Commit, publish, review, and merge**
+- [ ] **Step 8: Commit, publish, review, and merge**
 
 ```bash
-git add tests/architecture/dependency-rule.test.ts docs/architecture/dependency-rule-baseline.json docs/architecture/dependency-rule.md docs/architecture/mik-94-decomposition-proposal.md
-git commit -m "refactor(architecture): declare broker composition root (MIK-138)"
+git add -- src/broker/main.ts src/orchestration/startup-thread-retention.ts tests/orchestration/startup-thread-retention.test.ts tests/architecture/dependency-rule.test.ts docs/architecture/dependency-rule-baseline.json docs/architecture/dependency-rule.md docs/architecture/mik-94-decomposition-proposal.md docs/superpowers/plans/2026-08-20-session-registry-decomposition.md
+git commit -m "refactor(architecture): move startup retention into application (MIK-138)"
 ```
 
 Open a dedicated PR, require exact-head `verify`, resolve every live finding, merge with a merge commit, and confirm green `main` before Task 2.
