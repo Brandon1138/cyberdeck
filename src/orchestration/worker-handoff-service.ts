@@ -87,8 +87,8 @@ export class WorkerHandoffError extends Error {
 export interface WorkerHandoffOptions {
   coordination: WorkerCoordinationService;
   registry: SessionLookupPort;
-  orchestrators: OrchestratorStore;
-  instructions?: InstructionQueue;
+  orchestrators: Pick<OrchestratorStore, "findBySessionId">;
+  instructions?: Pick<InstructionQueue, "enqueue">;
   credentials?: WorkerLeaseCredentialCustodian;
 }
 

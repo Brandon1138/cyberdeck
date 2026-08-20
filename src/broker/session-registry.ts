@@ -80,7 +80,6 @@ import {
   type ScoutDecisionCard,
 } from "../domain/scout-output.js";
 import type {
-  ScoutArtifactRead,
   ScoutReportCapture,
   ScoutReportStore,
 } from "../persistence/scout-report-store.js";
@@ -88,6 +87,7 @@ import { captureScoutWorkspaceStateHash } from "../providers/cursor/workspace-st
 import type {
   InstructionDelivery,
   InstructionStateUpdate,
+  ScoutArtifactRead,
   WorkerResultSnapshot,
   WorkerWaitResult,
   WorkerWaitTarget,

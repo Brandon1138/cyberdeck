@@ -291,9 +291,9 @@ export interface WorkerControlOptions {
   registry: SessionLookupPort
     & SessionProcessControlPort
     & SessionUpdatePort
-    & WorkerTruthQueryPort;
-  orchestrators: OrchestratorStore;
-  instructions?: InstructionQueue;
+    & Pick<WorkerTruthQueryPort, "workerTruth">;
+  orchestrators: Pick<OrchestratorStore, "findBySessionId">;
+  instructions?: Pick<InstructionQueue, "enqueue">;
   now?: () => number;
   /** Minimum time a graceful worker stop must stay pending before force escalation is allowed. */
   forceStopGraceMs?: number;

@@ -35,9 +35,12 @@ export const WorkflowChangesParamsSchema = WorkflowRunActorParamsSchema.extend({
 export class WorkflowService {
   constructor(
     private readonly registry: SessionLookupPort,
-    private readonly orchestrators: OrchestratorStore,
-    private readonly store: WorkflowStore,
-    private readonly instructions: InstructionQueue,
+    private readonly orchestrators: Pick<OrchestratorStore, "findBySessionId">,
+    private readonly store: Pick<
+      WorkflowStore,
+      "putRun" | "listRuns" | "getRun" | "putMessage" | "listMessages"
+    >,
+    private readonly instructions: Pick<InstructionQueue, "enqueue">,
   ) {}
 
   async create(input: z.input<typeof CreateWorkflowParamsSchema>): Promise<WorkflowRun> {

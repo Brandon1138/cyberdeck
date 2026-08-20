@@ -65,12 +65,20 @@ export interface WorkerResultSnapshot {
     | "stopped"
     | "exited"
     | "budget_exhausted"
+    /** The provider stopped itself on its own limits. Terminal, and the process may still be alive. */
     | "provider-limit";
   completedTurns: number;
   text: string;
+  /**
+   * The authoritative worker state this snapshot was projected from. `status` above answers "what
+   * happened to the turn this wait asked about"; `truth` answers "what is this worker doing", and
+   * both come from the same projection so a wait cannot disagree with `threads_list`.
+   */
   truth: WorkerTruth;
+  /** Whether the target turn's text is a provider turn or a screen scrape the broker settled for. */
   provenance?: "provider-transcript" | "terminal-replay";
   providerLimit?: ProviderLimitTermination;
+  /** Only on a completed target: whether this delivery is the first one for that completion. */
   retrieval?: "fresh" | "replay";
   completedAt?: string;
   stalledForSeconds?: number;
@@ -117,14 +125,21 @@ export interface ScoutArtifactQueryPort {
   scoutDecisionCard(sessionId: string): ScoutDecisionCard | undefined;
 }
 
+/** What `submitInstruction` actually did, as opposed to what it hopes happened next. */
 export interface InstructionDelivery {
+  /**
+   * Never stronger than `rendered`: submission is observed later, never claimed synchronously.
+   * `undelivered` is the other terminal answer — the worker will not read this, ever.
+   */
   state: "queued" | "rendered" | "undelivered";
   hold?: DeliveryHoldReason;
   detail?: string;
+  /** Present when `rendered`: the turn ordinal that will answer this instruction. */
   expectedTurn?: number;
   at: string;
 }
 
+/** A transition the broker observed for an instruction it had already rendered. */
 export interface InstructionStateUpdate {
   sessionId: string;
   instructionId: string;
