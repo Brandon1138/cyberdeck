@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ScoutReportStore } from "../../src/persistence/scout-report-store.js";
+import type { ScoutArtifactRead } from "../../src/persistence/scout-report-store.js";
 import {
   SCOUT_REPORT_BEGIN,
   SCOUT_REPORT_END,
@@ -67,6 +68,19 @@ const card = [
 ].join("\n");
 
 describe("ScoutReportStore", () => {
+  it("keeps ScoutArtifactRead type-usable from the persistence path", () => {
+    const read: ScoutArtifactRead = {
+      artifact: "card",
+      text: "",
+      afterByte: 0,
+      nextByte: 0,
+      totalBytes: 0,
+      complete: true,
+    };
+
+    expect(read.complete).toBe(true);
+  });
+
   it("allocates private card/evidence/trace artifacts outside the worktree", async () => {
     const repo = await directory("cyberdeck-scout-repo-");
     const state = await directory("cyberdeck-scout-state-");

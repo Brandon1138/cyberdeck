@@ -25,6 +25,8 @@ import {
 import type { ScoutArtifactRead } from "../orchestration/session/session-ports.js";
 import { ensurePrivateDirectory } from "./private-files.js";
 
+export type { ScoutArtifactRead } from "../orchestration/session/session-ports.js";
+
 const PARTIAL_REPORT_PREFIX = "CYBERDECK_SCOUT_PARTIAL\n";
 const INVALID_REPORT_PREFIX = "CYBERDECK_SCOUT_INVALID\n";
 const TRACE_TRUNCATED_MARKER = Buffer.from(
