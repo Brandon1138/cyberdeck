@@ -135,6 +135,8 @@ interface RuntimeSession {
   scoutTraceFailure?: string;
   /** Prevents duplicate async finalization when a child process reports more than one close path. */
   scoutFinalizing?: boolean;
+  /** The exact exiting runtime is settling its last durable turn before terminal publication. */
+  terminalFinalizing?: boolean;
   scoutBudgetTimer?: ReturnType<typeof setTimeout>;
   scoutBudgetActive?: boolean;
   scoutBudgetExhausting?: boolean;
@@ -722,6 +724,7 @@ export class SessionRegistry {
     failed: FailureSink = () => {},
   ): Promise<Buffer> {
     const runtime = this.requireRuntime(sessionId);
+    this.requireTerminalFinalizationComplete(runtime);
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active; resume it before attaching");
     }
@@ -775,6 +778,7 @@ export class SessionRegistry {
 
   async write(sessionId: string, clientId: string | undefined, data: Buffer): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
+    this.requireTerminalFinalizationComplete(runtime);
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
     }
@@ -788,6 +792,7 @@ export class SessionRegistry {
 
   async submit(sessionId: string, clientId: string | undefined, message: string): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
+    this.requireTerminalFinalizationComplete(runtime);
     this.requireInteractiveInput(runtime);
     const adapter = this.requireAdapter(runtime.record.provider);
     const data = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
@@ -866,6 +871,7 @@ export class SessionRegistry {
 
   resize(sessionId: string, clientId: string | undefined, cols: number, rows: number): void {
     const runtime = this.requireRuntime(sessionId);
+    this.requireTerminalFinalizationComplete(runtime);
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
     }
@@ -893,6 +899,7 @@ export class SessionRegistry {
 
   async stop(sessionId: string): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
+    if (runtime.terminalFinalizing === true) return;
     if (runtime.record.exitCode !== null) {
       if (runtime.record.attentionState === "stopped") return;
       await this.setAttention(runtime, "stopped", true);
@@ -929,6 +936,7 @@ export class SessionRegistry {
   /** Force only one already-stopping session. Child sessions are deliberately untouched. */
   forceStop(sessionId: string): void {
     const runtime = this.requireRuntime(sessionId);
+    if (runtime.terminalFinalizing === true) return;
     if (runtime.record.exitCode !== null) return;
     if (!runtime.stopRequested) {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Graceful stop must be requested before force");
@@ -961,6 +969,12 @@ export class SessionRegistry {
 
   async resume(sessionId: string): Promise<SessionRecord> {
     const runtime = this.requireRuntime(sessionId);
+    if (runtime.terminalFinalizing === true) {
+      throw new RegistryError(
+        "SESSION_ALREADY_ACTIVE",
+        "Session exit is still finalizing its last durable turn",
+      );
+    }
     if (runtime.record.executionState === "active" || runtime.record.executionState === "starting") {
       throw new RegistryError("SESSION_ALREADY_ACTIVE", "Session is already active");
     }
@@ -1421,11 +1435,70 @@ export class SessionRegistry {
     this.notifySessionUpdate(runtime.record.id);
   }
 
-  private handleExit(runtime: RuntimeSession, exitCode: number, signal?: number): void {
-    runtime.turns.releaseTimers();
+  private handleExit(
+    runtime: RuntimeSession,
+    sessionRuntime: SessionRuntime,
+    exitCode: number,
+    signal?: number,
+  ): void {
+    if (
+      runtime.sessionRuntime !== sessionRuntime
+      || runtime.terminalFinalizing === true
+      || runtime.record.exitCode !== null
+    ) return;
+    // Every process exit ends the Scout's wall-clock ownership synchronously, including legacy
+    // interactive-PTY Scouts that take the non-semantic branch below. A surviving timer could
+    // otherwise rewrite an already-published exit as budget exhaustion and kill a dead handle.
     if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
     delete runtime.scoutBudgetTimer;
     runtime.scoutBudgetActive = false;
+    const settlesNormalSemanticTurn = runtime.record.executionState === "active"
+      && !runtime.stopRequested
+      && runtime.record.profile !== "scout"
+      && runtime.record.termination === undefined;
+    if (!settlesNormalSemanticTurn) {
+      // Fatal/provider-limit, explicit-stop, and Scout authority already chose their terminal
+      // semantics. They must not reinterpret a previously frozen screen as a normal turn. A bare
+      // non-zero process exit has no such semantic authority: it still settles an exact receipt
+      // before the process outcome is published as failed.
+      runtime.turns.releaseTimers();
+      this.publishTerminalExit(runtime, sessionRuntime, exitCode, signal);
+      return;
+    }
+    // Input closes synchronously with the exact process handle. Terminal execution/attention truth
+    // stays unpublished until every turn that process could already own has a durable outcome.
+    runtime.terminalFinalizing = true;
+    let settlement: Promise<void> | undefined;
+    try {
+      settlement = runtime.turns.startTerminalFinalization(
+        () => sessionRuntime.snapshot().toString("utf8"),
+      );
+    } catch {
+      this.publishTerminalExit(runtime, sessionRuntime, exitCode, signal);
+      return;
+    }
+    if (settlement === undefined) {
+      this.publishTerminalExit(runtime, sessionRuntime, exitCode, signal);
+      return;
+    }
+    void settlement.then(
+      () => this.publishTerminalExit(runtime, sessionRuntime, exitCode, signal),
+      () => this.publishTerminalExit(runtime, sessionRuntime, exitCode, signal),
+    );
+  }
+
+  private publishTerminalExit(
+    runtime: RuntimeSession,
+    sessionRuntime: SessionRuntime,
+    exitCode: number,
+    signal?: number,
+  ): void {
+    // The identity check before handleExit's await is not enough: a stale finalizer must never tear
+    // down a replacement generation or clear its input fence.
+    if (runtime.sessionRuntime !== sessionRuntime) return;
+    // A valid final receipt has already completed every matching instruction. Only work still left
+    // in the dead process's composer becomes undelivered now.
+    runtime.turns.stopPendingInstructions();
     const scoutTerminal = runtime.record.scout?.terminalState;
     runtime.record.executionState = scoutTerminal === "complete"
       ? "exited"
@@ -1439,10 +1512,6 @@ export class SessionRegistry {
               ? "exited"
               : "failed";
     runtime.record.exitCode = exitCode;
-    // Anything still sitting in the composer died with the process. Saying so is the difference
-    // between an orchestrator retrying an instruction and one waiting forever on a turn that can
-    // no longer happen.
-    runtime.turns.stopPendingInstructions();
     const controller = runtime.controller;
     const watchers = [...runtime.watchers.values()];
     delete runtime.controller;
@@ -1461,6 +1530,9 @@ export class SessionRegistry {
               ? "done"
               : "failed";
     runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
+    // The record is terminal before either fence opens, so no input path can observe an active gap.
+    runtime.turns.finishTerminalFinalization();
+    delete runtime.terminalFinalizing;
     controller?.ended(exitCode);
     for (const watcher of watchers) watcher.ended(exitCode);
     void this.appendEvent("session.exited", runtime.record.id, {
@@ -1485,6 +1557,7 @@ export class SessionRegistry {
 
   private async finalizeHeadlessScout(
     runtime: RuntimeSession,
+    sessionRuntime: SessionRuntime,
     exitCode: number,
     signal?: number,
   ): Promise<void> {
@@ -1496,13 +1569,13 @@ export class SessionRegistry {
 
     const scout = runtime.record.scout;
     if (scout === undefined) {
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
     this.captureScoutReport(
       runtime,
-      () => runtime.sessionRuntime?.snapshot().toString("utf8") ?? "",
+      () => sessionRuntime.snapshot().toString("utf8"),
     );
     await runtime.scoutCaptureTail?.catch(() => undefined);
     await runtime.scoutTraceTail?.catch(() => undefined);
@@ -1514,7 +1587,7 @@ export class SessionRegistry {
         `Durable Scout trace could not be persisted: ${runtime.scoutTraceFailure}`,
         true,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
@@ -1526,7 +1599,7 @@ export class SessionRegistry {
         "Scout has no pre-launch workspace state baseline",
         true,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
     let after: string;
@@ -1539,7 +1612,7 @@ export class SessionRegistry {
         `Post-run workspace verification failed: ${errorMessage(error)}`,
         true,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
     if (after !== baseline) {
@@ -1549,14 +1622,14 @@ export class SessionRegistry {
         "Scout changed observable repository state despite its read-only profile",
         true,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
     // A launch/setup failure already carries its more precise reason. Workspace immutability still
     // ran above, but it must not rewrite that failure into a successful canary.
     if (scout.terminalState === "failed") {
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
@@ -1570,12 +1643,12 @@ export class SessionRegistry {
     if (runtime.stopRequested) {
       scout.terminalState = "failed";
       await this.persist(runtime).catch(() => undefined);
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
     if (scout.terminalState === "budget_exhausted") {
       await this.persist(runtime).catch(() => undefined);
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
     if (exitCode !== 0 && runtime.scoutExpectedSuccessfulStop !== true) {
@@ -1585,7 +1658,7 @@ export class SessionRegistry {
         `Cursor Scout exited with code ${exitCode}`,
         false,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
@@ -1605,7 +1678,7 @@ export class SessionRegistry {
         `Cursor Scout did not produce a valid decision card: ${detail}`,
         false,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
@@ -1625,7 +1698,7 @@ export class SessionRegistry {
       basis: captured.card.basis,
     }).catch(() => undefined);
     await this.persist(runtime).catch(() => undefined);
-    this.handleExit(runtime, exitCode, signal);
+    this.handleExit(runtime, sessionRuntime, exitCode, signal);
   }
 
   private async markFinalScoutFailure(
@@ -1689,9 +1762,9 @@ export class SessionRegistry {
     sessionRuntime.onExit((exitCode, signal) => {
       if (runtime.sessionRuntime !== sessionRuntime) return;
       if (runtime.record.scout?.transport === "headless-stream-json") {
-        void this.finalizeHeadlessScout(runtime, exitCode, signal);
+        void this.finalizeHeadlessScout(runtime, sessionRuntime, exitCode, signal);
       } else {
-        this.handleExit(runtime, exitCode, signal);
+        this.handleExit(runtime, sessionRuntime, exitCode, signal);
       }
     });
   }
@@ -2018,6 +2091,14 @@ export class SessionRegistry {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session runtime is not active; resume it before use");
     }
     return runtime.sessionRuntime;
+  }
+
+  private requireTerminalFinalizationComplete(runtime: RuntimeSession): void {
+    if (runtime.terminalFinalizing !== true) return;
+    throw new RegistryError(
+      "SESSION_NOT_ACTIVE",
+      "Session is finalizing its last durable turn",
+    );
   }
 
   private requireInteractiveInput(runtime: RuntimeSession): void {

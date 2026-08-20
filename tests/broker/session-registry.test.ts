@@ -1329,6 +1329,300 @@ describe("SessionRegistry", () => {
       .rejects.toMatchObject({ code: "SESSION_NOT_ACTIVE" });
   });
 
+  it.each([
+    {
+      label: "native",
+      providerTurns: [{ id: "final-native", text: "final native answer" }],
+      answer: "final native answer",
+      provenance: "provider-transcript",
+      exitCode: 0,
+      executionState: "exited",
+      captureSequence: ["native-only", "native-only"],
+    },
+    {
+      label: "native before failed process exit",
+      providerTurns: [{ id: "final-native-failed-exit", text: "final answer before exit 1" }],
+      answer: "final answer before exit 1",
+      provenance: "provider-transcript",
+      exitCode: 1,
+      executionState: "failed",
+      captureSequence: ["native-only", "native-only"],
+    },
+    {
+      label: "fallback",
+      providerTurns: [],
+      answer: "final fallback answer",
+      provenance: "terminal-replay",
+      exitCode: 0,
+      executionState: "exited",
+      captureSequence: [
+        "native-only",
+        "native-only",
+        "native-only",
+        "native-only",
+        "fallback-allowed",
+      ],
+    },
+  ])("settles a final $label receipt before publishing process exit", async ({
+    providerTurns,
+    answer,
+    provenance,
+    exitCode,
+    executionState,
+    captureSequence,
+  }) => {
+    const readGate = deferred<void>();
+    const readStarted = deferred<void>();
+    const { registry, ptys, captureCalls, commitCalls } = harness({
+      exitOnKill: false,
+      providerTurns,
+      onProviderTurnsRead: async () => {
+        readStarted.resolve();
+        await readGate.promise;
+      },
+    });
+    const record = await registry.start(request({ name: `terminal-${provenance}` }));
+    const instructionId = provenance === "provider-transcript"
+      ? "11111111-1111-4111-8111-111111111112"
+      : "11111111-1111-4111-8111-111111111113";
+    const states: InstructionStateUpdate[] = [];
+    registry.onInstructionState((update) => states.push(update));
+    await expect(registry.submitInstruction(
+      record.id,
+      "finish before exit",
+      "orchestrator",
+      {},
+      instructionId,
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+    ptys[0]!.emitOutput(
+      `\u001b]0;\u2839 terminal-${provenance}\u0007\u001b[2JWorking\r\nesc to interrupt`,
+    );
+    ptys[0]!.emitOutput(
+      `\u001b[2J${answer}\r\n\u001b]0;terminal-${provenance}\u0007`,
+    );
+    await readStarted.promise;
+
+    let waitSettled = false;
+    const wait = registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300).then((result) => {
+      waitSettled = true;
+      return result;
+    });
+    ptys[0]!.emitExit(exitCode);
+    await flushMicrotasks();
+
+    expect(waitSettled).toBe(false);
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "active",
+      exitCode: null,
+      generation: 1,
+    });
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      state: "working",
+      terminal: false,
+      composerOccupied: false,
+      modalOpen: false,
+    });
+    const writesBeforeBlockedInput = ptys[0]!.writes.length;
+    await expect(registry.submitInstruction(
+      record.id,
+      "must not reach a dead process",
+      "orchestrator",
+      {},
+      "11111111-1111-4111-8111-111111111114",
+    )).resolves.toMatchObject({ state: "undelivered", hold: "worker-terminal" });
+    await expect(registry.submit(record.id, undefined, "human input must also stop"))
+      .rejects.toMatchObject({ code: "SESSION_NOT_ACTIVE" });
+    expect(ptys[0]!.writes).toHaveLength(writesBeforeBlockedInput);
+
+    readGate.resolve();
+    const settled = await wait;
+    expect(settled).toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "completed",
+        completedTurns: 1,
+        text: expect.stringContaining(answer),
+        provenance,
+      }],
+    });
+    expect(captureCalls).toEqual(captureSequence);
+    expect(commitCalls).toHaveLength(1);
+    expect(registry.get(record.id)).toMatchObject({
+      executionState,
+      exitCode,
+      generation: 1,
+    });
+    expect(states).toContainEqual(expect.objectContaining({
+      instructionId,
+      state: "completed",
+      turn: 1,
+    }));
+    expect(states).not.toContainEqual(expect.objectContaining({
+      instructionId,
+      state: "undelivered",
+    }));
+  });
+
+  it("publishes terminal exit after a rejected final commit without fabricating completion", async () => {
+    const commitGate = deferred<void>();
+    const { registry, ptys, commitCalls } = harness({
+      exitOnKill: false,
+      providerTurns: [{ id: "rejected-final", text: "must not be fabricated" }],
+      onProviderTurnsCommit: () => commitGate.promise,
+    });
+    const record = await registry.start(request({ name: "terminal-commit-rejection" }));
+    const instructionId = "11111111-1111-4111-8111-111111111115";
+    const states: InstructionStateUpdate[] = [];
+    registry.onInstructionState((update) => states.push(update));
+    await registry.submitInstruction(
+      record.id,
+      "final commit may reject",
+      "orchestrator",
+      {},
+      instructionId,
+    );
+    ptys[0]!.emitOutput(
+      "\u001b]0;\u2839 terminal-commit-rejection\u0007\u001b[2JWorking\r\nesc to interrupt",
+    );
+    ptys[0]!.emitOutput(
+      "\u001b[2Jmust not be fabricated\r\n\u001b]0;terminal-commit-rejection\u0007",
+    );
+    await vi.waitFor(() => expect(commitCalls).toHaveLength(1), { timeout: 2_000 });
+
+    let waitSettled = false;
+    const wait = registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300).then((result) => {
+      waitSettled = true;
+      return result;
+    });
+    ptys[0]!.emitExit(0);
+    await flushMicrotasks();
+    expect(waitSettled).toBe(false);
+    expect(registry.get(record.id).executionState).toBe("active");
+
+    commitGate.reject(new Error("durable commit rejected"));
+    const settled = await wait;
+    expect(settled).toMatchObject({
+      timedOut: false,
+      results: [{ status: "exited", completedTurns: 0 }],
+    });
+    expect(registry.get(record.id)).toMatchObject({ executionState: "exited", exitCode: 0 });
+    expect(states).toContainEqual(expect.objectContaining({
+      instructionId,
+      state: "undelivered",
+    }));
+    expect(states).not.toContainEqual(expect.objectContaining({
+      instructionId,
+      state: "completed",
+    }));
+  });
+
+  it("does not reinterpret an armed final screen after explicit stop", async () => {
+    const { registry, ptys, captureCalls, commitCalls } = harness({
+      exitOnKill: false,
+      providerTurns: [],
+    });
+    const record = await registry.start(request({ name: "stopped-final-screen" }));
+    const instructionId = "11111111-1111-4111-8111-111111111116";
+    const states: InstructionStateUpdate[] = [];
+    registry.onInstructionState((update) => states.push(update));
+    await registry.submitInstruction(
+      record.id,
+      "stop before the final screen banks",
+      "orchestrator",
+      {},
+      instructionId,
+    );
+    ptys[0]!.emitOutput(
+      "\u001b]0;\u2839 stopped-final-screen\u0007\u001b[2JWorking\r\nesc to interrupt",
+    );
+    ptys[0]!.emitOutput(
+      "\u001b[2Jscreen must not become a completion\r\n\u001b]0;stopped-final-screen\u0007",
+    );
+
+    await registry.stop(record.id);
+    expect(registry.workerTruth(record.id)).toMatchObject({ state: "stopped", terminal: true });
+    ptys[0]!.emitExit(0);
+    const result = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
+
+    expect(result).toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "stopped",
+        completedTurns: 0,
+        truth: { state: "stopped", terminal: true },
+      }],
+    });
+    expect(captureCalls).toEqual([]);
+    expect(commitCalls).toEqual([]);
+    expect(states).toContainEqual(expect.objectContaining({
+      instructionId,
+      state: "undelivered",
+    }));
+    expect(states).not.toContainEqual(expect.objectContaining({
+      instructionId,
+      state: "completed",
+    }));
+  });
+
+  it("keeps provider-limit authority over an armed final screen and process exit", async () => {
+    const { registry, ptys, captureCalls, commitCalls } = harness({
+      exitOnKill: false,
+      providerTurns: [],
+    });
+    const record = await registry.start(request({ name: "limited-final-screen" }));
+    const instructionId = "11111111-1111-4111-8111-111111111117";
+    const states: InstructionStateUpdate[] = [];
+    registry.onInstructionState((update) => states.push(update));
+    await registry.submitInstruction(
+      record.id,
+      "reach the provider limit",
+      "orchestrator",
+      {},
+      instructionId,
+    );
+    ptys[0]!.emitOutput(
+      "\u001b]0;\u2839 limited-final-screen\u0007\u001b[2JWorking\r\nesc to interrupt",
+    );
+    ptys[0]!.emitOutput(
+      "\u001b[2Jscreen must not outrank provider limit\r\n\u001b]0;limited-final-screen\u0007",
+    );
+    ptys[0]!.emitOutput("Usage limit reached \u00b7 resets 3:00pm\r\n");
+
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      state: "provider-limit",
+      terminal: true,
+    });
+    ptys[0]!.emitExit(1);
+    const result = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
+
+    expect(result).toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "provider-limit",
+        completedTurns: 0,
+        truth: { state: "provider-limit", terminal: true },
+      }],
+    });
+    expect(captureCalls).toEqual([]);
+    expect(commitCalls).toEqual([]);
+    expect(states).toContainEqual(expect.objectContaining({
+      instructionId,
+      state: "undelivered",
+    }));
+    expect(states).not.toContainEqual(expect.objectContaining({
+      instructionId,
+      state: "completed",
+    }));
+  });
+
   it("rolls back a controller claim when attachment journaling fails", async () => {
     const { registry } = harness({ failAttachJournal: true });
     const record = await registry.start(request());

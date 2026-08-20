@@ -165,6 +165,8 @@ export class WorkerTurnEngine {
   private armedScreenReplay?: () => string;
   /** Activity revision whose completed screen armed the current bank. */
   private armedScreenActivityRevision?: number;
+  /** The process exited, but its last exact semantic receipt has not finished settling yet. */
+  private terminalFinalizing = false;
   private suppressSemanticTurns?: boolean;
   private stallObservation?: StallObservation;
 
@@ -213,6 +215,7 @@ export class WorkerTurnEngine {
 
   /** Reset generation-local truth while preserving the durable completion ledger. */
   resetForResume(): void {
+    this.terminalFinalizing = false;
     this.activity = "unknown";
     this.observedWorking = false;
     this.fatalReported = false;
@@ -306,7 +309,7 @@ export class WorkerTurnEngine {
   }
 
   async submitInstruction(input: SubmitWorkerInstruction): Promise<InstructionDelivery> {
-    if (this.record.executionState !== "active") {
+    if (this.record.executionState !== "active" || this.terminalFinalizing) {
       return this.terminalDelivery(input.source, input.instructionId);
     }
     const hold = this.deliveryHold();
@@ -353,6 +356,17 @@ export class WorkerTurnEngine {
   }
 
   projectTruth(): WorkerTruth {
+    if (this.terminalFinalizing) {
+      return projectWorkerTruth({
+        executionState: "active",
+        exitCode: null,
+        activity: "working",
+        composer: { modalOpen: false, occupied: false },
+        completedTurns: this.completedTurnCount,
+        canonicalTurns: this.canonicalTurnCount,
+        pendingInstructions: this.rendered.length,
+      });
+    }
     this.observeComposer();
     const stalled = this.stalledWorker();
     return projectWorkerTruth({
@@ -480,6 +494,52 @@ export class WorkerTurnEngine {
   /** Wait until an already-enqueued provider-turn commit is durably accounted for. */
   settlePendingTurnCommit(): Promise<void> {
     return this.pendingTurnCommit?.settlement ?? Promise.resolve();
+  }
+
+  /**
+   * Fence a dead process while preserving the exact final turn it may already have completed.
+   *
+   * The registry keeps the durable record unpublished until this settles. Generation-local UI
+   * effects are invalidated immediately, while durable observations/commits and exact screen
+   * evidence drain through the same ordinal barrier used by resume. Newly banked truth is then
+   * applied to instruction/latest-result state before the registry retires anything still pending.
+   */
+  startTerminalFinalization(rawReplay: () => string): Promise<void> | undefined {
+    const completedBeforeExit = this.completedTurnCount;
+    this.terminalFinalizing = true;
+    const frozenArmedReplay = this.idleTimer === undefined ? undefined : rawReplay();
+    this.releaseTimers(frozenArmedReplay);
+    const captures = [...this.pendingTurnCaptures];
+    const requiresSettlement = captures.length > 0
+      || this.pendingTurnCommit !== undefined
+      || this.completedTurnCount < this.completionBarrierFloor;
+    if (!requiresSettlement) return undefined;
+
+    return (async () => {
+      await Promise.all(captures);
+      await this.settlePendingTurnCommit();
+      await this.drainCompletionBarrier();
+      if (this.completedTurnCount < this.completionBarrierFloor) {
+        throw new Error("Terminal completion barrier did not account for every reserved ordinal");
+      }
+      if (this.completedTurnCount > completedBeforeExit) {
+        const latest = this.completions.get(this.completedTurnCount);
+        if (latest === undefined) {
+          throw new Error("Terminal completion barrier lost its latest durable receipt");
+        }
+        this.applyCurrentTurnReceipt({
+          bankedThrough: this.completedTurnCount,
+          latest: latest.text,
+          provenance: latest.provenance,
+        });
+      }
+      this.forgetScreenCompletionsThrough(this.completedTurnCount);
+    })();
+  }
+
+  /** Clear the input/wait fence only after the registry has published a terminal record. */
+  finishTerminalFinalization(): void {
+    this.terminalFinalizing = false;
   }
 
   /**
@@ -685,6 +745,7 @@ export class WorkerTurnEngine {
     ) {
       return { status: "completed" };
     }
+    if (this.terminalFinalizing) return { status: "working" };
     if (this.currentProviderLimit !== undefined) return { status: "provider-limit" };
     if (this.activity === "needs-input") return { status: "needs-input" };
     if (this.record.executionState === "failed") return { status: "failed" };
