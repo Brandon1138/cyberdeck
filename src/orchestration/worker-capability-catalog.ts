@@ -1,6 +1,6 @@
 import { execFile, type ExecFileOptions } from "node:child_process";
 import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
-import type { ProviderId } from "../domain/session.js";
+import { ReasoningEffortSchema, type ProviderId, type ReasoningEffort } from "../domain/session.js";
 import {
   WORKER_PROVIDER_CAPABILITIES,
   type ResolvedWorkerCapability,
@@ -37,6 +37,14 @@ export interface ProviderModel {
   id: string;
   /** The provider's own display name for this id, when its listing printed one. */
   label?: string;
+  /**
+   * The efforts this id alone accepts, when the provider's listing named them per model.
+   *
+   * A provider that prints one effort range for one model has answered a question the static
+   * catalog can only answer as a snapshot: `codex debug models` gives gpt-5.3-codex-spark
+   * low..xhigh while gpt-5.6-sol reaches ultra. Absent here means unconstrained, not empty.
+   */
+  efforts?: readonly ReasoningEffort[];
 }
 
 export interface ProviderModelProbe {
@@ -50,19 +58,23 @@ export interface ProviderModelProbe {
  * a provider with no models — it is a provider Cyberdeck has no read-only way to ask, which is why
  * its absence produces a named fallback rather than an empty list. Adding one is a row here.
  */
+export type ProviderListingFormat = "labelled-lines" | "codex-json";
+
 export const PROVIDER_MODEL_LISTING_COMMANDS: Partial<
-  Record<ProviderId, { executable: string; args: readonly string[] }>
+  Record<ProviderId, { executable: string; args: readonly string[]; format: ProviderListingFormat }>
 > = {
   // `agent models` printed `<id> - <label>` lines under an "Available models" header, 2026-08-16.
-  cursor: { executable: "agent", args: ["models"] },
+  cursor: { executable: "agent", args: ["models"], format: "labelled-lines" },
   // `agy models` printed tab-separated `<id>\t<label>` lines after a progress line, 2026-08-16.
-  antigravity: { executable: "agy", args: ["models"] },
+  antigravity: { executable: "agy", args: ["models"], format: "labelled-lines" },
+  // `codex debug models` printed a JSON catalog naming each model's own effort range, 2026-08-20.
+  // Its own format, read by its own parser: the line parser must not be widened to guess at JSON.
+  codex: { executable: "codex", args: ["debug", "models"], format: "codex-json" },
 };
 
 /** Why a provider with no row above is never queried. Quoted verbatim as the fallback reason. */
 const NO_LISTING_COMMAND: Partial<Record<ProviderId, string>> = {
   claude: "the claude CLI advertises no model-listing subcommand, so its models cannot be observed",
-  codex: "the codex CLI advertises no model-listing subcommand, so its models cannot be observed",
 };
 
 /**
@@ -97,7 +109,10 @@ export class CliProviderModelProbe implements ProviderModelProbe {
     try {
       ({ stdout } = await runListingCommand(command.executable, command.args, {
         timeout: this.timeoutMs,
-        maxBuffer: 1024 * 1024,
+        // `codex debug models` printed 355KB on 2026-08-20 — every model embeds its full
+        // instruction template — and a listing truncated at the buffer is a parse failure that
+        // would read as "this provider offers nothing".
+        maxBuffer: 8 * 1024 * 1024,
         // The listing is a fact about the installed CLI, not about any repository, so it is read
         // from a directory no worker owns.
         cwd: "/",
@@ -108,7 +123,9 @@ export class CliProviderModelProbe implements ProviderModelProbe {
         unavailable: `${command.executable} ${command.args.join(" ")} failed: ${message}`,
       };
     }
-    const models = parseModelListing(stdout);
+    const models = command.format === "codex-json"
+      ? parseCodexModelCatalog(stdout)
+      : parseModelListing(stdout);
     return models.length === 0
       ? {
         unavailable: `${command.executable} ${command.args.join(" ")} printed no recognizable model ids`,
@@ -144,6 +161,63 @@ export function parseModelListing(output: string): ProviderModel[] {
     models.push({ id: trimmedId, ...(trimmedLabel === "" ? {} : { label: trimmedLabel }) });
   }
   return models;
+}
+
+/**
+ * The JSON catalog `codex debug models` prints.
+ *
+ * Read strictly, and only for what a launch needs: the slug, the display name, and the effort
+ * range that slug alone accepts. Two things the catalog carries are deliberately dropped. Entries
+ * marked `visibility: "hide"` — `codex-auto-review`, `gpt-reserve` on 2026-08-20 — are the CLI's
+ * own internal models, and offering one in Fleet's composer advertises a launch the provider does
+ * not mean to sell. And a reasoning level the ReasoningEffort contract does not name is a rung
+ * Cyberdeck has no way to pass, so it is dropped rather than widening the contract by parse.
+ *
+ * Malformed JSON, a missing `models` array, or an entry list that yields nothing recognizable all
+ * return empty, which the caller reports as unavailable — the stored catalog stands in, and no
+ * reader is ever served an empty model list as though codex offered nothing.
+ */
+export function parseCodexModelCatalog(output: string): ProviderModel[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return [];
+  }
+  if (typeof parsed !== "object" || parsed === null) return [];
+  const entries = (parsed as { models?: unknown }).models;
+  if (!Array.isArray(entries)) return [];
+
+  const models: ProviderModel[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    if (record["visibility"] !== "list") continue;
+    const slug = typeof record["slug"] === "string" ? record["slug"].trim() : "";
+    if (!MODEL_ID.test(slug) || seen.has(slug)) continue;
+    seen.add(slug);
+    const displayName = typeof record["display_name"] === "string" ? record["display_name"].trim() : "";
+    const efforts = codexReasoningEfforts(record["supported_reasoning_levels"]);
+    models.push({
+      id: slug,
+      ...(displayName === "" ? {} : { label: displayName }),
+      ...(efforts.length === 0 ? {} : { efforts }),
+    });
+  }
+  return models;
+}
+
+/** The `supported_reasoning_levels` entries that name an effort Cyberdeck can actually launch. */
+function codexReasoningEfforts(levels: unknown): readonly ReasoningEffort[] {
+  if (!Array.isArray(levels)) return [];
+  const efforts: ReasoningEffort[] = [];
+  for (const level of levels) {
+    if (typeof level !== "object" || level === null) continue;
+    const parsed = ReasoningEffortSchema.safeParse((level as { effort?: unknown }).effort);
+    if (parsed.success && !efforts.includes(parsed.data)) efforts.push(parsed.data);
+  }
+  return efforts;
 }
 
 export interface WorkerCapabilityCatalogOptions {
@@ -224,13 +298,22 @@ export class WorkerCapabilityCatalog {
           return { ...declared, source: "fallback-catalog", fallbackReason: listing.unavailable };
         }
         const modelLabels: Record<string, string> = {};
+        const modelEfforts: Record<string, readonly ReasoningEffort[]> = {};
         for (const model of listing.models) {
           if (model.label !== undefined) modelLabels[model.id] = model.label;
+          if (model.efforts !== undefined) modelEfforts[model.id] = model.efforts;
         }
+        // The static entry's own per-model labels and efforts are a dated snapshot of this very
+        // listing, so a live answer replaces them rather than merging with them: a model the
+        // provider has since dropped must not keep constraining the list that replaced it.
+        const { modelLabels: snapshotLabels, modelEfforts: snapshotEfforts, ...contract } = declared;
+        void snapshotLabels;
+        void snapshotEfforts;
         return {
-          ...declared,
+          ...contract,
           models: listing.models.map((model) => model.id),
           ...(Object.keys(modelLabels).length === 0 ? {} : { modelLabels }),
+          ...(Object.keys(modelEfforts).length === 0 ? {} : { modelEfforts }),
           source: "provider-query",
           observedAt,
         };

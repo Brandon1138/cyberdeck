@@ -273,7 +273,12 @@ describe("Cyberdeck MCP server", () => {
     const text = ((response?.result as { content: Array<{ text: string }> }).content[0]!.text);
     expect(JSON.parse(text)).toEqual([expect.objectContaining({
       provider: "codex",
-      models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+      models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.3-codex-spark"],
+      // The stand-in carries the per-model ranges too, so an orchestrator reading it offline is
+      // told what Spark accepts rather than being left to infer it from the provider's range.
+      modelEfforts: expect.objectContaining({
+        "gpt-5.3-codex-spark": ["low", "medium", "high", "xhigh"],
+      }),
       source: "fallback-catalog",
       fallbackReason: "Cyberdeck broker is unreachable at /tmp/missing.sock",
     })]);
