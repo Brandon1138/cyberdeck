@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { realpath, stat } from "node:fs/promises";
 import type { BrokerRuntimeConfig } from "../config.js";
 import { MAX_WAIT_SECONDS } from "../limits.js";
 import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
@@ -33,7 +32,6 @@ import { selectExpiredThreads } from "../domain/thread-retention.js";
 import {
   MIN_SCOUT_REPLAY_BYTES,
   resolveScoutEffectiveState,
-  scoutScopeViolation,
 } from "../domain/worker-profile.js";
 import type {
   ScoutArtifactKind,
@@ -46,7 +44,6 @@ import type {
   ScoutReportCapture,
   ScoutReportStore,
 } from "../persistence/scout-report-store.js";
-import { captureScoutWorkspaceStateHash } from "../providers/cursor/workspace-state.js";
 import type {
   InstructionDelivery,
   InstructionStateUpdate,
@@ -55,6 +52,12 @@ import type {
   WorkerWaitResult,
   WorkerWaitTarget,
 } from "../orchestration/session/session-ports.js";
+import { checkSessionCwdAccessible } from "../orchestration/session/session-cwd-check.js";
+import {
+  SessionWorkspaceCoordinator,
+  SessionWorkspaceError,
+} from "../orchestration/session/session-workspace-coordinator.js";
+import type { WorkspaceStateReader } from "../orchestration/session/session-workspace-ports.js";
 import {
   WorkerTurnEngineFactory,
   type WorkerTurnAppendResult,
@@ -189,7 +192,7 @@ export interface SessionRegistryOptions {
     ScoutReportStore,
     "initialize" | "capture" | "collect" | "appendTrace" | "readArtifact" | "remove"
   >;
-  scoutWorkspaceState?: (cwd: string) => Promise<string>;
+  scoutWorkspaceState?: WorkspaceStateReader;
   /**
    * Creates the worktree for a `cyberdeck-provisioned` workspace. Absent means the broker cannot
    * provision, and a start that asks it to is refused rather than quietly downgraded to running in
@@ -233,7 +236,8 @@ export class SessionRegistry {
   private readonly sessionUpdateListeners = new Set<(sessionId: string) => void>();
   private readonly deliveryBoundaryListeners = new Set<(sessionId: string) => void>();
   private readonly instructionStateListeners = new Set<(update: InstructionStateUpdate) => void>();
-  private readonly scoutWorkspaceStateInflight = new Map<string, Promise<string>>();
+  /** Owns cwd refusal, worktree provisioning and rollback, and Scout workspace verification. */
+  private readonly workspace: SessionWorkspaceCoordinator;
   /** Sessions whose output has changed but whose update has not been announced yet. */
   private readonly pendingSessionUpdates = new Set<string>();
   private sessionUpdateFlush?: ReturnType<typeof setTimeout>;
@@ -247,6 +251,19 @@ export class SessionRegistry {
     if (options.workerTurnObservation === undefined) {
       throw new TypeError("SessionRegistry requires workerTurnObservation");
     }
+    this.workspace = new SessionWorkspaceCoordinator({
+      journal: {
+        workspaceProvisioned: (sessionId, facts) =>
+          this.appendEvent("workspace.provisioned", sessionId, { ...facts }),
+      },
+      validateCwd: options.validateCwd ?? checkSessionCwdAccessible,
+      ...(options.scoutWorkspaceState === undefined
+        ? {}
+        : { workspaceState: options.scoutWorkspaceState }),
+      ...(options.worktreeProvisioner === undefined
+        ? {}
+        : { provisioner: options.worktreeProvisioner }),
+    });
     const writes: Promise<void>[] = [];
     for (const stored of options.recoveredSessions ?? []) {
       const record = this.recoverRecord(stored);
@@ -311,31 +328,11 @@ export class SessionRegistry {
         imageInputRefusal(validated.provider, validated.imageAttachments.length),
       );
     }
-    if (validated.profile === "scout") {
-      if (validated.brief === undefined) {
-        throw new RegistryError("INVALID_WORKER_PROFILE", "Scout profile requires a structured brief");
-      }
-      if ((validated.kind ?? "worker") !== "worker") {
-        throw new RegistryError("INVALID_WORKER_PROFILE", "Scout profile can only use worker lifecycle");
-      }
-      if (
-        validated.provider !== "cursor"
-        || validated.model !== "composer"
-        || validated.sandbox !== "read-only"
-        || validated.approvalMode !== "auto"
-        || validated.workerMode === "caveman"
-      ) {
-        throw new RegistryError(
-          "INVALID_WORKER_PROFILE",
-          "Scout profile requires Cursor Composer, read-only sandbox, auto approval, and normal worker mode",
-        );
-      }
-      const scopeViolation = scoutScopeViolation(validated.cwd, validated.brief.scope);
-      if (scopeViolation !== undefined) {
-        throw new RegistryError("INVALID_WORKER_PROFILE", scopeViolation);
-      }
+    try {
+      await this.workspace.verifyStartRequest(validated);
+    } catch (error) {
+      throw registryError(error);
     }
-    await (this.options.validateCwd ?? validateSessionCwd)(validated.cwd);
     const parsed = validated;
     this.requireActiveParent(parsed.parentSessionId);
     const ancestry = this.resolveAncestry(parsed.parentSessionId);
@@ -376,10 +373,10 @@ export class SessionRegistry {
     // and a worker that has already launched cannot be moved into one.
     let provisioned: ProvisionedWorktree | undefined;
     try {
-      provisioned = await this.provisionWorkspace(parsed, id);
+      provisioned = await this.workspace.provision(parsed, id);
     } catch (error) {
       releaseReservation();
-      throw error;
+      throw registryError(error);
     }
     const provisional: SessionRecord = {
       ...parsed,
@@ -414,7 +411,9 @@ export class SessionRegistry {
     try {
       if (provisional.profile === "scout" && provisional.scout !== undefined) {
         scoutLaunchPhase = "verify";
-        provisional.scout.workspaceStateHash = await this.scoutWorkspaceState(provisional.cwd);
+        provisional.scout.workspaceStateHash = await this.workspace.captureWorkspaceState(
+          provisional.cwd,
+        );
       }
       scoutLaunchPhase = "prepare";
       adapter = this.requireAdapter(parsed.provider);
@@ -459,10 +458,7 @@ export class SessionRegistry {
       releaseReservation();
       // The worktree was made for a worker that never started, so it holds nothing and belongs to
       // nobody. `discard` still refuses to force, so anything that did land in it survives.
-      if (provisioned !== undefined) {
-        await this.options.worktreeProvisioner?.discard(provisioned.workspace)
-          .catch(() => undefined);
-      }
+      await this.workspace.discardFailedStart(provisioned);
       if (provisional.profile === "scout" && provisional.scout !== undefined) {
         await this.preserveFailedScoutLaunch(
           provisional,
@@ -1314,65 +1310,6 @@ export class SessionRegistry {
     return adapter;
   }
 
-  /**
-   * Create the worktree a `cyberdeck-provisioned` start asked for, and answer with nothing for
-   * every other mode.
-   *
-   * This is the whole of "an orchestrator no longer shells out": the declaration reached the broker
-   * as typed fields, the broker owns the one `git worktree add`, and the worker's cwd becomes the
-   * worktree it never had to know how to make. Every other provisioning mode is untouched — a
-   * pre-provisioned worktree is still validated and used as-is, and a worker-provisioned one still
-   * gets the grants that let the worker do it itself.
-   */
-  private async provisionWorkspace(
-    request: StartSessionRequest,
-    sessionId: string,
-  ): Promise<ProvisionedWorktree | undefined> {
-    const workspace = request.workspace;
-    if (workspace?.provisioning !== "cyberdeck-provisioned") return undefined;
-    const provisioner = this.options.worktreeProvisioner;
-    if (provisioner === undefined) {
-      throw new RegistryError(
-        "WORKSPACE_PROVISIONER_UNAVAILABLE",
-        "This broker cannot provision worktrees; pre-provision one and declare provisioning "
-        + "pre-provisioned",
-      );
-    }
-    let provisioned: ProvisionedWorktree;
-    try {
-      provisioned = await provisioner.provision({ workspace, cwd: request.cwd, sessionId });
-    } catch (error) {
-      throw new RegistryError(
-        "WORKSPACE_PROVISION_FAILED",
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-    // Everything past this point has a worktree behind it, and throwing from here would return no
-    // `ProvisionedWorktree` for the caller's discard path to act on: the start would fail leaving
-    // the branch and the directory behind, and the deterministic naming means the retry that
-    // follows is refused with WORKSPACE_BRANCH_EXISTS. So this failure gives the worktree back
-    // itself — still non-forced, so anything that somehow landed in it survives.
-    try {
-      await this.appendEvent("workspace.provisioned", sessionId, {
-        worktreePath: provisioned.workspace.worktreePath ?? null,
-        repositoryPath: provisioned.workspace.repositoryPath ?? null,
-        branch: provisioned.workspace.branch,
-        baseRef: provisioned.workspace.baseRef,
-        baseCommit: provisioned.baseCommit,
-        warnings: provisioned.warnings,
-      });
-    } catch (error) {
-      await provisioner.discard(provisioned.workspace).catch(() => undefined);
-      throw new RegistryError(
-        "WORKSPACE_PROVISION_FAILED",
-        `Worktree ${provisioned.workspace.worktreePath ?? "(unnamed)"} was created and then given `
-        + `back because its provisioning could not be journaled: `
-        + `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    return provisioned;
-  }
-
   private updateAttachmentState(runtime: RuntimeSession): void {
     runtime.record.attachmentState = runtime.controller !== undefined
       ? "controlled"
@@ -1609,37 +1546,12 @@ export class SessionRegistry {
       return;
     }
 
-    const baseline = scout.workspaceStateHash;
-    if (baseline === undefined) {
-      await this.markFinalScoutFailure(
-        runtime,
-        "verify",
-        "Scout has no pre-launch workspace state baseline",
-        true,
-      );
-      this.handleExit(runtime, sessionRuntime, exitCode, signal);
-      return;
-    }
-    let after: string;
-    try {
-      after = await this.scoutWorkspaceState(runtime.record.cwd);
-    } catch (error) {
-      await this.markFinalScoutFailure(
-        runtime,
-        "verify",
-        `Post-run workspace verification failed: ${errorMessage(error)}`,
-        true,
-      );
-      this.handleExit(runtime, sessionRuntime, exitCode, signal);
-      return;
-    }
-    if (after !== baseline) {
-      await this.markFinalScoutFailure(
-        runtime,
-        "verify",
-        "Scout changed observable repository state despite its read-only profile",
-        true,
-      );
+    const verdict = await this.workspace.verifyScoutWorkspace(
+      scout.workspaceStateHash,
+      runtime.record.cwd,
+    );
+    if (!verdict.ok) {
+      await this.markFinalScoutFailure(runtime, "verify", verdict.reason, true);
       this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
@@ -1655,7 +1567,7 @@ export class SessionRegistry {
     scout.canary = { status: "verified", verifiedAt };
     await this.appendEvent("scout.canary.verified", runtime.record.id, {
       verifiedAt,
-      workspaceStateHash: baseline,
+      workspaceStateHash: verdict.workspaceStateHash,
     }).catch(() => undefined);
 
     if (runtime.stopRequested) {
@@ -2025,19 +1937,6 @@ export class SessionRegistry {
       `Scout ${sessionId} failed to launch: ${errorMessage(error)}`,
       sessionId,
     );
-  }
-
-  private scoutWorkspaceState(cwd: string): Promise<string> {
-    const existing = this.scoutWorkspaceStateInflight.get(cwd);
-    if (existing !== undefined) return existing;
-    const capture = this.options.scoutWorkspaceState ?? captureScoutWorkspaceStateHash;
-    const pending = capture(cwd).finally(() => {
-      if (this.scoutWorkspaceStateInflight.get(cwd) === pending) {
-        this.scoutWorkspaceStateInflight.delete(cwd);
-      }
-    });
-    this.scoutWorkspaceStateInflight.set(cwd, pending);
-    return pending;
   }
 
   /**
@@ -2442,14 +2341,13 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function validateSessionCwd(cwd: string): Promise<void> {
-  try {
-    const canonical = await realpath(cwd);
-    if (!(await stat(canonical)).isDirectory()) throw new Error("not a directory");
-  } catch {
-    throw new RegistryError(
-      "INVALID_SESSION_CWD",
-      `Session cwd is not an accessible directory: ${cwd}`,
-    );
-  }
+/**
+ * Re-words a workspace refusal as the registry's own error, keeping the code and the message the
+ * coordinator chose. The coordinator names what is wrong with a workspace; only `RegistryError`
+ * carries a code the broker's RPC boundary knows how to report, so anything else is rethrown as-is.
+ */
+function registryError(error: unknown): unknown {
+  return error instanceof SessionWorkspaceError
+    ? new RegistryError(error.code, error.message)
+    : error;
 }

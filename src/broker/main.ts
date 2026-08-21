@@ -15,6 +15,7 @@ import { ClaudeJobDispatchAdapter } from "../providers/claude/dispatch-adapter.j
 import { CodexProviderAdapter } from "../providers/codex.js";
 import { CursorJobDispatchAdapter } from "../providers/cursor/dispatch-adapter.js";
 import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
+import { captureScoutWorkspaceStateHash } from "../providers/cursor/workspace-state.js";
 import { createSessionRuntime } from "../runtime/session-runtime-adapter.js";
 import { WorkerTurnObservationAdapter } from "../runtime/worker-turn-observation-adapter.js";
 import { Journal } from "./journal.js";
@@ -124,6 +125,7 @@ export async function runBroker(
     recoveredSessions,
     scoutReports,
     worktreeProvisioner: new GitWorktreeProvisioner(),
+    scoutWorkspaceState: captureScoutWorkspaceStateHash,
     config,
   });
   await registry.ready();

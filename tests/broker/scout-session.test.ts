@@ -8,6 +8,7 @@ import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import { MIN_SCOUT_REPLAY_BYTES } from "../../src/domain/worker-profile.js";
+import type { WorktreeProvisioner } from "../../src/domain/worker-workspace.js";
 import { ScoutReportStore } from "../../src/persistence/scout-report-store.js";
 import type {
   ProviderAdapter,
@@ -107,18 +108,31 @@ function streamText(text: string, usage?: { input_tokens: number; output_tokens:
   })}\n`;
 }
 
+/** Steps are recorded for one start only: the whole-chain test runs a second one to be refused. */
+function recorded(
+  steps: { underRoot: string } | undefined,
+  cwd: string,
+): boolean {
+  return steps !== undefined && cwd.startsWith(steps.underRoot);
+}
+
 async function harness(options: {
   spawnError?: Error;
   workspaceStates?: string[];
   captureDelayMs?: number;
   killExitCode?: number;
   interactiveScout?: boolean;
+  worktreeProvisioner?: WorktreeProvisioner;
+  maxConcurrentWorkers?: number;
+  /** Start steps recorded in the order the registry reached them, for the whole-chain test. */
+  steps?: { push: (step: string) => void; underRoot: string };
 } = {}) {
   const repo = await mkdtemp(join(tmpdir(), "cyberdeck-scout-repo-"));
   const state = await mkdtemp(join(tmpdir(), "cyberdeck-scout-state-"));
   directories.push(repo, state);
   const pty = new FakePty(options.killExitCode);
-  const ptyFactory = vi.fn((_spec: ProviderLaunchSpec) => {
+  const ptyFactory = vi.fn((spec: ProviderLaunchSpec) => {
+    if (recorded(options.steps, spec.cwd)) options.steps?.push("spawn");
     if (options.spawnError !== undefined) throw options.spawnError;
     return pty;
   });
@@ -138,10 +152,13 @@ async function harness(options: {
   const states = [...(options.workspaceStates ?? ["a".repeat(64), "a".repeat(64)])];
   const reportStore = new ScoutReportStore(state);
   const scoutReports = {
-    initialize: async (...args: Parameters<ScoutReportStore["initialize"]>) => ({
-      ...await reportStore.initialize(...args),
-      ...(options.interactiveScout === true ? { transport: "interactive-pty" as const } : {}),
-    }),
+    initialize: async (...args: Parameters<ScoutReportStore["initialize"]>) => {
+      if (recorded(options.steps, args[1])) options.steps?.push("scout-init");
+      return {
+        ...await reportStore.initialize(...args),
+        ...(options.interactiveScout === true ? { transport: "interactive-pty" as const } : {}),
+      };
+    },
     capture: options.captureDelayMs === undefined
       ? reportStore.capture.bind(reportStore)
       : async (...args: Parameters<ScoutReportStore["capture"]>) => {
@@ -158,10 +175,22 @@ async function harness(options: {
     adapters: { cursor },
     sessionRuntimeFactory: ptyFactory,
     journal: { append: async () => {} },
-    validateCwd: async () => undefined,
-    config: BrokerRuntimeConfigSchema.parse({}),
+    validateCwd: async (cwd) => {
+      if (recorded(options.steps, cwd)) options.steps?.push("validate");
+    },
+    config: BrokerRuntimeConfigSchema.parse(
+      options.maxConcurrentWorkers === undefined
+        ? {}
+        : { maxConcurrentWorkers: options.maxConcurrentWorkers },
+    ),
     scoutReports,
-    scoutWorkspaceState: async () => states.shift() ?? states.at(-1) ?? "a".repeat(64),
+    scoutWorkspaceState: async (cwd) => {
+      if (recorded(options.steps, cwd)) options.steps?.push("baseline");
+      return states.shift() ?? states.at(-1) ?? "a".repeat(64);
+    },
+    ...(options.worktreeProvisioner === undefined
+      ? {}
+      : { worktreeProvisioner: options.worktreeProvisioner }),
   });
   return { registry, pty, ptyFactory, repo, state, cursor };
 }
@@ -501,5 +530,62 @@ describe("Scout session lifecycle", () => {
       }],
     });
     expect(registry.get(record.id).scout?.canary.status).toBe("failed");
+  });
+});
+
+describe("Scout start ordering", () => {
+  it("validates, admits, reserves, initializes, provisions, baselines, then spawns", async () => {
+    const steps: string[] = [];
+    const recorder = { push: (step: string) => { steps.push(step); }, underRoot: "/nowhere" };
+    const elsewhere = await mkdtemp(join(tmpdir(), "cyberdeck-scout-other-"));
+    directories.push(elsewhere);
+    let registry!: SessionRegistry;
+    let worktreePath = "";
+    let concurrent: unknown;
+    const provisioner: WorktreeProvisioner = {
+      provision: async ({ workspace }) => {
+        steps.push("provision");
+        // The worker slot is already held here: a start arriving while the worktree is being cut is
+        // refused by the budget rather than admitted into a second provisioning.
+        concurrent = await registry
+          .start(request(elsewhere, { maxWallClockMs: 10_000, maxTokens: 10_000 }), "Second")
+          .then(() => undefined, (error: unknown) => error);
+        return {
+          workspace: { ...workspace, worktreePath, repositoryPath: recorder.underRoot },
+          baseCommit: "0".repeat(40),
+          warnings: [],
+        };
+      },
+      discard: async () => {},
+    };
+
+    const started = await harness({
+      worktreeProvisioner: provisioner,
+      maxConcurrentWorkers: 1,
+      steps: recorder,
+    });
+    registry = started.registry;
+    recorder.underRoot = started.repo;
+    worktreePath = join(started.repo, "worktree");
+
+    const record = await registry.start(
+      {
+        ...request(started.repo, { maxWallClockMs: 10_000, maxTokens: 10_000 }),
+        workspace: {
+          branch: "cyberdeck/mik-141",
+          baseRef: "HEAD",
+          provisioning: "cyberdeck-provisioned",
+          writableRoots: [],
+        },
+      },
+      "Scout prompt",
+    );
+
+    expect(steps).toEqual(["validate", "scout-init", "provision", "baseline", "spawn"]);
+    expect(concurrent).toMatchObject({ code: "MAX_CONCURRENT_WORKERS" });
+    // The Scout was initialized against the requested cwd and then moved into the worktree that
+    // provisioning cut for it, which is also where its pre-launch baseline was read.
+    expect(record.cwd).toBe(worktreePath);
+    started.pty.exit(0);
   });
 });
