@@ -8,8 +8,15 @@
  * *pixels* is twice its height in rows on screen.
  *
  * `.` is the ground. It paints nothing at all, not white: the octopus sits on whatever background
- * the operator's terminal has, so the same grid reads on a light and a dark theme.
+ * the operator's terminal has. The *shape* survives that on any theme; the palette does not, which
+ * is why there are two of them and `renderPixelArt` takes the background when the terminal was
+ * willing to name it (`terminal-background.ts`). An unknown background gets the dark palette and no
+ * softening — exactly the rendering this file always produced.
  */
+
+import { isLightBackground, type TerminalBackground } from "./terminal-background.js";
+
+type Rgb = readonly [number, number, number];
 
 /**
  * The reference artwork's own purples, sampled from it rather than chosen here.
@@ -18,7 +25,7 @@
  * carries in `fleet.ts` — a status hue that happened to match the octopus would read as the octopus
  * meaning something.
  */
-const PALETTE: Readonly<Record<string, readonly [number, number, number]>> = {
+const DARK_PALETTE: Readonly<Record<string, Rgb>> = {
   /** Outline and the deep shadow inside every tentacle. */
   "1": [35, 9, 69],
   /** The body's mid tone. */
@@ -28,6 +35,28 @@ const PALETTE: Readonly<Record<string, readonly [number, number, number]>> = {
   /** The dome's highlight, and the only near-pink in the piece. */
   "4": [196, 130, 232],
 };
+
+/**
+ * The same animal, lit for a light terminal.
+ *
+ * The dark palette's outline is near-black, and near-black on white turns every one-pixel staircase
+ * step into a maximum-contrast jaggy while its highlight drifts off toward the paper. So the light
+ * palette moves only the two colours that touch those failure modes — the outline up into a legible
+ * mid-purple, the highlight down until it still separates from the dome — and leaves the mid tones,
+ * which read the same on both grounds, alone.
+ */
+const LIGHT_PALETTE: Readonly<Record<string, Rgb>> = {
+  "1": [74, 43, 110],
+  "2": [108, 52, 140],
+  "3": [158, 84, 196],
+  "4": [176, 108, 222],
+};
+
+/**
+ * How far a silhouette pixel leans toward the terminal's background. High enough that the perimeter
+ * stops ringing against the ground, low enough that the edge is still an edge and not a smear.
+ */
+const EDGE_FEATHER = 0.3;
 
 const RESET = "\u001b[0m";
 /** Ground as a *background* is the terminal's own, never an explicit colour. */
@@ -103,21 +132,64 @@ export function pixelArtHeight(art: readonly string[]): number {
 /**
  * Renders a grid into terminal rows, each exactly `pixelArtWidth` columns wide.
  *
+ * A known `background` does two things a bare render cannot: it picks the palette the art is
+ * actually sitting on, and it feathers the silhouette — every ink pixel with open ground beside it
+ * leans `EDGE_FEATHER` of the way toward the background, which is the one-pixel anti-aliasing a
+ * half-block canvas has room for. No background means the dark palette, hard edges, and an output
+ * byte-identical to what this renderer produced before it learned to ask.
+ *
  * Without colour the palette is gone but the shape is not, so the glyph alone carries it: a cell
  * with ink above and below is full, one with ink on a single side is that half. The rows are still
  * the right width, which is what lets the caller lay text out beside them either way.
  */
-export function renderPixelArt(art: readonly string[], color: boolean): string[] {
+export function renderPixelArt(
+  art: readonly string[],
+  color: boolean,
+  background?: TerminalBackground,
+): string[] {
   const width = pixelArtWidth(art);
+  const ink = resolveInk(art, width, background);
   const lines: string[] = [];
   for (let row = 0; row < art.length; row += 2) {
     let line = "";
     for (let column = 0; column < width; column += 1) {
-      line += renderCell(art[row]?.[column], art[row + 1]?.[column], color);
+      line += renderCell(ink[row]?.[column], ink[row + 1]?.[column], color);
     }
     lines.push(color ? `${line}${RESET}` : line);
   }
   return lines;
+}
+
+/**
+ * Every pixel's colour, decided before any cell is composed — a cell borrows two pixels that may
+ * each be pure ink, feathered edge, or ground, and pairing them is the renderer's job, not this
+ * one's.
+ */
+function resolveInk(
+  art: readonly string[],
+  width: number,
+  background: TerminalBackground | undefined,
+): (Rgb | undefined)[][] {
+  const palette = background !== undefined && isLightBackground(background)
+    ? LIGHT_PALETTE
+    : DARK_PALETTE;
+  const inkAt = (row: number, column: number): Rgb | undefined =>
+    palette[art[row]?.[column] ?? ""];
+  return art.map((rowPixels, row) =>
+    Array.from({ length: width }, (_, column): Rgb | undefined => {
+      const pixel = palette[rowPixels[column] ?? ""];
+      if (pixel === undefined || background === undefined) return pixel;
+      const onSilhouette = inkAt(row - 1, column) === undefined
+        || inkAt(row + 1, column) === undefined
+        || inkAt(row, column - 1) === undefined
+        || inkAt(row, column + 1) === undefined;
+      return onSilhouette ? feather(pixel, background) : pixel;
+    }));
+}
+
+function feather([red, green, blue]: Rgb, background: TerminalBackground): Rgb {
+  const lean = (ink: number, ground: number) => Math.round(ink + (ground - ink) * EDGE_FEATHER);
+  return [lean(red, background.red), lean(green, background.green), lean(blue, background.blue)];
 }
 
 /**
@@ -127,9 +199,7 @@ export function renderPixelArt(art: readonly string[], color: boolean): string[]
  * the previous cell left set. A ground cell emits no colour at all, and inheriting the neighbour's
  * background would paint it — a trail of purple behind the tentacles.
  */
-function renderCell(upper: string | undefined, lower: string | undefined, color: boolean): string {
-  const above = PALETTE[upper ?? ""];
-  const below = PALETTE[lower ?? ""];
+function renderCell(above: Rgb | undefined, below: Rgb | undefined, color: boolean): string {
   if (!color) {
     if (above !== undefined && below !== undefined) return "█";
     if (above !== undefined) return "▀";
@@ -142,10 +212,10 @@ function renderCell(upper: string | undefined, lower: string | undefined, color:
   return `${RESET}${foreground(above)}${background(below)}▀`;
 }
 
-function foreground([red, green, blue]: readonly [number, number, number]): string {
+function foreground([red, green, blue]: Rgb): string {
   return `\u001b[38;2;${red};${green};${blue}m`;
 }
 
-function background([red, green, blue]: readonly [number, number, number]): string {
+function background([red, green, blue]: Rgb): string {
   return `\u001b[48;2;${red};${green};${blue}m`;
 }

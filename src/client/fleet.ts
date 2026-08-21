@@ -90,6 +90,7 @@ import {
   type PullRequestSummary,
 } from "./pr-status.js";
 import { RpcError } from "./rpc-client.js";
+import { queryTerminalBackground, type TerminalBackground } from "./terminal-background.js";
 import type { SessionSnapshotResult } from "../domain/session-snapshot.js";
 
 export interface FleetTransport {
@@ -418,6 +419,12 @@ export interface FleetRenderOptions {
    * a checkout no longer inherit each other's.
    */
   pullRequests?: ReadonlyMap<string, PullRequestSummary> | undefined;
+  /**
+   * The terminal's own background, when it answered the OSC 11 query at startup. It only tunes the
+   * octopus — palette and edge softening — and absent means unknown, which renders exactly as
+   * before anything asked.
+   */
+  background?: TerminalBackground | undefined;
 }
 
 interface ResolvedFleetRenderOptions {
@@ -427,6 +434,7 @@ interface ResolvedFleetRenderOptions {
   now: number;
   home: string;
   pullRequests: ReadonlyMap<string, PullRequestSummary>;
+  background: TerminalBackground | undefined;
 }
 
 interface WorkerModelChoice {
@@ -1484,7 +1492,7 @@ export function renderFleet(
   const color = options.color ?? true;
   const home = options.home ?? homedir();
   const pullRequests = options.pullRequests ?? new Map();
-  const resolved = { width, height, now, color, home, pullRequests };
+  const resolved = { width, height, now, color, home, pullRequests, background: options.background };
   const state = normalizeState(current, snapshot, now);
   if (state.workerPicker !== undefined) {
     return renderWorkerPicker(state, resolved);
@@ -2562,7 +2570,7 @@ function renderEmptyFleet(
   const center = (span: number) => " ".repeat(Math.max(0, Math.floor((options.width - span) / 2)));
   const indent = center(width);
   return [
-    ...renderPixelArt(OCTOPUS_SPLASH, options.color).map((line) => `${indent}${line}`),
+    ...renderPixelArt(OCTOPUS_SPLASH, options.color, options.background).map((line) => `${indent}${line}`),
     "",
     `${center(caption.length)}${paint(caption, "dim", options.color)}`,
   ];
@@ -2611,7 +2619,7 @@ function renderHeader(
     paint(fit(counts, textWidth), "dim", options.color),
   ];
   if (!showsMark) return textLines;
-  const mark = renderPixelArt(OCTOPUS_MARK, options.color);
+  const mark = renderPixelArt(OCTOPUS_MARK, options.color, options.background);
   return Array.from(
     { length: Math.max(mark.length, textLines.length) },
     (_, index) => `${mark[index] ?? " ".repeat(markWidth)}  ${textLines[index] ?? ""}`,
@@ -3983,6 +3991,10 @@ export async function runFleet(
     client.close();
     return;
   }
+  // One OSC 11 round trip, before the key decoder owns stdin, asks what the octopus is sitting
+  // on. Silence — an older terminal, a tmux that will not forward — costs the timeout once and
+  // means unknown, which renders exactly as it always has.
+  const terminalBackground = await queryTerminalBackground(input, output);
   // workerModels feeds only the interactive composer's model picker — the list rendering above
   // never reads it. Probing for it runs the provider listing CLIs (WorkerCapabilityCatalog), which
   // can hold a cold broker for the full capability-probe timeout, so a piped snapshot must never
@@ -4216,6 +4228,7 @@ export async function runFleet(
       now: Date.now(),
       home: homedir(),
       pullRequests: pullRequestStatus.states(),
+      background: terminalBackground,
     };
     state = normalizeThreadListViewport(snapshot, state, renderOptions);
     const transition = transitionFleet(
@@ -4731,6 +4744,7 @@ export async function runFleet(
           now: Date.now(),
           home: homedir(),
           pullRequests: pullRequestStatus.states(),
+          background: terminalBackground,
         };
         state = normalizeThreadListViewport(snapshot, state, renderOptions);
         const rendered = renderFleet(snapshot, state, renderOptions);
@@ -4818,6 +4832,7 @@ export function composerCursor(
     color: false,
     home: "",
     pullRequests: new Map(),
+    background: undefined,
   }).at(-1);
   const rowIndex = expectedComposerRow === undefined
     ? -1
