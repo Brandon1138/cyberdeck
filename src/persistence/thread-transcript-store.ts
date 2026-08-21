@@ -19,6 +19,7 @@ import type {
   AppendWorkerTurnTranscriptEvent as AppendThreadEvent,
   CaptureWorkerTurns as CaptureProviderTurns,
   WorkerTurnObservation,
+  WorkerTurnTranscript,
   WorkerTurnTranscriptPort,
 } from "../orchestration/session/worker-turn-ports.js";
 import { ClaudeConversationBindingStore } from "./claude-conversation-bindings.js";
@@ -190,42 +191,36 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     };
   }
 
-  /** Serialize dedupe and persistence so concurrent observations can append each turn only once. */
-  commitProviderTurns(observation: WorkerTurnObservation): Promise<ThreadEvent[]> {
+  /** Serialize append-once dedupe while acknowledging every observed turn as durably owned. */
+  commitProviderTurns(observation: WorkerTurnObservation): Promise<WorkerTurnTranscript[]> {
     return this.enqueueWrite(async () => {
       await this.init();
-      const captured: ThreadEvent[] = [];
-      for (const turn of observation.turns) {
+      const receipts: WorkerTurnTranscript[] = [];
+      for (const [index, turn] of observation.turns.entries()) {
         const semanticTurnId = `${observation.provider}:${turn.providerTurnId}`;
+        const turnNumber = observation.turnNumber + index;
+        const receipt = this.providerTurnReceipt(observation, turn, turnNumber);
         if (this.semanticTurnIds.has(this.semanticKey(observation.sessionId, semanticTurnId))) {
+          receipts.push(receipt);
           continue;
         }
         const event = this.createEvent({
           sessionId: observation.sessionId,
           kind: "turn",
           source: "provider",
-          text: turn.text,
-          data: {
-            semantic: true,
-            semanticTurnId,
-            provider: observation.provider,
-            transport: turn.transport,
-            originalLength: turn.text.length,
-            turnNumber: observation.turnNumber + captured.length,
-            providerOccurredAt: turn.providerOccurredAt,
-            ...(turn.data ?? {}),
-          },
+          text: receipt.text,
+          data: receipt.data,
         });
         await this.persist(event);
         this.rememberSemanticTurn(event);
-        captured.push(event);
+        receipts.push(event);
       }
-      return captured;
+      return receipts;
     });
   }
 
   /** Compatibility path for callers that have not yet adopted explicit observation ownership. */
-  async captureProviderTurns(input: CaptureProviderTurns): Promise<ThreadEvent[]> {
+  async captureProviderTurns(input: CaptureProviderTurns): Promise<WorkerTurnTranscript[]> {
     const observation = await this.observeProviderTurns(input);
     return this.commitProviderTurns(observation);
   }
@@ -389,6 +384,29 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
 
   private semanticKey(sessionId: string, semanticTurnId: string): string {
     return `${sessionId}:${semanticTurnId}`;
+  }
+
+  /** Reconstruct the exact bounded semantic payload acknowledged by an append or dedupe hit. */
+  private providerTurnReceipt(
+    observation: WorkerTurnObservation,
+    turn: WorkerTurnObservation["turns"][number],
+    turnNumber: number,
+  ): { text: string; data: Record<string, unknown> } {
+    const text = this.boundEventText(turn.text) ?? "";
+    const data = {
+      semantic: true,
+      semanticTurnId: `${observation.provider}:${turn.providerTurnId}`,
+      provider: observation.provider,
+      transport: turn.transport,
+      originalLength: turn.text.length,
+      turnNumber,
+      providerOccurredAt: turn.providerOccurredAt,
+      ...(turn.data ?? {}),
+    };
+    return {
+      text,
+      data: text === turn.text ? data : { ...data, storageOriginalLength: turn.text.length },
+    };
   }
 
   private createEvent(input: AppendThreadEvent): ThreadEvent {

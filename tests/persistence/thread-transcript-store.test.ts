@@ -138,7 +138,7 @@ describe("ThreadTranscriptStore", () => {
     })).resolves.toMatchObject({ turns: [] });
   });
 
-  it("serializes concurrent commits and appends one event for a semantic turn", async () => {
+  it("serializes concurrent commits, appends once, and acknowledges both durable owners", async () => {
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
     let id = 0;
     const store = new ThreadTranscriptStore(root, {
@@ -163,10 +163,61 @@ describe("ThreadTranscriptStore", () => {
       store.commitProviderTurns(second),
     ]);
 
-    expect(committed.map((events) => events.length)).toEqual([1, 0]);
+    expect(committed.map((events) => events.length)).toEqual([1, 1]);
+    expect(committed[1]).toMatchObject([{
+      text: "one durable result",
+      data: {
+        semanticTurnId: "cursor:fallback:1",
+        transport: "terminal-replay-fallback",
+        turnNumber: 1,
+      },
+    }]);
     await expect(store.read(SESSION_ONE)).resolves.toMatchObject({
       events: [{ text: "one durable result", data: { semanticTurnId: "cursor:fallback:1" } }],
       nextCursor: 1,
+    });
+  });
+
+  it("keeps later turn ordinals aligned when a concurrent commit overlaps a durable prefix", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const store = new ThreadTranscriptStore(root, {
+      now: () => "2026-08-20T12:00:00.000Z",
+    });
+    const firstTurn = {
+      providerTurnId: "fallback:1",
+      providerOccurredAt: "2026-08-20T12:00:00.000Z",
+      text: "first durable result",
+      transport: "terminal-replay-fallback" as const,
+    };
+    const first = {
+      sessionId: SESSION_ONE,
+      provider: "cursor",
+      turnNumber: 1,
+      turns: [firstTurn],
+    };
+    const overlapping = {
+      ...first,
+      turns: [firstTurn, {
+        providerTurnId: "fallback:2",
+        providerOccurredAt: "2026-08-20T12:01:00.000Z",
+        text: "second durable result",
+        transport: "terminal-replay-fallback" as const,
+      }],
+    };
+
+    const [firstReceipt, overlappingReceipt] = await Promise.all([
+      store.commitProviderTurns(first),
+      store.commitProviderTurns(overlapping),
+    ]);
+
+    expect(firstReceipt).toHaveLength(1);
+    expect(overlappingReceipt).toHaveLength(2);
+    await expect(store.read(SESSION_ONE)).resolves.toMatchObject({
+      events: [
+        { data: { semanticTurnId: "cursor:fallback:1", turnNumber: 1 } },
+        { data: { semanticTurnId: "cursor:fallback:2", turnNumber: 2 } },
+      ],
+      nextCursor: 2,
     });
   });
 

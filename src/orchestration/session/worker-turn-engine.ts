@@ -75,7 +75,6 @@ interface PendingTurnCommit {
   reservationThrough: number;
   settlement: Promise<void>;
   poisoned: boolean;
-  providerNative: boolean;
 }
 
 interface ScreenCompletionEvidence {
@@ -550,17 +549,19 @@ export class WorkerTurnEngine {
   }
 
   /**
-   * Reject every unbanked screen/fallback claim owned by the current process generation.
+   * Reject screen/fallback evidence that has not crossed the durable commit boundary.
    *
-   * Explicit stop, fatal/provider-limit truth, and Scout completion are already authoritative.
-   * Their armed screens and fallback receipts must never survive into resume as completions.
-   * Provider-native observations/commits remain durable truth and still settle through the ordinal
-   * barrier; only terminal-replay evidence from the rejected screen becomes inert.
+   * Explicit stop, fatal/provider-limit truth, and Scout completion are already authoritative, so
+   * an armed screen or a merely observed fallback must not survive into resume as a completion.
+   * Once `commitProviderTurns` has synchronously enqueued its append-only write, however, that write
+   * cannot be cancelled: native and fallback commits both remain ordinal reservations until their
+   * receipts settle. Only pre-commit terminal-replay evidence becomes inert here.
    */
   discardPendingScreenTurns(): void {
     if (!this.terminalScreenReservationsDiscarded) {
-      // Any pre-existing floor in this epoch came from screen claims/evidence. Actual native
-      // observations which return after the fence may raise it again through reserveFencedObservation.
+      // Any pre-existing floor in this epoch came from screen claims/evidence. An already-enqueued
+      // commit is re-reserved by releaseTimers below; native observations which return after the
+      // fence may also raise the floor through reserveFencedObservation.
       this.completionBarrierFloor = this.completedTurnCount;
     }
     this.discardedScreenObservationEpoch = Math.max(
@@ -568,12 +569,6 @@ export class WorkerTurnEngine {
       this.observationEpoch,
     );
     this.terminalScreenReservationsDiscarded = true;
-    if (this.pendingTurnCommit?.providerNative === false) {
-      if (this.turnCaptureOwner !== undefined) {
-        this.pendingTurnCaptures.delete(this.turnCaptureOwner.settlement);
-      }
-      delete this.pendingTurnCommit;
-    }
     this.releaseTimers();
     this.screenCompletionEvidence.clear();
   }
@@ -627,9 +622,7 @@ export class WorkerTurnEngine {
       screenClaimTarget,
       claim?.bankedThrough ?? 0,
       deferredScreenTarget,
-      this.pendingTurnCommit?.providerNative === true
-        ? this.pendingTurnCommit.reservationThrough
-        : 0,
+      this.pendingTurnCommit?.reservationThrough ?? 0,
       armedScreenTarget,
     );
     this.observationEpoch += 1;
@@ -1033,7 +1026,6 @@ export class WorkerTurnEngine {
       reservationThrough: claim.completionTarget + observation.turns.length - 1,
       settlement,
       poisoned: false,
-      providerNative: observation.turns.every((turn) => turn.transport === "provider-native"),
     };
     this.pendingTurnCommit = pending;
 
@@ -1049,14 +1041,6 @@ export class WorkerTurnEngine {
 
     return receipt.then((turns): TurnCommitOutcome => {
       try {
-        if (
-          claim.epoch <= this.discardedScreenObservationEpoch
-          && !pending.providerNative
-        ) {
-          if (this.pendingTurnCommit === pending) delete this.pendingTurnCommit;
-          resolveSettlement();
-          return { status: "failed" };
-        }
         const banked = this.bankTurnReceipt(turns, claim);
         if (turns.length !== observation.turns.length || banked === undefined) {
           throw new Error(
@@ -1078,14 +1062,6 @@ export class WorkerTurnEngine {
         throw error;
       }
     }, (error: unknown) => {
-      if (
-        claim.epoch <= this.discardedScreenObservationEpoch
-        && !pending.providerNative
-      ) {
-        if (this.pendingTurnCommit === pending) delete this.pendingTurnCommit;
-        resolveSettlement();
-        return { status: "failed" };
-      }
       // A rejected asynchronous write can have persisted a multi-turn prefix. Keep the reservation
       // and make resume fail closed rather than assigning those possibly durable ordinals again.
       pending.poisoned = true;

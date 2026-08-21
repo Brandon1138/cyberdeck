@@ -27,6 +27,7 @@ import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import type {
   WorkerTurnObservation,
   WorkerTurnTranscript,
+  WorkerTurnTranscriptPort,
 } from "../../src/orchestration/session/worker-turn-ports.js";
 import {
   ThreadTranscriptStore,
@@ -136,7 +137,7 @@ function harness(options: {
   /** Held inside the serialized durable commit after the engine has reserved its ordinals. */
   onProviderTurnsCommit?: () => Promise<void>;
   /** Real persistence boundary for end-to-end ordinal/transcript integration cases. */
-  transcriptStore?: ThreadTranscriptStore;
+  transcriptStore?: WorkerTurnTranscriptPort;
 } = {}) {
   const ptys: FakePty[] = [];
   const events: BrokerEvent[] = [];
@@ -2060,6 +2061,116 @@ describe("SessionRegistry", () => {
     expect(registry.workerTruth(record.id)).toMatchObject({ completedTurns: 0 });
     registry.forceStop(record.id);
     expect(ptys[0]!.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  it("fences a durable fallback receipt and rejects concurrent resume before it settles", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-resume-fallback-receipt-"));
+    temporaryDirectories.push(root);
+    const store = new ThreadTranscriptStore(root, {
+      now: () => "2026-08-20T11:00:00.000Z",
+    });
+    const receiptGate = deferred<void>();
+    const appendCompleted = deferred<void>();
+    const transcripts: WorkerTurnTranscriptPort = {
+      append: (event) => store.append(event),
+      observeProviderTurns: (input) => store.observeProviderTurns(input),
+      commitProviderTurns: async (observation) => {
+        const receipt = await store.commitProviderTurns(observation);
+        appendCompleted.resolve();
+        await receiptGate.promise;
+        return receipt;
+      },
+      readTranscriptMessages: (input) => store.readTranscriptMessages(input),
+      readObservedModel: (input) => store.readObservedModel(input),
+    };
+    const cursor: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session) => ({
+        executable: "fake",
+        args: ["cursor"],
+        cwd: session.cwd,
+        env: {},
+      }),
+      buildResumeSpec: (session) => ({
+        executable: "fake",
+        args: ["resume", session.id],
+        cwd: session.cwd,
+        env: {},
+      }),
+    };
+    const { registry, ptys } = harness({
+      adapters: { ...adapters, cursor },
+      exitOnKill: false,
+      transcriptStore: transcripts,
+    });
+    const record = await registry.start(request({
+      provider: "cursor",
+      model: "composer",
+      approvalMode: "auto",
+      name: "fallback-receipt-fence",
+    }));
+
+    await expect(registry.submitInstruction(
+      record.id,
+      "old Cursor task",
+      "orchestrator",
+      {},
+      "99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+    ptys[0]!.emitOutput("\u001b]0;Cursor Agent\u0007 Composing ctrl+c to stop");
+    ptys[0]!.emitOutput(
+      "\nold Cursor answer\n\u001b]777;notify;Cursor;Cursor is waiting for you\u0007",
+    );
+    await appendCompleted.promise;
+
+    await registry.stop(record.id);
+    let resumeSettled = false;
+    const resume = registry.resume(record.id).then((resumed) => {
+      resumeSettled = true;
+      return resumed;
+    });
+    await flushMicrotasks();
+
+    expect(resumeSettled).toBe(false);
+    expect(ptys).toHaveLength(1);
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      completedTurns: 0,
+      canonicalTurns: 0,
+    });
+    await expect(registry.resume(record.id)).rejects.toMatchObject({
+      code: "SESSION_ALREADY_ACTIVE",
+      message: "Session resume is already in progress",
+    });
+    expect(ptys).toHaveLength(1);
+    const persistedTurns = (await store.read(record.id)).events.filter(
+      ({ kind }) => kind === "turn",
+    );
+    expect(persistedTurns).toMatchObject([{
+      text: expect.stringContaining("old Cursor answer"),
+      data: {
+        semanticTurnId: "cursor:fallback:1",
+        transport: "terminal-replay-fallback",
+        turnNumber: 1,
+      },
+    }]);
+
+    receiptGate.resolve();
+    await expect(resume).resolves.toMatchObject({
+      executionState: "active",
+      generation: 2,
+      pid: 1001,
+    });
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      completedTurns: 1,
+      canonicalTurns: 0,
+    });
+    await expect(registry.submitInstruction(
+      record.id,
+      "new generation task",
+      "orchestrator",
+      {},
+      "99999999-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
   });
 
   it("keeps real-store native transcript ordinals aligned across resume", async () => {

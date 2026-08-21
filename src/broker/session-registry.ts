@@ -137,6 +137,8 @@ interface RuntimeSession {
   scoutFinalizing?: boolean;
   /** The exact exiting runtime is settling its last durable turn before terminal publication. */
   terminalFinalizing?: boolean;
+  /** Serializes resume ownership before the first asynchronous turn-settlement boundary. */
+  resuming?: boolean;
   scoutBudgetTimer?: ReturnType<typeof setTimeout>;
   scoutBudgetActive?: boolean;
   scoutBudgetExhausting?: boolean;
@@ -978,9 +980,22 @@ export class SessionRegistry {
         "Session exit is still finalizing its last durable turn",
       );
     }
+    if (runtime.resuming === true) {
+      throw new RegistryError("SESSION_ALREADY_ACTIVE", "Session resume is already in progress");
+    }
     if (runtime.record.executionState === "active" || runtime.record.executionState === "starting") {
       throw new RegistryError("SESSION_ALREADY_ACTIVE", "Session is already active");
     }
+    runtime.resuming = true;
+    try {
+      return await this.resumeRuntime(runtime);
+    } finally {
+      runtime.resuming = false;
+    }
+  }
+
+  private async resumeRuntime(runtime: RuntimeSession): Promise<SessionRecord> {
+    const sessionId = runtime.record.id;
 
     // The outgoing runtime stops speaking for this session here, before anything is awaited. A kill is
     // acknowledged asynchronously, so its exit would otherwise land in the middle of the respawn

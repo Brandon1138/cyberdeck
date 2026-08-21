@@ -94,6 +94,7 @@ export interface WorkerTurnObservation {
 export interface WorkerTurnTranscriptPort {
   append(event: AppendWorkerTurnTranscriptEvent): Promise<unknown>;
   observeProviderTurns?(input: CaptureWorkerTurns): Promise<WorkerTurnObservation>;
+  /** Return one ordered durable acknowledgement per observed turn, including deduped turns. */
   commitProviderTurns?(observation: WorkerTurnObservation): Promise<WorkerTurnTranscript[]>;
   /** Compatibility composition for callers that have not adopted explicit observation ownership. */
   captureProviderTurns?(input: CaptureWorkerTurns): Promise<WorkerTurnTranscript[]>;

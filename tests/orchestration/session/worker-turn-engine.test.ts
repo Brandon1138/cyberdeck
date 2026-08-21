@@ -317,7 +317,7 @@ describe("WorkerTurnEngine", () => {
     })).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
   });
 
-  it("makes a late fallback commit inert after terminal authority rejects its screen", async () => {
+  it("fences a late fallback receipt after terminal authority rejects its screen", async () => {
     vi.useFakeTimers();
     const lateCommit = deferred<WorkerTurnTranscript[]>();
     const {
@@ -343,7 +343,20 @@ describe("WorkerTurnEngine", () => {
 
     engine.discardPendingScreenTurns();
     record.executionState = "failed";
-    await expect(engine.settleForResume(replay())).resolves.toBeUndefined();
+    let barrierSettled = false;
+    const barrier = engine.settleForResume(replay()).then(() => { barrierSettled = true; });
+    await flushMicrotasks();
+    expect(barrierSettled).toBe(false);
+
+    lateCommit.resolve([{
+      text: "turn rejected by terminal authority",
+      data: { transport: "terminal-replay-fallback" },
+    }]);
+    await expect(barrier).resolves.toBeUndefined();
+    expect(engine.completedTurns).toBe(1);
+    expect(engine.canonicalTurns).toBe(0);
+    expect(engine.waitResult(1)).toMatchObject({ completedTurns: 1 });
+
     record.executionState = "active";
     engine.resetForResume();
     await expect(engine.submitInstruction({
@@ -351,17 +364,7 @@ describe("WorkerTurnEngine", () => {
       encoded: Buffer.from("new generation work\n"),
       source: "orchestrator",
       instructionId: "after-discarded-commit",
-    })).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
-
-    lateCommit.resolve([{
-      text: "turn rejected by terminal authority",
-      data: { transport: "terminal-replay-fallback" },
-    }]);
-    await flushMicrotasks();
-
-    expect(engine.completedTurns).toBe(0);
-    expect(engine.canonicalTurns).toBe(0);
-    expect(engine.waitResult(1)).toMatchObject({ completedTurns: 0 });
+    })).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
   });
 
   it("quiesces a stale native observation before a resumed instruction can reuse its ordinal", async () => {
