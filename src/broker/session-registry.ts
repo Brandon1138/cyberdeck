@@ -41,10 +41,6 @@ import {
   type ScoutDecisionCard,
 } from "../domain/scout-output.js";
 import type {
-  ScoutReportCapture,
-  ScoutReportStore,
-} from "../persistence/scout-report-store.js";
-import type {
   InstructionDelivery,
   InstructionStateUpdate,
   ScoutArtifactRead,
@@ -58,6 +54,12 @@ import {
   SessionWorkspaceError,
 } from "../orchestration/session/session-workspace-coordinator.js";
 import type { WorkspaceStateReader } from "../orchestration/session/session-workspace-ports.js";
+import {
+  ScoutSessionSupervisor,
+  ScoutSessionSupervisorFactory,
+  ScoutSupervisionError,
+} from "../orchestration/session/scout-session-supervisor.js";
+import type { ScoutReportPort } from "../orchestration/session/scout-supervision-ports.js";
 import {
   WorkerTurnEngineFactory,
   type WorkerTurnAppendResult,
@@ -131,24 +133,16 @@ interface RuntimeSession {
   outcomePreserved?: boolean;
   /** Serializes provider launch-artifact work so a pending cleanup cannot delete a fresh resume. */
   launchTail: Promise<void>;
-  /** Serializes framed drop-box capture so older runtime snapshots cannot overwrite newer ones. */
-  scoutCaptureTail?: Promise<void>;
-  /** Serializes the full provider stream into the durable trace artifact. */
-  scoutTraceTail?: Promise<void>;
-  scoutTraceFailure?: string;
-  /** Prevents duplicate async finalization when a child process reports more than one close path. */
-  scoutFinalizing?: boolean;
+  /**
+   * Everything that is true of a Scout and of nothing else: trace and capture tails, the wall-clock
+   * cutoff, card promotion, canary verification, and finalization. Present only on a Scout — an
+   * ordinary session instantiates no supervisor and therefore carries no Scout runtime state.
+   */
+  scout?: ScoutSessionSupervisor;
   /** The exact exiting runtime is settling its last durable turn before terminal publication. */
   terminalFinalizing?: boolean;
   /** Serializes resume ownership before the first asynchronous turn-settlement boundary. */
   resuming?: boolean;
-  scoutBudgetTimer?: ReturnType<typeof setTimeout>;
-  scoutBudgetActive?: boolean;
-  scoutBudgetExhausting?: boolean;
-  scoutCutoffStarted?: boolean;
-  scoutExpectedSuccessfulStop?: boolean;
-  scoutAcceptedCardStopRequested?: boolean;
-  scoutCard?: ScoutDecisionCard;
 }
 
 /**
@@ -188,10 +182,7 @@ export interface SessionRegistryOptions {
   config: BrokerRuntimeConfig;
   /** Injected monotonic-enough wall clock for stalled-worker tests. */
   now?: () => number;
-  scoutReports?: Pick<
-    ScoutReportStore,
-    "initialize" | "capture" | "collect" | "appendTrace" | "readArtifact" | "remove"
-  >;
+  scoutReports?: ScoutReportPort;
   scoutWorkspaceState?: WorkspaceStateReader;
   /**
    * Creates the worktree for a `cyberdeck-provisioned` workspace. Absent means the broker cannot
@@ -238,6 +229,8 @@ export class SessionRegistry {
   private readonly instructionStateListeners = new Set<(update: InstructionStateUpdate) => void>();
   /** Owns cwd refusal, worktree provisioning and rollback, and Scout workspace verification. */
   private readonly workspace: SessionWorkspaceCoordinator;
+  /** Builds the per-session supervisor a Scout needs, and nothing at all for any other session. */
+  private readonly scoutSupervision: ScoutSessionSupervisorFactory;
   /** Sessions whose output has changed but whose update has not been announced yet. */
   private readonly pendingSessionUpdates = new Set<string>();
   private sessionUpdateFlush?: ReturnType<typeof setTimeout>;
@@ -263,6 +256,10 @@ export class SessionRegistry {
       ...(options.worktreeProvisioner === undefined
         ? {}
         : { provisioner: options.worktreeProvisioner }),
+    });
+    this.scoutSupervision = new ScoutSessionSupervisorFactory({
+      workspace: this.workspace,
+      ...(options.scoutReports === undefined ? {} : { reports: options.scoutReports }),
     });
     const writes: Promise<void>[] = [];
     for (const stored of options.recoveredSessions ?? []) {
@@ -362,11 +359,11 @@ export class SessionRegistry {
     let scout: ScoutRuntimeState | undefined;
     try {
       scout = parsed.profile === "scout"
-        ? await this.requireScoutReports().initialize(id, parsed.cwd)
+        ? await this.scoutSupervision.initialize(id, parsed.cwd)
         : undefined;
     } catch (error) {
       releaseReservation();
-      throw error;
+      throw registryError(error);
     }
     // Isolation is created here, after admission and before any provider process exists: a worktree
     // made for a start that the concurrency budget was about to refuse is litter nobody asked for,
@@ -492,7 +489,7 @@ export class SessionRegistry {
       try {
         await this.registerSession(runtime);
       } catch (error) {
-        await this.failLiveScout(runtime, "initialize", error);
+        await runtime.scout?.failLive("initialize", error);
         throw this.scoutLaunchError(record.id, error);
       }
     }
@@ -530,7 +527,7 @@ export class SessionRegistry {
           data: { initial: true },
         });
         this.requireActiveParent(parsed.parentSessionId);
-        this.armScoutBudget(runtime);
+        runtime.scout?.armBudget();
         if (adapter.submitInputToTerminal !== undefined) {
           await adapter.submitInputToTerminal(preparedInitialPrompt, sessionTerminal);
         } else {
@@ -539,11 +536,11 @@ export class SessionRegistry {
           sessionRuntime.write(data);
         }
       } else {
-        this.armScoutBudget(runtime);
+        runtime.scout?.armBudget();
       }
     } catch (error) {
       if (record.profile === "scout") {
-        await this.failLiveScout(runtime, "initialize", error);
+        await runtime.scout?.failLive("initialize", error);
         throw this.scoutLaunchError(record.id, error);
       }
       runtime.turns.releaseTimers();
@@ -589,26 +586,23 @@ export class SessionRegistry {
     afterByte = 0,
     maxBytes = 16 * 1024,
   ): Promise<ScoutArtifactRead> {
-    const record = this.requireRuntime(sessionId).record;
-    if (record.profile !== "scout" || record.scout === undefined) {
+    const runtime = this.requireRuntime(sessionId);
+    const supervisor = runtime.scout;
+    if (supervisor === undefined || runtime.record.scout === undefined) {
       throw new RegistryError(
         "INVALID_WORKER_PROFILE",
         `Session ${sessionId} is not a Scout`,
       );
     }
-    return this.requireScoutReports().readArtifact(
-      record.scout,
-      artifact,
-      afterByte,
-      maxBytes,
-    );
+    try {
+      return await supervisor.readArtifact(artifact, afterByte, maxBytes);
+    } catch (error) {
+      throw registryError(error);
+    }
   }
 
   scoutDecisionCard(sessionId: string): ScoutDecisionCard | undefined {
-    const card = this.requireRuntime(sessionId).scoutCard;
-    return card === undefined
-      ? undefined
-      : { ...card, evidence: [...card.evidence] };
+    return this.requireRuntime(sessionId).scout?.decisionCard();
   }
 
   /**
@@ -1242,12 +1236,25 @@ export class SessionRegistry {
         notifySessionUpdate: () => this.notifySessionUpdate(record.id),
         scheduleSessionUpdate: () => this.scheduleSessionUpdate(record.id),
         stopRequested: () => runtime.stopRequested,
-        scoutBudgetExhausting: () => runtime.scoutBudgetExhausting === true,
+        scoutBudgetExhausting: () => runtime.scout?.isBudgetExhausting() === true,
       },
       workerStallSeconds: this.options.config.workerStallSeconds,
       ...(this.options.now === undefined ? {} : { now: this.options.now }),
     }).create(record, this.replayBytesFor(record));
-    runtime = { record, turns, ...state };
+    // A Scout gets a supervisor; every other session gets `undefined` and carries no Scout state.
+    const scout = this.scoutSupervision.create(record, {
+      persist: () => this.persist(runtime),
+      appendEvent: (type, data) => this.appendEvent(type, record.id, data),
+      appendTranscript: (text, data) =>
+        this.appendTranscript(record.id, "lifecycle", "broker", text, data),
+      notifySessionUpdate: () => this.notifySessionUpdate(record.id),
+      setLatestResult: (text) => runtime.turns.setLatestResult(text),
+      setLatestResultIfAbsent: (text) => runtime.turns.setLatestResultIfAbsent(text),
+      recordCompletion: (turns_, text) => runtime.turns.recordCompletion(turns_, text),
+      kill: (signal) => runtime.sessionRuntime?.kill(signal),
+      stopRequested: () => runtime.stopRequested,
+    });
+    runtime = { record, turns, ...(scout === undefined ? {} : { scout }), ...state };
     return runtime;
   }
 
@@ -1329,15 +1336,14 @@ export class SessionRegistry {
     const rawReplay = (): string => sessionRuntime.snapshot().toString("utf8");
     if (runtime.record.scout?.transport === "headless-stream-json") {
       runtime.turns.appendOutput(chunk, rawReplay, false);
-      this.appendScoutTrace(runtime, chunk);
-      this.captureScoutReport(runtime, rawReplay);
+      runtime.scout?.observeOutput(chunk, rawReplay);
       runtime.controller?.output(chunk);
       for (const watcher of runtime.watchers.values()) watcher.output(chunk);
       this.scheduleSessionUpdate(runtime.record.id);
       return;
     }
     const turnObservation = runtime.turns.appendOutput(chunk, rawReplay);
-    this.captureScoutReport(runtime, rawReplay);
+    runtime.scout?.observeOutput(chunk, rawReplay);
     if (turnObservation.fatal) {
       this.handleFatalObservation(runtime, chunk, turnObservation);
       return;
@@ -1404,9 +1410,7 @@ export class SessionRegistry {
     // Every process exit ends the Scout's wall-clock ownership synchronously, including legacy
     // interactive-PTY Scouts that take the non-semantic branch below. A surviving timer could
     // otherwise rewrite an already-published exit as budget exhaustion and kill a dead handle.
-    if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
-    delete runtime.scoutBudgetTimer;
-    runtime.scoutBudgetActive = false;
+    runtime.scout?.releaseBudget();
     const settlesNormalSemanticTurn = runtime.record.executionState === "active"
       && !runtime.stopRequested
       && runtime.record.profile !== "scout"
@@ -1510,166 +1514,32 @@ export class SessionRegistry {
     this.notifySessionUpdate(runtime.record.id);
   }
 
+  /**
+   * Settle a headless Scout's own truth, then publish the one canonical exit.
+   *
+   * The supervisor decides the Scout's terminal state; the registry still owns the lifecycle exit
+   * that every session shares. A duplicate close path is reported as such and publishes nothing —
+   * the call that owns the exit already did.
+   */
   private async finalizeHeadlessScout(
     runtime: RuntimeSession,
     sessionRuntime: SessionRuntime,
     exitCode: number,
     signal?: number,
   ): Promise<void> {
-    if (runtime.scoutFinalizing === true) return;
-    runtime.scoutFinalizing = true;
-    if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
-    delete runtime.scoutBudgetTimer;
-    runtime.scoutBudgetActive = false;
-
-    const scout = runtime.record.scout;
-    if (scout === undefined) {
+    const supervisor = runtime.scout;
+    if (supervisor === undefined) {
       this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
-
-    this.captureScoutReport(
-      runtime,
+    // The replay thunk is bound to the exact handle that exited, so a replacement generation's
+    // screen can never be read as this process's final report.
+    const outcome = await supervisor.finalizeExit(
+      exitCode,
       () => sessionRuntime.snapshot().toString("utf8"),
     );
-    await runtime.scoutCaptureTail?.catch(() => undefined);
-    await runtime.scoutTraceTail?.catch(() => undefined);
-
-    if (runtime.scoutTraceFailure !== undefined) {
-      await this.markFinalScoutFailure(
-        runtime,
-        "verify",
-        `Durable Scout trace could not be persisted: ${runtime.scoutTraceFailure}`,
-        true,
-      );
-      this.handleExit(runtime, sessionRuntime, exitCode, signal);
-      return;
-    }
-
-    const verdict = await this.workspace.verifyScoutWorkspace(
-      scout.workspaceStateHash,
-      runtime.record.cwd,
-    );
-    if (!verdict.ok) {
-      await this.markFinalScoutFailure(runtime, "verify", verdict.reason, true);
-      this.handleExit(runtime, sessionRuntime, exitCode, signal);
-      return;
-    }
-
-    // A launch/setup failure already carries its more precise reason. Workspace immutability still
-    // ran above, but it must not rewrite that failure into a successful canary.
-    if (scout.terminalState === "failed") {
-      this.handleExit(runtime, sessionRuntime, exitCode, signal);
-      return;
-    }
-
-    const verifiedAt = new Date().toISOString();
-    scout.canary = { status: "verified", verifiedAt };
-    await this.appendEvent("scout.canary.verified", runtime.record.id, {
-      verifiedAt,
-      workspaceStateHash: verdict.workspaceStateHash,
-    }).catch(() => undefined);
-
-    if (runtime.stopRequested) {
-      scout.terminalState = "failed";
-      await this.persist(runtime).catch(() => undefined);
-      this.handleExit(runtime, sessionRuntime, exitCode, signal);
-      return;
-    }
-    if (scout.terminalState === "budget_exhausted") {
-      await this.persist(runtime).catch(() => undefined);
-      this.handleExit(runtime, sessionRuntime, exitCode, signal);
-      return;
-    }
-    if (exitCode !== 0 && runtime.scoutExpectedSuccessfulStop !== true) {
-      await this.markFinalScoutFailure(
-        runtime,
-        "execute",
-        `Cursor Scout exited with code ${exitCode}`,
-        false,
-      );
-      this.handleExit(runtime, sessionRuntime, exitCode, signal);
-      return;
-    }
-
-    const captured = await this.requireScoutReports().collect(scout).catch((error) => ({
-      state: "invalid" as const,
-      text: "",
-      reason: errorMessage(error),
-    }));
-    await this.applyScoutCapture(runtime, captured);
-    if (captured.state !== "complete" || !("card" in captured)) {
-      const detail = captured.state === "invalid"
-        ? captured.reason
-        : `result state is ${captured.state}`;
-      await this.markFinalScoutFailure(
-        runtime,
-        "execute",
-        `Cursor Scout did not produce a valid decision card: ${detail}`,
-        false,
-      );
-      this.handleExit(runtime, sessionRuntime, exitCode, signal);
-      return;
-    }
-
-    scout.terminalState = "complete";
-    runtime.scoutCard = captured.card;
-    runtime.turns.setLatestResult(captured.text);
-    runtime.record.latestPreview = captured.card.finding.slice(0, PREVIEW_STORAGE_LIMIT);
-    runtime.turns.recordCompletion(1, captured.text);
-    runtime.record.attentionState = "done";
-    runtime.record.updatedAt = new Date().toISOString();
-    runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
-    await this.appendEvent("scout.report.captured", runtime.record.id, {
-      reportPath: scout.reportPath,
-      evidencePath: scout.evidencePath ?? null,
-      tracePath: scout.tracePath ?? null,
-      verdict: captured.card.verdict,
-      basis: captured.card.basis,
-    }).catch(() => undefined);
-    await this.persist(runtime).catch(() => undefined);
+    if (outcome.status === "duplicate") return;
     this.handleExit(runtime, sessionRuntime, exitCode, signal);
-  }
-
-  private async markFinalScoutFailure(
-    runtime: RuntimeSession,
-    phase: "execute" | "verify",
-    message: string,
-    canaryFailed: boolean,
-  ): Promise<void> {
-    const scout = runtime.record.scout;
-    if (scout === undefined) return;
-    const failedAt = new Date().toISOString();
-    scout.terminalState = "failed";
-    scout.launchFailure = { phase, failedAt, message };
-    if (canaryFailed) {
-      scout.canary = { status: "failed", failedAt, reason: message };
-      await this.appendEvent("scout.canary.failed", runtime.record.id, {
-        phase,
-        message,
-      }).catch(() => undefined);
-    }
-    const latestResult = `Scout failed during ${phase}: ${message}`;
-    runtime.turns.setLatestResult(latestResult);
-    runtime.record.latestPreview = latestResult.slice(0, PREVIEW_STORAGE_LIMIT);
-    runtime.record.executionState = "failed";
-    runtime.record.attentionState = "failed";
-    runtime.record.updatedAt = failedAt;
-    runtime.record.meaningfulUpdatedAt = failedAt;
-    await this.appendEvent("scout.run.failed", runtime.record.id, {
-      phase,
-      message,
-      reportPath: scout.reportPath,
-    }).catch(() => undefined);
-    await this.appendTranscript(
-      runtime.record.id,
-      "lifecycle",
-      "broker",
-      "Scout failed",
-      { phase, message },
-    ).catch(() => undefined);
-    await this.persist(runtime).catch(() => undefined);
-    this.notifySessionUpdate(runtime.record.id);
   }
 
   /**
@@ -1775,13 +1645,9 @@ export class SessionRegistry {
         cleanupFailures.push(error instanceof Error ? error.message : String(error));
       }
     }
-    if (
-      record.profile === "scout"
-      && reason === "session-deleted"
-      && this.options.scoutReports !== undefined
-    ) {
+    if (record.profile === "scout" && reason === "session-deleted") {
       try {
-        await this.options.scoutReports.remove(record.id);
+        await this.scoutSupervision.discardReports(record.id);
       } catch (error) {
         cleanupFailures.push(error instanceof Error ? error.message : String(error));
       }
@@ -1835,29 +1701,20 @@ export class SessionRegistry {
     });
   }
 
+  /**
+   * Turn a Scout that never launched into a durable Fleet row.
+   *
+   * Registration is handed to the supervisor as a callback so the record is already failed when it
+   * is first persisted: a Scout that reached the catalog as `starting` and was rewritten afterwards
+   * would be adoptable for the width of that window.
+   */
   private async preserveFailedScoutLaunch(
     record: SessionRecord,
     phase: NonNullable<ScoutRuntimeState["launchFailure"]>["phase"],
     error: unknown,
     launchSpec?: ProviderLaunchSpec,
   ): Promise<void> {
-    const scout = record.scout;
-    if (scout === undefined) return;
-    const failedAt = new Date().toISOString();
-    const message = errorMessage(error);
-    scout.canary = { status: "failed", failedAt, reason: message };
-    scout.terminalState = "failed";
-    scout.launchFailure = { phase, failedAt, message };
-    record.executionState = "failed";
-    record.attentionState = "failed";
-    record.pid = 0;
-    record.exitCode = 1;
-    record.updatedAt = failedAt;
-    record.meaningfulUpdatedAt = failedAt;
-    record.latestPreview = `Scout launch failed during ${phase}: ${message}`.slice(
-      0,
-      PREVIEW_STORAGE_LIMIT,
-    );
+    if (record.scout === undefined) return;
     if (launchSpec !== undefined) {
       record.launchRecord = resolvedLaunchRecord(launchSpec, "launch");
     }
@@ -1866,69 +1723,9 @@ export class SessionRegistry {
       stopRequested: false,
       launchTail: Promise.resolve(),
     });
-    runtime.turns.setLatestResult(record.latestPreview);
     this.sessions.set(record.id, runtime);
-    await this.registerSession(runtime).catch(() => this.persist(runtime).catch(() => undefined));
-    await this.appendEvent("scout.launch.failed", record.id, {
-      phase,
-      message,
-      reportPath: scout.reportPath,
-    }).catch(() => undefined);
-    await this.appendEvent("scout.canary.failed", record.id, {
-      phase,
-      message,
-    }).catch(() => undefined);
-    await this.appendTranscript(
-      record.id,
-      "lifecycle",
-      "broker",
-      "Scout launch failed",
-      { phase, message },
-    ).catch(() => undefined);
-    this.notifySessionUpdate(record.id);
-  }
-
-  private async failLiveScout(
-    runtime: RuntimeSession,
-    phase: NonNullable<ScoutRuntimeState["launchFailure"]>["phase"],
-    error: unknown,
-  ): Promise<void> {
-    const scout = runtime.record.scout;
-    if (scout === undefined) return;
-    if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
-    delete runtime.scoutBudgetTimer;
-    runtime.scoutBudgetActive = false;
-    const failedAt = new Date().toISOString();
-    const message = errorMessage(error);
-    scout.canary = { status: "failed", failedAt, reason: message };
-    scout.terminalState = "failed";
-    scout.launchFailure = { phase, failedAt, message };
-    const latestResult = `Scout failed during ${phase}: ${message}`;
-    runtime.turns.setLatestResult(latestResult);
-    runtime.record.latestPreview = latestResult.slice(0, PREVIEW_STORAGE_LIMIT);
-    runtime.record.executionState = "failed";
-    runtime.record.attentionState = "failed";
-    runtime.record.updatedAt = failedAt;
-    runtime.record.meaningfulUpdatedAt = failedAt;
-    await this.appendEvent("scout.launch.failed", runtime.record.id, {
-      phase,
-      message,
-      reportPath: scout.reportPath,
-    }).catch(() => undefined);
-    await this.appendEvent("scout.canary.failed", runtime.record.id, {
-      phase,
-      message,
-    }).catch(() => undefined);
-    await this.appendTranscript(
-      runtime.record.id,
-      "lifecycle",
-      "broker",
-      "Scout failed",
-      { phase, message },
-    ).catch(() => undefined);
-    await this.persist(runtime).catch(() => undefined);
-    this.notifySessionUpdate(runtime.record.id);
-    runtime.sessionRuntime?.kill("SIGTERM");
+    await runtime.scout?.preserveLaunchFailure(phase, error, () =>
+      this.registerSession(runtime).catch(() => this.persist(runtime).catch(() => undefined)));
   }
 
   private scoutLaunchError(sessionId: string, error: unknown): RegistryError {
@@ -2027,196 +1824,15 @@ export class SessionRegistry {
     }
   }
 
-  private requireScoutReports(): NonNullable<SessionRegistryOptions["scoutReports"]> {
-    if (this.options.scoutReports === undefined) {
-      throw new RegistryError(
-        "SCOUT_REPORT_STORE_UNAVAILABLE",
-        "Scout profile requires broker-owned drop-box storage",
-      );
-    }
-    return this.options.scoutReports;
-  }
-
-  private appendScoutTrace(runtime: RuntimeSession, chunk: Buffer): void {
-    const scout = runtime.record.scout;
-    const reports = this.options.scoutReports;
-    if (scout === undefined || reports === undefined || chunk.length === 0) return;
-    runtime.scoutTraceTail = (runtime.scoutTraceTail ?? Promise.resolve())
-      .then(() => reports.appendTrace(scout, chunk))
-      .catch(async (error) => {
-        runtime.scoutTraceFailure = errorMessage(error);
-        runtime.turns.setLatestResultIfAbsent(
-          `Scout trace persistence failed: ${runtime.scoutTraceFailure}`,
-        );
-        await this.persist(runtime).catch(() => undefined);
-      });
-  }
-
   /**
-   * `replay` is a thunk because this is called from the broadcast path for every session, and only
-   * a scout ever gets past the guard below. Materializing the replay for the check was a copy and a
-   * decode of the whole buffer that every non-scout session paid on every chunk.
+   * Rehydrate every recovered Scout's result from its drop box.
+   *
+   * Runs once at startup, after records are recovered and before `ready()` resolves, so a Scout that
+   * finished while the broker was down is a finished thread by the time anything can read it.
    */
-  private captureScoutReport(runtime: RuntimeSession, replay: () => string): void {
-    if (
-      runtime.record.profile !== "scout"
-      || runtime.record.scout === undefined
-      || runtime.record.scout.terminalState === "complete"
-      || runtime.record.scout.terminalState === "failed"
-      || runtime.record.scout.terminalState === "budget_exhausted"
-      || runtime.scoutCutoffStarted === true
-      || this.options.scoutReports === undefined
-    ) return;
-    const scout = { ...runtime.record.scout, canary: { ...runtime.record.scout.canary } };
-    const capture = this.options.scoutReports.capture.bind(this.options.scoutReports);
-    const text = replay();
-    runtime.scoutCaptureTail = (runtime.scoutCaptureTail ?? Promise.resolve())
-      .then(async () => {
-        const result = await capture(scout, text);
-        await this.applyScoutCapture(runtime, result);
-      })
-      .catch(async (error) => {
-        if (runtime.record.scout === undefined) return;
-        if (runtime.record.scout.reportState === "complete") return;
-        runtime.record.scout.reportState = "invalid";
-        runtime.turns.setLatestResult(error instanceof Error ? error.message : String(error));
-        await this.persist(runtime).catch(() => undefined);
-        this.notifySessionUpdate(runtime.record.id);
-      });
-  }
-
-  private async applyScoutCapture(runtime: RuntimeSession, result: ScoutReportCapture): Promise<void> {
-    const scout = runtime.record.scout;
-    if (scout === undefined || scout.terminalState === "complete" || result.state === "missing") return;
-    const changed = scout.reportState !== result.state;
-    scout.reportState = result.state;
-    if ("text" in result && result.text !== "") runtime.turns.setLatestResult(result.text);
-    if (result.state === "complete" && "card" in result) runtime.scoutCard = result.card;
-    if (scout.terminalState === "budget_exhausted") {
-      if (changed) await this.persist(runtime);
-      this.notifySessionUpdate(runtime.record.id);
-      return;
-    }
-    if (changed || result.state === "complete") await this.persist(runtime);
-    this.notifySessionUpdate(runtime.record.id);
-    if (
-      result.state === "complete"
-      && "card" in result
-      && runtime.scoutFinalizing !== true
-      && runtime.scoutAcceptedCardStopRequested !== true
-    ) {
-      runtime.scoutAcceptedCardStopRequested = true;
-      runtime.scoutExpectedSuccessfulStop = true;
-      runtime.sessionRuntime?.kill("SIGTERM");
-    }
-  }
-
-  private armScoutBudget(runtime: RuntimeSession): void {
-    const budget = runtime.record.brief?.budget;
-    if (
-      runtime.record.profile !== "scout"
-      || budget === undefined
-      || runtime.scoutBudgetActive === true
-    ) return;
-    runtime.scoutBudgetActive = true;
-    runtime.scoutBudgetTimer = setTimeout(() => {
-      void this.exhaustScoutBudget(runtime, "time", budget.maxWallClockMs);
-    }, budget.maxWallClockMs);
-    runtime.scoutBudgetTimer.unref?.();
-  }
-
-  private async exhaustScoutBudget(
-    runtime: RuntimeSession,
-    dimension: "time",
-    observed: number,
-  ): Promise<void> {
-    const scout = runtime.record.scout;
-    if (
-      scout === undefined
-      || scout.terminalState !== undefined
-      || runtime.scoutBudgetExhausting === true
-    ) return;
-    runtime.scoutBudgetExhausting = true;
-    runtime.scoutCutoffStarted = true;
-    runtime.scoutBudgetActive = false;
-    if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
-    delete runtime.scoutBudgetTimer;
-    await runtime.scoutCaptureTail?.catch(() => undefined);
-    if (scout.reportState === "complete" && runtime.scoutCard !== undefined) {
-      runtime.scoutExpectedSuccessfulStop = true;
-      if (runtime.scoutAcceptedCardStopRequested !== true) {
-        runtime.scoutAcceptedCardStopRequested = true;
-        runtime.sessionRuntime?.kill("SIGTERM");
-      }
-      runtime.scoutBudgetExhausting = false;
-      this.notifySessionUpdate(runtime.record.id);
-      return;
-    }
-    scout.terminalState = "budget_exhausted";
-    runtime.record.executionState = "cancelled";
-    runtime.record.attentionState = "stopped";
-    runtime.record.updatedAt = new Date().toISOString();
-    runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
-    try {
-      // Persist cutoff before stopping provider. Later output cannot promote this terminal result.
-      await this.persist(runtime);
-      runtime.sessionRuntime?.kill("SIGTERM");
-      await this.appendEvent("scout.budget.exhausted", runtime.record.id, {
-        dimension,
-        observed,
-        reportState: scout.reportState,
-        reportPath: scout.reportPath,
-      });
-      await this.appendTranscript(
-        runtime.record.id,
-        "lifecycle",
-        "broker",
-        "Scout budget exhausted",
-        { dimension, observed, reportState: scout.reportState },
-      );
-    } catch (error) {
-      // A persistence failure must not leave an over-budget provider running indefinitely.
-      runtime.sessionRuntime?.kill("SIGTERM");
-      throw error;
-    } finally {
-      runtime.scoutBudgetExhausting = false;
-      this.notifySessionUpdate(runtime.record.id);
-    }
-  }
-
   private async recoverScoutReports(): Promise<void> {
-    if (this.options.scoutReports === undefined) return;
     for (const runtime of this.sessions.values()) {
-      const scout = runtime.record.scout;
-      if (runtime.record.profile !== "scout" || scout === undefined) continue;
-      const captured = await this.options.scoutReports.collect(scout).catch(() => undefined);
-      if (captured === undefined || captured.state === "missing") continue;
-      let changed = scout.reportState !== captured.state;
-      scout.reportState = captured.state;
-      if ("text" in captured) runtime.turns.setLatestResult(captured.text);
-      if (captured.state === "complete") {
-        if ("card" in captured) runtime.scoutCard = captured.card;
-        const verifiedHeadlessResult = scout.transport === "headless-stream-json"
-          && scout.terminalState === "complete";
-        const recoverableLegacyResult = scout.transport !== "headless-stream-json"
-          && scout.terminalState !== "budget_exhausted"
-          && scout.terminalState !== "failed";
-        if (verifiedHeadlessResult || recoverableLegacyResult) {
-          changed ||= scout.terminalState !== "complete"
-            || runtime.record.executionState !== "exited"
-            || runtime.record.attentionState !== "done";
-          scout.terminalState = "complete";
-          runtime.turns.recordCompletion(1, captured.text);
-          runtime.record.executionState = "exited";
-          runtime.record.attentionState = "done";
-          runtime.record.exitCode ??= 0;
-        }
-      }
-      if (changed) {
-        runtime.record.updatedAt = new Date().toISOString();
-        runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
-        await this.persist(runtime);
-      }
+      await runtime.scout?.recover();
     }
   }
 
@@ -2347,7 +1963,7 @@ function errorMessage(error: unknown): string {
  * carries a code the broker's RPC boundary knows how to report, so anything else is rethrown as-is.
  */
 function registryError(error: unknown): unknown {
-  return error instanceof SessionWorkspaceError
+  return error instanceof SessionWorkspaceError || error instanceof ScoutSupervisionError
     ? new RegistryError(error.code, error.message)
     : error;
 }
