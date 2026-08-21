@@ -22,10 +22,19 @@ import {
   SCOUT_REPORT_BEGIN,
   SCOUT_REPORT_END,
 } from "../orchestration/worker-profiles.js";
+import type { ScoutReportCapture } from "../orchestration/session/scout-supervision-ports.js";
 import type { ScoutArtifactRead } from "../orchestration/session/session-ports.js";
 import { ensurePrivateDirectory } from "./private-files.js";
 
 export type { ScoutArtifactRead } from "../orchestration/session/session-ports.js";
+
+/**
+ * The drop box's own reading of a Scout's report, declared by the layer that acts on it.
+ *
+ * Re-exported here so the durable format and the port the supervisor drives cannot drift: there is
+ * one shape, owned where the decision about it is made, and this store is the adapter for it.
+ */
+export type { ScoutReportCapture } from "../orchestration/session/scout-supervision-ports.js";
 
 const PARTIAL_REPORT_PREFIX = "CYBERDECK_SCOUT_PARTIAL\n";
 const INVALID_REPORT_PREFIX = "CYBERDECK_SCOUT_INVALID\n";
@@ -35,18 +44,6 @@ const TRACE_TRUNCATED_MARKER = Buffer.from(
     maximumBytes: MAX_SCOUT_TRACE_BYTES,
   })}\n`,
 );
-
-export type ScoutReportCapture =
-  | { state: "missing" }
-  | { state: "partial"; text: string }
-  | { state: "invalid"; text: string; reason: string }
-  | {
-      state: "complete";
-      text: string;
-      card: ScoutDecisionCard;
-      evidenceText?: string;
-    }
-  | { state: "complete"; text: string; report: ScoutReport };
 
 /**
  * Broker-owned Scout drop box. Composer never receives a repository write exception: it emits one
