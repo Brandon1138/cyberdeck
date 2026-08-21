@@ -1,12 +1,22 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderId } from "../../src/domain/session.js";
+import { capabilityModelEfforts } from "../../src/orchestration/worker-capabilities.js";
 import {
+  parseCodexModelCatalog,
   parseModelListing,
+  PROVIDER_MODEL_LISTING_COMMANDS,
   runListingCommand,
   WorkerCapabilityCatalog,
   type ProviderModelListing,
   type ProviderModelProbe,
 } from "../../src/orchestration/worker-capability-catalog.js";
+
+/** Cut down from real `codex debug models` output on 2026-08-20, keeping one hidden model. */
+const CODEX_CATALOG = readFileSync(
+  new URL("../fixtures/codex-debug-models.json", import.meta.url),
+  "utf8",
+);
 
 function probe(
   listings: Partial<Record<ProviderId, ProviderModelListing>>,
@@ -50,6 +60,62 @@ describe("provider model listings", () => {
   });
 });
 
+describe("the codex JSON catalog", () => {
+  it("reads each model's own effort range, and offers only what codex means to list", () => {
+    expect(parseCodexModelCatalog(CODEX_CATALOG)).toEqual([
+      {
+        id: "gpt-5.6-sol",
+        label: "GPT-5.6-Sol",
+        efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      },
+      {
+        id: "gpt-5.6-luna",
+        label: "GPT-5.6-Luna",
+        // Luna stops at max: the provider's own listing is narrower than the provider's range.
+        efforts: ["low", "medium", "high", "xhigh", "max"],
+      },
+      {
+        id: "gpt-5.3-codex-spark",
+        label: "GPT-5.3-Codex-Spark",
+        efforts: ["low", "medium", "high", "xhigh"],
+      },
+    ]);
+    // codex-auto-review is in the fixture and carries visibility "hide"; offering it in Fleet's
+    // composer would advertise a launch the provider does not mean to sell.
+    expect(parseCodexModelCatalog(CODEX_CATALOG).map((model) => model.id))
+      .not.toContain("codex-auto-review");
+  });
+
+  it("reports nothing rather than something, for output that is not this catalog", () => {
+    expect(parseCodexModelCatalog("")).toEqual([]);
+    expect(parseCodexModelCatalog("{\"models\":[{\"slug\":\"trunc")).toEqual([]);
+    expect(parseCodexModelCatalog("[]")).toEqual([]);
+    expect(parseCodexModelCatalog(JSON.stringify({ models: "soon" }))).toEqual([]);
+    // A listing whose ids are prose, and a rung Cyberdeck has no way to pass, are both dropped.
+    expect(parseCodexModelCatalog(JSON.stringify({
+      models: [
+        { slug: "rm -rf /", display_name: "nope", visibility: "list" },
+        {
+          slug: "gpt-5.3-codex-spark",
+          display_name: "GPT-5.3-Codex-Spark",
+          visibility: "list",
+          supported_reasoning_levels: [{ effort: "low" }, { effort: "hyper" }, { effort: "low" }],
+        },
+      ],
+    }))).toEqual([
+      { id: "gpt-5.3-codex-spark", label: "GPT-5.3-Codex-Spark", efforts: ["low"] },
+    ]);
+  });
+
+  it("keeps the line parser out of it, so neither format is widened to fit the other", () => {
+    expect(PROVIDER_MODEL_LISTING_COMMANDS.codex)
+      .toEqual({ executable: "codex", args: ["debug", "models"], format: "codex-json" });
+    // The line parser reading the JSON catalog is exactly what a widened parser would look like.
+    expect(parseModelListing(CODEX_CATALOG).map((model) => model.id))
+      .not.toContain("gpt-5.3-codex-spark");
+  });
+});
+
 describe("listing commands", () => {
   it("closes stdin, so a CLI that waits to be typed at still prints its listing", async () => {
     // `agy models` prints its list and then blocks on an open stdin pipe. Left attached, the probe
@@ -83,6 +149,42 @@ describe("WorkerCapabilityCatalog", () => {
     // Efforts, approval modes, and grant notes are launch policy, not something a listing reports.
     expect(codex?.efforts).toContain("xhigh");
     expect(codex?.approvalModes).toEqual(["prompt", "auto"]);
+  });
+
+  it("serves the per-model effort range a provider named, replacing the stored snapshot", async () => {
+    const catalog = new WorkerCapabilityCatalog({
+      probe: probe({
+        codex: {
+          models: [
+            { id: "gpt-5.3-codex-spark", label: "GPT-5.3-Codex-Spark", efforts: ["low", "high"] },
+            { id: "gpt-5.6-sol", label: "GPT-5.6-Sol" },
+          ],
+        },
+      }),
+    });
+
+    const [codex] = await catalog.resolve("codex");
+    expect(codex?.modelEfforts).toEqual({ "gpt-5.3-codex-spark": ["low", "high"] });
+    // The stored entry pins gpt-5.6-luna; a live listing that dropped luna must not keep its pin.
+    expect(codex?.modelEfforts?.["gpt-5.6-luna"]).toBeUndefined();
+    // A model the listing left unconstrained keeps the provider's whole range.
+    expect(capabilityModelEfforts(codex!, "gpt-5.6-sol")).toEqual(codex?.efforts);
+    expect(capabilityModelEfforts(codex!, "gpt-5.3-codex-spark")).toEqual(["low", "high"]);
+  });
+
+  it("stands the dated codex snapshot in when the CLI cannot be asked", async () => {
+    const catalog = new WorkerCapabilityCatalog({
+      probe: probe({ codex: { unavailable: "codex debug models failed: spawn ENOENT" } }),
+    });
+
+    const [codex] = await catalog.resolve("codex");
+    expect(codex).toMatchObject({
+      provider: "codex",
+      source: "fallback-catalog",
+      fallbackReason: "codex debug models failed: spawn ENOENT",
+    });
+    expect(codex?.models).toContain("gpt-5.3-codex-spark");
+    expect(codex?.modelEfforts?.["gpt-5.3-codex-spark"]).toEqual(["low", "medium", "high", "xhigh"]);
   });
 
   it("names the reason a provider could not be asked instead of serving an empty list", async () => {
