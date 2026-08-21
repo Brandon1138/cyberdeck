@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -842,8 +842,24 @@ function staticModuleSpecifiersFromSource(unprocessedSource: string): string[] {
   ];
 }
 
+/**
+ * Parsed specifiers per file, keyed by the file's own mtime and size.
+ *
+ * The suite walks every source file four times over — twice for the two whole-tree assertions, and
+ * once more for each of the two that scope themselves to a single importer — and tokenizing the
+ * tree is the expensive half of each walk. Caching on identity rather than on path keeps the
+ * regression file this suite writes and deletes mid-run correctly re-read.
+ */
+const parsedSpecifiers = new Map<string, { identity: string; specifiers: string[] }>();
+
 function staticModuleSpecifiers(path: string): string[] {
-  return staticModuleSpecifiersFromSource(readFileSync(path, "utf8"));
+  const { mtimeMs, size } = statSync(path);
+  const identity = `${mtimeMs}:${size}`;
+  const cached = parsedSpecifiers.get(path);
+  if (cached?.identity === identity) return cached.specifiers;
+  const specifiers = staticModuleSpecifiersFromSource(readFileSync(path, "utf8"));
+  parsedSpecifiers.set(path, { identity, specifiers });
+  return specifiers;
 }
 
 function resolveSourceImport(importer: string, specifier: string): string | undefined {
@@ -904,6 +920,14 @@ function currentViolations(): Violation[] {
   return [...violations.values()].sort(compareViolations);
 }
 
+/**
+ * `currentViolations` reads and scans every file under `src/`. Standalone that is fast, but this
+ * suite runs alongside every other fork in a full run, and the cold walk has already crossed the
+ * default 10s timeout under that contention — a timeout that says nothing about the dependency
+ * rule it was meant to check. The walking tests get their own headroom instead.
+ */
+const WHOLE_TREE_WALK_TIMEOUT_MS = 60_000;
+
 function baseline(): Baseline {
   return JSON.parse(readFileSync(BASELINE_PATH, "utf8")) as Baseline;
 }
@@ -928,7 +952,7 @@ describe("architecture dependency rule", () => {
     expect(
       currentViolations().filter(({ from }) => from === "src/orchestration/startup-thread-retention.ts"),
     ).toEqual([]);
-  });
+  }, WHOLE_TREE_WALK_TIMEOUT_MS);
 
   it("keeps InstructionQueue independent of broker and persistence implementations", () => {
     const path = resolve(SOURCE_ROOT, "orchestration/instruction-queue.ts");
@@ -1126,7 +1150,7 @@ describe("architecture dependency rule", () => {
     } finally {
       rmSync(regressionFile, { force: true });
     }
-  });
+  }, WHOLE_TREE_WALK_TIMEOUT_MS);
 
   it("keeps baseline sorted and unique", () => {
     const entries = baseline().violations;
@@ -1138,5 +1162,5 @@ describe("architecture dependency rule", () => {
 
   it("rejects new violations and stale baseline entries", () => {
     expect(currentViolations()).toEqual(baseline().violations);
-  });
+  }, WHOLE_TREE_WALK_TIMEOUT_MS);
 });

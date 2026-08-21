@@ -82,10 +82,6 @@
     },
     {
       "from": "src/broker/session-registry.ts",
-      "to": "src/providers/cursor/workspace-state.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
       "to": "src/providers/image-input.ts"
     },
     {
