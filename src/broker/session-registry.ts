@@ -26,46 +26,9 @@ import type {
   ProviderLaunchSpec,
   ProviderSessionTerminal,
 } from "../providers/provider.js";
-import type {
-  AppendThreadEvent,
-  CaptureProviderTurns,
-  ThreadTranscriptStore,
-} from "../persistence/thread-transcript-store.js";
 import { applyWorkerMode } from "../providers/worker-mode.js";
 import { addWorkerReportingGuidance } from "../providers/worker-reporting.js";
-import {
-  conversationPreview,
-  PREVIEW_STORAGE_LIMIT,
-  type TranscriptMessage,
-} from "../runtime/conversation-preview.js";
-import type { ObservedModel } from "../runtime/observed-model.js";
-import {
-  compactFrameResult,
-  compactTerminalResult,
-  markerTerminalActivity,
-  terminalFallbackResult,
-  truncateResult,
-  type ProviderTerminalActivity,
-} from "../runtime/terminal-replay.js";
-import { ReplayDigest } from "../runtime/replay-digest.js";
-import {
-  detectProviderLimitTerminationInTail,
-  detectSessionFatalErrorInTail,
-  TAIL_BYTES,
-} from "../runtime/session-liveness.js";
-import { frameComposerState } from "../runtime/composer-state.js";
-import {
-  advanceInstruction,
-  DELIVERY_HOLD_DETAIL,
-  projectWorkerTruth,
-  providerLimitFromTermination,
-  type ComposerObservation,
-  type DeliveryHoldReason,
-  type InstructionLifecycleState,
-  type ProviderLimitTermination,
-  type SessionTermination,
-  type WorkerTruth,
-} from "../domain/worker-truth.js";
+import type { WorkerTruth } from "../domain/worker-truth.js";
 import { selectExpiredThreads } from "../domain/thread-retention.js";
 import {
   MIN_SCOUT_REPLAY_BYTES,
@@ -92,6 +55,20 @@ import type {
   WorkerWaitResult,
   WorkerWaitTarget,
 } from "../orchestration/session/session-ports.js";
+import {
+  WorkerTurnEngineFactory,
+  type WorkerTurnAppendResult,
+  type WorkerTurnEngine,
+} from "../orchestration/session/worker-turn-engine.js";
+import type {
+  AppendWorkerTurnTranscriptEvent,
+  CaptureWorkerTurns,
+  WorkerTurnObservation,
+  WorkerTurnObservationPort,
+  WorkerTurnPreviewPort,
+  WorkerTurnTranscript,
+  WorkerTurnTranscriptMessage,
+} from "../orchestration/session/worker-turn-ports.js";
 
 export type {
   InstructionDelivery,
@@ -116,11 +93,14 @@ interface SessionStoreLike {
 }
 
 interface TranscriptLike {
-  append(event: AppendThreadEvent): Promise<unknown>;
+  append(event: AppendWorkerTurnTranscriptEvent): Promise<unknown>;
   dropClaudeBinding?(sessionId: string): Promise<void>;
-  captureProviderTurns?(input: CaptureProviderTurns): Promise<Array<{ text?: string | undefined }>>;
-  readTranscriptMessages?(input: CaptureProviderTurns): Promise<TranscriptMessage[]>;
-  readObservedModel?(input: CaptureProviderTurns): Promise<ObservedModel | undefined>;
+  observeProviderTurns?(input: CaptureWorkerTurns): Promise<WorkerTurnObservation>;
+  commitProviderTurns?(observation: WorkerTurnObservation): Promise<WorkerTurnTranscript[]>;
+  /** Compatibility only; WorkerTurnEngine requires the explicit observation/commit pair. */
+  captureProviderTurns?(input: CaptureWorkerTurns): Promise<WorkerTurnTranscript[]>;
+  readTranscriptMessages?(input: CaptureWorkerTurns): Promise<WorkerTurnTranscriptMessage[]>;
+  readObservedModel?(input: CaptureWorkerTurns): Promise<SessionRecord["observedModel"] | undefined>;
 }
 
 interface Controller {
@@ -136,115 +116,16 @@ interface Watcher {
   failed: FailureSink;
 }
 
-/**
- * One completed turn, kept so the same `completionTarget` stays retrievable after the caller's
- * transport dies. `deliveries` makes a replay distinguishable from a first read, which is what lets
- * an orchestrator prove a mutation already ran instead of relaunching a duplicate worker.
- */
-interface CompletionLedgerEntry {
-  text: string;
-  completedAt: string;
-  deliveries: number;
-  /**
-   * Where the text came from. `provider-transcript` is a canonical turn the provider itself wrote;
-   * `terminal-replay` is a screen scrape the broker settled for. Both count as completed turns —
-   * refusing to count a replay turn would hang every provider without a native transcript — but a
-   * caller that was told a worker "completed" while `thread_read` showed zero semantic turns was
-   * looking at this distinction with no way to see it.
-   */
-  provenance: "provider-transcript" | "terminal-replay";
-}
-
-/**
- * An instruction whose bytes are in the provider's input surface but whose submission has not been
- * observed. It is the object the `rendered` state is about.
- */
-interface RenderedInstruction {
-  instructionId: string;
-  /** The turn ordinal that will answer this instruction, fixed at render time. */
-  expectedTurn: number;
-  renderedAt: string;
-  state: InstructionLifecycleState;
-}
-
 interface RuntimeSession {
   record: SessionRecord;
   sessionRuntime?: SessionRuntime;
-  /**
-   * Everything the broker reads out of this session's output, folded in one chunk at a time.
-   *
-   * The session runtime still owns the raw replay — that is what an attaching client is handed. What
-   * lives here is the reading of it: the broker used to re-derive activity, composer state, token
-   * count and liveness by re-scanning that whole buffer on every chunk, which is what pinned a core
-   * in MIK-87.
-   */
-  replay: ReplayDigest;
+  turns: WorkerTurnEngine;
   controller?: Controller;
   watchers: Map<string, Watcher>;
   stopRequested: boolean;
   stopRequestedAt?: string;
-  activity: ProviderTerminalActivity;
-  observedWorking: boolean;
-  completedTurns: number;
-  /** Subset of `completedTurns` whose text came from a provider-native transcript turn. */
-  canonicalTurns: number;
-  /**
-   * Completed turns at the moment the newest instruction was rendered. A `completionTarget` at or
-   * below this floor names a turn that finished before the instruction existed, so settling a wait
-   * from that ledger slot would hand back an answer to an older question.
-   */
-  turnsBeforeLatestInstruction: number;
-  /** What the provider's input surface is holding, refreshed from every observed frame. */
-  composer: ComposerObservation;
-  /** Instructions written into the composer whose submission has not been observed yet. */
-  rendered: RenderedInstruction[];
-  /** Set while the delivery boundary is unsafe, so the return to safety can be announced once. */
-  deliveryHeld: boolean;
-  /** Set once the provider stopped itself on its own limits. */
-  providerLimit?: ProviderLimitTermination;
-  latestResult?: string;
-  /** Set once a fatal provider fault has been recorded, so replay never re-reports the same death. */
-  fatalReported: boolean;
   /** The stop that killed this session was a broker shutdown of an already-finished thread. */
   outcomePreserved?: boolean;
-  /** Per-turn results keyed by completion target, bounded by MAX_COMPLETION_LEDGER_ENTRIES. */
-  completions: Map<number, CompletionLedgerEntry>;
-  idleTimer?: ReturnType<typeof setTimeout>;
-  /**
-   * Armed whenever the broker is expecting a turn to land and the screen has gone quiet without
-   * banking one. See {@link SessionRegistry.reconcileCanonicalTurns}.
-   */
-  canonicalReconcileTimer?: ReturnType<typeof setTimeout>;
-  /**
-   * Which of the two paths that can bank a turn currently owns the next one, while it owns it.
-   *
-   * Both paths consume the same source: `captureProviderTurns` *appends and deduplicates* the
-   * provider's native turn ids, so a read is not a peek — whichever call runs first takes them, and
-   * the other finds an empty transcript and settles for a scrape. That made a discard-after-the-fact
-   * guard the wrong shape: by the time it can tell it lost, it has already spent the turns. This
-   * field is claimed synchronously, before either path reads anything, so ownership is decided
-   * rather than discovered. See {@link SessionRegistry.releaseTurnCapture} for the hand-back.
-   */
-  turnCaptureOwner?: "screen" | "reconcile";
-  /**
-   * The screen path reached its turn while a reconcile owned the capture, and stood down.
-   *
-   * A deferral is not a completion: if the reconcile then banks nothing, the turn the screen
-   * observed is still owed, and this is what says so.
-   */
-  screenTurnDeferred?: boolean;
-  /** Provider-native setup output must never satisfy the worker task's first completion target. */
-  suppressSemanticTurns?: boolean;
-  stallObservation?: {
-    /**
-     * The digest revision this observation was taken at. Used to be a retained copy of the whole
-     * replay, compared character by character on every chunk — a second 128 KiB of resident memory
-     * per session to answer a question a counter answers.
-     */
-    version: number;
-    tokenCount: number;
-    unchangedSinceMs: number;
-  };
   /** Serializes provider launch-artifact work so a pending cleanup cannot delete a fresh resume. */
   launchTail: Promise<void>;
   /** Serializes framed drop-box capture so older runtime snapshots cannot overwrite newer ones. */
@@ -254,6 +135,10 @@ interface RuntimeSession {
   scoutTraceFailure?: string;
   /** Prevents duplicate async finalization when a child process reports more than one close path. */
   scoutFinalizing?: boolean;
+  /** The exact exiting runtime is settling its last durable turn before terminal publication. */
+  terminalFinalizing?: boolean;
+  /** Serializes resume ownership before the first asynchronous turn-settlement boundary. */
+  resuming?: boolean;
   scoutBudgetTimer?: ReturnType<typeof setTimeout>;
   scoutBudgetActive?: boolean;
   scoutBudgetExhausting?: boolean;
@@ -263,8 +148,6 @@ interface RuntimeSession {
   scoutCard?: ScoutDecisionCard;
 }
 
-const MAX_COMPLETION_LEDGER_ENTRIES = 64;
-
 /**
  * How long an output-driven session update may sit before it is announced.
  *
@@ -273,60 +156,7 @@ const MAX_COMPLETION_LEDGER_ENTRIES = 64;
  * bounded by the clock instead of by how fast a model is emitting tokens.
  */
 const SESSION_UPDATE_FLUSH_MS = 16;
-
-/** First wait between provider-transcript reads; each further attempt doubles it. */
-const TRANSCRIPT_RETRY_BASE_MS = 50;
-
-/**
- * How long a session must produce nothing before its ledger is reconciled against the provider's
- * own transcript.
- *
- * Comfortably above the 200 ms the screen path banks a turn in, so the two never race for the same
- * turn in the ordinary case: by the time this fires, a screen-observed completion has already been
- * counted and cleared `observedWorking`, and the reconcile finds nothing to do. It is also long
- * enough that a provider still emitting tokens keeps pushing the timer out — which is the whole
- * safety condition for concluding that a turn named in the transcript is over.
- */
-const CANONICAL_RECONCILE_QUIET_MS = 1_500;
-
-/**
- * How long the screen path waits, after the provider returns to its prompt, before banking the turn.
- *
- * Long enough that a prompt redrawn mid-frame does not read as a completion, short enough that a
- * waiter is not kept guessing.
- */
-const SCREEN_TURN_BANK_MS = 200;
-
-/**
- * The state-machine fields every runtime session starts with, in one place so a construction site
- * added later cannot silently omit one and leave a worker projecting from undefined.
- */
-function freshTruthState(replayChars: number): Pick<
-  RuntimeSession,
-  | "completedTurns"
-  | "canonicalTurns"
-  | "turnsBeforeLatestInstruction"
-  | "composer"
-  | "rendered"
-  | "deliveryHeld"
-  | "replay"
-> {
-  return {
-    replay: new ReplayDigest(replayChars),
-    completedTurns: 0,
-    canonicalTurns: 0,
-    turnsBeforeLatestInstruction: 0,
-    composer: { modalOpen: false, occupied: false },
-    rendered: [],
-    deliveryHeld: false,
-  };
-}
-
-/** The status half of a {@link WorkerResultSnapshot}, which is all a wait needs to decide settling. */
-interface WorkerStatusReading {
-  status: WorkerResultSnapshot["status"];
-  stalled?: { stalledForSeconds: number; tokenCount: number };
-}
+const PREVIEW_STORAGE_LIMIT = 600;
 
 export interface SessionTreeProgress {
   rootSessionId: string;
@@ -347,7 +177,8 @@ export interface SessionRegistryOptions {
   adapters: Record<string, ProviderAdapter>;
   sessionRuntimeFactory: SessionRuntimeFactory<ProviderLaunchSpec>;
   journal: JournalLike;
-  transcripts?: ThreadTranscriptStore | TranscriptLike;
+  transcripts?: TranscriptLike;
+  workerTurnObservation: WorkerTurnObservationPort & WorkerTurnPreviewPort;
   store?: SessionStoreLike;
   recoveredSessions?: readonly SessionRecord[];
   validateCwd?: ((cwd: string) => Promise<void>) | undefined;
@@ -413,6 +244,9 @@ export class SessionRegistry {
   private shuttingDown = false;
 
   constructor(private readonly options: SessionRegistryOptions) {
+    if (options.workerTurnObservation === undefined) {
+      throw new TypeError("SessionRegistry requires workerTurnObservation");
+    }
     const writes: Promise<void>[] = [];
     for (const stored of options.recoveredSessions ?? []) {
       const record = this.recoverRecord(stored);
@@ -420,19 +254,11 @@ export class SessionRegistry {
       // it, because the cap belongs to the account rather than to the runtime. Recovery folds `errored`
       // into `failed`, so without rehydrating this the operator is told the worker crashed when it
       // was actually told to come back at 3:00pm.
-      const providerLimit = providerLimitFromTermination(record.termination);
-      this.sessions.set(record.id, {
-        record,
+      this.sessions.set(record.id, this.createRuntimeSession(record, {
         watchers: new Map(),
         stopRequested: false,
-        activity: "unknown",
-        observedWorking: false,
-        ...freshTruthState(this.replayBytesFor(record)),
-        ...(providerLimit === undefined ? {} : { providerLimit }),
-        fatalReported: false,
-        completions: new Map(),
         launchTail: Promise.resolve(),
-      });
+      }));
       // Recovery rewrites lifecycle fields, so the catalog is only authoritative once the rewrite
       // is written back. Persist whenever recovery actually changed the outcome, not just for the
       // interrupted case — a thread recovered as finished has to survive the *next* restart too.
@@ -655,19 +481,13 @@ export class SessionRegistry {
       updatedAt: new Date().toISOString(),
       launchRecord: resolvedLaunchRecord(launchSpec, "launch"),
     };
-    const runtime: RuntimeSession = {
-      record,
+    const runtime = this.createRuntimeSession(record, {
       sessionRuntime,
       watchers: new Map(),
       stopRequested: false,
-      activity: "unknown",
-      observedWorking: false,
-      ...freshTruthState(this.replayBytesFor(record)),
-      fatalReported: false,
-      completions: new Map(),
-      suppressSemanticTurns: true,
       launchTail: Promise.resolve(),
-    };
+    });
+    runtime.turns.suppressTurns();
     this.sessions.set(id, runtime);
     releaseReservation();
     this.adoptSessionRuntime(runtime, sessionRuntime);
@@ -697,13 +517,10 @@ export class SessionRegistry {
       ) {
         throw new RegistryError(
           "SESSION_NOT_ACTIVE",
-          runtime.latestResult ?? "Provider session exited during initialization",
+          runtime.turns.latestResult ?? "Provider session exited during initialization",
         );
       }
-      runtime.activity = "unknown";
-      runtime.observedWorking = false;
-      delete runtime.stallObservation;
-      delete runtime.suppressSemanticTurns;
+      runtime.turns.finishInitialization();
       if (
         deferredInitialPrompt
         && initialPrompt !== undefined
@@ -733,7 +550,7 @@ export class SessionRegistry {
         await this.failLiveScout(runtime, "initialize", error);
         throw this.scoutLaunchError(record.id, error);
       }
-      this.clearTurnTimers(runtime);
+      runtime.turns.releaseTimers();
       if (runtime.sessionRuntime === sessionRuntime) delete runtime.sessionRuntime;
       sessionRuntime.kill();
       this.sessions.delete(id);
@@ -841,7 +658,7 @@ export class SessionRegistry {
     // schemas validate against, so no layer can accept a value another layer would silently cut.
     const boundedTimeout = Math.max(0, Math.min(timeoutMs, MAX_WAIT_SECONDS * 1_000));
     const snapshot = (): WorkerResultSnapshot[] => targets.map((target) =>
-      this.workerResultSnapshot(target, maxResultChars)
+      this.requireRuntime(target.sessionId).turns.waitResult(target.completionTarget, maxResultChars)
     );
     const isSettled = (status: WorkerResultSnapshot["status"]): boolean =>
       status !== "working" && status !== "waiting";
@@ -849,7 +666,8 @@ export class SessionRegistry {
     // snapshot on every update meant one chunk from one worker re-scanned all N workers' replays,
     // which is the fan-out MIK-87 profiled as `ArrayMap` over an accumulated structure. A snapshot
     // is built when the wait actually answers.
-    const statuses = targets.map((target) => this.workerResultStatus(target).status);
+    const statuses = targets.map((target) =>
+      this.requireRuntime(target.sessionId).turns.waitStatus(target.completionTarget));
 
     if (statuses.every(isSettled)) {
       return { timedOut: false, results: this.deliver(targets, snapshot()) };
@@ -872,7 +690,9 @@ export class SessionRegistry {
         let touched = false;
         targets.forEach((target, index) => {
           if (target.sessionId !== sessionId) return;
-          statuses[index] = this.workerResultStatus(target).status;
+          statuses[index] = this.requireRuntime(target.sessionId).turns.waitStatus(
+            target.completionTarget,
+          );
           touched = true;
         });
         if (!touched) return;
@@ -883,7 +703,9 @@ export class SessionRegistry {
       // A target can settle between the reading above and the listener being attached, and nothing
       // more would arrive to notice it.
       for (const [index, target] of targets.entries()) {
-        statuses[index] = this.workerResultStatus(target).status;
+        statuses[index] = this.requireRuntime(target.sessionId).turns.waitStatus(
+          target.completionTarget,
+        );
       }
       if (statuses.every(isSettled)) finish(false);
     });
@@ -904,6 +726,7 @@ export class SessionRegistry {
     failed: FailureSink = () => {},
   ): Promise<Buffer> {
     const runtime = this.requireRuntime(sessionId);
+    this.requireTerminalFinalizationComplete(runtime);
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active; resume it before attaching");
     }
@@ -957,6 +780,7 @@ export class SessionRegistry {
 
   async write(sessionId: string, clientId: string | undefined, data: Buffer): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
+    this.requireTerminalFinalizationComplete(runtime);
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
     }
@@ -970,10 +794,11 @@ export class SessionRegistry {
 
   async submit(sessionId: string, clientId: string | undefined, message: string): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
+    this.requireTerminalFinalizationComplete(runtime);
     this.requireInteractiveInput(runtime);
     const adapter = this.requireAdapter(runtime.record.provider);
     const data = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
-    delete runtime.stallObservation;
+    runtime.turns.resetStallObservation();
     await this.appendTranscript(sessionId, "prompt", "human", message, {});
     await this.setAttention(runtime, "working", true);
     await this.write(sessionId, clientId, data);
@@ -1001,112 +826,20 @@ export class SessionRegistry {
     instructionId?: string,
   ): Promise<InstructionDelivery> {
     const runtime = this.requireRuntime(sessionId);
-    if (runtime.record.executionState !== "active") {
-      // Not an exception: a worker that died between acceptance and delivery has answered the
-      // question. Throwing here left the durable record `accepted` forever, deduplicating every
-      // retry of an instruction nothing would ever read.
-      return this.terminalDelivery(runtime, source, instructionId);
-    }
-    if (runtime.controller !== undefined) {
+    if (runtime.record.executionState === "active" && runtime.controller !== undefined) {
       throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
     }
-    this.requireInteractiveInput(runtime);
-    const hold = this.deliveryHold(runtime);
-    if (hold !== undefined) return this.holdInstruction(runtime, hold, source, instructionId);
-    const adapter = this.requireAdapter(runtime.record.provider);
-    const encoded = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
-    const sessionRuntime = this.requireSessionRuntime(runtime);
-    delete runtime.stallObservation;
-    const at = new Date().toISOString();
-    const expectedTurn = runtime.completedTurns + 1;
-    // Nothing is awaited between the boundary check and the write. An await here is a window for a
-    // human to attach or for the provider to start a turn of its own, and either one would make the
-    // ordinal above name a turn this instruction did not cause.
-    runtime.turnsBeforeLatestInstruction = runtime.completedTurns;
-    if (instructionId !== undefined) {
-      runtime.rendered.push({ instructionId, expectedTurn, renderedAt: at, state: "rendered" });
-    }
-    sessionRuntime.write(encoded);
-    await this.appendTranscript(sessionId, "instruction", source, message, {
-      ...metadata,
-      instructionState: "rendered" satisfies InstructionLifecycleState,
-      expectedTurn,
+    if (runtime.record.executionState === "active") this.requireInteractiveInput(runtime);
+    return runtime.turns.submitInstruction({
+      message,
+      encoded: () => {
+        const adapter = this.requireAdapter(runtime.record.provider);
+        return adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
+      },
+      source,
+      metadata,
       ...(instructionId === undefined ? {} : { instructionId }),
     });
-    await this.setAttention(runtime, "working", true);
-    await this.appendEvent("session.input", sessionId, { bytes: encoded.length, source });
-    return { state: "rendered", expectedTurn, at };
-  }
-
-  /**
-   * Whether the provider is in a state where a written payload would actually be read.
-   *
-   * A blocking modal and an occupied composer are both "the input surface is not yours right now".
-   * The difference from a human controller is only who took it, and all three answers are the same:
-   * hold the instruction rather than writing into a surface that will swallow it.
-   */
-  private deliveryHold(runtime: RuntimeSession): DeliveryHoldReason | undefined {
-    if (runtime.record.executionState !== "active") return "worker-terminal";
-    if (runtime.controller !== undefined) return "human-controller";
-    this.observeComposer(runtime);
-    if (runtime.composer.modalOpen || runtime.activity === "needs-input") return "provider-modal";
-    if (runtime.composer.occupied) return "composer-occupied";
-    // A turn in flight owns the ordinal this instruction would otherwise be given. `observedWorking`
-    // keeps the hold through the gap between the provider returning to its prompt and the ledger
-    // counting that turn: for those milliseconds the screen looks idle and the turn is not banked
-    // yet, which is the same ordinal collision one frame later.
-    if (runtime.activity === "working" || runtime.observedWorking) return "provider-busy";
-    return undefined;
-  }
-
-  /**
-   * Answer an instruction aimed at a worker that is already gone.
-   *
-   * `queued` would be a lie with no end: nothing will ever clear this hold, and the queue would keep
-   * the record alive and deduplicated against every retry. `undelivered` is terminal and says the
-   * one thing the caller needs — the payload was never read, so the work did not happen.
-   */
-  private async terminalDelivery(
-    runtime: RuntimeSession,
-    source: "orchestrator" | "worker",
-    instructionId: string | undefined,
-  ): Promise<InstructionDelivery> {
-    const at = new Date().toISOString();
-    await this.appendTranscript(runtime.record.id, "lifecycle", "broker", "instruction undelivered", {
-      instructionState: "undelivered" satisfies InstructionLifecycleState,
-      holdReason: "worker-terminal" satisfies DeliveryHoldReason,
-      executionState: runtime.record.executionState,
-      source,
-      ...(instructionId === undefined ? {} : { instructionId }),
-    });
-    return {
-      state: "undelivered",
-      hold: "worker-terminal",
-      detail: DELIVERY_HOLD_DETAIL["worker-terminal"],
-      at,
-    };
-  }
-
-  private async holdInstruction(
-    runtime: RuntimeSession,
-    hold: DeliveryHoldReason,
-    source: "orchestrator" | "worker",
-    instructionId: string | undefined,
-  ): Promise<InstructionDelivery> {
-    runtime.deliveryHeld = true;
-    const at = new Date().toISOString();
-    await this.appendTranscript(runtime.record.id, "lifecycle", "broker", "instruction held", {
-      instructionState: "queued" satisfies InstructionLifecycleState,
-      holdReason: hold,
-      source,
-      ...(instructionId === undefined ? {} : { instructionId }),
-    });
-    await this.appendEvent("session.input", runtime.record.id, {
-      bytes: 0,
-      source,
-      held: hold,
-    });
-    return { state: "queued", hold, detail: DELIVERY_HOLD_DETAIL[hold], at };
   }
 
   /** Announce that a worker which was refusing instructions can take one again. */
@@ -1135,29 +868,12 @@ export class SessionRegistry {
    * was filed for.
    */
   workerTruth(sessionId: string): WorkerTruth {
-    return this.projectTruth(this.requireRuntime(sessionId));
-  }
-
-  private projectTruth(runtime: RuntimeSession): WorkerTruth {
-    this.observeComposer(runtime);
-    const stalled = this.stalledWorker(runtime);
-    return projectWorkerTruth({
-      executionState: runtime.record.executionState,
-      exitCode: runtime.record.exitCode,
-      activity: runtime.activity,
-      composer: runtime.composer,
-      completedTurns: runtime.completedTurns,
-      canonicalTurns: runtime.canonicalTurns,
-      pendingInstructions: runtime.rendered.length,
-      providerLimit: runtime.providerLimit,
-      stalledForSeconds: stalled?.stalledForSeconds,
-      scoutTerminalState: runtime.record.scout?.terminalState,
-      stopRequested: runtime.stopRequested,
-    });
+    return this.requireRuntime(sessionId).turns.projectTruth();
   }
 
   resize(sessionId: string, clientId: string | undefined, cols: number, rows: number): void {
     const runtime = this.requireRuntime(sessionId);
+    this.requireTerminalFinalizationComplete(runtime);
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
     }
@@ -1185,6 +901,7 @@ export class SessionRegistry {
 
   async stop(sessionId: string): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
+    if (runtime.terminalFinalizing === true) return;
     if (runtime.record.exitCode !== null) {
       if (runtime.record.attentionState === "stopped") return;
       await this.setAttention(runtime, "stopped", true);
@@ -1212,6 +929,9 @@ export class SessionRegistry {
     // finished its task keeps that outcome through the kill, so it rehydrates as Done rather than
     // as Stopped. An operator-initiated stop still reads as Stopped — that is their action.
     runtime.outcomePreserved = this.shuttingDown && runtime.record.attentionState === "done";
+    // Stop authority rejects any unbanked screen synchronously, before journaling or process kill
+    // can yield long enough for the 200 ms bank to reinterpret it as a completed turn.
+    runtime.turns.discardPendingScreenTurns();
     if (runtime.outcomePreserved !== true) await this.setAttention(runtime, "stopping", true);
     this.requireSessionRuntime(runtime).kill("SIGTERM");
     await this.appendEvent("session.stopped", sessionId, {});
@@ -1221,6 +941,7 @@ export class SessionRegistry {
   /** Force only one already-stopping session. Child sessions are deliberately untouched. */
   forceStop(sessionId: string): void {
     const runtime = this.requireRuntime(sessionId);
+    if (runtime.terminalFinalizing === true) return;
     if (runtime.record.exitCode !== null) return;
     if (!runtime.stopRequested) {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Graceful stop must be requested before force");
@@ -1253,16 +974,57 @@ export class SessionRegistry {
 
   async resume(sessionId: string): Promise<SessionRecord> {
     const runtime = this.requireRuntime(sessionId);
+    if (runtime.terminalFinalizing === true) {
+      throw new RegistryError(
+        "SESSION_ALREADY_ACTIVE",
+        "Session exit is still finalizing its last durable turn",
+      );
+    }
+    if (runtime.resuming === true) {
+      throw new RegistryError("SESSION_ALREADY_ACTIVE", "Session resume is already in progress");
+    }
     if (runtime.record.executionState === "active" || runtime.record.executionState === "starting") {
       throw new RegistryError("SESSION_ALREADY_ACTIVE", "Session is already active");
     }
+    runtime.resuming = true;
+    try {
+      return await this.resumeRuntime(runtime);
+    } finally {
+      runtime.resuming = false;
+    }
+  }
+
+  private async resumeRuntime(runtime: RuntimeSession): Promise<SessionRecord> {
+    const sessionId = runtime.record.id;
 
     // The outgoing runtime stops speaking for this session here, before anything is awaited. A kill is
     // acknowledged asynchronously, so its exit would otherwise land in the middle of the respawn
     // and tear down the session it was replaced by — rewriting executionState, dropping the new
     // controller and watchers, and queueing a launch-artifact cleanup onto the fresh resume.
     const previousRuntime = runtime.sessionRuntime;
+    // Freeze the outgoing runtime's raw replay while its identity is still unambiguous. The turn
+    // engine's bounded visible frame is not parity with the legacy terminal fallback, and reading
+    // through `runtime.sessionRuntime` after detachment could observe a replacement generation.
+    const previousReplay = previousRuntime?.snapshot().toString("utf8") ?? "";
     delete runtime.sessionRuntime;
+    // Detaching the process is also the synchronous generation boundary for every in-flight turn.
+    // Resume is an ordinal quiescence barrier: observations and commits from the outgoing process
+    // must settle, and every frozen completion reservation must have an exact durable receipt before
+    // a replacement pid/generation or its input can become visible.
+    const turnBarrier = runtime.turns.settleForResume(previousReplay);
+    // A delayed old-process exit has not run handleExit's normal instruction cleanup yet. Retire
+    // those generation-local instructions now so a later resumed receipt cannot complete them.
+    runtime.turns.stopPendingInstructions();
+    try {
+      await turnBarrier;
+    } catch (error) {
+      // Indeterminate durable ownership or an unaccounted observation fails closed, but the outgoing
+      // handle remains reachable so the operator can still stop or inspect the process.
+      if (runtime.sessionRuntime === undefined && previousRuntime !== undefined) {
+        runtime.sessionRuntime = previousRuntime;
+      }
+      throw error;
+    }
 
     // An errored session's process outlived its provider session. Resuming would otherwise leave
     // that orphan running alongside the replacement, so it is killed before the respawn.
@@ -1293,16 +1055,11 @@ export class SessionRegistry {
     runtime.record.updatedAt = new Date().toISOString();
     runtime.record.attentionState = "done";
     runtime.record.launchRecord = resolvedLaunchRecord(resumeSpec, "resume");
-    runtime.activity = "unknown";
-    runtime.observedWorking = false;
-    runtime.fatalReported = false;
+    runtime.turns.resetForResume();
     // The limit belonged to the generation that hit it. A resumed session is a new generation with
     // its own budget, so carrying the old one forward would report a live worker as terminal for
     // the rest of its life. The journal keeps the history; the record carries current truth only.
-    delete runtime.providerLimit;
     delete runtime.record.termination;
-    delete runtime.stallObservation;
-    this.clearTurnTimers(runtime);
     this.adoptSessionRuntime(runtime, sessionRuntime);
     // Replacing the runtime also replaces its replay. Advance every derived cursor now so a
     // silent resumed process cannot leave clients displaying the previous generation forever.
@@ -1463,6 +1220,41 @@ export class SessionRegistry {
     return runtime;
   }
 
+  private createRuntimeSession(
+    record: SessionRecord,
+    state: Omit<RuntimeSession, "record" | "turns">,
+  ): RuntimeSession {
+    let runtime!: RuntimeSession;
+    const turns = new WorkerTurnEngineFactory({
+      observations: this.options.workerTurnObservation,
+      preview: this.options.workerTurnObservation,
+      ...(this.options.transcripts === undefined ? {} : { transcripts: this.options.transcripts }),
+      effects: {
+        hasRuntime: () => runtime.sessionRuntime !== undefined,
+        snapshot: () => runtime.sessionRuntime?.snapshot().toString("utf8"),
+        write: (data) => this.requireSessionRuntime(runtime).write(data),
+        appendEvent: (type, data) => this.appendEvent(type, record.id, data),
+        persist: () => this.persist(runtime),
+        setAttention: (attentionState, meaningful) =>
+          this.setAttention(runtime, attentionState, meaningful),
+        notifyInstructionState: (update) => {
+          for (const listener of this.instructionStateListeners) listener(update);
+        },
+        notifyDeliveryBoundary: () => {
+          for (const listener of this.deliveryBoundaryListeners) listener(record.id);
+        },
+        notifySessionUpdate: () => this.notifySessionUpdate(record.id),
+        scheduleSessionUpdate: () => this.scheduleSessionUpdate(record.id),
+        stopRequested: () => runtime.stopRequested,
+        scoutBudgetExhausting: () => runtime.scoutBudgetExhausting === true,
+      },
+      workerStallSeconds: this.options.config.workerStallSeconds,
+      ...(this.options.now === undefined ? {} : { now: this.options.now }),
+    }).create(record, this.replayBytesFor(record));
+    runtime = { record, turns, ...state };
+    return runtime;
+  }
+
   private requireActiveParent(parentSessionId: string | undefined): void {
     if (parentSessionId === undefined) return;
     const parent = this.requireRuntime(parentSessionId);
@@ -1599,6 +1391,7 @@ export class SessionRegistry {
     // decode on every chunk of provider output, for readers that were about to look at one screen.
     const rawReplay = (): string => sessionRuntime.snapshot().toString("utf8");
     if (runtime.record.scout?.transport === "headless-stream-json") {
+      runtime.turns.appendOutput(chunk, rawReplay, false);
       this.appendScoutTrace(runtime, chunk);
       this.captureScoutReport(runtime, rawReplay);
       runtime.controller?.output(chunk);
@@ -1606,141 +1399,124 @@ export class SessionRegistry {
       this.scheduleSessionUpdate(runtime.record.id);
       return;
     }
+    const turnObservation = runtime.turns.appendOutput(chunk, rawReplay);
     this.captureScoutReport(runtime, rawReplay);
-    if (this.observeFatalError(runtime)) {
-      // The bytes still reach anyone attached — the operator should be able to read the fault —
-      // but no activity is derived from them. A dead session has no activity to derive.
-      const controller = runtime.controller;
-      const watchers = [...runtime.watchers.values()];
-      controller?.output(chunk);
-      for (const watcher of watchers) watcher.output(chunk);
-      delete runtime.controller;
-      runtime.watchers.clear();
-      this.updateAttachmentState(runtime);
-      const failure = {
-        code: "SESSION_ERRORED",
-        message: runtime.latestResult ?? "Provider session failed",
-      };
-      controller?.failed(failure);
-      for (const watcher of watchers) watcher.failed(failure);
-      void this.persist(runtime).catch(() => undefined);
-      this.notifySessionUpdate(runtime.record.id);
+    if (turnObservation.fatal) {
+      this.handleFatalObservation(runtime, chunk, turnObservation);
       return;
     }
-    const activity = markerTerminalActivity(runtime.record.provider, runtime.replay);
-    if (activity === "working") {
-      runtime.observedWorking = true;
-      if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
-      delete runtime.idleTimer;
-      if (runtime.record.attentionState !== "working") {
-        void this.setAttention(runtime, "working", false);
-      }
-    }
-    runtime.activity = activity;
-    this.observeComposer(runtime);
-    // The provider left the composer and started a turn: the only evidence that a payload the broker
-    // wrote was actually consumed. Nothing about the write itself is admissible here.
-    if (activity === "working" && !runtime.composer.occupied) {
-      this.advanceRenderedInstructions(runtime, "submitted");
-      this.advanceRenderedInstructions(runtime, "acknowledged");
-    }
-    this.notifyDeliveryBoundary(runtime);
-    if (runtime.suppressSemanticTurns === true) {
-      runtime.controller?.output(chunk);
-      for (const watcher of runtime.watchers.values()) watcher.output(chunk);
-      this.scheduleSessionUpdate(runtime.record.id);
-      return;
-    }
-    this.updateStallObservation(runtime);
-    if (activity === "awaiting-input" && runtime.observedWorking) {
-      this.armScreenTurnBank(runtime, rawReplay);
-    } else if (activity === "needs-input") {
-      runtime.latestResult = compactFrameResult(runtime.replay.frameText());
-      if (runtime.record.attentionState !== "needs-input") {
-        void this.setAttention(runtime, "needs-input", true);
-        // A blocked session has no completed turn, so the transcript is the only place the last
-        // real reply exists. Read it off the broadcast path, once per transition into the state.
-        void this.refreshPreview(runtime, rawReplay(), []).catch(() => undefined);
-        // A session can sit blocked for a long time after a model switch, so this transition is the
-        // other place the running model is worth re-reading.
-        void this.refreshObservedModel(runtime).catch(() => undefined);
-      }
-    }
-    // Armed on every chunk, whatever the screen said. The branch above only banks a turn when the
-    // provider walks back to its prompt in front of the broker; a worker that finished under a
-    // dialog, or behind a spinner frame that was never redrawn, takes neither branch and used to
-    // leave its finished turn unbanked forever. This is the path that notices.
-    this.armCanonicalReconcile(runtime);
     runtime.controller?.output(chunk);
     for (const watcher of runtime.watchers.values()) {
       watcher.output(chunk);
     }
-    this.scheduleSessionUpdate(runtime.record.id);
   }
 
-  /**
-   * Detect a session that has died inside a process that is still running, and move it to a
-   * terminal state.
-   *
-   * Liveness used to be inferred from the runtime being open, which is not evidence of anything: a
-   * worker killed by an unrecoverable API 4xx keeps its process, so it reported `active` with a
-   * null exit code, consumed a worker slot forever, and could even show `needs-input` — inviting
-   * the operator to type at a session that can never read it again. The verdict comes from the
-   * session's last result instead.
-   */
-  private observeFatalError(runtime: RuntimeSession): boolean {
-    if (runtime.record.executionState === "errored") return true;
-    if (runtime.fatalReported || runtime.record.executionState !== "active") return false;
-    // Both scans only ever read the last few thousand characters — a fatal notice is the last thing
-    // a provider prints. They used to reach that tail by stripping the whole replay first.
-    const tail = runtime.replay.strippedTail(TAIL_BYTES);
-    // A limit the provider set for itself is read first. It is terminal for the same reason a fault
-    // is — nothing more will run — but "hit the session cap" and "prompt too long" name a remedy,
-    // and the generic 4xx pattern below would otherwise swallow both into "rejected the request".
-    const limit = detectProviderLimitTerminationInTail(tail);
-    const fault = limit === undefined ? detectSessionFatalErrorInTail(tail) : undefined;
-    const at = new Date().toISOString();
-    const termination: SessionTermination | undefined = limit !== undefined
-      ? { kind: limit.kind, reason: limit.reason, detail: limit.detail, at }
-      : fault === undefined
-        ? undefined
-        : { kind: "provider-fault", reason: fault.reason, detail: fault.detail, at };
-    if (termination === undefined) return false;
-    if (limit !== undefined) runtime.providerLimit = limit;
-    runtime.record.termination = termination;
-
-    // Whatever is still sitting in the composer will never be read now, and anything the queue was
-    // holding for a safe boundary has run out of boundaries.
-    this.advanceRenderedInstructions(runtime, "undelivered");
-    this.releaseDeliveryHolds(runtime);
-    runtime.fatalReported = true;
-    this.clearTurnTimers(runtime);
-    runtime.activity = "unknown";
-    runtime.observedWorking = false;
-    runtime.latestResult = termination.detail;
-    // exitCode stays null on purpose: the process is still there, and deleting the thread must
-    // still require stopping it. Only the slot and the "can accept input" claim are released.
+  private handleFatalObservation(
+    runtime: RuntimeSession,
+    chunk: Buffer,
+    observation: WorkerTurnAppendResult,
+  ): void {
+    const firstObservation = runtime.record.executionState !== "errored";
+    const termination = observation.termination ?? runtime.record.termination;
+    if (termination !== undefined) runtime.record.termination = termination;
     runtime.record.executionState = "errored";
-    void this.appendEvent("session.errored", runtime.record.id, {
-      reason: termination.reason,
-      detail: termination.detail,
-      kind: termination.kind,
-      pid: runtime.record.pid,
-    }).catch(() => undefined);
-    void this.appendTranscript(runtime.record.id, "lifecycle", "broker", "session errored", {
-      reason: termination.reason,
-      detail: termination.detail,
-      kind: termination.kind,
-    }).catch(() => undefined);
-    void this.setAttention(runtime, "failed", true).catch(() => undefined);
-    return true;
+    if (firstObservation && termination !== undefined) {
+      // Preserve the original fatal boundary: durable bookkeeping is started, and setAttention's
+      // synchronous record mutation happens, before an attached client observes the failure bytes.
+      void this.appendEvent("session.errored", runtime.record.id, {
+        reason: termination.reason,
+        detail: termination.detail,
+        kind: termination.kind,
+        pid: runtime.record.pid,
+      }).catch(() => undefined);
+      void this.appendTranscript(runtime.record.id, "lifecycle", "broker", "session errored", {
+        reason: termination.reason,
+        detail: termination.detail,
+        kind: termination.kind,
+      }).catch(() => undefined);
+      void this.setAttention(runtime, "failed", true).catch(() => undefined);
+    }
+    const controller = runtime.controller;
+    const watchers = [...runtime.watchers.values()];
+    controller?.output(chunk);
+    for (const watcher of watchers) watcher.output(chunk);
+    delete runtime.controller;
+    runtime.watchers.clear();
+    this.updateAttachmentState(runtime);
+    const failure = {
+      code: "SESSION_ERRORED",
+      message: runtime.turns.latestResult ?? "Provider session failed",
+    };
+    controller?.failed(failure);
+    for (const watcher of watchers) watcher.failed(failure);
+    void this.persist(runtime).catch(() => undefined);
+    this.notifySessionUpdate(runtime.record.id);
   }
 
-  private handleExit(runtime: RuntimeSession, exitCode: number, signal?: number): void {
-    this.clearTurnTimers(runtime);
+  private handleExit(
+    runtime: RuntimeSession,
+    sessionRuntime: SessionRuntime,
+    exitCode: number,
+    signal?: number,
+  ): void {
+    if (
+      runtime.sessionRuntime !== sessionRuntime
+      || runtime.terminalFinalizing === true
+      || runtime.record.exitCode !== null
+    ) return;
+    // Every process exit ends the Scout's wall-clock ownership synchronously, including legacy
+    // interactive-PTY Scouts that take the non-semantic branch below. A surviving timer could
+    // otherwise rewrite an already-published exit as budget exhaustion and kill a dead handle.
     if (runtime.scoutBudgetTimer !== undefined) clearTimeout(runtime.scoutBudgetTimer);
     delete runtime.scoutBudgetTimer;
     runtime.scoutBudgetActive = false;
+    const settlesNormalSemanticTurn = runtime.record.executionState === "active"
+      && !runtime.stopRequested
+      && runtime.record.profile !== "scout"
+      && runtime.record.termination === undefined;
+    if (!settlesNormalSemanticTurn) {
+      // Fatal/provider-limit, explicit-stop, and Scout authority already chose their terminal
+      // semantics. They must not reinterpret a previously frozen screen as a normal turn. A bare
+      // non-zero process exit has no such semantic authority: it still settles an exact receipt
+      // before the process outcome is published as failed.
+      runtime.turns.discardPendingScreenTurns();
+      this.publishTerminalExit(runtime, sessionRuntime, exitCode, signal);
+      return;
+    }
+    // Input closes synchronously with the exact process handle. Terminal execution/attention truth
+    // stays unpublished until every turn that process could already own has a durable outcome.
+    runtime.terminalFinalizing = true;
+    let settlement: Promise<void> | undefined;
+    try {
+      settlement = runtime.turns.startTerminalFinalization(
+        () => sessionRuntime.snapshot().toString("utf8"),
+      );
+    } catch {
+      this.publishTerminalExit(runtime, sessionRuntime, exitCode, signal);
+      return;
+    }
+    if (settlement === undefined) {
+      this.publishTerminalExit(runtime, sessionRuntime, exitCode, signal);
+      return;
+    }
+    void settlement.then(
+      () => this.publishTerminalExit(runtime, sessionRuntime, exitCode, signal),
+      () => this.publishTerminalExit(runtime, sessionRuntime, exitCode, signal),
+    );
+  }
+
+  private publishTerminalExit(
+    runtime: RuntimeSession,
+    sessionRuntime: SessionRuntime,
+    exitCode: number,
+    signal?: number,
+  ): void {
+    // The identity check before handleExit's await is not enough: a stale finalizer must never tear
+    // down a replacement generation or clear its input fence.
+    if (runtime.sessionRuntime !== sessionRuntime) return;
+    // A valid final receipt has already completed every matching instruction. Only work still left
+    // in the dead process's composer becomes undelivered now.
+    runtime.turns.stopPendingInstructions();
     const scoutTerminal = runtime.record.scout?.terminalState;
     runtime.record.executionState = scoutTerminal === "complete"
       ? "exited"
@@ -1754,11 +1530,6 @@ export class SessionRegistry {
               ? "exited"
               : "failed";
     runtime.record.exitCode = exitCode;
-    // Anything still sitting in the composer died with the process. Saying so is the difference
-    // between an orchestrator retrying an instruction and one waiting forever on a turn that can
-    // no longer happen.
-    this.advanceRenderedInstructions(runtime, "undelivered");
-    this.releaseDeliveryHolds(runtime);
     const controller = runtime.controller;
     const watchers = [...runtime.watchers.values()];
     delete runtime.controller;
@@ -1777,6 +1548,9 @@ export class SessionRegistry {
               ? "done"
               : "failed";
     runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
+    // The record is terminal before either fence opens, so no input path can observe an active gap.
+    runtime.turns.finishTerminalFinalization();
+    delete runtime.terminalFinalizing;
     controller?.ended(exitCode);
     for (const watcher of watchers) watcher.ended(exitCode);
     void this.appendEvent("session.exited", runtime.record.id, {
@@ -1801,6 +1575,7 @@ export class SessionRegistry {
 
   private async finalizeHeadlessScout(
     runtime: RuntimeSession,
+    sessionRuntime: SessionRuntime,
     exitCode: number,
     signal?: number,
   ): Promise<void> {
@@ -1812,13 +1587,13 @@ export class SessionRegistry {
 
     const scout = runtime.record.scout;
     if (scout === undefined) {
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
     this.captureScoutReport(
       runtime,
-      () => runtime.sessionRuntime?.snapshot().toString("utf8") ?? "",
+      () => sessionRuntime.snapshot().toString("utf8"),
     );
     await runtime.scoutCaptureTail?.catch(() => undefined);
     await runtime.scoutTraceTail?.catch(() => undefined);
@@ -1830,7 +1605,7 @@ export class SessionRegistry {
         `Durable Scout trace could not be persisted: ${runtime.scoutTraceFailure}`,
         true,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
@@ -1842,7 +1617,7 @@ export class SessionRegistry {
         "Scout has no pre-launch workspace state baseline",
         true,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
     let after: string;
@@ -1855,7 +1630,7 @@ export class SessionRegistry {
         `Post-run workspace verification failed: ${errorMessage(error)}`,
         true,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
     if (after !== baseline) {
@@ -1865,14 +1640,14 @@ export class SessionRegistry {
         "Scout changed observable repository state despite its read-only profile",
         true,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
     // A launch/setup failure already carries its more precise reason. Workspace immutability still
     // ran above, but it must not rewrite that failure into a successful canary.
     if (scout.terminalState === "failed") {
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
@@ -1886,12 +1661,12 @@ export class SessionRegistry {
     if (runtime.stopRequested) {
       scout.terminalState = "failed";
       await this.persist(runtime).catch(() => undefined);
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
     if (scout.terminalState === "budget_exhausted") {
       await this.persist(runtime).catch(() => undefined);
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
     if (exitCode !== 0 && runtime.scoutExpectedSuccessfulStop !== true) {
@@ -1901,7 +1676,7 @@ export class SessionRegistry {
         `Cursor Scout exited with code ${exitCode}`,
         false,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
@@ -1921,16 +1696,15 @@ export class SessionRegistry {
         `Cursor Scout did not produce a valid decision card: ${detail}`,
         false,
       );
-      this.handleExit(runtime, exitCode, signal);
+      this.handleExit(runtime, sessionRuntime, exitCode, signal);
       return;
     }
 
     scout.terminalState = "complete";
     runtime.scoutCard = captured.card;
-    runtime.latestResult = captured.text;
+    runtime.turns.setLatestResult(captured.text);
     runtime.record.latestPreview = captured.card.finding.slice(0, PREVIEW_STORAGE_LIMIT);
-    runtime.completedTurns = Math.max(runtime.completedTurns, 1);
-    this.recordCompletion(runtime, 1, captured.text);
+    runtime.turns.recordCompletion(1, captured.text);
     runtime.record.attentionState = "done";
     runtime.record.updatedAt = new Date().toISOString();
     runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
@@ -1942,7 +1716,7 @@ export class SessionRegistry {
       basis: captured.card.basis,
     }).catch(() => undefined);
     await this.persist(runtime).catch(() => undefined);
-    this.handleExit(runtime, exitCode, signal);
+    this.handleExit(runtime, sessionRuntime, exitCode, signal);
   }
 
   private async markFinalScoutFailure(
@@ -1963,8 +1737,9 @@ export class SessionRegistry {
         message,
       }).catch(() => undefined);
     }
-    runtime.latestResult = `Scout failed during ${phase}: ${message}`;
-    runtime.record.latestPreview = runtime.latestResult.slice(0, PREVIEW_STORAGE_LIMIT);
+    const latestResult = `Scout failed during ${phase}: ${message}`;
+    runtime.turns.setLatestResult(latestResult);
+    runtime.record.latestPreview = latestResult.slice(0, PREVIEW_STORAGE_LIMIT);
     runtime.record.executionState = "failed";
     runtime.record.attentionState = "failed";
     runtime.record.updatedAt = failedAt;
@@ -1997,18 +1772,17 @@ export class SessionRegistry {
     runtime.sessionRuntime = sessionRuntime;
     // A resumed session inherits whatever the new handle already replayed, and starts its reading
     // over: the old process's markers describe a process that is gone.
-    runtime.replay.reset(sessionRuntime.snapshot().toString("utf8"));
+    runtime.turns.resetReplay(sessionRuntime.snapshot().toString("utf8"));
     sessionRuntime.onOutput((chunk) => {
       if (runtime.sessionRuntime !== sessionRuntime) return;
-      runtime.replay.appendBytes(chunk);
       this.broadcast(runtime, chunk);
     });
     sessionRuntime.onExit((exitCode, signal) => {
       if (runtime.sessionRuntime !== sessionRuntime) return;
       if (runtime.record.scout?.transport === "headless-stream-json") {
-        void this.finalizeHeadlessScout(runtime, exitCode, signal);
+        void this.finalizeHeadlessScout(runtime, sessionRuntime, exitCode, signal);
       } else {
-        this.handleExit(runtime, exitCode, signal);
+        this.handleExit(runtime, sessionRuntime, exitCode, signal);
       }
     });
   }
@@ -2175,18 +1949,12 @@ export class SessionRegistry {
     if (launchSpec !== undefined) {
       record.launchRecord = resolvedLaunchRecord(launchSpec, "launch");
     }
-    const runtime: RuntimeSession = {
-      record,
+    const runtime = this.createRuntimeSession(record, {
       watchers: new Map(),
       stopRequested: false,
-      activity: "unknown",
-      observedWorking: false,
-      ...freshTruthState(this.replayBytesFor(record)),
-      latestResult: record.latestPreview,
-      fatalReported: false,
-      completions: new Map(),
       launchTail: Promise.resolve(),
-    };
+    });
+    runtime.turns.setLatestResult(record.latestPreview);
     this.sessions.set(record.id, runtime);
     await this.registerSession(runtime).catch(() => this.persist(runtime).catch(() => undefined));
     await this.appendEvent("scout.launch.failed", record.id, {
@@ -2223,8 +1991,9 @@ export class SessionRegistry {
     scout.canary = { status: "failed", failedAt, reason: message };
     scout.terminalState = "failed";
     scout.launchFailure = { phase, failedAt, message };
-    runtime.latestResult = `Scout failed during ${phase}: ${message}`;
-    runtime.record.latestPreview = runtime.latestResult.slice(0, PREVIEW_STORAGE_LIMIT);
+    const latestResult = `Scout failed during ${phase}: ${message}`;
+    runtime.turns.setLatestResult(latestResult);
+    runtime.record.latestPreview = latestResult.slice(0, PREVIEW_STORAGE_LIMIT);
     runtime.record.executionState = "failed";
     runtime.record.attentionState = "failed";
     runtime.record.updatedAt = failedAt;
@@ -2258,174 +2027,6 @@ export class SessionRegistry {
     );
   }
 
-  private workerResultSnapshot(target: WorkerWaitTarget, maxResultChars: number): WorkerResultSnapshot {
-    const runtime = this.requireRuntime(target.sessionId);
-    // A recorded completion wins over live runtime state: once the target turn is in the ledger its
-    // text is fixed, so a later turn cannot overwrite the answer this wait was asked for.
-    const recorded = runtime.completions.get(target.completionTarget);
-    const scoutTerminal = runtime.record.scout?.terminalState;
-    const result = recorded?.text
-      ?? (runtime.record.profile === "scout"
-        ? scoutTerminal === "failed" || scoutTerminal === "budget_exhausted"
-          ? runtime.latestResult
-            ?? runtime.record.latestPreview
-            ?? `Scout ${scoutTerminal}`
-          : runtime.record.executionState === "active"
-              || runtime.record.executionState === "starting"
-            ? `Scout running · result ${runtime.record.scout?.reportState ?? "missing"} · raw provider stream retained in trace artifact`
-            : `Scout ${runtime.record.executionState} without a verified decision card`
-        : runtime.latestResult === undefined
-          ? this.fallbackResult(runtime, maxResultChars)
-          : runtime.latestResult);
-    const text = truncateResult(result, maxResultChars);
-    const base = {
-      sessionId: runtime.record.id,
-      ...(runtime.record.name === undefined ? {} : { name: runtime.record.name }),
-      provider: runtime.record.provider,
-      ...(runtime.record.model === undefined ? {} : { model: runtime.record.model }),
-      ...(runtime.record.effort === undefined ? {} : { effort: runtime.record.effort }),
-      ...(runtime.record.profile === undefined ? {} : { profile: runtime.record.profile }),
-      ...(runtime.record.effectiveState === undefined
-        ? {}
-        : { effectiveState: { ...runtime.record.effectiveState } }),
-      ...(runtime.record.scout === undefined
-        ? {}
-        : {
-            reportPath: runtime.record.scout.reportPath,
-            reportState: runtime.record.scout.reportState,
-            ...(runtime.record.scout.terminalState === undefined
-              ? {}
-              : { terminalState: runtime.record.scout.terminalState }),
-          }),
-      completedTurns: runtime.completedTurns,
-      text,
-      truth: this.projectTruth(runtime),
-      ...(recorded === undefined ? {} : { provenance: recorded.provenance }),
-      ...(runtime.providerLimit === undefined ? {} : { providerLimit: runtime.providerLimit }),
-    };
-    const reading = this.workerResultStatus(target);
-    if (reading.status === "completed") {
-      return {
-        ...base,
-        status: "completed",
-        ...(recorded === undefined ? {} : { completedAt: recorded.completedAt }),
-      };
-    }
-    if (reading.stalled !== undefined) {
-      return {
-        ...base,
-        status: "stalled",
-        stalledForSeconds: reading.stalled.stalledForSeconds,
-        stallReason: "transcript-and-token-count-unchanged-while-idle",
-        tokenCount: reading.stalled.tokenCount,
-      };
-    }
-    // `providerLimit` is already on `base` when it is set, which is exactly when this status is.
-    return { ...base, status: reading.status };
-  }
-
-  /**
-   * What happened to the turn a wait is asking about, with none of the text a caller is handed.
-   *
-   * Split out of {@link workerResultSnapshot} because a wait over N workers used to rebuild all N
-   * snapshots on every output chunk from any one of them — the quadratic fan-out that showed up in
-   * the MIK-87 profile as a single `ArrayMap` branch owning most of the samples. Settling is a
-   * question about status alone, so only the status is recomputed, and only for the worker that
-   * actually produced output.
-   */
-  private workerResultStatus(target: WorkerWaitTarget): WorkerStatusReading {
-    const runtime = this.requireRuntime(target.sessionId);
-    const recorded = runtime.completions.get(target.completionTarget);
-    if (runtime.scoutBudgetExhausting === true) return { status: "working" };
-    if (
-      runtime.record.scout?.terminalState === "budget_exhausted"
-      && runtime.record.exitCode === null
-    ) {
-      return { status: "working" };
-    }
-    if (runtime.record.scout?.terminalState === "budget_exhausted") {
-      return { status: "budget_exhausted" };
-    }
-    // `completionTarget` is an ordinal, not an identity, so a target the worker passed before its
-    // newest instruction was written must not settle: the ledger slot it names was filled by a turn
-    // that predates the question this wait is asking. A slot that has already been handed to a
-    // caller is exempt — re-asking for a result you were given is a replay, not a stale settle, and
-    // that replay is how an orchestrator proves the work already ran.
-    const alreadyDelivered = (recorded?.deliveries ?? 0) > 0;
-    if (
-      runtime.completedTurns >= target.completionTarget
-      && (alreadyDelivered || target.completionTarget > runtime.turnsBeforeLatestInstruction)
-    ) {
-      return { status: "completed" };
-    }
-    if (runtime.providerLimit !== undefined) return { status: "provider-limit" };
-    if (runtime.activity === "needs-input") return { status: "needs-input" };
-    if (runtime.record.executionState === "failed") return { status: "failed" };
-    if (runtime.record.executionState === "cancelled") return { status: "stopped" };
-    if (runtime.record.executionState === "exited") return { status: "exited" };
-    if (runtime.activity === "working") return { status: "working" };
-    const stalled = this.stalledWorker(runtime);
-    if (stalled !== undefined) return { status: "stalled", stalled };
-    return { status: "waiting" };
-  }
-
-  /**
-   * Screen-scrape text for a worker whose provider produced no result of its own.
-   *
-   * The current frame is all `compactTerminalResult` ever read — it slices from the last
-   * clear-screen before doing anything else — so the digest's frame is the same reading without the
-   * re-normalization of everything before it. A session with no runtime has no frame, and falls back to
-   * the preview that outlived its process.
-   */
-  private fallbackResult(runtime: RuntimeSession, maxResultChars: number): string {
-    return runtime.sessionRuntime === undefined
-      ? compactTerminalResult(runtime.record.latestPreview ?? "", maxResultChars)
-      : compactFrameResult(runtime.replay.frameText(), maxResultChars);
-  }
-
-  private updateStallObservation(runtime: RuntimeSession): void {
-    const tokenCount = runtime.replay.tokenCount();
-    if (tokenCount === undefined) {
-      delete runtime.stallObservation;
-      return;
-    }
-    const previous = runtime.stallObservation;
-    const version = runtime.replay.version;
-    if (
-      previous === undefined
-      || previous.version !== version
-      || previous.tokenCount !== tokenCount
-    ) {
-      runtime.stallObservation = {
-        version,
-        tokenCount,
-        unchangedSinceMs: this.now(),
-      };
-    }
-  }
-
-  private stalledWorker(
-    runtime: RuntimeSession,
-  ): { stalledForSeconds: number; tokenCount: number } | undefined {
-    this.updateStallObservation(runtime);
-    const observation = runtime.stallObservation;
-    if (
-      observation === undefined
-      || runtime.record.executionState !== "active"
-      || runtime.activity === "working"
-      || runtime.activity === "needs-input"
-    ) {
-      return undefined;
-    }
-    const stalledForSeconds = Math.floor((this.now() - observation.unchangedSinceMs) / 1_000);
-    if (stalledForSeconds < this.options.config.workerStallSeconds) return undefined;
-    return { stalledForSeconds, tokenCount: observation.tokenCount };
-  }
-
-  private now(): number {
-    return this.options.now?.() ?? Date.now();
-  }
-
   private scoutWorkspaceState(cwd: string): Promise<string> {
     const existing = this.scoutWorkspaceStateInflight.get(cwd);
     if (existing !== undefined) return existing;
@@ -2450,43 +2051,11 @@ export class SessionRegistry {
   ): WorkerResultSnapshot[] {
     return results.map((result, index) => {
       const target = targets[index];
-      if (result.status !== "completed" || target === undefined) return result;
+      if (target === undefined) return result;
       const runtime = this.sessions.get(target.sessionId);
       if (runtime === undefined) return result;
-      // A completion the semantic-turn path never recorded (an exit that raced the ledger, a
-      // recovered session) is admitted on first delivery so replays stay stable from here on.
-      const entry = runtime.completions.get(target.completionTarget)
-        ?? this.recordCompletion(runtime, target.completionTarget, result.text);
-      entry.deliveries += 1;
-      return {
-        ...result,
-        retrieval: entry.deliveries === 1 ? "fresh" : "replay",
-        completedAt: entry.completedAt,
-      };
+      return runtime.turns.deliverResult(target.completionTarget, result);
     });
-  }
-
-  private recordCompletion(
-    runtime: RuntimeSession,
-    completionTarget: number,
-    text: string,
-    provenance: CompletionLedgerEntry["provenance"] = "terminal-replay",
-  ): CompletionLedgerEntry {
-    const existing = runtime.completions.get(completionTarget);
-    if (existing !== undefined) return existing;
-    if (provenance === "provider-transcript") runtime.canonicalTurns += 1;
-    const entry: CompletionLedgerEntry = {
-      text,
-      completedAt: new Date().toISOString(),
-      deliveries: 0,
-      provenance,
-    };
-    runtime.completions.set(completionTarget, entry);
-    while (runtime.completions.size > MAX_COMPLETION_LEDGER_ENTRIES) {
-      const oldest = Math.min(...runtime.completions.keys());
-      runtime.completions.delete(oldest);
-    }
-    return entry;
   }
 
   private notifySessionUpdate(sessionId: string): void {
@@ -2535,489 +2104,19 @@ export class SessionRegistry {
    * worker, because a claim made from a composer reading taken minutes ago is the class of lie this
    * whole change exists to stop.
    */
-  private observeComposer(runtime: RuntimeSession): ComposerObservation {
-    if (runtime.sessionRuntime === undefined) return runtime.composer;
-    runtime.composer = frameComposerState(runtime.record.provider, runtime.replay.frameText(), {
-      modalOpen: runtime.activity === "needs-input",
-    });
-    return runtime.composer;
-  }
-
-  /**
-   * Announce the boundary reopening, once per closure.
-   *
-   * Held instructions are flushed by whoever is listening; the registry deliberately does not hold
-   * a queue of its own. Its job is to say when writing would be safe, not to decide what to write.
-   */
-  private notifyDeliveryBoundary(runtime: RuntimeSession): void {
-    if (!runtime.deliveryHeld) return;
-    if (this.deliveryHold(runtime) !== undefined) return;
-    runtime.deliveryHeld = false;
-    for (const listener of this.deliveryBoundaryListeners) listener(runtime.record.id);
-  }
-
-  /**
-   * Wake the queue for a worker that just became terminal.
-   *
-   * The boundary this announces is not a safe one — it is the last one. Held instructions have to be
-   * told something, and a re-delivery attempt against a terminal session is exactly what turns each
-   * of them into `undelivered` rather than leaving them queued against a worker that is never coming
-   * back.
-   */
-  private releaseDeliveryHolds(runtime: RuntimeSession): void {
-    if (!runtime.deliveryHeld) return;
-    runtime.deliveryHeld = false;
-    for (const listener of this.deliveryBoundaryListeners) listener(runtime.record.id);
-  }
-
-  /**
-   * Move every rendered instruction on, and tell anyone recording instruction state.
-   *
-   * `submitted` is only ever reached here, from an observation: the provider left the composer and
-   * started a turn. Nothing about writing bytes reaches this path.
-   */
-  private advanceRenderedInstructions(
-    runtime: RuntimeSession,
-    state: InstructionLifecycleState,
-    turn?: number,
-  ): void {
-    if (runtime.rendered.length === 0) return;
-    const at = new Date().toISOString();
-    const remaining: RenderedInstruction[] = [];
-    for (const entry of runtime.rendered) {
-      // A completion only answers the instruction whose expected turn it is. An instruction rendered
-      // during turn N is not answered by turn N-1 finishing, which is exactly how a wait used to
-      // settle on output older than the question it was asking.
-      const applies = state !== "completed" || turn === undefined || entry.expectedTurn <= turn;
-      // A turn can complete without the broker having caught the frame where the provider took the
-      // payload — a fast turn between two polls. Walk the intermediate states rather than dropping
-      // the completion on the floor: the instruction did reach the provider, that is what a
-      // completed turn for its ordinal means.
-      const path = state === "completed"
-        ? (["submitted", "acknowledged", "completed"] as const)
-        : ([state] as const);
-      let next = entry.state;
-      if (applies) for (const step of path) next = advanceInstruction(next, step);
-      if (next !== entry.state) {
-        entry.state = next;
-        for (const listener of this.instructionStateListeners) {
-          listener({
-            sessionId: runtime.record.id,
-            instructionId: entry.instructionId,
-            state: next,
-            at,
-            ...(turn === undefined ? {} : { turn }),
-          });
-        }
-      }
-      if (next !== "completed" && next !== "undelivered" && next !== "cancelled") {
-        remaining.push(entry);
-      }
-    }
-    runtime.rendered = remaining;
-  }
-
-  private async completeSemanticTurn(runtime: RuntimeSession, replay: string): Promise<void> {
-    // Scout completion comes only from a validated canonical drop-box report. Cursor returning to
-    // input corroborates that event but cannot replace it.
-    if (runtime.record.profile === "scout" && runtime.record.scout?.terminalState !== "complete") {
-      runtime.completedTurns = Math.max(0, runtime.completedTurns - 1);
-      runtime.latestResult = terminalFallbackResult(replay);
-      await this.refreshPreview(runtime, replay, []);
-      await this.setAttention(runtime, "done", true);
-      this.notifySessionUpdate(runtime.record.id);
-      return;
-    }
-    const fallback = terminalFallbackResult(replay);
-    const transcriptAttempts = runtime.record.provider === "claude"
-      || runtime.record.provider === "codex"
-      ? 4
-      : 1;
-    let nativeTurns: Array<{ text?: string | undefined; data?: Record<string, unknown> }> = [];
-    try {
-      const capture = this.options.transcripts?.captureProviderTurns;
-      const attempts = transcriptAttempts;
-      for (let attempt = 0; capture !== undefined && attempt < attempts; attempt += 1) {
-        nativeTurns = await capture.call(this.options.transcripts, {
-          sessionId: runtime.record.id,
-          provider: runtime.record.provider,
-          cwd: runtime.record.cwd,
-          createdAt: runtime.record.createdAt,
-          turnNumber: runtime.completedTurns,
-          fallbackText: fallback,
-          // A screen scrape is accepted only once the provider's own transcript has been given every
-          // retry. Accepting one earlier would mark real canonical turns as replay-derived.
-          allowFallback: attempt + 1 === attempts,
-        });
-        if (nativeTurns.length > 0) break;
-        if (attempt + 1 < attempts) {
-          // Escalating, not fixed. A flat 50 ms was four reads inside 150 ms, and a broker under
-          // ingest load is exactly when a provider's transcript writer is slowest to land its
-          // frame — so the retry budget ran out precisely in the case it existed for, and the turn
-          // settled for a scrape. Doubling spends the same first read and buys 350 ms in total.
-          await new Promise((resolve) => setTimeout(resolve, TRANSCRIPT_RETRY_BASE_MS * 2 ** attempt));
-        }
-      }
-    } catch {
-      // Native transcript can lag its TUI frame. Keep worker completion usable without persisting runtime bytes.
-    }
-    // `completedTurns` already counts the turn that just ended, so it names the last turn the
-    // native transcript describes. Ledger each captured turn under the completionTarget a waiter
-    // would ask for, oldest first.
-    const firstTurn = runtime.completedTurns;
-    if (nativeTurns.length > 1) runtime.completedTurns += nativeTurns.length - 1;
-    const latest = nativeTurns.at(-1)?.text ?? fallback;
-    const texts = nativeTurns.length > 0
-      ? nativeTurns.map((turn) => turn.text ?? fallback)
-      : [fallback];
-    // Where the text came from travels with it. A worker that completed turns with nothing but
-    // screen scrapes behind them is exactly the shape of the incident where two Codex workers
-    // stamped identical completion seconds and `thread_read` showed no semantic turn at all. The
-    // transcript store labels each turn it wrote; a fallback turn is a scrape wearing a turn's shape.
-    const provenance = nativeTurns.some((turn) => turn.data?.transport === "provider-native")
-      ? "provider-transcript"
-      : "terminal-replay";
-    texts.forEach((text, index) =>
-      this.recordCompletion(runtime, firstTurn + index, text, provenance));
-    // A scrape standing in for a turn is a degraded reading, and it used to reach nobody who was not
-    // already inspecting a snapshot's `provenance` field. Under the MIK-87 saturation every turn
-    // degraded this way at once and the only evidence was scrambled result text. Say it where the
-    // operator and the event stream can both see it.
-    if (provenance === "terminal-replay") {
-      void this.appendEvent("session.turn_scraped", runtime.record.id, {
-        provider: runtime.record.provider,
-        completionTarget: runtime.completedTurns,
-        attempts: transcriptAttempts,
-      }).catch(() => undefined);
-      void this.appendTranscript(
-        runtime.record.id,
-        "lifecycle",
-        "broker",
-        "turn recorded from a terminal scrape; the provider transcript did not land in time",
-        { provider: runtime.record.provider, completionTarget: runtime.completedTurns },
-      ).catch(() => undefined);
-    }
-    // The turn that answers an instruction is the one it has been waiting for since it was written.
-    this.advanceRenderedInstructions(runtime, "completed", runtime.completedTurns);
-    runtime.latestResult = latest;
-    await this.refreshPreview(
-      runtime,
-      replay,
-      nativeTurns.map((turn): TranscriptMessage => ({ role: "assistant", text: turn.text ?? "" })),
-    );
-    await this.refreshObservedModel(runtime);
-    await this.setAttention(runtime, "done", true);
-    this.notifySessionUpdate(runtime.record.id);
-  }
-
-  /** Both timers that can bank a turn, dropped together wherever a session stops earning one. */
-  private clearTurnTimers(runtime: RuntimeSession): void {
-    if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
-    delete runtime.idleTimer;
-    if (runtime.canonicalReconcileTimer !== undefined) {
-      clearTimeout(runtime.canonicalReconcileTimer);
-    }
-    delete runtime.canonicalReconcileTimer;
-    // A turn nobody is going to bank cannot still be owed to the screen path.
-    delete runtime.screenTurnDeferred;
-  }
-
-  /**
-   * Arm the screen path's claim on the turn the provider just walked back from.
-   *
-   * Kept as its own method because it has two callers: the ingest path, which arms it the moment the
-   * provider returns to its prompt, and {@link SessionRegistry.releaseTurnCapture}, which re-arms it
-   * when a reconcile that owned this turn banked nothing after all.
-   */
-  private armScreenTurnBank(runtime: RuntimeSession, rawReplay: () => string): void {
-    if (runtime.idleTimer !== undefined) clearTimeout(runtime.idleTimer);
-    runtime.idleTimer = setTimeout(() => {
-      delete runtime.idleTimer;
-      this.bankScreenObservedTurn(runtime, rawReplay);
-    }, SCREEN_TURN_BANK_MS);
-  }
-
-  /** The turn the screen watched end, banked — unless something truer than the screen owns it. */
-  private bankScreenObservedTurn(runtime: RuntimeSession, rawReplay: () => string): void {
-    if (runtime.activity !== "awaiting-input" || !runtime.observedWorking) return;
-    // A composer holding text the provider never took is not a finished turn. Counting it is how
-    // an unsent instruction came to satisfy the very wait that was asking whether it had run.
-    if (this.observeComposer(runtime).occupied) {
-      this.notifySessionUpdate(runtime.record.id);
-      return;
-    }
-    // A reconcile claimed this turn before it read the provider's transcript, and that read consumes
-    // what it finds. Banking here now would either duplicate the ordinal or — because the native
-    // turns are already spent — record this one as a scrape while the record of it sits unread in
-    // the transcript. Stand down and let the owner finish; it hands the turn back if it banks none.
-    if (runtime.turnCaptureOwner !== undefined) {
-      runtime.screenTurnDeferred = true;
-      this.notifySessionUpdate(runtime.record.id);
-      return;
-    }
-    runtime.turnCaptureOwner = "screen";
-    runtime.completedTurns += 1;
-    runtime.observedWorking = false;
-    // The turn that owned the next ordinal has banked it. Anything held for that reason can go
-    // now, and this is the only announcement it will get: a provider that has finished and is
-    // sitting at its prompt emits nothing more to trigger one.
-    this.notifyDeliveryBoundary(runtime);
-    // One snapshot, once per completed turn — a turn boundary is rare enough to pay for it, and
-    // the fallback text a provider without a native transcript falls back to is drawn from the
-    // whole replay rather than from the screen the digest keeps.
-    void this.completeSemanticTurn(runtime, rawReplay()).finally(() => {
-      if (runtime.turnCaptureOwner === "screen") delete runtime.turnCaptureOwner;
-    });
-  }
-
-  /**
-   * Release a reconcile's claim, and give the turn back if the screen path stood down for it.
-   *
-   * Ownership is taken before anything is consumed, which is what makes the two paths exclusive —
-   * but it also means a reconcile that ends up banking nothing has silenced a screen-observed
-   * completion that was ready to bank. Handing it back is the other half of that bargain: without
-   * it, the guard that fixed a double-bank would have invented a way to lose a turn instead.
-   */
-  private releaseTurnCapture(runtime: RuntimeSession): void {
-    if (runtime.turnCaptureOwner === "reconcile") delete runtime.turnCaptureOwner;
-    if (runtime.screenTurnDeferred !== true) return;
-    delete runtime.screenTurnDeferred;
-    const sessionRuntime = runtime.sessionRuntime;
-    if (sessionRuntime === undefined) return;
-    this.armScreenTurnBank(runtime, () => sessionRuntime.snapshot().toString("utf8"));
-  }
-
-  /**
-   * Re-arm the reconcile, so it only fires once the session has actually gone quiet.
-   *
-   * Debounced rather than periodic: every chunk pushes it out, so a provider that is still emitting
-   * never reaches it, and the only sessions it runs against are the ones that have stopped
-   * producing output without the broker having banked a turn.
-   */
-  private armCanonicalReconcile(runtime: RuntimeSession): void {
-    if (this.options.transcripts?.captureProviderTurns === undefined) return;
-    if (!this.canReconcileCanonicalTurns(runtime)) return;
-    if (runtime.canonicalReconcileTimer !== undefined) clearTimeout(runtime.canonicalReconcileTimer);
-    runtime.canonicalReconcileTimer = setTimeout(() => {
-      delete runtime.canonicalReconcileTimer;
-      void this.reconcileCanonicalTurns(runtime);
-    }, CANONICAL_RECONCILE_QUIET_MS);
-    // A ledger correction is never a reason to keep a broker that is on its way out alive.
-    runtime.canonicalReconcileTimer.unref?.();
-  }
-
-  /**
-   * Whether reconciling this session's ledger against a provider transcript could mean anything.
-   *
-   * Two conditions say the broker is *expecting* a turn: it watched one start and has not banked it
-   * (`observedWorking`), or it wrote an instruction whose answering turn has not arrived
-   * (`rendered`). Without one of them there is no missing turn to recover, and reading a transcript
-   * would only risk counting conversation the session was resumed on top of.
-   */
-  private canReconcileCanonicalTurns(runtime: RuntimeSession): boolean {
-    if (runtime.record.executionState !== "active") return false;
-    if (runtime.suppressSemanticTurns === true) return false;
-    // A scout completes on a validated drop-box report and on nothing else.
-    if (runtime.record.profile === "scout") return false;
-    // Only providers that write a transcript of their own. Cursor and Antigravity write none, so the
-    // only turn a capture could hand back for them is a screen scrape wearing a turn's shape — the
-    // guess this whole path exists to replace.
-    if (runtime.record.provider !== "claude" && runtime.record.provider !== "codex") return false;
-    return runtime.observedWorking || runtime.rendered.length > 0;
-  }
-
-  /**
-   * Bank the turns the provider's own transcript records and the screen never reported.
-   *
-   * The screen path banks a turn on one transition: the provider walked back to its prompt while the
-   * broker was watching. Three shapes never make it, and all three were MIK-89. A worker that
-   * finished and then painted a dialog over the result reads `needs-input`, not `awaiting-input`. A
-   * worker whose last spinner frame was never redrawn reads `working` forever. A worker whose
-   * composer holds text at the moment the idle timer fires has its turn dropped and never re-armed.
-   * In every one of them the turn happened, the work was pushed, and `completedTurns` stayed at zero
-   * — so `workers_wait` on `completionTarget: 1` could not settle, ever.
-   *
-   * The provider's own transcript is not a second guess at the screen; it is the record the provider
-   * wrote because the turn ended. `allowFallback: false` is what keeps that true: a scrape cannot
-   * tell a finished turn from a dialog painted over an unfinished one, and inventing a turn here
-   * would be worse than the silence it replaces. Turns already seen are filtered out by the store
-   * itself, keyed on the provider's own turn id, so this is idempotent by construction.
-   */
-  private async reconcileCanonicalTurns(runtime: RuntimeSession): Promise<void> {
-    const transcripts = this.options.transcripts;
-    const capture = transcripts?.captureProviderTurns;
-    if (transcripts === undefined || capture === undefined) return;
-    // Ownership first, and synchronously — before a single native turn is read, let alone consumed.
-    // `captureProviderTurns` appends and deduplicates the provider's turn ids, so a read spends
-    // them: two paths reading concurrently either append the same turn twice, or leave the loser
-    // recording a scrape while the real record sits already-consumed in the store.
-    if (runtime.turnCaptureOwner !== undefined) return;
-    if (!this.canReconcileCanonicalTurns(runtime)) return;
-    // The screen path already has a claim on this turn and will bank it 200 ms from now.
-    if (runtime.idleTimer !== undefined) return;
-
-    runtime.turnCaptureOwner = "reconcile";
-    delete runtime.screenTurnDeferred;
-    const before = runtime.completedTurns;
-    let turns: Array<{ text?: string | undefined; data?: Record<string, unknown> }> = [];
-    try {
-      turns = await capture.call(transcripts, {
-        sessionId: runtime.record.id,
-        provider: runtime.record.provider,
-        cwd: runtime.record.cwd,
-        createdAt: runtime.record.createdAt,
-        turnNumber: before + 1,
-        allowFallback: false,
-      });
-    } catch {
-      this.releaseTurnCapture(runtime);
-      return;
-    }
-
-    // Only turns the provider itself wrote. The store labels every turn it appends, and a session
-    // configured to allow fallbacks elsewhere must not smuggle one in through here.
-    const native = turns.filter((turn) => turn.data?.transport === "provider-native");
-    if (native.length === 0) {
-      this.releaseTurnCapture(runtime);
-      return;
-    }
-    // Nothing else may have moved the ledger while the read was in flight. Exclusive ownership is
-    // what makes that true of the screen path — a prompt redrawn mid-read arms its timer, that timer
-    // finds this reconcile holding the turn and defers instead of banking — so this is the assertion
-    // that the invariant held, not the mechanism that enforces it. A turn is never discarded here
-    // after being consumed: the only path that could have taken this ordinal stood down for it.
-    if (runtime.completedTurns !== before) {
-      this.releaseTurnCapture(runtime);
-      return;
-    }
-
-    const firstTurn = before + 1;
-    runtime.completedTurns = before + native.length;
-    native.forEach((turn, index) =>
-      this.recordCompletion(runtime, firstTurn + index, turn.text ?? "", "provider-transcript"));
-    runtime.observedWorking = false;
-    // The ledger is authoritative from here, so the claim is spent: released synchronously rather
-    // than after the event, preview and model reads below, none of which the next turn should wait
-    // on. A screen path that deferred to this reconcile has had its turn banked by it — with the
-    // provider's own record behind it — so there is nothing left to hand back.
-    delete runtime.turnCaptureOwner;
-    delete runtime.screenTurnDeferred;
-    // The screen said `working` because of a frame the provider never redrew. Its transcript says
-    // the turn ended, and after this much silence there is no turn in flight for that to be wrong
-    // about. A modal is left alone: the dialog on top of the finished turn is real, and saying so is
-    // the difference between a worker that needs a keypress and one that needs nothing.
-    if (runtime.activity === "working") runtime.activity = "awaiting-input";
-    this.observeComposer(runtime);
-    // Whatever the queue was holding for the ordinal this turn owned can go now.
-    this.notifyDeliveryBoundary(runtime);
-    this.advanceRenderedInstructions(runtime, "completed", runtime.completedTurns);
-    const latest = native.at(-1)?.text;
-    if (latest !== undefined) runtime.latestResult = latest;
-    await this.appendEvent("session.turn_reconciled", runtime.record.id, {
-      provider: runtime.record.provider,
-      completionTarget: runtime.completedTurns,
-      turns: native.length,
-    }).catch(() => undefined);
-    await this.appendTranscript(
-      runtime.record.id,
-      "lifecycle",
-      "broker",
-      "turn recorded from the provider transcript; the terminal never reported it finishing",
-      { provider: runtime.record.provider, completionTarget: runtime.completedTurns },
-    ).catch(() => undefined);
-    await this.refreshPreview(
-      runtime,
-      runtime.sessionRuntime?.snapshot().toString("utf8") ?? "",
-      native.map((turn): TranscriptMessage => ({ role: "assistant", text: turn.text ?? "" })),
-    ).catch(() => undefined);
-    await this.refreshObservedModel(runtime).catch(() => undefined);
-    // A worker parked at a dialog has finished its turn *and* still needs a keypress. Both are true,
-    // and the attention state has to be the one the operator can act on.
-    await this.setAttention(
-      runtime,
-      runtime.activity === "needs-input" ? "needs-input" : "done",
-      true,
-    );
-    this.notifySessionUpdate(runtime.record.id);
-  }
-
-  /**
-   * Store the preview the fleet renders.
-   *
-   * The turns just captured are the cheapest source, so they are tried first; only when they yield
-   * nothing usable does this re-read the provider transcript, and only when that is also empty does
-   * a pane scrape get a say. A pass that recovers nothing leaves the previous preview in place,
-   * because a stale-but-real reply beats spinner debris.
-   */
-  private async refreshPreview(
-    runtime: RuntimeSession,
-    replay: string,
-    captured: readonly TranscriptMessage[],
-  ): Promise<void> {
-    let preview = conversationPreview({ transcript: captured, maxLength: PREVIEW_STORAGE_LIMIT });
-    if (preview.kind === "none") {
-      const transcript = await this.readTranscriptMessages(runtime).catch(() => []);
-      preview = conversationPreview({
-        transcript,
-        storedPreview: runtime.record.latestPreview,
-        replay,
-        maxLength: PREVIEW_STORAGE_LIMIT,
-      });
-    }
-    if (preview.kind === "none" || preview.text === runtime.record.latestPreview) return;
-    runtime.record.latestPreview = preview.text;
-    await this.persist(runtime);
-  }
-
-  /**
-   * Project the model the provider is actually running onto the session record.
-   *
-   * Read at the same points the preview is: a provider writes the new model into its transcript with
-   * the first turn that model produces, so turn completion is the earliest moment the switch is a
-   * fact rather than a guess. Unchanged observations persist nothing; a provider that keeps no
-   * transcript leaves the field absent, which is what every reader renders as "launch value, not a
-   * current one" instead of silently passing the launch model off as observed.
-   */
-  private async refreshObservedModel(runtime: RuntimeSession): Promise<void> {
-    const transcripts = this.options.transcripts;
-    const read = transcripts?.readObservedModel;
-    if (transcripts === undefined || read === undefined) return;
-    const observed = await read.call(transcripts, {
-      sessionId: runtime.record.id,
-      provider: runtime.record.provider,
-      cwd: runtime.record.cwd,
-      createdAt: runtime.record.createdAt,
-      turnNumber: runtime.completedTurns,
-    }).catch(() => undefined);
-    if (observed === undefined) return;
-    const current = runtime.record.observedModel;
-    if (
-      current?.model === observed.model
-      && current.effort === observed.effort
-    ) return;
-    runtime.record.observedModel = observed;
-    await this.persist(runtime);
-    this.notifySessionUpdate(runtime.record.id);
-  }
-
-  private async readTranscriptMessages(runtime: RuntimeSession): Promise<TranscriptMessage[]> {
-    const transcripts = this.options.transcripts;
-    const read = transcripts?.readTranscriptMessages;
-    if (transcripts === undefined || read === undefined) return [];
-    return read.call(transcripts, {
-      sessionId: runtime.record.id,
-      provider: runtime.record.provider,
-      cwd: runtime.record.cwd,
-      createdAt: runtime.record.createdAt,
-      turnNumber: runtime.completedTurns,
-    });
-  }
-
   private requireSessionRuntime(runtime: RuntimeSession): SessionRuntime {
     if (runtime.sessionRuntime === undefined) {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session runtime is not active; resume it before use");
     }
     return runtime.sessionRuntime;
+  }
+
+  private requireTerminalFinalizationComplete(runtime: RuntimeSession): void {
+    if (runtime.terminalFinalizing !== true) return;
+    throw new RegistryError(
+      "SESSION_NOT_ACTIVE",
+      "Session is finalizing its last durable turn",
+    );
   }
 
   private requireInteractiveInput(runtime: RuntimeSession): void {
@@ -3047,7 +2146,9 @@ export class SessionRegistry {
       .then(() => reports.appendTrace(scout, chunk))
       .catch(async (error) => {
         runtime.scoutTraceFailure = errorMessage(error);
-        runtime.latestResult ??= `Scout trace persistence failed: ${runtime.scoutTraceFailure}`;
+        runtime.turns.setLatestResultIfAbsent(
+          `Scout trace persistence failed: ${runtime.scoutTraceFailure}`,
+        );
         await this.persist(runtime).catch(() => undefined);
       });
   }
@@ -3079,7 +2180,7 @@ export class SessionRegistry {
         if (runtime.record.scout === undefined) return;
         if (runtime.record.scout.reportState === "complete") return;
         runtime.record.scout.reportState = "invalid";
-        runtime.latestResult = error instanceof Error ? error.message : String(error);
+        runtime.turns.setLatestResult(error instanceof Error ? error.message : String(error));
         await this.persist(runtime).catch(() => undefined);
         this.notifySessionUpdate(runtime.record.id);
       });
@@ -3090,7 +2191,7 @@ export class SessionRegistry {
     if (scout === undefined || scout.terminalState === "complete" || result.state === "missing") return;
     const changed = scout.reportState !== result.state;
     scout.reportState = result.state;
-    if ("text" in result && result.text !== "") runtime.latestResult = result.text;
+    if ("text" in result && result.text !== "") runtime.turns.setLatestResult(result.text);
     if (result.state === "complete" && "card" in result) runtime.scoutCard = result.card;
     if (scout.terminalState === "budget_exhausted") {
       if (changed) await this.persist(runtime);
@@ -3193,7 +2294,7 @@ export class SessionRegistry {
       if (captured === undefined || captured.state === "missing") continue;
       let changed = scout.reportState !== captured.state;
       scout.reportState = captured.state;
-      if ("text" in captured) runtime.latestResult = captured.text;
+      if ("text" in captured) runtime.turns.setLatestResult(captured.text);
       if (captured.state === "complete") {
         if ("card" in captured) runtime.scoutCard = captured.card;
         const verifiedHeadlessResult = scout.transport === "headless-stream-json"
@@ -3206,8 +2307,7 @@ export class SessionRegistry {
             || runtime.record.executionState !== "exited"
             || runtime.record.attentionState !== "done";
           scout.terminalState = "complete";
-          runtime.completedTurns = 1;
-          this.recordCompletion(runtime, 1, captured.text);
+          runtime.turns.recordCompletion(1, captured.text);
           runtime.record.executionState = "exited";
           runtime.record.attentionState = "done";
           runtime.record.exitCode ??= 0;

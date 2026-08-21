@@ -16,6 +16,7 @@ import { CodexProviderAdapter } from "../providers/codex.js";
 import { CursorJobDispatchAdapter } from "../providers/cursor/dispatch-adapter.js";
 import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
 import { createSessionRuntime } from "../runtime/session-runtime-adapter.js";
+import { WorkerTurnObservationAdapter } from "../runtime/worker-turn-observation-adapter.js";
 import { Journal } from "./journal.js";
 import { NvimBindingService } from "./nvim-binding-service.js";
 import { BrokerServer } from "./server.js";
@@ -116,6 +117,7 @@ export async function runBroker(
       antigravity: new AntigravityProviderAdapter(),
     },
     sessionRuntimeFactory: createSessionRuntime,
+    workerTurnObservation: new WorkerTurnObservationAdapter(),
     journal,
     transcripts,
     store: sessionStore,

@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import { BrokerServer } from "../../src/broker/server.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
@@ -145,6 +146,7 @@ async function harness(options: { workerCapabilities?: WorkerCapabilityCatalog }
   const brokerEvents: BrokerEvent[] = [];
   const journal = { append: async (event: BrokerEvent) => { brokerEvents.push(event); } };
   const registry = new SessionRegistry({
+    workerTurnObservation: new WorkerTurnObservationAdapter(),
     adapters,
     sessionRuntimeFactory: ptyFactory,
     journal,

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import type { ProviderAdapter } from "../../src/providers/provider.js";
 import {
@@ -161,6 +162,7 @@ function registryFor(
   recoveredSessions: SessionRecord[],
 ): SessionRegistry {
   return new SessionRegistry({
+    workerTurnObservation: new WorkerTurnObservationAdapter(),
     adapters: { claude: claudeAdapter },
     sessionRuntimeFactory: () => { throw new Error("no session is launched in these tests"); },
     journal: { append: async () => undefined },

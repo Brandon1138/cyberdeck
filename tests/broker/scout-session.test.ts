@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { SessionRecord, StartSessionRequest } from "../../src/domain/session.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
@@ -19,6 +20,7 @@ import {
 
 const directories: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -110,6 +112,7 @@ async function harness(options: {
   workspaceStates?: string[];
   captureDelayMs?: number;
   killExitCode?: number;
+  interactiveScout?: boolean;
 } = {}) {
   const repo = await mkdtemp(join(tmpdir(), "cyberdeck-scout-repo-"));
   const state = await mkdtemp(join(tmpdir(), "cyberdeck-scout-state-"));
@@ -134,25 +137,30 @@ async function harness(options: {
   };
   const states = [...(options.workspaceStates ?? ["a".repeat(64), "a".repeat(64)])];
   const reportStore = new ScoutReportStore(state);
+  const scoutReports = {
+    initialize: async (...args: Parameters<ScoutReportStore["initialize"]>) => ({
+      ...await reportStore.initialize(...args),
+      ...(options.interactiveScout === true ? { transport: "interactive-pty" as const } : {}),
+    }),
+    capture: options.captureDelayMs === undefined
+      ? reportStore.capture.bind(reportStore)
+      : async (...args: Parameters<ScoutReportStore["capture"]>) => {
+          await new Promise((resolve) => setTimeout(resolve, options.captureDelayMs));
+          return reportStore.capture(...args);
+        },
+    collect: reportStore.collect.bind(reportStore),
+    appendTrace: reportStore.appendTrace.bind(reportStore),
+    readArtifact: reportStore.readArtifact.bind(reportStore),
+    remove: reportStore.remove.bind(reportStore),
+  };
   const registry = new SessionRegistry({
+    workerTurnObservation: new WorkerTurnObservationAdapter(),
     adapters: { cursor },
     sessionRuntimeFactory: ptyFactory,
     journal: { append: async () => {} },
     validateCwd: async () => undefined,
     config: BrokerRuntimeConfigSchema.parse({}),
-    scoutReports: options.captureDelayMs === undefined
-      ? reportStore
-      : {
-          initialize: reportStore.initialize.bind(reportStore),
-          capture: async (...args: Parameters<ScoutReportStore["capture"]>) => {
-            await new Promise((resolve) => setTimeout(resolve, options.captureDelayMs));
-            return reportStore.capture(...args);
-          },
-          collect: reportStore.collect.bind(reportStore),
-          appendTrace: reportStore.appendTrace.bind(reportStore),
-          readArtifact: reportStore.readArtifact.bind(reportStore),
-          remove: reportStore.remove.bind(reportStore),
-        },
+    scoutReports,
     scoutWorkspaceState: async () => states.shift() ?? states.at(-1) ?? "a".repeat(64),
   });
   return { registry, pty, ptyFactory, repo, state, cursor };
@@ -182,6 +190,35 @@ function request(
 }
 
 describe("Scout session lifecycle", () => {
+  it("cancels the wall-clock cutoff when a legacy interactive Scout exits", async () => {
+    vi.useFakeTimers();
+    const { registry, pty, repo } = await harness({ interactiveScout: true });
+    const record = await registry.start(
+      request(repo, { maxWallClockMs: 50, maxTokens: 10_000 }),
+      "Scout prompt",
+    );
+    expect(record.scout?.transport).toBe("interactive-pty");
+
+    pty.exit(0);
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "exited",
+      attentionState: "done",
+      exitCode: 0,
+      scout: { reportState: "missing" },
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(registry.get(record.id)).toMatchObject({
+      executionState: "exited",
+      attentionState: "done",
+      exitCode: 0,
+      scout: { reportState: "missing" },
+    });
+    expect(registry.get(record.id).scout?.terminalState).toBeUndefined();
+    expect(pty.kills).toEqual([]);
+  });
+
   it("preserves a failed headless launch as a durable Fleet record", async () => {
     const { registry, repo } = await harness({ spawnError: new Error("spawn refused") });
 
@@ -407,6 +444,7 @@ describe("Scout session lifecycle", () => {
     const storedBeforeCapture = registry.get(started.id);
 
     const recovered = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
       adapters: { cursor },
       sessionRuntimeFactory: () => { throw new Error("recovery must not spawn"); },
       journal: { append: async () => {} },

@@ -7,8 +7,6 @@ import { join } from "node:path";
 import {
   ThreadEventSchema,
   type ThreadEvent,
-  type ThreadEventKind,
-  type ThreadEventSource,
   type ThreadReadResult,
 } from "../domain/thread.js";
 import {
@@ -17,6 +15,13 @@ import {
   PREVIEW_MESSAGE_WINDOW,
   type TranscriptMessage,
 } from "../runtime/conversation-preview.js";
+import type {
+  AppendWorkerTurnTranscriptEvent as AppendThreadEvent,
+  CaptureWorkerTurns as CaptureProviderTurns,
+  WorkerTurnObservation,
+  WorkerTurnTranscript,
+  WorkerTurnTranscriptPort,
+} from "../orchestration/session/worker-turn-ports.js";
 import { ClaudeConversationBindingStore } from "./claude-conversation-bindings.js";
 import { observedModelParser, type ObservedModel } from "../runtime/observed-model.js";
 import { openPrivateAppendFile } from "./private-files.js";
@@ -26,31 +31,10 @@ const DEFAULT_RETAINED_FILES = 3;
 const MAX_REMEMBERED_TURN_IDS = 100_000;
 const CODEX_SESSION_MATCH_WINDOW_MS = 30_000;
 
-export interface AppendThreadEvent {
-  sessionId: string;
-  kind: ThreadEventKind;
-  source: ThreadEventSource;
-  text?: string;
-  data?: Record<string, unknown>;
-}
-
-export interface CaptureProviderTurns {
-  sessionId: string;
-  provider: string;
-  cwd: string;
-  createdAt: string;
-  turnNumber: number;
-  fallbackText?: string;
-  /**
-   * Whether a terminal-replay turn may stand in when the provider's own transcript has nothing.
-   *
-   * The caller retries a provider-native read a few times before giving up, so it passes `false`
-   * until the last attempt. On that attempt it must be `true` for every provider: a completed turn
-   * with no `turn` event at all is the cursor gap MIK-71 reported, where a worker was marked
-   * completed and `thread_read` showed nothing to account for it.
-   */
-  allowFallback?: boolean;
-}
+export type {
+  AppendWorkerTurnTranscriptEvent as AppendThreadEvent,
+  CaptureWorkerTurns as CaptureProviderTurns,
+} from "../orchestration/session/worker-turn-ports.js";
 
 export interface ThreadTranscriptStoreOptions {
   now?: () => string;
@@ -106,7 +90,7 @@ interface ObservedModelCursor {
  * transcript.jsonl. Reads stream retained segments. Provider output is one native final response
  * per turn; Cursor and Antigravity use explicitly marked terminal-replay fallback turns.
  */
-export class ThreadTranscriptStore {
+export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   readonly path: string;
   readonly legacyPath: string;
   private initialized = false;
@@ -147,31 +131,18 @@ export class ThreadTranscriptStore {
     this.initialized = true;
   }
 
-  async append(input: AppendThreadEvent): Promise<ThreadEvent> {
-    await this.init();
-    const text = this.boundEventText(input.text);
-    const event = ThreadEventSchema.parse({
-      id: this.options.idFactory?.() ?? randomUUID(),
-      cursor: ++this.nextCursor,
-      sessionId: input.sessionId,
-      occurredAt: this.options.now?.() ?? new Date().toISOString(),
-      kind: input.kind,
-      source: input.source,
-      ...(text === undefined ? {} : { text }),
-      data: text === input.text
-        ? input.data ?? {}
-        : { ...input.data, storageOriginalLength: input.text?.length },
+  append(input: AppendThreadEvent): Promise<ThreadEvent> {
+    return this.enqueueWrite(async () => {
+      await this.init();
+      const event = this.createEvent(input);
+      await this.persist(event);
+      this.rememberSemanticTurn(event);
+      return event;
     });
-    this.writeTail = this.writeTail.then(
-      () => this.persist(event),
-      () => this.persist(event),
-    );
-    await this.writeTail;
-    this.rememberSemanticTurn(event);
-    return event;
   }
 
-  async captureProviderTurns(input: CaptureProviderTurns): Promise<ThreadEvent[]> {
+  /** Read and prepare provider turns without mutating the semantic transcript. */
+  async observeProviderTurns(input: CaptureProviderTurns): Promise<WorkerTurnObservation> {
     await this.init();
     const nativeTurns = input.provider === "claude"
       ? await this.readClaudeTurns(input)
@@ -198,30 +169,60 @@ export class ThreadTranscriptStore {
     const claudeStatus = input.provider === "claude"
       ? this.claudeStatuses.get(input.sessionId)
       : undefined;
-    const captured: ThreadEvent[] = [];
-    for (const turn of turns) {
-      const semanticTurnId = `${input.provider}:${turn.id}`;
-      if (this.semanticTurnIds.has(this.semanticKey(input.sessionId, semanticTurnId))) continue;
-      captured.push(await this.append({
-        sessionId: input.sessionId,
-        kind: "turn",
-        source: "provider",
+    const unseenTurns = turns.filter((turn) => !this.semanticTurnIds.has(this.semanticKey(
+      input.sessionId,
+      `${input.provider}:${turn.id}`,
+    )));
+    return {
+      sessionId: input.sessionId,
+      provider: input.provider,
+      turnNumber: input.turnNumber,
+      turns: unseenTurns.map((turn) => ({
+        providerTurnId: turn.id,
+        providerOccurredAt: turn.occurredAt,
         text: turn.text,
-        data: {
-          semantic: true,
-          semanticTurnId,
-          provider: input.provider,
-          transport: nativeTurns.length > 0 ? "provider-native" : "terminal-replay-fallback",
-          originalLength: turn.text.length,
-          turnNumber: input.turnNumber + captured.length,
-          providerOccurredAt: turn.occurredAt,
-          ...(claudeStatus === undefined || claudeStatus === "bound"
-            ? {}
-            : { claudeTranscriptStatus: claudeStatus }),
-        },
-      }));
-    }
-    return captured;
+        transport: nativeTurns.length > 0
+          ? "provider-native" as const
+          : "terminal-replay-fallback" as const,
+        ...(claudeStatus === undefined || claudeStatus === "bound"
+          ? {}
+          : { data: { claudeTranscriptStatus: claudeStatus } }),
+      })),
+    };
+  }
+
+  /** Serialize append-once dedupe while acknowledging every observed turn as durably owned. */
+  commitProviderTurns(observation: WorkerTurnObservation): Promise<WorkerTurnTranscript[]> {
+    return this.enqueueWrite(async () => {
+      await this.init();
+      const receipts: WorkerTurnTranscript[] = [];
+      for (const [index, turn] of observation.turns.entries()) {
+        const semanticTurnId = `${observation.provider}:${turn.providerTurnId}`;
+        const turnNumber = observation.turnNumber + index;
+        const receipt = this.providerTurnReceipt(observation, turn, turnNumber);
+        if (this.semanticTurnIds.has(this.semanticKey(observation.sessionId, semanticTurnId))) {
+          receipts.push(receipt);
+          continue;
+        }
+        const event = this.createEvent({
+          sessionId: observation.sessionId,
+          kind: "turn",
+          source: "provider",
+          text: receipt.text,
+          data: receipt.data,
+        });
+        await this.persist(event);
+        this.rememberSemanticTurn(event);
+        receipts.push(event);
+      }
+      return receipts;
+    });
+  }
+
+  /** Compatibility path for callers that have not yet adopted explicit observation ownership. */
+  async captureProviderTurns(input: CaptureProviderTurns): Promise<WorkerTurnTranscript[]> {
+    const observation = await this.observeProviderTurns(input);
+    return this.commitProviderTurns(observation);
   }
 
   /**
@@ -383,6 +384,52 @@ export class ThreadTranscriptStore {
 
   private semanticKey(sessionId: string, semanticTurnId: string): string {
     return `${sessionId}:${semanticTurnId}`;
+  }
+
+  /** Reconstruct the exact bounded semantic payload acknowledged by an append or dedupe hit. */
+  private providerTurnReceipt(
+    observation: WorkerTurnObservation,
+    turn: WorkerTurnObservation["turns"][number],
+    turnNumber: number,
+  ): { text: string; data: Record<string, unknown> } {
+    const text = this.boundEventText(turn.text) ?? "";
+    const data = {
+      semantic: true,
+      semanticTurnId: `${observation.provider}:${turn.providerTurnId}`,
+      provider: observation.provider,
+      transport: turn.transport,
+      originalLength: turn.text.length,
+      turnNumber,
+      providerOccurredAt: turn.providerOccurredAt,
+      ...(turn.data ?? {}),
+    };
+    return {
+      text,
+      data: text === turn.text ? data : { ...data, storageOriginalLength: turn.text.length },
+    };
+  }
+
+  private createEvent(input: AppendThreadEvent): ThreadEvent {
+    const text = this.boundEventText(input.text);
+    return ThreadEventSchema.parse({
+      id: this.options.idFactory?.() ?? randomUUID(),
+      cursor: ++this.nextCursor,
+      sessionId: input.sessionId,
+      occurredAt: this.options.now?.() ?? new Date().toISOString(),
+      kind: input.kind,
+      source: input.source,
+      ...(text === undefined ? {} : { text }),
+      data: text === input.text
+        ? input.data ?? {}
+        : { ...input.data, storageOriginalLength: input.text?.length },
+    });
+  }
+
+  /** Queue one complete stateful write operation while allowing the queue to recover after errors. */
+  private enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.writeTail.then(operation, operation);
+    this.writeTail = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   private async persist(event: ThreadEvent): Promise<void> {

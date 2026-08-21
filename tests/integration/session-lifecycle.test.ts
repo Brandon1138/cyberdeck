@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { BrokerServer } from "../../src/broker/server.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import { RpcClient } from "../../src/client/rpc-client.js";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { SessionRecord } from "../../src/domain/session.js";
@@ -55,6 +56,7 @@ describe("complete session lifecycle", () => {
       const socketPath = `/tmp/cyberdeck-int-${randomUUID().slice(0, 8)}.sock`;
       const ptyFactory = vi.fn((spec, replayBytes: number) => new PtyProcess(spec, replayBytes));
       const registry = new SessionRegistry({
+        workerTurnObservation: new WorkerTurnObservationAdapter(),
         adapters: { codex: fakeAdapter("codex"), claude: fakeAdapter("claude") },
         sessionRuntimeFactory: ptyFactory,
         journal: { append: async () => {} },
