@@ -88,6 +88,18 @@ export type OutputSink = (chunk: Buffer) => void;
 export type ExitSink = (exitCode: number) => void;
 export type FailureSink = (failure: { code: string; message: string }) => void;
 
+/** Broker-owned gate installed by worker-budget enforcement after composition. */
+export interface WorkerBudgetGate {
+  assertMayConsume(sessionId: string): void;
+}
+
+/** Generation-local inputs for durable, explicitly approximate worker-budget accounting. */
+export interface WorkerBudgetObservation {
+  generation: number;
+  canonicalTurns: number;
+  tokenCount?: number;
+}
+
 interface JournalLike {
   append(event: BrokerEvent): Promise<void>;
 }
@@ -227,6 +239,7 @@ export class SessionRegistry {
   private readonly sessionUpdateListeners = new Set<(sessionId: string) => void>();
   private readonly deliveryBoundaryListeners = new Set<(sessionId: string) => void>();
   private readonly instructionStateListeners = new Set<(update: InstructionStateUpdate) => void>();
+  private workerBudgetGate: WorkerBudgetGate | undefined;
   /** Owns cwd refusal, worktree provisioning and rollback, and Scout workspace verification. */
   private readonly workspace: SessionWorkspaceCoordinator;
   /** Builds the per-session supervisor a Scout needs, and nothing at all for any other session. */
@@ -290,6 +303,15 @@ export class SessionRegistry {
 
   async ready(): Promise<void> {
     await this.recovery;
+  }
+
+  /**
+   * Install one broker-owned budget gate after registry and durable coordination recovery exist.
+   * Keeping this at the registry boundary covers attached input, queued instructions, and resume;
+   * individual RPC/MCP tools cannot bypass an exhausted hard limit.
+   */
+  setWorkerBudgetGate(gate: WorkerBudgetGate): void {
+    this.workerBudgetGate = gate;
   }
 
   onControllerReleased(listener: (sessionId: string) => void): () => void {
@@ -770,6 +792,7 @@ export class SessionRegistry {
 
   async write(sessionId: string, clientId: string | undefined, data: Buffer): Promise<void> {
     const runtime = this.requireRuntime(sessionId);
+    this.workerBudgetGate?.assertMayConsume(sessionId);
     this.requireTerminalFinalizationComplete(runtime);
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
@@ -783,6 +806,7 @@ export class SessionRegistry {
   }
 
   async submit(sessionId: string, clientId: string | undefined, message: string): Promise<void> {
+    this.workerBudgetGate?.assertMayConsume(sessionId);
     const runtime = this.requireRuntime(sessionId);
     this.requireTerminalFinalizationComplete(runtime);
     this.requireInteractiveInput(runtime);
@@ -811,10 +835,11 @@ export class SessionRegistry {
   async submitInstruction(
     sessionId: string,
     message: string,
-    source: "orchestrator" | "worker" = "orchestrator",
+    source: "orchestrator" | "worker" | "broker" = "orchestrator",
     metadata: Record<string, unknown> = {},
     instructionId?: string,
   ): Promise<InstructionDelivery> {
+    this.workerBudgetGate?.assertMayConsume(sessionId);
     const runtime = this.requireRuntime(sessionId);
     if (runtime.record.executionState === "active" && runtime.controller !== undefined) {
       throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
@@ -859,6 +884,15 @@ export class SessionRegistry {
    */
   workerTruth(sessionId: string): WorkerTruth {
     return this.requireRuntime(sessionId).turns.projectTruth();
+  }
+
+  workerBudgetObservation(sessionId: string): WorkerBudgetObservation {
+    const runtime = this.requireRuntime(sessionId);
+    return {
+      generation: runtime.record.generation ?? 1,
+      canonicalTurns: runtime.turns.canonicalTurns,
+      ...(runtime.turns.tokenCount === undefined ? {} : { tokenCount: runtime.turns.tokenCount }),
+    };
   }
 
   resize(sessionId: string, clientId: string | undefined, cols: number, rows: number): void {
@@ -964,6 +998,7 @@ export class SessionRegistry {
 
   async resume(sessionId: string): Promise<SessionRecord> {
     const runtime = this.requireRuntime(sessionId);
+    this.workerBudgetGate?.assertMayConsume(sessionId);
     if (runtime.terminalFinalizing === true) {
       throw new RegistryError(
         "SESSION_ALREADY_ACTIVE",

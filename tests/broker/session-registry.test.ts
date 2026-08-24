@@ -2177,20 +2177,18 @@ describe("SessionRegistry", () => {
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-resume-native-store-"));
     temporaryDirectories.push(root);
     const codexRoot = join(root, "codex-sessions");
-    // Rollout discovery scans day directories at the session's createdAt ± 1 day, so the fixture
-    // must sit under the current date rather than the date this test was written on.
-    const today = new Date();
-    const day = join(
-      codexRoot,
-      String(today.getUTCFullYear()),
-      String(today.getUTCMonth() + 1).padStart(2, "0"),
-      String(today.getUTCDate()).padStart(2, "0"),
-    );
-    await mkdir(day, { recursive: true });
-    const rolloutPath = join(day, "rollout.jsonl");
     const store = new ThreadTranscriptStore(root, { codexSessionsDirectory: codexRoot });
     const { registry, ptys } = harness({ transcriptStore: store });
     const record = await registry.start(request({ name: "real-store-resume" }));
+    const created = new Date(record.createdAt);
+    const day = join(
+      codexRoot,
+      String(created.getUTCFullYear()),
+      String(created.getUTCMonth() + 1).padStart(2, "0"),
+      String(created.getUTCDate()).padStart(2, "0"),
+    );
+    await mkdir(day, { recursive: true });
+    const rolloutPath = join(day, "rollout.jsonl");
     const sessionMeta = JSON.stringify({
       type: "session_meta",
       timestamp: record.createdAt,
@@ -3521,5 +3519,32 @@ describe("SessionRegistry ingest cost", () => {
     quiet.forEach((pty, index) => {
       expect(pty.snapshotCount - counts[index]!).toBeLessThanOrEqual(1);
     });
+  });
+});
+
+describe("SessionRegistry worker-budget gate", () => {
+  it("blocks every consumption path after hard exhaustion while leaving stop available", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request(), "Initial task");
+    const exhausted = Object.assign(new Error("Worker budget hard limit reached"), {
+      code: "WORKER_BUDGET_EXHAUSTED",
+    });
+    registry.setWorkerBudgetGate({
+      assertMayConsume: (sessionId) => {
+        if (sessionId === record.id) throw exhausted;
+      },
+    });
+
+    await expect(registry.write(record.id, undefined, Buffer.from("continue\n")))
+      .rejects.toMatchObject({ code: "WORKER_BUDGET_EXHAUSTED" });
+    await expect(registry.submit(record.id, undefined, "continue"))
+      .rejects.toMatchObject({ code: "WORKER_BUDGET_EXHAUSTED" });
+    await expect(registry.submitInstruction(record.id, "continue"))
+      .rejects.toMatchObject({ code: "WORKER_BUDGET_EXHAUSTED" });
+
+    await expect(registry.stop(record.id)).resolves.toBeUndefined();
+    expect(ptys[0]?.killSignals).toContain("SIGTERM");
+    await expect(registry.resume(record.id))
+      .rejects.toMatchObject({ code: "WORKER_BUDGET_EXHAUSTED" });
   });
 });

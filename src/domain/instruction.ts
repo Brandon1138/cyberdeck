@@ -50,6 +50,8 @@ export const InstructionRecordSchema = z.preprocess(
     messageId: z.uuid(),
     causationId: z.uuid().optional(),
     hop: z.number().int().nonnegative().default(0),
+    /** Broker policy instruction (for example, budget wrap-up), never caller-minted authority. */
+    brokerOwned: z.boolean().optional(),
   }),
 );
 

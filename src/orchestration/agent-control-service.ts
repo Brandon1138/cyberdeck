@@ -13,6 +13,7 @@ import { grantAllows, type CapabilityGrant, type CyberdeckCapability } from "../
 import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
 import { isFableModel } from "../domain/policy.js";
 import {
+  orchestratorController,
   orchestratorKey,
   type OrchestratorBinding,
   type OrchestratorScope,
@@ -27,6 +28,10 @@ import {
 } from "../domain/session.js";
 import type { ThreadReadResult } from "../domain/thread.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
+import {
+  WorkerBudgetDeclarationSchema,
+  type WorkerBudgetDeclaration,
+} from "../domain/worker-budget.js";
 import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
 import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
@@ -111,6 +116,8 @@ const AgentStandardWorkerInputSchema = z.object({
    * all and are always "normal".
    */
   workerMode: WorkerModeSchema.optional(),
+  /** Broker-owned allowance. Omission preserves unbudgeted worker behavior. */
+  budget: WorkerBudgetDeclarationSchema.optional(),
 });
 const AgentScoutWorkerInputSchema = z.object({
   profile: z.literal("scout"),
@@ -319,6 +326,7 @@ export class AgentControlError extends Error {
       | "EFFORT_NOT_SUPPORTED"
       | "MODEL_EFFORT_MISMATCH"
       | "APPROVAL_MODE_NOT_SUPPORTED"
+      | "WORKER_BUDGET_UNAVAILABLE"
       | PermissionResolutionFailureCode
       | WorkerWorkspaceFailureCode,
     message: string,
@@ -326,6 +334,17 @@ export class AgentControlError extends Error {
     super(message);
     this.name = "AgentControlError";
   }
+}
+
+/** Durable budget registration performed before a newly launched worker can take its first turn. */
+export interface WorkerBudgetRegistrationPort {
+  register(input: {
+    record: SessionRecord;
+    name: string;
+    declaration: WorkerBudgetDeclaration;
+    controller: ReturnType<typeof orchestratorController>;
+  }): Promise<void>;
+  markLaunchFailed?(input: { workerId: string; reason: string }): Promise<void>;
 }
 
 export interface AgentControlOptions {
@@ -351,6 +370,8 @@ export interface AgentControlOptions {
    * which will refuse a model a provider added after that catalog was written.
    */
   workerCapabilities?: WorkerCapabilityCatalog;
+  /** Broker coordination substrate that owns scoped worker budgets. */
+  workerBudgets?: WorkerBudgetRegistrationPort;
 }
 
 export class AgentControlService {
@@ -367,6 +388,7 @@ export class AgentControlService {
   private readonly scoutEgress: AgentControlOptions["scoutEgress"];
   private readonly workspaceProbe: WorkspaceProbe | undefined;
   private readonly workerCapabilities: WorkerCapabilityCatalog | undefined;
+  private readonly workerBudgets: WorkerBudgetRegistrationPort | undefined;
 
   constructor(
     private readonly registry: SessionLookupPort
@@ -389,6 +411,7 @@ export class AgentControlService {
     this.scoutEgress = options.scoutEgress;
     this.workspaceProbe = options.workspaceProbe;
     this.workerCapabilities = options.workerCapabilities;
+    this.workerBudgets = options.workerBudgets;
   }
 
   /**
@@ -717,6 +740,12 @@ export class AgentControlService {
     if (request.profile === "scout") {
       return this.startScout(request);
     }
+    if (request.budget !== undefined && this.workerBudgets === undefined) {
+      throw new AgentControlError(
+        "WORKER_BUDGET_UNAVAILABLE",
+        "Broker-owned worker budgets are unavailable for this launch",
+      );
+    }
     // Provider is not gated here for anyone: the capability catalog serves every provider's model
     // list to every orchestrator, so a dispatch that follows what was advertised must not bounce off
     // a switch the catalog never mentioned (MIK-96). Only Fable is gated, and the catalog says so.
@@ -770,7 +799,7 @@ export class AgentControlService {
     // `workerMode` on this one spawn (e.g. "normal" for a research worker) wins over it (MIK-79).
     const workerMode = request.workerMode
       ?? ((await this.workerPreferences?.get())?.caveman === true ? "caveman" : "normal");
-    const worker = await this.registry.start({
+    const startRequest: Parameters<SessionStartPort["start"]>[0] = {
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
       ...(request.effort === undefined ? {} : { effort: request.effort }),
@@ -784,7 +813,38 @@ export class AgentControlService {
       role: "worker",
       workerMode,
       name,
-    }, request.prompt);
+    };
+    let worker: SessionRecord;
+    if (request.budget === undefined) {
+      worker = await this.registry.start(startRequest, request.prompt);
+    } else {
+      const workerBudgets = this.workerBudgets!;
+      const controller = orchestratorController(binding);
+      let activatedWorkerId: string | undefined;
+      try {
+        worker = await this.registry.start(
+          startRequest,
+          request.prompt,
+          async (record) => {
+            await workerBudgets.register({
+              record,
+              name,
+              declaration: request.budget!,
+              controller,
+            });
+            activatedWorkerId = record.id;
+          },
+        );
+      } catch (error) {
+        if (activatedWorkerId !== undefined) {
+          await workerBudgets.markLaunchFailed?.({
+            workerId: activatedWorkerId,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+        throw error;
+      }
+    }
     const warnings = plan.value.shortfalls.map((shortfall) => shortfall.message);
     return {
       sessionId: worker.id,

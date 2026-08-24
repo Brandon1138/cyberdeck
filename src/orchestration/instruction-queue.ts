@@ -21,6 +21,14 @@ export const EnqueueInstructionParamsSchema = z.object({
   hop: z.number().int().nonnegative().default(0),
 });
 
+/** Internal-only policy instruction. No broker RPC routes to this schema. */
+export const EnqueueBrokerInstructionParamsSchema = z.object({
+  actorSessionId: z.uuid(),
+  targetSessionId: z.uuid(),
+  message: z.string().trim().min(1),
+  messageId: z.uuid(),
+});
+
 export class InstructionQueue {
   private subscriptions: Array<() => void> = [];
   /**
@@ -98,6 +106,39 @@ export class InstructionQueue {
     return (await this.store.list(record.targetSessionId)).find(({ id }) => id === record.id) ?? record;
   }
 
+  /**
+   * Persist one broker-owned policy instruction through the same FIFO/delivery truth path.
+   *
+   * Authorization comes from broker composition, not an orchestrator lease. Deterministic
+   * `messageId` makes a restart retry idempotent after policy state was persisted but before the
+   * worker consumed the wrap-up nudge.
+   */
+  async enqueueBroker(
+    input: z.input<typeof EnqueueBrokerInstructionParamsSchema>,
+  ): Promise<InstructionRecord> {
+    const request = EnqueueBrokerInstructionParamsSchema.parse(input);
+    this.registry.get(request.targetSessionId);
+    const existing = await this.store.list(request.targetSessionId);
+    const duplicate = existing.find((record) => record.messageId === request.messageId);
+    if (duplicate !== undefined) return duplicate;
+    const now = new Date().toISOString();
+    const record = InstructionRecordSchema.parse({
+      id: randomUUID(),
+      actorSessionId: request.actorSessionId,
+      targetSessionId: request.targetSessionId,
+      message: request.message,
+      status: "accepted",
+      createdAt: now,
+      updatedAt: now,
+      messageId: request.messageId,
+      hop: 0,
+      brokerOwned: true,
+    });
+    await this.store.put(record);
+    await this.flush(record.targetSessionId);
+    return (await this.store.list(record.targetSessionId)).find(({ id }) => id === record.id) ?? record;
+  }
+
   flush(targetSessionId: string): Promise<InstructionRecord[]> {
     return this.serialize(targetSessionId, async () => {
       const pending = (await this.store.list(targetSessionId))
@@ -170,9 +211,11 @@ export class InstructionQueue {
   }
 
   private async tryDeliver(record: InstructionRecord): Promise<InstructionRecord> {
-    const source = record.senderSessionId !== undefined && record.senderSessionId !== record.actorSessionId
-      ? "worker"
-      : "orchestrator";
+    const source = record.brokerOwned === true
+      ? "broker"
+      : record.senderSessionId !== undefined && record.senderSessionId !== record.actorSessionId
+        ? "worker"
+        : "orchestrator";
     let delivery;
     try {
       delivery = await this.registry.submitInstruction(record.targetSessionId, record.message, source, {
@@ -180,6 +223,7 @@ export class InstructionQueue {
         senderSessionId: record.senderSessionId ?? record.actorSessionId,
         messageId: record.messageId,
         workflowRunId: record.workflowRunId ?? null,
+        brokerOwned: record.brokerOwned === true,
       }, record.id);
     } catch (error) {
       const code = typeof error === "object" && error !== null && "code" in error
@@ -192,6 +236,11 @@ export class InstructionQueue {
       // record is both retried forever and deduplicated against the retry that would replace it.
       if (code === "SESSION_NOT_FOUND") {
         return this.persistState(record, "undelivered", { holdReason: "worker-terminal" });
+      }
+      if (code === "WORKER_BUDGET_EXHAUSTED") {
+        return this.persistState(record, "undelivered", {
+          holdReason: "worker-budget-exhausted",
+        });
       }
       throw error;
     }

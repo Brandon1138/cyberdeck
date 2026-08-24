@@ -29,6 +29,29 @@ function payload(response: Record<string, unknown> | undefined, index = 0): Reco
   return JSON.parse(content[index]!.text) as Record<string, unknown>;
 }
 
+interface JsonSchema {
+  type?: string;
+  const?: unknown;
+  enum?: unknown[];
+  default?: unknown;
+  description?: string;
+  deprecated?: boolean;
+  properties?: Record<string, JsonSchema>;
+  items?: JsonSchema;
+  required?: string[];
+  additionalProperties?: boolean;
+  oneOf?: JsonSchema[];
+  anyOf?: JsonSchema[];
+  allOf?: JsonSchema[];
+  not?: JsonSchema;
+  if?: JsonSchema;
+  then?: JsonSchema;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  maxItems?: number;
+}
+
 describe("Cyberdeck MCP server", () => {
   it("advertises semantic Cyberdeck tools", async () => {
     const response = await handleMcpRequest(context({ request: vi.fn() }), {
@@ -58,9 +81,7 @@ describe("Cyberdeck MCP server", () => {
     const tools = (response?.result as {
       tools: Array<{
         name: string;
-        inputSchema: {
-          properties?: Record<string, { enum?: string[]; maxItems?: number; default?: unknown }>;
-        };
+        inputSchema: JsonSchema;
       }>;
     }).tools;
     const workerStart = tools.find(({ name }) => name === "cyberdeck_worker_start");
@@ -100,6 +121,39 @@ describe("Cyberdeck MCP server", () => {
     expect(workersStart?.inputSchema.properties?.workers?.maxItems).toBe(64);
     expect(workersWait?.inputSchema.properties?.targets?.maxItems).toBe(64);
     expect(workersWait?.inputSchema.properties?.settleOnIntervention?.default).toBe(false);
+
+    const singleBudget = workerStart?.inputSchema.properties?.budget;
+    const batchBudget = workersStart?.inputSchema.properties?.workers?.items?.properties?.budget;
+    expect(batchBudget).toEqual(singleBudget);
+    expect(singleBudget).toMatchObject({
+      type: "object",
+      required: ["resource", "allocation"],
+      additionalProperties: false,
+      properties: {
+        schemaVersion: { type: "integer", const: 1, default: 1 },
+        resource: { enum: ["weekly", "session"] },
+        allocation: {
+          required: ["unit", "amount"],
+          properties: {
+            unit: { enum: ["percent", "tokens", "wall-clock-ms"] },
+            amount: { exclusiveMinimum: 0 },
+          },
+        },
+        policy: {
+          properties: {
+            softLimitRatio: { default: 0.8 },
+            hardLimitRatio: { const: 1 },
+            softAction: { const: "wrap-up" },
+            hardAction: { const: "stop" },
+          },
+        },
+      },
+    });
+    expect(singleBudget?.properties?.allocation?.allOf?.[0]?.then?.properties?.amount?.maximum).toBe(100);
+    expect(workerStart?.inputSchema.oneOf?.[1]?.not?.anyOf?.map((entry) => entry.required?.[0]))
+      .toContain("budget");
+    expect(workersStart?.inputSchema.properties?.workers?.items?.oneOf?.[1]?.not?.anyOf
+      ?.map((entry) => entry.required?.[0])).toContain("budget");
   });
 
   it("routes worker reporting wrappers through one compact submission method", async () => {
@@ -417,7 +471,7 @@ describe("Cyberdeck MCP server", () => {
     await served;
   });
 
-  it("routes one compact batch-start request", async () => {
+  it("routes one compact batch-start request without dropping its budget", async () => {
     const request = vi.fn(async () => []);
     const workers = [{
       provider: "codex",
@@ -426,6 +480,10 @@ describe("Cyberdeck MCP server", () => {
       cwd: "/repo",
       prompt: "Ping",
       name: "sol-ping",
+      budget: {
+        resource: "weekly",
+        allocation: { unit: "percent", amount: 20 },
+      },
     }];
     await handleMcpRequest(context({ request: request as never }), {
       jsonrpc: "2.0",

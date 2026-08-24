@@ -279,6 +279,7 @@ const TOOLS = [
         approvalMode: { type: "string", enum: ["prompt", "auto"] },
         prompt: { type: "string" },
         workspace: workerWorkspaceInputSchema(),
+        budget: workerBudgetInputSchema(),
         brief: scoutBriefInputSchema(),
         leasePolicy: {
           type: "string",
@@ -297,7 +298,7 @@ const TOOLS = [
           required: ["profile", "brief"],
           properties: { profile: { const: "scout" } },
           not: {
-            anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt", "workspace", "workerMode"]
+            anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt", "workspace", "workerMode", "budget"]
               .map((field) => ({ required: [field] })),
           },
         },
@@ -327,6 +328,7 @@ const TOOLS = [
               approvalMode: { type: "string", enum: ["prompt", "auto"] },
               prompt: { type: "string" },
               workspace: workerWorkspaceInputSchema(),
+              budget: workerBudgetInputSchema(),
               brief: scoutBriefInputSchema(),
               leasePolicy: {
                 type: "string",
@@ -345,7 +347,7 @@ const TOOLS = [
                 required: ["profile", "brief"],
                 properties: { profile: { const: "scout" } },
                 not: {
-                  anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt", "workspace", "workerMode"]
+                  anyOf: ["provider", "model", "effort", "sandbox", "approvalMode", "prompt", "workspace", "workerMode", "budget"]
                     .map((field) => ({ required: [field] })),
                 },
               },
@@ -541,6 +543,53 @@ const TOOLS = [
     },
   },
 ] as const;
+
+/** JSON Schema mirror of `WorkerBudgetDeclarationSchema` for MCP clients. */
+function workerBudgetInputSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    description:
+      "Optional broker-owned worker allowance. Measurements may be approximate or stale; "
+      + "Cyberdeck owns soft wrap-up and hard stop enforcement.",
+    properties: {
+      schemaVersion: { type: "integer", const: 1, default: 1 },
+      resource: { type: "string", enum: ["weekly", "session"] },
+      allocation: {
+        type: "object",
+        properties: {
+          unit: { type: "string", enum: ["percent", "tokens", "wall-clock-ms"] },
+          amount: { type: "number", exclusiveMinimum: 0 },
+        },
+        required: ["unit", "amount"],
+        allOf: [{
+          if: {
+            properties: { unit: { const: "percent" } },
+            required: ["unit"],
+          },
+          then: { properties: { amount: { maximum: 100 } } },
+        }],
+        additionalProperties: false,
+      },
+      policy: {
+        type: "object",
+        properties: {
+          softLimitRatio: {
+            type: "number",
+            exclusiveMinimum: 0,
+            exclusiveMaximum: 1,
+            default: 0.8,
+          },
+          hardLimitRatio: { type: "number", const: 1, default: 1 },
+          softAction: { type: "string", const: "wrap-up", default: "wrap-up" },
+          hardAction: { type: "string", const: "stop", default: "stop" },
+        },
+        additionalProperties: false,
+      },
+    },
+    required: ["resource", "allocation"],
+    additionalProperties: false,
+  };
+}
 
 /** Typed worker workspace, mirroring `WorkerWorkspaceSchema`. */
 function workerWorkspaceInputSchema(): Record<string, unknown> {

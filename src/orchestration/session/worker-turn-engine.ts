@@ -191,6 +191,17 @@ export class WorkerTurnEngine {
     return this.canonicalTurnCount;
   }
 
+  /**
+   * Best token reading currently exposed by an interactive provider.
+   *
+   * This is a terminal counter, not provider billing truth: providers may redraw, reset, or omit
+   * it. Budget accounting therefore treats it as approximate and owns any durable high-water
+   * outside this generation-local engine.
+   */
+  get tokenCount(): number | undefined {
+    return this.replay.tokenCount();
+  }
+
   get latestResult(): string | undefined {
     return this.currentLatestResult;
   }
@@ -725,7 +736,7 @@ export class WorkerTurnEngine {
   }
 
   private async terminalDelivery(
-    source: "orchestrator" | "worker",
+    source: "orchestrator" | "worker" | "broker",
     instructionId: string | undefined,
   ): Promise<InstructionDelivery> {
     const at = new Date().toISOString();
@@ -746,7 +757,7 @@ export class WorkerTurnEngine {
 
   private async holdInstruction(
     hold: DeliveryHoldReason,
-    source: "orchestrator" | "worker",
+    source: "orchestrator" | "worker" | "broker",
     instructionId: string | undefined,
   ): Promise<InstructionDelivery> {
     this.deliveryHeld = true;

@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { schemaVersionField } from "./control-plane.js";
+import { WorkerBudgetRecordSchema } from "./worker-budget.js";
 
 export const WORKER_COORDINATION_SCHEMA_VERSION = 1;
 
@@ -101,6 +102,8 @@ export const OwnershipSubjectSchema = z.object({
   origin: WorkerOriginSchema,
   lifecycle: WorkerLifecycleSchema,
   resources: SubjectResourceRefsSchema,
+  /** Optional scoped allowance. Absence preserves pre-budget worker behavior. */
+  budget: WorkerBudgetRecordSchema.optional(),
   lease: ControllerLeaseSchema,
   decisionGate: DecisionGateSchema.default({ state: "none" }),
   updatedAt: z.iso.datetime(),
@@ -158,6 +161,10 @@ export const OwnershipOperationSchema = z.enum([
   "event-submit",
   "event-resolve",
   "checkpoint-request",
+  "budget-declare",
+  "budget-observe",
+  "budget-adjust",
+  "budget-enforce",
 ]);
 
 export const OwnershipMutationResultSchema = z.object({

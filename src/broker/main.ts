@@ -38,6 +38,8 @@ import { GitWorkspaceProbe } from "../orchestration/git-workspace-probe.js";
 import { GitWorktreeProvisioner } from "../orchestration/git-worktree-provisioner.js";
 import { WorkerCapabilityCatalog } from "../orchestration/worker-capability-catalog.js";
 import { InstructionQueue } from "../orchestration/instruction-queue.js";
+import { LocalWorkerControlService } from "../orchestration/local-worker-control-service.js";
+import { WorkerBudgetEnforcer } from "./worker-budget-enforcer.js";
 import { WorkerControlService } from "../orchestration/worker-control-service.js";
 import { WorkerHandoffService } from "../orchestration/worker-handoff-service.js";
 import { InstructionStore } from "../persistence/instruction-store.js";
@@ -153,6 +155,18 @@ export async function runBroker(
   // validates against it, the Fleet composer offers what it serves, and the MCP capabilities tool
   // reads the same instance.
   const workerCapabilities = new WorkerCapabilityCatalog();
+  const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
+  instructions.start();
+  const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
+  const workerBudgets = new WorkerBudgetEnforcer({
+    registry,
+    coordination: workerCoordination.service,
+    instructions,
+    transcripts,
+    credentials: workerLeaseCredentials,
+  });
+  registry.setWorkerBudgetGate(workerBudgets);
+  await workerBudgets.start();
   const agentControl = new AgentControlService(
     registry,
     orchestratorStore,
@@ -165,11 +179,9 @@ export async function runBroker(
       scoutEgress,
       workspaceProbe: new GitWorkspaceProbe(),
       workerCapabilities,
+      workerBudgets,
     },
   );
-  const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
-  instructions.start();
-  const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerControl = new WorkerControlService({
     coordination: workerCoordination.service,
     credentials: workerLeaseCredentials,
@@ -208,6 +220,10 @@ export async function runBroker(
     onSessionUpdate: (listener) => registry.onSessionUpdate(listener),
   });
   nvimBindings.start();
+  const localWorkerControl = new LocalWorkerControlService({
+    registry,
+    budgets: workerCoordination.service,
+  });
 
   // The control plane owns durable job state, admission, budgets, leases, and reconciliation. Its
   // runtime enforces the ordering: persistence, then recovery, then reconciliation, and only then is
@@ -227,6 +243,8 @@ export async function runBroker(
     shuttingDown = true;
     // Admission stops first, then in-flight jobs drain and persist, then live sessions stop.
     await runtime.shutdown(reason);
+    localWorkerControl.close();
+    workerBudgets.close();
     instructions.stop();
     nvimBindings.stop();
     await registry.stopAll();
@@ -256,6 +274,7 @@ export async function runBroker(
     workerHandoff,
     workerEvents,
     nvimBindings,
+    localWorkerControl,
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();

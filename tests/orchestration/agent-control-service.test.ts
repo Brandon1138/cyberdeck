@@ -5,7 +5,10 @@ import {
   AgentStartWorkersParamsSchema,
   AgentWaitWorkersParamsSchema,
 } from "../../src/orchestration/agent-control-service.js";
-import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
+import {
+  orchestratorController,
+  type OrchestratorBinding,
+} from "../../src/domain/orchestrator.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { renderScoutDecisionCard } from "../../src/domain/scout-output.js";
@@ -77,6 +80,148 @@ describe("AgentControlService", () => {
 
     expect(parsed).not.toHaveProperty("sshAuthSock");
     expect(parsed).not.toHaveProperty("environment");
+  });
+
+  it("accepts a standard worker budget and applies declaration defaults", () => {
+    expect(AgentStartWorkerParamsSchema.parse({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      cwd: "/repo/one",
+      prompt: "Inspect repository",
+      budget: {
+        resource: "weekly",
+        allocation: { unit: "percent", amount: 20 },
+      },
+    })).toMatchObject({
+      budget: {
+        schemaVersion: 1,
+        resource: "weekly",
+        allocation: { unit: "percent", amount: 20 },
+        policy: {
+          softLimitRatio: 0.8,
+          hardLimitRatio: 1,
+          softAction: "wrap-up",
+          hardAction: "stop",
+        },
+      },
+    });
+  });
+
+  it("rejects a top-level scoped budget on strict Scout input", () => {
+    expect(AgentStartWorkerParamsSchema.safeParse({
+      actorSessionId: ACTOR,
+      profile: "scout",
+      cwd: "/repo/one",
+      brief: {
+        objective: "Inspect",
+        scope: ["src/**"],
+        questions: ["Where is launch policy?"],
+        stopCondition: "Answer",
+      },
+      budget: {
+        resource: "weekly",
+        allocation: { unit: "percent", amount: 20 },
+      },
+    }).success).toBe(false);
+  });
+
+  it("refuses a budgeted worker before launch when budget storage is unavailable", async () => {
+    const start = vi.fn();
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      cwd: "/repo/one",
+      prompt: "Inspect repository",
+      budget: {
+        resource: "weekly",
+        allocation: { unit: "percent", amount: 20 },
+      },
+    })).rejects.toMatchObject({ code: "WORKER_BUDGET_UNAVAILABLE" });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("registers a budget with the durable worker record before activation completes", async () => {
+    const register = vi.fn(async () => undefined);
+    const start = vi.fn(async (request, _prompt, activate) => {
+      const started = { ...worker, ...request, id: WORKER } as SessionRecord;
+      await activate?.(started);
+      return started;
+    });
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+      undefined,
+      { workerBudgets: { register } },
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      cwd: "/repo/one",
+      prompt: "Inspect repository",
+      name: "budgeted-inspection",
+      budget: {
+        resource: "weekly",
+        allocation: { unit: "percent", amount: 20 },
+      },
+    })).resolves.toMatchObject({ sessionId: WORKER });
+    expect(start.mock.calls[0]).toHaveLength(3);
+    expect(start.mock.calls[0]?.[0]).not.toHaveProperty("budget");
+    expect(register).toHaveBeenCalledWith({
+      record: expect.objectContaining({ id: WORKER, parentSessionId: ACTOR }),
+      name: "budgeted-inspection",
+      declaration: {
+        schemaVersion: 1,
+        resource: "weekly",
+        allocation: { unit: "percent", amount: 20 },
+        policy: {
+          softLimitRatio: 0.8,
+          hardLimitRatio: 1,
+          softAction: "wrap-up",
+          hardAction: "stop",
+        },
+      },
+      controller: orchestratorController(binding),
+    });
+  });
+
+  it("marks a registered budget failed when later worker initialization fails", async () => {
+    const register = vi.fn(async () => undefined);
+    const markLaunchFailed = vi.fn(async () => undefined);
+    const start = vi.fn(async (request, _prompt, activate) => {
+      const started = { ...worker, ...request, id: WORKER } as SessionRecord;
+      await activate?.(started);
+      throw new Error("provider initialization failed");
+    });
+    const service = new AgentControlService(
+      { start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      {} as never,
+      undefined,
+      { workerBudgets: { register, markLaunchFailed } },
+    );
+
+    await expect(service.startWorker({
+      actorSessionId: ACTOR,
+      provider: "codex",
+      cwd: "/repo/one",
+      prompt: "Inspect repository",
+      budget: {
+        resource: "session",
+        allocation: { unit: "tokens", amount: 10_000 },
+      },
+    })).rejects.toThrow("provider initialization failed");
+    expect(markLaunchFailed).toHaveBeenCalledWith({
+      workerId: WORKER,
+      reason: "provider initialization failed",
+    });
   });
 
   it("accepts 64-worker start and wait batches from one orchestrator turn", () => {
@@ -222,6 +367,7 @@ describe("AgentControlService", () => {
       completionTarget: 1,
     });
     expect(start).toHaveBeenCalledWith(expect.objectContaining({ effort: "low" }), "Return 8 + 1000");
+    expect(start.mock.calls[0]).toHaveLength(2);
   });
 
   it("tells an automatic Codex worker that its MCP calls will still stop at an approval prompt", async () => {

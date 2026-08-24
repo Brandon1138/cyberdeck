@@ -8,6 +8,12 @@ import { BrokerServer } from "../../src/broker/server.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
 import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
+import {
+  LocalWorkerCommandResultSchema,
+  LocalWorkerCommandSchema,
+  LocalWorkerTelemetrySnapshotSchema,
+  type LocalWorkerTelemetrySnapshot,
+} from "../../src/domain/local-worker-control.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../src/providers/provider.js";
@@ -20,6 +26,7 @@ import { WorkerCapabilityCatalog } from "../../src/orchestration/worker-capabili
 import { WorkerPreferenceStore } from "../../src/persistence/worker-preference-store.js";
 import { FleetDetachStore } from "../../src/persistence/fleet-detach-store.js";
 import { AgentControlService } from "../../src/orchestration/agent-control-service.js";
+import type { LocalWorkerControlService } from "../../src/orchestration/local-worker-control-service.js";
 
 class FakePty implements SessionRuntime {
   readonly pid: number;
@@ -137,6 +144,161 @@ class TestClient {
   }
 }
 
+const LOCAL_WORKER = "44444444-4444-4444-8444-444444444444";
+const LOCAL_PARENT = "55555555-5555-4555-8555-555555555555";
+
+function localWorkerSnapshot(cursor = 7): LocalWorkerTelemetrySnapshot {
+  return LocalWorkerTelemetrySnapshotSchema.parse({
+    schemaVersion: 1,
+    cursor,
+    generatedAt: "2026-08-24T10:02:00.000Z",
+    workers: [{
+      schemaVersion: 1,
+      sessionId: LOCAL_WORKER,
+      parent: { sessionId: LOCAL_PARENT, kind: "orchestrator" },
+      provider: "codex",
+      role: "worker",
+      model: {
+        value: "gpt-5.6-sol",
+        effort: "high",
+        provenance: "observed",
+        observedAt: "2026-08-24T10:01:00.000Z",
+      },
+      taskSummary: "Inspect local telemetry",
+      lifecycle: {
+        state: "working",
+        terminal: false,
+        executionState: "active",
+        detail: "Provider turn in flight",
+        startedAt: "2026-08-24T10:00:00.000Z",
+        endedAt: null,
+        elapsedMs: 120_000,
+      },
+      budget: {
+        revision: 2,
+        resource: "weekly",
+        unit: "percent",
+        allocatedAmount: 20,
+        consumedAmount: 12,
+        remainingAmount: 8,
+        measurement: {
+          source: "provider-telemetry",
+          accuracy: "approximate",
+          observedAt: "2026-08-24T10:01:00.000Z",
+          freshness: "fresh",
+          reason: null,
+        },
+        providerRemaining: {
+          amount: 38,
+          unit: "percent",
+          observedAt: "2026-08-24T10:01:00.000Z",
+          freshness: "fresh",
+          accuracy: "approximate",
+          reason: null,
+        },
+        policy: {
+          softLimit: { thresholdAmount: 16, action: "wrap-up", triggeredAt: null },
+          hardLimit: { thresholdAmount: 20, action: "stop", triggeredAt: null },
+        },
+        enforcement: {
+          state: "active",
+          revision: null,
+          reachedAt: null,
+          actionAt: null,
+        },
+      },
+      commands: {
+        inspect: true,
+        stop: true,
+        extendBudget: true,
+        reduceBudget: true,
+        pause: false,
+        resume: false,
+        open: false,
+      },
+    }],
+  });
+}
+
+function localWorkerControlHarness() {
+  let listener: ((snapshot: LocalWorkerTelemetrySnapshot) => void) | undefined;
+  const snapshot = vi.fn(() => localWorkerSnapshot());
+  const unsubscribe = vi.fn(() => { listener = undefined; });
+  const onUpdate = vi.fn((next: (value: LocalWorkerTelemetrySnapshot) => void) => {
+    listener = next;
+    return unsubscribe;
+  });
+  const command = vi.fn(async (input: unknown) => {
+    const parsed = LocalWorkerCommandSchema.parse(input);
+    return LocalWorkerCommandResultSchema.parse(parsed.action === "stop"
+      ? {
+          schemaVersion: 1,
+          action: "stop",
+          workerId: parsed.workerId,
+          mutationId: parsed.mutationId,
+          status: "accepted",
+          revision: null,
+        }
+      : {
+          schemaVersion: 1,
+          action: parsed.action,
+          workerId: parsed.workerId,
+          mutationId: parsed.mutationId,
+          status: "updated",
+          revision: parsed.expectedRevision + 1,
+        });
+  });
+  return {
+    service: { snapshot, onUpdate, command } as unknown as LocalWorkerControlService,
+    snapshot,
+    onUpdate,
+    command,
+    unsubscribe,
+    emit(value: LocalWorkerTelemetrySnapshot) { listener?.(value); },
+    subscribed: () => listener !== undefined,
+  };
+}
+
+function localWorkerBrokerRouteHarness() {
+  const local = localWorkerControlHarness();
+  const frames: ServerFrame[] = [];
+  const decoder = new JsonlDecoder(ServerFrameSchema);
+  const socket = {
+    destroyed: false,
+    write: vi.fn((chunk: Uint8Array | string) => {
+      frames.push(...decoder.push(Buffer.from(chunk)));
+      return true;
+    }),
+  } as unknown as Socket;
+  const registry = {
+    onSessionUpdate: vi.fn(() => () => undefined),
+  } as unknown as SessionRegistry;
+  const server = new BrokerServer({
+    socketPath: "/tmp/unused-local-worker-broker.sock",
+    registry,
+    localWorkerControl: local.service,
+  });
+  const context = { id: "local-client", socket, attachments: new Map() };
+  const routeRequest = (
+    server as unknown as {
+      routeRequest(
+        context: unknown,
+        frame: { type: "request"; id: number; method: string; params: unknown },
+      ): Promise<unknown>;
+    }
+  ).routeRequest.bind(server);
+  return {
+    local,
+    frames,
+    request: (method: string, params: unknown) => routeRequest(context, {
+      type: "request",
+      id: 1,
+      method,
+      params,
+    }),
+  };
+}
+
 async function harness(options: { workerCapabilities?: WorkerCapabilityCatalog } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-server-"));
   const socketPath = join(directory, "broker.sock");
@@ -250,6 +412,74 @@ describe("BrokerServer", () => {
       data: Buffer.from("READY\r\n").toString("base64"),
     });
     await expect(request({ sessionId, cursor: 0 })).rejects.toThrow();
+  });
+
+  it("validates versioned local worker snapshot requests before reading telemetry", async () => {
+    const { local, request } = localWorkerBrokerRouteHarness();
+    await expect(request("local.worker.v1.snapshot", { schemaVersion: 2 }))
+      .rejects.toMatchObject({ name: "ZodError" });
+    await expect(request("local.worker.v1.snapshot", {
+      schemaVersion: 1,
+      includeProcesses: true,
+    })).rejects.toMatchObject({ name: "ZodError" });
+    expect(local.snapshot).not.toHaveBeenCalled();
+
+    await expect(request("local.worker.v1.snapshot", { schemaVersion: 1 }))
+      .resolves.toEqual(localWorkerSnapshot());
+    expect(local.snapshot).toHaveBeenCalledOnce();
+  });
+
+  it("streams full local worker telemetry and releases unsubscribed clients", async () => {
+    const { local, frames, request } = localWorkerBrokerRouteHarness();
+    await expect(request("local.worker.v1.subscribe", { schemaVersion: 1 }))
+      .resolves.toEqual(localWorkerSnapshot());
+    expect(local.onUpdate).toHaveBeenCalledOnce();
+    expect(local.subscribed()).toBe(true);
+
+    const update = localWorkerSnapshot(8);
+    local.emit(update);
+    expect(frames).toContainEqual({
+      type: "local-worker-telemetry",
+      snapshot: update,
+    });
+
+    await expect(request("local.worker.v1.unsubscribe", { schemaVersion: 1 }))
+      .resolves.toEqual({ schemaVersion: 1, subscribed: false });
+    expect(local.unsubscribe).toHaveBeenCalledOnce();
+    expect(local.subscribed()).toBe(false);
+    const frameCount = frames.length;
+    local.emit(localWorkerSnapshot(9));
+    expect(frames).toHaveLength(frameCount);
+  });
+
+  it("forwards validated local worker commands and returns validation failures", async () => {
+    const { local, request } = localWorkerBrokerRouteHarness();
+    const command = {
+      schemaVersion: 1,
+      action: "extend-budget",
+      workerId: LOCAL_WORKER,
+      reason: "allow final verification",
+      mutationId: "local:extend:1",
+      expectedRevision: 2,
+      amount: 5,
+    };
+    await expect(request("local.worker.v1.command", command)).resolves.toEqual({
+      schemaVersion: 1,
+      action: "extend-budget",
+      workerId: LOCAL_WORKER,
+      mutationId: "local:extend:1",
+      status: "updated",
+      revision: 3,
+    });
+    expect(local.command).toHaveBeenCalledWith(command);
+
+    await expect(request("local.worker.v1.command", {
+      schemaVersion: 1,
+      action: "pause",
+      workerId: LOCAL_WORKER,
+      reason: "pause until reviewed",
+      mutationId: "local:pause:1",
+    })).rejects.toMatchObject({ name: "ZodError" });
   });
 
   it("exposes durable Scout egress mutation only on the operator broker route", async () => {
