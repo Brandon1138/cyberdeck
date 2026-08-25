@@ -62,7 +62,7 @@ function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 function orc(id: string, name: string, controllerId: string, createdAt = NOW): FleetThread {
-  return { record: session({ id, name, createdAt }), replay: "", controllerId };
+  return { record: session({ id, name, createdAt }), controllerId };
 }
 
 function coordination(
@@ -102,7 +102,6 @@ function worker(
   const record = session({ id, name, kind: "worker", role: "worker" } as Partial<SessionRecord>);
   return {
     record,
-    replay: "",
     ...(owner === undefined ? {} : { coordination: coordination(id, owner) }),
   };
 }

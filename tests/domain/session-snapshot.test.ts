@@ -7,7 +7,7 @@ import {
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 
 describe("session snapshot protocol", () => {
-  it("keeps the cursor optional for legacy full-snapshot callers", () => {
+  it("is a one-shot full read, requested by session alone", () => {
     expect(SessionSnapshotParamsSchema.parse({ sessionId: SESSION_ID })).toEqual({
       sessionId: SESSION_ID,
     });
@@ -16,18 +16,11 @@ describe("session snapshot protocol", () => {
     });
   });
 
-  it("accepts cursor-aware full and not-modified responses", () => {
-    expect(SessionSnapshotParamsSchema.parse({ sessionId: SESSION_ID, cursor: 0 })).toEqual({
-      sessionId: SESSION_ID,
-      cursor: 0,
-    });
-    expect(SessionSnapshotResultSchema.parse({ data: "UkVBRFk=", cursor: 3 })).toEqual({
-      data: "UkVBRFk=",
-      cursor: 3,
-    });
-    expect(SessionSnapshotResultSchema.parse({ cursor: 3, notModified: true })).toEqual({
-      cursor: 3,
-      notModified: true,
-    });
+  it("rejects the retired cursor protocol instead of silently serving it", () => {
+    // A caller still sending a cursor is a stale Fleet that believes the list can poll replays
+    // cheaply. It cannot — that belief cost every working session its full buffer per tick — so
+    // the request fails loudly rather than degrading into exactly that traffic.
+    expect(() => SessionSnapshotParamsSchema.parse({ sessionId: SESSION_ID, cursor: 0 }))
+      .toThrow();
   });
 });
