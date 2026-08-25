@@ -55,36 +55,39 @@ describe("octopus", () => {
 
   it("carries the shape into a colourless terminal with half blocks alone", () => {
     // Ink above and below is a full cell; ink on one side is that half; neither is blank.
-    expect(renderPixelArt(["1.1.", ".11."], false)).toEqual(["▀▄█ "]);
-    expect(renderPixelArt(["1111"], false)).toEqual(["▀▀▀▀"]);
+    expect(renderPixelArt(["x.x.", ".xx."], false)).toEqual(["▀▄█ "]);
+    expect(renderPixelArt(["xxxx"], false)).toEqual(["▀▀▀▀"]);
   });
 
-  it("renders without a background exactly as it always has", () => {
-    // Dark outline throughout, no light-palette outline, no feathering: an unanswered OSC 11
-    // query must cost nothing visually.
-    const lines = renderPixelArt(OCTOPUS_MARK, true).join("\n");
-    expect(lines).toContain("38;2;35;9;69");
-    expect(lines).not.toContain("38;2;74;43;110");
+  it("inks the animal the same on any ground, and on none", () => {
+    // One ink is the whole point of MIK-160: an unanswered OSC 11 query, a black terminal and a
+    // white one all get the same purple, so there is no palette left to pick wrongly.
+    const solid = ["xxx", "xxx", "xxx"];
+    const interior = "48;2;158;84;196";
+    expect(renderPixelArt(solid, true).join("\n")).toContain(interior);
+    expect(renderPixelArt(solid, true, { red: 255, green: 255, blue: 255 }).join("\n"))
+      .toContain(interior);
+    expect(renderPixelArt(solid, true, { red: 0, green: 0, blue: 0 }).join("\n"))
+      .toContain(interior);
   });
 
-  it("swaps to the light palette when the terminal says its background is light", () => {
-    // 3x3 solid outline: the centre pixel is interior, so it carries the palette colour pure.
-    const solid = ["111", "111", "111"];
-    const light = renderPixelArt(solid, true, { red: 255, green: 255, blue: 255 }).join("\n");
-    expect(light).toContain("48;2;74;43;110");
-    expect(light).not.toContain("35;9;69");
-    const dark = renderPixelArt(solid, true, { red: 0, green: 0, blue: 0 }).join("\n");
-    expect(dark).toContain("48;2;35;9;69");
-    expect(dark).not.toContain("74;43;110");
+  it("cuts the eyes out of the ink rather than painting them", () => {
+    // The eyes are ground, which is what lets them invert for free: on a white terminal they are
+    // white, on a black one black, and no second colour is involved either way.
+    const row = OCTOPUS_MARK[2]!;
+    expect(row).toMatch(/x{2,}\.x+\.x{2,}/u);
+    for (const art of [OCTOPUS_MARK, OCTOPUS_SPLASH]) {
+      expect(art.every((line) => /^[.x]+$/u.test(line))).toBe(true);
+    }
   });
 
   it("feathers silhouette pixels toward a known background and leaves the interior alone", () => {
-    const solid = ["111", "111", "111"];
+    const solid = ["xxx", "xxx", "xxx"];
     const [first] = renderPixelArt(solid, true, { red: 0, green: 0, blue: 0 });
-    // Top-left pixel has open ground above and left: 30% of the way to black from [35, 9, 69].
-    expect(first).toContain("38;2;25;6;48");
-    // The centre pixel, walled in on all four sides, keeps the palette colour untouched.
-    expect(first).toContain("48;2;35;9;69");
+    // Top-left pixel has open ground above and left: 30% of the way to black from [158, 84, 196].
+    expect(first).toContain("38;2;111;59;137");
+    // The centre pixel, walled in on all four sides, keeps the ink untouched.
+    expect(first).toContain("48;2;158;84;196");
   });
 
   it("keeps the ground unpainted even when the background is known", () => {
@@ -92,7 +95,7 @@ describe("octopus", () => {
     const [blank] = renderPixelArt(["....", "...."], true, background);
     expect(blank).not.toContain("48;2;");
     // A half-ground cell still rides the terminal's own background, never an explicit colour.
-    const [mixed] = renderPixelArt(["1...", "...."], true, background);
+    const [mixed] = renderPixelArt(["x...", "...."], true, background);
     expect(mixed).toContain("[49m");
   });
 
@@ -107,7 +110,7 @@ describe("octopus", () => {
   it("draws the mark small enough for a header and the splash large enough to read", () => {
     // Eight pixel rows is the floor at which the octopus is still the octopus. Four terminal rows
     // is what that costs the header, and the splash is the only surface that can afford more.
-    expect([pixelArtWidth(OCTOPUS_MARK), pixelArtHeight(OCTOPUS_MARK)]).toEqual([12, 4]);
+    expect([pixelArtWidth(OCTOPUS_MARK), pixelArtHeight(OCTOPUS_MARK)]).toEqual([13, 4]);
     expect([pixelArtWidth(OCTOPUS_SPLASH), pixelArtHeight(OCTOPUS_SPLASH)]).toEqual([32, 14]);
   });
 });
