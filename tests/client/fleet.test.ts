@@ -76,13 +76,11 @@ function registryExit(record: SessionRecord): SessionRecord {
 
 function fleet(...records: Array<{
   record: SessionRecord;
-  replay?: string;
   coordination?: FleetWorkerCoordinationView;
 }>): FleetSnapshot {
   return {
-    threads: records.map(({ record, replay = "", coordination }) => ({
+    threads: records.map(({ record, coordination }) => ({
       record,
-      replay,
       ...(coordination === undefined ? {} : { coordination }),
     })),
   };
@@ -779,8 +777,11 @@ describe("fleet presentation", () => {
   it("groups threads by project and shows provider, model, status, preview, and recency", () => {
     const snapshot = fleet(
       {
-        record: session({ updatedAt: "2026-07-22T09:59:46.000Z" }),
-        replay: "\u001b]0;cyberdeck\u0007\r\nLatest useful response",
+        record: session({
+          updatedAt: "2026-07-22T09:59:46.000Z",
+          attentionState: "done",
+          latestPreview: "Latest useful response",
+        }),
       },
       {
         record: session({
@@ -793,7 +794,6 @@ describe("fleet presentation", () => {
           executionState: "exited",
           updatedAt: "2026-07-22T09:58:00.000Z",
         }),
-        replay: "Finished review",
       },
     );
 
@@ -1097,12 +1097,9 @@ describe("fleet presentation", () => {
 
   it("reads a session that died inside a live process as failed, never as needs input", () => {
     const errored = session({ executionState: "errored", attentionState: "failed" });
-    expect(threadStatus({ record: errored, replay: "Codex needs your approval\nAllow" })).toBe("Failed");
+    expect(threadStatus({ record: errored })).toBe("Failed");
     // Even with no persisted attention state, the execution state alone settles it.
-    expect(threadStatus({
-      record: session({ executionState: "errored" }),
-      replay: "Codex needs your approval\nAllow",
-    })).toBe("Failed");
+    expect(threadStatus({ record: session({ executionState: "errored" }) })).toBe("Failed");
   });
 
   it("gives finished and blocked threads separate hues, and marks focus with a rule", () => {
@@ -1272,7 +1269,7 @@ describe("fleet presentation", () => {
       name: "Final thread",
     });
     const snapshot = {
-      threads: [...firstGroup, { record: finalThread, replay: "" }],
+      threads: [...firstGroup, { record: finalThread }],
     };
     const rendered = renderFleet(snapshot, createFleetState(snapshot), {
       color: false,
@@ -1466,7 +1463,6 @@ describe("fleet presentation", () => {
       record: session({
         latestPreview: "Tip: Try the Desktop app. Run 'codex app' or visit",
       }),
-      replay: "",
     });
     const rendered = renderFleet(snapshot, createFleetState(snapshot), {
       color: false,
@@ -1479,28 +1475,13 @@ describe("fleet presentation", () => {
     expect(rendered).not.toContain("Tip: Try the Desktop app");
   });
 
-  it("uses provider activity for working but reserves Needs input for explicit blockers", () => {
-    expect(threadStatus({
-      record: session(),
-      replay: "\u001b]0;⠹ cyberdeck\u0007",
-    })).toBe("Working");
-    expect(threadStatus({
-      record: session(),
-      replay: "\u001b]0;cyberdeck\u0007",
-    })).toBe("Done");
-    expect(threadStatus({
-      record: session(),
-      replay: "Do you trust the contents of this project?",
-    })).toBe("Needs input");
+  it("renders status from the broker's attention state, never from replay bytes", () => {
+    // The broker classifies provider output once, on arrival, and persists the verdict on the
+    // record. The list is a reader of that verdict: there is no replay here to second-guess it.
+    expect(threadStatus({ record: session({ attentionState: "working" }) })).toBe("Working");
+    expect(threadStatus({ record: session({ attentionState: "done" }) })).toBe("Done");
     const approval = fleet({
-      record: session({ provider: "claude", model: "opus" }),
-      replay: [
-        "Claude needs your permission to use Bash",
-        "Do you want to proceed?",
-        "❯ 1. Yes",
-        "  2. No",
-        "Esc to cancel · Tab to amend",
-      ].join("\n"),
+      record: session({ provider: "claude", model: "opus", attentionState: "needs-input" }),
     });
     expect(threadStatus(approval.threads[0]!)).toBe("Needs input");
     const rendered = renderFleet(approval, createFleetState(approval), {
@@ -1511,18 +1492,17 @@ describe("fleet presentation", () => {
     });
     expect(rendered).toContain("1 needs input");
     expect(rendered).toContain("Needs input");
-    expect(threadStatus({
-      record: session({ executionState: "failed" }),
-      replay: "",
-    })).toBe("Failed");
+    // An active record the broker has not classified yet reads Working — the answer that invites
+    // patience — never Done, which would invite closing a thread that is still starting up.
+    expect(threadStatus({ record: session() })).toBe("Working");
+    expect(threadStatus({ record: session({ executionState: "failed" }) })).toBe("Failed");
     expect(threadStatus({
       record: session({ executionState: "cancelled", exitCode: 0 }),
-      replay: "",
     })).toBe("Stopped");
   });
 
   it("keeps a dedicated new-thread composer at the bottom with explicit launch context", () => {
-    const snapshot = fleet({ record: session(), replay: "First line\r\nMost recent answer" });
+    const snapshot = fleet({ record: session() });
     const rendered = renderFleet(snapshot, {
       ...createFleetState(snapshot),
       draft: "Inspect the failure",
@@ -1602,22 +1582,6 @@ describe("fleet presentation", () => {
     );
   });
 
-  it("preserves word boundaries from cursor-positioned provider output", () => {
-    const snapshot = fleet({
-      record: session(),
-      replay: "-\u001b[5GCyberdeck\u001b[15Gis\u001b[18Ga\u001b[20Glocal\u001b[26Gbroker",
-    });
-    const rendered = renderFleet(snapshot, createFleetState(snapshot), {
-      color: false,
-      width: 160,
-      height: 28,
-      now: NOW_MS,
-      home: "/Users/brandon",
-    });
-
-    expect(rendered).toContain("Cyberdeck is a local broker");
-    expect(rendered).not.toContain("Cyberdeckisalocalbroker");
-  });
 });
 
 describe("fleet controls", () => {
@@ -3253,79 +3217,26 @@ describe("fleet controls", () => {
 });
 
 describe("collectFleetSnapshot", () => {
-  it("loads replay for every durable session on first observation", async () => {
-    const record = session();
-    const request = vi.fn(async (method: string) => {
-      if (method === "session.list") return [record];
-      if (method === "session.snapshot") return { data: Buffer.from("latest").toString("base64") };
-      throw new Error(`unexpected ${method}`);
-    });
-
-    await expect(collectFleetSnapshot({ request } as never)).resolves.toEqual({
-      threads: [{ record, replay: "latest" }],
-    });
-    expect(request).toHaveBeenCalledWith("session.snapshot", { sessionId: record.id, cursor: 0 });
-  });
-
-  it("polls only active sessions after warming a 170-session catalog", async () => {
+  it("builds the thread list from records alone, without a byte of replay", async () => {
+    // Every per-thread question the list asks — status, preview, recency — is answered by the
+    // session record the broker already maintains. Replay bytes scale with worker output and are
+    // priced accordingly: they move only through session.attach, never through the list poll.
     const records = Array.from({ length: 170 }, (_, index) => session({
       id: `11111111-1111-4111-8111-${String(index + 1).padStart(12, "0")}`,
       executionState: index < 14 ? "active" : "exited",
       exitCode: index < 14 ? null : 0,
     }));
-    let snapshotRequests = 0;
-    const request = vi.fn(async (method: string, params?: { cursor?: number }) => {
+    const request = vi.fn(async (method: string) => {
       if (method === "session.list") return records;
-      if (method === "session.snapshot") {
-        snapshotRequests += 1;
-        if (params?.cursor === 1) return { cursor: 1, notModified: true };
-        return { data: Buffer.from("latest").toString("base64"), cursor: 1 };
-      }
+      if (method === "fleet.workerCoordination") return [];
+      if (method === "fleet.orchestratorOwnership") return [];
+      if (method === "fleet.projects") throw new Error("no registry");
       throw new Error(`unexpected ${method}`);
     });
-    const client = { request } as never;
 
-    await collectFleetSnapshot(client);
-    expect(snapshotRequests).toBe(170);
-
-    snapshotRequests = 0;
-    await expect(collectFleetSnapshot(client)).resolves.toHaveProperty("threads.length", 170);
-    expect(snapshotRequests).toBe(14);
-  });
-
-  it("keeps polling a cancelled session until its process has exited", async () => {
-    // session.stop marks a session cancelled before signalling its process, so output can
-    // still arrive after the state turns terminal. Freezing the cache on state alone loses it.
-    const record = session({ executionState: "cancelled", exitCode: null });
-    let revision = 1;
-    let replay = "dying output";
-    const request = vi.fn(async (method: string, params?: { cursor?: number }) => {
-      if (method === "session.list") return [record];
-      if (method === "session.snapshot") {
-        if (params?.cursor === revision) return { cursor: revision, notModified: true };
-        return { data: Buffer.from(replay).toString("base64"), cursor: revision };
-      }
-      throw new Error(`unexpected ${method}`);
-    });
-    const client = { request } as never;
-
-    await expect(collectFleetSnapshot(client)).resolves.toEqual({
-      threads: [{ record, replay: "dying output" }],
-    });
-
-    revision = 2;
-    replay = "dying output plus a late flush";
-    await expect(collectFleetSnapshot(client)).resolves.toEqual({
-      threads: [{ record, replay: "dying output plus a late flush" }],
-    });
-
-    record.exitCode = 143;
-    await collectFleetSnapshot(client);
-    const fetchesBeforeFreeze = request.mock.calls.filter(([method]) => method === "session.snapshot").length;
-    await collectFleetSnapshot(client);
-    const fetchesAfterFreeze = request.mock.calls.filter(([method]) => method === "session.snapshot").length;
-    expect(fetchesBeforeFreeze).toBe(3);
-    expect(fetchesAfterFreeze).toBe(3);
+    await expect(collectFleetSnapshot({ request } as never))
+      .resolves.toHaveProperty("threads.length", 170);
+    expect(request.mock.calls.filter(([method]) => method === "session.snapshot")).toHaveLength(0);
   });
 
   it("joins broker lease projection onto matching worker sessions", async () => {
@@ -3338,12 +3249,13 @@ describe("collectFleetSnapshot", () => {
     const request = vi.fn(async (method: string) => {
       if (method === "session.list") return [record];
       if (method === "fleet.workerCoordination") return [ownership];
-      if (method === "session.snapshot") return { data: Buffer.from("latest").toString("base64") };
+      if (method === "fleet.orchestratorOwnership") return [];
+      if (method === "fleet.projects") throw new Error("no registry");
       throw new Error(`unexpected ${method}`);
     });
 
     await expect(collectFleetSnapshot({ request } as never)).resolves.toEqual({
-      threads: [{ record, replay: "latest", coordination: ownership }],
+      threads: [{ record, coordination: ownership }],
     });
   });
 
@@ -3361,16 +3273,16 @@ describe("collectFleetSnapshot", () => {
       if (method === "fleet.orchestratorOwnership") {
         return [{ sessionId: orc.id, controllerId: "orchestrator:workspace:/repo/one" }];
       }
-      if (method === "session.snapshot") return { data: Buffer.from("latest").toString("base64") };
+      if (method === "fleet.projects") throw new Error("no registry");
       throw new Error(`unexpected ${method}`);
     });
 
     await expect(collectFleetSnapshot({ request } as never)).resolves.toEqual({
       threads: [
-        { record: orc, replay: "latest", controllerId: "orchestrator:workspace:/repo/one" },
+        { record: orc, controllerId: "orchestrator:workspace:/repo/one" },
         // The worker row carries no controller id of its own: its owner is whatever its lease
         // currently names, which the coordination projection already said.
-        { record: workerRecord, replay: "latest", coordination: ownership },
+        { record: workerRecord, coordination: ownership },
       ],
     });
   });
@@ -3379,13 +3291,14 @@ describe("collectFleetSnapshot", () => {
     const record = session();
     const request = vi.fn(async (method: string) => {
       if (method === "session.list") return [record];
+      if (method === "fleet.workerCoordination") return [];
       if (method === "fleet.orchestratorOwnership") throw new Error("unknown method");
-      if (method === "session.snapshot") return { data: Buffer.from("latest").toString("base64") };
+      if (method === "fleet.projects") throw new Error("no registry");
       throw new Error(`unexpected ${method}`);
     });
 
     await expect(collectFleetSnapshot({ request } as never)).resolves.toEqual({
-      threads: [{ record, replay: "latest" }],
+      threads: [{ record }],
     });
   });
 });
@@ -5360,7 +5273,7 @@ describe("fleet repaint", () => {
       wholeFrame: Buffer.byteLength(wholeFrame),
       rowDamage: Buffer.byteLength(damage),
     };
-    expect(bytes).toEqual({ wholeFrame: 850, rowDamage: 90 });
+    expect(bytes).toEqual({ wholeFrame: 851, rowDamage: 91 });
     expect(bytes.rowDamage).toBeLessThan(bytes.wholeFrame / 8);
 
     input.emit("data", Buffer.from([0x03, 0x03]));

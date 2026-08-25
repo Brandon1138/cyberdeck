@@ -41,7 +41,7 @@ import {
 } from "../providers/image-input.js";
 import { conversationPreview } from "../runtime/conversation-preview.js";
 import type { ShellCommandResult } from "../runtime/shell-command.js";
-import { providerTerminalActivity, stripTerminalControl } from "../runtime/terminal-replay.js";
+import { stripTerminalControl } from "../runtime/terminal-replay.js";
 import { attachSession, type AttachTransport } from "./attach.js";
 import {
   capturePasteboardImage,
@@ -91,7 +91,6 @@ import {
 } from "./pr-status.js";
 import { RpcError } from "./rpc-client.js";
 import { queryTerminalBackground, type TerminalBackground } from "./terminal-background.js";
-import type { SessionSnapshotResult } from "../domain/session-snapshot.js";
 
 export interface FleetTransport {
   request<T = unknown>(method: string, params: unknown): Promise<T>;
@@ -123,7 +122,6 @@ interface FleetSignals {
 
 export interface FleetThread {
   record: SessionRecord;
-  replay: string;
   coordination?: FleetWorkerCoordinationView;
   /**
    * The durable controller family this orchestrator row speaks for, from its binding. Absent on
@@ -143,15 +141,6 @@ export interface FleetSnapshot {
    */
   projects?: readonly string[] | undefined;
 }
-
-interface FleetReplayCacheEntry {
-  replay: string;
-  cursor?: number;
-  /** True only once the session can no longer produce output: terminal state AND its process gone. */
-  settled: boolean;
-}
-
-const fleetReplayCaches = new WeakMap<FleetTransport, Map<string, FleetReplayCacheEntry>>();
 
 export interface DeleteConfirmation {
   sessionId: string;
@@ -777,17 +766,19 @@ const SELECTION_RULE = "▌";
 const HANDOFF_MARK = "✓";
 const ROW_GUTTER = "  ";
 
+/**
+ * One list poll's worth of broker truth, and nothing that scales with worker output.
+ *
+ * The thread list renders exclusively from session records: `attentionState` for the status dot
+ * and `latestPreview` for the preview cell, both of which the broker maintains event-driven as
+ * provider output arrives. Fleet used to also pull every non-settled session's full PTY replay
+ * here to re-derive the same two answers client-side, which cost each working agent its whole
+ * replay buffer on every 100ms tick — encode, transfer, decode, and regex, twice over, across two
+ * processes. Raw replay bytes now flow only through `session.attach`, when the operator actually
+ * enters a thread.
+ */
 export async function collectFleetSnapshot(client: FleetTransport): Promise<FleetSnapshot> {
   const sessions = await client.request<SessionRecord[]>("session.list", {});
-  let replayCache = fleetReplayCaches.get(client);
-  if (replayCache === undefined) {
-    replayCache = new Map();
-    fleetReplayCaches.set(client, replayCache);
-  }
-  const listedSessionIds = new Set(sessions.map(({ id }) => id));
-  for (const sessionId of replayCache.keys()) {
-    if (!listedSessionIds.has(sessionId)) replayCache.delete(sessionId);
-  }
   const coordination = await client.request<FleetWorkerCoordinationView[]>(
     "fleet.workerCoordination",
     {},
@@ -807,53 +798,17 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
   // grouping every thread under "Unregistered" is the wrong answer to a question nobody asked.
   const projects = await client.request<string[]>("fleet.projects", {})
     .then((roots) => roots as readonly string[] | undefined, () => undefined);
-  const threads = await Promise.all(sessions.map(async (record): Promise<FleetThread | null> => {
-    try {
-      const cached = replayCache.get(record.id);
-      const workerCoordination = coordinationBySession.get(record.id);
-      const controllerId = orchestratorOwnership.get(record.id);
-      // A terminal executionState alone is not enough to stop polling: session.stop marks a
-      // session cancelled before signalling it, so the process can still be flushing output.
-      // Only a settled session — terminal AND with no live process (exited, or never launched)
-      // — is safe to freeze in the cache.
-      const terminal = record.executionState !== "active" && record.executionState !== "starting";
-      const settled = terminal && (record.exitCode !== null || record.pid === 0);
-      if (settled && cached?.settled === true) {
-        return {
-          record,
-          replay: cached.replay,
-          ...(workerCoordination === undefined ? {} : { coordination: workerCoordination }),
-          ...(controllerId === undefined ? {} : { controllerId }),
-        };
-      }
-      const snapshot = await client.request<SessionSnapshotResult>("session.snapshot", {
-        sessionId: record.id,
-        cursor: cached?.cursor ?? 0,
-      });
-      const replay = "notModified" in snapshot
-        ? cached?.replay
-        : Buffer.from(snapshot.data, "base64").toString("utf8");
-      if (replay === undefined) {
-        throw new Error(`Broker returned not-modified before Fleet cached session ${record.id}`);
-      }
-      replayCache.set(record.id, {
-        replay,
-        ...(snapshot.cursor === undefined ? {} : { cursor: snapshot.cursor }),
-        settled,
-      });
-      return {
-        record,
-        replay,
-        ...(workerCoordination === undefined ? {} : { coordination: workerCoordination }),
-        ...(controllerId === undefined ? {} : { controllerId }),
-      };
-    } catch (error) {
-      if (error instanceof RpcError && error.code === "SESSION_NOT_FOUND") return null;
-      throw error;
-    }
-  }));
+  const threads = sessions.map((record): FleetThread => {
+    const workerCoordination = coordinationBySession.get(record.id);
+    const controllerId = orchestratorOwnership.get(record.id);
+    return {
+      record,
+      ...(workerCoordination === undefined ? {} : { coordination: workerCoordination }),
+      ...(controllerId === undefined ? {} : { controllerId }),
+    };
+  });
   return {
-    threads: threads.filter((thread): thread is FleetThread => thread !== null),
+    threads,
     ...(projects === undefined ? {} : { projects }),
   };
 }
@@ -893,12 +848,10 @@ export function threadStatus(thread: FleetThread): ThreadStatus {
     // last terminal frame happened to look like, so nobody is invited to type at it.
     case "errored": return "Failed";
     case "cancelled": return thread.record.exitCode === null ? "Stopping" : "Stopped";
-    case "active": {
-      const activity = providerTerminalActivity(thread.record.provider, thread.replay);
-      if (activity === "working") return "Working";
-      if (activity === "needs-input") return "Needs input";
-      return "Done";
-    }
+    // The broker stamps attentionState at start and maintains it as output arrives, so an active
+    // record without one is a record the broker has not classified yet. "Working" is the answer
+    // that invites patience rather than input at a thread nothing has vouched for.
+    case "active": return "Working";
   }
 }
 
@@ -3343,7 +3296,7 @@ function existingOrchestratorLabel(record: SessionRecord, color: boolean): strin
  * replay — is unreachable and the empty replay below is never consulted.
  */
 function terminalOrchestratorState(record: SessionRecord): string {
-  return threadStatus({ record, replay: "" }).toLowerCase();
+  return threadStatus({ record }).toLowerCase();
 }
 
 function pickerRow(value: string, selected: boolean, color: boolean): string {
@@ -3698,22 +3651,16 @@ function pullRequestCell(
  * The preview cell for one row.
  *
  * `record.latestPreview` is the broker's transcript-derived extraction and is re-classified here
- * because records persisted by earlier versions hold raw TUI chrome. The PTY replay is only
- * consulted when nothing better exists, and a session with no reply yet shows its task prompt under
- * an explicit label so it can never be mistaken for something the agent said.
+ * because records persisted by earlier versions hold raw TUI chrome. It is also the only source:
+ * the broker maintains it event-driven for every provider, so re-deriving a preview from raw PTY
+ * bytes here would repeat, at poll frequency, work already done once on arrival. A session with
+ * no reply yet shows the placeholder until its first result lands.
  */
 function threadPreview(thread: FleetThread, width: number): string {
-  const preview = conversationPreview({
+  return conversationPreview({
     storedPreview: thread.record.latestPreview,
-    replay: thread.replay,
     maxLength: width,
-  });
-  if (preview.kind !== "prompt") return preview.text;
-  const label = "Task: ";
-  return `${label}${conversationPreview({
-    prompt: preview.text,
-    maxLength: Math.max(1, width - label.length),
-  }).text}`;
+  }).text;
 }
 
 /**
