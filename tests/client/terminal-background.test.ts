@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isLightBackground, queryTerminalBackground } from "../../src/client/terminal-background.js";
+import { queryTerminalBackground } from "../../src/client/terminal-background.js";
 
 /** A tty double that records the raw-mode trail, writes, and what was handed back. */
 class FakeTty {
@@ -92,14 +92,5 @@ describe("queryTerminalBackground", () => {
     await expect(queryTerminalBackground(input, output)).resolves.toBeUndefined();
     expect(output.writes).toEqual([]);
     expect(input.rawModes).toEqual([]);
-  });
-});
-
-describe("isLightBackground", () => {
-  it("splits near-white from near-black by perceived luma", () => {
-    expect(isLightBackground({ red: 255, green: 255, blue: 255 })).toBe(true);
-    expect(isLightBackground({ red: 250, green: 245, blue: 235 })).toBe(true);
-    expect(isLightBackground({ red: 0, green: 0, blue: 0 })).toBe(false);
-    expect(isLightBackground({ red: 30, green: 30, blue: 46 })).toBe(false);
   });
 });

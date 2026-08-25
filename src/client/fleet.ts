@@ -409,9 +409,9 @@ export interface FleetRenderOptions {
    */
   pullRequests?: ReadonlyMap<string, PullRequestSummary> | undefined;
   /**
-   * The terminal's own background, when it answered the OSC 11 query at startup. It only tunes the
-   * octopus — palette and edge softening — and absent means unknown, which renders exactly as
-   * before anything asked.
+   * The terminal's own background, when it answered the OSC 11 query at startup. The octopus is
+   * one ink on any ground, so this picks nothing: it softens the silhouette's edge and that is
+   * all. Absent means unknown, which costs a slightly harder edge and nothing else.
    */
   background?: TerminalBackground | undefined;
 }
@@ -3939,8 +3939,8 @@ export async function runFleet(
     return;
   }
   // One OSC 11 round trip, before the key decoder owns stdin, asks what the octopus is sitting
-  // on. Silence — an older terminal, a tmux that will not forward — costs the timeout once and
-  // means unknown, which renders exactly as it always has.
+  // on — only to feather its edge against it. Silence — an older terminal, a tmux that will not
+  // forward — costs the timeout once and means unknown, which renders with hard edges.
   const terminalBackground = await queryTerminalBackground(input, output);
   // workerModels feeds only the interactive composer's model picker — the list rendering above
   // never reads it. Probing for it runs the provider listing CLIs (WorkerCapabilityCatalog), which
