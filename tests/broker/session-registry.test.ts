@@ -2177,7 +2177,15 @@ describe("SessionRegistry", () => {
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-resume-native-store-"));
     temporaryDirectories.push(root);
     const codexRoot = join(root, "codex-sessions");
-    const day = join(codexRoot, "2026", "08", "20");
+    // Rollout discovery scans day directories at the session's createdAt ± 1 day, so the fixture
+    // must sit under the current date rather than the date this test was written on.
+    const today = new Date();
+    const day = join(
+      codexRoot,
+      String(today.getUTCFullYear()),
+      String(today.getUTCMonth() + 1).padStart(2, "0"),
+      String(today.getUTCDate()).padStart(2, "0"),
+    );
     await mkdir(day, { recursive: true });
     const rolloutPath = join(day, "rollout.jsonl");
     const store = new ThreadTranscriptStore(root, { codexSessionsDirectory: codexRoot });
