@@ -645,10 +645,10 @@ describe("SessionRegistry", () => {
     ]);
   });
 
-  // A provider with no system-prompt flag submits its instructions as the first message, so that
-  // turn — and any broker call it makes — happens inside `start`. Whatever the caller has to make
-  // durable first gets its chance before the provider is spoken to at all.
-  it("runs the caller's activation before the provider's first turn", async () => {
+  // An adapter that carries the prompt in its launch arguments has the provider taking its first
+  // model turn the moment the process spawns, so whatever the caller has to make durable first
+  // gets its chance before any provider process exists — not merely before initialization.
+  it("runs the caller's activation before the provider process spawns", async () => {
     const order: string[] = [];
     const cursor: ProviderAdapter = {
       id: "cursor",
@@ -665,7 +665,12 @@ describe("SessionRegistry", () => {
         throw new Error("not used");
       },
     };
-    const { registry } = harness({ adapters: { ...adapters, cursor } });
+    const { registry, ptyFactory } = harness({ adapters: { ...adapters, cursor } });
+    const spawn = ptyFactory.getMockImplementation()!;
+    ptyFactory.mockImplementation((spec) => {
+      order.push("spawn");
+      return spawn(spec);
+    });
     const activated: SessionRecord[] = [];
 
     const record = await registry.start(
@@ -677,8 +682,10 @@ describe("SessionRegistry", () => {
       },
     );
 
-    expect(order).toEqual(["activate", "instructions", "prompt"]);
-    expect(activated).toEqual([expect.objectContaining({ id: record.id, pid: record.pid })]);
+    expect(order).toEqual(["activate", "spawn", "instructions", "prompt"]);
+    expect(activated).toEqual([
+      expect.objectContaining({ id: record.id, pid: 0, executionState: "starting" }),
+    ]);
   });
 
   it("leaves no live session behind when activation fails", async () => {
@@ -710,7 +717,8 @@ describe("SessionRegistry", () => {
       message: "binding store unavailable",
     });
     expect(initializeSession).not.toHaveBeenCalled();
-    expect(ptys[0]!.killCount).toBe(1);
+    // Activation precedes the spawn, so a failed activation means no provider process ever ran.
+    expect(ptys).toHaveLength(0);
     expect(registry.list()).toEqual([]);
     expect(events).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "session.created" }),

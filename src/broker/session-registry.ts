@@ -454,6 +454,10 @@ export class SessionRegistry {
           ? undefined
           : preparedInitialPrompt,
       );
+      // A provider whose launch arguments carry the prompt takes its first model turn the moment
+      // it spawns, so whatever the caller must make durable — a worker's budget above all — gets
+      // its chance before any provider process exists, not merely before initialization.
+      await activate?.(this.cloneRecord(provisional));
       sessionRuntime = await this.spawnPreparedLaunch(
         adapter,
         provisional,
@@ -522,9 +526,6 @@ export class SessionRegistry {
         write: (data) => sessionRuntime.write(data),
         wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
       };
-      // Before initialization, because initialization is where a message-instructed provider takes
-      // its first model turn and can immediately call back into the broker.
-      await activate?.(this.cloneRecord(record));
       await adapter.initializeSession?.(record, sessionTerminal);
       if (
         runtime.record.profile !== "scout"
