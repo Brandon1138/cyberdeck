@@ -63,6 +63,12 @@ export const WorkerBudgetMeasurementSchema = z.discriminatedUnion("status", [
     staleAfterMs: z.number().int().positive(),
     /** Provider-process generation that produced a generation-scoped counter, when applicable. */
     generation: z.number().int().positive().optional(),
+    /**
+     * Accumulated consumption at the moment this measurement's generation began. A resumed
+     * provider's counter restarts at zero, so the counter is read on top of this baseline rather
+     * than as one monotonic series across generations.
+     */
+    generationBaseline: z.number().finite().nonnegative().optional(),
   }),
 ]);
 

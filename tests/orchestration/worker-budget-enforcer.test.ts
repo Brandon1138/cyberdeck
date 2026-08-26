@@ -380,4 +380,52 @@ describe("WorkerBudgetEnforcer", () => {
       enforcement: { state: "active" },
     });
   });
+
+  // A resumed provider's token counter restarts at zero. Tokens the earlier generation consumed
+  // must stay counted, or a worker could reset its way under a hard cap it had already spent.
+  it("accumulates token consumption across process generations", async () => {
+    const context = await harness();
+    const enqueueBroker = vi.fn(async (_input: BrokerInstructionInput) => undefined);
+    const subject = enforcer({ ...context, enqueueBroker });
+    await registerBudget(subject, context.registry.worker, declaration("tokens", 1_000));
+
+    context.registry.observation = { generation: 1, canonicalTurns: 0, tokenCount: 700 };
+    await subject.refresh(WORKER_ID);
+    expect(context.coordination.getBudget(WORKER_ID)).toMatchObject({
+      measurement: {
+        status: "known",
+        unit: "tokens",
+        amount: 700,
+        source: "terminal-token-counter",
+        generation: 1,
+        generationBaseline: 0,
+      },
+      enforcement: { state: "active" },
+    });
+
+    // Resume: generation 2's counter starts over, on top of the 700 generation 1 spent.
+    context.registry.observation = { generation: 2, canonicalTurns: 0, tokenCount: 50 };
+    await subject.refresh(WORKER_ID);
+    expect(context.coordination.getBudget(WORKER_ID)).toMatchObject({
+      measurement: { status: "known", amount: 750, generation: 2, generationBaseline: 700 },
+      enforcement: { state: "active" },
+    });
+
+    // The baseline holds within the generation: the counter adds onto 700, it does not restack.
+    context.registry.observation = { generation: 2, canonicalTurns: 0, tokenCount: 150 };
+    await subject.refresh(WORKER_ID);
+    expect(context.coordination.getBudget(WORKER_ID)).toMatchObject({
+      measurement: { status: "known", amount: 850, generation: 2, generationBaseline: 700 },
+      enforcement: { state: "soft-notified" },
+    });
+    expect(enqueueBroker).toHaveBeenCalledTimes(1);
+
+    context.registry.observation = { generation: 2, canonicalTurns: 0, tokenCount: 300 };
+    await subject.refresh(WORKER_ID);
+    expect(context.registry.stop).toHaveBeenCalledWith(WORKER_ID);
+    expect(context.coordination.getBudget(WORKER_ID)).toMatchObject({
+      measurement: { status: "known", amount: 1_000, generation: 2, generationBaseline: 700 },
+      enforcement: { state: "hard-stop-requested" },
+    });
+  });
 });

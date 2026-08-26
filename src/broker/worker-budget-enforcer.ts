@@ -283,30 +283,38 @@ export class WorkerBudgetEnforcer implements WorkerBudgetGate {
       };
     }
     if (unit === "tokens") {
+      // Provider and terminal token counters are scoped to one process generation: a resume
+      // restarts them at zero. The prior generation's accumulated total becomes the new
+      // generation's baseline, so tokens spent before a resume still count against the allowance.
+      const prior = budget.measurement.status === "known" ? budget.measurement : undefined;
+      const priorAmount = prior?.amount ?? 0;
+      const baseline = prior === undefined || prior.generation !== runtime.generation
+        ? priorAmount
+        : prior.generationBaseline ?? 0;
       if (telemetry.totalTokens !== undefined) {
-        const current = budget.measurement.status === "known" ? budget.measurement.amount : 0;
         return {
           status: "known",
           unit,
-          amount: Math.max(current, telemetry.totalTokens),
+          amount: Math.max(priorAmount, baseline + telemetry.totalTokens),
           source: "provider-telemetry",
           quality: "exact",
           observedAt: telemetry.tokenObservedAt ?? observedAt,
           staleAfterMs: this.providerTelemetryStaleAfterMs,
           generation: runtime.generation,
+          generationBaseline: baseline,
         };
       }
       if (runtime.tokenCount !== undefined) {
-        const current = budget.measurement.status === "known" ? budget.measurement.amount : 0;
         return {
           status: "known",
           unit,
-          amount: Math.max(current, runtime.tokenCount),
+          amount: Math.max(priorAmount, baseline + runtime.tokenCount),
           source: "terminal-token-counter",
           quality: "approximate",
           observedAt,
           staleAfterMs,
           generation: runtime.generation,
+          generationBaseline: baseline,
         };
       }
       return undefined;
