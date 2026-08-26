@@ -78,10 +78,6 @@
     },
     {
       "from": "src/broker/session-registry.ts",
-      "to": "src/persistence/scout-report-store.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
       "to": "src/providers/image-input.ts"
     },
     {
