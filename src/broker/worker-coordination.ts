@@ -27,6 +27,25 @@ import {
   type WorkerLifecycle,
 } from "../domain/worker-coordination.js";
 import {
+  WorkerBudgetAllocationSchema,
+  WorkerBudgetAdjustmentDirectionSchema,
+  WorkerBudgetDeclarationSchema,
+  WorkerBudgetMeasurementSchema,
+  WorkerBudgetMutationResultSchema,
+  WorkerBudgetRecordSchema,
+  WorkerProviderRemainingSchema,
+  createWorkerBudgetRecord,
+  workerBudgetEnforcementTransitionAllowed,
+  workerBudgetThresholdEnforcement,
+  type WorkerBudgetAdjustmentDirection,
+  type WorkerBudgetDeclaration,
+  type WorkerBudgetEnforcement,
+  type WorkerBudgetMeasurement,
+  type WorkerBudgetMutationResult,
+  type WorkerBudgetRecord,
+  type WorkerProviderRemaining,
+} from "../domain/worker-budget.js";
+import {
   WorkerHandoffSchema,
   type HandoffManifestEntry,
   type WorkerHandoff,
@@ -51,6 +70,13 @@ export class WorkerCoordinationError extends Error {
       | "CHECKPOINT_IDENTITY_COLLISION"
       | "EVENT_NOT_FOUND"
       | "HANDOFF_NOT_FOUND"
+      | "BUDGET_ALREADY_DECLARED"
+      | "BUDGET_NOT_DECLARED"
+      | "BUDGET_UNSUPPORTED_SUBJECT"
+      | "BUDGET_REVISION_CONFLICT"
+      | "BUDGET_UNIT_MISMATCH"
+      | "BUDGET_ADJUSTMENT_INVALID"
+      | "BUDGET_ENFORCEMENT_INVALID"
       | "INVALID_EVENT",
     message: string,
   ) {
@@ -81,8 +107,40 @@ export interface RegisterSubjectInput {
   lifecycle: WorkerLifecycle;
   resources: OwnershipSubject["resources"];
   controller?: ControllerIdentity;
+  budget?: WorkerBudgetDeclaration;
   reason: string;
 }
+
+interface BudgetMutationInput {
+  mutationId: string;
+  subjectId: string;
+  reason: string;
+}
+
+export interface DeclareBudgetInput extends BudgetMutationInput {
+  declaration: WorkerBudgetDeclaration;
+}
+
+export interface ObserveBudgetInput extends BudgetMutationInput {
+  measurement: WorkerBudgetMeasurement;
+  providerRemaining?: WorkerProviderRemaining;
+}
+
+export interface AdjustBudgetInput extends BudgetMutationInput {
+  expectedRevision: number;
+  direction: WorkerBudgetAdjustmentDirection;
+  amount: number;
+}
+
+export interface AdvanceBudgetEnforcementInput extends BudgetMutationInput {
+  expectedRevision: number;
+  state: "soft-notified" | "hard-stop-requested";
+}
+
+export type WorkerBudgetUpdateListener = (
+  subjectId: string,
+  budget: WorkerBudgetRecord,
+) => void;
 
 interface LeaseMutationInput {
   mutationId: string;
@@ -241,6 +299,7 @@ export class WorkerCoordinationService {
   private readonly liveness = new Map<string, ControllerLiveness>();
   private readonly handoffs = new Map<string, WorkerHandoff>();
   private readonly receipts = new Map<string, MutationReceipt>();
+  private readonly budgetListeners = new Set<WorkerBudgetUpdateListener>();
   private initialized = false;
   private tail = Promise.resolve();
   private nextOrdinal = 1;
@@ -286,6 +345,299 @@ export class WorkerCoordinationService {
     return [...this.subjects.values()];
   }
 
+  getBudget(subjectId: string): WorkerBudgetRecord | undefined {
+    return this.subjects.get(subjectId)?.budget;
+  }
+
+  onBudgetUpdate(listener: WorkerBudgetUpdateListener): () => void {
+    this.budgetListeners.add(listener);
+    return () => this.budgetListeners.delete(listener);
+  }
+
+  async declareBudget(input: DeclareBudgetInput): Promise<WorkerBudgetMutationResult> {
+    return this.exclusive(async () => {
+      this.assertReady();
+      const declaration = WorkerBudgetDeclarationSchema.parse(input.declaration);
+      const requestHash = hashBudgetRequest({
+        subjectId: input.subjectId,
+        declaration,
+        reason: input.reason,
+      });
+      const replay = this.replayBudget(input.mutationId, "budget-declare", requestHash);
+      if (replay !== undefined) return replay;
+      const subject = this.requireBudgetableSubject(input.subjectId);
+      const current = subject.budget;
+      if (
+        current !== undefined
+        && canonicalJson(current.declaration) !== canonicalJson(declaration)
+      ) {
+        throw new WorkerCoordinationError(
+          "BUDGET_ALREADY_DECLARED",
+          `Subject ${input.subjectId} already has a different budget declaration`,
+        );
+      }
+      if (current !== undefined) {
+        const result = this.budgetResult(
+          input.mutationId,
+          "budget-declare",
+          input.subjectId,
+          current,
+          false,
+        );
+        await this.persistBudgetReceipt(result, requestHash, {
+          audits: [this.budgetAudit(
+            input,
+            "budget-declare",
+            subject,
+            "ALREADY_DECLARED",
+          )],
+        });
+        return result;
+      }
+
+      const now = this.now();
+      const budget = createWorkerBudgetRecord(declaration, now);
+      const updated = OwnershipSubjectSchema.parse({
+        ...subject,
+        budget,
+        updatedAt: now,
+      });
+      const result = this.budgetResult(
+        input.mutationId,
+        "budget-declare",
+        input.subjectId,
+        budget,
+        true,
+      );
+      await this.persistBudgetReceipt(result, requestHash, {
+        subjects: [updated],
+        audits: [this.budgetAudit(input, "budget-declare", updated, "DECLARED")],
+      });
+      this.notifyBudgetUpdate(input.subjectId, budget);
+      return result;
+    });
+  }
+
+  async observeBudget(input: ObserveBudgetInput): Promise<WorkerBudgetMutationResult> {
+    return this.exclusive(async () => {
+      this.assertReady();
+      const measurement = WorkerBudgetMeasurementSchema.parse(input.measurement);
+      const providerRemaining = input.providerRemaining === undefined
+        ? undefined
+        : WorkerProviderRemainingSchema.parse(input.providerRemaining);
+      const requestHash = hashBudgetRequest({
+        subjectId: input.subjectId,
+        measurement,
+        providerRemaining: providerRemaining ?? null,
+        reason: input.reason,
+      });
+      const replay = this.replayBudget(input.mutationId, "budget-observe", requestHash);
+      if (replay !== undefined) return replay;
+      const subject = this.requireBudgetableSubject(input.subjectId);
+      const current = this.requireBudget(subject);
+      if (
+        measurement.status === "known"
+        && measurement.unit !== current.declaration.allocation.unit
+      ) {
+        throw new WorkerCoordinationError(
+          "BUDGET_UNIT_MISMATCH",
+          `Budget uses ${current.declaration.allocation.unit}; observation uses ${measurement.unit}`,
+        );
+      }
+
+      const nextMeasurement = monotonicBudgetMeasurement(current.measurement, measurement);
+      const nextProviderRemaining = monotonicProviderRemaining(
+        current.providerRemaining,
+        providerRemaining,
+      );
+      const now = this.now();
+      const thresholdCandidate: WorkerBudgetRecord = {
+        ...current,
+        measurement: nextMeasurement,
+        providerRemaining: nextProviderRemaining,
+      };
+      const nextEnforcement = observedBudgetEnforcement(thresholdCandidate, now);
+      const changed = canonicalJson({
+        measurement: current.measurement,
+        providerRemaining: current.providerRemaining,
+        enforcement: current.enforcement,
+      }) !== canonicalJson({
+        measurement: nextMeasurement,
+        providerRemaining: nextProviderRemaining,
+        enforcement: nextEnforcement,
+      });
+      if (!changed) {
+        const result = this.budgetResult(
+          input.mutationId,
+          "budget-observe",
+          input.subjectId,
+          current,
+          false,
+        );
+        await this.persistBudgetReceipt(result, requestHash, {
+          audits: [this.budgetAudit(input, "budget-observe", subject, "STALE_IGNORED")],
+        });
+        return result;
+      }
+
+      const budget = WorkerBudgetRecordSchema.parse({
+        ...thresholdCandidate,
+        enforcement: nextEnforcement,
+        updatedAt: now,
+      });
+      const updated = OwnershipSubjectSchema.parse({ ...subject, budget, updatedAt: now });
+      const result = this.budgetResult(
+        input.mutationId,
+        "budget-observe",
+        input.subjectId,
+        budget,
+        true,
+      );
+      await this.persistBudgetReceipt(result, requestHash, {
+        subjects: [updated],
+        audits: [this.budgetAudit(input, "budget-observe", updated, "OBSERVED")],
+      });
+      this.notifyBudgetUpdate(input.subjectId, budget);
+      return result;
+    });
+  }
+
+  async adjustBudget(input: AdjustBudgetInput): Promise<WorkerBudgetMutationResult> {
+    return this.exclusive(async () => {
+      this.assertReady();
+      const expectedRevision = z.number().int().positive().parse(input.expectedRevision);
+      const direction = WorkerBudgetAdjustmentDirectionSchema.parse(input.direction);
+      const amount = z.number().finite().positive().parse(input.amount);
+      const requestHash = hashBudgetRequest({
+        subjectId: input.subjectId,
+        expectedRevision,
+        direction,
+        amount,
+        reason: input.reason,
+      });
+      const replay = this.replayBudget(input.mutationId, "budget-adjust", requestHash);
+      if (replay !== undefined) return replay;
+      const subject = this.requireBudgetableSubject(input.subjectId);
+      const current = this.requireBudget(subject);
+      this.assertBudgetRevision(current, expectedRevision);
+      const allocated = current.declaration.allocation;
+      const adjustedAmount = direction === "extend"
+        ? allocated.amount + amount
+        : allocated.amount - amount;
+      const allocation = WorkerBudgetAllocationSchema.safeParse({
+        unit: allocated.unit,
+        amount: adjustedAmount,
+      });
+      if (!allocation.success) {
+        throw new WorkerCoordinationError(
+          "BUDGET_ADJUSTMENT_INVALID",
+          `Cannot ${direction} ${allocated.unit} budget by ${amount}: ${z.prettifyError(allocation.error)}`,
+        );
+      }
+
+      const now = this.now();
+      const candidate: WorkerBudgetRecord = {
+        ...current,
+        declaration: { ...current.declaration, allocation: allocation.data },
+        revision: current.revision + 1,
+        enforcement: { state: "active" },
+        updatedAt: now,
+      };
+      const budget = WorkerBudgetRecordSchema.parse({
+        ...candidate,
+        enforcement: workerBudgetThresholdEnforcement(candidate, now),
+      });
+      const updated = OwnershipSubjectSchema.parse({ ...subject, budget, updatedAt: now });
+      const result = this.budgetResult(
+        input.mutationId,
+        "budget-adjust",
+        input.subjectId,
+        budget,
+        true,
+      );
+      await this.persistBudgetReceipt(result, requestHash, {
+        subjects: [updated],
+        audits: [this.budgetAudit(input, "budget-adjust", updated, direction.toUpperCase())],
+      });
+      this.notifyBudgetUpdate(input.subjectId, budget);
+      return result;
+    });
+  }
+
+  async advanceBudgetEnforcement(
+    input: AdvanceBudgetEnforcementInput,
+  ): Promise<WorkerBudgetMutationResult> {
+    return this.exclusive(async () => {
+      this.assertReady();
+      const expectedRevision = z.number().int().positive().parse(input.expectedRevision);
+      const state = z.enum(["soft-notified", "hard-stop-requested"]).parse(input.state);
+      const requestHash = hashBudgetRequest({
+        subjectId: input.subjectId,
+        expectedRevision,
+        state,
+        reason: input.reason,
+      });
+      const replay = this.replayBudget(input.mutationId, "budget-enforce", requestHash);
+      if (replay !== undefined) return replay;
+      const subject = this.requireBudgetableSubject(input.subjectId);
+      const current = this.requireBudget(subject);
+      this.assertBudgetRevision(current, expectedRevision);
+      if (current.enforcement.state === state) {
+        const result = this.budgetResult(
+          input.mutationId,
+          "budget-enforce",
+          input.subjectId,
+          current,
+          false,
+        );
+        await this.persistBudgetReceipt(result, requestHash, {
+          audits: [this.budgetAudit(input, "budget-enforce", subject, "ALREADY_RECORDED")],
+        });
+        return result;
+      }
+      if (!workerBudgetEnforcementTransitionAllowed(current.enforcement.state, state)) {
+        throw new WorkerCoordinationError(
+          "BUDGET_ENFORCEMENT_INVALID",
+          `Budget enforcement cannot move from ${current.enforcement.state} to ${state}`,
+        );
+      }
+
+      const now = this.now();
+      const enforcement: WorkerBudgetEnforcement = state === "soft-notified"
+        ? {
+            state,
+            revision: current.revision,
+            reachedAt: enforcementReachedAt(current.enforcement),
+            notifiedAt: now,
+          }
+        : {
+            state,
+            revision: current.revision,
+            reachedAt: enforcementReachedAt(current.enforcement),
+            stopRequestedAt: now,
+          };
+      const budget = WorkerBudgetRecordSchema.parse({
+        ...current,
+        enforcement,
+        updatedAt: now,
+      });
+      const updated = OwnershipSubjectSchema.parse({ ...subject, budget, updatedAt: now });
+      const result = this.budgetResult(
+        input.mutationId,
+        "budget-enforce",
+        input.subjectId,
+        budget,
+        true,
+      );
+      await this.persistBudgetReceipt(result, requestHash, {
+        subjects: [updated],
+        audits: [this.budgetAudit(input, "budget-enforce", updated, state.toUpperCase())],
+      });
+      this.notifyBudgetUpdate(input.subjectId, budget);
+      return result;
+    });
+  }
+
   listAudits(subjectId?: string): OwnershipAuditRecord[] {
     return this.audits.filter((entry) => subjectId === undefined || entry.subjectId === subjectId);
   }
@@ -309,20 +661,63 @@ export class WorkerCoordinationService {
   async registerSubject(input: RegisterSubjectInput): Promise<OwnershipMutationResult> {
     return this.exclusive(async () => {
       this.assertReady();
-      const replay = this.replayOwnership(input.mutationId, "register");
-      if (replay !== undefined) return replay;
       const actor = ControllerIdentitySchema.parse(input.actor);
+      const controller = input.controller === undefined
+        ? undefined
+        : ControllerIdentitySchema.parse(input.controller);
+      const subjectKind = input.subjectKind ?? "worker";
+      const declaration = input.budget === undefined
+        ? undefined
+        : WorkerBudgetDeclarationSchema.parse(input.budget);
+      if (declaration !== undefined && subjectKind !== "worker") {
+        throw new WorkerCoordinationError(
+          "BUDGET_UNSUPPORTED_SUBJECT",
+          "Scoped usage budgets can be declared only for worker subjects",
+        );
+      }
+      const requestHash = hashRegisterSubjectInput({
+        ...input,
+        actor,
+        subjectKind,
+        ...(controller === undefined ? {} : { controller }),
+        ...(declaration === undefined ? {} : { budget: declaration }),
+      });
+      const replay = this.replayRegistration(input.mutationId, requestHash);
+      if (replay !== undefined) return replay;
       const existing = this.subjects.get(input.subjectId);
       if (existing !== undefined) {
-        if (JSON.stringify(existing.origin) !== JSON.stringify(input.origin)) {
+        if (canonicalJson(existing.origin) !== canonicalJson(input.origin)) {
           throw new WorkerCoordinationError(
             "IMMUTABLE_ORIGIN_MISMATCH",
             `Subject ${input.subjectId} origin cannot change`,
           );
         }
+        if (declaration !== undefined && existing.subjectKind !== "worker") {
+          throw new WorkerCoordinationError(
+            "BUDGET_UNSUPPORTED_SUBJECT",
+            "Scoped usage budgets can be declared only for worker subjects",
+          );
+        }
+        if (
+          declaration !== undefined
+          && existing.budget !== undefined
+          && canonicalJson(existing.budget.declaration) !== canonicalJson(declaration)
+        ) {
+          throw new WorkerCoordinationError(
+            "BUDGET_ALREADY_DECLARED",
+            `Subject ${input.subjectId} already has a different budget declaration`,
+          );
+        }
+        const now = this.now();
+        const attachedBudget = declaration !== undefined && existing.budget === undefined
+          ? createWorkerBudgetRecord(declaration, now)
+          : undefined;
+        const updated = attachedBudget === undefined
+          ? existing
+          : OwnershipSubjectSchema.parse({ ...existing, budget: attachedBudget, updatedAt: now });
         const result = this.result(input.mutationId, "register", [{
           subjectId: existing.subjectId,
-          code: existing.lease.controller?.controllerId === input.controller?.controllerId
+          code: existing.lease.controller?.controllerId === controller?.controllerId
             ? "ALREADY_CONTROLLED"
             : "NOT_ELIGIBLE",
           leaseVersion: existing.lease.version,
@@ -331,22 +726,38 @@ export class WorkerCoordinationService {
             : {}),
           leaseExpiresAt: existing.lease.expiresAt,
         }]);
-        await this.commitWithReceipt(result, {});
+        await this.persistReceipt(input.mutationId, "register", result, {
+          ...(attachedBudget === undefined ? {} : { subjects: [updated] }),
+          ...(attachedBudget === undefined
+            ? {}
+            : {
+                audits: [this.budgetAudit(
+                  input,
+                  "budget-declare",
+                  updated,
+                  "DECLARED_DURING_REGISTRATION",
+                )],
+              }),
+        }, requestHash);
+        if (attachedBudget !== undefined) {
+          this.notifyBudgetUpdate(input.subjectId, attachedBudget);
+        }
         return result;
       }
 
       const now = this.now();
-      const controller = input.controller === undefined
-        ? undefined
-        : ControllerIdentitySchema.parse(input.controller);
       const token = controller === undefined ? undefined : this.issueToken();
+      const budget = declaration === undefined
+        ? undefined
+        : createWorkerBudgetRecord(declaration, now);
       const subject = OwnershipSubjectSchema.parse({
         schemaVersion: WORKER_COORDINATION_SCHEMA_VERSION,
         subjectId: input.subjectId,
-        subjectKind: input.subjectKind ?? "worker",
+        subjectKind,
         origin: input.origin,
         lifecycle: input.lifecycle,
         resources: input.resources,
+        ...(budget === undefined ? {} : { budget }),
         lease: {
           leaseId: this.id(),
           version: 1,
@@ -381,13 +792,24 @@ export class WorkerCoordinationService {
         outcome.code,
       );
       const result = this.result(input.mutationId, "register", [outcome]);
-      await this.commitWithReceipt(result, {
+      await this.persistReceipt(input.mutationId, "register", result, {
         subjects: [subject],
-        audits: [audit],
+        audits: [
+          audit,
+          ...(budget === undefined
+            ? []
+            : [this.budgetAudit(
+                input,
+                "budget-declare",
+                subject,
+                "DECLARED_DURING_REGISTRATION",
+              )]),
+        ],
         ...(controller === undefined
           ? {}
           : { liveness: [this.connectedObservation(controller, now, "subject registration")] }),
-      });
+      }, requestHash);
+      if (budget !== undefined) this.notifyBudgetUpdate(input.subjectId, budget);
       return result;
     });
   }
@@ -1714,6 +2136,137 @@ export class WorkerCoordinationService {
     };
   }
 
+  private requireBudgetableSubject(subjectId: string): OwnershipSubject {
+    const subject = this.requireSubject(subjectId);
+    if (subject.subjectKind !== "worker") {
+      throw new WorkerCoordinationError(
+        "BUDGET_UNSUPPORTED_SUBJECT",
+        `Subject ${subjectId} is not a worker`,
+      );
+    }
+    return subject;
+  }
+
+  private requireBudget(subject: OwnershipSubject): WorkerBudgetRecord {
+    if (subject.budget === undefined) {
+      throw new WorkerCoordinationError(
+        "BUDGET_NOT_DECLARED",
+        `Subject ${subject.subjectId} has no scoped budget`,
+      );
+    }
+    return subject.budget;
+  }
+
+  private assertBudgetRevision(budget: WorkerBudgetRecord, expectedRevision: number): void {
+    if (budget.revision !== expectedRevision) {
+      throw new WorkerCoordinationError(
+        "BUDGET_REVISION_CONFLICT",
+        `Budget revision ${budget.revision} does not match expected revision ${expectedRevision}`,
+      );
+    }
+  }
+
+  private budgetResult(
+    mutationId: string,
+    operation: WorkerBudgetMutationResult["operation"],
+    subjectId: string,
+    budget: WorkerBudgetRecord,
+    changed: boolean,
+  ): WorkerBudgetMutationResult {
+    return WorkerBudgetMutationResultSchema.parse({
+      mutationId,
+      operation,
+      subjectId,
+      revision: budget.revision,
+      changed,
+      idempotentReplay: false,
+      budget,
+    });
+  }
+
+  private budgetAudit(
+    input: { mutationId: string; reason: string },
+    operation: WorkerBudgetMutationResult["operation"],
+    subject: OwnershipSubject,
+    outcome: string,
+  ): OwnershipAuditRecord {
+    return this.audit(
+      input.mutationId,
+      operation,
+      subject,
+      BROKER_ACTOR,
+      input.reason,
+      subject.lease.controller,
+      subject.lease.controller,
+      subject.lease.state,
+      subject.lease.state,
+      outcome,
+    );
+  }
+
+  private async persistBudgetReceipt(
+    result: WorkerBudgetMutationResult,
+    requestHash: string,
+    transaction: CoordinationTransaction,
+  ): Promise<void> {
+    await this.persistReceipt(
+      result.mutationId,
+      result.operation,
+      result,
+      transaction,
+      requestHash,
+    );
+  }
+
+  private replayBudget(
+    mutationId: string,
+    operation: WorkerBudgetMutationResult["operation"],
+    requestHash: string,
+  ): WorkerBudgetMutationResult | undefined {
+    const receipt = this.receipts.get(mutationId);
+    if (receipt === undefined) return undefined;
+    this.assertReceiptOperation(receipt, operation);
+    if (receipt.requestHash !== requestHash) {
+      throw new WorkerCoordinationError(
+        "MUTATION_ID_COLLISION",
+        `mutation ${mutationId} already used for a different ${operation} request`,
+      );
+    }
+    return {
+      ...WorkerBudgetMutationResultSchema.parse(receipt.result),
+      idempotentReplay: true,
+    };
+  }
+
+  private replayRegistration(
+    mutationId: string,
+    requestHash: string,
+  ): OwnershipMutationResult | undefined {
+    const receipt = this.receipts.get(mutationId);
+    if (receipt === undefined) return undefined;
+    this.assertReceiptOperation(receipt, "register");
+    if (receipt.requestHash !== undefined && receipt.requestHash !== requestHash) {
+      throw new WorkerCoordinationError(
+        "MUTATION_ID_COLLISION",
+        `mutation ${mutationId} already used for a different register request`,
+      );
+    }
+    return {
+      ...OwnershipMutationResultSchema.parse(receipt.result),
+      idempotentReplay: true,
+    };
+  }
+
+  private notifyBudgetUpdate(subjectId: string, budget: WorkerBudgetRecord): void {
+    for (const listener of this.budgetListeners) {
+      try {
+        listener(subjectId, budget);
+      } catch {
+        // Listener failure cannot roll back or misreport an already-fsynced budget mutation.
+      }
+    }
+  }
+
   private audit(
     mutationId: string,
     operation: OwnershipOperation,
@@ -1996,6 +2549,81 @@ export class WorkerCoordinationService {
     this.tail = run.then(() => undefined, () => undefined);
     return run;
   }
+}
+
+function hashRegisterSubjectInput(input: RegisterSubjectInput): string {
+  // Registration historically treats mutationId as its full idempotency key. Bind only newly
+  // introduced budget intent so old retry callers may still reconstruct incidental origin fields.
+  return hashBudgetRequest({
+    subjectId: input.subjectId,
+    budget: input.budget ?? null,
+  });
+}
+
+function hashBudgetRequest(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function monotonicBudgetMeasurement(
+  current: WorkerBudgetMeasurement,
+  observed: WorkerBudgetMeasurement,
+): WorkerBudgetMeasurement {
+  if (observed.status === "unknown") {
+    if (current.status === "known") return current;
+    if (
+      current.observedAt !== undefined
+      && observed.observedAt !== undefined
+      && Date.parse(observed.observedAt) < Date.parse(current.observedAt)
+    ) {
+      return current;
+    }
+    return observed;
+  }
+  if (current.status === "unknown") return observed;
+  if (
+    observed.unit !== current.unit
+    || Date.parse(observed.observedAt) < Date.parse(current.observedAt)
+    || observed.amount < current.amount
+  ) {
+    return current;
+  }
+  return observed;
+}
+
+function monotonicProviderRemaining(
+  current: WorkerProviderRemaining,
+  observed: WorkerProviderRemaining | undefined,
+): WorkerProviderRemaining {
+  if (observed === undefined) return current;
+  if (
+    current.status === "available"
+    && observed.status === "available"
+    && Date.parse(observed.observedAt) < Date.parse(current.observedAt)
+  ) {
+    return current;
+  }
+  return observed;
+}
+
+function observedBudgetEnforcement(
+  budget: WorkerBudgetRecord,
+  reachedAt: string,
+): WorkerBudgetEnforcement {
+  const threshold = workerBudgetThresholdEnforcement(budget, reachedAt);
+  const current = budget.enforcement;
+  if (current.state === "active") return threshold;
+  if (
+    threshold.state === "hard-reached"
+    && (current.state === "soft-pending" || current.state === "soft-notified")
+  ) {
+    return threshold;
+  }
+  return current;
+}
+
+function enforcementReachedAt(enforcement: WorkerBudgetEnforcement): string {
+  if ("reachedAt" in enforcement) return enforcement.reachedAt;
+  throw new Error(`Budget enforcement state ${enforcement.state} has no threshold timestamp`);
 }
 
 function hashToken(token: string): string {

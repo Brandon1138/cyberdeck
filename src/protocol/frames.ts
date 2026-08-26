@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { BrokerEventSchema } from "../domain/events.js";
+import { LocalWorkerTelemetrySnapshotSchema } from "../domain/local-worker-control.js";
 
 export const RequestFrameSchema = z.object({
   type: z.literal("request"),
@@ -79,6 +80,12 @@ export const EventFrameSchema = z.object({
   event: BrokerEventSchema,
 });
 
+/** Full versioned snapshot for subscribed local worker-telemetry clients. */
+export const LocalWorkerTelemetryFrameSchema = z.object({
+  type: z.literal("local-worker-telemetry"),
+  snapshot: LocalWorkerTelemetrySnapshotSchema,
+});
+
 export const ProtocolErrorFrameSchema = z.object({
   type: z.literal("protocol-error"),
   code: z.string().min(1),
@@ -91,6 +98,7 @@ export const ServerFrameSchema = z.union([
   SessionEndedFrameSchema,
   SessionFailedFrameSchema,
   EventFrameSchema,
+  LocalWorkerTelemetryFrameSchema,
   ProtocolErrorFrameSchema,
 ]);
 
@@ -102,6 +110,7 @@ export type ResponseFrame = z.infer<typeof ResponseFrameSchema>;
 export type OutputFrame = z.infer<typeof OutputFrameSchema>;
 export type SessionEndedFrame = z.infer<typeof SessionEndedFrameSchema>;
 export type SessionFailedFrame = z.infer<typeof SessionFailedFrameSchema>;
+export type LocalWorkerTelemetryFrame = z.infer<typeof LocalWorkerTelemetryFrameSchema>;
 export type ProtocolErrorFrame = z.infer<typeof ProtocolErrorFrameSchema>;
 export type ServerFrame = z.infer<typeof ServerFrameSchema>;
 export type WireFrame = z.infer<typeof WireFrameSchema>;

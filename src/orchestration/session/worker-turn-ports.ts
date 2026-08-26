@@ -131,7 +131,7 @@ export interface RenderedWorkerInstruction {
 export interface SubmitWorkerInstruction {
   message: string;
   encoded: Buffer | (() => Buffer);
-  source: "orchestrator" | "worker";
+  source: "orchestrator" | "worker" | "broker";
   metadata?: Record<string, unknown>;
   instructionId?: string;
 }

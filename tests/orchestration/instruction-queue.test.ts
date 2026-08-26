@@ -89,4 +89,88 @@ describe("InstructionQueue", () => {
     await expect(queue.enqueue({ actorSessionId: ACTOR, targetSessionId: TARGET, message: "Again", messageId }))
       .resolves.toBe(existing);
   });
+
+  it("delivers broker-owned policy instructions through the same durable queue", async () => {
+    const records = new Map<string, InstructionRecord>();
+    const sessions = {
+      get: vi.fn(() => ({ id: TARGET, cwd: "/repo" } as SessionRecord)),
+      onControllerReleased: vi.fn(() => () => undefined),
+      onDeliveryBoundary: vi.fn(() => () => undefined),
+      onInstructionState: vi.fn(() => () => undefined),
+      submitInstruction: vi.fn(async () => ({
+        state: "rendered" as const,
+        expectedTurn: 1,
+        at: new Date().toISOString(),
+      })),
+    } satisfies SessionInstructionPort;
+    const queue = new InstructionQueue(
+      sessions,
+      { findBySessionId: vi.fn(async () => undefined) } satisfies OrchestratorBindingReader,
+      {
+        put: vi.fn(async (record: InstructionRecord) => { records.set(record.id, record); }),
+        list: vi.fn(async (target?: string) => [...records.values()].filter(
+          (record) => target === undefined || record.targetSessionId === target,
+        )),
+      } satisfies InstructionRepository,
+    );
+    const messageId = crypto.randomUUID();
+
+    const first = await queue.enqueueBroker({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      message: "Wrap up and summarize before budget exhaustion.",
+      messageId,
+    });
+    const replay = await queue.enqueueBroker({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      message: "Wrap up and summarize before budget exhaustion.",
+      messageId,
+    });
+
+    expect(first).toMatchObject({ status: "rendered", brokerOwned: true });
+    expect(replay.id).toBe(first.id);
+    expect(sessions.submitInstruction).toHaveBeenCalledOnce();
+    expect(sessions.submitInstruction).toHaveBeenCalledWith(
+      TARGET,
+      "Wrap up and summarize before budget exhaustion.",
+      "broker",
+      expect.objectContaining({ brokerOwned: true }),
+      first.id,
+    );
+  });
+
+  it("persists instructions as undelivered after broker hard-budget refusal", async () => {
+    const records = new Map<string, InstructionRecord>();
+    const sessions = {
+      get: vi.fn(() => ({ id: TARGET, cwd: "/repo" } as SessionRecord)),
+      onControllerReleased: vi.fn(() => () => undefined),
+      onDeliveryBoundary: vi.fn(() => () => undefined),
+      onInstructionState: vi.fn(() => () => undefined),
+      submitInstruction: vi.fn(async () => {
+        throw Object.assign(new Error("hard budget reached"), {
+          code: "WORKER_BUDGET_EXHAUSTED",
+        });
+      }),
+    } satisfies SessionInstructionPort;
+    const queue = new InstructionQueue(
+      sessions,
+      { findBySessionId: vi.fn(async () => binding) } satisfies OrchestratorBindingReader,
+      {
+        put: vi.fn(async (record: InstructionRecord) => { records.set(record.id, record); }),
+        list: vi.fn(async (target?: string) => [...records.values()].filter(
+          (record) => target === undefined || record.targetSessionId === target,
+        )),
+      } satisfies InstructionRepository,
+    );
+
+    await expect(queue.enqueue({
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      message: "Continue work",
+    })).resolves.toMatchObject({
+      status: "undelivered",
+      holdReason: "worker-budget-exhausted",
+    });
+  });
 });

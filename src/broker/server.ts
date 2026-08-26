@@ -15,6 +15,14 @@ import { StartSessionRequestSchema } from "../domain/session.js";
 import { ScoutEgressRequestSchema } from "../domain/worker-profile.js";
 import { DelegationIntentSchema } from "../domain/delegation.js";
 import {
+  LOCAL_WORKER_CONTROL_SCHEMA_VERSION,
+  LocalWorkerSnapshotRequestSchema,
+  LocalWorkerSubscribeRequestSchema,
+  LocalWorkerUnsubscribeRequestSchema,
+  LocalWorkerUnsubscribeResultSchema,
+  type LocalWorkerTelemetrySnapshot,
+} from "../domain/local-worker-control.js";
+import {
   FleetFolderDispositionSchema,
   FleetLaunchProfileSchema,
   type FleetPreferenceStore,
@@ -56,6 +64,7 @@ import {
   type AgentControlService,
 } from "../orchestration/agent-control-service.js";
 import { EnqueueInstructionParamsSchema, type InstructionQueue } from "../orchestration/instruction-queue.js";
+import type { LocalWorkerControlService } from "../orchestration/local-worker-control-service.js";
 import {
   CreateWorkflowParamsSchema,
   SendWorkflowMessageParamsSchema,
@@ -118,6 +127,12 @@ interface ConnectionContext {
     mode: AttachmentMode;
     detachIdentity?: string | undefined;
   }>;
+  localWorkerTelemetry?: {
+    unsubscribe: () => void;
+    lastSentAt: number;
+    pending?: LocalWorkerTelemetrySnapshot;
+    timer?: ReturnType<typeof setTimeout>;
+  };
 }
 
 export interface BrokerServerOptions {
@@ -152,6 +167,8 @@ export interface BrokerServerOptions {
   workerEvents?: WorkerEventChannel;
   /** Which nvim is showing which worker's worktree. In memory only, by design. */
   nvimBindings?: NvimBindingService;
+  /** Versioned same-user read/control boundary for native local clients. */
+  localWorkerControl?: LocalWorkerControlService;
   onShutdown?: () => void;
 }
 
@@ -230,6 +247,7 @@ export class BrokerServer {
     });
     socket.on("close", () => {
       this.sockets.delete(socket);
+      this.unsubscribeLocalWorkerTelemetry(context);
       void this.options.registry.releaseClient(context.id);
     });
     socket.on("error", () => {
@@ -287,6 +305,22 @@ export class BrokerServer {
 
   private async routeRequest(context: ConnectionContext, frame: RequestFrame): Promise<unknown> {
     switch (frame.method) {
+      case "local.worker.v1.snapshot":
+        LocalWorkerSnapshotRequestSchema.parse(frame.params);
+        return this.requireLocalWorkerControl().snapshot();
+      case "local.worker.v1.subscribe":
+        LocalWorkerSubscribeRequestSchema.parse(frame.params);
+        this.subscribeLocalWorkerTelemetry(context);
+        return this.requireLocalWorkerControl().snapshot();
+      case "local.worker.v1.unsubscribe":
+        LocalWorkerUnsubscribeRequestSchema.parse(frame.params);
+        this.unsubscribeLocalWorkerTelemetry(context);
+        return LocalWorkerUnsubscribeResultSchema.parse({
+          schemaVersion: LOCAL_WORKER_CONTROL_SCHEMA_VERSION,
+          subscribed: false,
+        });
+      case "local.worker.v1.command":
+        return this.requireLocalWorkerControl().command(frame.params);
       case "session.start": {
         const request = await this.withSessionWorkerMode(StartSessionRequestSchema.parse(frame.params));
         return this.options.registry.start(request);
@@ -689,6 +723,51 @@ export class BrokerServer {
       });
     }
     return this.options.nvimBindings;
+  }
+
+  private requireLocalWorkerControl(): LocalWorkerControlService {
+    if (this.options.localWorkerControl === undefined) {
+      throw Object.assign(new Error("Local worker control is not available"), {
+        code: "METHOD_NOT_FOUND",
+      });
+    }
+    return this.options.localWorkerControl;
+  }
+
+  private subscribeLocalWorkerTelemetry(context: ConnectionContext): void {
+    if (context.localWorkerTelemetry !== undefined) return;
+    const subscription: NonNullable<ConnectionContext["localWorkerTelemetry"]> = {
+      unsubscribe: () => undefined,
+      lastSentAt: 0,
+    };
+    subscription.unsubscribe = this.requireLocalWorkerControl().onUpdate((snapshot) => {
+      const elapsed = Date.now() - subscription.lastSentAt;
+      if (elapsed >= 100 && subscription.timer === undefined) {
+        subscription.lastSentAt = Date.now();
+        this.send(context.socket, { type: "local-worker-telemetry", snapshot });
+        return;
+      }
+      subscription.pending = snapshot;
+      if (subscription.timer !== undefined) return;
+      subscription.timer = setTimeout(() => {
+        delete subscription.timer;
+        const pending = subscription.pending;
+        delete subscription.pending;
+        if (pending === undefined || context.localWorkerTelemetry !== subscription) return;
+        subscription.lastSentAt = Date.now();
+        this.send(context.socket, { type: "local-worker-telemetry", snapshot: pending });
+      }, Math.max(0, 100 - elapsed));
+      subscription.timer.unref();
+    });
+    context.localWorkerTelemetry = subscription;
+  }
+
+  private unsubscribeLocalWorkerTelemetry(context: ConnectionContext): void {
+    const subscription = context.localWorkerTelemetry;
+    if (subscription === undefined) return;
+    delete context.localWorkerTelemetry;
+    subscription.unsubscribe();
+    if (subscription.timer !== undefined) clearTimeout(subscription.timer);
   }
 
   private requireScoutEgress(): Pick<ScoutEgressGrantStore, "set" | "status"> {

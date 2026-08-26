@@ -155,7 +155,7 @@ export interface SessionInstructionPort extends SessionLookupPort {
   submitInstruction(
     sessionId: string,
     message: string,
-    source: "orchestrator" | "worker",
+    source: "orchestrator" | "worker" | "broker",
     metadata?: Record<string, unknown>,
     instructionId?: string,
   ): Promise<InstructionDelivery>;

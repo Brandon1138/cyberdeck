@@ -24,6 +24,11 @@ import type {
 } from "../orchestration/session/worker-turn-ports.js";
 import { ClaudeConversationBindingStore } from "./claude-conversation-bindings.js";
 import { observedModelParser, type ObservedModel } from "../runtime/observed-model.js";
+import {
+  parseCodexBudgetTelemetryLine,
+  type ParsedProviderBudgetTelemetry,
+  type ProviderBudgetWindow,
+} from "../runtime/provider-budget-telemetry.js";
 import { openPrivateAppendFile } from "./private-files.js";
 
 const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
@@ -83,6 +88,12 @@ interface ObservedModelCursor {
   observation: ObservedModel | undefined;
 }
 
+interface ProviderBudgetTelemetryCursor {
+  path: string;
+  offset: number;
+  telemetry: ParsedProviderBudgetTelemetry;
+}
+
 /**
  * Bounded semantic transcript.
  *
@@ -100,6 +111,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   private readonly semanticTurnIds = new Set<string>();
   private readonly nativePaths = new Map<string, string>();
   private readonly observedModelCursors = new Map<string, ObservedModelCursor>();
+  private readonly providerBudgetTelemetryCursors = new Map<string, ProviderBudgetTelemetryCursor>();
   private readonly claimedCodexPaths = new Map<string, string>();
   private readonly claimedClaudePaths = new Map<string, string>();
   private readonly claudeStatuses = new Map<string, ClaudeTranscriptStatus>();
@@ -317,6 +329,64 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     this.observedModelCursors.set(input.sessionId, cursor);
     if (observation !== undefined) this.nativePaths.set(input.sessionId, path);
     return observation;
+  }
+
+  /**
+   * Read provider-authored usage without promoting absence to zero.
+   *
+   * Codex currently supplies cumulative tokens and, in supported CLI frames, primary/secondary
+   * allowance windows. Other interactive adapters expose no provider-wide usage contract yet and
+   * therefore return an empty observation. Byte cursors keep repeated budget checks linear in new
+   * transcript data rather than file size.
+   */
+  async readProviderBudgetTelemetry(
+    input: CaptureProviderTurns,
+    window: ProviderBudgetWindow,
+  ): Promise<ParsedProviderBudgetTelemetry> {
+    await this.init();
+    if (input.provider !== "codex") return {};
+    const path = this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
+    if (path === undefined) return {};
+    this.nativePaths.set(input.sessionId, path);
+    this.claimedCodexPaths.set(path, input.sessionId);
+    const key = `${input.sessionId}\0${window}`;
+    const cached = this.providerBudgetTelemetryCursors.get(key);
+    let cursor: ProviderBudgetTelemetryCursor = cached !== undefined && cached.path === path
+      ? cached
+      : { path, offset: 0, telemetry: {} };
+    const size = await stat(path).then(
+      (info) => info.size,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      },
+    );
+    if (size === undefined) return cursor.telemetry;
+    if (size < cursor.offset) cursor = { path, offset: 0, telemetry: {} };
+    const { lines, nextOffset } = await readCompleteLinesFromOffset(path, cursor.offset);
+    let telemetry = cursor.telemetry;
+    for (const line of lines) {
+      const parsed = parseCodexBudgetTelemetryLine(line, window);
+      if (parsed === undefined) continue;
+      telemetry = {
+        ...(parsed.totalTokens === undefined
+          ? telemetry.totalTokens === undefined
+            ? {}
+            : { totalTokens: telemetry.totalTokens, tokenObservedAt: telemetry.tokenObservedAt }
+          : { totalTokens: parsed.totalTokens, tokenObservedAt: parsed.tokenObservedAt }),
+        ...(parsed.providerUsage === undefined
+          ? telemetry.providerUsage === undefined ? {} : { providerUsage: telemetry.providerUsage }
+          : { providerUsage: parsed.providerUsage }),
+      };
+    }
+    cursor = { path, offset: nextOffset, telemetry };
+    this.providerBudgetTelemetryCursors.set(key, cursor);
+    return {
+      ...(telemetry.totalTokens === undefined
+        ? {}
+        : { totalTokens: telemetry.totalTokens, tokenObservedAt: telemetry.tokenObservedAt }),
+      ...(telemetry.providerUsage === undefined ? {} : { providerUsage: { ...telemetry.providerUsage } }),
+    };
   }
 
   async read(sessionId: string, afterCursor = 0, limit = 200): Promise<ThreadReadResult> {

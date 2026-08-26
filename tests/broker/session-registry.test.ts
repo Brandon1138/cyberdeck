@@ -645,10 +645,10 @@ describe("SessionRegistry", () => {
     ]);
   });
 
-  // A provider with no system-prompt flag submits its instructions as the first message, so that
-  // turn — and any broker call it makes — happens inside `start`. Whatever the caller has to make
-  // durable first gets its chance before the provider is spoken to at all.
-  it("runs the caller's activation before the provider's first turn", async () => {
+  // An adapter that carries the prompt in its launch arguments has the provider taking its first
+  // model turn the moment the process spawns, so whatever the caller has to make durable first
+  // gets its chance before any provider process exists — not merely before initialization.
+  it("runs the caller's activation before the provider process spawns", async () => {
     const order: string[] = [];
     const cursor: ProviderAdapter = {
       id: "cursor",
@@ -665,7 +665,12 @@ describe("SessionRegistry", () => {
         throw new Error("not used");
       },
     };
-    const { registry } = harness({ adapters: { ...adapters, cursor } });
+    const { registry, ptyFactory } = harness({ adapters: { ...adapters, cursor } });
+    const spawn = ptyFactory.getMockImplementation()!;
+    ptyFactory.mockImplementation((spec) => {
+      order.push("spawn");
+      return spawn(spec);
+    });
     const activated: SessionRecord[] = [];
 
     const record = await registry.start(
@@ -677,8 +682,10 @@ describe("SessionRegistry", () => {
       },
     );
 
-    expect(order).toEqual(["activate", "instructions", "prompt"]);
-    expect(activated).toEqual([expect.objectContaining({ id: record.id, pid: record.pid })]);
+    expect(order).toEqual(["activate", "spawn", "instructions", "prompt"]);
+    expect(activated).toEqual([
+      expect.objectContaining({ id: record.id, pid: 0, executionState: "starting" }),
+    ]);
   });
 
   it("leaves no live session behind when activation fails", async () => {
@@ -710,7 +717,8 @@ describe("SessionRegistry", () => {
       message: "binding store unavailable",
     });
     expect(initializeSession).not.toHaveBeenCalled();
-    expect(ptys[0]!.killCount).toBe(1);
+    // Activation precedes the spawn, so a failed activation means no provider process ever ran.
+    expect(ptys).toHaveLength(0);
     expect(registry.list()).toEqual([]);
     expect(events).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "session.created" }),
@@ -2177,20 +2185,18 @@ describe("SessionRegistry", () => {
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-resume-native-store-"));
     temporaryDirectories.push(root);
     const codexRoot = join(root, "codex-sessions");
-    // Rollout discovery scans day directories at the session's createdAt ± 1 day, so the fixture
-    // must sit under the current date rather than the date this test was written on.
-    const today = new Date();
-    const day = join(
-      codexRoot,
-      String(today.getUTCFullYear()),
-      String(today.getUTCMonth() + 1).padStart(2, "0"),
-      String(today.getUTCDate()).padStart(2, "0"),
-    );
-    await mkdir(day, { recursive: true });
-    const rolloutPath = join(day, "rollout.jsonl");
     const store = new ThreadTranscriptStore(root, { codexSessionsDirectory: codexRoot });
     const { registry, ptys } = harness({ transcriptStore: store });
     const record = await registry.start(request({ name: "real-store-resume" }));
+    const created = new Date(record.createdAt);
+    const day = join(
+      codexRoot,
+      String(created.getUTCFullYear()),
+      String(created.getUTCMonth() + 1).padStart(2, "0"),
+      String(created.getUTCDate()).padStart(2, "0"),
+    );
+    await mkdir(day, { recursive: true });
+    const rolloutPath = join(day, "rollout.jsonl");
     const sessionMeta = JSON.stringify({
       type: "session_meta",
       timestamp: record.createdAt,
@@ -3521,5 +3527,32 @@ describe("SessionRegistry ingest cost", () => {
     quiet.forEach((pty, index) => {
       expect(pty.snapshotCount - counts[index]!).toBeLessThanOrEqual(1);
     });
+  });
+});
+
+describe("SessionRegistry worker-budget gate", () => {
+  it("blocks every consumption path after hard exhaustion while leaving stop available", async () => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request(), "Initial task");
+    const exhausted = Object.assign(new Error("Worker budget hard limit reached"), {
+      code: "WORKER_BUDGET_EXHAUSTED",
+    });
+    registry.setWorkerBudgetGate({
+      assertMayConsume: (sessionId) => {
+        if (sessionId === record.id) throw exhausted;
+      },
+    });
+
+    await expect(registry.write(record.id, undefined, Buffer.from("continue\n")))
+      .rejects.toMatchObject({ code: "WORKER_BUDGET_EXHAUSTED" });
+    await expect(registry.submit(record.id, undefined, "continue"))
+      .rejects.toMatchObject({ code: "WORKER_BUDGET_EXHAUSTED" });
+    await expect(registry.submitInstruction(record.id, "continue"))
+      .rejects.toMatchObject({ code: "WORKER_BUDGET_EXHAUSTED" });
+
+    await expect(registry.stop(record.id)).resolves.toBeUndefined();
+    expect(ptys[0]?.killSignals).toContain("SIGTERM");
+    await expect(registry.resume(record.id))
+      .rejects.toMatchObject({ code: "WORKER_BUDGET_EXHAUSTED" });
   });
 });
