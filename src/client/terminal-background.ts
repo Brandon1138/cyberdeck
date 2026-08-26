@@ -12,20 +12,16 @@
  * query runs once at startup before the key decoder owns the stream: raw mode on, read until the
  * reply or a deadline, then put back every byte that was not the reply. Silence is a real answer —
  * an older terminal, a tmux that will not forward — and it means *unknown*, never a guess.
+ *
+ * What the answer is *for* narrowed with MIK-160: the art is one ink on any ground now, so nothing
+ * here decides light versus dark. The colour is used as a colour — the shade the silhouette's edge
+ * leans toward — which is why this module reports the background and no longer judges it.
  */
 
 export interface TerminalBackground {
   red: number;
   green: number;
   blue: number;
-}
-
-/**
- * Light versus dark, by perceived luma. The threshold splits near-white operator themes from
- * near-black ones; genuinely mid-grey backgrounds land on whichever side they read closer to.
- */
-export function isLightBackground({ red, green, blue }: TerminalBackground): boolean {
-  return (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255 > 0.5;
 }
 
 interface BackgroundQueryInput {
