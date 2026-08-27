@@ -118,9 +118,11 @@ export async function liveSessionCwds(): Promise<Map<string, string>> {
 }
 
 export function projectRoot(): string {
+  // This module compiles to <root>/dist/src/cli/runtime.js and runs from <root>/src/cli/runtime.ts
+  // under tsx — one directory deeper than the src/cli.ts entry this logic originally lived in.
   const sourceDirectory = dirname(fileURLToPath(import.meta.url));
-  const parent = dirname(sourceDirectory);
-  return basename(parent) === "dist" ? dirname(parent) : parent;
+  const grandparent = dirname(dirname(sourceDirectory));
+  return basename(grandparent) === "dist" ? dirname(grandparent) : grandparent;
 }
 
 export async function waitForBroker(timeoutMs = 5_000): Promise<void> {
