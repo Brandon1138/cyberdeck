@@ -29,7 +29,10 @@ import { NvimBindingService } from "./nvim-binding-service.js";
 import { BrokerServer } from "./server.js";
 import { FleetProjectService } from "./fleet-project-service.js";
 import { SessionRegistry } from "./session-registry.js";
-import { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
+import {
+  ThreadTranscriptStore,
+  pruneLegacyTranscript,
+} from "../persistence/thread-transcript-store.js";
 import { ClaudeConversationBindingStore } from "../persistence/claude-conversation-bindings.js";
 import { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import { SessionStore } from "../persistence/session-store.js";
@@ -59,6 +62,26 @@ import { WorkerCoordinationRuntime } from "../persistence/worker-coordination-ru
 import { WorkerEventChannel } from "./worker-event-channel.js";
 import { BrokerWorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
 import { WorkerCoordinationService } from "./worker-coordination.js";
+import {
+  detachCockpit,
+  launchCockpit,
+  preflightCockpit,
+} from "../tmux/cockpit.js";
+import {
+  openCheckoutInNvim,
+  openWorktreeInNvim,
+  selectSession,
+  worktreeSubject,
+} from "../nvim/open-worktree.js";
+import {
+  createFleetNvimLayoutHooks,
+  rebalanceNvimLayoutFromHook,
+} from "../nvim/layout-hook.js";
+import { openInteractiveShell } from "../tmux/interactive-shell.js";
+import { runShellCommand } from "../runtime/shell-command.js";
+import { runClaudeTranscriptRebind } from "../providers/claude/transcript-hook.js";
+import type { CliToolkit } from "../cli/toolkit.js";
+import type { FleetRuntimeDeps } from "../client/fleet/deps.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -66,6 +89,38 @@ function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<st
     type,
     occurredAt: new Date().toISOString(),
     data,
+  };
+}
+
+export function createFleetRuntimeDeps(
+  stateDirectory = appStateDirectory,
+): FleetRuntimeDeps {
+  return {
+    permissionPreferences: new ProviderPermissionPreferenceStore(stateDirectory),
+    runShellCommand,
+  };
+}
+
+export function createCliToolkit(): CliToolkit {
+  return {
+    runBroker,
+    preflightCockpit,
+    launchCockpit,
+    detachCockpit,
+    selectSession,
+    worktreeSubject,
+    openWorktreeInNvim,
+    openCheckoutInNvim,
+    createFleetNvimLayoutHooks,
+    rebalanceNvimLayoutFromHook,
+    openInteractiveShell,
+    pruneLegacyTranscript,
+    rebindClaudeTranscript: ({ sessionId, stateDirectory, payload }) =>
+      runClaudeTranscriptRebind({
+        sessionId,
+        payload,
+        store: new ClaudeConversationBindingStore(stateDirectory),
+      }),
   };
 }
 
