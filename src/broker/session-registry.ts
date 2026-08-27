@@ -18,15 +18,15 @@ import type {
   ProvisionedWorktree,
   WorktreeProvisioner,
 } from "../domain/worker-workspace.js";
-import { imageInputRefusal, providerAttachesImagesAtLaunch } from "../providers/image-input.js";
-import { resolvedLaunchRecord } from "../providers/launch-record.js";
+import { imageInputRefusal, providerAttachesImagesAtLaunch } from "../domain/image-input.js";
+import { resolvedLaunchRecord } from "../orchestration/session/launch-record.js";
 import type {
   ProviderAdapter,
   ProviderLaunchSpec,
   ProviderSessionTerminal,
-} from "../providers/provider.js";
-import { applyWorkerMode } from "../providers/worker-mode.js";
-import { addWorkerReportingGuidance } from "../providers/worker-reporting.js";
+} from "../orchestration/session/provider-ports.js";
+import { applyWorkerMode } from "../orchestration/session/worker-mode.js";
+import { addWorkerReportingGuidance } from "../orchestration/session/worker-reporting.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
 import { selectExpiredThreads } from "../domain/thread-retention.js";
 import {

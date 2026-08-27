@@ -17,26 +17,6 @@
       "to": "src/version.ts"
     },
     {
-      "from": "src/broker/session-registry.ts",
-      "to": "src/providers/image-input.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
-      "to": "src/providers/launch-record.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
-      "to": "src/providers/provider.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
-      "to": "src/providers/worker-mode.ts"
-    },
-    {
-      "from": "src/broker/session-registry.ts",
-      "to": "src/providers/worker-reporting.ts"
-    },
-    {
       "from": "src/cli.ts",
       "to": "src/nvim/layout-hook.ts"
     },
