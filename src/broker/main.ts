@@ -3,7 +3,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ControlPlaneRuntime } from "../control-plane/runtime.js";
 import type { WorktreeLeaseManager } from "../control-plane/worktree-lease-manager.js";
-import type { ArtifactStore } from "../persistence/artifact-store.js";
+import { ArtifactStore } from "../persistence/artifact-store.js";
+import { JobStore } from "../persistence/job-store.js";
+import { LeaseStore } from "../persistence/lease-store.js";
 import { AppServerJobDispatchAdapter } from "../app-server/dispatch-adapter.js";
 import type { JobDispatchAdapter } from "../domain/dispatch.js";
 import type { BrokerEvent } from "../domain/events.js";
@@ -16,6 +18,8 @@ import { CodexProviderAdapter } from "../providers/codex.js";
 import { CursorJobDispatchAdapter } from "../providers/cursor/dispatch-adapter.js";
 import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
 import { captureScoutWorkspaceStateHash } from "../providers/cursor/workspace-state.js";
+import { jobLaunchEnvironment } from "../providers/launch-environment.js";
+import { applyWorkerMode } from "../providers/worker-mode.js";
 import { createSessionRuntime } from "../runtime/session-runtime-adapter.js";
 import { WorkerTurnObservationAdapter } from "../runtime/worker-turn-observation-adapter.js";
 import { Journal } from "../persistence/journal.js";
@@ -79,6 +83,8 @@ export function composeJobDispatchAdapters(context: {
     new AppServerJobDispatchAdapter({
       leaseManager: context.leases,
       artifactStore: context.artifacts,
+      launchEnvironment: jobLaunchEnvironment,
+      workerMode: applyWorkerMode,
     }),
     new ClaudeJobDispatchAdapter(),
     new CursorJobDispatchAdapter(),
@@ -234,11 +240,16 @@ export async function runBroker(
   // The control plane owns durable job state, admission, budgets, leases, and reconciliation. Its
   // runtime enforces the ordering: persistence, then recovery, then reconciliation, and only then is
   // admission opened. The B-owned dispatch adapters are composed in without being modified.
+  const artifactStore = new ArtifactStore(stateDirectory);
   const runtime = new ControlPlaneRuntime({
     stateDirectory,
     config,
     journal,
-    adapters: composeJobDispatchAdapters,
+    jobStore: new JobStore(stateDirectory),
+    artifacts: artifactStore,
+    leaseStore: new LeaseStore(stateDirectory),
+    adapters: (context) =>
+      composeJobDispatchAdapters({ leases: context.leases, artifacts: artifactStore }),
   });
   await runtime.start();
 

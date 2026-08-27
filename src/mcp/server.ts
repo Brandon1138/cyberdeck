@@ -11,7 +11,7 @@ import type { Readable, Writable } from "node:stream";
 import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
 import { diagnoseAgent } from "../orchestration/agent-diagnostics.js";
 import { readWorkerCapabilities } from "../orchestration/worker-capabilities.js";
-import { CYBERDECK_VERSION } from "../version.js";
+import { CYBERDECK_VERSION } from "../broker/version.js";
 
 export interface McpBrokerTransport {
   request<T = unknown>(method: string, params: unknown): Promise<T>;

@@ -1,0 +1,60 @@
+{
+  "files": [
+    {
+      "path": "src/app-server/dispatch-adapter.ts",
+      "maxLines": 639
+    },
+    {
+      "path": "src/broker/server.ts",
+      "maxLines": 955
+    },
+    {
+      "path": "src/broker/session-registry.ts",
+      "maxLines": 2005
+    },
+    {
+      "path": "src/broker/worker-coordination.ts",
+      "maxLines": 2772
+    },
+    {
+      "path": "src/cli.ts",
+      "maxLines": 1057
+    },
+    {
+      "path": "src/client/fleet.ts",
+      "maxLines": 6331
+    },
+    {
+      "path": "src/control-plane/job-control-plane.ts",
+      "maxLines": 826
+    },
+    {
+      "path": "src/mcp/server.ts",
+      "maxLines": 1031
+    },
+    {
+      "path": "src/orchestration/agent-control-service.ts",
+      "maxLines": 1391
+    },
+    {
+      "path": "src/orchestration/session/scout-session-supervisor.ts",
+      "maxLines": 607
+    },
+    {
+      "path": "src/orchestration/session/worker-turn-engine.ts",
+      "maxLines": 1587
+    },
+    {
+      "path": "src/orchestration/worker-control-service.ts",
+      "maxLines": 1360
+    },
+    {
+      "path": "src/persistence/thread-transcript-store.ts",
+      "maxLines": 976
+    },
+    {
+      "path": "src/runtime/conversation-preview.ts",
+      "maxLines": 516
+    }
+  ]
+}

@@ -2,10 +2,35 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { CONTROL_PLANE_SCHEMA_VERSION, JobIdSchema, LeaseIdSchema } from "../domain/control-plane.js";
+import type { WorktreeLease } from "../domain/lease.js";
 import { WorktreeLeaseSchema } from "../domain/lease.js";
-import type { DurableLeaseRecord, LeaseStore } from "../persistence/lease-store.js";
 
 export type LeaseAccess = "read-only" | "workspace-write";
+
+/**
+ * The durable, on-disk shape of one lease snapshot. Mirrors `DurableLeaseRecordSchema` in
+ * `persistence/lease-store.ts` field-for-field; declared locally so this application module never
+ * imports the persistence infrastructure that writes it.
+ */
+export interface DurableLeaseRecord {
+  schemaVersion: number;
+  lease: WorktreeLease;
+  access: LeaseAccess;
+  canonicalRepositoryPath: string;
+  canonicalWorktreePath: string;
+  canonicalKey: string;
+  fencingToken: number;
+  ownerKey: string;
+  lastRenewedAt: string;
+  orphanedAt?: string | undefined;
+  orphanReason?: string | undefined;
+}
+
+/** Narrow, append-only lease persistence port. `LeaseStore` implements this shape today. */
+export interface LeaseRepository {
+  append(record: DurableLeaseRecord): Promise<void>;
+  load(): Promise<DurableLeaseRecord[]>;
+}
 
 export interface AcquireLeaseRequest {
   repositoryPath: string;
@@ -31,7 +56,7 @@ export interface RepositoryInspector {
 }
 
 export interface WorktreeLeaseManagerOptions {
-  store: LeaseStore;
+  store: LeaseRepository;
   repositoryInspector?: RepositoryInspector;
   now?: () => string;
   idFactory?: () => string;

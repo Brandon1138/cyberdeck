@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AppServerJobDispatchAdapter } from "../src/app-server/dispatch-adapter.js";
 import { BrokerRuntimeConfigSchema } from "../src/config.js";
+import { ArtifactStore } from "../src/persistence/artifact-store.js";
+import { JobStore } from "../src/persistence/job-store.js";
+import { LeaseStore } from "../src/persistence/lease-store.js";
 import { ControlPlaneError, type JobSnapshot } from "../src/control-plane/job-control-plane.js";
 import { ControlPlaneRuntime } from "../src/control-plane/runtime.js";
 import type {
@@ -74,16 +77,20 @@ let recovered: ControlPlaneRuntime | undefined;
 try {
   const fixture = new ControlledFixtureAdapter();
   let codexAdapter: AppServerJobDispatchAdapter | undefined;
+  const artifactStore = new ArtifactStore(stateDirectory);
   runtime = new ControlPlaneRuntime({
     stateDirectory,
     config: BrokerRuntimeConfigSchema.parse({
       concurrency: { maxConcurrentJobs: 1 },
       budget: { maxJobs: 2 },
     }),
-    adapters: ({ leases, artifacts }) => {
+    jobStore: new JobStore(stateDirectory),
+    artifacts: artifactStore,
+    leaseStore: new LeaseStore(stateDirectory),
+    adapters: ({ leases }) => {
       codexAdapter = new AppServerJobDispatchAdapter({
         leaseManager: leases,
-        artifactStore: artifacts,
+        artifactStore,
         timeoutMs: 120_000,
       });
       return [codexAdapter, fixture];
@@ -131,7 +138,7 @@ try {
   }
   const descriptor = live.record.lifecycle.result.artifacts[0];
   if (descriptor === undefined) throw new Error("Live Codex result did not persist an artifact");
-  const resolved = await runtime.artifacts.resolve(descriptor);
+  const resolved = await artifactStore.resolve(descriptor);
   if (resolved.toString("utf8").trim() !== "CYBERDECK_GATE_OK") {
     throw new Error("Persisted live artifact did not resolve to the validated result");
   }
@@ -205,16 +212,20 @@ try {
   runtime = undefined;
 
   let recoveredCodexAdapter: AppServerJobDispatchAdapter | undefined;
+  const recoveredArtifactStore = new ArtifactStore(stateDirectory);
   recovered = new ControlPlaneRuntime({
     stateDirectory,
     config: BrokerRuntimeConfigSchema.parse({
       concurrency: { maxConcurrentJobs: 1 },
       budget: { maxJobs: 2 },
     }),
-    adapters: ({ leases, artifacts }) => {
+    jobStore: new JobStore(stateDirectory),
+    artifacts: recoveredArtifactStore,
+    leaseStore: new LeaseStore(stateDirectory),
+    adapters: ({ leases }) => {
       recoveredCodexAdapter = new AppServerJobDispatchAdapter({
         leaseManager: leases,
-        artifactStore: artifacts,
+        artifactStore: recoveredArtifactStore,
         timeoutMs: 120_000,
       });
       return [recoveredCodexAdapter, new ControlledFixtureAdapter()];
@@ -235,7 +246,7 @@ try {
       ? rebuilt.record.lifecycle.result.artifacts[0]
       : undefined;
   if (rebuiltDescriptor === undefined) throw new Error("Restart lost the live artifact descriptor");
-  await recovered.artifacts.resolve(rebuiltDescriptor);
+  await recoveredArtifactStore.resolve(rebuiltDescriptor);
 
   process.stdout.write(`${JSON.stringify({
     status: "PASS",

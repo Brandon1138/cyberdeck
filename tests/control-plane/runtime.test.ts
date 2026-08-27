@@ -11,7 +11,9 @@ import type {
   JobDispatchAdapter,
 } from "../../src/domain/dispatch.js";
 import type { JobReport } from "../../src/domain/job.js";
+import { ArtifactStore } from "../../src/persistence/artifact-store.js";
 import { JobStore } from "../../src/persistence/job-store.js";
+import { LeaseStore } from "../../src/persistence/lease-store.js";
 
 const NOW = "2026-07-21T00:00:00.000Z";
 
@@ -60,6 +62,9 @@ describe("control-plane runtime composition", () => {
     const composed = new ControlPlaneRuntime({
       stateDirectory: directory,
       config: BrokerRuntimeConfigSchema.parse(overrides),
+      jobStore: new JobStore(directory),
+      artifacts: new ArtifactStore(directory),
+      leaseStore: new LeaseStore(directory),
       adapters: [adapter.adapter],
       now: () => NOW,
     });

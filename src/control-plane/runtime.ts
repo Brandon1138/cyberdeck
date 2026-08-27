@@ -2,19 +2,17 @@ import type { BrokerRuntimeConfig } from "../config.js";
 import type { BrokerEvent } from "../domain/events.js";
 import type { JobDispatchAdapter } from "../domain/dispatch.js";
 import type { ProviderDescriptor } from "../domain/provider-registration.js";
-import { ArtifactStore } from "../persistence/artifact-store.js";
-import { JobStore } from "../persistence/job-store.js";
-import { LeaseStore } from "../persistence/lease-store.js";
 import { AdmissionScheduler, type AdmissionSnapshot } from "./admission-scheduler.js";
 import { BudgetLedger, type BudgetReport } from "./budget-ledger.js";
-import { JobControlPlane } from "./job-control-plane.js";
+import { JobControlPlane, type JobStateRepository } from "./job-control-plane.js";
 import { InMemoryProviderRegistry, defaultProviderRegistry } from "./provider-registry.js";
 import {
   ControlPlaneReconciler,
+  type ArtifactInspector,
   type ReconciliationReport,
   type RuntimeInspector,
 } from "./reconciler.js";
-import { WorktreeLeaseManager } from "./worktree-lease-manager.js";
+import { WorktreeLeaseManager, type LeaseRepository } from "./worktree-lease-manager.js";
 
 interface JournalLike {
   append(event: BrokerEvent): Promise<void>;
@@ -25,15 +23,24 @@ export interface ControlPlaneRuntimeOptions {
   config: BrokerRuntimeConfig;
   journal?: JournalLike;
   /**
+   * Durable stores, constructed by the composition root and handed in as inward-owned ports. The
+   * runtime still owns the ordering and recovery over them, but never constructs persistence
+   * itself — that construction is what belongs to the composition root under the dependency rule.
+   */
+  jobStore: JobStateRepository;
+  artifacts: ArtifactInspector;
+  leaseStore: LeaseRepository;
+  /**
    * Dispatch adapters to compose. Each one's provider id is registered as it is wired in. A factory
-   * receives the runtime's own lease manager and artifact store so adapters share the single
-   * durable services rather than constructing competing instances.
+   * receives the runtime's own lease manager and artifact inspector so adapters share the single
+   * durable services rather than constructing competing instances; a factory that needs the full
+   * artifact store closes over the composition root's own instance instead.
    */
   adapters?:
     | JobDispatchAdapter[]
     | ((context: {
         leases: WorktreeLeaseManager;
-        artifacts: ArtifactStore;
+        artifacts: ArtifactInspector;
       }) => JobDispatchAdapter[]);
   /** Extra provider descriptors (display names) for adapters that want a friendlier label. */
   providers?: ProviderDescriptor[];
@@ -58,8 +65,8 @@ export interface ControlPlaneRuntimeOptions {
  */
 export class ControlPlaneRuntime {
   readonly registry: InMemoryProviderRegistry;
-  readonly jobStore: JobStore;
-  readonly artifacts: ArtifactStore;
+  readonly jobStore: JobStateRepository;
+  readonly artifacts: ArtifactInspector;
   readonly leases: WorktreeLeaseManager;
   readonly scheduler: AdmissionScheduler;
   readonly budgets: BudgetLedger;
@@ -73,10 +80,10 @@ export class ControlPlaneRuntime {
     this.registry = defaultProviderRegistry();
     for (const descriptor of options.providers ?? []) this.registry.register(descriptor);
 
-    this.jobStore = new JobStore(options.stateDirectory);
-    this.artifacts = new ArtifactStore(options.stateDirectory);
+    this.jobStore = options.jobStore;
+    this.artifacts = options.artifacts;
     this.leases = new WorktreeLeaseManager({
-      store: new LeaseStore(options.stateDirectory),
+      store: options.leaseStore,
       ...(options.now !== undefined ? { now: options.now } : {}),
     });
     this.scheduler = new AdmissionScheduler({
