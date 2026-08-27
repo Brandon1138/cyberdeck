@@ -1,78 +1,11 @@
-import { resolve } from "node:path";
-import type { BoundedChanges, WorktreeBaseline, WorktreeChangeSet } from "./worktree-changes.js";
+import type { NvimWorktreeRequest } from "../domain/worktree-review.js";
 
-/** Exactly the fields nvim's `setqflist`/`setloclist` item dictionaries accept. */
-export interface QuickfixEntry {
-  filename: string;
-  lnum: number;
-  col: number;
-  text: string;
-}
-
-export interface NvimWorktreeRequest {
-  /**
-   * Which worker this request is about.
-   *
-   * The worktree cannot stand in for it. Worktrees nest — a worker running under another worker's
-   * worktree shares its whole path prefix — so a guard keyed by path alone cannot tell two
-   * overlapping workers apart, and releasing the outer one would unlock the inner one's files.
-   */
-  session: string;
-  worktree: string;
-  title: string;
-  /**
-   * True while the worker owning this worktree is still running. It drives read-only enforcement
-   * on the nvim side, and it is the same flag the completion refresh flips back.
-   */
-  live: boolean;
-  /**
-   * What the entries were measured from, in full rather than as the phrase folded into the title.
-   *
-   * The title is written to be read; this is written to be acted on. Cyberdeck is the only side
-   * that knows which rung of the ladder produced the list and which commit that rung resolved to,
-   * so it sends both and leaves how a file is shown against them to the operator's config. See
-   * `docs/architecture/nvim-surface.md` for where that line falls and why.
-   */
-  baseline: WorktreeBaseline;
-  entries: readonly QuickfixEntry[];
-}
-
-/**
- * Entries carry absolute paths even though the tab is `tcd`-scoped to the worktree.
- *
- * A relative entry resolves against whatever directory the window happens to be in when the
- * operator jumps, and nvim's per-tab cwd is exactly the thing that is not global. Resolving here,
- * once, against the worktree Cyberdeck already knows exactly, removes the question entirely.
- */
-export function quickfixEntries(worktree: string, changes: BoundedChanges): QuickfixEntry[] {
-  return changes.changes.map((change) => ({
-    filename: resolve(worktree, change.path),
-    lnum: change.line,
-    col: 1,
-    text: change.text,
-  }));
-}
-
-export function worktreeRequest(options: {
-  session: string;
-  worktree: string;
-  subject: string;
-  live: boolean;
-  changes: WorktreeChangeSet;
-}): NvimWorktreeRequest {
-  const suffix = options.changes.dropped === 0 ? "" : ` (+${options.changes.dropped} more)`;
-  return {
-    session: options.session,
-    worktree: options.worktree,
-    // The baseline is in the title because a list the operator cannot attribute is worse than no
-    // list: an empty one has to say whether nothing changed, nothing could be compared against, or
-    // there was no repository, and a full one has to say what "changed" was measured from.
-    title: `Cyberdeck · ${options.subject} · ${options.changes.baseline.label}${suffix}`,
-    live: options.live,
-    baseline: options.changes.baseline,
-    entries: quickfixEntries(options.worktree, options.changes),
-  };
-}
+export {
+  quickfixEntries,
+  worktreeRequest,
+  type NvimWorktreeRequest,
+  type QuickfixEntry,
+} from "../domain/worktree-review.js";
 
 /**
  * Base64 so the payload can be one `--remote-expr` argument with no escaping question at all.

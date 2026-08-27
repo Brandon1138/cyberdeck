@@ -4,10 +4,14 @@ import type {
   SessionLookupPort,
   SessionUpdatePort,
 } from "../orchestration/session/session-ports.js";
-import { callNvim, type NvimEntryPoint } from "../nvim/bridge.js";
-import { isWorkerLive, worktreeSubject } from "../nvim/open-worktree.js";
-import { worktreeRequest, type NvimWorktreeRequest } from "../nvim/quickfix.js";
-import { worktreeChanges, type WorktreeChangeSet } from "../nvim/worktree-changes.js";
+import {
+  isWorkerLive,
+  worktreeRequest,
+  worktreeSubject,
+  type NvimEntryPoint,
+  type NvimWorktreeRequest,
+  type WorktreeChangeSet,
+} from "../domain/worktree-review.js";
 
 export const NvimBindParamsSchema = z.object({
   sessionId: z.uuid(),
@@ -34,12 +38,14 @@ export interface NvimBinding {
 export interface NvimBindingServiceOptions {
   sessions: SessionLookupPort;
   onSessionUpdate: SessionUpdatePort["onSessionUpdate"];
-  changes?: ((cwd: string) => Promise<WorktreeChangeSet>) | undefined;
-  notify?: ((options: {
+  /** Reads a worktree's change list. Injected: git is infrastructure, and a test has no repository. */
+  changes: (cwd: string) => Promise<WorktreeChangeSet>;
+  /** Sends one message to one nvim. Injected for the same reason, and so a closed nvim is a test. */
+  notify: (options: {
     address: string;
     entryPoint: NvimEntryPoint;
     request: NvimWorktreeRequest;
-  }) => void) | undefined;
+  }) => void;
 }
 
 /**
@@ -132,9 +138,8 @@ export class NvimBindingService {
 
   async #release(binding: NvimBinding, record: SessionRecord): Promise<void> {
     try {
-      const changes = await (this.#options.changes ?? worktreeChanges)(binding.worktree);
-      const notify = this.#options.notify ?? callNvim;
-      notify({
+      const changes = await this.#options.changes(binding.worktree);
+      this.#options.notify({
         address: binding.address,
         entryPoint: "refresh",
         request: worktreeRequest({

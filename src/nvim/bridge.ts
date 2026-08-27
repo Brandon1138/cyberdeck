@@ -1,16 +1,9 @@
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import type { SpawnSyncLike } from "../tmux/cockpit.js";
-import { encodeNvimPayload, type NvimWorktreeRequest } from "./quickfix.js";
+import type { NvimEntryPoint, NvimWorktreeRequest } from "../domain/worktree-review.js";
+import { encodeNvimPayload } from "./quickfix.js";
 
-/**
- * The two things Cyberdeck ever asks nvim to do. Each names a function in the shipped Lua module
- * `contrib/nvim/lua/cyberdeck/init.lua`; nothing else in that module is part of the contract.
- *
- * There is no separate "release" call: the completion refresh already carries `live: false`, so the
- * new list and the lifting of read-only are one message driven by one state transition, and they
- * cannot land out of order or one without the other.
- */
-export type NvimEntryPoint = "open" | "refresh";
+export type { NvimEntryPoint } from "../domain/worktree-review.js";
 
 /**
  * `--remote-expr`, never `--remote-send`.

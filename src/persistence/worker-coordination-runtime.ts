@@ -1,13 +1,13 @@
 import type { SessionRecord } from "../domain/session.js";
 import type { ControllerIdentity } from "../domain/worker-coordination.js";
 import { orchestratorController } from "../domain/orchestrator.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import type { OrchestratorStore } from "./orchestrator-store.js";
 import {
   migrateLegacyWorkerSessions,
   type LegacyWorkerMigrationResult,
-} from "../persistence/migrations/0001-worker-coordination.js";
-import { WorkerCoordinationStore } from "../persistence/worker-coordination-store.js";
-import { WorkerCoordinationService, type WorkerCoordinationOptions } from "./worker-coordination.js";
+} from "./migrations/0001-worker-coordination.js";
+import { WorkerCoordinationStore } from "./worker-coordination-store.js";
+import { WorkerCoordinationService, type WorkerCoordinationOptions } from "../broker/worker-coordination.js";
 
 export interface WorkerCoordinationRuntimeOptions {
   stateDirectory: string;

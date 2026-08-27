@@ -17,6 +17,10 @@ import {
   type OwnershipSubject,
   type StoredWorkerEvent,
 } from "../domain/worker-coordination.js";
+import type {
+  CoordinationTransaction,
+  WorkerCoordinationState,
+} from "../domain/worker-coordination-state.js";
 import { WorkerHandoffSchema, type WorkerHandoff } from "../domain/worker-handoff.js";
 import { openPrivateAppendFile } from "./private-files.js";
 
@@ -38,25 +42,10 @@ const CoordinationTransactionSchema = z.object({
   receipts: z.array(MutationReceiptSchema).default([]),
 });
 
-export interface CoordinationTransaction {
-  subjects?: OwnershipSubject[];
-  events?: StoredWorkerEvent[];
-  checkpoints?: CheckpointRequest[];
-  audits?: OwnershipAuditRecord[];
-  liveness?: ControllerLiveness[];
-  handoffs?: WorkerHandoff[];
-  receipts?: MutationReceipt[];
-}
-
-export interface WorkerCoordinationState {
-  subjects: OwnershipSubject[];
-  events: StoredWorkerEvent[];
-  checkpoints: CheckpointRequest[];
-  audits: OwnershipAuditRecord[];
-  liveness: ControllerLiveness[];
-  handoffs: WorkerHandoff[];
-  receipts: MutationReceipt[];
-}
+export type {
+  CoordinationTransaction,
+  WorkerCoordinationState,
+} from "../domain/worker-coordination-state.js";
 
 export class WorkerCoordinationStoreError extends Error {
   constructor(

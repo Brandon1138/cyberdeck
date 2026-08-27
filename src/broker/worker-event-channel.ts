@@ -15,7 +15,7 @@ import {
 import { orchestratorController } from "../domain/orchestrator.js";
 import type { InstructionQueue } from "../orchestration/instruction-queue.js";
 import type { SessionLookupPort } from "../orchestration/session/session-ports.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import type { OrchestratorBinding } from "../domain/orchestrator.js";
 import {
   WorkerCoordinationError,
   type WorkerCoordinationService,
@@ -58,6 +58,11 @@ interface Credential {
   leaseVersion: number;
 }
 
+/** Exactly the binding lookup this channel needs to name a worker's controller. */
+export interface WorkerEventControllerLookup {
+  findBySessionId(sessionId: string): Promise<OrchestratorBinding | undefined>;
+}
+
 interface CheckpointDelivery {
   enqueue(input: Parameters<InstructionQueue["enqueue"]>[0]): ReturnType<InstructionQueue["enqueue"]>;
 }
@@ -72,7 +77,7 @@ export class WorkerEventChannel {
   constructor(
     private readonly coordination: WorkerCoordinationService,
     private readonly sessions: SessionLookupPort,
-    private readonly controllers: Pick<OrchestratorStore, "findBySessionId">,
+    private readonly controllers: WorkerEventControllerLookup,
     private readonly delivery: CheckpointDelivery,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly credentials: WorkerLeaseCredentialCustodian =

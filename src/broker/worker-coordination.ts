@@ -50,10 +50,8 @@ import {
   type HandoffManifestEntry,
   type WorkerHandoff,
 } from "../domain/worker-handoff.js";
-import {
-  WorkerCoordinationStore,
-  type CoordinationTransaction,
-} from "../persistence/worker-coordination-store.js";
+import type { CoordinationTransaction } from "../domain/worker-coordination-state.js";
+import type { WorkerCoordinationRepository } from "./worker-coordination-ports.js";
 
 type OwnershipOperation = z.infer<typeof OwnershipOperationSchema>;
 
@@ -86,7 +84,7 @@ export class WorkerCoordinationError extends Error {
 }
 
 export interface WorkerCoordinationOptions {
-  store: WorkerCoordinationStore;
+  store: WorkerCoordinationRepository;
   now?: () => string;
   idFactory?: () => string;
   tokenFactory?: () => string;

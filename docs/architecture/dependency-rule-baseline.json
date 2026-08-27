@@ -17,34 +17,6 @@
       "to": "src/version.ts"
     },
     {
-      "from": "src/broker/fleet-project-service.ts",
-      "to": "src/nvim/worktree-changes.ts"
-    },
-    {
-      "from": "src/broker/fleet-project-service.ts",
-      "to": "src/persistence/fleet-preference-store.ts"
-    },
-    {
-      "from": "src/broker/journal.ts",
-      "to": "src/persistence/private-files.ts"
-    },
-    {
-      "from": "src/broker/nvim-binding-service.ts",
-      "to": "src/nvim/bridge.ts"
-    },
-    {
-      "from": "src/broker/nvim-binding-service.ts",
-      "to": "src/nvim/open-worktree.ts"
-    },
-    {
-      "from": "src/broker/nvim-binding-service.ts",
-      "to": "src/nvim/quickfix.ts"
-    },
-    {
-      "from": "src/broker/nvim-binding-service.ts",
-      "to": "src/nvim/worktree-changes.ts"
-    },
-    {
       "from": "src/broker/server.ts",
       "to": "src/persistence/fleet-detach-store.ts"
     },
@@ -95,26 +67,6 @@
     {
       "from": "src/broker/session-registry.ts",
       "to": "src/providers/worker-reporting.ts"
-    },
-    {
-      "from": "src/broker/worker-coordination-runtime.ts",
-      "to": "src/persistence/migrations/0001-worker-coordination.ts"
-    },
-    {
-      "from": "src/broker/worker-coordination-runtime.ts",
-      "to": "src/persistence/orchestrator-store.ts"
-    },
-    {
-      "from": "src/broker/worker-coordination-runtime.ts",
-      "to": "src/persistence/worker-coordination-store.ts"
-    },
-    {
-      "from": "src/broker/worker-coordination.ts",
-      "to": "src/persistence/worker-coordination-store.ts"
-    },
-    {
-      "from": "src/broker/worker-event-channel.ts",
-      "to": "src/persistence/orchestrator-store.ts"
     },
     {
       "from": "src/cli.ts",

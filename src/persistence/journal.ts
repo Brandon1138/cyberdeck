@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { BrokerEventSchema, type BrokerEvent } from "../domain/events.js";
-import { openPrivateAppendFile } from "../persistence/private-files.js";
+import { openPrivateAppendFile } from "./private-files.js";
 
 export class Journal {
   readonly path: string;

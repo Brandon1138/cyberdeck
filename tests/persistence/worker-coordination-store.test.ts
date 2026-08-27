@@ -2,7 +2,7 @@ import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { WorkerCoordinationRuntime } from "../../src/broker/worker-coordination-runtime.js";
+import { WorkerCoordinationRuntime } from "../../src/persistence/worker-coordination-runtime.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 import {

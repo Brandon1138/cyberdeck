@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { WorkerCoordinationRuntime } from "../../src/broker/worker-coordination-runtime.js";
+import { WorkerCoordinationRuntime } from "../../src/persistence/worker-coordination-runtime.js";
 import type { ControllerIdentity } from "../../src/domain/worker-coordination.js";
 import {
   BROKER_ACTOR,
