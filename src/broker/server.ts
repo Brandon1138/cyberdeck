@@ -23,27 +23,27 @@ import {
   type LocalWorkerTelemetrySnapshot,
 } from "../domain/local-worker-control.js";
 import {
+  FleetDetachIdentitySchema,
   FleetFolderDispositionSchema,
   FleetLaunchProfileSchema,
-  type FleetPreferenceStore,
-} from "../persistence/fleet-preference-store.js";
-import {
-  FleetDetachIdentitySchema,
-  type FleetDetachStore,
-} from "../persistence/fleet-detach-store.js";
+} from "../domain/fleet-preferences.js";
+import type {
+  FleetDetachRecordPort,
+  FleetPreferenceReadPort,
+  OrchestratorBindingListPort,
+  ScoutEgressPort,
+  ThreadTranscriptReadPort,
+  WorkerPreferenceReadPort,
+} from "./server/store-ports.js";
 import type { FleetProjectService } from "./fleet-project-service.js";
-import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type RequestFrame } from "../protocol/frames.js";
-import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
+import { ClientFrameSchema, type ClientFrame, type ProtocolErrorFrame, type RequestFrame } from "./protocol/frames.js";
+import { encodeFrame, JsonlDecoder } from "./protocol/jsonl.js";
 import { SessionSnapshotParamsSchema } from "../domain/session-snapshot.js";
 import { NvimBindParamsSchema, type NvimBindingService } from "./nvim-binding-service.js";
 import { RegistryError, type AttachmentMode, type SessionRegistry } from "./session-registry.js";
-import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
-import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
-import type { ScoutEgressGrantStore } from "../persistence/scout-egress-grant-store.js";
 import type { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import type { WorkerCapabilityCatalog } from "../orchestration/worker-capability-catalog.js";
 import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import {
   CavemanWorkersRequestSchema,
   CreateOrchestratorRequestSchema,
@@ -138,7 +138,7 @@ interface ConnectionContext {
 export interface BrokerServerOptions {
   socketPath: string;
   registry: SessionRegistry;
-  transcripts?: ThreadTranscriptStore;
+  transcripts?: ThreadTranscriptReadPort;
   orchestrators?: OrchestratorManager;
   agentControl?: AgentControlService;
   instructions?: InstructionQueue;
@@ -146,19 +146,19 @@ export interface BrokerServerOptions {
   controlPlane?: JobControlPlane;
   /** Supplies the reconciliation view; queue/budget queries work from the control plane alone. */
   controlPlaneRuntime?: Pick<ControlPlaneRuntime, "lastReconciliation">;
-  fleetDetaches?: FleetDetachStore;
-  fleetPreferences?: FleetPreferenceStore;
+  fleetDetaches?: FleetDetachRecordPort;
+  fleetPreferences?: FleetPreferenceReadPort;
   /** Which repositories the operator calls projects. The Fleet list groups by these. */
   fleetProjects?: FleetProjectService;
-  workerPreferences?: WorkerPreferenceStore;
+  workerPreferences?: WorkerPreferenceReadPort;
   /**
    * What each provider currently says it can launch. One catalog serves Fleet's composer, the
    * `cyberdeck_provider_capabilities` tool, and the launch boundary, so those three cannot disagree
    * about which models exist.
    */
   workerCapabilities?: WorkerCapabilityCatalog;
-  scoutEgress?: Pick<ScoutEgressGrantStore, "set" | "status">;
-  orchestratorBindings?: OrchestratorStore;
+  scoutEgress?: ScoutEgressPort;
+  orchestratorBindings?: OrchestratorBindingListPort;
   /** Internal domain substrate. Orchestrator access goes through workerControl, never directly. */
   workerCoordination?: WorkerCoordinationService;
   workerControl?: WorkerControlService;
@@ -695,7 +695,7 @@ export class BrokerServer {
     };
   }
 
-  private requireTranscripts(): ThreadTranscriptStore {
+  private requireTranscripts(): ThreadTranscriptReadPort {
     if (this.options.transcripts === undefined) {
       throw Object.assign(new Error("Thread transcript store is not available"), { code: "METHOD_NOT_FOUND" });
     }
@@ -770,7 +770,7 @@ export class BrokerServer {
     if (subscription.timer !== undefined) clearTimeout(subscription.timer);
   }
 
-  private requireScoutEgress(): Pick<ScoutEgressGrantStore, "set" | "status"> {
+  private requireScoutEgress(): ScoutEgressPort {
     if (this.options.scoutEgress === undefined) {
       throw Object.assign(new Error("Scout egress grant store is not available"), {
         code: "METHOD_NOT_FOUND",
@@ -825,7 +825,7 @@ export class BrokerServer {
     return this.options.workerCapabilities;
   }
 
-  private requireFleetPreferences(): FleetPreferenceStore {
+  private requireFleetPreferences(): FleetPreferenceReadPort {
     if (this.options.fleetPreferences === undefined) {
       throw Object.assign(new Error("Fleet preferences are not available"), { code: "METHOD_NOT_FOUND" });
     }
@@ -841,7 +841,7 @@ export class BrokerServer {
     return this.options.fleetProjects;
   }
 
-  private requireFleetDetaches(): FleetDetachStore {
+  private requireFleetDetaches(): FleetDetachRecordPort {
     if (this.options.fleetDetaches === undefined) {
       throw Object.assign(new Error("Fleet detach history is not available"), { code: "METHOD_NOT_FOUND" });
     }

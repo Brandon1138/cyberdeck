@@ -17,38 +17,6 @@
       "to": "src/version.ts"
     },
     {
-      "from": "src/broker/server.ts",
-      "to": "src/persistence/fleet-detach-store.ts"
-    },
-    {
-      "from": "src/broker/server.ts",
-      "to": "src/persistence/fleet-preference-store.ts"
-    },
-    {
-      "from": "src/broker/server.ts",
-      "to": "src/persistence/orchestrator-store.ts"
-    },
-    {
-      "from": "src/broker/server.ts",
-      "to": "src/persistence/scout-egress-grant-store.ts"
-    },
-    {
-      "from": "src/broker/server.ts",
-      "to": "src/persistence/thread-transcript-store.ts"
-    },
-    {
-      "from": "src/broker/server.ts",
-      "to": "src/persistence/worker-preference-store.ts"
-    },
-    {
-      "from": "src/broker/server.ts",
-      "to": "src/protocol/frames.ts"
-    },
-    {
-      "from": "src/broker/server.ts",
-      "to": "src/protocol/jsonl.ts"
-    },
-    {
       "from": "src/broker/session-registry.ts",
       "to": "src/providers/image-input.ts"
     },
