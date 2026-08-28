@@ -165,10 +165,10 @@ export class BrokerServer {
   }
 
   private async routeRequest(context: ConnectionContext, frame: RequestFrame): Promise<unknown> {
-    const handler = BROKER_METHODS[frame.method];
-    if (handler === undefined) {
+    if (!Object.hasOwn(BROKER_METHODS, frame.method)) {
       throw Object.assign(new Error(`Unknown method ${frame.method}`), { code: "METHOD_NOT_FOUND" });
     }
+    const handler = BROKER_METHODS[frame.method]!;
     return handler(this.methodContext, context, frame);
   }
 

@@ -10,9 +10,10 @@ import { sessionMethods } from "./session-methods.js";
  * The groups are disjoint by construction — a duplicate key would silently shadow, so the table is
  * assembled once here rather than merged per call.
  */
-export const BROKER_METHODS: Record<string, BrokerMethodHandler> = {
-  ...sessionMethods,
-  ...agentMethods,
-  ...fleetMethods,
-  ...jobMethods,
-};
+export const BROKER_METHODS: Record<string, BrokerMethodHandler> = Object.assign(
+  Object.create(null) as Record<string, BrokerMethodHandler>,
+  sessionMethods,
+  agentMethods,
+  fleetMethods,
+  jobMethods,
+);
