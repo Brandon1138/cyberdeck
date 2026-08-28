@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -58,10 +58,16 @@ function readBaseline(): FileSizeBaseline {
 }
 
 describe("TypeScript file-size ratchet", () => {
-  it("keeps baseline sorted, unique, and live", () => {
+  it("keeps baseline sorted, unique, and pointed at files this ratchet scans", () => {
+    // Membership in the scan, not mere existence on disk: an entry naming a deleted file is stale
+    // and must fail, and so must one naming a path the ceiling check never walks — anything outside
+    // `src/`, or a non-`.ts` file — which would otherwise sit in the baseline reading as covered
+    // while granting and enforcing nothing. Slack is untouched: a listed file that shrank to 500
+    // lines or fewer is still scanned, so it stays a member and stays allowed.
+    const scanned = new Set(sourceFiles(SOURCE_ROOT).map(sourcePath));
     const paths = readBaseline().files.map((entry) => entry.path);
     expect(paths).toEqual([...new Set(paths)].sort());
-    expect(paths.filter((path) => !existsSync(resolve(REPOSITORY_ROOT, path)))).toEqual([]);
+    expect(paths.filter((path) => !scanned.has(path))).toEqual([]);
   });
 
   it("rejects new monoliths and growth above recorded ceilings", () => {
