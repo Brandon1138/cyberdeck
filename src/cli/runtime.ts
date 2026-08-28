@@ -1,7 +1,7 @@
 import { Command, Option } from "commander";
 import { spawnSync as nodeSpawnSync, spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appStateDirectory, brokerSocketPath } from "../broker/app-paths.js";
 import { attachSession } from "../client/attach.js";
@@ -117,12 +117,25 @@ export async function liveSessionCwds(): Promise<Map<string, string>> {
   return liveWorktreeCwds(sessions);
 }
 
-export function projectRoot(): string {
+export function projectRootFromModulePath(modulePath: string): string {
   // This module compiles to <root>/dist/src/cli/runtime.js and runs from <root>/src/cli/runtime.ts
   // under tsx — one directory deeper than the src/cli.ts entry this logic originally lived in.
-  const sourceDirectory = dirname(fileURLToPath(import.meta.url));
+  const sourceDirectory = dirname(modulePath);
   const grandparent = dirname(dirname(sourceDirectory));
-  return basename(grandparent) === "dist" ? dirname(grandparent) : grandparent;
+  const isCompiledLayout = extname(modulePath) === ".js" && basename(grandparent) === "dist";
+  return isCompiledLayout ? dirname(grandparent) : grandparent;
+}
+
+export function projectRoot(): string {
+  return projectRootFromModulePath(fileURLToPath(import.meta.url));
+}
+
+export function cliEntrypointFromModulePath(modulePath: string): string {
+  return resolve(dirname(dirname(modulePath)), `cli${extname(modulePath)}`);
+}
+
+function cliEntrypoint(): string {
+  return resolve(process.argv[1] ?? cliEntrypointFromModulePath(fileURLToPath(import.meta.url)));
 }
 
 export async function waitForBroker(timeoutMs = 5_000): Promise<void> {
@@ -276,7 +289,7 @@ export async function runCyberdeck(
     await startDetachedBroker(false);
     client = await RpcClient.connect(brokerSocketPath);
   }
-  const cliPath = resolve(process.argv[1] ?? fileURLToPath(import.meta.url));
+  const cliPath = cliEntrypoint();
   const nvimLayoutHooks = toolkit.createFleetNvimLayoutHooks({
     spawnSync: nodeSpawnSync as SpawnSyncLike,
     preflight: toolkit.preflightCockpit,
@@ -378,7 +391,7 @@ export async function openCockpit(
   const result = await services.ensure(request);
   try {
     services.present({
-      cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
+      cliPath: cliEntrypoint(),
       cwd: request.cwd,
       orchestratorSessionId: result.session.id,
       preflight,
@@ -417,7 +430,7 @@ export async function openFleetCockpit(
     };
   try {
     services.present({
-      cliPath: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
+      cliPath: cliEntrypoint(),
       cwd: target.cockpitCwd,
       orchestratorSessionId: result.session.id,
       preflight,
