@@ -1,5 +1,9 @@
-import type { WorkerCoordinationService } from "../../broker/worker-coordination.js";
-import type { ControllerIdentity, WorkerLifecycle } from "../../domain/worker-coordination.js";
+import type {
+  ControllerIdentity,
+  OwnershipMutationResult,
+  OwnershipSubject,
+  WorkerLifecycle,
+} from "../../domain/worker-coordination.js";
 import type { SessionRecord } from "../../domain/session.js";
 
 export const WORKER_COORDINATION_MIGRATION_ID = "0001-worker-coordination";
@@ -8,6 +12,21 @@ export interface LegacyWorkerMigrationResult {
   migrated: number;
   alreadyMigrated: number;
   orphaned: number;
+}
+
+export interface LegacyWorkerCoordinationPort {
+  getSubject(subjectId: string): OwnershipSubject | undefined;
+  registerSubject(input: {
+    mutationId: string;
+    actor: ControllerIdentity;
+    subjectId: string;
+    subjectKind?: "worker" | "orchestrator";
+    origin: OwnershipSubject["origin"];
+    lifecycle: WorkerLifecycle;
+    resources: OwnershipSubject["resources"];
+    controller?: ControllerIdentity;
+    reason: string;
+  }): Promise<OwnershipMutationResult>;
 }
 
 /**
@@ -19,7 +38,7 @@ export interface LegacyWorkerMigrationResult {
  */
 export async function migrateLegacyWorkerSessions(input: {
   sessions: readonly SessionRecord[];
-  coordination: WorkerCoordinationService;
+  coordination: LegacyWorkerCoordinationPort;
   resolveStableController: (
     parentSessionId: string,
     worker: SessionRecord,

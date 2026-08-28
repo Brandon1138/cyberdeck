@@ -54,6 +54,7 @@ import { ScoutEgressGrantStore } from "../persistence/scout-egress-grant-store.j
 import { WorkerCoordinationRuntime } from "../persistence/worker-coordination-runtime.js";
 import { WorkerEventChannel } from "./worker-event-channel.js";
 import { BrokerWorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
+import { WorkerCoordinationService } from "./worker-coordination.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -145,6 +146,7 @@ export async function runBroker(
     stateDirectory,
     recoveredSessions,
     orchestrators: orchestratorStore,
+    createService: (store) => new WorkerCoordinationService({ store }),
   });
   await workerCoordination.start();
   const orchestrators = new OrchestratorManager(

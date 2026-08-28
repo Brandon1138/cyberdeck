@@ -2,6 +2,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkerCoordinationRuntime } from "../../src/persistence/worker-coordination-runtime.js";
+import { WorkerCoordinationService } from "../../src/broker/worker-coordination.js";
 import type { ControllerIdentity } from "../../src/domain/worker-coordination.js";
 import {
   BROKER_ACTOR,
@@ -829,7 +830,11 @@ describe("worker coordination: durability", () => {
 
     const runtime = new WorkerCoordinationRuntime({
       stateDirectory: broker.directory,
-      service: { now: () => broker.now(), leaseDurationMs: 120_000 },
+      createService: (store) => new WorkerCoordinationService({
+        store,
+        now: () => broker.now(),
+        leaseDurationMs: 120_000,
+      }),
     });
     const migration = await runtime.start();
     expect(migration).toEqual({ migrated: 0, alreadyMigrated: 0, orphaned: 0 });
