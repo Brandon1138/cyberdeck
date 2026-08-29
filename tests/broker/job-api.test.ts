@@ -14,6 +14,9 @@ import type { JobDispatchAdapter } from "../../src/domain/dispatch.js";
 import type { JobRecord } from "../../src/domain/job.js";
 import { ServerFrameSchema, type ServerFrame } from "../../src/protocol/frames.js";
 import { JsonlDecoder, encodeFrame } from "../../src/protocol/jsonl.js";
+import { ArtifactStore } from "../../src/persistence/artifact-store.js";
+import { JobStore } from "../../src/persistence/job-store.js";
+import { LeaseStore } from "../../src/persistence/lease-store.js";
 import { WorkerPreferenceStore } from "../../src/persistence/worker-preference-store.js";
 
 const NOW = "2026-07-21T00:00:00.000Z";
@@ -107,6 +110,9 @@ async function composedHarness() {
   const runtime = new ControlPlaneRuntime({
     stateDirectory: directory,
     config: BrokerRuntimeConfigSchema.parse({}),
+    jobStore: new JobStore(directory),
+    artifacts: new ArtifactStore(directory),
+    leaseStore: new LeaseStore(directory),
     adapters: [acceptingAdapter("codex")],
     now: () => NOW,
   });

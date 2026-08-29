@@ -1,5 +1,5 @@
 import type { StartSessionRequest } from "./session.js";
-import { DEFAULT_MAX_CONCURRENT_WORKERS } from "../limits.js";
+import { DEFAULT_MAX_CONCURRENT_WORKERS } from "./limits.js";
 
 export type StartPolicyCode =
   | "MAX_CONCURRENT_WORKERS"

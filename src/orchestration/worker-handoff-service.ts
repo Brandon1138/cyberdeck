@@ -13,7 +13,7 @@ import type {
 } from "../domain/worker-coordination.js";
 import { HANDOFF_LIMITS, handoffBriefing } from "../domain/worker-handoff.js";
 import type { InstructionQueue } from "./instruction-queue.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import type { OrchestratorBindingLookup } from "./persistence-ports.js";
 import type { SessionLookupPort } from "./session/session-ports.js";
 
 export const WorkerHandoffParamsSchema = z.object({
@@ -87,7 +87,7 @@ export class WorkerHandoffError extends Error {
 export interface WorkerHandoffOptions {
   coordination: WorkerCoordinationService;
   registry: SessionLookupPort;
-  orchestrators: Pick<OrchestratorStore, "findBySessionId">;
+  orchestrators: OrchestratorBindingLookup;
   instructions?: Pick<InstructionQueue, "enqueue">;
   credentials?: WorkerLeaseCredentialCustodian;
 }

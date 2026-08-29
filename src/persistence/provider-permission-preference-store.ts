@@ -5,7 +5,7 @@ import { z } from "zod";
 import {
   ProviderPermissionPolicySchema,
   type ProviderPermissionPolicy,
-} from "../client/permission-policy.js";
+} from "../orchestration/permission-policy.js";
 import { ProviderIdSchema, type ProviderId } from "../domain/session.js";
 import { openPrivateAppendFile } from "./private-files.js";
 

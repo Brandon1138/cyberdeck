@@ -11,14 +11,14 @@ import {
   type DispatchRequest,
   type JobDispatchAdapter,
 } from "../domain/dispatch.js";
+import type { ArtifactDescriptor } from "../domain/artifact.js";
 import { JobReportSchema, type JobReport, type JobResult } from "../domain/job.js";
 import type { ProviderId } from "../domain/provider-registration.js";
+import type { WorkerMode } from "../domain/session.js";
 import type { UsageReport } from "../domain/usage.js";
-import { jobLaunchEnvironment } from "../providers/launch-environment.js";
-import { applyWorkerMode } from "../providers/worker-mode.js";
-import { CYBERDECK_VERSION } from "../version.js";
+import { CYBERDECK_VERSION } from "../broker/version.js";
 import type { LeaseGrant, WorktreeLeaseManager } from "../control-plane/worktree-lease-manager.js";
-import type { ArtifactStore } from "../persistence/artifact-store.js";
+import { defaultApplyWorkerMode, defaultJobLaunchEnvironment } from "./dispatch-defaults.js";
 import {
   AppServerJsonDecoder,
   AppServerProtocolError,
@@ -48,6 +48,28 @@ export interface AppServerProcessHandle {
 
 export type AppServerSpawn = (command: AppServerCommand) => AppServerProcessHandle;
 
+export interface ArtifactWritePort {
+  write(request: {
+    name: string;
+    logicalKind?: string;
+    mediaType: string;
+    content: Buffer | string;
+    producedByJobId?: string;
+  }): Promise<{ descriptor: ArtifactDescriptor; logicalKind?: string }>;
+}
+
+export type JobLaunchEnvironmentPort = (
+  source: Readonly<NodeJS.ProcessEnv>,
+  provider: ProviderId,
+  request: Pick<DispatchRequest["request"], "cwd" | "workerMode">,
+) => NodeJS.ProcessEnv;
+
+export type ApplyWorkerModePort = (
+  instruction: string,
+  mode: WorkerMode | undefined,
+  env?: NodeJS.ProcessEnv,
+) => string;
+
 export interface AppServerProgress {
   jobId: string;
   correlationId: string;
@@ -65,7 +87,9 @@ export interface AppServerJobDispatchAdapterOptions {
   compatibleCodexMinor?: string;
   leaseManager?: WorktreeLeaseManager;
   /** Persist the validated terminal agent message as a job artifact when the runtime supplies one. */
-  artifactStore?: ArtifactStore;
+  artifactStore?: ArtifactWritePort;
+  launchEnvironment?: JobLaunchEnvironmentPort;
+  workerMode?: ApplyWorkerModePort;
   leaseTtlMs?: number;
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
 }
@@ -113,6 +137,8 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
   private readonly listeners = new Set<(report: JobReport) => void>();
   private readonly progressListeners = new Set<(progress: AppServerProgress) => void>();
   private readonly spawn: AppServerSpawn;
+  private readonly launchEnvironment: JobLaunchEnvironmentPort;
+  private readonly workerMode: ApplyWorkerModePort;
 
   constructor(private readonly options: AppServerJobDispatchAdapterOptions = {}) {
     for (const [name, value] of [
@@ -127,6 +153,8 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
       }
     }
     this.spawn = options.spawn ?? defaultAppServerSpawn;
+    this.launchEnvironment = options.launchEnvironment ?? defaultJobLaunchEnvironment;
+    this.workerMode = options.workerMode ?? defaultApplyWorkerMode;
   }
 
   get activeJobCount(): number { return this.running.size; }
@@ -152,6 +180,7 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
     const command = buildAppServerCommand(
       request,
       this.options.sourceEnvironment ?? globalThis.process.env,
+      this.launchEnvironment,
     );
     let process: AppServerProcessHandle;
     try {
@@ -231,7 +260,7 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
           threadId: entry.threadId,
           input: [{
             type: "text",
-            text: applyWorkerMode(request.request.instruction, request.request.workerMode),
+            text: this.workerMode(request.request.instruction, request.request.workerMode),
           }],
           cwd: request.request.cwd,
           approvalPolicy: "on-request",
@@ -566,12 +595,13 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
 export function buildAppServerCommand(
   request: DispatchRequest,
   sourceEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
+  launchEnvironment: JobLaunchEnvironmentPort = defaultJobLaunchEnvironment,
 ): AppServerCommand {
   return {
     executable: "codex",
     args: ["app-server", "--stdio", "--strict-config"],
     cwd: request.request.cwd,
-    env: jobLaunchEnvironment(sourceEnvironment, "codex", request.request),
+    env: launchEnvironment(sourceEnvironment, "codex", request.request),
   };
 }
 

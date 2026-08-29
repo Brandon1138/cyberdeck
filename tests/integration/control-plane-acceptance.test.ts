@@ -16,6 +16,7 @@ import type {
 import type { JobReport, JobResult } from "../../src/domain/job.js";
 import type { UsageReport } from "../../src/domain/usage.js";
 import { ArtifactStore } from "../../src/persistence/artifact-store.js";
+import { JobStore } from "../../src/persistence/job-store.js";
 import { LeaseStore } from "../../src/persistence/lease-store.js";
 
 const run = promisify(execFile);
@@ -106,6 +107,9 @@ async function composed(options: {
   const runtime = new ControlPlaneRuntime({
     stateDirectory: options.stateDirectory,
     config: BrokerRuntimeConfigSchema.parse(options.config ?? {}),
+    jobStore: new JobStore(options.stateDirectory),
+    artifacts: new ArtifactStore(options.stateDirectory),
+    leaseStore: new LeaseStore(options.stateDirectory),
     adapters: options.runtimes.map((entry) => entry.adapter),
   });
   await runtime.start();

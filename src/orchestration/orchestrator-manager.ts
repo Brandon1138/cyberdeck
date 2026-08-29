@@ -20,10 +20,12 @@ import {
 } from "../domain/orchestrator.js";
 import type { CyberdeckCapability } from "../domain/capability.js";
 import type { ApprovalMode, ProviderId, SessionRecord } from "../domain/session.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
-import type { ProviderPermissionPreferencePort } from "../persistence/provider-permission-preference-store.js";
-import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
-import { resolveProviderPermission } from "../client/permission-policy.js";
+import { resolveProviderPermission } from "./permission-policy.js";
+import type {
+  OrchestratorBindingRepository,
+  ProviderPermissionPreferenceReader,
+  WorkerPreferenceRepository,
+} from "./persistence-ports.js";
 import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
 import { ORCHESTRATOR_CATALOG } from "./orchestrator-catalog.js";
 import type {
@@ -62,9 +64,9 @@ type BoundOrchestratorRequest = EnsureOrchestratorRequest & {
 export class OrchestratorManager {
   constructor(
     private readonly registry: SessionLookupPort & SessionStartPort & SessionResumePort,
-    private readonly store: OrchestratorStore,
-    private readonly workerPreferences?: WorkerPreferenceStore,
-    private readonly providerPermissions?: ProviderPermissionPreferencePort,
+    private readonly store: OrchestratorBindingRepository,
+    private readonly workerPreferences?: WorkerPreferenceRepository,
+    private readonly providerPermissions?: ProviderPermissionPreferenceReader,
   ) {}
 
   async ensure(input: EnsureOrchestratorRequest): Promise<OrchestratorManagerResult> {
@@ -370,7 +372,7 @@ export class OrchestratorManager {
     }
   }
 
-  private requireWorkerPreferences(): WorkerPreferenceStore {
+  private requireWorkerPreferences(): WorkerPreferenceRepository {
     if (this.workerPreferences === undefined) {
       throw Object.assign(new Error("Worker preferences are not available"), { code: "METHOD_NOT_FOUND" });
     }

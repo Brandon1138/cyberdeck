@@ -23,7 +23,7 @@ import {
   type WorkerLeaseCredentialCustodian,
 } from "../broker/worker-lease-credential-custodian.js";
 import type { InstructionQueue } from "./instruction-queue.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import type { OrchestratorBindingLookup } from "./persistence-ports.js";
 import type {
   SessionLookupPort,
   SessionProcessControlPort,
@@ -292,7 +292,7 @@ export interface WorkerControlOptions {
     & SessionProcessControlPort
     & SessionUpdatePort
     & Pick<WorkerTruthQueryPort, "workerTruth">;
-  orchestrators: Pick<OrchestratorStore, "findBySessionId">;
+  orchestrators: OrchestratorBindingLookup;
   instructions?: Pick<InstructionQueue, "enqueue">;
   now?: () => number;
   /** Minimum time a graceful worker stop must stay pending before force escalation is allowed. */

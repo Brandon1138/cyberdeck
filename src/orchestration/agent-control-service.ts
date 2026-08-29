@@ -32,11 +32,13 @@ import {
   WorkerBudgetDeclarationSchema,
   type WorkerBudgetDeclaration,
 } from "../domain/worker-budget.js";
-import type { ThreadTranscriptStore } from "../persistence/thread-transcript-store.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
-import type { WorkerPreferenceStore } from "../persistence/worker-preference-store.js";
-import type { ProviderPermissionPreferencePort } from "../persistence/provider-permission-preference-store.js";
-import { resolveProviderPermission } from "../client/permission-policy.js";
+import { resolveProviderPermission } from "./permission-policy.js";
+import type {
+  OrchestratorBindingReader,
+  ProviderPermissionPreferenceReader,
+  ThreadTranscriptReader,
+  WorkerPreferenceReader,
+} from "./persistence-ports.js";
 import { WORKER_PROVIDER_CAPABILITIES, validateWorkerSelection } from "./worker-capabilities.js";
 import type { WorkerCapabilityCatalog } from "./worker-capability-catalog.js";
 import {
@@ -356,7 +358,7 @@ export interface AgentControlOptions {
   audit?: { append(event: BrokerEvent): Promise<void> };
   /** Minimum elapsed time between graceful request and force escalation. */
   forceStopGraceMs?: number;
-  providerPermissions?: ProviderPermissionPreferencePort;
+  providerPermissions?: ProviderPermissionPreferenceReader;
   /** Wave 1 lease/event substrate used for opt-in intervention-aware waits. */
   workerCoordination?: WorkerInterventionProjection;
   /** Poll cadence for intervention events while a registry wait remains open. */
@@ -382,7 +384,7 @@ export class AgentControlService {
   private readonly segmentSeconds: number;
   private readonly audit: AgentControlOptions["audit"];
   private readonly forceStopGraceMs: number;
-  private readonly providerPermissions: ProviderPermissionPreferencePort | undefined;
+  private readonly providerPermissions: ProviderPermissionPreferenceReader | undefined;
   private readonly workerCoordination: WorkerInterventionProjection | undefined;
   private readonly interventionPollMs: number;
   private readonly scoutEgress: AgentControlOptions["scoutEgress"];
@@ -396,9 +398,9 @@ export class AgentControlService {
       & SessionProcessControlPort
       & WorkerTruthQueryPort
       & ScoutArtifactQueryPort,
-    private readonly orchestrators: OrchestratorStore,
-    private readonly transcripts: ThreadTranscriptStore,
-    private readonly workerPreferences?: WorkerPreferenceStore,
+    private readonly orchestrators: OrchestratorBindingReader,
+    private readonly transcripts: ThreadTranscriptReader,
+    private readonly workerPreferences?: WorkerPreferenceReader,
     options: AgentControlOptions = {},
   ) {
     this.now = options.now ?? (() => Date.now());
