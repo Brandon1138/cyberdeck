@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createProgram, openFleetCockpit } from "../src/cli.js";
+import {
+  cliEntrypointFromModulePath,
+  projectRootFromModulePath,
+} from "../src/cli/runtime.js";
 import type { OrchestratorManagerResult } from "../src/orchestration/orchestrator-manager.js";
 
 function quietCommand(name: string) {
@@ -47,6 +51,26 @@ function orchestratorResult(created: boolean): OrchestratorManagerResult {
     },
   };
 }
+
+describe("projectRootFromModulePath", () => {
+  it.each([
+    ["compiled layout", "/workspace/cyberdeck/dist/src/cli/runtime.js", "/workspace/cyberdeck"],
+    ["tsx layout", "/workspace/cyberdeck/src/cli/runtime.ts", "/workspace/cyberdeck"],
+    ["compiled layout whose root is named dist", "/workspace/dist/dist/src/cli/runtime.js", "/workspace/dist"],
+    ["tsx layout whose root is named dist", "/workspace/dist/src/cli/runtime.ts", "/workspace/dist"],
+  ])("resolves %s", (_layout, modulePath, expected) => {
+    expect(projectRootFromModulePath(modulePath)).toBe(expected);
+  });
+});
+
+describe("cliEntrypointFromModulePath", () => {
+  it.each([
+    ["compiled layout", "/workspace/cyberdeck/dist/src/cli/runtime.js", "/workspace/cyberdeck/dist/src/cli.js"],
+    ["tsx layout", "/workspace/cyberdeck/src/cli/runtime.ts", "/workspace/cyberdeck/src/cli.ts"],
+  ])("resolves %s", (_layout, modulePath, expected) => {
+    expect(cliEntrypointFromModulePath(modulePath)).toBe(expected);
+  });
+});
 
 describe("Cyberdeck CLI", () => {
   it("opens the fleet when invoked without a subcommand", async () => {

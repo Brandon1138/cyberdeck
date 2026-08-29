@@ -66,7 +66,7 @@ function layerFor(path: string): Layer {
 
   if (relativePath === "broker/main.ts") return "composition";
 
-  if (["mcp", "app-server", "client", "protocol"].includes(topLevel ?? "")) {
+  if (["mcp", "app-server", "client", "protocol", "cli"].includes(topLevel ?? "")) {
     return "delivery";
   }
   if (["orchestration", "control-plane", "broker"].includes(topLevel ?? "")) {

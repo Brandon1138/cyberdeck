@@ -18,7 +18,7 @@ Imports point down this diagram, never up or sideways between the two outer peer
 
 - **Composition:** exactly `src/broker/main.ts`, the construction-only composition root. It may import every layer to assemble concrete implementations; the sole importer is the executable bootstrap edge `src/cli.ts -> src/broker/main.ts`; startup retention is application-owned and `main.ts` only wires it.
 
-- **Delivery:** `src/mcp/**`, `src/app-server/**`, `src/client/**`, `src/protocol/**`, and `src/cli.ts`. These are MCP, app-server, wire-protocol, CLI, and interactive client entry points.
+- **Delivery:** `src/mcp/**`, `src/app-server/**`, `src/client/**`, `src/protocol/**`, `src/cli/**`, and `src/cli.ts`. These are MCP, app-server, wire-protocol, CLI, and interactive client entry points.
 - **Adapters/application:** `src/orchestration/**`, `src/control-plane/**`, `src/broker/**`, `src/config.ts`, and `src/limits.ts`. This conservatively keeps orchestration, control-plane, and broker code together as currently situated, along with application policy/configuration.
 - **Domain:** `src/domain/**`. Domain code may not import delivery, application, or infrastructure code.
 - **Infrastructure:** `src/runtime/**`, `src/tmux/**`, `src/providers/**`, `src/persistence/**`, `src/nvim/**`, `src/paths.ts`, `src/runtime-config.ts`, and `src/version.ts`. These contain runtime/process and PTY access, tmux, provider CLI adapters, filesystem/persistence implementations, nvim integration, and environment/runtime metadata.
