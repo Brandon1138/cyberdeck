@@ -2,25 +2,20 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { ProviderIdSchema } from "../domain/provider-registration.js";
-import { ReasoningEffortSchema } from "../domain/session.js";
+import {
+  FleetFolderDispositionSchema,
+  FleetLaunchProfileSchema,
+  type FleetFolderDisposition,
+  type FleetLaunchProfile,
+} from "../domain/fleet-preferences.js";
 import { openPrivateAppendFile } from "./private-files.js";
 
-export const FleetLaunchProfileSchema = z.object({
-  provider: ProviderIdSchema,
-  model: z.string().min(1),
-  effort: ReasoningEffortSchema.optional(),
-  /**
-   * Whether workers started in this folder get a worktree Cyberdeck cuts for them. Optional so
-   * every profile written before the choice existed replays as what it meant: run in the folder.
-   */
-  isolation: z.enum(["shared", "worktree"]).optional(),
-});
-
-export const FleetFolderDispositionSchema = z.object({
-  collapsed: z.boolean(),
-  expanded: z.boolean(),
-});
+export {
+  FleetFolderDispositionSchema,
+  FleetLaunchProfileSchema,
+  type FleetFolderDisposition,
+  type FleetLaunchProfile,
+} from "../domain/fleet-preferences.js";
 
 export const FLEET_NVIM_LAYOUT_KEY = "/@nvim-layout";
 export const FLEET_PROJECT_MIGRATION_KEY = "/@project-migration";
@@ -99,8 +94,6 @@ const FleetPreferenceRecordSchema = z.discriminatedUnion("recordType", [
 
 type FleetPreferenceRecord = z.infer<typeof FleetPreferenceRecordSchema>;
 
-export type FleetLaunchProfile = z.infer<typeof FleetLaunchProfileSchema>;
-export type FleetFolderDisposition = z.infer<typeof FleetFolderDispositionSchema>;
 
 /** Append-only per-project explicit worker launch selections. */
 export class FleetPreferenceStore {

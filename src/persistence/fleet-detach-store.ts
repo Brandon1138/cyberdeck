@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { FleetDetachIdentitySchema } from "../domain/fleet-preferences.js";
 import { openPrivateAppendFile } from "./private-files.js";
 
-export const FleetDetachIdentitySchema = z.string().trim().min(1).max(200);
+export { FleetDetachIdentitySchema } from "../domain/fleet-preferences.js";
 
 const FleetDetachRecordSchema = z.object({
   recordType: z.literal("fleet.detach"),

@@ -1,6 +1,19 @@
 import { basename, dirname, resolve } from "node:path";
-import { gitOutputIn, type GitOutput } from "../nvim/worktree-changes.js";
-import type { FleetPreferenceStore } from "../persistence/fleet-preference-store.js";
+import type { GitOutput } from "../domain/worktree-review.js";
+
+/**
+ * Exactly the preference rows a project registry reads and writes.
+ *
+ * Narrow on purpose: the concrete store also holds folder dispositions, launch profiles, and
+ * detach identities, none of which this service has any business reaching for.
+ */
+export interface FleetProjectStore {
+  listProjects(): Promise<string[]>;
+  projectDispositions(): Promise<Map<string, boolean>>;
+  setProject(root: string, registered: boolean): Promise<void>;
+  projectMigrationCompleted(): Promise<boolean>;
+  completeProjectMigration(): Promise<void>;
+}
 
 /** Where a path sits in git, once the difference between a repository and a worktree matters. */
 export interface ProjectResolution {
@@ -32,9 +45,9 @@ export interface FleetProjectSeedResult {
 }
 
 export interface FleetProjectServiceOptions {
-  store: FleetPreferenceStore;
+  store: FleetProjectStore;
   /** The git boundary, injected so resolution is testable without repositories on disk. */
-  gitIn?: (cwd: string) => GitOutput;
+  gitIn: (cwd: string) => GitOutput;
 }
 
 /**
@@ -45,12 +58,12 @@ export interface FleetProjectServiceOptions {
  * everything else folds underneath the longest one that contains it.
  */
 export class FleetProjectService {
-  private readonly store: FleetPreferenceStore;
+  private readonly store: FleetProjectStore;
   private readonly gitIn: (cwd: string) => GitOutput;
 
   constructor(options: FleetProjectServiceOptions) {
     this.store = options.store;
-    this.gitIn = options.gitIn ?? gitOutputIn;
+    this.gitIn = options.gitIn;
   }
 
   list(): Promise<string[]> {

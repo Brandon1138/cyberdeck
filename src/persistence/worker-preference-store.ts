@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { WorkerPreferencesSchema, type WorkerPreferences } from "../domain/worker-preferences.js";
 import { openPrivateAppendFile } from "./private-files.js";
 
-export const WorkerPreferencesSchema = z.object({
-  caveman: z.boolean().default(false),
-});
+export {
+  WorkerPreferencesSchema,
+  type WorkerPreferences,
+} from "../domain/worker-preferences.js";
 
 const WorkerPreferenceRecordSchema = z.object({
   recordType: z.literal("worker.preferences"),
@@ -14,8 +16,6 @@ const WorkerPreferenceRecordSchema = z.object({
   persistedAt: z.iso.datetime(),
   preferences: WorkerPreferencesSchema,
 });
-
-export type WorkerPreferences = z.infer<typeof WorkerPreferencesSchema>;
 
 /** Append-only, box-level defaults snapshotted into subsequently started Cyberdeck workers. */
 export class WorkerPreferenceStore {

@@ -1,34 +1,35 @@
 import type { SessionRecord } from "../domain/session.js";
 import type { ControllerIdentity } from "../domain/worker-coordination.js";
 import { orchestratorController } from "../domain/orchestrator.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
+import type { OrchestratorStore } from "./orchestrator-store.js";
 import {
   migrateLegacyWorkerSessions,
+  type LegacyWorkerCoordinationPort,
   type LegacyWorkerMigrationResult,
-} from "../persistence/migrations/0001-worker-coordination.js";
-import { WorkerCoordinationStore } from "../persistence/worker-coordination-store.js";
-import { WorkerCoordinationService, type WorkerCoordinationOptions } from "./worker-coordination.js";
+} from "./migrations/0001-worker-coordination.js";
+import { WorkerCoordinationStore } from "./worker-coordination-store.js";
 
-export interface WorkerCoordinationRuntimeOptions {
+export interface WorkerCoordinationRuntimeService extends LegacyWorkerCoordinationPort {
+  initialize(): Promise<void>;
+}
+
+export interface WorkerCoordinationRuntimeOptions<Service extends WorkerCoordinationRuntimeService> {
   stateDirectory: string;
   recoveredSessions?: readonly SessionRecord[];
   orchestrators?: OrchestratorStore;
-  service?: Omit<WorkerCoordinationOptions, "store">;
+  createService(store: WorkerCoordinationStore): Service;
 }
 
-/** Broker composition boundary. Startup replays durable state before legacy binding migration. */
-export class WorkerCoordinationRuntime {
+/** Durable startup boundary. Composition supplies service; startup replays state before migration. */
+export class WorkerCoordinationRuntime<Service extends WorkerCoordinationRuntimeService> {
   readonly store: WorkerCoordinationStore;
-  readonly service: WorkerCoordinationService;
+  readonly service: Service;
   private started = false;
   private migration: LegacyWorkerMigrationResult | undefined;
 
-  constructor(private readonly options: WorkerCoordinationRuntimeOptions) {
+  constructor(private readonly options: WorkerCoordinationRuntimeOptions<Service>) {
     this.store = new WorkerCoordinationStore(options.stateDirectory);
-    this.service = new WorkerCoordinationService({
-      store: this.store,
-      ...options.service,
-    });
+    this.service = options.createService(this.store);
   }
 
   async start(): Promise<LegacyWorkerMigrationResult> {

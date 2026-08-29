@@ -2,7 +2,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { Journal } from "../../src/broker/journal.js";
+import { Journal } from "../../src/persistence/journal.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
 
 describe("Journal", () => {

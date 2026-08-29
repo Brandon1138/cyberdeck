@@ -378,6 +378,48 @@ async function harness(options: { workerCapabilities?: WorkerCapabilityCatalog }
 }
 
 describe("BrokerServer", () => {
+  it.each(["toString", "hasOwnProperty", "constructor"])(
+    "rejects inherited Object.prototype method %s as unknown",
+    async (method) => {
+      const frames: ServerFrame[] = [];
+      const decoder = new JsonlDecoder(ServerFrameSchema);
+      const socket = {
+        destroyed: false,
+        write: vi.fn((chunk: Uint8Array | string) => {
+          frames.push(...decoder.push(Buffer.from(chunk)));
+          return true;
+        }),
+      } as unknown as Socket;
+      const registry = {
+        onSessionUpdate: vi.fn(() => () => undefined),
+      } as unknown as SessionRegistry;
+      const server = new BrokerServer({ socketPath: "/tmp/unused-broker.sock", registry });
+      const handleFrame = (
+        server as unknown as {
+          handleFrame(
+            context: unknown,
+            frame: { type: "request"; id: number; method: string; params: unknown },
+          ): Promise<void>;
+        }
+      ).handleFrame.bind(server);
+
+      await handleFrame(
+        { id: "inherited-method-client", socket, attachments: new Map() },
+        { type: "request", id: 1, method, params: {} },
+      );
+
+      expect(frames).toEqual([{
+        type: "response",
+        id: 1,
+        ok: false,
+        error: {
+          code: "METHOD_NOT_FOUND",
+          message: `Unknown method ${method}`,
+        },
+      }]);
+    },
+  );
+
   it("answers a snapshot request with the full replay and nothing protocol-shaped", async () => {
     // The one-shot form is the only form: a snapshot is asked for when something wants the raw
     // bytes, and the thread list no longer does. A cursor field is rejected rather than ignored,

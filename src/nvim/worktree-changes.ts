@@ -1,19 +1,28 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type {
+  BoundedChanges,
+  GitOutput,
+  WorktreeBaseline,
+  WorktreeChange,
+  WorktreeChangeSet,
+} from "../domain/worktree-review.js";
+
+/**
+ * The shapes a change list is reported in live in the domain: nvim renders them, Fleet renders
+ * them, and neither reaches through git to get them.
+ */
+export type {
+  BoundedChanges,
+  GitOutput,
+  WorktreeBaseline,
+  WorktreeBaselineKind,
+  WorktreeChange,
+  WorktreeChangeSet,
+} from "../domain/worktree-review.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT_BYTES = 16 * 1024 * 1024;
-
-/** One place the operator can land: a path inside the worktree and a line worth starting at. */
-export interface WorktreeChange {
-  /** Worktree-relative, exactly as git reported it. */
-  path: string;
-  line: number;
-  text: string;
-}
-
-/** The git boundary, injected so every parser above it is testable without a repository. */
-export type GitOutput = (args: readonly string[]) => Promise<string>;
 
 /**
  * `a/` and `b/` are git's own diff prefixes, not part of the path. `--no-prefix` users get paths
@@ -83,32 +92,6 @@ export function parseUntrackedPaths(output: string): string[] {
   return output.split("\0").filter((path) => path !== "").sort();
 }
 
-/**
- * Which rung of {@link diffBaseline}'s ladder produced a change list.
- *
- * The kind travels with the changes because the operator has to be able to read an empty list
- * correctly: "nothing changed since you branched" and "this directory is not a repository at all"
- * are the same zero entries and completely different facts. The label is what nvim's list title and
- * Fleet's status line render, so it is written to be read, not parsed.
- */
-export type WorktreeBaselineKind = "fork-point" | "uncommitted" | "none" | "not-a-repo";
-
-export interface WorktreeBaseline {
-  kind: WorktreeBaselineKind;
-  /** Short enough to sit in a title beside the worker's name. */
-  label: string;
-  /**
-   * The revision the change list was measured against, when the rung has one.
-   *
-   * The label says *which* baseline in words; this says which commit, so the nvim side can show a
-   * file against it rather than only listing that it moved. It is a resolved object name rather
-   * than a ref name — `HEAD` and a branch tip both move while the operator is reading — so a diff
-   * taken minutes later is still the diff the list described. Absent on the rungs with nothing to
-   * compare against, which is why nvim has to check rather than assume.
-   */
-  rev?: string;
-}
-
 const NO_BASELINE: WorktreeBaseline = { kind: "none", label: "no baseline" };
 const NOT_A_REPO: WorktreeBaseline = { kind: "not-a-repo", label: "not a git repository" };
 const UNCOMMITTED: WorktreeBaseline = { kind: "uncommitted", label: "uncommitted only" };
@@ -168,17 +151,6 @@ export async function diffBaseline(git: GitOutput): Promise<DiffPlan> {
     baseline: { kind: "fork-point", label: `since ${defaultBranch}`, rev: forkPoint },
     args: ["diff", "--no-ext-diff", "--unified=0", forkPoint, "--"],
   };
-}
-
-/** What survived {@link MAX_WORKTREE_CHANGES}, before a baseline is attached to it. */
-export interface BoundedChanges {
-  changes: readonly WorktreeChange[];
-  /** How many entries were dropped by {@link MAX_WORKTREE_CHANGES}. */
-  dropped: number;
-}
-
-export interface WorktreeChangeSet extends BoundedChanges {
-  baseline: WorktreeBaseline;
 }
 
 /**

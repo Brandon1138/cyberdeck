@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { canonicalScoutRepositoryRoot } from "../providers/cursor/workspace-state.js";
+import type { ScoutEgressGrant, ScoutEgressStatus } from "../domain/scout-egress.js";
 import { openPrivateAppendFile } from "./private-files.js";
+
+export type { ScoutEgressGrant, ScoutEgressStatus } from "../domain/scout-egress.js";
 
 const ScoutEgressEventSchema = z.object({
   recordType: z.enum(["scout-egress.granted", "scout-egress.revoked"]),
@@ -15,21 +18,6 @@ const ScoutEgressEventSchema = z.object({
   access: z.literal("read-only"),
   authority: z.literal("operator"),
 });
-
-export interface ScoutEgressGrant {
-  root: string;
-  provider: "cursor";
-  profile: "scout";
-  access: "read-only";
-  authority: "operator";
-  grantedAt: string;
-}
-
-export interface ScoutEgressStatus {
-  root: string;
-  enabled: boolean;
-  grant?: ScoutEgressGrant;
-}
 
 export interface ScoutEgressGrantStoreOptions {
   now?: () => string;

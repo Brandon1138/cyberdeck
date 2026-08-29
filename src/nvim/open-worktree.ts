@@ -2,6 +2,9 @@ import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import type { SessionRecord } from "../domain/session.js";
+import { isWorkerLive, worktreeSubject } from "../domain/worktree-review.js";
+
+export { isWorkerLive, worktreeSubject } from "../domain/worktree-review.js";
 import type { SpawnSyncLike } from "../tmux/cockpit.js";
 import { callNvim } from "./bridge.js";
 import { discoverNvimPane, type NvimSpawnOptions } from "./pane.js";
@@ -11,22 +14,6 @@ import {
   type WorktreeBaseline,
   type WorktreeChangeSet,
 } from "./worktree-changes.js";
-
-/**
- * Live means a provider process can still be writing to the worktree.
- *
- * `starting` counts as live: the process is about to exist, and opening its worktree writable for
- * the seconds before it does is exactly the window in which a co-edit is silently lost.
- */
-export function isWorkerLive(record: Pick<SessionRecord, "executionState">): boolean {
-  return record.executionState === "active" || record.executionState === "starting";
-}
-
-/** What a worker row calls itself in nvim's list title. */
-export function worktreeSubject(record: Pick<SessionRecord, "id" | "name">): string {
-  const name = record.name?.trim();
-  return name === undefined || name === "" ? record.id.slice(0, 8) : name;
-}
 
 /**
  * Resolve the session an operator named on the command line.

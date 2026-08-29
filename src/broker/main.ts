@@ -18,7 +18,9 @@ import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
 import { captureScoutWorkspaceStateHash } from "../providers/cursor/workspace-state.js";
 import { createSessionRuntime } from "../runtime/session-runtime-adapter.js";
 import { WorkerTurnObservationAdapter } from "../runtime/worker-turn-observation-adapter.js";
-import { Journal } from "./journal.js";
+import { Journal } from "../persistence/journal.js";
+import { callNvim } from "../nvim/bridge.js";
+import { worktreeChanges, gitOutputIn } from "../nvim/worktree-changes.js";
 import { NvimBindingService } from "./nvim-binding-service.js";
 import { BrokerServer } from "./server.js";
 import { FleetProjectService } from "./fleet-project-service.js";
@@ -49,9 +51,10 @@ import { loadBrokerRuntimeConfig } from "../runtime-config.js";
 import { retainStartupThreads } from "../orchestration/startup-thread-retention.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
 import { ScoutEgressGrantStore } from "../persistence/scout-egress-grant-store.js";
-import { WorkerCoordinationRuntime } from "./worker-coordination-runtime.js";
+import { WorkerCoordinationRuntime } from "../persistence/worker-coordination-runtime.js";
 import { WorkerEventChannel } from "./worker-event-channel.js";
 import { BrokerWorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
+import { WorkerCoordinationService } from "./worker-coordination.js";
 
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
@@ -98,7 +101,7 @@ export async function runBroker(
   const sessionStore = new SessionStore(stateDirectory);
   const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
-  const fleetProjects = new FleetProjectService({ store: fleetPreferences });
+  const fleetProjects = new FleetProjectService({ store: fleetPreferences, gitIn: gitOutputIn });
   const workerPreferences = new WorkerPreferenceStore(stateDirectory);
   const providerPermissions = new ProviderPermissionPreferenceStore(stateDirectory);
   const scoutReports = new ScoutReportStore(stateDirectory);
@@ -143,6 +146,7 @@ export async function runBroker(
     stateDirectory,
     recoveredSessions,
     orchestrators: orchestratorStore,
+    createService: (store) => new WorkerCoordinationService({ store }),
   });
   await workerCoordination.start();
   const orchestrators = new OrchestratorManager(
@@ -218,6 +222,8 @@ export async function runBroker(
   const nvimBindings = new NvimBindingService({
     sessions: registry,
     onSessionUpdate: (listener) => registry.onSessionUpdate(listener),
+    changes: worktreeChanges,
+    notify: callNvim,
   });
   nvimBindings.start();
   const localWorkerControl = new LocalWorkerControlService({

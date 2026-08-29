@@ -2,9 +2,13 @@ import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { WorkerCoordinationRuntime } from "../../src/broker/worker-coordination-runtime.js";
+import { WorkerCoordinationRuntime } from "../../src/persistence/worker-coordination-runtime.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
+import {
+  WorkerCoordinationService,
+  type WorkerCoordinationOptions,
+} from "../../src/broker/worker-coordination.js";
 import {
   WorkerCoordinationStore,
   WorkerCoordinationStoreError,
@@ -21,6 +25,19 @@ async function directory(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), "cyberdeck-worker-coordination-store-"));
   directories.push(path);
   return path;
+}
+
+function coordinationRuntime(options: {
+  stateDirectory: string;
+  recoveredSessions?: readonly SessionRecord[];
+  orchestrators?: OrchestratorStore;
+  service?: Omit<WorkerCoordinationOptions, "store">;
+}) {
+  const { service, ...runtimeOptions } = options;
+  return new WorkerCoordinationRuntime({
+    ...runtimeOptions,
+    createService: (store) => new WorkerCoordinationService({ store, ...service }),
+  });
 }
 
 function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
@@ -69,7 +86,7 @@ describe("WorkerCoordinationStore and migration", () => {
     });
     const controlled = session({ parentSessionId });
     const unresolved = session({ parentSessionId: crypto.randomUUID() });
-    const first = new WorkerCoordinationRuntime({
+    const first = coordinationRuntime({
       stateDirectory,
       recoveredSessions: [controlled, unresolved],
       orchestrators,
@@ -102,7 +119,7 @@ describe("WorkerCoordinationStore and migration", () => {
       }],
     });
 
-    const restarted = new WorkerCoordinationRuntime({
+    const restarted = coordinationRuntime({
       stateDirectory,
       recoveredSessions: [controlled, unresolved],
       orchestrators,
@@ -114,7 +131,7 @@ describe("WorkerCoordinationStore and migration", () => {
   it("does not overwrite immutable origin for a worker already registered by the coordination path", async () => {
     const stateDirectory = await directory();
     const worker = session({ parentSessionId: crypto.randomUUID() });
-    const initial = new WorkerCoordinationRuntime({
+    const initial = coordinationRuntime({
       stateDirectory,
       service: { now: () => NOW },
     });
@@ -145,7 +162,7 @@ describe("WorkerCoordinationStore and migration", () => {
       reason: "register worker reporting channel",
     });
 
-    const restarted = new WorkerCoordinationRuntime({
+    const restarted = coordinationRuntime({
       stateDirectory,
       recoveredSessions: [worker],
       service: { now: () => NOW },
@@ -161,7 +178,7 @@ describe("WorkerCoordinationStore and migration", () => {
 
   it("ignores only an unterminated crash tail", async () => {
     const stateDirectory = await directory();
-    const runtime = new WorkerCoordinationRuntime({ stateDirectory, service: { now: () => NOW } });
+    const runtime = coordinationRuntime({ stateDirectory, service: { now: () => NOW } });
     await runtime.start();
     await runtime.service.registerSubject({
       mutationId: "crash-tail-fixture",
@@ -190,7 +207,7 @@ describe("WorkerCoordinationStore and migration", () => {
 
   it("fails closed on unsupported versions and duplicate transaction ids", async () => {
     const stateDirectory = await directory();
-    const runtime = new WorkerCoordinationRuntime({ stateDirectory, service: { now: () => NOW } });
+    const runtime = coordinationRuntime({ stateDirectory, service: { now: () => NOW } });
     await runtime.start();
     await runtime.service.registerSubject({
       mutationId: "version-fixture",
