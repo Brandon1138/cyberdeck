@@ -5,24 +5,8 @@
       "maxLines": 639
     },
     {
-      "path": "src/broker/server.ts",
-      "maxLines": 955
-    },
-    {
-      "path": "src/broker/session-registry.ts",
-      "maxLines": 2005
-    },
-    {
       "path": "src/broker/worker-coordination.ts",
-      "maxLines": 2772
-    },
-    {
-      "path": "src/cli.ts",
-      "maxLines": 1057
-    },
-    {
-      "path": "src/client/fleet.ts",
-      "maxLines": 6331
+      "maxLines": 2770
     },
     {
       "path": "src/control-plane/job-control-plane.ts",
@@ -51,10 +35,6 @@
     {
       "path": "src/persistence/thread-transcript-store.ts",
       "maxLines": 976
-    },
-    {
-      "path": "src/runtime/conversation-preview.ts",
-      "maxLines": 516
     }
   ]
 }
