@@ -52,6 +52,8 @@ export type CodexCommandRunner = (
 
 const execFileAsync = promisify(execFile);
 const CODEX_REMOTE_ADDRESS = "unix://";
+const CODEX_FIRST_PARTY_MODEL_PROVIDER = "openai";
+const MAX_CODEX_COMMAND_ERROR = 2_000;
 
 const runCodexCommand: CodexCommandRunner = async (executable, args, options) => {
   await execFileAsync(executable, [...args], {
@@ -154,15 +156,27 @@ export class CodexProviderAdapter implements ProviderAdapter {
         { cwd: spec.cwd, env: spec.env },
       );
     } catch (cause) {
+      const detail = codexCommandFailure(cause);
       throw Object.assign(
-        new Error(`Could not start Codex Remote Control for orchestrator ${session.id}`, { cause }),
+        new Error(
+          `Could not start Codex Remote Control for orchestrator ${session.id}`
+            + (detail === undefined ? "" : `:\n${detail}`),
+          { cause },
+        ),
         { code: "CODEX_REMOTE_CONTROL_UNAVAILABLE" },
       );
     }
   }
 
   private remoteArgs(session: SessionRecord): string[] {
-    return session.kind === "orchestrator" ? ["--remote", CODEX_REMOTE_ADDRESS] : [];
+    return session.kind === "orchestrator"
+      ? [
+        "--remote",
+        CODEX_REMOTE_ADDRESS,
+        "-c",
+        `model_provider=${JSON.stringify(CODEX_FIRST_PARTY_MODEL_PROVIDER)}`,
+      ]
+      : [];
   }
 
   private addProviderInstructions(args: string[], session: SessionRecord): void {
@@ -219,6 +233,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     return match.id;
   }
+}
+
+function codexCommandFailure(cause: unknown): string | undefined {
+  const value = typeof cause === "object" && cause !== null && "stderr" in cause
+    ? String((cause as { stderr: unknown }).stderr)
+    : cause instanceof Error ? cause.message : String(cause);
+  const detail = value.trim().slice(0, MAX_CODEX_COMMAND_ERROR);
+  return detail === "" ? undefined : detail;
 }
 
 function candidateDayDirectories(root: string, timestamp: number): string[] {
