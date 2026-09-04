@@ -109,6 +109,7 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args).toEqual(expect.arrayContaining([
       "--remote",
       "unix://",
+      "model_provider=\"openai\"",
       "--approve-for-me",
     ]));
     expect(spec.args).not.toContain("-a");
@@ -139,8 +140,11 @@ describe("CodexProviderAdapter", () => {
   });
 
   it("fails an orchestrator launch loudly when Remote Control cannot start", async () => {
+    const commandError = Object.assign(new Error("Command failed"), {
+      stderr: "managed standalone Codex install not found at /managed/codex",
+    });
     const adapter = new CodexProviderAdapter({
-      runCommand: vi.fn(async () => { throw new Error("daemon unavailable"); }),
+      runCommand: vi.fn(async () => { throw commandError; }),
     });
     const orchestrator = session({
       kind: "orchestrator",
@@ -149,7 +153,10 @@ describe("CodexProviderAdapter", () => {
     });
 
     await expect(adapter.prepareLaunch(orchestrator, adapter.buildLaunchSpec(orchestrator)))
-      .rejects.toMatchObject({ code: "CODEX_REMOTE_CONTROL_UNAVAILABLE" });
+      .rejects.toMatchObject({
+        code: "CODEX_REMOTE_CONTROL_UNAVAILABLE",
+        message: expect.stringContaining("managed standalone Codex install not found"),
+      });
   });
 
   it("keeps workers on the direct CLI and never starts Remote Control", async () => {
@@ -267,6 +274,8 @@ describe("CodexProviderAdapter", () => {
       "/tmp/repo",
       "--remote",
       "unix://",
+      "-c",
+      "model_provider=\"openai\"",
       "--approve-for-me",
       "-m",
       "gpt-test",
