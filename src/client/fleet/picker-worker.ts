@@ -1,6 +1,7 @@
 import { stripTerminalControl } from "../../domain/terminal-replay.js";
 import { expandPath } from "../path-completion.js";
 import { composerCwd, friendlyEffort } from "./model-labels.js";
+import { adoptOrchestratorModels } from "./orchestrator-models.js";
 import { pickerRow, renderCursorlessPickerFrame } from "./picker-orchestrator.js";
 import { fit } from "./render-composer.js";
 import { renderHeader } from "./render-list.js";
@@ -286,7 +287,7 @@ export function transitionWorkerPicker(state: FleetState, key: string): FleetTra
  */
 export function adoptWorkerModels(state: FleetState, workerModels: WorkerModelCatalog): FleetState {
   const picker = state.workerPicker;
-  if (picker === undefined) return { ...state, workerModels };
+  if (picker === undefined) return adoptOrchestratorModels(state, workerModels);
   const selected = pickerModelChoices(state)[picker.modelIndex];
   const next = { ...state, workerModels };
   if (selected === undefined) return next;
@@ -360,4 +361,3 @@ export function renderWorkerPicker(state: FleetState, options: ResolvedFleetRend
   ];
   return renderCursorlessPickerFrame(lines, footer, options.height);
 }
-

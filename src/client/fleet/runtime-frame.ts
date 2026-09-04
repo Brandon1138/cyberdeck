@@ -113,6 +113,8 @@ export function fleetFrameLayout(
     return frame({
       surface: "orchestrator-picker",
       step: state.orchestratorPicker.step,
+      choices: state.workerModels.orchestratorChoices.map(({ provider, model }) =>
+        [provider.provider, model, provider.efforts, provider.fallbackReason]),
       sessions: existingOrchestrators(snapshot).map(({ id }) => id),
       footerRows: 2 + noticeRows + (state.orchestratorPicker.step === "effort" ? 1 : 0),
     }, `orchestrator-picker:${state.orchestratorPicker.step}`);
@@ -171,5 +173,4 @@ export function fleetFrameLayout(
     ? `fleet-list:${state.threadListScrollOffset}`
     : `shell:${shellTranscriptScrollOffset(state.shellMode, viewportHeight)}`);
 }
-
 

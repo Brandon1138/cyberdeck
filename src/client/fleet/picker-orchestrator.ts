@@ -1,13 +1,13 @@
 import type { SessionRecord } from "../../domain/session.js";
 import { stripTerminalControl } from "../../domain/terminal-replay.js";
-import { DELETE_CONFIRMATION_MS, ORCHESTRATOR_MODEL_CHOICES } from "./constants.js";
+import { DELETE_CONFIRMATION_MS } from "./constants.js";
 import { threadSubject } from "./list-groups.js";
 import { isTerminalSession, orderedThreads } from "./list-rows.js";
 import { friendlyModel } from "./model-labels.js";
 import { displayThreadName, fit } from "./render-composer.js";
 import { renderHeader } from "./render-list.js";
 import { boundedIndex } from "./render-rows.js";
-import { ResolvedFleetRenderOptions } from "./runtime-options.js";
+import { type OrchestratorModelChoice, ResolvedFleetRenderOptions } from "./runtime-options.js";
 import { paint, renderNotice } from "./slash-commands.js";
 import { FleetSnapshot, FleetState, FleetTransition, OrchestratorPickerFocus, OrchestratorPickerState } from "./state.js";
 import { threadStatus } from "./transport.js";
@@ -19,6 +19,7 @@ export function transitionOrchestratorPicker(
   now: number,
 ): FleetTransition {
   const picker = state.orchestratorPicker!;
+  const choices = state.workerModels.orchestratorChoices;
   if (key === "escape") {
     return {
       state: {
@@ -40,7 +41,7 @@ export function transitionOrchestratorPicker(
       // the first row rather than moved relative to a position it no longer has.
       const index = current < 0
         ? 0
-        : boundedIndex(current + delta, existing.length + ORCHESTRATOR_MODEL_CHOICES.length);
+        : boundedIndex(current + delta, existing.length + choices.length);
       return {
         state: {
           ...state,
@@ -48,7 +49,7 @@ export function transitionOrchestratorPicker(
         },
       };
     }
-    const choice = ORCHESTRATOR_MODEL_CHOICES[picker.modelIndex]!;
+    const choice = choices[picker.modelIndex]!;
     return {
       state: {
         ...state,
@@ -148,7 +149,7 @@ export function transitionOrchestratorPicker(
       };
     }
     const modelIndex = focus.modelIndex;
-    const choice = ORCHESTRATOR_MODEL_CHOICES[modelIndex];
+    const choice = choices[modelIndex];
     if (choice === undefined) {
       return {
         state: {
@@ -167,7 +168,7 @@ export function transitionOrchestratorPicker(
     };
   }
 
-  const selection = orchestratorSelection(picker);
+  const selection = orchestratorSelection(picker, choices);
   return {
     state: { ...state, orchestratorPicker: undefined, notice: undefined },
     action: {
@@ -190,7 +191,8 @@ export function renderOrchestratorPicker(
   options: ResolvedFleetRenderOptions,
 ): string {
   const picker = state.orchestratorPicker!;
-  const selection = picker.step === "effort" ? orchestratorSelection(picker) : undefined;
+  const choices = state.workerModels.orchestratorChoices;
+  const selection = picker.step === "effort" ? orchestratorSelection(picker, choices) : undefined;
   const stepNumber = picker.step === "target" ? 1 : 2;
   const lines = [
     ...renderHeader(orderedThreads(snapshot), state, options),
@@ -213,7 +215,11 @@ export function renderOrchestratorPicker(
         pickerRow(existingOrchestratorLabel(record, options.color), index === focusIndex, options.color)));
     }
     lines.push("", "New orchestrator", "");
-    lines.push(...ORCHESTRATOR_MODEL_CHOICES.map((choice, index) =>
+    const fallback = choices.find((choice) => choice.provider.provider === "codex")?.provider.fallbackReason;
+    if (fallback !== undefined) {
+      lines.push(paint(fit(`~ Codex models are a stored list — ${fallback}`, options.width), "muted", options.color), "");
+    }
+    lines.push(...choices.map((choice, index) =>
       pickerRow(
         `${choice.label}  ${paint(choice.provider.label, "dim", options.color)}`,
         existing.length + index === focusIndex,
@@ -257,8 +263,11 @@ export function renderOrchestratorPicker(
   );
 }
 
-export function orchestratorSelection(picker: Extract<OrchestratorPickerState, { step: "effort"; }>) {
-  const choice = ORCHESTRATOR_MODEL_CHOICES[picker.modelIndex]!;
+export function orchestratorSelection(
+  picker: Extract<OrchestratorPickerState, { step: "effort"; }>,
+  choices: readonly OrchestratorModelChoice[],
+) {
+  const choice = choices[picker.modelIndex]!;
   const provider = choice.provider;
   const effort = provider.efforts[picker.effortIndex]!;
   return {
@@ -378,4 +387,3 @@ export function renderCursorlessPickerFrame(
   while (body.length < bodyHeight) body.push("");
   return [...body, ...footer].join("\n");
 }
-

@@ -210,16 +210,15 @@ export async function runBroker(
     createService: (store) => new WorkerCoordinationService({ store }),
   });
   await workerCoordination.start();
+  // Shared discovery for worker launches, orchestrator creation, Fleet, and MCP capabilities.
+  const workerCapabilities = new WorkerCapabilityCatalog();
   const orchestrators = new OrchestratorManager(
     registry,
     orchestratorStore,
     workerPreferences,
     providerPermissions,
+    (provider) => workerCapabilities.resolve(provider),
   );
-  // One catalog, composed before anything that decides what may be launched: the launch boundary
-  // validates against it, the Fleet composer offers what it serves, and the MCP capabilities tool
-  // reads the same instance.
-  const workerCapabilities = new WorkerCapabilityCatalog();
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
   instructions.start();
   const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
