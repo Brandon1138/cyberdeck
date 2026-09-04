@@ -99,15 +99,15 @@ const PROVIDER_KEYS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * Claude gates Remote Control to first-party `api.anthropic.com`: under any other
- * `ANTHROPIC_BASE_URL` the feature-flag evaluation that registers `/remote-control` is skipped
- * entirely. The operator routes workers through a local compression proxy but drives
- * orchestrators from a phone, so orchestrator launches go direct while every other role keeps the
- * inherited routing. Orchestrators also launch with `--setting-sources project,local`, so nothing
- * re-injects the dropped value from user settings.
+ * Remote Control belongs to the providers' first-party account sessions. The operator routes
+ * workers through local compression/headroom proxies but drives orchestrators from a phone, so
+ * orchestrator launches go direct while every other role keeps inherited provider routing.
+ * Claude also launches orchestrators with `--setting-sources project,local`, so user settings
+ * cannot re-inject its dropped value.
  */
 const ORCHESTRATOR_WITHHELD_KEYS = [
   "ANTHROPIC_BASE_URL",
+  "OPENAI_BASE_URL",
 ] as const;
 
 /**

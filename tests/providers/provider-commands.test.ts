@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
 import { CodexProviderAdapter } from "../../src/providers/codex.js";
@@ -99,16 +99,75 @@ describe("CodexProviderAdapter", () => {
     const mcp = { nodePath: "/node", cliPath: "/cyberdeck.js" };
     const orchestrator = session({
       kind: "orchestrator",
+      sandbox: "workspace-write",
+      approvalMode: "auto",
       providerInstructions: "Cyberdeck orchestrator guidance",
     });
     const spec = new CodexProviderAdapter({ mcp }).buildLaunchSpec(orchestrator);
 
     expect(spec.args).toContain("developer_instructions=\"Cyberdeck orchestrator guidance\"");
+    expect(spec.args).toEqual(expect.arrayContaining([
+      "--remote",
+      "unix://",
+      "--approve-for-me",
+    ]));
+    expect(spec.args).not.toContain("-a");
     expect(spec.args.join(" ")).toContain("mcp_servers.cyberdeck.command");
     expect(spec.args.join(" ")).toContain(orchestrator.id);
     expect(spec.args).not.toContain("--");
     expect(new CodexProviderAdapter({ mcp }).buildLaunchSpec(session()).args.join(" "))
       .not.toContain("mcp_servers.cyberdeck");
+  });
+
+  it("starts the managed Remote Control daemon before an orchestrator connects", async () => {
+    const runCommand = vi.fn(async () => undefined);
+    const orchestrator = session({
+      kind: "orchestrator",
+      sandbox: "workspace-write",
+      approvalMode: "auto",
+    });
+    const adapter = new CodexProviderAdapter({ runCommand });
+    const spec = adapter.buildLaunchSpec(orchestrator);
+
+    await adapter.prepareLaunch(orchestrator, spec);
+
+    expect(runCommand).toHaveBeenCalledWith(
+      "codex",
+      ["remote-control", "start", "--json"],
+      { cwd: "/tmp/repo", env: spec.env },
+    );
+  });
+
+  it("fails an orchestrator launch loudly when Remote Control cannot start", async () => {
+    const adapter = new CodexProviderAdapter({
+      runCommand: vi.fn(async () => { throw new Error("daemon unavailable"); }),
+    });
+    const orchestrator = session({
+      kind: "orchestrator",
+      sandbox: "workspace-write",
+      approvalMode: "auto",
+    });
+
+    await expect(adapter.prepareLaunch(orchestrator, adapter.buildLaunchSpec(orchestrator)))
+      .rejects.toMatchObject({ code: "CODEX_REMOTE_CONTROL_UNAVAILABLE" });
+  });
+
+  it("keeps workers on the direct CLI and never starts Remote Control", async () => {
+    const runCommand = vi.fn(async () => undefined);
+    const worker = session({
+      kind: "worker",
+      sandbox: "workspace-write",
+      approvalMode: "auto",
+    });
+    const adapter = new CodexProviderAdapter({ runCommand });
+    const spec = adapter.buildLaunchSpec(worker);
+
+    await adapter.prepareLaunch(worker, spec);
+
+    expect(spec.args).not.toContain("--remote");
+    expect(spec.args).toEqual(expect.arrayContaining(["-s", "workspace-write", "-a", "never"]));
+    expect(spec.args).not.toContain("--approve-for-me");
+    expect(runCommand).not.toHaveBeenCalled();
   });
 
   it("passes a new thread's initial task as one positional argument", () => {
@@ -195,6 +254,8 @@ describe("CodexProviderAdapter", () => {
       exitCode: 0,
       model: "gpt-test",
       kind: "orchestrator",
+      sandbox: "workspace-write",
+      approvalMode: "auto",
       providerInstructions: "Cyberdeck orchestrator guidance",
     }));
 
@@ -204,10 +265,9 @@ describe("CodexProviderAdapter", () => {
       "--no-alt-screen",
       "-C",
       "/tmp/repo",
-      "-s",
-      "read-only",
-      "-a",
-      "on-request",
+      "--remote",
+      "unix://",
+      "--approve-for-me",
       "-m",
       "gpt-test",
       "-c",

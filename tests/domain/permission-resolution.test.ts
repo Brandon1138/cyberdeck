@@ -287,6 +287,34 @@ describe("writable roots", () => {
 });
 
 describe("MCP approval shortfalls", () => {
+  it("uses Codex automatic review for an opted-in workspace-write orchestrator", () => {
+    const result = resolveProviderPermissionPlan("codex", {
+      sandbox: "workspace-write",
+      approvalMode: "auto",
+      mcpInjected: true,
+      codexApproveForMe: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.args).toEqual(["--approve-for-me"]);
+    expect(result.value.shortfalls).toEqual([]);
+  });
+
+  it("does not let the combined Codex preset widen a read-only request", () => {
+    const result = resolveProviderPermissionPlan("codex", {
+      sandbox: "read-only",
+      approvalMode: "auto",
+      codexApproveForMe: true,
+      mcpInjected: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.args).toEqual(["-s", "read-only", "-a", "never"]);
+    expect(result.value.achieved.writes).toBe("denied");
+    expect(result.value.shortfalls.map((shortfall) => shortfall.code))
+      .toEqual(["MCP_APPROVAL_PROMPTS_REMAIN"]);
+  });
+
   it("warns that an automatic Codex session still stops at MCP approval prompts", () => {
     const result = resolveProviderPermissionPlan("codex", {
       sandbox: "workspace-write",

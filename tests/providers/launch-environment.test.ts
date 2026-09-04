@@ -105,7 +105,7 @@ describe("provider child environment", () => {
     }
   });
 
-  it("withholds ANTHROPIC_BASE_URL from orchestrators only", () => {
+  it("withholds provider routing from orchestrators only", () => {
     const worker = buildProviderChildEnvironment({
       source: SOURCE,
       provider: "claude",
@@ -123,6 +123,23 @@ describe("provider child environment", () => {
 
     expect(worker.ANTHROPIC_BASE_URL).toBe(SOURCE.ANTHROPIC_BASE_URL);
     expect(session.ANTHROPIC_BASE_URL).toBe(SOURCE.ANTHROPIC_BASE_URL);
+
+    const codexOrchestrator = buildProviderChildEnvironment({
+      source: SOURCE,
+      provider: "codex",
+      cwd: "/workspace/orchestrator",
+      terminal: "pty",
+      identity: { role: "orchestrator" },
+    });
+    const codexWorker = buildProviderChildEnvironment({
+      source: SOURCE,
+      provider: "codex",
+      cwd: "/workspace/worker",
+      terminal: "pty",
+      identity: { role: "worker" },
+    });
+    expect(codexOrchestrator.OPENAI_BASE_URL).toBeUndefined();
+    expect(codexWorker.OPENAI_BASE_URL).toBe(SOURCE.OPENAI_BASE_URL);
   });
 
   it("keeps provider routing in its matching profile only", () => {

@@ -19,7 +19,7 @@ import {
   type ResetOrchestratorRequest,
 } from "../domain/orchestrator.js";
 import type { CyberdeckCapability } from "../domain/capability.js";
-import type { ApprovalMode, ProviderId, SessionRecord } from "../domain/session.js";
+import type { ApprovalMode, ProviderId, Sandbox, SessionRecord } from "../domain/session.js";
 import { resolveProviderPermission } from "./permission-policy.js";
 import type {
   OrchestratorBindingRepository,
@@ -40,8 +40,9 @@ export interface OrchestratorManagerResult {
   created: boolean;
   /**
    * Capabilities the resolved permission mode could not deliver. An orchestrator session hardcodes
-   * `sandbox: "read-only"`, so an automatic Claude orchestrator asks for something Claude has no
-   * write-denying mode to express without prompting. It starts, and says so.
+   * Claude orchestrators remain read-only, so automatic mode asks for something Claude has no
+   * write-denying mode to express without prompting. Codex orchestrators use its reviewed
+   * workspace-write preset. Any diminished request starts and says so.
    */
   warnings?: string[];
 }
@@ -146,12 +147,14 @@ export class OrchestratorManager {
   ): Promise<OrchestratorManagerResult> {
     const approvalMode = request.approvalMode
       ?? await this.configuredApprovalMode(request.provider);
+    const sandbox = orchestratorSandbox(request.provider);
     // Resolved before the session exists so an unsatisfiable request is refused at create time,
     // and a satisfiable-but-diminished one is reported instead of discovered at a prompt.
     const plan = resolveProviderPermissionPlan(request.provider, {
-      sandbox: "read-only",
+      sandbox,
       approvalMode,
       mcpInjected: true,
+      codexApproveForMe: request.provider === "codex",
     });
     if (!plan.ok) {
       throw Object.assign(new Error(plan.message), { code: plan.code });
@@ -168,7 +171,7 @@ export class OrchestratorManager {
         ...(approvalMode === undefined ? {} : { approvalMode }),
         cwd: request.cwd,
         detached: true,
-        sandbox: "read-only",
+        sandbox,
         role: "orchestrator",
         kind: "orchestrator",
         orchestratorScope: request.scope,
@@ -184,7 +187,7 @@ export class OrchestratorManager {
           ...(request.model === undefined ? {} : { model: request.model }),
           ...(request.effort === undefined ? {} : { effort: request.effort }),
           cwd: request.cwd,
-          sandbox: "read-only",
+          sandbox,
           scope,
           grant: {
             subjectSessionId: started.id,
@@ -378,6 +381,10 @@ export class OrchestratorManager {
     }
     return this.workerPreferences;
   }
+}
+
+function orchestratorSandbox(provider: ProviderId): Sandbox {
+  return provider === "codex" ? "workspace-write" : "read-only";
 }
 
 /** Single source of truth for which providers can host the Cyberdeck MCP server. */
