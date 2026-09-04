@@ -226,7 +226,7 @@ describe("OrchestratorManager", () => {
     expect(result.warnings?.join("\n")).toContain("plan");
   });
 
-  it("warns that an automatic Codex orchestrator still stops at MCP approval prompts", async () => {
+  it("uses Codex automatic review without an MCP approval shortfall", async () => {
     const start = activatingStart((request: object) => ({ ...record, ...request }));
     const manager = new OrchestratorManager(
       { start, stop: vi.fn(async () => {}) } as never,
@@ -245,7 +245,7 @@ describe("OrchestratorManager", () => {
       cwd: "/repo/one",
       scope: "fleet",
     });
-    expect(result.warnings?.join("\n")).toContain("MCP tool");
+    expect(result.warnings).toBeUndefined();
   });
 
   it("starts a Claude orchestrator in persisted permissioned mode", async () => {
@@ -317,7 +317,7 @@ describe("OrchestratorManager", () => {
     expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "plan"]));
   });
 
-  it("starts a Codex orchestrator whose automatic mode reaches the CLI as -a never", async () => {
+  it("starts a Codex orchestrator with Remote Control and the reviewed approval preset", async () => {
     let launchArgs: string[] = [];
     const start = vi.fn(async (
       request: object,
@@ -349,14 +349,20 @@ describe("OrchestratorManager", () => {
       session: {
         provider: "codex",
         approvalMode: "auto",
+        sandbox: "workspace-write",
       },
     });
     expect(start.mock.calls[0]?.[0]).toMatchObject({
       provider: "codex",
       approvalMode: "auto",
+      sandbox: "workspace-write",
     });
-    expect(launchArgs).toEqual(expect.arrayContaining(["-a", "never"]));
-    expect(launchArgs).not.toContain("on-request");
+    expect(launchArgs).toEqual(expect.arrayContaining([
+      "--remote",
+      "unix://",
+      "--approve-for-me",
+    ]));
+    expect(launchArgs).not.toContain("-a");
   });
 
   it("keeps an explicit prompt mode ahead of persisted automatic Codex policy", async () => {

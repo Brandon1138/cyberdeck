@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { closeSync, openSync, readSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
 import type { SessionRecord } from "../domain/session.js";
 import { providerImageLaunchArgs } from "./image-input.js";
@@ -9,16 +11,16 @@ import { resolveProviderPermissionPlan } from "../domain/permission-resolution.j
 import { workspaceWritableRoots } from "../domain/worker-workspace.js";
 
 /**
- * Codex names both permission dimensions natively, so its flags are a direct transcription of the
- * request. They are still built by the shared resolver: the point of one resolution layer is that
- * the provider whose reading is literal and the provider whose reading was not cannot disagree
- * about what the same stored request meant.
+ * Codex workers name both permission dimensions independently. Top-level orchestrators use the
+ * provider's reviewed `--approve-for-me` preset. Both paths still come from the shared resolver so
+ * the stored request and the provider-native launch cannot disagree about what was granted.
  */
 function codexPermissionArgs(session: SessionRecord): string[] {
   const plan = resolveProviderPermissionPlan("codex", {
     sandbox: session.sandbox,
     approvalMode: session.approvalMode,
     writableRoots: workspaceWritableRoots(session.workspace),
+    codexApproveForMe: session.kind === "orchestrator",
   });
   if (!plan.ok) throw Object.assign(new Error(plan.message), { code: plan.code });
   return [...plan.value.args];
@@ -39,7 +41,26 @@ export interface CodexProviderAdapterOptions {
   sessionsDirectory?: string;
   mcp?: CyberdeckMcpLaunch;
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
+  runCommand?: CodexCommandRunner;
 }
+
+export type CodexCommandRunner = (
+  executable: string,
+  args: readonly string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+) => Promise<void>;
+
+const execFileAsync = promisify(execFile);
+const CODEX_REMOTE_ADDRESS = "unix://";
+
+const runCodexCommand: CodexCommandRunner = async (executable, args, options) => {
+  await execFileAsync(executable, [...args], {
+    cwd: options.cwd,
+    env: options.env,
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
+  });
+};
 
 export class CodexProviderAdapter implements ProviderAdapter {
   readonly id = "codex" as const;
@@ -57,6 +78,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       "--no-alt-screen",
       "-C",
       session.cwd,
+      ...this.remoteArgs(session),
       ...codexPermissionArgs(session),
     ];
     if (session.model !== undefined) {
@@ -95,6 +117,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       "--no-alt-screen",
       "-C",
       session.cwd,
+      ...this.remoteArgs(session),
       ...codexPermissionArgs(session),
     ];
     if (session.model !== undefined) args.push("-m", session.model);
@@ -115,6 +138,31 @@ export class CodexProviderAdapter implements ProviderAdapter {
         session,
       ),
     };
+  }
+
+  /**
+   * Codex Remote Control is hosted by its managed app-server daemon. Starting it is idempotent, so
+   * every orchestrator launch and resume can establish the prerequisite before the remote TUI
+   * connects. Workers remain direct provider processes and never touch this machine-wide daemon.
+   */
+  async prepareLaunch(session: SessionRecord, spec: ProviderLaunchSpec): Promise<void> {
+    if (session.kind !== "orchestrator") return;
+    try {
+      await (this.options.runCommand ?? runCodexCommand)(
+        spec.executable,
+        ["remote-control", "start", "--json"],
+        { cwd: spec.cwd, env: spec.env },
+      );
+    } catch (cause) {
+      throw Object.assign(
+        new Error(`Could not start Codex Remote Control for orchestrator ${session.id}`, { cause }),
+        { code: "CODEX_REMOTE_CONTROL_UNAVAILABLE" },
+      );
+    }
+  }
+
+  private remoteArgs(session: SessionRecord): string[] {
+    return session.kind === "orchestrator" ? ["--remote", CODEX_REMOTE_ADDRESS] : [];
   }
 
   private addProviderInstructions(args: string[], session: SessionRecord): void {

@@ -78,6 +78,13 @@ export interface ProviderPermissionRequest {
   sandbox: Sandbox;
   approvalMode?: ApprovalMode | undefined;
   /**
+   * Use Codex's automatic approval reviewer rather than the legacy `-a never` spelling. The
+   * reviewer is deliberately opt-in because `--approve-for-me` also selects workspace-write; only
+   * top-level Codex orchestrators request that combined preset. Workers keep the exact independent
+   * sandbox and prompt dimensions recorded on their session.
+   */
+  codexApproveForMe?: boolean | undefined;
+  /**
    * Absolute directories that must be writable alongside the workspace root. This is the mechanism
    * a worker needs to run `git worktree add`: the repository's git common directory lives outside
    * the worktree it is creating, and every provider blocks writes there without an explicit grant.
@@ -97,10 +104,9 @@ export const CLAUDE_PERMISSION_MODES = {
 } as const;
 
 const MCP_APPROVAL_AUTOMATIC: Record<ProviderId, boolean> = {
-  // `-a never` governs shell execution. Codex 0.147.0 advertises no per-server or per-tool MCP
-  // approval setting — `codex mcp add` has no such flag and the config schema has no such key — and
-  // on 2026-08-14 automatic Codex workers were observed stopping at an interactive approval prompt
-  // for a Cyberdeck MCP tool call. Unproven is treated as false.
+  // Worker launches still use the independent `-a never` flag, which does not provide automatic
+  // review for MCP approval requests. Codex orchestrators opt into `--approve-for-me` below; that
+  // combined preset is detected from the resolved plan rather than widening every Codex worker.
   codex: false,
   // `--permission-mode auto` covers tool use, MCP tools included.
   claude: true,
@@ -172,15 +178,17 @@ export function resolveProviderPermissionPlan(
   }
 
   const plan = provider === "codex"
-    ? codexPlan(requested, writableRoots)
+    ? codexPlan(requested, writableRoots, request.codexApproveForMe === true)
     : provider === "claude"
       ? claudePlan(requested, writableRoots)
       : cursorPlan(requested, writableRoots, request.cursorReadOnlyMode ?? "plan");
 
   const shortfalls = [...plan.shortfalls];
+  const codexAutomaticReviewer = provider === "codex" && plan.args.includes("--approve-for-me");
   if (
     request.mcpInjected === true
     && requested.prompts === "never"
+    && !codexAutomaticReviewer
     && !MCP_APPROVAL_AUTOMATIC[provider]
   ) {
     shortfalls.push({
@@ -197,9 +205,36 @@ export function resolveProviderPermissionPlan(
 function codexPlan(
   requested: EffectivePermission,
   writableRoots: readonly string[],
+  approveForMe: boolean,
 ): ProviderPermissionPlan {
-  // Codex names both dimensions natively and applies both literally, so it is the one provider
-  // whose flags are a direct transcription of the request.
+  if (approveForMe) {
+    if (requested.writes !== "workspace" || requested.prompts !== "never") {
+      return {
+        provider: "codex",
+        requested,
+        achieved: requested,
+        args: [
+          "-s",
+          requested.writes === "workspace" ? "workspace-write" : "read-only",
+          "-a",
+          requested.prompts === "never" ? "never" : "on-request",
+          ...addDirArgs(writableRoots),
+        ],
+        postLaunch: [],
+        shortfalls: [],
+      };
+    }
+    return {
+      provider: "codex",
+      requested,
+      achieved: requested,
+      args: ["--approve-for-me", ...addDirArgs(writableRoots)],
+      postLaunch: [],
+      shortfalls: [],
+    };
+  }
+  // Outside the reviewed orchestrator preset, Codex names both dimensions natively and applies
+  // both literally, so these flags are a direct transcription of the request.
   return {
     provider: "codex",
     requested,
