@@ -8,6 +8,8 @@ function setup(unavailable = false) {
   const models = parseCodexModelCatalog(JSON.stringify({ models: [
     { slug: "gpt-6-astra", display_name: "GPT-6-Astra", visibility: "list", supported_reasoning_levels: [{ effort: "high" }] },
     { slug: "future-codex-model", visibility: "list", supported_reasoning_levels: [{ effort: "medium" }] },
+    { slug: "empty-efforts", visibility: "list", supported_reasoning_levels: [] },
+    { slug: "future-efforts", visibility: "list", supported_reasoning_levels: [{ effort: "hyper" }] },
     { slug: "internal-model", visibility: "hide" },
   ] }));
   const list = vi.fn(async () => unavailable ? { unavailable: "CLI unavailable" } : { models });
@@ -34,7 +36,7 @@ describe("Codex orchestrator launch discovery", () => {
     // Fleet's RPC and creation use the same first-party catalog instance.
     await expect(fleetMethods["orchestrator.capabilities"]!(
       { options: { orchestrators: manager } } as never, {} as never, {} as never,
-    )).resolves.toEqual([expect.objectContaining({ models: ["gpt-6-astra", "future-codex-model"] })]);
+    )).resolves.toEqual([expect.objectContaining({ models: ["gpt-6-astra", "future-codex-model", "empty-efforts", "future-efforts"] })]);
     const probes = list.mock.calls.length;
     const result = await manager.create({ ...request, model });
     expect(result.binding).toMatchObject({ provider: "codex", model });
@@ -56,6 +58,15 @@ describe("Codex orchestrator launch discovery", () => {
     expect(start).not.toHaveBeenCalled();
     await manager.create({ ...request, model: "gpt-6-astra", effort: "high" });
     expect(start.mock.calls[0]![0]).toMatchObject({ model: "gpt-6-astra", effort: "high" });
+  });
+
+  it.each(["empty-efforts", "future-efforts"])("accepts only provider-managed effort for %s", async (model) => {
+    const { manager, start } = setup();
+    await expect(manager.create({ ...request, model, effort: "high" }))
+      .rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
+    expect(start).not.toHaveBeenCalled();
+    await manager.create({ ...request, model });
+    expect(start.mock.calls[0]![0].effort).toBeUndefined();
   });
 
   it("uses stored Codex selections on discovery failure and preserves other provider policy", async () => {

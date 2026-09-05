@@ -69,6 +69,16 @@ describe("Codex orchestrator discovery in Fleet", () => {
     expect(action.request).not.toHaveProperty("effort");
   });
 
+  it("offers only provider-managed effort when the discovered range is empty", () => {
+    const state = { ...initial(), workerModels: models({ modelEfforts: { "gpt-6-astra": [] } }) };
+    expect(state.workerModels.orchestratorChoices[0]!.provider.efforts).toEqual(["native-default"]);
+    const effort = key(key(state, "ctrl+o").state, "enter").state;
+    const action = key(key(effort, "down").state, "enter").action;
+    expect(action).toMatchObject({ type: "create-orchestrator", request: { model: "gpt-6-astra" } });
+    if (action?.type !== "create-orchestrator") throw new Error("Expected creation");
+    expect(action.request).not.toHaveProperty("effort");
+  });
+
   it("retains model and effort identity when discovery reorders both", () => {
     const opened = key(initial(), "ctrl+o").state;
     const selected = key(key(key(opened, "enter").state, "down").state, "down").state;
