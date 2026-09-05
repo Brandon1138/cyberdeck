@@ -1,8 +1,10 @@
+import { brokerExecutionRuntime } from "../runtime/execution/broker-execution-runtime.js";
+import { SentrySink } from "../observability/sentry-sink.js";
+import { withActivitySink, type ActivitySinkPort } from "../orchestration/activity-sink.js";
+import { openActivityRecorder } from "../persistence/agent-activity-store.js";
+import { activityInstructionStore } from "../orchestration/activity-instruction-store.js";
 import { enforceJobExecutionPolicy } from "../orchestration/job-execution-policy.js";
 import type { WorkerExecutionPolicy } from "../domain/worker-execution.js";
-import { HostExecutor } from "../runtime/execution/host-executor.js";
-import { WorkerExecutionStore } from "../persistence/worker-execution-store.js";
-import { WorkerExecutionService } from "../orchestration/worker-execution-service.js";
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -160,12 +162,25 @@ export async function runBroker(
 ): Promise<BrokerServer> {
   await ensurePrivateDirectory(stateDirectory);
   const journal = new Journal(stateDirectory);
+  const localActivity = await openActivityRecorder(resolve(stateDirectory, "activity"));
   const claudeConversations = new ClaudeConversationBindingStore(stateDirectory);
   const transcripts = new ThreadTranscriptStore(stateDirectory, { claudeConversations });
   await transcripts.init();
   const cliPath = resolve(dirname(fileURLToPath(import.meta.url)), "../cli.js");
   const mcp = { nodePath: process.execPath, cliPath };
   const config = loadBrokerRuntimeConfig(resolve(stateDirectory, "config.json"));
+  let sentry: SentrySink | undefined;
+  let telemetry: ActivitySinkPort | undefined;
+  if (config.sentry?.enabled === true) {
+    try {
+      sentry = new SentrySink({ enabled: true, dsn: config.sentry.dsn!, dailyCap: config.sentry.dailyEnvelopeCap!,
+        sampleRate: config.sentry.sampleRate, budgetStateFile: resolve(stateDirectory, "activity", "telemetry-budget.json") });
+      telemetry = sentry;
+    } catch {
+      telemetry = { record: () => {}, health: () => ({ enabled: false, degraded: true, code: "TELEMETRY_INITIALIZATION_FAILED" }) };
+    }
+  }
+  const activity = withActivitySink(localActivity, telemetry);
   const sessionStore = new SessionStore(stateDirectory);
   const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
@@ -183,15 +198,18 @@ export async function runBroker(
     config.threadRetention,
     Date.now(),
   );
-  const registry = new SessionRegistry({
-    adapters: {
-      codex: new CodexProviderAdapter({ mcp }),
-      claude: new ClaudeProviderAdapter({ mcp, stateDirectory }),
-      cursor: new CursorProviderAdapter({ mcp }),
-      antigravity: new AntigravityProviderAdapter(),
-    },
+  let registry: SessionRegistry;
+  let workerEvents: WorkerEventChannel;
+  const executionRuntime = await brokerExecutionRuntime({ stateDirectory, config, activity,
+    adapters: { codex: new CodexProviderAdapter({ mcp }), claude: new ClaudeProviderAdapter({ mcp, stateDirectory }),
+      cursor: new CursorProviderAdapter({ mcp }), antigravity: new AntigravityProviderAdapter() },
+    lookupSession: (id) => { try { return registry?.get(id); } catch { return undefined; } },
+    submitEvent: (input) => workerEvents.submit(input),
+  });
+  registry = new SessionRegistry({
+    adapters: executionRuntime.adapters,
     sessionRuntimeFactory: createSessionRuntime,
-    executions: new WorkerExecutionService(await WorkerExecutionStore.open(stateDirectory), { host: new HostExecutor(createSessionRuntime) }, config.workerExecution),
+    executions: executionRuntime.executions,
     workerTurnObservation: new WorkerTurnObservationAdapter(),
     journal,
     transcripts,
@@ -228,7 +246,9 @@ export async function runBroker(
     providerPermissions,
     (provider) => orchestratorCapabilities.resolve(provider),
   );
-  const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
+  const instructions = new InstructionQueue(registry, orchestratorStore, activityInstructionStore(new InstructionStore(stateDirectory), activity, (id) => {
+    try { return registry.get(id); } catch { return undefined; }
+  }));
   instructions.start();
   const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerBudgets = new WorkerBudgetEnforcer({
@@ -271,7 +291,7 @@ export async function runBroker(
     orchestrators: orchestratorStore,
     instructions,
   });
-  const workerEvents = new WorkerEventChannel(
+  workerEvents = new WorkerEventChannel(
     workerCoordination.service,
     registry,
     orchestratorStore,
@@ -328,11 +348,15 @@ export async function runBroker(
     instructions.stop();
     nvimBindings.stop();
     await registry.stopAll();
+    await executionRuntime.close();
+    await sentry?.close().catch(() => undefined);
     await journal.append(brokerEvent("broker.shutdown", { reason, pid: process.pid }));
     await server.close();
   };
 
   server = new BrokerServer({
+    activity,
+    ...(telemetry === undefined ? {} : { telemetry }),
     socketPath,
     registry,
     transcripts,

@@ -7,7 +7,7 @@ import { reconcileExecutions } from "../src/orchestration/execution-reconciler.j
 import { containerLaunchContext } from "../src/runtime/execution/container-launch-context.js";
 import { createSessionRuntime } from "../src/runtime/session-runtime-adapter.js";
 const directory = process.argv[2];
-if (!directory || !basename(directory).startsWith("cyberdeck-container-proof-")) throw new Error("PROOF_DIRECTORY_REQUIRED");
+if (!directory || !/^cyberdeck-(broker-)?container-proof-/.test(basename(directory))) throw new Error("PROOF_DIRECTORY_REQUIRED");
 const original = JSON.parse(await readFile(join(directory, "result.json"), "utf8"));
 const store = await WorkerExecutionStore.open(join(directory, "broker-state"));
 if (store.list().length !== 1) throw new Error("PROOF_SINGLE_EXECUTION_REQUIRED");
@@ -17,11 +17,12 @@ const context = containerLaunchContext({ workspace: manifest.workspace, hostStat
 const client = new OrbStackClient(`unix://${process.env.HOME}/.orbstack/run/docker.sock`);
 const backend = new OrbStackExecutor({ client, profile: { image: original.image, cpus: 1, memoryBytes: 268435456, slots: 1, network: "egress" },
   attach: createSessionRuntime, evidenceDirectory: join(directory, "collected"), onFailure: () => {}, contexts: { get: async () => context, prepare: async () => { throw new Error("RECOVERY_CANNOT_LAUNCH"); } } });
+const before = await backend.inspect(ref);
 const recovered = await reconcileExecutions(store, { "orbstack-container": backend });
 if (recovered.unreachable.length || recovered.absent.length) throw new Error("RECOVERY_NOT_COLLECTABLE");
 const collection = await backend.collect(ref);
 await backend.destroy(ref);
 const final = await backend.inspect(ref);
-await writeFile(join(directory, "recovery.json"), JSON.stringify({ recovered, collection, final }), { mode: 0o600 });
+await writeFile(join(directory, "recovery.json"), JSON.stringify({ before, recovered, collection, final, proofMode: original.proofMode ?? "failed-attempt-recovery" }), { mode: 0o600 });
 if (final.state !== "absent") throw new Error("RECOVERY_CLEANUP_UNCONFIRMED");
 console.log(JSON.stringify({ directory, recovered, cleanup: final.state }));

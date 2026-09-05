@@ -128,7 +128,7 @@ export class SessionRuntimeAssembly {
       await beforeSpawn?.();
       const replayBytes = this.catalog.replayBytesFor(record);
       onPhase?.("spawn");
-      if (this.catalog.options.executions !== undefined) {
+      if (record.kind !== "orchestrator" && this.catalog.options.executions !== undefined) {
         return await this.catalog.options.executions.start(record, spec, replayBytes);
       }
       return this.catalog.options.sessionRuntimeFactory(spec, replayBytes);

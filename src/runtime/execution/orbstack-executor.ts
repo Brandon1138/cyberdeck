@@ -16,7 +16,7 @@ export interface ContainerProfile {
 export interface OrbStackExecutorOptions {
   client: OrbStackClient;
   profile: ContainerProfile;
-  contexts: { prepare(input: ExecutionLaunchInput): Promise<ContainerLaunchContext>; get(ref: ExecutionRef): Promise<ContainerLaunchContext> };
+  contexts: { prepare(input: ExecutionLaunchInput): Promise<ContainerLaunchContext>; get(ref: ExecutionRef): Promise<ContainerLaunchContext>; release?(ref: ExecutionRef): Promise<void> };
   attach: SessionRuntimeFactory<ProviderLaunchSpec>;
   evidenceDirectory: string;
   onFailure(error: unknown): void;
@@ -33,7 +33,7 @@ export class OrbStackExecutor implements WorkerExecutionPort {
   async prepare(input: ExecutionLaunchInput): Promise<PreparedExecution> {
     const { client, profile } = this.options;
     if (input.launch.cwd !== "/workspace" || !["node", "claude", "codex"].includes(input.launch.executable)
-      || Object.keys(input.launch.env).some((key) => !["TERM", "DISABLE_UPDATES", "ENABLE_TOOL_SEARCH", "CYBERDECK_PROCESS_ROLE", "CYBERDECK_WORKER_MODE"].includes(key))) {
+      || Object.keys(input.launch.env).some((key) => !["TERM", "DISABLE_UPDATES", "ENABLE_TOOL_SEARCH", "CYBERDECK_PROCESS_ROLE", "CYBERDECK_WORKER_MODE", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"].includes(key))) {
       throw new Error("CONTAINER_LAUNCH_NOT_TARGETED");
     }
     const capacity = await client.capacity();
@@ -81,15 +81,18 @@ export class OrbStackExecutor implements WorkerExecutionPort {
     } catch (error) { this.release(input.identity.executionId); throw error; }
   }
   async start(prepared: PreparedExecution, replayBytes: number): Promise<SessionRuntime> {
-    await this.options.client.verify();
     try {
+      await this.options.client.verify();
       const attached = this.options.attach({ executable: "docker", args: ["--context", "orbstack", "start", "--attach", "--interactive", prepared.ref.backendId!],
         cwd: prepared.ref.workspaceId, env: { PATH: process.env.PATH, HOME: process.env.HOME },
         ...(prepared.launch.transport === undefined ? {} : { transport: prepared.launch.transport }),
       }, replayBytes);
       return new ContainerSessionRuntime(attached, this.options.client, prepared.ref,
         () => this.release(prepared.ref.executionId), this.options.onFailure);
-    } catch (error) { await this.stop(prepared.ref, true); throw error; }
+    } catch (error) {
+      try { await this.stop(prepared.ref, true); } catch (cleanup) { this.options.onFailure(cleanup); }
+      throw error;
+    }
   }
   async inspect(ref: ExecutionRef): Promise<ExecutionInspection> {
     try {
@@ -121,9 +124,10 @@ export class OrbStackExecutor implements WorkerExecutionPort {
     const manifest = JSON.parse(await readFile(join(this.options.evidenceDirectory, `${ref.executionId}-${ref.generation}.json`), "utf8")) as { payload: { ref: ExecutionRef }; sha256: string };
     if (manifest.sha256 !== contentHash(JSON.stringify(manifest.payload)) || JSON.stringify(manifest.payload.ref) !== JSON.stringify(ref)) throw new Error("CONTAINER_COLLECTION_UNVERIFIED");
     const inspected = await this.options.client.inspect(ref);
-    if (inspected === undefined) return;
+    if (inspected === undefined) { await this.options.contexts.release?.(ref); return; }
     if (inspected.State.Running) throw new Error("CONTAINER_STILL_RUNNING");
     await this.options.client.command(["rm", inspected.Id]);
+    await this.options.contexts.release?.(ref);
   }
   private release(id: string): void { this.reservations.get(id)?.(); this.reservations.delete(id); }
 }

@@ -1,5 +1,6 @@
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
+import { WorkspaceInputSelectionSchema } from "./workspace-input.js";
 
 /**
  * Where a worker's work lives, as typed fields rather than as prose in a prompt.
@@ -49,6 +50,8 @@ export const WorkerWorkspaceSchema = z.object({
   /** The ref the branch was cut from, and the baseline a review diffs against. */
   baseRef: RefNameSchema,
   provisioning: WorkerProvisioningSchema,
+  storage: z.enum(["linked-worktree", "independent-clone"]).optional(),
+  selectedInputs: z.array(WorkspaceInputSelectionSchema).max(1024).optional(),
   /**
    * The repository the worktree belongs to. Recorded by Cyberdeck when it provisions, so a worker
    * living in a sibling directory can still be shown under the project it is working on rather than

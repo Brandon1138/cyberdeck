@@ -2,3 +2,4 @@
 !Dockerfile
 !report.mjs
 !launch.mjs
+!mcp.mjs

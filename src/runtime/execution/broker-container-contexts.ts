@@ -1,0 +1,67 @@
+import { mkdir, readFile, writeFile, open, realpath, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { join } from "node:path";
+import type { ExecutionRef } from "../../domain/worker-execution.js";
+import type { ExecutionLaunchInput } from "../../orchestration/session/execution-ports.js";
+import type { WorkerGateway } from "../../broker/worker-gateway.js";
+import { PrivateCloneProvisioner } from "./isolated-workspace.js";
+import { containerLaunchContext, type ContainerLaunchContext } from "./container-launch-context.js";
+import { trustedGit } from "./trusted-git.js";
+import { readSelectedInputs } from "./read-selected-inputs.js";
+
+export class BrokerContainerContexts {
+  constructor(private readonly root: string, private readonly credentialFiles: Record<string, string>,
+    private readonly gateway: WorkerGateway, private readonly gatewayPort: number,
+  ) {}
+  async prepare(input: ExecutionLaunchInput): Promise<ContainerLaunchContext> {
+    const { record, identity } = input;
+    if (!this.credentialFiles[record.provider]) throw new Error("CONTAINER_CREDENTIALS_UNAVAILABLE");
+    let existing: ContainerLaunchContext | undefined;
+    try { existing = await this.get({ ...identity, executor: "orbstack-container", workspaceId: "pending" }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    const credentialFile = this.credentialFiles[record.provider]!;
+    const credential = await open(credentialFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let apiKey: string;
+    try { if ((await credential.stat()).size > 16384) throw new Error("CONTAINER_CREDENTIAL_INVALID"); apiKey = (await credential.readFile("utf8")).trim(); }
+    finally { await credential.close(); }
+    if (!apiKey) throw new Error("CONTAINER_CREDENTIALS_UNAVAILABLE");
+    const hostState = join(this.root, "provider-state", record.id), hostCredentials = join(this.root, "credentials", record.id);
+    await mkdir(hostState, { recursive: true, mode: 0o700 }); await mkdir(hostCredentials, { recursive: true, mode: 0o700 });
+    const token = this.gateway.issue({ workerId: record.id, executionId: identity.executionId, generation: identity.generation });
+    await writeFile(join(hostCredentials, "provider.json"), JSON.stringify({ provider: record.provider, apiKey }), { mode: 0o600 });
+    await writeFile(join(hostCredentials, "reporting-token"), token, { mode: 0o600 });
+    let workspace = existing?.workspace;
+    if (workspace === undefined) {
+      const source = record.cwd;
+      const root = (await trustedGit(source, ["rev-parse", "--show-toplevel"])).toString().trim();
+      if (root !== await realpath(source)) throw new Error("CONTAINER_CWD_MUST_BE_REPO_ROOT");
+      const baseRef = record.workspace?.baseRef ?? "HEAD";
+      const baseCommit = (await trustedGit(source, ["rev-parse", "--verify", "--end-of-options", `${baseRef}^{commit}`])).toString().trim();
+      workspace = await new PrivateCloneProvisioner(join(this.root, "clones")).provision({
+        executionId: identity.executionId, source, baseCommit, branch: record.workspace?.branch ?? `worker/${record.id}`,
+        inputs: await readSelectedInputs(source, record.workspace?.selectedInputs),
+      });
+    }
+    const context = containerLaunchContext({ workspace, hostState, hostCredentials, reportingUrl: `http://host.docker.internal:${this.gatewayPort}/v1/report` });
+    await mkdir(join(this.root, "contexts"), { recursive: true, mode: 0o700 });
+    await writeFile(join(this.root, "contexts", `${identity.executionId}.json`), JSON.stringify(context), { mode: 0o600 });
+    record.cwd = workspace.hostPath;
+    record.workspace = { provisioning: "pre-provisioned", storage: "independent-clone", worktreePath: workspace.hostPath, repositoryPath: workspace.source,
+      branch: workspace.branch, baseRef: workspace.baseCommit, writableRoots: [] };
+    return context;
+  }
+  async get(ref: ExecutionRef): Promise<ContainerLaunchContext> {
+    const parsed = JSON.parse(await readFile(join(this.root, "contexts", `${ref.executionId}.json`), "utf8"));
+    if (parsed.workspace?.executionId !== ref.executionId
+      || parsed.workspace?.hostPath !== join(this.root, "clones", ref.executionId)
+      || parsed.hostState !== join(this.root, "provider-state", ref.workerId)
+      || parsed.hostCredentials !== join(this.root, "credentials", ref.workerId)) throw new Error("CONTAINER_CONTEXT_MISMATCH");
+    return containerLaunchContext(parsed);
+  }
+  async release(ref: ExecutionRef): Promise<void> {
+    const context = await this.get(ref);
+    this.gateway.revoke(ref.executionId);
+    // Only the private staged copy is retired; the configured credential source is untouched.
+    await rm(context.hostCredentials, { recursive: true, force: true });
+  }
+}
