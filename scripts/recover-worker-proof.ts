@@ -1,0 +1,27 @@
+import { readFile, writeFile } from "node:fs/promises";
+import { join, basename } from "node:path";
+import { OrbStackClient } from "../src/runtime/execution/orbstack-client.js";
+import { OrbStackExecutor } from "../src/runtime/execution/orbstack-executor.js";
+import { WorkerExecutionStore } from "../src/persistence/worker-execution-store.js";
+import { reconcileExecutions } from "../src/orchestration/execution-reconciler.js";
+import { containerLaunchContext } from "../src/runtime/execution/container-launch-context.js";
+import { createSessionRuntime } from "../src/runtime/session-runtime-adapter.js";
+const directory = process.argv[2];
+if (!directory || !basename(directory).startsWith("cyberdeck-container-proof-")) throw new Error("PROOF_DIRECTORY_REQUIRED");
+const original = JSON.parse(await readFile(join(directory, "result.json"), "utf8"));
+const store = await WorkerExecutionStore.open(join(directory, "broker-state"));
+if (store.list().length !== 1) throw new Error("PROOF_SINGLE_EXECUTION_REQUIRED");
+const ref = store.list()[0]!.ref;
+const manifest = JSON.parse(await readFile(join(directory, "clones", `${ref.executionId}.manifest.json`), "utf8"));
+const context = containerLaunchContext({ workspace: manifest.workspace, hostState: join(directory, "worker-state"), hostCredentials: join(directory, "credentials"), reportingUrl: "http://host.docker.internal:1/v1/report" });
+const client = new OrbStackClient(`unix://${process.env.HOME}/.orbstack/run/docker.sock`);
+const backend = new OrbStackExecutor({ client, profile: { image: original.image, cpus: 1, memoryBytes: 268435456, slots: 1, network: "egress" },
+  attach: createSessionRuntime, evidenceDirectory: join(directory, "collected"), onFailure: () => {}, contexts: { get: async () => context, prepare: async () => { throw new Error("RECOVERY_CANNOT_LAUNCH"); } } });
+const recovered = await reconcileExecutions(store, { "orbstack-container": backend });
+if (recovered.unreachable.length || recovered.absent.length) throw new Error("RECOVERY_NOT_COLLECTABLE");
+const collection = await backend.collect(ref);
+await backend.destroy(ref);
+const final = await backend.inspect(ref);
+await writeFile(join(directory, "recovery.json"), JSON.stringify({ recovered, collection, final }), { mode: 0o600 });
+if (final.state !== "absent") throw new Error("RECOVERY_CLEANUP_UNCONFIRMED");
+console.log(JSON.stringify({ directory, recovered, cleanup: final.state }));
