@@ -55,3 +55,29 @@ it("retains tool call IDs with source provenance and detects conflicting turn at
   expect(JSON.stringify(events)).not.toContain("SENSITIVE_");
   expect(claudeActivity({ type: "assistant", message: { content: [{ type: "thinking", thinking: "hidden" }, { type: "tool_use", id: "call-b", input: { secret: true } }] } })).toEqual([{ kind: "tool.invocation", toolCallId: "call-b" }]);
 });
+
+it("retains pinned incident evidence across reopen and fails visibly at the byte cap", async () => {
+  const path = await directory(), event = input();
+  const store = await AgentActivityStore.open(path, { maxBytes: 1200, maxAgeMs: 86400000 });
+  await store.append(event); await store.pin(event.runId, true); await store.close();
+  const reopened = await AgentActivityStore.open(path, { maxBytes: 1200, maxAgeMs: 86400000 });
+  await reopened.append(input());
+  await expect(reopened.append(input())).rejects.toThrow("ACTIVITY_PINNED_CAPACITY");
+  expect((await reopened.read(event.runId, 0, 100))[0]?.eventId).toBe(event.eventId);
+  expect(reopened.health().degraded).toBe(true);
+  await reopened.pin(event.runId, false); await reopened.append(input());
+  expect(await reopened.read(event.runId, 0, 100)).toEqual([]);
+  await reopened.close();
+});
+it("reads exact pages while writes compact the journal and rebuilds its disk index", async () => {
+  const path = await directory(), store = await AgentActivityStore.open(path, { maxBytes: 2400, maxAgeMs: 86400000 });
+  const original = input();
+  for (let i = 0; i < 20; i++) {
+    await Promise.all([store.append({ ...original, sourceKey: `offset-${i}`, eventId: randomUUID() }), store.read(original.runId, 0, 100)]);
+  }
+  const before = await store.read(original.runId, 0, 100); await store.close();
+  const rebuilt = await AgentActivityStore.open(path);
+  expect(await rebuilt.read(original.runId, 0, 100)).toEqual(before);
+  expect(before.every((event, index) => index === 0 || event.sequence > before[index - 1]!.sequence)).toBe(true);
+  await rebuilt.close();
+});

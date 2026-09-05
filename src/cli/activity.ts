@@ -2,6 +2,14 @@ import type { Command } from "commander";
 import { writeFile } from "node:fs/promises";
 import { withClient } from "./runtime.js";
 export function registerActivityCommands(program: Command): void {
+  program.command("activity-pin")
+    .description("Pin a local incident run against retention; full capacity degrades recording visibly")
+    .requiredOption("--run <uuid>", "run or instruction identity")
+    .option("--release", "release this retention pin")
+    .action(async (options: { run: string; release?: boolean }) => {
+      const result = await withClient((client) => client.request("activity.pin", { runId: options.run, pinned: !options.release }));
+      process.stdout.write(JSON.stringify(result) + "\n");
+    });
   program.command("activity")
     .description("Inspect bounded local causal activity and recording coverage")
     .requiredOption("--run <uuid>", "run or instruction identity")
