@@ -1,3 +1,4 @@
+import { activityMethods } from "./activity-methods.js";
 import { agentMethods } from "./agent-methods.js";
 import { fleetMethods } from "./fleet-methods.js";
 import { jobMethods } from "./job-methods.js";
@@ -12,6 +13,7 @@ import { sessionMethods } from "./session-methods.js";
  */
 export const BROKER_METHODS: Record<string, BrokerMethodHandler> = Object.assign(
   Object.create(null) as Record<string, BrokerMethodHandler>,
+  activityMethods,
   sessionMethods,
   agentMethods,
   fleetMethods,
