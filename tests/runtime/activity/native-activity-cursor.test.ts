@@ -13,7 +13,7 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "activity-cursor-")); roots.push(root);
   const recorder = await AgentActivityStore.open(join(root, "journal"));
   const id = randomUUID(), path = join(root, "native.jsonl"), directory = join(root, "cursors");
-  const attribution = { runId: id, workerId: id, sessionId: id, generation: 1, instructionId: randomUUID(), providerTurnId: "turn-1" };
+  const attribution = { runId: id, workerId: id, sessionId: id, generation: 1, instructionId: randomUUID(), providerTurnId: "turn-1", origin: "instruction" as const };
   const input = { sourceRoot: root, path, sourceId: "fixture-source", provider: "codex", parse: codexActivity, attribution, fromOffset: 0 };
   return { recorder, directory, input };
 }

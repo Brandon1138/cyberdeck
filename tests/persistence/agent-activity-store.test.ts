@@ -42,7 +42,7 @@ it("preserves torn tails and reports recording degradation", async () => {
 });
 it("retains tool call IDs with source provenance and detects conflicting turn attribution", async () => {
   const store = await AgentActivityStore.open(await directory()), base = input();
-  const attribution = { runId: base.runId, workerId: base.workerId, sessionId: base.sessionId, generation: 2, instructionId: randomUUID(), providerTurnId: "turn-a" };
+  const attribution = { runId: base.runId, workerId: base.workerId, sessionId: base.sessionId, generation: 2, instructionId: randomUUID(), providerTurnId: "turn-a", origin: "instruction" as const };
   const frames = [
     { type: "response_item", payload: { type: "function_call", call_id: "call-a", arguments: "SENSITIVE_ARGUMENT" } },
     { type: "response_item", payload: { type: "function_call_output", call_id: "call-a", output: "SENSITIVE_RESULT", turn_id: "turn-b" } },

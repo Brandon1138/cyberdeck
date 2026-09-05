@@ -24,6 +24,8 @@ import type {
 } from "../orchestration/session/worker-turn-ports.js";
 import { ClaudeConversationBindingStore } from "./claude-conversation-bindings.js";
 import { observedModelParser, type ObservedModel } from "../runtime/observed-model.js";
+import { isClaudeClearFrame } from "../runtime/claude-clear-frame.js";
+export { isClaudeClearFrame };
 import {
   parseCodexBudgetTelemetryLine,
   type ParsedProviderBudgetTelemetry,
@@ -834,45 +836,6 @@ function parseClaudeTurn(line: string, now: (() => string) | undefined): NativeT
     };
   } catch {
     return undefined;
-  }
-}
-
-const CLAUDE_CLEAR_COMMAND = "<command-name>/clear</command-name>";
-
-/**
- * The `/clear` Claude writes as the last user frame of the conversation it is abandoning.
- *
- * Deliberately strict about *where* the marker sits. The same literal appears inside ordinary
- * conversation whenever a session greps its own transcripts or quotes this file, and those arrive
- * as tool-result user frames carrying `toolUseResult`. Only a frame whose entire content opens with
- * the command block is Claude's own record of the command.
- */
-export function isClaudeClearFrame(line: string): boolean {
-  if (!line.includes(CLAUDE_CLEAR_COMMAND)) return false;
-  try {
-    const frame = JSON.parse(line) as {
-      type?: unknown;
-      toolUseResult?: unknown;
-      message?: { role?: unknown; content?: unknown };
-    };
-    if (frame.type !== "user" || frame.toolUseResult !== undefined) return false;
-    const content = frame.message?.content;
-    const text = typeof content === "string"
-      ? content
-      : Array.isArray(content)
-        ? content
-          .map((block) =>
-            typeof block === "object"
-            && block !== null
-            && typeof (block as { text?: unknown }).text === "string"
-              ? (block as { text: string }).text
-              : ""
-          )
-          .join("")
-        : "";
-    return text.trimStart().startsWith(CLAUDE_CLEAR_COMMAND);
-  } catch {
-    return false;
   }
 }
 

@@ -27,6 +27,8 @@ export const AgentActivitySchema = z.object({
     recipient: ControllerIdentitySchema.optional(), leaseVersion: z.number().int().positive().optional(),
     state: z.enum(["received", "active", "superseded", "acknowledged", "answered", "closed", "pending", "consumed"]).optional(),
   }).strict().optional(),
+  /** How the provider turn was dispatched. Broker instruction, launch prompt, human composer prompt, or nothing the broker recorded. */
+  origin: z.enum(["instruction", "initial-prompt", "direct-input", "unattributed"]).optional(),
   gap: z.enum(["unsupported-source", "unknown-frame", "truncated-source", "attribution-conflict", "missing-result", "retention", "disk-failure"]).optional(),
   usage: z.object({ inputTokens: z.number().int().nonnegative().optional(), outputTokens: z.number().int().nonnegative().optional(), provenance: z.literal("provider-native") }).strict().optional(),
 }).strict();

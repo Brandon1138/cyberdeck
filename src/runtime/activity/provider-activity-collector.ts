@@ -4,7 +4,15 @@ import type { AgentActivityPort } from "../../orchestration/agent-activity-port.
 
 export interface ActivityAttribution {
   runId: string; workerId: string; sessionId: string; generation: number;
-  parentEventId?: string; instructionId: string; providerTurnId: string; executionId?: string;
+  parentEventId?: string; instructionId?: string; causationId?: string; executionId?: string;
+  origin: ActivityInput["origin"];
+  /** Known from Codex turn_context at turn start; only known at completion for Claude. Not part of the cursor identity. */
+  providerTurnId?: string;
+}
+/** The durable identity of one attribution. A provider turn id learned late must not fork the cursor. */
+export function attributionKey(attribution: ActivityAttribution): string {
+  const { providerTurnId: _late, ...stable } = attribution;
+  return JSON.stringify(Object.fromEntries(Object.entries(stable).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b))));
 }
 export interface NativeActivityFrame {
   kind: "tool.invocation" | "tool.result" | "provider.response" | "capture.gap";
@@ -25,7 +33,8 @@ export async function collectNativeActivity(input: {
     try { frames = input.parse(JSON.parse(line.text)); }
     catch { frames = [{ kind: "capture.gap", gap: "unknown-frame" }]; }
     for (const [index, frame] of frames.entries()) {
-      const conflict = frame.providerTurnId !== undefined && frame.providerTurnId !== input.attribution.providerTurnId;
+      const conflict = frame.providerTurnId !== undefined && input.attribution.providerTurnId !== undefined
+      && frame.providerTurnId !== input.attribution.providerTurnId;
       const { startedAt, occurredAt, providerTurnId: _turn, usage, gap, kind, toolCallId } = frame;
       await input.recorder.append({
         schemaVersion: 1, eventId: kind === "tool.invocation" && toolCallId ? activityIdentity(`${input.sourceId}:tool:${toolCallId}`) : randomUUID(),

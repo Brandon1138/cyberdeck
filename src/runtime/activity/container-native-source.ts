@@ -9,10 +9,15 @@ import { nativeSourceLines } from "./native-source-lines.js";
 import { nativeTimestamp, object } from "./provider-activity-collector.js";
 import { observedModelParser, type ObservedModel } from "../observed-model.js";
 import { parseClaudeTranscriptLine, parseCodexRolloutLine, type TranscriptMessage } from "../conversation-preview.js";
+import { isClaudeClearFrame } from "../claude-clear-frame.js";
 import { parseCodexBudgetTelemetryLine, type ParsedProviderBudgetTelemetry, type ProviderBudgetWindow } from "../provider-budget-telemetry.js";
 
 export const ContainerNativeBindingSchema = z.object({ sessionId: z.uuid(), nativeSessionId: z.uuid(),
   provider: z.enum(["claude", "codex"]), relativePath: z.string().min(1) }).strict();
+export interface PendingNativeInterval {
+  sourceRoot: string; path: string; fromOffset: number; throughOffset: number; generation: number;
+  executionId?: string; startedAt?: string; providerTurnId?: string;
+}
 export class ContainerNativeSource {
   constructor(private readonly root: string) {}
   stateRoot(id: string): string { return join(this.root, "provider-state", z.uuid().parse(id)); }
@@ -81,21 +86,28 @@ export class ContainerNativeSource {
   }
   async read(session: SessionRecord, window: ProviderBudgetWindow = "session"): Promise<{
     turns: ObservedWorkerTurn[]; messages: TranscriptMessage[]; model?: ObservedModel; budget: ParsedProviderBudgetTelemetry;
+    /** Complete frames after the last final frame: the turn still running, if any. */
+    pending?: PendingNativeInterval;
   }> {
     const source = await this.resolve(session), turns: ObservedWorkerTurn[] = [], messages: TranscriptMessage[] = [];
-    let startedAt: string | undefined;
-    let start = 0, model: ObservedModel | undefined, budget: ParsedProviderBudgetTelemetry = {};
+    let startedAt: string | undefined, pendingTurnId: string | undefined;
+    let start = 0, end = 0, model: ObservedModel | undefined, budget: ParsedProviderBudgetTelemetry = {};
     const parseMessage = session.provider === "claude" ? parseClaudeTranscriptLine : parseCodexRolloutLine;
     for await (const line of nativeSourceLines(source.sourceRoot, source.path)) {
+      end = line.end;
       const frame = object(JSON.parse(line.text)), payload = object(frame?.payload), message = object(frame?.message);
       if (frame?.isSidechain === true || frame?.isMeta === true) continue;
       model = observedModelParser(session.provider)?.(line.text) ?? model;
       if (session.provider === "codex") budget = { ...budget, ...parseCodexBudgetTelemetryLine(line.text, window) };
       const preview = parseMessage(line.text);
       if (preview) { messages.push(preview); if (messages.length > 20) messages.shift(); }
-      if (session.provider === "claude" && frame?.type === "user" && typeof message?.content === "string"
-        && message.content.trimStart().startsWith("<command-name>/clear</command-name>")) throw new Error("NATIVE_CONVERSATION_CLEARED");
-      if ((frame?.type === "turn_context" || session.provider === "claude" && frame?.type === "user" && typeof message?.content === "string") && startedAt === undefined) {
+      // Only Claude's own record of the command, never a tool result that quotes the literal.
+      if (session.provider === "claude" && isClaudeClearFrame(frame)) throw new Error("NATIVE_CONVERSATION_CLEARED");
+      if (frame?.type === "turn_context" && startedAt === undefined) {
+        startedAt = nativeTimestamp(frame?.timestamp);
+        pendingTurnId = typeof payload?.turn_id === "string" ? payload.turn_id : undefined;
+      }
+      if (session.provider === "claude" && frame?.type === "user" && frame.toolUseResult === undefined && startedAt === undefined) {
         startedAt = nativeTimestamp(frame?.timestamp);
       }
       const final = session.provider === "codex" ? frame?.type === "event_msg" && payload?.type === "task_complete"
@@ -107,9 +119,13 @@ export class ContainerNativeSource {
       if (typeof id !== "string" || typeof text !== "string" || !text.trim() || !timestamp) throw new Error("NATIVE_FINAL_INVALID");
       turns.push({ providerTurnId: id, providerOccurredAt: timestamp, text, transport: "provider-native",
         data: { nativeActivity: { ...source, fromOffset: start, throughOffset: line.end, generation: session.generation ?? 1, executionId: session.execution?.executionId, ...(startedAt ? { startedAt } : {}) } } });
-      start = line.end; startedAt = undefined;
+      start = line.end; startedAt = undefined; pendingTurnId = undefined;
       if (turns.length > 10000) throw new Error("NATIVE_TURN_LIMIT");
     }
-    return { turns, messages, budget, ...(model ? { model } : {}) };
+    const executionId = session.execution?.executionId;
+    const pending: PendingNativeInterval | undefined = end > start ? { ...source, fromOffset: start, throughOffset: end,
+      generation: session.generation ?? 1, ...(executionId ? { executionId } : {}),
+      ...(startedAt ? { startedAt } : {}), ...(pendingTurnId ? { providerTurnId: pendingTurnId } : {}) } : undefined;
+    return { turns, messages, budget, ...(model ? { model } : {}), ...(pending ? { pending } : {}) };
   }
 }

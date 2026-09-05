@@ -1,5 +1,5 @@
 import { ContainerNativeSource } from "../runtime/activity/container-native-source.js";
-import { InstructionNativeCapture } from "../runtime/activity/instruction-native-capture.js";
+import { TurnNativeCapture } from "../runtime/activity/turn-native-capture.js";
 import { ExecutionTranscriptStore } from "../persistence/execution-transcript-store.js";
 import { brokerExecutionRuntime } from "../runtime/execution/broker-execution-runtime.js";
 import { SentrySink } from "../observability/sentry-sink.js";
@@ -252,10 +252,12 @@ export async function runBroker(
     providerPermissions,
     (provider) => orchestratorCapabilities.resolve(provider),
   );
-  const nativeCapture = new InstructionNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts);
-  const instructions = new InstructionQueue(registry, orchestratorStore, activityInstructionStore(new InstructionStore(stateDirectory), activity, (id) => {
+  const instructionStore = new InstructionStore(stateDirectory);
+  const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
+  transcripts.attachNativeCapture(nativeCapture);
+  const instructions = new InstructionQueue(registry, orchestratorStore, activityInstructionStore(instructionStore, activity, (id) => {
     try { return registry.get(id); } catch { return undefined; }
-  }, (record, worker) => nativeCapture.capture(record, worker)));
+  }, (record, worker) => nativeCapture.captureInstruction(record, worker)));
   instructions.start();
   const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerBudgets = new WorkerBudgetEnforcer({

@@ -4,7 +4,7 @@ import { open, mkdir, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import type { AgentActivityPort } from "../../orchestration/agent-activity-port.js";
-import { collectNativeActivity, type ActivityAttribution, type NativeActivityParser } from "./provider-activity-collector.js";
+import { attributionKey, collectNativeActivity, type ActivityAttribution, type NativeActivityParser } from "./provider-activity-collector.js";
 
 const Cursor = z.object({ schemaVersion: z.literal(1), offset: z.number().int().nonnegative(),
   digest: z.string().regex(/^[a-f0-9]{64}$/), sourceId: z.string(), device: z.number(), inode: z.number(), fromOffset: z.number().int().nonnegative(), attributionHash: z.string() }).strict();
@@ -30,7 +30,7 @@ export class NativeActivityCursor {
     let cursor: z.infer<typeof Cursor> | undefined;
     try { cursor = Cursor.parse(JSON.parse(await readFile(path, "utf8"))); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    const attributionHash = createHash("sha256").update(JSON.stringify(input.attribution)).digest("hex");
+    const attributionHash = createHash("sha256").update(attributionKey(input.attribution)).digest("hex");
     if (cursor && (cursor.fromOffset !== input.fromOffset || cursor.attributionHash !== attributionHash)) throw new Error("ACTIVITY_ATTRIBUTION_CONFLICT");
     const source = await openContainedSource(input.sourceRoot, input.path);
     try {
