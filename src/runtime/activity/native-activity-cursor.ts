@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { openContainedSource } from "./contained-source.js";
 import { open, mkdir, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -15,7 +15,7 @@ export class NativeActivityCursor {
   private tail = Promise.resolve();
   constructor(private readonly directory: string, private readonly recorder: AgentActivityPort) {}
   collect(input: {
-    path: string; sourceId: string; provider: string; parse: NativeActivityParser;
+    sourceRoot: string; path: string; sourceId: string; provider: string; parse: NativeActivityParser;
     attribution: ActivityAttribution; fromOffset: number; throughOffset: number;
   }): Promise<number> {
     const operation = this.tail.then(() => this.readInterval(input));
@@ -30,7 +30,7 @@ export class NativeActivityCursor {
     let cursor: z.infer<typeof Cursor> | undefined;
     try { cursor = Cursor.parse(JSON.parse(await readFile(path, "utf8"))); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    const source = await open(input.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const source = await openContainedSource(input.sourceRoot, input.path);
     try {
       const stat = await source.stat();
       if (!stat.isFile()) throw new Error("ACTIVITY_SOURCE_NOT_FILE");

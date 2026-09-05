@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile, open, realpath, rm } from "node:fs/promises";
+import { writeAtomicPrivateFile } from "../../persistence/atomic-private-file.js";
+import { mkdir, readFile, open, realpath, rm } from "node:fs/promises";
 import { constants } from "node:fs";
 import { join } from "node:path";
 import type { ExecutionRef } from "../../domain/worker-execution.js";
@@ -28,8 +29,8 @@ export class BrokerContainerContexts {
     const hostState = join(this.root, "provider-state", record.id), hostCredentials = join(this.root, "credentials", record.id);
     await mkdir(hostState, { recursive: true, mode: 0o700 }); await mkdir(hostCredentials, { recursive: true, mode: 0o700 });
     const token = this.gateway.issue({ workerId: record.id, executionId: identity.executionId, generation: identity.generation });
-    await writeFile(join(hostCredentials, "provider.json"), JSON.stringify({ provider: record.provider, apiKey }), { mode: 0o600 });
-    await writeFile(join(hostCredentials, "reporting-token"), token, { mode: 0o600 });
+    await writeAtomicPrivateFile(join(hostCredentials, "provider.json"), JSON.stringify({ provider: record.provider, apiKey }));
+    await writeAtomicPrivateFile(join(hostCredentials, "reporting-token"), token);
     let workspace = existing?.workspace;
     if (workspace === undefined) {
       const source = record.cwd;
@@ -44,7 +45,7 @@ export class BrokerContainerContexts {
     }
     const context = containerLaunchContext({ workspace, hostState, hostCredentials, reportingUrl: `http://host.docker.internal:${this.gatewayPort}/v1/report` });
     await mkdir(join(this.root, "contexts"), { recursive: true, mode: 0o700 });
-    await writeFile(join(this.root, "contexts", `${identity.executionId}.json`), JSON.stringify(context), { mode: 0o600 });
+    await writeAtomicPrivateFile(join(this.root, "contexts", `${identity.executionId}.json`), JSON.stringify(context));
     record.cwd = workspace.hostPath;
     record.workspace = { provisioning: "pre-provisioned", storage: "independent-clone", worktreePath: workspace.hostPath, repositoryPath: workspace.source,
       branch: workspace.branch, baseRef: workspace.baseCommit, writableRoots: [] };

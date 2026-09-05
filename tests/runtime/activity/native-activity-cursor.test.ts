@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, writeFile, appendFile, rm, readdir } from "node:fs/promises";
+import { mkdtemp, writeFile, appendFile, rm, readdir, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it } from "vitest";
@@ -14,7 +14,7 @@ async function fixture() {
   const recorder = await AgentActivityStore.open(join(root, "journal"));
   const id = randomUUID(), path = join(root, "native.jsonl"), directory = join(root, "cursors");
   const attribution = { runId: id, workerId: id, sessionId: id, generation: 1, instructionId: randomUUID(), providerTurnId: "turn-1" };
-  const input = { path, sourceId: "fixture-source", provider: "codex", parse: codexActivity, attribution, fromOffset: 0 };
+  const input = { sourceRoot: root, path, sourceId: "fixture-source", provider: "codex", parse: codexActivity, attribution, fromOffset: 0 };
   return { recorder, directory, input };
 }
 const frame = (type: string) => JSON.stringify({ type: "response_item", payload: { type, call_id: "parallel-call-1", arguments: "LOCAL_SECRET" } }) + "\n";
@@ -47,4 +47,16 @@ it("never checkpoints provider progress after a failed activity append", async (
   await expect(broken.collect({ ...f.input, throughOffset: Buffer.byteLength(text) })).rejects.toThrow("disk-full");
   expect(await readdir(f.directory)).toEqual([]);
   expect(await new NativeActivityCursor(f.directory, f.recorder).collect({ ...f.input, throughOffset: Buffer.byteLength(text) })).toBe(1);
+});
+
+it("refuses a symlinked parent and a final symlink without reading their contents", async () => {
+  const f = await fixture();
+  const outside = await mkdtemp(join(tmpdir(), "outside-native-")); roots.push(outside);
+  await writeFile(join(outside, "native.jsonl"), frame("function_call"));
+  await symlink(outside, join(f.input.sourceRoot, "linked"));
+  const cursor = new NativeActivityCursor(f.directory, f.recorder);
+  await expect(cursor.collect({ ...f.input, path: join(f.input.sourceRoot, "linked", "native.jsonl"), throughOffset: 1 })).rejects.toThrow();
+  await symlink(join(outside, "native.jsonl"), f.input.path);
+  await expect(cursor.collect({ ...f.input, throughOffset: 1 })).rejects.toThrow();
+  expect(await f.recorder.read(f.input.attribution.runId, 0, 100)).toEqual([]);
 });

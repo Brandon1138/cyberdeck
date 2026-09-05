@@ -1,4 +1,5 @@
-import { mkdir, writeFile, readFile, open } from "node:fs/promises";
+import { writeAtomicPrivateFile } from "../../persistence/atomic-private-file.js";
+import { mkdir, readFile, open } from "node:fs/promises";
 import { join } from "node:path";
 import type { SessionRuntime, SessionRuntimeFactory } from "../../domain/session-runtime.js";
 import type { ExecutionInspection, ExecutionRef } from "../../domain/worker-execution.js";
@@ -44,8 +45,8 @@ export class OrbStackExecutor implements WorkerExecutionPort {
       const context = await this.options.contexts.prepare(input);
       let ref: ExecutionRef = { ...input.identity, executor: "orbstack-container", workspaceId: context.workspace.hostPath };
       // Launch data is local-only, protected by the credentials mount, never Docker metadata.
-      await writeFile(join(context.hostCredentials, "launch.json"), JSON.stringify({ executable: input.launch.executable,
-        args: input.launch.args, env: input.launch.env, cwd: context.guest.workspace }), { mode: 0o600 });
+      await writeAtomicPrivateFile(join(context.hostCredentials, "launch.json"), JSON.stringify({ executable: input.launch.executable,
+        args: input.launch.args, env: input.launch.env, cwd: context.guest.workspace }));
       let inspected = await client.inspect(ref);
       if (inspected === undefined) {
         const mount = (source: string, target: string, readonly: boolean) => {
