@@ -15,11 +15,13 @@ export class WorkerGateway {
     this.server = createServer((request, response) => {
       const respond = (status: number, body: unknown) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(body)); };
       void (async () => {
-        if (request.method !== "POST" || request.url !== "/v1/report" || request.headers.origin !== undefined
-          || request.headers["content-type"] !== "application/json") return respond(404, { code: "GATEWAY_METHOD_REFUSED" });
+        const readiness = request.method === "GET" && request.url === "/v1/ready";
+        if (request.headers.origin !== undefined || (!readiness && (request.method !== "POST" || request.url !== "/v1/report"
+          || request.headers["content-type"] !== "application/json"))) return respond(404, { code: "GATEWAY_METHOD_REFUSED" });
         const bearer = request.headers.authorization?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
         const digest = createHash("sha256").update(bearer ?? "").digest();
         const grant = [...this.grants.values()].find((entry) => timingSafeEqual(entry.digest, digest));
+        if (grant !== undefined && readiness) return respond(this.active(grant) ? 200 : 409, { code: this.active(grant) ? "GATEWAY_READY" : "GATEWAY_NOT_READY" });
         if (grant === undefined || !this.active(grant)) return respond(401, { code: "GATEWAY_UNAUTHORIZED" });
         let body = Buffer.alloc(0);
         for await (const chunk of request) {

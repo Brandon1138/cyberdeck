@@ -21,8 +21,10 @@ it("authenticates report-only traffic, binds worker and generation, and revokes 
   expect((await send(report)).status).toBe(200);
   expect(submit).toHaveBeenCalledTimes(1);
   active = false;
+  const ready = () => fetch(`http://127.0.0.1:${port}/v1/ready`, { headers: { authorization: `Bearer ${token}` } });
+  expect((await ready()).status).toBe(409);
   expect((await send(report)).status).toBe(401);
-  active = true; gateway.revoke(binding.executionId);
+  active = true; expect((await ready()).status).toBe(200); gateway.revoke(binding.executionId);
   expect((await send(report)).status).toBe(401);
   expect(submit).toHaveBeenCalledTimes(1);
 });

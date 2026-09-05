@@ -9,6 +9,19 @@ if (spec.executable !== 'node') {
   if (credential.provider !== spec.executable) throw new Error('PROVIDER_CREDENTIAL_MISMATCH');
   env[credential.provider === 'claude' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'] = credential.apiKey;
 }
+// Provider/model execution begins only after this generation is registered and authoritative.
+const token = (await readFile('/run/credentials/reporting-token', 'utf8')).trim();
+const ready = new URL(process.env.CYBERDECK_REPORT_URL);
+if (ready.hostname !== 'host.docker.internal' || ready.protocol !== 'http:' || ready.pathname !== '/v1/report') throw new Error('REPORT_URL_REFUSED');
+ready.pathname = '/v1/ready';
+const deadline = Date.now() + 30000;
+for (;;) {
+  const response = await fetch(ready, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(2000), redirect: 'error' });
+  await response.body?.cancel();
+  if (response.ok) break;
+  if (response.status !== 409 || Date.now() >= deadline) throw new Error('BROKER_ACTIVATION_UNAVAILABLE');
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
 const child = spawn(spec.executable, spec.args, { cwd: '/workspace', stdio: 'inherit', env });
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => child.kill(signal));
 child.on('error', () => { process.exitCode = 127; });

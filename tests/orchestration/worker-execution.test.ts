@@ -87,6 +87,25 @@ describe("worker execution seam", () => {
     await service.start(session, launch, 2048);
     expect(session.execution).toMatchObject({ executionId, workerId: session.id, generation: 2 });
   });
+  it("passes and persists the same resumed generation through the real registry", async () => {
+    const fixture = await store(), factory = vi.fn(runtime);
+    const executions = new WorkerExecutionService(fixture.store, { host: new HostExecutor(factory) });
+    const registry = new SessionRegistry({
+      adapters: { codex: { id: "codex", buildLaunchSpec: () => launch, buildResumeSpec: () => launch } },
+      executions, sessionRuntimeFactory: factory, journal: { append: async () => {} },
+      workerTurnObservation: new WorkerTurnObservationAdapter(), validateCwd: async () => {}, config: BrokerRuntimeConfigSchema.parse({}),
+    });
+    await registry.ready();
+    try {
+      const first = await registry.start({ provider: "codex", cwd: "/tmp", sandbox: "read-only", detached: true });
+      await registry.stop(first.id);
+      await vi.waitFor(() => expect(registry.get(first.id).exitCode).not.toBeNull());
+      const resumed = await registry.resume(first.id);
+      expect(resumed.generation).toBe(2);
+      expect(resumed.execution).toMatchObject({ executionId: first.execution!.executionId, generation: 2 });
+      expect(fixture.store.get(first.id)?.ref).toMatchObject({ generation: 2 });
+    } finally { await registry.stopAll(); }
+  });
   it("preserves crash tails and rejects corrupted committed frames", async () => {
     const fixture = await store();
     const service = new WorkerExecutionService(fixture.store, {});

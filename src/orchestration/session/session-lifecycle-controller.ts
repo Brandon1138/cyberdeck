@@ -177,6 +177,7 @@ export class SessionLifecycleController {
 
     const adapter = this.catalog.requireAdapter(runtime.record.provider);
     const record = cloneRecord(runtime.record);
+    record.generation = (record.generation ?? 1) + 1;
     const resumeSpec = adapter.buildResumeSpec(record);
     // A resume spec can name provider-owned artifacts (Claude's payload files) that the previous
     // exit removed, so wait for any in-flight cleanup and then rebuild them before the spawn.
@@ -193,7 +194,8 @@ export class SessionLifecycleController {
     delete runtime.controller;
     runtime.watchers.clear();
     runtime.record.pid = sessionRuntime.pid;
-    runtime.record.generation = (runtime.record.generation ?? 1) + 1;
+    runtime.record.generation = record.generation;
+    if (record.execution !== undefined) runtime.record.execution = record.execution;
     runtime.record.executionState = "active";
     runtime.record.attachmentState = "detached";
     runtime.record.exitCode = null;
