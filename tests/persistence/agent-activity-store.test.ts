@@ -81,3 +81,17 @@ it("reads exact pages while writes compact the journal and rebuilds its disk ind
   expect(before.every((event, index) => index === 0 || event.sequence > before[index - 1]!.sequence)).toBe(true);
   await rebuilt.close();
 });
+
+it("joins runs for one session in ingestion order without admitting another session", async () => {
+  const path = await directory(), store = await AgentActivityStore.open(path), event = input();
+  await store.append(event);
+  await store.append(input());
+  await store.append({ ...event, eventId: randomUUID(), sourceKey: "other-run", runId: randomUUID(), kind: "worker.handoff" });
+  expect((await store.readSession(event.sessionId, 0, 100)).map((record) => record.sequence)).toEqual([1, 3]);
+  expect((await store.readSession(event.sessionId, 1, 1)).map((record) => record.sequence)).toEqual([3]);
+  await expect(store.readSession(event.sessionId, -1, 100)).rejects.toThrow("ACTIVITY_READ_CURSOR");
+  await store.close();
+  const reopened = await AgentActivityStore.open(path);
+  expect((await reopened.readSession(event.sessionId, 0, 100)).map((record) => record.sequence)).toEqual([1, 3]);
+  await reopened.close();
+});

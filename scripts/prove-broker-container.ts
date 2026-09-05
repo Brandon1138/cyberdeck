@@ -27,9 +27,16 @@ import { WorkerHandoffService } from "../src/orchestration/worker-handoff-servic
 import { BrokerWorkerLeaseCredentialCustodian } from "../src/broker/worker-lease-credential-custodian.js";
 import { reconcileExecutions } from "../src/orchestration/execution-reconciler.js";
 import { proveHandoff } from "./worker-proof-handoff.js";
+import { AgentActivityStore } from "../src/persistence/agent-activity-store.js";
+import { activityCoordinationStore } from "../src/orchestration/activity-coordination-store.js";
+import { activityExecutionStore } from "../src/orchestration/activity-execution-store.js";
+import type { AgentActivity } from "../src/domain/agent-activity.js";
 
 const evidence = await mkdtemp(join(tmpdir(), "cyberdeck-broker-container-proof-"));
 console.log(JSON.stringify({ evidence }));
+const sourceCommit = (await trustedGit(process.cwd(), ["rev-parse", "HEAD"])).toString().trim();
+const sourceDirty = Boolean((await trustedGit(process.cwd(), ["status", "--porcelain"])).toString().trim());
+const activity = await AgentActivityStore.open(join(evidence, "activity"));
 const client = new OrbStackClient(`unix://${process.env.HOME}/.orbstack/run/docker.sock`);
 const image = (await client.command(["image", "inspect", "cyberdeck-worker:20260905", "--format", "{{.Id}}"])).trim();
 const source = join(evidence, "source"); await mkdir(source);
@@ -77,7 +84,7 @@ const backend = new OrbStackExecutor({ client,
     get: async () => context,
   },
 });
-const service = new WorkerExecutionService(store, { "orbstack-container": backend }, undefined, process.argv[2] === "--timeout-after-handoff" ? 5000 : 3600000);
+const service = new WorkerExecutionService(activityExecutionStore(store, activity), { "orbstack-container": backend }, undefined, process.argv[2] === "--timeout-after-handoff" ? 5000 : 3600000);
 let record: SessionRecord = { id: workerId, generation: 1, provider: "codex", model: "scripted-fixture", kind: "worker", cwd: source,
   executor: "orbstack-container", executionProfile: "ordinary", sandbox: "read-only", detached: true,
   createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), executionState: "starting", attachmentState: "detached", pid: 0, exitCode: null, childIds: [] };
@@ -109,12 +116,12 @@ setInterval(() => {},1000);
     workerTurnObservation: new WorkerTurnObservationAdapter(), config: BrokerRuntimeConfigSchema.parse({}),
   });
   await registry.ready();
-  const coordination = new WorkerCoordinationService({ store: new WorkerCoordinationStore(state) }); await coordination.initialize();
+  const coordination = new WorkerCoordinationService({ store: activityCoordinationStore(new WorkerCoordinationStore(state), activity) }); await coordination.initialize();
   const orchestrators = new OrchestratorStore(state), credentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerHandoff = new WorkerHandoffService({ coordination, registry, orchestrators, credentials });
   channel = new WorkerEventChannel(coordination, registry, { findBySessionId: async () => undefined }, { enqueue: async () => { throw new Error("FIXTURE_NO_CHECKPOINTS"); } });
   const socketPath = join(evidence, "broker.sock");
-  server = new BrokerServer({ registry, socketPath, workerEvents: channel, workerHandoff }); await server.listen();
+  server = new BrokerServer({ registry, socketPath, workerEvents: channel, workerHandoff, activity }); await server.listen();
   rpc = await RpcClient.connect(socketPath);
   record = await rpc.request<SessionRecord>("session.start", record);
   const runtime = { snapshot: () => registry.snapshot(record.id) };
@@ -146,6 +153,10 @@ setInterval(() => {},1000);
     await writeFile(join(evidence, "resume.json"), JSON.stringify({ firstExecution, resumed: record, reports }), { mode: 0o600 });
   }
   await proveHandoff({ registry, rpc, coordination, credentials, orchestrators, worker: record, client, evidence });
+  const activityPage = await rpc.request<{ events: AgentActivity[]; health: { degraded: boolean } }>("activity.readSession", { sessionId: record.id, limit: 1000 });
+  await writeFile(join(evidence, "activity-page.json"), JSON.stringify(activityPage), { mode: 0o600 });
+  if (activityPage.health.degraded || !["execution.lifecycle", "worker.report", "worker.handoff"].every((kind) => activityPage.events.some((event) => event.kind === kind))
+    || !activityPage.events.some((event) => event.kind === "worker.report" && event.provenance === "worker-report" && event.outcome === "observed")) throw new Error("ACTIVITY_INSPECTION_NOT_PROVED");
   if (process.argv[2] === "--timeout-after-handoff") {
     const deadline = Date.now() + 15000;
     while (store.get(record.id)?.phase !== "stopped" && Date.now() < deadline) {
@@ -165,7 +176,7 @@ setInterval(() => {},1000);
   }
   if (process.argv[2] === "--crash-after-handoff") {
     const checkpoint = await open(join(evidence, "result.json"), "wx", 0o600);
-    try { await checkpoint.writeFile(JSON.stringify({ image, record, reports, failures, cleanup: "crash-recovery-required", proofMode: "intentional-broker-sigkill" })); await checkpoint.sync(); }
+    try { await checkpoint.writeFile(JSON.stringify({ sourceCommit, sourceDirty, image, record, reports, failures, cleanup: "crash-recovery-required", proofMode: "intentional-broker-sigkill" })); await checkpoint.sync(); }
     finally { await checkpoint.close(); }
     console.log(JSON.stringify({ evidence, checkpoint: "durable-before-sigkill", executionId: record.execution!.executionId }));
     process.kill(process.pid, "SIGKILL");
@@ -200,7 +211,8 @@ setInterval(() => {},1000);
   rpc?.close();
   await server?.close();
   await gateway.close();
-  await writeFile(join(evidence, "result.json"), JSON.stringify({ success, image, record, reports, failures, cleanup }), { mode: 0o600 });
+  await activity.close();
+  await writeFile(join(evidence, "result.json"), JSON.stringify({ sourceCommit, sourceDirty, success, image, record, reports, failures, cleanup }), { mode: 0o600 });
   console.log(JSON.stringify({ evidence, success, image, cleanup }));
   if (cleanup !== "absent") process.exitCode = 1;
 }

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ExecutionRecordSchema } from "./worker-execution.js";
+import { ControllerIdentitySchema, OwnershipOperationSchema } from "./worker-coordination.js";
 export const AgentActivityKindSchema = z.enum([
   "instruction.accepted", "instruction.queued", "instruction.rendered", "instruction.submitted", "instruction.acknowledged", "instruction.settled", "instruction.undelivered", "instruction.cancelled", "instruction.held",
   "worker.lifecycle", "worker.control", "worker.handoff", "execution.lifecycle", "provider.turn", "provider.response",
@@ -19,6 +20,13 @@ export const AgentActivitySchema = z.object({
   executionPhase: ExecutionRecordSchema.shape.phase.optional(),
   outcome: z.enum(["observed", "succeeded", "failed", "cancelled", "unknown"]).default("observed"),
   payloadRef: z.string().max(4096).optional(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  /** Local acknowledged coordination metadata. Never projected wholesale to a remote sink. */
+  coordination: z.object({
+    auditId: z.uuid().optional(), handoffId: z.uuid().optional(), reportId: z.string().max(256).optional(),
+    operation: OwnershipOperationSchema.optional(), actor: ControllerIdentitySchema.optional(),
+    recipient: ControllerIdentitySchema.optional(), leaseVersion: z.number().int().positive().optional(),
+    state: z.enum(["received", "active", "superseded", "acknowledged", "answered", "closed", "pending", "consumed"]).optional(),
+  }).strict().optional(),
   gap: z.enum(["unsupported-source", "unknown-frame", "truncated-source", "attribution-conflict", "missing-result", "retention", "disk-failure"]).optional(),
   usage: z.object({ inputTokens: z.number().int().nonnegative().optional(), outputTokens: z.number().int().nonnegative().optional(), provenance: z.literal("provider-native") }).strict().optional(),
 }).strict();

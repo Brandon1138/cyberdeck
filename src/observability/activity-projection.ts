@@ -31,7 +31,7 @@ export function projectActivity(event: AgentActivity): RemoteActivity {
 }
 export function correlationIds(event: RemoteActivity): { traceId: string; spanId: string } {
   // Short event segments, durably reproducible IDs. The run ID links segments across restarts.
-  return { traceId: createHash("sha256").update(event.instructionId ?? event.eventId).digest("hex").slice(0, 32),
+  return { traceId: createHash("sha256").update(event.instructionId ?? event.causationId ?? event.eventId).digest("hex").slice(0, 32),
     spanId: createHash("sha256").update(`span:${event.eventId}`).digest("hex").slice(0, 16) };
 }
 /** Closed serialization boundary: raw SDK scopes/envelopes are never forwarded. */

@@ -68,13 +68,26 @@ export class AgentActivityStore implements AgentActivityPort {
     return operation;
   }
   async read(runId: string, afterSequence = 0, limit = 100): Promise<AgentActivity[]> {
-    await this.tail;
+    return this.readPage(() => this.index.page(runId, afterSequence, limit), afterSequence, limit);
+  }
+  async readSession(sessionId: string, afterSequence = 0, limit = 100): Promise<AgentActivity[]> {
+    return this.readPage(() => this.index.sessionPage(sessionId, afterSequence, limit), afterSequence, limit);
+  }
+  private readPage(locations: () => ReturnType<ActivityDiskIndex["page"]>, afterSequence: number, limit: number): Promise<AgentActivity[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("ACTIVITY_READ_LIMIT");
-    const operation = this.tail.then(() => Promise.all(this.index.page(runId, afterSequence, limit).map((location) => readActivityLocation(this.path, location))));
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new Error("ACTIVITY_READ_CURSOR");
+    const operation = this.tail.then(() => Promise.all(locations().map((location) => readActivityLocation(this.path, location))));
     this.tail = operation.then(() => {}, () => {});
     return operation;
   }
   health(): { degraded: boolean; dropped: number; retained: number } { return { degraded: this.degraded, dropped: this.dropped, retained: this.index.count() }; }
+  noteGap(): Promise<void> {
+    const operation = this.tail.then(async () => {
+      this.degraded = true; this.dropped++;
+      await writeAtomicPrivateFile(join(this.directory, "activity-health.json"), JSON.stringify({ sequence: this.sequence, dropped: this.dropped }));
+    });
+    this.tail = operation.then(() => {}, () => {}); return operation;
+  }
   private async prune(incoming: number): Promise<void> {
     if (incoming > this.retention.maxBytes) throw new Error("ACTIVITY_EVENT_TOO_LARGE");
     const cutoff = (this.retention.now?.() ?? Date.now()) - this.retention.maxAgeMs;
@@ -120,6 +133,7 @@ export async function openActivityRecorder(directory: string): Promise<AgentActi
   catch {
     let dropped = 1;
     return { append: async () => { dropped += 1; throw new Error("ACTIVITY_CAPTURE_UNAVAILABLE"); },
+      noteGap: async () => { dropped++; },
       read: async () => [], health: () => ({ degraded: true, dropped, retained: 0 }) };
   }
 }

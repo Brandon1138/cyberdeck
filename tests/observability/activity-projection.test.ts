@@ -7,6 +7,8 @@ it("drops every excluded field at the final serialized envelope boundary", () =>
   const event = AgentActivitySchema.parse({ schemaVersion: 1, eventId: randomUUID(), sequence: 1, sourceKey: secret,
     runId: id, workerId: id, sessionId: id, observedAt: new Date().toISOString(), kind: "tool.invocation", operation: "tool",
     provenance: "provider-native", coverage: "partial", provider: secret, model: secret, payloadRef: `/private/${secret}`, toolCallId: secret,
+    coordination: { reportId: secret, actor: { controllerId: secret, familyId: secret,
+      scope: { kind: "worktree", scopeId: secret, worktreePath: `/private/${secret}` } } },
   });
   const projection = projectActivity(event);
   const raw = [{ dsn: secret, sent_at: secret }, [[{ type: "transaction", arbitrary: secret }, {

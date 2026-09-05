@@ -13,12 +13,13 @@ export class ActivityDiskIndex {
     this.db.exec(`PRAGMA cache_size=-2048; PRAGMA temp_store=FILE; PRAGMA journal_mode=OFF;
       DROP TABLE IF EXISTS activity;
       CREATE TABLE activity(sequence INTEGER PRIMARY KEY, source TEXT UNIQUE NOT NULL, run TEXT NOT NULL,
-        offset INTEGER NOT NULL, bytes INTEGER NOT NULL, observed REAL NOT NULL);
-      CREATE INDEX activity_run ON activity(run, sequence);`);
+        offset INTEGER NOT NULL, bytes INTEGER NOT NULL, observed REAL NOT NULL, session TEXT NOT NULL);
+      CREATE INDEX activity_run ON activity(run, sequence);
+      CREATE INDEX activity_session ON activity(session, sequence);`);
   }
   add(event: AgentActivity, offset: number, bytes: number): void {
-    this.db.prepare("INSERT INTO activity VALUES (?, ?, ?, ?, ?, ?)").run(event.sequence,
-      createHash("sha256").update(event.sourceKey).digest("hex"), event.runId, offset, bytes, Date.parse(event.observedAt));
+    this.db.prepare("INSERT INTO activity VALUES (?, ?, ?, ?, ?, ?, ?)").run(event.sequence,
+      createHash("sha256").update(event.sourceKey).digest("hex"), event.runId, offset, bytes, Date.parse(event.observedAt), event.sessionId);
   }
   source(key: string): ActivityLocation | undefined {
     return this.db.prepare("SELECT sequence, offset, bytes, observed, run FROM activity WHERE source=?")
@@ -27,6 +28,10 @@ export class ActivityDiskIndex {
   page(run: string, after: number, limit: number): ActivityLocation[] {
     return this.db.prepare("SELECT sequence, offset, bytes, observed, run FROM activity WHERE run=? AND sequence>? ORDER BY sequence LIMIT ?")
       .all(run, after, limit) as unknown as ActivityLocation[];
+  }
+  sessionPage(session: string, after: number, limit: number): ActivityLocation[] {
+    return this.db.prepare("SELECT sequence, offset, bytes, observed, run FROM activity WHERE session=? AND sequence>? ORDER BY sequence LIMIT ?")
+      .all(session, after, limit) as unknown as ActivityLocation[];
   }
   oldest(after = 0): ActivityLocation[] {
     return this.db.prepare("SELECT sequence, offset, bytes, observed, run FROM activity WHERE sequence>? ORDER BY sequence LIMIT 1000")

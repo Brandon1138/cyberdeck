@@ -7,6 +7,12 @@ export const activityMethods: Record<string, BrokerMethodHandler> = {
     if (!activity) throw new Error("ACTIVITY_CAPTURE_UNAVAILABLE");
     return { events: await activity.read(input.runId, input.afterSequence, input.limit), health: activity.health() };
   },
+  "activity.readSession": async (server, _context, frame) => {
+    const input = ReadSchema.omit({ runId: true }).extend({ sessionId: z.uuid() }).strict().parse(frame.params);
+    const activity = server.options.activity;
+    if (!activity?.readSession) throw new Error("ACTIVITY_SESSION_CAPTURE_UNAVAILABLE");
+    return { events: await activity.readSession(input.sessionId, input.afterSequence, input.limit), health: activity.health() };
+  },
   "activity.pin": async (server, _context, frame) => {
     const input = z.object({ runId: z.uuid(), pinned: z.boolean() }).strict().parse(frame.params);
     if (!server.options.activity?.pin) throw new Error("ACTIVITY_PIN_UNAVAILABLE");

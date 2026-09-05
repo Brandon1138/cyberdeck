@@ -61,6 +61,7 @@ import { LocalWorkerControlService } from "../orchestration/local-worker-control
 import { WorkerBudgetEnforcer } from "./worker-budget-enforcer.js";
 import { WorkerControlService } from "../orchestration/worker-control-service.js";
 import { WorkerHandoffService } from "../orchestration/worker-handoff-service.js";
+import { activityCoordinationStore } from "../orchestration/activity-coordination-store.js";
 import { InstructionStore } from "../persistence/instruction-store.js";
 import { WorkflowStore } from "../persistence/workflow-store.js";
 import { WorkflowService } from "../orchestration/workflow-service.js";
@@ -238,7 +239,7 @@ export async function runBroker(
     stateDirectory,
     recoveredSessions,
     orchestrators: orchestratorStore,
-    createService: (store) => new WorkerCoordinationService({ store }),
+    createService: (store) => new WorkerCoordinationService({ store: activityCoordinationStore(store, activity) }),
   });
   await workerCoordination.start();
   // Each launch context has its own cached catalog; orchestrators force first-party Codex.
