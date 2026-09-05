@@ -61,6 +61,18 @@ describe("provider model listings", () => {
 });
 
 describe("the codex JSON catalog", () => {
+  it("preserves empty ranges when a model has no recognized reasoning levels", () => {
+    expect(parseCodexModelCatalog(JSON.stringify({ models: [
+      { slug: "empty-efforts", visibility: "list", supported_reasoning_levels: [] },
+      { slug: "future-efforts", visibility: "list", supported_reasoning_levels: [{ effort: "hyper" }] },
+      { slug: "missing-efforts", visibility: "list" },
+    ] }))).toEqual([
+      { id: "empty-efforts", efforts: [] },
+      { id: "future-efforts", efforts: [] },
+      { id: "missing-efforts", efforts: [] },
+    ]);
+  });
+
   it("reads each model's own effort range, and offers only what codex means to list", () => {
     expect(parseCodexModelCatalog(CODEX_CATALOG)).toEqual([
       {

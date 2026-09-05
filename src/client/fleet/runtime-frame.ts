@@ -13,15 +13,24 @@ import { ResolvedFleetRenderOptions, WorkerModelCatalog } from "./runtime-option
 import { FleetSnapshot, FleetState, InteractiveFleetTransport } from "./state.js";
 
 export async function readWorkerModels(client: InteractiveFleetTransport): Promise<WorkerModelCatalog> {
+  const [workers, orchestrators] = await Promise.all([
+    readCapabilities(client, "worker.capabilities"),
+    readCapabilities(client, "orchestrator.capabilities"),
+  ]);
+  return workerModelCatalog(workers, orchestrators);
+}
+
+async function readCapabilities(
+  client: InteractiveFleetTransport,
+  method: "worker.capabilities" | "orchestrator.capabilities",
+): Promise<readonly ResolvedWorkerCapability[]> {
   try {
-    return workerModelCatalog(
-      await client.request<readonly ResolvedWorkerCapability[]>("worker.capabilities", {}),
-    );
+    return await client.request<readonly ResolvedWorkerCapability[]>(method, {});
   } catch (error) {
-    return workerModelCatalog(fallbackWorkerCapabilities(
-      `Fleet could not read provider capabilities from the broker: ${error instanceof Error ? error.message : String(error)
+    return fallbackWorkerCapabilities(
+      `Fleet could not read ${method} from the broker: ${error instanceof Error ? error.message : String(error)
       }`,
-    ));
+    );
   }
 }
 
@@ -113,6 +122,8 @@ export function fleetFrameLayout(
     return frame({
       surface: "orchestrator-picker",
       step: state.orchestratorPicker.step,
+      choices: state.workerModels.orchestratorChoices.map(({ provider, model }) =>
+        [provider.provider, model, provider.efforts, provider.fallbackReason]),
       sessions: existingOrchestrators(snapshot).map(({ id }) => id),
       footerRows: 2 + noticeRows + (state.orchestratorPicker.step === "effort" ? 1 : 0),
     }, `orchestrator-picker:${state.orchestratorPicker.step}`);
@@ -171,5 +182,3 @@ export function fleetFrameLayout(
     ? `fleet-list:${state.threadListScrollOffset}`
     : `shell:${shellTranscriptScrollOffset(state.shellMode, viewportHeight)}`);
 }
-
-

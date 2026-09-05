@@ -1,4 +1,4 @@
-import { ORCHESTRATOR_CATALOG } from "../../orchestration/orchestrator-catalog.js";
+import { orchestratorCatalog, orchestratorModelEfforts } from "../../orchestration/orchestrator-catalog.js";
 import { capabilityModelEfforts, fallbackWorkerCapabilities, type ResolvedWorkerCapability, } from "../../orchestration/worker-capabilities.js";
 import { type ConfigurablePermissionProvider, type ProviderPermissionPolicy } from "../permission-policy.js";
 import { friendlyModel } from "./model-labels.js";
@@ -121,8 +121,15 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
  */
 export function workerModelCatalog(
   capabilities: readonly ResolvedWorkerCapability[],
+  orchestratorCapabilities: readonly ResolvedWorkerCapability[] = [],
 ): WorkerModelCatalog {
   return {
+    orchestratorChoices: orchestratorCatalog(orchestratorCapabilities).flatMap((provider) =>
+      provider.models.map((model): OrchestratorModelChoice => ({
+        provider: { ...provider, efforts: orchestratorModelEfforts(provider, model) },
+        model,
+        label: provider.modelLabels?.[model] ?? friendlyModel(provider.provider, model),
+      }))),
     choices: capabilities.flatMap((capability) =>
       capability.models.map((model): WorkerModelChoice => {
         const efforts = capabilityModelEfforts(capability, model);
@@ -152,13 +159,6 @@ export function workerModelCatalog(
  */
 export const UNQUERIED_WORKER_MODELS: WorkerModelCatalog = workerModelCatalog(
   fallbackWorkerCapabilities("Fleet has not read provider capabilities from the broker"),
-);
-export const ORCHESTRATOR_MODEL_CHOICES: readonly OrchestratorModelChoice[] = ORCHESTRATOR_CATALOG.flatMap((provider) =>
-  provider.models.map((model) => ({
-    provider,
-    model,
-    label: friendlyModel(provider.provider, model),
-  })),
 );
 export const DISABLE_INHERITED_TERMINAL_INPUT_MODES = [
   "\u001b[?1000l", // basic mouse tracking

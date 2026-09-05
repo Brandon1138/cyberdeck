@@ -27,7 +27,8 @@ import type {
   WorkerPreferenceRepository,
 } from "./persistence-ports.js";
 import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
-import { ORCHESTRATOR_CATALOG } from "./orchestrator-catalog.js";
+import { ORCHESTRATOR_CATALOG, orchestratorCatalog, orchestratorModelEfforts, type OrchestratorCatalogEntry } from "./orchestrator-catalog.js";
+import { fallbackWorkerCapabilities, type ResolvedWorkerCapability } from "./worker-capabilities.js";
 import type {
   SessionLookupPort,
   SessionResumePort,
@@ -68,6 +69,7 @@ export class OrchestratorManager {
     private readonly store: OrchestratorBindingRepository,
     private readonly workerPreferences?: WorkerPreferenceRepository,
     private readonly providerPermissions?: ProviderPermissionPreferenceReader,
+    private readonly readCapabilities?: (provider: ProviderId) => Promise<ResolvedWorkerCapability[]>,
   ) {}
 
   async ensure(input: EnsureOrchestratorRequest): Promise<OrchestratorManagerResult> {
@@ -118,11 +120,18 @@ export class OrchestratorManager {
   /** Always creates a distinct bound peer; it never consults or replaces the scope's primary binding. */
   async create(input: CreateOrchestratorRequest): Promise<OrchestratorManagerResult> {
     const request = CreateOrchestratorRequestSchema.parse(input);
-    validateCreateSelection(request);
+    const capabilities = request.provider === "codex" ? await this.capabilities() : undefined;
+    validateCreateSelection(request, orchestratorCatalog(capabilities));
     const scope: OrchestratorScope = request.scope === "fleet"
       ? { kind: "fleet" }
       : { kind: "workspace", cwd: request.cwd };
     return this.createBound(request, scope, true);
+  }
+
+  /** Fleet and creation validate against the same first-party Codex discovery context. */
+  async capabilities(): Promise<ResolvedWorkerCapability[]> {
+    return this.readCapabilities?.("codex")
+      ?? fallbackWorkerCapabilities("Codex orchestrator discovery is unavailable", "codex");
   }
 
   /**
@@ -408,8 +417,8 @@ function isRecoverableResumeError(error: unknown): boolean {
   return error.code === "SESSION_NOT_FOUND" || error.code === "SESSION_RESUME_UNAVAILABLE";
 }
 
-function validateCreateSelection(request: CreateOrchestratorRequest): void {
-  const provider = ORCHESTRATOR_CATALOG.find((entry) => entry.provider === request.provider);
+function validateCreateSelection(request: CreateOrchestratorRequest, catalog: readonly OrchestratorCatalogEntry[]): void {
+  const provider = catalog.find((entry) => entry.provider === request.provider);
   if (provider === undefined || !provider.models.includes(request.model)) {
     throw Object.assign(
       new Error(`Unsupported orchestrator selection: ${request.provider}:${request.model}`),
@@ -417,7 +426,7 @@ function validateCreateSelection(request: CreateOrchestratorRequest): void {
     );
   }
   const effort = request.effort ?? "native-default";
-  if (!provider.efforts.includes(effort)) {
+  if (!orchestratorModelEfforts(provider, request.model).includes(effort)) {
     throw Object.assign(
       new Error(`${request.provider}:${request.model} does not support ${effort} effort`),
       { code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" },

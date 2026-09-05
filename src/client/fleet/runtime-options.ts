@@ -1,6 +1,6 @@
 import type { CreateOrchestratorRequest } from "../../domain/orchestrator.js";
 import type { ProviderId, ReasoningEffort, SessionRecord } from "../../domain/session.js";
-import { ORCHESTRATOR_CATALOG } from "../../orchestration/orchestrator-catalog.js";
+import type { OrchestratorCatalogEntry } from "../../orchestration/orchestrator-catalog.js";
 import { type ResolvedWorkerCapability } from "../../orchestration/worker-capabilities.js";
 import { type PasteboardImageAttachment } from "../clipboard-image.js";
 import { type PullRequestStatusPort, type PullRequestSummary } from "../pr-status.js";
@@ -49,11 +49,12 @@ export interface WorkerModelChoice {
  */
 export interface WorkerModelCatalog {
   choices: readonly WorkerModelChoice[];
+  orchestratorChoices: readonly OrchestratorModelChoice[];
   fallbacks: readonly { provider: ProviderId; reason: string; }[];
 }
 
 export interface OrchestratorModelChoice {
-  provider: (typeof ORCHESTRATOR_CATALOG)[number];
+  provider: OrchestratorCatalogEntry;
   model: string;
   label: string;
 }

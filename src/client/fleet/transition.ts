@@ -68,6 +68,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
         notice: undefined,
         orchestratorPicker: initialOrchestratorPicker(snapshot, state.fallbackCwd),
       },
+      action: { type: "worker-capabilities" },
     };
   }
   if (state.orchestratorPicker !== undefined) {

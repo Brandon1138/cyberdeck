@@ -1,13 +1,17 @@
 import type { ProviderId, ReasoningEffort } from "../domain/session.js";
+import { capabilityModelEfforts, type ResolvedWorkerCapability } from "./worker-capabilities.js";
 
 export interface OrchestratorCatalogEntry {
   provider: ProviderId;
   label: string;
   models: readonly string[];
   efforts: readonly (ReasoningEffort | "native-default")[];
+  modelLabels?: Readonly<Record<string, string>>;
+  modelEfforts?: Readonly<Record<string, readonly ReasoningEffort[]>>;
+  fallbackReason?: string;
 }
 
-/** Stable explicit choices for the picker, never automatic routing or fallback. */
+/** Provider launch contracts and stored choices when discovery is unavailable. */
 export const ORCHESTRATOR_CATALOG: readonly OrchestratorCatalogEntry[] = [
   {
     provider: "codex",
@@ -35,3 +39,32 @@ export const ORCHESTRATOR_CATALOG: readonly OrchestratorCatalogEntry[] = [
     efforts: ["native-default"],
   },
 ];
+
+/** Codex models come from discovery configured for the orchestrator's first-party launch. */
+export function orchestratorCatalog(
+  capabilities: readonly ResolvedWorkerCapability[] = [],
+): readonly OrchestratorCatalogEntry[] {
+  const codex = capabilities.find((entry) => entry.provider === "codex");
+  return ORCHESTRATOR_CATALOG.map((entry) => {
+    if (entry.provider !== "codex") return entry;
+    if (codex?.source !== "provider-query") {
+      return { ...entry, fallbackReason: codex?.fallbackReason ?? "Codex model discovery is unavailable" };
+    }
+    return {
+      ...entry,
+      models: codex.models,
+      modelLabels: codex.modelLabels ?? {},
+      modelEfforts: Object.fromEntries(codex.models.map((model) =>
+        [model, capabilityModelEfforts(codex, model)])),
+    };
+  });
+}
+
+export function orchestratorModelEfforts(
+  entry: OrchestratorCatalogEntry,
+  model: string,
+): readonly (ReasoningEffort | "native-default")[] {
+  const supported = entry.modelEfforts?.[model];
+  return supported === undefined ? entry.efforts : entry.efforts.filter((effort) =>
+    effort === "native-default" || supported.includes(effort));
+}

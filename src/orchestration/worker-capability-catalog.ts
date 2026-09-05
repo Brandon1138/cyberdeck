@@ -202,7 +202,8 @@ export function parseCodexModelCatalog(output: string): ProviderModel[] {
     models.push({
       id: slug,
       ...(displayName === "" ? {} : { label: displayName }),
-      ...(efforts.length === 0 ? {} : { efforts }),
+      // Empty or unknown levels do not authorize the provider's whole effort range.
+      efforts,
     });
   }
   return models;

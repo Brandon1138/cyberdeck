@@ -31,6 +31,9 @@ export const fleetMethods: Record<string, BrokerMethodHandler> = {
   "orchestrator.create": async (server, _context, frame) => {
     return requireOrchestrators(server.options).create(CreateOrchestratorRequestSchema.parse(frame.params));
   },
+  "orchestrator.capabilities": async (server) => {
+    return requireOrchestrators(server.options).capabilities();
+  },
   "orchestrator.reset": async (server, _context, frame) => {
     return requireOrchestrators(server.options).reset(ResetOrchestratorRequestSchema.parse(frame.params));
   },
