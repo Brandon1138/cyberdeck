@@ -40,6 +40,8 @@ export class CodexResumeError extends Error {
 
 export interface CodexProviderAdapterOptions {
   sessionsDirectory?: string;
+  /** Explicit execution-owned conversation binding; host discovery remains unchanged. */
+  nativeSessionId?: string;
   mcp?: CyberdeckMcpLaunch;
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
   runCommand?: CodexCommandRunner;
@@ -113,7 +115,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   buildResumeSpec(session: SessionRecord): ProviderLaunchSpec {
-    const nativeSessionId = this.findNativeSessionId(session);
+    const nativeSessionId = this.options.nativeSessionId ?? this.findNativeSessionId(session);
     const args = [
       "resume",
       "--no-alt-screen",

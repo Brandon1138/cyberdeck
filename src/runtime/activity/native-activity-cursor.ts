@@ -7,7 +7,7 @@ import type { AgentActivityPort } from "../../orchestration/agent-activity-port.
 import { collectNativeActivity, type ActivityAttribution, type NativeActivityParser } from "./provider-activity-collector.js";
 
 const Cursor = z.object({ schemaVersion: z.literal(1), offset: z.number().int().nonnegative(),
-  digest: z.string().regex(/^[a-f0-9]{64}$/), sourceId: z.string(), device: z.number(), inode: z.number() }).strict();
+  digest: z.string().regex(/^[a-f0-9]{64}$/), sourceId: z.string(), device: z.number(), inode: z.number(), fromOffset: z.number().int().nonnegative(), attributionHash: z.string() }).strict();
 
 /** Serialized per source. The caller supplies an explicit committed instruction/turn binding
  * for this interval. Reading a shared cwd or assigning by timestamp is never a binding. */
@@ -30,6 +30,8 @@ export class NativeActivityCursor {
     let cursor: z.infer<typeof Cursor> | undefined;
     try { cursor = Cursor.parse(JSON.parse(await readFile(path, "utf8"))); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    const attributionHash = createHash("sha256").update(JSON.stringify(input.attribution)).digest("hex");
+    if (cursor && (cursor.fromOffset !== input.fromOffset || cursor.attributionHash !== attributionHash)) throw new Error("ACTIVITY_ATTRIBUTION_CONFLICT");
     const source = await openContainedSource(input.sourceRoot, input.path);
     try {
       const stat = await source.stat();
@@ -37,14 +39,15 @@ export class NativeActivityCursor {
       if (cursor && (cursor.sourceId !== input.sourceId || cursor.inode !== stat.ino || cursor.device !== stat.dev || stat.size < cursor.offset)) {
         await this.gap(input, "truncated-source"); throw new Error("ACTIVITY_SOURCE_REPLACED");
       }
-      if (input.fromOffset > (cursor?.offset ?? 0) || input.throughOffset > stat.size) throw new Error("ACTIVITY_INTERVAL_GAP");
+      if (input.fromOffset > (cursor?.offset ?? input.fromOffset) || input.throughOffset > stat.size) throw new Error("ACTIVITY_INTERVAL_GAP");
       if ((cursor?.offset ?? 0) > input.throughOffset) throw new Error("ACTIVITY_INTERVAL_STALE");
       // Verify the acknowledged prefix without loading whole native files into memory.
       // A changed source is preserved and refused; it cannot silently rewrite prior evidence.
+      const initialOffset = cursor?.offset ?? input.fromOffset;
       const hash = createHash("sha256"), buffer = Buffer.alloc(64 * 1024);
       let position = 0;
-      while (position < (cursor?.offset ?? 0)) {
-        const count = Math.min(buffer.length, cursor!.offset - position);
+      while (position < initialOffset) {
+        const count = Math.min(buffer.length, initialOffset - position);
         const read = await source.read(buffer, 0, count, position);
         if (!read.bytesRead) throw new Error("ACTIVITY_SOURCE_TRUNCATED");
         hash.update(buffer.subarray(0, read.bytesRead)); position += read.bytesRead;
@@ -73,7 +76,7 @@ export class NativeActivityCursor {
       }
       // Commit only after all complete frames' activity writes have been fsynced. If this
       // checkpoint fails, replay uses source dedup keys and does not duplicate tool events.
-      const value = { schemaVersion: 1, sourceId: input.sourceId, device: stat.dev, inode: stat.ino, offset: acknowledged, digest: hash.digest("hex") };
+      const value = { schemaVersion: 1, sourceId: input.sourceId, device: stat.dev, inode: stat.ino, fromOffset: input.fromOffset, attributionHash, offset: acknowledged, digest: hash.digest("hex") };
       const temporary = `${path}.${randomUUID()}.pending`, file = await open(temporary, "wx", 0o600);
       try { await file.writeFile(JSON.stringify(value)); await file.sync(); } finally { await file.close(); }
       await rename(temporary, path);

@@ -1,3 +1,6 @@
+import { ContainerNativeSource } from "../runtime/activity/container-native-source.js";
+import { InstructionNativeCapture } from "../runtime/activity/instruction-native-capture.js";
+import { ExecutionTranscriptStore } from "../persistence/execution-transcript-store.js";
 import { brokerExecutionRuntime } from "../runtime/execution/broker-execution-runtime.js";
 import { SentrySink } from "../observability/sentry-sink.js";
 import { withActivitySink, type ActivitySinkPort } from "../orchestration/activity-sink.js";
@@ -37,7 +40,6 @@ import { BrokerServer } from "./server.js";
 import { FleetProjectService } from "./fleet-project-service.js";
 import { SessionRegistry } from "./session-registry.js";
 import {
-  ThreadTranscriptStore,
   pruneLegacyTranscript,
 } from "../persistence/thread-transcript-store.js";
 import { ClaudeConversationBindingStore } from "../persistence/claude-conversation-bindings.js";
@@ -164,7 +166,11 @@ export async function runBroker(
   const journal = new Journal(stateDirectory);
   const localActivity = await openActivityRecorder(resolve(stateDirectory, "activity"));
   const claudeConversations = new ClaudeConversationBindingStore(stateDirectory);
-  const transcripts = new ThreadTranscriptStore(stateDirectory, { claudeConversations });
+  let registry: SessionRegistry;
+  const containerNativeSource = new ContainerNativeSource(resolve(stateDirectory, "containers"));
+  const transcripts = new ExecutionTranscriptStore(stateDirectory, { claudeConversations }, containerNativeSource, (id) => {
+    try { return registry?.get(id); } catch { return undefined; }
+  });
   await transcripts.init();
   const cliPath = resolve(dirname(fileURLToPath(import.meta.url)), "../cli.js");
   const mcp = { nodePath: process.execPath, cliPath };
@@ -198,7 +204,6 @@ export async function runBroker(
     config.threadRetention,
     Date.now(),
   );
-  let registry: SessionRegistry;
   let workerEvents: WorkerEventChannel;
   const executionRuntime = await brokerExecutionRuntime({ stateDirectory, config, activity,
     adapters: { codex: new CodexProviderAdapter({ mcp }), claude: new ClaudeProviderAdapter({ mcp, stateDirectory }),
@@ -246,9 +251,10 @@ export async function runBroker(
     providerPermissions,
     (provider) => orchestratorCapabilities.resolve(provider),
   );
+  const nativeCapture = new InstructionNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts);
   const instructions = new InstructionQueue(registry, orchestratorStore, activityInstructionStore(new InstructionStore(stateDirectory), activity, (id) => {
     try { return registry.get(id); } catch { return undefined; }
-  }));
+  }, (record, worker) => nativeCapture.capture(record, worker)));
   instructions.start();
   const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerBudgets = new WorkerBudgetEnforcer({

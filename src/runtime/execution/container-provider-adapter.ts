@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { ContainerNativeBindingSchema } from "../activity/container-native-source.js";
 import { join } from "node:path";
 import type { SessionRecord } from "../../domain/session.js";
 import type { ProviderAdapter, ProviderLaunchSpec } from "../../orchestration/session/provider-ports.js";
@@ -15,17 +17,29 @@ export class ContainerProviderAdapter implements ProviderAdapter {
     const { workspace: _workspace, ...rest } = session;
     return { ...rest, cwd: "/workspace" };
   }
-  private adapter(session: SessionRecord, write = false): ProviderAdapter {
+  private adapter(session: SessionRecord, write = false, nativeSessionId?: string): ProviderAdapter {
     const mcp = { nodePath: "node", cliPath: "/opt/cyberdeck/mcp.mjs" };
-    return this.id === "claude" ? new ClaudeProviderAdapter({ sourceEnvironment: {}, mcp,
+    return this.id === "claude" ? new ClaudeProviderAdapter({ sourceEnvironment: {}, mcp, ...(nativeSessionId ? { nativeSessionId } : {}),
       directory: write ? join(this.root, "credentials", session.id, "launch") : "/run/credentials/launch",
       mcpAllowlist: { allowlistPath: join(this.root, "no-ambient-mcp.json"), operatorConfigPath: join(this.root, "no-ambient-provider-config.json") },
-    }) : new CodexProviderAdapter({ sourceEnvironment: {}, mcp,
+    }) : new CodexProviderAdapter({ sourceEnvironment: {}, mcp, ...(nativeSessionId ? { nativeSessionId } : {}),
       sessionsDirectory: join(this.root, "provider-state", session.id, ".codex", "sessions"),
     });
   }
+  private nativeSessionId(session: SessionRecord): string {
+    const binding = ContainerNativeBindingSchema.parse(JSON.parse(readFileSync(join(this.root, "native-bindings", `${session.id}.json`), "utf8")));
+    if (binding.sessionId !== session.id || binding.provider !== session.provider) throw new Error("NATIVE_BINDING_CONFLICT");
+    return binding.nativeSessionId;
+  }
   private clean(spec: ProviderLaunchSpec): ProviderLaunchSpec {
     const keys = ["TERM", "DISABLE_UPDATES", "ENABLE_TOOL_SEARCH", "CYBERDECK_PROCESS_ROLE", "CYBERDECK_WORKER_MODE", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"];
+    if (spec.executable === "claude") {
+      // Baked guest helper writes only provider-owned state. Host attribution validates the file.
+      const end = spec.args.indexOf("--");
+      spec.args.splice(end < 0 ? spec.args.length : end, 0, "--settings", JSON.stringify({ hooks: {
+        SessionStart: [{ matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: "node /opt/cyberdeck/native-binding.mjs" }] }],
+      } }));
+    }
     return { ...spec, env: Object.fromEntries(Object.entries(spec.env).filter(([key]) => keys.includes(key))) };
   }
   buildLaunchSpec(session: SessionRecord, prompt?: string): ProviderLaunchSpec {
@@ -34,7 +48,7 @@ export class ContainerProviderAdapter implements ProviderAdapter {
   }
   buildResumeSpec(session: SessionRecord): ProviderLaunchSpec {
     return session.executor !== "orbstack-container" ? this.host.buildResumeSpec(session)
-      : this.clean(this.adapter(session).buildResumeSpec(this.guest(session)));
+      : this.clean(this.adapter(session, false, this.nativeSessionId(session)).buildResumeSpec(this.guest(session)));
   }
   async prepareLaunch(session: SessionRecord, spec: ProviderLaunchSpec): Promise<void> {
     if (session.executor !== "orbstack-container") { await this.host.prepareLaunch?.(session, spec); return; }

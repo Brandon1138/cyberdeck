@@ -4,6 +4,7 @@ export function codexActivity(value: unknown): NativeActivityFrame[] {
   const frame = object(value), payload = object(frame?.payload);
   if (frame?.type !== "response_item" || !payload) return [];
   const type = payload.type;
+  if (type === "reasoning" || type === "message" && payload.role !== "assistant") return [];
   const kind = type === "function_call" || type === "custom_tool_call" ? "tool.invocation"
     : type === "function_call_output" || type === "custom_tool_call_output" ? "tool.result"
     : type === "message" && payload.role === "assistant" ? "provider.response" : undefined;

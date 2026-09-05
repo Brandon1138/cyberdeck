@@ -7,6 +7,7 @@ interface Instructions { put(record: InstructionRecord): Promise<void>; list(tar
 /** Activity follows the acknowledged instruction write; recorder failure cannot rewrite its outcome. */
 export function activityInstructionStore(store: Instructions, recorder: AgentActivityPort,
   session: (id: string) => SessionRecord | undefined,
+  capture?: (record: InstructionRecord, session: SessionRecord | undefined) => Promise<void>,
 ): Instructions {
   return {
     list: (id) => store.list(id),
@@ -22,7 +23,8 @@ export function activityInstructionStore(store: Instructions, recorder: AgentAct
         kind, operation: "instruction", provenance: "broker", coverage: worker === undefined ? "partial" : "complete-for-source",
         occurredAt: record.updatedAt, observedAt: new Date().toISOString(), outcome: "observed",
       }).catch(() => undefined);
-      if (record.status === "accepted") {
+      await capture?.(record, worker).catch(() => undefined);
+      if (record.status === "accepted" && (capture === undefined || worker?.executor !== "orbstack-container")) {
         await recorder.append({ schemaVersion: 1, eventId: randomUUID(), sourceKey: `native-capture-unwired:${record.id}`,
           runId: record.workflowRunId ?? record.id, workerId: record.targetSessionId, sessionId: record.targetSessionId,
           instructionId: record.id, observedAt: new Date().toISOString(), kind: "capture.gap", operation: "capture",
