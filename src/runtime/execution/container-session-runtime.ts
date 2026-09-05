@@ -8,6 +8,8 @@ export class ContainerSessionRuntime implements SessionRuntime {
   private outcome: number | undefined;
   private finalizing: Promise<void> | undefined;
   private escalating: Promise<void> | undefined;
+  private retry: ReturnType<typeof setTimeout> | undefined;
+  private forceRequested = false;
   constructor(private readonly attach: SessionRuntime, private readonly client: OrbStackClient,
     private readonly ref: ExecutionRef, private readonly released: () => void,
     private readonly failure: (error: unknown) => void,
@@ -28,6 +30,7 @@ export class ContainerSessionRuntime implements SessionRuntime {
     return () => { this.exits.delete(listener); };
   }
   private finish(force: boolean): Promise<void> {
+    this.forceRequested ||= force;
     if (this.outcome !== undefined) return Promise.resolve();
     if (this.finalizing !== undefined) {
       // SIGKILL must reach the guest while a graceful Docker stop is still pending.
@@ -50,9 +53,17 @@ export class ContainerSessionRuntime implements SessionRuntime {
       if (inspected === undefined) throw new Error("CONTAINER_EXIT_EVIDENCE_MISSING");
       if (inspected.State.Running) throw new Error("CONTAINER_STOP_UNCONFIRMED");
       this.outcome = inspected.State.ExitCode;
+      clearTimeout(this.retry);
       this.attach.kill();
       this.released();
       for (const listener of this.exits) listener(this.outcome);
-    } catch (error) { if (this.outcome === undefined) this.failure(error); }
+    } catch (error) {
+      if (this.outcome === undefined) {
+        this.failure(error);
+        if (this.retry === undefined) this.retry = setTimeout(() => {
+          this.retry = undefined; void this.finish(this.forceRequested);
+        }, 5000).unref();
+      }
+    }
   }
 }

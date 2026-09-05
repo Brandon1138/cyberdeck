@@ -27,6 +27,8 @@ export const ExecutionRecordSchema = z.object({
   phase: z.enum(["reserved", "preparing", "ready", "running", "stopping", "stopped", "collecting", "retained", "destroyed", "failed"]),
   updatedAt: z.iso.datetime(), failure: z.enum(["prepare", "start", "persistence", "recovery"]).optional(),
   cleanupFailed: z.boolean().optional(),
+  guestOutcome: z.object({ exitCode: z.number().int(), oomKilled: z.boolean() }).strict().optional(),
+  manifestRef: z.string().min(1).optional(),
 });
 export type ExecutionRecord = z.infer<typeof ExecutionRecordSchema>;
 export const WorkerExecutionPolicySchema = z.object({

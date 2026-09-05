@@ -25,4 +25,5 @@ export interface ExecutionStorePort {
 }
 export interface SessionExecutionPort {
   start(record: SessionRecord, launch: ProviderLaunchSpec, replayBytes: number): Promise<SessionRuntime>;
+  retire?(sessionId: string): Promise<void>;
 }

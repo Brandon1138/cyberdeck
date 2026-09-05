@@ -16,6 +16,7 @@ import { HostExecutor } from "../../src/runtime/execution/host-executor.js";
 import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import type { ProviderLaunchSpec } from "../../src/orchestration/session/provider-ports.js";
+import type { WorkerExecutionPort } from "../../src/orchestration/session/execution-ports.js";
 
 const directories: string[] = [];
 afterEach(async () => { for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true }); });
@@ -113,5 +114,24 @@ describe("worker execution seam", () => {
     await expect(service.start(session, launch, 1)).rejects.toThrow("primary-failure");
     expect(stop).toHaveBeenCalledOnce();
     expect(fixture.store.get(session.id)).toMatchObject({ phase: "failed", cleanupFailed: false });
+  });
+  it("retains the binding and refuses destruction until collection is complete", async () => {
+    const fixture = await store(), session = { ...record(), executor: "orbstack-container" as const };
+    const ref = { brokerId: fixture.store.brokerId, executionId: randomUUID(), workerId: session.id, sessionId: session.id,
+      generation: 1, executor: "orbstack-container" as const, workspaceId: "/private/clone" };
+    await fixture.store.put({ schemaVersion: 1, ref, phase: "stopped", request: { executor: "orbstack-container", profile: "ordinary" }, updatedAt: new Date().toISOString() });
+    const collect = vi.fn().mockResolvedValueOnce({ complete: false, manifestRef: "/evidence/incomplete" }).mockResolvedValue({ complete: true, manifestRef: "/evidence/complete" });
+    const destroy = vi.fn().mockRejectedValueOnce(new Error("daemon-offline")).mockResolvedValue(undefined);
+    const backend = { stop: async () => ({ ref, state: "stopped" }), collect, destroy } as unknown as WorkerExecutionPort;
+    const service = new WorkerExecutionService(fixture.store, { "orbstack-container": backend });
+    await expect(service.retire(session.id)).rejects.toThrow("EXECUTION_COLLECTION_INCOMPLETE");
+    expect(destroy).not.toHaveBeenCalled();
+    await expect(service.retire(session.id)).rejects.toThrow("daemon-offline");
+    expect(fixture.store.get(session.id)).toMatchObject({ phase: "failed", manifestRef: "/evidence/complete" });
+    await service.retire(session.id);
+    expect(collect).toHaveBeenCalledTimes(2);
+    expect(fixture.store.get(session.id)).toMatchObject({ phase: "destroyed", manifestRef: "/evidence/complete" });
+    await service.retire(session.id);
+    expect(destroy).toHaveBeenCalledTimes(2);
   });
 });
