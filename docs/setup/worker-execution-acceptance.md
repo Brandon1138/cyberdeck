@@ -15,7 +15,11 @@ gates pass and native/provider exceptions are accepted.
 | Operator/peer handoff | Same worker execution; canonical authority transfer and stale token fencing | Real broker + OrbStack scripted proof |
 | Stop | Guest inspection, force escalation during graceful stop; retries after control failure | OrbStack scripted proof + escalation tests |
 | Startup reconciliation | Known guest writers stopped before new admission; unreachable resources retained | Actual isolated broker SIGKILL left a running guest; fresh recovery stopped/collected/removed it |
-| Retirement | Confirm stop, collect/hash evidence, destroy only after verification; preserve clone | Service tests; exact-candidate integration remains |
+| Retirement | Confirm stop, collect/hash evidence, destroy only after verification; preserve clone | Service tests; selective retirement of one of three live workers proved in `cyberdeck-multi-worker-proof-vggghx` |
+| Two concurrent workers, third queued | Distinct clones/homes/grants; slot handover; cross-worker report refused from guest and host | `cyberdeck-multi-worker-proof-vggghx`; `eval:container` cross-worker (host-verified) |
+| `network: none` | Explicit refusal at prepare (`CONTAINER_NETWORK_PROFILE_UNSUPPORTED`), reported in `execution-health` | Executor tests; reason in `docs/architecture/worker-execution.md` |
+| Container-backed evaluation | Eight scenarios through the production execution runtime with a scripted guest | Promptfoo `eval-n0b-2026-09-05T20:04:11`, 8/8, validator clean |
+| Live provider canary | One real provider, model, credential and ceiling from `CYBERDECK_LIVE_EVAL_CONFIG` | `scripts/provider-canary.ts`; refuses without config; not yet authorized |
 
 Selected dirty input is supplied through `workspace.selectedInputs` (relative path, action,
 SHA-256 and executable bit). Bytes are read from the declared source under verification. Omitted
@@ -54,9 +58,10 @@ only acknowledged canonical lease renewal extends it. Shutdown closes admission 
 pending starts. The periodic sweep only retires old failed acquisitions without registered sessions;
 registered/resumable workers require explicit retirement.
 
-Remaining integration gates include broader retained-failure policy, all crash boundaries,
-initial/direct/in-progress and host-native tool capture, complete supported-provider
-canaries and reviewable default rollout. No remote Sentry trace or live Promptfoo run exists yet. Missing
+Remaining integration gates are the authorized provider canaries (Claude, then Codex), the live
+Promptfoo baseline, the real Sentry trace, and acceptance of the host exceptions listed in
+`docs/setup/worker-infrastructure-acceptance.md`; the rollout/rollback configuration is written in
+`docs/architecture/worker-execution.md`. Host-native tool capture remains a recorded gap. No remote Sentry trace or live Promptfoo run exists yet. Missing
 remote authorization/configuration and provider/model/spend values will be requested after independent
 implementation is ready; those gaps do not count as passes.
 

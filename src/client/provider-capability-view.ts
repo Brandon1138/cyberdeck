@@ -1,3 +1,5 @@
+import { providerExecutionSupport, type ExecutionSupportStatus } from "../domain/execution-support.js";
+
 type AntigravityCapabilitySupport = "supported" | "unsupported" | "live-unverified";
 
 interface AntigravityCapabilityView {
@@ -296,11 +298,22 @@ const CURSOR_ROWS: readonly ProviderCapabilityRow[] = [
   },
 ];
 
+/** Executor cells come from the same matrix the broker serves; unproved is never shown as proven. */
+const EXECUTION_ROWS: ProviderCapabilityRow[] = (Object.keys(PROVIDER_EXECUTABLES) as PresentedProvider[]).flatMap((provider) => {
+  const support = providerExecutionSupport(provider);
+  if (support === undefined) return [];
+  const evidence = (status: ExecutionSupportStatus): CapabilityEvidence => status === "supported" ? "fixture-proven" : status === "unproved" ? "live-unverified" : "unsupported";
+  return [
+    { provider, capability: "host-execution", evidence: evidence(support.host.status), reason: support.host.reason },
+    { provider, capability: "container-execution", evidence: evidence(support.container.status), reason: support.container.gate === undefined ? support.container.reason : `${support.container.reason}; gate: ${support.container.gate}` },
+  ];
+});
 /** Every presented row, ordered by provider id then capability. Order encodes no preference. */
 export const PROVIDER_CAPABILITY_ROWS: readonly ProviderCapabilityRow[] = [
   ...ANTIGRAVITY_ROWS,
   ...CLAUDE_ROWS,
   ...CURSOR_ROWS,
+  ...EXECUTION_ROWS,
 ].sort((left, right) =>
   left.provider === right.provider
     ? left.capability.localeCompare(right.capability)

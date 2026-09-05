@@ -22,7 +22,7 @@ describe("provider capability view", () => {
   });
 
   it("derives the antigravity rows from the adapter register rather than copying them", () => {
-    const derived = capabilityRowsFor("antigravity");
+    const derived = capabilityRowsFor("antigravity").filter((row) => !row.capability.endsWith("-execution"));
     expect(derived).toHaveLength(ANTIGRAVITY_CAPABILITIES.length);
     for (const capability of ANTIGRAVITY_CAPABILITIES) {
       const row = derived.find((candidate) => candidate.capability === capability.capability);
@@ -80,5 +80,17 @@ describe("provider capability view", () => {
 
   it("never renders Fable as an option", () => {
     expect(renderCapabilityMatrix(PROVIDER_CAPABILITY_ROWS)).not.toMatch(/fable/i);
+  });
+
+  it("presents executor cells from the shared matrix without promoting an unproved one", () => {
+    for (const provider of ["claude", "cursor", "antigravity"]) {
+      const rows = capabilityRowsFor(provider).filter((row) => row.capability.endsWith("-execution"));
+      expect(rows.map((row) => row.capability).sort()).toEqual(["container-execution", "host-execution"]);
+      expect(rows.find((row) => row.capability === "host-execution")?.evidence).toBe("fixture-proven");
+      const container = rows.find((row) => row.capability === "container-execution")!;
+      expect(container.evidence).toBe(provider === "claude" ? "live-unverified" : "unsupported");
+      expect(container.evidence).not.toBe("live-proven");
+      if (provider === "claude") expect(container.reason).toContain("gate:");
+    }
   });
 });

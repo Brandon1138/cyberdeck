@@ -86,8 +86,21 @@ After 75b569d: 58 focused persistence/coordination/observability/handoff/archite
 TypeScript passed. The new session inspection proof is scripted-provider runtime evidence, not a live
 model run.
 
-Next: remaining native capture coverage, index
-capacity/rebuild durability, multi-worker/crash coverage, provider auth/resume matrix, container-backed
-live harness, exact-candidate proof and rollout commands. Missing Sentry activation/project/region/DSN/
-quota and live provider/model/total spend remain external gates. Request only those after independent
-implementation is complete. Objective remains open.
+Continuation branch feat/worker-infrastructure-live-harness (stacked on #111): 2ceebd4 turn-driven
+native capture by dispatch origin (instruction, initial-prompt, direct-input, unattributed) with
+running-turn reads and strict /clear; 032fddb index counted against the cap, corrupt index rebuilt,
+failed write self-heal, health accounting; 03e5a1e multi-worker proof and `network: none` refusal,
+shutdown awaits in-flight work, retained failures in health; 898d2fb container-scripted Promptfoo mode
+through the production runtime, config-gated live mode, manual trusted workflow. Provider execution
+support matrix (`src/domain/execution-support.ts`) served through capabilities and Fleet; provider canary
+(`scripts/provider-canary.ts`); packed CLI proof (`scripts/prove-pack.ts`).
+
+Actual evidence: cyberdeck-multi-worker-proof-vggghx (two slots, three workers, cross-worker 403 from
+guest and host, queue handover, selective retirement, reconciliation of two live guests);
+`eval:container` Promptfoo eval-n0b-2026-09-05T20:04:11 8/8 with validator clean (real deadline stop
+exit 143, real OOM 137 at 256 MiB, guest probes 400/404/403, gateway report, host-verified mount
+isolation); `eval:offline` 8/8 after the refactor. Full suite at 898d2fb: 176 files / 2,104 tests.
+
+Next: request the external values (provider/model/total spend ceiling and credential file for the
+canary and live baseline; Sentry activation/project/region/DSN/allowance; acceptance of the host
+exceptions; broker restart for rollout). Objective remains open until those gates run.
