@@ -1,0 +1,10 @@
+import { readFile } from "node:fs/promises";
+import { validatePromptfooResults } from "../evals/assertions/promptfoo-results.js";
+import { verifyEvidenceArtifacts } from "../evals/assertions/artifacts.js";
+const path = process.argv[2];
+if (!path) throw new Error("PROMPTFOO_RESULT_PATH_REQUIRED");
+const result = JSON.parse(await readFile(path, "utf8"));
+const failures = validatePromptfooResults(result);
+if (!failures.length) for (const row of result.results.results) failures.push(...await verifyEvidenceArtifacts(JSON.parse(row.response.output)));
+console.log(JSON.stringify({ failures }));
+if (failures.length) process.exitCode = 1;

@@ -1,0 +1,12 @@
+{
+  "name": "cyberdeck-infrastructure-evals",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.18.0 <25" },
+  "packageManager": "pnpm@11.5.0",
+  "scripts": {
+    "eval:offline": "PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 promptfoo eval --no-cache --max-concurrency 1 --output results/offline.json && tsx ../scripts/validate-promptfoo-results.ts results/offline.json",
+    "verify": "tsx ../scripts/run-infrastructure-evals.ts --offline"
+  },
+  "devDependencies": { "promptfoo": "0.122.2", "tsx": "4.20.5" }
+}

@@ -1,0 +1,21 @@
+description: Cyberdeck isolated real broker - offline scripted infrastructure checks
+prompts:
+  - '{{scenario}}'
+providers:
+  - file://providers/cyberdeck.ts
+evaluateOptions:
+  maxConcurrency: 1
+  cache: false
+defaultTest:
+  assert:
+    - type: javascript
+      value: file://assertions/promptfoo.ts
+tests:
+  - vars: { scenario: dirty-tree-false-completion }
+  - vars: { scenario: phantom-turn }
+  - vars: { scenario: stale-authority }
+  - vars: { scenario: malicious-text }
+  - vars: { scenario: timeout }
+  - vars: { scenario: oom }
+  - vars: { scenario: sentry-outage }
+  - vars: { scenario: cross-worker }
