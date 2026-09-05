@@ -14,7 +14,8 @@ Committed stack: 62ee50a accepted preflight; 9820585 executor identity (#103); 9
 boundary and 87bc85f OrbStack runtime (#104); 3bc9429 prepared-resource cleanup/force escalation;
 e41216e evidence-gated retirement; d59ba54 hostile-Git review protection; 94c59ec local activity/cursors;
 988dbc5 bounded Sentry projection (#105). cebd64c production composition (#106); e016bea offline real-broker Promptfoo (#107).
-Current branch: feat/worker-infrastructure-durability. Follow-up commits: dae5789 atomic launch/source
+Durability drafts: native capture #108, disk index #109, cancellation/deadlines/retry #110.
+Current branch: feat/worker-infrastructure-coordination-activity at 75b569d. Follow-up commits: dae5789 atomic launch/source
 containment; 3486609 native container binding; 0668336 causal intervals; d5b3bc1 resume activation
 fencing; 3882828 disk activity index/pins; e82b25a cancellation/deadlines; f2fd754 bounded queue retry.
 
@@ -28,8 +29,10 @@ Activity records acknowledged instruction/execution transitions. Completed queue
 bind container native turns through exact semantic receipts, explicit resume IDs, persisted byte
 cursors and source-prefix validation. Provider-native turn/tool intervals and parent IDs are observed,
 not HTTP/request timings. SQLite indexes the canonical JSONL by location without keeping payloads in
-memory; incident pins persist across restart. Initial/direct/in-progress and host-native tool coverage,
-coordination emitters, session-wide reads and index capacity/rebuild hardening remain incomplete.
+memory; incident pins persist across restart. Initial/direct/in-progress and host-native tool coverage
+and index capacity/rebuild hardening remain incomplete. Post-commit coordination reports, controls and
+handoffs now project with source provenance and replay deduplication; session-wide activity reads join
+these with lifecycle and instruction events. Missing explicit session mappings durably degrade coverage.
 
 The Sentry serialized envelope excludes content, hashes native tool IDs and links instruction segments.
 The bounded queue retries transient failures/429 after 60 seconds and drains without new activity;
@@ -55,6 +58,11 @@ Newer actual proofs under the same temporary root:
 - cyberdeck-broker-container-proof-12IhOQ: actual five-second deadline stops the guest, records
   timeout, releases the slot and preserves evidence before collection/removal.
 
+Exact-commit activity/resume proof at clean 75b569d: cyberdeck-broker-container-proof-37EeF8.
+The real broker session read returned 14 ordered events including execution lifecycle, control,
+worker report and handoff, with no recorder degradation. Generation-2 resume/report, handoff,
+fencing, recovery and evidence-preserving removal passed; cleanup is absent.
+
 Latest image: sha256:5d179eccc6bd197adbb6d0ca2928778e04716ce3ab4d6a3ae560fbe95227e413.
 Base: node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d.
 Guest versions: Node 24.18.0, Claude 2.1.261, Codex 0.153.4. No model authentication/calls proved.
@@ -74,7 +82,11 @@ ratchets passed. After f2fd754, 10 observability tests and TypeScript passed. cy
 retains an earlier clean-installed CLI proof: 0.1.0-alpha.2; eval files excluded. Packed CLI broker
 commands were not aimed at the hardcoded active socket. These proofs predate final acceptance.
 
-Next: unified coordination activity/session inspection, remaining native capture coverage, index
+After 75b569d: 58 focused persistence/coordination/observability/handoff/architecture tests and
+TypeScript passed. The new session inspection proof is scripted-provider runtime evidence, not a live
+model run.
+
+Next: remaining native capture coverage, index
 capacity/rebuild durability, multi-worker/crash coverage, provider auth/resume matrix, container-backed
 live harness, exact-candidate proof and rollout commands. Missing Sentry activation/project/region/DSN/
 quota and live provider/model/total spend remain external gates. Request only those after independent

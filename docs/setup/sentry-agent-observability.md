@@ -2,11 +2,13 @@
 
 Current dependencies: Sentry Node/OpenTelemetry 10.73.0, OTel API 1.9.0, OTel SDK/core 2.11.0. Exactly one NodeTracerProvider is registered with SentrySampler, SentrySpanProcessor, SentryPropagator and SentryContextManager; automatic integrations and ESM instrumentation hooks are disabled.
 
-Local instruction activity is recorded after acknowledged instruction persistence. Completed queued instructions bind Claude/Codex container native turns to exact semantic receipts and durable byte cursors, with parent links from accepted instruction through turn, invocation and result. Initial prompts, direct input, in-progress turns, host-native tools and control/handoff emitters remain incomplete. Cursor/Antigravity native tool capture is unavailable. The source fixtures are not live provider proof. Activity inspection reports provenance and retention loss:
+Local instruction activity is recorded after acknowledged instruction persistence. Completed queued instructions bind Claude/Codex container native turns to exact semantic receipts and durable byte cursors, with parent links from accepted instruction through turn, invocation and result. Initial prompts, direct input, in-progress turns and host-native tools remain incomplete. Coordination reports, controls and handoffs project after the
+existing atomic commit and deduplicate on replay; missing session mappings durably degrade capture. Cursor/Antigravity native tool capture is unavailable. The source fixtures are not live provider proof. Activity inspection reports provenance and retention loss:
 
 ```sh
 rtk cyberdeck activity --run <instruction-or-run-uuid> --after 0 --limit 100
 rtk cyberdeck activity --run <uuid> --export /absolute/new-local-page.json
+rtk cyberdeck activity --session <worker-session-uuid> --after 0 --limit 100
 ```
 
 Sentry is disabled unless broker config explicitly sets `sentry.enabled: true`, a selected `dsn`, and an actual-quota-derived `dailyEnvelopeCap`. `sampleRate` defaults to 0.1. Do not activate this configuration until the operator authorizes telemetry and supplies project/region/allowance; these values remain missing. No account settings or active configuration were changed.

@@ -55,7 +55,13 @@ pending starts. The periodic sweep only retires old failed acquisitions without 
 registered/resumable workers require explicit retirement.
 
 Remaining integration gates include broader retained-failure policy, all crash boundaries,
-initial/direct/in-progress and host-native tool capture, coordination activity, complete supported-provider
+initial/direct/in-progress and host-native tool capture, complete supported-provider
 canaries and reviewable default rollout. No remote Sentry trace or live Promptfoo run exists yet. Missing
 remote authorization/configuration and provider/model/spend values will be requested after independent
 implementation is ready; those gaps do not count as passes.
+
+Session-wide inspection proof at clean 75b569d: `cyberdeck-broker-container-proof-37EeF8`.
+Real broker RPC returned lifecycle/control/report/handoff evidence for the resumed worker, preserving
+worker-report provenance and separate outcomes. Recording was not degraded; generation-2 report,
+handoff, recovery, collection and owned-container removal passed. This remains a scripted provider,
+not authenticated Claude/Codex behavioral proof.
