@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { scenarioIds } from "../scenarios/catalog.js";
+export const EvalModeSchema = z.enum(["offline-scripted", "container-scripted", "live-container"]);
 export const ScenarioEvidenceSchema = z.object({
   schemaVersion: z.literal(1), runId: z.uuid(), scenarioId: z.enum(scenarioIds as [string, ...string[]]),
-  scenarioVersion: z.literal(1), mode: z.enum(["offline-scripted", "live-container"]),
+  scenarioVersion: z.literal(1), mode: EvalModeSchema,
   status: z.enum(["completed", "failed", "timed-out"]), startedAt: z.iso.datetime(), finishedAt: z.iso.datetime(),
   commit: z.string().regex(/^[a-f0-9]{40}$/), dirtyImplementation: z.boolean(), brokerId: z.uuid().nullable(),
   provider: z.string().min(1), providerVersion: z.string().min(1), model: z.string().min(1),
@@ -17,3 +18,4 @@ export const ScenarioEvidenceSchema = z.object({
   spend: z.object({ measuredUsd: z.number().nonnegative().nullable(), authorizedCeilingUsd: z.number().nonnegative().nullable() }).strict(),
 }).strict();
 export type ScenarioEvidence = z.infer<typeof ScenarioEvidenceSchema>;
+export type EvalMode = z.infer<typeof EvalModeSchema>;

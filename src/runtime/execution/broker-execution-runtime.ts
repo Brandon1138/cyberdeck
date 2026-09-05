@@ -28,7 +28,7 @@ export async function brokerExecutionRuntime(options: {
   const store = options.activity === undefined ? localStore : activityExecutionStore(localStore, options.activity);
   const host = new HostExecutor(createSessionRuntime), config = options.config.containerRuntime;
   const root = join(options.stateDirectory, "containers");
-  let gateway: WorkerGateway | undefined, container: OrbStackExecutor | undefined;
+  let gateway: WorkerGateway | undefined, container: OrbStackExecutor | undefined, gatewayPort: number | undefined;
   let reachable = true;
   const backends: Partial<Record<WorkerExecutor, WorkerExecutionPort>> = { host };
   let recoveryTimer: ReturnType<typeof setInterval> | undefined;
@@ -41,6 +41,7 @@ export async function brokerExecutionRuntime(options: {
         && session?.executionState === "active";
     });
     const port = await gateway.listen();
+    gatewayPort = port;
     container = new OrbStackExecutor({ client: new OrbStackClient(config.endpoint), profile: config,
       contexts: new BrokerContainerContexts(root, config.credentialFiles, gateway, port), attach: createSessionRuntime,
       evidenceDirectory: join(root, "evidence"), onFailure: () => { failures++; },
@@ -82,7 +83,7 @@ export async function brokerExecutionRuntime(options: {
     })().catch(() => { failures++; }).finally(() => { cleanupWork = undefined; });
   }, 60000).unref();
   return {
-    executions, closeAdmission: () => executions.closeAdmission(),
+    executions, brokerId: localStore.brokerId, gatewayPort, closeAdmission: () => executions.closeAdmission(),
     adapters: config === undefined ? options.adapters : Object.fromEntries(Object.entries(options.adapters).map(([id, adapter]) => [id, new ContainerProviderAdapter(adapter, root)])),
     health: () => ({ configured: config !== undefined, reachable, failures, slots: container?.slots.snapshot(), profile: container?.support(),
       retainedFailures: store.list().filter((record) => record.phase === "failed" && record.ref.executor === "orbstack-container").map((record) => ({

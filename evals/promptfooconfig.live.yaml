@@ -1,0 +1,23 @@
+description: Cyberdeck isolated real broker - live provider inside real OrbStack containers (requires CYBERDECK_LIVE_EVAL_CONFIG; spends the authorized ceiling)
+prompts:
+  - '{{scenario}}'
+providers:
+  - id: file://providers/cyberdeck.ts
+    config: { mode: live-container }
+evaluateOptions:
+  maxConcurrency: 1
+  cache: false
+  repeat: 3
+defaultTest:
+  assert:
+    - type: javascript
+      value: file://assertions/promptfoo.ts
+tests:
+  - vars: { scenario: dirty-tree-false-completion }
+  - vars: { scenario: phantom-turn }
+  - vars: { scenario: stale-authority }
+  - vars: { scenario: malicious-text }
+  - vars: { scenario: timeout }
+  - vars: { scenario: oom }
+  - vars: { scenario: sentry-outage }
+  - vars: { scenario: cross-worker }

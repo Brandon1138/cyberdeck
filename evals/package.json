@@ -2,11 +2,20 @@
   "name": "cyberdeck-infrastructure-evals",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24.18.0 <25" },
+  "engines": {
+    "node": ">=24.18.0 <25"
+  },
   "packageManager": "pnpm@11.5.0",
   "scripts": {
-    "eval:offline": "PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 promptfoo eval --no-cache --max-concurrency 1 --output results/offline.json && tsx ../scripts/validate-promptfoo-results.ts results/offline.json",
-    "verify": "tsx ../scripts/run-infrastructure-evals.ts --offline"
+    "eval:offline": "PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 promptfoo eval --no-cache --max-concurrency 1 --output results/offline.json && tsx ../scripts/validate-promptfoo-results.ts results/offline.json offline-scripted 1",
+    "eval:container": "PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 promptfoo eval --config promptfooconfig.container.yaml --no-cache --max-concurrency 1 --output results/container.json && tsx ../scripts/validate-promptfoo-results.ts results/container.json container-scripted 1",
+    "eval:live": "PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 promptfoo eval --config promptfooconfig.live.yaml --no-cache --max-concurrency 1 --output results/live.json && tsx ../scripts/validate-promptfoo-results.ts results/live.json live-container 3",
+    "verify": "tsx ../scripts/run-infrastructure-evals.ts --offline",
+    "verify:container": "tsx ../scripts/run-infrastructure-evals.ts --container",
+    "verify:live": "tsx ../scripts/run-infrastructure-evals.ts --live"
   },
-  "devDependencies": { "promptfoo": "0.122.2", "tsx": "4.20.5" }
+  "devDependencies": {
+    "promptfoo": "0.122.2",
+    "tsx": "4.20.5"
+  }
 }

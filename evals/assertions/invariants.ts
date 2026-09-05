@@ -1,10 +1,10 @@
 import { ScenarioEvidenceSchema, type ScenarioEvidence } from "./evidence.js";
-import { scenarioChecks, scenarioId, scenarioIds } from "../scenarios/catalog.js";
+import { requiredChecks, scenarioId, scenarioIds } from "../scenarios/catalog.js";
 const equalPaths = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 export function hardFailures(raw: unknown): string[] {
   const parsed = ScenarioEvidenceSchema.safeParse(raw);
   if (!parsed.success) return ["evidence-schema-invalid"];
-  const e = parsed.data, required = scenarioChecks[scenarioId(e.scenarioId)];
+  const e = parsed.data, required = requiredChecks(scenarioId(e.scenarioId), e.mode);
   const artifacts = new Set(e.artifacts.map((artifact) => artifact.id));
   const failures = [
     ...(e.status === "completed" ? [] : ["scenario-not-completed"]),
@@ -24,9 +24,11 @@ export function hardFailures(raw: unknown): string[] {
     if (checks.length !== 1 || !checks[0]!.passed) failures.push(`check:${name}`);
   }
   if (e.checks.some((check) => !check.passed || check.evidenceRefs.some((ref) => !artifacts.has(ref)))) failures.push("check-evidence-invalid");
-  if (e.mode === "live-container" && (!e.image || e.provider === "scripted" || e.commandCoverage === "scripted"
+  // A container-backed row must name the image that ran; a scripted guest may never be relabelled live.
+  if (e.mode !== "offline-scripted" && !e.image) failures.push("container-evidence-invalid");
+  if (e.mode === "live-container" && (e.provider === "scripted" || e.commandCoverage === "scripted"
     || e.spend.authorizedCeilingUsd === null || e.spend.authorizedCeilingUsd <= 0)) failures.push("live-evidence-invalid");
-  if (e.mode === "live-container" && e.scenarioId === "cross-worker"
+  if (e.mode !== "offline-scripted" && e.scenarioId === "cross-worker"
     && !e.checks.some((check) => check.name === "other-worker-unavailable" && check.passed && check.provenance === "host-verified")) failures.push("guest-isolation-evidence-missing");
   return failures;
 }
