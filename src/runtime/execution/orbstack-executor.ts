@@ -22,6 +22,18 @@ export interface OrbStackExecutorOptions {
   evidenceDirectory: string;
   onFailure(error: unknown): void;
 }
+/**
+ * `network: none` is a configured value with no launch path today. The guest gates its provider
+ * process on the authenticated readiness endpoint and reports through the same host gateway,
+ * both TCP to host.docker.internal, and every supported provider needs egress to its model API.
+ * Until a host-reachable transport that needs no network is proved on OrbStack, the profile is
+ * refused at prepare and reported as unsupported; it is never silently launched as egress.
+ */
+export function networkProfileSupport(network: ContainerProfile["network"]): { supported: boolean; reason?: string } {
+  return network === "none"
+    ? { supported: false, reason: "readiness/report gateway and provider APIs require egress; no non-network transport is proved" }
+    : { supported: true };
+}
 export class OrbStackExecutor implements WorkerExecutionPort {
   readonly slots: ExecutionSlotScheduler;
   private readonly reservations = new Map<string, () => void>();
@@ -31,8 +43,12 @@ export class OrbStackExecutor implements WorkerExecutionPort {
       || !Number.isSafeInteger(p.memoryBytes) || p.memoryBytes < 64 * 1024 * 1024) throw new Error("CONTAINER_PROFILE_INVALID");
     this.slots = new ExecutionSlotScheduler(p.slots);
   }
+  support(): { network: ContainerProfile["network"]; supported: boolean; reason?: string } {
+    return { network: this.options.profile.network, ...networkProfileSupport(this.options.profile.network) };
+  }
   async prepare(input: ExecutionLaunchInput): Promise<PreparedExecution> {
     const { client, profile } = this.options;
+    if (!networkProfileSupport(profile.network).supported) throw new Error("CONTAINER_NETWORK_PROFILE_UNSUPPORTED");
     if (input.launch.cwd !== "/workspace" || !["node", "claude", "codex"].includes(input.launch.executable)
       || Object.keys(input.launch.env).some((key) => !["TERM", "DISABLE_UPDATES", "ENABLE_TOOL_SEARCH", "CYBERDECK_PROCESS_ROLE", "CYBERDECK_WORKER_MODE", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"].includes(key))) {
       throw new Error("CONTAINER_LAUNCH_NOT_TARGETED");
