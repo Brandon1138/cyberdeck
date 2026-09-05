@@ -98,4 +98,20 @@ describe("worker execution seam", () => {
     await appendFile(join(fixture.directory, "worker-executions.jsonl"), '{}\n');
     await expect(WorkerExecutionStore.open(fixture.directory)).rejects.toThrow();
   });
+  it.each(["ready-write", "start", "running-write"])("stops prepared resources after %s fails", async (boundary) => {
+    const fixture = await store();
+    const originalPut = fixture.store.put.bind(fixture.store);
+    vi.spyOn(fixture.store, "put").mockImplementation(async (value) => {
+      if (value.phase === (boundary === "ready-write" ? "ready" : boundary === "running-write" ? "running" : "never")) throw new Error("primary-failure");
+      await originalPut(value);
+    });
+    const backend = new HostExecutor(runtime);
+    if (boundary === "start") vi.spyOn(backend, "start").mockRejectedValue(new Error("primary-failure"));
+    const stop = vi.spyOn(backend, "stop");
+    const service = new WorkerExecutionService(fixture.store, { host: backend });
+    const session = record();
+    await expect(service.start(session, launch, 1)).rejects.toThrow("primary-failure");
+    expect(stop).toHaveBeenCalledOnce();
+    expect(fixture.store.get(session.id)).toMatchObject({ phase: "failed", cleanupFailed: false });
+  });
 });

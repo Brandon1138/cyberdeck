@@ -7,6 +7,7 @@ export class ContainerSessionRuntime implements SessionRuntime {
   private readonly exits = new Set<(code: number, signal?: number) => void>();
   private outcome: number | undefined;
   private finalizing: Promise<void> | undefined;
+  private escalating: Promise<void> | undefined;
   constructor(private readonly attach: SessionRuntime, private readonly client: OrbStackClient,
     private readonly ref: ExecutionRef, private readonly released: () => void,
     private readonly failure: (error: unknown) => void,
@@ -28,19 +29,30 @@ export class ContainerSessionRuntime implements SessionRuntime {
   }
   private finish(force: boolean): Promise<void> {
     if (this.outcome !== undefined) return Promise.resolve();
-    if (this.finalizing !== undefined) return this.finalizing;
+    if (this.finalizing !== undefined) {
+      // SIGKILL must reach the guest while a graceful Docker stop is still pending.
+      if (force && this.escalating === undefined) {
+        this.escalating = this.completeStop(true).finally(() => { this.escalating = undefined; });
+      }
+      return this.escalating ?? this.finalizing;
+    }
     this.finalizing = (async () => {
-      try {
-        // A lost attach client cannot leave a live, unsupervised guest writing indefinitely.
-        const inspected = await this.client.stop(this.ref, force);
-        if (inspected === undefined) throw new Error("CONTAINER_EXIT_EVIDENCE_MISSING");
-        this.outcome = inspected.State.ExitCode;
-        this.attach.kill();
-        this.released();
-        for (const listener of this.exits) listener(this.outcome);
-      } catch (error) { this.failure(error); }
+      try { await this.completeStop(force); }
       finally { this.finalizing = undefined; }
     })();
     return this.finalizing;
+  }
+  private async completeStop(force: boolean): Promise<void> {
+    try {
+      // A lost attach client cannot leave a live, unsupervised guest writing indefinitely.
+      const inspected = await this.client.stop(this.ref, force);
+      if (this.outcome !== undefined) return;
+      if (inspected === undefined) throw new Error("CONTAINER_EXIT_EVIDENCE_MISSING");
+      if (inspected.State.Running) throw new Error("CONTAINER_STOP_UNCONFIRMED");
+      this.outcome = inspected.State.ExitCode;
+      this.attach.kill();
+      this.released();
+      for (const listener of this.exits) listener(this.outcome);
+    } catch (error) { if (this.outcome === undefined) this.failure(error); }
   }
 }

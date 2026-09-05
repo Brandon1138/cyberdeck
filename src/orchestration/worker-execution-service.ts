@@ -39,7 +39,6 @@ export class WorkerExecutionService implements SessionExecutionPort {
     };
     await this.store.put(intent); // Intent exists even if the backend cannot prepare.
     record.execution = intent.ref;
-    let runtime: SessionRuntime | undefined;
     try {
       if (backend === undefined) throw new ExecutionError("EXECUTOR_UNAVAILABLE");
       const prepared = await backend.prepare({ record, request, identity: intent.ref, launch });
@@ -51,13 +50,24 @@ export class WorkerExecutionService implements SessionExecutionPort {
       intent = { ...intent, ref: prepared.ref, phase: "ready", updatedAt: new Date().toISOString() };
       await this.store.put(intent);
       record.execution = prepared.ref;
-      runtime = await backend.start(prepared, replayBytes);
+      const runtime = await backend.start(prepared, replayBytes);
       await this.store.put({ ...intent, phase: "running", updatedAt: new Date().toISOString() });
+      runtime.onExit(() => {
+        // A previous generation's delayed observer must never overwrite a resumed binding.
+        const current = this.store.get(record.id);
+        if (current?.ref.generation !== intent.ref.generation || current.phase !== "running") return;
+        void this.store.put({ ...current, phase: "stopped", updatedAt: new Date().toISOString() }).catch(() => undefined);
+      });
       return runtime;
     } catch (error) {
       let cleanupFailed = false;
-      if (runtime !== undefined) {
-        try { await backend!.stop(intent.ref, true); } catch { cleanupFailed = true; }
+      if (backend !== undefined) {
+        // Preparation may already own a slot/container even when start or its journal write
+        // never returns. Stop by the durable identity, including partial create failures.
+        try {
+          const stopped = await backend.stop(intent.ref, true);
+          cleanupFailed = stopped.state !== "stopped" && stopped.state !== "absent";
+        } catch { cleanupFailed = true; }
       }
       await this.store.put({ ...intent, phase: "failed", failure: intent.phase === "preparing" ? "prepare" : "start",
         cleanupFailed, updatedAt: new Date().toISOString() }).catch(() => undefined);
