@@ -1,3 +1,4 @@
+import { WorkerExecutionPolicySchema } from "./domain/worker-execution.js";
 import { z } from "zod";
 import { BudgetDeclarationSchema, ConcurrencyDeclarationSchema } from "./domain/budget.js";
 import { CONTROL_PLANE_SCHEMA_VERSION } from "./domain/control-plane.js";
@@ -18,6 +19,7 @@ import { ThreadRetentionPolicySchema } from "./domain/thread-retention.js";
 export const BrokerRuntimeConfigSchema = z.object({
   /** Active workers only; orchestrators are excluded. `null` explicitly disables the ceiling. */
   maxConcurrentWorkers: z.number().int().positive().nullable().default(DEFAULT_MAX_CONCURRENT_WORKERS),
+  workerExecution: WorkerExecutionPolicySchema.optional(),
   maxDelegationDepth: z.literal(1).default(1),
   replayBytes: z.number().int().positive().default(128 * 1024),
   workerStallSeconds: z.number().int().positive().default(DEFAULT_WORKER_STALL_SECONDS),

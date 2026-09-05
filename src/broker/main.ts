@@ -1,3 +1,8 @@
+import { enforceJobExecutionPolicy } from "../orchestration/job-execution-policy.js";
+import type { WorkerExecutionPolicy } from "../domain/worker-execution.js";
+import { HostExecutor } from "../runtime/execution/host-executor.js";
+import { WorkerExecutionStore } from "../persistence/worker-execution-store.js";
+import { WorkerExecutionService } from "../orchestration/worker-execution-service.js";
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -134,6 +139,7 @@ export function createCliToolkit(): CliToolkit {
 export function composeJobDispatchAdapters(context: {
   leases: WorktreeLeaseManager;
   artifacts: ArtifactStore;
+  executionPolicy?: WorkerExecutionPolicy | undefined;
 }): JobDispatchAdapter[] {
   return [
     new AppServerJobDispatchAdapter({
@@ -145,7 +151,7 @@ export function composeJobDispatchAdapters(context: {
     new ClaudeJobDispatchAdapter(),
     new CursorJobDispatchAdapter(),
     new AntigravityJobDispatchAdapter(),
-  ];
+  ].map((adapter) => enforceJobExecutionPolicy(adapter, context.executionPolicy));
 }
 
 export async function runBroker(
@@ -185,6 +191,7 @@ export async function runBroker(
       antigravity: new AntigravityProviderAdapter(),
     },
     sessionRuntimeFactory: createSessionRuntime,
+    executions: new WorkerExecutionService(await WorkerExecutionStore.open(stateDirectory), { host: new HostExecutor(createSessionRuntime) }, config.workerExecution),
     workerTurnObservation: new WorkerTurnObservationAdapter(),
     journal,
     transcripts,
@@ -305,7 +312,7 @@ export async function runBroker(
     artifacts: artifactStore,
     leaseStore: new LeaseStore(stateDirectory),
     adapters: (context) =>
-      composeJobDispatchAdapters({ leases: context.leases, artifacts: artifactStore }),
+      composeJobDispatchAdapters({ leases: context.leases, artifacts: artifactStore, executionPolicy: config.workerExecution }),
   });
   await runtime.start();
 

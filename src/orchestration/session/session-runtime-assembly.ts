@@ -121,10 +121,16 @@ export class SessionRuntimeAssembly {
   ): Promise<SessionRuntime> {
     try {
       onPhase?.("prepare");
+      if (record.executor === "orbstack-container" && this.catalog.options.executions === undefined) {
+        throw new Error("EXECUTOR_UNAVAILABLE");
+      }
       if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
       await beforeSpawn?.();
       const replayBytes = this.catalog.replayBytesFor(record);
       onPhase?.("spawn");
+      if (this.catalog.options.executions !== undefined) {
+        return await this.catalog.options.executions.start(record, spec, replayBytes);
+      }
       return this.catalog.options.sessionRuntimeFactory(spec, replayBytes);
     } catch (error) {
       await this.cleanupLaunchArtifacts(record, "launch-failed");

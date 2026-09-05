@@ -35,6 +35,8 @@ export interface StartOptions {
   role?: string;
   name?: string;
   sandbox: "read-only" | "workspace-write";
+  executor?: "host" | "orbstack-container";
+  executionProfile?: string;
   approvalMode?: ApprovalMode;
   attach?: boolean;
 }
@@ -91,6 +93,8 @@ export function addSessionOptions(command: Command, allowAttach: boolean): Comma
     .option("--name <name>", "session name")
     .addOption(new Option("--approval-mode <mode>", "provider permission/approval behavior")
       .choices(["prompt", "auto"]))
+    .addOption(new Option("--executor <executor>").choices(["host", "orbstack-container"]))
+    .option("--execution-profile <profile>", "trusted execution profile")
     .addOption(new Option("--sandbox <sandbox>").choices(["read-only", "workspace-write"]).default("read-only"));
   if (allowAttach) command.option("--attach", "attach a controlling client immediately");
   return command;
@@ -352,6 +356,8 @@ export function sessionRequest(options: StartOptions, parentSessionId?: string) 
     cwd: options.cwd,
     detached: parentSessionId !== undefined || options.attach !== true,
     sandbox: options.sandbox,
+    ...(options.executor === undefined ? {} : { executor: options.executor }),
+    ...(options.executionProfile === undefined ? {} : { executionProfile: options.executionProfile }),
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.effort === undefined ? {} : { effort: options.effort }),
     ...(options.role === undefined ? {} : { role: options.role }),

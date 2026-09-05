@@ -33,3 +33,5 @@ The primary checkout remains on main. Its untracked AGENTS.md, handoffs/ and thr
 Provider Linux authentication, image digests, PTY/report-back, limits and recovery remain unproved. No model requests or credentials were inspected. Sentry project/region/DSN/quota and activation authorization are missing; live evaluation provider/model and total spend ceiling are missing. These block only dependent remote/live gates.
 
 Required integration checks: pnpm check, test, build, architecture/file-size ratchets, packed CLI install and git diff --check. Use Node 24.18.0. No baseline ceilings may be raised.
+
+Live host-permitted Docker info: Engine 29.4.0 / OrbStack aarch64, 12 CPUs, 12,599,844,864 bytes RAM, memory limits supported. Twelve pre-existing containers were present; none were modified or removed. Capacity preflight cannot admit four 4-GiB reservations: cap the initial ordinary profile at two slots (8 GiB aggregate), leaving about 3.7 GiB VM headroom. Global context was already orbstack and was not switched.

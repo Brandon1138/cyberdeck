@@ -1,3 +1,4 @@
+import { AgentStandardWorkerInputSchema, AgentScoutWorkerInputSchema } from "./worker-launch-input.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
@@ -92,42 +93,6 @@ export const AgentReadScoutArtifactParamsSchema = AgentActorParamsSchema.extend(
   afterByte: z.number().int().nonnegative().default(0),
   maxBytes: z.number().int().min(256).max(64 * 1024).default(16 * 1024),
 });
-const AgentStandardWorkerInputSchema = z.object({
-  profile: z.undefined().optional(),
-  brief: z.undefined().optional(),
-  leasePolicy: z.undefined().optional(),
-  provider: ProviderIdSchema,
-  model: z.string().optional(),
-  effort: ReasoningEffortSchema.optional(),
-  cwd: z.string().min(1),
-  sandbox: SandboxSchema.default("read-only"),
-  approvalMode: ApprovalModeSchema.optional(),
-  prompt: z.string().trim().min(1),
-  name: z.string().optional(),
-  /**
-   * Where the work lives, when the dispatch knows. Declaring it lets the broker check the worktree,
-   * the branch, and the base before a process exists, and lets the launch grant the writable roots
-   * the declared provisioning mode needs. Omitted, the worker is validated exactly as before.
-   */
-  workspace: WorkerWorkspaceSchema.optional(),
-  /**
-   * Per-spawn override of the box `caveman-workers` default (MIK-79). Orchestrator spawns are
-   * caveman by default when the operator has that box preference on; passing "normal" here opts
-   * this one spawn out, e.g. a research worker the orchestrator wants to read eloquent. Composer
-   * launches (Fleet's `session.start`/`session.startWithPrompt`) never consult this default at
-   * all and are always "normal".
-   */
-  workerMode: WorkerModeSchema.optional(),
-  /** Broker-owned allowance. Omission preserves unbudgeted worker behavior. */
-  budget: WorkerBudgetDeclarationSchema.optional(),
-});
-const AgentScoutWorkerInputSchema = z.object({
-  profile: z.literal("scout"),
-  cwd: z.string().min(1),
-  brief: ScoutBriefSchema,
-  leasePolicy: WorkerLeasePolicySchema.optional(),
-  name: z.string().optional(),
-}).strict();
 export const AgentStartWorkerParamsSchema = z.union([
   AgentActorParamsSchema.extend(AgentScoutWorkerInputSchema.shape).strict(),
   AgentActorParamsSchema.extend(AgentStandardWorkerInputSchema.shape),
@@ -808,6 +773,8 @@ export class AgentControlService {
       ...(approvalMode === undefined ? {} : { approvalMode }),
       cwd: request.cwd,
       detached: true,
+      ...(request.executor === undefined ? {} : { executor: request.executor }),
+      ...(request.executionProfile === undefined ? {} : { executionProfile: request.executionProfile }),
       sandbox: request.sandbox,
       ...(workspace === undefined ? {} : { workspace }),
       parentSessionId: request.actorSessionId,

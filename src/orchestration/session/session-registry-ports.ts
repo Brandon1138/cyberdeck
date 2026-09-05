@@ -1,3 +1,4 @@
+import type { SessionExecutionPort } from "./execution-ports.js";
 import type { BrokerRuntimeConfig } from "../../config.js";
 import type { BrokerEvent } from "../../domain/events.js";
 import type { StartPolicyCode } from "../../domain/policy.js";
@@ -127,6 +128,7 @@ export type ReattachTarget =
 export interface SessionRegistryOptions {
   adapters: Record<string, ProviderAdapter>;
   sessionRuntimeFactory: SessionRuntimeFactory<ProviderLaunchSpec>;
+  executions?: SessionExecutionPort;
   journal: JournalLike;
   transcripts?: TranscriptLike;
   workerTurnObservation: WorkerTurnObservationPort & WorkerTurnPreviewPort;

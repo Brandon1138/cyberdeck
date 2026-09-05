@@ -20,6 +20,7 @@ function record(overrides: Partial<SessionRecord> = {}): SessionRecord {
     cwd: "/repo/one",
     detached: true,
     sandbox: "read-only",
+    executor: "host",
     kind: "worker",
     name: "Durable task",
     createdAt: "2026-07-22T10:00:00.000Z",
