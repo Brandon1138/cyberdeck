@@ -3,6 +3,7 @@ import { SentryPropagator, SentrySampler, SentrySpanProcessor } from "@sentry/op
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import type { AgentActivity } from "../domain/agent-activity.js";
 import { projectActivity, sanitizeSentryEnvelope } from "./activity-projection.js";
+import { BoundedExportQueue } from "./bounded-export-queue.js";
 import { TelemetryBudget } from "./telemetry-budget.js";
 
 export interface SentrySinkOptions {
@@ -16,22 +17,19 @@ export interface SentrySinkOptions {
 export class SentrySink {
   private readonly provider: NodeTracerProvider;
   private readonly budget: TelemetryBudget;
-  private readonly queue: string[] = [];
-  private pumping = false;
+  private readonly queue: BoundedExportQueue;
   private closed = false;
   private dropped = 0;
-  private retryAt = 0;
-  private readonly send: (body: string) => Promise<{ status: number }>;
   constructor(options: SentrySinkOptions) {
     if (options.enabled !== true || Sentry.isInitialized()) throw new Error("TELEMETRY_SETUP_REFUSED");
     const dsn = new URL(options.dsn);
     if (dsn.protocol !== "https:" || !/^[a-f0-9]+$/.test(dsn.username) || !/^\/\d+$/.test(dsn.pathname) || dsn.password) throw new Error("SENTRY_DSN_INVALID");
     const endpoint = `https://${dsn.host}/api${dsn.pathname}/envelope/`;
-    this.send = options.send ?? (async (body) => {
+    this.queue = new BoundedExportQueue(options.send ?? (async (body) => {
       const response = await fetch(endpoint, { method: "POST", redirect: "error", signal: AbortSignal.timeout(2000),
         headers: { "content-type": "application/x-sentry-envelope", "x-sentry-auth": `Sentry sentry_version=7,sentry_key=${dsn.username}` }, body });
       await response.body?.cancel(); return { status: response.status };
-    });
+    }));
     if (options.send === undefined && options.budgetStateFile === undefined) throw new Error("TELEMETRY_DURABLE_BUDGET_REQUIRED");
     this.budget = new TelemetryBudget(options.dailyCap, options.sampleRate, Date.now, options.budgetStateFile);
     const client = Sentry.init({ dsn: options.dsn, skipOpenTelemetrySetup: true, defaultIntegrations: false,
@@ -39,10 +37,10 @@ export class SentrySink {
       transport: () => ({
         send: async (envelope) => {
           const body = sanitizeSentryEnvelope(envelope);
-          if (body === undefined || this.queue.length >= 100 || this.closed) { this.dropped += 1; return { statusCode: 200 }; }
-          this.queue.push(body); void this.pump(); return { statusCode: 200 };
+          if (body === undefined || this.closed) { this.dropped += 1; return { statusCode: 200 }; }
+          this.queue.enqueue(body); return { statusCode: 200 };
         },
-        flush: async () => { await this.pump(); return this.queue.length === 0; },
+        flush: async () => { await this.queue.pump(); return this.queue.health().queued === 0; },
       }),
     });
     if (!client) throw new Error("SENTRY_INITIALIZATION_FAILED");
@@ -60,25 +58,11 @@ export class SentrySink {
     } catch { this.dropped += 1; }
   }
   health(): { queued: number; dropped: number; budget: ReturnType<TelemetryBudget["health"]> } {
-    return { queued: this.queue.length, dropped: this.dropped, budget: this.budget.health() };
+    return { queued: this.queue.health().queued, dropped: this.dropped + this.queue.health().dropped, budget: this.budget.health() };
   }
-  async flush(): Promise<void> { await this.provider.forceFlush(); await Sentry.flush(2000); await this.pump(); }
+  async flush(): Promise<void> { await this.provider.forceFlush(); await Sentry.flush(2000); await this.queue.pump(); }
   async close(): Promise<void> {
-    await this.flush().catch(() => undefined); this.closed = true;
+    await this.flush().catch(() => undefined); this.closed = true; this.queue.close();
     await this.provider.shutdown().catch(() => undefined); await Sentry.close(2000).catch(() => undefined);
-  }
-  private async pump(): Promise<void> {
-    if (this.pumping || Date.now() < this.retryAt || this.closed) return;
-    this.pumping = true;
-    try {
-      for (let sent = 0; sent < 10 && this.queue.length > 0; sent += 1) {
-        try {
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          const response = await Promise.race([this.send(this.queue[0]!), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("SINK_TIMEOUT")), 2000); })]).finally(() => clearTimeout(timer));
-          if (response.status === 429 || response.status >= 500) { this.retryAt = Date.now() + 60_000; break; }
-          this.queue.shift(); if (response.status >= 400) this.dropped += 1;
-        } catch { this.retryAt = Date.now() + 60_000; break; }
-      }
-    } finally { this.pumping = false; }
   }
 }
