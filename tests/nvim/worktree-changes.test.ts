@@ -118,7 +118,7 @@ describe("diffBaseline", () => {
     // to — and told once, so a branch moving underneath does not change the answer.
     expect(await diffBaseline(git)).toEqual({
       baseline: { kind: "fork-point", label: "since origin/main", rev: "base" },
-      args: ["diff", "--no-ext-diff", "--unified=0", "base", "--"],
+      args: ["diff", "--no-ext-diff", "--no-textconv", "--unified=0", "base", "--"],
     });
   });
 
@@ -143,7 +143,7 @@ describe("diffBaseline", () => {
 
     expect(await diffBaseline(git)).toEqual({
       baseline: { kind: "uncommitted", label: "uncommitted only", rev: "same" },
-      args: ["diff", "--no-ext-diff", "--unified=0", "same", "--"],
+      args: ["diff", "--no-ext-diff", "--no-textconv", "--unified=0", "same", "--"],
     });
   });
 

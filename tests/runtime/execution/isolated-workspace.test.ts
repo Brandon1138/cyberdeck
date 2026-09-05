@@ -6,6 +6,7 @@ import { afterEach, expect, it } from "vitest";
 import { PrivateCloneProvisioner } from "../../../src/runtime/execution/isolated-workspace.js";
 import { trustedGit } from "../../../src/runtime/execution/trusted-git.js";
 import { contentHash, workspaceManifest } from "../../../src/runtime/execution/workspace-manifest.js";
+import { worktreeChanges } from "../../../src/nvim/worktree-changes.js";
 
 const dirs: string[] = [];
 afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
@@ -58,4 +59,18 @@ it("rejects escaping symlinks and preserves an existing target", async () => {
   await trustedGit(f.source, ["add", "escape"]); await trustedGit(f.source, ["commit", "-m", "symlink"]);
   f.baseCommit = (await trustedGit(f.source, ["rev-parse", "HEAD"])).toString().trim();
   await expect(new PrivateCloneProvisioner(join(f.root, "workers")).provision(f)).rejects.toThrow("WORKSPACE_SYMLINK_ESCAPE");
+});
+it("reviewing worker changes disables fsmonitor, external diff and textconv execution", async () => {
+  const f = await fixture(), sentinel = join(f.root, "review-executed"), helper = join(f.root, "hostile-helper");
+  await writeFile(helper, `#!/bin/sh\ntouch '${sentinel}'\n`, { mode: 0o700 });
+  await trustedGit(f.source, ["update-ref", "refs/remotes/origin/main", f.baseCommit]);
+  await trustedGit(f.source, ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+  await trustedGit(f.source, ["config", "core.fsmonitor", helper]);
+  await trustedGit(f.source, ["config", "diff.external", helper]);
+  await trustedGit(f.source, ["config", "diff.hostile.textconv", helper]);
+  await writeFile(join(f.source, ".gitattributes"), "answer.txt diff=hostile\n");
+  await writeFile(join(f.source, "answer.txt"), "review me\n");
+  const changes = await worktreeChanges(f.source);
+  expect(changes.changes.some((change) => change.path === "answer.txt")).toBe(true);
+  await expect(lstat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
 });
