@@ -38,7 +38,13 @@ async function fixture(provider = "codex") {
     instructions.push(record); return record;
   };
   const observe = (turnNumber: number) => transcripts.observeProviderTurns({ sessionId: id, provider, cwd: session.cwd, createdAt, turnNumber });
-  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+  // Capture is fire-and-forget behind the receipt; wait for the recorder to hold what the test expects.
+  const settle = async (expected = 0) => {
+    for (let i = 0; i < 100; i++) {
+      if (recorder.health().retained >= expected && i > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
   return { root, session, source, transcripts, recorder, capture, path, nativeId, instruction, instructions, observe, settle };
 }
 const codex = (type: string, payload: unknown) => ({ timestamp: "2026-09-05T10:00:01.000Z", type, payload });
@@ -54,7 +60,7 @@ it("binds delayed instruction completion to exact native intervals through resta
   const observed = await f.observe(1);
   expect(observed.turns).toHaveLength(2);
   await f.transcripts.commitProviderTurns(observed);
-  await f.settle();
+  await f.settle(8);
   f.session.generation = 3; // A delayed callback must retain the generation observed in its receipt.
   await f.capture.captureInstruction(second, f.session);
   await f.capture.captureInstruction(first, f.session);
@@ -90,7 +96,7 @@ it("captures a running turn incrementally under the identity its later receipt c
   const [context, invocation, output, final] = codexTurn(1);
   await writeFile(f.path, lines([codex("session_meta", { id: f.nativeId, originator: "codex-tui", cwd: "/workspace" }), context, invocation]) + JSON.stringify(output).slice(0, 12));
   expect((await f.observe(1)).turns).toHaveLength(0);
-  await f.settle();
+  await f.settle(2);
   let events = await f.recorder.read(instruction.id, 0, 100);
   expect(events.map((event) => event.kind)).toEqual(["provider.turn", "tool.invocation"]);
   expect(events[0]).toMatchObject({ coverage: "partial", outcome: "observed", providerTurnId: "turn-1", origin: "instruction" });
@@ -98,7 +104,7 @@ it("captures a running turn incrementally under the identity its later receipt c
   const observed = await f.observe(1);
   expect(observed.turns).toHaveLength(1);
   await f.transcripts.commitProviderTurns(observed);
-  await f.settle();
+  await f.settle(4);
   instruction.status = "completed";
   await f.capture.captureInstruction(instruction, f.session);
   events = await f.recorder.read(instruction.id, 0, 100);
@@ -111,7 +117,7 @@ it("defers a rendered-only claim and records a visible conflict when two instruc
   const rendered = f.instruction(1, "rendered");
   f.instruction(2, "acknowledged"); f.instruction(2, "submitted");
   await f.transcripts.commitProviderTurns(await f.observe(1));
-  await f.settle();
+  await f.settle(1);
   expect(await f.recorder.read(rendered.id, 0, 100)).toHaveLength(0);
   const session = await f.recorder.readSession(f.session.id, 0, 100);
   expect(session.map((event) => [event.kind, event.gap])).toEqual([["capture.gap", "attribution-conflict"]]);
@@ -121,14 +127,14 @@ it("attributes the launch prompt, a human composer prompt, and nothing at all as
   const launch = await f.transcripts.append({ sessionId: f.session.id, kind: "prompt", source: "human", text: "launch", data: { initial: true } });
   await writeFile(f.path, lines([codex("session_meta", { id: f.nativeId, originator: "codex-tui", cwd: "/workspace" }), ...codexTurn(1)]));
   await f.transcripts.commitProviderTurns(await f.observe(1));
-  await f.settle();
+  await f.settle(4);
   const composer = await f.transcripts.append({ sessionId: f.session.id, kind: "prompt", source: "human", text: "typed", data: {} });
   await appendFile(f.path, lines(codexTurn(2)));
   await f.transcripts.commitProviderTurns(await f.observe(2));
-  await f.settle();
+  await f.settle(8);
   await appendFile(f.path, lines(codexTurn(3)));
   await f.transcripts.commitProviderTurns(await f.observe(3));
-  await f.settle();
+  await f.settle(12);
   const turns = (await f.recorder.read(f.session.id, 0, 100)).filter((event) => event.kind === "provider.turn" && event.outcome === "succeeded");
   expect(turns.map((event) => [event.origin, event.causationId, event.providerTurnId])).toEqual([
     ["initial-prompt", launch.id, "turn-1"], ["direct-input", composer.id, "turn-2"], ["unattributed", undefined, "turn-3"]]);
