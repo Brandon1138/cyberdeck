@@ -40,7 +40,7 @@ export const ORCHESTRATOR_CATALOG: readonly OrchestratorCatalogEntry[] = [
   },
 ];
 
-/** Codex models come from the same discovery answer used by worker launches. */
+/** Codex models come from discovery configured for the orchestrator's first-party launch. */
 export function orchestratorCatalog(
   capabilities: readonly ResolvedWorkerCapability[] = [],
 ): readonly OrchestratorCatalogEntry[] {

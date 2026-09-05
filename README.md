@@ -83,7 +83,8 @@ Fleet controls:
   explicit model and provider-supported effort, then adds and focuses another cockpit pane without
   replacing or stopping the current orchestrator.
   Codex choices and reasoning levels come from the installed CLI's `codex debug models` listing,
-  shared with worker discovery and checked again at creation. Opening the switcher refreshes from
+  using the same first-party OpenAI configuration as orchestrator launches, with a separate cache
+  from worker discovery. The list is checked again at creation. Opening the switcher refreshes from
   the broker's five-minute cache, so newly advertised models need no Cyberdeck update. If discovery
   fails, the switcher labels its stored Codex choices and shows the reason. Refresh preserves the
   selected model and effort; a removed selection requires choosing again.

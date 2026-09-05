@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
 import { WorkerCapabilityCatalog, parseCodexModelCatalog } from "../../src/orchestration/worker-capability-catalog.js";
+import { fleetMethods } from "../../src/broker/server/fleet-methods.js";
 
 function setup(unavailable = false) {
   const models = parseCodexModelCatalog(JSON.stringify({ models: [
@@ -29,9 +30,11 @@ const request = { provider: "codex" as const, cwd: "/repo", scope: "fleet" as co
 
 describe("Codex orchestrator launch discovery", () => {
   it.each(["gpt-6-astra", "future-codex-model"])("accepts discovered %s without a static entry", async (model) => {
-    const { manager, start, catalog, list } = setup();
-    // Fleet and the worker boundary have already read this same catalog instance.
-    await catalog.resolve("codex");
+    const { manager, start, list } = setup();
+    // Fleet's RPC and creation use the same first-party catalog instance.
+    await expect(fleetMethods["orchestrator.capabilities"]!(
+      { options: { orchestrators: manager } } as never, {} as never, {} as never,
+    )).resolves.toEqual([expect.objectContaining({ models: ["gpt-6-astra", "future-codex-model"] })]);
     const probes = list.mock.calls.length;
     const result = await manager.create({ ...request, model });
     expect(result.binding).toMatchObject({ provider: "codex", model });

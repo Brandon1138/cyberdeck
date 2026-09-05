@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   adoptWorkerModels, createFleetState, renderFleet, transitionFleet, workerModelCatalog,
   type FleetSnapshot, type FleetState,
 } from "../../src/client/fleet.js";
-import { fleetFrameLayout } from "../../src/client/fleet/runtime-frame.js";
+import { fleetFrameLayout, readWorkerModels } from "../../src/client/fleet/runtime-frame.js";
 import { fallbackWorkerCapabilities, type ResolvedWorkerCapability } from "../../src/orchestration/worker-capabilities.js";
 
 const snapshot: FleetSnapshot = { threads: [] };
@@ -14,11 +14,33 @@ const capability: ResolvedWorkerCapability = {
   modelLabels: { "gpt-6-astra": "GPT-6-Astra" },
   modelEfforts: { "gpt-6-astra": ["low", "high"], "future-codex-model": ["medium"] },
 };
-const models = (overrides: Partial<ResolvedWorkerCapability> = {}) => workerModelCatalog([{ ...capability, ...overrides }]);
+const models = (overrides: Partial<ResolvedWorkerCapability> = {}) => workerModelCatalog([], [{ ...capability, ...overrides }]);
 const key = (state: FleetState, input: string) => transitionFleet(state, snapshot, input, 0);
 const initial = () => ({ ...createFleetState(snapshot, "/repo"), workerModels: models() });
 
 describe("Codex orchestrator discovery in Fleet", () => {
+  it("reads separate worker and first-party orchestrator catalogs", async () => {
+    const request = vi.fn(async (method: string) => method === "worker.capabilities"
+      ? [{ ...capability, models: ["custom-provider-model"] }]
+      : [capability]);
+    const catalog = await readWorkerModels({ request } as never);
+    expect(request).toHaveBeenCalledWith("orchestrator.capabilities", {});
+    expect(catalog.choices.map(({ model }) => model)).toEqual(["custom-provider-model"]);
+    expect(catalog.orchestratorChoices.map(({ model }) => model)).toContain("gpt-6-astra");
+    expect(catalog.orchestratorChoices.map(({ model }) => model)).not.toContain("custom-provider-model");
+  });
+
+  it("never substitutes worker-context models when orchestrator discovery fails", async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method === "orchestrator.capabilities") throw new Error("orchestrator catalog unavailable");
+      return [{ ...capability, models: ["custom-provider-model"] }];
+    });
+    const catalog = await readWorkerModels({ request } as never);
+    expect(catalog.choices.map(({ model }) => model)).toEqual(["custom-provider-model"]);
+    expect(catalog.orchestratorChoices.map(({ model }) => model)).not.toContain("custom-provider-model");
+    expect(catalog.orchestratorChoices[0]!.provider.fallbackReason).toContain("orchestrator catalog unavailable");
+  });
+
   it("refreshes on open and offers provider labels and only the selected model's efforts", () => {
     const opened = key(initial(), "ctrl+o");
     expect(opened.action).toEqual({ type: "worker-capabilities" });
@@ -73,7 +95,7 @@ describe("Codex orchestrator discovery in Fleet", () => {
 
   it("labels unavailable discovery and keeps existing sessions focused during refresh", () => {
     const opened = key(initial(), "ctrl+o").state;
-    const fallback = adoptWorkerModels(opened, workerModelCatalog(fallbackWorkerCapabilities("CLI timed out")));
+    const fallback = adoptWorkerModels(opened, workerModelCatalog([], fallbackWorkerCapabilities("CLI timed out")));
     expect(renderFleet(snapshot, fallback, { color: false, width: 140, height: 40 }))
       .toContain("Codex models are a stored list — CLI timed out");
     const existing: FleetState = { ...opened, orchestratorPicker: { step: "target", focus: { kind: "existing", sessionId: "existing-orc" } } };

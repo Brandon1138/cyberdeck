@@ -7,6 +7,7 @@ import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./
 import type { SessionRecord } from "../domain/session.js";
 import { providerImageLaunchArgs } from "./image-input.js";
 import { sessionLaunchEnvironment } from "./launch-environment.js";
+import { CODEX_ORCHESTRATOR_CONFIG_ARGS } from "./codex-orchestrator-config.js";
 import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
 import { workspaceWritableRoots } from "../domain/worker-workspace.js";
 
@@ -52,7 +53,6 @@ export type CodexCommandRunner = (
 
 const execFileAsync = promisify(execFile);
 const CODEX_REMOTE_ADDRESS = "unix://";
-const CODEX_FIRST_PARTY_MODEL_PROVIDER = "openai";
 const MAX_CODEX_COMMAND_ERROR = 2_000;
 
 const runCodexCommand: CodexCommandRunner = async (executable, args, options) => {
@@ -173,8 +173,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       ? [
         "--remote",
         CODEX_REMOTE_ADDRESS,
-        "-c",
-        `model_provider=${JSON.stringify(CODEX_FIRST_PARTY_MODEL_PROVIDER)}`,
+        ...CODEX_ORCHESTRATOR_CONFIG_ARGS,
       ]
       : [];
   }

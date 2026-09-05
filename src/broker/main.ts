@@ -46,6 +46,7 @@ import { AgentControlService } from "../orchestration/agent-control-service.js";
 import { GitWorkspaceProbe } from "../orchestration/git-workspace-probe.js";
 import { GitWorktreeProvisioner } from "../orchestration/git-worktree-provisioner.js";
 import { WorkerCapabilityCatalog } from "../orchestration/worker-capability-catalog.js";
+import { CodexOrchestratorModelProbe } from "../providers/codex-orchestrator-model-probe.js";
 import { InstructionQueue } from "../orchestration/instruction-queue.js";
 import { LocalWorkerControlService } from "../orchestration/local-worker-control-service.js";
 import { WorkerBudgetEnforcer } from "./worker-budget-enforcer.js";
@@ -210,14 +211,15 @@ export async function runBroker(
     createService: (store) => new WorkerCoordinationService({ store }),
   });
   await workerCoordination.start();
-  // Shared discovery for worker launches, orchestrator creation, Fleet, and MCP capabilities.
+  // Each launch context has its own cached catalog; orchestrators force first-party Codex.
   const workerCapabilities = new WorkerCapabilityCatalog();
+  const orchestratorCapabilities = new WorkerCapabilityCatalog({ probe: new CodexOrchestratorModelProbe() });
   const orchestrators = new OrchestratorManager(
     registry,
     orchestratorStore,
     workerPreferences,
     providerPermissions,
-    (provider) => workerCapabilities.resolve(provider),
+    (provider) => orchestratorCapabilities.resolve(provider),
   );
   const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
   instructions.start();

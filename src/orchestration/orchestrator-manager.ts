@@ -28,7 +28,7 @@ import type {
 } from "./persistence-ports.js";
 import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
 import { ORCHESTRATOR_CATALOG, orchestratorCatalog, orchestratorModelEfforts, type OrchestratorCatalogEntry } from "./orchestrator-catalog.js";
-import type { ResolvedWorkerCapability } from "./worker-capabilities.js";
+import { fallbackWorkerCapabilities, type ResolvedWorkerCapability } from "./worker-capabilities.js";
 import type {
   SessionLookupPort,
   SessionResumePort,
@@ -120,12 +120,18 @@ export class OrchestratorManager {
   /** Always creates a distinct bound peer; it never consults or replaces the scope's primary binding. */
   async create(input: CreateOrchestratorRequest): Promise<OrchestratorManagerResult> {
     const request = CreateOrchestratorRequestSchema.parse(input);
-    const capabilities = request.provider === "codex" ? await this.readCapabilities?.("codex") : undefined;
+    const capabilities = request.provider === "codex" ? await this.capabilities() : undefined;
     validateCreateSelection(request, orchestratorCatalog(capabilities));
     const scope: OrchestratorScope = request.scope === "fleet"
       ? { kind: "fleet" }
       : { kind: "workspace", cwd: request.cwd };
     return this.createBound(request, scope, true);
+  }
+
+  /** Fleet and creation validate against the same first-party Codex discovery context. */
+  async capabilities(): Promise<ResolvedWorkerCapability[]> {
+    return this.readCapabilities?.("codex")
+      ?? fallbackWorkerCapabilities("Codex orchestrator discovery is unavailable", "codex");
   }
 
   /**

@@ -121,9 +121,10 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
  */
 export function workerModelCatalog(
   capabilities: readonly ResolvedWorkerCapability[],
+  orchestratorCapabilities: readonly ResolvedWorkerCapability[] = [],
 ): WorkerModelCatalog {
   return {
-    orchestratorChoices: orchestratorCatalog(capabilities).flatMap((provider) =>
+    orchestratorChoices: orchestratorCatalog(orchestratorCapabilities).flatMap((provider) =>
       provider.models.map((model): OrchestratorModelChoice => ({
         provider: { ...provider, efforts: orchestratorModelEfforts(provider, model) },
         model,
