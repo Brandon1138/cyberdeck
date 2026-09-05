@@ -54,8 +54,10 @@ it("binds delayed instruction completion to exact native intervals through resta
   const durable = await AgentActivityStore.open(join(f.root, "activity"));
   for (const [instruction, turn] of [[first, 1], [second, 2]] as const) {
     const events = await durable.read(instruction.id, 0, 100);
-    expect(events.map((event) => event.kind)).toEqual(["tool.invocation", "tool.result"]);
-    expect(events.every((event) => event.instructionId === instruction.id && event.generation === 2 && event.toolCallId === `call-${turn}`)).toBe(true);
+    expect(events.map((event) => event.kind)).toEqual(["provider.turn", "tool.invocation", "tool.result"]);
+    expect(events[1]?.parentEventId).toBe(events[0]?.eventId);
+    expect(events[2]?.parentEventId).toBe(events[1]?.eventId);
+    expect(events.every((event) => event.instructionId === instruction.id && event.generation === 2 && (event.kind === "provider.turn" || event.toolCallId === `call-${turn}`))).toBe(true);
     expect(JSON.stringify(events)).not.toContain("PRIVATE_");
   }
   expect((await f.source.read(f.session)).model?.model).toBe("observed-model");

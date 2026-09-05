@@ -15,7 +15,8 @@ export function activityInstructionStore(store: Instructions, recorder: AgentAct
       await store.put(record);
       const worker = session(record.targetSessionId);
       const kind = record.status === "completed" ? "instruction.settled" : `instruction.${record.status}` as const;
-      await recorder.append({ schemaVersion: 1, eventId: randomUUID(), sourceKey: `instruction:${record.id}:${record.status}:${record.updatedAt}`,
+      await recorder.append({ schemaVersion: 1, eventId: record.status === "accepted" ? record.id : randomUUID(),
+        ...(record.status === "accepted" ? {} : { parentEventId: record.id }), sourceKey: `instruction:${record.id}:${record.status}:${record.updatedAt}`,
         runId: record.workflowRunId ?? record.id, workerId: record.targetSessionId, sessionId: record.targetSessionId,
         instructionId: record.id, ...(worker?.generation === undefined ? {} : { generation: worker.generation }),
         ...(worker?.execution === undefined ? {} : { executionId: worker.execution.executionId }),

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ExecutionRecordSchema } from "./worker-execution.js";
 export const AgentActivityKindSchema = z.enum([
   "instruction.accepted", "instruction.queued", "instruction.rendered", "instruction.submitted", "instruction.acknowledged", "instruction.settled", "instruction.undelivered", "instruction.cancelled", "instruction.held",
-  "worker.lifecycle", "worker.control", "worker.handoff", "execution.lifecycle", "provider.response",
+  "worker.lifecycle", "worker.control", "worker.handoff", "execution.lifecycle", "provider.turn", "provider.response",
   "tool.invocation", "tool.result", "worker.report", "capture.gap", "workspace.snapshot", "evaluation.result",
 ]);
 export const AgentActivitySchema = z.object({
@@ -10,7 +10,7 @@ export const AgentActivitySchema = z.object({
   sourceKey: z.string().min(1).max(1024), runId: z.uuid(), workerId: z.uuid(), sessionId: z.uuid(),
   generation: z.number().int().positive().optional(), instructionId: z.uuid().optional(),
   executionId: z.uuid().optional(), causationId: z.uuid().optional(), parentEventId: z.uuid().optional(),
-  occurredAt: z.iso.datetime().optional(), observedAt: z.iso.datetime(), kind: AgentActivityKindSchema,
+  startedAt: z.iso.datetime().optional(), occurredAt: z.iso.datetime().optional(), observedAt: z.iso.datetime(), kind: AgentActivityKindSchema,
   provenance: z.enum(["broker", "provider-native", "worker-report", "host-verified", "terminal-fallback"]),
   coverage: z.enum(["complete-for-source", "partial", "unavailable"]),
   provider: z.string().max(128).optional(), model: z.string().max(256).optional(),

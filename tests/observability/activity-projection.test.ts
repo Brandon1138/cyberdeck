@@ -37,3 +37,17 @@ it("keeps an instruction's event segments causally linked without exporting nati
   expect(payload.contexts.trace.parent_span_id).toBe(correlationIds(parent).spanId);
   expect(JSON.stringify(payload)).not.toContain("sensitive-native-id");
 });
+
+it("exports observed causal intervals without using synthetic SDK span duration", () => {
+  const id = randomUUID();
+  const activity = AgentActivitySchema.parse({ schemaVersion: 1, eventId: randomUUID(), sequence: 1, sourceKey: "observed-interval",
+    runId: id, workerId: id, sessionId: id, observedAt: "2026-09-05T10:02:00.000Z", startedAt: "2026-09-05T10:00:00.000Z", occurredAt: "2026-09-05T10:00:05.000Z",
+    kind: "tool.result", operation: "tool", provenance: "provider-native", coverage: "complete-for-source" });
+  const projection = projectActivity(activity);
+  const body = sanitizeSentryEnvelope([{}, [[{ type: "transaction" }, { start_timestamp: 1, timestamp: 99999,
+    contexts: { trace: { data: { "cyberdeck.projection": JSON.stringify(projection) } } } }]]])!;
+  const payload = JSON.parse(body.split("\n")[2]!);
+  expect(payload.timestamp - payload.start_timestamp).toBe(5);
+  expect(payload.tags["cyberdeck.timing"]).toBe("provider-native-interval");
+  expect(() => projectActivity({ ...activity, startedAt: "2026-09-05T11:00:00.000Z" })).toThrow();
+});

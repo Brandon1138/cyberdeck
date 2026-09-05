@@ -83,6 +83,7 @@ export class ContainerNativeSource {
     turns: ObservedWorkerTurn[]; messages: TranscriptMessage[]; model?: ObservedModel; budget: ParsedProviderBudgetTelemetry;
   }> {
     const source = await this.resolve(session), turns: ObservedWorkerTurn[] = [], messages: TranscriptMessage[] = [];
+    let startedAt: string | undefined;
     let start = 0, model: ObservedModel | undefined, budget: ParsedProviderBudgetTelemetry = {};
     const parseMessage = session.provider === "claude" ? parseClaudeTranscriptLine : parseCodexRolloutLine;
     for await (const line of nativeSourceLines(source.sourceRoot, source.path)) {
@@ -94,6 +95,9 @@ export class ContainerNativeSource {
       if (preview) { messages.push(preview); if (messages.length > 20) messages.shift(); }
       if (session.provider === "claude" && frame?.type === "user" && typeof message?.content === "string"
         && message.content.trimStart().startsWith("<command-name>/clear</command-name>")) throw new Error("NATIVE_CONVERSATION_CLEARED");
+      if ((frame?.type === "turn_context" || session.provider === "claude" && frame?.type === "user" && typeof message?.content === "string") && startedAt === undefined) {
+        startedAt = nativeTimestamp(frame?.timestamp);
+      }
       const final = session.provider === "codex" ? frame?.type === "event_msg" && payload?.type === "task_complete"
         : frame?.type === "assistant" && message?.stop_reason === "end_turn";
       if (!final) continue;
@@ -102,8 +106,8 @@ export class ContainerNativeSource {
       const timestamp = nativeTimestamp(frame?.timestamp);
       if (typeof id !== "string" || typeof text !== "string" || !text.trim() || !timestamp) throw new Error("NATIVE_FINAL_INVALID");
       turns.push({ providerTurnId: id, providerOccurredAt: timestamp, text, transport: "provider-native",
-        data: { nativeActivity: { ...source, fromOffset: start, throughOffset: line.end, generation: session.generation ?? 1, executionId: session.execution?.executionId } } });
-      start = line.end;
+        data: { nativeActivity: { ...source, fromOffset: start, throughOffset: line.end, generation: session.generation ?? 1, executionId: session.execution?.executionId, ...(startedAt ? { startedAt } : {}) } } });
+      start = line.end; startedAt = undefined;
       if (turns.length > 10000) throw new Error("NATIVE_TURN_LIMIT");
     }
     return { turns, messages, budget, ...(model ? { model } : {}) };

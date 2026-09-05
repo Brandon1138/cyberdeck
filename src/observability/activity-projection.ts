@@ -6,6 +6,7 @@ export const RemoteActivitySchema = z.object({
   eventId: z.uuid(), runId: z.uuid(), workerId: z.uuid(), sessionId: z.uuid(), instructionId: z.uuid().optional(), executionId: z.uuid().optional(),
   parentEventId: z.uuid().optional(), causationId: z.uuid().optional(),
   toolCallId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  timing: z.object({ start: z.number().finite(), end: z.number().finite(), source: z.enum(["provider-native", "broker"]) }).strict().refine((timing) => timing.end >= timing.start).optional(),
   operation: z.enum(operationNames), provenance: AgentActivitySchema.shape.provenance, coverage: AgentActivitySchema.shape.coverage,
   outcome: AgentActivitySchema.shape.outcome, generation: z.number().int().positive().optional(),
   provider: z.enum(["claude", "codex", "cursor", "antigravity", "scripted", "unknown"]),
@@ -13,6 +14,9 @@ export const RemoteActivitySchema = z.object({
 export type RemoteActivity = z.infer<typeof RemoteActivitySchema>;
 export function projectActivity(event: AgentActivity): RemoteActivity {
   return RemoteActivitySchema.parse({
+    ...(event.startedAt && event.occurredAt && ["provider-native", "broker"].includes(event.provenance) ? {
+      timing: { start: Date.parse(event.startedAt) / 1000, end: Date.parse(event.occurredAt) / 1000, source: event.provenance },
+    } : {}),
     eventId: event.eventId, runId: event.runId, workerId: event.workerId, sessionId: event.sessionId,
     ...(event.instructionId === undefined ? {} : { instructionId: event.instructionId }),
     ...(event.parentEventId === undefined ? {} : { parentEventId: event.parentEventId }),
@@ -34,13 +38,13 @@ export function correlationIds(event: RemoteActivity): { traceId: string; spanId
 export function serializeActivityEnvelope(event: RemoteActivity, timestamps: { start: number; end: number }): string {
   const projection = RemoteActivitySchema.parse(event), ids = correlationIds(projection);
   if (!Number.isFinite(timestamps.start) || !Number.isFinite(timestamps.end) || timestamps.end < timestamps.start) throw new Error("TELEMETRY_TIMING_INVALID");
-  const tags = Object.fromEntries(Object.entries(projection).filter(([key]) => !["operation", "eventId"].includes(key)).map(([key, value]) => [`cyberdeck.${key}`, String(value)]));
+  const tags = Object.fromEntries(Object.entries(projection).filter(([key]) => !["operation", "eventId", "timing"].includes(key)).map(([key, value]) => [`cyberdeck.${key}`, String(value)]));
   return [JSON.stringify({ event_id: projection.eventId.replaceAll("-", "") }),
     JSON.stringify({ type: "transaction", content_type: "application/json" }),
     JSON.stringify({ event_id: projection.eventId.replaceAll("-", ""), type: "transaction", platform: "node", transaction: projection.operation,
-      start_timestamp: timestamps.start, timestamp: timestamps.end, contexts: { trace: { trace_id: ids.traceId, span_id: ids.spanId, op: projection.operation,
+      start_timestamp: projection.timing?.start ?? timestamps.start, timestamp: projection.timing?.end ?? timestamps.end, contexts: { trace: { trace_id: ids.traceId, span_id: ids.spanId, op: projection.operation,
         ...(projection.parentEventId === undefined ? {} : { parent_span_id: createHash("sha256").update(`span:${projection.parentEventId}`).digest("hex").slice(0, 16) }) } },
-      tags: { ...tags, "cyberdeck.timing": "observation-marker" }, spans: [], measurements: {} })].join("\n");
+      tags: { ...tags, "cyberdeck.timing": projection.timing ? `${projection.timing.source}-interval` : "observation-marker" }, spans: [], measurements: {} })].join("\n");
 }
 
 /** Scrub the SDK's complete envelope, including ambient scope data, before transport serialization. */
@@ -55,7 +59,7 @@ export function sanitizeSentryEnvelope(raw: unknown): string | undefined {
     try { event = RemoteActivitySchema.parse(JSON.parse(encoded)); } catch { continue; }
     const observed = Number(payload.start_timestamp);
     if (!Number.isFinite(observed)) continue;
-    // These are observation markers, not invented provider HTTP/tool duration spans.
+    // Intervals come only from validated explicit activity evidence. Ignore SDK wall-clock duration.
     return serializeActivityEnvelope(event, { start: observed, end: observed });
   }
   return undefined;

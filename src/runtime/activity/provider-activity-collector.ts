@@ -4,11 +4,11 @@ import type { AgentActivityPort } from "../../orchestration/agent-activity-port.
 
 export interface ActivityAttribution {
   runId: string; workerId: string; sessionId: string; generation: number;
-  instructionId: string; providerTurnId: string; executionId?: string;
+  parentEventId?: string; instructionId: string; providerTurnId: string; executionId?: string;
 }
 export interface NativeActivityFrame {
   kind: "tool.invocation" | "tool.result" | "provider.response" | "capture.gap";
-  toolCallId?: string; providerTurnId?: string; occurredAt?: string;
+  toolCallId?: string; providerTurnId?: string; occurredAt?: string; startedAt?: string;
   usage?: ActivityInput["usage"]; gap?: ActivityInput["gap"];
 }
 export type NativeActivityParser = (frame: unknown) => NativeActivityFrame[];
@@ -26,11 +26,13 @@ export async function collectNativeActivity(input: {
     catch { frames = [{ kind: "capture.gap", gap: "unknown-frame" }]; }
     for (const [index, frame] of frames.entries()) {
       const conflict = frame.providerTurnId !== undefined && frame.providerTurnId !== input.attribution.providerTurnId;
-      const { occurredAt, providerTurnId: _turn, usage, gap, kind, toolCallId } = frame;
+      const { startedAt, occurredAt, providerTurnId: _turn, usage, gap, kind, toolCallId } = frame;
       await input.recorder.append({
-        schemaVersion: 1, eventId: randomUUID(),
+        schemaVersion: 1, eventId: kind === "tool.invocation" && toolCallId ? activityIdentity(`${input.sourceId}:tool:${toolCallId}`) : randomUUID(),
         sourceKey: `${input.sourceId}:${line.offset}:${index}:${sourceHash}`,
         ...input.attribution, provider: input.provider,
+        ...(kind === "tool.result" && toolCallId && !conflict ? { parentEventId: activityIdentity(`${input.sourceId}:tool:${toolCallId}`) } : {}),
+        ...(startedAt === undefined || conflict ? {} : { startedAt }),
         observedAt: new Date().toISOString(), ...(occurredAt === undefined ? {} : { occurredAt }),
         kind: conflict ? "capture.gap" : kind, provenance: "provider-native", coverage: conflict || kind === "capture.gap" ? "partial" : "complete-for-source",
         operation: kind === "provider.response" ? "agent" : kind === "capture.gap" || conflict ? "capture" : "tool",
@@ -49,4 +51,9 @@ export function object(value: unknown): Record<string, unknown> | undefined {
 }
 export function nativeTimestamp(value: unknown): string | undefined {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value) && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined;
+}
+
+export function activityIdentity(value: string): string {
+  const hex = createHash("sha256").update(value).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
