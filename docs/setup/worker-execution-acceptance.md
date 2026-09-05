@@ -23,8 +23,9 @@ dirty paths refuse launch; ignored files and symlink modifications are not silen
 Persisted workspaces mark `storage: independent-clone`. Broad host roots are never mounted.
 
 Container authentication currently accepts an explicitly configured API-key file per provider;
-OAuth refresh, custom endpoints, certificate/proxy configuration and native transcript rebinding
-have not passed provider runtime gates. Host authentication does not establish container support.
+OAuth refresh, custom endpoints, certificate/proxy configuration
+have not passed provider runtime gates. Native transcript rebinding is implemented with confined
+provider-owned bindings and explicit persisted resume IDs, but authenticated provider proof is pending. Host authentication does not establish container support.
 
 Latest real broker/container scripted proof:
 `/var/folders/dn/ts3sd7810lb9wv8j58h_3qrh0000gn/T/cyberdeck-broker-container-proof-xTIuP9`.
@@ -40,8 +41,21 @@ OOMKilled=true and exit 137 using image
 `sha256:596f6caf80f4e581392a3fcad8b7a652ec3569d6862e34b4c65e1e9b69c67374`.
 Both owned containers were collected and removed. These remain scripted-provider proofs.
 
-Remaining integration gates include physical queue cancellation through launch APIs, per-attempt
-timeouts, periodic retained-failure policy, all crash boundaries, production native tool attribution,
-complete supported-provider canaries and reviewable default rollout. No remote Sentry trace or live
-Promptfoo run exists yet. Missing remote authorization/configuration and provider/model/spend values
-will be requested after independent implementation is ready; those gaps do not count as passes.
+Subsequent generation-bound resume proof: `cyberdeck-broker-container-proof-8bfTTa` preserved the
+same execution/container/workspace at generation 2 and verified resumed report-back. Real five-second
+attempt expiry: `cyberdeck-broker-container-proof-12IhOQ` stopped the guest, recorded timeout, released
+the slot and collected/removed the container. Both used image
+`sha256:5d179eccc6bd197adbb6d0ca2928778e04716ce3ab4d6a3ae560fbe95227e413`. Guest provider versions
+remain Claude 2.1.261 and Codex 0.153.4, without model calls. Earlier evidence remains preserved.
+
+Queued launches are cancellable through the registry and `execution-cancel --session UUID`.
+`execution-health` exposes connection, slots and durable records. Default attempt timeout is 60 minutes;
+only acknowledged canonical lease renewal extends it. Shutdown closes admission before cancelling
+pending starts. The periodic sweep only retires old failed acquisitions without registered sessions;
+registered/resumable workers require explicit retirement.
+
+Remaining integration gates include broader retained-failure policy, all crash boundaries,
+initial/direct/in-progress and host-native tool capture, coordination activity, complete supported-provider
+canaries and reviewable default rollout. No remote Sentry trace or live Promptfoo run exists yet. Missing
+remote authorization/configuration and provider/model/spend values will be requested after independent
+implementation is ready; those gaps do not count as passes.
