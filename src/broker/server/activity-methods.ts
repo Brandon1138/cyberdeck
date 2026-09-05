@@ -13,6 +13,7 @@ export const activityMethods: Record<string, BrokerMethodHandler> = {
     await server.options.activity.pin(input.runId, input.pinned);
     return { runId: input.runId, pinned: input.pinned };
   },
+  "execution.health": async (server) => server.options.executionHealth?.() ?? { configured: false },
   "telemetry.health": async (server) => server.options.telemetry?.health() ?? { enabled: false },
   "activity.health": async (server) => server.options.activity?.health() ?? { degraded: true, dropped: 0, retained: 0 },
 };

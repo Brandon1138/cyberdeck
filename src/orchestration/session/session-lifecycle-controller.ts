@@ -44,6 +44,7 @@ export class SessionLifecycleController {
   }
 
   async stop(sessionId: string): Promise<void> {
+    if (this.catalog.options.executions?.cancelStart?.(sessionId)) return;
     const runtime = this.catalog.requireRuntime(sessionId);
     if (runtime.terminalFinalizing === true) return;
     if (runtime.record.exitCode !== null) {

@@ -353,6 +353,7 @@ export async function runBroker(
     workerBudgets.close();
     instructions.stop();
     nvimBindings.stop();
+    await executionRuntime.closeAdmission();
     await registry.stopAll();
     await executionRuntime.close();
     await sentry?.close().catch(() => undefined);
@@ -361,7 +362,13 @@ export async function runBroker(
   };
 
   server = new BrokerServer({
-    activity,
+    activity, executionHealth: executionRuntime.health,
+    renewExecutionAttempt: async (input) => {
+      const lease = workerCoordination.service.getSubject(input.sessionId)?.lease;
+      if (lease?.state !== "active" || lease.version !== input.leaseVersion || lease.expiresAt !== input.leaseExpiresAt
+        || lease.controller?.controllerId !== input.controllerId || Date.parse(lease.expiresAt) <= Date.now()) return "not-running";
+      return executionRuntime.executions.renewAttempt(input.sessionId, input.leaseExpiresAt);
+    },
     ...(telemetry === undefined ? {} : { telemetry }),
     socketPath,
     registry,

@@ -11,6 +11,7 @@ import { resolveWorkerExecution } from "../../src/domain/worker-execution.js";
 import { SessionRegistry } from "../../src/broker/session-registry.js";
 import { WorkerExecutionStore } from "../../src/persistence/worker-execution-store.js";
 import { enforceJobExecutionPolicy } from "../../src/orchestration/job-execution-policy.js";
+import { ExecutionSlotScheduler } from "../../src/orchestration/execution-slot-scheduler.js";
 import { WorkerExecutionService } from "../../src/orchestration/worker-execution-service.js";
 import { HostExecutor } from "../../src/runtime/execution/host-executor.js";
 import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
@@ -106,6 +107,32 @@ describe("worker execution seam", () => {
       expect(fixture.store.get(first.id)?.ref).toMatchObject({ generation: 2 });
     } finally { await registry.stopAll(); }
   });
+  it("cancels a queued launch through the registry without starting a process or leaking its slot", async () => {
+    const fixture = await store(), scheduler = new ExecutionSlotScheduler(1), held = await scheduler.reserve("occupied");
+    const start = vi.fn(runtime);
+    const backend: WorkerExecutionPort = {
+      prepare: async (input) => {
+        const release = await scheduler.reserve(input.identity.executionId, input.signal);
+        input.signal?.throwIfAborted(); release();
+        return { ref: { ...input.identity, executor: "orbstack-container", workspaceId: "/private/clone" }, launch: input.launch };
+      }, start: async () => start(), inspect: async (ref) => ({ ref, state: "absent" }), stop: async (ref) => ({ ref, state: "absent" }),
+      collect: async () => { throw new Error("not-created"); }, destroy: async () => {},
+    };
+    const registry = new SessionRegistry({ adapters: { codex: { id: "codex", buildLaunchSpec: () => launch, buildResumeSpec: () => launch } },
+      executions: new WorkerExecutionService(fixture.store, { "orbstack-container": backend }), sessionRuntimeFactory: start,
+      journal: { append: async () => {} }, workerTurnObservation: new WorkerTurnObservationAdapter(), validateCwd: async () => {},
+      config: BrokerRuntimeConfigSchema.parse({ workerExecution: { defaultExecutor: "orbstack-container" } }),
+    });
+    await registry.ready();
+    const launching = registry.start({ provider: "codex", cwd: "/tmp", sandbox: "read-only", detached: true });
+    const refusal = expect(launching).rejects.toThrow("EXECUTION_QUEUE_CANCELLED");
+    await vi.waitFor(() => expect(scheduler.snapshot().queued).toHaveLength(1));
+    await registry.stop(fixture.store.list()[0]!.ref.sessionId);
+    await refusal;
+    expect(start).not.toHaveBeenCalled();
+    expect(scheduler.snapshot()).toMatchObject({ queued: [], running: ["occupied"] });
+    expect(fixture.store.list()[0]).toMatchObject({ phase: "failed", cleanupFailed: false }); held();
+  });
   it("preserves crash tails and rejects corrupted committed frames", async () => {
     const fixture = await store();
     const service = new WorkerExecutionService(fixture.store, {});
@@ -133,6 +160,29 @@ describe("worker execution seam", () => {
     await expect(service.start(session, launch, 1)).rejects.toThrow("primary-failure");
     expect(stop).toHaveBeenCalledOnce();
     expect(fixture.store.get(session.id)).toMatchObject({ phase: "failed", cleanupFailed: false });
+  });
+  it("renews a durable attempt only once per lease expiry and retries an unconfirmed timeout stop", async () => {
+    const fixture = await store(), session = record(), now = Date.now();
+    const ref = { brokerId: fixture.store.brokerId, executionId: randomUUID(), workerId: session.id, sessionId: session.id,
+      generation: 1, executor: "orbstack-container" as const, workspaceId: "/private/clone" };
+    await fixture.store.put({ schemaVersion: 1, ref, phase: "running", request: { executor: "orbstack-container", profile: "ordinary" },
+      attemptDeadline: new Date(now + 1000).toISOString(), updatedAt: new Date(now).toISOString() });
+    const stop = vi.fn().mockRejectedValueOnce(new Error("daemon-unreachable"))
+      .mockResolvedValue({ ref, state: "stopped", guestExitCode: 143, oomKilled: false });
+    const backend = { stop } as unknown as WorkerExecutionPort;
+    const service = new WorkerExecutionService(fixture.store, { "orbstack-container": backend });
+    const expiry = new Date(now + 300000).toISOString();
+    expect(await service.renewAttempt(session.id, expiry)).toBe("renewed");
+    const renewed = fixture.store.get(session.id)!.attemptDeadline!;
+    expect(await service.renewAttempt(session.id, expiry)).toBe("not-running");
+    expect(fixture.store.get(session.id)!.attemptDeadline).toBe(renewed);
+    await service.expireAttempts(now + 1001); expect(stop).not.toHaveBeenCalled();
+    await service.expireAttempts(Date.parse(renewed) + 1);
+    expect(fixture.store.get(session.id)).toMatchObject({ phase: "failed", failure: "timeout", cleanupFailed: true });
+    await service.expireAttempts(Date.parse(renewed) + 2);
+    expect(fixture.store.get(session.id)).toMatchObject({ phase: "stopped", failure: "timeout", cleanupFailed: false, guestOutcome: { exitCode: 143, oomKilled: false } });
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(await service.renewAttempt(session.id, new Date(now + 600000).toISOString())).toBe("not-running");
   });
   it("retains the binding and refuses destruction until collection is complete", async () => {
     const fixture = await store(), session = { ...record(), executor: "orbstack-container" as const };

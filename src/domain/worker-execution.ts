@@ -25,8 +25,11 @@ export interface ExecutionInspection {
 export const ExecutionRecordSchema = z.object({
   schemaVersion: z.literal(1), ref: ExecutionRefSchema, request: WorkerExecutionRequestSchema,
   phase: z.enum(["reserved", "preparing", "ready", "running", "stopping", "stopped", "collecting", "retained", "destroyed", "failed"]),
-  updatedAt: z.iso.datetime(), failure: z.enum(["prepare", "start", "persistence", "recovery"]).optional(),
+  updatedAt: z.iso.datetime(), failure: z.enum(["prepare", "start", "persistence", "recovery", "timeout"]).optional(),
   cleanupFailed: z.boolean().optional(),
+  cleanupEligibleAt: z.iso.datetime().optional(),
+  attemptDeadline: z.iso.datetime().optional(),
+  renewedLeaseExpiresAt: z.iso.datetime().optional(),
   guestOutcome: z.object({ exitCode: z.number().int(), oomKilled: z.boolean() }).strict().optional(),
   manifestRef: z.string().min(1).optional(),
 });

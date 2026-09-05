@@ -39,15 +39,18 @@ export class OrbStackExecutor implements WorkerExecutionPort {
     }
     const capacity = await client.capacity();
     if (profile.slots * profile.cpus > capacity.cpus || profile.slots * profile.memoryBytes > capacity.memory * 0.8) throw new Error("CONTAINER_CAPACITY_EXCEEDED");
-    const release = await this.slots.reserve(input.identity.executionId);
+    const release = await this.slots.reserve(input.identity.executionId, input.signal);
     this.reservations.set(input.identity.executionId, release);
     try {
+      input.signal?.throwIfAborted();
       const context = await this.options.contexts.prepare(input);
+      input.signal?.throwIfAborted();
       let ref: ExecutionRef = { ...input.identity, executor: "orbstack-container", workspaceId: context.workspace.hostPath };
       // Launch data is local-only, protected by the credentials mount, never Docker metadata.
       await writeAtomicPrivateFile(join(context.hostCredentials, "launch.json"), JSON.stringify({ executable: input.launch.executable,
         args: input.launch.args, env: input.launch.env, cwd: context.guest.workspace }));
       let inspected = await client.inspect(ref);
+      input.signal?.throwIfAborted();
       if (inspected === undefined) {
         const mount = (source: string, target: string, readonly: boolean) => {
           if (source.includes(",")) throw new Error("CONTAINER_MOUNT_PATH_UNSUPPORTED");
@@ -68,6 +71,7 @@ export class OrbStackExecutor implements WorkerExecutionPort {
         ref = { ...ref, backendId };
         inspected = await client.inspect(ref);
       }
+      input.signal?.throwIfAborted();
       if (!inspected || inspected.State.Running) throw new Error("CONTAINER_NOT_READY");
       ref = { ...ref, backendId: inspected.Id };
       const host = inspected.HostConfig;

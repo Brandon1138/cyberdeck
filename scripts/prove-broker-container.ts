@@ -45,7 +45,13 @@ let registry: SessionRegistry;
 let server: BrokerServer | undefined;
 let rpc: RpcClient | undefined;
 const reports: unknown[] = [];
-const gateway = new WorkerGateway({ submit: async (event) => { const ack = await channel.submit(event); reports.push(ack); return ack; } }, (binding) => binding.workerId === workerId);
+const gateway = new WorkerGateway({ submit: async (event) => { const ack = await channel.submit(event); reports.push(ack); return ack; } }, (binding) => {
+  try {
+    const session = registry?.get(binding.workerId), execution = store.get(binding.workerId);
+    return binding.workerId === workerId && session?.executionState === "active" && session.generation === binding.generation
+      && execution?.ref.executionId === binding.executionId && execution.ref.generation === binding.generation;
+  } catch { return false; }
+});
 const port = await gateway.listen();
 const store = await WorkerExecutionStore.open(join(evidence, "broker-state"));
 let context: ReturnType<typeof containerLaunchContext>;
@@ -55,7 +61,11 @@ const backend = new OrbStackExecutor({ client,
   attach: createSessionRuntime, evidenceDirectory: join(evidence, "collected"), onFailure: (error) => failures.push(String(error)),
   contexts: {
     prepare: async (input) => {
-      if (context !== undefined) return context;
+      if (context !== undefined) {
+        const token = gateway.issue({ workerId, executionId: input.identity.executionId, generation: input.identity.generation });
+        await writeFile(join(context.hostCredentials, "reporting-token"), token, { mode: 0o600 });
+        return context;
+      }
       const workspace = await new PrivateCloneProvisioner(join(evidence, "clones")).provision({ executionId: input.identity.executionId, source, baseCommit, branch: "worker/proof", inputs: [] });
       const hostState = join(evidence, "worker-state"), hostCredentials = join(evidence, "credentials");
       await mkdir(hostState, { mode: 0o700 }); await mkdir(hostCredentials, { mode: 0o700 });
@@ -67,7 +77,7 @@ const backend = new OrbStackExecutor({ client,
     get: async () => context,
   },
 });
-const service = new WorkerExecutionService(store, { "orbstack-container": backend });
+const service = new WorkerExecutionService(store, { "orbstack-container": backend }, undefined, process.argv[2] === "--timeout-after-handoff" ? 5000 : 3600000);
 let record: SessionRecord = { id: workerId, generation: 1, provider: "codex", model: "scripted-fixture", kind: "worker", cwd: source,
   executor: "orbstack-container", executionProfile: "ordinary", sandbox: "read-only", detached: true,
   createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), executionState: "starting", attachmentState: "detached", pid: 0, exitCode: null, childIds: [] };
@@ -94,7 +104,7 @@ setInterval(() => {},1000);
       if (session.kind === "orchestrator") return { executable: process.execPath, args: ["-e", "setInterval(()=>{},1000)"], cwd: source, env: {}, transport: "pipe" };
       workerId = session.id;
       return { executable: "node", args: ["-e", code.replace("__WORKER_ID__", session.id)], cwd: "/workspace", env: {}, transport: "pty" };
-    }, buildResumeSpec: () => { throw new Error("FIXTURE_RESUME_NOT_IMPLEMENTED"); } } },
+    }, buildResumeSpec: (session) => ({ executable: "node", args: ["-e", code.replace("__WORKER_ID__", session.id)], cwd: "/workspace", env: {}, transport: "pty" }) } },
     executions: service, sessionRuntimeFactory: createSessionRuntime, journal: new Journal(state), store: new SessionStore(state),
     workerTurnObservation: new WorkerTurnObservationAdapter(), config: BrokerRuntimeConfigSchema.parse({}),
   });
@@ -122,7 +132,29 @@ setInterval(() => {},1000);
   await writeFile(join(evidence, "running-inspection.json"), JSON.stringify(inspected), { mode: 0o600 });
   if (!output.includes('"readOnly":true') || !output.includes('"uid":1000') || !output.includes('"memory":"268435456"')
     || !output.includes('"cpu":"100000 100000"') || !output.includes("ECHO:hello-container") || !output.includes("SIZE:93:31") || reports.length !== 1 || (reports[0] as { code: string }).code !== "accepted") throw new Error("CONTAINER_PROOF_ASSERTION_FAILED");
+  if (process.argv[2] === "--resume-before-handoff") {
+    const firstExecution = record.execution!;
+    await rpc.request("session.stopOne", { sessionId: record.id });
+    const stoppedBy = Date.now() + 15000;
+    while (registry.get(record.id).exitCode === null && Date.now() < stoppedBy) await new Promise((r) => setTimeout(r, 100));
+    if (registry.get(record.id).exitCode === null) throw new Error("RESUME_STOP_NOT_CONFIRMED");
+    record = await rpc.request<SessionRecord>("session.resume", { sessionId: record.id });
+    const readyBy = Date.now() + 30000;
+    while (reports.length < 2 && Date.now() < readyBy) await new Promise((r) => setTimeout(r, 100));
+    if (record.generation !== 2 || record.execution?.generation !== 2 || record.execution.executionId !== firstExecution.executionId
+      || record.execution.backendId !== firstExecution.backendId || reports.slice().length !== 2) throw new Error("RESUME_GENERATION_OR_REPORT_FAILED");
+    await writeFile(join(evidence, "resume.json"), JSON.stringify({ firstExecution, resumed: record, reports }), { mode: 0o600 });
+  }
   await proveHandoff({ registry, rpc, coordination, credentials, orchestrators, worker: record, client, evidence });
+  if (process.argv[2] === "--timeout-after-handoff") {
+    const deadline = Date.now() + 15000;
+    while (store.get(record.id)?.phase !== "stopped" && Date.now() < deadline) {
+      await service.expireAttempts(); await new Promise((r) => setTimeout(r, 100));
+    }
+    const outcome = await backend.inspect(record.execution!), execution = store.get(record.id);
+    await writeFile(join(evidence, "timeout.json"), JSON.stringify({ outcome, execution }), { mode: 0o600 });
+    if (execution?.failure !== "timeout" || outcome.state !== "stopped" || backend.slots.snapshot().running.length) throw new Error("ATTEMPT_TIMEOUT_NOT_PROVED");
+  }
   if (process.argv[2] === "--oom-after-handoff") {
     await rpc.request("session.send", { sessionId: record.id, data: Buffer.from("oom-proof\n").toString("base64") });
     const deadline = Date.now() + 20_000;

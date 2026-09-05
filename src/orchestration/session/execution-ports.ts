@@ -6,7 +6,7 @@ import type { ProviderLaunchSpec } from "./provider-ports.js";
 export interface PreparedExecution { ref: ExecutionRef; launch: ProviderLaunchSpec }
 export interface ExecutionLaunchInput {
   record: SessionRecord; request: WorkerExecutionRequest;
-  identity: ExecutionIdentity; launch: ProviderLaunchSpec;
+  identity: ExecutionIdentity; launch: ProviderLaunchSpec; signal?: AbortSignal;
 }
 export interface CollectedExecution { manifestRef: string; complete: boolean }
 export interface WorkerExecutionPort {
@@ -25,5 +25,6 @@ export interface ExecutionStorePort {
 }
 export interface SessionExecutionPort {
   start(record: SessionRecord, launch: ProviderLaunchSpec, replayBytes: number): Promise<SessionRuntime>;
+  cancelStart?(sessionId: string): boolean;
   retire?(sessionId: string): Promise<void>;
 }

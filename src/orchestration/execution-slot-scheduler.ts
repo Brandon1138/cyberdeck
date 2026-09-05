@@ -5,9 +5,15 @@ export class ExecutionSlotScheduler {
   constructor(readonly capacity: number) {
     if (!Number.isInteger(capacity) || capacity < 1) throw new Error("EXECUTION_CAPACITY_INVALID");
   }
-  reserve(id: string): Promise<() => void> {
+  reserve(id: string, signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) return Promise.reject(new Error("EXECUTION_QUEUE_CANCELLED"));
     if (this.held.has(id) || this.pending.has(id)) return Promise.reject(new Error("EXECUTION_SLOT_ALREADY_RESERVED"));
-    return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.drain(); });
+    return new Promise<() => void>((resolve, reject) => {
+      const abort = () => this.cancel(id);
+      const cleanup = () => signal?.removeEventListener("abort", abort);
+      this.pending.set(id, { resolve: (release) => { cleanup(); resolve(release); }, reject: (error) => { cleanup(); reject(error); } });
+      signal?.addEventListener("abort", abort, { once: true }); this.drain();
+    });
   }
   cancel(id: string): void {
     const queued = this.pending.get(id);

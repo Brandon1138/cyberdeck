@@ -2,6 +2,15 @@ import type { Command } from "commander";
 import { writeFile } from "node:fs/promises";
 import { withClient } from "./runtime.js";
 export function registerActivityCommands(program: Command): void {
+  program.command("execution-health")
+    .description("Inspect executor connection, physical queue, and durable execution records")
+    .action(async () => { process.stdout.write(JSON.stringify(await withClient((client) => client.request("execution.health", {})), null, 2) + "\n"); });
+  program.command("execution-cancel")
+    .description("Cancel a queued worker launch or stop its active process")
+    .requiredOption("--session <uuid>", "session identity from execution-health")
+    .action(async (options: { session: string }) => {
+      process.stdout.write(JSON.stringify(await withClient((client) => client.request("session.stopOne", { sessionId: options.session }))) + "\n");
+    });
   program.command("activity-pin")
     .description("Pin a local incident run against retention; full capacity degrades recording visibly")
     .requiredOption("--run <uuid>", "run or instruction identity")

@@ -60,10 +60,31 @@ export async function brokerExecutionRuntime(options: {
     // reconciler must not mistake their live executions for abandoned crash survivors.
     if (!reachable) recoveryTimer = setInterval(() => { void recover(); }, 15_000).unref();
   }
+  const executions = new WorkerExecutionService(store, backends, options.config.workerExecution, (config?.attemptTimeoutMinutes ?? 60) * 60000);
+  let timeoutPending = false;
+  const timeoutTimer = setInterval(() => {
+    if (timeoutPending) return;
+    timeoutPending = true;
+    void executions.expireAttempts().catch(() => { failures++; }).finally(() => { timeoutPending = false; });
+  }, 1000).unref();
+  let cleanupPending = false;
+  const cleanupTimer = setInterval(() => {
+    if (cleanupPending) return;
+    cleanupPending = true;
+    void (async () => {
+      for (const record of store.list()) {
+        // Only failed acquisitions with no registered session. Live/resumable workers retain
+        // their environment; explicit session retirement owns their deletion boundary.
+        if (record.phase !== "failed" || record.ref.executor !== "orbstack-container"
+          || options.lookupSession(record.ref.sessionId) !== undefined || Date.now() < Date.parse(record.cleanupEligibleAt ?? record.updatedAt) + (record.cleanupEligibleAt ? 0 : 24 * 3600000)) continue;
+        await executions.retire(record.ref.sessionId).catch(() => { failures++; });
+      }
+    })().catch(() => { failures++; }).finally(() => { cleanupPending = false; });
+  }, 60000).unref();
   return {
-    executions: new WorkerExecutionService(store, backends, options.config.workerExecution),
+    executions, closeAdmission: () => executions.closeAdmission(),
     adapters: config === undefined ? options.adapters : Object.fromEntries(Object.entries(options.adapters).map(([id, adapter]) => [id, new ContainerProviderAdapter(adapter, root)])),
-    health: () => ({ configured: config !== undefined, reachable, failures, slots: container?.slots.snapshot() }),
-    close: async () => { clearInterval(recoveryTimer); await gateway?.close(); },
+    health: () => ({ configured: config !== undefined, reachable, failures, slots: container?.slots.snapshot(), records: store.list() }),
+    close: async () => { clearInterval(recoveryTimer); clearInterval(cleanupTimer); clearInterval(timeoutTimer); await executions.closeAdmission(); await gateway?.close(); },
   };
 }

@@ -24,6 +24,7 @@ export const BrokerRuntimeConfigSchema = z.object({
     endpoint: z.string().startsWith("unix:///"), image: z.string().regex(/^sha256:[a-f0-9]{64}$/),
     cpus: z.number().positive().default(2), memoryBytes: z.number().int().positive().default(4 * 1024 ** 3),
     slots: z.number().int().min(1).max(4).default(2), network: z.enum(["egress", "none"]).default("egress"),
+    attemptTimeoutMinutes: z.number().int().min(1).max(1440).default(60),
     credentialFiles: z.record(z.string(), z.string().startsWith("/")).default({}),
   }).strict().optional(),
   sentry: z.object({ enabled: z.boolean().default(false), dsn: z.url().optional(),

@@ -43,6 +43,8 @@ export interface ConnectionContext {
 export interface BrokerServerOptions {
   activity?: AgentActivityPort;
   telemetry?: ActivitySinkPort;
+  executionHealth?: () => unknown;
+  renewExecutionAttempt?: (input: { sessionId: string; leaseVersion: number; leaseExpiresAt: string; controllerId: string }) => Promise<"renewed" | "not-running">;
   socketPath: string;
   registry: SessionRegistry;
   transcripts?: ThreadTranscriptReadPort;
