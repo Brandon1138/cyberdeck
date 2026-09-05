@@ -20,6 +20,6 @@ export function trustedGitEnvironment(): NodeJS.ProcessEnv {
 /** Only call non-executing object/ref commands against worker-controlled repositories. */
 export async function trustedGit(cwd: string, args: string[]): Promise<Buffer> {
   return (await exec("/usr/bin/git", ["--no-optional-locks", "-C", cwd, ...args], {
-    env: trustedGitEnvironment(), encoding: "buffer", maxBuffer: 64 * 1024 * 1024,
+    env: trustedGitEnvironment(), encoding: "buffer", maxBuffer: 64 * 1024 * 1024, timeout: 30_000,
   })).stdout;
 }

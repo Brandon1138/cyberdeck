@@ -1,5 +1,5 @@
 import { verifySelectedInput } from "./selected-workspace-input.js";
-import { mkdir, lstat, writeFile, rename, rm } from "node:fs/promises";
+import { mkdir, lstat, writeFile, rename, rm, chmod } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import type { IsolatedWorkspace, IsolatedWorkspaceProvisioner, IsolatedWorkspaceRequest } from "../../orchestration/isolated-workspace-provisioner.js";
@@ -43,6 +43,7 @@ export class PrivateCloneProvisioner implements IsolatedWorkspaceProvisioner {
         changed = true;
         if (file.action === "delete") { await rm(target, { force: true }); continue; }
         await writeFile(target, file.bytes, { mode: file.executable ? 0o700 : 0o600 });
+        await chmod(target, file.executable ? 0o700 : 0o600);
       }
       const manifest = await workspaceManifest(staging);
       const result: IsolatedWorkspace = { mode: "independent-clone", executionId: input.executionId,

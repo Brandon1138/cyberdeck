@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { trustedGitEnvironment } from "../runtime/execution/trusted-git.js";
 import type {
   BoundedChanges,
   GitOutput,
@@ -144,12 +145,12 @@ export async function diffBaseline(git: GitOutput): Promise<DiffPlan> {
       // The resolved commit rather than the literal `HEAD`, for the same reason `rev` is resolved at
       // all: the worker can commit between this plan being made and the diff being run, and a `HEAD`
       // that moved would measure the list from one revision while `:CyberdeckDiff` shows another.
-      args: ["diff", "--no-ext-diff", "--unified=0", head, "--"],
+      args: ["diff", "--no-ext-diff", "--no-textconv", "--unified=0", head, "--"],
     };
   }
   return {
     baseline: { kind: "fork-point", label: `since ${defaultBranch}`, rev: forkPoint },
-    args: ["diff", "--no-ext-diff", "--unified=0", forkPoint, "--"],
+    args: ["diff", "--no-ext-diff", "--no-textconv", "--unified=0", forkPoint, "--"],
   };
 }
 
@@ -202,7 +203,7 @@ export function gitOutputIn(cwd: string): GitOutput {
     const { stdout } = await execFileAsync(
       "git",
       ["--no-optional-locks", "-c", "core.quotePath=false", "-C", cwd, ...args],
-      { encoding: "utf8", maxBuffer: MAX_GIT_OUTPUT_BYTES },
+      { encoding: "utf8", maxBuffer: MAX_GIT_OUTPUT_BYTES, env: trustedGitEnvironment(), timeout: 30_000 },
     );
     return stdout;
   };

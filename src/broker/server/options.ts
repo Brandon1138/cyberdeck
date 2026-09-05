@@ -1,3 +1,5 @@
+import type { ActivitySinkPort } from "../../orchestration/activity-sink.js";
+import type { AgentActivityPort } from "../../orchestration/agent-activity-port.js";
 import type { Socket } from "node:net";
 import type { JobControlPlane } from "../../control-plane/job-control-plane.js";
 import type { ControlPlaneRuntime } from "../../control-plane/runtime.js";
@@ -39,6 +41,8 @@ export interface ConnectionContext {
   };
 }
 export interface BrokerServerOptions {
+  activity?: AgentActivityPort;
+  telemetry?: ActivitySinkPort;
   socketPath: string;
   registry: SessionRegistry;
   transcripts?: ThreadTranscriptReadPort;

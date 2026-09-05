@@ -230,6 +230,9 @@ export class SessionLifecycleController {
     ) {
       throw new RegistryError("SESSION_STILL_ACTIVE", "Stop the agent before deleting its thread");
     }
+    // Keep the thread visible when its isolated evidence cannot be collected. Retirement
+    // uses the same execution identity as resume and never deletes the private clone.
+    await this.catalog.options.executions?.retire?.(sessionId);
     await beforeDelete?.();
 
     // Workers outlive an orchestrator. Detach their live parent reference before

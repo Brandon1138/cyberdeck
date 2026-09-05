@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { registerActivityCommands } from "./cli/activity.js";
 import { Command } from "commander";
 import { spawnSync as processSpawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
@@ -117,6 +118,7 @@ export function createProgram(options: CreateProgramOptions = {}) {
     toolkit,
     fleetRuntimeDeps,
   };
+  registerActivityCommands(program);
   registerBrokerCommands(program, context);
   registerNvimLayoutCommands(program, context);
   registerProjectCommands(program, context);
