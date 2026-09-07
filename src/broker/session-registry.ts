@@ -1,3 +1,4 @@
+import type { ModalAnswerAttempt } from "../domain/modal-descriptor.js";
 import type { ResolvedLaunchRecord, SessionRecord, StartSessionRequest } from "../domain/session.js";
 import type { ScoutDecisionCard } from "../domain/scout-output.js";
 import type { ScoutArtifactKind } from "../domain/worker-profile.js";
@@ -252,6 +253,14 @@ export class SessionRegistry {
 
   workerTruth(sessionId: string): WorkerTruth {
     return this.reads.workerTruth(sessionId);
+  }
+
+  answerWorkerModal(
+    sessionId: string,
+    fingerprint: string,
+    answer: string,
+  ): Promise<ModalAnswerAttempt> {
+    return this.io.answerModal(sessionId, fingerprint, answer);
   }
 
   workerBudgetObservation(sessionId: string): WorkerBudgetObservation {

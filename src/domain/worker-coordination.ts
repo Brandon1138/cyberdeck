@@ -161,6 +161,8 @@ export const OwnershipOperationSchema = z.enum([
   "event-submit",
   "event-resolve",
   "checkpoint-request",
+  /** The broker pressed one enumerated answer at a worker's blocking provider prompt. */
+  "answer-modal",
   "budget-declare",
   "budget-observe",
   "budget-adjust",

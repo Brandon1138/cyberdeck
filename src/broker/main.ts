@@ -14,7 +14,9 @@ import { AntigravityJobDispatchAdapter } from "../providers/antigravity/dispatch
 import { AntigravityProviderAdapter } from "../providers/antigravity/session-adapter.js";
 import { ClaudeProviderAdapter } from "../providers/claude.js";
 import { ClaudeJobDispatchAdapter } from "../providers/claude/dispatch-adapter.js";
+import { ClaudeWorkspaceTrust } from "../providers/claude/workspace-trust.js";
 import { CodexProviderAdapter } from "../providers/codex.js";
+import { CodexWorkspaceTrust } from "../providers/codex/workspace-trust.js";
 import { CursorJobDispatchAdapter } from "../providers/cursor/dispatch-adapter.js";
 import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
 import { captureScoutWorkspaceStateHash } from "../providers/cursor/workspace-state.js";
@@ -59,6 +61,8 @@ import { loadBrokerRuntimeConfig } from "../runtime-config.js";
 import { retainStartupThreads } from "../orchestration/startup-thread-retention.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
 import { ScoutEgressGrantStore } from "../persistence/scout-egress-grant-store.js";
+import { ModalAnswerGrantStore } from "../persistence/modal-answer-grant-store.js";
+import { ModalAnswerPolicy } from "../orchestration/modal-answer-policy.js";
 import { WorkerCoordinationRuntime } from "../persistence/worker-coordination-runtime.js";
 import { WorkerEventChannel } from "./worker-event-channel.js";
 import { BrokerWorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
@@ -168,6 +172,20 @@ export async function runBroker(
   const providerPermissions = new ProviderPermissionPreferenceStore(stateDirectory);
   const scoutReports = new ScoutReportStore(stateDirectory);
   const scoutEgress = new ScoutEgressGrantStore(stateDirectory);
+  const modalAnswerGrants = new ModalAnswerGrantStore(stateDirectory);
+  const modalAnswerPolicy = new ModalAnswerPolicy({
+    grants: modalAnswerGrants,
+    probe: new GitWorkspaceProbe(),
+  });
+  // Provision-time avoidance: a worker spawned into a granted repository (or one of its linked
+  // worktrees) has its cwd written into the provider's own trust store before the process exists,
+  // so the folder-trust dialog never appears. Ungranted repositories keep today's behavior.
+  const claudeTrust = new ClaudeWorkspaceTrust();
+  const codexTrust = new CodexWorkspaceTrust();
+  const grantGatedTrust = (writer: { trust(cwd: string): Promise<string> }) =>
+    async (cwd: string): Promise<void> => {
+      if (await modalAnswerPolicy.allowsWorkspaceTrust(cwd)) await writer.trust(cwd);
+    };
   const recoveredSessions = await retainStartupThreads(
     {
       catalog: sessionStore,
@@ -179,8 +197,12 @@ export async function runBroker(
   );
   const registry = new SessionRegistry({
     adapters: {
-      codex: new CodexProviderAdapter({ mcp }),
-      claude: new ClaudeProviderAdapter({ mcp, stateDirectory }),
+      codex: new CodexProviderAdapter({ mcp, workspaceTrust: grantGatedTrust(codexTrust) }),
+      claude: new ClaudeProviderAdapter({
+        mcp,
+        stateDirectory,
+        workspaceTrust: grantGatedTrust(claudeTrust),
+      }),
       cursor: new CursorProviderAdapter({ mcp }),
       antigravity: new AntigravityProviderAdapter(),
     },
@@ -254,6 +276,7 @@ export async function runBroker(
     registry,
     orchestrators: orchestratorStore,
     instructions,
+    modalPolicy: modalAnswerPolicy,
   });
   // The same custodian the control service uses, so a handed-off lease is immediately usable by
   // the orchestrator that received it rather than reporting OWNERSHIP_LOST on its next call.
@@ -341,6 +364,7 @@ export async function runBroker(
     workerPreferences,
     workerCapabilities,
     scoutEgress,
+    modalAnswerGrants,
     orchestratorBindings: orchestratorStore,
     workerCoordination: workerCoordination.service,
     workerControl,

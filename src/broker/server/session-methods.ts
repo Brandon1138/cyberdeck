@@ -5,6 +5,7 @@ import {
   LocalWorkerUnsubscribeRequestSchema,
   LocalWorkerUnsubscribeResultSchema,
 } from "../../domain/local-worker-control.js";
+import { ModalAnswersRequestSchema } from "../../domain/modal-answer.js";
 import { SessionSnapshotParamsSchema } from "../../domain/session-snapshot.js";
 import { StartSessionRequestSchema } from "../../domain/session.js";
 import { ScoutEgressRequestSchema } from "../../domain/worker-profile.js";
@@ -14,6 +15,7 @@ import {
   type BrokerMethodHandler,
   requireFleetDetaches,
   requireLocalWorkerControl,
+  requireModalAnswerGrants,
   requireNvimBindings,
   requireScoutEgress,
   requireTranscripts,
@@ -88,6 +90,13 @@ export const sessionMethods: Record<string, BrokerMethodHandler> = {
       await requireScoutEgress(server.options).set(request.root, request.enabled);
     }
     return requireScoutEgress(server.options).status(request.root);
+  },
+  "modal.answers": async (server, _context, frame) => {
+    const request = ModalAnswersRequestSchema.parse(frame.params);
+    if (request.enabled !== undefined) {
+      await requireModalAnswerGrants(server.options).set(request.root, request.enabled);
+    }
+    return requireModalAnswerGrants(server.options).status(request.root);
   },
   // Read-only inspection of what the broker actually spawned. The broker is the source of
   // record: no client rebuilds a spec, so nothing here runs a provider preflight or writes.

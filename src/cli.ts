@@ -12,6 +12,7 @@ import {
   createFleetRuntimeDeps,
 } from "./broker/main.js";
 import { CYBERDECK_VERSION } from "./broker/version.js";
+import type { ModalAnswerGrantStatus } from "./domain/modal-answer.js";
 import type { CavemanWorkersResult, FableWorkersResult } from "./domain/orchestrator.js";
 import type { EventAck } from "./domain/worker-coordination.js";
 import type { OrchestratorManagerResult, OrchestratorResetResult } from "./orchestration/orchestrator-manager.js";
@@ -19,6 +20,7 @@ import { registerBrokerCommands } from "./cli/broker.js";
 import { registerCockpitCommands } from "./cli/cockpit.js";
 import { registerEventCommands } from "./cli/event.js";
 import { registerMcpCommands } from "./cli/mcp.js";
+import { registerModalAnswerCommands } from "./cli/modal-answers.js";
 import { registerNvimLayoutCommands } from "./cli/nvim-layout.js";
 import { registerOrchestratorCommands } from "./cli/orchestrator.js";
 import type { CliProgramContext, CreateProgramOptions } from "./cli/program.js";
@@ -69,6 +71,9 @@ export function createProgram(options: CreateProgramOptions = {}) {
   const scoutEgress = options.scoutEgress
     ?? ((request: { root: string; enabled?: boolean }) =>
       withClient((client) => client.request<ScoutEgressStatus>("scout.egress", request)));
+  const modalAnswers = options.modalAnswers
+    ?? ((request: { root: string; enabled?: boolean }) =>
+      withClient((client) => client.request<ModalAnswerGrantStatus>("modal.answers", request)));
   const rebalanceNvimLayout = options.rebalanceNvimLayout
     ?? ((windowId: string) => {
       toolkit.rebalanceNvimLayoutFromHook({
@@ -110,6 +115,7 @@ export function createProgram(options: CreateProgramOptions = {}) {
     rebindClaudeTranscript,
     submitWorkerEvent,
     scoutEgress,
+    modalAnswers,
     rebalanceNvimLayout,
     listProjects,
     addProject,
@@ -122,6 +128,7 @@ export function createProgram(options: CreateProgramOptions = {}) {
   registerProjectCommands(program, context);
   registerWorktreeCommands(program, context);
   registerScoutEgressCommands(program, context);
+  registerModalAnswerCommands(program, context);
   registerEventCommands(program, context);
   registerTranscriptCommands(program, context);
   registerSessionCommands(program, context);

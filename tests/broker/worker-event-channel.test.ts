@@ -122,6 +122,7 @@ async function harness(options: {
       onSessionUpdate: () => () => undefined,
       stop: async () => undefined,
       forceStop: () => undefined,
+      answerWorkerModal: async () => ({ status: "no-modal" as const }),
       workerTruth: vi.fn(),
     } satisfies WorkerControlOptions["registry"],
     orchestrators: {

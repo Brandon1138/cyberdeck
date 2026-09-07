@@ -6,7 +6,7 @@
     },
     {
       "path": "src/broker/worker-coordination.ts",
-      "maxLines": 2770
+      "maxLines": 2807
     },
     {
       "path": "src/control-plane/job-control-plane.ts",
@@ -14,7 +14,7 @@
     },
     {
       "path": "src/mcp/server.ts",
-      "maxLines": 1031
+      "maxLines": 1039
     },
     {
       "path": "src/orchestration/agent-control-service.ts",
@@ -26,11 +26,11 @@
     },
     {
       "path": "src/orchestration/session/worker-turn-engine.ts",
-      "maxLines": 1587
+      "maxLines": 1640
     },
     {
       "path": "src/orchestration/worker-control-service.ts",
-      "maxLines": 1360
+      "maxLines": 1526
     },
     {
       "path": "src/persistence/thread-transcript-store.ts",

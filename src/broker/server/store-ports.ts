@@ -1,4 +1,5 @@
 import type { FleetFolderDisposition, FleetLaunchProfile } from "../../domain/fleet-preferences.js";
+import type { ModalAnswerGrant, ModalAnswerGrantStatus } from "../../domain/modal-answer.js";
 import type { OrchestratorBinding } from "../../domain/orchestrator.js";
 import type { ScoutEgressGrant, ScoutEgressStatus } from "../../domain/scout-egress.js";
 import type { ThreadReadResult } from "../../domain/thread.js";
@@ -45,6 +46,11 @@ export interface WorkerPreferenceReadPort {
 export interface ScoutEgressPort {
   set(root: string, enabled: boolean): Promise<ScoutEgressGrant | undefined>;
   status(root: string): Promise<ScoutEgressStatus>;
+}
+
+export interface ModalAnswerGrantPort {
+  set(root: string, enabled: boolean): Promise<ModalAnswerGrant | undefined>;
+  status(root: string): Promise<ModalAnswerGrantStatus>;
 }
 
 /** Fleet's ownership view reads every binding; nothing on this surface writes one. */
