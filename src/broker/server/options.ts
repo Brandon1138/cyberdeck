@@ -18,6 +18,7 @@ import type { WorkerEventChannel } from "../worker-event-channel.js";
 import type {
   FleetDetachRecordPort,
   FleetPreferenceReadPort,
+  ModalAnswerGrantPort,
   OrchestratorBindingListPort,
   ScoutEgressPort,
   ThreadTranscriptReadPort,
@@ -61,6 +62,8 @@ export interface BrokerServerOptions {
    */
   workerCapabilities?: WorkerCapabilityCatalog;
   scoutEgress?: ScoutEgressPort;
+  /** Operator grants for automated modal answering and provision-time workspace trust. */
+  modalAnswerGrants?: ModalAnswerGrantPort;
   orchestratorBindings?: OrchestratorBindingListPort;
   /** Internal domain substrate. Orchestrator access goes through workerControl, never directly. */
   workerCoordination?: WorkerCoordinationService;

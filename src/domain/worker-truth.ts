@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { WorkerModalDescriptor } from "./modal-descriptor.js";
 import type { SessionExecutionState } from "./session.js";
 
 /**
@@ -145,6 +146,8 @@ export interface WorkerTruthInput {
   scoutTerminalState?: "complete" | "failed" | "budget_exhausted" | undefined;
   /** True once a stop was requested, so an exit is reported as `stopped` rather than `exited`. */
   stopRequested?: boolean | undefined;
+  /** The structured reading of the blocking prompt, when the caller derived one. */
+  modal?: WorkerModalDescriptor | undefined;
 }
 
 export interface WorkerTruth {
@@ -155,6 +158,12 @@ export interface WorkerTruth {
   pendingInstructions: number;
   composerOccupied: boolean;
   modalOpen: boolean;
+  /**
+   * Which prompt owns the UI and what answers it, present only in `blocked-modal`. Carrying it on
+   * the truth is what lets every surface (threads_list, worker_events, workers_wait) describe the
+   * same dialog identically — and what `worker_ctl answer_modal` verifies its fingerprint against.
+   */
+  modal?: WorkerModalDescriptor;
   providerLimit?: ProviderLimitTermination;
   stalledForSeconds?: number;
   /** One sentence an orchestrator can act on without reading anything else. */
@@ -219,12 +228,13 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
   // composer flag is still reported: an instruction that landed in the buffer behind a modal is the
   // exact shape of the MIK-64 incident and must stay visible.
   if (input.composer.modalOpen || input.activity === "needs-input") {
-    return settle(
+    const settled = settle(
       "blocked-modal",
       input.composer.occupied
         ? "Blocked on a provider prompt with unsent text in the composer"
         : "Blocked on a provider prompt; no turn will run until it is answered",
     );
+    return input.modal === undefined ? settled : { ...settled, modal: input.modal };
   }
   if (input.activity === "working") {
     return settle("working", "Provider turn in flight");

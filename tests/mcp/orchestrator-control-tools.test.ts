@@ -63,7 +63,7 @@ describe("orchestrator control-plane tools", () => {
     expect(lease?.inputSchema.properties?.scope?.enum).toEqual(["worker", "wave", "all-eligible"]);
     expect(lease?.inputSchema.required).toEqual(["action", "scope", "reason"]);
     expect(control?.inputSchema.properties?.action?.enum)
-      .toEqual(["stop", "redirect", "request_checkpoint"]);
+      .toEqual(["stop", "redirect", "request_checkpoint", "answer_modal"]);
     expect(control?.inputSchema.properties?.mode?.enum).toEqual(["graceful", "force"]);
     expect(events?.inputSchema.properties?.view?.enum)
       .toEqual(["active", "unresolved", "resolved", "all"]);

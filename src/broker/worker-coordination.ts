@@ -1653,6 +1653,43 @@ export class WorkerCoordinationService {
     };
   }
 
+  /**
+   * Journal one automated modal answer as its own fsynced audit line.
+   *
+   * The lease renew that authenticated the `answer_modal` call already recorded actor and reason;
+   * this record carries what that one cannot — which dialog (provider, kind, fingerprint) and which
+   * enumerated answer was pressed — so the full "who answered what with what" survives restart in
+   * the same log as every other authority change.
+   */
+  async recordModalAnswer(input: {
+    workerId: string;
+    controller: ControllerIdentity;
+    provider: string;
+    kind: string;
+    fingerprint: string;
+    answer: string;
+    reason: string;
+  }): Promise<void> {
+    return this.exclusive(async () => {
+      this.assertReady();
+      const subject = this.requireSubject(input.workerId);
+      await this.commit({
+        audits: [this.audit(
+          `modal-answer:${input.workerId}:${this.id()}`,
+          "answer-modal",
+          subject,
+          input.controller,
+          `provider=${input.provider} kind=${input.kind} fingerprint=${input.fingerprint} answer=${input.answer}: ${input.reason}`,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          "ANSWERED",
+        )],
+      });
+    });
+  }
+
   async requestCheckpoint(input: CheckpointRequestInput): Promise<CheckpointRequest> {
     return this.exclusive(async () => {
       this.assertReady();
