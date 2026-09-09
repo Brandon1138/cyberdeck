@@ -50,7 +50,8 @@ path (stop, collect, destroy) and the fixture's broker labels are checked to be 
 
 Live mode never has a default provider, model, credential or budget. It reads one JSON file named
 by `CYBERDECK_LIVE_EVAL_CONFIG` (`harness/live-config.ts`): provider, model, optional effort,
-absolute credential file path, `authorizedCeilingUsd`, repetitions (default three), optional image
+absolute credential file path and `authorizedCeilingUsd` for API mode, or an explicit subscription
+`authentication` source without either API field (see [subscription workers](../docs/setup/subscription-workers.md)), repetitions (default three), optional image
 digest, container cpus/memory, attempt timeout and per-scenario wall clock. The ceiling is written
 into every evidence row; a live row without a positive ceiling, with a scripted provider, or with
 scripted command coverage fails `live-evidence-invalid`. Command coverage in live mode is the

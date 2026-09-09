@@ -190,6 +190,7 @@ export class SessionLaunchCoordinator {
           ? addWorkerReportingGuidance(
               applyWorkerMode(initialPrompt, provisional.workerMode),
               provisional.id,
+              provisional.executor === "orbstack-container",
             )
           : applyWorkerMode(initialPrompt, provisional.workerMode);
       deferredInitialPrompt = initialPrompt !== undefined

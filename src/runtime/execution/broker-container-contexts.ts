@@ -1,6 +1,5 @@
 import { writeAtomicPrivateFile } from "../../persistence/atomic-private-file.js";
-import { mkdir, readFile, open, realpath, rm } from "node:fs/promises";
-import { constants } from "node:fs";
+import { mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExecutionRef } from "../../domain/worker-execution.js";
 import type { ExecutionLaunchInput } from "../../orchestration/session/execution-ports.js";
@@ -10,28 +9,29 @@ import { containerLaunchContext, type ContainerLaunchContext } from "./container
 import { trustedGit } from "./trusted-git.js";
 import { readSelectedInputs } from "./read-selected-inputs.js";
 import { prepareContainerWorkspaceTrust } from "./container-workspace-trust.js";
+import type { ContainerAuthentication } from "../../domain/container-authentication.js";
+import { resolveContainerCredential } from "./subscription-credentials.js";
 
 export class BrokerContainerContexts {
   constructor(private readonly root: string, private readonly credentialFiles: Record<string, string>,
     private readonly gateway: WorkerGateway, private readonly gatewayPort: number,
     private readonly allowsWorkspaceTrust?: (source: string) => Promise<boolean>,
+    private readonly authentication: Record<string, ContainerAuthentication> = {},
+    private readonly attemptTimeoutMinutes = 60,
   ) {}
   async prepare(input: ExecutionLaunchInput): Promise<ContainerLaunchContext> {
     const { record, identity } = input;
-    if (!this.credentialFiles[record.provider]) throw new Error("CONTAINER_CREDENTIALS_UNAVAILABLE");
+    const auth = this.authentication[record.provider] ?? (this.credentialFiles[record.provider]
+      ? { kind: "api-key" as const, file: this.credentialFiles[record.provider]! } : undefined);
+    if (!auth) throw new Error("CONTAINER_CREDENTIALS_UNAVAILABLE");
+    const credential = await resolveContainerCredential(record.provider, auth, this.attemptTimeoutMinutes * 60_000);
     let existing: ContainerLaunchContext | undefined;
     try { existing = await this.get({ ...identity, executor: "orbstack-container", workspaceId: "pending" }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    const credentialFile = this.credentialFiles[record.provider]!;
-    const credential = await open(credentialFile, constants.O_RDONLY | constants.O_NOFOLLOW);
-    let apiKey: string;
-    try { if ((await credential.stat()).size > 16384) throw new Error("CONTAINER_CREDENTIAL_INVALID"); apiKey = (await credential.readFile("utf8")).trim(); }
-    finally { await credential.close(); }
-    if (!apiKey) throw new Error("CONTAINER_CREDENTIALS_UNAVAILABLE");
     const hostState = join(this.root, "provider-state", record.id), hostCredentials = join(this.root, "credentials", record.id);
     await mkdir(hostState, { recursive: true, mode: 0o700 }); await mkdir(hostCredentials, { recursive: true, mode: 0o700 });
     const token = this.gateway.issue({ workerId: record.id, executionId: identity.executionId, generation: identity.generation });
-    await writeAtomicPrivateFile(join(hostCredentials, "provider.json"), JSON.stringify({ provider: record.provider, apiKey }));
+    await writeAtomicPrivateFile(join(hostCredentials, "provider.json"), JSON.stringify(credential));
     await writeAtomicPrivateFile(join(hostCredentials, "reporting-token"), token);
     let workspace = existing?.workspace;
     if (workspace === undefined) {

@@ -234,6 +234,14 @@ describe("WorkerTurnEngine", () => {
     });
   });
 
+  it.each(["host", "orbstack-container"] as const)("uses exact container transcripts without requiring a recognized spinner (%s)", async (executor) => {
+    const { engine, captureProviderTurns, replay } = harness({ provider: "claude", executor });
+    engine.appendOutput(Buffer.from("new provider display format"), replay);
+    captureProviderTurns.mockResolvedValue([{ text: "native completion", data: { transport: "provider-native" } }]);
+    await engine.reconcileCanonicalTurns();
+    expect(engine.canonicalTurns).toBe(executor === "orbstack-container" ? 1 : 0);
+  });
+
   it.each([
     ["unlabelled", { text: "ambiguous" }],
     ["terminal replay", { text: "scraped", data: { transport: "terminal-replay-fallback" } }],

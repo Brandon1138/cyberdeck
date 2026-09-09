@@ -42,7 +42,7 @@ export async function containerRuntime(root: string, guest: { kind: "scripted"; 
   const state = join(root, "broker"); await mkdir(state, { recursive: true, mode: 0o700 });
   const client = new OrbStackClient(EVAL_ENDPOINT), image = guest.kind === "provider" ? guest.live.image ?? await resolveEvalImage(client) : await resolveEvalImage(client);
   const provider = guest.kind === "provider" ? guest.live.provider : guest.provider ?? "claude";
-  let credentialFile: string;
+  let credentialFile: string | undefined;
   if (guest.kind === "scripted") {
     // The scripted guest is `node`; the launcher never reads a provider credential for it, but
     // context preparation requires one to exist. This placeholder is never a real key.
@@ -50,7 +50,8 @@ export async function containerRuntime(root: string, guest: { kind: "scripted"; 
   } else credentialFile = guest.live.credentialFile;
   const config = BrokerRuntimeConfigSchema.parse({ containerRuntime: { endpoint: EVAL_ENDPOINT, image, cpus: guest.kind === "provider" ? guest.live.cpus : 1,
     memoryBytes: guest.kind === "provider" ? guest.live.memoryBytes : 256 * 1024 ** 2, slots: 2, network: "egress", attemptTimeoutMinutes: guest.kind === "provider" ? guest.live.attemptTimeoutMinutes : 60,
-    credentialFiles: { [provider]: credentialFile } } });
+    credentialFiles: credentialFile ? { [provider]: credentialFile } : {},
+    authentication: guest.kind === "provider" && guest.live.authentication ? { [provider]: guest.live.authentication } : {} } });
   let lookup: (id: string) => SessionRecord | undefined = () => undefined, submit: WorkerEventChannel["submit"] = async () => { throw new Error("EVAL_EVENTS_UNBOUND"); };
   const hostAdapters: Record<string, ProviderAdapter> = { claude: new ClaudeProviderAdapter({ sourceEnvironment: {}, mcp: { nodePath: process.execPath, cliPath: "/nonexistent" }, stateDirectory: state }),
     codex: new CodexProviderAdapter({ sourceEnvironment: {}, mcp: { nodePath: process.execPath, cliPath: "/nonexistent" } }) };

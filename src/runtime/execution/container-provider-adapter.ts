@@ -9,7 +9,8 @@ import { CodexProviderAdapter } from "../../providers/codex.js";
 /** Target-aware argument construction; host paths are never rewritten inside strings. */
 export class ContainerProviderAdapter implements ProviderAdapter {
   readonly id: string;
-  constructor(private readonly host: ProviderAdapter, private readonly root: string) { this.id = host.id; }
+  constructor(private readonly host: ProviderAdapter, private readonly root: string,
+    private readonly codexWorkspaceIsolation: "native" | "container" = "native") { this.id = host.id; }
   private guest(session: SessionRecord): SessionRecord {
     if (session.workspace?.provisioning === "worker-provisioned" || (session.workspace?.writableRoots.length ?? 0) > 0) throw new Error("CONTAINER_WORKSPACE_POLICY_UNSUPPORTED");
     if (session.profile === "scout" || (session.imageAttachments?.length ?? 0) > 0) throw new Error("CONTAINER_PROVIDER_MODE_UNSUPPORTED");
@@ -39,6 +40,17 @@ export class ContainerProviderAdapter implements ProviderAdapter {
       spec.args.splice(end < 0 ? spec.args.length : end, 0, "--settings", JSON.stringify({ hooks: {
         SessionStart: [{ matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: "node /opt/cyberdeck/native-binding.mjs" }] }],
       } }));
+    } else if (spec.executable === "codex" && spec.args[spec.args.indexOf("-s") + 1] === "read-only") {
+      // Read-only remains enforced by the native sandbox regardless of the writable opt-in.
+      spec.args.unshift("--enable", "use_legacy_landlock");
+    } else if (spec.executable === "codex" && this.codexWorkspaceIsolation === "container"
+      && spec.args[spec.args.indexOf("-s") + 1] === "workspace-write") {
+      // Explicit operator opt-in: OrbStack and the worker gateway enforce the boundary.
+      // Routine permitted operations must not wait for interactive approval.
+      spec.args[spec.args.indexOf("-s") + 1] = "danger-full-access";
+      const approval = spec.args.indexOf("-a");
+      if (approval < 0) throw new Error("CONTAINER_CODEX_APPROVAL_POLICY_MISSING");
+      spec.args[approval + 1] = "never";
     }
     return { ...spec, env: Object.fromEntries(Object.entries(spec.env).filter(([key]) => keys.includes(key))) };
   }

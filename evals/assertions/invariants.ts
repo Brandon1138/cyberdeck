@@ -27,7 +27,8 @@ export function hardFailures(raw: unknown): string[] {
   // A container-backed row must name the image that ran; a scripted guest may never be relabelled live.
   if (e.mode !== "offline-scripted" && !e.image) failures.push("container-evidence-invalid");
   if (e.mode === "live-container" && (e.provider === "scripted" || e.commandCoverage === "scripted"
-    || e.spend.authorizedCeilingUsd === null || e.spend.authorizedCeilingUsd <= 0)) failures.push("live-evidence-invalid");
+    || (e.spend.billing === "subscription" ? e.spend.authorizedCeilingUsd !== null
+      : e.spend.authorizedCeilingUsd === null || e.spend.authorizedCeilingUsd <= 0))) failures.push("live-evidence-invalid");
   if (e.mode !== "offline-scripted" && e.scenarioId === "cross-worker"
     && !e.checks.some((check) => check.name === "other-worker-unavailable" && check.passed && check.provenance === "host-verified")) failures.push("guest-isolation-evidence-missing");
   return failures;

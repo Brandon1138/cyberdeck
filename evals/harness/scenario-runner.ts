@@ -68,7 +68,8 @@ export async function runScenario(value: unknown, mode: EvalMode = "offline-scri
     unauthorizedMutationCount: 0, missingInstructionIds: [], harnessErrors,
     checks: Object.entries(result?.checks ?? {}).map(([name, passed]) => ({ name, passed: passed === true, provenance: result?.provenance?.[name] ?? "scripted", evidenceRefs: ["facts"] })),
     artifacts: [{ id: "facts", path: factsPath, sha256 }], cleanup: result === undefined ? "retained-failure" : "complete",
-    spend: { measuredUsd: null, authorizedCeilingUsd: live?.authorizedCeilingUsd ?? null },
+    spend: { measuredUsd: null, authorizedCeilingUsd: live?.authorizedCeilingUsd ?? null,
+      ...(live ? { billing: live.authentication && live.authentication.kind !== "api-key" ? "subscription" : "api" } : {}) },
   });
   await writeFile(join(root, "evidence.json"), JSON.stringify(evidence, null, 2) + "\n", { mode: 0o600 });
   return evidence;

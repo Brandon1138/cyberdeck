@@ -10,6 +10,7 @@ import type { ContainerLaunchContext } from "./container-launch-context.js";
 import { ContainerSessionRuntime } from "./container-session-runtime.js";
 import { OrbStackClient, containerName } from "./orbstack-client.js";
 import { contentHash, workspaceManifest } from "./workspace-manifest.js";
+import { prepareWorkerNetwork, activateWorkerNetwork } from "./worker-network-boundary.js";
 
 export interface ContainerProfile {
   image: string; cpus: number; memoryBytes: number; slots: number; network: "none" | "egress";
@@ -21,6 +22,7 @@ export interface OrbStackExecutorOptions {
   attach: SessionRuntimeFactory<ProviderLaunchSpec>;
   evidenceDirectory: string;
   onFailure(error: unknown): void;
+  writableProxyPort?: number;
 }
 /**
  * `network: none` is a configured value with no launch path today. The guest gates its provider
@@ -60,11 +62,13 @@ export class OrbStackExecutor implements WorkerExecutionPort {
     try {
       input.signal?.throwIfAborted();
       const context = await this.options.contexts.prepare(input);
+      const networkHost = input.record.sandbox !== "read-only"
+        ? await prepareWorkerNetwork(client, profile.image, context, this.options.writableProxyPort ?? 0) : undefined;
       input.signal?.throwIfAborted();
       let ref: ExecutionRef = { ...input.identity, executor: "orbstack-container", workspaceId: context.workspace.hostPath };
       // Launch data is local-only, protected by the credentials mount, never Docker metadata.
       await writeAtomicPrivateFile(join(context.hostCredentials, "launch.json"), JSON.stringify({ executable: input.launch.executable,
-        args: input.launch.args, env: input.launch.env, cwd: context.guest.workspace }));
+        args: input.launch.args, env: input.launch.env, cwd: context.guest.workspace, networkRestricted: input.record.sandbox !== "read-only" }));
       let inspected = await client.inspect(ref);
       input.signal?.throwIfAborted();
       if (inspected === undefined) {
@@ -78,6 +82,7 @@ export class OrbStackExecutor implements WorkerExecutionPort {
           "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--pids-limit", "512",
           "--cpus", String(profile.cpus), "--memory", String(profile.memoryBytes), "--memory-swap", String(profile.memoryBytes),
           "--network", profile.network === "none" ? "none" : "bridge", "--interactive",
+          ...(networkHost ? ["--add-host", `host.docker.internal:${networkHost}`] : []),
           ...(input.launch.transport === "pipe" ? [] : ["--tty"]),
           "--tmpfs", "/tmp:rw,nosuid,nodev,size=268435456", "--mount", mount(context.workspace.hostPath, "/workspace", input.record.sandbox === "read-only"),
           "--mount", mount(context.hostState, "/home/worker", false), "--mount", mount(context.hostCredentials, "/run/credentials", true),
@@ -96,6 +101,7 @@ export class OrbStackExecutor implements WorkerExecutionPort {
         || host.Privileged || host.Memory !== profile.memoryBytes || host.NanoCpus !== profile.cpus * 1e9
         || host.MemorySwap !== profile.memoryBytes || !host.ReadonlyRootfs || host.PidsLimit !== 512
         || host.NetworkMode !== "bridge" || host.PidMode !== "" || !["private", ""].includes(host.IpcMode)
+        || (networkHost !== undefined && (host.ExtraHosts?.length !== 1 || host.ExtraHosts[0] !== `host.docker.internal:${networkHost}`))
         || (host.CapAdd?.length ?? 0) !== 0 || (host.Devices?.length ?? 0) !== 0
         || !host.CapDrop?.includes("ALL") || !host.SecurityOpt?.some((s) => s.startsWith("no-new-privileges"))
         || mounts.length !== 3 || !mounts.some((m) => m.Source === context.workspace.hostPath && m.Destination === "/workspace" && m.RW === (input.record.sandbox !== "read-only"))
@@ -111,6 +117,9 @@ export class OrbStackExecutor implements WorkerExecutionPort {
         cwd: prepared.ref.workspaceId, env: { PATH: process.env.PATH, HOME: process.env.HOME },
         ...(prepared.launch.transport === undefined ? {} : { transport: prepared.launch.transport }),
       }, replayBytes);
+      const context = await this.options.contexts.get(prepared.ref);
+      const spec = JSON.parse(await readFile(join(context.hostCredentials, "launch.json"), "utf8"));
+      if (spec.networkRestricted === true) await activateWorkerNetwork(this.options.client, this.options.profile.image, prepared.ref, context);
       return new ContainerSessionRuntime(attached, this.options.client, prepared.ref,
         () => this.release(prepared.ref.executionId), this.options.onFailure);
     } catch (error) {

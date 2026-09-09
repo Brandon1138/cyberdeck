@@ -96,5 +96,13 @@ describe("evidence requirements", () => {
     expect(LiveEvalConfigSchema.safeParse({ ...base, credentialFile: "relative/key" }).success).toBe(false);
     expect(LiveEvalConfigSchema.safeParse({ ...base, provider: "cursor" }).success).toBe(false);
     expect(LiveEvalConfigSchema.safeParse({ ...base, judgeModel: "anything" }).success).toBe(false);
+    const subscription = { provider: "codex", model: "fixture-model", authentication: { kind: "codex-subscription", authFile: "/tmp/auth" } };
+    expect(LiveEvalConfigSchema.safeParse(subscription).success).toBe(true);
+    expect(LiveEvalConfigSchema.safeParse({ ...subscription, authorizedCeilingUsd: 5 }).success).toBe(false);
+    expect(LiveEvalConfigSchema.safeParse({ ...subscription, credentialFile: "/tmp/key" }).success).toBe(false);
+    expect(LiveEvalConfigSchema.safeParse({ ...subscription, provider: "claude" }).success).toBe(false);
+    const row = evidence("cross-worker", "live-container");
+    expect(hardFailures({ ...row, spend: { billing: "subscription", measuredUsd: null, authorizedCeilingUsd: null } })).toEqual([]);
+    expect(hardFailures({ ...row, spend: { billing: "api", measuredUsd: null, authorizedCeilingUsd: null } })).toContain("live-evidence-invalid");
   });
 });

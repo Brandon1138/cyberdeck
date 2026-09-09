@@ -1434,7 +1434,7 @@ export class WorkerTurnEngine {
     if (this.record.executionState !== "active") return false;
     if (this.suppressSemanticTurns === true || this.record.profile === "scout") return false;
     if (this.record.provider !== "claude" && this.record.provider !== "codex") return false;
-    return this.observedWorking || this.rendered.length > 0;
+    return this.record.executor === "orbstack-container" || this.observedWorking || this.rendered.length > 0; // Exact native bindings need no spinner match.
   }
 
   async reconcileCanonicalTurns(): Promise<void> {

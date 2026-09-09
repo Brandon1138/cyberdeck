@@ -54,6 +54,16 @@ const codexTurn = (turn: number) => [codex("turn_context", { turn_id: `turn-${tu
   codex("event_msg", { type: "task_complete", turn_id: `turn-${turn}`, last_agent_message: `answer-${turn}` })];
 const lines = (frames: unknown[]) => frames.map((frame) => JSON.stringify(frame)).join("\n") + "\n";
 
+it("waits for Claude's text block when thinking and text both carry end_turn", async () => {
+  const f = await fixture("claude");
+  const timestamp = "2026-09-05T10:00:01.000Z";
+  const thinking = { type: "assistant", timestamp, message: { id: "msg-one", role: "assistant", stop_reason: "end_turn", content: [{ type: "thinking", thinking: "" }] } };
+  await writeFile(f.path, lines([{ type: "user", timestamp, message: { role: "user", content: "canary" } }, thinking]));
+  expect((await f.source.read(f.session)).turns).toHaveLength(0);
+  await appendFile(f.path, lines([{ ...thinking, message: { ...thinking.message, content: [{ type: "text", text: "SUBSCRIPTION_CANARY_OK" }] } }]));
+  expect((await f.source.read(f.session)).turns).toMatchObject([{ providerTurnId: "msg-one", text: "SUBSCRIPTION_CANARY_OK" }]);
+});
+
 it("binds delayed instruction completion to exact native intervals through restart and generation change", async () => {
   const f = await fixture(), first = f.instruction(1), second = f.instruction(2);
   await writeFile(f.path, lines([codex("session_meta", { id: f.nativeId, originator: "codex-tui", cwd: "/workspace" }), ...codexTurn(1), ...codexTurn(2)]));

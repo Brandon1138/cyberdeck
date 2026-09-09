@@ -13,6 +13,7 @@ it("drops every excluded field at the final serialized envelope boundary", () =>
   const projection = projectActivity(event);
   const raw = [{ dsn: secret, sent_at: secret }, [[{ type: "transaction", arbitrary: secret }, {
     transaction: secret, exception: { values: [secret] }, request: { url: secret, headers: { authorization: secret } },
+    user: { ip_address: "198.51.100.42", email: secret, geo: { city: secret } },
     breadcrumbs: [{ message: secret }], tags: { injected: secret }, extra: { prompt: secret, transcript: secret, source: secret, diff: secret },
     spans: [{ description: secret, data: { arguments: secret, output: secret, command: secret } }],
     start_timestamp: 100, timestamp: 999,
@@ -26,6 +27,8 @@ it("drops every excluded field at the final serialized envelope boundary", () =>
   expect(payload.timestamp).toBe(payload.start_timestamp);
   expect(payload.tags["cyberdeck.timing"]).toBe("observation-marker");
   expect(payload.spans).toEqual([]);
+  expect(payload.user).toEqual({ ip_address: "0.0.0.0" });
+  expect(serialized).not.toContain("198.51.100.42");
   expect(sanitizeSentryEnvelope([{}, [[{ type: "event" }, { message: secret }]]])).toBeUndefined();
   expect(sanitizeSentryEnvelope([{}, [[{ type: "transaction" }, { contexts: { trace: { data: { "cyberdeck.projection": JSON.stringify({ ...projection, injected: secret }) } } } }]]])).toBeUndefined();
 });

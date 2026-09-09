@@ -15,7 +15,9 @@ export const ScenarioEvidenceSchema = z.object({
   checks: z.array(z.object({ name: z.string(), passed: z.boolean(), provenance: z.enum(["broker", "host-verified", "scripted", "provider-native"]), evidenceRefs: z.array(z.string()).min(1) }).strict()),
   artifacts: z.array(z.object({ id: z.string().min(1), path: z.string().min(1), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1),
   cleanup: z.enum(["complete", "retained-failure"]),
-  spend: z.object({ measuredUsd: z.number().nonnegative().nullable(), authorizedCeilingUsd: z.number().nonnegative().nullable() }).strict(),
+  spend: z.object({ measuredUsd: z.number().nonnegative().nullable(), authorizedCeilingUsd: z.number().nonnegative().nullable(),
+    billing: z.enum(["api", "subscription"]).optional(),
+  }).strict(),
 }).strict();
 export type ScenarioEvidence = z.infer<typeof ScenarioEvidenceSchema>;
 export type EvalMode = z.infer<typeof EvalModeSchema>;
