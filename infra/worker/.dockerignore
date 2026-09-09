@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!report.mjs
+!launch.mjs
+!mcp.mjs
+!native-binding.mjs

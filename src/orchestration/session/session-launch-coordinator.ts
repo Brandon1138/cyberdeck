@@ -1,3 +1,4 @@
+import { resolveWorkerExecution } from "../../domain/worker-execution.js";
 import { randomUUID } from "node:crypto";
 import { evaluateStart } from "../../domain/policy.js";
 import { imageInputRefusal, providerAttachesImagesAtLaunch } from "../../domain/image-input.js";
@@ -75,6 +76,9 @@ export class SessionLaunchCoordinator {
     activate?: (record: SessionRecord) => Promise<void>,
   ): Promise<SessionRecord> {
     const validated = StartSessionRequestSchema.parse(request);
+    const execution = resolveWorkerExecution(validated, this.catalog.options.config.workerExecution);
+    validated.executor = execution.executor;
+    validated.executionProfile = execution.profile;
     // The launch boundary is the only place that knows whether an attachment list will actually
     // become launch arguments. A provider with no flag to carry them would drop the whole list
     // without a word, so the start is refused rather than run as a text-only prompt that looks

@@ -73,7 +73,7 @@ function layerFor(path: string): Layer {
     return "application";
   }
   if (topLevel === "domain") return "domain";
-  if (["runtime", "tmux", "providers", "persistence", "nvim"].includes(topLevel ?? "")) {
+  if (["runtime", "tmux", "providers", "persistence", "nvim", "observability"].includes(topLevel ?? "")) {
     return "infrastructure";
   }
 

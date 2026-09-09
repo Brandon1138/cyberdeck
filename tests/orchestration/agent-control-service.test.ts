@@ -355,6 +355,8 @@ describe("AgentControlService", () => {
       provider: "codex",
       model: "gpt-5.6-sol",
       effort: "low",
+      executor: "orbstack-container",
+      executionProfile: "ordinary",
       cwd: "/repo/one",
       prompt: "Return 8 + 1000",
       name: "connectivity-sol",
@@ -366,7 +368,7 @@ describe("AgentControlService", () => {
       effort: "low",
       completionTarget: 1,
     });
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({ effort: "low" }), "Return 8 + 1000");
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ effort: "low", executor: "orbstack-container", executionProfile: "ordinary" }), "Return 8 + 1000");
     expect(start.mock.calls[0]).toHaveLength(2);
   });
 

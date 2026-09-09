@@ -1,0 +1,11 @@
+import { readFile } from "node:fs/promises";
+import { validatePromptfooResults } from "../evals/assertions/promptfoo-results.js";
+import { verifyEvidenceArtifacts } from "../evals/assertions/artifacts.js";
+import { EvalModeSchema } from "../evals/assertions/evidence.js";
+const [path, mode = "offline-scripted", repetitions = "1"] = process.argv.slice(2);
+if (!path) throw new Error("PROMPTFOO_RESULT_PATH_REQUIRED");
+const result = JSON.parse(await readFile(path, "utf8"));
+const failures = validatePromptfooResults(result, EvalModeSchema.parse(mode), Number(repetitions));
+if (!failures.length) for (const row of result.results.results) failures.push(...await verifyEvidenceArtifacts(JSON.parse(row.response.output)));
+console.log(JSON.stringify({ mode, repetitions: Number(repetitions), failures }));
+if (failures.length) process.exitCode = 1;

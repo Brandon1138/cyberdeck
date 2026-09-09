@@ -1100,7 +1100,7 @@ describe("WorkerControlService answer_modal", () => {
     ]);
     // Policy saw the worker's own cwd and the descriptor's kind, nothing wider.
     expect(bench.policyEvaluations).toEqual([
-      { cwd: "/repo/worktrees/w", kind: "workspace-trust" },
+      { cwd: "/repo/worktrees/w", kind: "workspace-trust", sessionId: workerId },
     ]);
     // The durable journal names the dialog and the answer, beyond the renew's actor/reason audit.
     const audit = bench.coordination.listAudits(workerId)

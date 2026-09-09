@@ -89,7 +89,16 @@ export const agentMethods: Record<string, BrokerMethodHandler> = {
     return requireInstructions(server.options).enqueue(EnqueueInstructionParamsSchema.parse(frame.params));
   },
   "agent.lease.control": async (server, _context, frame) => {
-    return requireWorkerControl(server.options).lease(AgentLeaseParamsSchema.parse(frame.params));
+    const result = await requireWorkerControl(server.options).lease(AgentLeaseParamsSchema.parse(frame.params));
+    if (result.action !== "renew" || result.idempotentReplay || !server.options.renewExecutionAttempt) return result;
+    const executionRenewals = [];
+    for (const outcome of result.results) {
+      if (outcome.code !== "ACQUIRED" && outcome.code !== "ALREADY_CONTROLLED") continue;
+      if (outcome.leaseVersion === undefined || outcome.leaseExpiresAt === undefined) continue;
+      const status = await server.options.renewExecutionAttempt({ sessionId: outcome.workerId, leaseVersion: outcome.leaseVersion, leaseExpiresAt: outcome.leaseExpiresAt, controllerId: result.controllerId }).catch(() => "unavailable" as const);
+      executionRenewals.push({ workerId: outcome.workerId, status });
+    }
+    return { ...result, executionRenewals };
   },
   "agent.worker.control": async (server, _context, frame) => {
     return requireWorkerControl(server.options).control(AgentWorkerControlParamsSchema.parse(frame.params));

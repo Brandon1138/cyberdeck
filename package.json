@@ -59,6 +59,12 @@
     "postinstall": "node -e \"const fs=require('node:fs'),path=require('node:path');if(process.platform==='darwin'){const helper=path.join(path.dirname(require.resolve('node-pty/package.json')),'prebuilds',process.platform+'-'+process.arch,'spawn-helper');if(fs.existsSync(helper))fs.chmodSync(helper,0o755)}\""
   },
   "dependencies": {
+    "@opentelemetry/api": "1.9.0",
+    "@opentelemetry/core": "2.11.0",
+    "@opentelemetry/sdk-trace-base": "2.11.0",
+    "@opentelemetry/sdk-trace-node": "2.11.0",
+    "@sentry/node": "10.73.0",
+    "@sentry/opentelemetry": "10.73.0",
     "commander": "^15.0.0",
     "node-pty": "^1.1.0",
     "zod": "^4.4.3"

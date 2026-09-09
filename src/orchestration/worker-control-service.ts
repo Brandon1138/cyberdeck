@@ -322,7 +322,7 @@ export class WorkerControlError extends Error {
  * grant ledger; absent (not composed), every `answer_modal` is refused as policy-denied.
  */
 export interface ModalAnswerPolicyPort {
-  evaluate(input: { cwd: string; kind: ModalKind }): Promise<{ allowed: boolean; reason: string }>;
+  evaluate(input: { cwd: string; kind: ModalKind; sessionId?: string }): Promise<{ allowed: boolean; reason: string }>;
 }
 
 export interface WorkerControlOptions {
@@ -1011,7 +1011,7 @@ export class WorkerControlService {
     const policy = this.options.modalPolicy;
     const decision = policy === undefined
       ? { allowed: false, reason: "This broker has no modal answer policy configured" }
-      : await policy.evaluate({ cwd: record.cwd, kind: descriptor.kind });
+      : await policy.evaluate({ cwd: record.cwd, kind: descriptor.kind, sessionId: record.id });
     if (!decision.allowed) {
       return { ...base, code: "MODAL_POLICY_DENIED", modal: descriptor, detail: decision.reason };
     }

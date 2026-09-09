@@ -24,6 +24,7 @@ export interface ModalAnswerPolicyOptions {
   grants: ModalAnswerGrantReader;
   probe: ModalAnswerRepositoryProbe;
   canonicalize?: (path: string) => Promise<string>;
+  resolveSessionCwd?: (sessionId: string, cwd: string) => Promise<string | undefined>;
 }
 
 /**
@@ -40,14 +41,16 @@ export interface ModalAnswerPolicyOptions {
 export class ModalAnswerPolicy {
   constructor(private readonly options: ModalAnswerPolicyOptions) {}
 
-  async evaluate(input: { cwd: string; kind: ModalKind }): Promise<ModalAnswerPolicyDecision> {
+  async evaluate(input: { cwd: string; kind: ModalKind; sessionId?: string }): Promise<ModalAnswerPolicyDecision> {
     if (!ANSWERABLE_MODAL_KINDS.has(input.kind)) {
       return {
         allowed: false,
         reason: `Modal kind ${input.kind} is never answerable by policy; it stays with the operator`,
       };
     }
-    const root = await this.repositoryRootOf(input.cwd);
+    const cwd = input.sessionId !== undefined && this.options.resolveSessionCwd
+      ? await this.options.resolveSessionCwd(input.sessionId, input.cwd) : input.cwd;
+    const root = cwd === undefined ? undefined : await this.repositoryRootOf(cwd);
     if (root === undefined) {
       return {
         allowed: false,

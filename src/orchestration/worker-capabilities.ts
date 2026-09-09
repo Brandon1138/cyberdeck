@@ -1,5 +1,7 @@
 import type { ApprovalMode, ProviderId, ReasoningEffort } from "../domain/session.js";
 
+import { PROVIDER_EXECUTION_SUPPORT, type ProviderExecutionSupport } from "../domain/execution-support.js";
+
 export interface WorkerProviderCapability {
   provider: ProviderId;
   models: readonly string[];
@@ -17,6 +19,8 @@ export interface WorkerProviderCapability {
    * never means "no efforts", which is what an empty array here would mean.
    */
   modelEfforts?: Readonly<Record<string, readonly ReasoningEffort[]>>;
+  /** What this provider can do under each executor in this build; never a live claim. */
+  execution?: ProviderExecutionSupport;
 }
 
 /**
@@ -53,6 +57,7 @@ export interface ResolvedWorkerCapability extends WorkerProviderCapability {
 export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] = [
   {
     provider: "codex",
+    execution: PROVIDER_EXECUTION_SUPPORT.codex,
     models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.3-codex-spark"],
     efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
     // Read from `codex debug models` on 2026-08-20. Only the models whose range is narrower than
@@ -72,6 +77,7 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
   },
   {
     provider: "claude",
+    execution: PROVIDER_EXECUTION_SUPPORT.claude,
     models: ["haiku", "sonnet", "opus", "fable"],
     efforts: ["low", "medium", "high", "xhigh", "max"],
     approvalModes: ["prompt", "auto"],
@@ -83,6 +89,7 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
   },
   {
     provider: "cursor",
+    execution: PROVIDER_EXECUTION_SUPPORT.cursor,
     models: [
       "composer-2.5",
       "gpt-5.6-luna-low",
@@ -127,6 +134,7 @@ export const WORKER_PROVIDER_CAPABILITIES: readonly WorkerProviderCapability[] =
   },
   {
     provider: "antigravity",
+    execution: PROVIDER_EXECUTION_SUPPORT.antigravity,
     models: ["gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high"],
     efforts: ["low", "medium", "high"],
     approvalModes: ["prompt"],

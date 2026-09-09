@@ -119,6 +119,7 @@ export class SessionWorkspaceCoordinator {
     sessionId: string,
   ): Promise<ProvisionedWorktree | undefined> {
     const workspace = request.workspace;
+    if (request.executor === "orbstack-container") return undefined; // Private clone provisioning belongs to the selected executor.
     if (workspace?.provisioning !== "cyberdeck-provisioned") return undefined;
     const provisioner = this.options.provisioner;
     if (provisioner === undefined) {

@@ -1,3 +1,13 @@
+import { ContainerNativeSource } from "../runtime/activity/container-native-source.js";
+import { TurnNativeCapture } from "../runtime/activity/turn-native-capture.js";
+import { ExecutionTranscriptStore } from "../persistence/execution-transcript-store.js";
+import { brokerExecutionRuntime } from "../runtime/execution/broker-execution-runtime.js";
+import { SentrySink } from "../observability/sentry-sink.js";
+import { withActivitySink, type ActivitySinkPort } from "../orchestration/activity-sink.js";
+import { openActivityRecorder } from "../persistence/agent-activity-store.js";
+import { activityInstructionStore } from "../orchestration/activity-instruction-store.js";
+import { enforceJobExecutionPolicy } from "../orchestration/job-execution-policy.js";
+import type { WorkerExecutionPolicy } from "../domain/worker-execution.js";
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,7 +42,6 @@ import { BrokerServer } from "./server.js";
 import { FleetProjectService } from "./fleet-project-service.js";
 import { SessionRegistry } from "./session-registry.js";
 import {
-  ThreadTranscriptStore,
   pruneLegacyTranscript,
 } from "../persistence/thread-transcript-store.js";
 import { ClaudeConversationBindingStore } from "../persistence/claude-conversation-bindings.js";
@@ -54,6 +63,7 @@ import { LocalWorkerControlService } from "../orchestration/local-worker-control
 import { WorkerBudgetEnforcer } from "./worker-budget-enforcer.js";
 import { WorkerControlService } from "../orchestration/worker-control-service.js";
 import { WorkerHandoffService } from "../orchestration/worker-handoff-service.js";
+import { activityCoordinationStore } from "../orchestration/activity-coordination-store.js";
 import { InstructionStore } from "../persistence/instruction-store.js";
 import { WorkflowStore } from "../persistence/workflow-store.js";
 import { WorkflowService } from "../orchestration/workflow-service.js";
@@ -138,6 +148,7 @@ export function createCliToolkit(): CliToolkit {
 export function composeJobDispatchAdapters(context: {
   leases: WorktreeLeaseManager;
   artifacts: ArtifactStore;
+  executionPolicy?: WorkerExecutionPolicy | undefined;
 }): JobDispatchAdapter[] {
   return [
     new AppServerJobDispatchAdapter({
@@ -149,7 +160,7 @@ export function composeJobDispatchAdapters(context: {
     new ClaudeJobDispatchAdapter(),
     new CursorJobDispatchAdapter(),
     new AntigravityJobDispatchAdapter(),
-  ];
+  ].map((adapter) => enforceJobExecutionPolicy(adapter, context.executionPolicy));
 }
 
 export async function runBroker(
@@ -158,12 +169,29 @@ export async function runBroker(
 ): Promise<BrokerServer> {
   await ensurePrivateDirectory(stateDirectory);
   const journal = new Journal(stateDirectory);
+  const localActivity = await openActivityRecorder(resolve(stateDirectory, "activity"));
   const claudeConversations = new ClaudeConversationBindingStore(stateDirectory);
-  const transcripts = new ThreadTranscriptStore(stateDirectory, { claudeConversations });
+  let registry: SessionRegistry;
+  const containerNativeSource = new ContainerNativeSource(resolve(stateDirectory, "containers"));
+  const transcripts = new ExecutionTranscriptStore(stateDirectory, { claudeConversations }, containerNativeSource, (id) => {
+    try { return registry?.get(id); } catch { return undefined; }
+  });
   await transcripts.init();
   const cliPath = resolve(dirname(fileURLToPath(import.meta.url)), "../cli.js");
   const mcp = { nodePath: process.execPath, cliPath };
   const config = loadBrokerRuntimeConfig(resolve(stateDirectory, "config.json"));
+  let sentry: SentrySink | undefined;
+  let telemetry: ActivitySinkPort | undefined;
+  if (config.sentry?.enabled === true) {
+    try {
+      sentry = new SentrySink({ enabled: true, dsn: config.sentry.dsn!, dailyCap: config.sentry.dailyEnvelopeCap!,
+        sampleRate: config.sentry.sampleRate, budgetStateFile: resolve(stateDirectory, "activity", "telemetry-budget.json") });
+      telemetry = sentry;
+    } catch {
+      telemetry = { record: () => {}, health: () => ({ enabled: false, degraded: true, code: "TELEMETRY_INITIALIZATION_FAILED" }) };
+    }
+  }
+  const activity = withActivitySink(localActivity, telemetry);
   const sessionStore = new SessionStore(stateDirectory);
   const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
@@ -176,6 +204,7 @@ export async function runBroker(
   const modalAnswerPolicy = new ModalAnswerPolicy({
     grants: modalAnswerGrants,
     probe: new GitWorkspaceProbe(),
+    resolveSessionCwd: (id, cwd) => executionRuntime.modalCwd(id, cwd),
   });
   // Provision-time avoidance: a worker spawned into a granted repository (or one of its linked
   // worktrees) has its cwd written into the provider's own trust store before the process exists,
@@ -195,18 +224,19 @@ export async function runBroker(
     config.threadRetention,
     Date.now(),
   );
-  const registry = new SessionRegistry({
-    adapters: {
-      codex: new CodexProviderAdapter({ mcp, workspaceTrust: grantGatedTrust(codexTrust) }),
-      claude: new ClaudeProviderAdapter({
-        mcp,
-        stateDirectory,
-        workspaceTrust: grantGatedTrust(claudeTrust),
-      }),
-      cursor: new CursorProviderAdapter({ mcp }),
-      antigravity: new AntigravityProviderAdapter(),
-    },
+  let workerEvents: WorkerEventChannel;
+  const executionRuntime = await brokerExecutionRuntime({ stateDirectory, config, activity,
+    allowsWorkspaceTrust: (source) => modalAnswerPolicy.allowsWorkspaceTrust(source),
+    adapters: { codex: new CodexProviderAdapter({ mcp, workspaceTrust: grantGatedTrust(codexTrust) }),
+      claude: new ClaudeProviderAdapter({ mcp, stateDirectory, workspaceTrust: grantGatedTrust(claudeTrust) }),
+      cursor: new CursorProviderAdapter({ mcp }), antigravity: new AntigravityProviderAdapter() },
+    lookupSession: (id) => { try { return registry?.get(id); } catch { return undefined; } },
+    submitEvent: (input) => workerEvents.submit(input),
+  });
+  registry = new SessionRegistry({
+    adapters: executionRuntime.adapters,
     sessionRuntimeFactory: createSessionRuntime,
+    executions: executionRuntime.executions,
     workerTurnObservation: new WorkerTurnObservationAdapter(),
     journal,
     transcripts,
@@ -230,7 +260,7 @@ export async function runBroker(
     stateDirectory,
     recoveredSessions,
     orchestrators: orchestratorStore,
-    createService: (store) => new WorkerCoordinationService({ store }),
+    createService: (store) => new WorkerCoordinationService({ store: activityCoordinationStore(store, activity) }),
   });
   await workerCoordination.start();
   // Each launch context has its own cached catalog; orchestrators force first-party Codex.
@@ -243,7 +273,12 @@ export async function runBroker(
     providerPermissions,
     (provider) => orchestratorCapabilities.resolve(provider),
   );
-  const instructions = new InstructionQueue(registry, orchestratorStore, new InstructionStore(stateDirectory));
+  const instructionStore = new InstructionStore(stateDirectory);
+  const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
+  transcripts.attachNativeCapture(nativeCapture);
+  const instructions = new InstructionQueue(registry, orchestratorStore, activityInstructionStore(instructionStore, activity, (id) => {
+    try { return registry.get(id); } catch { return undefined; }
+  }, (record, worker) => nativeCapture.captureInstruction(record, worker)));
   instructions.start();
   const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerBudgets = new WorkerBudgetEnforcer({
@@ -287,7 +322,7 @@ export async function runBroker(
     orchestrators: orchestratorStore,
     instructions,
   });
-  const workerEvents = new WorkerEventChannel(
+  workerEvents = new WorkerEventChannel(
     workerCoordination.service,
     registry,
     orchestratorStore,
@@ -328,7 +363,7 @@ export async function runBroker(
     artifacts: artifactStore,
     leaseStore: new LeaseStore(stateDirectory),
     adapters: (context) =>
-      composeJobDispatchAdapters({ leases: context.leases, artifacts: artifactStore }),
+      composeJobDispatchAdapters({ leases: context.leases, artifacts: artifactStore, executionPolicy: config.workerExecution }),
   });
   await runtime.start();
 
@@ -343,12 +378,23 @@ export async function runBroker(
     workerBudgets.close();
     instructions.stop();
     nvimBindings.stop();
+    await executionRuntime.closeAdmission();
     await registry.stopAll();
+    await executionRuntime.close();
+    await sentry?.close().catch(() => undefined);
     await journal.append(brokerEvent("broker.shutdown", { reason, pid: process.pid }));
     await server.close();
   };
 
   server = new BrokerServer({
+    activity, executionHealth: executionRuntime.health,
+    renewExecutionAttempt: async (input) => {
+      const lease = workerCoordination.service.getSubject(input.sessionId)?.lease;
+      if (lease?.state !== "active" || lease.version !== input.leaseVersion || lease.expiresAt !== input.leaseExpiresAt
+        || lease.controller?.controllerId !== input.controllerId || Date.parse(lease.expiresAt) <= Date.now()) return "not-running";
+      return executionRuntime.executions.renewAttempt(input.sessionId, input.leaseExpiresAt);
+    },
+    ...(telemetry === undefined ? {} : { telemetry }),
     socketPath,
     registry,
     transcripts,

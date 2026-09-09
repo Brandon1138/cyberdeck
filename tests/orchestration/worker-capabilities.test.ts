@@ -225,4 +225,17 @@ describe("worker provider capabilities", () => {
       }),
     ]);
   });
+
+  it("carries the execution support matrix on every provider and refuses fallback to another executor", () => {
+    for (const entry of WORKER_PROVIDER_CAPABILITIES) {
+      expect(entry.execution, entry.provider).toBeDefined();
+      expect(entry.execution!.host.status).toBe("supported");
+      const container = entry.execution!.container;
+      if (container.status === "unproved") { expect(container.gate).toContain("canary"); expect(container.transports.length).toBeGreaterThan(0); }
+      if (container.status === "unsupported") { expect(container.reason).toContain("CONTAINER_PROVIDER_UNSUPPORTED"); expect(container.transports).toEqual([]); }
+      expect(container.status).not.toBe("supported");
+      expect(container.refused).toContain("job dispatch");
+    }
+    expect(fallbackWorkerCapabilities("offline", "codex")[0]?.execution?.container.status).toBe("unproved");
+  });
 });

@@ -44,6 +44,7 @@ export class SessionLifecycleController {
   }
 
   async stop(sessionId: string): Promise<void> {
+    if (this.catalog.options.executions?.cancelStart?.(sessionId)) return;
     const runtime = this.catalog.requireRuntime(sessionId);
     if (runtime.terminalFinalizing === true) return;
     if (runtime.record.exitCode !== null) {
@@ -177,6 +178,7 @@ export class SessionLifecycleController {
 
     const adapter = this.catalog.requireAdapter(runtime.record.provider);
     const record = cloneRecord(runtime.record);
+    record.generation = (record.generation ?? 1) + 1;
     const resumeSpec = adapter.buildResumeSpec(record);
     // A resume spec can name provider-owned artifacts (Claude's payload files) that the previous
     // exit removed, so wait for any in-flight cleanup and then rebuild them before the spawn.
@@ -193,7 +195,8 @@ export class SessionLifecycleController {
     delete runtime.controller;
     runtime.watchers.clear();
     runtime.record.pid = sessionRuntime.pid;
-    runtime.record.generation = (runtime.record.generation ?? 1) + 1;
+    runtime.record.generation = record.generation;
+    if (record.execution !== undefined) runtime.record.execution = record.execution;
     runtime.record.executionState = "active";
     runtime.record.attachmentState = "detached";
     runtime.record.exitCode = null;
@@ -230,6 +233,9 @@ export class SessionLifecycleController {
     ) {
       throw new RegistryError("SESSION_STILL_ACTIVE", "Stop the agent before deleting its thread");
     }
+    // Keep the thread visible when its isolated evidence cannot be collected. Retirement
+    // uses the same execution identity as resume and never deletes the private clone.
+    await this.catalog.options.executions?.retire?.(sessionId);
     await beforeDelete?.();
 
     // Workers outlive an orchestrator. Detach their live parent reference before

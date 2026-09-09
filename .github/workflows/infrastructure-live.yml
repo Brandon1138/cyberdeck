@@ -1,0 +1,69 @@
+name: Infrastructure live evaluation (manual, trusted host)
+
+# Runs the container-backed Promptfoo suite on a trusted self-hosted macOS runner with OrbStack.
+# Never triggered by pull requests: the runner holds provider credentials and spends real money.
+# The scripted-guest container suite costs nothing; the live suite requires the operator's config
+# file with provider, model, credential path and total spend ceiling, supplied at dispatch time.
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: container-scripted (real containers, no model) or live-container (paid)
+        required: true
+        default: container-scripted
+        type: choice
+        options: [container-scripted, live-container]
+      live_config_path:
+        description: Absolute path, on the runner, to the operator's live evaluation config JSON (live-container only)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: [self-hosted, macOS, orbstack, cyberdeck-trusted]
+    timeout-minutes: 180
+    concurrency:
+      group: infrastructure-live
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir evals install --frozen-lockfile
+      - run: pnpm check && pnpm exec tsc -p evals/tsconfig.json
+      - name: Refuse a live run without an operator config
+        if: inputs.suite == 'live-container' && inputs.live_config_path == ''
+        run: |
+          echo "live-container requires live_config_path" >&2
+          exit 1
+      - name: Container-scripted suite
+        if: inputs.suite == 'container-scripted'
+        run: pnpm --dir evals run eval:container
+        env:
+          PROMPTFOO_DISABLE_TELEMETRY: '1'
+          PROMPTFOO_DISABLE_UPDATE: '1'
+          PROMPTFOO_CONFIG_DIR: ${{ runner.temp }}/cyberdeck-promptfoo
+      - name: Live suite (three repetitions, cache off, authorized ceiling recorded per row)
+        if: inputs.suite == 'live-container'
+        run: pnpm --dir evals run eval:live
+        env:
+          CYBERDECK_LIVE_EVAL_CONFIG: ${{ inputs.live_config_path }}
+          PROMPTFOO_DISABLE_TELEMETRY: '1'
+          PROMPTFOO_DISABLE_UPDATE: '1'
+          PROMPTFOO_CONFIG_DIR: ${{ runner.temp }}/cyberdeck-promptfoo
+      # Reports stay on the runner and in the workflow artifact; nothing is shared automatically.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: infrastructure-eval-${{ inputs.suite }}-${{ github.run_id }}
+          path: evals/results/*.json
+          retention-days: 30

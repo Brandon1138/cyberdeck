@@ -45,6 +45,18 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Install isolated evaluation dependencies
+        run: pnpm --dir evals install --frozen-lockfile
+
+      - name: Offline Promptfoo against isolated scripted brokers
+        run: |
+          pnpm exec tsc -p evals/tsconfig.json
+          pnpm --dir evals run eval:offline
+        env:
+          PROMPTFOO_DISABLE_TELEMETRY: '1'
+          PROMPTFOO_DISABLE_UPDATE: '1'
+          PROMPTFOO_CONFIG_DIR: ${{ runner.temp }}/cyberdeck-promptfoo
+
       - name: Audit production dependencies
         run: pnpm audit --prod --audit-level=high
 
@@ -58,7 +70,7 @@ jobs:
             for (const required of ["LICENSE", "README.md", "dist/src/cli.js"]) {
               if (!names.has(required)) throw new Error(`Packed artifact is missing ${required}`);
             }
-            if ([...names].some((name) => name.startsWith("tests/") || name.startsWith("docs/prompts/"))) {
+            if ([...names].some((name) => name.startsWith("tests/") || name.startsWith("docs/prompts/") || name.startsWith("evals/") || name.startsWith("dist/evals/"))) {
               throw new Error("Packed artifact contains development-only files");
             }
             console.log(result.filename);

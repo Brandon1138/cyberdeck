@@ -18,6 +18,24 @@ function policy(options: {
 }
 
 describe("ModalAnswerPolicy", () => {
+  it("uses broker-resolved clone provenance, honors revocation and refuses missing provenance", async () => {
+    let granted = true, source: string | undefined = "/repo";
+    const guarded = new ModalAnswerPolicy({
+      grants: { allowsRoot: async (root) => granted && root === "/repo" },
+      probe: { gitCommonDirectory: async (cwd) => `${cwd}/.git`, primaryWorktree: async () => undefined },
+      canonicalize: async (path) => path,
+      resolveSessionCwd: async (id, cwd) => id === "worker" && cwd === "/private/clone" ? source : undefined,
+    });
+    const input = { cwd: "/private/clone", sessionId: "worker", kind: "workspace-trust" as const };
+    expect(await guarded.evaluate(input)).toMatchObject({ allowed: true, root: "/repo" });
+    for (const kind of ["login", "unknown", "permission-approval"] as const) {
+      expect((await guarded.evaluate({ ...input, kind })).allowed).toBe(false);
+    }
+    granted = false;
+    expect((await guarded.evaluate(input)).allowed).toBe(false);
+    granted = true; source = undefined;
+    expect((await guarded.evaluate(input)).allowed).toBe(false);
+  });
   it("allows an answerable kind when the grant covers the primary checkout root", async () => {
     const decision = await policy({
       grantedRoots: ["/repo"],

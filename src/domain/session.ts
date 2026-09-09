@@ -1,3 +1,4 @@
+import { WorkerExecutorSchema, ExecutionRefSchema } from "./worker-execution.js";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { ProviderIdSchema } from "./provider-registration.js";
@@ -54,6 +55,8 @@ export const StartSessionRequestSchema = z.object({
   cwd: z.string().refine(isAbsolute, "cwd must be an absolute path"),
   detached: z.boolean(),
   sandbox: SandboxSchema,
+  executor: WorkerExecutorSchema.optional(),
+  executionProfile: z.string().max(64).optional(),
   approvalMode: ApprovalModeSchema.optional(),
   model: z.string().optional(),
   effort: ReasoningEffortSchema.optional(),
@@ -136,6 +139,8 @@ export const ObservedModelSchema = z.object({
 });
 
 export const SessionRecordSchema = StartSessionRequestSchema.extend({
+  executor: WorkerExecutorSchema.optional().transform((value) => value ?? "host"),
+  execution: ExecutionRefSchema.optional(),
   id: z.uuid(),
   /** Monotonic provider-process generation. Incremented every time this durable session resumes. */
   generation: z.number().int().positive().optional(),
@@ -175,4 +180,4 @@ export type WorkerMode = z.infer<typeof WorkerModeSchema>;
 export type ThreadAttentionState = z.infer<typeof ThreadAttentionStateSchema>;
 export type ResolvedLaunchRecord = z.infer<typeof ResolvedLaunchRecordSchema>;
 export type StartSessionRequest = z.infer<typeof StartSessionRequestSchema>;
-export type SessionRecord = z.infer<typeof SessionRecordSchema>;
+export type SessionRecord = Omit<z.infer<typeof SessionRecordSchema>, "executor"> & { executor?: z.infer<typeof WorkerExecutorSchema> | undefined };

@@ -1,3 +1,4 @@
+import { WorkerExecutorSchema } from "./worker-execution.js";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { ArtifactDescriptorSchema } from "./artifact.js";
@@ -25,6 +26,8 @@ export const JobRequestSchema = z
     provider: ProviderIdSchema,
     cwd: z.string().refine(isAbsolute, "cwd must be an absolute path"),
     sandbox: SandboxSchema,
+    executor: WorkerExecutorSchema.refine((value) => value === "host", "JOB_EXECUTOR_UNSUPPORTED").optional(),
+    executionProfile: z.literal("host-compatible").optional(),
     instruction: z.string().min(1),
     model: z.string().optional(),
     role: z.string().optional(),

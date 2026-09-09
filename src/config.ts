@@ -1,3 +1,4 @@
+import { WorkerExecutionPolicySchema } from "./domain/worker-execution.js";
 import { z } from "zod";
 import { BudgetDeclarationSchema, ConcurrencyDeclarationSchema } from "./domain/budget.js";
 import { CONTROL_PLANE_SCHEMA_VERSION } from "./domain/control-plane.js";
@@ -18,6 +19,18 @@ import { ThreadRetentionPolicySchema } from "./domain/thread-retention.js";
 export const BrokerRuntimeConfigSchema = z.object({
   /** Active workers only; orchestrators are excluded. `null` explicitly disables the ceiling. */
   maxConcurrentWorkers: z.number().int().positive().nullable().default(DEFAULT_MAX_CONCURRENT_WORKERS),
+  workerExecution: WorkerExecutionPolicySchema.optional(),
+  containerRuntime: z.object({
+    endpoint: z.string().startsWith("unix:///"), image: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    cpus: z.number().positive().default(2), memoryBytes: z.number().int().positive().default(4 * 1024 ** 3),
+    slots: z.number().int().min(1).max(4).default(2), network: z.enum(["egress", "none"]).default("egress"),
+    attemptTimeoutMinutes: z.number().int().min(1).max(1440).default(60),
+    credentialFiles: z.record(z.string(), z.string().startsWith("/")).default({}),
+  }).strict().optional(),
+  sentry: z.object({ enabled: z.boolean().default(false), dsn: z.url().optional(),
+    dailyEnvelopeCap: z.number().int().min(0).max(100000).optional(), sampleRate: z.number().min(0).max(1).default(0.1),
+  }).strict().refine((value) => !value.enabled || (value.dsn !== undefined && value.dailyEnvelopeCap !== undefined),
+    "enabled Sentry requires an explicit DSN and quota-derived daily envelope cap").optional(),
   maxDelegationDepth: z.literal(1).default(1),
   replayBytes: z.number().int().positive().default(128 * 1024),
   workerStallSeconds: z.number().int().positive().default(DEFAULT_WORKER_STALL_SECONDS),

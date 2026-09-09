@@ -30,6 +30,8 @@ export interface ClaudeProviderAdapterOptions extends SessionLaunchFilesOptions 
   mcpAllowlist?: McpAllowlistPaths;
   /** Where the transcript-rebind hook writes its binding. Omitted, no hook is installed. */
   stateDirectory?: string;
+  /** Explicit execution-owned native conversation for resume after clear/compact. */
+  nativeSessionId?: string;
   /**
    * Pre-spawn workspace trust for the session cwd. The broker supplies a policy-gated hook — trust
    * is written only for repositories the operator granted (`cyberdeck modal-answers on`), so the
@@ -109,7 +111,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
 
     const args = [
       "--resume",
-      session.id,
+      this.options.nativeSessionId ?? session.id,
       "--name",
       session.name ?? session.id,
       ...claudePermissionArgs(
