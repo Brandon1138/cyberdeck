@@ -434,11 +434,11 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_worker_ctl",
-    description: "Act on a worker you hold the lease for. stop: graceful then force (force requires a prior graceful stop plus a grace period), sets a terminal state, never kills a PID. redirect: queue one complete new instruction. request_checkpoint: ask for a correlated answer at the worker's next turn boundary without cancelling its task; decisionGate:true also makes it pause before the next irreversible step. Authority failures return codes NOT_CONTROLLER, OWNERSHIP_LOST, LEASE_EXPIRED, WORKER_TERMINAL, SUBJECT_NOT_FOUND, DENIED.",
+    description: "Act on a worker you hold the lease for. stop: graceful then force (force requires a prior graceful stop plus a grace period), sets a terminal state, never kills a PID. redirect: queue an instruction. request_checkpoint: ask for a correlated answer at the next turn boundary without cancelling the task; decisionGate:true also pauses before the next irreversible step. answer_modal: press one enumerated answer from a blocked-modal descriptor (fingerprint + answer id); needs an operator grant; returns MODAL_NOT_PRESENT, MODAL_UNRECOGNIZED, MODAL_MISMATCH, MODAL_ANSWER_UNSUPPORTED, or MODAL_POLICY_DENIED. Authority failures: NOT_CONTROLLER, OWNERSHIP_LOST, LEASE_EXPIRED, WORKER_TERMINAL, SUBJECT_NOT_FOUND, DENIED.",
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["stop", "redirect", "request_checkpoint"] },
+        action: { type: "string", enum: ["stop", "redirect", "request_checkpoint", "answer_modal"] },
         workerId: { type: "string" },
         reason: { type: "string", minLength: 1, maxLength: 500 },
         mode: { type: "string", enum: ["graceful", "force"], default: "graceful" },
@@ -448,6 +448,14 @@ const TOOLS = [
         focus: { type: "string" },
         question: { type: "string" },
         decisionGate: { type: "boolean", default: false },
+        fingerprint: {
+          type: "string",
+          description: "Required for answer_modal: the modal descriptor fingerprint you read from worker truth. The press refuses if the dialog changed since.",
+        },
+        answer: {
+          type: "string",
+          description: "Required for answer_modal: one answer id enumerated by the descriptor. Never free text.",
+        },
       },
       required: ["action", "workerId", "reason"],
       additionalProperties: false,

@@ -23,11 +23,13 @@ export async function brokerExecutionRuntime(options: {
   lookupSession(id: string): SessionRecord | undefined;
   submitEvent: WorkerEventChannel["submit"];
   activity?: AgentActivityPort;
+  allowsWorkspaceTrust?: (source: string) => Promise<boolean>;
 }) {
   const localStore = await WorkerExecutionStore.open(options.stateDirectory);
   const store = options.activity === undefined ? localStore : activityExecutionStore(localStore, options.activity);
   const host = new HostExecutor(createSessionRuntime), config = options.config.containerRuntime;
   const root = join(options.stateDirectory, "containers");
+  let contexts: BrokerContainerContexts | undefined;
   let gateway: WorkerGateway | undefined, container: OrbStackExecutor | undefined, gatewayPort: number | undefined;
   let reachable = true;
   const backends: Partial<Record<WorkerExecutor, WorkerExecutionPort>> = { host };
@@ -38,12 +40,14 @@ export async function brokerExecutionRuntime(options: {
     gateway = new WorkerGateway({ submit: options.submitEvent }, (binding) => {
       const execution = store.get(binding.workerId), session = options.lookupSession(binding.workerId);
       return execution?.ref.executionId === binding.executionId && execution.ref.generation === binding.generation
-        && session?.executionState === "active";
+        && session?.executionState === "active" && session.generation === binding.generation
+        && session.execution?.executionId === binding.executionId;
     });
     const port = await gateway.listen();
     gatewayPort = port;
+    contexts = new BrokerContainerContexts(root, config.credentialFiles, gateway, port, options.allowsWorkspaceTrust);
     container = new OrbStackExecutor({ client: new OrbStackClient(config.endpoint), profile: config,
-      contexts: new BrokerContainerContexts(root, config.credentialFiles, gateway, port), attach: createSessionRuntime,
+      contexts, attach: createSessionRuntime,
       evidenceDirectory: join(root, "evidence"), onFailure: () => { failures++; },
     });
     const recover = async () => {
@@ -83,6 +87,20 @@ export async function brokerExecutionRuntime(options: {
     })().catch(() => { failures++; }).finally(() => { cleanupWork = undefined; });
   }, 60000).unref();
   return {
+    // Only broker-owned context links a private clone to a grant's repository. Request metadata
+    // and the guest's mutable Git configuration cannot supply this authority relationship.
+    modalCwd: async (sessionId: string, cwd: string): Promise<string | undefined> => {
+      const session = options.lookupSession(sessionId);
+      if (!session || session.cwd !== cwd) return undefined;
+      if (session.executor !== "orbstack-container") return cwd;
+      const execution = store.get(sessionId);
+      if (!contexts || !execution || execution.ref.executionId !== session.execution?.executionId
+        || execution.ref.generation !== session.generation) return undefined;
+      try {
+        const context = await contexts.get(execution.ref);
+        return context.workspace.hostPath === cwd ? context.workspace.source : undefined;
+      } catch { return undefined; }
+    },
     executions, brokerId: localStore.brokerId, gatewayPort, closeAdmission: () => executions.closeAdmission(),
     adapters: config === undefined ? options.adapters : Object.fromEntries(Object.entries(options.adapters).map(([id, adapter]) => [id, new ContainerProviderAdapter(adapter, root)])),
     health: () => ({ configured: config !== undefined, reachable, failures, slots: container?.slots.snapshot(), profile: container?.support(),

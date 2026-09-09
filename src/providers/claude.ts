@@ -32,6 +32,12 @@ export interface ClaudeProviderAdapterOptions extends SessionLaunchFilesOptions 
   stateDirectory?: string;
   /** Explicit execution-owned native conversation for resume after clear/compact. */
   nativeSessionId?: string;
+  /**
+   * Pre-spawn workspace trust for the session cwd. The broker supplies a policy-gated hook — trust
+   * is written only for repositories the operator granted (`cyberdeck modal-answers on`), so the
+   * adapter never decides trust on its own. Omitted, the folder-trust dialog surfaces as before.
+   */
+  workspaceTrust?: (cwd: string) => Promise<void>;
 }
 
 /**
@@ -178,6 +184,9 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
   }
 
   async prepareLaunch(session: SessionRecord, _spec: ProviderLaunchSpec): Promise<void> {
+    // Before any launch file: an untrusted cwd parks the session at the folder-trust dialog at
+    // 0 turns, and a dialog that never appears beats any answering tool.
+    await this.options.workspaceTrust?.(session.cwd);
     const writes: Promise<unknown>[] = [];
     if (session.providerInstructions !== undefined) {
       writes.push(writeSessionLaunchFile(

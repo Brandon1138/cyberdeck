@@ -8,6 +8,12 @@ export const BrokerEventTypeSchema = z.enum([
   "session.attached",
   "session.detached",
   "session.input",
+  /**
+   * The broker pressed one enumerated answer at a recognized blocking provider prompt on an
+   * orchestrator's behalf. `data` carries the provider, modal kind, fingerprint, and answer id;
+   * the authoritative who/when record is the coordination journal's `answer-modal` audit.
+   */
+  "session.modal_answered",
   "session.exited",
   /** The provider session took an unrecoverable fault while its OS process kept running. */
   "session.errored",

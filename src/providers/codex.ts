@@ -45,6 +45,12 @@ export interface CodexProviderAdapterOptions {
   mcp?: CyberdeckMcpLaunch;
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
   runCommand?: CodexCommandRunner;
+  /**
+   * Pre-spawn workspace trust for the session cwd. The broker supplies a policy-gated hook — trust
+   * is written only for repositories the operator granted (`cyberdeck modal-answers on`), so the
+   * adapter never decides trust on its own. Omitted, the folder-trust dialog surfaces as before.
+   */
+  workspaceTrust?: (cwd: string) => Promise<void>;
 }
 
 export type CodexCommandRunner = (
@@ -150,6 +156,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
    * connects. Workers remain direct provider processes and never touch this machine-wide daemon.
    */
   async prepareLaunch(session: SessionRecord, spec: ProviderLaunchSpec): Promise<void> {
+    // Before anything else: an untrusted cwd parks the session at Codex's folder-trust dialog at
+    // 0 turns, and a dialog that never appears beats any answering tool.
+    await this.options.workspaceTrust?.(session.cwd);
     if (session.kind !== "orchestrator") return;
     try {
       await (this.options.runCommand ?? runCodexCommand)(

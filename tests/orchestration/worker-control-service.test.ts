@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerCoordinationService } from "../../src/broker/worker-coordination.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { WorkerLifecycle } from "../../src/domain/worker-coordination.js";
+import type { ModalAnswerAttempt, WorkerModalDescriptor } from "../../src/domain/modal-descriptor.js";
+import type { WorkerTruth } from "../../src/domain/worker-truth.js";
 import { WorkerControlService } from "../../src/orchestration/worker-control-service.js";
 import { WorkerCoordinationStore } from "../../src/persistence/worker-coordination-store.js";
 
@@ -84,6 +86,11 @@ async function harness(options: {
   const stopRequests = new Map<string, string>();
   const sessionUpdateListeners = new Set<(sessionId: string) => void>();
   const enqueued: Array<{ targetSessionId: string; message: string }> = [];
+  const truths = new Map<string, WorkerTruth>();
+  const modalPresses: Array<{ sessionId: string; fingerprint: string; answer: string }> = [];
+  let modalAttempt: ModalAnswerAttempt = { status: "no-modal" };
+  let policyDecision = { allowed: true, reason: "operator grant covers /repo" };
+  const policyEvaluations: Array<{ cwd: string; kind: string }> = [];
 
   const registry = {
     get(sessionId: string): FakeSession {
@@ -110,6 +117,15 @@ async function harness(options: {
     forceStop(sessionId: string) {
       forced.push(sessionId);
     },
+    workerTruth(sessionId: string): WorkerTruth {
+      const truth = truths.get(sessionId);
+      if (truth === undefined) throw new Error(`No runtime for ${sessionId}`);
+      return truth;
+    },
+    async answerWorkerModal(sessionId: string, fingerprint: string, answer: string) {
+      modalPresses.push({ sessionId, fingerprint, answer });
+      return modalAttempt;
+    },
   };
 
   const instructions = {
@@ -124,6 +140,12 @@ async function harness(options: {
     registry: registry as never,
     orchestrators: { findBySessionId: async (id: string) => bindings.get(id) } as never,
     instructions: instructions as never,
+    modalPolicy: {
+      evaluate: async (input: { cwd: string; kind: string }) => {
+        policyEvaluations.push(input);
+        return policyDecision;
+      },
+    } as never,
     now: () => nowMs,
     forceStopGraceMs: 5_000,
   });
@@ -139,6 +161,11 @@ async function harness(options: {
     forced_count: () => forced.length,
     enqueued,
     instructions,
+    modalPresses,
+    policyEvaluations,
+    setTruth: (sessionId: string, truth: WorkerTruth) => { truths.set(sessionId, truth); },
+    setModalAttempt: (attempt: ModalAnswerAttempt) => { modalAttempt = attempt; },
+    setPolicy: (decision: { allowed: boolean; reason: string }) => { policyDecision = decision; },
     advance: (ms: number) => { nowMs += ms; },
     now: () => nowMs,
     exit(sessionId: string, exitCode: number) {
@@ -1009,6 +1036,207 @@ async function leaseToken(bench: Awaited<ReturnType<typeof harness>>, workerId: 
   });
   return result.outcomes[0]!.leaseToken!;
 }
+
+describe("WorkerControlService answer_modal", () => {
+  function trustDescriptor(overrides: Partial<WorkerModalDescriptor> = {}): WorkerModalDescriptor {
+    return {
+      provider: "claude",
+      kind: "workspace-trust",
+      fingerprint: "abcdef0123456789",
+      evidence: "Do you trust the files in this folder?",
+      answers: [
+        { id: "trust", label: "Yes, proceed" },
+        { id: "exit", label: "No, exit" },
+      ],
+      ...overrides,
+    };
+  }
+
+  function blockedTruth(modal?: WorkerModalDescriptor): WorkerTruth {
+    return {
+      state: "blocked-modal",
+      terminal: false,
+      completedTurns: 0,
+      canonicalTurns: 0,
+      pendingInstructions: 0,
+      composerOccupied: false,
+      modalOpen: true,
+      ...(modal === undefined ? {} : { modal }),
+      detail: "Blocked on a provider prompt; no turn will run until it is answered",
+    };
+  }
+
+  async function blockedWorker(modal = trustDescriptor()) {
+    const bench = await harness();
+    const workerId = bench.addSession();
+    await bench.register({ workerId });
+    await bench.control.lease({
+      actorSessionId: ORC, action: "adopt", scope: "worker", workerId, reason: "adopt",
+    });
+    bench.setTruth(workerId, blockedTruth(modal));
+    return { bench, workerId, modal };
+  }
+
+  it("presses a policy-permitted answer and journals who answered which dialog", async () => {
+    const { bench, workerId, modal } = await blockedWorker();
+    bench.setModalAttempt({
+      status: "pressed",
+      descriptor: modal,
+      answer: { id: "trust", label: "Yes, proceed" },
+    });
+
+    const result = await bench.control.control({
+      actorSessionId: ORC,
+      action: "answer_modal",
+      workerId,
+      fingerprint: modal.fingerprint,
+      answer: "trust",
+      reason: "worktree provisioned by Cyberdeck",
+    });
+
+    expect(result).toMatchObject({ code: "MODAL_ANSWERED", answer: "trust" });
+    expect(bench.modalPresses).toEqual([
+      { sessionId: workerId, fingerprint: modal.fingerprint, answer: "trust" },
+    ]);
+    // Policy saw the worker's own cwd and the descriptor's kind, nothing wider.
+    expect(bench.policyEvaluations).toEqual([
+      { cwd: "/repo/worktrees/w", kind: "workspace-trust", sessionId: workerId },
+    ]);
+    // The durable journal names the dialog and the answer, beyond the renew's actor/reason audit.
+    const audit = bench.coordination.listAudits(workerId)
+      .find((entry) => entry.operation === "answer-modal");
+    expect(audit).toBeDefined();
+    expect(audit?.outcome).toBe("ANSWERED");
+    expect(audit?.reason).toContain(`fingerprint=${modal.fingerprint}`);
+    expect(audit?.reason).toContain("answer=trust");
+    expect(audit?.actor.controllerId).toBe("orchestrator:fleet");
+  });
+
+  it("returns MODAL_NOT_PRESENT without pressing when the worker is not blocked", async () => {
+    const { bench, workerId } = await blockedWorker();
+    bench.setTruth(workerId, { ...blockedTruth(), state: "working", modalOpen: false });
+
+    const result = await bench.control.control({
+      actorSessionId: ORC,
+      action: "answer_modal",
+      workerId,
+      fingerprint: "abcdef0123456789",
+      answer: "trust",
+      reason: "stale read",
+    });
+
+    expect(result.code).toBe("MODAL_NOT_PRESENT");
+    expect(bench.modalPresses).toEqual([]);
+  });
+
+  it("refuses an unrecognized dialog by construction", async () => {
+    const { bench, workerId } = await blockedWorker(
+      trustDescriptor({ kind: "unknown", answers: [] }),
+    );
+
+    const result = await bench.control.control({
+      actorSessionId: ORC,
+      action: "answer_modal",
+      workerId,
+      fingerprint: "abcdef0123456789",
+      answer: "trust",
+      reason: "attempt",
+    });
+
+    expect(result.code).toBe("MODAL_UNRECOGNIZED");
+    expect(bench.modalPresses).toEqual([]);
+    expect(bench.policyEvaluations).toEqual([]);
+  });
+
+  it("refuses a stale fingerprint and returns the current descriptor", async () => {
+    const { bench, workerId, modal } = await blockedWorker();
+
+    const result = await bench.control.control({
+      actorSessionId: ORC,
+      action: "answer_modal",
+      workerId,
+      fingerprint: "0000000000000000",
+      answer: "trust",
+      reason: "dialog changed underneath",
+    });
+
+    expect(result.code).toBe("MODAL_MISMATCH");
+    expect(result.modal).toEqual(modal);
+    expect(bench.modalPresses).toEqual([]);
+  });
+
+  it("returns the policy refusal verbatim and journals nothing", async () => {
+    const { bench, workerId, modal } = await blockedWorker();
+    bench.setPolicy({ allowed: false, reason: "No operator modal-answer grant covers /repo" });
+
+    const result = await bench.control.control({
+      actorSessionId: ORC,
+      action: "answer_modal",
+      workerId,
+      fingerprint: modal.fingerprint,
+      answer: "trust",
+      reason: "attempt without grant",
+    });
+
+    expect(result).toMatchObject({
+      code: "MODAL_POLICY_DENIED",
+      detail: "No operator modal-answer grant covers /repo",
+    });
+    expect(bench.modalPresses).toEqual([]);
+    expect(
+      bench.coordination.listAudits(workerId).find((entry) => entry.operation === "answer-modal"),
+    ).toBeUndefined();
+  });
+
+  it("reports MODAL_ANSWER_UNSUPPORTED when the engine refuses the answer id", async () => {
+    const { bench, workerId, modal } = await blockedWorker();
+    bench.setModalAttempt({ status: "unsupported-answer", descriptor: modal });
+
+    const result = await bench.control.control({
+      actorSessionId: ORC,
+      action: "answer_modal",
+      workerId,
+      fingerprint: modal.fingerprint,
+      answer: "self-destruct",
+      reason: "bad answer id",
+    });
+
+    expect(result.code).toBe("MODAL_ANSWER_UNSUPPORTED");
+    expect(
+      bench.coordination.listAudits(workerId).find((entry) => entry.operation === "answer-modal"),
+    ).toBeUndefined();
+  });
+
+  it("authenticates like every other control action: no lease, no press", async () => {
+    const bench = await harness();
+    const workerId = bench.addSession();
+    await bench.register({ workerId, controllerId: "orchestrator:workspace:/other" });
+    bench.setTruth(workerId, blockedTruth(trustDescriptor()));
+
+    const result = await bench.control.control({
+      actorSessionId: ORC,
+      action: "answer_modal",
+      workerId,
+      fingerprint: "abcdef0123456789",
+      answer: "trust",
+      reason: "no authority",
+    });
+
+    expect(result.code).toBe("NOT_CONTROLLER");
+    expect(bench.modalPresses).toEqual([]);
+  });
+
+  it("requires fingerprint and answer in the schema itself", async () => {
+    const { bench, workerId } = await blockedWorker();
+
+    await expect(bench.control.control({
+      actorSessionId: ORC,
+      action: "answer_modal",
+      workerId,
+      reason: "missing params",
+    })).rejects.toThrow(/fingerprint/u);
+  });
+});
 
 async function submit(
   bench: Awaited<ReturnType<typeof harness>>,

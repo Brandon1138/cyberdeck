@@ -77,7 +77,9 @@ export async function backendScenario(root: string, scenario: "oom" | "cross-wor
       const id = String(inspections.size + 1).repeat(64);
       inspections.set(id, { Id: id, Name: value("--name"), Config: { Labels: labels, User: "1000:1000", Image: image },
         State: { Running: false, ExitCode: scenario === "oom" ? 137 : 0, OOMKilled: scenario === "oom" },
-        HostConfig: { Memory: 256 * 1024 ** 2, NanoCpus: 1e9, Privileged: false, NetworkMode: "bridge", CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges"] }, Mounts: mounts });
+        HostConfig: { Memory: Number(value("--memory")), MemorySwap: Number(value("--memory-swap")), NanoCpus: Number(value("--cpus")) * 1e9,
+          ReadonlyRootfs: command.includes("--read-only"), PidsLimit: Number(value("--pids-limit")), PidMode: "", IpcMode: "private",
+          CapAdd: null, Devices: [], Privileged: false, NetworkMode: value("--network"), CapDrop: [value("--cap-drop")], SecurityOpt: [value("--security-opt")] }, Mounts: mounts });
       return id;
     }
     throw new Error(`UNEXPECTED_SCRIPTED_DOCKER_COMMAND:${command[0]}`);

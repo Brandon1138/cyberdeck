@@ -94,6 +94,9 @@ export class OrbStackExecutor implements WorkerExecutionPort {
       const mounts = inspected.Mounts;
       if (inspected.Config.Image !== profile.image || inspected.Config.User !== "1000:1000"
         || host.Privileged || host.Memory !== profile.memoryBytes || host.NanoCpus !== profile.cpus * 1e9
+        || host.MemorySwap !== profile.memoryBytes || !host.ReadonlyRootfs || host.PidsLimit !== 512
+        || host.NetworkMode !== "bridge" || host.PidMode !== "" || !["private", ""].includes(host.IpcMode)
+        || (host.CapAdd?.length ?? 0) !== 0 || (host.Devices?.length ?? 0) !== 0
         || !host.CapDrop?.includes("ALL") || !host.SecurityOpt?.some((s) => s.startsWith("no-new-privileges"))
         || mounts.length !== 3 || !mounts.some((m) => m.Source === context.workspace.hostPath && m.Destination === "/workspace" && m.RW === (input.record.sandbox !== "read-only"))
         || !mounts.some((m) => m.Source === context.hostState && m.Destination === "/home/worker" && m.RW)

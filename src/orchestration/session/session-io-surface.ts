@@ -1,3 +1,4 @@
+import type { ModalAnswerAttempt } from "../../domain/modal-descriptor.js";
 import { SessionCatalog } from "./session-catalog.js";
 import type { InstructionDelivery } from "./session-ports.js";
 import {
@@ -161,6 +162,41 @@ export class SessionIoSurface {
       metadata,
       ...(instructionId === undefined ? {} : { instructionId }),
     });
+  }
+
+  /**
+   * Answer the blocking provider prompt with one enumerated answer, on behalf of the broker.
+   *
+   * This is deliberately *not* `write`: no client identity, no free bytes. The engine resolves the
+   * answer id through the domain's static key table against the dialog it can currently see, and
+   * everything else is a refusal. Human control keeps priority exactly as it does for instructions —
+   * a controlled session's dialogs belong to the operator holding the terminal.
+   */
+  async answerModal(
+    sessionId: string,
+    fingerprint: string,
+    answer: string,
+  ): Promise<ModalAnswerAttempt> {
+    this.catalog.assertMayConsume(sessionId);
+    const runtime = this.catalog.requireRuntime(sessionId);
+    requireTerminalFinalizationComplete(runtime);
+    if (runtime.record.executionState !== "active") {
+      throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");
+    }
+    if (runtime.controller !== undefined) {
+      throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
+    }
+    requireInteractiveInput(runtime);
+    const attempt = runtime.turns.answerModal({ fingerprint, answer });
+    if (attempt.status === "pressed") {
+      await this.catalog.appendEvent("session.modal_answered", sessionId, {
+        provider: attempt.descriptor.provider,
+        kind: attempt.descriptor.kind,
+        fingerprint: attempt.descriptor.fingerprint,
+        answer: attempt.answer.id,
+      });
+    }
+    return attempt;
   }
 
   resize(sessionId: string, clientId: string | undefined, cols: number, rows: number): void {

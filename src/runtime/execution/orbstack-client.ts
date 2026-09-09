@@ -9,7 +9,10 @@ const InspectionSchema = z.object({
   Id: z.string(), Name: z.string(),
   Config: z.object({ Labels: z.record(z.string(), z.string()).nullable(), User: z.string(), Image: z.string() }),
   State: z.object({ Running: z.boolean(), ExitCode: z.number(), OOMKilled: z.boolean() }),
-  HostConfig: z.object({ Memory: z.number(), NanoCpus: z.number(), Privileged: z.boolean(), NetworkMode: z.string(), CapDrop: z.array(z.string()).nullable(), SecurityOpt: z.array(z.string()).nullable() }),
+  HostConfig: z.object({ Memory: z.number(), MemorySwap: z.number(), NanoCpus: z.number(), Privileged: z.boolean(),
+    ReadonlyRootfs: z.boolean(), PidsLimit: z.number(), PidMode: z.string(), IpcMode: z.string(), NetworkMode: z.string(),
+    CapAdd: z.array(z.string()).nullable(), Devices: z.array(z.unknown()).nullable(),
+    CapDrop: z.array(z.string()).nullable(), SecurityOpt: z.array(z.string()).nullable() }),
   Mounts: z.array(z.object({ Source: z.string(), Destination: z.string(), RW: z.boolean() })),
 });
 export type ContainerInspection = z.infer<typeof InspectionSchema>;

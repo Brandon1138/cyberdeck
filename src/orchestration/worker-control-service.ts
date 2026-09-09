@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows, type CapabilityGrant, type CyberdeckCapability } from "../domain/capability.js";
+import type { ModalKind, WorkerModalDescriptor } from "../domain/modal-descriptor.js";
 import { orchestratorController, type OrchestratorBinding } from "../domain/orchestrator.js";
 import type { SessionRecord } from "../domain/session.js";
 import {
@@ -42,7 +43,12 @@ import type {
 
 export const LeaseActionSchema = z.enum(["acquire", "renew", "release", "transfer", "adopt"]);
 export const LeaseScopeSchema = z.enum(["worker", "wave", "all-eligible"]);
-export const WorkerControlActionSchema = z.enum(["stop", "redirect", "request_checkpoint"]);
+export const WorkerControlActionSchema = z.enum([
+  "stop",
+  "redirect",
+  "request_checkpoint",
+  "answer_modal",
+]);
 export const WorkerEventViewSchema = z.enum(["active", "unresolved", "resolved", "all"]);
 
 const ReasonSchema = z.string().trim().min(1).max(500);
@@ -92,6 +98,10 @@ export const AgentWorkerControlParamsSchema = z.object({
   focus: z.string().trim().min(1).max(1_024).optional(),
   question: z.string().trim().min(1).max(1_024).optional(),
   decisionGate: z.boolean().default(false),
+  /** The descriptor fingerprint the caller read; the press refuses if the dialog changed since. */
+  fingerprint: z.string().trim().min(8).max(64).optional(),
+  /** One enumerated answer id from the descriptor. Never free text, never raw keys. */
+  answer: z.string().trim().min(1).max(64).optional(),
 }).superRefine((value, context) => {
   if (value.action === "redirect" && value.instruction === undefined) {
     context.addIssue({ code: "custom", message: "redirect requires instruction", path: ["instruction"] });
@@ -102,6 +112,12 @@ export const AgentWorkerControlParamsSchema = z.object({
       message: "request_checkpoint requires correlationId",
       path: ["correlationId"],
     });
+  }
+  if (value.action === "answer_modal" && value.fingerprint === undefined) {
+    context.addIssue({ code: "custom", message: "answer_modal requires fingerprint", path: ["fingerprint"] });
+  }
+  if (value.action === "answer_modal" && value.answer === undefined) {
+    context.addIssue({ code: "custom", message: "answer_modal requires answer", path: ["answer"] });
   }
 });
 
@@ -200,6 +216,18 @@ export type WorkerControlCode =
   | "LEASE_EXPIRED"
   | "LEASE_CONFLICT"
   | "SUBJECT_NOT_FOUND"
+  /** The enumerated answer was pressed at the worker's PTY and durably journaled. */
+  | "MODAL_ANSWERED"
+  /** The worker is not blocked on a modal right now; nothing was pressed. */
+  | "MODAL_NOT_PRESENT"
+  /** A dialog owns the UI but no known prompt matched; unanswerable by construction. */
+  | "MODAL_UNRECOGNIZED"
+  /** The dialog changed since the caller read its descriptor; `modal` carries the current one. */
+  | "MODAL_MISMATCH"
+  /** The named answer id is not one this modal's descriptor enumerates. */
+  | "MODAL_ANSWER_UNSUPPORTED"
+  /** Recognized, but outside the operator's grant or an unanswerable kind. Surfaces to the operator. */
+  | "MODAL_POLICY_DENIED"
   | "DENIED";
 
 export interface WorkerControlResult {
@@ -225,6 +253,10 @@ export interface WorkerControlResult {
   delivery?: "rendered" | "queued" | "deferred" | "undelivered" | "unavailable";
   /** Why an instruction is held rather than written, when it is held. */
   holdReason?: string;
+  /** On modal outcomes: the descriptor the decision was made against (current one on MISMATCH). */
+  modal?: WorkerModalDescriptor;
+  /** On MODAL_ANSWERED: the enumerated answer id that was pressed. */
+  answer?: string;
 }
 
 export interface WorkerStateSummary {
@@ -285,6 +317,14 @@ export class WorkerControlError extends Error {
   }
 }
 
+/**
+ * The one gate over automated modal answers. `ModalAnswerPolicy` implements it from the operator's
+ * grant ledger; absent (not composed), every `answer_modal` is refused as policy-denied.
+ */
+export interface ModalAnswerPolicyPort {
+  evaluate(input: { cwd: string; kind: ModalKind; sessionId?: string }): Promise<{ allowed: boolean; reason: string }>;
+}
+
 export interface WorkerControlOptions {
   coordination: WorkerCoordinationService;
   credentials?: WorkerLeaseCredentialCustodian;
@@ -294,6 +334,7 @@ export interface WorkerControlOptions {
     & Pick<WorkerTruthQueryPort, "workerTruth">;
   orchestrators: OrchestratorBindingLookup;
   instructions?: Pick<InstructionQueue, "enqueue">;
+  modalPolicy?: ModalAnswerPolicyPort;
   now?: () => number;
   /** Minimum time a graceful worker stop must stay pending before force escalation is allowed. */
   forceStopGraceMs?: number;
@@ -372,7 +413,9 @@ export class WorkerControlService {
       }
       return request.action === "redirect"
         ? this.redirectWorker(request, subject)
-        : this.requestCheckpoint(request, subject, controller);
+        : request.action === "answer_modal"
+          ? this.answerModal(request, subject, controller)
+          : this.requestCheckpoint(request, subject, controller);
     });
   }
 
@@ -910,6 +953,129 @@ export class WorkerControlService {
         code: enqueueFailureCode(error),
         detail: error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  /**
+   * Press one enumerated answer at a worker's blocking provider prompt — the typed unpark path.
+   *
+   * Ordering carries the safety story. The descriptor is read from the same truth projection every
+   * other surface renders, so the caller and the broker cannot be describing different dialogs.
+   * Policy is evaluated on that descriptor's kind *before* anything touches the PTY, and the
+   * fingerprint the caller echoes back pins the whole decision to the exact rendered dialog: the
+   * engine re-derives it at press time, so a dialog that changed under the caller — even to the
+   * same kind — refuses with the current descriptor instead of pressing. The key bytes come from
+   * the domain's static table only; no orchestrator string reaches the terminal.
+   */
+  private async answerModal(
+    request: z.infer<typeof AgentWorkerControlParamsSchema>,
+    subject: OwnershipSubject,
+    controller: ControllerIdentity,
+  ): Promise<WorkerControlResult> {
+    const base = { action: "answer_modal" as const, workerId: request.workerId };
+    const record = this.sessionRecord(request.workerId);
+    if (record === undefined) {
+      return {
+        ...base,
+        code: "MODAL_NOT_PRESENT",
+        detail: "No broker session remains for this worker, so no dialog can be on its screen",
+      };
+    }
+    const truth = this.workerTruth(request.workerId)?.truth;
+    const descriptor = truth?.modal;
+    if (truth === undefined || truth.state !== "blocked-modal" || descriptor === undefined) {
+      return {
+        ...base,
+        code: "MODAL_NOT_PRESENT",
+        detail: truth === undefined
+          ? "This broker holds no runtime for the worker, so no modal can be observed"
+          : `Worker state is ${truth.state}; nothing is blocked on a prompt`,
+      };
+    }
+    if (descriptor.kind === "unknown" || descriptor.answers.length === 0) {
+      return {
+        ...base,
+        code: "MODAL_UNRECOGNIZED",
+        modal: descriptor,
+        detail: "The blocking prompt matches no known dialog, so it is unanswerable by construction",
+      };
+    }
+    if (descriptor.fingerprint !== request.fingerprint) {
+      return {
+        ...base,
+        code: "MODAL_MISMATCH",
+        modal: descriptor,
+        detail: "The dialog changed since this fingerprint was read; decide again from the current descriptor",
+      };
+    }
+    const policy = this.options.modalPolicy;
+    const decision = policy === undefined
+      ? { allowed: false, reason: "This broker has no modal answer policy configured" }
+      : await policy.evaluate({ cwd: record.cwd, kind: descriptor.kind, sessionId: record.id });
+    if (!decision.allowed) {
+      return { ...base, code: "MODAL_POLICY_DENIED", modal: descriptor, detail: decision.reason };
+    }
+    let attempt;
+    try {
+      attempt = await this.options.registry.answerWorkerModal(
+        request.workerId,
+        request.fingerprint!,
+        request.answer!,
+      );
+    } catch (error) {
+      return {
+        ...base,
+        code: "DENIED",
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+    switch (attempt.status) {
+      case "pressed": {
+        await this.options.coordination.recordModalAnswer({
+          workerId: request.workerId,
+          controller,
+          provider: attempt.descriptor.provider,
+          kind: attempt.descriptor.kind,
+          fingerprint: attempt.descriptor.fingerprint,
+          answer: attempt.answer.id,
+          reason: request.reason,
+        });
+        return {
+          ...base,
+          code: "MODAL_ANSWERED",
+          lifecycle: subject.lifecycle,
+          modal: attempt.descriptor,
+          answer: attempt.answer.id,
+          detail: `Pressed "${attempt.answer.label}" at the ${attempt.descriptor.kind} prompt`,
+        };
+      }
+      case "no-modal":
+        return {
+          ...base,
+          code: "MODAL_NOT_PRESENT",
+          detail: "The prompt cleared before the answer landed; nothing was pressed",
+        };
+      case "unrecognized":
+        return {
+          ...base,
+          code: "MODAL_UNRECOGNIZED",
+          modal: attempt.descriptor,
+          detail: "The blocking prompt matches no known dialog, so it is unanswerable by construction",
+        };
+      case "fingerprint-mismatch":
+        return {
+          ...base,
+          code: "MODAL_MISMATCH",
+          modal: attempt.descriptor,
+          detail: "The dialog changed since this fingerprint was read; decide again from the current descriptor",
+        };
+      case "unsupported-answer":
+        return {
+          ...base,
+          code: "MODAL_ANSWER_UNSUPPORTED",
+          modal: attempt.descriptor,
+          detail: `Answer "${request.answer!}" is not one this dialog enumerates`,
+        };
     }
   }
 

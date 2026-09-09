@@ -1,4 +1,5 @@
 import type { InstructionRecord } from "../../domain/instruction.js";
+import type { ModalAnswerAttempt } from "../../domain/modal-descriptor.js";
 import type { OrchestratorBinding } from "../../domain/orchestrator.js";
 import type {
   SessionRecord,
@@ -38,6 +39,16 @@ export interface SessionProcessControlPort {
   stopRequestedAt(sessionId: string): string | undefined;
   stop(sessionId: string): Promise<void>;
   forceStop(sessionId: string): void;
+  /**
+   * Press one enumerated answer at the worker's blocking provider prompt. The implementation
+   * resolves the answer through the domain's static key table only — there is no byte payload in
+   * this signature, deliberately.
+   */
+  answerWorkerModal(
+    sessionId: string,
+    fingerprint: string,
+    answer: string,
+  ): Promise<ModalAnswerAttempt>;
 }
 
 export interface SessionUpdatePort {

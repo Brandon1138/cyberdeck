@@ -18,6 +18,7 @@ import type { BrokerServerOptions, ConnectionContext } from "./options.js";
 import type {
   FleetDetachRecordPort,
   FleetPreferenceReadPort,
+  ModalAnswerGrantPort,
   ScoutEgressPort,
   ThreadTranscriptReadPort,
 } from "./store-ports.js";
@@ -128,6 +129,15 @@ export function requireScoutEgress(options: BrokerServerOptions): ScoutEgressPor
     });
   }
   return options.scoutEgress;
+}
+
+export function requireModalAnswerGrants(options: BrokerServerOptions): ModalAnswerGrantPort {
+  if (options.modalAnswerGrants === undefined) {
+    throw Object.assign(new Error("Modal answer grant store is not available"), {
+      code: "METHOD_NOT_FOUND",
+    });
+  }
+  return options.modalAnswerGrants;
 }
 
 export function requireInstructions(options: BrokerServerOptions): InstructionQueue {

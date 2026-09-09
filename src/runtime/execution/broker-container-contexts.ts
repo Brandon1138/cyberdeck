@@ -9,10 +9,12 @@ import { PrivateCloneProvisioner } from "./isolated-workspace.js";
 import { containerLaunchContext, type ContainerLaunchContext } from "./container-launch-context.js";
 import { trustedGit } from "./trusted-git.js";
 import { readSelectedInputs } from "./read-selected-inputs.js";
+import { prepareContainerWorkspaceTrust } from "./container-workspace-trust.js";
 
 export class BrokerContainerContexts {
   constructor(private readonly root: string, private readonly credentialFiles: Record<string, string>,
     private readonly gateway: WorkerGateway, private readonly gatewayPort: number,
+    private readonly allowsWorkspaceTrust?: (source: string) => Promise<boolean>,
   ) {}
   async prepare(input: ExecutionLaunchInput): Promise<ContainerLaunchContext> {
     const { record, identity } = input;
@@ -44,6 +46,7 @@ export class BrokerContainerContexts {
       });
     }
     const context = containerLaunchContext({ workspace, hostState, hostCredentials, reportingUrl: `http://host.docker.internal:${this.gatewayPort}/v1/report` });
+    await prepareContainerWorkspaceTrust(context, record.provider, this.allowsWorkspaceTrust);
     await mkdir(join(this.root, "contexts"), { recursive: true, mode: 0o700 });
     await writeAtomicPrivateFile(join(this.root, "contexts", `${identity.executionId}.json`), JSON.stringify(context));
     record.cwd = workspace.hostPath;

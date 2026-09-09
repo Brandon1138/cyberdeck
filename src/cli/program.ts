@@ -1,6 +1,7 @@
 import type { FleetProjectAddResult, FleetProjectRemoveResult } from "../broker/fleet-project-service.js";
 import type { WorkerEventSubmitParams } from "../broker/worker-event-channel.js";
 import type { FleetRuntimeDeps } from "../client/fleet/deps.js";
+import type { ModalAnswerGrantStatus } from "../domain/modal-answer.js";
 import type { CavemanWorkersRequest, CavemanWorkersResult, EnsureOrchestratorRequest, FableWorkersRequest, FableWorkersResult, ResetOrchestratorRequest } from "../domain/orchestrator.js";
 import type { EventAck } from "../domain/worker-coordination.js";
 import type { OrchestratorManagerResult, OrchestratorResetResult } from "../orchestration/orchestrator-manager.js";
@@ -29,6 +30,7 @@ export interface CreateProgramOptions {
   ) => Promise<ClaudeTranscriptRebindOutcome>;
   submitWorkerEvent?: (request: WorkerEventSubmitParams) => Promise<EventAck>;
   scoutEgress?: (request: { root: string; enabled?: boolean }) => Promise<ScoutEgressStatus>;
+  modalAnswers?: (request: { root: string; enabled?: boolean }) => Promise<ModalAnswerGrantStatus>;
   rebalanceNvimLayout?: (windowId: string) => void | Promise<void>;
   listProjects?: () => Promise<string[]>;
   addProject?: (request: { path: string; acceptParent?: boolean }) => Promise<FleetProjectAddResult>;

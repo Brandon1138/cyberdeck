@@ -67,6 +67,10 @@ export async function sentryOutageScenario(root: string, mode: EvalMode = "offli
   try {
     const instruction = await broker.instruct(mode === "live-container" ? livePrompts["sentry-outage"] : "complete despite sink outage");
     await eventually(async () => (await broker.queue.list(broker.worker.id))[0]?.status === "completed", "SINK_BLOCKED_DELIVERY", broker.timeout);
+    // Instruction persistence precedes its activity projection. Seeing completed in the first
+    // journal does not mean the second write has even begun; wait for that durable boundary too.
+    await eventually(async () => (await broker.activity.read(instruction.id, 0, 100))
+      .some((event) => event.kind === "instruction.settled"), "SINK_SETTLEMENT_EVIDENCE_MISSING", broker.timeout);
     const events = await broker.activity.read(instruction.id, 0, 100), records = await broker.queue.list(broker.worker.id);
     return { brokerId: broker.brokerId, image: broker.container?.image, facts: { attempted, events, instructions: records }, checks: {
       "delivery-with-failing-sink": attempted > 0 && records[0]?.submittedAt !== undefined,
