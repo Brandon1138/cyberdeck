@@ -131,4 +131,3 @@ export function scoutBriefInputSchema(): Record<string, unknown> {
     additionalProperties: false,
   };
 }
-

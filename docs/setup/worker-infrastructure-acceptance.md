@@ -1,7 +1,8 @@
 # Worker infrastructure integration acceptance — 2026-09-09
 
 The complete #103–#112 implementation is integrated with main `79cfcbc` (#113), preserving the
-original stack commits. Runtime integration commit: `af5ade0`. The subsequent proof/documentation
+original stack commits on the integration branch. Main requires linear history, so the integration
+is squash-merged there; the source branches retain exact commit provenance. Runtime integration commit: `af5ade0`. The subsequent proof/documentation
 commit adds the container-policy proof; it does not change production runtime code.
 The repository is eligible for an opt-in implementation merge. Live rollout remains gated below.
 
@@ -54,18 +55,19 @@ Temporary artifacts may expire; commands are committed so the proofs can be repr
 | --- | --- |
 | TypeScript, production build, eval TypeScript | `pnpm check`, `pnpm build`, `pnpm exec tsc -p evals/tsconfig.json` passed |
 | Repository tests and architecture/file-size/dependency ratchets | 183 files / 2,159 tests passed; baseline files unchanged from #113 |
-| History secrets / production dependency audit | Gitleaks: 27 integration commits, no leaks; `pnpm audit --prod --audit-level=high`: no known vulnerabilities |
+| History secrets / production dependency audit | Gitleaks: 485 commits across full history, no leaks; `pnpm audit --prod --audit-level=high`: no known vulnerabilities |
 | Offline Promptfoo, CI settings, cache disabled | `eval-JdH-2026-09-09T07:52:21`, 8/8, validator clean |
 | Real container-scripted Promptfoo | `eval-LEu-2026-09-09T07:51:44`, 8/8, validator clean; real deadline stop, cgroup OOM, gateway refusal and mount isolation |
 | Two slots / three workers, cross-report 403, queue handover, selective retirement, reconciliation | `cyberdeck-multi-worker-proof-Brv1U4`, success, all three containers absent |
 | Generation-2 resume, same execution/workspace, reporting, handoff/stale fencing and activity | `cyberdeck-broker-container-proof-AkoKwk`, success, container absent |
 | Deliberate isolated-broker SIGKILL and fresh recovery | `cyberdeck-broker-container-proof-Gtjume`, recovery observed/stopped the surviving guest, collected evidence, container absent |
-| Private Claude/Codex trust, source-grant revocation, operator-only policy, actual queued cancellation and resume | `cyberdeck-policy-proof-b99MQN`, both providers' scripted workers passed; containers absent |
+| Private Claude/Codex trust, source-grant revocation, operator-only policy, actual queued cancellation and resume | `cyberdeck-policy-proof-LGFYjD` at clean `d979dd0`, both providers' scripted workers passed; containers absent |
 | Native attribution, clear/resume, modal answer/refusal/audit, Sentry final-envelope privacy | Repository fixture/regression tests; no claim of authenticated provider or remote telemetry proof |
 | Packed CLI, fresh temporary install, development-content exclusion | `cyberdeck-pack-proof-EjxIFX`, CLI 0.1.0-alpha.2, 954 package entries, evals/tests/scripts excluded |
 
-Runtime/eval/pack proofs used clean `af5ade0`; the first container-policy proof additionally used
-the then-uncommitted proof harness. No active-broker restart, paid/authenticated provider call,
+Runtime/eval/pack proofs used clean `af5ade0`; the container-policy proof and 30/30 successful
+Sentry-outage repetitions used clean `d979dd0`. Later changes are documentation and EOF whitespace.
+No active-broker restart, paid/authenticated provider call,
 remote Sentry export, production routing change or host-exception acceptance was performed.
 
 Reproduce using Node 24.18.0:
