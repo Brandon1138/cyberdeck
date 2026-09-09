@@ -60,6 +60,16 @@ Resume reuses the same execution, container and workspace at generation+1 and ha
 explicit native conversation id. Handoff moves authority through the one atomic transfer and never
 touches the container.
 
+## Workspace trust and interactive prompts
+
+The [#113 prompt policy](provider-interactive-prompts.md) also applies to private clones. A source
+repository's operator grant permits the same Claude/Codex trust writer to add only `/workspace` in
+that worker's private provider home during quiescent preparation. No host provider config is used
+for container launches; provider-owned symlinks refuse preparation. Modal answers resolve the source
+through the broker-owned execution context and re-evaluate the current grant. Request metadata and
+guest Git config cannot supply a granted source. Revocation blocks answers but does not undo an
+existing provider trust entry. Login, unknown and per-action permission prompts remain operator-owned.
+
 ## Activity
 
 Every container-native semantic turn is captured from the worker's private transcript under the

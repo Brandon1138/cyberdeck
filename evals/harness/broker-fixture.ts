@@ -52,6 +52,7 @@ export async function fixtureRepository(source: string, files: Record<string, st
   return source;
 }
 export interface FixtureOptions {
+  scriptedProvider?: "claude" | "codex"; allowsWorkspaceTrust?: (source: string) => Promise<boolean>;
   cwd?: string; sink?: ActivitySinkPort; transcripts?: WorkerTurnTranscriptPort; mode?: EvalMode; live?: LiveEvalConfig;
   selectedInputs?: WorkspaceInputSelection[]; workerPrompt?: string;
 }
@@ -64,7 +65,8 @@ export async function brokerFixture(root: string, options: FixtureOptions = {}) 
   let source = options.cwd ?? join(root, "workspace");
   let container: ContainerRuntimeFixture | undefined;
   if (isContainerMode(mode)) {
-    container = await containerRuntime(root, mode === "live-container" ? { kind: "provider", live: live! } : { kind: "scripted" }, activity);
+    container = await containerRuntime(root, mode === "live-container" ? { kind: "provider", live: live! }
+      : { kind: "scripted", ...(options.scriptedProvider ? { provider: options.scriptedProvider } : {}) }, activity, options.allowsWorkspaceTrust);
     if (options.cwd === undefined) source = await fixtureRepository(join(root, "source"));
   } else await mkdir(source, { recursive: true });
   const provider = container?.provider ?? "claude";

@@ -4,7 +4,7 @@ Promptfoo 0.122.2 is an isolated development dependency. It is excluded from Cyb
 package and ordinary installation. Use Node 24.18.0 and pnpm 11.5.0.
 
 ```sh
-cd /Users/brandon/code/personal/cyberdeck/worktrees/worker-infrastructure
+cd /Users/brandon/code/personal/cyberdeck
 rtk pnpm --dir evals install --frozen-lockfile
 rtk pnpm --dir evals run eval:offline      # scripted host provider, CI
 rtk pnpm --dir evals run eval:container    # real OrbStack containers, scripted guest, no model
