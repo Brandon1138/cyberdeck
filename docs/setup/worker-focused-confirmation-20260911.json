@@ -1,0 +1,541 @@
+{
+  "purpose": "Post-baseline correctness regression; providers ran concurrently; not a full baseline or latency comparison",
+  "providers": [
+    {
+      "provider": "claude",
+      "model": "haiku",
+      "commit": "28193f5b2f25089a127823a0ff009fbeaeb6ae31",
+      "total": 6,
+      "passed": 6,
+      "reportSha256": "040751e6a1fc4be8c7136cf39142bfc5e92d81228486332ab9bf9afc089144ec",
+      "scenarios": [
+        {
+          "runId": "4703e982-ae3a-46d4-9f80-8ec658f3228d",
+          "scenario": "phantom-turn",
+          "metrics": {
+            "durationMs": 28731,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "checks": [
+            {
+              "name": "distinct-instructions",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "late-turn-not-reused",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "second-instruction-completed",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "e3897f0890ea57d77a463233cd42da9f62a8cccd3f4152de357d51294f1a08d2"
+            }
+          ]
+        },
+        {
+          "runId": "9697cf5e-1a24-4045-94a1-82c288a5564d",
+          "scenario": "phantom-turn",
+          "metrics": {
+            "durationMs": 27483,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "checks": [
+            {
+              "name": "distinct-instructions",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "late-turn-not-reused",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "second-instruction-completed",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "e0a8bb232d553d50e243e366940391ea8cc0a923c5210424bb215c169fc94b40"
+            }
+          ]
+        },
+        {
+          "runId": "b01110b3-1b9c-492f-8c3b-79d3c7ea4eb2",
+          "scenario": "phantom-turn",
+          "metrics": {
+            "durationMs": 28743,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "checks": [
+            {
+              "name": "distinct-instructions",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "late-turn-not-reused",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "second-instruction-completed",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "6f1358e0f090e7f7bda81c37037320f60f9fca80ee6e4513a043908768863201"
+            }
+          ]
+        },
+        {
+          "runId": "5608ccba-2187-4e0e-9d6f-9fbcb84a2558",
+          "scenario": "sentry-outage",
+          "metrics": {
+            "durationMs": 14861,
+            "nativeToolInvocations": 0,
+            "nativeToolResults": 0,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 0
+          },
+          "checks": [
+            {
+              "name": "delivery-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "local-evidence-durable",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "settlement-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "dd9a4c91db049ea0ea9bbd01fcce5bf6bd5e7c917e8722c8cd6fc39edd0076ca"
+            }
+          ]
+        },
+        {
+          "runId": "dafb7e47-59b5-41bb-9511-aab69ead08e9",
+          "scenario": "sentry-outage",
+          "metrics": {
+            "durationMs": 14446,
+            "nativeToolInvocations": 0,
+            "nativeToolResults": 0,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 0
+          },
+          "checks": [
+            {
+              "name": "delivery-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "local-evidence-durable",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "settlement-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "8dfb250ec415200e0c7ed559d6d575475af15485f1830ca9de0be8bc404dee4e"
+            }
+          ]
+        },
+        {
+          "runId": "5befc6ce-8fcb-470f-bc2c-b589df670760",
+          "scenario": "sentry-outage",
+          "metrics": {
+            "durationMs": 16349,
+            "nativeToolInvocations": 0,
+            "nativeToolResults": 0,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 0
+          },
+          "checks": [
+            {
+              "name": "delivery-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "local-evidence-durable",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "settlement-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "67efc8bba2df7424a50c53e387646bf6a043b5c5dde541db7d03be5d968b628f"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-5.6-luna",
+      "commit": "28193f5b2f25089a127823a0ff009fbeaeb6ae31",
+      "total": 6,
+      "passed": 6,
+      "reportSha256": "54b58da41d490e9e1b84d500dccbba9686e846bc7e9585f24bd9088ea2443003",
+      "scenarios": [
+        {
+          "runId": "cb2a8580-d420-409a-a9c8-aa7539934798",
+          "scenario": "phantom-turn",
+          "metrics": {
+            "durationMs": 26405,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "checks": [
+            {
+              "name": "distinct-instructions",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "late-turn-not-reused",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "second-instruction-completed",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "592895210a50f0a838c853bf9a77d264fd063f7424f13ab994953452af3fc295"
+            }
+          ]
+        },
+        {
+          "runId": "994f83e4-3ef3-41e3-b6ae-1ea7c4c15b7e",
+          "scenario": "phantom-turn",
+          "metrics": {
+            "durationMs": 27057,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "checks": [
+            {
+              "name": "distinct-instructions",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "late-turn-not-reused",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "second-instruction-completed",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "9b1740dd3f3a817969b801e193c68b1b82001d4e44befc540473b8798f84958d"
+            }
+          ]
+        },
+        {
+          "runId": "ce3b18ff-0ce9-4ca2-8739-b269e7c07cf9",
+          "scenario": "phantom-turn",
+          "metrics": {
+            "durationMs": 23571,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "checks": [
+            {
+              "name": "distinct-instructions",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "late-turn-not-reused",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "second-instruction-completed",
+              "passed": true,
+              "provenance": "provider-native",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "b7dfdf720fb960fa2e05e8959a5e435532b264bc86d844bcd96b225a9627111a"
+            }
+          ]
+        },
+        {
+          "runId": "c8ed927e-f551-49fc-bf83-76d8c03f8c6d",
+          "scenario": "sentry-outage",
+          "metrics": {
+            "durationMs": 18878,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "checks": [
+            {
+              "name": "delivery-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "local-evidence-durable",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "settlement-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "9948f7486013d9f8eaf2ce0f00272977e7238375ed7744591cc99a8fde1461bf"
+            }
+          ]
+        },
+        {
+          "runId": "390a3e71-47d9-4f2e-8e45-629e8264baa3",
+          "scenario": "sentry-outage",
+          "metrics": {
+            "durationMs": 19228,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "checks": [
+            {
+              "name": "delivery-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "local-evidence-durable",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "settlement-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "ff5a67bae81f5cc4677e31f9c1705e5d703a32c0187ca862e10adb3e807a3d65"
+            }
+          ]
+        },
+        {
+          "runId": "841eed3d-06c4-4fb6-a8da-83a84e382c1f",
+          "scenario": "sentry-outage",
+          "metrics": {
+            "durationMs": 22342,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "checks": [
+            {
+              "name": "delivery-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "local-evidence-durable",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            },
+            {
+              "name": "settlement-with-failing-sink",
+              "passed": true,
+              "provenance": "scripted",
+              "evidenceRefs": [
+                "facts"
+              ]
+            }
+          ],
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "7893fcf6ddd6a0f6f9ff27a21780c042e09903c8b5961d40279207e17cfa1699"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

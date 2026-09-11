@@ -8,7 +8,8 @@ Activation on the operator's main broker remains pending: active workers and orc
 
 ## Candidate and proof
 
-Baseline candidate: `dde764a77f50c669b92638a4e6df3950af967898`. Resume readiness fix: `26289ec`
+Baseline candidate: `dde764a77f50c669b92638a4e6df3950af967898`. Resume readiness fix: `26289ec`;
+dispatch/durability fixes: `28193f5`
 (the baseline completed against its original clean candidate; resume was verified separately).
 Final worker image: `sha256:38605831c783da47710a5ebd9649f95002bb8f489a93dcc74a662756ab3ecc8f`.
 Pinned image tools: Claude 2.1.261, Codex 0.153.4. Runtime and evaluations use Node 24.18.0.
@@ -16,7 +17,7 @@ Pinned image tools: Claude 2.1.261, Codex 0.153.4. Runtime and evaluations use N
 | Requirement | Evidence | Boundary |
 | --- | --- | --- |
 | Source/type safety | Production and eval TypeScript checks; production build | Local candidate |
-| Regressions | Final runtime CI passed tests, build, offline evaluation, audit and clean package install; local resume and file-size checks passed | GitHub CI `34585285387` on `26289ec`; initial candidate CI `34583091994` |
+| Regressions | Final runtime: 189 test files / 2,218 tests passed; production and eval typechecks passed; CI green | Local Node 24 and GitHub verification of `28193f5` |
 | Offline Promptfoo | `evals/results/rollout-offline.json`, 8/8 with strict validation | Scripted host harness |
 | Container Promptfoo | `evals/results/rollout-container.json`, 8/8 with strict validation | Final image; real kernel resource limits and isolation with scripted guests |
 | Failed acquisition retirement | `cyberdeck-rollout-retirement-66XYEz/proof.json` | Real OrbStack confirms absence; source preserved; staged credentials removed; idempotent retirement |
@@ -25,7 +26,7 @@ Pinned image tools: Claude 2.1.261, Codex 0.153.4. Runtime and evaluations use N
 | Live routine edits and reporting | Claude `cyberdeck-eval-ukFOv8/evidence.json`; Codex `cyberdeck-eval-NRT9Kq/evidence.json` | Correct edit, unrelated files preserved, accepted structured gateway report, native command evidence |
 | Writable network containment | `cyberdeck-network-proof-sdp5QK` | Final image; host/private/sibling/direct-Internet probes denied; provider routes and own reports accepted; host sentinel hits zero; helper containers removed |
 | Authenticated resume | Codex `cyberdeck-live-resume-U7FIVz/proof.json`; Claude `cyberdeck-live-resume-iO8tPv/proof.json` | Final image and readiness fix: immediate queued instruction, same execution, generation 2, renewed network nonce, native tools, accepted report and exactly one additional completion |
-| Packaging and dependency audit | `cyberdeck-pack-proof-qtxvpv`, 966 package entries, eval artifacts excluded; production audit clean | Fresh package install; Gitleaks clean through all three runtime commits |
+| Packaging and dependency audit | `cyberdeck-pack-proof-qtxvpv`, 966 package entries, eval artifacts excluded; production audit clean | Fresh package install; Gitleaks clean through the runtime fixes |
 
 Named temporary evidence directories are under `/private/var/folders/dn/ts3sd7810lb9wv8j58h_3qrh0000gn/T/`; they may expire. The isolated production acceptance broker used `/tmp/cd-rollout-acceptance-5SI1FU`. Both canaries were retired, their containers removed, and that broker shut down.
 
@@ -50,7 +51,10 @@ Claude's three `phantom-turn` failures assigned two instructions the same ordina
 repainted. Its three `sentry-outage` failures skipped `instruction.submitted` when a native completion
 advanced straight from rendered to completed. The fixes reserve a rendered container instruction's
 turn until settlement and emit every reached lifecycle transition. Graders are unchanged. Targeted
-three-repetition reruns of both scenarios for both providers are required before acceptance.
+three-repetition reruns passed **Claude 6/6 and Codex 6/6** on clean commit `28193f5`.
+The [focused confirmation](worker-focused-confirmation-20260911.json) preserves checks, metrics and
+report hashes. Providers ran concurrently for correctness confirmation; these timings are not a
+latency comparison. This is a 12-case subset, not a replacement full baseline.
 
 Both providers also failed all three OOM cases, described below. The initial baseline is preserved;
 subsequent focused results do not rewrite it as a passing full suite.
