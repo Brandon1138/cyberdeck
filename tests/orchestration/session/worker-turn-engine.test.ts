@@ -215,6 +215,24 @@ describe("WorkerTurnEngine", () => {
     expect(writes).toEqual([]);
   });
 
+  it("holds resumed container input through startup without inventing a completed turn", async () => {
+    vi.useFakeTimers();
+    const { engine, observations, replay, writes } = harness({ executor: "orbstack-container" });
+    engine.resetForResume();
+    const input = { message: "resume work", encoded: Buffer.from("resume work\n"), source: "orchestrator" as const, instructionId: "resume-input" };
+    expect(engine.projectTruth().state).toBe("working");
+    expect((await engine.submitInstruction(input)).state).toBe("queued");
+    observations.activity = "working";
+    engine.appendOutput(Buffer.from("Resuming session; starting MCP"), replay);
+    expect((await engine.submitInstruction(input)).state).toBe("queued");
+    observations.activity = "awaiting-input";
+    engine.appendOutput(Buffer.from("READY from history; empty composer"), replay);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(engine.completedTurns).toBe(0);
+    expect(writes).toEqual([]);
+    expect(await engine.submitInstruction(input)).toMatchObject({ state: "rendered", expectedTurn: 1 });
+  });
+
   it("banks provider transcript turns with canonical provenance", async () => {
     const { engine, observations, captureProviderTurns, replay } = harness();
     observations.activity = "working";

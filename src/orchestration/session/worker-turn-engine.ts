@@ -36,67 +36,8 @@ import type {
   WorkerTurnTranscriptPort,
 } from "./worker-turn-ports.js";
 
-interface CompletionLedgerEntry {
-  text: string;
-  completedAt: string;
-  deliveries: number;
-  provenance: "provider-transcript" | "terminal-replay";
-}
-
-interface RenderedInstruction {
-  instructionId: string;
-  expectedTurn: number;
-  renderedAt: string;
-  state: InstructionLifecycleState;
-}
-
-interface StallObservation {
-  version: number;
-  tokenCount: number;
-  unchangedSinceMs: number;
-}
-
-interface WorkerStatusReading {
-  status: WorkerResultSnapshot["status"];
-  stalled?: { stalledForSeconds: number; tokenCount: number };
-}
-
-interface TurnCaptureClaim {
-  kind: "screen" | "reconcile";
-  epoch: number;
-  revision: number;
-  activityRevision: number;
-  completionTarget: number;
-  bankedThrough?: number;
-  settlement: Promise<void>;
-  settle(): void;
-}
-
-interface BankedTurnReceipt {
-  bankedThrough: number;
-  latest: string;
-  provenance: CompletionLedgerEntry["provenance"];
-}
-
-interface PendingTurnCommit {
-  reservationThrough: number;
-  settlement: Promise<void>;
-  poisoned: boolean;
-}
-
-interface ScreenCompletionEvidence {
-  replay: string;
-  text: string;
-  activityRevision: number;
-}
-
-type TurnCommitOutcome =
-  | {
-      status: "committed";
-      turns: WorkerTurnTranscript[];
-      banked?: BankedTurnReceipt;
-    }
-  | { status: "failed" };
+import type { CompletionLedgerEntry, RenderedInstruction, StallObservation, WorkerStatusReading,
+  TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
 
 export interface WorkerTurnAppendResult {
   fatal: boolean;
@@ -138,6 +79,7 @@ export class WorkerTurnEngine {
   private readonly replay: ReplayObservation;
   private activity: ReturnType<WorkerTurnObservationPort["activity"]> = "unknown";
   private observedWorking = false;
+  private awaitingResumeReady = false;
   private completedTurnCount = 0;
   private canonicalTurnCount = 0;
   private turnsBeforeLatestInstruction = 0;
@@ -237,6 +179,8 @@ export class WorkerTurnEngine {
 
   /** Reset generation-local truth while preserving the durable completion ledger. */
   resetForResume(): void {
+    // Container resume returns when the process attaches, before the provider composer is ready.
+    this.awaitingResumeReady = this.record.executor === "orbstack-container";
     this.terminalFinalizing = false;
     this.activity = "unknown";
     this.observedWorking = false;
@@ -278,6 +222,16 @@ export class WorkerTurnEngine {
     if (this.terminalScreenReservationsDiscarded) return { fatal: false };
 
     const activity = this.options.observations.activity(this.record.provider, this.replay);
+    if (this.awaitingResumeReady) {
+      // Loading history and MCP startup can spin then become idle without any model turn.
+      // Keep queued input off that startup surface and never bank it as a completion.
+      this.activity = activity;
+      this.observeComposer();
+      if (activity === "awaiting-input") this.awaitingResumeReady = false;
+      this.notifyDeliveryBoundary();
+      this.options.effects.scheduleSessionUpdate?.();
+      return { fatal: false };
+    }
     if (activity === "working") {
       this.observedWorking = true;
       if (this.idleTimer !== undefined) clearTimeout(this.idleTimer);
@@ -396,7 +350,7 @@ export class WorkerTurnEngine {
     return projectWorkerTruth({
       executionState: this.record.executionState,
       exitCode: this.record.exitCode,
-      activity: this.activity,
+      activity: this.awaitingResumeReady && this.activity !== "needs-input" ? "working" : this.activity,
       composer: this.composer,
       completedTurns: this.completedTurnCount,
       canonicalTurns: this.canonicalTurnCount,
@@ -772,6 +726,7 @@ export class WorkerTurnEngine {
     this.observeComposer();
     if (this.composer.modalOpen || this.activity === "needs-input") return "provider-modal";
     if (this.composer.occupied) return "composer-occupied";
+    if (this.awaitingResumeReady) return "provider-busy";
     // An indeterminate or incomplete durable receipt has no automatic recovery path. Accepting
     // another instruction would write work whose completion can never be captured while the poisoned
     // reservation remains, so fail closed at the existing provider-busy delivery boundary.

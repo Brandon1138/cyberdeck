@@ -17,7 +17,9 @@ if (!provider || !["claude", "codex"].includes(provider) || !model) throw new Er
 const state = options.includes("--state") ? options[options.indexOf("--state") + 1]! : appStateDirectory;
 const socket = options.includes("--socket") ? options[options.indexOf("--socket") + 1]! : brokerSocketPath;
 const writable = options.includes("--writable");
+const defaultRouting = options.includes("--default-executor");
 const config = loadBrokerRuntimeConfig(join(state, "config.json"));
+if (defaultRouting && config.workerExecution?.defaultExecutor !== "orbstack-container") throw new Error("CANARY_REQUIRES_CONTAINER_DEFAULT");
 if (writable && (provider !== "codex" || config.containerRuntime?.codexWorkspaceIsolation !== "container")) throw new Error("CANARY_REQUIRES_EXPLICIT_WRITABLE_OPT_IN");
 if (config.containerRuntime?.authentication[provider]?.kind !== `${provider}-subscription`) throw new Error("CANARY_REQUIRES_SUBSCRIPTION_AUTH");
 const evidence = await mkdtemp(join(tmpdir(), `cyberdeck-${provider}-subscription-canary-`));
@@ -47,11 +49,12 @@ let passed = false;
 console.log(JSON.stringify({ evidence, provider, model, billing: "subscription" }));
 try {
   worker = await client.request<SessionRecord>("session.startWithPrompt", {
-    provider, model, executor: "orbstack-container", cwd: source, sandbox: provider === "codex" && !writable ? "read-only" : "workspace-write", detached: true,
+    provider, model, ...(defaultRouting ? {} : { executor: "orbstack-container" }), cwd: source, sandbox: provider === "codex" && !writable ? "read-only" : "workspace-write", detached: true,
     name: `${provider} subscription canary`,
     initialPrompt: (writable ? "This is an authorized writable subscription canary in a disposable workspace. Create answer.txt containing exactly WRITABLE_SUBSCRIPTION_OK followed by a newline. Install the local dependency with npm install --offline --ignore-scripts --no-audit --no-fund ./fixture-dependency. Verify with node that require('canary-local-dependency') equals LOCAL_DEP_OK and that answer.txt has the required content. These routine operations are permitted; do not ask for approval. Do not delegate or contact other services. After all steps succeed, " : "This is a subscription authentication and observability canary. Do not inspect or change files, use network tools, or delegate work. ")
       + "Use your terminal tool to run exactly: printf 'SUBSCRIPTION_CANARY_OK\\n'. For the Codex JavaScript wrapper use exactly: const result = await tools.exec_command({cmd: \"printf 'SUBSCRIPTION_CANARY_OK\\\\n'\", yield_time_ms: 10000}); text(JSON.stringify(result)); Do not print only result.output: the acceptance checker requires the numeric exit_code from the returned object. Only if all commands succeed, reply with exactly SUBSCRIPTION_CANARY_OK; otherwise report the failure.",
   });
+  if (worker.executor !== "orbstack-container" || !worker.execution) throw new Error("CANARY_CONTAINER_ROUTING_FAILED");
   console.log(JSON.stringify({ sessionId: worker.id, executionId: worker.execution?.executionId }));
   const deadline = Date.now() + 180_000;
   while (Date.now() < deadline) {
@@ -89,7 +92,7 @@ try {
     events = (await client.request<{ events: AgentActivity[] }>("activity.readSession", { sessionId: worker.id, limit: 1000 })).events;
     const sessions = await client.request<SessionRecord[]>("session.list", {});
     const current = sessions.find((session) => session.id === worker!.id);
-    await writeFile(join(evidence, "canary.json"), JSON.stringify({ passed, provider, model, billing: "subscription", session: current,
+    await writeFile(join(evidence, "canary.json"), JSON.stringify({ passed, provider, model, routing: defaultRouting ? "broker-default" : "explicit-container", billing: "subscription", session: current,
       events, correlations: events.map((event) => ({ eventId: event.eventId, kind: event.kind, ...correlationIds(projectActivity(event)) })),
       telemetry: await client.request("telemetry.health", {}),
     }, null, 2), { mode: 0o600 });
