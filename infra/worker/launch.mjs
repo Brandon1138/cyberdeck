@@ -1,13 +1,28 @@
 import { readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:os';
+import { applyAuthentication } from './auth.mjs';
 const spec = JSON.parse(await readFile('/run/credentials/launch.json', 'utf8'));
 if (!['claude', 'codex', 'node'].includes(spec.executable) || !Array.isArray(spec.args) || spec.cwd !== '/workspace') throw new Error('LAUNCH_SPEC_REFUSED');
 const env = { HOME: '/home/worker', PATH: process.env.PATH, TERM: process.env.TERM ?? 'xterm-256color', CYBERDECK_REPORT_URL: process.env.CYBERDECK_REPORT_URL, ...spec.env };
+if (spec.networkRestricted === true) {
+  const policy = JSON.parse(await readFile('/run/credentials/network-policy.json', 'utf8'));
+  const deadline = Date.now() + 60000;
+  for (;;) {
+    const ready = await readFile('/run/credentials/network-ready', 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
+    if (ready === policy.nonce) break;
+    if (Date.now() >= deadline) throw new Error('NETWORK_BOUNDARY_UNAVAILABLE');
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const proxy = `http://host.docker.internal:${policy.proxyPort}`;
+  Object.assign(env, { HTTPS_PROXY: proxy, HTTP_PROXY: proxy, https_proxy: proxy, http_proxy: proxy,
+    NO_PROXY: `localhost,127.0.0.1,host.docker.internal:${policy.reportPort}`,
+    no_proxy: `localhost,127.0.0.1,host.docker.internal:${policy.reportPort}` });
+}
 if (spec.executable !== 'node') {
   const credential = JSON.parse(await readFile('/run/credentials/provider.json', 'utf8'));
-  if (credential.provider !== spec.executable) throw new Error('PROVIDER_CREDENTIAL_MISMATCH');
-  env[credential.provider === 'claude' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'] = credential.apiKey;
+  await applyAuthentication(credential, spec.executable, env);
+  if (credential.kind === 'codex-subscription') spec.args.unshift('-c', 'forced_login_method="chatgpt"', '-c', 'cli_auth_credentials_store="file"');
 }
 // Provider/model execution begins only after this generation is registered and authoritative.
 const token = (await readFile('/run/credentials/reporting-token', 'utf8')).trim();

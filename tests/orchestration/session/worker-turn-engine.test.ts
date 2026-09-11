@@ -215,6 +215,39 @@ describe("WorkerTurnEngine", () => {
     expect(writes).toEqual([]);
   });
 
+  it("holds resumed container input through startup without inventing a completed turn", async () => {
+    vi.useFakeTimers();
+    const { engine, observations, replay, writes } = harness({ executor: "orbstack-container" });
+    engine.resetForResume();
+    const input = { message: "resume work", encoded: Buffer.from("resume work\n"), source: "orchestrator" as const, instructionId: "resume-input" };
+    expect(engine.projectTruth().state).toBe("working");
+    expect((await engine.submitInstruction(input)).state).toBe("queued");
+    observations.activity = "working";
+    engine.appendOutput(Buffer.from("Resuming session; starting MCP"), replay);
+    expect((await engine.submitInstruction(input)).state).toBe("queued");
+    observations.activity = "awaiting-input";
+    engine.appendOutput(Buffer.from("READY from history; empty composer"), replay);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(engine.completedTurns).toBe(0);
+    expect(writes).toEqual([]);
+    expect(await engine.submitInstruction(input)).toMatchObject({ state: "rendered", expectedTurn: 1 });
+  });
+
+  it("reserves a container turn before repaint and records every fast native transition", async () => {
+    const { engine, observations, captureProviderTurns, replay, effects, writes } = harness({ executor: "orbstack-container" });
+    observations.activity = "awaiting-input";
+    engine.appendOutput(Buffer.from("empty composer"), replay);
+    const input = { message: "first", encoded: Buffer.from("first\n"), source: "orchestrator" as const, instructionId: "first" };
+    expect(await engine.submitInstruction(input)).toMatchObject({ state: "rendered", expectedTurn: 1 });
+    expect((await engine.submitInstruction({ ...input, instructionId: "second" })).state).toBe("queued");
+    expect(writes).toHaveLength(1);
+    captureProviderTurns.mockResolvedValueOnce([{ text: "first result", data: { transport: "provider-native" } }]);
+    await engine.reconcileCanonicalTurns();
+    expect(vi.mocked(effects.notifyInstructionState).mock.calls.map(([event]) => event.state))
+      .toEqual(["submitted", "acknowledged", "completed"]);
+    expect(await engine.submitInstruction({ ...input, instructionId: "second" })).toMatchObject({ state: "rendered", expectedTurn: 2 });
+  });
+
   it("banks provider transcript turns with canonical provenance", async () => {
     const { engine, observations, captureProviderTurns, replay } = harness();
     observations.activity = "working";
@@ -232,6 +265,14 @@ describe("WorkerTurnEngine", () => {
       provenance: "provider-transcript",
       text: "canonical",
     });
+  });
+
+  it.each(["host", "orbstack-container"] as const)("uses exact container transcripts without requiring a recognized spinner (%s)", async (executor) => {
+    const { engine, captureProviderTurns, replay } = harness({ provider: "claude", executor });
+    engine.appendOutput(Buffer.from("new provider display format"), replay);
+    captureProviderTurns.mockResolvedValue([{ text: "native completion", data: { transport: "provider-native" } }]);
+    await engine.reconcileCanonicalTurns();
+    expect(engine.canonicalTurns).toBe(executor === "orbstack-container" ? 1 : 0);
   });
 
   it.each([

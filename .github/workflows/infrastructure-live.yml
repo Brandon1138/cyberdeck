@@ -1,14 +1,14 @@
 name: Infrastructure live evaluation (manual, trusted host)
 
 # Runs the container-backed Promptfoo suite on a trusted self-hosted macOS runner with OrbStack.
-# Never triggered by pull requests: the runner holds provider credentials and spends real money.
+# Never triggered by pull requests: the runner holds provider credentials and consumes authorized provider usage.
 # The scripted-guest container suite costs nothing; the live suite requires the operator's config
-# file with provider, model, credential path and total spend ceiling, supplied at dispatch time.
+# file with provider/model and explicit subscription authentication or API credentials plus a spend ceiling.
 on:
   workflow_dispatch:
     inputs:
       suite:
-        description: container-scripted (real containers, no model) or live-container (paid)
+        description: container-scripted (real containers, no model) or live-container (authenticated model)
         required: true
         default: container-scripted
         type: choice
@@ -52,7 +52,7 @@ jobs:
           PROMPTFOO_DISABLE_TELEMETRY: '1'
           PROMPTFOO_DISABLE_UPDATE: '1'
           PROMPTFOO_CONFIG_DIR: ${{ runner.temp }}/cyberdeck-promptfoo
-      - name: Live suite (three repetitions, cache off, authorized ceiling recorded per row)
+      - name: Live suite (three repetitions, cache off, billing authorization recorded per row)
         if: inputs.suite == 'live-container'
         run: pnpm --dir evals run eval:live
         env:

@@ -28,17 +28,17 @@ const AUTH_GATE = "an authorized provider canary (scripts/provider-canary.ts) pr
 export const PROVIDER_EXECUTION_SUPPORT: Readonly<Record<"claude" | "codex" | "cursor" | "antigravity", ProviderExecutionSupport>> = {
   claude: {
     host: { status: "supported", reason: "unchanged host launch, resume and permission flags; regression tests" },
-    container: { status: "unproved", reason: "guest launch arguments, private provider home, staged API-key file, report-only MCP and native transcript binding are built and fixture-tested; no authenticated model call has run",
-      gate: AUTH_GATE, transports: ["pty", "pipe"], authentication: ["api-key file (ANTHROPIC_API_KEY)"],
+    container: { status: "unproved", reason: "subscription canary proves a native turn/tool and attribution; full report-back/resume acceptance remains unproved",
+      gate: AUTH_GATE, transports: ["pty", "pipe"], authentication: ["api-key file (ANTHROPIC_API_KEY)", "subscription access token (selected Keychain item or setup-token file)"],
       resume: "explicit native session id persisted from the guest SessionStart hook; unproved against the real CLI",
       nativeCapture: "provider-native turns and tool invocations/results from the private transcript, bound per semantic turn (fixture-proved)",
       refused: CONTAINER_REFUSED },
   },
   codex: {
     host: { status: "supported", reason: "unchanged host launch, resume and permission flags; regression tests" },
-    container: { status: "unproved", reason: "guest launch arguments, private sessions directory, staged API-key file, report-only MCP and rollout discovery are built and fixture-tested; no authenticated model call has run",
-      gate: AUTH_GATE, transports: ["pty", "pipe"], authentication: ["api-key file (OPENAI_API_KEY)"],
-      resume: "single rollout under the private sessions root, bound by session_meta id; unproved against the real CLI",
+    container: { status: "unproved", reason: "ChatGPT read-only and opted-in writable canaries, scoped reporting and generation-2 startup are proved; the full provider acceptance suite remains unproved",
+      gate: AUTH_GATE, transports: ["pty", "pipe"], authentication: ["api-key file (OPENAI_API_KEY)", "ChatGPT subscription (access-only auth.json snapshot)"],
+      resume: "single rollout under the private sessions root, bound by session_meta id; real generation-2 startup proved, resumed-turn acceptance remains unproved",
       nativeCapture: "provider-native turns and function-call invocations/results from the rollout, bound per semantic turn (fixture-proved)",
       refused: CONTAINER_REFUSED },
   },

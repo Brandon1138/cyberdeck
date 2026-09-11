@@ -1,4 +1,5 @@
 import { WorkerExecutionPolicySchema } from "./domain/worker-execution.js";
+import { ContainerAuthenticationSchema, authenticationMatchesProvider } from "./domain/container-authentication.js";
 import { z } from "zod";
 import { BudgetDeclarationSchema, ConcurrencyDeclarationSchema } from "./domain/budget.js";
 import { CONTROL_PLANE_SCHEMA_VERSION } from "./domain/control-plane.js";
@@ -25,8 +26,12 @@ export const BrokerRuntimeConfigSchema = z.object({
     cpus: z.number().positive().default(2), memoryBytes: z.number().int().positive().default(4 * 1024 ** 3),
     slots: z.number().int().min(1).max(4).default(2), network: z.enum(["egress", "none"]).default("egress"),
     attemptTimeoutMinutes: z.number().int().min(1).max(1440).default(60),
+    codexWorkspaceIsolation: z.enum(["native", "container"]).default("native"),
     credentialFiles: z.record(z.string(), z.string().startsWith("/")).default({}),
-  }).strict().optional(),
+    authentication: z.record(z.string(), ContainerAuthenticationSchema).default({}),
+  }).strict().refine((value) => Object.entries(value.authentication).every(([provider, auth]) =>
+    authenticationMatchesProvider(provider, auth) && value.credentialFiles[provider] === undefined),
+  "provider authentication must match and must not duplicate credentialFiles").optional(),
   sentry: z.object({ enabled: z.boolean().default(false), dsn: z.url().optional(),
     dailyEnvelopeCap: z.number().int().min(0).max(100000).optional(), sampleRate: z.number().min(0).max(1).default(0.1),
   }).strict().refine((value) => !value.enabled || (value.dsn !== undefined && value.dailyEnvelopeCap !== undefined),

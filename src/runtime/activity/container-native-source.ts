@@ -113,6 +113,10 @@ export class ContainerNativeSource {
       const final = session.provider === "codex" ? frame?.type === "event_msg" && payload?.type === "task_complete"
         : frame?.type === "assistant" && message?.stop_reason === "end_turn";
       if (!final) continue;
+      // Claude 2.1.261 emits separate thinking/text blocks with the same message id
+      // and end_turn on both. Only the text block is the semantic completion.
+      if (session.provider === "claude" && Array.isArray(message?.content) && message.content.length > 0
+        && message.content.every((block: unknown) => ["thinking", "redacted_thinking"].includes(String(object(block)?.type)))) continue;
       const id = session.provider === "codex" ? payload?.turn_id : message?.id;
       const text = session.provider === "codex" ? payload?.last_agent_message : preview?.text;
       const timestamp = nativeTimestamp(frame?.timestamp);

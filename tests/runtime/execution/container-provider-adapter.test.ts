@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import { ContainerProviderAdapter } from "../../../src/runtime/execution/contain
 import { ClaudeProviderAdapter } from "../../../src/providers/claude.js";
 import { CodexProviderAdapter } from "../../../src/providers/codex.js";
 import type { SessionRecord } from "../../../src/domain/session.js";
+import { BrokerRuntimeConfigSchema } from "../../../src/config.js";
 
 const directories: string[] = [];
 afterEach(async () => { for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true }); });
@@ -22,7 +23,13 @@ it.each(["claude", "codex"])("constructs guest-valid %s reporting paths and pres
   expect(spec.cwd).toBe("/workspace");
   expect(JSON.stringify(spec)).not.toContain("/host/workspace");
   expect(JSON.stringify(spec)).not.toContain(root);
-  if (provider === "codex") expect(JSON.stringify(spec.args)).toContain("/opt/cyberdeck/mcp.mjs");
+  if (provider === "codex") {
+    expect(JSON.stringify(spec.args)).toContain("/opt/cyberdeck/mcp.mjs");
+    expect(spec.args[spec.args.indexOf("-s") + 1]).toBe("read-only");
+    expect(spec.args[spec.args.indexOf("-a") + 1]).toBe("on-request");
+    expect(spec.args).toContain("use_legacy_landlock");
+    expect(host.buildLaunchSpec({ ...session, executor: "host" }).args).not.toContain("danger-full-access");
+  }
   expect(spec.args).not.toContain("--dangerously-skip-permissions");
   expect(spec.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
   await adapter.prepareLaunch(session, spec);
@@ -37,4 +44,53 @@ it.each(["claude", "codex"])("constructs guest-valid %s reporting paths and pres
 it("refuses unsupported native provider modes and extra host roots explicitly", () => {
   const adapter = new ContainerProviderAdapter(new ClaudeProviderAdapter(), "/private/broker");
   expect(() => adapter.buildLaunchSpec({ ...record("claude"), workspace: { provisioning: "worker-provisioned", worktreePath: "/host/new", branch: "work", baseRef: "main", writableRoots: ["/host/.git"] } })).toThrow("CONTAINER_WORKSPACE_POLICY_UNSUPPORTED");
+});
+it("defaults to native isolation and requires an explicit configuration value", () => {
+  const containerRuntime = { endpoint: "unix:///tmp/docker.sock", image: `sha256:${"a".repeat(64)}` };
+  expect(BrokerRuntimeConfigSchema.parse({ containerRuntime }).containerRuntime?.codexWorkspaceIsolation).toBe("native");
+  expect(BrokerRuntimeConfigSchema.parse({ containerRuntime: { ...containerRuntime, codexWorkspaceIsolation: "container" } }).containerRuntime?.codexWorkspaceIsolation).toBe("container");
+  expect(BrokerRuntimeConfigSchema.safeParse({ containerRuntime: { ...containerRuntime, codexWorkspaceIsolation: true } }).success).toBe(false);
+});
+it("applies semi-autonomous container isolation only to opted-in writable Codex launch and resume", async () => {
+  const root = await mkdtemp(join(tmpdir(), "container-opt-in-")); directories.push(root);
+  const host = new CodexProviderAdapter({ sourceEnvironment: {}, nativeSessionId: randomUUID() });
+  const adapter = new ContainerProviderAdapter(host, root, "container");
+  const session = { ...record("codex"), sandbox: "workspace-write" as const };
+  await mkdir(join(root, "native-bindings"));
+  await writeFile(join(root, "native-bindings", `${session.id}.json`), JSON.stringify({ sessionId: session.id,
+    nativeSessionId: randomUUID(), provider: "codex", relativePath: ".codex/sessions/fixture.jsonl" }));
+  for (const spec of [adapter.buildLaunchSpec(session), adapter.buildResumeSpec(session)]) {
+    expect(spec.args[spec.args.indexOf("-s") + 1]).toBe("danger-full-access");
+    expect(spec.args[spec.args.indexOf("-a") + 1]).toBe("never");
+    expect(spec.args).not.toContain("use_legacy_landlock");
+  }
+  const native = new ContainerProviderAdapter(host, root).buildLaunchSpec(session);
+  expect(native.args[native.args.indexOf("-s") + 1]).toBe("workspace-write");
+  expect(native.args[native.args.indexOf("-a") + 1]).toBe("on-request");
+  const readOnly = adapter.buildLaunchSpec(record("codex"));
+  expect(readOnly.args[readOnly.args.indexOf("-s") + 1]).toBe("read-only");
+  expect(readOnly.args[readOnly.args.indexOf("-a") + 1]).toBe("on-request");
+  const hostSession = { ...session, executor: "host" as const };
+  expect(adapter.buildLaunchSpec(hostSession)).toEqual(host.buildLaunchSpec(hostSession));
+  expect(adapter.buildResumeSpec(hostSession)).toEqual(host.buildResumeSpec(hostSession));
+  const claude = new ClaudeProviderAdapter({ sourceEnvironment: {} });
+  const claudeSession = record("claude");
+  expect(new ContainerProviderAdapter(claude, root, "container").buildLaunchSpec(claudeSession))
+    .toEqual(new ContainerProviderAdapter(claude, root).buildLaunchSpec(claudeSession));
+});
+
+it.each(["claude", "codex"])("frames container %s instructions as paste while retaining its native Enter and host bytes", (provider) => {
+  const host = provider === "claude" ? new ClaudeProviderAdapter() : new CodexProviderAdapter();
+  const adapter = new ContainerProviderAdapter(host, "/private/broker"), session = record(provider);
+  expect(adapter.submitInput("line one\nline two", session)).toEqual(host.submitInput("\u001b[200~line one\nline two\u001b[201~"));
+  expect(adapter.submitInput("host", { ...session, executor: "host" })).toEqual(host.submitInput("host"));
+});
+
+it("allows routine Claude tools only for an automatically approved writable guest", () => {
+  const host = new ClaudeProviderAdapter(), adapter = new ContainerProviderAdapter(host, "/private/broker");
+  const session = { ...record("claude"), sandbox: "workspace-write" as const, approvalMode: "auto" as const };
+  expect(adapter.buildLaunchSpec(session).args).toContain("--allowedTools");
+  expect(adapter.buildLaunchSpec({ ...session, executor: "host" }).args).not.toContain("--allowedTools");
+  expect(adapter.buildLaunchSpec({ ...session, sandbox: "read-only" }).args).not.toContain("--allowedTools");
+  expect(adapter.buildLaunchSpec({ ...session, approvalMode: "prompt" }).args).not.toContain("--allowedTools");
 });

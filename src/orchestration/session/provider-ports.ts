@@ -49,7 +49,7 @@ export interface ProviderAdapter {
   /** Re-open the exact provider-native conversation represented by a terminal Cyberdeck thread. */
   buildResumeSpec(session: SessionRecord): ProviderLaunchSpec;
   /** Encode one logical prompt submission for the provider's negotiated interactive terminal. */
-  submitInput?(message: string): Buffer;
+  submitInput?(message: string, session?: SessionRecord): Buffer;
   /**
    * Submit one logical prompt when the provider requires paced terminal interaction rather than a
    * single encoded buffer. Takes precedence over `submitInput` for deferred initial prompts.

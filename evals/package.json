@@ -12,7 +12,8 @@
     "eval:live": "PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 promptfoo eval --config promptfooconfig.live.yaml --no-cache --max-concurrency 1 --output results/live.json && tsx ../scripts/validate-promptfoo-results.ts results/live.json live-container 3",
     "verify": "tsx ../scripts/run-infrastructure-evals.ts --offline",
     "verify:container": "tsx ../scripts/run-infrastructure-evals.ts --container",
-    "verify:live": "tsx ../scripts/run-infrastructure-evals.ts --live"
+    "verify:live": "tsx ../scripts/run-infrastructure-evals.ts --live",
+    "eval:baseline": "tsx ../scripts/run-worker-baseline.ts"
   },
   "devDependencies": {
     "promptfoo": "0.122.2",

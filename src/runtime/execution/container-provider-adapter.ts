@@ -9,7 +9,8 @@ import { CodexProviderAdapter } from "../../providers/codex.js";
 /** Target-aware argument construction; host paths are never rewritten inside strings. */
 export class ContainerProviderAdapter implements ProviderAdapter {
   readonly id: string;
-  constructor(private readonly host: ProviderAdapter, private readonly root: string) { this.id = host.id; }
+  constructor(private readonly host: ProviderAdapter, private readonly root: string,
+    private readonly codexWorkspaceIsolation: "native" | "container" = "native") { this.id = host.id; }
   private guest(session: SessionRecord): SessionRecord {
     if (session.workspace?.provisioning === "worker-provisioned" || (session.workspace?.writableRoots.length ?? 0) > 0) throw new Error("CONTAINER_WORKSPACE_POLICY_UNSUPPORTED");
     if (session.profile === "scout" || (session.imageAttachments?.length ?? 0) > 0) throw new Error("CONTAINER_PROVIDER_MODE_UNSUPPORTED");
@@ -34,11 +35,27 @@ export class ContainerProviderAdapter implements ProviderAdapter {
   private clean(spec: ProviderLaunchSpec): ProviderLaunchSpec {
     const keys = ["TERM", "DISABLE_UPDATES", "ENABLE_TOOL_SEARCH", "CYBERDECK_PROCESS_ROLE", "CYBERDECK_WORKER_MODE", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"];
     if (spec.executable === "claude") {
+      if (spec.args[spec.args.indexOf("--permission-mode") + 1] === "auto") {
+        // The writable container enforces filesystem/network scope. Approve only routine tools;
+        // unknown tools, login and trust prompts retain their existing operator boundary.
+        spec.args.unshift("--allowedTools", "Bash,Read,Edit,Write,Glob,Grep,mcp__cyberdeck__cyberdeck_report_progress,mcp__cyberdeck__cyberdeck_signal_exception,mcp__cyberdeck__cyberdeck_signal_risk,mcp__cyberdeck__cyberdeck_request_decision,mcp__cyberdeck__cyberdeck_respond_checkpoint");
+      }
       // Baked guest helper writes only provider-owned state. Host attribution validates the file.
       const end = spec.args.indexOf("--");
       spec.args.splice(end < 0 ? spec.args.length : end, 0, "--settings", JSON.stringify({ hooks: {
         SessionStart: [{ matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: "node /opt/cyberdeck/native-binding.mjs" }] }],
       } }));
+    } else if (spec.executable === "codex" && spec.args[spec.args.indexOf("-s") + 1] === "read-only") {
+      // Read-only remains enforced by the native sandbox regardless of the writable opt-in.
+      spec.args.unshift("--enable", "use_legacy_landlock");
+    } else if (spec.executable === "codex" && this.codexWorkspaceIsolation === "container"
+      && spec.args[spec.args.indexOf("-s") + 1] === "workspace-write") {
+      // Explicit operator opt-in: OrbStack and the worker gateway enforce the boundary.
+      // Routine permitted operations must not wait for interactive approval.
+      spec.args[spec.args.indexOf("-s") + 1] = "danger-full-access";
+      const approval = spec.args.indexOf("-a");
+      if (approval < 0) throw new Error("CONTAINER_CODEX_APPROVAL_POLICY_MISSING");
+      spec.args[approval + 1] = "never";
     }
     return { ...spec, env: Object.fromEntries(Object.entries(spec.env).filter(([key]) => keys.includes(key))) };
   }
@@ -58,7 +75,11 @@ export class ContainerProviderAdapter implements ProviderAdapter {
     if (session.executor !== "orbstack-container") await this.host.cleanupLaunch?.(session);
     // Container launch/config files remain for recovery/collection; retirement owns their policy.
   }
-  submitInput(message: string): Buffer { return this.host.submitInput?.(message) ?? Buffer.from(`${message}\n`); }
+  submitInput(message: string, session?: SessionRecord): Buffer {
+    // Explicit paste framing prevents the guest TUI's burst heuristic from swallowing Enter.
+    const text = session?.executor === "orbstack-container" ? `\u001b[200~${message}\u001b[201~` : message;
+    return this.host.submitInput?.(text) ?? Buffer.from(`${text}\n`);
+  }
   deferInitialPrompt(session: SessionRecord): boolean { return this.host.deferInitialPrompt?.(session) ?? false; }
   async initializeSession(session: SessionRecord, terminal: Parameters<NonNullable<ProviderAdapter["initializeSession"]>>[1]): Promise<void> {
     await this.host.initializeSession?.(session, terminal);

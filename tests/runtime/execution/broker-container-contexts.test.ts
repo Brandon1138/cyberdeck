@@ -29,6 +29,7 @@ it("prepares selected dirty input, reuses private state on resume, and retires o
   const contexts = new BrokerContainerContexts(join(root, "broker"), { claude: selectedKey }, gateway, 1234);
   const input = { record, identity, request: { executor: "orbstack-container" as const, profile: "ordinary" }, launch: { executable: "claude", args: [], cwd: "/workspace", env: {} } };
   const first = await contexts.prepare(input);
+  expect(await readFile(join(first.hostCredentials, "reporting-url"), "utf8")).toBe(first.reportingUrl);
   expect(record.workspace?.storage).toBe("independent-clone");
   expect(await readFile(join(first.workspace.hostPath, "answer.txt"), "utf8")).toBe("selected input");
   await writeFile(join(first.workspace.hostPath, "answer.txt"), "worker output");

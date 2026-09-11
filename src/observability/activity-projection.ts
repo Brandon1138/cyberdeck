@@ -44,6 +44,9 @@ export function serializeActivityEnvelope(event: RemoteActivity, timestamps: { s
     JSON.stringify({ event_id: projection.eventId.replaceAll("-", ""), type: "transaction", platform: "node", transaction: projection.operation,
       start_timestamp: projection.timing?.start ?? timestamps.start, timestamp: projection.timing?.end ?? timestamps.end, contexts: { trace: { trace_id: ids.traceId, span_id: ids.spanId, op: projection.operation,
         ...(projection.parentEventId === undefined ? {} : { parent_span_id: createHash("sha256").update(`span:${projection.parentEventId}`).digest("hex").slice(0, 16) }) } },
+      // Absence lets Sentry infer the transport IP and enrich geolocation before scrubbing.
+      // An explicit unspecified address carries no identity and prevents that inference.
+      user: { ip_address: "0.0.0.0" },
       tags: { ...tags, "cyberdeck.timing": projection.timing ? `${projection.timing.source}-interval` : "observation-marker" }, spans: [], measurements: {} })].join("\n");
 }
 

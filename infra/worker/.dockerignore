@@ -2,5 +2,7 @@
 !Dockerfile
 !report.mjs
 !launch.mjs
+!auth.mjs
 !mcp.mjs
 !native-binding.mjs
+!firewall.mjs

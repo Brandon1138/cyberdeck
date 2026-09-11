@@ -9,4 +9,10 @@ describe("worker reporting launch guidance", () => {
     expect(prompt).toContain("DECISION_REQUEST");
     expect(addWorkerReportingGuidance(prompt, workerId)).toBe(prompt);
   });
+  it("targets the existing guest gateway without advertising an absent host CLI", () => {
+    const prompt = addWorkerReportingGuidance("Run tests.", "11111111-1111-4111-8111-111111111111", true);
+    expect(prompt).toContain("node /opt/cyberdeck/report.mjs");
+    expect(prompt).toContain("interventionRequired=true");
+    expect(prompt).not.toContain("cyberdeck event submit");
+  });
 });

@@ -17,6 +17,7 @@ import { activityExecutionStore } from "../../orchestration/activity-execution-s
 import type { AgentActivityPort } from "../../orchestration/agent-activity-port.js";
 import type { WorkerExecutor } from "../../domain/worker-execution.js";
 import type { WorkerExecutionPort } from "../../orchestration/session/execution-ports.js";
+import { WorkerEgressProxy } from "./worker-egress-proxy.js";
 
 export async function brokerExecutionRuntime(options: {
   stateDirectory: string; config: BrokerRuntimeConfig; adapters: Record<string, ProviderAdapter>;
@@ -31,6 +32,7 @@ export async function brokerExecutionRuntime(options: {
   const root = join(options.stateDirectory, "containers");
   let contexts: BrokerContainerContexts | undefined;
   let gateway: WorkerGateway | undefined, container: OrbStackExecutor | undefined, gatewayPort: number | undefined;
+  let egressProxy: WorkerEgressProxy | undefined;
   let reachable = true;
   const backends: Partial<Record<WorkerExecutor, WorkerExecutionPort>> = { host };
   let recoveryTimer: ReturnType<typeof setInterval> | undefined;
@@ -44,10 +46,13 @@ export async function brokerExecutionRuntime(options: {
         && session.execution?.executionId === binding.executionId;
     });
     const port = await gateway.listen();
+    egressProxy = new WorkerEgressProxy();
+    const writableProxyPort = await egressProxy.listen();
     gatewayPort = port;
-    contexts = new BrokerContainerContexts(root, config.credentialFiles, gateway, port, options.allowsWorkspaceTrust);
+    contexts = new BrokerContainerContexts(root, config.credentialFiles, gateway, port, options.allowsWorkspaceTrust,
+      config.authentication, config.attemptTimeoutMinutes);
     container = new OrbStackExecutor({ client: new OrbStackClient(config.endpoint), profile: config,
-      contexts, attach: createSessionRuntime,
+      contexts, attach: createSessionRuntime, writableProxyPort,
       evidenceDirectory: join(root, "evidence"), onFailure: () => { failures++; },
     });
     const recover = async () => {
@@ -102,7 +107,7 @@ export async function brokerExecutionRuntime(options: {
       } catch { return undefined; }
     },
     executions, brokerId: localStore.brokerId, gatewayPort, closeAdmission: () => executions.closeAdmission(),
-    adapters: config === undefined ? options.adapters : Object.fromEntries(Object.entries(options.adapters).map(([id, adapter]) => [id, new ContainerProviderAdapter(adapter, root)])),
+    adapters: config === undefined ? options.adapters : Object.fromEntries(Object.entries(options.adapters).map(([id, adapter]) => [id, new ContainerProviderAdapter(adapter, root, config.codexWorkspaceIsolation)])),
     health: () => ({ configured: config !== undefined, reachable, failures, slots: container?.slots.snapshot(), profile: container?.support(),
       retainedFailures: store.list().filter((record) => record.phase === "failed" && record.ref.executor === "orbstack-container").map((record) => ({
         sessionId: record.ref.sessionId, failure: record.failure, cleanupFailed: record.cleanupFailed === true, cleanupEligibleAt: record.cleanupEligibleAt,
@@ -114,6 +119,7 @@ export async function brokerExecutionRuntime(options: {
       await executions.closeAdmission();
       await Promise.all([timeoutWork, cleanupWork]);
       await gateway?.close();
+      await egressProxy?.close();
     },
   };
 }
