@@ -14,7 +14,7 @@ import type { LiveEvalConfig } from "./live-config.js";
 
 /** The worker image an evaluation launches. A digest from the environment wins; otherwise the
  * pinned tag is resolved on the actual daemon, so evidence always carries the digest that ran. */
-export const EVAL_IMAGE_TAG = "cyberdeck-worker:20260905";
+export const EVAL_IMAGE_TAG = "cyberdeck-worker:rollout-20260911";
 export const EVAL_ENDPOINT = `unix://${process.env.HOME}/.orbstack/run/docker.sock`;
 export async function resolveEvalImage(client = new OrbStackClient(EVAL_ENDPOINT)): Promise<string> {
   const configured = process.env.CYBERDECK_EVAL_IMAGE;
