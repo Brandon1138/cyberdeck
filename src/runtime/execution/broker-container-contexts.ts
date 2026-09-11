@@ -1,7 +1,7 @@
 import { writeAtomicPrivateFile } from "../../persistence/atomic-private-file.js";
 import { mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { ExecutionRef } from "../../domain/worker-execution.js";
+import { ExecutionRefSchema, type ExecutionRef } from "../../domain/worker-execution.js";
 import type { ExecutionLaunchInput } from "../../orchestration/session/execution-ports.js";
 import type { WorkerGateway } from "../../broker/worker-gateway.js";
 import { PrivateCloneProvisioner } from "./isolated-workspace.js";
@@ -46,6 +46,7 @@ export class BrokerContainerContexts {
       });
     }
     const context = containerLaunchContext({ workspace, hostState, hostCredentials, reportingUrl: `http://host.docker.internal:${this.gatewayPort}/v1/report` });
+    await writeAtomicPrivateFile(join(hostCredentials, "reporting-url"), context.reportingUrl);
     await prepareContainerWorkspaceTrust(context, record.provider, this.allowsWorkspaceTrust);
     await mkdir(join(this.root, "contexts"), { recursive: true, mode: 0o700 });
     await writeAtomicPrivateFile(join(this.root, "contexts", `${identity.executionId}.json`), JSON.stringify(context));
@@ -63,9 +64,13 @@ export class BrokerContainerContexts {
     return containerLaunchContext(parsed);
   }
   async release(ref: ExecutionRef): Promise<void> {
-    const context = await this.get(ref);
+    ExecutionRefSchema.parse(ref);
+    const context = await this.get(ref).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
     this.gateway.revoke(ref.executionId);
     // Only the private staged copy is retired; the configured credential source is untouched.
-    await rm(context.hostCredentials, { recursive: true, force: true });
+    await rm(context?.hostCredentials ?? join(this.root, "credentials", ref.workerId), { recursive: true, force: true });
   }
 }

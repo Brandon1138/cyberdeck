@@ -140,12 +140,16 @@ export class OrbStackExecutor implements WorkerExecutionPort {
   }
   async collect(ref: ExecutionRef): Promise<CollectedExecution> {
     const state = await this.inspect(ref);
-    if (state.state !== "stopped") throw new Error("CONTAINER_COLLECTION_REQUIRES_STOP");
-    const context = await this.options.contexts.get(ref);
-    const files = await workspaceManifest(context.workspace.hostPath);
-    const providerFiles = await workspaceManifest(context.hostState, 512 * 1024 * 1024, true);
-    const logs = await this.options.client.command(["logs", "--timestamps", ref.backendId!]);
-    const payload = { ref, state, files, providerFiles, logs };
+    if (state.state !== "stopped" && state.state !== "absent") throw new Error("CONTAINER_COLLECTION_REQUIRES_STOP");
+    const context = await this.options.contexts.get(ref).catch((error: NodeJS.ErrnoException) => {
+      if (state.state === "absent" && error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    // Never use ref.workspaceId here: failed preparation can still name the user's source.
+    const files = context ? await workspaceManifest(context.workspace.hostPath) : [];
+    const providerFiles = context ? await workspaceManifest(context.hostState, 512 * 1024 * 1024, true) : [];
+    const logs = state.state === "absent" ? null : await this.options.client.command(["logs", "--timestamps", ref.backendId ?? containerName(ref)]);
+    const payload = { ref, state, files, providerFiles, logs, contextAvailable: context !== undefined };
     const body = JSON.stringify({ payload, sha256: contentHash(JSON.stringify(payload)) });
     await mkdir(this.options.evidenceDirectory, { recursive: true, mode: 0o700 });
     const manifestRef = join(this.options.evidenceDirectory, `${ref.executionId}-${ref.generation}.json`);

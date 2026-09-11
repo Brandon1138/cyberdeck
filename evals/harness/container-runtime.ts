@@ -50,6 +50,7 @@ export async function containerRuntime(root: string, guest: { kind: "scripted"; 
   } else credentialFile = guest.live.credentialFile;
   const config = BrokerRuntimeConfigSchema.parse({ containerRuntime: { endpoint: EVAL_ENDPOINT, image, cpus: guest.kind === "provider" ? guest.live.cpus : 1,
     memoryBytes: guest.kind === "provider" ? guest.live.memoryBytes : 256 * 1024 ** 2, slots: 2, network: "egress", attemptTimeoutMinutes: guest.kind === "provider" ? guest.live.attemptTimeoutMinutes : 60,
+    codexWorkspaceIsolation: guest.kind === "provider" ? guest.live.codexWorkspaceIsolation : "native",
     credentialFiles: credentialFile ? { [provider]: credentialFile } : {},
     authentication: guest.kind === "provider" && guest.live.authentication ? { [provider]: guest.live.authentication } : {} } });
   let lookup: (id: string) => SessionRecord | undefined = () => undefined, submit: WorkerEventChannel["submit"] = async () => { throw new Error("EVAL_EVENTS_UNBOUND"); };

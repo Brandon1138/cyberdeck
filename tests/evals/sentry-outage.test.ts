@@ -19,5 +19,5 @@ it("waits for durable settlement activity after the instruction becomes complete
       "local-evidence-durable": true,
       "settlement-with-failing-sink": true,
     });
-  } finally { delayed.mockRestore(); await rm(root, { recursive: true, force: true }); }
+  } finally { delayed.mockRestore(); await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); }
 });

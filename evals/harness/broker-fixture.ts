@@ -1,3 +1,6 @@
+import { ContainerNativeSource } from "../../src/runtime/activity/container-native-source.js";
+import { ExecutionTranscriptStore } from "../../src/persistence/execution-transcript-store.js";
+import { TurnNativeCapture } from "../../src/runtime/activity/turn-native-capture.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,7 +69,7 @@ export async function brokerFixture(root: string, options: FixtureOptions = {}) 
   let container: ContainerRuntimeFixture | undefined;
   if (isContainerMode(mode)) {
     container = await containerRuntime(root, mode === "live-container" ? { kind: "provider", live: live! }
-      : { kind: "scripted", ...(options.scriptedProvider ? { provider: options.scriptedProvider } : {}) }, activity, options.allowsWorkspaceTrust);
+      : { kind: "scripted", ...(options.scriptedProvider ? { provider: options.scriptedProvider } : {}) }, activity, options.allowsWorkspaceTrust ?? (mode === "live-container" ? async (path) => path === source : undefined));
     if (options.cwd === undefined) source = await fixtureRepository(join(root, "source"));
   } else await mkdir(source, { recursive: true });
   const provider = container?.provider ?? "claude";
@@ -79,17 +82,20 @@ export async function brokerFixture(root: string, options: FixtureOptions = {}) 
     buildResumeSpec: (session) => { if (guest === undefined) throw new Error("EVAL_RESUME_NOT_REQUESTED"); return guest.buildResumeSpec(session); },
     prepareLaunch: async (session, spec) => { if (session.kind !== "orchestrator" && container) { await container.stageGuest(session); await guest?.prepareLaunch?.(session, spec); } },
     cleanupLaunch: async (session) => { if (session.kind !== "orchestrator") await guest?.cleanupLaunch?.(session); },
-    submitInput: (message) => guest?.submitInput?.(message) ?? Buffer.from(`${message}\n`),
+    submitInput: (message, session) => guest?.submitInput?.(message, session) ?? Buffer.from(`${message}\n`),
     deferInitialPrompt: (session) => guest?.deferInitialPrompt?.(session) ?? false,
     initializeSession: async (session, terminal) => { if (session.kind !== "orchestrator") await guest?.initializeSession?.(session, terminal); },
-    submitInputToTerminal: async (message, terminal) => { if (guest?.submitInputToTerminal) await guest.submitInputToTerminal(message, terminal); else terminal.write(Buffer.from(`${message}\n`)); },
+    submitInputToTerminal: async (message, terminal) => { if (guest?.submitInputToTerminal) await guest.submitInputToTerminal(message, terminal); else terminal.write(guest?.submitInput?.(message) ?? Buffer.from(`${message}\n`)); },
   };
   const hostExecutions = container ? undefined : await WorkerExecutionStore.open(state);
   const executions = container ? container.executions : new WorkerExecutionService(hostExecutions!, { host: new HostExecutor(createSessionRuntime) });
   const brokerId = container ? container.runtime.brokerId : hostExecutions!.brokerId;
-  const registry = new SessionRegistry({ adapters: { [provider]: adapter }, sessionRuntimeFactory: createSessionRuntime, executions,
+  const nativeTranscripts = mode === "live-container" ? new ExecutionTranscriptStore(state, {},
+    new ContainerNativeSource(join(state, "containers")), (id) => { try { return registry.get(id); } catch { return undefined; } }) : undefined;
+  await nativeTranscripts?.init();
+  const registry: SessionRegistry = new SessionRegistry({ adapters: { [provider]: adapter }, sessionRuntimeFactory: createSessionRuntime, executions,
     workerTurnObservation: new WorkerTurnObservationAdapter(), journal: new Journal(state), store: new SessionStore(state),
-    config: BrokerRuntimeConfigSchema.parse({}), ...(options.transcripts === undefined ? {} : { transcripts: options.transcripts }),
+    config: BrokerRuntimeConfigSchema.parse({}), ...((options.transcripts ?? nativeTranscripts) === undefined ? {} : { transcripts: options.transcripts ?? nativeTranscripts! }),
   });
   const workers: SessionRecord[] = [], reports: AcknowledgedReport[] = [];
   let unwind: () => Promise<void> = async () => { await registry.stopAll(); await container?.close(); };
@@ -100,7 +106,10 @@ export async function brokerFixture(root: string, options: FixtureOptions = {}) 
   await orchestrators.put({ key: "fleet", kind: "primary", sessionId: actor, provider, cwd: source, sandbox: "read-only", scope,
     grant: { subjectSessionId: actor, capabilities: [...ORCHESTRATOR_GRANT_CAPABILITIES], scope }, createdAt: now, updatedAt: now });
   const instructionStore = new InstructionStore(state);
-  const queue = new InstructionQueue(registry, orchestrators, activityInstructionStore(instructionStore, activity, (id) => registry.get(id)));
+  const nativeCapture = nativeTranscripts ? new TurnNativeCapture(join(state, "activity", "native-cursors"), activity, nativeTranscripts, instructionStore) : undefined;
+  if (nativeCapture) nativeTranscripts!.attachNativeCapture(nativeCapture);
+  const queue = new InstructionQueue(registry, orchestrators, activityInstructionStore(instructionStore, activity, (id) => registry.get(id),
+    nativeCapture ? (record, worker) => nativeCapture.captureInstruction(record, worker) : undefined));
   queue.start();
   unwind = async () => { queue.stop(); await registry.stopAll(); await container?.close(); };
   const coordination = new WorkerCoordinationService({ store: new WorkerCoordinationStore(state) }); await coordination.initialize();
@@ -112,17 +121,18 @@ export async function brokerFixture(root: string, options: FixtureOptions = {}) 
     reports.push({ workerId: input.workerId, ...(input.eventId === undefined ? {} : { eventId: input.eventId }), facts: input.structuredFacts, code: (ack as { code: string }).code });
     return ack;
   });
-  const socketPath = join(root, "broker.sock"), server = new BrokerServer({ registry, socketPath, instructions: queue, activity, workerHandoff, workerEvents: channel });
+  const socketPath = join(root, "broker.sock"), server = new BrokerServer({ registry, socketPath, instructions: queue, activity, ...(nativeTranscripts ? { transcripts: nativeTranscripts } : {}), workerHandoff, workerEvents: channel });
   unwind = async () => { queue.stop(); await registry.stopAll(); await server.close(); await container?.close(); };
   await server.listen();
   const rpc = await RpcClient.connect(socketPath);
   unwind = async () => { queue.stop(); await registry.stopAll(); rpc.close(); await server.close(); await container?.close(); };
   const startWorker = async (prompt?: string): Promise<SessionRecord> => {
-    const record = await registry.start({ provider, model: live?.model ?? "scripted-fixture", kind: "worker", executor: container ? "orbstack-container" : "host", cwd: source, sandbox: "workspace-write", detached: true,
+    const record = await registry.start({ provider, model: live?.model ?? "scripted-fixture", ...(live?.effort ? { effort: live.effort } : {}), kind: "worker", executor: container ? "orbstack-container" : "host", cwd: source, sandbox: "workspace-write", ...(live ? { approvalMode: "auto" as const } : {}), detached: true,
       ...(container && options.selectedInputs ? { workspace: { provisioning: "pre-provisioned" as const, worktreePath: source, branch: "eval/scoped", baseRef: "main", writableRoots: [], selectedInputs: options.selectedInputs } } : {}),
-    }, prompt);
+    }, prompt ?? (mode === "live-container" ? "Reply with READY. Do not use tools or change any files." : undefined));
     workers.push(record);
-    if (mode === "live-container") await eventually(() => container!.runtime.health().records.some((item) => item.ref.workerId === record.id && item.phase === "running"), "LIVE_WORKER_START_TIMEOUT", timeoutFor(mode, live));
+    if (mode === "live-container") await eventually(async () => (await nativeTranscripts!.read(record.id, 0, 100)).events
+      .some((event) => event.kind === "turn" && event.data.transport === "provider-native") && registry.workerTruth(record.id).state === "idle", "LIVE_WORKER_START_TIMEOUT", timeoutFor(mode, live));
     else await eventually(() => registry.snapshot(record.id).includes("SCRIPT_READY"), "SCRIPT_START_TIMEOUT", timeoutFor(mode));
     return registry.get(record.id);
   };

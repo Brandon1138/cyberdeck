@@ -76,7 +76,7 @@ export class WorkerExecutionService implements SessionExecutionPort {
       current = { ...current, phase: "stopping", updatedAt: new Date().toISOString() };
       await this.store.put(current);
       const stopped = await backend.stop(current.ref, false);
-      if (stopped.state !== "stopped" && !(stopped.state === "absent" && current.manifestRef)) throw new ExecutionError("EXECUTION_NOT_QUIESCENT");
+      if (stopped.state !== "stopped" && stopped.state !== "absent") throw new ExecutionError("EXECUTION_NOT_QUIESCENT");
       if (!current.manifestRef) {
         current = { ...current, phase: "collecting", updatedAt: new Date().toISOString() }; await this.store.put(current);
         const collection = await backend.collect(current.ref);
@@ -87,7 +87,7 @@ export class WorkerExecutionService implements SessionExecutionPort {
       // The backend re-verifies the saved manifest and refuses live/foreign resources.
       // A crash after removal retries this same identity and verified collection.
       await backend.destroy(current.ref);
-      await this.store.put({ ...current, phase: "destroyed", updatedAt: new Date().toISOString() });
+      await this.store.put({ ...current, phase: "destroyed", cleanupFailed: false, updatedAt: new Date().toISOString() });
     } catch (error) {
       if (current) await this.store.put({ ...current, phase: "failed", failure: "recovery", cleanupFailed: true, updatedAt: new Date().toISOString() }).catch(() => undefined);
       throw error;

@@ -41,24 +41,28 @@ export async function runScenario(value: unknown, mode: EvalMode = "offline-scri
   } catch (error) { harnessErrors.push(error instanceof Error ? error.message : "UNKNOWN_HARNESS_ERROR"); }
   // Live command coverage is the provider-native tool evidence the recorder captured, read back
   // from the durable journal; a live row with no such evidence says so rather than inferring it.
-  let nativeTools = 0;
+  let nativeTools = 0, nativeToolFailures = 0, nativeToolResults = 0, unclassifiedToolResults = 0;
   if (live) {
     try {
       const activity = await AgentActivityStore.open(join(root, "broker", "activity"));
       try {
         let after = 0;
         for (;;) { const page = await activity.read(result?.brokerId ?? runId, after, 1000); if (!page.length) break; after = page.at(-1)!.sequence; }
-        const journal = (await readFile(join(root, "broker", "activity", "activity.jsonl"), "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as { kind: string; provenance: string });
+        const journal = (await readFile(join(root, "broker", "activity", "activity.jsonl"), "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as { kind: string; provenance: string; outcome?: string });
+        nativeToolResults = journal.filter((event) => event.kind === "tool.result" && event.provenance === "provider-native").length;
+        unclassifiedToolResults = journal.filter((event) => event.kind === "tool.result" && event.provenance === "provider-native" && !["succeeded", "failed"].includes(event.outcome ?? "")).length;
+        nativeToolFailures = journal.filter((event) => event.kind === "tool.result" && event.provenance === "provider-native" && event.outcome === "failed").length;
         nativeTools = journal.filter((event) => event.kind === "tool.invocation" && event.provenance === "provider-native").length;
       } finally { await activity.close(); }
     } catch { nativeTools = 0; }
   }
-  const factsPath = join(root, "facts.json"), body = JSON.stringify({ result: result?.facts ?? null, harnessErrors, nativeTools });
+  const factsPath = join(root, "facts.json"), body = JSON.stringify({ result: result?.facts ?? null, harnessErrors, nativeTools, nativeToolResults, nativeToolFailures, unclassifiedToolResults });
   await writeFile(factsPath, body, { mode: 0o600 });
   const sha256 = contentHash(body);
   if (contentHash(await readFile(factsPath)) !== sha256) harnessErrors.push("EVIDENCE_HASH_MISMATCH");
   const evidence = ScenarioEvidenceSchema.parse({ schemaVersion: 1, runId, scenarioId: id, scenarioVersion: 1, mode,
     startedAt, finishedAt: new Date().toISOString(), commit, dirtyImplementation, brokerId: result?.brokerId ?? null,
+    metrics: { durationMs: Date.now() - Date.parse(startedAt), nativeToolInvocations: live ? nativeTools : null, nativeToolResults: live ? nativeToolResults : null, nativeToolFailures: live ? nativeToolFailures : null, unclassifiedToolResults: live ? unclassifiedToolResults : null },
     provider: live?.provider ?? "scripted", providerVersion: live ? `${live.provider}-in-image` : `fixture-v1/node-${process.versions.node}`, model: live?.model ?? "scripted-fixture",
     ...(result?.image ? { image: result.image } : {}),
     status: harnessErrors.length ? "failed" : "completed", captureComplete: result !== undefined && harnessErrors.length === 0,

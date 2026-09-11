@@ -35,6 +35,11 @@ export class ContainerProviderAdapter implements ProviderAdapter {
   private clean(spec: ProviderLaunchSpec): ProviderLaunchSpec {
     const keys = ["TERM", "DISABLE_UPDATES", "ENABLE_TOOL_SEARCH", "CYBERDECK_PROCESS_ROLE", "CYBERDECK_WORKER_MODE", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"];
     if (spec.executable === "claude") {
+      if (spec.args[spec.args.indexOf("--permission-mode") + 1] === "auto") {
+        // The writable container enforces filesystem/network scope. Approve only routine tools;
+        // unknown tools, login and trust prompts retain their existing operator boundary.
+        spec.args.unshift("--allowedTools", "Bash,Read,Edit,Write,Glob,Grep,mcp__cyberdeck__cyberdeck_report_progress,mcp__cyberdeck__cyberdeck_signal_exception,mcp__cyberdeck__cyberdeck_signal_risk,mcp__cyberdeck__cyberdeck_request_decision,mcp__cyberdeck__cyberdeck_respond_checkpoint");
+      }
       // Baked guest helper writes only provider-owned state. Host attribution validates the file.
       const end = spec.args.indexOf("--");
       spec.args.splice(end < 0 ? spec.args.length : end, 0, "--settings", JSON.stringify({ hooks: {
@@ -70,7 +75,11 @@ export class ContainerProviderAdapter implements ProviderAdapter {
     if (session.executor !== "orbstack-container") await this.host.cleanupLaunch?.(session);
     // Container launch/config files remain for recovery/collection; retirement owns their policy.
   }
-  submitInput(message: string): Buffer { return this.host.submitInput?.(message) ?? Buffer.from(`${message}\n`); }
+  submitInput(message: string, session?: SessionRecord): Buffer {
+    // Explicit paste framing prevents the guest TUI's burst heuristic from swallowing Enter.
+    const text = session?.executor === "orbstack-container" ? `\u001b[200~${message}\u001b[201~` : message;
+    return this.host.submitInput?.(text) ?? Buffer.from(`${text}\n`);
+  }
   deferInitialPrompt(session: SessionRecord): boolean { return this.host.deferInitialPrompt?.(session) ?? false; }
   async initializeSession(session: SessionRecord, terminal: Parameters<NonNullable<ProviderAdapter["initializeSession"]>>[1]): Promise<void> {
     await this.host.initializeSession?.(session, terminal);

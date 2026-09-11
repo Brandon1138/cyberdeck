@@ -1,3 +1,4 @@
+import { ReasoningEffortSchema } from "../../src/domain/session.js";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { ContainerAuthenticationSchema, authenticationMatchesProvider } from "../../src/domain/container-authentication.js";
@@ -7,9 +8,10 @@ import { ContainerAuthenticationSchema, authenticationMatchesProvider } from "..
  * named by `CYBERDECK_LIVE_EVAL_CONFIG`. API mode records a ceiling; subscription mode has none.
  */
 export const LiveEvalConfigSchema = z.object({
-  provider: z.enum(["claude", "codex"]), model: z.string().min(1), effort: z.string().min(1).optional(),
+  provider: z.enum(["claude", "codex"]), model: z.string().min(1), effort: ReasoningEffortSchema.optional(),
   credentialFile: z.string().startsWith("/").optional(), authorizedCeilingUsd: z.number().positive().optional(),
   authentication: ContainerAuthenticationSchema.optional(),
+  codexWorkspaceIsolation: z.enum(["native", "container"]).default("native"),
   repetitions: z.number().int().min(1).max(10).default(3),
   image: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
   cpus: z.number().positive().default(2), memoryBytes: z.number().int().positive().default(4 * 1024 ** 3),

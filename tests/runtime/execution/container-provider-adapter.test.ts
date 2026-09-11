@@ -78,3 +78,19 @@ it("applies semi-autonomous container isolation only to opted-in writable Codex 
   expect(new ContainerProviderAdapter(claude, root, "container").buildLaunchSpec(claudeSession))
     .toEqual(new ContainerProviderAdapter(claude, root).buildLaunchSpec(claudeSession));
 });
+
+it.each(["claude", "codex"])("frames container %s instructions as paste while retaining its native Enter and host bytes", (provider) => {
+  const host = provider === "claude" ? new ClaudeProviderAdapter() : new CodexProviderAdapter();
+  const adapter = new ContainerProviderAdapter(host, "/private/broker"), session = record(provider);
+  expect(adapter.submitInput("line one\nline two", session)).toEqual(host.submitInput("\u001b[200~line one\nline two\u001b[201~"));
+  expect(adapter.submitInput("host", { ...session, executor: "host" })).toEqual(host.submitInput("host"));
+});
+
+it("allows routine Claude tools only for an automatically approved writable guest", () => {
+  const host = new ClaudeProviderAdapter(), adapter = new ContainerProviderAdapter(host, "/private/broker");
+  const session = { ...record("claude"), sandbox: "workspace-write" as const, approvalMode: "auto" as const };
+  expect(adapter.buildLaunchSpec(session).args).toContain("--allowedTools");
+  expect(adapter.buildLaunchSpec({ ...session, executor: "host" }).args).not.toContain("--allowedTools");
+  expect(adapter.buildLaunchSpec({ ...session, sandbox: "read-only" }).args).not.toContain("--allowedTools");
+  expect(adapter.buildLaunchSpec({ ...session, approvalMode: "prompt" }).args).not.toContain("--allowedTools");
+});

@@ -118,7 +118,7 @@ export class SessionIoSurface {
     requireTerminalFinalizationComplete(runtime);
     requireInteractiveInput(runtime);
     const adapter = this.catalog.requireAdapter(runtime.record.provider);
-    const data = adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
+    const data = adapter.submitInput?.(message, runtime.record) ?? Buffer.from(`${message}\n`);
     runtime.turns.resetStallObservation();
     await this.catalog.appendTranscript(sessionId, "prompt", "human", message, {});
     await this.catalog.setAttention(runtime, "working", true);
@@ -156,7 +156,7 @@ export class SessionIoSurface {
       message,
       encoded: () => {
         const adapter = this.catalog.requireAdapter(runtime.record.provider);
-        return adapter.submitInput?.(message) ?? Buffer.from(`${message}\n`);
+        return adapter.submitInput?.(message, runtime.record) ?? Buffer.from(`${message}\n`);
       },
       source,
       metadata,

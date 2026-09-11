@@ -8,6 +8,7 @@ export const ScenarioEvidenceSchema = z.object({
   commit: z.string().regex(/^[a-f0-9]{40}$/), dirtyImplementation: z.boolean(), brokerId: z.uuid().nullable(),
   provider: z.string().min(1), providerVersion: z.string().min(1), model: z.string().min(1),
   image: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
+  metrics: z.object({ durationMs: z.number().nonnegative(), nativeToolInvocations: z.number().int().nonnegative().nullable(), nativeToolResults: z.number().int().nonnegative().nullable(), nativeToolFailures: z.number().int().nonnegative().nullable(), unclassifiedToolResults: z.number().int().nonnegative().nullable() }).strict().optional(),
   captureComplete: z.boolean(), requiredCommandCoverage: z.boolean(), commandCoverage: z.enum(["scripted", "provider-native", "unavailable"]),
   expectedChangedPaths: z.array(z.string()), actualChangedPaths: z.array(z.string()), reportedChangedPaths: z.array(z.string()),
   unrelatedPathsChanged: z.array(z.string()), unauthorizedMutationCount: z.number().int().nonnegative(),
