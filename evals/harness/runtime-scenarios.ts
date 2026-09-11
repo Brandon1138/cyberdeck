@@ -118,15 +118,25 @@ export async function backendScenario(root: string, scenario: "oom" | "cross-wor
   } finally { await broker.close(); }
 }
 async function containerOom(root: string, mode: EvalMode, live?: LiveEvalConfig) {
-  const broker = await brokerFixture(root, { mode, ...(live ? { live } : {}) }), container = broker.container!;
+  // OOM is fault injection against the container runtime, never a model-cooperation test. A
+  // subscription provider cannot arrange for PID 1 to exhaust the cgroup: it either refuses the
+  // allocation command or spawns a child the kernel kills first, leaving its own container alive —
+  // which is why the 2026-09-11 baseline carried six red rows that said nothing about either the
+  // models or the infrastructure. The scripted guest IS the allocator (PID 1 allocates
+  // in-process), so a live run keeps the real container, the real cgroup limit, the real kill and
+  // the real broker evidence, deterministically and with no subscription spend. `live` is
+  // deliberately not forwarded: this scenario has no model to bill or grade.
+  void live;
+  const broker = await brokerFixture(root, { mode: mode === "live-container" ? "container-scripted" : mode }), container = broker.container!;
   try {
     const ref = broker.registry.get(broker.worker.id).execution!;
-    await broker.instruct(mode === "live-container" ? livePrompts["oom"] : "oom-fixture");
+    await broker.instruct("oom-fixture");
     await eventually(async () => (await container.client.inspect(ref))?.State.Running === false, "GUEST_NOT_OOM_KILLED", broker.timeout);
     await eventually(() => container.runtime.health().records.some((record) => record.ref.workerId === broker.worker.id && record.phase === "stopped"), "OOM_NOT_RECORDED", broker.timeout);
     const inspection = await container.client.inspect(ref), health = container.runtime.health();
     const record = health.records.find((item) => item.ref.workerId === broker.worker.id)!;
-    return { brokerId: broker.brokerId, image: container.image, facts: { state: inspection?.State, memory: inspection?.HostConfig.Memory, record, slots: health.slots },
+    return { brokerId: broker.brokerId, image: container.image,
+      facts: { guest: "scripted-oom-injection", state: inspection?.State, memory: inspection?.HostConfig.Memory, record, slots: health.slots },
       provenance: { "oom-classified": "host-verified", "capacity-released": "broker", "evidence-retained": "broker", "real-cgroup-oom": "host-verified" } as const,
       checks: { "oom-classified": inspection?.State.OOMKilled === true && inspection.State.ExitCode === 137,
         "capacity-released": !health.slots!.running.includes(ref.executionId),

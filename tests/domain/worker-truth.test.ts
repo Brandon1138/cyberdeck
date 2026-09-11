@@ -50,6 +50,43 @@ describe("projectWorkerTruth", () => {
     expect(projectWorkerTruth(input({ activity: "working" })).state).toBe("working");
   });
 
+  it("lets a working-state stall verdict outrank the repainted working chrome", () => {
+    // A frozen Cursor session claims a turn is in flight forever; the engine's token-progress
+    // detector is the only witness, so its verdict must not hide behind the activity reading.
+    const truth = projectWorkerTruth(input({
+      activity: "working",
+      stalledForSeconds: 320,
+      stallReason: "token-counter-pinned-while-working",
+    }));
+
+    expect(truth).toMatchObject({
+      state: "stalled",
+      terminal: false,
+      stalledForSeconds: 320,
+      stallReason: "token-counter-pinned-while-working",
+    });
+    expect(truth.detail).toContain("pinned for 320s");
+  });
+
+  it("keeps a stall verdict below a blocking modal", () => {
+    const truth = projectWorkerTruth(input({
+      activity: "needs-input",
+      composer: { modalOpen: true, occupied: false },
+      stalledForSeconds: 320,
+      stallReason: "token-counter-pinned-while-working",
+    }));
+
+    expect(truth.state).toBe("blocked-modal");
+  });
+
+  it("reports the idle stall exactly as before when no reason arrives", () => {
+    const truth = projectWorkerTruth(input({ stalledForSeconds: 61 }));
+
+    expect(truth.state).toBe("stalled");
+    expect(truth.detail).toBe("No transcript or token movement for 61s");
+    expect(truth.stallReason).toBeUndefined();
+  });
+
   it("lets a provider-declared limit outrank the process outcome that followed it", () => {
     const truth = projectWorkerTruth(input({
       executionState: "failed",

@@ -72,6 +72,15 @@ mount checks use an explicitly scripted Engine behind the production OrbStack ad
 rows prove the boundary and the lifecycle with a scripted guest; they say nothing about what a model
 would do. Only live rows carry agent decisions, and they carry them per repetition.
 
+**The OOM scenario is fault injection in every mode.** A live run keeps the real container, the
+real cgroup limit and the real kill, but its guest is always the scripted allocator (PID 1
+allocates in-process until the kernel kills the container). No subscription provider can arrange a
+whole-container OOM from inside — it either refuses the command or spawns a child the kernel kills
+first, leaving its own container alive — so the 2026-09-11 baseline's six red OOM rows measured
+neither the models nor the infrastructure. The row proves memory management and cleanup
+(classification, capacity release, retained evidence) deterministically and spends nothing; it is
+not a model-performance signal and its facts carry `guest: "scripted-oom-injection"` to say so.
+
 To turn an incident into a regression: select the local run and source event IDs, preserve/hash the
 original evidence, copy only a sanitized minimal fixture, record provider/version and source
 provenance, demonstrate the failure against an independent invariant, fix it, and retain both
