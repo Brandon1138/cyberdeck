@@ -36,8 +36,10 @@ import type {
   WorkerTurnTranscriptPort,
 } from "./worker-turn-ports.js";
 
-import type { CompletionLedgerEntry, RenderedInstruction, StallObservation, WorkerStatusReading,
-  TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
+import type { CompletionLedgerEntry, RenderedInstruction, StallReading, WorkerStatusReading,
+  TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence,
+  TurnCommitOutcome } from "./worker-turn-state.js";
+import { observeStall, readStall, type StallObservations } from "./worker-stall.js";
 
 export interface WorkerTurnAppendResult {
   fatal: boolean;
@@ -121,7 +123,7 @@ export class WorkerTurnEngine {
   /** The process exited, but its last exact semantic receipt has not finished settling yet. */
   private terminalFinalizing = false;
   private suppressSemanticTurns?: boolean;
-  private stallObservation?: StallObservation;
+  private stallObservations: StallObservations = {};
 
   constructor(
     private readonly record: SessionRecord,
@@ -168,7 +170,7 @@ export class WorkerTurnEngine {
   finishInitialization(): void {
     this.activity = "unknown";
     this.observedWorking = false;
-    delete this.stallObservation;
+    this.stallObservations = {};
     delete this.suppressSemanticTurns;
   }
 
@@ -186,7 +188,7 @@ export class WorkerTurnEngine {
     this.observedWorking = false;
     this.fatalReported = false;
     this.currentProviderLimit = undefined;
-    delete this.stallObservation;
+    this.stallObservations = {};
     this.releaseTimers();
     this.terminalScreenReservationsDiscarded = false;
   }
@@ -200,7 +202,7 @@ export class WorkerTurnEngine {
   }
 
   resetStallObservation(): void {
-    delete this.stallObservation;
+    this.stallObservations = {};
   }
 
   appendOutput(
@@ -296,7 +298,7 @@ export class WorkerTurnEngine {
     // awaiting I/O. It must synchronously fence those effects before this method performs any await.
     this.activityRevision += 1;
     const encoded = typeof input.encoded === "function" ? input.encoded() : input.encoded;
-    delete this.stallObservation;
+    this.stallObservations = {};
     const at = new Date().toISOString();
     const completionFloor = this.completionReservationFloor();
     const expectedTurn = completionFloor + 1;
@@ -357,6 +359,7 @@ export class WorkerTurnEngine {
       pendingInstructions: this.rendered.length,
       providerLimit: this.currentProviderLimit,
       stalledForSeconds: stalled?.stalledForSeconds,
+      stallReason: stalled?.reason,
       scoutTerminalState: this.record.scout?.terminalState,
       stopRequested: this.options.effects.stopRequested?.(),
       modal: this.currentModalDescriptor(),
@@ -464,7 +467,7 @@ export class WorkerTurnEngine {
         ...base,
         status: "stalled",
         stalledForSeconds: reading.stalled.stalledForSeconds,
-        stallReason: "transcript-and-token-count-unchanged-while-idle",
+        stallReason: reading.stalled.reason,
         tokenCount: reading.stalled.tokenCount,
       };
     }
@@ -804,9 +807,11 @@ export class WorkerTurnEngine {
     if (this.record.executionState === "failed") return { status: "failed" };
     if (this.record.executionState === "cancelled") return { status: "stopped" };
     if (this.record.executionState === "exited") return { status: "exited" };
-    if (this.activity === "working") return { status: "working" };
+    // Read the stall detectors before trusting "working": a frozen Cursor session repaints its
+    // working chrome forever, and only the token-progress detector can see through that.
     const stalled = this.stalledWorker();
     if (stalled !== undefined) return { status: "stalled", stalled };
+    if (this.activity === "working") return { status: "working" };
     return { status: "waiting" };
   }
 
@@ -817,36 +822,23 @@ export class WorkerTurnEngine {
   }
 
   private updateStallObservation(): void {
-    const tokenCount = this.replay.tokenCount();
-    if (tokenCount === undefined) {
-      delete this.stallObservation;
-      return;
-    }
-    const previous = this.stallObservation;
-    const version = this.replay.version;
-    if (
-      previous === undefined
-      || previous.version !== version
-      || previous.tokenCount !== tokenCount
-    ) {
-      this.stallObservation = { version, tokenCount, unchangedSinceMs: this.now() };
-    }
+    observeStall(this.stallObservations, {
+      provider: this.record.provider,
+      activity: this.activity,
+      tokenCount: this.replay.tokenCount(),
+      version: this.replay.version,
+      nowMs: this.now(),
+    });
   }
 
-  private stalledWorker(): { stalledForSeconds: number; tokenCount: number } | undefined {
+  private stalledWorker(): StallReading | undefined {
     this.updateStallObservation();
-    const observation = this.stallObservation;
-    if (
-      observation === undefined
-      || this.record.executionState !== "active"
-      || this.activity === "working"
-      || this.activity === "needs-input"
-    ) {
-      return undefined;
-    }
-    const stalledForSeconds = Math.floor((this.now() - observation.unchangedSinceMs) / 1_000);
-    if (stalledForSeconds < this.options.workerStallSeconds) return undefined;
-    return { stalledForSeconds, tokenCount: observation.tokenCount };
+    return readStall(this.stallObservations, {
+      active: this.record.executionState === "active",
+      activity: this.activity,
+      workerStallSeconds: this.options.workerStallSeconds,
+      nowMs: this.now(),
+    });
   }
 
   private now(): number {

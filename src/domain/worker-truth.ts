@@ -117,6 +117,20 @@ export function providerLimitFromTermination(
   return { kind: termination.kind, reason: termination.reason, detail: termination.detail };
 }
 
+/**
+ * Why a worker was judged stalled.
+ *
+ * The idle reason is the original detector: a byte-quiet PTY whose transcript and token counter
+ * stopped moving. The working reason is Cursor's freeze signature observed 2026-09-11: the TUI
+ * keeps repainting a status line whose token counter is pinned, so the session claims a turn is in
+ * flight indefinitely while the model produces nothing. The second reason is advisory — a very
+ * long silent tool run can look identical — so consumers should treat it as "probably frozen,
+ * inspect or relaunch", not as a terminal verdict.
+ */
+export type WorkerStallReason =
+  | "transcript-and-token-count-unchanged-while-idle"
+  | "token-counter-pinned-while-working";
+
 /** What the input surface of the provider TUI is holding. */
 export interface ComposerObservation {
   /** A blocking prompt (permission, trust, approval) owns the UI. */
@@ -142,6 +156,7 @@ export interface WorkerTruthInput {
   /** Set once the provider stopped itself on its own limits. */
   providerLimit?: ProviderLimitTermination | undefined;
   stalledForSeconds?: number | undefined;
+  stallReason?: WorkerStallReason | undefined;
   /** A Scout's own terminal verdict, which outranks process-shaped guessing. */
   scoutTerminalState?: "complete" | "failed" | "budget_exhausted" | undefined;
   /** True once a stop was requested, so an exit is reported as `stopped` rather than `exited`. */
@@ -166,6 +181,7 @@ export interface WorkerTruth {
   modal?: WorkerModalDescriptor;
   providerLimit?: ProviderLimitTermination;
   stalledForSeconds?: number;
+  stallReason?: WorkerStallReason;
   /** One sentence an orchestrator can act on without reading anything else. */
   detail: string;
 }
@@ -236,6 +252,22 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
     );
     return input.modal === undefined ? settled : { ...settled, modal: input.modal };
   }
+  // The engine only supplies stalledForSeconds once its own detector decided the worker is stuck,
+  // so a stall verdict outranks the raw activity reading. That ordering is what lets a frozen
+  // Cursor session — which repaints "working" forever — surface as stalled instead of hiding
+  // behind "Provider turn in flight" for the rest of the session.
+  if (input.stalledForSeconds !== undefined) {
+    return {
+      ...settle(
+        "stalled",
+        input.stallReason === "token-counter-pinned-while-working"
+          ? `Token counter pinned for ${input.stalledForSeconds}s while the provider claims a turn is in flight — likely frozen`
+          : `No transcript or token movement for ${input.stalledForSeconds}s`,
+      ),
+      stalledForSeconds: input.stalledForSeconds,
+      ...(input.stallReason === undefined ? {} : { stallReason: input.stallReason }),
+    };
+  }
   if (input.activity === "working") {
     return settle("working", "Provider turn in flight");
   }
@@ -244,12 +276,6 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
       "blocked-composer",
       "Unsent text is sitting in the provider composer; no turn is running",
     );
-  }
-  if (input.stalledForSeconds !== undefined) {
-    return {
-      ...settle("stalled", `No transcript or token movement for ${input.stalledForSeconds}s`),
-      stalledForSeconds: input.stalledForSeconds,
-    };
   }
   return settle(
     "idle",
