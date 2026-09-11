@@ -112,3 +112,15 @@ scrub rule **Remove Anything from `user.geo.**`**. The existing serializer also 
 the constant unspecified IP `0.0.0.0`, preventing transport-IP geolocation before server
 scrubbing. Live verification found project scrubbing alone insufficient. These settings
 affect new telemetry; they do not rewrite historical events.
+
+## Operational rollout and comparison baseline
+
+See [the operational acceptance record](worker-operational-rollout.md) for the tested image,
+default-routing evidence, failures, activation and rollback. Existing host workers are not migrated
+when the default changes. Preserve Sentry settings during the configuration merge and restart only
+in a safe window.
+
+`evals` provides `eval:baseline <private-codex-config> <private-claude-config>` for three repetitions
+of all scenarios per provider. This measures the benchmark workers; arbitrary production tasks are
+not automatically correctness-graded. Full reports remain local and must not include credentials in
+PR artifacts.

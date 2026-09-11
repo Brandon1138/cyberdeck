@@ -727,6 +727,8 @@ export class WorkerTurnEngine {
     if (this.composer.modalOpen || this.activity === "needs-input") return "provider-modal";
     if (this.composer.occupied) return "composer-occupied";
     if (this.awaitingResumeReady) return "provider-busy";
+    // A rendered container instruction owns the next turn even before the TUI repaints.
+    if (this.record.executor === "orbstack-container" && this.rendered.length > 0) return "provider-busy";
     // An indeterminate or incomplete durable receipt has no automatic recovery path. Accepting
     // another instruction would write work whose completion can never be captured while the poisoned
     // reservation remains, so fail closed at the existing provider-busy delivery boundary.
@@ -878,9 +880,11 @@ export class WorkerTurnEngine {
       const path = state === "completed"
         ? (["submitted", "acknowledged", "completed"] as const)
         : ([state] as const);
-      let next = entry.state;
-      if (applies) for (const step of path) next = advanceInstruction(next, step);
-      if (next !== entry.state) {
+      // A fast native turn can establish all three states in one observation. Preserve each
+      // reached transition so the durable activity stream includes submission before settlement.
+      if (applies) for (const step of path) {
+        const next = advanceInstruction(entry.state, step);
+        if (next === entry.state) continue;
         entry.state = next;
         const update: InstructionStateUpdate = {
           sessionId: this.record.id,
@@ -891,7 +895,7 @@ export class WorkerTurnEngine {
         };
         this.options.effects.notifyInstructionState(update);
       }
-      if (next !== "completed" && next !== "undelivered" && next !== "cancelled") {
+      if (entry.state !== "completed" && entry.state !== "undelivered" && entry.state !== "cancelled") {
         remaining.push(entry);
       }
     }

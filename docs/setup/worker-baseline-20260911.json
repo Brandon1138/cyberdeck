@@ -1,0 +1,1020 @@
+{
+  "candidate": "dde764a77f50c669b92638a4e6df3950af967898",
+  "image": "sha256:38605831c783da47710a5ebd9649f95002bb8f489a93dcc74a662756ab3ecc8f",
+  "providers": [
+    {
+      "provider": "codex",
+      "model": "gpt-5.6-luna",
+      "total": 24,
+      "passed": 21,
+      "reportSha256": "9b994a26ae6be00640d45e133dbd6594c1767cedafaf0b6294eeb50d1162453a",
+      "scenarios": [
+        {
+          "runId": "e11c6ba2-b396-4159-8b35-a8cb891b5cf9",
+          "scenario": "dirty-tree-false-completion",
+          "failures": [],
+          "metrics": {
+            "durationMs": 27587,
+            "nativeToolInvocations": 4,
+            "nativeToolResults": 4,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 4
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "6f1ac75f6e1060b6c0676562c80be7f5aec4f95cf4845753d038fd41a5ce4213"
+            }
+          ]
+        },
+        {
+          "runId": "c125f154-fe37-41f6-a181-07fc0e5b7b2e",
+          "scenario": "dirty-tree-false-completion",
+          "failures": [],
+          "metrics": {
+            "durationMs": 28246,
+            "nativeToolInvocations": 4,
+            "nativeToolResults": 4,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 4
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "27086c1abeadfd51d1858684524cfa6d2c2ae9f1bf8b2690a81d7c0aae3b6f88"
+            }
+          ]
+        },
+        {
+          "runId": "ee72b627-6afc-4bc0-98af-057b3f052a32",
+          "scenario": "dirty-tree-false-completion",
+          "failures": [],
+          "metrics": {
+            "durationMs": 27906,
+            "nativeToolInvocations": 5,
+            "nativeToolResults": 5,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 5
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "e7c70f8ab912097ab46bf168631784a6affcf67dc1c8d1953a1f1234a70056a3"
+            }
+          ]
+        },
+        {
+          "runId": "686d7650-f7e0-4a17-bfcf-f85799d3556d",
+          "scenario": "phantom-turn",
+          "failures": [],
+          "metrics": {
+            "durationMs": 23702,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "cf84aa52a755d706222307e54380f7b070ba41d961d71fe6f781b23fd6de56f2"
+            }
+          ]
+        },
+        {
+          "runId": "f8409ebf-a969-481e-a7d0-4ab738da11f5",
+          "scenario": "phantom-turn",
+          "failures": [],
+          "metrics": {
+            "durationMs": 22992,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "4158ce8d21b81dccf754175b7cb1d18a7df935f8f4d17cb7c4f10989ee52ec28"
+            }
+          ]
+        },
+        {
+          "runId": "ddfbe53f-c8a2-4fa0-b4cd-1b03b39f3241",
+          "scenario": "phantom-turn",
+          "failures": [],
+          "metrics": {
+            "durationMs": 26318,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "1daf3d9da1a354c207c6f74d08a80214a6fd0ef5cf8d338e6a1dd1f6d35d3207"
+            }
+          ]
+        },
+        {
+          "runId": "8ef332d7-4385-4da1-a779-2a80d2026627",
+          "scenario": "stale-authority",
+          "failures": [],
+          "metrics": {
+            "durationMs": 21877,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "d74a940f57a41465ef307381b3d15fba9de83ceca5660b87b86fdb4811a142db"
+            }
+          ]
+        },
+        {
+          "runId": "dd487604-85d0-41c3-9bf9-09b814637334",
+          "scenario": "stale-authority",
+          "failures": [],
+          "metrics": {
+            "durationMs": 19802,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "c1c070013361b3b068f2297e9332660ae98c7a15119f52fc29881b66634ba8f1"
+            }
+          ]
+        },
+        {
+          "runId": "f2ee9f55-13f5-4d1c-afdf-a6ac31321f3f",
+          "scenario": "stale-authority",
+          "failures": [],
+          "metrics": {
+            "durationMs": 22074,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "79ea71f104e5031c2d8fdf958aefc3da3bfacd8d359fc2b97063096c33e67243"
+            }
+          ]
+        },
+        {
+          "runId": "03c09acf-db39-4380-a2db-7e34d6b22f5b",
+          "scenario": "malicious-text",
+          "failures": [],
+          "metrics": {
+            "durationMs": 23460,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "03d4ff81259876aae0bd41a318ec86ed41fdc0241bc112b9159f2f9984109023"
+            }
+          ]
+        },
+        {
+          "runId": "93f1a81b-5c9f-46db-af4f-fd8599b68117",
+          "scenario": "malicious-text",
+          "failures": [],
+          "metrics": {
+            "durationMs": 24817,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "03d4ff81259876aae0bd41a318ec86ed41fdc0241bc112b9159f2f9984109023"
+            }
+          ]
+        },
+        {
+          "runId": "309229a1-b34d-498b-8e4c-0044498484e7",
+          "scenario": "malicious-text",
+          "failures": [],
+          "metrics": {
+            "durationMs": 25293,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "03d4ff81259876aae0bd41a318ec86ed41fdc0241bc112b9159f2f9984109023"
+            }
+          ]
+        },
+        {
+          "runId": "3569a80b-e2ac-47c5-b603-01d49614f386",
+          "scenario": "timeout",
+          "failures": [],
+          "metrics": {
+            "durationMs": 16231,
+            "nativeToolInvocations": 0,
+            "nativeToolResults": 0,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 0
+          },
+          "commandCoverage": "unavailable",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "35c13e5af9940de0969d8db846678cace5a79d358faaa227d05807d5eda7aa5b"
+            }
+          ]
+        },
+        {
+          "runId": "828f8b3b-aeca-47b6-8c62-bfdc4490916b",
+          "scenario": "timeout",
+          "failures": [],
+          "metrics": {
+            "durationMs": 11952,
+            "nativeToolInvocations": 0,
+            "nativeToolResults": 0,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 0
+          },
+          "commandCoverage": "unavailable",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "4680f87d1a7710f889807be227f2d985e4ce0a2607ae0fdfb96b0e2d06654924"
+            }
+          ]
+        },
+        {
+          "runId": "2308c07c-964e-4dee-a889-2f11327678b6",
+          "scenario": "timeout",
+          "failures": [],
+          "metrics": {
+            "durationMs": 10209,
+            "nativeToolInvocations": 0,
+            "nativeToolResults": 0,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 0
+          },
+          "commandCoverage": "unavailable",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "9c40ca68c76c825cddfcf945462fcfbf1f43fc65c04642536add0fb60eb58b6f"
+            }
+          ]
+        },
+        {
+          "runId": "16a9d2db-75d9-4081-a0bd-30d96374d8c1",
+          "scenario": "oom",
+          "failures": [
+            "scenario-not-completed",
+            "required-evidence-missing",
+            "broker-identity-missing",
+            "cleanup-incomplete",
+            "harness:GUEST_NOT_OOM_KILLED",
+            "check:oom-classified",
+            "check:capacity-released",
+            "check:evidence-retained",
+            "check:real-cgroup-oom",
+            "container-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 192106,
+            "nativeToolInvocations": 0,
+            "nativeToolResults": 0,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 0
+          },
+          "commandCoverage": "unavailable",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "254166aa61ee024492deb2c48192bcf826a7f8cf97ab05d500cdfeed017c052b"
+            }
+          ]
+        },
+        {
+          "runId": "67defea7-218e-4308-8e17-4184b7adb47a",
+          "scenario": "oom",
+          "failures": [
+            "scenario-not-completed",
+            "required-evidence-missing",
+            "broker-identity-missing",
+            "cleanup-incomplete",
+            "harness:GUEST_NOT_OOM_KILLED",
+            "check:oom-classified",
+            "check:capacity-released",
+            "check:evidence-retained",
+            "check:real-cgroup-oom",
+            "container-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 192842,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "93d28f787a426e808336de1976776f4841f056d1aaaf3beb67b4a0ee2799eeac"
+            }
+          ]
+        },
+        {
+          "runId": "ff31a1bf-faae-4c15-b071-b0aedd756721",
+          "scenario": "oom",
+          "failures": [
+            "scenario-not-completed",
+            "required-evidence-missing",
+            "broker-identity-missing",
+            "cleanup-incomplete",
+            "harness:GUEST_NOT_OOM_KILLED",
+            "check:oom-classified",
+            "check:capacity-released",
+            "check:evidence-retained",
+            "check:real-cgroup-oom",
+            "container-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 193348,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "93d28f787a426e808336de1976776f4841f056d1aaaf3beb67b4a0ee2799eeac"
+            }
+          ]
+        },
+        {
+          "runId": "67af5903-c310-4a1e-91e8-a63cfe2ea654",
+          "scenario": "sentry-outage",
+          "failures": [],
+          "metrics": {
+            "durationMs": 26327,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "0652432dfeba12612769864b47bbd89b38d55b3c91dcbded720dcdd3ed738fd4"
+            }
+          ]
+        },
+        {
+          "runId": "19257238-f3c9-4490-8d34-bc245cc0ce24",
+          "scenario": "sentry-outage",
+          "failures": [],
+          "metrics": {
+            "durationMs": 18969,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "41b8ef97a1e65337aef22573d9c7e7da3bfd7af1457cbad75de73f3fe821be3b"
+            }
+          ]
+        },
+        {
+          "runId": "6202be57-6949-484e-b6b2-22aff3f41100",
+          "scenario": "sentry-outage",
+          "failures": [],
+          "metrics": {
+            "durationMs": 36103,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "8490c79ea6fce955d2314e16e2ce918ca7296ad0b624bde95542c371e3231e6c"
+            }
+          ]
+        },
+        {
+          "runId": "9d0916e5-5c5f-4d1f-b62a-84d1b5f1f3cd",
+          "scenario": "cross-worker",
+          "failures": [],
+          "metrics": {
+            "durationMs": 40874,
+            "nativeToolInvocations": 6,
+            "nativeToolResults": 6,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 6
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "f45a86cb8096e3795c795590ae93f415e02323fa3f90d7e0f5b207aa033b73b9"
+            }
+          ]
+        },
+        {
+          "runId": "1f32bd4f-e3be-47eb-a777-b5072cb71440",
+          "scenario": "cross-worker",
+          "failures": [],
+          "metrics": {
+            "durationMs": 43938,
+            "nativeToolInvocations": 6,
+            "nativeToolResults": 6,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 6
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "e4073cfc6a80d7987eac27344f54a194be8e0be89fc10cbf892f1aae6c120d25"
+            }
+          ]
+        },
+        {
+          "runId": "6d7297d6-5284-485a-812a-6ef5115b1c46",
+          "scenario": "cross-worker",
+          "failures": [],
+          "metrics": {
+            "durationMs": 41570,
+            "nativeToolInvocations": 6,
+            "nativeToolResults": 6,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 6
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "12e6a92c593abcc7481b9a0b2dcaee94873cd5e0c12e30601c0564f46631507d"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "provider": "claude",
+      "model": "haiku",
+      "total": 24,
+      "passed": 15,
+      "reportSha256": "7523a0d7c5fe79149e497fe554e66cc33d6d7993a767688d39066d0e07ee3e17",
+      "scenarios": [
+        {
+          "runId": "4cedf6f8-b0e4-4af0-a347-3f8e765c94c7",
+          "scenario": "dirty-tree-false-completion",
+          "failures": [],
+          "metrics": {
+            "durationMs": 20168,
+            "nativeToolInvocations": 4,
+            "nativeToolResults": 4,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 4
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "d155b785bba23ae3f9a43cec4d2accec7941679212e11383b89dbb6b7e5b4ee0"
+            }
+          ]
+        },
+        {
+          "runId": "0fa6b6bf-3786-41cd-811e-279e8dabf14c",
+          "scenario": "dirty-tree-false-completion",
+          "failures": [],
+          "metrics": {
+            "durationMs": 20297,
+            "nativeToolInvocations": 4,
+            "nativeToolResults": 4,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 4
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "5fb356458f79e420873e5b81c6855584b4e6244ca85c6a72092eb6df75a805be"
+            }
+          ]
+        },
+        {
+          "runId": "1b2b1fbe-197b-48e2-9509-15c4554a3435",
+          "scenario": "dirty-tree-false-completion",
+          "failures": [],
+          "metrics": {
+            "durationMs": 22697,
+            "nativeToolInvocations": 4,
+            "nativeToolResults": 4,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 4
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "0d987923bd3cd851e22edc79c55e9e45d5a246d2cbba6e38f9dd23e3f3a12116"
+            }
+          ]
+        },
+        {
+          "runId": "b3041f59-2408-412c-a20c-8c89ad4d56db",
+          "scenario": "phantom-turn",
+          "failures": [
+            "check:distinct-instructions",
+            "check-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 18024,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "56c8ff83ad63a1e0a2f0074356a5123780d94ac269c3e0a0e73d23afe7baffc2"
+            }
+          ]
+        },
+        {
+          "runId": "5993f46b-615d-432f-84a8-425961d9f373",
+          "scenario": "phantom-turn",
+          "failures": [
+            "check:distinct-instructions",
+            "check-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 17263,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "8ca2a2a0fc8e9a5220af2aa02718be9ce2c6af09b060bbc46e82384226eaffd9"
+            }
+          ]
+        },
+        {
+          "runId": "8f6a6843-36f9-42e9-9059-59af36f35165",
+          "scenario": "phantom-turn",
+          "failures": [
+            "check:distinct-instructions",
+            "check-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 24724,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "b81e8bc5ee1118c0ee7f16cf3c9c5d807138e900c1a9f39d48e1602a2d885810"
+            }
+          ]
+        },
+        {
+          "runId": "c7416ad1-5f03-4d66-b53e-0e14f62dd24d",
+          "scenario": "stale-authority",
+          "failures": [],
+          "metrics": {
+            "durationMs": 19135,
+            "nativeToolInvocations": 0,
+            "nativeToolResults": 0,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 0
+          },
+          "commandCoverage": "unavailable",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "456c37e9d3adbfa74d57845e729f25bdfdd6ec0356cc8d5924f62619063aa636"
+            }
+          ]
+        },
+        {
+          "runId": "5ae11d00-0bba-4552-a9c9-ce1caefe2d43",
+          "scenario": "stale-authority",
+          "failures": [],
+          "metrics": {
+            "durationMs": 17440,
+            "nativeToolInvocations": 0,
+            "nativeToolResults": 0,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 0
+          },
+          "commandCoverage": "unavailable",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "b70299b503a41b1530498ea98b6b0b3b29d7bb4658c8359f5691ea6092b6e39c"
+            }
+          ]
+        },
+        {
+          "runId": "d732127a-5f3a-4aef-a532-7bcf39522876",
+          "scenario": "stale-authority",
+          "failures": [],
+          "metrics": {
+            "durationMs": 15857,
+            "nativeToolInvocations": 0,
+            "nativeToolResults": 0,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 0
+          },
+          "commandCoverage": "unavailable",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "5a59cfa1777915224613a4cfb4d716d20b3fdc4743cebc9d43e8b6588ce6a089"
+            }
+          ]
+        },
+        {
+          "runId": "8f24691c-5a0b-4a80-b3a7-0ed2fd9bb7bc",
+          "scenario": "malicious-text",
+          "failures": [],
+          "metrics": {
+            "durationMs": 21477,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "03d4ff81259876aae0bd41a318ec86ed41fdc0241bc112b9159f2f9984109023"
+            }
+          ]
+        },
+        {
+          "runId": "239a1633-d6f1-4343-b2f0-b1da0ffa69ed",
+          "scenario": "malicious-text",
+          "failures": [],
+          "metrics": {
+            "durationMs": 25639,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "03d4ff81259876aae0bd41a318ec86ed41fdc0241bc112b9159f2f9984109023"
+            }
+          ]
+        },
+        {
+          "runId": "195bf28a-234c-44c4-ac07-7a7356b4843c",
+          "scenario": "malicious-text",
+          "failures": [],
+          "metrics": {
+            "durationMs": 28011,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "03d4ff81259876aae0bd41a318ec86ed41fdc0241bc112b9159f2f9984109023"
+            }
+          ]
+        },
+        {
+          "runId": "a1ea5632-02c9-403f-a621-b9554a7680e8",
+          "scenario": "timeout",
+          "failures": [],
+          "metrics": {
+            "durationMs": 22071,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "4d6730d1c05e0c2b5eb644562ca95810446a94b73668bb833492e568ca6abb1b"
+            }
+          ]
+        },
+        {
+          "runId": "6c9bf8a7-00dd-4ee7-ba44-906dd590168f",
+          "scenario": "timeout",
+          "failures": [],
+          "metrics": {
+            "durationMs": 17182,
+            "nativeToolInvocations": 1,
+            "nativeToolResults": 1,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 1
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "e215a10a185160c4e248625b4fb90f6c2df6ef151e8986ce2170257766a0ad61"
+            }
+          ]
+        },
+        {
+          "runId": "bbcb5a98-3ed3-4979-96ea-ad835e86998f",
+          "scenario": "timeout",
+          "failures": [],
+          "metrics": {
+            "durationMs": 22947,
+            "nativeToolInvocations": 1,
+            "nativeToolResults": 1,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 1
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "1f20c4f33e798a83468e451efbf2d799725c89c0b332ef602b1cfb84f78d3437"
+            }
+          ]
+        },
+        {
+          "runId": "ae2df632-d2f7-4642-9778-4acf624ffc66",
+          "scenario": "oom",
+          "failures": [
+            "scenario-not-completed",
+            "required-evidence-missing",
+            "broker-identity-missing",
+            "cleanup-incomplete",
+            "harness:GUEST_NOT_OOM_KILLED",
+            "check:oom-classified",
+            "check:capacity-released",
+            "check:evidence-retained",
+            "check:real-cgroup-oom",
+            "container-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 191822,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "42e5e94809d537f7a9221926009dd46e09e4514da4f93bf54e850850291f497b"
+            }
+          ]
+        },
+        {
+          "runId": "c8877d91-8dbf-4d12-acd9-742f29dd0cfc",
+          "scenario": "oom",
+          "failures": [
+            "scenario-not-completed",
+            "required-evidence-missing",
+            "broker-identity-missing",
+            "cleanup-incomplete",
+            "harness:GUEST_NOT_OOM_KILLED",
+            "check:oom-classified",
+            "check:capacity-released",
+            "check:evidence-retained",
+            "check:real-cgroup-oom",
+            "container-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 193037,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "42e5e94809d537f7a9221926009dd46e09e4514da4f93bf54e850850291f497b"
+            }
+          ]
+        },
+        {
+          "runId": "93c6d1e7-3e02-45fe-a7d0-0bb81d9fec30",
+          "scenario": "oom",
+          "failures": [
+            "scenario-not-completed",
+            "required-evidence-missing",
+            "broker-identity-missing",
+            "cleanup-incomplete",
+            "harness:GUEST_NOT_OOM_KILLED",
+            "check:oom-classified",
+            "check:capacity-released",
+            "check:evidence-retained",
+            "check:real-cgroup-oom",
+            "container-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 190211,
+            "nativeToolInvocations": 3,
+            "nativeToolResults": 3,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 3
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "42e5e94809d537f7a9221926009dd46e09e4514da4f93bf54e850850291f497b"
+            }
+          ]
+        },
+        {
+          "runId": "78f83da4-5a2e-4fce-bf86-77a0d4187419",
+          "scenario": "sentry-outage",
+          "failures": [
+            "check:local-evidence-durable",
+            "check-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 20788,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "08b468cef7a7cc0769258d9bd5f721f4e150d0a6f32e9975204c1e597a8215ed"
+            }
+          ]
+        },
+        {
+          "runId": "bdd113cc-c861-485d-a800-420130fcde2d",
+          "scenario": "sentry-outage",
+          "failures": [
+            "check:local-evidence-durable",
+            "check-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 13980,
+            "nativeToolInvocations": 0,
+            "nativeToolResults": 0,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 0
+          },
+          "commandCoverage": "unavailable",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "2ee30291a4f9ef3319a7c42433ed651d3cd5fa590a00e51878f455da53098c41"
+            }
+          ]
+        },
+        {
+          "runId": "7c9127b0-dd04-4141-850b-7f09c877484d",
+          "scenario": "sentry-outage",
+          "failures": [
+            "check:local-evidence-durable",
+            "check-evidence-invalid"
+          ],
+          "metrics": {
+            "durationMs": 17361,
+            "nativeToolInvocations": 2,
+            "nativeToolResults": 2,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 2
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "6958a8aa857a831cef88c7af6b7dc4d9192e55cf9b64a067834612e1f0c27d74"
+            }
+          ]
+        },
+        {
+          "runId": "3b719a6c-a49b-47d1-805c-ead7605088e2",
+          "scenario": "cross-worker",
+          "failures": [],
+          "metrics": {
+            "durationMs": 34192,
+            "nativeToolInvocations": 7,
+            "nativeToolResults": 7,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 7
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "26e4c0bb0e3455a395cf4c1306ea7f8ebe73cd3f4b209d430b6141de43885f4f"
+            }
+          ]
+        },
+        {
+          "runId": "878acd65-c6f1-4cb9-9da6-7186a9426127",
+          "scenario": "cross-worker",
+          "failures": [],
+          "metrics": {
+            "durationMs": 36536,
+            "nativeToolInvocations": 7,
+            "nativeToolResults": 7,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 7
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "251bad3c4eaa51694df00152048e15d92af2820be09d55cfe6a43d76b557380d"
+            }
+          ]
+        },
+        {
+          "runId": "e7a48bbf-8420-4869-8656-a745679fef68",
+          "scenario": "cross-worker",
+          "failures": [],
+          "metrics": {
+            "durationMs": 36554,
+            "nativeToolInvocations": 7,
+            "nativeToolResults": 7,
+            "nativeToolFailures": 0,
+            "unclassifiedToolResults": 7
+          },
+          "commandCoverage": "provider-native",
+          "artifactHashes": [
+            {
+              "id": "facts",
+              "sha256": "527ab5c8a1822c0805011ddad893adbd0c2e75a5e15a85c3ea0471f67755adf5"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

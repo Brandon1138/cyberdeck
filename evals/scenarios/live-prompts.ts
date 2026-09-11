@@ -1,8 +1,8 @@
 /**
  * Instructions a real provider receives inside its container. Every prompt asks for the same
  * structured report the graders read from the acknowledged worker report, never from prose in
- * the transcript. These have not yet been exercised against a paid model: their wording is a
- * starting point for the first authorized live baseline, not a calibrated contract.
+ * the transcript. The operational acceptance record preserves subscription baseline outcomes, including
+ * model refusals. Prompt wording is versioned benchmark input, not a reliability contract.
  */
 const REPORT = "When finished, call cyberdeck_report_progress once with structuredFacts.changedPaths listing every path you changed relative to the workspace root (an empty list if none).";
 export const livePrompts = {

@@ -233,6 +233,21 @@ describe("WorkerTurnEngine", () => {
     expect(await engine.submitInstruction(input)).toMatchObject({ state: "rendered", expectedTurn: 1 });
   });
 
+  it("reserves a container turn before repaint and records every fast native transition", async () => {
+    const { engine, observations, captureProviderTurns, replay, effects, writes } = harness({ executor: "orbstack-container" });
+    observations.activity = "awaiting-input";
+    engine.appendOutput(Buffer.from("empty composer"), replay);
+    const input = { message: "first", encoded: Buffer.from("first\n"), source: "orchestrator" as const, instructionId: "first" };
+    expect(await engine.submitInstruction(input)).toMatchObject({ state: "rendered", expectedTurn: 1 });
+    expect((await engine.submitInstruction({ ...input, instructionId: "second" })).state).toBe("queued");
+    expect(writes).toHaveLength(1);
+    captureProviderTurns.mockResolvedValueOnce([{ text: "first result", data: { transport: "provider-native" } }]);
+    await engine.reconcileCanonicalTurns();
+    expect(vi.mocked(effects.notifyInstructionState).mock.calls.map(([event]) => event.state))
+      .toEqual(["submitted", "acknowledged", "completed"]);
+    expect(await engine.submitInstruction({ ...input, instructionId: "second" })).toMatchObject({ state: "rendered", expectedTurn: 2 });
+  });
+
   it("banks provider transcript turns with canonical provenance", async () => {
     const { engine, observations, captureProviderTurns, replay } = harness();
     observations.activity = "working";

@@ -52,9 +52,9 @@ Live mode never has a default provider, model, credential or budget. It reads on
 by `CYBERDECK_LIVE_EVAL_CONFIG` (`harness/live-config.ts`): provider, model, optional effort,
 absolute credential file path and `authorizedCeilingUsd` for API mode, or an explicit subscription
 `authentication` source without either API field (see [subscription workers](../docs/setup/subscription-workers.md)), repetitions (default three), optional image
-digest, container cpus/memory, attempt timeout and per-scenario wall clock. The ceiling is written
-into every evidence row; a live row without a positive ceiling, with a scripted provider, or with
-scripted command coverage fails `live-evidence-invalid`. Command coverage in live mode is the
+digest, container cpus/memory, attempt timeout and per-scenario wall clock. API rows record their
+positive authorized ceiling; subscription rows explicitly record subscription billing and unmeasured
+cost. Scripted providers or scripted command coverage fail `live-evidence-invalid`. Command coverage in live mode is the
 provider-native `tool.invocation` evidence the activity recorder captured for that broker; a run
 with none is labelled `unavailable` and fails where command evidence is required.
 
@@ -63,9 +63,9 @@ trusted macOS runner with OrbStack, refuses a live run without a config path, ke
 workflow artifact and shares nothing automatically. Pull requests never reach it.
 
 The live prompts (`scenarios/live-prompts.ts`) ask each worker for the same structured report the
-graders read from the acknowledged worker report. They have not been exercised against a paid model
-yet; the first authorized baseline calibrates them, and its stochastic outcomes are recorded, never
-promoted to reliability proof from a single pass.
+graders read from the acknowledged worker report. They have been exercised with subscription-authenticated Codex and Claude. The
+[operational acceptance record](../docs/setup/worker-operational-rollout.md) records the models,
+image and failures. Stochastic outcomes remain per-run evidence, not a reliability guarantee.
 
 **Proof limits:** offline rows are scripted evaluations, not live agent behaviour. Offline OOM and
 mount checks use an explicitly scripted Engine behind the production OrbStack adapter. Container
@@ -76,3 +76,22 @@ To turn an incident into a regression: select the local run and source event IDs
 original evidence, copy only a sanitized minimal fixture, record provider/version and source
 provenance, demonstrate the failure against an independent invariant, fix it, and retain both
 negative grader tests and the scenario. Never use worker completion prose as fixture ground truth.
+
+## Repeatable provider baseline
+
+Run all eight scenarios three times per configured provider, sequentially, with cache disabled:
+
+```sh
+rtk pnpm --dir evals run eval:baseline /absolute/private/codex.json /absolute/private/claude.json
+```
+
+Each config must request three repetitions. The runner writes separate full reports and summaries
+under `evals/results/baseline-<timestamp>/` and exits nonzero for failed or incomplete suites.
+Summaries include scenario duration, native tool invocations/results, classified failures and
+unclassified tool results. Zero classified failures does not establish that all tools succeeded.
+Use `codexWorkspaceIsolation: "container"` for writable Codex benchmark tasks only when the
+container boundary is explicitly selected (see the subscription setup guide).
+
+This is an on-demand benchmark for the named model/image, not automatic grading of every production
+worker task. Run it after provider, image or dispatch-policy changes; preserve failed attempts and
+compare identical scenarios. Do not treat kernel fault-injection tests as model-quality scores.
