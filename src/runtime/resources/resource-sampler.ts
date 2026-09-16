@@ -7,6 +7,7 @@ export type ResourceSnapshot = {
   vm: ResourceSample[];
   /** Host total excludes guests and shared VM. Never a whole-installation total. */
   managedHostRssBytes: number | null;
+  managedHostPhysicalBytes: number | null;
   guestCgroupBytes: number | null;
   installationPhysicalBytes: null;
   uncertainty: string[];
@@ -53,7 +54,8 @@ export class ResourceSampler {
     const guests = guestResult!.status === "fulfilled" ? guestResult!.value : [];
     const vm = vmResult!.status === "fulfilled" ? vmResult!.value : [];
     const snapshot: ResourceSnapshot = { observedAt, host, guests, vm,
-      managedHostRssBytes: hostResult!.status === "fulfilled" ? sum(host) : null,
+      managedHostRssBytes: hostResult!.status === "fulfilled" && host.every((sample) => sample.memoryKind === "rss") ? sum(host) : null,
+      managedHostPhysicalBytes: hostResult!.status === "fulfilled" && host.every((sample) => sample.memoryKind === "physical-footprint") ? sum(host) : null,
       guestCgroupBytes: guestResult!.status === "fulfilled" ? sum(guests) : null,
       installationPhysicalBytes: null,
       uncertainty: ["shared-vm-attribution-unavailable", "rss-not-physical-footprint",

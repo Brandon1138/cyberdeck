@@ -3,7 +3,7 @@ import { runResourceCommand, type ResourceCommand } from "./bounded-command.js";
 
 export type ProcessIdentity = { pid: number; startTime: string };
 export type ProcessRoot = { owner: ResourceOwner; identity: ProcessIdentity };
-export type ProcessReading = { identity: ProcessIdentity; parentPid: number; rssBytes: number; cpuCoreFraction: number };
+export type ProcessReading = { identity: ProcessIdentity; parentPid: number; rssBytes: number | null; cpuCoreFraction: number | null; physicalFootprintBytes?: number | null; uncertainty?: string[] };
 const key = (identity: ProcessIdentity): string => `${identity.pid}:${identity.startTime}`;
 const ownerKey = (owner: ResourceOwner | Record<string, never>): string => JSON.stringify(owner);
 
@@ -24,7 +24,7 @@ export function parseProcessTable(text: string): ProcessReading[] {
 /** Only observed descendants survive reparenting. A disappeared identity is forgotten. */
 export class ProcessOwnership {
   private known = new Map<string, ResourceOwner>();
-  sample(rows: ProcessReading[], roots: ProcessRoot[], observedAt: string): ResourceSample[] {
+  sample(rows: ProcessReading[], roots: ProcessRoot[], observedAt: string, memoryKind: "rss" | "physical-footprint" = "rss", tableUncertainty: string[] = []): ResourceSample[] {
     const activeOwners = new Map(roots.map((root) => [ownerKey(root.owner), root.owner]));
     const current = new Map(rows.map((row) => [key(row.identity), row]));
     const next = new Map<string, ResourceOwner>();
@@ -40,24 +40,41 @@ export class ProcessOwnership {
     for (const row of rows) {
       const id = key(row.identity);
       if (next.has(id)) continue;
-      const visited = new Set<number>([row.identity.pid]);
-      let parent = byPid.get(row.parentPid);
-      while (parent && !visited.has(parent.identity.pid)) {
-        visited.add(parent.identity.pid);
-        const owner = next.get(key(parent.identity));
-        if (owner) { next.set(id, owner); break; }
-        parent = byPid.get(parent.parentPid);
+      const visited = new Set<number>();
+      const chain: ProcessReading[] = [];
+      let node: ProcessReading | undefined = row;
+      let resolved: ResourceOwner | undefined;
+      while (node && !visited.has(node.identity.pid)) {
+        visited.add(node.identity.pid);
+        resolved = next.get(key(node.identity));
+        if (resolved) break;
+        chain.push(node);
+        const parent = byPid.get(node.parentPid);
+        // A reused parent PID cannot own a child born before that parent's birth.
+        const childBirth = /^libproc:(\d+)\.(\d{6})$/.exec(node.identity.startTime);
+        const parentBirth = parent && /^libproc:(\d+)\.(\d{6})$/.exec(parent.identity.startTime);
+        if (childBirth && parentBirth && BigInt(parentBirth[1]! + parentBirth[2]!) > BigInt(childBirth[1]! + childBirth[2]!)) break;
+        node = parent;
       }
-      const retained = this.known.get(id);
-      if (!next.has(id) && retained && activeOwners.has(ownerKey(retained))) next.set(id, retained);
+      // Current rooted ancestry outranks retained ownership, independent of row order.
+      if (!resolved) for (const ancestor of chain) {
+        const retained = this.known.get(key(ancestor.identity));
+        if (retained && activeOwners.has(ownerKey(retained))) { resolved = retained; break; }
+      }
+      if (resolved) next.set(id, resolved);
     }
     this.known = next;
     return [...activeOwners].map(([id, owner]) => {
       const owned = rows.filter((row) => ownerKey(next.get(key(row.identity)) ?? {}) === id);
-      return { owner, observedAt, source: "macos-process", memoryKind: "rss",
-        memoryBytes: owned.length ? owned.reduce((sum, row) => sum + row.rssBytes, 0) : null,
-        cpuCoreFraction: owned.length ? owned.reduce((sum, row) => sum + row.cpuCoreFraction, 0) : null,
-        pids: owned.length || null, uncertainty: ["rss-not-physical-footprint", "ps-cpu-decayed-average", "unobserved-short-lived-descendants", "start-time-resolution-one-second", ...(owned.length ? [] : ["process-identity-not-observed"])] };
+      const memories = owned.map((row) => memoryKind === "rss" ? row.rssBytes : row.physicalFootprintBytes ?? null);
+      const cpu = owned.map((row) => row.cpuCoreFraction);
+      return { owner, observedAt, source: "macos-process", memoryKind,
+        memoryBytes: memories.length && memories.every((value) => value !== null) ? memories.reduce<number>((sum, value) => sum + value!, 0) : null,
+        cpuCoreFraction: cpu.length && cpu.every((value) => value !== null) ? cpu.reduce<number>((sum, value) => sum + value!, 0) : null,
+        pids: owned.length || null, uncertainty: [...new Set([
+          ...(memoryKind === "rss" ? ["rss-not-physical-footprint", "ps-cpu-decayed-average", "start-time-resolution-one-second", "not-reclamation-identity"] : []),
+          "unobserved-short-lived-descendants", ...tableUncertainty, ...owned.flatMap((row) => row.uncertainty ?? []),
+          ...(owned.length ? [] : ["process-identity-not-observed"])])] };
     });
   }
 }
