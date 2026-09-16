@@ -6,10 +6,22 @@ import { afterEach, expect, test } from "vitest";
 import { TaskEvaluationStore } from "../../src/persistence/task-evaluation-store.js";
 import { auditTerminalInstructions } from "../../src/orchestration/task-evaluation-reconciliation.js";
 import type { LegacyInstructionSnapshot } from "../../src/orchestration/task-evaluation-legacy.js";
+import type { AgentActivity } from "../../src/domain/agent-activity.js";
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 const path = () => { const dir = mkdtempSync(join(tmpdir(), "legacy-evaluation-")); dirs.push(dir); return join(dir, "db"); };
 const record = (status = "completed") => ({ id: randomUUID(), status, updatedAt: "2026-09-16T00:00:00.000Z", message: "private historical input", targetSessionId: randomUUID() });
+test("activity freeze errors rollback snapshot seal; existing seal never acquires new exemptions", () => {
+  const store = new TaskEvaluationStore(path()), r = record();
+  const event: AgentActivity = { schemaVersion: 1, eventId: randomUUID(), sourceKey: `instruction:${r.id}:${r.status}:${r.updatedAt}`,
+    instructionId: r.id, sessionId: r.targetSessionId, runId: randomUUID(), workerId: randomUUID(), sequence: 1,
+    observedAt: r.updatedAt, occurredAt: r.updatedAt, kind: "instruction.settled", provenance: "broker", coverage: "partial", operation: "instruction", outcome: "succeeded" };
+  expect(() => store.initializeLegacyTerminalSnapshot("journal", [r], 100, { sourceId: "activity", throughSequence: 0, events: [event] })).toThrow("BOUNDARY");
+  expect(store.legacyMigration()).toBeUndefined(); expect(store.legacyDispositions()).toEqual([]);
+  store.initializeLegacyTerminalSnapshot("journal", [r]);
+  store.initializeLegacyTerminalSnapshot("journal", [r], 100, { sourceId: "activity", throughSequence: 1, events: [event] });
+  expect(store.hasLegacyTerminalActivity("activity", event)).toBe(false); store.close();
+});
 
 test("sealed exact snapshot survives restart without invented attempts or quality credit", async () => {
   const file = path(), records = [record(), record("cancelled"), record("undelivered")];

@@ -2,7 +2,7 @@ import type { AgentActivityPort } from "./agent-activity-port.js";
 import type { EvaluationReplayStorePort } from "./task-evaluation-ports.js";
 import type { TaskEvaluationService } from "./task-evaluation-service.js";
 import type { InstructionRecord } from "../domain/instruction.js";
-import type { LegacyEvaluationCoveragePort } from "./task-evaluation-legacy.js";
+import type { LegacyEvaluationCoveragePort, LegacyActivityCoveragePort } from "./task-evaluation-legacy.js";
 
 export type EvaluationCoverageAudit = { state: "complete" } | { state: "gap"; reason: string };
 export interface EvaluationReplayHealth {
@@ -21,7 +21,7 @@ export class TaskEvaluationReconciliationService {
   private tail: Promise<unknown> = Promise.resolve();
   private readonly pageSize: number;
   private readonly maxPages: number;
-  constructor(private readonly activity: AgentActivityPort, private readonly outbox: EvaluationReplayStorePort,
+  constructor(private readonly activity: AgentActivityPort, private readonly outbox: EvaluationReplayStorePort & Partial<LegacyActivityCoveragePort>,
     private readonly evaluator: Pick<TaskEvaluationService, "observeTerminal">, private readonly options: EvaluationReconciliationOptions) {
     this.pageSize = options.pageSize ?? 100; this.maxPages = options.maxPages ?? 4;
     if (!/^[a-zA-Z0-9:_-]{1,128}$/.test(options.consumer) || !Number.isSafeInteger(this.pageSize) || this.pageSize < 1 || this.pageSize > 1000
@@ -59,7 +59,9 @@ export class TaskEvaluationReconciliationService {
         let sequence = this.state.checkpoint;
         for (const event of page) {
           if (event.sequence !== sequence + 1) return fail("gap", "canonical-sequence-gap");
-          await this.evaluator.observeTerminal(event); // FULL SQLite commit or throw; never advance past failure.
+          // Only an exact pre-sealed historical event can use a migration disposition.
+          if (!this.outbox.hasLegacyTerminalActivity?.(bounds.sourceId, event))
+            await this.evaluator.observeTerminal(event); // FULL SQLite commit or throw; never advance past failure.
           sequence = event.sequence; this.state.processed++;
         }
         if (sequence !== this.state.checkpoint) {

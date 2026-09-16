@@ -30,6 +30,39 @@ async function fixture() {
     { consumer: "production-v1", pageSize: 1, maxPages: 1, auditCanonicalCoverage: async () => ({ state: "complete" }), ...options });
   return { path, activityPath, outboxPath, activity, outbox, capture, service, reconciler, openActivity };
 }
+test("sealed legacy activity survives restart and bypasses only the exact historical event", async () => {
+  const f = await fixture(), instructionId = randomUUID(), sessionId = randomUUID(), updatedAt = new Date(0).toISOString();
+  const record = { id: instructionId, targetSessionId: sessionId, updatedAt, status: "completed", message: "historical" };
+  const { generation: _generation, ...legacy } = input({ kind: "instruction.settled", provenance: "broker", instructionId, sessionId,
+    occurredAt: updatedAt, sourceKey: `instruction:${instructionId}:completed:${updatedAt}` });
+  const event = await f.activity.append(legacy), sourceId = f.activity.replayBounds().sourceId;
+  f.outbox.initializeLegacyTerminalSnapshot("instructions", [record], 100, { sourceId, throughSequence: 1, events: [event] });
+  expect(f.outbox.hasLegacyTerminalActivity(sourceId, event)).toBe(true);
+  expect(f.outbox.hasLegacyTerminalActivity("replacement", event)).toBe(false);
+  for (const changed of [{ ...event, sequence: 2 }, { ...event, observedAt: new Date(1).toISOString() }, { ...event, generation: 1 }])
+    expect(f.outbox.hasLegacyTerminalActivity(sourceId, changed)).toBe(false);
+  await f.activity.close(); f.outbox.close();
+  const activity = await f.openActivity(), outbox = new TaskEvaluationStore(f.outboxPath);
+  expect(await f.reconciler(activity, outbox, { auditCanonicalCoverage: () => auditTerminalInstructions(outbox, [record]) }).reconcile())
+    .toMatchObject({ state: "caught-up", checkpoint: 1 });
+  expect(f.capture).not.toHaveBeenCalled(); expect(outbox.claim(0, 10)).toBeUndefined();
+  await activity.append({ ...legacy, eventId: randomUUID(), sourceKey: "new-missing-generation", instructionId: randomUUID() });
+  expect(await f.reconciler(activity, outbox).reconcile()).toMatchObject({ state: "gap", reason: "EVALUATION_GENERATION_UNKNOWN", checkpoint: 1 });
+  await activity.close(); outbox.close();
+});
+test("legacy activity correlation rejects any mismatched identity field and known generation", async () => {
+  const f = await fixture(), id = randomUUID(), sessionId = randomUUID(), updatedAt = new Date(0).toISOString();
+  const record = { id, targetSessionId: sessionId, updatedAt, status: "completed" };
+  const { generation: _generation, ...legacy } = input({ kind: "instruction.settled", provenance: "broker", instructionId: id, sessionId,
+    occurredAt: updatedAt, sourceKey: `instruction:${id}:completed:${updatedAt}` });
+  const changes = [{ instructionId: randomUUID() }, { sessionId: randomUUID() }, { occurredAt: new Date(1).toISOString() },
+    { provenance: "worker-report" as const }, { kind: "instruction.cancelled" as const }, { generation: 2 }, { sourceKey: "other" }];
+  const events = changes.map((change, i) => ({ ...legacy, ...change, sequence: i + 1 }));
+  f.outbox.initializeLegacyTerminalSnapshot("instructions", [record], 100, { sourceId: "activity", throughSequence: events.length, events });
+  expect(f.outbox.legacyMigration()?.activity?.events).toBe(0);
+  for (const event of events) expect(f.outbox.hasLegacyTerminalActivity("activity", event)).toBe(false);
+  await f.activity.close(); f.outbox.close();
+});
 test("settlement-before-enqueue crash replays bounded pages after restart without pruning pending history", async () => {
   const f = await fixture(); await f.activity.retainAfter("production-v1", 0);
   await f.activity.append(input()); await f.activity.append(input());

@@ -19,6 +19,15 @@ fail the canonical audit. Restart only reads the sealed set and refuses a change
 Initialization after a replay checkpoint already exists fails closed; migrating an installation
 that has already enabled replay requires a separately reviewed frozen historical boundary.
 
+The optional fourth initializer argument seals retained activity alongside those snapshots:
+`{ sourceId, throughSequence, events }`. The caller captures a bounded, ordered historical
+activity snapshot before startup admits writes. Only broker terminal events without generation,
+correlated to the frozen instruction source, ID, session, timestamp and kind, receive a retained
+full-event hash. Replay accepts that migration disposition only for the original activity source,
+sequence and exact event hash. Changed fields, a replacement journal, later events, known
+generations and unrelated instruction IDs still use normal evaluation and fail closed on gaps.
+An existing seal cannot be expanded with activity on a later initialization.
+
 
 The broker records intents through `TaskEvaluationService` after canonical activity fsync.
 Startup must replay retained canonical activity and recovered instruction terminal receipts;

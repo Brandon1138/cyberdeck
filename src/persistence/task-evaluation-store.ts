@@ -5,7 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 import { TaskEvaluationIntentSchema, TaskEvaluationResultSchema, type TaskEvaluationIntent, type TaskEvaluationResult } from "../domain/task-evaluation.js";
 
 import { evidenceHash, type EvaluationEvidenceManifest, type EvaluationReplayCheckpoint } from "../orchestration/task-evaluation-ports.js";
-import { legacySnapshotHash, terminalInstructionSource, type LegacyInstructionSnapshot, type LegacyEvaluationMigration, type LegacyEvaluationDisposition } from "../orchestration/task-evaluation-legacy.js";
+import { legacySnapshotHash, terminalInstructionSource, type LegacyInstructionSnapshot, type LegacyEvaluationMigration, type LegacyEvaluationDisposition, type LegacyActivitySnapshot } from "../orchestration/task-evaluation-legacy.js";
+import type { AgentActivity } from "../domain/agent-activity.js";
 export { evidenceHash, type EvaluationEvidenceManifest } from "../orchestration/task-evaluation-ports.js";
 export const evaluationKey = (intent: TaskEvaluationIntent): string => createHash("sha256").update(JSON.stringify([intent.attemptId, intent.rubricId, intent.rubricVersion])).digest("hex");
 export interface EvaluationClaim { key: string; token: string; expiresAt: number; intent: TaskEvaluationIntent; manifest: EvaluationEvidenceManifest }
@@ -68,14 +69,17 @@ export class TaskEvaluationStore {
   /** Invoke before any admission, replay checkpoint, or new instruction writes at FIRST
    * initialization. A single FULL transaction seals the allowlist including the empty case.
    * Failure rolls back everything and MUST keep startup/admission closed. Restart never widens it. */
-  initializeLegacyTerminalSnapshot(sourceId: string, records: Iterable<LegacyInstructionSnapshot>, maxRecords = 10000): LegacyEvaluationMigration {
+  initializeLegacyTerminalSnapshot(sourceId: string, records: Iterable<LegacyInstructionSnapshot>, maxRecords = 10000, activity?: LegacyActivitySnapshot): LegacyEvaluationMigration {
     if (!sourceId || sourceId.length > 256 || !Number.isSafeInteger(maxRecords) || maxRecords < 1 || maxRecords > 100000)
       throw new Error("EVALUATION_LEGACY_OPTIONS_INVALID");
+    if (activity && (!activity.sourceId || activity.sourceId.length > 256 || !Number.isSafeInteger(activity.throughSequence) || activity.throughSequence < 0))
+      throw new Error("EVALUATION_LEGACY_ACTIVITY_OPTIONS_INVALID");
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const prior = this.legacyMigration();
       if (prior) {
         if (prior.sourceId !== sourceId) throw new Error("EVALUATION_LEGACY_SOURCE_CONFLICT");
+        if (activity && prior.activity && prior.activity.sourceId !== activity.sourceId) throw new Error("EVALUATION_LEGACY_ACTIVITY_SOURCE_CONFLICT");
         this.db.exec("COMMIT"); return prior;
       }
       if (this.db.prepare("SELECT 1 FROM evaluation_checkpoints LIMIT 1").get()) throw new Error("EVALUATION_LEGACY_INITIALIZATION_TOO_LATE");
@@ -83,6 +87,7 @@ export class TaskEvaluationStore {
         CREATE TABLE evaluation_legacy_snapshots (source TEXT PRIMARY KEY, hash TEXT NOT NULL, result TEXT NOT NULL) WITHOUT ROWID;`);
       let count = 0;
       const hashes: string[] = [];
+      const frozen = new Map<string, LegacyInstructionSnapshot>();
       for (const record of records) {
         if (++count > maxRecords) throw new Error("EVALUATION_LEGACY_SNAPSHOT_LIMIT");
         if (!["completed", "cancelled", "undelivered"].includes(record.status)
@@ -92,9 +97,31 @@ export class TaskEvaluationStore {
         const result: LegacyEvaluationDisposition = { sourceKey, snapshotHash, disposition: "unverified", reason: "legacy-terminal-attempt-identity-unavailable" };
         this.db.prepare("INSERT INTO evaluation_legacy_snapshots VALUES (?,?,?)").run(sourceKey, snapshotHash, JSON.stringify(result));
         hashes.push(`${sourceKey}:${snapshotHash}`);
+        frozen.set(sourceKey, record);
       }
       const manifest: LegacyEvaluationMigration = { schemaVersion: 1, sourceId, snapshots: hashes.length,
         snapshotHash: createHash("sha256").update(JSON.stringify([sourceId, hashes.sort()])).digest("hex") };
+      if (activity) {
+        this.db.exec("CREATE TABLE evaluation_legacy_activity (sequence INTEGER PRIMARY KEY, hash TEXT NOT NULL)");
+        let seen = 0, previous = 0;
+        const activityHashes: string[] = [];
+        for (const event of activity.events) {
+          if (++seen > maxRecords) throw new Error("EVALUATION_LEGACY_ACTIVITY_LIMIT");
+          if (!Number.isSafeInteger(event.sequence) || event.sequence <= previous || event.sequence > activity.throughSequence)
+            throw new Error("EVALUATION_LEGACY_ACTIVITY_BOUNDARY");
+          previous = event.sequence;
+          const record = frozen.get(event.sourceKey);
+          if (!record || event.generation !== undefined || event.provenance !== "broker"
+            || event.instructionId !== record.id || !record.targetSessionId || event.sessionId !== record.targetSessionId
+            || event.occurredAt !== record.updatedAt
+            || event.kind !== (record.status === "completed" ? "instruction.settled" : `instruction.${record.status}`)) continue;
+          const hash = legacySnapshotHash(event);
+          this.db.prepare("INSERT INTO evaluation_legacy_activity VALUES (?,?)").run(event.sequence, hash);
+          activityHashes.push(`${event.sequence}:${hash}`);
+        }
+        manifest.activity = { sourceId: activity.sourceId, throughSequence: activity.throughSequence, events: activityHashes.length,
+          snapshotHash: legacySnapshotHash([activity.sourceId, activity.throughSequence, activityHashes]) };
+      }
       this.db.prepare("INSERT INTO evaluation_legacy_migration VALUES (1,?)").run(JSON.stringify(manifest));
       this.db.exec("COMMIT"); return manifest;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -103,6 +130,12 @@ export class TaskEvaluationStore {
     if (!this.legacyMigration()) return false;
     const row = this.db.prepare("SELECT hash FROM evaluation_legacy_snapshots WHERE source=?").get(terminalInstructionSource(record));
     return row?.hash === legacySnapshotHash(record);
+  }
+  hasLegacyTerminalActivity(sourceId: string, event: AgentActivity): boolean {
+    const boundary = this.legacyMigration()?.activity;
+    if (!boundary || boundary.sourceId !== sourceId || event.sequence > boundary.throughSequence) return false;
+    const row = this.db.prepare("SELECT hash FROM evaluation_legacy_activity WHERE sequence=?").get(event.sequence);
+    return row?.hash === legacySnapshotHash(event);
   }
   legacyDispositions(afterSource = "", limit = 100): LegacyEvaluationDisposition[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("EVALUATION_PAGE_LIMIT");
