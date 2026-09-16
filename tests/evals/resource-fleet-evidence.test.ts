@@ -18,6 +18,24 @@ describe("resource fleet acceptance evidence", () => {
     expect(result.status).toBe("structurally-consistent");
     expect(result.disclaimer).toContain("do not authenticate");
   });
+  it("requires exactly one native first-party subscription Orc covering barrier and common progress", () => {
+    const missing = resourceFleetFixture(); missing.runs[1]!.orchestrators = [];
+    expect(assess(missing).failures).toContain("schema-invalid");
+    const partial = resourceFleetFixture(); partial.runs[1]!.orchestrators[0]!.runnableUntil = at(13000);
+    expect(assess(partial).failures).toContain("run-1:orc-missing-common-progress");
+    const reused = resourceFleetFixture(); reused.runs[1]!.orchestrators[0]!.runtimeId = reused.runs[1]!.workers[0]!.runtimeId;
+    expect(assess(reused).failures).toContain("run-1:orc-worker-runtime-reused");
+    const zeroHost = resourceFleetFixture(); zeroHost.runs[1]!.samples[2]!.managedHostPhysicalBytes = 0;
+    expect(assess(zeroHost).failures).toContain("run-1:live-orc-zero-host-footprint");
+    const api = resourceFleetFixture(); api.runs[1]!.orchestrators[0]!.authMode = "api";
+    expect(assess(api).failures).toContain("run-1:orc-non-subscription-auth");
+  });
+  it("keeps a dirty candidate unverified even when expected identity matches", () => {
+    const fixture = resourceFleetFixture(); fixture.candidate.dirty = true;
+    fixture.runs.forEach((run) => { run.candidate.dirty = true; });
+    expect(assess(fixture).status).toBe("unverified");
+    expect(assess(fixture).unverified).toContain("dirty-candidate");
+  });
   it("rejects eight rows backed by only two runtimes and containers", () => {
     const fixture = resourceFleetFixture();
     fixture.runs[1]!.workers.forEach((worker, i) => { worker.runtimeId = `runtime-${i % 2}`; worker.containerId = String(i % 2).repeat(64); });

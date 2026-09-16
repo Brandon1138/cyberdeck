@@ -17,6 +17,7 @@ export function assessResourceFleetEvidence(raw: unknown, expectedRaw: unknown):
   const parsed = ResourceFleetEvidenceSchema.safeParse(raw), expected = ResourceCandidateSchema.safeParse(expectedRaw);
   if (!parsed.success || !expected.success) { failures.add("schema-invalid"); return result(); }
   const evidence = parsed.data;
+  if (evidence.candidate.dirty) unverified.add("dirty-candidate");
   if (evidence.runs.reduce((sum, run) => sum + run.samples.length, evidence.soak?.samples.length ?? 0) > 100000) {
     failures.add("sample-count-limit"); return result();
   }
@@ -83,6 +84,14 @@ export function assessResourceFleetEvidence(raw: unknown, expectedRaw: unknown):
     const overlapStart = Math.max(...run.workers.map((worker) => ms(worker.runnableFrom)));
     const overlapEnd = Math.min(...run.workers.map((worker) => ms(worker.runnableUntil)));
     if (released < overlapStart || released >= overlapEnd) failures.add(`${scope}:no-common-runnable-barrier`);
+    const orc = run.orchestrators[0]!;
+    ref(orc.evidenceRef, "sanitized-native-events");
+    if (run.candidate.dirty) unverified.add(`${scope}:dirty-candidate`);
+    if (orc.authMode !== "subscription") failures.add(`${scope}:orc-non-subscription-auth`);
+    if (run.workers.some((worker) => worker.runtimeId === orc.runtimeId)) failures.add(`${scope}:orc-worker-runtime-reused`);
+    if (ms(orc.runnableFrom) < ms(run.startedAt) || ms(orc.runnableFrom) > ms(orc.readyAt)
+      || ms(orc.readyAt) > released || ms(orc.runnableUntil) > ms(run.finishedAt)
+      || ms(orc.runnableUntil) <= released) failures.add(`${scope}:orc-interval-invalid`);
     const progressStarts: number[] = [], progressEnds: number[] = [];
     const eventIds = new Set<string>();
     for (const worker of run.workers) {
@@ -110,6 +119,10 @@ export function assessResourceFleetEvidence(raw: unknown, expectedRaw: unknown):
       else { progressStarts.push(commonProgress[0]!); progressEnds.push(commonProgress.at(-1)!); }
     }
     if (progressStarts.length !== 8 || Math.max(...progressStarts) >= Math.min(...progressEnds)) failures.add(`${scope}:no-common-progress-window`);
+    if (progressStarts.length && (ms(orc.runnableFrom) > Math.max(...progressStarts)
+      || ms(orc.runnableUntil) < Math.min(...progressEnds))) failures.add(`${scope}:orc-missing-common-progress`);
+    if (run.samples.some((sample) => ms(sample.at) >= ms(orc.runnableFrom) && ms(sample.at) <= ms(orc.runnableUntil)
+      && sample.managedHostPhysicalBytes === 0)) failures.add(`${scope}:live-orc-zero-host-footprint`);
     samples(run.samples, run.startedAt, run.finishedAt, scope);
   }
   if (!providers.has("claude") || !providers.has("codex")) unverified.add("provider-coverage-incomplete");

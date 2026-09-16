@@ -23,10 +23,16 @@ const Worker = z.object({ workerId: id, runtimeId: id, containerId: hash, genera
   progress: z.array(z.object({ at: time, eventId: id, source: z.enum(["provider-native", "scripted", "unknown"]), evidenceRef: id }).strict()).min(2).max(10000),
   outcome: z.enum(["passed", "failed", "cancelled", "unknown"]), outcomeEvidenceRef: id,
 }).strict();
+const Orc = z.object({ runtimeId: id, sessionId: id, pid: z.number().int().positive(),
+  birthIdentity: z.string().regex(/^libproc:\d+\.\d{6}$/),
+  provider: z.literal("codex"), runtime: z.literal("first-party-codex"),
+  authMode: z.enum(["subscription", "api", "unknown"]), providerVersion: id, model: id, effort: id,
+  readyAt: time, runnableFrom: time, runnableUntil: time, evidenceRef: id,
+}).strict();
 const Run = z.object({ runId: id, phase: z.enum(["warmup", "measured"]), candidate: ResourceCandidateSchema,
   mode: z.enum(["live-subscription", "scripted", "unknown"]), startedAt: time, finishedAt: time,
   barrier: z.object({ barrierId: id, releasedAt: time, evidenceRef: id }).strict(),
-  workers: z.array(Worker).length(8), samples: z.array(Sample).max(100000),
+  orchestrators: z.array(Orc).length(1), workers: z.array(Worker).length(8), samples: z.array(Sample).max(100000),
   healthRpcP95Ms: z.number().finite().nonnegative().nullable(), eventLoopP99Ms: z.number().finite().nonnegative().nullable(),
   captureComplete: z.boolean(), cleanupUnexplainedResources: z.number().int().nonnegative(),
   terminalAttempts: z.number().int().nonnegative(), evaluationDispositions: z.number().int().nonnegative(),

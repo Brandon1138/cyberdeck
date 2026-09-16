@@ -12,6 +12,9 @@ export function resourceFleetFixture(): ResourceFleetEvidence {
     const start = n * 10000;
     evidence.runs.push({ runId: `run-${n}`, phase: n === 0 ? "warmup" : "measured", candidate: { ...candidate }, mode: "live-subscription",
       startedAt: at(start), finishedAt: at(start + 6000), barrier: { barrierId: `barrier-${n}`, releasedAt: at(start + 1500), evidenceRef: "native" },
+      orchestrators: [{ runtimeId: `orc-${n}`, sessionId: `orc-session-${n}`, pid: 100 + n, birthIdentity: `libproc:123.${String(n).padStart(6, "0")}`,
+        provider: "codex", runtime: "first-party-codex", authMode: "subscription", providerVersion: "1.0", model: "fixture-model", effort: "low",
+        readyAt: at(start + 100), runnableFrom: at(start), runnableUntil: at(start + 6000), evidenceRef: "native" }],
       workers: Array.from({ length: 8 }, (_, i) => ({ workerId: `worker-${i}`, runtimeId: `runtime-${n}-${i}`, containerId: (i + 1).toString().repeat(64), generation: 1,
         provider: i % 2 ? "codex" : "claude", providerVersion: "1.0", model: "fixture-model", effort: "low", authMode: "subscription", imageDigest: candidate.imageDigest,
         readyAt: at(start + 1000), runnableFrom: at(start + 500), runnableUntil: at(start + 5500),

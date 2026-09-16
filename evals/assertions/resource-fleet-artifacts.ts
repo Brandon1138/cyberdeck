@@ -35,6 +35,7 @@ export function resourceEvidenceArtifactBodies(evidence: ResourceFleetEvidence):
   const append = (ref: string, record: unknown) => records.get(ref)?.push(record);
   for (const run of evidence.runs) {
     append(run.barrier.evidenceRef, { type: "barrier", runId: run.runId, ...run.barrier });
+    for (const orc of run.orchestrators) append(orc.evidenceRef, { type: "orchestrator-native-runtime", runId: run.runId, ...orc });
     for (const worker of run.workers) {
       const { progress, outcome, outcomeEvidenceRef, ...identity } = worker;
       append(run.barrier.evidenceRef, { type: "worker-ready", runId: run.runId, ...identity });
