@@ -21,6 +21,7 @@ export async function fixture(options: { passed?: boolean; complete?: boolean; s
     rubricId: "task", rubricVersion: "1", evidenceManifestHash: evidenceHash(manifest) };
   const key = store.enqueue(options.reversedIntent ? Object.fromEntries(Object.entries(intent).reverse()) as typeof intent : intent, manifest), files = new EvaluatorFiles(evidence);
   const control = { now: 0, waiting: false, stuck: false, removeFails: false, unavailable: false, oom: false, stoppedPid: 0,
+    startFails: false, logsUnavailable: false,
     forgedOutput: false, forgedHash: false, malformed: false, oversized: false, tamper: undefined as ((c: EvaluatorContainer) => void) | undefined };
   const calls: string[][] = [], releases: string[] = [], reservations: ResourceReservation[] = [];
   let container: EvaluatorContainer | undefined, logs = "", executor: TaskEvaluationExecutor;
@@ -35,7 +36,7 @@ export async function fixture(options: { passed?: boolean; complete?: boolean; s
       const map = (items: string[]) => Object.fromEntries(items.map(v => [v.slice(0, v.indexOf("=")), v.slice(v.indexOf("=") + 1)]));
       const source = value("--mount").split(",").find(v => v.startsWith("src="))!.slice(4);
       container = { Id: "c".repeat(64), Name: `/${value("--name")}`, Config: { Image: image, User: value("--user"), Labels: map(values("--label")) },
-        State: { Running: false, Pid: 0, ExitCode: 0, OOMKilled: false },
+        State: { Running: false, Pid: 0, ExitCode: 0, OOMKilled: false, Status: "created", StartedAt: "0001-01-01T00:00:00Z" },
         HostConfig: { Memory: Number(value("--memory")), MemorySwap: Number(value("--memory-swap")), NanoCpus: Number(value("--cpus")) * 1e9,
           PidsLimit: Number(value("--pids-limit")), NetworkMode: value("--network"), Privileged: false, ReadonlyRootfs: args.includes("--read-only"),
           PidMode: "", IpcMode: "private", CapAdd: null, CapDrop: values("--cap-drop"), SecurityOpt: values("--security-opt"), Binds: null, Devices: [], PortBindings: {},
@@ -54,9 +55,13 @@ export async function fixture(options: { passed?: boolean; complete?: boolean; s
       if (control.oversized) logs = "x".repeat(800 * 1024);
       return container.Id;
     }
-    if (args[0] === "start") { container!.State = { Running: control.stuck, Pid: control.stuck ? 123 : control.stoppedPid, ExitCode: control.oom ? 137 : 0, OOMKilled: control.oom }; return ""; }
+    if (args[0] === "start") {
+      if (control.startFails) throw new Error("start failed before log initialization");
+      container!.State = { Running: control.stuck, Pid: control.stuck ? 123 : control.stoppedPid, ExitCode: control.oom ? 137 : 0,
+        OOMKilled: control.oom, Status: control.stuck ? "running" : "exited", StartedAt: "2026-09-16T00:00:00Z" }; return "";
+    }
     if (args[0] === "stop") { container!.State.Running = false; container!.State.Pid = control.stoppedPid; return ""; }
-    if (args[0] === "logs") return logs;
+    if (args[0] === "logs") { if (control.logsUnavailable) throw new Error("log stream unavailable"); return logs; }
     if (args[0] === "rm") { if (control.removeFails) throw new Error("remove failed"); container = undefined; return ""; }
     throw new Error(`Unexpected mock command ${args[0]}`);
   };

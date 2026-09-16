@@ -190,3 +190,10 @@ terminal launches, restart deduplication, and delayed catalog projection. The fo
 20-test evaluation suite and TypeScript passed; automatic real-container execution remains
 unverified. The first new timing check observed outbox capture before async retirement
 completed; it now waits for complete reconciliation and preserves the durability assertions.
+
+Follow-up High review found no additional P0/P1 in launch recovery/capture, but found an
+evaluator cleanup P1: a never-started container's missing logs could strand evaluation and
+recovery admission. Evaluator cleanup now requires Docker's exact created/PID-zero/zero-start
+identity before recording an explicit no-log observation; previously started containers still
+retain evidence and capacity on log failure. All 35 focused evaluator checks pass, including
+recovery and a subsequent successful attempt. Final source review and exact suite are pending.

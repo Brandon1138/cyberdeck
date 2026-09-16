@@ -4,7 +4,8 @@ import { evaluatorLabels, evaluatorName, type EvaluatorState, type EvaluatorFile
 
 const Container = z.object({ Id: z.string().regex(/^[a-f0-9]{64}$/), Name: z.string(),
   Config: z.object({ Image: z.string(), User: z.string(), Labels: z.record(z.string(), z.string()).nullable() }),
-  State: z.object({ Running: z.boolean(), Pid: z.number().int().nonnegative(), ExitCode: z.number().int(), OOMKilled: z.boolean() }),
+  State: z.object({ Running: z.boolean(), Pid: z.number().int().nonnegative(), ExitCode: z.number().int(), OOMKilled: z.boolean(),
+    Status: z.string().optional(), StartedAt: z.string().optional() }),
   HostConfig: z.object({ Memory: z.number(), MemorySwap: z.number(), NanoCpus: z.number(), PidsLimit: z.number(),
     NetworkMode: z.string(), Privileged: z.boolean(), ReadonlyRootfs: z.boolean(), PidMode: z.string(), IpcMode: z.string(),
     CapAdd: z.array(z.string()).nullable(), CapDrop: z.array(z.string()).nullable(), SecurityOpt: z.array(z.string()).nullable(),

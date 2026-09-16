@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "vitest";
 import { rm, readFile, writeFile, symlink } from "node:fs/promises";
 import { fixture } from "./task-evaluation-executor-fixture.js";
 import { EvaluatorFiles } from "../../../src/runtime/execution/task-evaluation-executor-state.js";
+import { randomUUID } from "node:crypto";
 
 const contexts: Awaited<ReturnType<typeof fixture>>[] = [];
 async function setup(options?: Parameters<typeof fixture>[0]) { const f = await fixture(options); contexts.push(f); return f; }
@@ -134,6 +135,33 @@ test("cleanup retry never creates another container", async () => {
   const f = await setup(); f.control.removeFails = true; await f.executor.reconcile(); await f.executor.runNext();
   f.control.removeFails = false; expect((await f.executor.runNext()).state).toBe("finished");
   expect(f.calls.filter(a => a[0] === "create")).toHaveLength(1); expect(f.releases).toHaveLength(1);
+});
+
+test("never-started evaluator needs no nonexistent logs and does not strand later attempts", async () => {
+  const f = await setup(); f.control.startFails = f.control.logsUnavailable = true;
+  await f.executor.reconcile(); expect((await f.executor.runNext()).state).toBe("finished");
+  expect(f.calls.some(args => args[0] === "logs")).toBe(false);
+  expect(f.container).toBeUndefined(); expect(f.releases).toHaveLength(1);
+  expect(f.store.result(f.key)?.disposition).toBe("infrastructure-error");
+  const state = (await f.files.inventory())[0]!.state;
+  expect(JSON.parse(await readFile(f.files.path(state.runId, "report.json"), "utf8")))
+    .toEqual({ observation: "container-never-started-no-log-stream" });
+  expect(await f.executor.recoveryReady(f.reservations[0]!)).toBe(true);
+  expect((await f.restart().reconcile()).state).toBe("empty");
+  const next = f.store.enqueue({ ...f.intent, attemptId: randomUUID() }, f.manifest);
+  f.control.startFails = f.control.logsUnavailable = false;
+  expect((await f.executor.runNext()).state).toBe("finished");
+  expect(f.store.result(next)?.disposition).toBe("verified-pass"); expect(f.releases).toHaveLength(2);
+});
+
+test("previously-started evaluator retains capacity until logs can be preserved", async () => {
+  const f = await setup(); f.control.logsUnavailable = true;
+  await f.executor.reconcile(); expect((await f.executor.runNext()).state).toBe("blocked");
+  expect((await f.restart().reconcile()).state).toBe("blocked");
+  expect(f.calls.some(args => args[0] === "rm")).toBe(false); expect(f.releases).toHaveLength(0);
+  expect(f.store.result(f.key)).toBeUndefined();
+  f.control.logsUnavailable = false;
+  expect((await f.executor.reconcile()).state).toBe("empty"); expect(f.releases).toHaveLength(1);
 });
 
 test("retention refuses an active run and only prunes settled evidence with fresh absence", async () => {

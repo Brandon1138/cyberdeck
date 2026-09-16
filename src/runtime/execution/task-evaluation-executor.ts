@@ -168,7 +168,13 @@ export class TaskEvaluationExecutor {
     if (current) {
       if (current.State.Running || current.State.Pid !== 0) throw new Error("EVALUATOR_CGROUP_TERMINATION_UNCONFIRMED");
       state.backendId = current.Id; state.exit = { exitCode: current.State.ExitCode, oomKilled: current.State.OOMKilled };
-      const raw = await this.engine.command(["logs", current.Id]);
+      const neverStarted = current.State.Status === "created" && current.State.Pid === 0
+        && current.State.StartedAt === "0001-01-01T00:00:00Z";
+      // A failed first start has no stream. Any previously-started or uncertain state
+      // still requires logs before destructive cleanup and reservation release.
+      const raw = neverStarted ? JSON.stringify({ observation: "container-never-started-no-log-stream" })
+        : await this.engine.command(["logs", current.Id]);
+      if (neverStarted) state.result ??= { disposition: "infrastructure-error", reason: "evaluator-never-started" };
       if (Buffer.byteLength(raw) <= REPORT_CAP) await writeAtomicPrivateFile(this.files.path(state.runId, "report.json"), raw);
       if (current.State.OOMKilled) state.result = { disposition: "infrastructure-error", reason: "evaluator-oom" };
       if (!state.result) {
