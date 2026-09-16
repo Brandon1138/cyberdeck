@@ -47,3 +47,10 @@ describe("resource fleet fail-closed collector", () => {
     expect(CollectorConfigSchema.safeParse({ ...valid, workers: Array(8).fill(choice) }).success).toBe(false);
   });
 });
+
+it("never starts another run after uncooperative timed out launch despite cleanup success", async () => {
+  let launches = 0; const rows: object[] = [];
+  await collectSequence({ run: async () => { launches++; return new Promise(() => {}); },
+    cleanup: async () => ({ complete: true, unexplained: 0 }) }, 5, async row => { rows.push(row); });
+  expect(launches).toBe(1); expect(rows).toHaveLength(2);
+});

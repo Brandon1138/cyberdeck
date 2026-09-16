@@ -48,13 +48,15 @@ export async function collectSequence(adapter: FleetAdapter, timeoutMs: number, 
     const row: Record<string, unknown> = { runId, phase, status: "unverified", startedAt: new Date().toISOString() };
     // Persist intent before a possibly partial launch. Restart reconciliation is mandatory.
     await persist({ ...row, stage: "intent" });
-    try { row.result = await bounded(signal => adapter.run({ runId, phase, workerCount: 8, signal }), timeoutMs); }
+    let runSettled = false;
+    try { row.result = await bounded(signal => adapter.run({ runId, phase, workerCount: 8, signal }).finally(() => { runSettled = true; }), timeoutMs); }
     catch { row.failure = "run-failed-or-timeout"; }
     let safe = false;
     try { const cleanup = await bounded(signal => adapter.cleanup(runId, signal), timeoutMs); row.cleanup = cleanup; safe = cleanup.complete && cleanup.unexplained === 0; }
     catch { row.cleanup = { complete: false }; }
+    row.launchOperationSettled = runSettled;
     row.finishedAt = new Date().toISOString();
     await persist(row);
-    if (!safe) break; // Never compound unknown ownership with another run.
+    if (!safe || !runSettled) break; // Never compound unknown ownership with another run.
   }
 }
