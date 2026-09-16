@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "node": "v24.18.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "fixture": {
+    "nativeBytes": 2904833,
+    "turns": 2000,
+    "fleetRows": 64
+  },
+  "uncachedFleet": false,
+  "requests": 4004,
+  "results": {
+    "nativeCold": {
+      "operations": 1,
+      "wallMs": 173.293458,
+      "cpuMs": 137.638,
+      "rssBytes": 117112832,
+      "maxRssBytes": 117112832
+    },
+    "nativeIdle": {
+      "operations": 20,
+      "wallMs": 196.47024999999996,
+      "cpuMs": 171.52,
+      "rssBytes": 125075456,
+      "maxRssBytes": 125075456
+    },
+    "nativeAppend": {
+      "operations": 20,
+      "wallMs": 275.56929200000013,
+      "cpuMs": 185.436,
+      "rssBytes": 125911040,
+      "maxRssBytes": 125911040
+    },
+    "semanticIdle": {
+      "operations": 20,
+      "wallMs": 243.25679200000013,
+      "cpuMs": 193.44,
+      "rssBytes": 149356544,
+      "maxRssBytes": 149356544
+    },
+    "fleet64Idle": {
+      "operations": 1000,
+      "wallMs": 200.37387500000023,
+      "cpuMs": 169.583,
+      "rssBytes": 166215680,
+      "maxRssBytes": 166215680
+    }
+  }
+}

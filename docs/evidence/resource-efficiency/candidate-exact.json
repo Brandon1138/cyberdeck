@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "node": "v24.18.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "host": {
+    "osRelease": "27.0.0",
+    "cpu": "Apple M4 Pro",
+    "logicalCpus": 12,
+    "memoryBytes": 25769803776
+  },
+  "startedAt": "2026-09-16T09:34:16.379Z",
+  "endedAt": "2026-09-16T09:34:16.853Z",
+  "sourceHashes": {
+    "src/runtime/activity/container-native-source.ts": "adb3495388e2a6354c32013742d97adebfeea33de4106618b0e7d81f3bf56695",
+    "src/runtime/activity/native-source-lines.ts": "1cc5795a966d5f0e07d8bc6ab44494be24e7cc497f9ac077622369e59abf0081",
+    "src/persistence/execution-transcript-store.ts": "f58bd5a952f32c52e852204a6451007278af224f81257f4eb0884569933c85d8",
+    "src/persistence/thread-transcript-store.ts": "7fbe4aadd44f128eee81b3280e3776540e1763668a5309295c791087c18851ff",
+    "src/client/fleet/runtime-frame.ts": "374e0f6b3bb1d9c2fce0dd20e0d5e3315b92cf032dc048091135738bff8f478c",
+    "src/client/fleet/runtime.ts": "643895ae68fe8877202ee97203ebcc9b5a1530c28c7e267c2995cf8880363182",
+    "src/client/fleet/transport.ts": "1a6828c5caf21cff9c51bd68e79efb13d3c4cc4f67dd211038d9d969c6e3ec30",
+    "scripts/bench-resource-efficiency.ts": "e1bf9e56863263af5b4dfe1a63081d714b42589546871e57bfee10f6111a835a"
+  },
+  "fixture": {
+    "nativeBytes": 2904833,
+    "turns": 2000,
+    "fleetRows": 64
+  },
+  "uncachedFleet": false,
+  "requests": 4004,
+  "results": {
+    "nativeCold": {
+      "operations": 1,
+      "wallMs": 51.291292,
+      "cpuMs": 55.562,
+      "rssBytes": 140509184,
+      "maxRssBytes": 140509184
+    },
+    "nativeIdle": {
+      "operations": 20,
+      "wallMs": 76.70250000000001,
+      "cpuMs": 82.177,
+      "rssBytes": 145309696,
+      "maxRssBytes": 145309696
+    },
+    "nativeAppend": {
+      "operations": 20,
+      "wallMs": 124.447791,
+      "cpuMs": 131.646,
+      "rssBytes": 146636800,
+      "maxRssBytes": 146636800
+    },
+    "semanticIdle": {
+      "operations": 20,
+      "wallMs": 98.18062500000002,
+      "cpuMs": 119.712,
+      "rssBytes": 154189824,
+      "maxRssBytes": 154206208
+    },
+    "fleet64Idle": {
+      "operations": 1000,
+      "wallMs": 84.89391699999999,
+      "cpuMs": 102.017,
+      "rssBytes": 187613184,
+      "maxRssBytes": 187613184
+    }
+  }
+}
