@@ -1,10 +1,11 @@
 import { z } from "zod";
+import { ResourceSummarySchema } from "./resource-summary.js";
 import { ExecutionRecordSchema } from "./worker-execution.js";
 import { ControllerIdentitySchema, OwnershipOperationSchema } from "./worker-coordination.js";
 export const AgentActivityKindSchema = z.enum([
   "instruction.accepted", "instruction.queued", "instruction.rendered", "instruction.submitted", "instruction.acknowledged", "instruction.settled", "instruction.undelivered", "instruction.cancelled", "instruction.held",
   "worker.lifecycle", "worker.control", "worker.handoff", "execution.lifecycle", "provider.turn", "provider.response",
-  "tool.invocation", "tool.result", "worker.report", "capture.gap", "workspace.snapshot", "evaluation.result",
+  "tool.invocation", "tool.result", "worker.report", "capture.gap", "workspace.snapshot", "evaluation.result", "resource.summary", "resource.incident",
 ]);
 export const AgentActivitySchema = z.object({
   schemaVersion: z.literal(1), eventId: z.uuid(), sequence: z.number().int().positive(),
@@ -16,7 +17,8 @@ export const AgentActivitySchema = z.object({
   coverage: z.enum(["complete-for-source", "partial", "unavailable"]),
   provider: z.string().max(128).optional(), model: z.string().max(256).optional(),
   providerTurnId: z.string().max(256).optional(), toolCallId: z.string().max(256).optional(),
-  operation: z.enum(["agent", "tool", "instruction", "lifecycle", "control", "capture", "snapshot", "evaluation"]),
+  operation: z.enum(["agent", "tool", "instruction", "lifecycle", "control", "capture", "snapshot", "evaluation", "resource"]),
+  resource: ResourceSummarySchema.optional(),
   executionPhase: ExecutionRecordSchema.shape.phase.optional(),
   outcome: z.enum(["observed", "succeeded", "failed", "cancelled", "unknown"]).default("observed"),
   payloadRef: z.string().max(4096).optional(), sourceHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),

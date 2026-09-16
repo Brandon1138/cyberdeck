@@ -7,6 +7,9 @@ export class TelemetryBudget {
   private used = 0;
   private readonly seen = new Set<string>();
   dropped = 0;
+  private sampledOut = 0;
+  private capped = 0;
+  private duplicates = 0;
   constructor(private readonly dailyCap: number, private readonly sampleRate = 0.1, private readonly now = () => Date.now(), private readonly stateFile?: string) {
     if (stateFile !== undefined) {
       try {
@@ -19,9 +22,10 @@ export class TelemetryBudget {
   admit(runId: string, eventId?: string): boolean {
     const day = new Date(this.now()).toISOString().slice(0, 10);
     if (day !== this.day) { this.day = day; this.used = 0; this.seen.clear(); }
-    if (eventId !== undefined && this.seen.has(eventId)) return false;
+    if (eventId !== undefined && this.seen.has(eventId)) { this.duplicates++; return false; }
     const sample = createHash("sha256").update(runId).digest().readUInt32BE(0) / 2 ** 32;
-    if (sample >= this.sampleRate || this.used >= this.dailyCap) { this.dropped += 1; return false; }
+    if (sample >= this.sampleRate) { this.sampledOut++; this.dropped++; return false; }
+    if (this.used >= this.dailyCap) { this.capped++; this.dropped++; return false; }
     this.used += 1;
     if (eventId !== undefined) this.seen.add(eventId);
     if (this.stateFile !== undefined) {
@@ -33,5 +37,6 @@ export class TelemetryBudget {
     }
     return true;
   }
-  health(): { day: string; used: number; cap: number; dropped: number } { return { day: this.day, used: this.used, cap: this.dailyCap, dropped: this.dropped }; }
+  health() { return { day: this.day, used: this.used, cap: this.dailyCap, dropped: this.dropped,
+    sampledOut: this.sampledOut, capped: this.capped, duplicates: this.duplicates }; }
 }

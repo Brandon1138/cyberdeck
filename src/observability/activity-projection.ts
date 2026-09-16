@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { AgentActivitySchema, type AgentActivity } from "../domain/agent-activity.js";
-const operationNames = ["gen_ai.invoke_agent", "gen_ai.execute_tool", "cyberdeck.instruction", "cyberdeck.lifecycle", "cyberdeck.control", "cyberdeck.capture", "cyberdeck.snapshot", "cyberdeck.evaluation"] as const;
+import { ResourceSummarySchema } from "../domain/resource-summary.js";
+import { projectResourceMeasurements } from "./resource-projection.js";
+const operationNames = ["gen_ai.invoke_agent", "gen_ai.execute_tool", "cyberdeck.instruction", "cyberdeck.lifecycle", "cyberdeck.control", "cyberdeck.capture", "cyberdeck.snapshot", "cyberdeck.evaluation", "cyberdeck.resource"] as const;
 export const RemoteActivitySchema = z.object({
   eventId: z.uuid(), runId: z.uuid(), workerId: z.uuid(), sessionId: z.uuid(), instructionId: z.uuid().optional(), executionId: z.uuid().optional(),
   parentEventId: z.uuid().optional(), causationId: z.uuid().optional(),
@@ -10,6 +12,7 @@ export const RemoteActivitySchema = z.object({
   operation: z.enum(operationNames), provenance: AgentActivitySchema.shape.provenance, coverage: AgentActivitySchema.shape.coverage,
   outcome: AgentActivitySchema.shape.outcome, generation: z.number().int().positive().optional(),
   provider: z.enum(["claude", "codex", "cursor", "antigravity", "scripted", "unknown"]),
+  resource: ResourceSummarySchema.optional(),
 }).strict();
 export type RemoteActivity = z.infer<typeof RemoteActivitySchema>;
 export function projectActivity(event: AgentActivity): RemoteActivity {
@@ -18,6 +21,7 @@ export function projectActivity(event: AgentActivity): RemoteActivity {
       timing: { start: Date.parse(event.startedAt) / 1000, end: Date.parse(event.occurredAt) / 1000, source: event.provenance },
     } : {}),
     eventId: event.eventId, runId: event.runId, workerId: event.workerId, sessionId: event.sessionId,
+    ...(event.resource === undefined ? {} : { resource: ResourceSummarySchema.parse(event.resource) }),
     ...(event.instructionId === undefined ? {} : { instructionId: event.instructionId }),
     ...(event.parentEventId === undefined ? {} : { parentEventId: event.parentEventId }),
     ...(event.causationId === undefined ? {} : { causationId: event.causationId }),
@@ -38,7 +42,8 @@ export function correlationIds(event: RemoteActivity): { traceId: string; spanId
 export function serializeActivityEnvelope(event: RemoteActivity, timestamps: { start: number; end: number }): string {
   const projection = RemoteActivitySchema.parse(event), ids = correlationIds(projection);
   if (!Number.isFinite(timestamps.start) || !Number.isFinite(timestamps.end) || timestamps.end < timestamps.start) throw new Error("TELEMETRY_TIMING_INVALID");
-  const tags = Object.fromEntries(Object.entries(projection).filter(([key]) => !["operation", "eventId", "timing"].includes(key)).map(([key, value]) => [`cyberdeck.${key}`, String(value)]));
+  const tags = Object.fromEntries(Object.entries(projection).filter(([key]) => !["operation", "eventId", "timing", "resource"].includes(key)).map(([key, value]) => [`cyberdeck.${key}`, String(value)]));
+  if (projection.resource) { tags["cyberdeck.resource.reason"] = projection.resource.reason; tags["cyberdeck.resource.enforcement"] = projection.resource.enforcement; }
   return [JSON.stringify({ event_id: projection.eventId.replaceAll("-", "") }),
     JSON.stringify({ type: "transaction", content_type: "application/json" }),
     JSON.stringify({ event_id: projection.eventId.replaceAll("-", ""), type: "transaction", platform: "node", transaction: projection.operation,
@@ -47,7 +52,8 @@ export function serializeActivityEnvelope(event: RemoteActivity, timestamps: { s
       // Absence lets Sentry infer the transport IP and enrich geolocation before scrubbing.
       // An explicit unspecified address carries no identity and prevents that inference.
       user: { ip_address: "0.0.0.0" },
-      tags: { ...tags, "cyberdeck.timing": projection.timing ? `${projection.timing.source}-interval` : "observation-marker" }, spans: [], measurements: {} })].join("\n");
+      tags: { ...tags, "cyberdeck.timing": projection.timing ? `${projection.timing.source}-interval` : "observation-marker" }, spans: [],
+      measurements: projection.resource ? projectResourceMeasurements(projection.resource) : {} })].join("\n");
 }
 
 /** Scrub the SDK's complete envelope, including ambient scope data, before transport serialization. */

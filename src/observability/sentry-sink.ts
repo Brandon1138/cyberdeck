@@ -57,8 +57,9 @@ export class SentrySink {
         attributes: { "cyberdeck.projection": JSON.stringify(projection) } }, () => {}));
     } catch { this.dropped += 1; }
   }
-  health(): { queued: number; dropped: number; budget: ReturnType<TelemetryBudget["health"]> } {
-    return { queued: this.queue.health().queued, dropped: this.dropped + this.queue.health().dropped, budget: this.budget.health() };
+  health() {
+    return { queued: this.queue.health().queued, dropped: this.dropped + this.queue.health().dropped,
+      projectionFailed: this.dropped, transport: this.queue.transportHealth(), budget: this.budget.health() };
   }
   async flush(): Promise<void> { await this.provider.forceFlush(); await Sentry.flush(2000); await this.queue.pump(); }
   async close(): Promise<void> {
