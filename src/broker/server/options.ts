@@ -46,6 +46,7 @@ export interface BrokerServerOptions {
   telemetry?: ActivitySinkPort;
   executionHealth?: () => unknown;
   resourceHealth?: () => unknown;
+  resourceDrain?: () => unknown;
   evaluationHealth?: () => unknown;
   auxiliaryHealth?: () => unknown;
   parkingHealth?: () => unknown;

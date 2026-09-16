@@ -9,7 +9,7 @@ Policy target: 8 GiB total. No production configuration changes or broker restar
 | Orientation | inspected | Source clean except pre-existing untracked AGENTS, handoffs, older prompt; Node 24.18.0, Codex 0.154.0, ChatGPT subscription, Xcode 27.0 |
 | A measurements | in progress | Native libproc and cgroup adapters; 10-minute active baseline and separate Claude/Codex subscription footprint canaries (JSON summaries here). Idle/W1 calibration pending |
 | B efficiency | in progress | Native projection, semantic index and Fleet frame reuse committed; synthetic benchmarks in docs/evidence/resource-efficiency; live plateau/delta refresh incomplete |
-| C admission | in progress | Durable shared admission wired into session preparation/spawn; per-generation container envelopes, observed-budget holds, helper caps. Whole-VM upper-bound calibration, native lifetime cleanup and job adapter support remain open |
+| C admission | in progress | Durable shared admission wired into session preparation/spawn; per-generation container envelopes, observed-budget holds, helper caps. Whole-VM upper-bound calibration, native lifetime cleanup remain open; all four native job adapters now use the shared gate |
 | D lifecycle / native / services | unverified | D3/D4 and D1 parking source integrated; durable parking composition wired; D2 refresh transport still pending. Real service attempt held by observed-budget; native/service success pending |
 | E observability | partial proof | Fresh synthetic receipt matched through authenticated Zen session; see sentry-resource-probe.json. Durable monitor-to-activity bridge wired; final workload receipt pending |
 | F evaluation | unverified | Durable retention/replay, historical instruction outbox and broker capture composition implemented; admitted offline evaluator wired but image/live automatic final dispositions pending |
@@ -36,7 +36,7 @@ Initial process RSS and CPU snapshots are approximate and do not establish physi
 
 Current limitations of the opt-in composition: native polling never proves whole-lifetime cleanup, so
 unproven native reservations remain held. Job dispatch fails explicitly under resource management
-until its runtime identity is accounted; it cannot bypass the gate. VM accounting uses a conservative
+when the required shared launch port is absent or container execution is requested; composed native jobs now have durable PID binding. VM accounting uses a conservative
 whole-VM upper bound pending residual calibration. These are incomplete requirements, not acceptance.
 
 The worktree now has an independent frozen-lockfile install (Node 24.18.0, pnpm 11.5.0). The lockfile
@@ -62,3 +62,21 @@ execution identity; legacy missing identity remains an explicit migration gap.
 Current composition checks: TypeScript passed; 68 resource/architecture/authority/read-model/
 projection tests and 83 gateway/coordination/parking/service/evaluation tests passed. These
 are source checks of the dirty composition checkpoint, not final-candidate or live acceptance.
+
+Additional checkpoints: full regression at `93ed28a` passed **224 files / 2,470 tests**.
+The job composition at `cf4138e` adds asynchronous queued receipts, canonical family recheck
+before preparation, and cancellation of resource waits. The interim High review of `93ed28a`
+found native workload collisions, stale auxiliary queue debt, and missing integration cleanup
+retries; `2ea67ba` integrates the 52-test remediation. This is not final H acceptance.
+
+At 2026-09-16T11:46:03.516Z, read-only current-capacity inspection found native physical
+9,493,627,776 bytes, VM physical 4,645,412,768 bytes, conservative total 14,139,040,544 bytes,
+normal host pressure and unchanged container inventory. Implementation tooling accounted for
+2,859,186,056 native bytes / 58 processes; the larger Orc tree 1,896,373,104 bytes / 17 processes;
+existing broker 740,255,568 bytes. Exact source was `8c7acd4` plus the untracked inspection script.
+This active-load snapshot is not W0/W1 or proof of optimized eight-worker infeasibility.
+
+Isolated evaluation dependencies installed from the frozen lockfile; exact eval TypeScript
+command passed and production dependency audit reported no known vulnerabilities at `8c7acd4`.
+Worker/evaluator image builds and live Promptfoo container execution remain capacity-held.
+The native lifetime mechanism and automatic subscription refresh remain unresolved.

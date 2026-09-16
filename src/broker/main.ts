@@ -184,6 +184,7 @@ export async function runBroker(
   }
   const activity = withActivitySink(localActivity, telemetry);
   const instructionStore = new InstructionStore(stateDirectory);
+  const jobStore = new JobStore(stateDirectory);
   let evaluationRuntime: Awaited<ReturnType<typeof brokerEvaluationRuntime>> | undefined;
   let auxiliaryRuntime: Awaited<ReturnType<typeof brokerAuxiliaryRuntime>> | undefined;
   let parkingRuntime: Awaited<ReturnType<typeof brokerParkingRuntime>> | undefined;
@@ -258,7 +259,7 @@ export async function runBroker(
   if (config.resourceManagement) {
     try {
       evaluationRuntime = await brokerEvaluationRuntime({ directory: config.resourceManagement.directory,
-        activity, instructions: () => instructionStore.list(), instructionVersion: () => instructionStore.version(),
+        activity, instructions: () => instructionStore.list(), instructionVersion: () => instructionStore.version(), jobs: jobStore,
         ...(resourceRuntime ? { execution: { config, resource: resourceRuntime } } : {}) });
     } catch (error) {
       await resourceRuntime?.close();
@@ -403,7 +404,7 @@ export async function runBroker(
     stateDirectory,
     config,
     journal,
-    jobStore: new JobStore(stateDirectory),
+    jobStore,
     artifacts: artifactStore,
     leaseStore: new LeaseStore(stateDirectory),
     adapters: (context) =>
@@ -444,7 +445,8 @@ export async function runBroker(
 
   server = new BrokerServer({
     activity, executionHealth: executionRuntime.health,
-    ...(resourceRuntime ? { resourceHealth: () => ({ ...resourceRuntime.health(), activity: resourceActivity?.health() }) } : {}),
+    ...(resourceRuntime ? { resourceHealth: () => ({ ...resourceRuntime.health(), activity: resourceActivity?.health() }),
+      resourceDrain: () => { resourceRuntime!.drain(); runtime.scheduler.closeAdmission(); return resourceRuntime!.health(); } } : {}),
     ...(auxiliaryRuntime ? { auxiliaryHealth: auxiliaryRuntime.health } : {}),
     ...(parkingRuntime ? { parkingHealth: parkingRuntime.health } : {}),
     ...(evaluationRuntime ? { evaluationHealth: evaluationRuntime.health } : {}),

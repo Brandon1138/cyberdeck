@@ -1,0 +1,112 @@
+{
+  "sourceSha": "302755eaace02d04e00056e472a278f58397d19e",
+  "dirty": true,
+  "mode": "read-only-current-capacity",
+  "node": "v24.18.0",
+  "budgetBytes": 8589934592,
+  "inventoryUnchanged": true,
+  "limitations": [
+    "single snapshot; not idle, concurrency or soak acceptance",
+    "external control roots explicitly supplied; no full installation census",
+    "native ancestry polling cannot prove full lifetime ownership",
+    "whole VM upper bound; residual attribution uncalibrated"
+  ],
+  "observedAt": "2026-09-16T11:46:03.516Z",
+  "managedNativePhysicalBytes": 9493627776,
+  "conservativePhysicalUpperBytes": 14139040544,
+  "pressure": "normal",
+  "vm": {
+    "vmPhysicalBytes": 4645412768,
+    "ownedGuestBytes": 0,
+    "foreignGuestBytes": 2289840128,
+    "residualVmBytes": 2355572640,
+    "attributedVmEstimateBytes": 2355572640,
+    "conservativeVmUpperBytes": 4645412768,
+    "uncertaintyReserveBytes": 268435456,
+    "uncertainty": [
+      "guest-usage-not-host-residency",
+      "shared-vm-residual-fully-charged"
+    ]
+  },
+  "artifactDirectory": "/private/tmp/cyberdeck-resource-capacity-02",
+  "nativeBreakdown": [
+    {
+      "kind": "control",
+      "workload": "existing-broker",
+      "physicalBytes": 740255568,
+      "pids": 1
+    },
+    {
+      "kind": "control",
+      "workload": "explicit-control-85652",
+      "physicalBytes": 356213128,
+      "pids": 1
+    },
+    {
+      "kind": "control",
+      "workload": "explicit-control-41092",
+      "physicalBytes": 2859186056,
+      "pids": 58
+    },
+    {
+      "kind": "orchestrator",
+      "workload": "de48d3e7-4ac0-431e-ae15-57763660f789",
+      "physicalBytes": 1896373104,
+      "pids": 17
+    },
+    {
+      "kind": "worker",
+      "workload": "50e5db8b-a0df-4e8d-8d8a-59521acb86ce",
+      "physicalBytes": 640907560,
+      "pids": 11
+    },
+    {
+      "kind": "orchestrator",
+      "workload": "f5c54cf5-dbfe-4cbe-938b-bf8f13fe053a",
+      "physicalBytes": 144376960,
+      "pids": 1
+    },
+    {
+      "kind": "worker",
+      "workload": "8f0810c8-d2d2-47f4-9222-aad377e28942",
+      "physicalBytes": 454231584,
+      "pids": 9
+    },
+    {
+      "kind": "worker",
+      "workload": "f778fa9d-2b03-4239-bb0e-f8ed7a6f06c2",
+      "physicalBytes": 446777152,
+      "pids": 9
+    },
+    {
+      "kind": "worker",
+      "workload": "6e648e39-956d-4060-8a78-10b7898ff4ea",
+      "physicalBytes": 461817760,
+      "pids": 9
+    },
+    {
+      "kind": "worker",
+      "workload": "389b768b-5ac5-474d-b33c-c1688dc12a0e",
+      "physicalBytes": 470304744,
+      "pids": 9
+    },
+    {
+      "kind": "worker",
+      "workload": "ddf9fec4-1d4b-4741-bc63-f8a26a5bf17b",
+      "physicalBytes": 480449512,
+      "pids": 11
+    },
+    {
+      "kind": "worker",
+      "workload": "3a8e9761-a09c-4461-b8b9-8de9bea79a7c",
+      "physicalBytes": 465425048,
+      "pids": 11
+    },
+    {
+      "kind": "control",
+      "workload": "broker",
+      "physicalBytes": 77309600,
+      "pids": 4
+    }
+  ]
+}

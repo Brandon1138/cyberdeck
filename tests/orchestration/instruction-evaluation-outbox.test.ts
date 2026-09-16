@@ -6,6 +6,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { InstructionRecordSchema } from "../../src/domain/instruction.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { InstructionStore } from "../../src/persistence/instruction-store.js";
+import { JobStore } from "../../src/persistence/job-store.js";
 import { AgentActivityStore } from "../../src/persistence/agent-activity-store.js";
 import { TaskEvaluationStore } from "../../src/persistence/task-evaluation-store.js";
 import { activityInstructionStore } from "../../src/orchestration/activity-instruction-store.js";
@@ -46,7 +47,7 @@ test("canonical settlement survives a crash before activity append and reconcile
   await f.wrapped.put({ ...record, status: "completed", updatedAt: new Date(1).toISOString() });
   await f.activity.close(); f.advance();
   const reopened = await AgentActivityStore.open(join(f.path, "activity"));
-  const runtime = await brokerEvaluationRuntime({ directory: f.path, activity: reopened, instructions: () => new InstructionStore(f.path).list() });
+  const runtime = await brokerEvaluationRuntime({ directory: f.path, activity: reopened, instructions: () => new InstructionStore(f.path).list(), jobs: new JobStore(f.path) });
   await runtime.replay.reconcile();
   expect(runtime.health().capture.state).toBe("caught-up");
   expect(runtime.store.health().pending).toBe(1);

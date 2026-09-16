@@ -28,6 +28,7 @@ test("reconciliation and admission gate all container creation; pinned fixed pro
 test.each([
   [{ passed: false }, "verified-fail"], [{ complete: false }, "unverified"], [{ source: "worker" }, "unverified"],
   [{ checks: [] }, "unverified"], [{ event: { kind: "profile.settled", outcome: "unknown" } }, "infrastructure-error"],
+  [{ event: { kind: "job.settled", outcome: "unknown" } }, "infrastructure-error"],
   [{ event: { kind: "profile.settled", outcome: "succeeded" }, checks: ["missing"] }, "unverified"],
   [{ event: { outcome: "cancelled" } }, "cancelled"],
 ] as const)("independent host grading handles %j as %s", async (options, disposition) => {

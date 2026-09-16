@@ -24,6 +24,11 @@ export const activityMethods: Record<string, BrokerMethodHandler> = {
   "profile.health": async (server) => server.options.auxiliaryHealth?.() ?? { configured: false },
   "parking.health": async (server) => server.options.parkingHealth?.() ?? { configured: false },
   "resource.health": async (server) => server.options.resourceHealth?.() ?? { configured: false, hold: "measurement-not-configured" },
+  "resource.drain": async (server, _context, frame) => {
+    z.object({}).strict().parse(frame.params);
+    if (!server.options.resourceDrain) throw new Error("RESOURCE_MANAGEMENT_NOT_CONFIGURED");
+    return server.options.resourceDrain();
+  },
   "telemetry.health": async (server) => server.options.telemetry?.health() ?? { enabled: false },
   "activity.health": async (server) => server.options.activity?.health() ?? { degraded: true, dropped: 0, retained: 0 },
 };
