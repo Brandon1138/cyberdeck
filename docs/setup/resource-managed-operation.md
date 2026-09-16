@@ -119,3 +119,5 @@ For a future mini, record Node/provider versions, OrbStack startup, private stat
 subscription login/Keychain, FileVault/login requirements and SSH/tmux recovery. Keep tests
 headless until nvim alternate-checkout/version/namespace ownership is resolved. MacBook results
 do not replace the later physical M4 mini gate or prove unattended startup past login authority.
+The [mini installation runbook](resource-managed-mini.md) lists the target preparation and
+physical acceptance steps without claiming that unavailable hardware has been verified.
