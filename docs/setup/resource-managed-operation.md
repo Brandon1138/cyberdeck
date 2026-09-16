@@ -90,7 +90,10 @@ evaluation tests, both auxiliary profiles and the full 24-hour soak. On the firs
 initialization, legacy terminal instructions with neither historical generation nor terminal
 projection receive sealed snapshot dispositions marked unverified. They are not reconstructed
 attempts or model-quality samples. The snapshot cannot grow after startup; changed/new missing
-projections still hold admission. A prior evaluation checkpoint without the migration seal
+projections still hold admission. Retained legacy terminal activity is covered only by its
+sealed original source, sequence boundary and full event hash. Initial admission also waits
+for complete startup replay and canonical coverage audit; the first bounded replay page is
+not readiness. A prior evaluation checkpoint without the migration seal
 requires reviewed migration rather than silently widening coverage. Interrupted-job supersession must
 be resolved by canonical job ID before counting model-quality samples. No model comparisons
 or completed deployment are inferred from missing evidence.

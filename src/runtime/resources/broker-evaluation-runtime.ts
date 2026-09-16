@@ -1,3 +1,4 @@
+import { legacyEvaluationActivitySnapshot } from "./legacy-evaluation-snapshot.js";
 import { join } from "node:path";
 import type { AgentActivityPort } from "../../orchestration/agent-activity-port.js";
 import { TaskEvaluationStore } from "../../persistence/task-evaluation-store.js";
@@ -23,7 +24,8 @@ export async function brokerEvaluationRuntime(options: {
   let instructionSnapshot: InstructionRecord[];
   try {
     instructionSnapshot = await options.instructions();
-    store.initializeLegacyTerminalSnapshot(options.instructionSourceId, instructionSnapshot);
+    const legacyActivity = store.legacyMigration() ? undefined : await legacyEvaluationActivitySnapshot(options.activity);
+    store.initializeLegacyTerminalSnapshot(options.instructionSourceId, instructionSnapshot, 10000, legacyActivity);
   } catch (error) { store.close(); throw error; }
   const service = new TaskEvaluationService(store, { capture: async event => {
     if (!event.generation) throw new Error("EVALUATION_GENERATION_UNKNOWN");
@@ -51,7 +53,13 @@ export async function brokerEvaluationRuntime(options: {
       return auditTerminalJobs(store, jobSnapshot);
     },
   });
-  await replay.reconcile();
+  let startupReady = false;
+  const reconcile = async () => {
+    const result = await replay.reconcile();
+    if (result.state === "caught-up") startupReady = true;
+    return result;
+  };
+  await reconcile();
   let executor: TaskEvaluationExecutor | undefined;
   const configured = options.execution?.config.resourceManagement?.evaluation;
   if (configured && options.execution) {
@@ -73,7 +81,7 @@ export async function brokerEvaluationRuntime(options: {
     const signature = JSON.stringify([options.activity.replayBounds?.(), options.instructionVersion?.(), options.jobs?.version()]);
     if (!pending && (signature !== lastSignature || Date.now() - auditedAt >= 60000)) {
       lastSignature = signature; auditedAt = Date.now();
-      pending = replay.reconcile().finally(() => { pending = undefined; });
+      pending = reconcile().finally(() => { pending = undefined; });
     }
     if (executor && !evaluation && !abort.signal.aborted && Date.now() >= nextEvaluationAt
       && (store.health().pending > 0 || executor.health().state === "blocked" || !executor.health().reconciled)) {
@@ -82,9 +90,9 @@ export async function brokerEvaluationRuntime(options: {
         .finally(() => { evaluation = undefined; });
     }
   }, 1000).unref();
-  return { store, service, replay,
-    admissionHold: () => ["gap", "backpressure"].includes(replay.health().state) ? "evaluation-capture-gap" : null,
-    health: () => ({ capture: replay.health(), legacy: store.legacyMigration(), outbox: store.health(), evaluator: executor?.health() ?? "not-configured" }),
-    close: async () => { clearInterval(timer); abort.abort(); await Promise.all([pending, evaluation]); await replay.reconcile(); store.close(); },
+  return { store, service, replay: { reconcile, health: () => replay.health() },
+    admissionHold: () => !startupReady || ["gap", "backpressure"].includes(replay.health().state) ? "evaluation-capture-gap" : null,
+    health: () => ({ startupReady, capture: replay.health(), legacy: store.legacyMigration(), outbox: store.health(), evaluator: executor?.health() ?? "not-configured" }),
+    close: async () => { clearInterval(timer); abort.abort(); await Promise.all([pending, evaluation]); await reconcile(); store.close(); },
   };
 }

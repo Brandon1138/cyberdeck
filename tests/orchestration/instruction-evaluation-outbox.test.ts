@@ -81,3 +81,37 @@ test("broker startup seals preexisting unverified history without exempting a la
   expect(restarted.admissionHold()).toBe("evaluation-capture-gap");
   await restarted.close(); await f.activity.close();
 });
+
+test.each([false, true])("startup stays held until the first full audit, late invalid terminal=%s", async invalid => {
+  const f = await fixture();
+  for (let i = 0; i < 401; i++) await f.activity.append({ schemaVersion: 1, eventId: randomUUID(), sourceKey: `startup-${i}`,
+    runId: f.record.id, workerId: f.record.targetSessionId, sessionId: f.record.targetSessionId, instructionId: f.record.id,
+    kind: invalid && i === 400 ? "instruction.settled" : "instruction.accepted", operation: "instruction",
+    provenance: "broker", coverage: "partial", observedAt: new Date().toISOString(), outcome: "observed" });
+  const runtime = await brokerEvaluationRuntime({ directory: f.path, instructionSourceId: "fixture-journal", activity: f.activity,
+    instructions: () => f.store.list(), jobs: new JobStore(f.path) });
+  expect(runtime.health()).toMatchObject({ startupReady: false, capture: { state: "pending" } });
+  expect(runtime.admissionHold()).toBe("evaluation-capture-gap");
+  await runtime.replay.reconcile();
+  expect(runtime.health().startupReady).toBe(!invalid);
+  expect(runtime.admissionHold()).toBe(invalid ? "evaluation-capture-gap" : null);
+  await runtime.close(); await f.activity.close();
+});
+
+test("legacy retained terminal activity receives only its exact sealed unverified snapshot coverage", async () => {
+  const f = await fixture(), record = { ...f.record, status: "completed" as const };
+  await f.store.put(record);
+  const event = { schemaVersion: 1 as const, eventId: randomUUID(), sourceKey: `instruction:${record.id}:${record.status}:${record.updatedAt}`,
+    runId: record.id, workerId: record.targetSessionId, sessionId: record.targetSessionId, instructionId: record.id,
+    kind: "instruction.settled" as const, operation: "instruction" as const, provenance: "broker" as const,
+    coverage: "partial" as const, occurredAt: record.updatedAt, observedAt: new Date().toISOString(), outcome: "observed" as const };
+  await f.activity.append(event);
+  const runtime = await brokerEvaluationRuntime({ directory: f.path, instructionSourceId: "fixture-journal", activity: f.activity,
+    instructions: () => f.store.list(), jobs: new JobStore(f.path) });
+  expect(runtime.health()).toMatchObject({ startupReady: true, capture: { state: "caught-up" }, legacy: { snapshots: 1 } });
+  expect(runtime.admissionHold()).toBeNull(); expect(runtime.store.health().pending).toBe(0);
+  await f.activity.append({ ...event, eventId: randomUUID(), sourceKey: `${event.sourceKey}:after-seal` });
+  await runtime.replay.reconcile();
+  expect(runtime.admissionHold()).toBe("evaluation-capture-gap");
+  await runtime.close(); await f.activity.close();
+});

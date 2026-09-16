@@ -112,3 +112,19 @@ new/changed records, disk failure and modern projection gaps are covered; 28 foc
 and TypeScript pass. Whole-history Gitleaks at `68d425e` scanned 551 commits with no leaks.
 Native lifetime SDK findings are in `native-lifetime-investigation.md`; the unresolved
 supervision boundary still prevents native cleanup and operational refresh completion.
+
+
+At 2026-09-16T12:38:42.476Z, exact clean `e87d381` read-only census measured native
+7,432,675,288 bytes plus VM 1,760,528,024 bytes = 9,193,203,312 bytes (~8.56 GiB),
+603,268,720 bytes above target. The running foreign container set was empty, unlike the
+previous baseline; retained foreign containers show recent stops and the database identity
+changed. This work issued no stop/restart/prune against those services. Cause/actor remains
+unverified. The immediate before/after inventory of this census matched. Original broker
+85613 and Fleet 85652 still have their original September 14 process start identities.
+
+Legacy replay now additionally covers only exact preexisting terminal activity source,
+sequence and hash; missing-generation events cannot receive a broad instruction-ID waiver.
+Initial admission waits for first complete replay plus canonical coverage audit, including
+histories exceeding the 400-event per-pass limit. Composition regressions pass 32 tests.
+The strict W1/soak artifact validator is integrated, but no live fleet collector result or
+24-hour soak is implied by its synthetic negative fixtures.
