@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AgentActivity } from "../domain/agent-activity.js";
 import type { TaskEvaluationIntent } from "../domain/task-evaluation.js";
-import { evidenceHash, TaskEvaluationStore, type EvaluationEvidenceManifest } from "../persistence/task-evaluation-store.js";
+import { evidenceHash, type TaskEvaluationOutboxPort, type EvaluationEvidenceManifest } from "./task-evaluation-ports.js";
 
 export interface TaskEvaluationEvidencePort {
   /** Read only host-owned immutable artifacts. Missing artifacts return incomplete evidence.
@@ -11,7 +11,7 @@ export interface TaskEvaluationEvidencePort {
 /** Called after canonical fsync. Exceptions leave the canonical source pending for replay;
  * callers must expose backpressure and retain source journals until reconciliation succeeds. */
 export class TaskEvaluationService {
-  constructor(private readonly store: TaskEvaluationStore, private readonly evidence: TaskEvaluationEvidencePort,
+  constructor(private readonly store: TaskEvaluationOutboxPort, private readonly evidence: TaskEvaluationEvidencePort,
     private readonly rubric: { id: string; version: string }) {}
   async observeTerminal(event: AgentActivity): Promise<void> {
     if (event.provenance === "worker-report") return;

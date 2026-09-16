@@ -4,16 +4,8 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { TaskEvaluationIntentSchema, TaskEvaluationResultSchema, type TaskEvaluationIntent, type TaskEvaluationResult } from "../domain/task-evaluation.js";
 
-export interface EvaluationEvidenceManifest {
-  schemaVersion: 1;
-  terminalEvent: unknown;
-  /** Trusted host checks only. A worker's completion report is never a check. */
-  checks: { id: string; passed: boolean; source: "host-verified"; artifactHash: string }[];
-  complete: boolean;
-  versions?: { inputHash: string; codeRevision: string; toolVersions: Record<string, string> };
-  metadata: { provider?: string; model?: string; effort?: string; image?: string; cli?: string; modelSource: "observed" | "launch" | "unknown" };
-}
-export const evidenceHash = (manifest: EvaluationEvidenceManifest): string => createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
+import { evidenceHash, type EvaluationEvidenceManifest } from "../orchestration/task-evaluation-ports.js";
+export { evidenceHash, type EvaluationEvidenceManifest } from "../orchestration/task-evaluation-ports.js";
 export const evaluationKey = (intent: TaskEvaluationIntent): string => createHash("sha256").update(JSON.stringify([intent.attemptId, intent.rubricId, intent.rubricVersion])).digest("hex");
 export interface EvaluationClaim { key: string; token: string; expiresAt: number; intent: TaskEvaluationIntent; manifest: EvaluationEvidenceManifest }
 
