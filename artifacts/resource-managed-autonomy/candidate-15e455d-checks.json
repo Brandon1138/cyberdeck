@@ -1,0 +1,99 @@
+{
+  "source": "15e455d16c5fb1eb20dc6a59bb62b4ab74224065",
+  "dirty": false,
+  "node": "v24.18.0",
+  "tests": {
+    "files": 238,
+    "passed": 2628,
+    "failed": 0
+  },
+  "checks": {
+    "check": {
+      "exitCode": 0,
+      "log": "check.log"
+    },
+    "unit": {
+      "exitCode": 0,
+      "log": "unit.log"
+    },
+    "build": {
+      "exitCode": 0,
+      "log": "build.log"
+    },
+    "eval-types": {
+      "exitCode": 0,
+      "log": "eval-types.log"
+    },
+    "offline": {
+      "exitCode": 0,
+      "log": "offline.log"
+    },
+    "audit": {
+      "exitCode": 0,
+      "log": "audit.log"
+    },
+    "secrets": {
+      "exitCode": 1,
+      "log": "secrets.log"
+    },
+    "pack": {
+      "exitCode": 0,
+      "log": "pack.log"
+    },
+    "clean-install": {
+      "exitCode": 0,
+      "log": "clean-install.log"
+    },
+    "installed-version": {
+      "exitCode": 0,
+      "log": "installed-version.log"
+    },
+    "installed-dependencies": {
+      "exitCode": 0,
+      "log": "installed-dependencies.log"
+    }
+  },
+  "package": {
+    "filename": "ishmael38-cyberdeck-0.1.0-alpha.2.tgz",
+    "sha256": "c77f9c7855e3cbe5444c022fd17045c74176c5ccdbfa4ae3157899bf7fc455cd",
+    "files": 1161
+  },
+  "historyScan": {
+    "initialExitCode": 1,
+    "finding": "SHA256 of redacted report verified locally, not a credential",
+    "exception": "exact original commit/file/rule/line in .gitleaksignore",
+    "reviewedExitCode": 0
+  },
+  "installedHeadlessSmoke": true,
+  "rawArtifacts": "/private/tmp/cyberdeck-resource-candidate-15e455d",
+  "artifacts": [
+    {
+      "file": "manifest.json",
+      "sha256": "7e136374cc66e059cf21289637353e92720e98825386d9d1f6e4ccdd776830e0"
+    },
+    {
+      "file": "unit-results.json",
+      "sha256": "7232749907dc38a9b863b2f3b3b98d8620189a81503c59ab8f9f1388abd25671"
+    },
+    {
+      "file": "offline.json",
+      "sha256": "c20a79522ac202b349172bb1e856fd1239cf0daf23c9746405d593aa7e4328cf"
+    },
+    {
+      "file": "secret-scan.json",
+      "sha256": "48e24d1d2fcb89f259bbaeb4ff996b00a58d7ef297f9d8b6b6658d8e0fbdc302"
+    },
+    {
+      "file": "secret-scan-reviewed.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "file": "package-smoke.json",
+      "sha256": "b0a928fe5cef9d869e7f3ace93b53ffc834be2c8c5da53d537829b1069528a0e"
+    }
+  ],
+  "limitations": [
+    "Source checks target 15e455d; PR wrap-up adds documentation/evidence and an exact scanner exception only",
+    "No final worker/evaluator image, W1, native W9, full W10, 24-hour soak or live activation acceptance"
+  ]
+}

@@ -4,6 +4,27 @@ Implementation base: `af8d19ecda9e16ece12c4b713e9867c66984920b`.
 Implementation tree: `/private/tmp/cyberdeck-resource-managed-autonomy`.
 Policy target: 8 GiB total. No production configuration changes or broker restart authorized by this artifact.
 
+**Operator-requested scope freeze (2026-09-16): draft PR for source review; not full delivery
+or activation acceptance.** Latest product source is `15e455d16c5fb1eb20dc6a59bb62b4ab74224065`.
+All 2,628 tests across 238 files, root/evaluation TypeScript, build, eight offline scenarios,
+production audit, package inspection, fresh-prefix installation and isolated installed-broker
+startup/status/shutdown passed. Whole-history scan passed after an exact false-positive
+exception for the verified SHA-256 of an earlier redacted scan report; the original failure
+is retained. `candidate-15e455d-checks.json` records provenance. Independent follow-up review
+found no remaining scoped P0/P1 after the evaluator cleanup correction. Final PR CI remains
+a separate check on the documentation/evidence wrap-up commit.
+
+Do not merge or activate on the claim that Tasks A–H are complete. W1's eight concurrent
+authenticated workers, W9 native ownership/build/test, final worker/evaluator images,
+automatic container evaluation, full W10 composition, workload Sentry receipt, fairness,
+parking and the 24-hour soak remain open. There is no measured optimized-eight-worker
+infeasibility conclusion. The physical mini gate remains separate. The primary checkout,
+its dist/configuration and the original live broker were not replaced.
+
+Unfinished offline worker-image assembler code is preserved separately in
+`/private/tmp/cyberdeck-resource-worker-image` and deliberately excluded from this branch.
+It has no committed/tested/live proof and must not be used as a completed capability.
+
 | Gate | State | Evidence / remaining work |
 | --- | --- | --- |
 | Orientation | inspected | Source clean except pre-existing untracked AGENTS, handoffs, older prompt; Node 24.18.0, Codex 0.154.0, ChatGPT subscription, Xcode 27.0 |
