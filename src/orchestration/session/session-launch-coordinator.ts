@@ -1,5 +1,5 @@
-import { setTimeout as delay } from "node:timers/promises";
 import type { SessionLaunchIntent } from "../../domain/session-launch-intent.js";
+import { SessionPendingLaunchCoordinator } from "./session-pending-launch-coordinator.js";
 import { resolveWorkerExecution } from "../../domain/worker-execution.js";
 import { randomUUID } from "node:crypto";
 import { evaluateStart } from "../../domain/policy.js";
@@ -55,7 +55,7 @@ export class SessionLaunchCoordinator {
   private readonly observer: SessionRuntimeObserver;
   /** Starts admitted by policy but not yet represented in the catalog. */
   private pendingWorkerStarts = 0;
-  private readonly pending = new Map<string, AbortController>();
+  private readonly pendingLaunch: SessionPendingLaunchCoordinator;
 
   constructor(options: SessionLaunchCoordinatorOptions) {
     this.catalog = options.catalog;
@@ -63,6 +63,10 @@ export class SessionLaunchCoordinator {
     this.scoutSupervision = options.scoutSupervision;
     this.assembly = options.assembly;
     this.observer = options.observer;
+    this.pendingLaunch = new SessionPendingLaunchCoordinator({ catalog: this.catalog, assembly: this.assembly,
+      requireActiveParent: id => this.requireActiveParent(id),
+      launch: (record, input, fence, assert, waiting) => this.performLaunch(record, input, undefined,
+        undefined, undefined, fence, assert, waiting) });
   }
 
   /**
@@ -180,15 +184,15 @@ export class SessionLaunchCoordinator {
         await activate?.(cloneRecord(provisional));
         provisional.pendingLaunch.state = "waiting-capacity";
         await this.catalog.options.launchIntents.put({ ...intent, record: cloneRecord(provisional), phase: "ready" });
-        await this.publishPending(provisional, releaseReservation);
-        this.arm({ ...intent, record: provisional, phase: "ready" });
+        await this.pendingLaunch.publish(provisional, releaseReservation);
+        this.pendingLaunch.arm({ ...intent, record: provisional, phase: "ready" });
         return cloneRecord(provisional);
       } catch (error) {
         releaseReservation();
         // An activation/persistence ambiguity is never replayed; preserve its worktree as evidence.
         const current = this.catalog.options.launchIntents.get(id);
         if (current && current.phase !== "terminal")
-          await this.finishPending(current, "interrupted").catch(() => undefined);
+          await this.pendingLaunch.finish(current, "interrupted").catch(() => undefined);
         throw error;
       }
     }
@@ -262,7 +266,11 @@ export class SessionLaunchCoordinator {
           this.requireActiveParent(parsed.parentSessionId);
         },
         (phase) => { scoutLaunchPhase = phase; },
-        () => { assertPending?.(); this.requireActiveParent(parsed.parentSessionId); },
+        async () => {
+          assertPending?.(); this.requireActiveParent(parsed.parentSessionId);
+          if (provisional.pendingLaunch) await this.catalog.options.resourceExecution?.assertAuthority?.(provisional);
+          assertPending?.(); this.requireActiveParent(parsed.parentSessionId);
+        },
         fence ? async () => {
           await fence();
           if (initialPrompt !== undefined && !deferredInitialPrompt) {
@@ -387,138 +395,8 @@ export class SessionLaunchCoordinator {
     return cloneRecord(runtime.record);
   }
 
-  /** Rehydrate receipts without awaiting capacity or invoking activation callbacks again. */
-  async recover(): Promise<void> {
-    const intents = this.catalog.options.launchIntents?.list() ?? [];
-    const ready = intents.filter(intent => intent.phase === "ready"
-      && this.catalog.options.resourceExecution?.recoverable?.(intent.record) !== false);
-    this.catalog.options.resourceExecution?.retainPending?.(ready.map(intent => intent.record));
-    for (const intent of intents) {
-      if (intent.phase === "terminal") {
-        // A crash between cancellation and catalog persistence must not resurrect the receipt.
-        const existing = this.catalog.sessions.get(intent.record.id);
-        if (existing?.record.pendingLaunch && intent.outcome !== "launched")
-          await this.finishPending(intent, intent.outcome ?? "interrupted", false);
-        continue;
-      }
-      if (intent.phase !== "ready" || !ready.includes(intent)) {
-        await this.finishPending(intent, "interrupted");
-        continue;
-      }
-      await this.publishPending(intent.record);
-      this.arm(intent);
-    }
-  }
-
-  async cancel(sessionId: string): Promise<boolean> {
-    const intent = this.catalog.options.launchIntents?.get(sessionId);
-    if (!intent || intent.phase === "terminal") return false;
-    if (intent.phase === "launching") {
-      // Preparation may already own helpers. Stop the continuation, but do not claim that the
-      // launch never happened or free its reservation without whole-runtime termination proof.
-      await this.catalog.options.launchIntents!.put({ ...intent, phase: "terminal", outcome: "interrupted",
-        terminalAt: new Date().toISOString(), terminalFromPhase: "launching" }, "launching");
-      this.pending.get(sessionId)?.abort();
-      this.catalog.options.resourceExecution?.cancelStart(sessionId);
-      if (this.catalog.sessions.get(sessionId)?.sessionRuntime) return false;
-      await this.finishPending(intent, "interrupted", false);
-      return true;
-    }
-    // Durable terminal wins the race with the launch fence before any cancellation is acknowledged.
-    try { await this.finishPending(intent, "cancelled"); }
-    catch (error) {
-      if (error instanceof Error && error.message === "SESSION_LAUNCH_INTENT_PHASE_CHANGED") return this.cancel(sessionId);
-      throw error;
-    }
-    this.pending.get(sessionId)?.abort();
-    await this.catalog.options.resourceExecution?.cancelPending?.(intent.record);
-    this.catalog.options.resourceExecution?.cancelStart(sessionId);
-    return true;
-  }
-
-  private async publishPending(record: SessionRecord, published?: () => void): Promise<void> {
-    const current = this.catalog.options.launchIntents?.get(record.id);
-    if (current?.phase === "terminal" && record.executionState === "starting") throw new Error("SESSION_LAUNCH_INTENT_TERMINAL");
-    await this.catalog.options.store?.put(cloneRecord(record));
-    const existing = this.catalog.sessions.get(record.id);
-    if (existing) Object.assign(existing.record, record);
-    else this.catalog.sessions.set(record.id, this.assembly.createRuntimeSession(record, {
-      watchers: new Map(), stopRequested: false, launchTail: Promise.resolve(),
-    }));
-    published?.();
-    if (record.parentSessionId) {
-      const parent = this.catalog.sessions.get(record.parentSessionId);
-      if (parent && !parent.record.childIds.includes(record.id)) {
-        parent.record.childIds.push(record.id);
-        await this.catalog.persist(parent);
-      }
-    }
-  }
-
-  private arm(intent: SessionLaunchIntent): void {
-    const controller = new AbortController();
-    this.pending.set(intent.record.id, controller);
-    void this.runPending(intent, controller.signal).catch(async () => {
-      const current = this.catalog.options.launchIntents?.get(intent.record.id);
-      if (current && current.phase !== "terminal") await this.finishPending(current,
-        current.phase === "launching" ? "interrupted" : "failed");
-    }).catch(() => {
-      // Persistence failure fails closed: never re-run a side effect or claim durable completion.
-    }).finally(() => this.pending.delete(intent.record.id));
-  }
-
-  private async runPending(intent: SessionLaunchIntent, signal: AbortSignal): Promise<void> {
-    const record = intent.record;
-    // A retained binding is accounting, not permission. Parent and canonical authority must both
-    // be available. Polling is bounded in rate and lifetime; stopped parents remain explicit waits.
-    for (;;) {
-      signal.throwIfAborted();
-      if (Date.now() - Date.parse(record.createdAt) > 7 * 24 * 60 * 60 * 1000)
-        throw new Error("SESSION_LAUNCH_INTENT_EXPIRED");
-      try {
-        this.requireActiveParent(record.parentSessionId);
-        await this.catalog.options.resourceExecution?.assertAuthority?.(record);
-        break;
-      } catch {
-        await this.catalog.options.resourceExecution?.suspendPending?.(record);
-        if (record.pendingLaunch?.state !== "waiting-authority") {
-          record.pendingLaunch = { requestId: intent.requestId, state: "waiting-authority" };
-          await this.publishPending(record);
-        }
-        await delay(250, undefined, { signal });
-      }
-    }
-    signal.throwIfAborted();
-    record.pendingLaunch = { requestId: intent.requestId, state: "waiting-capacity" };
-    await this.publishPending(record);
-    await this.performLaunch(record, intent.initialPrompt, undefined, undefined, undefined, async () => {
-      signal.throwIfAborted();
-      this.requireActiveParent(record.parentSessionId);
-      this.catalog.assertMayConsume(record.id);
-      await this.catalog.options.resourceExecution?.assertAuthority?.(record);
-      await this.catalog.options.launchIntents!.put({ ...intent, phase: "launching" }, "ready");
-      record.pendingLaunch = { requestId: intent.requestId, state: "launching" };
-      await this.publishPending(record);
-      signal.throwIfAborted();
-    }, () => signal.throwIfAborted(), async state => {
-      if (record.pendingLaunch?.state !== state) {
-        record.pendingLaunch = { requestId: intent.requestId, state };
-        await this.publishPending(record);
-      }
-    });
-    await this.catalog.options.launchIntents!.put({ ...intent, phase: "terminal", outcome: "launched", terminalAt: new Date().toISOString(), terminalFromPhase: "launching" }, "launching");
-  }
-
-  private async finishPending(intent: SessionLaunchIntent, outcome: "cancelled" | "interrupted" | "failed", persist = true): Promise<void> {
-    if (persist) await this.catalog.options.launchIntents!.put({ ...intent, phase: "terminal", outcome, terminalAt: new Date().toISOString(),
-      terminalFromPhase: intent.phase === "terminal" ? intent.terminalFromPhase! : intent.phase }, intent.phase);
-    const record = cloneRecord(intent.record);
-    record.pendingLaunch = { requestId: intent.requestId, state: outcome };
-    record.executionState = outcome === "failed" ? "failed" : "cancelled";
-    record.attentionState = outcome === "cancelled" ? "stopped" : outcome;
-    record.exitCode = 0;
-    await this.publishPending(record);
-  }
+  recover(): Promise<void> { return this.pendingLaunch.recover(); }
+  cancel(sessionId: string): Promise<boolean> { return this.pendingLaunch.cancel(sessionId); }
 
   requireActiveParent(parentSessionId: string | undefined): void {
     if (parentSessionId === undefined) return;

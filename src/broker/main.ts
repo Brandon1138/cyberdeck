@@ -245,9 +245,8 @@ export async function runBroker(
   });
   resourceRuntime = await brokerResourceRuntime({ config, brokerId: executionRuntime.brokerId,
     execution: executionRuntime.execution,
-    assertAuthority: sessionLaunchAuthority({ orchestrators: orchestratorStore,
-      coordination: () => workerCoordination?.service, credentials: workerLeaseCredentials,
-      session: id => { try { return registry?.get(id); } catch { return undefined; } } }),
+    assertAuthority: sessionLaunchAuthority({ orchestrators: orchestratorStore, credentials: workerLeaseCredentials,
+      coordination: () => workerCoordination?.service, session: id => { try { return registry?.get(id); } catch { return undefined; } } }),
     captureHold: () => auxiliaryRuntime?.admissionHold() ?? (evaluationRuntime ? evaluationRuntime.admissionHold() : "evaluation-capture-gap"),
     resolveFamily: async (record) => {
       const lease = workerCoordination?.service.getSubject(record.id)?.lease
@@ -287,9 +286,7 @@ export async function runBroker(
     config,
   });
   await registry.ready();
-  // One pass, on the first broker start that has this code: the directories threads already live
-  // in are the only evidence of the operator's projects that predates the registry. It runs before
-  // the socket is listening so the first Fleet render never sees a half-seeded list.
+  // Seed legacy thread projects before the socket can expose an incomplete Fleet list.
   await fleetProjects.seed(recoveredSessions.map((record) => record.cwd)).catch(() => {
     // A machine without git, or with none of these directories left on disk, starts empty. The
     // operator registers projects by hand from there; refusing to boot over it would be worse.
@@ -301,7 +298,6 @@ export async function runBroker(
     createService: (store) => new WorkerCoordinationService({ store: activityCoordinationStore(store, activity) }),
   });
   await workerCoordination.start();
-  // Each launch context has its own cached catalog; orchestrators force first-party Codex.
   const workerCapabilities = new WorkerCapabilityCatalog();
   const orchestratorCapabilities = new WorkerCapabilityCatalog({ probe: new CodexOrchestratorModelProbe() });
   const orchestrators = new OrchestratorManager(

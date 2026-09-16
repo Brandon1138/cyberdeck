@@ -115,7 +115,7 @@ describe("durable interactive launch intents", () => {
     expect(f.intents.get(receipt.id)?.outcome).toBe("cancelled");
     expect(f.registry.get(receipt.id).attentionState).toBe("stopped");
     f.allow(); await f.admission.refresh(); expect(f.launch).not.toHaveBeenCalled();
-    await f.registry.delete(receipt.id);
+    await vi.waitFor(async () => f.registry.delete(receipt.id));
     const restored = await fixture(await checkpoint(f));
     expect(restored.registry.list()).toEqual([]); expect(restored.launch).not.toHaveBeenCalled();
   });
@@ -310,6 +310,46 @@ describe("durable interactive launch intents", () => {
     expect(restored.launch).toHaveBeenCalledTimes(2); expect(restored.writes).toHaveBeenCalledOnce();
     expect(restored.registry.get(child.id).generation).toBe(1);
     expect(restored.registry.get(other.id).executionState).toBe("starting");
+  });
+
+  it("does not spawn after authority is revoked during asynchronous provider preparation", async () => {
+    const f = await fixture(); await f.gate.reconcile(); f.allow();
+    f.prepare.mockImplementation(async () => {
+      const binding = (await f.grants.list())[0]!;
+      await f.grants.put({ ...binding, grant: { ...binding.grant, capabilities: [] } });
+    });
+    const receipt = await f.registry.start(request, "authority must outlive preparation", f.activate);
+    await vi.waitFor(() => expect(f.intents.get(receipt.id)?.outcome).toBe("interrupted"));
+    expect(f.prepare).toHaveBeenCalledOnce(); expect(f.launch).not.toHaveBeenCalled(); expect(f.writes).not.toHaveBeenCalled();
+    expect(f.admission.health().reservedBytes).toBe(6 * GiB); // Preparation helpers remain unverified.
+  });
+
+  it("keeps terminal input until catalog cancellation is durable and repairs that crash gap", async () => {
+    const f = await fixture(); await f.gate.reconcile();
+    const receipt = await f.registry.start(request, "capture cannot erase pending cancellation", f.activate);
+    await vi.waitFor(() => expect(f.admission.health().queue).toHaveLength(1));
+    let commit!: () => void;
+    const blocked = new Promise<void>(resolve => { commit = resolve; });
+    const put = f.sessions.put.bind(f.sessions);
+    vi.spyOn(f.sessions, "put").mockImplementation(async record => {
+      if (record.pendingLaunch?.state === "cancelled") await blocked;
+      await put(record);
+    });
+    const cancellation = f.registry.stopTree(receipt.id);
+    await vi.waitFor(() => expect(f.intents.get(receipt.id)?.phase).toBe("terminal"));
+    const terminal = f.intents.get(receipt.id)!;
+    expect(terminal.terminalProjectionCommitted).not.toBe(true);
+    await expect(f.intents.ackTerminal(receipt.id, terminal.requestId, terminal.terminalAt!)).rejects.toThrow("ACK_MISMATCH");
+    await expect(f.registry.delete(receipt.id)).rejects.toThrow("projection must settle");
+    const copy = await directory();
+    await cp(f.path, copy, { recursive: true, filter: source => !source.endsWith("resource-owner.lock") });
+    commit(); await cancellation;
+    const restored = await fixture(copy);
+    expect(restored.registry.get(receipt.id).attentionState).toBe("stopped");
+    expect(restored.intents.get(receipt.id)?.terminalProjectionCommitted).toBe(true);
+    await restored.intents.ackTerminal(receipt.id, terminal.requestId, terminal.terminalAt!);
+    expect(restored.intents.get(receipt.id)).toBeUndefined();
+    expect(restored.launch).not.toHaveBeenCalled();
   });
 
 });

@@ -76,7 +76,7 @@ unknown proof retains capacity. This lets a parent reacquire capacity to resume 
 children become runnable. Eligibility and authority are rechecked before preparation. No
 controller or callback is reconstructed from the private payload.
 
-A compare-and-set intent fence and resource `launching` fence precede provider preparation.
+A compare-and-set intent fence and resource `launching` fence precede provider preparation. Canonical authority is checked again after asynchronous preparation and immediately before spawn.
 Any crash at or beyond either fence becomes interrupted/unverified and never resubmits the
 initial prompt. Automatic recovery is restricted to provably prelaunch work. An interrupted
 launch cannot use ordinary conversation resume; its preserved work and runtime accounting
@@ -85,7 +85,7 @@ intent before acknowledgement, aborts waits, and remains cancelled after catalog
 or deletion. Cancellation never claims a live or uncertain process has terminated.
 
 The owner-scoped 0600 snapshot caps original input at 1 MiB each, 256 nonterminal intents,
-384 total intents and 16 MiB total. Terminal input is retained with immutable terminal time and source phase until evaluation capture; a full store applies backpressure rather than dropping it. `ackTerminal` removes only the exact terminal request/time after its evaluator owner confirms capture; mismatched or nonterminal acknowledgements fail. Ready authority waits retry every 250 ms and
+384 total intents and 16 MiB total. Terminal input is retained with immutable terminal time and source phase until evaluation capture; a full store applies backpressure rather than dropping it. `ackTerminal` removes only the exact terminal request/time after its evaluator owner confirms capture and `terminalProjectionCommitted` proves the catalog projection is durable. Recovery repairs an interrupted projection before committing that flag; deletion cannot race it. Mismatched, unprojected or nonterminal acknowledgements fail. Ready authority waits retry every 250 ms and
 expire after seven days; no automatic provider launch retry occurs. Persistence or schema
 failure fails closed. These deterministic contracts do not establish calibrated envelopes,
 native whole-lifetime termination proof, authenticated provider success, or W1 acceptance.

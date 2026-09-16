@@ -204,6 +204,15 @@ describe("resource launch gate", () => {
     expect(restored.admission.health().reservedBytes).toBe(0);
     expect(restored.bindings.get(req.requestId)?.phase).toBe("terminated");
   });
+  it("cannot demote a bound runtime through an authority eligibility hold", async () => {
+    const f = await fixture();
+    await f.gate.start(record(), async () => runtime().value);
+    const requestId = f.admission.health().reservations[0]!.request.requestId;
+    await f.gate.suspendPending({ ...record(), pendingLaunch: { requestId, state: "waiting-authority" } });
+    expect(f.admission.health().reservedBytes).toBe(6 * GiB);
+    expect(f.store.read().entries[0]).toMatchObject({ state: "admitted", eligibilityHold: "waiting-authority" });
+    expect(f.bindings.get(requestId)?.phase).toBe("bound");
+  });
   it("fences generations and stale exit observers after resume", async () => {
     const f = await fixture(), first = runtime(); await f.gate.start(record(), async () => first.value);
     const old = f.bindings.list()[0]!;

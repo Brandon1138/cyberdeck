@@ -1,14 +1,13 @@
 import { isFableModel } from "../domain/policy.js";
 import { grantAllows } from "../domain/capability.js";
-import { orchestratorController } from "../domain/orchestrator.js";
+import { orchestratorController, type OrchestratorBinding } from "../domain/orchestrator.js";
 import type { SessionRecord } from "../domain/session.js";
 import type { WorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
 import type { WorkerCoordinationService } from "./worker-coordination.js";
-import type { OrchestratorStore } from "../persistence/orchestrator-store.js";
 
 /** Launch permission, distinct from the resource scheduler's family classification. */
 export function sessionLaunchAuthority(options: {
-  orchestrators: OrchestratorStore;
+  orchestrators: { list(): Promise<OrchestratorBinding[]>; findBySessionId(id: string): Promise<OrchestratorBinding | undefined> };
   coordination(): WorkerCoordinationService | undefined;
   credentials: WorkerLeaseCredentialCustodian;
   session?(id: string): SessionRecord | undefined;

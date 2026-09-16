@@ -67,13 +67,28 @@ export class SessionLaunchIntentStore implements SessionLaunchIntentPort {
     });
     this.tail = result.catch(() => undefined); return result;
   }
-  ackTerminal(sessionId: string, requestId: string, terminalAt: string): Promise<void> {
+  markTerminalProjected(sessionId: string, requestId: string, terminalAt: string): Promise<void> {
     const result = this.tail.then(async () => {
       this.assertOwner();
       if (this.poisoned) throw new Error("SESSION_LAUNCH_INTENTS_UNAVAILABLE");
       const prior = this.get(sessionId);
       if (!prior) return;
       if (prior.phase !== "terminal" || prior.requestId !== requestId || prior.terminalAt !== terminalAt)
+        throw new Error("SESSION_LAUNCH_INTENT_PROJECTION_MISMATCH");
+      if (prior.terminalProjectionCommitted) return;
+      await this.writeSnapshot(this.intents.map(intent => intent.record.id === sessionId
+        ? { ...intent, terminalProjectionCommitted: true } : intent));
+    });
+    this.tail = result.catch(() => undefined); return result;
+  }
+
+  ackTerminal(sessionId: string, requestId: string, terminalAt: string): Promise<void> {
+    const result = this.tail.then(async () => {
+      this.assertOwner();
+      if (this.poisoned) throw new Error("SESSION_LAUNCH_INTENTS_UNAVAILABLE");
+      const prior = this.get(sessionId);
+      if (!prior) return;
+      if (prior.phase !== "terminal" || !prior.terminalProjectionCommitted || prior.requestId !== requestId || prior.terminalAt !== terminalAt)
         throw new Error("SESSION_LAUNCH_INTENT_ACK_MISMATCH");
       await this.writeSnapshot(this.intents.filter(intent => intent.record.id !== sessionId));
     });

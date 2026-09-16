@@ -240,6 +240,9 @@ export class SessionLifecycleController {
   }
 
   async delete(sessionId: string, beforeDelete?: () => Promise<void>): Promise<void> {
+    const intent = this.catalog.options.launchIntents?.get(sessionId);
+    if (intent?.phase === "terminal" && !intent.terminalProjectionCommitted)
+      throw new RegistryError("SESSION_BUSY", "Terminal launch projection must settle before deletion");
     if (this.cancelPendingStart(sessionId)) {
       throw new RegistryError("SESSION_STILL_ACTIVE", "Launch cancellation is pending; retry after it settles");
     }
