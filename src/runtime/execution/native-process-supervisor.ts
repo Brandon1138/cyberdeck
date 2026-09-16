@@ -50,7 +50,9 @@ export class MacosNativeProcessSupervisor implements NativeProcessSupervisor {
     });
     const collect = async (): Promise<NativeProcessReading[]> => {
       const table = await this.sampler.readTable();
-      if (table.inaccessibleProcesses) throw new Error("native-process-table-incomplete");
+      // Foreign processes commonly deny libproc inspection. Their presence does not make
+      // known owned metrics unavailable, and polling still cannot prove lifetime cleanup.
+      if (table.inaccessibleProcesses) uncertainty.add("foreign-process-table-incomplete");
       if (!known.size) {
         const root = table.rows.find(row => row.identity.pid === child.pid);
         if (!root) throw new Error("native-root-identity-unavailable");

@@ -60,10 +60,14 @@ describe("native process supervision", () => {
     expect(kill.mock.calls.every(([pid]) => pid === 101)).toBe(true);
     expect(kill).toHaveBeenCalled();
   });
-  it("keeps incomplete process tables uncertain and never signals unidentified processes", async () => {
+  it("does not confuse inaccessible foreign processes with missing owned metrics", async () => {
     const f = await fixture(); const kill = vi.spyOn(process, "kill").mockReturnValue(true);
-    const sampler = { readTable: vi.fn(async () => ({ rows: [row(101, 1)], inaccessibleProcesses: 1 })) };
+    let rows = [row(101, 1)];
+    f.child.send.mockImplementation(() => { rows = []; f.child.emit("exit", 0, null); });
+    const sampler = { readTable: vi.fn(async () => ({ rows, inaccessibleProcesses: 303 })) };
     const result = await new MacosNativeProcessSupervisor(sampler).run(f.command, { identities: async () => {} });
-    expect(result.cleanup).toBe("unproven"); expect(kill).not.toHaveBeenCalled(); expect(f.child.send).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ exitCode: 0, cleanup: "unproven" });
+    expect(result.uncertainty).toContain("foreign-process-table-incomplete");
+    expect(kill).not.toHaveBeenCalled(); expect(f.child.send).toHaveBeenCalledOnce();
   });
 });

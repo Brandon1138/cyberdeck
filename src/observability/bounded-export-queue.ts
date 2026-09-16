@@ -2,6 +2,7 @@
 export class BoundedExportQueue {
   private readonly queue: string[] = [];
   private pumping = false;
+  private pending: Promise<void> | undefined;
   private closed = false;
   private dropped = 0;
   private queueDropped = 0;
@@ -19,7 +20,12 @@ export class BoundedExportQueue {
   transportHealth() { return { queueDropped: this.queueDropped, transportFailed: this.transportFailed,
     accepted: this.accepted, lastFailure: this.lastFailure }; }
   close(): void { this.closed = true; clearTimeout(this.retryTimer); }
-  async pump(): Promise<void> {
+  pump(): Promise<void> {
+    if (this.pending) return this.pending;
+    const work = this.pumpBatch().finally(() => { this.pending = undefined; });
+    this.pending = work; return work;
+  }
+  private async pumpBatch(): Promise<void> {
     if (this.pumping || Date.now() < this.retryAt || this.closed) return;
     this.pumping = true;
     try {

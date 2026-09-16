@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "sourceSha": "ba1fc0946cec11d72c507a19c67340956a99b9fd",
+  "dirty": true,
+  "mode": "real-service-fixed-sql",
+  "startedAt": "2026-09-16T10:26:56.646Z",
+  "endedAt": "2026-09-16T10:27:00.766Z",
+  "state": "waiting-capacity",
+  "reason": "observed-budget",
+  "policyBytes": 8589934592,
+  "requestBytes": 671088640,
+  "nativePhysicalBytes": 9486441624,
+  "vmPhysicalBytes": 4437678520,
+  "foreignGuestCgroupBytes": 2296901632,
+  "vmResidualEstimateBytes": 2140776888,
+  "conservativePhysicalUpperBytes": 13924120144,
+  "serviceCreated": false,
+  "foreignInventoryUnchanged": true,
+  "image": "postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3",
+  "privateEvidenceDirectory": "/private/tmp/cyberdeck-resource-integration-live-01",
+  "limitations": ["No SQL workload ran", "Fixed harness authority does not prove production RPC or lease wiring", "Whole-VM attribution remains conservative pending calibration"]
+}

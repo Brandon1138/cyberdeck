@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "sourceSha": "ba1fc0946cec11d72c507a19c67340956a99b9fd",
+  "dirty": true,
+  "testMode": "synthetic-resource-sentry-probe",
+  "measuredWorkload": false,
+  "remoteReceiptVerified": true,
+  "node": "v24.18.0",
+  "eventId": "4b97424daebf43438f8e7d5572e22547",
+  "runId": "a4a14b9c-5d76-4368-b863-a68b3bc0e69e",
+  "sessionId": "7da760fc-5f72-4c8b-9f05-558846c1937d",
+  "observedAt": "2026-09-16T10:14:55.318Z",
+  "eventHash": "f45725d243d25b6455af267e5a20dcd0e613b1b7617ac0a778cf37126e9f7522",
+  "health": {
+    "queued": 1,
+    "dropped": 0,
+    "projectionFailed": 0,
+    "transport": {
+      "queueDropped": 0,
+      "transportFailed": 0,
+      "accepted": 0,
+      "lastFailure": null
+    },
+    "budget": {
+      "day": "2026-09-16",
+      "used": 1,
+      "cap": 1,
+      "dropped": 2,
+      "sampledOut": 2,
+      "capped": 0,
+      "duplicates": 0
+    }
+  },
+  "remote": {
+    "method": "authenticated Zen UI via computer-use",
+    "verifiedAt": "2026-09-16T10:17:15.958470+00:00",
+    "project": "cyberdeck",
+    "projectId": "4512055627022417",
+    "traceId": "65d609c47404a8928b8d644c5967850e",
+    "spanId": "bc903f9bce6b2a3a",
+    "url": "https://mikoshi-ej.sentry.io/explore/traces/trace/65d609c47404a8928b8d644c5967850e/",
+    "matchedFields": [
+      "transaction.event_id",
+      "cyberdeck.runId",
+      "cyberdeck.sessionId",
+      "cyberdeck.workerId"
+    ],
+    "limitBytes": 8589934592,
+    "reason": "metrics-unavailable",
+    "observedBytesOmitted": true,
+    "privacy": "Visible remote attributes contain the closed projection; no prompts, paths, credentials or source contents. Complete SDK serializer privacy test remains separate."
+  },
+  "limitations": [
+    "synthetic probe, not measured workload",
+    "dirty source: uncommitted probe driver only",
+    "local transport health snapshot taken before in-flight flush settled; indexed receipt is independent evidence",
+    "repeat against final candidate and workload events before final acceptance"
+  ]
+}
