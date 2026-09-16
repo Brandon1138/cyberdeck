@@ -73,6 +73,7 @@ interface CheckpointDelivery {
  */
 export class WorkerEventChannel {
   private tail = Promise.resolve();
+  private readonly reporting = new Map<string, number>();
 
   constructor(
     private readonly coordination: WorkerCoordinationService,
@@ -85,6 +86,10 @@ export class WorkerEventChannel {
   ) {}
 
   submit(input: WorkerEventSubmitParams): Promise<EventAck> {
+    // Count before entering the serialized tail: a report queued behind another worker is
+    // still outstanding. Malformed/rejected requests are removed by the same finally path.
+    const workerId = input.workerId;
+    this.reporting.set(workerId, (this.reporting.get(workerId) ?? 0) + 1);
     return this.exclusive(async () => {
       const request = WorkerEventSubmitParamsSchema.parse(input);
       const semanticError = validateSemantics(request);
@@ -151,8 +156,13 @@ export class WorkerEventChannel {
         leaseToken: credential.leaseToken,
         event,
       });
+    }).finally(() => {
+      const remaining = (this.reporting.get(workerId) ?? 1) - 1;
+      if (remaining) this.reporting.set(workerId, remaining); else this.reporting.delete(workerId);
     });
   }
+
+  inFlightReports(workerId: string): number { return this.reporting.get(workerId) ?? 0; }
 
   requestCheckpoint(input: WorkerCheckpointRequestParams) {
     return this.exclusive(async () => {
