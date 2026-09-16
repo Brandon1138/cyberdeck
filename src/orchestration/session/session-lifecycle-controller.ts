@@ -43,8 +43,14 @@ export class SessionLifecycleController {
     this.observer = options.observer;
   }
 
+  private cancelPendingStart(sessionId: string): boolean {
+    const resourceCancelled = this.catalog.options.resourceExecution?.cancelStart(sessionId) ?? false;
+    const executionCancelled = this.catalog.options.executions?.cancelStart?.(sessionId) ?? false;
+    return resourceCancelled || executionCancelled;
+  }
+
   async stop(sessionId: string): Promise<void> {
-    if (this.catalog.options.executions?.cancelStart?.(sessionId)) return;
+    if (this.cancelPendingStart(sessionId)) return;
     const runtime = this.catalog.requireRuntime(sessionId);
     if (runtime.terminalFinalizing === true) return;
     if (runtime.record.exitCode !== null) {
@@ -85,6 +91,7 @@ export class SessionLifecycleController {
 
   /** Force only one already-stopping session. Child sessions are deliberately untouched. */
   forceStop(sessionId: string): void {
+    if (this.cancelPendingStart(sessionId)) return;
     const runtime = this.catalog.requireRuntime(sessionId);
     if (runtime.terminalFinalizing === true) return;
     if (runtime.record.exitCode !== null) return;
@@ -112,7 +119,7 @@ export class SessionLifecycleController {
   async stopAll(): Promise<void> {
     this.shuttingDown = true;
     for (const [sessionId, runtime] of this.catalog.sessions) {
-      if (runtime.record.exitCode !== null) continue;
+      if (runtime.record.exitCode !== null) { this.cancelPendingStart(sessionId); continue; }
       await this.stop(sessionId);
     }
   }
@@ -225,6 +232,9 @@ export class SessionLifecycleController {
   }
 
   async delete(sessionId: string, beforeDelete?: () => Promise<void>): Promise<void> {
+    if (this.cancelPendingStart(sessionId)) {
+      throw new RegistryError("SESSION_STILL_ACTIVE", "Launch cancellation is pending; retry after it settles");
+    }
     const runtime = this.catalog.requireRuntime(sessionId);
     if (
       runtime.record.executionState === "active"

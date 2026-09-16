@@ -84,4 +84,14 @@ describe("shared resource admission", () => {
     const old = request("old"); old.owner.workloadId = "work";
     await expect(service.request(old)).rejects.toThrow("GENERATION");
   });
+  it("does not admit two competing queued generations of one workload", async () => {
+    const { service, env } = await fixture(); env.pressure = "elevated";
+    const first = request("first"); first.owner.workloadId = "same-worker";
+    await service.request(first);
+    const next = request("next"); next.owner.workloadId = "same-worker"; next.owner.generation = 2;
+    await expect(service.request(next)).rejects.toThrow("GENERATION_CONFLICT");
+    env.pressure = "normal"; await service.refresh();
+    expect(service.health().reservations.map(entry => entry.request.requestId)).toEqual(["first"]);
+  });
+
 });

@@ -1,3 +1,4 @@
+import type { ResourceSessionLaunchPort } from "../../domain/resource-runtime.js";
 import type { SessionExecutionPort } from "./execution-ports.js";
 import type { BrokerRuntimeConfig } from "../../config.js";
 import type { BrokerEvent } from "../../domain/events.js";
@@ -129,6 +130,7 @@ export interface SessionRegistryOptions {
   adapters: Record<string, ProviderAdapter>;
   sessionRuntimeFactory: SessionRuntimeFactory<ProviderLaunchSpec>;
   executions?: SessionExecutionPort;
+  resourceExecution?: ResourceSessionLaunchPort;
   journal: JournalLike;
   transcripts?: TranscriptLike;
   workerTurnObservation: WorkerTurnObservationPort & WorkerTurnPreviewPort;

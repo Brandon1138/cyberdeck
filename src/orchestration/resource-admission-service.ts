@@ -44,7 +44,8 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
       const generation = request.owner.generation;
       const related = ledger.entries.filter(e => e.request.owner.workloadId === request.owner.workloadId);
       if (related.some(e => (e.request.owner.generation ?? 0) > (generation ?? 0)
-        || e.request.requestId !== request.requestId && e.state === "admitted")) throw new Error("RESOURCE_GENERATION_CONFLICT");
+        || e.request.requestId !== request.requestId && (e.state === "admitted" || e.state === "waiting-capacity"
+          || e.request.owner.generation === generation))) throw new Error("RESOURCE_GENERATION_CONFLICT");
       if (!prior) {
         if (ledger.entries.length >= 10000 || ledger.entries.filter(e => e.state === "waiting-capacity").length >= this.policy.maxQueue)
           throw new Error("RESOURCE_LEDGER_BACKPRESSURE");
