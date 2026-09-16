@@ -36,14 +36,21 @@ async function fixture(path?: string, recover = true) {
   () => ({ observedAt: Date.now(), availableBytes: 20 * GiB, pressure: "normal", attributionComplete: true }),
   (reservation, evidence) => gate.verifyTermination(reservation, evidence));
   const capture = vi.fn(async () => inspection.identities);
+  const resolveFamily = vi.fn(() => "canonical-family");
   gate = new ResourceExecutionGate({ installationId: "test", admission, bindings, pollMs: 1,
-    resolveFamily: () => "canonical-family", resolveDemand: () => ({ memoryBytes: 6 * GiB, cpuWeight: 100,
+    resolveFamily, resolveDemand: () => ({ memoryBytes: 6 * GiB, cpuWeight: 100,
       pidLimit: 32, profileId: "synthetic", profileVersion: "1" }), capture,
     inspect: async () => inspection });
   if (recover) await gate.reconcile();
-  return { path, store, bindings, gate, admission, capture, inspect: (value: ResourceRuntimeInspection) => { inspection = value; } };
+  return { path, store, bindings, gate, admission, capture, resolveFamily, inspect: (value: ResourceRuntimeInspection) => { inspection = value; } };
 }
 describe("resource launch gate", () => {
+  it("rechecks canonical family after waiting and releases before preparation on a handoff", async () => {
+    const f = await fixture(), launch = vi.fn(async () => runtime().value);
+    f.resolveFamily.mockReturnValueOnce("previous-family").mockReturnValue("new-family");
+    await expect(f.gate.start(record(), launch)).rejects.toThrow("RESOURCE_CANONICAL_FAMILY_CHANGED");
+    expect(launch).not.toHaveBeenCalled(); expect(f.admission.health().reservedBytes).toBe(0);
+  });
   it("reserves before launch, queues visibly, cancels without spawning and never frees a live tree", async () => {
     const f = await fixture(), first = runtime(), launch = vi.fn(async () => {
       expect(f.gate.demand("worker", 1)?.memoryBytes).toBe(6 * GiB);

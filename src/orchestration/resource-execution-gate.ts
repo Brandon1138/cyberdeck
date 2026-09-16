@@ -121,6 +121,7 @@ export class ResourceExecutionGate implements ResourceSessionLaunchPort {
       }
       binding = { ...binding, phase: "reserved" }; await this.options.bindings.put(binding);
       signal.throwIfAborted();
+      if (await this.options.resolveFamily(record) !== familyId) throw new Error("RESOURCE_CANONICAL_FAMILY_CHANGED");
       // This fsynced transition precedes every side effect of prepareLaunch. No recovery may
       // release a launching binding merely because PID/container binding never reached disk.
       binding = { ...binding, phase: "launching" }; await this.options.bindings.put(binding);

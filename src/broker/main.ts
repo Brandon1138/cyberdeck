@@ -19,6 +19,8 @@ import { AppServerJobDispatchAdapter } from "../app-server/dispatch-adapter.js";
 import type { WorktreeLeaseManager } from "../control-plane/worktree-lease-manager.js";
 import { jobLaunchEnvironment } from "../providers/launch-environment.js";
 import { applyWorkerMode } from "../providers/worker-mode.js";
+import { ResourceJobLaunch } from "../orchestration/resource-job-launch.js";
+import { resourceJobRecord } from "../orchestration/resource-job-record.js";
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -107,6 +109,7 @@ export function composeJobDispatchAdapters(context: Omit<Parameters<typeof compo
   return composeRuntimeJobAdapters({ ...context, codex: new AppServerJobDispatchAdapter({
     leaseManager: context.leases, artifactStore: context.artifacts,
     launchEnvironment: jobLaunchEnvironment, workerMode: applyWorkerMode,
+    ...(context.resourceLaunch ? { resourceLaunch: context.resourceLaunch } : {}),
   }) });
 }
 
@@ -241,7 +244,8 @@ export async function runBroker(
     execution: executionRuntime.execution,
     captureHold: () => auxiliaryRuntime?.admissionHold() ?? (evaluationRuntime ? evaluationRuntime.admissionHold() : "evaluation-capture-gap"),
     resolveFamily: async (record) => {
-      const lease = workerCoordination?.service.getSubject(record.id)?.lease;
+      const lease = workerCoordination?.service.getSubject(record.id)?.lease
+        ?? (record.parentSessionId ? workerCoordination?.service.getSubject(record.parentSessionId)?.lease : undefined);
       if (lease?.controller) return lease.controller.familyId;
       const binding = await orchestratorStore.findBySessionId(record.kind === "orchestrator" ? record.id : record.parentSessionId ?? record.id);
       if (binding) return orchestratorController(binding).familyId;
@@ -393,7 +397,9 @@ export async function runBroker(
   // runtime enforces the ordering: persistence, then recovery, then reconciliation, and only then is
   // admission opened. The B-owned dispatch adapters are composed in without being modified.
   const artifactStore = new ArtifactStore(stateDirectory);
-  const runtime = new ControlPlaneRuntime({
+  const resourceLaunch = resourceRuntime ? new ResourceJobLaunch({ gate: resourceRuntime.gate,
+    resolveRecord: request => resourceJobRecord(runtime.controlPlane.dispatchContext(request.jobId), request) }) : undefined;
+  const runtime: ControlPlaneRuntime = new ControlPlaneRuntime({
     stateDirectory,
     config,
     journal,
@@ -401,7 +407,8 @@ export async function runBroker(
     artifacts: artifactStore,
     leaseStore: new LeaseStore(stateDirectory),
     adapters: (context) =>
-      composeJobDispatchAdapters({ leases: context.leases, artifacts: artifactStore, executionPolicy: config.workerExecution, resourceManaged: resourceRuntime !== undefined }),
+      composeJobDispatchAdapters({ leases: context.leases, artifacts: artifactStore, executionPolicy: config.workerExecution,
+        resourceManaged: resourceRuntime !== undefined, ...(resourceLaunch ? { resourceLaunch } : {}) }),
   });
   await runtime.start();
   const resourceActivity = resourceRuntime && config.resourceManagement ? await brokerResourceActivity({

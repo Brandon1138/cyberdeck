@@ -4,8 +4,23 @@ import { JobControlPlane, type PersistedJobState } from "../../src/control-plane
 import { defaultProviderRegistry } from "../../src/control-plane/provider-registry.js";
 import { DispatchRequestSchema, type DispatchRequest, type JobDispatchAdapter } from "../../src/domain/dispatch.js";
 import { resourceJobRecord } from "../../src/orchestration/resource-job-record.js";
+import { AdmissionScheduler } from "../../src/control-plane/admission-scheduler.js";
 
 const request = { provider: "codex", cwd: "/tmp/repo", sandbox: "read-only", instruction: "inspect", model: "explicit-model" };
+test("resource waits return queued receipts and do not hide a second family behind dispatch acknowledgment", async () => {
+  const scheduler = new AdmissionScheduler({ limits: { schemaVersion: 1 } }); scheduler.openAdmission();
+  const plane = new JobControlPlane({ registry: defaultProviderRegistry(), scheduler, deferDispatchAcknowledgment: true });
+  const waiting = new Map<string, (error: Error) => void>();
+  plane.registerAdapter({ provider: "codex", dispatch: input => new Promise((_resolve, reject) => { waiting.set(input.jobId, reject); }),
+    cancel: async input => { waiting.get(input.jobId)!(new Error("cancelled")); return { accepted: true, jobId: input.jobId }; },
+    onReport: () => () => {} });
+  const first = await plane.delegate({ request, delegationId: randomUUID(), correlationId: randomUUID(), parentSessionId: randomUUID() });
+  const second = await plane.delegate({ request, delegationId: randomUUID(), correlationId: randomUUID(), parentSessionId: randomUUID() });
+  expect(first.job.lifecycle.status).toBe("queued"); expect(second.job.lifecycle.status).toBe("queued");
+  expect(waiting.size).toBe(2);
+  await plane.cancel(first.job.id); await plane.cancel(second.job.id); await plane.whenIdle();
+  expect(plane.listJobs().every(job => job.record.lifecycle.status === "settled")).toBe(true);
+});
 function waitingAdapter(accepted = true) {
   let reject!: (error: Error) => void;
   const dispatches: DispatchRequest[] = [];

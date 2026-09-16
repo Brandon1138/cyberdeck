@@ -1,5 +1,6 @@
 import type { JobDispatchContext } from "../orchestration/resource-job-record.js";
 import { randomUUID } from "node:crypto";
+import { pumpAdmittedJobs } from "./job-admission-pump.js";
 import { z } from "zod";
 import type { AdmissionScheduler, AdmissionSnapshot } from "./admission-scheduler.js";
 import type { BudgetLedger, BudgetReport } from "./budget-ledger.js";
@@ -132,6 +133,8 @@ export interface JobControlPlaneOptions {
   budgets?: BudgetLedger;
   /** Job-tree delegation depth, mirroring the session policy. Defaults to 1. */
   maxDelegationDepth?: number;
+  /** Resource waits keep queued jobs inspectable and must not block startup or other families. */
+  deferDispatchAcknowledgment?: boolean;
   now?: () => string;
   idFactory?: () => string;
 }
@@ -174,10 +177,8 @@ interface CreateSpec {
 }
 
 /**
- * The durable job control plane. It owns all job state and lifecycle; Agent B-owned adapters
- * translate provider/runtime events through the frozen {@link JobDispatchAdapter} port, which the
- * control plane consumes but never redesigns. The control plane never ranks or routes providers: it
- * selects the explicitly requested, registered provider's adapter and calls it.
+ * Owns durable job state and lifecycle. Provider events enter through {@link JobDispatchAdapter};
+ * dispatch always selects the explicitly requested, registered provider.
  */
 export class JobControlPlane {
   private readonly jobs = new Map<string, JobEntry>();
@@ -188,6 +189,7 @@ export class JobControlPlane {
   private pendingReportError: unknown;
   private pumping = false;
   private readonly dispatching = new Set<string>();
+  private readonly pendingDispatches = new Set<Promise<void>>();
   private readonly cancellations = new Map<string, Promise<CancellationResult>>();
   constructor(private readonly options: JobControlPlaneOptions) {}
 
@@ -261,6 +263,7 @@ export class JobControlPlane {
 
   /** Wait until asynchronously emitted adapter reports have been durably ingested. */
   async whenIdle(): Promise<void> {
+    await Promise.all([...this.pendingDispatches]);
     await this.pendingReports;
     if (this.pendingReportError !== undefined) throw this.pendingReportError;
   }
@@ -417,17 +420,13 @@ export class JobControlPlane {
     if (scheduler === undefined || this.pumping) return;
     this.pumping = true;
     try {
-      for (;;) {
-        const reservation = scheduler.admitNext();
-        if (reservation === undefined) return;
-        const entry = this.jobs.get(reservation.jobId);
-        if (entry === undefined || entry.record.lifecycle.status !== "queued") {
-          scheduler.release(reservation.jobId);
-          continue;
-        }
-        entry.holdsSlot = true;
-        await this.dispatch(entry);
-      }
+      await pumpAdmittedJobs(scheduler, id => this.jobs.get(id), async entry => {
+        if (this.options.deferDispatchAcknowledgment) {
+          const pending = this.dispatch(entry).catch(error => { this.pendingReportError = error; })
+            .finally(() => { this.pendingDispatches.delete(pending); });
+          this.pendingDispatches.add(pending);
+        } else await this.dispatch(entry);
+      });
     } finally {
       this.pumping = false;
     }
