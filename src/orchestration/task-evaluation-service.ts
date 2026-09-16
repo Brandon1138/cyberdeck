@@ -26,7 +26,7 @@ export class TaskEvaluationService {
     const prior = this.store.findIntent?.(attemptId, this.rubric.id, this.rubric.version);
     if (prior) {
       if (prior.sessionId !== event.sessionId || prior.generation !== event.generation || prior.executionId !== event.executionId
-        || prior.instructionId !== event.instructionId) throw new Error("EVALUATION_REPLAY_IDENTITY_CONFLICT");
+        || prior.instructionId !== event.instructionId || prior.jobId !== event.jobId) throw new Error("EVALUATION_REPLAY_IDENTITY_CONFLICT");
       return; // Keep the original immutable evidence after enqueue-before-checkpoint crashes.
     }
     const { generation, manifest } = await this.evidence.capture(event);
@@ -35,6 +35,7 @@ export class TaskEvaluationService {
       || manifest.checks.some(check => check.source !== "host-verified")) throw new Error("EVALUATION_EVIDENCE_NOT_CANONICAL");
     const intent: TaskEvaluationIntent = { attemptId, sessionId: event.sessionId, generation,
       ...(event.executionId ? { executionId: event.executionId } : {}), ...(event.instructionId ? { instructionId: event.instructionId } : {}),
+      ...(event.jobId ? { jobId: event.jobId } : {}),
       attribution: instruction ? "instruction" : event.origin ?? "unattributed", rubricId: this.rubric.id,
       rubricVersion: this.rubric.version, evidenceManifestHash: evidenceHash(manifest) };
     this.store.enqueue(intent, manifest);

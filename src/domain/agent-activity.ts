@@ -10,7 +10,7 @@ export const AgentActivityKindSchema = z.enum([
 export const AgentActivitySchema = z.object({
   schemaVersion: z.literal(1), eventId: z.uuid(), sequence: z.number().int().positive(),
   sourceKey: z.string().min(1).max(1024), runId: z.uuid(), workerId: z.uuid(), sessionId: z.uuid(),
-  generation: z.number().int().positive().optional(), instructionId: z.uuid().optional(),
+  generation: z.number().int().positive().optional(), instructionId: z.uuid().optional(), jobId: z.uuid().optional(),
   executionId: z.uuid().optional(), causationId: z.uuid().optional(), parentEventId: z.uuid().optional(),
   startedAt: z.iso.datetime().optional(), occurredAt: z.iso.datetime().optional(), observedAt: z.iso.datetime(), kind: AgentActivityKindSchema,
   provenance: z.enum(["broker", "provider-native", "worker-report", "host-verified", "terminal-fallback"]),

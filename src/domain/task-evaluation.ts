@@ -3,7 +3,7 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const id = z.string().min(1).max(256);
 export const TaskEvaluationIntentSchema = z.object({
   attemptId: id, sessionId: z.uuid(), executionId: z.uuid().optional(), generation: z.number().int().positive(),
-  instructionId: z.uuid().optional(), attribution: z.enum(["instruction", "initial-prompt", "direct-input", "unattributed"]),
+  instructionId: z.uuid().optional(), jobId: z.uuid().optional(), attribution: z.enum(["instruction", "initial-prompt", "direct-input", "unattributed"]),
   rubricId: id, rubricVersion: id, evidenceManifestHash: hash,
 }).strict();
 export type TaskEvaluationIntent = z.infer<typeof TaskEvaluationIntentSchema>;
