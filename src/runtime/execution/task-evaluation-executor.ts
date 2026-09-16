@@ -110,7 +110,8 @@ export class TaskEvaluationExecutor {
           continue;
         }
         if (!state.reservationId) {
-          const decision = await this.options.admission.request(state.resource);
+          const held = await this.options.admission.lookupReservation?.(state.resource);
+          const decision = held ? { state: "admitted" as const, reservationId: held } : await this.options.admission.request(state.resource);
           if (decision.state === "admitted") { state.reservationId = decision.reservationId; await this.files.save(state); }
           else await this.options.admission.cancel(state.resource.requestId);
         }

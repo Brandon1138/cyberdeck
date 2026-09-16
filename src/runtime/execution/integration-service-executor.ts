@@ -147,7 +147,8 @@ export class IntegrationServiceExecutor {
         try { await this.options.admission.cancel(manifest.resource.requestId); }
         catch (error) {
           if (!(error instanceof Error) || error.message !== "RESOURCE_TERMINATION_REQUIRED") throw error;
-          const decision = await this.options.admission.request(manifest.resource);
+          const held = await this.options.admission.lookupReservation?.(manifest.resource);
+          const decision = held ? { state: "admitted" as const, reservationId: held } : await this.options.admission.request(manifest.resource);
           if (decision.state !== "admitted") throw new Error("INTEGRATION_RECOVERY_ADMISSION_UNCONFIRMED");
           manifest.reservationId = decision.reservationId;
         }

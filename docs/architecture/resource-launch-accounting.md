@@ -41,3 +41,13 @@ the canonical session generation. A released runtime that actually launched rema
 ordinary termination evidence alone does not authorize another runtime at that generation.
 Older binaries reject ledgers containing the new strict-schema proof field: drain and retain
 the current reader during rollback rather than deleting or rewriting the ledger.
+
+
+Holding a reservation and permission to begin execution are separate. `request()` returns
+waiting-capacity whenever installation recovery, pressure, capture or drain holds apply,
+including requests already reserved before a crash. Owner cleanup may use the exact-request
+read-only `lookupReservation()` to recover the original reservation ID under a hold; it
+must not use this lookup to launch a runtime. This avoids both recovery deadlock and a
+preserved prelaunch reservation bypassing an unrelated owner's unresolved recovery.
+Canonical typed lease-authentication failures are translated at the auxiliary authorizer
+boundary to explicit revocation; transport/read failures remain temporary unavailable.

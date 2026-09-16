@@ -106,7 +106,8 @@ export class NativeToolExecutor {
     catch (error) {
       if (!(error instanceof Error) || error.message !== "RESOURCE_TERMINATION_REQUIRED") throw error;
       // refresh() may have admitted a previously waiting request. Reuse its immutable identity.
-      const decision = await this.options.admission.request(resource);
+      const held = await this.options.admission.lookupReservation?.(resource);
+      const decision = held ? { state: "admitted" as const, reservationId: held } : await this.options.admission.request(resource);
       if (decision.state !== "admitted") throw new Error("native-recovery-admission-unconfirmed");
       await this.options.admission.release({ reservationId: decision.reservationId, terminationEvidenceId: `${key}-not-launched` });
     }

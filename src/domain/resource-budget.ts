@@ -25,6 +25,8 @@ export type ResourceDecision =
   | { state: "resource-infeasible"; reason: string; requiredBytes: number; availableBytes: number };
 export interface ResourceAdmissionPort {
   request(input: ResourceRequest): Promise<ResourceDecision>;
+  /** Owner recovery only: look up an exact held request without granting launch permission. */
+  lookupReservation?(input: ResourceRequest): Promise<string | undefined>;
   cancel(requestId: string): Promise<void>;
   release(input: { reservationId: string; terminationEvidenceId: string }): Promise<void>;
 }

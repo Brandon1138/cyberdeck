@@ -61,6 +61,15 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
     });
   }
 
+  async lookupReservation(input: ResourceRequest): Promise<string | undefined> {
+    const request = ResourceRequestSchema.parse(input);
+    return this.serial(async () => {
+      const entry = this.store.read().entries.find(entry => entry.request.requestId === request.requestId);
+      if (entry && JSON.stringify(entry.request) !== JSON.stringify(request)) throw new Error("RESOURCE_REQUEST_CONFLICT");
+      return entry?.state === "admitted" ? entry.reservationId : undefined;
+    });
+  }
+
   async refresh(): Promise<void> {
     return this.serial(async () => {
       const ledger = this.store.read(); this.schedule(ledger); await this.persist(ledger);
@@ -146,7 +155,7 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
     }
   }
   private decision(entry: ResourceReservation): ResourceDecision {
-    return entry.state === "admitted" ? { state: "admitted", reservationId: entry.reservationId, demand: entry.request.demand }
+    return entry.state === "admitted" && !this.hold() ? { state: "admitted", reservationId: entry.reservationId, demand: entry.request.demand }
       : { state: "waiting-capacity", reason: this.hold() ?? "reserved-capacity", queuedAt: entry.queuedAt };
   }
   private async persist(ledger: ResourceLedger): Promise<void> {

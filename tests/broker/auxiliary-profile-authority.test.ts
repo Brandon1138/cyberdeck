@@ -41,9 +41,9 @@ test("uses canonical peer controller and the existing token/version/expiry predi
   const f = await fixture();
   expect(await f.authorize(f.binding, f.request)).toMatchObject({ familyId: "canonical-family", leaseVersion: f.credential.leaseVersion });
   f.credentials.set(f.controller.controllerId, f.binding.workerId, { leaseVersion: f.credential.leaseVersion!, leaseToken: "invalid" });
-  await expect(f.authorize(f.binding, f.request)).rejects.toThrow("lease is no longer current");
+  await expect(f.authorize(f.binding, f.request)).rejects.toThrow("AUXILIARY_LEASE_STALE");
   f.credentials.set(f.controller.controllerId, f.binding.workerId, { leaseVersion: f.credential.leaseVersion!, leaseToken: f.credential.leaseToken! });
-  f.advance(); await expect(f.authorize(f.binding, f.request)).rejects.toThrow("lease is no longer current");
+  f.advance(); await expect(f.authorize(f.binding, f.request)).rejects.toThrow("AUXILIARY_LEASE_STALE");
 });
 test("refuses stale version/generation and read-only policy without substituting a controller", async () => {
   const f = await fixture();

@@ -23,6 +23,23 @@ async function fixture() {
   return { service, store, env, make };
 }
 describe("shared resource admission", () => {
+  it("preserves held identity for cleanup while withholding prelaunch permission behind global recovery and pressure", async () => {
+    const { service, env, make } = await fixture(), input = request("reserved-before-crash");
+    const granted = await service.request(input); if (granted.state !== "admitted") throw new Error("setup");
+    const restarted = make();
+    expect(await restarted.request(input)).toMatchObject({ state: "waiting-capacity", reason: "reconciliation" });
+    expect(await restarted.lookupReservation(input)).toBe(granted.reservationId);
+    expect(restarted.health().reservations).toHaveLength(1);
+    await expect(restarted.lookupReservation({ ...input, owner: { ...input.owner, generation: 2 } })).rejects.toThrow("CONFLICT");
+    await expect(restarted.reconcile(async () => false)).rejects.toThrow("RECONCILIATION_REQUIRED");
+    expect((await restarted.request(input)).state).toBe("waiting-capacity");
+    await restarted.reconcile(async () => true);
+    expect(await restarted.request(input)).toEqual(granted);
+    env.observedBytes = 8 * GiB;
+    expect(await restarted.request(input)).toMatchObject({ state: "waiting-capacity", reason: "observed-budget" });
+    await restarted.release({ reservationId: (await restarted.lookupReservation(input))!, terminationEvidenceId: "terminated" });
+    expect(await restarted.lookupReservation(input)).toBeUndefined();
+  });
   it("holds on an observed budget breach and unknown usage, and queues transient overhead", async () => {
     const { service, env, store } = await fixture();
     env.observedBytes = 8 * GiB;

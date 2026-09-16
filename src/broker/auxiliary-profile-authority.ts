@@ -2,7 +2,7 @@ import type { AuxiliaryProfileRequest } from "../domain/auxiliary-profile.js";
 import type { InstructionRecord } from "../domain/instruction.js";
 import type { SessionRecord } from "../domain/session.js";
 import type { GatewayBinding } from "./worker-gateway.js";
-import type { WorkerCoordinationService } from "./worker-coordination.js";
+import { WorkerCoordinationError, type WorkerCoordinationService } from "./worker-coordination.js";
 import type { WorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
 
 /** Canonical lease authentication remains in WorkerCoordinationService; this adds recipe scope. */
@@ -24,8 +24,15 @@ export function auxiliaryProfileAuthorizer(options: {
         throw new Error("AUXILIARY_LEASE_STALE");
       const credential = options.credentials.get(controller.controllerId, session.id);
       if (!credential || credential.leaseVersion !== subject.lease.version) throw new Error("AUXILIARY_CREDENTIAL_UNAVAILABLE");
-      const canonical = options.coordination.authenticateCurrentLease({ workerId: session.id, controller,
-        leaseToken: credential.leaseToken, leaseVersion: subject.lease.version });
+      let canonical: ReturnType<WorkerCoordinationService["authenticateCurrentLease"]>;
+      try {
+        canonical = options.coordination.authenticateCurrentLease({ workerId: session.id, controller,
+          leaseToken: credential.leaseToken, leaseVersion: subject.lease.version });
+      } catch (error) {
+        if (error instanceof WorkerCoordinationError && ["LEASE_EXPIRED", "OWNERSHIP_LOST", "LEASE_TOKEN_INVALID"].includes(error.code))
+          throw new Error("AUXILIARY_LEASE_STALE", { cause: error });
+        throw error;
+      }
       if (session.sandbox !== "workspace-write") throw new Error("AUXILIARY_WRITE_POLICY_REFUSED");
       return { session, ref, familyId: canonical.familyId, leaseVersion: subject.lease.version };
     };
