@@ -27,6 +27,8 @@ const RecordSchema = z.object({ request: AuxiliaryProfileRequestSchema, binding:
   result: z.unknown().optional(),
   cleanupPending: z.boolean().optional(), cleanupAttempts: z.number().int().nonnegative().optional(),
   cleanupAfter: z.number().nonnegative().optional(), cleanupReason: z.string().max(256).optional(),
+  recoveryPending: z.boolean().optional(), recoveryAttempts: z.number().int().nonnegative().optional(),
+  recoveryAfter: z.number().nonnegative().optional(), recoveryReason: z.string().max(256).optional(),
 }).strict();
 type Record = z.infer<typeof RecordSchema>;
 export interface AuxiliaryAuthority {
@@ -127,7 +129,7 @@ export async function brokerAuxiliaryRuntime(options: {
         || reservation.request.owner.installationId !== config.installationId) return false;
       const record = [...records.values()].find(r => (r.request.profile === "integration"
         ? integrationNames(integrationRequest(r)).key : `native-${r.request.requestId}`) === reservation.request.requestId);
-      if (!record || record.familyId !== reservation.request.owner.familyId) return false;
+      if (!record || record.recoveryPending || record.familyId !== reservation.request.owner.familyId) return false;
       if (!record.terminal) await authorize(record);
       ready = record.request.profile === "integration" ? await integration?.recoveryReady(reservation) === true
         : profiles?.nativeRecipes.some(recipe => recipe.id === record.request.recipeId) === true
@@ -167,9 +169,17 @@ export async function brokerAuxiliaryRuntime(options: {
       executionId: record.binding.executionId, causationId: record.request.attemptId,
       observedAt: new Date().toISOString(), kind: "profile.settled", operation: "lifecycle", provenance: "host-verified",
       coverage: "complete-for-source", outcome };
-    await save({ ...record, state: "finished", terminal: event, result });
+    await save({ ...record, state: "finished", terminal: event, result,
+      recoveryPending: false, recoveryAfter: undefined, recoveryReason: undefined });
     await options.activity.append(event); // Durable request is the recovery source if append fails.
     projected.add(record.request.requestId);
+  };
+  const deferRecovery = async (record: Record) => {
+    const attempts = (record.recoveryAttempts ?? 0) + 1;
+    await save({ ...record, recoveryPending: true, recoveryAttempts: attempts,
+      recoveryAfter: Date.now() + Math.min(60000, 2000 * 2 ** Math.min(attempts - 1, 5)),
+      recoveryReason: "owned-runtime-recovery-unavailable", cleanupPending: true });
+    failures++;
   };
   const run = async (record: Record, signal: AbortSignal) => {
     let enteredExecutor = false;
@@ -189,9 +199,11 @@ export async function brokerAuxiliaryRuntime(options: {
       if (!signal.aborted && !revoked(error)) {
         let stillPending = !enteredExecutor;
         if (enteredExecutor) {
-          const recovered = record.request.profile === "integration"
-            ? await integration!.recover(integrationRequest(record)) : await native.recover(nativeRequest(record));
-          stillPending = "pending" in recovered || "state" in recovered && recovered.state === "pending";
+          try {
+            const recovered = record.request.profile === "integration"
+              ? await integration!.recover(integrationRequest(record)) : await native.recover(nativeRequest(record));
+            stillPending = "pending" in recovered || "state" in recovered && recovered.state === "pending";
+          } catch { await deferRecovery(current); return; }
         }
         if (stillPending) {
           await save({ ...current, state: "queued", reason: "auxiliary-operation-unavailable", cleanupPending: false }); return;
@@ -203,12 +215,13 @@ export async function brokerAuxiliaryRuntime(options: {
     }
   };
   const start = (record: Record) => {
-    if (closing || poisoned || active.has(record.request.requestId)) return;
+    if (closing || poisoned || record.recoveryPending || active.has(record.request.requestId)) return;
     const abort = new AbortController();
     const done = run(record, abort.signal).catch(() => { failures++; }).finally(() => active.delete(record.request.requestId));
     active.set(record.request.requestId, { abort, done });
   };
   const preservePending = async (record: Record) => {
+    record = { ...record, recoveryPending: false, recoveryAfter: undefined, recoveryReason: undefined };
     try {
       await authorize(record);
       await save({ ...record, state: "waiting-capacity", reason: undefined, cleanupPending: false });
@@ -218,6 +231,22 @@ export async function brokerAuxiliaryRuntime(options: {
       }
       const recovered = await retire(record);
       await terminal(records.get(record.request.requestId)!, outcome(recovered), recovered ?? { reason: "auxiliary-authority-revoked" });
+    }
+  };
+  const retryRecovery = async (record: Record) => {
+    try {
+      const recovered = record.request.profile === "integration"
+        ? await integration!.recover(integrationRequest(record)) : await native.recover(nativeRequest(record));
+      if ("pending" in recovered || "state" in recovered && recovered.state === "pending") {
+        await preservePending(record); return;
+      }
+      const result = "state" in recovered ? recovered : recovered.result;
+      const cleanupComplete = "cleanupComplete" in recovered ? recovered.cleanupComplete : false;
+      await terminal({ ...record, cleanupPending: !cleanupComplete, cleanupAfter: Date.now() + 2000 },
+        outcome(result), result ?? { reason: "auxiliary-operation-interrupted" });
+    } catch {
+      const current = records.get(record.request.requestId)!;
+      if (!current.terminal) await deferRecovery(current); // Terminal projection has its own durable retry path.
     }
   };
   // Recovered engine results remain authoritative even when their cleanup needs another retry.
@@ -265,7 +294,8 @@ export async function brokerAuxiliaryRuntime(options: {
         }
         if (active.has(record.request.requestId)) {
           try { await authorize(record); } catch (error) { if (revoked(error)) active.get(record.request.requestId)?.abort.abort(); }
-        } else if (record.cleanupPending && record.terminal && (record.cleanupAfter ?? 0) <= Date.now() && cleanupBudget-- > 0) await retire(record);
+        } else if (record.recoveryPending && (record.recoveryAfter ?? 0) <= Date.now() && cleanupBudget-- > 0) await retryRecovery(record);
+        else if (record.cleanupPending && record.terminal && (record.cleanupAfter ?? 0) <= Date.now() && cleanupBudget-- > 0) await retire(record);
         else if (["queued", "waiting-capacity"].includes(record.state)) start(record);
       }
     })().catch(() => { failures++; }).finally(() => { pending = undefined; });
@@ -292,11 +322,13 @@ export async function brokerAuxiliaryRuntime(options: {
       return { requestId: request.requestId, state: record.state, reason: record.reason, outcome: record.terminal?.outcome,
         artifactRef: record.terminal ? `profile:${request.requestId}` : undefined };
     },
-    admissionHold: () => poisoned || [...records.values()].some(r => r.terminal && !projected.has(r.request.requestId))
+    admissionHold: () => poisoned || [...records.values()].some(r => r.recoveryPending || r.terminal && !projected.has(r.request.requestId))
       ? "auxiliary-capture-gap" as const : null,
     recoveryReady,
     health: () => ({ active: active.size, retained: records.size, failures, poisoned,
-      recovery: { inventoryReady, checked: recoveryChecks.size, held: [...recoveryChecks.values()].filter(ready => !ready).length },
+      recovery: { inventoryReady, checked: recoveryChecks.size, held: [...recoveryChecks.values()].filter(ready => !ready).length,
+        pending: [...records.values()].filter(r => r.recoveryPending).length,
+        retries: [...records.values()].reduce((sum, r) => sum + (r.recoveryAttempts ?? 0), 0) },
       waiting: [...records.values()].filter(r => r.state === "waiting-capacity").length,
       cleanupPending: [...records.values()].filter(r => r.cleanupPending).length,
       cleanupRetries: [...records.values()].reduce((sum, r) => sum + (r.cleanupAttempts ?? 0), 0),

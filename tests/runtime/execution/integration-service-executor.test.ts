@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -209,11 +209,37 @@ describe("broker-owned integration services", () => {
   it("does not recover a sibling attempt or reveal its credentials", async () => {
     const f = await setup(), input = request(); f.state.failRemove = true;
     await f.backend.run(input); const count = f.run.mock.calls.length;
-    await expect(f.backend.recover({ ...input, attemptId: randomUUID() })).rejects.toThrow("INTEGRATION_RECOVERY_UNKNOWN");
+    expect(await f.backend.recover({ ...input, attemptId: randomUUID() })).toEqual({ state: "pending", resource: null });
     expect(f.run.mock.calls).toHaveLength(count);
     const privateManifest = JSON.parse(await readFile(join(f.directory, `${integrationNames(input).key}.credentials.json`), "utf8"));
     expect(privateManifest.network).toBe(integrationNames(input).network);
     expect(privateManifest.password).toHaveLength(64);
+  });
+  it.each(["invalid", "dangling-symlink"])("does not confuse %s intent with a missing prelaunch manifest", async mode => {
+    const f = await setup(), input = request(), path = join(f.directory, `${integrationNames(input).key}.json`);
+    if (mode === "invalid") await writeFile(path, "not valid JSON");
+    else await symlink(join(f.directory, "missing-target"), path);
+    await expect(f.backend.recover(input)).rejects.toThrow();
+    expect(f.admission.request).not.toHaveBeenCalled(); expect(f.admission.cancel).not.toHaveBeenCalled();
+    expect(f.run).not.toHaveBeenCalled();
+  });
+  it("held reconciliation blocks auto-admitted prelaunch work while exact cleanup lookup remains available", async () => {
+    // Depends on the composition root's concurrent lookupReservation/request-hold remediation.
+    const f = await setup(true), first = request(), second = { ...first, attemptId: randomUUID() };
+    try {
+      f.real!.control.available = false; await f.backend.run(first); await f.backend.run(second);
+      f.real!.control.available = true; await f.real!.admission.refresh();
+      const before = f.real!.store.read(), owned = before.entries.find(entry => entry.request.requestId === integrationNames(first).key)!;
+      await expect(f.real!.admission.reconcile(async () => false)).rejects.toThrow("RESOURCE_RECONCILIATION_REQUIRED");
+      expect(await f.backend.run(first)).toMatchObject({ state: "waiting-capacity", reason: "reconciliation" });
+      expect(f.run).not.toHaveBeenCalled(); expect(f.real!.store.read()).toEqual(before);
+      const admission = f.real!.admission as unknown as ResourceAdmissionPort & { lookupReservation(input: ResourceRequest): Promise<string | undefined> };
+      expect(await admission.lookupReservation(owned.request)).toBe(owned.reservationId);
+      expect(f.real!.store.read()).toEqual(before);
+      await f.real!.admission.reconcile(async held => (await Promise.all(held.map(entry => f.backend.recoveryReady(entry)))).every(Boolean));
+      expect(await f.backend.run(first)).toMatchObject({ state: "completed", outcome: "verified-pass" });
+      expect(f.real!.store.read().entries[0]!.request).toEqual(before.entries[0]!.request);
+    } finally { await f.real!.store.close(); }
   });
   it("enumerates exact persisted bindings and rejects malformed inventory before any recovery mutation", async () => {
     const f = await setup(), input = request(); f.state.failRemove = true;

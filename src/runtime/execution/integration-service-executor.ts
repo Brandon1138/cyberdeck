@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { readFile, readdir, unlink } from "node:fs/promises";
+import { lstat, readFile, readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import type { ResourceAdmissionPort, ResourceDecision, ResourceReservation } from "../../domain/resource-budget.js";
@@ -23,7 +23,7 @@ type Manifest = z.infer<typeof ManifestSchema>;
 export type IntegrationServiceResult = Exclude<ResourceDecision, { state: "admitted" }> | {
   state: "completed"; outcome: NonNullable<Manifest["outcome"]>; manifestRef: string; cleanupComplete: boolean;
 };
-export type IntegrationServiceRecovery = IntegrationServiceResult | { state: "pending"; resource: ResourceRequest };
+export type IntegrationServiceRecovery = IntegrationServiceResult | { state: "pending"; resource: ResourceRequest | null };
 export interface IntegrationServiceExecutorOptions {
   client: OrbStackClient; admission: ResourceAdmissionPort; image: string; evidenceDirectory: string;
   /** Resolve canonical bindings/lease fencing afresh, never derive family from request data. */
@@ -136,7 +136,11 @@ export class IntegrationServiceExecutor {
     const request = IntegrationServiceRequestSchema.parse(input);
     return this.exclusive(integrationNames(request).key, async () => {
       const manifest = await this.read(request);
-      if (!manifest) throw new Error("INTEGRATION_RECOVERY_UNKNOWN");
+      if (!manifest) {
+        if (cancelPending) throw new Error("INTEGRATION_RECOVERY_UNKNOWN");
+        // Initial authorization can fail before intent exists. Missing is pending, never cleanup proof.
+        return { state: "pending", resource: null };
+      }
       const recipe = integrationRecipe(manifest.image);
       if (manifest.recipeHash !== integrationHash(recipe)) throw new Error("INTEGRATION_RECIPE_MISMATCH");
       if (manifest.phase === "waiting" && !manifest.outcome && !cancelPending) {
@@ -245,11 +249,16 @@ export class IntegrationServiceExecutor {
   private secretPath(request: IntegrationServiceRequest): string { return join(this.options.evidenceDirectory, `${integrationNames(request).key}.credentials.json`); }
   private save(manifest: Manifest): Promise<void> { return writeAtomicPrivateFile(this.path(manifest.request), JSON.stringify(manifest)); }
   private async read(request: IntegrationServiceRequest): Promise<Manifest | undefined> {
-    try {
-      const manifest = ManifestSchema.parse(JSON.parse(await readFile(this.path(request), "utf8")));
-      if (JSON.stringify(manifest.request) !== JSON.stringify(request)) throw new Error("INTEGRATION_RECOVERY_IDENTITY_MISMATCH");
-      return manifest;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    // Only a conclusively absent directory entry is missing intent. Unreadable files, dangling
+    // symlinks, invalid content, and files disappearing after stat remain unknown recovery state.
+    const stat = await lstat(this.path(request)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined; throw error;
+    });
+    if (!stat) return undefined;
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("INTEGRATION_RECOVERY_MANIFEST_INVALID");
+    const manifest = ManifestSchema.parse(JSON.parse(await readFile(this.path(request), "utf8")));
+    if (JSON.stringify(manifest.request) !== JSON.stringify(request)) throw new Error("INTEGRATION_RECOVERY_IDENTITY_MISMATCH");
+    return manifest;
   }
   private result(manifest: Manifest): IntegrationServiceResult {
     return { state: "completed", outcome: manifest.outcome!, manifestRef: this.path(manifest.request), cleanupComplete: manifest.cleanupComplete };
