@@ -32,8 +32,9 @@ export async function brokerResourceRuntime(options: BrokerResourceRuntimeOption
   const client = new OrbStackClient(endpoint);
   const sampler = new NativeMacosProcessSampler(config.nativeHelper);
   let admission: ResourceAdmissionService | undefined, gate: ResourceExecutionGate | undefined;
-  let failures = 0, recoveryHold = true;
+  let failures = 0, recoveryHold = true, recoveryConfigured = false;
   const verifiers = new Map<string, (reservation: ResourceReservation, evidence: string) => Promise<boolean>>();
+  const recoveryChecks = new Map<string, (reservation: ResourceReservation) => Promise<boolean>>();
   const store = await ResourceReservationStore.open(config.directory, config.installationId, {
     acquireOwner: path => acquireResourceOwnerLock(config.ownerLockHelper, path, () => { admission?.drain(); void gate?.close(); }),
   });
@@ -108,7 +109,19 @@ export async function brokerResourceRuntime(options: BrokerResourceRuntimeOption
   let timer: ReturnType<typeof setInterval> | undefined, pending: Promise<void> | undefined;
   const sweep = async () => {
     try {
-      if (recoveryHold) { await gate!.reconcile(); recoveryHold = false; }
+      if (recoveryHold) {
+        if (!recoveryConfigured) return;
+        const sessionsReady = await gate!.reconcileOwned();
+        await admission!.reconcile(async held => {
+          if (!sessionsReady) return false;
+          for (const reservation of held) if (!["worker", "orchestrator"].includes(reservation.request.owner.kind)) {
+            const check = recoveryChecks.get(reservation.request.demand.profileId);
+            if (!check || !await check(reservation)) return false;
+          }
+          return true;
+        });
+        recoveryHold = false;
+      }
       for (const reservation of admission!.health().reservations) {
         if (["worker", "orchestrator"].includes(reservation.request.owner.kind))
           await gate!.release(reservation.request.requestId).catch(() => undefined);
@@ -116,15 +129,19 @@ export async function brokerResourceRuntime(options: BrokerResourceRuntimeOption
       await admission!.refresh();
     } catch { failures++; }
   };
+  const runSweep = () => pending ??= sweep().finally(() => { pending = undefined; });
   try {
-    await monitor.start(); await sweep();
-    timer = setInterval(() => {
-      if (!pending) pending = sweep().finally(() => { pending = undefined; });
-    }, 5000).unref();
+    await monitor.start(); await runSweep();
+    timer = setInterval(() => { void runSweep(); }, 5000).unref();
   } catch (error) { await monitor.close(); await store.close(); throw error; }
   return {
     gate, admission, bindings,
     assertOwner: () => store.assertOwner(),
+    async completeRecovery() { recoveryConfigured = true; await pending; await runSweep(); },
+    registerRecovery(profileId: string, check: (reservation: ResourceReservation) => Promise<boolean>) {
+      if (recoveryChecks.has(profileId)) throw new Error("RESOURCE_RECOVERY_OWNER_DUPLICATE");
+      recoveryChecks.set(profileId, check);
+    },
     registerVerifier(profileId: string, verifier: (reservation: ResourceReservation, evidence: string) => Promise<boolean>) {
       if (verifiers.has(profileId)) throw new Error("RESOURCE_VERIFIER_DUPLICATE");
       verifiers.set(profileId, verifier);

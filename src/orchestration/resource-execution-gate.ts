@@ -24,6 +24,7 @@ export interface ResourceExecutionGateOptions {
 /** Durable reservation surrounds provider preparation as well as spawn, including Orc daemons. */
 export class ResourceExecutionGate implements ResourceSessionLaunchPort {
   private readonly starts = new Map<string, AbortController>();
+  private readonly activeRequests = new Map<string, string>();
   private readonly settlements = new Set<Promise<unknown>>();
   private closed = false;
   private readonly abandonedBeforeSpawn = new Set<string>();
@@ -34,7 +35,7 @@ export class ResourceExecutionGate implements ResourceSessionLaunchPort {
     if (this.starts.has(record.id)) return Promise.reject(new Error("RESOURCE_LAUNCH_BUSY"));
     const controller = new AbortController(); this.starts.set(record.id, controller);
     const operation = this.startExclusive(record, launch, controller.signal).finally(() => {
-      this.starts.delete(record.id); this.settlements.delete(operation);
+      this.starts.delete(record.id); this.activeRequests.delete(record.id); this.settlements.delete(operation);
     });
     this.settlements.add(operation); return operation;
   }
@@ -55,41 +56,45 @@ export class ResourceExecutionGate implements ResourceSessionLaunchPort {
     return reservation ? structuredClone(reservation.request.demand) : undefined;
   }
   /** Wire directly into ResourceAdmissionService's verifier. Evidence cannot cross a generation. */
-  async verifyTermination(reservation: ResourceReservation, evidenceId: string): Promise<boolean> {
+  async verifyTermination(reservation: ResourceReservation, evidenceId: string): Promise<boolean | "never-launched"> {
     const binding = this.options.bindings.get(reservation.request.requestId);
     if (!binding || evidenceId !== binding.request.requestId
       || JSON.stringify(binding.request) !== JSON.stringify(reservation.request)) return false;
     if (binding.phase === "terminated") return true;
     if (binding.phase === "queued" || binding.phase === "reserved")
-      return !this.starts.has(binding.request.owner.workloadId) || this.abandonedBeforeSpawn.has(binding.request.requestId);
+      return !this.starts.has(binding.request.owner.workloadId) || this.abandonedBeforeSpawn.has(binding.request.requestId) ? "never-launched" : false;
     const inspection = await this.options.inspect(binding);
     return inspection.state === "terminated" && inspection.inventoryComplete;
   }
-  /** Reconcile *all* held work before admission opens. Unknown spawn gaps remain held. */
+  /** Standalone session recovery; installation composition owns the mixed-executor barrier. */
   async reconcile(): Promise<void> {
-    if (this.starts.size) throw new Error("RESOURCE_RECONCILIATION_DURING_LAUNCH");
-    const terminated: ResourceReservation[] = [];
-    await this.options.admission.reconcile(async held => {
-      let complete = true;
-      for (const reservation of held) {
-        const binding = this.options.bindings.get(reservation.request.requestId);
-        if (!binding || JSON.stringify(binding.request) !== JSON.stringify(reservation.request)) { complete = false; continue; }
-        if (binding.phase === "queued" || binding.phase === "reserved" || binding.phase === "terminated") {
-          terminated.push(reservation); continue;
-        }
-        const inspection = await this.options.inspect(binding);
-        if (inspection.state === "unknown" || !inspection.inventoryComplete) { complete = false; continue; }
-        if (inspection.state === "terminated") terminated.push(reservation);
-        else {
-          if (!inspection.identities.length) { complete = false; continue; }
-          const identities = [...binding.identities, ...inspection.identities.filter(identity =>
-            !binding.identities.some(prior => JSON.stringify(prior) === JSON.stringify(identity)))];
-          await this.options.bindings.put({ ...binding, phase: "bound", identities });
-        }
+    const complete = await this.reconcileOwned();
+    await this.options.admission.reconcile(async held => complete && held.every(reservation =>
+      ["worker", "orchestrator"].includes(reservation.request.owner.kind)));
+  }
+  /** Mutate only session-owned bindings, before global admission can be reopened. */
+  async reconcileOwned(): Promise<boolean> {
+    let complete = true;
+    const held = this.options.admission.health().reservations.filter(reservation =>
+      ["worker", "orchestrator"].includes(reservation.request.owner.kind));
+    for (const reservation of held) {
+      const binding = this.options.bindings.get(reservation.request.requestId);
+      if (!binding || JSON.stringify(binding.request) !== JSON.stringify(reservation.request)) { complete = false; continue; }
+      if (this.activeRequests.get(binding.request.owner.workloadId) === binding.request.requestId) { complete = false; continue; }
+      if (binding.phase === "queued" || binding.phase === "reserved" || binding.phase === "terminated") {
+        await this.release(reservation.request.requestId); continue;
       }
-      return complete;
-    });
-    for (const reservation of terminated) await this.release(reservation.request.requestId);
+      const inspection = await this.options.inspect(binding);
+      if (inspection.state === "unknown" || !inspection.inventoryComplete) { complete = false; continue; }
+      if (inspection.state === "terminated") await this.release(reservation.request.requestId);
+      else {
+        if (!inspection.identities.length) { complete = false; continue; }
+        const identities = [...binding.identities, ...inspection.identities.filter(identity =>
+          !binding.identities.some(prior => JSON.stringify(prior) === JSON.stringify(identity)))];
+        await this.options.bindings.put({ ...binding, phase: "bound", identities });
+      }
+    }
+    return complete;
   }
   /** Periodic cleanup/recovery may retry this; a runtime exit callback is only a hint. */
   async release(requestId: string): Promise<void> {
@@ -108,6 +113,7 @@ export class ResourceExecutionGate implements ResourceSessionLaunchPort {
       kind: record.kind === "orchestrator" ? "orchestrator" : "worker", familyId,
     }, demand: await this.options.resolveDemand(record), priority: "interactive" };
     let binding: ResourceRuntimeBinding = { request, phase: "queued", identities: [] };
+    this.activeRequests.set(record.id, request.requestId);
     await this.options.bindings.put(binding);
     let runtime: SessionRuntime | undefined;
     try {

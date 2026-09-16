@@ -168,3 +168,16 @@ test("non-schema insertion order in a stored intent remains valid across capacit
   f.control.now = 300001; f.control.waiting = false;
   expect((await f.executor.runNext()).state).toBe("finished"); expect(f.store.result(f.key)?.disposition).toBe("verified-pass");
 });
+
+
+test("owner recovery requires exact durable reservation and fresh container absence", async () => {
+  const f = await setup(); f.control.removeFails = true;
+  await f.executor.reconcile(); await f.executor.runNext();
+  const reservation = f.reservations[0]!;
+  expect(await f.executor.recoveryReady(reservation)).toBe(false);
+  f.control.removeFails = false; await f.executor.reconcile();
+  expect(await f.executor.recoveryReady(reservation)).toBe(true);
+  expect(await f.executor.recoveryReady({ ...reservation, reservationId: "other" })).toBe(false);
+  f.control.unavailable = true;
+  expect(await f.executor.recoveryReady(reservation)).toBe(false);
+});

@@ -21,3 +21,23 @@ The persisted `resource-owner-mode` prevents participants using legacy `wx` and 
 Deterministic tests cover reserve-before-prepare, queue cancellation, cancelled admitted work without spawn, durable reserve/spawn crash gaps, generation fencing, helper identity retention, PID reuse, Engine outage, kernel owner exclusion/reacquisition, and original provider routing. Kernel tests compile only a temporary helper and touch isolated fixture files. No provider launch, live broker mutation, or container mutation is part of these tests.
 
 This foundation does not implement calibrated profiles, production wiring, complete native lifetime tracking, parking, authenticated wake, or real eight-worker feasibility. It must not be described as MacBook acceptance or enabled production containment. Unknown native attribution remains held until an authoritative tracker or recovery procedure proves termination.
+
+
+## Installation recovery barrier
+
+The broker leaves admission closed while executor owners are composed. Session recovery
+only inspects worker/orchestrator reservations; native/service and evaluator profiles
+register their own read-only readiness checks. The global barrier opens only after all
+held reservations have owner evidence and all required session releases are durable.
+Missing owner registrations, failed releases and unknown lifetime inventories keep the
+barrier closed. Owner checks must not call admission from its serialized reconciliation
+callback. New queued session starts may wait during recovery without blocking that barrier.
+
+A cancelled queued request was never admitted and can be retried at the same prospective
+session generation. An admitted cancellation before provider preparation instead records
+`terminationKind: "never-launched"` in the released ledger entry, derived solely from the
+session owner's durable prelaunch binding. Both allow retry after restart without advancing
+the canonical session generation. A released runtime that actually launched remains fenced;
+ordinary termination evidence alone does not authorize another runtime at that generation.
+Older binaries reject ledgers containing the new strict-schema proof field: drain and retain
+the current reader during rollback rather than deleting or rewriting the ledger.

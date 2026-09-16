@@ -2,6 +2,9 @@ import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { SessionRegistry } from "../../src/broker/session-registry.js";
+import { BrokerRuntimeConfigSchema } from "../../src/config.js";
+import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import { ResourcePolicySchema } from "../../src/domain/resource-budget.js";
@@ -45,6 +48,88 @@ async function fixture(path?: string, recover = true) {
   return { path, store, bindings, gate, admission, capture, resolveFamily, inspect: (value: ResourceRuntimeInspection) => { inspection = value; } };
 }
 describe("resource launch gate", () => {
+  it("ordinary registry resume can retry after cancellation without advancing its canonical generation", async () => {
+    const f = await fixture(), launched: ReturnType<typeof runtime>[] = [];
+    const registry = new SessionRegistry({ config: BrokerRuntimeConfigSchema.parse({}),
+      adapters: { codex: { id: "codex", buildLaunchSpec: record => ({ executable: "fixture", args: [], cwd: record.cwd, env: {} }),
+        buildResumeSpec: record => ({ executable: "fixture", args: ["resume"], cwd: record.cwd, env: {} }) } },
+      sessionRuntimeFactory: () => { const child = runtime(); launched.push(child); return child.value; },
+      workerTurnObservation: new WorkerTurnObservationAdapter(), journal: { append: async () => {} },
+      validateCwd: async () => {}, resourceExecution: f.gate });
+    const session = await registry.start({ provider: "codex", cwd: "/tmp/resource-resume-fixture", detached: true, sandbox: "read-only" });
+    f.inspect({ state: "terminated", inventoryComplete: true, identities: [] });
+    launched[0]!.exit();
+    await vi.waitFor(() => expect(registry.get(session.id).executionState).toBe("exited"));
+    await f.gate.release(f.bindings.list()[0]!.request.requestId);
+    f.inspect({ state: "running", inventoryComplete: true, identities: [{ kind: "native", pid: 42, startTime: "libproc:1234.000002" }] });
+    await f.gate.start(record("blocker"), async () => runtime().value);
+    const pending = registry.resume(session.id), rejected = expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(f.admission.health().queue).toHaveLength(1));
+    await registry.stop(session.id); await rejected;
+    expect(registry.get(session.id).generation).toBe(1); expect(launched).toHaveLength(1);
+    f.inspect({ state: "terminated", inventoryComplete: true, identities: [] });
+    await f.gate.release(f.admission.health().reservations[0]!.request.requestId);
+    f.inspect({ state: "running", inventoryComplete: true, identities: [{ kind: "native", pid: 42, startTime: "libproc:1234.000003" }] });
+    await registry.resume(session.id);
+    expect(registry.get(session.id).generation).toBe(2); expect(launched).toHaveLength(2);
+    f.inspect({ state: "terminated", inventoryComplete: true, identities: [] }); launched[1]!.exit();
+    await vi.waitFor(() => expect(registry.get(session.id).executionState).toBe("exited"));
+    await f.gate.release(f.admission.health().reservations[0]?.request.requestId ?? f.bindings.list().at(-1)!.request.requestId);
+  });
+  it("retries a cancelled queued resume after durable reopen without duplicating a launched generation", async () => {
+    const f = await fixture();
+    await f.gate.start(record(), async () => runtime().value);
+    f.inspect({ state: "terminated", inventoryComplete: true, identities: [] });
+    await f.gate.release(f.bindings.list()[0]!.request.requestId);
+    f.inspect({ state: "running", inventoryComplete: true, identities: [{ kind: "native", pid: 42, startTime: "libproc:1234.000001" }] });
+    await f.gate.start(record("blocker"), async () => runtime().value);
+    const launch = vi.fn(async () => runtime().value);
+    const resume = f.gate.start(record("worker", 2), launch), rejected = expect(resume).rejects.toThrow();
+    await vi.waitFor(() => expect(f.admission.health().queue).toHaveLength(1));
+    f.gate.cancelStart("worker"); await rejected; expect(launch).not.toHaveBeenCalled();
+    await f.store.close();
+    const restored = await fixture(f.path, false);
+    restored.inspect({ state: "terminated", inventoryComplete: true, identities: [] });
+    await restored.gate.reconcile();
+    restored.inspect({ state: "running", inventoryComplete: true, identities: [{ kind: "native", pid: 42, startTime: "libproc:1234.000002" }] });
+    await restored.gate.start(record("worker", 2), launch);
+    expect(launch).toHaveBeenCalledTimes(1);
+    const active = restored.admission.health().reservations[0]!;
+    restored.inspect({ state: "terminated", inventoryComplete: true, identities: [] });
+    await restored.gate.release(active.request.requestId);
+    await expect(restored.gate.start(record("worker", 2), launch)).rejects.toThrow("GENERATION_CONFLICT");
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+  it("allows new waiters during held recovery without treating them as surviving runtimes", async () => {
+    const f = await fixture(undefined, false), launch = vi.fn(async () => runtime().value);
+    const pending = f.gate.start(record(), launch);
+    await vi.waitFor(() => expect(f.admission.health().queue).toHaveLength(1));
+    expect(launch).not.toHaveBeenCalled();
+    await f.gate.reconcile(); await pending;
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+  it("does not inspect auxiliary reservations or reopen admission when their owner is missing", async () => {
+    const f = await fixture();
+    await f.admission.request({ requestId: "service", owner: { installationId: "test", workloadId: "service",
+      familyId: "canonical-family", kind: "service", generation: 1 }, priority: "interactive",
+      demand: { memoryBytes: 6 * GiB, cpuWeight: 100, pidLimit: 32, profileId: "service", profileVersion: "1" } });
+    expect(await f.gate.reconcileOwned()).toBe(true);
+    await expect(f.gate.reconcile()).rejects.toThrow("RECONCILIATION_REQUIRED");
+    expect(f.admission.health()).toMatchObject({ hold: "reconciliation", reservedBytes: 6 * GiB });
+    expect(f.bindings.list()).toEqual([]);
+  });
+  it("keeps startup admission closed when release of a proven prelaunch binding fails", async () => {
+    const f = await fixture();
+    const req = { requestId: "unreleased", owner: { installationId: "test", workloadId: "worker",
+      familyId: "canonical-family", kind: "worker" as const, generation: 1 }, priority: "interactive" as const,
+      demand: { memoryBytes: 6 * GiB, cpuWeight: 100, pidLimit: 32, profileId: "synthetic", profileVersion: "1" } };
+    await f.bindings.put({ request: req, phase: "reserved", identities: [] });
+    await f.admission.request(req); await f.store.close();
+    const restored = await fixture(f.path, false);
+    vi.spyOn(restored.admission, "release").mockRejectedValue(new Error("durable release failed"));
+    await expect(restored.gate.reconcile()).rejects.toThrow("durable release failed");
+    expect(restored.admission.health()).toMatchObject({ hold: "reconciliation", reservedBytes: 6 * GiB });
+  });
   it("rechecks canonical family after waiting and releases before preparation on a handoff", async () => {
     const f = await fixture(), launch = vi.fn(async () => runtime().value);
     f.resolveFamily.mockReturnValueOnce("previous-family").mockReturnValue("new-family");
@@ -77,13 +162,17 @@ describe("resource launch gate", () => {
   it("releases admitted cancellation before any preparation side effect", async () => {
     const f = await fixture();
     const put = f.bindings.put.bind(f.bindings);
-    vi.spyOn(f.bindings, "put").mockImplementation(async binding => {
+    const save = vi.spyOn(f.bindings, "put").mockImplementation(async binding => {
       await put(binding); if (binding.phase === "reserved") f.gate.cancelStart("worker");
     });
     const launch = vi.fn(async () => runtime().value);
     await expect(f.gate.start(record(), launch)).rejects.toThrow("CANCELLED");
     expect(launch).not.toHaveBeenCalled();
     expect(f.admission.health().reservedBytes).toBe(0);
+    expect(f.store.read().entries[0]?.terminationKind).toBe("never-launched");
+    save.mockRestore(); await f.store.close();
+    const restored = await fixture(f.path);
+    await restored.gate.start(record(), launch); expect(launch).toHaveBeenCalledTimes(1);
   });
   it("retains crash-after-spawn uncertainty across real durable reopen", async () => {
     const f = await fixture(); f.capture.mockRejectedValue(new Error("crash before binding"));

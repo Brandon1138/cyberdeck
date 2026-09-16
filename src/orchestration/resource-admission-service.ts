@@ -13,7 +13,7 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
   private readonly policy: ResourcePolicy;
   constructor(private readonly store: ResourceLedgerPort, policy: ResourcePolicy,
     private readonly environment: () => ResourceEnvironment,
-    private readonly verifyTermination: (reservation: ResourceReservation, evidenceId: string) => Promise<boolean>,
+    private readonly verifyTermination: (reservation: ResourceReservation, evidenceId: string) => Promise<boolean | "never-launched">,
     private readonly now: () => number = Date.now) {
     this.policy = ResourcePolicySchema.parse(policy);
   }
@@ -43,10 +43,12 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
           requiredBytes: request.demand.memoryBytes, availableBytes: pool };
       }
       const generation = request.owner.generation;
+      // Cancelled entries were never admitted: cancel() refuses every admitted reservation.
+      // A released generation remains fenced unless its owner durably proved launch never began.
       const related = ledger.entries.filter(e => e.request.owner.workloadId === request.owner.workloadId);
       if (related.some(e => (e.request.owner.generation ?? 0) > (generation ?? 0)
         || e.request.requestId !== request.requestId && (e.state === "admitted" || e.state === "waiting-capacity"
-          || e.request.owner.generation === generation))) throw new Error("RESOURCE_GENERATION_CONFLICT");
+          || e.request.owner.generation === generation && e.state !== "cancelled" && e.terminationKind !== "never-launched"))) throw new Error("RESOURCE_GENERATION_CONFLICT");
       if (!prior) {
         if (ledger.entries.length >= 10000 || ledger.entries.filter(e => e.state === "waiting-capacity").length >= this.policy.maxQueue)
           throw new Error("RESOURCE_LEDGER_BACKPRESSURE");
@@ -80,9 +82,11 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
       const ledger = this.store.read(), entry = ledger.entries.find(e => e.reservationId === input.reservationId);
       if (!entry) throw new Error("RESOURCE_RESERVATION_UNKNOWN");
       if (entry.state === "released") return;
-      if (entry.state !== "admitted" || !input.terminationEvidenceId ||
-        !await this.verifyTermination(structuredClone(entry), input.terminationEvidenceId)) throw new Error("RESOURCE_TERMINATION_UNCONFIRMED");
+      if (entry.state !== "admitted" || !input.terminationEvidenceId) throw new Error("RESOURCE_TERMINATION_UNCONFIRMED");
+      const proof = await this.verifyTermination(structuredClone(entry), input.terminationEvidenceId);
+      if (proof !== true && proof !== "never-launched") throw new Error("RESOURCE_TERMINATION_UNCONFIRMED");
       entry.state = "released"; entry.terminationEvidenceId = input.terminationEvidenceId;
+      if (proof === "never-launched") entry.terminationKind = proof;
       this.schedule(ledger); await this.persist(ledger);
     });
   }

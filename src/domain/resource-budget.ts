@@ -51,7 +51,9 @@ export const ResourceReservationSchema = z.object({
   state: z.enum(["waiting-capacity", "admitted", "cancelled", "released"]),
   reservationId: id, bypasses: z.number().int().nonnegative(),
   terminationEvidenceId: id.optional(),
-}).strict();
+  terminationKind: z.literal("never-launched").optional(),
+}).strict().refine(entry => !entry.terminationKind || entry.state === "released" && Boolean(entry.terminationEvidenceId),
+  "Never-launched proof belongs to a confirmed release");
 export type ResourceReservation = z.infer<typeof ResourceReservationSchema>;
 export const ResourceLedgerSchema = z.object({
   schemaVersion: z.literal(1), installationId: id, revision: z.number().int().nonnegative(),

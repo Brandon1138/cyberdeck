@@ -42,6 +42,7 @@ const executor = new IntegrationServiceExecutor({ client, admission: runtime.adm
     return { installationId, familyId: "operator-profile-fixture" };
   } });
 runtime.registerVerifier("postgres-fixture-v1", (reservation, evidence) => executor.verifyTermination(reservation, evidence));
+await runtime.completeRecovery(); // This fresh fixture has no recovered auxiliary reservations.
 const samples: unknown[] = [runtime.health()];
 const timer = setInterval(() => { if (samples.length < 120) samples.push(runtime.health()); }, 1000).unref();
 try {

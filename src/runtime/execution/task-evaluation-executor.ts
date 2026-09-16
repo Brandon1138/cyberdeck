@@ -130,6 +130,14 @@ export class TaskEvaluationExecutor {
         && !await this.engine.inspect(state); // Fresh daemon confirmation, not a historical receipt alone.
     } catch { return false; }
   }
+  /** Owner-only startup evidence; never calls admission while its reconciliation lock is held. */
+  async recoveryReady(reservation: ResourceReservation): Promise<boolean> {
+    try {
+      const state = (await this.inventory()).find(entry => entry.resource.requestId === reservation.request.requestId);
+      return Boolean(state && state.cleanupConfirmed && state.reservationId === reservation.reservationId
+        && evaluatorHash(state.resource) === evaluatorHash(reservation.request) && !await this.engine.inspect(state));
+    } catch { return false; }
+  }
   private terminationId(state: EvaluatorState): string {
     return evaluatorHash({ run: state.runId, resource: state.resource, reservation: state.reservationId, backend: state.backendId ?? null, absent: true });
   }

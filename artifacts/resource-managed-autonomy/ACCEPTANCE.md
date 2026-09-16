@@ -80,3 +80,18 @@ Isolated evaluation dependencies installed from the frozen lockfile; exact eval 
 command passed and production dependency audit reported no known vulnerabilities at `8c7acd4`.
 Worker/evaluator image builds and live Promptfoo container execution remain capacity-held.
 The native lifetime mechanism and automatic subscription refresh remain unresolved.
+
+
+Recovery review checkpoint: independent High review of `3c7f40c` found three P1 defects:
+auxiliary waiting requests lost on restart, mixed-owner admission reopening, and cancelled
+prospective resume generations becoming permanently fenced. Root corrections now require
+owner-specific readiness and durable releases before global admission, and permit retries
+only with cancelled/never-launched evidence. Regression coverage includes the real session
+registry, ledger close/reopen, admitted-before-launch cancellation, failed releases and
+missing auxiliary owners. Focused source/architecture checks: 68 tests and TypeScript passed.
+Auxiliary queue-preservation integration and final-candidate reruns remain pending.
+
+Exact clean `3c7f40c` regression: 229 files / 2,522 tests and build passed. Its offline suite
+had 6 passes / 2 fixture errors (`WORKER_EGRESS_PROXY_REQUIRED`); a separate bounded fixture
+patch passes all 8 scenarios without changing production egress or grading. Results from
+that leaf are not final integrated-candidate evidence.

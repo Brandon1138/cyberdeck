@@ -56,6 +56,7 @@ export async function brokerEvaluationRuntime(options: {
       // Explicit installation background bucket; never attribute history to a newer controller.
       resolveFamily: async () => "operator-evaluation", requiredChecks: () => [] });
     resource.registerVerifier("offline-promptfoo", (reservation, evidence) => executor!.verifyTermination(reservation, evidence));
+    resource.registerRecovery("offline-promptfoo", reservation => executor!.recoveryReady(reservation));
     await executor.reconcile();
   }
   let pending: Promise<unknown> | undefined;

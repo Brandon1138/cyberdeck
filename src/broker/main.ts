@@ -365,14 +365,15 @@ export async function runBroker(
       assertOwner: resourceRuntime.assertOwner, registry, transcripts, coordination: workerCoordination.service,
       instructions, instructionFacts, inFlightReports: id => workerEvents.inFlightReports(id), ...config.resourceManagement.parking });
   }
-  instructions.start();
-  await workerBudgets.start();
   if (resourceRuntime && config.resourceManagement?.auxiliaryProfiles) {
     auxiliaryRuntime = await brokerAuxiliaryRuntime({ config, resource: resourceRuntime, activity,
       authorize: auxiliaryProfileAuthorizer({ brokerId: executionRuntime.brokerId, session: id => registry.get(id),
         coordination: workerCoordination.service, credentials: workerLeaseCredentials,
         instructions: id => instructionStore.list(id) }) });
   }
+  await resourceRuntime?.completeRecovery();
+  instructions.start();
+  await workerBudgets.start();
   const workflows = new WorkflowService(
     registry,
     orchestratorStore,
