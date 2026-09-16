@@ -54,3 +54,20 @@ it("never starts another run after uncooperative timed out launch despite cleanu
     cleanup: async () => ({ complete: true, unexplained: 0 }) }, 5, async row => { rows.push(row); });
   expect(launches).toBe(1); expect(rows).toHaveLength(2);
 });
+
+it("does not continue when a timed-out launch settles during cleanup", async () => {
+  let launches = 0;
+  let settle: (() => void) | undefined;
+  const rows: object[] = [];
+  await collectSequence({ run: async () => {
+    launches++;
+    await new Promise<void>(resolve => { settle = resolve; });
+    return { captureComplete: true, dispositions: 8, terminalAttempts: 8, failures: [] };
+  }, cleanup: async () => {
+    settle!();
+    await new Promise(resolve => setTimeout(resolve, 1));
+    return { complete: true, unexplained: 0 };
+  } }, 10, async row => { rows.push(row); });
+  expect(launches).toBe(1); expect(rows).toHaveLength(2);
+  expect(rows[1]).toMatchObject({ launchOperationSettled: true, launchSettledBeforeCleanup: false });
+});

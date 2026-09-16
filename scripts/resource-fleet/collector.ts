@@ -51,12 +51,14 @@ export async function collectSequence(adapter: FleetAdapter, timeoutMs: number, 
     let runSettled = false;
     try { row.result = await bounded(signal => adapter.run({ runId, phase, workerCount: 8, signal }).finally(() => { runSettled = true; }), timeoutMs); }
     catch { row.failure = "run-failed-or-timeout"; }
+    const settledBeforeCleanup = runSettled;
     let safe = false;
     try { const cleanup = await bounded(signal => adapter.cleanup(runId, signal), timeoutMs); row.cleanup = cleanup; safe = cleanup.complete && cleanup.unexplained === 0; }
     catch { row.cleanup = { complete: false }; }
     row.launchOperationSettled = runSettled;
+    row.launchSettledBeforeCleanup = settledBeforeCleanup;
     row.finishedAt = new Date().toISOString();
     await persist(row);
-    if (!safe || !runSettled) break; // Never compound unknown ownership with another run.
+    if (!safe || !settledBeforeCleanup) break; // Never compound unknown ownership with another run.
   }
 }
