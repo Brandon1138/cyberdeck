@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "evidenceLayer": "authenticated-provider-baseline",
+  "provider": "claude",
+  "model": "haiku",
+  "effort": "low",
+  "authMode": "subscription",
+  "source": "49c1260 plus uncommitted canary sampling changes; broker compiled baseline predates integrations",
+  "exactCandidateAcceptance": false,
+  "rawPath": "/var/folders/dn/ts3sd7810lb9wv8j58h_3qrh0000gn/T/cyberdeck-claude-subscription-canary-a08iGL",
+  "samplesSha256": "69dc97d182121626743425ae5e11bde3aac366a7ffc153dd5a93c88773e663f7",
+  "sampleCount": 10,
+  "start": "2026-09-16T09:45:47.621503048Z",
+  "end": "2026-09-16T09:45:56.929189698Z",
+  "sampledPeakGuestBytes": 499466240,
+  "sampledPeakPids": 28,
+  "containerLimitBytes": 2147483648,
+  "containerId": "cfe14e3c0041be189c63562cfcea7f6916846c75859679f6c9bbab906e654127",
+  "cpuNanosDelta": 4363419000,
+  "limitations": [
+    "single worker; no eight-worker concurrency proof",
+    "sampled peak is not lifetime cgroup memory.peak",
+    "guest measurement excludes VM and control-plane footprint",
+    "short lightweight canary, not calibrated production envelope"
+  ]
+}

@@ -1,0 +1,120 @@
+{
+  "sourceSha": "1c075f9",
+  "sourceDirty": true,
+  "mode": "single-provider-baseline",
+  "provider": "codex",
+  "model": "gpt-6-astra",
+  "effort": "low",
+  "billing": "subscription",
+  "passed": true,
+  "sessionId": "0d2a9651-96fb-4e50-b153-13cd56512373",
+  "executionId": "cec76300-12f1-4ee2-beb3-e4fa3b7bbef6",
+  "image": "sha256:38605831c783da47710a5ebd9649f95002bb8f489a93dcc74a662756ab3ecc8f",
+  "localEvidence": "/var/folders/dn/ts3sd7810lb9wv8j58h_3qrh0000gn/T/cyberdeck-codex-subscription-canary-Vn42RK/canary.json",
+  "events": [
+    {
+      "eventId": "68600497-40b9-4094-a508-fe6c3a705caa",
+      "kind": "execution.lifecycle",
+      "outcome": "observed",
+      "provenance": "broker"
+    },
+    {
+      "eventId": "6a776483-7861-49fe-b0ca-5e6aacc9dc49",
+      "kind": "execution.lifecycle",
+      "outcome": "observed",
+      "provenance": "broker"
+    },
+    {
+      "eventId": "a394db1f-192f-4eb1-801b-422b2b476efb",
+      "kind": "execution.lifecycle",
+      "outcome": "observed",
+      "provenance": "broker"
+    },
+    {
+      "eventId": "6d648a54-1063-8333-ab9a-f26d835421d7",
+      "kind": "worker.control",
+      "outcome": "observed",
+      "provenance": "broker"
+    },
+    {
+      "eventId": "b2a6b28d-3b79-835d-a4d3-377f4e48b285",
+      "kind": "worker.report",
+      "outcome": "observed",
+      "provenance": "worker-report"
+    },
+    {
+      "eventId": "66c7886b-bd12-52d6-a06a-ec64b0cd3dda",
+      "kind": "provider.turn",
+      "outcome": "observed",
+      "provenance": "provider-native"
+    },
+    {
+      "eventId": "a16538c7-ce08-470b-9626-38f59268e850",
+      "kind": "provider.response",
+      "outcome": "observed",
+      "provenance": "provider-native"
+    },
+    {
+      "eventId": "7549108b-f743-567b-aa94-f2114d3f3393",
+      "kind": "tool.invocation",
+      "outcome": "observed",
+      "provenance": "provider-native"
+    },
+    {
+      "eventId": "52e2c5ec-6c96-4610-bbd3-aef551339b33",
+      "kind": "tool.result",
+      "outcome": "observed",
+      "provenance": "provider-native"
+    },
+    {
+      "eventId": "7ce5ddda-fc7f-5ca3-a648-6994a999c4bc",
+      "kind": "tool.invocation",
+      "outcome": "observed",
+      "provenance": "provider-native"
+    },
+    {
+      "eventId": "7955f04b-5be7-4225-a195-0a753e182332",
+      "kind": "tool.result",
+      "outcome": "observed",
+      "provenance": "provider-native"
+    },
+    {
+      "eventId": "d9d4845c-47ed-5e62-a018-ac23f0ef16d2",
+      "kind": "tool.invocation",
+      "outcome": "observed",
+      "provenance": "provider-native"
+    },
+    {
+      "eventId": "0700de49-92c5-4d37-b1e5-6e3d3a61062c",
+      "kind": "tool.result",
+      "outcome": "observed",
+      "provenance": "provider-native"
+    },
+    {
+      "eventId": "7bece950-ef52-41ee-b6a2-2cba82b65d42",
+      "kind": "provider.response",
+      "outcome": "observed",
+      "provenance": "provider-native"
+    },
+    {
+      "eventId": "3cd23019-bc43-5cd1-a16e-93ca1a962063",
+      "kind": "provider.turn",
+      "outcome": "succeeded",
+      "provenance": "provider-native"
+    }
+  ],
+  "sample": {
+    "source": "read-only docker exec tool output during run",
+    "memoryCurrentBytes": 409116672,
+    "memoryPeakBytes": 580505600,
+    "pids": 84,
+    "limitBytes": 2147483648,
+    "timestamp": null
+  },
+  "limitations": [
+    "single point sample; no synchronized host or VM sample",
+    "timestamp unavailable for manual cgroup read",
+    "later measurement attempt found container already stopped",
+    "not whole-installation or eight-worker acceptance"
+  ]
+}

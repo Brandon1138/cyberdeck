@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, readFile, writeFile, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RpcClient } from "../src/client/rpc-client.js";
@@ -10,6 +10,7 @@ import { correlationIds, projectActivity } from "../src/observability/activity-p
 import { trustedGit } from "../src/runtime/execution/trusted-git.js";
 import { ContainerNativeSource } from "../src/runtime/activity/container-native-source.js";
 import { successfulCanaryTool } from "./subscription-canary-evidence.js";
+import { readDockerStats } from "../src/runtime/resources/docker-stats-reader.js";
 
 /** One normal worker through the active production broker. No config mutation or API fallback. */
 const [provider, model, ...options] = process.argv.slice(2);
@@ -18,6 +19,9 @@ const state = options.includes("--state") ? options[options.indexOf("--state") +
 const socket = options.includes("--socket") ? options[options.indexOf("--socket") + 1]! : brokerSocketPath;
 const writable = options.includes("--writable");
 const defaultRouting = options.includes("--default-executor");
+const measure = options.includes("--resource-evidence");
+const effort = options.includes("--effort") ? options[options.indexOf("--effort") + 1] : undefined;
+if (effort !== undefined && !["low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) throw new Error("CANARY_EFFORT_INVALID");
 const config = loadBrokerRuntimeConfig(join(state, "config.json"));
 if (defaultRouting && config.workerExecution?.defaultExecutor !== "orbstack-container") throw new Error("CANARY_REQUIRES_CONTAINER_DEFAULT");
 if (writable && (provider !== "codex" || config.containerRuntime?.codexWorkspaceIsolation !== "container")) throw new Error("CANARY_REQUIRES_EXPLICIT_WRITABLE_OPT_IN");
@@ -46,10 +50,11 @@ const client = await RpcClient.connect(socket);
 let worker: SessionRecord | undefined;
 let events: AgentActivity[] = [];
 let passed = false;
+let measurementFailures = 0;
 console.log(JSON.stringify({ evidence, provider, model, billing: "subscription" }));
 try {
   worker = await client.request<SessionRecord>("session.startWithPrompt", {
-    provider, model, ...(defaultRouting ? {} : { executor: "orbstack-container" }), cwd: source, sandbox: provider === "codex" && !writable ? "read-only" : "workspace-write", detached: true,
+    provider, model, ...(effort ? { effort } : {}), ...(defaultRouting ? {} : { executor: "orbstack-container" }), cwd: source, sandbox: provider === "codex" && !writable ? "read-only" : "workspace-write", detached: true,
     name: `${provider} subscription canary`,
     initialPrompt: (writable ? "This is an authorized writable subscription canary in a disposable workspace. Create answer.txt containing exactly WRITABLE_SUBSCRIPTION_OK followed by a newline. Install the local dependency with npm install --offline --ignore-scripts --no-audit --no-fund ./fixture-dependency. Verify with node that require('canary-local-dependency') equals LOCAL_DEP_OK and that answer.txt has the required content. These routine operations are permitted; do not ask for approval. Do not delegate or contact other services. After all steps succeed, " : "This is a subscription authentication and observability canary. Do not inspect or change files, use network tools, or delegate work. ")
       + "Use your terminal tool to run exactly: printf 'SUBSCRIPTION_CANARY_OK\\n'. For the Codex JavaScript wrapper use exactly: const result = await tools.exec_command({cmd: \"printf 'SUBSCRIPTION_CANARY_OK\\\\n'\", yield_time_ms: 10000}); text(JSON.stringify(result)); Do not print only result.output: the acceptance checker requires the numeric exit_code from the returned object. Only if all commands succeed, reply with exactly SUBSCRIPTION_CANARY_OK; otherwise report the failure.",
@@ -58,6 +63,12 @@ try {
   console.log(JSON.stringify({ sessionId: worker.id, executionId: worker.execution?.executionId }));
   const deadline = Date.now() + 180_000;
   while (Date.now() < deadline) {
+    if (measure && worker.execution.backendId && config.containerRuntime) {
+      try {
+        const sample = await readDockerStats(config.containerRuntime.endpoint.slice("unix://".length), worker.execution.backendId);
+        await appendFile(join(evidence, "resource-samples.jsonl"), JSON.stringify(sample) + "\n", { mode: 0o600 });
+      } catch { measurementFailures++; }
+    }
     events = (await client.request<{ events: AgentActivity[] }>("activity.readSession", { sessionId: worker.id, limit: 1000 })).events;
     passed = events.some((event) => event.kind === "provider.turn" && event.outcome === "succeeded" && event.origin === "initial-prompt")
       && events.some((event) => event.kind === "tool.result" && event.provenance === "provider-native");
@@ -92,7 +103,10 @@ try {
     events = (await client.request<{ events: AgentActivity[] }>("activity.readSession", { sessionId: worker.id, limit: 1000 })).events;
     const sessions = await client.request<SessionRecord[]>("session.list", {});
     const current = sessions.find((session) => session.id === worker!.id);
-    await writeFile(join(evidence, "canary.json"), JSON.stringify({ passed, provider, model, routing: defaultRouting ? "broker-default" : "explicit-container", billing: "subscription", session: current,
+    await writeFile(join(evidence, "canary.json"), JSON.stringify({ passed, provider, model, effort, measurementFailures, image: config.containerRuntime?.image,
+      sourceSha: (await trustedGit(process.cwd(), ["rev-parse", "HEAD"])).toString().trim(),
+      sourceDirty: Boolean((await trustedGit(process.cwd(), ["status", "--porcelain"])).toString().trim()),
+      routing: defaultRouting ? "broker-default" : "explicit-container", billing: "subscription", session: current,
       events, correlations: events.map((event) => ({ eventId: event.eventId, kind: event.kind, ...correlationIds(projectActivity(event)) })),
       telemetry: await client.request("telemetry.health", {}),
     }, null, 2), { mode: 0o600 });
