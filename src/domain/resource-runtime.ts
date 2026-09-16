@@ -22,8 +22,13 @@ export interface ResourceRuntimeBindingPort {
   put(binding: ResourceRuntimeBinding): Promise<void>;
 }
 export interface ResourceSessionLaunchPort {
-  start(record: SessionRecord, launch: () => Promise<SessionRuntime>): Promise<SessionRuntime>;
+  start(record: SessionRecord, launch: () => Promise<SessionRuntime>, beforeLaunch?: () => Promise<void>, onWaiting?: (state: "waiting-capacity" | "waiting-authority") => Promise<void>): Promise<SessionRuntime>;
   cancelStart(sessionId: string): boolean;
+  retainPending?(records: readonly SessionRecord[]): void;
+  recoverable?(record: SessionRecord): boolean;
+  assertAuthority?(record: SessionRecord): Promise<void>;
+  suspendPending?(record: SessionRecord): Promise<void>;
+  cancelPending?(record: SessionRecord): Promise<void>;
 }
 /** Complete means all descendants/helpers are accounted, including reparented native children. */
 export type ResourceRuntimeInspection = {

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { WorkerModalDescriptor } from "./modal-descriptor.js";
-import type { SessionExecutionState } from "./session.js";
+import type { SessionExecutionState, SessionRecord } from "./session.js";
 
 /**
  * The single authoritative per-worker state machine.
@@ -25,6 +25,8 @@ import type { SessionExecutionState } from "./session.js";
  * three situations an orchestrator must act on differently.
  */
 export const WorkerTruthStateSchema = z.enum([
+  "waiting-capacity",
+  "waiting-authority",
   /** Provider process launched, no turn observed yet. */
   "starting",
   /** A provider turn is in flight. */
@@ -128,6 +130,7 @@ export interface ComposerObservation {
 }
 
 export interface WorkerTruthInput {
+  pendingLaunch?: SessionRecord["pendingLaunch"];
   executionState: SessionExecutionState;
   exitCode: number | null;
   /** Derived from the PTY replay by `providerTerminalActivity`. */
@@ -220,6 +223,10 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
       input.stopRequested === true ? "Stopped on request" : "Provider process exited cleanly",
     );
   }
+  if (input.executionState === "starting" && input.pendingLaunch?.state === "waiting-capacity")
+    return settle("waiting-capacity", "Launch queued for installation capacity; no provider process exists");
+  if (input.executionState === "starting" && input.pendingLaunch?.state === "waiting-authority")
+    return settle("waiting-authority", "Launch awaits an active parent and existing canonical authority; no provider process exists");
   if (input.executionState === "starting") {
     return settle("starting", "Provider process launching");
   }

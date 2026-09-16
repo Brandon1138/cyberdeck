@@ -51,6 +51,7 @@ export type ResourcePolicy = z.infer<typeof ResourcePolicySchema>;
 export const ResourceReservationSchema = z.object({
   request: ResourceRequestSchema, sequence: z.number().int().nonnegative(), queuedAt: z.iso.datetime(),
   state: z.enum(["waiting-capacity", "admitted", "cancelled", "released"]),
+  eligibilityHold: z.literal("waiting-authority").optional(),
   reservationId: id, bypasses: z.number().int().nonnegative(),
   terminationEvidenceId: id.optional(),
   terminationKind: z.literal("never-launched").optional(),

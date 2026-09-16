@@ -158,6 +158,11 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
   pinned: z.boolean().optional(),
   displayOrder: z.number().int().nonnegative().optional(),
   launchRecord: ResolvedLaunchRecordSchema.optional(),
+  /** Receipt only; original input lives in the private launch-intent store. */
+  pendingLaunch: z.object({
+    requestId: z.uuid(),
+    state: z.enum(["preparing", "waiting-capacity", "waiting-authority", "launching", "interrupted", "cancelled", "failed"]),
+  }).strict().optional(),
   /** What the session is running now, when its provider keeps a transcript that says so. */
   observedModel: ObservedModelSchema.optional(),
   effectiveState: WorkerEffectiveStateSchema.optional(),

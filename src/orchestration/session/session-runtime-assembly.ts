@@ -119,12 +119,16 @@ export class SessionRuntimeAssembly {
     beforeSpawn?: () => Promise<void>,
     onPhase?: (phase: "prepare" | "spawn") => void,
     assertLaunch?: () => void,
+    launchFence?: () => Promise<void>,
+    onWaiting?: (state: "waiting-capacity" | "waiting-authority") => Promise<void>,
   ): Promise<SessionRuntime> {
     try {
       // Persist canonical controller/lease authority before resolving resource ownership.
       // This callback performs no provider preparation or runtime launch.
       await beforeSpawn?.();
+      assertLaunch?.();
       const launch = async (): Promise<SessionRuntime> => {
+        if (!this.catalog.options.resourceExecution) await launchFence?.();
         assertLaunch?.();
         onPhase?.("prepare");
         if (record.executor === "orbstack-container" && this.catalog.options.executions === undefined) {
@@ -140,7 +144,7 @@ export class SessionRuntimeAssembly {
         return this.catalog.options.sessionRuntimeFactory(spec, replayBytes);
       };
       return this.catalog.options.resourceExecution
-        ? await this.catalog.options.resourceExecution.start(record, launch)
+        ? await this.catalog.options.resourceExecution.start(record, launch, launchFence, onWaiting)
         : await launch();
     } catch (error) {
       await this.cleanupLaunchArtifacts(record, "launch-failed");

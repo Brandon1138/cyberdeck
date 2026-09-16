@@ -60,7 +60,7 @@ export class SessionCatalog {
    */
   activeWorkerCount(): number {
     return [...this.sessions.values()].filter(({ record }) =>
-      record.executionState === "active" && record.kind !== "orchestrator"
+      (record.executionState === "active" || record.executionState === "starting") && record.kind !== "orchestrator"
     ).length;
   }
 

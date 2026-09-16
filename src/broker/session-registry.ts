@@ -127,6 +127,7 @@ export class SessionRegistry {
     this.reads = new SessionReadModel(this.catalog);
     this.wait = new SessionWaitCoordinator({ catalog: this.catalog, bus: this.bus });
     this.lifecycle = new SessionLifecycleController({
+      cancelPendingLaunch: (id) => this.launch.cancel(id),
       catalog: this.catalog,
       bus: this.bus,
       assembly: this.assembly,
@@ -139,7 +140,7 @@ export class SessionRegistry {
       assembly: this.assembly,
       observer: this.observer,
     });
-    this.recovery = this.assembly.recover(options.recoveredSessions ?? []);
+    this.recovery = this.assembly.recover(options.recoveredSessions ?? []).then(() => this.launch.recover());
   }
 
   async ready(): Promise<void> {

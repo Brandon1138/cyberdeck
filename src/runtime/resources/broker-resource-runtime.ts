@@ -8,6 +8,7 @@ import type { ResourceRuntimeBinding, ResourceRuntimeIdentity, ResourceRuntimeIn
 import { ResourceAdmissionService } from "../../orchestration/resource-admission-service.js";
 import { ResourceExecutionGate } from "../../orchestration/resource-execution-gate.js";
 import { ResourceReservationStore } from "../../persistence/resource-reservation-store.js";
+import { SessionLaunchIntentStore } from "../../persistence/session-launch-intent-store.js";
 import { ResourceRuntimeBindingStore } from "../../persistence/resource-runtime-binding-store.js";
 import { OrbStackClient } from "../execution/orbstack-client.js";
 import { ResourceMonitor } from "./resource-monitor.js";
@@ -21,6 +22,7 @@ export interface BrokerResourceRuntimeOptions {
   captureHold?(): "evaluation-capture-gap" | "auxiliary-capture-gap" | null;
   execution(sessionId: string): ExecutionRef | undefined;
   resolveFamily(record: SessionRecord): Promise<string>;
+  assertAuthority?(record: SessionRecord): Promise<void>;
 }
 type ContainerRow = { id: string; labels: Record<string, string>; running: boolean };
 /** Installation-scoped composition. It never signals foreign processes or containers. */
@@ -39,6 +41,7 @@ export async function brokerResourceRuntime(options: BrokerResourceRuntimeOption
     acquireOwner: path => acquireResourceOwnerLock(config.ownerLockHelper, path, () => { admission?.drain(); void gate?.close(); }),
   });
   const bindings = await ResourceRuntimeBindingStore.open(config.directory, () => store.assertOwner());
+  const launchIntents = await SessionLaunchIntentStore.open(config.directory, () => store.assertOwner());
   // A successful bounded full inventory is needed to account for helpers and spawn gaps.
   const inventory = (): Promise<ContainerRow[]> => readDockerInventory(endpoint.slice("unix://".length));
   const roots = (): ProcessRoot[] => [
@@ -88,6 +91,7 @@ export async function brokerResourceRuntime(options: BrokerResourceRuntimeOption
   });
   gate = new ResourceExecutionGate({ installationId: config.installationId, admission, bindings,
     resolveFamily: options.resolveFamily,
+    ...(options.assertAuthority ? { assertAuthority: options.assertAuthority } : {}),
     resolveDemand: record => {
       const profile = config.profiles[`${record.provider}:${record.kind === "orchestrator" ? "orchestrator" : "worker"}`];
       if (!profile) throw new Error("RESOURCE_PROFILE_UNCONFIGURED");
@@ -135,7 +139,7 @@ export async function brokerResourceRuntime(options: BrokerResourceRuntimeOption
     timer = setInterval(() => { void runSweep(); }, 5000).unref();
   } catch (error) { await monitor.close(); await store.close(); throw error; }
   return {
-    gate, admission, bindings,
+    gate, admission, bindings, launchIntents,
     assertOwner: () => store.assertOwner(),
     async completeRecovery() { recoveryConfigured = true; await pending; await runSweep(); },
     registerRecovery(profileId: string, check: (reservation: ResourceReservation) => Promise<boolean>) {

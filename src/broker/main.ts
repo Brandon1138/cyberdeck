@@ -4,6 +4,7 @@ import { brokerResourceActivity } from "../runtime/resources/broker-resource-act
 import { InstructionParkingReadModel } from "../orchestration/instruction-parking-read-model.js";
 import { brokerAuxiliaryRuntime } from "../runtime/resources/broker-auxiliary-runtime.js";
 import { auxiliaryProfileAuthorizer } from "./auxiliary-profile-authority.js";
+import { sessionLaunchAuthority } from "./session-launch-authority.js";
 import { brokerResourceRuntime } from "../runtime/resources/broker-resource-runtime.js";
 import { orchestratorController } from "../domain/orchestrator.js";
 import { ContainerNativeSource } from "../runtime/activity/container-native-source.js";
@@ -223,6 +224,7 @@ export async function runBroker(
   );
   const orchestratorStore = new OrchestratorStore(stateDirectory);
   let workerCoordination: WorkerCoordinationRuntime<WorkerCoordinationService>;
+  const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   let resourceRuntime: Awaited<ReturnType<typeof brokerResourceRuntime>>;
   let workerEvents: WorkerEventChannel;
   const executionRuntime = await brokerExecutionRuntime({ stateDirectory, config, activity,
@@ -243,6 +245,9 @@ export async function runBroker(
   });
   resourceRuntime = await brokerResourceRuntime({ config, brokerId: executionRuntime.brokerId,
     execution: executionRuntime.execution,
+    assertAuthority: sessionLaunchAuthority({ orchestrators: orchestratorStore,
+      coordination: () => workerCoordination?.service, credentials: workerLeaseCredentials,
+      session: id => { try { return registry?.get(id); } catch { return undefined; } } }),
     captureHold: () => auxiliaryRuntime?.admissionHold() ?? (evaluationRuntime ? evaluationRuntime.admissionHold() : "evaluation-capture-gap"),
     resolveFamily: async (record) => {
       const lease = workerCoordination?.service.getSubject(record.id)?.lease
@@ -267,7 +272,7 @@ export async function runBroker(
     }
   }
   registry = new SessionRegistry({
-    ...(resourceRuntime ? { resourceExecution: resourceRuntime.gate } : {}),
+    ...(resourceRuntime ? { resourceExecution: resourceRuntime.gate, launchIntents: resourceRuntime.launchIntents } : {}),
     adapters: executionRuntime.adapters,
     sessionRuntimeFactory: createSessionRuntime,
     executions: executionRuntime.executions,
@@ -311,7 +316,6 @@ export async function runBroker(
   const instructions = new InstructionQueue(registry, orchestratorStore, activityInstructionStore(instructionStore, activity, (id) => {
     try { return registry.get(id); } catch { return undefined; }
   }, (record, worker) => nativeCapture.captureInstruction(record, worker), instructionFacts));
-  const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerBudgets = new WorkerBudgetEnforcer({
     registry,
     coordination: workerCoordination.service,

@@ -20,7 +20,7 @@ The persisted `resource-owner-mode` prevents participants using legacy `wx` and 
 
 Deterministic tests cover reserve-before-prepare, queue cancellation, cancelled admitted work without spawn, durable reserve/spawn crash gaps, generation fencing, helper identity retention, PID reuse, Engine outage, kernel owner exclusion/reacquisition, and original provider routing. Kernel tests compile only a temporary helper and touch isolated fixture files. No provider launch, live broker mutation, or container mutation is part of these tests.
 
-This foundation does not implement calibrated profiles, production wiring, complete native lifetime tracking, parking, authenticated wake, or real eight-worker feasibility. It must not be described as MacBook acceptance or enabled production containment. Unknown native attribution remains held until an authoritative tracker or recovery procedure proves termination.
+Broker composition now wires installation accounting, auxiliary owners, evaluation and parking. Calibrated profiles, complete native lifetime tracking, authenticated operational wake evidence and real eight-worker feasibility remain separate acceptance gates. It must not be described as MacBook acceptance or enabled production containment. Unknown native attribution remains held until an authoritative tracker or recovery procedure proves termination.
 
 
 ## Installation recovery barrier
@@ -51,3 +51,41 @@ must not use this lookup to launch a runtime. This avoids both recovery deadlock
 preserved prelaunch reservation bypassing an unrelated owner's unresolved recovery.
 Canonical typed lease-authentication failures are translated at the auxiliary authorizer
 boundary to explicit revocation; transport/read failures remain temporary unavailable.
+
+
+## Durable interactive launch receipts
+
+Resource-managed fresh starts persist a private `SessionLaunchIntent` before activation.
+The `preparing` phase cannot replay: only successful existing grant/budget activation permits
+`ready`. The intent holds the original initial input (including deferred Cursor input),
+provisioned workspace and provider selection, stable session/generation and resource request ID.
+It never serializes callbacks, launch environment or generated arguments. A fsynced catalog
+row and asynchronous starting receipt expose `waiting-capacity` or `waiting-authority` to
+Fleet, worker truth and Orc status/start results. Pending workers occupy the existing count
+limit once; an Orc receipt also preserves its activated binding before it returns.
+
+Recovery arms ready intents without waiting for capacity, reuses the exact durable resource
+request and FIFO sequence, and preserves admitted prelaunch reservations through the global
+recovery barrier. Accounting ownership does not grant permission: launch still requires an
+active parent (when present), the existing canonical family and all installation holds to clear.
+An interrupted parent or missing/rebound authority remains an explicit authority wait.
+A durable `waiting-authority` eligibility hold excludes that exact request from scheduling
+without changing its FIFO sequence. A previously admitted prelaunch claim returns to the
+same queue position only after the owning gate proves `never-launched`; launching/bound or
+unknown proof retains capacity. This lets a parent reacquire capacity to resume before its
+children become runnable. Eligibility and authority are rechecked before preparation. No
+controller or callback is reconstructed from the private payload.
+
+A compare-and-set intent fence and resource `launching` fence precede provider preparation.
+Any crash at or beyond either fence becomes interrupted/unverified and never resubmits the
+initial prompt. Automatic recovery is restricted to provably prelaunch work. An interrupted
+launch cannot use ordinary conversation resume; its preserved work and runtime accounting
+need inspection before the operator requests fresh work. Cancellation persists a terminal
+intent before acknowledgement, aborts waits, and remains cancelled after catalog-write gaps
+or deletion. Cancellation never claims a live or uncertain process has terminated.
+
+The owner-scoped 0600 snapshot caps original input at 1 MiB each, 256 nonterminal intents,
+384 total intents and 16 MiB total. Terminal input is retained with immutable terminal time and source phase until evaluation capture; a full store applies backpressure rather than dropping it. `ackTerminal` removes only the exact terminal request/time after its evaluator owner confirms capture; mismatched or nonterminal acknowledgements fail. Ready authority waits retry every 250 ms and
+expire after seven days; no automatic provider launch retry occurs. Persistence or schema
+failure fails closed. These deterministic contracts do not establish calibrated envelopes,
+native whole-lifetime termination proof, authenticated provider success, or W1 acceptance.

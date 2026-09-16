@@ -61,6 +61,24 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
     });
   }
 
+  /** Preserve FIFO and identity while an owner temporarily lacks launch permission. */
+  async setEligibility(requestId: string, eligible: boolean, evidenceId?: string): Promise<void> {
+    return this.serial(async () => {
+      const ledger = this.store.read(), entry = ledger.entries.find(e => e.request.requestId === requestId);
+      if (!entry || entry.state === "released" || entry.state === "cancelled") return;
+      if (eligible) delete entry.eligibilityHold;
+      else {
+        entry.eligibilityHold = "waiting-authority";
+        // Only the current owner's never-launched proof can return a runnable reservation to
+        // its original queue position. Runtime/unknown proof keeps the capacity charged.
+        if (entry.state === "admitted" && evidenceId
+          && await this.verifyTermination(structuredClone(entry), evidenceId) === "never-launched")
+          entry.state = "waiting-capacity";
+      }
+      this.schedule(ledger); await this.persist(ledger);
+    });
+  }
+
   async lookupReservation(input: ResourceRequest): Promise<string | undefined> {
     const request = ResourceRequestSchema.parse(input);
     return this.serial(async () => {
@@ -106,7 +124,7 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
     return { policy: this.policy, hold: this.hold(), reservedBytes: held.reduce((n, e) => n + e.request.demand.memoryBytes, 0),
       reservedPids: held.reduce((n, e) => n + e.request.demand.pidLimit, 0),
       queue: ledger.entries.filter(e => e.state === "waiting-capacity").map(e => ({ requestId: e.request.requestId,
-        familyId: e.request.owner.familyId, queuedAt: e.queuedAt, demand: e.request.demand, reason: this.hold() ?? "reserved-capacity" })),
+        familyId: e.request.owner.familyId, queuedAt: e.queuedAt, demand: e.request.demand, reason: e.eligibilityHold ?? this.hold() ?? "reserved-capacity" })),
       reservations: held, revision: ledger.revision };
   }
 
@@ -137,7 +155,7 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
     let pids = held.reduce((n, e) => n + e.request.demand.pidLimit, 0);
     // Available host headroom is consumed by this batch, never multiplied per new request.
     let headroom = this.environment().availableBytes! - this.policy.controlMarginBytes - memory;
-    const pending = ledger.entries.filter(e => e.state === "waiting-capacity").sort((a, b) => a.sequence - b.sequence);
+    const pending = ledger.entries.filter(e => e.state === "waiting-capacity" && !e.eligibilityHold).sort((a, b) => a.sequence - b.sequence);
     while (pending.length) {
       const oldest = pending[0]!;
       const family = (e: ResourceReservation) => e.request.owner.familyId ?? e.request.owner.kind;
@@ -155,8 +173,8 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
     }
   }
   private decision(entry: ResourceReservation): ResourceDecision {
-    return entry.state === "admitted" && !this.hold() ? { state: "admitted", reservationId: entry.reservationId, demand: entry.request.demand }
-      : { state: "waiting-capacity", reason: this.hold() ?? "reserved-capacity", queuedAt: entry.queuedAt };
+    return entry.state === "admitted" && !entry.eligibilityHold && !this.hold() ? { state: "admitted", reservationId: entry.reservationId, demand: entry.request.demand }
+      : { state: "waiting-capacity", reason: entry.eligibilityHold ?? this.hold() ?? "reserved-capacity", queuedAt: entry.queuedAt };
   }
   private async persist(ledger: ResourceLedger): Promise<void> {
     // A queued poll or unchanged refresh is not a new durable state transition.

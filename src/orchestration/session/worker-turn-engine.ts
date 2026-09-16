@@ -358,6 +358,7 @@ export class WorkerTurnEngine {
     const stalled = this.stalledWorker();
     return projectWorkerTruth({
       executionState: this.record.executionState,
+      ...(this.record.pendingLaunch ? { pendingLaunch: this.record.pendingLaunch } : {}),
       exitCode: this.record.exitCode,
       activity: this.awaitingResumeReady && this.activity !== "needs-input" ? "working" : this.activity,
       composer: this.composer,

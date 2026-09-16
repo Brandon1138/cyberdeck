@@ -72,6 +72,7 @@ export class SessionReadModel {
   resolveReattachTarget(sessionId: string): ReattachTarget {
     const runtime = this.catalog.sessions.get(sessionId);
     if (runtime === undefined) return { status: "stale" };
+    if (runtime.record.pendingLaunch) return { status: "unavailable", record: cloneRecord(runtime.record) };
     if (runtime.record.executionState === "active") {
       const record = cloneRecord(runtime.record);
       return runtime.controller === undefined

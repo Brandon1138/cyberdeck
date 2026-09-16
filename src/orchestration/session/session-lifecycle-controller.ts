@@ -18,6 +18,7 @@ export interface SessionLifecycleControllerOptions {
   bus: SessionUpdateBus;
   assembly: SessionRuntimeAssembly;
   observer: SessionRuntimeObserver;
+  cancelPendingLaunch?: (sessionId: string) => Promise<boolean>;
 }
 
 /**
@@ -35,8 +36,10 @@ export class SessionLifecycleController {
   private readonly observer: SessionRuntimeObserver;
   /** Set by `stopAll` so the shutdown kill is distinguishable from an operator stop. */
   private shuttingDown = false;
+  private readonly cancelPendingLaunch;
 
   constructor(options: SessionLifecycleControllerOptions) {
+    this.cancelPendingLaunch = options.cancelPendingLaunch;
     this.catalog = options.catalog;
     this.bus = options.bus;
     this.assembly = options.assembly;
@@ -50,6 +53,7 @@ export class SessionLifecycleController {
   }
 
   async stop(sessionId: string, preserveOutcome = false): Promise<void> {
+    if (await this.cancelPendingLaunch?.(sessionId)) return;
     if (this.cancelPendingStart(sessionId)) return;
     const runtime = this.catalog.requireRuntime(sessionId);
     if (runtime.terminalFinalizing === true) return;
@@ -126,6 +130,7 @@ export class SessionLifecycleController {
 
   async resume(sessionId: string, parkingToken?: string, assertLaunch?: () => void): Promise<SessionRecord> {
     const runtime = this.catalog.requireRuntime(sessionId);
+    if (runtime.record.pendingLaunch) throw new RegistryError("SESSION_BUSY", "Pending or interrupted launch cannot be resumed as an existing provider conversation");
     if ((runtime.parkingClaim || runtime.parkingStopped) && (!parkingToken || runtime.parkingClaim !== parkingToken))
       throw new RegistryError("SESSION_BUSY", "Session parking transition owns resume");
     this.catalog.assertMayConsume(sessionId);
