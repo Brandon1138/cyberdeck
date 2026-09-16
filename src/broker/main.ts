@@ -21,7 +21,7 @@ import { jobLaunchEnvironment } from "../providers/launch-environment.js";
 import { applyWorkerMode } from "../providers/worker-mode.js";
 import { ResourceJobLaunch } from "../orchestration/resource-job-launch.js";
 import { resourceJobRecord } from "../orchestration/resource-job-record.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ControlPlaneRuntime } from "../control-plane/runtime.js";
@@ -259,7 +259,7 @@ export async function runBroker(
   if (config.resourceManagement) {
     try {
       evaluationRuntime = await brokerEvaluationRuntime({ directory: config.resourceManagement.directory,
-        activity, instructions: () => instructionStore.list(), instructionVersion: () => instructionStore.version(), jobs: jobStore,
+        instructionSourceId: createHash("sha256").update(config.resourceManagement.installationId + "\0" + instructionStore.path).digest("hex"), activity, instructions: () => instructionStore.list(), instructionVersion: () => instructionStore.version(), jobs: jobStore,
         ...(resourceRuntime ? { execution: { config, resource: resourceRuntime } } : {}) });
     } catch (error) {
       await resourceRuntime?.close();

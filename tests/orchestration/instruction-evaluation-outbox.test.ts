@@ -47,7 +47,7 @@ test("canonical settlement survives a crash before activity append and reconcile
   await f.wrapped.put({ ...record, status: "completed", updatedAt: new Date(1).toISOString() });
   await f.activity.close(); f.advance();
   const reopened = await AgentActivityStore.open(join(f.path, "activity"));
-  const runtime = await brokerEvaluationRuntime({ directory: f.path, activity: reopened, instructions: () => new InstructionStore(f.path).list(), jobs: new JobStore(f.path) });
+  const runtime = await brokerEvaluationRuntime({ directory: f.path, instructionSourceId: "fixture-instructions", activity: reopened, instructions: () => new InstructionStore(f.path).list(), jobs: new JobStore(f.path) });
   await runtime.replay.reconcile();
   expect(runtime.health().capture.state).toBe("caught-up");
   expect(runtime.store.health().pending).toBe(1);
@@ -64,4 +64,20 @@ test("a mismatched persisted projection is refused without append", async () => 
   const outbox = new TaskEvaluationStore(join(f.path, "eval.sqlite")), append = vi.fn();
   await expect(repairTerminalInstructionProjections(outbox, { append }, [record])).rejects.toThrow("EVALUATION_CANONICAL_IDENTITY_CONFLICT");
   expect(append).not.toHaveBeenCalled(); outbox.close(); await f.activity.close();
+});
+
+
+test("broker startup seals preexisting unverified history without exempting a later projection gap", async () => {
+  const f = await fixture(); await f.store.put({ ...f.record, status: "completed" });
+  const open = () => brokerEvaluationRuntime({ directory: f.path, instructionSourceId: "fixture-journal", activity: f.activity,
+    instructions: () => f.store.list(), instructionVersion: () => f.store.version(), jobs: new JobStore(f.path) });
+  const first = await open();
+  expect(first.health()).toMatchObject({ capture: { state: "caught-up" }, legacy: { snapshots: 1 } });
+  expect(first.store.legacyDispositions()).toMatchObject([{ disposition: "unverified", reason: "legacy-terminal-attempt-identity-unavailable" }]);
+  expect(first.store.health().pending).toBe(0); await first.close();
+  await f.store.put({ ...f.record, id: randomUUID(), status: "completed" });
+  const restarted = await open();
+  expect(restarted.health()).toMatchObject({ capture: { state: "gap", reason: "canonical-instruction-projection-missing" }, legacy: { snapshots: 1 } });
+  expect(restarted.admissionHold()).toBe("evaluation-capture-gap");
+  await restarted.close(); await f.activity.close();
 });

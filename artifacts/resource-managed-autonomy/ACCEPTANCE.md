@@ -95,3 +95,20 @@ Exact clean `3c7f40c` regression: 229 files / 2,522 tests and build passed. Its 
 had 6 passes / 2 fixture errors (`WORKER_EGRESS_PROXY_REQUIRED`); a separate bounded fixture
 patch passes all 8 scenarios without changing production egress or grading. Results from
 that leaf are not final integrated-candidate evidence.
+
+
+Recovery follow-up: `3e53b07` passes 77 focused checks. Independent High review reports no
+remaining scoped P0/P1 findings in the launch-hold, bounded recovery-retry and typed lease
+revocation corrections. Review is source/test inspection, not final workload acceptance.
+The `6336faa` full suite passed 2,545/2,546 tests; shell-command streaming's fixed 200ms check
+failed under load and passed the focused rerun. Failure report is preserved at
+`/private/tmp/cyberdeck-resource-candidate-6336faa/unit-results.json`. A full subsequent
+candidate run will use two test workers to reduce fixture timing contention.
+
+Legacy migration composition now seals the exact first-start historical terminal snapshot
+before replay. Only records missing both historical generation and terminal projection are
+eligible; dispositions are explicit unverified snapshots, not invented attempts. Restart,
+new/changed records, disk failure and modern projection gaps are covered; 28 focused tests
+and TypeScript pass. Whole-history Gitleaks at `68d425e` scanned 551 commits with no leaks.
+Native lifetime SDK findings are in `native-lifetime-investigation.md`; the unresolved
+supervision boundary still prevents native cleanup and operational refresh completion.

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 export interface LegacyInstructionSnapshot {
   id: string; status: string; updatedAt: string;
-  attemptGeneration?: number; terminalActivity?: unknown;
+  attemptGeneration?: number | undefined; terminalActivity?: unknown;
 }
 /** A snapshot disposition is not an attempt: historical attempt multiplicity and generation
  * are unknown. It must never enter evaluator claims or model-quality comparisons. */

@@ -13,20 +13,26 @@ import { auditTerminalJobs, repairTerminalJobProjections } from "../../orchestra
 
 /** Capture is independent of evaluator availability. Missing objective evidence stays unverified. */
 export async function brokerEvaluationRuntime(options: {
-  directory: string; activity: AgentActivityPort; instructions(): Promise<InstructionRecord[]>;
+  directory: string; instructionSourceId: string; activity: AgentActivityPort; instructions(): Promise<InstructionRecord[]>;
   instructionVersion?(): number;
   jobs?: { load(): Promise<PersistedJobState[]>; version(): number };
   execution?: { config: BrokerRuntimeConfig; resource: NonNullable<Awaited<ReturnType<typeof brokerResourceRuntime>>> };
 }) {
   const store = new TaskEvaluationStore(join(options.directory, "task-evaluations.sqlite"));
+  let instructionRevision = options.instructionVersion?.();
+  let instructionSnapshot: InstructionRecord[];
+  try {
+    instructionSnapshot = await options.instructions();
+    store.initializeLegacyTerminalSnapshot(options.instructionSourceId, instructionSnapshot);
+  } catch (error) { store.close(); throw error; }
   const service = new TaskEvaluationService(store, { capture: async event => {
     if (!event.generation) throw new Error("EVALUATION_GENERATION_UNKNOWN");
     return { generation: event.generation, manifest: { schemaVersion: 1, terminalEvent: event,
       complete: false, checks: [], metadata: { ...(event.provider ? { provider: event.provider } : {}),
         ...(event.model ? { model: event.model } : {}), modelSource: event.model ? "observed" : "unknown" } } };
   } }, { id: "production-attempt", version: "1" });
-  let instructionRevision: number | undefined, jobRevision: number | undefined;
-  let instructionSnapshot: InstructionRecord[] = [], jobSnapshot: PersistedJobState[] = [];
+  let jobRevision: number | undefined;
+  let jobSnapshot: PersistedJobState[] = [];
   const replay = new TaskEvaluationReconciliationService(options.activity, store, service, {
     consumer: "production-attempt-v1", pageSize: 100, maxPages: 4,
     auditCanonicalCoverage: async () => {
@@ -78,7 +84,7 @@ export async function brokerEvaluationRuntime(options: {
   }, 1000).unref();
   return { store, service, replay,
     admissionHold: () => ["gap", "backpressure"].includes(replay.health().state) ? "evaluation-capture-gap" : null,
-    health: () => ({ capture: replay.health(), outbox: store.health(), evaluator: executor?.health() ?? "not-configured" }),
+    health: () => ({ capture: replay.health(), legacy: store.legacyMigration(), outbox: store.health(), evaluator: executor?.health() ?? "not-configured" }),
     close: async () => { clearInterval(timer); abort.abort(); await Promise.all([pending, evaluation]); await replay.reconcile(); store.close(); },
   };
 }

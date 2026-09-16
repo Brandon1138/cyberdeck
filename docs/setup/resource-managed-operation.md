@@ -86,8 +86,12 @@ project proofs are still required. Subscription refresh likewise needs an admitt
 host transport; a protocol helper alone is not operational refresh.
 
 Require three real eight-worker W1 runs, two-family fairness, heavy/helper/transcript/parking/
-evaluation tests, both auxiliary profiles and the full 24-hour soak. Legacy instructions without
-historical generation need an explicit migration disposition. Interrupted-job supersession must
+evaluation tests, both auxiliary profiles and the full 24-hour soak. On the first evaluation
+initialization, legacy terminal instructions with neither historical generation nor terminal
+projection receive sealed snapshot dispositions marked unverified. They are not reconstructed
+attempts or model-quality samples. The snapshot cannot grow after startup; changed/new missing
+projections still hold admission. A prior evaluation checkpoint without the migration seal
+requires reviewed migration rather than silently widening coverage. Interrupted-job supersession must
 be resolved by canonical job ID before counting model-quality samples. No model comparisons
 or completed deployment are inferred from missing evidence.
 

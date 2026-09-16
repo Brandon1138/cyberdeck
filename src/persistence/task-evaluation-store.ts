@@ -86,7 +86,7 @@ export class TaskEvaluationStore {
       for (const record of records) {
         if (++count > maxRecords) throw new Error("EVALUATION_LEGACY_SNAPSHOT_LIMIT");
         if (!["completed", "cancelled", "undelivered"].includes(record.status)
-          || (record.attemptGeneration !== undefined && record.terminalActivity !== undefined)) continue;
+          || record.attemptGeneration !== undefined || record.terminalActivity !== undefined) continue;
         const sourceKey = terminalInstructionSource(record), snapshotHash = legacySnapshotHash(record);
         if (sourceKey.length > 1024) throw new Error("EVALUATION_LEGACY_SOURCE_INVALID");
         const result: LegacyEvaluationDisposition = { sourceKey, snapshotHash, disposition: "unverified", reason: "legacy-terminal-attempt-identity-unavailable" };

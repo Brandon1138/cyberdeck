@@ -42,7 +42,8 @@ test("interrupted snapshot transaction rolls back and cannot partially exempt hi
 
 test("empty snapshot seals future exemption; current capable and active records are not migrated", async () => {
   const store = new TaskEvaluationStore(path()), current = { ...record(), attemptGeneration: 1, terminalActivity: {} }, active = record("submitted");
-  expect(store.initializeLegacyTerminalSnapshot("journal", [current, active]).snapshots).toBe(0);
+  expect(store.initializeLegacyTerminalSnapshot("journal", [current, active, { ...record(), attemptGeneration: 1 },
+    { ...record(), terminalActivity: {} }]).snapshots).toBe(0);
   expect((await auditTerminalInstructions(store, [current])).state).toBe("gap");
   expect(store.initializeLegacyTerminalSnapshot("journal", [record()]).snapshots).toBe(0);
   expect((await auditTerminalInstructions(store, [{ ...active, status: "completed" }])).state).toBe("gap"); store.close();
