@@ -9,6 +9,7 @@ import {
 } from "./limits.js";
 import { ThreadRetentionPolicySchema } from "./domain/thread-retention.js";
 import { ResourceDemandSchema, ResourcePolicySchema } from "./domain/resource-budget.js";
+import { NativeToolRecipeSchema } from "./domain/auxiliary-profile.js";
 
 /**
  * Broker-wide runtime configuration.
@@ -25,6 +26,13 @@ export const BrokerRuntimeConfigSchema = z.object({
   resourceManagement: z.object({
     installationId: z.uuid(), directory: z.string().startsWith("/"), nativeHelper: z.string().startsWith("/"),
     ownerLockHelper: z.string().startsWith("/"), policy: ResourcePolicySchema,
+    parking: z.object({ idleGraceMs: z.number().int().min(1000).max(86400000).default(60000),
+      maxWakeAttempts: z.number().int().min(1).max(3).default(1) }).strict().prefault({}),
+    evaluation: z.object({ image: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+      memoryBytes: z.number().int().min(512 * 1024 ** 2).max(8 * 1024 ** 3).default(768 * 1024 ** 2),
+      retentionBytes: z.number().int().min(4 * 1024 ** 2).max(128 * 1024 ** 2).default(32 * 1024 ** 2) }).strict().optional(),
+    auxiliaryProfiles: z.object({ integrationImage: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
+      nativeRecipes: z.array(NativeToolRecipeSchema).max(16).default([]) }).strict().optional(),
     vmIdentity: z.object({ pid: z.number().int().positive(), startTime: z.string().regex(/^libproc:\d+\.\d{6}$/) }).strict(),
     externalRoots: z.array(z.object({ pid: z.number().int().positive(), startTime: z.string().regex(/^libproc:\d+\.\d{6}$/),
       workloadId: z.string().min(1).max(128) }).strict()).max(128).default([]),

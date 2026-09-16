@@ -28,3 +28,21 @@ it("authenticates report-only traffic, binds worker and generation, and revokes 
   expect((await send(report)).status).toBe(401);
   expect(submit).toHaveBeenCalledTimes(1);
 });
+it("binds fixed profile requests to authenticated execution and refuses injected authority/commands", async () => {
+  const binding = { workerId: randomUUID(), executionId: randomUUID(), generation: 2 };
+  let active = true;
+  const profile = vi.fn(async () => ({ state: "waiting-capacity" }));
+  const gateway = new WorkerGateway({ submit: vi.fn() }, () => active, profile); gateways.push(gateway);
+  const port = await gateway.listen(), token = gateway.issue(binding);
+  const input = { requestId: randomUUID(), attemptId: randomUUID(), profile: "integration", recipeId: "postgres-fixture-v1" };
+  const send = (body: unknown, bearer = token) => fetch(`http://127.0.0.1:${port}/v1/profile`, {
+    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` }, body: JSON.stringify(body),
+  });
+  for (const injected of [{ workerId: randomUUID() }, { generation: 99 }, { command: "sh" }, { image: "host" }, { mounts: ["/"] }])
+    expect((await send({ ...input, ...injected })).status).toBe(400);
+  expect((await send(input, "0".repeat(64))).status).toBe(401);
+  expect((await send(input)).status).toBe(200);
+  expect(profile).toHaveBeenCalledWith(binding, input);
+  active = false; expect((await send(input)).status).toBe(401);
+  expect(profile).toHaveBeenCalledTimes(1);
+});

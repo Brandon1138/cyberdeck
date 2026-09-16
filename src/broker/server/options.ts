@@ -47,6 +47,8 @@ export interface BrokerServerOptions {
   executionHealth?: () => unknown;
   resourceHealth?: () => unknown;
   evaluationHealth?: () => unknown;
+  auxiliaryHealth?: () => unknown;
+  parkingHealth?: () => unknown;
   renewExecutionAttempt?: (input: { sessionId: string; leaseVersion: number; leaseExpiresAt: string; controllerId: string }) => Promise<"renewed" | "not-running">;
   socketPath: string;
   registry: SessionRegistry;

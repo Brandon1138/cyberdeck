@@ -4,10 +4,16 @@ import { TaskEvaluationStore } from "../../persistence/task-evaluation-store.js"
 import { TaskEvaluationService } from "../../orchestration/task-evaluation-service.js";
 import { auditTerminalInstructions, repairTerminalInstructionProjections, TaskEvaluationReconciliationService } from "../../orchestration/task-evaluation-reconciliation.js";
 import type { InstructionRecord } from "../../domain/instruction.js";
+import type { BrokerRuntimeConfig } from "../../config.js";
+import type { brokerResourceRuntime } from "./broker-resource-runtime.js";
+import { TaskEvaluationExecutor } from "../execution/task-evaluation-executor.js";
+import { OrbStackClient } from "../execution/orbstack-client.js";
 
 /** Capture is independent of evaluator availability. Missing objective evidence stays unverified. */
 export async function brokerEvaluationRuntime(options: {
   directory: string; activity: AgentActivityPort; instructions(): Promise<InstructionRecord[]>;
+  instructionVersion?(): number;
+  execution?: { config: BrokerRuntimeConfig; resource: NonNullable<Awaited<ReturnType<typeof brokerResourceRuntime>>> };
 }) {
   const store = new TaskEvaluationStore(join(options.directory, "task-evaluations.sqlite"));
   const service = new TaskEvaluationService(store, { capture: async event => {
@@ -25,13 +31,38 @@ export async function brokerEvaluationRuntime(options: {
     },
   });
   await replay.reconcile();
+  let executor: TaskEvaluationExecutor | undefined;
+  const configured = options.execution?.config.resourceManagement?.evaluation;
+  if (configured && options.execution) {
+    const { config, resource } = options.execution;
+    executor = new TaskEvaluationExecutor({ client: new OrbStackClient(config.containerRuntime!.endpoint), store,
+      admission: resource.admission, ...configured, installationId: config.resourceManagement!.installationId,
+      directory: join(options.directory, "evaluations"),
+      // Explicit installation background bucket; never attribute history to a newer controller.
+      resolveFamily: async () => "operator-evaluation", requiredChecks: () => [] });
+    resource.registerVerifier("offline-promptfoo", (reservation, evidence) => executor!.verifyTermination(reservation, evidence));
+    await executor.reconcile();
+  }
   let pending: Promise<unknown> | undefined;
+  let evaluation: Promise<unknown> | undefined;
+  const abort = new AbortController();
+  let lastSignature = "", auditedAt = 0, nextEvaluationAt = 0;
   const timer = setInterval(() => {
-    if (!pending) pending = replay.reconcile().finally(() => { pending = undefined; });
+    const signature = JSON.stringify([options.activity.replayBounds?.(), options.instructionVersion?.()]);
+    if (!pending && (signature !== lastSignature || Date.now() - auditedAt >= 60000)) {
+      lastSignature = signature; auditedAt = Date.now();
+      pending = replay.reconcile().finally(() => { pending = undefined; });
+    }
+    if (executor && !evaluation && !abort.signal.aborted && Date.now() >= nextEvaluationAt
+      && (store.health().pending > 0 || executor.health().state === "blocked" || !executor.health().reconciled)) {
+      nextEvaluationAt = Date.now() + (executor.health().state === "blocked" ? 30000 : 5000);
+      evaluation = (executor.health().reconciled ? executor.runNext(abort.signal) : executor.reconcile())
+        .finally(() => { evaluation = undefined; });
+    }
   }, 1000).unref();
   return { store, service, replay,
     admissionHold: () => ["gap", "backpressure"].includes(replay.health().state) ? "evaluation-capture-gap" : null,
-    health: () => ({ capture: replay.health(), outbox: store.health(), evaluator: "not-configured" }),
-    close: async () => { clearInterval(timer); await pending; await replay.reconcile(); store.close(); },
+    health: () => ({ capture: replay.health(), outbox: store.health(), evaluator: executor?.health() ?? "not-configured" }),
+    close: async () => { clearInterval(timer); abort.abort(); await Promise.all([pending, evaluation]); await replay.reconcile(); store.close(); },
   };
 }

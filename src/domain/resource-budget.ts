@@ -65,7 +65,7 @@ export interface ResourceLedgerPort {
   save(next: ResourceLedger, expectedRevision: number): Promise<void>;
 }
 export interface ResourceEnvironment {
-  captureHold?: "evaluation-capture-gap" | null;
+  captureHold?: "evaluation-capture-gap" | "auxiliary-capture-gap" | null;
   /** Optional for deterministic adapters; the operational monitor always supplies these. */
   observedBytes?: number | null;
   unreservedBytes?: number | null;

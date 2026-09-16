@@ -99,8 +99,11 @@ export class IntegrationServiceExecutor {
     if (!/^[a-f0-9]{64}$/.test(key)) return false;
     try {
       const manifest = ManifestSchema.parse(JSON.parse(await readFile(join(this.options.evidenceDirectory, `${key}.json`), "utf8")));
-      return manifest.cleanupComplete && manifest.phase === "retained" && manifest.reservationId === reservation.reservationId
-        && integrationHash(manifest.resource) === integrationHash(reservation.request) && integrationHash(manifest) === evidenceId;
+      if (!manifest.cleanupComplete || manifest.phase !== "retained" || manifest.reservationId !== reservation.reservationId
+        || integrationHash(manifest.resource) !== integrationHash(reservation.request) || integrationHash(manifest) !== evidenceId) return false;
+      const engine = new IntegrationServiceEngine(this.options.client, manifest.request, integrationRecipe(manifest.image));
+      for (const role of ["runner", "service", "volume", "network"] as const) if (await engine.inspect(role)) return false;
+      return true;
     } catch { return false; }
   }
   /** Validate the entire bounded inventory before mutating anything during startup reconciliation. */

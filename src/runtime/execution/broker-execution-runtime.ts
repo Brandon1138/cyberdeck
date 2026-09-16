@@ -5,7 +5,7 @@ import type { ProviderAdapter } from "../../orchestration/session/provider-ports
 import { WorkerExecutionService } from "../../orchestration/worker-execution-service.js";
 import { reconcileExecutions } from "../../orchestration/execution-reconciler.js";
 import { WorkerExecutionStore } from "../../persistence/worker-execution-store.js";
-import { WorkerGateway } from "../../broker/worker-gateway.js";
+import { WorkerGateway, type GatewayProfileHandler } from "../../broker/worker-gateway.js";
 import type { WorkerEventChannel } from "../../broker/worker-event-channel.js";
 import { createSessionRuntime } from "../session-runtime-adapter.js";
 import { HostExecutor } from "./host-executor.js";
@@ -23,6 +23,7 @@ export async function brokerExecutionRuntime(options: {
   stateDirectory: string; config: BrokerRuntimeConfig; adapters: Record<string, ProviderAdapter>;
   lookupSession(id: string): SessionRecord | undefined;
   submitEvent: WorkerEventChannel["submit"];
+  profileRequest?: GatewayProfileHandler;
   activity?: AgentActivityPort;
   grantedEnvelope?: OrbStackExecutorOptions["grantedEnvelope"];
   allowsWorkspaceTrust?: (source: string) => Promise<boolean>;
@@ -45,7 +46,7 @@ export async function brokerExecutionRuntime(options: {
       return execution?.ref.executionId === binding.executionId && execution.ref.generation === binding.generation
         && session?.executionState === "active" && session.generation === binding.generation
         && session.execution?.executionId === binding.executionId;
-    });
+    }, options.profileRequest);
     const port = await gateway.listen();
     egressProxy = new WorkerEgressProxy();
     const writableProxyPort = await egressProxy.listen();

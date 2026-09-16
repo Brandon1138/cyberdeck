@@ -18,7 +18,7 @@ import type { ProcessRoot } from "./macos-process-sampler.js";
 export interface BrokerResourceRuntimeOptions {
   config: BrokerRuntimeConfig;
   brokerId: string;
-  captureHold?(): "evaluation-capture-gap" | null;
+  captureHold?(): "evaluation-capture-gap" | "auxiliary-capture-gap" | null;
   execution(sessionId: string): ExecutionRef | undefined;
   resolveFamily(record: SessionRecord): Promise<string>;
 }
@@ -50,6 +50,7 @@ export async function brokerResourceRuntime(options: BrokerResourceRuntimeOption
   const monitor = new ResourceMonitor({ installationId: config.installationId, nativeHelper: config.nativeHelper,
     vmIdentity: config.vmIdentity, engineSocket: endpoint.slice("unix://".length), roots, uncertainBytes: config.policy.uncertainBytes,
     containers: async () => (await inventory()).filter(r => r.running).map(r => ({ id: r.id,
+      helper: r.labels["cyberdeck.network-helper"] !== undefined,
       owned: r.labels["cyberdeck.broker"] === options.brokerId || r.labels["cyberdeck.installation"] === config.installationId })),
   });
   const inspect = async (binding: ResourceRuntimeBinding): Promise<ResourceRuntimeInspection> => {
@@ -123,6 +124,7 @@ export async function brokerResourceRuntime(options: BrokerResourceRuntimeOption
   } catch (error) { await monitor.close(); await store.close(); throw error; }
   return {
     gate, admission, bindings,
+    assertOwner: () => store.assertOwner(),
     registerVerifier(profileId: string, verifier: (reservation: ResourceReservation, evidence: string) => Promise<boolean>) {
       if (verifiers.has(profileId)) throw new Error("RESOURCE_VERIFIER_DUPLICATE");
       verifiers.set(profileId, verifier);

@@ -10,9 +10,9 @@ Policy target: 8 GiB total. No production configuration changes or broker restar
 | A measurements | in progress | Native libproc and cgroup adapters; 10-minute active baseline and separate Claude/Codex subscription footprint canaries (JSON summaries here). Idle/W1 calibration pending |
 | B efficiency | in progress | Native projection, semantic index and Fleet frame reuse committed; synthetic benchmarks in docs/evidence/resource-efficiency; live plateau/delta refresh incomplete |
 | C admission | in progress | Durable shared admission wired into session preparation/spawn; per-generation container envelopes, observed-budget holds, helper caps. Whole-VM upper-bound calibration, native lifetime cleanup and job adapter support remain open |
-| D lifecycle / native / services | unverified | D3/D4 and D1 parking source integrated; durable parking composition and D2 refresh still in progress. Real service attempt held by observed-budget; native/service success pending |
-| E observability | partial proof | Fresh synthetic receipt matched through authenticated Zen session; see sentry-resource-probe.json. Monitor-to-activity bridge and final workload receipt pending |
-| F evaluation | unverified | Durable retention/replay, historical instruction outbox and broker capture composition implemented; admitted evaluator and automatic final dispositions pending |
+| D lifecycle / native / services | unverified | D3/D4 and D1 parking source integrated; durable parking composition wired; D2 refresh transport still pending. Real service attempt held by observed-budget; native/service success pending |
+| E observability | partial proof | Fresh synthetic receipt matched through authenticated Zen session; see sentry-resource-probe.json. Durable monitor-to-activity bridge wired; final workload receipt pending |
+| F evaluation | unverified | Durable retention/replay, historical instruction outbox and broker capture composition implemented; admitted offline evaluator wired but image/live automatic final dispositions pending |
 | G operating package | unverified | Exact image/config, recovery and rollout pending |
 | H independent review | unverified | Exact final candidate review and checks pending |
 | W0 idle 10 minutes | unverified | Live snapshot is active workload, not idle acceptance |
@@ -26,7 +26,7 @@ Policy target: 8 GiB total. No production configuration changes or broker restar
 | W8 24-hour soak | unverified | Not started; cannot infer from unit tests |
 | W9 native | unverified | Unsigned simulator fixture plus representative project pending |
 | W10 services | capacity-held | Fixed service proof refused before provisioning under observed-budget; foreign inventory unchanged. Successful service test and fault cleanup pending |
-| Live activation | not performed | Original broker preserved; no production build/config/restart changes. Earlier isolated baseline broker runs older compiled dist, not current source |
+| Live activation | not performed | Original broker preserved; no production build/config/restart changes. Earlier isolated baseline broker safely retired after its active-session set was confirmed empty |
 | Physical M4 mini | pending hardware | Independent of MacBook delivery |
 
 Initial private configuration inspected through an allowlist: mode 0600, no workerExecution override,
@@ -51,3 +51,14 @@ not evidence that the final optimized eight-worker profile is infeasible or comp
 
 Sentry proof is a synthetic closed-schema transport/privacy check, not measured workload
 telemetry or exact-final-candidate acceptance. No remote settings or billing modes changed.
+
+Composition checkpoint (2026-09-16): narrow authenticated `cyberdeck_run_profile` RPC,
+durable auxiliary request replay, canonical lease/attempt checks, parking recovery before
+input delivery, bounded rotating parking sweeps, canonical retirement of instruction facts,
+and shared-admission evaluator scheduling are implemented. Unknown resource measurements
+remain null and are omitted remotely. Historical terminal instructions retain their original
+execution identity; legacy missing identity remains an explicit migration gap.
+
+Current composition checks: TypeScript passed; 68 resource/architecture/authority/read-model/
+projection tests and 83 gateway/coordination/parking/service/evaluation tests passed. These
+are source checks of the dirty composition checkpoint, not final-candidate or live acceptance.

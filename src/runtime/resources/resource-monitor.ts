@@ -12,7 +12,7 @@ export interface ResourceMonitorOptions {
   nativeHelper: string;
   roots(): ProcessRoot[];
   vmIdentity?: ProcessIdentity;
-  containers(): Promise<{ id: string; owned: boolean }[]>;
+  containers(): Promise<{ id: string; owned: boolean; helper?: boolean }[]>;
   engineSocket?: string;
   uncertainBytes: number;
   intervalMs?: number;
@@ -24,6 +24,7 @@ export interface ResourceHealth {
   pressure: ResourceEnvironment["pressure"]; availableBytes: number | null;
   eventLoopP99Ms: number; sampleDurationMs: number; collectionFailures: number;
   uncertainty: string[];
+  activeWorkloads: number;
 }
 /** Bounded snapshots; inspection RPC reads cached data and cannot force sampling work. */
 export class ResourceMonitor {
@@ -86,6 +87,8 @@ export class ResourceMonitor {
     const availableBytes = percent && Number(percent[1]) <= 100 ? Math.floor(totalmem() * Number(percent[1]) / 100) : null;
     const addNative = (vmBytes: number | null) => managedNativePhysicalBytes === null || vmBytes === null ? null : managedNativePhysicalBytes + vmBytes;
     const result: ResourceHealth = { configured: true, observedAt, samples, managedNativePhysicalBytes, vm,
+      activeWorkloads: containers.filter(c => c.owned && !c.helper).length
+        + samples.filter(s => s.owner.kind !== "control" && s.pids !== null && s.pids > 0).length,
       attributedPhysicalEstimateBytes: addNative(vm.attributedVmEstimateBytes), conservativePhysicalUpperBytes: addNative(vm.conservativeVmUpperBytes),
       pressure, availableBytes, eventLoopP99Ms: this.loop.percentile(99) / 1e6, sampleDurationMs: performance.now() - began,
       collectionFailures: this.failures, uncertainty: [...vm.uncertainty, "os-headroom-estimate", "unobserved-short-lived-descendants",

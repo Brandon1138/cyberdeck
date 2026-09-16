@@ -9,6 +9,9 @@ describe("resource telemetry", () => {
     const projected = projectResourceMeasurements(sample);
     expect(projected["cyberdeck.resource.observedBytes"]).toBeUndefined();
     expect(projected["cyberdeck.resource.reservedBytes"]).toEqual({ value: 100, unit: "byte" });
+    const missing = projectResourceMeasurements({ ...sample, active: null, eventLoopP99Ms: null, sampleDurationMs: null });
+    for (const name of ["active", "eventLoopP99Ms", "sampleDurationMs"])
+      expect(missing[`cyberdeck.resource.${name}`]).toBeUndefined();
   });
   it("rejects arbitrary metadata, reasons and non-finite or invalid measurements", () => {
     for (const extra of [{ path: "/private/secret" }, { reason: "sk-secret" }, { active: -1 }, { eventLoopP99Ms: NaN },

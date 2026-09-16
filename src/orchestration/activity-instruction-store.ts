@@ -5,10 +5,16 @@ import type { AgentActivityPort } from "./agent-activity-port.js";
 import type { ActivityInput } from "../domain/agent-activity.js";
 
 interface Instructions { put(record: InstructionRecord): Promise<void>; list(targetSessionId?: string): Promise<InstructionRecord[]> }
+export interface InstructionCommitObserver {
+  writing(record: InstructionRecord): void;
+  committed(record: InstructionRecord): void;
+  failed(record: InstructionRecord): void;
+}
 /** Activity follows the acknowledged instruction write; recorder failure cannot rewrite its outcome. */
 export function activityInstructionStore(store: Instructions, recorder: AgentActivityPort,
   session: (id: string) => SessionRecord | undefined,
   capture?: (record: InstructionRecord, session: SessionRecord | undefined) => Promise<void>,
+  observer?: InstructionCommitObserver,
 ): Instructions {
   return {
     list: (id) => store.list(id),
@@ -32,7 +38,10 @@ export function activityInstructionStore(store: Instructions, recorder: AgentAct
         occurredAt: record.updatedAt, observedAt: new Date().toISOString(), outcome: "observed",
       };
       const terminal = ["completed", "cancelled", "undelivered"].includes(record.status);
-      await store.put({ ...persisted, ...(terminal ? { terminalActivity: event } : {}) });
+      const durable = { ...persisted, ...(terminal ? { terminalActivity: event } : {}) };
+      observer?.writing(durable);
+      try { await store.put(durable); observer?.committed(durable); }
+      catch (error) { observer?.failed(durable); throw error; }
       await recorder.append(event).catch(() => undefined);
       await capture?.(persisted, worker).catch(() => undefined);
       if (record.status === "accepted" && (capture === undefined || worker?.executor !== "orbstack-container")) {

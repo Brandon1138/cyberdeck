@@ -104,7 +104,7 @@ export class RuntimeParkingService {
     this.idle.delete(sessionId); this.wakeRequested.delete(sessionId);
   }
   /** Restart reconciles recorded intent with exact current identity; it never invents cleanup. */
-  recover(sessionId: string): Promise<ParkingResult> {
+  recover(sessionId: string, wakePending = true): Promise<ParkingResult> {
     return this.serialize(sessionId, async () => {
       const record = this.store.get(sessionId);
       if (!record || record.phase === "active") return { state: "active" };
@@ -119,12 +119,14 @@ export class RuntimeParkingService {
       if (current.runtime !== "stopped") return this.intervene(record, "stop-not-confirmed");
       if (!this.port.restoreParked(current)) return this.intervene(record, "snapshot-changed");
       await this.store.put({ ...record, phase: "parked", reason: null });
-      if (current.instructions.some(status => !terminalInstructions.has(status)) || this.wakeRequested.has(sessionId))
+      if (wakePending && (current.instructions.some(status => !terminalInstructions.has(status)) || this.wakeRequested.has(sessionId)))
         return this.wakeCurrent(sessionId);
       return { state: "parked" };
     });
   }
   private async park(sessionId: string): Promise<ParkingResult> {
+    const existing = this.store.get(sessionId);
+    if (existing && existing.phase !== "active") return { state: "skipped", reason: `parking-${existing.phase}` };
     const before = this.port.snapshot(sessionId);
     const refused = parkingRefusal(before);
     if (refused || this.wakeRequested.has(sessionId)) {
