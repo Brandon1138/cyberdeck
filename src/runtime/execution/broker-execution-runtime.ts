@@ -10,7 +10,7 @@ import type { WorkerEventChannel } from "../../broker/worker-event-channel.js";
 import { createSessionRuntime } from "../session-runtime-adapter.js";
 import { HostExecutor } from "./host-executor.js";
 import { OrbStackClient } from "./orbstack-client.js";
-import { OrbStackExecutor } from "./orbstack-executor.js";
+import { OrbStackExecutor, type OrbStackExecutorOptions } from "./orbstack-executor.js";
 import { BrokerContainerContexts } from "./broker-container-contexts.js";
 import { ContainerProviderAdapter } from "./container-provider-adapter.js";
 import { activityExecutionStore } from "../../orchestration/activity-execution-store.js";
@@ -24,6 +24,7 @@ export async function brokerExecutionRuntime(options: {
   lookupSession(id: string): SessionRecord | undefined;
   submitEvent: WorkerEventChannel["submit"];
   activity?: AgentActivityPort;
+  grantedEnvelope?: OrbStackExecutorOptions["grantedEnvelope"];
   allowsWorkspaceTrust?: (source: string) => Promise<boolean>;
 }) {
   const localStore = await WorkerExecutionStore.open(options.stateDirectory);
@@ -53,6 +54,7 @@ export async function brokerExecutionRuntime(options: {
       config.authentication, config.attemptTimeoutMinutes);
     container = new OrbStackExecutor({ client: new OrbStackClient(config.endpoint), profile: config,
       contexts, attach: createSessionRuntime, writableProxyPort,
+      ...(options.grantedEnvelope ? { grantedEnvelope: options.grantedEnvelope } : {}),
       evidenceDirectory: join(root, "evidence"), onFailure: () => { failures++; },
     });
     const recover = async () => {
@@ -106,6 +108,7 @@ export async function brokerExecutionRuntime(options: {
         return context.workspace.hostPath === cwd ? context.workspace.source : undefined;
       } catch { return undefined; }
     },
+    execution: (sessionId: string) => store.get(sessionId)?.ref,
     executions, brokerId: localStore.brokerId, gatewayPort, closeAdmission: () => executions.closeAdmission(),
     adapters: config === undefined ? options.adapters : Object.fromEntries(Object.entries(options.adapters).map(([id, adapter]) => [id, new ContainerProviderAdapter(adapter, root, config.codexWorkspaceIsolation)])),
     health: () => ({ configured: config !== undefined, reachable, failures, slots: container?.slots.snapshot(), profile: container?.support(),

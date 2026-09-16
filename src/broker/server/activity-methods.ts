@@ -20,6 +20,7 @@ export const activityMethods: Record<string, BrokerMethodHandler> = {
     return { runId: input.runId, pinned: input.pinned };
   },
   "execution.health": async (server) => server.options.executionHealth?.() ?? { configured: false },
+  "resource.health": async (server) => server.options.resourceHealth?.() ?? { configured: false, hold: "measurement-not-configured" },
   "telemetry.health": async (server) => server.options.telemetry?.health() ?? { enabled: false },
   "activity.health": async (server) => server.options.activity?.health() ?? { degraded: true, dropped: 0, retained: 0 },
 };

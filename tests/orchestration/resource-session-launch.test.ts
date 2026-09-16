@@ -32,6 +32,7 @@ describe("shared resource launch boundary", () => {
     const beforeSpawn = vi.fn(async () => {});
     const launch = f.assembly.spawnPreparedLaunch(f.adapter, record, spec, beforeSpawn);
     await Promise.resolve();
+    expect(beforeSpawn).toHaveBeenCalledOnce();
     expect(f.prepare).not.toHaveBeenCalled(); expect(f.factory).not.toHaveBeenCalled(); expect(f.workerStart).not.toHaveBeenCalled();
     admit(); expect(await launch).toBe(runtime);
     expect(f.prepare).toHaveBeenCalledWith(record, spec); expect(beforeSpawn).toHaveBeenCalledOnce();

@@ -4,7 +4,7 @@ export const CYBERDECK_MEMORY_BYTES = 8 * 1024 ** 3;
 const id = z.string().min(1).max(128);
 const bytes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const ResourceOwnerSchema = z.object({
-  installationId: id, workloadId: id, familyId: id.optional(), executionId: id.optional(),
+  installationId: id, workloadId: id, familyId: z.string().min(1).max(256).optional(), executionId: id.optional(),
   generation: z.number().int().positive().optional(),
   kind: z.enum(["control", "orchestrator", "worker", "evaluation", "service"]),
 }).strict();
@@ -65,6 +65,9 @@ export interface ResourceLedgerPort {
   save(next: ResourceLedger, expectedRevision: number): Promise<void>;
 }
 export interface ResourceEnvironment {
+  /** Optional for deterministic adapters; the operational monitor always supplies these. */
+  observedBytes?: number | null;
+  unreservedBytes?: number | null;
   observedAt: number;
   pressure: "normal" | "elevated" | "critical" | "unknown";
   availableBytes: number | null;

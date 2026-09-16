@@ -3,16 +3,19 @@ import { isIP } from "node:net";
 import { rm, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { writeAtomicPrivateFile } from "../../persistence/atomic-private-file.js";
-import type { ExecutionRef } from "../../domain/worker-execution.js";
+import type { ExecutionIdentity, ExecutionRef } from "../../domain/worker-execution.js";
 import type { ContainerLaunchContext } from "./container-launch-context.js";
 import { OrbStackClient, containerName } from "./orbstack-client.js";
 
-export async function prepareWorkerNetwork(client: OrbStackClient, image: string, context: ContainerLaunchContext, proxyPort: number): Promise<string> {
+export async function prepareWorkerNetwork(client: OrbStackClient, image: string, context: ContainerLaunchContext, proxyPort: number, identity?: ExecutionIdentity): Promise<string> {
   if (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65535) throw new Error("WORKER_EGRESS_PROXY_REQUIRED");
   const label = (await client.command(["image", "inspect", image, "--format", '{{index .Config.Labels "cyberdeck.network-boundary"}}'])).trim();
   if (label !== "1") throw new Error("WORKER_NETWORK_IMAGE_REQUIRED");
   const hostAddress = (await client.command(["run", "--rm", "--user", "1000:1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-    "--read-only", "--network", "bridge", "--entrypoint", "node", image, "-e",
+    "--read-only", "--network", "bridge", "--memory", "134217728", "--memory-swap", "134217728", "--pids-limit", "32", "--cpus", "0.25",
+    ...(identity ? ["--name", `${containerName(identity)}-dns`, "--label", `cyberdeck.broker=${identity.brokerId}`,
+      "--label", `cyberdeck.network-helper=${identity.executionId}`] : []),
+    "--entrypoint", "node", image, "-e",
     'require("dns").lookup("host.docker.internal",{family:4},(e,a)=>{if(e)process.exit(1);console.log(a)})'])).trim();
   if (isIP(hostAddress) !== 4) throw new Error("WORKER_NETWORK_HOST_UNRESOLVED");
   await rm(join(context.hostCredentials, "network-ready"), { force: true });
@@ -31,8 +34,8 @@ export async function activateWorkerNetwork(client: OrbStackClient, image: strin
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   const output = await client.command(["run", "--rm", "--name", helper, "--label", `cyberdeck.network-helper=${ref.executionId}`,
-    "--network", `container:${ref.backendId}`, "--user", "0:0", "--cap-drop", "ALL", "--cap-add", "NET_ADMIN",
-    "--security-opt", "no-new-privileges", "--read-only", "--pids-limit", "32", "--memory", "134217728", "--cpus", "0.25",
+    "--label", `cyberdeck.broker=${ref.brokerId}`, "--network", `container:${ref.backendId}`, "--user", "0:0", "--cap-drop", "ALL", "--cap-add", "NET_ADMIN",
+    "--security-opt", "no-new-privileges", "--read-only", "--pids-limit", "32", "--memory", "134217728", "--memory-swap", "134217728", "--cpus", "0.25",
     "--tmpfs", "/run:rw,nosuid,nodev,size=1048576",
     "--entrypoint", "node", image, "/opt/cyberdeck/firewall.mjs", String(policy.reportPort), String(policy.proxyPort), policy.hostAddress]);
   const evidence = JSON.parse(output);

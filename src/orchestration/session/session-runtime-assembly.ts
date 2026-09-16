@@ -120,13 +120,15 @@ export class SessionRuntimeAssembly {
     onPhase?: (phase: "prepare" | "spawn") => void,
   ): Promise<SessionRuntime> {
     try {
+      // Persist canonical controller/lease authority before resolving resource ownership.
+      // This callback performs no provider preparation or runtime launch.
+      await beforeSpawn?.();
       const launch = async (): Promise<SessionRuntime> => {
         onPhase?.("prepare");
         if (record.executor === "orbstack-container" && this.catalog.options.executions === undefined) {
           throw new Error("EXECUTOR_UNAVAILABLE");
         }
         if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
-        await beforeSpawn?.();
         const replayBytes = this.catalog.replayBytesFor(record);
         onPhase?.("spawn");
         if (record.kind !== "orchestrator" && this.catalog.options.executions !== undefined) {

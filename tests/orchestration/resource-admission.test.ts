@@ -23,6 +23,20 @@ async function fixture() {
   return { service, store, env, make };
 }
 describe("shared resource admission", () => {
+  it("holds on an observed budget breach and unknown usage, and queues transient overhead", async () => {
+    const { service, env, store } = await fixture();
+    env.observedBytes = 8 * GiB;
+    expect(await service.request(request("one"))).toMatchObject({ state: "waiting-capacity", reason: "observed-budget" });
+    env.observedBytes = null; await service.refresh();
+    expect(service.health().hold).toBe("metrics-unavailable");
+    env.observedBytes = 2 * GiB; env.unreservedBytes = 7 * GiB;
+    expect((await service.request(request("two"))).state).toBe("waiting-capacity");
+    const revision = store.read().revision;
+    await service.refresh(); await service.request(request("two"));
+    expect(store.read().revision).toBe(revision);
+    env.unreservedBytes = GiB; await service.refresh();
+    expect(service.health().reservations).toHaveLength(2);
+  });
   it("admits eight synthetic light envelopes, queues ninth and rejects impossible request", async () => {
     const { service } = await fixture();
     const decisions = await Promise.all(Array.from({ length: 9 }, (_, i) => service.request(request(String(i)))));

@@ -23,6 +23,8 @@ export interface OrbStackExecutorOptions {
   evidenceDirectory: string;
   onFailure(error: unknown): void;
   writableProxyPort?: number;
+  /** Present only under shared admission; must return this generation's granted envelope. */
+  grantedEnvelope?: (input: ExecutionLaunchInput) => { memoryBytes: number; cpus: number; pidLimit: number };
 }
 /**
  * `network: none` is a configured value with no launch path today. The guest gates its provider
@@ -43,32 +45,40 @@ export class OrbStackExecutor implements WorkerExecutionPort {
     const p = options.profile;
     if (!/^sha256:[a-f0-9]{64}$/.test(p.image) || !Number.isFinite(p.cpus) || p.cpus <= 0
       || !Number.isSafeInteger(p.memoryBytes) || p.memoryBytes < 64 * 1024 * 1024) throw new Error("CONTAINER_PROFILE_INVALID");
-    this.slots = new ExecutionSlotScheduler(p.slots);
+    this.slots = new ExecutionSlotScheduler(options.grantedEnvelope ? 64 : p.slots);
   }
   support(): { network: ContainerProfile["network"]; supported: boolean; reason?: string } {
     return { network: this.options.profile.network, ...networkProfileSupport(this.options.profile.network) };
   }
   async prepare(input: ExecutionLaunchInput): Promise<PreparedExecution> {
-    const { client, profile } = this.options;
+    const { client } = this.options;
+    const envelope = this.options.grantedEnvelope?.(input);
+    const profile = { ...this.options.profile, ...envelope };
+    const pidLimit = envelope?.pidLimit ?? 512;
+    if (!Number.isSafeInteger(pidLimit) || pidLimit < 1 || !Number.isSafeInteger(profile.memoryBytes)
+      || profile.memoryBytes < 64 * 1024 ** 2 || !Number.isFinite(profile.cpus) || profile.cpus <= 0)
+      throw new Error("CONTAINER_GRANTED_ENVELOPE_INVALID");
     if (!networkProfileSupport(profile.network).supported) throw new Error("CONTAINER_NETWORK_PROFILE_UNSUPPORTED");
     if (input.launch.cwd !== "/workspace" || !["node", "claude", "codex"].includes(input.launch.executable)
       || Object.keys(input.launch.env).some((key) => !["TERM", "DISABLE_UPDATES", "ENABLE_TOOL_SEARCH", "CYBERDECK_PROCESS_ROLE", "CYBERDECK_WORKER_MODE", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"].includes(key))) {
       throw new Error("CONTAINER_LAUNCH_NOT_TARGETED");
     }
     const capacity = await client.capacity();
-    if (profile.slots * profile.cpus > capacity.cpus || profile.slots * profile.memoryBytes > capacity.memory * 0.8) throw new Error("CONTAINER_CAPACITY_EXCEEDED");
+    // CPU is a ceiling, not reserved physical cores. Shared admission owns aggregate memory.
+    if (envelope ? profile.memoryBytes > capacity.memory
+      : profile.slots * profile.cpus > capacity.cpus || profile.slots * profile.memoryBytes > capacity.memory * 0.8)
+      throw new Error("CONTAINER_CAPACITY_EXCEEDED");
     const release = await this.slots.reserve(input.identity.executionId, input.signal);
     this.reservations.set(input.identity.executionId, release);
     try {
       input.signal?.throwIfAborted();
       const context = await this.options.contexts.prepare(input);
-      const networkHost = input.record.sandbox !== "read-only"
-        ? await prepareWorkerNetwork(client, profile.image, context, this.options.writableProxyPort ?? 0) : undefined;
+      const networkHost = await prepareWorkerNetwork(client, profile.image, context, this.options.writableProxyPort ?? 0, input.identity);
       input.signal?.throwIfAborted();
       let ref: ExecutionRef = { ...input.identity, executor: "orbstack-container", workspaceId: context.workspace.hostPath };
       // Launch data is local-only, protected by the credentials mount, never Docker metadata.
       await writeAtomicPrivateFile(join(context.hostCredentials, "launch.json"), JSON.stringify({ executable: input.launch.executable,
-        args: input.launch.args, env: input.launch.env, cwd: context.guest.workspace, networkRestricted: input.record.sandbox !== "read-only" }));
+        args: input.launch.args, env: input.launch.env, cwd: context.guest.workspace, networkRestricted: true }));
       let inspected = await client.inspect(ref);
       input.signal?.throwIfAborted();
       if (inspected === undefined) {
@@ -79,7 +89,7 @@ export class OrbStackExecutor implements WorkerExecutionPort {
         const args = ["create", "--name", containerName(ref),
           "--label", `cyberdeck.broker=${ref.brokerId}`, "--label", `cyberdeck.worker=${ref.workerId}`,
           "--label", `cyberdeck.execution=${ref.executionId}`, "--init", "--user", "1000:1000",
-          "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--pids-limit", "512",
+          "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--pids-limit", String(pidLimit),
           "--cpus", String(profile.cpus), "--memory", String(profile.memoryBytes), "--memory-swap", String(profile.memoryBytes),
           "--network", profile.network === "none" ? "none" : "bridge", "--interactive",
           ...(networkHost ? ["--add-host", `host.docker.internal:${networkHost}`] : []),
@@ -99,7 +109,7 @@ export class OrbStackExecutor implements WorkerExecutionPort {
       const mounts = inspected.Mounts;
       if (inspected.Config.Image !== profile.image || inspected.Config.User !== "1000:1000"
         || host.Privileged || host.Memory !== profile.memoryBytes || host.NanoCpus !== profile.cpus * 1e9
-        || host.MemorySwap !== profile.memoryBytes || !host.ReadonlyRootfs || host.PidsLimit !== 512
+        || host.MemorySwap !== profile.memoryBytes || !host.ReadonlyRootfs || host.PidsLimit !== pidLimit
         || host.NetworkMode !== "bridge" || host.PidMode !== "" || !["private", ""].includes(host.IpcMode)
         || (networkHost !== undefined && (host.ExtraHosts?.length !== 1 || host.ExtraHosts[0] !== `host.docker.internal:${networkHost}`))
         || (host.CapAdd?.length ?? 0) !== 0 || (host.Devices?.length ?? 0) !== 0

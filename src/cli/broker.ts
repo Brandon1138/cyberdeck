@@ -3,6 +3,10 @@ import type { CliProgramContext } from "./program.js";
 import { startDetachedBroker, withClient } from "./runtime.js";
 
 export function registerBrokerCommands(program: Command, context: CliProgramContext): void {
+  program.command("resource").description("inspect cached resource measurements").command("health").action(async () => {
+    const health = await withClient(client => client.request("resource.health", {}));
+    process.stdout.write(`${JSON.stringify(health, null, 2)}\n`);
+  });
   const { restartBroker, toolkit } = context;
   const broker = program.command("broker").description("manage the durable broker process");
   broker.command("run").action(async () => {
@@ -20,4 +24,3 @@ export function registerBrokerCommands(program: Command, context: CliProgramCont
   broker.command("restart").description("gracefully replace the running broker").action(restartBroker);
 
 }
-

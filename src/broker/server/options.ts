@@ -45,6 +45,7 @@ export interface BrokerServerOptions {
   activity?: AgentActivityPort;
   telemetry?: ActivitySinkPort;
   executionHealth?: () => unknown;
+  resourceHealth?: () => unknown;
   renewExecutionAttempt?: (input: { sessionId: string; leaseVersion: number; leaseExpiresAt: string; controllerId: string }) => Promise<"renewed" | "not-running">;
   socketPath: string;
   registry: SessionRegistry;

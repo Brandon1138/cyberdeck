@@ -1,3 +1,5 @@
+import { brokerResourceRuntime } from "../runtime/resources/broker-resource-runtime.js";
+import { orchestratorController } from "../domain/orchestrator.js";
 import { ContainerNativeSource } from "../runtime/activity/container-native-source.js";
 import { TurnNativeCapture } from "../runtime/activity/turn-native-capture.js";
 import { ExecutionTranscriptStore } from "../persistence/execution-transcript-store.js";
@@ -149,6 +151,7 @@ export function composeJobDispatchAdapters(context: {
   leases: WorktreeLeaseManager;
   artifacts: ArtifactStore;
   executionPolicy?: WorkerExecutionPolicy | undefined;
+  resourceManaged?: boolean;
 }): JobDispatchAdapter[] {
   return [
     new AppServerJobDispatchAdapter({
@@ -160,7 +163,7 @@ export function composeJobDispatchAdapters(context: {
     new ClaudeJobDispatchAdapter(),
     new CursorJobDispatchAdapter(),
     new AntigravityJobDispatchAdapter(),
-  ].map((adapter) => enforceJobExecutionPolicy(adapter, context.executionPolicy));
+  ].map((adapter) => enforceJobExecutionPolicy(adapter, context.executionPolicy, context.resourceManaged));
 }
 
 export async function runBroker(
@@ -224,8 +227,15 @@ export async function runBroker(
     config.threadRetention,
     Date.now(),
   );
+  const orchestratorStore = new OrchestratorStore(stateDirectory);
+  let workerCoordination: WorkerCoordinationRuntime<WorkerCoordinationService>;
+  let resourceRuntime: Awaited<ReturnType<typeof brokerResourceRuntime>>;
   let workerEvents: WorkerEventChannel;
   const executionRuntime = await brokerExecutionRuntime({ stateDirectory, config, activity,
+    ...(config.resourceManagement ? { grantedEnvelope: (input) => {
+      if (!resourceRuntime) throw new Error("RESOURCE_RUNTIME_UNAVAILABLE");
+      return resourceRuntime.envelope(input.record, input.identity.generation);
+    } } : {}),
     allowsWorkspaceTrust: (source) => modalAnswerPolicy.allowsWorkspaceTrust(source),
     adapters: { codex: new CodexProviderAdapter({ mcp, workspaceTrust: grantGatedTrust(codexTrust) }),
       claude: new ClaudeProviderAdapter({ mcp, stateDirectory, workspaceTrust: grantGatedTrust(claudeTrust) }),
@@ -233,7 +243,20 @@ export async function runBroker(
     lookupSession: (id) => { try { return registry?.get(id); } catch { return undefined; } },
     submitEvent: (input) => workerEvents.submit(input),
   });
+  resourceRuntime = await brokerResourceRuntime({ config, brokerId: executionRuntime.brokerId,
+    execution: executionRuntime.execution,
+    resolveFamily: async (record) => {
+      const lease = workerCoordination?.service.getSubject(record.id)?.lease;
+      if (lease?.controller) return lease.controller.familyId;
+      const binding = await orchestratorStore.findBySessionId(record.kind === "orchestrator" ? record.id : record.parentSessionId ?? record.id);
+      if (binding) return orchestratorController(binding).familyId;
+      if (record.kind === "orchestrator" || record.parentSessionId) throw new Error("RESOURCE_CANONICAL_FAMILY_UNAVAILABLE");
+      // Operator-launched sessions have no controller grant; this is a scheduling bucket only.
+      return "operator";
+    },
+  });
   registry = new SessionRegistry({
+    ...(resourceRuntime ? { resourceExecution: resourceRuntime.gate } : {}),
     adapters: executionRuntime.adapters,
     sessionRuntimeFactory: createSessionRuntime,
     executions: executionRuntime.executions,
@@ -255,8 +278,7 @@ export async function runBroker(
     // A machine without git, or with none of these directories left on disk, starts empty. The
     // operator registers projects by hand from there; refusing to boot over it would be worse.
   });
-  const orchestratorStore = new OrchestratorStore(stateDirectory);
-  const workerCoordination = new WorkerCoordinationRuntime({
+  workerCoordination = new WorkerCoordinationRuntime({
     stateDirectory,
     recoveredSessions,
     orchestrators: orchestratorStore,
@@ -363,7 +385,7 @@ export async function runBroker(
     artifacts: artifactStore,
     leaseStore: new LeaseStore(stateDirectory),
     adapters: (context) =>
-      composeJobDispatchAdapters({ leases: context.leases, artifacts: artifactStore, executionPolicy: config.workerExecution }),
+      composeJobDispatchAdapters({ leases: context.leases, artifacts: artifactStore, executionPolicy: config.workerExecution, resourceManaged: resourceRuntime !== undefined }),
   });
   await runtime.start();
 
@@ -373,7 +395,9 @@ export async function runBroker(
     if (shuttingDown) return;
     shuttingDown = true;
     // Admission stops first, then in-flight jobs drain and persist, then live sessions stop.
+    resourceRuntime?.drain();
     await runtime.shutdown(reason);
+    await Promise.all([resourceRuntime?.closeAdmission(), executionRuntime.closeAdmission()]);
     localWorkerControl.close();
     workerBudgets.close();
     instructions.stop();
@@ -381,6 +405,7 @@ export async function runBroker(
     await executionRuntime.closeAdmission();
     await registry.stopAll();
     await executionRuntime.close();
+    await resourceRuntime?.close();
     await sentry?.close().catch(() => undefined);
     await journal.append(brokerEvent("broker.shutdown", { reason, pid: process.pid }));
     await server.close();
@@ -388,6 +413,7 @@ export async function runBroker(
 
   server = new BrokerServer({
     activity, executionHealth: executionRuntime.health,
+    ...(resourceRuntime ? { resourceHealth: resourceRuntime.health } : {}),
     renewExecutionAttempt: async (input) => {
       const lease = workerCoordination.service.getSubject(input.sessionId)?.lease;
       if (lease?.state !== "active" || lease.version !== input.leaseVersion || lease.expiresAt !== input.leaseExpiresAt

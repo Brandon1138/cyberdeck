@@ -36,7 +36,8 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
       const prior = ledger.entries.find(e => e.request.requestId === request.requestId);
       if (prior && JSON.stringify(prior.request) !== JSON.stringify(request)) throw new Error("RESOURCE_REQUEST_CONFLICT");
       if (prior?.state === "cancelled" || prior?.state === "released") throw new Error("RESOURCE_REQUEST_TERMINAL");
-      const pool = this.pool();
+      // Temporary observed overhead queues feasible work; it does not change feasibility.
+      const pool = this.policy.totalBytes - this.policy.fixedBytes - this.policy.uncertainBytes - this.policy.controlMarginBytes;
       if (request.demand.memoryBytes > pool || request.demand.pidLimit > this.policy.maxPids) {
         return { state: "resource-infeasible", reason: request.demand.pidLimit > this.policy.maxPids ? "pid-limit" : "memory-envelope",
           requiredBytes: request.demand.memoryBytes, availableBytes: pool };
@@ -96,11 +97,20 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
       reservations: held, revision: ledger.revision };
   }
 
-  private pool(): number { return this.policy.totalBytes - this.policy.fixedBytes - this.policy.uncertainBytes - this.policy.controlMarginBytes; }
+  private pool(): number {
+    const observed = this.environment().unreservedBytes;
+    const fixed = observed !== undefined && observed !== null && Number.isFinite(observed) && observed >= 0
+      ? Math.max(this.policy.fixedBytes, observed) : this.policy.fixedBytes;
+    return Math.max(0, this.policy.totalBytes - fixed - this.policy.uncertainBytes - this.policy.controlMarginBytes);
+  }
   private hold(): string | null {
     if (!this.reconciled) return "reconciliation";
     if (this.draining) return "draining";
     const env = this.environment(), age = this.now() - env.observedAt;
+    if (env.observedBytes === null || env.unreservedBytes === null
+      || [env.observedBytes, env.unreservedBytes].some(n => n !== undefined && (!Number.isFinite(n) || n! < 0)))
+      return "metrics-unavailable";
+    if (env.observedBytes !== undefined && env.observedBytes >= this.policy.totalBytes) return "observed-budget";
     if (age < 0 || age > this.policy.maxMetricAgeMs || !env.attributionComplete || env.availableBytes === null
       || !Number.isFinite(env.availableBytes) || env.availableBytes < 0) return "metrics-unavailable";
     if (env.pressure !== "normal") return "host-pressure";
@@ -135,6 +145,8 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
       : { state: "waiting-capacity", reason: this.hold() ?? "reserved-capacity", queuedAt: entry.queuedAt };
   }
   private async persist(ledger: ResourceLedger): Promise<void> {
+    // A queued poll or unchanged refresh is not a new durable state transition.
+    if (JSON.stringify(ledger) === JSON.stringify(this.store.read())) return;
     const revision = ledger.revision; ledger.revision++; await this.store.save(ledger, revision);
   }
   private serial<T>(operation: () => Promise<T>): Promise<T> {
