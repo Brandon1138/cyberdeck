@@ -14,7 +14,7 @@ Policy target: 8 GiB total. No production configuration changes or broker restar
 | E observability | partial proof | Fresh synthetic receipt matched through authenticated Zen session; see sentry-resource-probe.json. Durable monitor-to-activity bridge wired; final workload receipt pending |
 | F evaluation | unverified | Durable retention/replay, historical instruction outbox and broker capture composition implemented; admitted offline evaluator wired but image/live automatic final dispositions pending |
 | G operating package | unverified | Exact image/config, recovery and rollout pending |
-| H independent review | unverified | Exact final candidate review and checks pending |
+| H independent review | in progress | Clean e6cc020: 234 files / 2,585 tests, CI-equivalent source checks and isolated installed-package smoke passed. Subsequent review found queued interactive launch task loss; correction and final rerun pending |
 | W0 idle 10 minutes | unverified | Live snapshot is active workload, not idle acceptance |
 | W1 eight authenticated workers x3 | unverified | No capacity claim from configured limits or thread count |
 | W2 two families | unverified | Shared policy and real fair service pending |
@@ -128,3 +128,27 @@ Initial admission waits for first complete replay plus canonical coverage audit,
 histories exceeding the 400-event per-pass limit. Composition regressions pass 32 tests.
 The strict W1/soak artifact validator is integrated, but no live fleet collector result or
 24-hour soak is implied by its synthetic negative fixtures.
+
+Exact clean `e6cc02015249483861a553d936a2015edd098e4a` passed root/evaluation TypeScript,
+all 2,585 tests in 234 files (two test workers), build, all eight offline scripted scenarios,
+production dependency audit, whole-history redacted Gitleaks, package-content assertions,
+fresh-prefix package install, installed CLI version/dependency inventory and isolated headless
+broker startup/status/shutdown. Package SHA-256 is
+`c9b1b7cc97bab205e240ee463156fac465aaa3b1cff408c5eafea6f6fa05c5d7`.
+`candidate-e6cc020-checks.json` records provenance and private log hashes. The first install
+attempt failed only in mise's post-install reshim; direct npm passed with the two inspected
+package scripts allowed. The first smoke was denied Unix-socket creation by the sandbox;
+the authorized retry used a fresh socket/state, launched no providers and removed its socket.
+Both failed attempts remain in the private artifact folder.
+
+Subsequent scoped High review found a P1 in fresh interactive starts: capacity waiting occurred
+before a durable launch record or Fleet row, so a restart could lose the launch callback and
+initial input. A separate worktree is implementing durable pending launch receipts, recovery
+and cancellation. Passing the existing suite did not cover this defect or establish completion.
+
+After that package smoke, the next read-only census refused the changed/missing OrbStack VM birth
+identity; subsequent process-name inspection found no OrbStack process. No service proof or
+image build was attempted, and no VM/container restart was performed. The live broker 85613
+and Fleet 85652 retained their September 14 start identities. Current foreign-service state
+must be re-inspected once the Engine is available; older bracketed inventories are not a
+claim that external state stayed unchanged throughout the session.

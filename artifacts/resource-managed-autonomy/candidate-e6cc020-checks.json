@@ -1,0 +1,102 @@
+{
+  "sourceSha": "e6cc02015249483861a553d936a2015edd098e4a",
+  "dirty": false,
+  "mode": "exact-candidate-source-and-isolated-package-checks",
+  "node": "v24.18.0",
+  "startedAt": "2026-09-16T12:46:27.616045+00:00",
+  "checks": {
+    "check": {
+      "exitCode": 0,
+      "log": "check.log"
+    },
+    "unit": {
+      "exitCode": 0,
+      "log": "unit.log"
+    },
+    "build": {
+      "exitCode": 0,
+      "log": "build.log"
+    },
+    "eval-types": {
+      "exitCode": 0,
+      "log": "eval-types.log"
+    },
+    "offline": {
+      "exitCode": 0,
+      "log": "offline.log"
+    },
+    "audit": {
+      "exitCode": 0,
+      "log": "audit.log"
+    },
+    "secrets": {
+      "exitCode": 0,
+      "log": "secrets.log"
+    },
+    "pack": {
+      "exitCode": 0,
+      "log": "pack.log"
+    },
+    "clean-install": {
+      "exitCode": 1,
+      "log": "clean-install.log"
+    },
+    "clean-install-direct": {
+      "exitCode": 0,
+      "log": "clean-install-direct.log"
+    },
+    "installed-version": {
+      "exitCode": 0,
+      "log": "installed-version.log"
+    },
+    "installed-dependencies": {
+      "exitCode": 0,
+      "log": "installed-dependencies.log"
+    }
+  },
+  "unit": {
+    "files": 234,
+    "passed": 2585,
+    "failed": 0
+  },
+  "offline": {
+    "mode": "scripted",
+    "passed": 8,
+    "failed": 0,
+    "errors": 0
+  },
+  "package": {
+    "filename": "ishmael38-cyberdeck-0.1.0-alpha.2.tgz",
+    "sha256": "c9b1b7cc97bab205e240ee463156fac465aaa3b1cff408c5eafea6f6fa05c5d7",
+    "files": 1146
+  },
+  "headlessSmoke": {
+    "passed": true,
+    "startedAt": "2026-09-16T12:55:47.911Z",
+    "finishedAt": "2026-09-16T12:55:48.225Z",
+    "pid": 10380,
+    "socketRemoved": true,
+    "exit": {
+      "code": 0,
+      "signal": null
+    }
+  },
+  "artifactHashes": {
+    "manifest.json": "7f279a4ef045407a0a266f7aa613ac8b3c8ea22b6fc76a5440f19cbb7d198367",
+    "unit-results.json": "f52af0495a5345cb49b45fbf532467e465f80d6bf19be3e6cb8e3f9e2516803b",
+    "offline.json": "62712f3c31865bf368f029fbf7fda2054480ff04aa0e34b53ed03a36d59194ed",
+    "secret-scan.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+    "package-smoke.json": "616f8caab86aaf821c685f50f1d8cd2768c15ab8f5c37805de7267eb7f216204",
+    "package-smoke.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sandbox-package-smoke.json": "431185566bf7d5d7b2f3044b2e913ebb18c93f6639f8d75256301a0ab720d8da",
+    "sandbox-package-smoke.log": "c08f8c758f682100bb8fd56179c30f2bcd67d21d9f15e8024db3eeaf1b572d14"
+  },
+  "privateArtifactDirectory": "/private/tmp/cyberdeck-resource-candidate-e6cc020",
+  "limitations": [
+    "initial npm wrapper exit 1 after install due to mise reshim trust; direct npm fresh-prefix retry passed with only inspected package scripts allowed",
+    "initial socket listen denied by sandbox; isolated authorized retry passed; failed evidence retained",
+    "headless smoke had no resource config, workers, providers or second UI",
+    "subsequent independent review found queued interactive launch task-loss P1; fix pending",
+    "not runtime fleet, native, service, activation or soak acceptance"
+  ]
+}
