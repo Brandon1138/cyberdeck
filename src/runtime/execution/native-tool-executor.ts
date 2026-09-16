@@ -1,6 +1,7 @@
-import { mkdir, readFile, realpath } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import type { ResourceAdmissionPort, ResourceDecision, ResourceRequest } from "../../domain/resource-budget.js";
+import { isDeepStrictEqual } from "node:util";
+import type { ResourceAdmissionPort, ResourceDecision, ResourceRequest, ResourceReservation } from "../../domain/resource-budget.js";
 import type { ResourceRuntimeBindingPort, ResourceRuntimeIdentity } from "../../domain/resource-runtime.js";
 import { NativeToolRequestSchema, type NativeCommandResult, type NativeProcessSupervisor,
   type NativeToolAuthorization, type NativeToolRecipe, type NativeToolRequest } from "./native-tool-types.js";
@@ -63,8 +64,12 @@ export class NativeToolExecutor {
     finally { this.active.delete(request.requestId); }
   }
   /** Recovery never runs a tool or infers native lifetime completion from current PIDs. */
-  async recover(input: NativeToolRequest): Promise<{ cleanupComplete: boolean; result?: Extract<NativeToolResult, { state: "finished" }> }> {
-    const request = NativeToolRequestSchema.parse(input), cleanup = await this.cancelPending(request);
+  async recover(input: NativeToolRequest, cancelPending = false): Promise<{ cleanupComplete: boolean; pending?: ResourceRequest | null;
+    result?: Extract<NativeToolResult, { state: "finished" }> }> {
+    const request = NativeToolRequestSchema.parse(input), binding = this.ownedBinding(request);
+    if (!cancelPending && (!binding || (["queued", "reserved"].includes(binding.phase) && !binding.identities.length)))
+      return { cleanupComplete: false, pending: binding?.request ?? null };
+    const cleanup = await this.cancelPending(request);
     try {
       const result = JSON.parse(await readFile(join(this.options.rootDirectory, request.requestId, "result.json"), "utf8")) as Extract<NativeToolResult, { state: "finished" }>;
       if (result.state !== "finished" || JSON.stringify(NativeToolRequestSchema.parse(result.request)) !== JSON.stringify(request))
@@ -72,14 +77,28 @@ export class NativeToolExecutor {
       return { ...cleanup, result };
     } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return cleanup; throw error; }
   }
-  private async retireOwned(request: NativeToolRequest): Promise<{ cleanupComplete: boolean }> {
+  /** Pure owner inventory check; never requests/cancels/releases admission inside its lock. */
+  recoveryReady(request: NativeToolRequest, reservation: ResourceReservation): boolean {
+    try {
+      const binding = this.ownedBinding(NativeToolRequestSchema.parse(request));
+      return !!binding && isDeepStrictEqual(binding.request, reservation.request)
+        && ["queued", "reserved", "terminated"].includes(binding.phase) && !binding.identities.length;
+    } catch { return false; }
+  }
+  private ownedBinding(request: NativeToolRequest) {
     const key = `native-${request.requestId}`, binding = this.options.bindings.get(key);
-    if (!binding) return { cleanupComplete: true }; // Intent always precedes admission.
+    if (!binding) return undefined;
     const resource = binding.request;
     if (resource.requestId !== key || resource.owner.installationId !== this.options.installationId
       || resource.owner.kind !== "service" || ![key, request.attemptId].includes(resource.owner.workloadId)
       || resource.owner.executionId !== request.executionId || resource.owner.generation !== request.generation)
       throw new Error("native-recovery-identity-mismatch");
+    return binding;
+  }
+  private async retireOwned(request: NativeToolRequest): Promise<{ cleanupComplete: boolean }> {
+    const key = `native-${request.requestId}`, binding = this.ownedBinding(request);
+    if (!binding) return { cleanupComplete: true }; // Intent always precedes admission.
+    const resource = binding.request;
     // Accept legacy attemptId owners only for recovery; new requests always use their unique key.
     if (["launching", "bound"].includes(binding.phase) || binding.identities.length) return { cleanupComplete: false };
     await this.options.bindings.put({ ...binding, phase: "terminated" }); // Durable never-launched proof before release.
@@ -103,9 +122,9 @@ export class NativeToolExecutor {
         executionId: request.executionId, generation: request.generation, familyId: authority.familyId, kind: "service" },
       demand: recipe.demand };
     const prior = this.options.bindings.get(resource.requestId);
-    if (prior && prior.phase !== "queued") throw new Error("native-request-already-launched");
-    if (prior && JSON.stringify(prior.request) !== JSON.stringify(resource)) throw new Error("native-request-identity-changed");
-    await this.options.bindings.put({ request: resource, phase: "queued", identities: [] });
+    if (prior && (!["queued", "reserved"].includes(prior.phase) || prior.identities.length)) throw new Error("native-request-already-launched");
+    if (prior && !isDeepStrictEqual(prior.request, resource)) throw new Error("native-request-identity-changed");
+    if (!prior) await this.options.bindings.put({ request: resource, phase: "queued", identities: [] });
     if (signal?.aborted) { await this.retireOwned(request); throw new Error("native-cancelled-before-launch"); }
     const decision = await this.options.admission.request(resource);
     if (decision.state !== "admitted") return decision;
@@ -120,6 +139,16 @@ export class NativeToolExecutor {
       await mkdir(this.options.rootDirectory, { recursive: true, mode: 0o700 });
       const root = await realpath(this.options.rootDirectory);
       const directory = join(root, request.requestId);
+      if (prior?.phase === "reserved") {
+        // A crash during input staging precedes durable launching, so no tool can own these files.
+        // Only normal authorized execution may rebuild its private staging; reconciliation is read-only.
+        const partial = await lstat(directory).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+        if (partial) {
+          if (!partial.isDirectory() || partial.isSymbolicLink() || partial.uid !== process.getuid?.()
+            || await realpath(directory) !== directory) throw new Error("native-recovery-staging-unsafe");
+          await rm(directory, { recursive: true });
+        }
+      }
       await mkdir(directory, { mode: 0o700 }); // exclusive identity; never reuse another attempt's files
       const workspace = join(directory, "input"), artifacts = join(directory, "artifacts");
       await prepareNativeWorkspace(workspace, current.workspaceRoot, current.inputManifest, recipe.maxInputBytes);

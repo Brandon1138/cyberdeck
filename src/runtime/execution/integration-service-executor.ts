@@ -23,6 +23,7 @@ type Manifest = z.infer<typeof ManifestSchema>;
 export type IntegrationServiceResult = Exclude<ResourceDecision, { state: "admitted" }> | {
   state: "completed"; outcome: NonNullable<Manifest["outcome"]>; manifestRef: string; cleanupComplete: boolean;
 };
+export type IntegrationServiceRecovery = IntegrationServiceResult | { state: "pending"; resource: ResourceRequest };
 export interface IntegrationServiceExecutorOptions {
   client: OrbStackClient; admission: ResourceAdmissionPort; image: string; evidenceDirectory: string;
   /** Resolve canonical bindings/lease fencing afresh, never derive family from request data. */
@@ -108,7 +109,7 @@ export class IntegrationServiceExecutor {
     } catch { return false; }
   }
   /** Validate the entire bounded inventory before mutating anything during startup reconciliation. */
-  async reconcileAll(): Promise<Array<{ request: IntegrationServiceRequest; result: IntegrationServiceResult }>> {
+  async reconcileAll(): Promise<Array<{ request: IntegrationServiceRequest; result: IntegrationServiceRecovery }>> {
     const entries = await readdir(this.options.evidenceDirectory, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return []; throw error;
     });
@@ -126,18 +127,22 @@ export class IntegrationServiceExecutor {
         || manifest.resource.demand.profileVersion !== manifest.recipeHash) throw new Error("INTEGRATION_RECOVERY_MANIFEST_INVALID");
       requests.push(manifest.request);
     }
-    const results: Array<{ request: IntegrationServiceRequest; result: IntegrationServiceResult }> = [];
+    const results: Array<{ request: IntegrationServiceRequest; result: IntegrationServiceRecovery }> = [];
     for (const request of requests) results.push({ request, result: await this.recover(request) });
     return results;
   }
-  /** Startup reconciliation only. Expired authority never prevents stopping already owned services. */
-  async recover(input: IntegrationServiceRequest): Promise<IntegrationServiceResult> {
+  /** Pending intent is not an interrupted execution, even if admission.refresh already reserved it. */
+  async recover(input: IntegrationServiceRequest, cancelPending = false): Promise<IntegrationServiceRecovery> {
     const request = IntegrationServiceRequestSchema.parse(input);
     return this.exclusive(integrationNames(request).key, async () => {
       const manifest = await this.read(request);
       if (!manifest) throw new Error("INTEGRATION_RECOVERY_UNKNOWN");
       const recipe = integrationRecipe(manifest.image);
       if (manifest.recipeHash !== integrationHash(recipe)) throw new Error("INTEGRATION_RECIPE_MISMATCH");
+      if (manifest.phase === "waiting" && !manifest.outcome && !cancelPending) {
+        if (manifest.observations.length || manifest.cleanupComplete) throw new Error("INTEGRATION_RECOVERY_MANIFEST_INVALID");
+        return { state: "pending", resource: manifest.resource }; // No admission call: preserve sequence and auto-admission races.
+      }
       if (!manifest.reservationId) {
         try { await this.options.admission.cancel(manifest.resource.requestId); }
         catch (error) {
@@ -160,8 +165,26 @@ export class IntegrationServiceExecutor {
   async cancelPending(input: IntegrationServiceRequest): Promise<{ cleanupComplete: boolean; result?: IntegrationServiceResult }> {
     const request = IntegrationServiceRequestSchema.parse(input);
     if (!await this.read(request)) return { cleanupComplete: true }; // No intent means no admission or engine mutation.
-    const result = await this.recover(request);
+    const result = await this.recover(request, true);
+    if (result.state === "pending") throw new Error("INTEGRATION_CANCELLATION_UNCONFIRMED");
     return { cleanupComplete: result.state === "completed" && result.cleanupComplete, result };
+  }
+  /** Read-only owner check, safe inside ResourceAdmissionService.reconcile's serialized callback. */
+  async recoveryReady(reservation: ResourceReservation): Promise<boolean> {
+    const key = reservation.request.requestId;
+    if (!/^[a-f0-9]{64}$/.test(key)) return false;
+    try {
+      const manifest = ManifestSchema.parse(JSON.parse(await readFile(join(this.options.evidenceDirectory, `${key}.json`), "utf8")));
+      if (integrationNames(manifest.request).key !== key || integrationHash(manifest.resource) !== integrationHash(reservation.request)
+        || manifest.resource.owner.kind !== "service" || manifest.resource.owner.workloadId !== key
+        || manifest.resource.owner.executionId !== manifest.request.identity.executionId
+        || manifest.resource.owner.generation !== manifest.request.identity.generation
+        || manifest.recipeHash !== integrationHash(integrationRecipe(manifest.image))
+        || manifest.resource.demand.profileVersion !== manifest.recipeHash) return false;
+      if (manifest.phase === "waiting" && !manifest.outcome && !manifest.observations.length && !manifest.cleanupComplete)
+        return !manifest.reservationId || manifest.reservationId === reservation.reservationId;
+      return this.verifyTermination(reservation, integrationHash(manifest));
+    } catch { return false; }
   }
   private async waitFor(engine: IntegrationServiceEngine, role: "service" | "runner", request: IntegrationServiceRequest, timeout: number, signal?: AbortSignal) {
     const deadline = this.now() + timeout;

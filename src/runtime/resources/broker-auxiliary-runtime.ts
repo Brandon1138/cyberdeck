@@ -8,8 +8,10 @@ import { AuxiliaryProfileRequestSchema, type AuxiliaryProfileRequest } from "../
 import { ExecutionIdentitySchema, type ExecutionIdentity } from "../../domain/worker-execution.js";
 import type { GatewayBinding } from "../../broker/worker-gateway.js";
 import type { AgentActivityPort } from "../../orchestration/agent-activity-port.js";
+import type { ResourceReservation } from "../../domain/resource-budget.js";
 import { writeAtomicPrivateFile } from "../../persistence/atomic-private-file.js";
 import { IntegrationServiceExecutor, type IntegrationServiceResult } from "../execution/integration-service-executor.js";
+import { integrationNames } from "../execution/integration-service-recipe.js";
 import { NativeToolExecutor, type NativeToolResult } from "../execution/native-tool-executor.js";
 import { MacosNativeProcessSupervisor } from "../execution/native-process-supervisor.js";
 import { OrbStackClient } from "../execution/orbstack-client.js";
@@ -33,7 +35,9 @@ export interface AuxiliaryAuthority {
 
 /** Broker-owned recipe supervisor. Requests persist before launch; the worker only polls a receipt. */
 export async function brokerAuxiliaryRuntime(options: {
-  config: BrokerRuntimeConfig; resource: NonNullable<Awaited<ReturnType<typeof brokerResourceRuntime>>>;
+  config: BrokerRuntimeConfig; resource: NonNullable<Awaited<ReturnType<typeof brokerResourceRuntime>>> & {
+    registerRecovery?(profileId: string, check: (reservation: ResourceReservation) => Promise<boolean>): void;
+  };
   activity: AgentActivityPort;
   authorize(binding: GatewayBinding, request: AuxiliaryProfileRequest, expectedLeaseVersion?: number): Promise<AuxiliaryAuthority>;
 }) {
@@ -41,6 +45,8 @@ export async function brokerAuxiliaryRuntime(options: {
   const path = join(config.directory, "auxiliary-requests.json");
   const records = new Map<string, Record>(), active = new Map<string, { abort: AbortController; done: Promise<void> }>();
   let closing = false, poisoned = false, failures = 0, writeTail = Promise.resolve();
+  let inventoryReady = false;
+  const recoveryChecks = new Map<string, boolean>();
   const projected = new Set<string>();
   try {
     const stat = await lstat(path);
@@ -70,7 +76,8 @@ export async function brokerAuxiliaryRuntime(options: {
   };
   const authorize = async (record: Record) => {
     const current = await options.authorize(record.binding, record.request, record.leaseVersion);
-    if (!isDeepStrictEqual(current.identity, record.identity) || current.familyId !== record.familyId)
+    if (!isDeepStrictEqual(current.identity, record.identity) || current.familyId !== record.familyId
+      || current.leaseVersion !== record.leaseVersion || !current.writeAllowed)
       throw new Error("AUXILIARY_AUTHORITY_CHANGED");
     return current;
   };
@@ -110,6 +117,28 @@ export async function brokerAuxiliaryRuntime(options: {
     executionId: record.identity.executionId, generation: record.identity.generation, recipeId: record.request.recipeId });
   const integrationRequest = (record: Record) => ({ identity: record.identity, attemptId: record.request.requestId,
     leaseVersion: record.leaseVersion, recipe: "postgres-fixture-v1" as const });
+  const revoked = (error: unknown) => error instanceof Error && ["AUXILIARY_EXECUTION_STALE", "AUXILIARY_LEASE_STALE",
+    "AUXILIARY_ATTEMPT_STALE", "AUXILIARY_ATTEMPT_AMBIGUOUS", "AUXILIARY_WRITE_POLICY_REFUSED", "AUXILIARY_AUTHORITY_CHANGED"].includes(error.message);
+  // Owner checks run under admission's serialized recovery callback: no ledger mutations here.
+  const recoveryReady = async (reservation: ResourceReservation): Promise<boolean> => {
+    let ready = false;
+    try {
+      if (!inventoryReady || poisoned || reservation.request.owner.kind !== "service"
+        || reservation.request.owner.installationId !== config.installationId) return false;
+      const record = [...records.values()].find(r => (r.request.profile === "integration"
+        ? integrationNames(integrationRequest(r)).key : `native-${r.request.requestId}`) === reservation.request.requestId);
+      if (!record || record.familyId !== reservation.request.owner.familyId) return false;
+      if (!record.terminal) await authorize(record);
+      ready = record.request.profile === "integration" ? await integration?.recoveryReady(reservation) === true
+        : profiles?.nativeRecipes.some(recipe => recipe.id === record.request.recipeId) === true
+          && native.recoveryReady(nativeRequest(record), reservation);
+      return ready;
+    } catch { return false; }
+    finally { recoveryChecks.set(reservation.request.requestId, ready); }
+  };
+  if (integration) options.resource.registerRecovery?.("postgres-fixture-v1", recoveryReady);
+  for (const profileId of new Set(profiles?.nativeRecipes.map(r => r.demand.profileId)))
+    options.resource.registerRecovery?.(profileId, recoveryReady);
   const outcome = (result: IntegrationServiceResult | NativeToolResult | undefined): ActivityInput["outcome"] => result?.state === "completed"
     ? result.outcome === "verified-pass" ? "succeeded" : result.outcome === "verified-fail" ? "failed" : result.outcome === "cancelled" ? "cancelled" : "unknown"
     : result?.state === "finished" ? result.result.cancelled ? "cancelled"
@@ -121,7 +150,7 @@ export async function brokerAuxiliaryRuntime(options: {
       cleanupAfter: Date.now() + Math.min(60000, 2000 * 2 ** Math.min(attempts - 1, 5)) });
     try {
       const recovery = record.request.profile === "integration"
-        ? await integration!.cancelPending(integrationRequest(record)) : await native.recover(nativeRequest(record));
+        ? await integration!.cancelPending(integrationRequest(record)) : await native.recover(nativeRequest(record), true);
       const current = records.get(record.request.requestId)!;
       await save({ ...current, cleanupPending: !recovery.cleanupComplete,
         cleanupReason: recovery.cleanupComplete ? undefined : "owned-runtime-cleanup-unproven" });
@@ -143,8 +172,10 @@ export async function brokerAuxiliaryRuntime(options: {
     projected.add(record.request.requestId);
   };
   const run = async (record: Record, signal: AbortSignal) => {
+    let enteredExecutor = false;
     try {
       await authorize(record); await save({ ...record, state: "running", cleanupPending: true });
+      enteredExecutor = true;
       const result = record.request.profile === "integration"
         ? await integration!.run(integrationRequest(record), signal) : await native.execute(nativeRequest(record), signal);
       if (result.state === "waiting-capacity" || result.state === "resource-infeasible") {
@@ -152,9 +183,20 @@ export async function brokerAuxiliaryRuntime(options: {
       }
       const cleanupPending = result.state === "completed" ? !result.cleanupComplete : result.result.cleanup !== "terminated";
       await terminal({ ...records.get(record.request.requestId)!, cleanupPending, cleanupAfter: Date.now() + 2000 }, outcome(result), result);
-    } catch {
+    } catch (error) {
       const current = records.get(record.request.requestId)!;
       if (current.terminal) return; // A capture retry must never replace the terminal result.
+      if (!signal.aborted && !revoked(error)) {
+        let stillPending = !enteredExecutor;
+        if (enteredExecutor) {
+          const recovered = record.request.profile === "integration"
+            ? await integration!.recover(integrationRequest(record)) : await native.recover(nativeRequest(record));
+          stillPending = "pending" in recovered || "state" in recovered && recovered.state === "pending";
+        }
+        if (stillPending) {
+          await save({ ...current, state: "queued", reason: "auxiliary-operation-unavailable", cleanupPending: false }); return;
+        }
+      }
       const recovered = await retire(current);
       await terminal(records.get(record.request.requestId)!, recovered ? outcome(recovered) : signal.aborted ? "cancelled" : "unknown",
         recovered ?? { reason: "auxiliary-operation-interrupted" });
@@ -166,24 +208,52 @@ export async function brokerAuxiliaryRuntime(options: {
     const done = run(record, abort.signal).catch(() => { failures++; }).finally(() => active.delete(record.request.requestId));
     active.set(record.request.requestId, { abort, done });
   };
+  const preservePending = async (record: Record) => {
+    try {
+      await authorize(record);
+      await save({ ...record, state: "waiting-capacity", reason: undefined, cleanupPending: false });
+    } catch (error) {
+      if (!revoked(error)) {
+        await save({ ...record, state: "queued", reason: "auxiliary-authority-unavailable", cleanupPending: false }); return;
+      }
+      const recovered = await retire(record);
+      await terminal(records.get(record.request.requestId)!, outcome(recovered), recovered ?? { reason: "auxiliary-authority-revoked" });
+    }
+  };
   // Recovered engine results remain authoritative even when their cleanup needs another retry.
+  const preserved = new Set<string>();
   for (const recovered of await integration?.reconcileAll() ?? []) {
     const record = records.get(recovered.request.attemptId);
-    if (!record || record.request.profile !== "integration" || recovered.result.state !== "completed") continue;
+    if (!record || record.request.profile !== "integration") continue;
+    if (!isDeepStrictEqual(integrationRequest(record), recovered.request)) throw new Error("AUXILIARY_RECOVERY_IDENTITY_MISMATCH");
+    if (recovered.result.state === "pending") {
+      if (!record.terminal) { await preservePending(record); preserved.add(record.request.requestId); }
+      continue;
+    }
+    if (recovered.result.state !== "completed") continue;
     const updated = { ...record, cleanupPending: !recovered.result.cleanupComplete, cleanupAfter: Date.now() + 2000 };
     if (record.terminal) await save(updated);
     else await terminal(updated, outcome(recovered.result), recovered.result);
   }
   for (const record of records.values()) {
+    if (preserved.has(record.request.requestId)) continue;
     if (record.terminal) {
       if (record.cleanupPending || record.request.profile === "native" && record.cleanupPending === undefined) await retire(record);
       await options.activity.append(record.terminal); projected.add(record.request.requestId);
     }
-    else if (record.state === "running" || record.cleanupPending) {
-      const recovered = await retire(record);
-      await terminal(records.get(record.request.requestId)!, outcome(recovered), recovered ?? { reason: "broker-restarted-during-profile" });
+    else if (record.request.profile === "native") {
+      const recovered = await native.recover(nativeRequest(record));
+      if ("pending" in recovered) await preservePending(record);
+      else {
+        await save({ ...record, cleanupPending: !recovered.cleanupComplete, cleanupAfter: Date.now() + 2000 });
+        await terminal(records.get(record.request.requestId)!, outcome(recovered.result), recovered.result ?? { reason: "broker-restarted-during-profile" });
+      }
     }
+    // No integration manifest means the crash preceded executor intent/admission. A running
+    // auxiliary receipt alone is not evidence that infrastructure was provisioned.
+    else if (["queued", "waiting-capacity", "running"].includes(record.state)) await preservePending(record);
   }
+  inventoryReady = true;
   let pending: Promise<void> | undefined;
   const timer = setInterval(() => {
     if (pending || closing) return;
@@ -194,7 +264,7 @@ export async function brokerAuxiliaryRuntime(options: {
           await options.activity.append(record.terminal); projected.add(record.request.requestId);
         }
         if (active.has(record.request.requestId)) {
-          try { await authorize(record); } catch { active.get(record.request.requestId)?.abort.abort(); }
+          try { await authorize(record); } catch (error) { if (revoked(error)) active.get(record.request.requestId)?.abort.abort(); }
         } else if (record.cleanupPending && record.terminal && (record.cleanupAfter ?? 0) <= Date.now() && cleanupBudget-- > 0) await retire(record);
         else if (["queued", "waiting-capacity"].includes(record.state)) start(record);
       }
@@ -224,7 +294,9 @@ export async function brokerAuxiliaryRuntime(options: {
     },
     admissionHold: () => poisoned || [...records.values()].some(r => r.terminal && !projected.has(r.request.requestId))
       ? "auxiliary-capture-gap" as const : null,
+    recoveryReady,
     health: () => ({ active: active.size, retained: records.size, failures, poisoned,
+      recovery: { inventoryReady, checked: recoveryChecks.size, held: [...recoveryChecks.values()].filter(ready => !ready).length },
       waiting: [...records.values()].filter(r => r.state === "waiting-capacity").length,
       cleanupPending: [...records.values()].filter(r => r.cleanupPending).length,
       cleanupRetries: [...records.values()].reduce((sum, r) => sum + (r.cleanupAttempts ?? 0), 0),

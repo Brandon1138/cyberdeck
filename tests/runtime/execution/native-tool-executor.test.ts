@@ -139,11 +139,36 @@ describe("broker-owned native execution", () => {
       f.authorize.mockRejectedValue(new Error("stale authority"));
       if (admitted) { real.control.available = true; await real.admission.refresh(); expect(real.admission.health().reservedBytes).toBe(f.recipe.demand.memoryBytes); }
       await expect(executor.execute(request)).rejects.toThrow("stale authority");
-      // A fresh executor owns recovery after restart; no current authority is consulted.
-      expect(await new NativeToolExecutor(options).recover(request)).toMatchObject({ cleanupComplete: true });
+      // Explicit canonical revocation retirement is distinct from inventory recovery.
+      expect(await new NativeToolExecutor(options).recover(request, true)).toMatchObject({ cleanupComplete: true });
       expect(real.admission.health()).toMatchObject({ reservedBytes: 0, queue: [] }); expect(f.run).not.toHaveBeenCalled();
       expect(await executor.cancelPending(request)).toMatchObject({ cleanupComplete: true });
     } finally { await real.store.close(); }
+  });
+  it.each(["queued", "auto-admitted", "reserved", "reserved-partial"])("preserves %s identity across ledger restart without spawning", async phase => {
+    const f = await fixture(), real = await realAuxiliaryAdmission(f.root, "installation1", async () => false);
+    real.control.available = false;
+    await new NativeToolExecutor({ ...f.options, admission: real.admission, bindings: real.bindings }).execute(request);
+    if (phase !== "queued") { real.control.available = true; await real.admission.refresh(); }
+    if (phase.startsWith("reserved")) await real.bindings.put({ ...real.bindings.get("native-run1")!, phase: "reserved" });
+    if (phase === "reserved-partial") {
+      await mkdir(join(f.options.rootDirectory, "run1", "input"), { recursive: true });
+      await writeFile(join(f.options.rootDirectory, "run1", "input", "input.swift"), "partial staging");
+    }
+    const before = real.store.read(), binding = real.bindings.get("native-run1"); await real.store.close();
+    const reopened = await realAuxiliaryAdmission(f.root, "installation1", async () => false);
+    try {
+      const executor = new NativeToolExecutor({ ...f.options, admission: reopened.admission, bindings: reopened.bindings });
+      const admissionRequest = vi.spyOn(reopened.admission, "request"), cancel = vi.spyOn(reopened.admission, "cancel");
+      expect(await executor.recover(request)).toMatchObject({ cleanupComplete: false, pending: before.entries[0]!.request });
+      expect(reopened.store.read()).toEqual(before); expect(reopened.bindings.get("native-run1")).toEqual(binding);
+      expect(admissionRequest).not.toHaveBeenCalled(); expect(cancel).not.toHaveBeenCalled(); expect(f.run).not.toHaveBeenCalled();
+      expect(executor.recoveryReady(request, before.entries[0]!)).toBe(true);
+      await reopened.admission.reconcile(async held => held.every(entry => executor.recoveryReady(request, entry)));
+      expect(await executor.execute(request)).toMatchObject({ state: "finished" });
+      expect(reopened.store.read().entries[0]!.request).toEqual(before.entries[0]!.request);
+      expect(reopened.store.read().entries[0]!.sequence).toBe(before.entries[0]!.sequence);
+    } finally { await reopened.store.close(); }
   });
   it("launched native recovery keeps capacity and never substitutes PID-table absence for lifetime proof", async () => {
     const f = await fixture(), real = await realAuxiliaryAdmission(f.root, "installation1", async () => false);

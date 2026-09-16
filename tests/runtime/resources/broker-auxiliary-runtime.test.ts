@@ -47,6 +47,19 @@ test("two concurrent request-id owners cannot overwrite the persisted authority"
   expect(outcomes.filter(r => r.status === "fulfilled")).toHaveLength(1);
   expect(outcomes.filter(r => r.status === "rejected")).toHaveLength(1);
 });
+test("recovered waiting integration manifests remain pending without terminal projection or rerunning SQL", async () => {
+  mocks.run.mockResolvedValue({ state: "waiting-capacity", reason: "observed-budget", queuedAt: new Date().toISOString() });
+  const f = await fixture(), runtime = await f.open();
+  await runtime.request(f.binding, f.request); await vi.waitFor(() => expect(runtime.health()).toMatchObject({ waiting: 1, active: 0 }));
+  await runtime.close(); runtimes.splice(runtimes.indexOf(runtime), 1);
+  const authority = await f.authorize();
+  mocks.recover.mockResolvedValueOnce([{ request: { identity: authority.identity, attemptId: f.request.requestId,
+    leaseVersion: authority.leaseVersion, recipe: "postgres-fixture-v1" }, result: { state: "pending" } }] as never[]);
+  const reopened = await f.open();
+  expect(reopened.health()).toMatchObject({ waiting: 1, active: 0, cleanupPending: 0, recovery: { inventoryReady: true } });
+  expect(mocks.run).toHaveBeenCalledTimes(1); expect(mocks.cleanup).not.toHaveBeenCalled();
+  expect(await f.activity.read(f.request.requestId, 0, 10)).toHaveLength(0);
+});
 test("terminal-before-projection crash replays the exact receipt without repeating the service", async () => {
   mocks.run.mockResolvedValue({ state: "completed", outcome: "verified-pass", manifestRef: "private-evidence", cleanupComplete: true });
   const f = await fixture(), runtime = await f.open();
@@ -91,6 +104,10 @@ test("failed selective cleanup backs off before retrying and never changes task 
   try {
     sweep(); await vi.waitFor(() => expect(runtime.health().cleanupRetries).toBe(1));
     await vi.waitFor(() => expect(mocks.cleanup).toHaveBeenCalledTimes(1));
+    await vi.waitFor(async () => {
+      const records = JSON.parse(await readFile(join(f.directory, "auxiliary-requests.json"), "utf8"));
+      expect(records[0].cleanupReason).toBe("owned-runtime-cleanup-unproven");
+    });
     sweep(); await new Promise(resolve => setTimeout(resolve, 20)); expect(mocks.cleanup).toHaveBeenCalledTimes(1);
     clock.mockReturnValue(now + 10000); sweep(); await vi.waitFor(() => expect(runtime.health().cleanupPending).toBe(0));
     expect(mocks.run).toHaveBeenCalledTimes(1);

@@ -69,9 +69,10 @@ async function setup(realLedger = false) {
   const admission: ResourceAdmissionPort = real?.admission ?? { request: vi.fn(async (input: ResourceRequest) => ({ state: "admitted" as const, reservationId: "reserved", demand: input.demand })),
     cancel: vi.fn(async () => {}), release: vi.fn(async () => {}) };
   const authorize = vi.fn(async () => ({ installationId: "installation", familyId: "canonical-family" }));
-  backend = new IntegrationServiceExecutor({ client: new OrbStackClient("unix:///tmp/integration-test.sock", fake.run),
-    admission, image, evidenceDirectory: directory, authorize, now: () => fake.state.tick, pause: async ms => { fake.state.tick += ms; } });
-  return { backend, admission, authorize, directory, real, ...fake };
+  const options = { client: new OrbStackClient("unix:///tmp/integration-test.sock", fake.run),
+    admission, image, evidenceDirectory: directory, authorize, now: () => fake.state.tick, pause: async (ms: number) => { fake.state.tick += ms; } };
+  backend = new IntegrationServiceExecutor(options);
+  return { backend, options, admission, authorize, directory, real, ...fake };
 }
 describe("broker-owned integration services", () => {
   it("runs the accounted fixed SQL recipe and preserves evidence before selective teardown", async () => {
@@ -126,9 +127,34 @@ describe("broker-owned integration services", () => {
     vi.mocked(f.admission.request).mockResolvedValue({ state: "waiting-capacity", reason: "reserved-capacity", queuedAt: new Date().toISOString() });
     expect(await f.backend.run(input)).toMatchObject({ state: "waiting-capacity" });
     expect(f.run).not.toHaveBeenCalled();
-    await f.backend.recover(input);
+    expect(await f.backend.recover(input)).toMatchObject({ state: "pending" });
+    expect(f.admission.cancel).not.toHaveBeenCalled();
+    await f.backend.cancelPending(input);
     expect(f.admission.cancel).toHaveBeenCalledWith(integrationNames(input).key);
     expect(f.admission.release).not.toHaveBeenCalled();
+  });
+  it.each([false, true])("preserves queued FIFO identity across ledger restart, auto-admitted=%s", async admitted => {
+    const f = await setup(true), first = request(), second = { ...first, attemptId: randomUUID() };
+    f.real!.control.available = false;
+    await f.backend.run(first); await f.backend.run(second);
+    if (admitted) { f.real!.control.available = true; await f.real!.admission.refresh(); }
+    const before = f.real!.store.read();
+    await f.real!.store.close();
+    const reopened = await realAuxiliaryAdmission(f.directory, "installation", (reservation, evidence) => f.backend.verifyTermination(reservation, evidence));
+    try {
+      const executor = new IntegrationServiceExecutor({ ...f.options, admission: reopened.admission });
+      const admissionRequest = vi.spyOn(reopened.admission, "request"), cancel = vi.spyOn(reopened.admission, "cancel");
+      expect((await executor.reconcileAll()).map(r => r.result.state)).toEqual(["pending", "pending"]);
+      expect(reopened.store.read()).toEqual(before); expect(admissionRequest).not.toHaveBeenCalled(); expect(cancel).not.toHaveBeenCalled();
+      expect(f.run).not.toHaveBeenCalled();
+      for (const entry of before.entries) expect(await executor.recoveryReady(entry)).toBe(true);
+      await reopened.admission.reconcile(async held => (await Promise.all(held.map(entry => executor.recoveryReady(entry)))).every(Boolean));
+      expect(reopened.store.read()).toEqual(before);
+      // Normal authorized polling resumes the original request; reconciliation itself never starts SQL.
+      expect(await executor.run(first)).toMatchObject({ state: "completed", outcome: "verified-pass" });
+      expect(reopened.store.read().entries[0]!.request).toEqual(before.entries[0]!.request);
+      expect(reopened.store.read().entries[0]!.sequence).toBe(before.entries[0]!.sequence);
+    } finally { await reopened.store.close(); }
   });
   it.each(["corruptNetwork", "corruptLabel"] as const)("retains reservation on malicious %s ownership/boundary", async field => {
     const f = await setup(); f.state[field] = true;
@@ -143,6 +169,8 @@ describe("broker-owned integration services", () => {
     f.state.unavailable = true;
     expect(await f.backend.recover(input)).toMatchObject({ cleanupComplete: false });
     expect(f.admission.release).not.toHaveBeenCalled();
+    const resource = vi.mocked(f.admission.request).mock.calls[0]![0];
+    expect(await f.backend.recoveryReady({ request: resource, reservationId: "reserved" } as ResourceReservation)).toBe(false);
     f.state.unavailable = false; f.state.failRemove = false;
     expect(await f.backend.recover(input)).toMatchObject({ cleanupComplete: true });
     expect(f.objects.size).toBe(0); expect(f.admission.release).toHaveBeenCalledTimes(1);
