@@ -35,4 +35,7 @@ it("uses durable session-scoped dedupe after restart and preserves a pending tur
   const other = { ...session, id: randomUUID() };
   const otherStore = new ExecutionTranscriptStore(root, {}, source, () => other);
   expect((await otherStore.observeProviderTurns({ ...input, sessionId: other.id })).turns).toHaveLength(1);
+  const forget = vi.spyOn(source, "forget");
+  await otherStore.dropClaudeBinding(other.id);
+  expect(forget).toHaveBeenCalledWith(other.id);
 });

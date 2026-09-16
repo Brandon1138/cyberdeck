@@ -18,6 +18,11 @@ export class ExecutionTranscriptStore extends ThreadTranscriptStore {
     private readonly session: (id: string) => SessionRecord | undefined,
   ) { super(directory, options); }
   attachNativeCapture(capture: NativeTurnCapture): void { this.capture = capture; }
+  override async dropClaudeBinding(sessionId: string): Promise<void> {
+    // Both explicit deletion and retention retirement call this final cleanup boundary.
+    this.containerSource.forget(sessionId);
+    await super.dropClaudeBinding(sessionId);
+  }
   private container(id: string): SessionRecord | undefined {
     const record = this.session(id);
     return record?.executor === "orbstack-container" ? record : undefined;
