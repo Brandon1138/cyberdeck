@@ -11,6 +11,7 @@ import { readSelectedInputs } from "./read-selected-inputs.js";
 import { prepareContainerWorkspaceTrust } from "./container-workspace-trust.js";
 import type { ContainerAuthentication } from "../../domain/container-authentication.js";
 import { resolveContainerCredential } from "./subscription-credentials.js";
+import { SubscriptionPreflightError, type SubscriptionPreflightPort } from "./subscription-refresh-ports.js";
 
 export class BrokerContainerContexts {
   constructor(private readonly root: string, private readonly credentialFiles: Record<string, string>,
@@ -18,13 +19,17 @@ export class BrokerContainerContexts {
     private readonly allowsWorkspaceTrust?: (source: string) => Promise<boolean>,
     private readonly authentication: Record<string, ContainerAuthentication> = {},
     private readonly attemptTimeoutMinutes = 60,
+    private readonly subscriptionPreflight?: SubscriptionPreflightPort,
   ) {}
   async prepare(input: ExecutionLaunchInput): Promise<ContainerLaunchContext> {
     const { record, identity } = input;
     const auth = this.authentication[record.provider] ?? (this.credentialFiles[record.provider]
       ? { kind: "api-key" as const, file: this.credentialFiles[record.provider]! } : undefined);
     if (!auth) throw new Error("CONTAINER_CREDENTIALS_UNAVAILABLE");
-    const credential = await resolveContainerCredential(record.provider, auth, this.attemptTimeoutMinutes * 60_000);
+    const preflight = await this.subscriptionPreflight?.prepare({ provider: record.provider, authentication: auth,
+      minimumLifetimeMs: this.attemptTimeoutMinutes * 60_000, identity, phase: "launch", ...(input.signal ? { signal: input.signal } : {}) });
+    if (preflight && preflight.state !== "ready") throw new SubscriptionPreflightError(preflight);
+    const credential = preflight?.credential ?? await resolveContainerCredential(record.provider, auth, this.attemptTimeoutMinutes * 60_000);
     let existing: ContainerLaunchContext | undefined;
     try { existing = await this.get({ ...identity, executor: "orbstack-container", workspaceId: "pending" }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }

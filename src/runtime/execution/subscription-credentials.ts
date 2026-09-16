@@ -32,7 +32,9 @@ export async function resolveContainerCredential(provider: string, auth: Contain
   deps: SubscriptionCredentialDeps = {},
 ): Promise<Record<string, unknown>> {
   if (!authenticationMatchesProvider(provider, auth)) throw new Error("CONTAINER_AUTH_PROVIDER_MISMATCH");
+  if (!Number.isSafeInteger(minimumLifetimeMs) || minimumLifetimeMs < 0) throw new Error("CONTAINER_SUBSCRIPTION_LIFETIME_INVALID");
   const now = (deps.now ?? Date.now)();
+  if (!Number.isSafeInteger(now) || now < 0) throw new Error("CONTAINER_SUBSCRIPTION_CLOCK_INVALID");
   const fresh = (expiresAt: number) => {
     if (!Number.isFinite(expiresAt) || expiresAt <= now + minimumLifetimeMs + 60_000) throw new Error("CONTAINER_SUBSCRIPTION_LOGIN_EXPIRED");
   };
