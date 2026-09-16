@@ -55,6 +55,10 @@ export interface JobStoreOptions {
  */
 export class JobStore implements JobStateRepository {
   readonly path: string;
+  private revision = 0;
+
+  /** Process-local invalidation token; replay still comes exclusively from durable snapshots. */
+  version(): number { return this.revision; }
 
   constructor(
     stateDirectory: string,
@@ -81,6 +85,7 @@ export class JobStore implements JobStateRepository {
     } finally {
       await handle.close();
     }
+    this.revision++;
   }
 
   async load(): Promise<PersistedJobState[]> {

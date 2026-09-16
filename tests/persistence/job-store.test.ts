@@ -44,6 +44,20 @@ function state(overrides: Partial<PersistedJobState> = {}): PersistedJobState {
 }
 
 describe("JobStore", () => {
+  it("increments the local version only after a successful canonical append", async () => {
+    const store = new JobStore(await stateDirectory());
+    expect(store.version()).toBe(0);
+    await store.append(state());
+    expect(store.version()).toBe(1);
+    await store.load();
+    expect(store.version()).toBe(1);
+    await expect(store.append({ ...state(), idempotencyKey: "" })).rejects.toThrow();
+    expect(store.version()).toBe(1);
+    const reopened = new JobStore(store.path.replace(/\/control-plane\/jobs\.jsonl$/, ""));
+    expect(reopened.version()).toBe(0);
+    expect(await reopened.load()).toHaveLength(1);
+  });
+
   it("round-trips validated snapshots in append order and keeps the latest state", async () => {
     const store = new JobStore(await stateDirectory(), { now: () => NOW });
     const queued = state();
