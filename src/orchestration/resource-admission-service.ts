@@ -107,6 +107,7 @@ export class ResourceAdmissionService implements ResourceAdmissionPort {
     if (!this.reconciled) return "reconciliation";
     if (this.draining) return "draining";
     const env = this.environment(), age = this.now() - env.observedAt;
+    if (env.captureHold) return env.captureHold;
     if (env.observedBytes === null || env.unreservedBytes === null
       || [env.observedBytes, env.unreservedBytes].some(n => n !== undefined && (!Number.isFinite(n) || n! < 0)))
       return "metrics-unavailable";

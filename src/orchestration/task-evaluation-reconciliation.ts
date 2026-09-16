@@ -1,6 +1,7 @@
 import type { AgentActivityPort } from "./agent-activity-port.js";
 import type { EvaluationReplayStorePort } from "./task-evaluation-ports.js";
 import type { TaskEvaluationService } from "./task-evaluation-service.js";
+import type { InstructionRecord } from "../domain/instruction.js";
 
 export type EvaluationCoverageAudit = { state: "complete" } | { state: "gap"; reason: string };
 export interface EvaluationReplayHealth {
@@ -102,4 +103,24 @@ export async function auditTerminalInstructions(
       return { state: "gap", reason: "canonical-instruction-projection-missing" };
   }
   return { state: "complete" };
+}
+
+/** Recreate only the projection durably committed by the instruction writer. No live lookups. */
+export async function repairTerminalInstructionProjections(
+  outbox: Pick<EvaluationReplayStorePort, "hasTerminalSource">,
+  activity: Pick<AgentActivityPort, "append">, records: Iterable<InstructionRecord>, maxRecords = 10000,
+): Promise<void> {
+  let count = 0;
+  for (const record of records) {
+    if (++count > maxRecords) throw new Error("EVALUATION_CANONICAL_AUDIT_LIMIT");
+    if (!["completed", "cancelled", "undelivered"].includes(record.status)) continue;
+    const source = `instruction:${record.id}:${record.status}:${record.updatedAt}`;
+    if (outbox.hasTerminalSource(source) || !record.terminalActivity) continue;
+    const event = record.terminalActivity;
+    if (event.sourceKey !== source || event.instructionId !== record.id || event.sessionId !== record.targetSessionId
+      || event.generation !== record.attemptGeneration || event.executionId !== record.attemptExecutionId
+      || event.provenance !== "broker" || event.kind !== (record.status === "completed" ? "instruction.settled" : `instruction.${record.status}`))
+      throw new Error("EVALUATION_CANONICAL_IDENTITY_CONFLICT");
+    await activity.append(event);
+  }
 }

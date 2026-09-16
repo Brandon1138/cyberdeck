@@ -10,9 +10,9 @@ Policy target: 8 GiB total. No production configuration changes or broker restar
 | A measurements | in progress | Native libproc and cgroup adapters; 10-minute active baseline and separate Claude/Codex subscription footprint canaries (JSON summaries here). Idle/W1 calibration pending |
 | B efficiency | in progress | Native projection, semantic index and Fleet frame reuse committed; synthetic benchmarks in docs/evidence/resource-efficiency; live plateau/delta refresh incomplete |
 | C admission | in progress | Durable shared admission wired into session preparation/spawn; per-generation container envelopes, observed-budget holds, helper caps. Whole-VM upper-bound calibration, native lifetime cleanup and job adapter support remain open |
-| D lifecycle / native / services | unverified | D3/D4 source delivered separately; integration and actual native/service runs pending. D1 parking and D2 credential refresh incomplete |
-| E observability | unverified | Closed resource schema and exporter health implemented; monitor-to-activity bridge and fresh remote receipt pending (no browser/read credential available) |
-| F evaluation | unverified | Durable outbox and offline grader implemented; architecture seam corrected. Canonical retention/replay, broker composition and admitted evaluator still pending |
+| D lifecycle / native / services | unverified | D3/D4 and D1 parking source integrated; durable parking composition and D2 refresh still in progress. Real service attempt held by observed-budget; native/service success pending |
+| E observability | partial proof | Fresh synthetic receipt matched through authenticated Zen session; see sentry-resource-probe.json. Monitor-to-activity bridge and final workload receipt pending |
+| F evaluation | unverified | Durable retention/replay, historical instruction outbox and broker capture composition implemented; admitted evaluator and automatic final dispositions pending |
 | G operating package | unverified | Exact image/config, recovery and rollout pending |
 | H independent review | unverified | Exact final candidate review and checks pending |
 | W0 idle 10 minutes | unverified | Live snapshot is active workload, not idle acceptance |
@@ -25,7 +25,7 @@ Policy target: 8 GiB total. No production configuration changes or broker restar
 | W7 evaluation load | unverified | Attempt reconciliation and queue progress pending |
 | W8 24-hour soak | unverified | Not started; cannot infer from unit tests |
 | W9 native | unverified | Unsigned simulator fixture plus representative project pending |
-| W10 services | unverified | Scoped service fixture and selective teardown pending |
+| W10 services | capacity-held | Fixed service proof refused before provisioning under observed-budget; foreign inventory unchanged. Successful service test and fault cleanup pending |
 | Live activation | not performed | Original broker preserved; no production build/config/restart changes. Earlier isolated baseline broker runs older compiled dist, not current source |
 | Physical M4 mini | pending hardware | Independent of MacBook delivery |
 
@@ -41,3 +41,13 @@ whole-VM upper bound pending residual calibration. These are incomplete requirem
 
 The worktree now has an independent frozen-lockfile install (Node 24.18.0, pnpm 11.5.0). The lockfile
 resolves Vitest 4.1.11 and TypeScript 7.0.2; package ranges are not exact resolved versions.
+
+The 2026-09-16T10:26:55Z service attempt measured 9,486,441,624 bytes of managed native
+physical footprints (including the existing two Orcs, seven Start Parking workers, Fleet and
+implementation tooling), already above 8 GiB before attributable VM overhead. The whole-VM
+conservative upper was 13,924,120,144 bytes. Admission held the 640 MiB request without
+creating any service infrastructure. This is a real capacity constraint under that active load,
+not evidence that the final optimized eight-worker profile is infeasible or complete.
+
+Sentry proof is a synthetic closed-schema transport/privacy check, not measured workload
+telemetry or exact-final-candidate acceptance. No remote settings or billing modes changed.

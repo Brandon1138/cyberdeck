@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { InstructionRecord } from "../domain/instruction.js";
 import type { SessionRecord } from "../domain/session.js";
 import type { AgentActivityPort } from "./agent-activity-port.js";
+import type { ActivityInput } from "../domain/agent-activity.js";
 
 interface Instructions { put(record: InstructionRecord): Promise<void>; list(targetSessionId?: string): Promise<InstructionRecord[]> }
 /** Activity follows the acknowledged instruction write; recorder failure cannot rewrite its outcome. */
@@ -12,19 +13,28 @@ export function activityInstructionStore(store: Instructions, recorder: AgentAct
   return {
     list: (id) => store.list(id),
     put: async (record) => {
-      await store.put(record);
       const worker = session(record.targetSessionId);
+      // Snapshot before the first await. A provider may exit or resume while fsync is pending.
+      // Rendering rebinds a queued/parked instruction to its actual admitted generation.
+      const pin = record.status === "rendered" || record.status === "accepted";
+      const generation = pin ? worker?.generation : record.attemptGeneration;
+      const executionId = pin ? worker?.execution?.executionId : record.attemptExecutionId;
+      const persisted = { ...record, ...(generation === undefined ? {} : { attemptGeneration: generation }),
+        ...(executionId === undefined ? {} : { attemptExecutionId: executionId }) };
       const kind = record.status === "completed" ? "instruction.settled" : `instruction.${record.status}` as const;
-      await recorder.append({ schemaVersion: 1, eventId: record.status === "accepted" ? record.id : randomUUID(),
+      const event: ActivityInput = { schemaVersion: 1, eventId: record.status === "accepted" ? record.id : randomUUID(),
         ...(record.status === "accepted" ? {} : { parentEventId: record.id }), sourceKey: `instruction:${record.id}:${record.status}:${record.updatedAt}`,
         runId: record.workflowRunId ?? record.id, workerId: record.targetSessionId, sessionId: record.targetSessionId,
-        instructionId: record.id, ...(worker?.generation === undefined ? {} : { generation: worker.generation }),
-        ...(worker?.execution === undefined ? {} : { executionId: worker.execution.executionId }),
+        instructionId: record.id, ...(generation === undefined ? {} : { generation }),
+        ...(executionId === undefined ? {} : { executionId }),
         ...(record.causationId === undefined ? {} : { causationId: record.causationId }),
         kind, operation: "instruction", provenance: "broker", coverage: worker === undefined ? "partial" : "complete-for-source",
         occurredAt: record.updatedAt, observedAt: new Date().toISOString(), outcome: "observed",
-      }).catch(() => undefined);
-      await capture?.(record, worker).catch(() => undefined);
+      };
+      const terminal = ["completed", "cancelled", "undelivered"].includes(record.status);
+      await store.put({ ...persisted, ...(terminal ? { terminalActivity: event } : {}) });
+      await recorder.append(event).catch(() => undefined);
+      await capture?.(persisted, worker).catch(() => undefined);
       if (record.status === "accepted" && (capture === undefined || worker?.executor !== "orbstack-container")) {
         await recorder.append({ schemaVersion: 1, eventId: randomUUID(), sourceKey: `native-capture-unwired:${record.id}`,
           runId: record.workflowRunId ?? record.id, workerId: record.targetSessionId, sessionId: record.targetSessionId,

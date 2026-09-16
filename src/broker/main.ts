@@ -1,3 +1,4 @@
+import { brokerEvaluationRuntime } from "../runtime/resources/broker-evaluation-runtime.js";
 import { brokerResourceRuntime } from "../runtime/resources/broker-resource-runtime.js";
 import { orchestratorController } from "../domain/orchestrator.js";
 import { ContainerNativeSource } from "../runtime/activity/container-native-source.js";
@@ -195,6 +196,8 @@ export async function runBroker(
     }
   }
   const activity = withActivitySink(localActivity, telemetry);
+  const instructionStore = new InstructionStore(stateDirectory);
+  let evaluationRuntime: Awaited<ReturnType<typeof brokerEvaluationRuntime>> | undefined;
   const sessionStore = new SessionStore(stateDirectory);
   const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
@@ -245,6 +248,7 @@ export async function runBroker(
   });
   resourceRuntime = await brokerResourceRuntime({ config, brokerId: executionRuntime.brokerId,
     execution: executionRuntime.execution,
+    captureHold: () => evaluationRuntime ? evaluationRuntime.admissionHold() : "evaluation-capture-gap",
     resolveFamily: async (record) => {
       const lease = workerCoordination?.service.getSubject(record.id)?.lease;
       if (lease?.controller) return lease.controller.familyId;
@@ -255,6 +259,16 @@ export async function runBroker(
       return "operator";
     },
   });
+  // The installation owner lock precedes every evaluation-store mutation and replay timer.
+  if (config.resourceManagement) {
+    try {
+      evaluationRuntime = await brokerEvaluationRuntime({ directory: config.resourceManagement.directory,
+        activity, instructions: () => instructionStore.list() });
+    } catch (error) {
+      await resourceRuntime?.close();
+      throw error;
+    }
+  }
   registry = new SessionRegistry({
     ...(resourceRuntime ? { resourceExecution: resourceRuntime.gate } : {}),
     adapters: executionRuntime.adapters,
@@ -295,7 +309,6 @@ export async function runBroker(
     providerPermissions,
     (provider) => orchestratorCapabilities.resolve(provider),
   );
-  const instructionStore = new InstructionStore(stateDirectory);
   const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
   transcripts.attachNativeCapture(nativeCapture);
   const instructions = new InstructionQueue(registry, orchestratorStore, activityInstructionStore(instructionStore, activity, (id) => {
@@ -405,6 +418,7 @@ export async function runBroker(
     await executionRuntime.closeAdmission();
     await registry.stopAll();
     await executionRuntime.close();
+    await evaluationRuntime?.close();
     await resourceRuntime?.close();
     await sentry?.close().catch(() => undefined);
     await journal.append(brokerEvent("broker.shutdown", { reason, pid: process.pid }));
@@ -414,6 +428,7 @@ export async function runBroker(
   server = new BrokerServer({
     activity, executionHealth: executionRuntime.health,
     ...(resourceRuntime ? { resourceHealth: resourceRuntime.health } : {}),
+    ...(evaluationRuntime ? { evaluationHealth: evaluationRuntime.health } : {}),
     renewExecutionAttempt: async (input) => {
       const lease = workerCoordination.service.getSubject(input.sessionId)?.lease;
       if (lease?.state !== "active" || lease.version !== input.leaseVersion || lease.expiresAt !== input.leaseExpiresAt

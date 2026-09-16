@@ -18,6 +18,7 @@ import type { ProcessRoot } from "./macos-process-sampler.js";
 export interface BrokerResourceRuntimeOptions {
   config: BrokerRuntimeConfig;
   brokerId: string;
+  captureHold?(): "evaluation-capture-gap" | null;
   execution(sessionId: string): ExecutionRef | undefined;
   resolveFamily(record: SessionRecord): Promise<string>;
 }
@@ -69,14 +70,14 @@ export async function brokerResourceRuntime(options: BrokerResourceRuntimeOption
   };
   admission = new ResourceAdmissionService(store, config.policy, () => {
     const environment = monitor.environment(), health = monitor.health();
-    if (!("samples" in health)) return { ...environment, observedBytes: null, unreservedBytes: null };
+    if (!("samples" in health)) return { ...environment, captureHold: options.captureHold?.() ?? null, observedBytes: null, unreservedBytes: null };
     const control = health.samples.filter(s => s.owner.kind === "control");
     // Until residual attribution is calibrated, reserve the whole VM as an upper bound.
     // This intentionally exposes calibration pressure rather than pretending foreign guests
     // are precisely subtractable from host physical memory.
     const unreservedBytes = control.some(s => s.memoryBytes === null) || health.vm.conservativeVmUpperBytes === null ? null
       : control.reduce((n, s) => n + s.memoryBytes!, 0) + health.vm.conservativeVmUpperBytes;
-    return { ...environment, observedBytes: health.conservativePhysicalUpperBytes, unreservedBytes };
+    return { ...environment, captureHold: options.captureHold?.() ?? null, observedBytes: health.conservativePhysicalUpperBytes, unreservedBytes };
   }, async (reservation, evidence) => {
     if (reservation.request.owner.kind === "worker" || reservation.request.owner.kind === "orchestrator")
       return gate?.verifyTermination(reservation, evidence) ?? false;
