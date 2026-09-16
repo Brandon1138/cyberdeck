@@ -13,6 +13,23 @@ a passing host unit suite proves the candidate image. OrbStack owns the configur
 endpoint; guests receive no Engine socket. Foreign projects' containers, networks and volumes
 must retain the same identities and state before and after tests.
 
+The serialized integration fixture runner requires an explicit mode-0600 candidate configuration,
+the existing broker's read-only inventory socket, and an independently pinned clean source SHA:
+
+```sh
+rtk proxy node --import tsx scripts/prove-resource-profile-runtime.ts \
+  /private/tmp/cyberdeck-resource-integration-run integration \
+  /absolute/private/candidate-config.json /absolute/broker.sock <full-candidate-sha>
+```
+
+Its output directory must be new. The configuration supplies the native sampler/owner helper,
+verified VM and external control birth identities, exact service image and 8 GiB policy. The
+runner adds current native session roots from the named broker inventory, assigns a fresh test
+installation/state directory, and hashes both supplied and effective configuration. It refuses
+stale identities or dirty/mismatched source before service provisioning. It does not restart
+OrbStack. This fixed SQL fixture still does not prove the production lease/RPC path or W10's
+concurrent fleet; those remain separate acceptance runs.
+
 The installation has one durable resource directory, UUID and owner-lock helper. Every broker
 for that installation shares this policy and cannot acquire a competing writer lock. Unique
 headless test installations use separate directories, sockets and identities. Explicit external
