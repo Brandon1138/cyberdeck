@@ -2,19 +2,10 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import type { ResourceAdmissionPort, ResourceRequest } from "../../src/domain/resource-budget.js";
 import type { TaskEvaluationResult } from "../../src/domain/task-evaluation.js";
-import { evidenceHash, type EvaluationClaim, TaskEvaluationStore } from "../../src/persistence/task-evaluation-store.js";
+import { type EvaluationClaim, TaskEvaluationStore } from "../../src/persistence/task-evaluation-store.js";
 
-/** Independent checks consume host evidence; worker prose has no grading authority. */
-export function evaluateEvidence(claim: EvaluationClaim, requiredChecks: readonly string[] = []): TaskEvaluationResult {
-  const manifest = claim.manifest;
-  if (evidenceHash(manifest) !== claim.intent.evidenceManifestHash) return { disposition: "unverified", reason: "evidence-hash-mismatch" };
-  const event = manifest.terminalEvent as { outcome?: string; kind?: string };
-  if (event.outcome === "cancelled" || event.kind === "instruction.cancelled") return { disposition: "cancelled", reason: "canonical-cancellation" };
-  if (event.kind === "execution.lifecycle" && event.outcome === "failed") return { disposition: "infrastructure-error", reason: "execution-failed" };
-  if (!manifest.complete || !requiredChecks.length || requiredChecks.some(id => manifest.checks.filter(c => c.id === id).length !== 1)) return { disposition: "unverified", reason: "missing-independent-evidence" };
-  if (manifest.checks.some(c => c.source !== "host-verified" || !/^[a-f0-9]{64}$/.test(c.artifactHash))) return { disposition: "unverified", reason: "untrusted-check" };
-  return { disposition: manifest.checks.filter(c => requiredChecks.includes(c.id)).every(c => c.passed) ? "verified-pass" : "verified-fail", reason: "independent-host-checks" };
-}
+export { evaluateEvidence } from "../../src/runtime/execution/task-evaluation-executor-report.js";
+import { evaluateEvidence } from "../../src/runtime/execution/task-evaluation-executor-report.js";
 
 export interface EvaluationProcessResult { exitCode: number | null; timedOut: boolean; output: string; terminationEvidenceId: string; evaluationResult?: TaskEvaluationResult }
 export interface EvaluationProcessPort { run(claim: EvaluationClaim): Promise<EvaluationProcessResult> }

@@ -14,16 +14,18 @@ without deleting old attempts. Operators must archive the database and advance t
 retention checkpoint explicitly; there is no silent result eviction. Unknown artifacts are
 unverified. A new rubric version creates a new row.
 
-`evaluateNext` runs only in a separate supervisor. Its fixed host-owned Promptfoo command must
-use offline assertions and a bounded workspace. Admission happens before process creation.
-Timeout/output overflow kills the group; unconfirmed descendants retain the reservation for
-reconciliation. Never run this supervisor in a broker thread or substitute API credentials.
-Process/report failure is infrastructure-error, never model failure. `PromptfooAttemptRunner`
-writes a versioned offline config, checks exact returned evidence, parses one complete result row
-and retains fsynced report bytes plus a hash manifest before acknowledgment. Its provider only
-echoes host evidence; it never invokes a model or judge. It preflights total retention and bounds
-report reads; hard child filesystem limits must come from the admitted execution profile.
-The current adapter is not proof of deployed evaluation.
+Production execution uses `TaskEvaluationExecutor`: an admitted, pinned, network-disabled
+container with 768 MiB default cgroup memory, read-only input and bounded tmpfs/report storage.
+It requires reconciliation before launch, durable run intents, host-independent grading and fresh
+daemon absence before releasing resources. Long admission waits leave expired claims pending.
+See [setup and recovery](../../docs/setup/task-evaluation-executor.md) and
+[`docker/evaluator/Dockerfile`](../../docker/evaluator/Dockerfile). `container-entrypoint.mjs`
+runs a fixed echo provider with offline assertions; it invokes no model or judge.
+
+`evaluateNext`, `PromptfooProcess` and `PromptfooAttemptRunner` remain legacy test/supervisor
+adapters for deterministic report and process tests. They are not the production fallback.
+The container adapter never invokes them. Process/report failure is infrastructure-error,
+never model failure, and no adapter is proof of deployed evaluation until its live gate passes.
 
 The rubric catalogue defines required independent checks. Without the matching objective
 verifier, attempts receive unverified rather than trusting a successful exit or worker claim.

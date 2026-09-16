@@ -2,27 +2,12 @@ import { constants } from "node:fs";
 import { open, mkdir, readdir, lstat } from "node:fs/promises";
 import { join, resolve, basename } from "node:path";
 import { createHash } from "node:crypto";
-import { z } from "zod";
 import { writeAtomicPrivateFile } from "../../src/persistence/atomic-private-file.js";
 import type { EvaluationClaim } from "../../src/persistence/task-evaluation-store.js";
-import { evaluateEvidence, PromptfooProcess, type EvaluationProcessPort, type EvaluationProcessResult } from "./evaluate-attempt.js";
-import type { TaskEvaluationResult } from "../../src/domain/task-evaluation.js";
+import { PromptfooProcess, type EvaluationProcessPort, type EvaluationProcessResult } from "./evaluate-attempt.js";
 
-const Report = z.object({ results: z.object({ results: z.array(z.object({
-  success: z.boolean(), error: z.unknown().optional(), response: z.object({ output: z.string() }),
-  gradingResult: z.object({ pass: z.boolean() }),
-})).length(1) }) });
-export function parseAttemptReport(raw: unknown, claim: EvaluationClaim, checks: readonly string[]): TaskEvaluationResult {
-  const parsed = Report.safeParse(raw);
-  if (!parsed.success) return { disposition: "infrastructure-error", reason: "promptfoo-report-invalid" };
-  const row = parsed.data.results.results[0]!;
-  if (row.error !== undefined && row.error !== null) return { disposition: "infrastructure-error", reason: "promptfoo-row-error" };
-  if (row.response.output !== JSON.stringify(claim.manifest)) return { disposition: "unverified", reason: "promptfoo-evidence-mismatch" };
-  const independent = evaluateEvidence(claim, checks);
-  if (independent.disposition === "verified-pass" && (!row.success || !row.gradingResult.pass)) return { disposition: "infrastructure-error", reason: "promptfoo-grader-disagreement" };
-  if (independent.disposition === "verified-fail" && (row.success || row.gradingResult.pass)) return { disposition: "infrastructure-error", reason: "promptfoo-grader-disagreement" };
-  return independent;
-}
+export { parseAttemptReport } from "../../src/runtime/execution/task-evaluation-executor-report.js";
+import { parseAttemptReport } from "../../src/runtime/execution/task-evaluation-executor-report.js";
 
 /** One supervisor owns the report directory; maxBytes includes retained reports/configs.
  * Content-derived filenames contain no worker-provided path. No API provider or judge is used. */
