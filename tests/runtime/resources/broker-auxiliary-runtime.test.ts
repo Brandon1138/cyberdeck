@@ -6,11 +6,11 @@ import { afterEach, expect, test, vi } from "vitest";
 import type { BrokerRuntimeConfig } from "../../../src/config.js";
 import type { brokerResourceRuntime } from "../../../src/runtime/resources/broker-resource-runtime.js";
 import { AgentActivityStore } from "../../../src/persistence/agent-activity-store.js";
-const mocks = vi.hoisted(() => ({ run: vi.fn(), recover: vi.fn(async () => []), verify: vi.fn(async () => true) }));
+const mocks = vi.hoisted(() => ({ run: vi.fn(), recover: vi.fn(async () => []), verify: vi.fn(async () => true), cleanup: vi.fn(async () => ({ cleanupComplete: true })) }));
 vi.mock("../../../src/runtime/execution/integration-service-executor.js", () => ({ IntegrationServiceExecutor: class {
-  run = mocks.run; reconcileAll = mocks.recover; verifyTermination = mocks.verify;
+  run = mocks.run; reconcileAll = mocks.recover; verifyTermination = mocks.verify; cancelPending = mocks.cleanup;
 } }));
-vi.mock("../../../src/runtime/execution/native-tool-executor.js", () => ({ NativeToolExecutor: class {} }));
+vi.mock("../../../src/runtime/execution/native-tool-executor.js", () => ({ NativeToolExecutor: class { recover = mocks.cleanup; } }));
 import { brokerAuxiliaryRuntime } from "../../../src/runtime/resources/broker-auxiliary-runtime.js";
 
 const paths: string[] = [], runtimes: Awaited<ReturnType<typeof brokerAuxiliaryRuntime>>[] = [], stores: AgentActivityStore[] = [];
@@ -59,4 +59,41 @@ test("terminal-before-projection crash replays the exact receipt without repeati
   expect(await reopened.request(f.binding, f.request)).toMatchObject({ state: "finished", outcome: "succeeded", artifactRef: `profile:${f.request.requestId}` });
   expect(mocks.run).toHaveBeenCalledTimes(1);
   expect(await f.activity.read(f.request.requestId, 0, 10)).toMatchObject([{ kind: "profile.settled", generation: 2, causationId: f.request.attemptId }]);
+});
+test("periodic cleanup retries are bounded and preserve verified terminal results without rerunning the profile", async () => {
+  mocks.run.mockResolvedValue({ state: "completed", outcome: "verified-pass", manifestRef: "private-evidence", cleanupComplete: false });
+  mocks.cleanup.mockResolvedValue({ cleanupComplete: true });
+  const f = await fixture(), timer = vi.spyOn(globalThis, "setInterval"), runtime = await f.open();
+  const sweep = timer.mock.calls.at(-1)![0] as () => void; timer.mockRestore();
+  const requests = [f.request, { ...f.request, requestId: randomUUID() }, { ...f.request, requestId: randomUUID() }];
+  for (const request of requests) await runtime.request(f.binding, request);
+  await vi.waitFor(() => expect(runtime.health()).toMatchObject({ active: 0, cleanupPending: 3 }));
+  const before = JSON.parse(await readFile(join(f.directory, "auxiliary-requests.json"), "utf8"));
+  f.authorize.mockRejectedValue(new Error("authority revoked after completion"));
+  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 5000);
+  try {
+    sweep(); await vi.waitFor(() => expect(runtime.health()).toMatchObject({ cleanupPending: 1, cleanupRetries: 2 }));
+    expect(mocks.cleanup).toHaveBeenCalledTimes(2);
+    sweep(); await vi.waitFor(() => expect(runtime.health()).toMatchObject({ cleanupPending: 0, cleanupRetries: 3 }));
+    expect(mocks.run).toHaveBeenCalledTimes(3);
+    const after = JSON.parse(await readFile(join(f.directory, "auxiliary-requests.json"), "utf8"));
+    expect(after.map((r: any) => ({ terminal: r.terminal, result: r.result }))).toEqual(before.map((r: any) => ({ terminal: r.terminal, result: r.result })));
+    expect(after.every((r: any) => r.terminal.outcome === "succeeded")).toBe(true);
+  } finally { clock.mockRestore(); }
+});
+test("failed selective cleanup backs off before retrying and never changes task outcome", async () => {
+  mocks.run.mockResolvedValue({ state: "completed", outcome: "verified-fail", manifestRef: "private-evidence", cleanupComplete: false });
+  mocks.cleanup.mockResolvedValueOnce({ cleanupComplete: false }).mockResolvedValue({ cleanupComplete: true });
+  const f = await fixture(), timer = vi.spyOn(globalThis, "setInterval"), runtime = await f.open();
+  const sweep = timer.mock.calls.at(-1)![0] as () => void; timer.mockRestore();
+  await runtime.request(f.binding, f.request); await vi.waitFor(() => expect(runtime.health()).toMatchObject({ active: 0, cleanupPending: 1 }));
+  const now = Date.now(), clock = vi.spyOn(Date, "now").mockReturnValue(now + 5000);
+  try {
+    sweep(); await vi.waitFor(() => expect(runtime.health().cleanupRetries).toBe(1));
+    await vi.waitFor(() => expect(mocks.cleanup).toHaveBeenCalledTimes(1));
+    sweep(); await new Promise(resolve => setTimeout(resolve, 20)); expect(mocks.cleanup).toHaveBeenCalledTimes(1);
+    clock.mockReturnValue(now + 10000); sweep(); await vi.waitFor(() => expect(runtime.health().cleanupPending).toBe(0));
+    expect(mocks.run).toHaveBeenCalledTimes(1);
+    expect(await f.activity.read(f.request.requestId, 0, 10)).toMatchObject([{ outcome: "failed" }]);
+  } finally { clock.mockRestore(); }
 });

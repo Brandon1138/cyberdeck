@@ -7,6 +7,7 @@ import { nativeManifestHash } from "../../../src/runtime/execution/native-tool-w
 import type { NativeCommandResult, NativeProcessSupervisor, NativeToolRecipe, NativeToolRequest } from "../../../src/runtime/execution/native-tool-types.js";
 import { workspaceManifest } from "../../../src/runtime/execution/workspace-manifest.js";
 import type { ResourceRuntimeBinding } from "../../../src/domain/resource-runtime.js";
+import { realAuxiliaryAdmission } from "./auxiliary-admission-fixture.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
@@ -112,5 +113,46 @@ describe("broker-owned native execution", () => {
     await expect(executor.execute(request)).rejects.toThrow("outbox-full");
     await expect(executor.execute(request)).rejects.toThrow("native-request-already-launched");
     expect(f.run).toHaveBeenCalledTimes(4); expect(f.admission.release).not.toHaveBeenCalled();
+  });
+  it("gives sibling native requests unique workload IDs without losing attempt attribution", async () => {
+    const f = await fixture(), real = await realAuxiliaryAdmission(f.root, "installation1", async () => false);
+    try {
+      // The canonical worker may already hold this initial attempt ID at the same generation.
+      await real.admission.request({ requestId: "active-worker", owner: { installationId: "installation1", workloadId: request.attemptId,
+        kind: "worker", generation: 1, familyId: "family1" }, demand: f.recipe.demand, priority: "interactive" });
+      const executor = new NativeToolExecutor({ ...f.options, admission: real.admission, bindings: real.bindings });
+      await executor.execute(request); await executor.execute({ ...request, requestId: "run2" });
+      expect(real.admission.health().reservations.map(r => r.request.owner.workloadId)).toEqual([request.attemptId, "native-run1", "native-run2"]);
+      expect(JSON.parse(await readFile(join(f.options.rootDirectory, "run2", "request.json"), "utf8")).request.attemptId).toBe(request.attemptId);
+    } finally { await real.store.close(); }
+  });
+  it.each([false, true])("retires stale queued authority without launching, including already-admitted=%s", async admitted => {
+    const f = await fixture();
+    const real = await realAuxiliaryAdmission(f.root, "installation1", async (reservation, evidence) => {
+      const binding = real.bindings.get(reservation.request.requestId);
+      return evidence === `${reservation.request.requestId}-not-launched` && binding?.phase === "terminated" && !binding.identities.length;
+    });
+    try {
+      real.control.available = false;
+      const options = { ...f.options, admission: real.admission, bindings: real.bindings }, executor = new NativeToolExecutor(options);
+      expect(await executor.execute(request)).toMatchObject({ state: "waiting-capacity" });
+      f.authorize.mockRejectedValue(new Error("stale authority"));
+      if (admitted) { real.control.available = true; await real.admission.refresh(); expect(real.admission.health().reservedBytes).toBe(f.recipe.demand.memoryBytes); }
+      await expect(executor.execute(request)).rejects.toThrow("stale authority");
+      // A fresh executor owns recovery after restart; no current authority is consulted.
+      expect(await new NativeToolExecutor(options).recover(request)).toMatchObject({ cleanupComplete: true });
+      expect(real.admission.health()).toMatchObject({ reservedBytes: 0, queue: [] }); expect(f.run).not.toHaveBeenCalled();
+      expect(await executor.cancelPending(request)).toMatchObject({ cleanupComplete: true });
+    } finally { await real.store.close(); }
+  });
+  it("launched native recovery keeps capacity and never substitutes PID-table absence for lifetime proof", async () => {
+    const f = await fixture(), real = await realAuxiliaryAdmission(f.root, "installation1", async () => false);
+    try {
+      const options = { ...f.options, admission: real.admission, bindings: real.bindings };
+      await new NativeToolExecutor(options).execute(request); const calls = f.run.mock.calls.length;
+      f.authorize.mockRejectedValue(new Error("stale authority"));
+      expect(await new NativeToolExecutor(options).recover(request)).toMatchObject({ cleanupComplete: false, result: { state: "finished", result: { exitCode: 0 } } });
+      expect(real.admission.health().reservedBytes).toBe(f.recipe.demand.memoryBytes); expect(f.run).toHaveBeenCalledTimes(calls);
+    } finally { await real.store.close(); }
   });
 });

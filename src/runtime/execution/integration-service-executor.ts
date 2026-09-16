@@ -16,6 +16,7 @@ const ManifestSchema = z.object({
   phase: z.enum(["waiting", "provisioning", "testing", "cleanup", "retained"]),
   outcome: z.enum(["verified-pass", "verified-fail", "cancelled", "infrastructure-error"]).optional(),
   reason: z.string().optional(), cleanupComplete: z.boolean(),
+  cleanupReason: z.string().optional(), cleanupAttempts: z.number().int().nonnegative().optional(),
   observations: z.array(z.object({ role: z.enum(["service", "runner"]), id: z.string(), exitCode: z.number(), oomKilled: z.boolean(), logs: z.string() })),
 });
 type Manifest = z.infer<typeof ManifestSchema>;
@@ -138,9 +139,14 @@ export class IntegrationServiceExecutor {
       const recipe = integrationRecipe(manifest.image);
       if (manifest.recipeHash !== integrationHash(recipe)) throw new Error("INTEGRATION_RECIPE_MISMATCH");
       if (!manifest.reservationId) {
-        const decision = await this.options.admission.request(manifest.resource);
-        if (decision.state === "admitted") manifest.reservationId = decision.reservationId;
-        else { await this.options.admission.cancel(manifest.resource.requestId); }
+        try { await this.options.admission.cancel(manifest.resource.requestId); }
+        catch (error) {
+          if (!(error instanceof Error) || error.message !== "RESOURCE_TERMINATION_REQUIRED") throw error;
+          const decision = await this.options.admission.request(manifest.resource);
+          if (decision.state !== "admitted") throw new Error("INTEGRATION_RECOVERY_ADMISSION_UNCONFIRMED");
+          manifest.reservationId = decision.reservationId;
+        }
+        await this.save(manifest);
       }
       if (!manifest.outcome) { manifest.outcome = "infrastructure-error"; manifest.reason = "INTEGRATION_BROKER_INTERRUPTED"; }
       let password = "";
@@ -149,6 +155,13 @@ export class IntegrationServiceExecutor {
       await this.cleanup(manifest, new IntegrationServiceEngine(this.options.client, request, recipe), password);
       return this.result(manifest);
     });
+  }
+  /** Cleanup authority comes from the durable owner manifest, never the now-stale caller grant. */
+  async cancelPending(input: IntegrationServiceRequest): Promise<{ cleanupComplete: boolean; result?: IntegrationServiceResult }> {
+    const request = IntegrationServiceRequestSchema.parse(input);
+    if (!await this.read(request)) return { cleanupComplete: true }; // No intent means no admission or engine mutation.
+    const result = await this.recover(request);
+    return { cleanupComplete: result.state === "completed" && result.cleanupComplete, result };
   }
   private async waitFor(engine: IntegrationServiceEngine, role: "service" | "runner", request: IntegrationServiceRequest, timeout: number, signal?: AbortSignal) {
     const deadline = this.now() + timeout;
@@ -166,6 +179,7 @@ export class IntegrationServiceExecutor {
   }
   private async cleanup(manifest: Manifest, engine: IntegrationServiceEngine, password: string): Promise<void> {
     manifest.phase = "cleanup"; manifest.cleanupComplete = false;
+    manifest.cleanupAttempts = (manifest.cleanupAttempts ?? 0) + 1;
     try {
       await this.save(manifest);
       for (const role of ["runner", "service"] as const) {
@@ -173,10 +187,13 @@ export class IntegrationServiceExecutor {
         if (!current) continue;
         if (current.State.Running) { await engine.command(["stop", "--timeout", "5", current.Id]); current = await engine.container(role); }
         if (!current || current.State.Running) throw new Error("INTEGRATION_STOP_UNCONFIRMED");
-        let logs = (await engine.command(["logs", "--tail", "200", current.Id])).slice(-65536);
-        if (password) logs = logs.replaceAll(password, "[redacted]");
-        manifest.observations = manifest.observations.filter(o => o.role !== role);
-        manifest.observations.push({ role, id: current.Id, exitCode: current.State.ExitCode, oomKilled: current.State.OOMKilled, logs });
+        const observation = manifest.observations.find(o => o.role === role);
+        if (observation && observation.id !== current.Id) throw new Error("INTEGRATION_RECOVERY_IDENTITY_MISMATCH");
+        if (!observation) {
+          let logs = (await engine.command(["logs", "--tail", "200", current.Id])).slice(-65536);
+          if (password) logs = logs.replaceAll(password, "[redacted]");
+          manifest.observations.push({ role, id: current.Id, exitCode: current.State.ExitCode, oomKilled: current.State.OOMKilled, logs });
+        }
         await this.save(manifest); // Evidence must reach disk before any destructive operation.
         await engine.command(["rm", current.Id]);
         if (await engine.container(role)) throw new Error("INTEGRATION_REMOVE_UNCONFIRMED");
@@ -187,12 +204,13 @@ export class IntegrationServiceExecutor {
         if (await engine.inspect(kind)) throw new Error("INTEGRATION_REMOVE_UNCONFIRMED");
       }
       manifest.cleanupComplete = true; manifest.phase = "retained";
+      delete manifest.cleanupReason;
       await this.save(manifest);
       if (manifest.reservationId) await this.options.admission.release({ reservationId: manifest.reservationId,
         terminationEvidenceId: integrationHash(manifest) });
       await unlink(this.secretPath(manifest.request)).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
     } catch {
-      manifest.cleanupComplete = false; manifest.reason = "INTEGRATION_CLEANUP_INCOMPLETE";
+      manifest.cleanupComplete = false; manifest.cleanupReason = "INTEGRATION_CLEANUP_INCOMPLETE";
       await this.save(manifest);
     }
   }

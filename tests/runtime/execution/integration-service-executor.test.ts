@@ -7,6 +7,7 @@ import { IntegrationServiceExecutor } from "../../../src/runtime/execution/integ
 import { integrationNames, type IntegrationServiceRequest } from "../../../src/runtime/execution/integration-service-recipe.js";
 import { OrbStackClient } from "../../../src/runtime/execution/orbstack-client.js";
 import type { ResourceAdmissionPort, ResourceRequest, ResourceReservation } from "../../../src/domain/resource-budget.js";
+import { realAuxiliaryAdmission } from "./auxiliary-admission-fixture.js";
 
 const roots: string[] = [], image = `sha256:${"a".repeat(64)}`;
 afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
@@ -60,15 +61,17 @@ function fakeEngine() {
   });
   return { run, objects, state };
 }
-async function setup() {
+async function setup(realLedger = false) {
   const directory = await mkdtemp(join(tmpdir(), "integration-executor-")); roots.push(directory);
   const fake = fakeEngine();
-  const admission: ResourceAdmissionPort = { request: vi.fn(async (input: ResourceRequest) => ({ state: "admitted" as const, reservationId: "reserved", demand: input.demand })),
+  let backend!: IntegrationServiceExecutor;
+  const real = realLedger ? await realAuxiliaryAdmission(directory, "installation", (reservation, evidence) => backend.verifyTermination(reservation, evidence)) : undefined;
+  const admission: ResourceAdmissionPort = real?.admission ?? { request: vi.fn(async (input: ResourceRequest) => ({ state: "admitted" as const, reservationId: "reserved", demand: input.demand })),
     cancel: vi.fn(async () => {}), release: vi.fn(async () => {}) };
   const authorize = vi.fn(async () => ({ installationId: "installation", familyId: "canonical-family" }));
-  const backend = new IntegrationServiceExecutor({ client: new OrbStackClient("unix:///tmp/integration-test.sock", fake.run),
+  backend = new IntegrationServiceExecutor({ client: new OrbStackClient("unix:///tmp/integration-test.sock", fake.run),
     admission, image, evidenceDirectory: directory, authorize, now: () => fake.state.tick, pause: async ms => { fake.state.tick += ms; } });
-  return { backend, admission, authorize, directory, ...fake };
+  return { backend, admission, authorize, directory, real, ...fake };
 }
 describe("broker-owned integration services", () => {
   it("runs the accounted fixed SQL recipe and preserves evidence before selective teardown", async () => {
@@ -143,6 +146,37 @@ describe("broker-owned integration services", () => {
     f.state.unavailable = false; f.state.failRemove = false;
     expect(await f.backend.recover(input)).toMatchObject({ cleanupComplete: true });
     expect(f.objects.size).toBe(0); expect(f.admission.release).toHaveBeenCalledTimes(1);
+  });
+  it.each([false, true])("retires a stale authority wait with real admission, already-admitted=%s", async admitted => {
+    const f = await setup(true), input = request();
+    try {
+      f.real!.control.available = false;
+      expect(await f.backend.run(input)).toMatchObject({ state: "waiting-capacity" });
+      f.authorize.mockRejectedValue(new Error("stale authority"));
+      if (admitted) { f.real!.control.available = true; await f.real!.admission.refresh(); }
+      await expect(f.backend.run(input)).rejects.toThrow("stale authority");
+      expect(await f.backend.cancelPending(input)).toMatchObject({ cleanupComplete: true });
+      expect(f.real!.admission.health()).toMatchObject({ reservedBytes: 0, queue: [] });
+      expect(f.run.mock.calls.some(([args]) => ["create", "start"].includes(args[2]!))).toBe(false);
+      expect(await f.backend.recover(input)).toMatchObject({ cleanupComplete: true });
+    } finally { await f.real!.store.close(); }
+  });
+  it("transient cleanup retry preserves the verified result and original evidence without rerunning SQL", async () => {
+    const f = await setup(true), input = request();
+    try {
+      f.state.failRemove = true;
+      expect(await f.backend.run(input)).toMatchObject({ outcome: "verified-pass", cleanupComplete: false });
+      expect(f.real!.admission.health().reservedBytes).toBeGreaterThan(0);
+      const path = join(f.directory, `${integrationNames(input).key}.json`), original = JSON.parse(await readFile(path, "utf8"));
+      const creates = f.run.mock.calls.filter(([args]) => args[2] === "create").length;
+      f.authorize.mockRejectedValue(new Error("stale authority")); f.state.failRemove = false;
+      expect(await f.backend.recover(input)).toMatchObject({ outcome: "verified-pass", cleanupComplete: true });
+      const recovered = JSON.parse(await readFile(path, "utf8"));
+      expect(recovered.observations).toEqual(expect.arrayContaining(original.observations));
+      expect(recovered.cleanupAttempts).toBe(2); expect(recovered.outcome).toBe(original.outcome);
+      expect(f.run.mock.calls.filter(([args]) => args[2] === "create")).toHaveLength(creates);
+      expect(f.real!.admission.health().reservedBytes).toBe(0);
+    } finally { await f.real!.store.close(); }
   });
   it("does not recover a sibling attempt or reveal its credentials", async () => {
     const f = await setup(), input = request(); f.state.failRemove = true;

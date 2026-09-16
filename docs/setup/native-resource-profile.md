@@ -59,6 +59,25 @@ process and simulator-service ownership plus termination**. Its evidence ID is
 `native-<requestId>-terminated`. Register these IDs with the shared admission
 verifier; don't turn an arbitrary evidence string into release authority.
 
+Each resource workload is `native-<requestId>`, separate from the canonical worker
+or instruction attempt ID retained in the request/result attribution. An active
+worker and multiple tool requests for the same instruction therefore consume
+independent reservations without colliding at the same generation.
+
+`cancelPending(request)` and `recover(request)` use the durable executor binding
+without reauthorizing a revoked worker. Queued/reserved bindings are retired with
+durable never-launched evidence. If admission refresh granted the request while
+its auxiliary receipt still said waiting, recovery resolves the same immutable
+request, obtains its actual reservation ID and performs verified release. A crash
+after that proof but before release is retryable. Launched/bound native work is
+never released by these methods: they return `cleanupComplete: false` and preserve
+any stored result. They do not run Xcode, simctl, a provider or a PID polling proof.
+
+The auxiliary supervisor persists recovery debt before publishing a terminal
+event, replays it on restart, and reports pending cleanup and retry counts in
+health. Periodic attempts are capped at two per sweep and back off to 60 seconds.
+Terminal outcomes and artifact references remain unchanged during cleanup retries.
+
 Without that stronger verifier the actual build/test result is returned, but
 `cleanup: unproven` retains the reservation. A current PID-table scan, successful
 `xcodebuild` exit, successful simulator deletion or an empty current descendant

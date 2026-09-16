@@ -1,4 +1,4 @@
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import type { ResourceAdmissionPort, ResourceDecision, ResourceRequest } from "../../domain/resource-budget.js";
 import type { ResourceRuntimeBindingPort, ResourceRuntimeIdentity } from "../../domain/resource-runtime.js";
@@ -54,20 +54,59 @@ export class NativeToolExecutor {
     try { return await this.executeAuthorized(request, recipe, signal); }
     finally { this.active.delete(request.requestId); }
   }
+  /** Retire this durable request without consulting authority that may already be stale. */
+  async cancelPending(input: NativeToolRequest): Promise<{ cleanupComplete: boolean }> {
+    const request = NativeToolRequestSchema.parse(input);
+    if (this.active.has(request.requestId)) throw new Error("native-request-active");
+    this.active.add(request.requestId);
+    try { return await this.retireOwned(request); }
+    finally { this.active.delete(request.requestId); }
+  }
+  /** Recovery never runs a tool or infers native lifetime completion from current PIDs. */
+  async recover(input: NativeToolRequest): Promise<{ cleanupComplete: boolean; result?: Extract<NativeToolResult, { state: "finished" }> }> {
+    const request = NativeToolRequestSchema.parse(input), cleanup = await this.cancelPending(request);
+    try {
+      const result = JSON.parse(await readFile(join(this.options.rootDirectory, request.requestId, "result.json"), "utf8")) as Extract<NativeToolResult, { state: "finished" }>;
+      if (result.state !== "finished" || JSON.stringify(NativeToolRequestSchema.parse(result.request)) !== JSON.stringify(request))
+        throw new Error("native-recovery-result-mismatch");
+      return { ...cleanup, result };
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return cleanup; throw error; }
+  }
+  private async retireOwned(request: NativeToolRequest): Promise<{ cleanupComplete: boolean }> {
+    const key = `native-${request.requestId}`, binding = this.options.bindings.get(key);
+    if (!binding) return { cleanupComplete: true }; // Intent always precedes admission.
+    const resource = binding.request;
+    if (resource.requestId !== key || resource.owner.installationId !== this.options.installationId
+      || resource.owner.kind !== "service" || ![key, request.attemptId].includes(resource.owner.workloadId)
+      || resource.owner.executionId !== request.executionId || resource.owner.generation !== request.generation)
+      throw new Error("native-recovery-identity-mismatch");
+    // Accept legacy attemptId owners only for recovery; new requests always use their unique key.
+    if (["launching", "bound"].includes(binding.phase) || binding.identities.length) return { cleanupComplete: false };
+    await this.options.bindings.put({ ...binding, phase: "terminated" }); // Durable never-launched proof before release.
+    try { await this.options.admission.cancel(key); }
+    catch (error) {
+      if (!(error instanceof Error) || error.message !== "RESOURCE_TERMINATION_REQUIRED") throw error;
+      // refresh() may have admitted a previously waiting request. Reuse its immutable identity.
+      const decision = await this.options.admission.request(resource);
+      if (decision.state !== "admitted") throw new Error("native-recovery-admission-unconfirmed");
+      await this.options.admission.release({ reservationId: decision.reservationId, terminationEvidenceId: `${key}-not-launched` });
+    }
+    return { cleanupComplete: true };
+  }
   private async executeAuthorized(request: NativeToolRequest, recipe: NativeToolRecipe, signal?: AbortSignal): Promise<NativeToolResult> {
     const authority = await this.options.authorize(request);
     if (!authority.writeAllowed) throw new Error("native-write-policy-refused");
     const hash = nativeManifestHash(authority.inputManifest);
     if (hash !== recipe.inputManifestSha256) throw new Error("native-recipe-input-mismatch");
     const resource: ResourceRequest = { requestId: `native-${request.requestId}`, priority: "interactive",
-      owner: { installationId: this.options.installationId, workloadId: request.attemptId,
+      owner: { installationId: this.options.installationId, workloadId: `native-${request.requestId}`,
         executionId: request.executionId, generation: request.generation, familyId: authority.familyId, kind: "service" },
       demand: recipe.demand };
     const prior = this.options.bindings.get(resource.requestId);
     if (prior && prior.phase !== "queued") throw new Error("native-request-already-launched");
     if (prior && JSON.stringify(prior.request) !== JSON.stringify(resource)) throw new Error("native-request-identity-changed");
     await this.options.bindings.put({ request: resource, phase: "queued", identities: [] });
-    if (signal?.aborted) { await this.options.admission.cancel(resource.requestId); throw new Error("native-cancelled-before-launch"); }
+    if (signal?.aborted) { await this.retireOwned(request); throw new Error("native-cancelled-before-launch"); }
     const decision = await this.options.admission.request(resource);
     if (decision.state !== "admitted") return decision;
     await this.options.bindings.put({ request: resource, phase: "reserved", identities: [] });

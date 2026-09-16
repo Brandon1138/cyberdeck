@@ -33,7 +33,10 @@ queued/infeasible, or a terminal result with evaluation disposition, cleanup sta
 path. The private credentials file holds a unique password and scoped endpoint for that run.
 It is never returned to the worker and is removed after confirmed teardown. Connect the terminal
 result to the attempt's evaluation outbox at broker composition. Queued cancellation can use
-startup-style `recover()` to cancel pending admission and reconcile absence.
+`cancelPending()` or `recover()` to cancel pending admission and reconcile absence. Neither
+requires current worker authority. If admission refresh granted a waiting request in the meantime,
+recovery resolves that same immutable resource request and releases its actual reservation only
+after selective Engine absence is confirmed.
 
 Each engine object carries broker/execution/worker/generation/attempt/lease/recipe ownership.
 Recovery manifests persist intent before resource admission. Startup `recover(request)` uses
@@ -48,6 +51,14 @@ Admission must remain closed when reconciliation throws or any returned cleanup 
 Bind `executor.verifyTermination(reservation, evidenceId)` into the shared admission verifier;
 it checks the durable manifest, exact resource request, reservation ID and canonical evidence hash.
 Serialize these operations through the single installation budget owner.
+
+An incomplete cleanup is durable debt, not a new task failure. The auxiliary supervisor saves
+`cleanupPending` before terminal publication and replays it on restart, including a terminal
+receipt whose activity projection was interrupted. Periodic recovery attempts at most two owned
+cleanups per two-second sweep, with per-request exponential backoff capped at 60 seconds. Health
+exposes pending cleanup and retry counts. Recovery never reruns SQL or changes a verified outcome;
+captured observations for an existing container ID are retained. Container identity changes,
+failed removal or engine unavailability keep the reservation and debt visible.
 
 `scripts/prove-integration-service.ts` exports `proveIntegrationService`. Supply the actual
 shared-budget executor, verified OrbStack client, authorized request, exact SHA and evidence path.
