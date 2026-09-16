@@ -1,3 +1,4 @@
+import type { JobDispatchContext } from "../orchestration/resource-job-record.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { AdmissionScheduler, AdmissionSnapshot } from "./admission-scheduler.js";
@@ -84,12 +85,6 @@ export const ReportBackRecordSchema = z.object({
 });
 export type ReportBackRecord = z.infer<typeof ReportBackRecordSchema>;
 
-/**
- * The terminal result envelope the control plane stores and exposes: the job record (status,
- * result summary/error, structured artifact references, and provenance — provider, correlation,
- * parent, timestamps), the reported `usage` (absent when the provider did not report it), and the
- * report-back handoff state for delegated jobs.
- */
 export interface JobSnapshot {
   record: JobRecord;
   usage?: UsageReport;
@@ -192,7 +187,8 @@ export class JobControlPlane {
   private pendingReports: Promise<void> = Promise.resolve();
   private pendingReportError: unknown;
   private pumping = false;
-
+  private readonly dispatching = new Set<string>();
+  private readonly cancellations = new Map<string, Promise<CancellationResult>>();
   constructor(private readonly options: JobControlPlaneOptions) {}
 
   /**
@@ -239,11 +235,6 @@ export class JobControlPlane {
     }
   }
 
-  /**
-   * Register an in-process adapter for its provider and subscribe to its report stream. Reports are
-   * funneled through {@link ingestReport}, the same idempotent path used by the broker's out-of-
-   * process completion ingest.
-   */
   registerAdapter(adapter: JobDispatchAdapter): () => void {
     this.adapters.set(adapter.provider, adapter);
     const unsubscribe = adapter.onReport((report) => {
@@ -421,11 +412,6 @@ export class JobControlPlane {
     return { job: cloneJobRecord(entry.record), deduplicated: false };
   }
 
-  /**
-   * Dispatch every job that can hold a slot right now. Re-entrant calls (a dispatch that settles
-   * synchronously and releases its own slot) collapse into the running loop, so a job is never
-   * dispatched twice and a freed slot is always re-offered.
-   */
   private async pump(): Promise<void> {
     const scheduler = this.options.scheduler;
     if (scheduler === undefined || this.pumping) return;
@@ -476,9 +462,12 @@ export class JobControlPlane {
       correlationId: entry.record.correlationId,
       request: entry.record.request,
     });
+    this.dispatching.add(entry.record.id);
     try {
       await adapter.dispatch(dispatchRequest);
     } catch (error) {
+      const cancellation = await this.cancellations.get(entry.record.id)?.catch(() => undefined);
+      if (cancellation?.accepted || entry.record.lifecycle.status === "settled" || entry.record.lifecycle.status === "interrupted") return;
       await this.settle(entry, {
         outcome: "failed",
         error: {
@@ -488,6 +477,8 @@ export class JobControlPlane {
         artifacts: [],
       });
       return;
+    } finally {
+      this.dispatching.delete(entry.record.id); this.cancellations.delete(entry.record.id);
     }
 
     // A late report may have already settled the job while we awaited dispatch; do not clobber it.
@@ -553,11 +544,10 @@ export class JobControlPlane {
 
     const adapter = this.adapters.get(entry.record.request.provider);
     if (
-      entry.record.lifecycle.status === "queued" ||
-      entry.record.lifecycle.status === "interrupted" ||
-      adapter === undefined
+      entry.record.lifecycle.status === "queued" && !this.dispatching.has(parsedId) ||
+      entry.record.lifecycle.status === "interrupted" || adapter === undefined
     ) {
-      // Nothing was handed to a live adapter; settle directly without a port round-trip.
+      // A queued job already awaiting resource admission must cancel through its adapter.
       await this.settle(entry, {
         outcome: "cancelled",
         ...(reason !== undefined ? { reason } : {}),
@@ -570,7 +560,9 @@ export class JobControlPlane {
       correlationId: entry.record.correlationId,
       ...(reason !== undefined ? { reason } : {}),
     });
-    const result = CancellationResultSchema.parse(await adapter.cancel(cancelRequest));
+    const operation = adapter.cancel(cancelRequest);
+    if (this.dispatching.has(parsedId)) this.cancellations.set(parsedId, operation);
+    const result = CancellationResultSchema.parse(await operation);
     if (result.accepted) {
       await this.settle(entry, {
         outcome: "cancelled",
@@ -643,6 +635,14 @@ export class JobControlPlane {
     });
     await this.releaseSlot(entry);
     return true;
+  }
+
+  /** Canonical immutable attempt context, including durable delegated parent provenance. */
+  dispatchContext(jobId: unknown): JobDispatchContext {
+    const entry = this.jobs.get(JobIdSchema.parse(jobId));
+    if (!entry) throw new ControlPlaneError("JOB_NOT_FOUND", `Unknown job ${String(jobId)}`);
+    return { record: structuredClone(entry.record), attemptGeneration: 1,
+      ...(entry.parentSessionId !== undefined ? { parentSessionId: entry.parentSessionId } : {}) };
   }
 
   getJob(jobId: unknown): JobSnapshot {

@@ -1,4 +1,5 @@
 import { spawn as spawnChildProcess } from "node:child_process";
+import type { ResourceJobLaunchPort } from "../../orchestration/resource-job-launch.js";
 import { CONTROL_PLANE_SCHEMA_VERSION } from "../../domain/control-plane.js";
 import {
   CancellationResultSchema,
@@ -21,9 +22,11 @@ import { ClaudeStreamDecoder, type ClaudeStreamFrame } from "./stream-codec.js";
 
 /** The minimal process surface the adapter needs, so tests can inject B1's fixture. */
 export interface ClaudeProcessHandle {
+  readonly pid?: number | undefined;
   onStdout(listener: (chunk: Buffer) => void): void;
   onStderr(listener: (chunk: Buffer) => void): void;
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
+  onError?(listener: (error: Error) => void): void;
   writeStdin(data: string): void;
   endStdin(): void;
   kill(signal?: NodeJS.Signals): void;
@@ -71,6 +74,7 @@ export const unverifiedClaudeResultInterpreter: ClaudeResultInterpreter = () => 
 });
 
 export interface ClaudeJobDispatchAdapterOptions {
+  resourceLaunch?: ResourceJobLaunchPort;
   spawn?: ClaudeSpawn;
   interpreter?: ClaudeResultInterpreter;
   headless?: ClaudeHeadlessOptions;
@@ -111,12 +115,13 @@ export class ClaudeJobDispatchAdapter implements JobDispatchAdapter {
       throw new Error(`Job ${request.jobId} was already dispatched`);
     }
 
-    // Command construction runs the launch-safety gate, so an omitted model throws here before
-    // anything is spawned. Delegated Fable authorization is checked before dispatch.
-    const command = buildClaudeHeadlessCommand(request.request, this.options.headless ?? {});
-
-    this.seen.add(request.jobId);
-    const handle = this.spawn(command);
+    let command!: ClaudeHeadlessCommand;
+    const prepare = () => {
+      command = buildClaudeHeadlessCommand(request.request, this.options.headless ?? {});
+      this.seen.add(request.jobId); return this.spawn(command);
+    };
+    const handle = this.options.resourceLaunch
+      ? await this.options.resourceLaunch.start(request, prepare) : prepare();
     const entry: RunningJob = { handle, settled: false, cancelled: false };
     this.running.set(request.jobId, entry);
 
@@ -164,6 +169,7 @@ export class ClaudeJobDispatchAdapter implements JobDispatchAdapter {
   }
 
   async cancel(request: CancellationRequest): Promise<CancellationResult> {
+    if (this.options.resourceLaunch?.cancelStart(request.jobId)) return { accepted: true, jobId: request.jobId };
     const entry = this.running.get(request.jobId);
     if (entry === undefined) {
       const code = this.seen.has(request.jobId) ? "JOB_ALREADY_TERMINAL" : "JOB_NOT_FOUND";
@@ -211,6 +217,8 @@ const defaultClaudeSpawn: ClaudeSpawn = (command) => {
   });
 
   return {
+    get pid() { return child.pid; },
+    onError: listener => { child.on("error", listener); },
     onStdout: (listener) => {
       child.stdout?.on("data", listener);
     },

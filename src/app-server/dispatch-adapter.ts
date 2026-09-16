@@ -1,4 +1,5 @@
-import { spawn as spawnChildProcess } from "node:child_process";
+import { defaultAppServerSpawn } from "./dispatch-process.js";
+import type { ResourceJobLaunchPort } from "../orchestration/resource-job-launch.js";
 import { isAbsolute } from "node:path";
 import { CONTROL_PLANE_SCHEMA_VERSION } from "../domain/control-plane.js";
 import {
@@ -37,6 +38,7 @@ export interface AppServerCommand {
 }
 
 export interface AppServerProcessHandle {
+  readonly pid?: number | undefined;
   onStdout(listener: (chunk: Buffer) => void): void;
   onStderr(listener: (chunk: Buffer) => void): void;
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
@@ -78,6 +80,7 @@ export interface AppServerProgress {
 }
 
 export interface AppServerJobDispatchAdapterOptions {
+  resourceLaunch?: ResourceJobLaunchPort;
   spawn?: AppServerSpawn;
   now?: () => string;
   timeoutMs?: number;
@@ -167,24 +170,27 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
     this.seen.add(request.jobId);
 
     let lease: LeaseGrant | undefined;
-    if (request.request.sandbox === "workspace-write" && this.options.leaseManager !== undefined) {
-      lease = await this.options.leaseManager.acquire({
-        repositoryPath: request.request.cwd,
-        worktreePath: request.request.cwd,
-        access: "workspace-write",
-        holderJobId: request.jobId,
-        ...(this.options.leaseTtlMs !== undefined ? { ttlMs: this.options.leaseTtlMs } : {}),
-      });
-    }
+    const prepare = async () => {
+      if (request.request.sandbox === "workspace-write" && this.options.leaseManager !== undefined) {
+        lease = await this.options.leaseManager.acquire({
+          repositoryPath: request.request.cwd,
+          worktreePath: request.request.cwd,
+          access: "workspace-write",
+          holderJobId: request.jobId,
+          ...(this.options.leaseTtlMs !== undefined ? { ttlMs: this.options.leaseTtlMs } : {}),
+        });
+      }
 
-    const command = buildAppServerCommand(
-      request,
-      this.options.sourceEnvironment ?? globalThis.process.env,
-      this.launchEnvironment,
-    );
+      const command = buildAppServerCommand(
+        request,
+        this.options.sourceEnvironment ?? globalThis.process.env,
+        this.launchEnvironment,
+      );
+      return this.spawn(command);
+    };
     let process: AppServerProcessHandle;
     try {
-      process = this.spawn(command);
+      process = this.options.resourceLaunch ? await this.options.resourceLaunch.start(request, prepare) : await prepare();
     } catch (error) {
       if (lease !== undefined) await this.options.leaseManager?.release(lease);
       throw error;
@@ -290,6 +296,7 @@ export class AppServerJobDispatchAdapter implements JobDispatchAdapter {
   }
 
   async cancel(request: CancellationRequest): Promise<CancellationResult> {
+    if (this.options.resourceLaunch?.cancelStart(request.jobId)) return { accepted: true, jobId: request.jobId };
     const entry = this.running.get(request.jobId);
     if (entry === undefined) {
       const code = this.seen.has(request.jobId) ? "JOB_ALREADY_TERMINAL" : "JOB_NOT_FOUND";
@@ -620,20 +627,3 @@ function interrupted(message: string): JobResult {
 function isNonnegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
-
-const defaultAppServerSpawn: AppServerSpawn = (command) => {
-  const child = spawnChildProcess(command.executable, command.args, {
-    cwd: command.cwd,
-    env: command.env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  return {
-    onStdout: (listener) => child.stdout?.on("data", listener),
-    onStderr: (listener) => child.stderr?.on("data", listener),
-    onExit: (listener) => child.on("exit", listener),
-    onError: (listener) => child.on("error", listener),
-    write: (data) => { child.stdin?.write(data); },
-    endStdin: () => { child.stdin?.end(); },
-    kill: (signal) => { child.kill(signal); },
-  };
-};
