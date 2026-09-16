@@ -8,6 +8,9 @@ import { existingOrchestrators } from "./picker-orchestrator.js";
 import { commandPaletteCandidates } from "./picker-palette.js";
 import { pickerModelChoices, pickerScrollOffset } from "./picker-worker.js";
 import { renderComposerLines } from "./render-composer.js";
+import { renderFleet } from "./render-frame.js";
+import { normalizeState } from "./normalize.js";
+import { relativeTime } from "./slash-commands.js";
 import { renderFleetFooter, renderHeader, renderShellTranscript, shellTranscriptScrollOffset } from "./render-list.js";
 import { ResolvedFleetRenderOptions, WorkerModelCatalog } from "./runtime-options.js";
 import { FleetSnapshot, FleetState, InteractiveFleetTransport } from "./state.js";
@@ -49,6 +52,24 @@ export interface FleetFrameLayout {
 export interface RetainedFleetFrame extends FleetFrameLayout {
   rows: readonly string[];
   cursor: { row: number; column: number; } | undefined;
+}
+
+/** One frame only: unchanged polls need neither grapheme layout nor a second topology walk. */
+export class FleetFrameCache {
+  private previous: { key: string; body: string; layout: FleetFrameLayout } | undefined;
+  render(snapshot: FleetSnapshot, current: FleetState, options: ResolvedFleetRenderOptions) {
+    const state = normalizeState(current, snapshot, options.now);
+    // Time affects expiry normalization and row ages. Key the exact displayed ages, not a wall
+    // clock bucket that could delay a boundary. All other renderer inputs remain in the key.
+    const { now, pullRequests, ...appearance } = options;
+    const key = JSON.stringify([snapshot, state, appearance, [...pullRequests], snapshot.threads.map(({ record }) =>
+      relativeTime(record.meaningfulUpdatedAt ?? record.updatedAt, now))]);
+    if (key === this.previous?.key) return this.previous;
+    const result = { key, body: renderFleet(snapshot, state, options), layout: fleetFrameLayout(snapshot, state, options) };
+    // An unusually large catalog/draft still renders normally, without retaining another copy.
+    this.previous = key.length + result.body.length < 1024 * 1024 ? result : undefined;
+    return result;
+  }
 }
 
 /**
