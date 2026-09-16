@@ -19,10 +19,20 @@ export class TaskEvaluationService {
     const turn = event.kind === "provider.turn" && ["succeeded", "failed", "cancelled"].includes(event.outcome) && !event.instructionId;
     const execution = event.kind === "execution.lifecycle" && ["failed", "cancelled"].includes(event.outcome) && !event.instructionId;
     if (!instruction && !turn && !execution) return;
+    // A current session snapshot is never evidence of a historical attempt's generation.
+    if (!Number.isSafeInteger(event.generation) || event.generation! < 1) throw new Error("EVALUATION_GENERATION_UNKNOWN");
+    const identity = instruction ? `instruction:${event.instructionId ?? event.eventId}` : `event:${event.eventId}`;
+    const attemptId = createHash("sha256").update(JSON.stringify([event.sessionId, event.generation, identity])).digest("hex");
+    const prior = this.store.findIntent?.(attemptId, this.rubric.id, this.rubric.version);
+    if (prior) {
+      if (prior.sessionId !== event.sessionId || prior.generation !== event.generation || prior.executionId !== event.executionId
+        || prior.instructionId !== event.instructionId) throw new Error("EVALUATION_REPLAY_IDENTITY_CONFLICT");
+      return; // Keep the original immutable evidence after enqueue-before-checkpoint crashes.
+    }
     const { generation, manifest } = await this.evidence.capture(event);
     if (!Number.isSafeInteger(generation) || generation < 1 || (event.generation !== undefined && generation !== event.generation)) throw new Error("EVALUATION_GENERATION_UNKNOWN");
-    const identity = instruction ? `instruction:${event.instructionId ?? event.eventId}` : `event:${event.eventId}`;
-    const attemptId = createHash("sha256").update(JSON.stringify([event.sessionId, generation, identity])).digest("hex");
+    if (JSON.stringify(manifest.terminalEvent) !== JSON.stringify(event)
+      || manifest.checks.some(check => check.source !== "host-verified")) throw new Error("EVALUATION_EVIDENCE_NOT_CANONICAL");
     const intent: TaskEvaluationIntent = { attemptId, sessionId: event.sessionId, generation,
       ...(event.executionId ? { executionId: event.executionId } : {}), ...(event.instructionId ? { instructionId: event.instructionId } : {}),
       attribution: instruction ? "instruction" : event.origin ?? "unattributed", rubricId: this.rubric.id,

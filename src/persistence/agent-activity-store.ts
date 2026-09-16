@@ -14,6 +14,9 @@ export interface ActivityRetention { maxBytes: number; maxAgeMs: number; now?: (
 export class AgentActivityStore implements AgentActivityPort {
   private readonly index: ActivityDiskIndex;
   private readonly pins = new Set<string>();
+  private readonly fences = new Map<string, number>();
+  private sourceId: string = randomUUID();
+  private captureGaps = 0;
   private sequence = 0;
   private bytes = 0;
   private dropped = 0;
@@ -27,16 +30,24 @@ export class AgentActivityStore implements AgentActivityPort {
     const store = new AgentActivityStore(directory, retention);
     await store.load().catch((error) => { store.index.close(); throw error; });
     try {
-      const checkpoint = z.object({ sequence: z.number().int().nonnegative(), dropped: z.number().int().nonnegative() }).parse(JSON.parse(await readFile(join(directory, "activity-health.json"), "utf8")));
+      const checkpoint = z.object({ sequence: z.number().int().nonnegative(), dropped: z.number().int().nonnegative(), captureGaps: z.number().int().nonnegative().optional() }).parse(JSON.parse(await readFile(join(directory, "activity-health.json"), "utf8")));
       store.sequence = Math.max(store.sequence, Number(checkpoint.sequence) || 0);
       store.dropped += Number(checkpoint.dropped) || 0;
+      store.captureGaps += checkpoint.captureGaps ?? checkpoint.dropped; // Legacy losses cannot be assumed to be safe pruning.
       store.degraded ||= store.dropped > 0;
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
     try {
       const pins = z.array(z.uuid()).max(1024).parse(JSON.parse(await readFile(join(directory, "activity-pins.json"), "utf8")));
       for (const run of pins) store.pins.add(run);
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") { store.index.close(); throw error; } }
-    if (store.degraded) await writeAtomicPrivateFile(join(directory, "activity-health.json"), JSON.stringify({ sequence: store.sequence, dropped: store.dropped }));
+    try {
+      const replay = z.object({ sourceId: z.uuid(), fences: z.record(z.string().regex(/^[a-zA-Z0-9:_-]{1,128}$/), z.number().int().nonnegative()) }).parse(JSON.parse(await readFile(join(directory, "activity-replay.json"), "utf8")));
+      store.sourceId = replay.sourceId; for (const [consumer, sequence] of Object.entries(replay.fences)) store.fences.set(consumer, sequence);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") { store.index.close(); throw error; }
+      await store.persistFences();
+    }
+    if (store.degraded) await store.persistHealth();
     return store;
   }
   private get path(): string { return join(this.directory, "activity.jsonl"); }
@@ -48,15 +59,15 @@ export class AgentActivityStore implements AgentActivityPort {
       this.index.add(event, offset, bytes); this.sequence = event.sequence;
     });
     this.bytes = recovered.bytes;
-    if (recovered.torn) { this.degraded = true; this.dropped++; }
+    if (recovered.torn) { this.degraded = true; this.dropped++; this.captureGaps++; }
   }
   /** After a failed write nothing about the file is trusted until the journal has been re-read.
    * A recovered store carries the loss forward; one that cannot recover stays visibly unavailable. */
   private async recover(): Promise<void> {
     const sequence = this.sequence, dropped = this.dropped;
     await this.load();
-    this.sequence = Math.max(this.sequence, sequence); this.dropped = Math.max(this.dropped, dropped + 1); this.degraded = true;
-    await writeAtomicPrivateFile(join(this.directory, "activity-health.json"), JSON.stringify({ sequence: this.sequence, dropped: this.dropped }));
+    this.sequence = Math.max(this.sequence, sequence); this.dropped = Math.max(this.dropped, dropped + 1); this.degraded = true; this.captureGaps++;
+    await this.persistHealth();
     this.poisoned = false;
   }
   append(input: ActivityInput): Promise<AgentActivity> {
@@ -78,7 +89,10 @@ export class AgentActivityStore implements AgentActivityPort {
       this.sequence = event.sequence; this.bytes += Buffer.byteLength(line);
       return structuredClone(event);
     });
-    this.tail = operation.then(() => {}, () => { this.degraded = true; this.dropped += 1; });
+    this.tail = operation.then(() => {}, async () => {
+      this.degraded = true; this.dropped += 1; this.captureGaps++;
+      await this.persistHealth().catch(() => { this.poisoned = true; });
+    });
     return operation;
   }
   async read(runId: string, afterSequence = 0, limit = 100): Promise<AgentActivity[]> {
@@ -86,6 +100,28 @@ export class AgentActivityStore implements AgentActivityPort {
   }
   async readSession(sessionId: string, afterSequence = 0, limit = 100): Promise<AgentActivity[]> {
     return this.readPage(() => this.index.sessionPage(sessionId, afterSequence, limit), afterSequence, limit);
+  }
+  async readGlobal(afterSequence = 0, limit = 100): Promise<AgentActivity[]> {
+    return this.readPage(() => this.index.globalPage(afterSequence, limit), afterSequence, limit);
+  }
+  replayBounds() {
+    return { sourceId: this.sourceId, firstSequence: this.index.firstSequence(), sequence: this.sequence, captureGaps: this.captureGaps, uncertain: this.poisoned };
+  }
+  retainAfter(consumer: string, sequence: number): Promise<void> {
+    const operation = this.tail.then(async () => {
+      if (!/^[a-zA-Z0-9:_-]{1,128}$/.test(consumer) || !Number.isSafeInteger(sequence) || sequence < 0 || sequence > this.sequence
+        || sequence < (this.fences.get(consumer) ?? 0)) throw new Error("ACTIVITY_REPLAY_FENCE_INVALID");
+      const next = new Map(this.fences); next.set(consumer, sequence);
+      if (next.size > 32) throw new Error("ACTIVITY_REPLAY_FENCE_LIMIT");
+      await this.persistFences(next); this.fences.set(consumer, sequence);
+    });
+    this.tail = operation.then(() => {}, () => {}); return operation;
+  }
+  private persistFences(fences = this.fences): Promise<void> {
+    return writeAtomicPrivateFile(join(this.directory, "activity-replay.json"), JSON.stringify({ sourceId: this.sourceId, fences: Object.fromEntries(fences) }));
+  }
+  private persistHealth(dropped = this.dropped): Promise<void> {
+    return writeAtomicPrivateFile(join(this.directory, "activity-health.json"), JSON.stringify({ sequence: this.sequence, dropped, captureGaps: this.captureGaps }));
   }
   private readPage(locations: () => ReturnType<ActivityDiskIndex["page"]>, afterSequence: number, limit: number): Promise<AgentActivity[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("ACTIVITY_READ_LIMIT");
@@ -100,8 +136,8 @@ export class AgentActivityStore implements AgentActivityPort {
   }
   noteGap(): Promise<void> {
     const operation = this.tail.then(async () => {
-      this.degraded = true; this.dropped++;
-      await writeAtomicPrivateFile(join(this.directory, "activity-health.json"), JSON.stringify({ sequence: this.sequence, dropped: this.dropped }));
+      this.degraded = true; this.dropped++; this.captureGaps++;
+      await this.persistHealth();
     });
     this.tail = operation.then(() => {}, () => {}); return operation;
   }
@@ -118,7 +154,7 @@ export class AgentActivityStore implements AgentActivityPort {
       const page = this.index.oldest(through);
       if (!page.length) break;
       for (const location of page) {
-        if (this.pins.has(location.run)) break outer;
+        if (this.pins.has(location.run) || [...this.fences.values()].some(sequence => location.sequence > sequence)) break outer;
         if (location.observed >= cutoff && this.bytes - removedBytes + incoming <= target) break outer;
         removedBytes = location.offset + location.bytes; through = location.sequence; remove++;
       }
@@ -126,7 +162,7 @@ export class AgentActivityStore implements AgentActivityPort {
     if (this.bytes - removedBytes + incoming > cap) throw new Error("ACTIVITY_PINNED_CAPACITY");
     if (!remove) return;
     // Loss is durable before replacement. A crash may overreport it, never erase it.
-    await writeAtomicPrivateFile(join(this.directory, "activity-health.json"), JSON.stringify({ sequence: this.sequence, dropped: this.dropped + remove }));
+    await this.persistHealth(this.dropped + remove);
     const temporary = `${this.path}.${randomUUID()}.compact`;
     await copyActivitySuffix(this.path, temporary, removedBytes);
     this.poisoned = true;

@@ -48,7 +48,14 @@ export class ActivityDiskIndex {
       .all(uuidBlob(session), after, limit).map(row);
   }
   oldest(after = 0): ActivityLocation[] {
-    return this.db.prepare("SELECT sequence, offset, bytes, observed, run FROM activity WHERE sequence>? ORDER BY sequence LIMIT 1000").all(after).map(row);
+    return this.globalPage(after, 1000);
+  }
+  globalPage(after: number, limit: number): ActivityLocation[] {
+    return this.db.prepare("SELECT sequence, offset, bytes, observed, run FROM activity WHERE sequence>? ORDER BY sequence LIMIT ?").all(after, limit).map(row);
+  }
+  firstSequence(): number | null {
+    const value = this.db.prepare("SELECT min(sequence) AS first FROM activity").get()!.first;
+    return value === null ? null : Number(value);
   }
   removePrefix(sequence: number, bytes: number): void {
     this.db.exec("BEGIN");

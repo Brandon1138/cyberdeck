@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { TaskEvaluationIntentSchema, TaskEvaluationResultSchema, type TaskEvaluationIntent, type TaskEvaluationResult } from "../domain/task-evaluation.js";
 
-import { evidenceHash, type EvaluationEvidenceManifest } from "../orchestration/task-evaluation-ports.js";
+import { evidenceHash, type EvaluationEvidenceManifest, type EvaluationReplayCheckpoint } from "../orchestration/task-evaluation-ports.js";
 export { evidenceHash, type EvaluationEvidenceManifest } from "../orchestration/task-evaluation-ports.js";
 export const evaluationKey = (intent: TaskEvaluationIntent): string => createHash("sha256").update(JSON.stringify([intent.attemptId, intent.rubricId, intent.rubricVersion])).digest("hex");
 export interface EvaluationClaim { key: string; token: string; expiresAt: number; intent: TaskEvaluationIntent; manifest: EvaluationEvidenceManifest }
@@ -25,6 +25,11 @@ export class TaskEvaluationStore {
       CREATE TABLE IF NOT EXISTS evaluations (
         key TEXT PRIMARY KEY, intent TEXT NOT NULL, manifest TEXT, token TEXT, expires REAL,
         result TEXT, acknowledged INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS evaluation_sources (source TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(source,key));
+      CREATE TABLE IF NOT EXISTS evaluation_checkpoints (consumer TEXT PRIMARY KEY, source TEXT NOT NULL, sequence INTEGER NOT NULL);
+      INSERT OR IGNORE INTO evaluation_sources(source,key)
+        SELECT json_extract(manifest,'$.terminalEvent.sourceKey'),key FROM evaluations
+        WHERE manifest IS NOT NULL AND json_type(manifest,'$.terminalEvent.sourceKey')='text';
     `);
   }
   enqueue(intent: TaskEvaluationIntent, manifest: EvaluationEvidenceManifest): string {
@@ -37,8 +42,39 @@ export class TaskEvaluationStore {
       return key;
     }
     if (Buffer.byteLength(body) > Math.min(1024 * 1024, this.maxBytes / 4)) throw new Error("EVALUATION_EVIDENCE_CAP");
-    this.db.prepare("INSERT INTO evaluations(key,intent,manifest) VALUES (?,?,?)").run(key, JSON.stringify(intent), body);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("INSERT INTO evaluations(key,intent,manifest) VALUES (?,?,?)").run(key, JSON.stringify(intent), body);
+      const terminal = manifest.terminalEvent as { sourceKey?: unknown } | null;
+      if (typeof terminal?.sourceKey === "string") this.db.prepare("INSERT INTO evaluation_sources(source,key) VALUES (?,?)").run(terminal.sourceKey, key);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     return key;
+  }
+  findIntent(attemptId: string, rubricId: string, rubricVersion: string): TaskEvaluationIntent | undefined {
+    const key = createHash("sha256").update(JSON.stringify([attemptId, rubricId, rubricVersion])).digest("hex");
+    const row = this.db.prepare("SELECT intent FROM evaluations WHERE key=?").get(key);
+    return row ? TaskEvaluationIntentSchema.parse(JSON.parse(String(row.intent))) : undefined;
+  }
+  hasTerminalSource(sourceKey: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM evaluation_sources WHERE source=? LIMIT 1").get(sourceKey));
+  }
+  checkpoint(consumer: string): EvaluationReplayCheckpoint | undefined {
+    const row = this.db.prepare("SELECT source,sequence FROM evaluation_checkpoints WHERE consumer=?").get(consumer);
+    return row ? { sourceId: String(row.source), sequence: Number(row.sequence) } : undefined;
+  }
+  /** The caller must durably enqueue each terminal event before advancing this cursor. */
+  advanceCheckpoint(consumer: string, sourceId: string, expectedSequence: number, sequence: number): void {
+    if (!/^[a-zA-Z0-9:_-]{1,128}$/.test(consumer) || !sourceId || !Number.isSafeInteger(expectedSequence)
+      || expectedSequence < 0 || !Number.isSafeInteger(sequence) || sequence < expectedSequence) throw new Error("EVALUATION_CHECKPOINT_INVALID");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const prior = this.checkpoint(consumer);
+      if (prior && (prior.sourceId !== sourceId || prior.sequence !== expectedSequence) || !prior && expectedSequence !== 0)
+        throw new Error("EVALUATION_CHECKPOINT_CONFLICT");
+      this.db.prepare("INSERT INTO evaluation_checkpoints VALUES (?,?,?) ON CONFLICT(consumer) DO UPDATE SET sequence=excluded.sequence").run(consumer, sourceId, sequence);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   claim(now: number, leaseMs: number): EvaluationClaim | undefined {
     if (!Number.isFinite(now) || !Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 300000) throw new Error("EVALUATION_LEASE_INVALID");

@@ -38,3 +38,13 @@ test("disk cap refuses rather than deleting pending evidence", () => {
   expect(() => { for (let i = 0; i < 1000; i++) { store.enqueue(intent(), manifest); accepted++; } }).toThrow();
   expect(accepted).toBeGreaterThan(0); expect(store.health().pending).toBe(accepted); expect(store.health().bytes).toBeLessThanOrEqual(32768); store.close();
 });
+test("replay checkpoints survive restart and fence stale cursors or source replacement", () => {
+  const file = path(), source = randomUUID(); let store = new TaskEvaluationStore(file);
+  store.advanceCheckpoint("production-v1", source, 0, 0); store.advanceCheckpoint("production-v1", source, 0, 7); store.close();
+  store = new TaskEvaluationStore(file);
+  expect(store.checkpoint("production-v1")).toEqual({ sourceId: source, sequence: 7 });
+  expect(() => store.advanceCheckpoint("production-v1", source, 0, 8)).toThrow("CONFLICT");
+  expect(() => store.advanceCheckpoint("production-v1", randomUUID(), 7, 8)).toThrow("CONFLICT");
+  expect(() => store.advanceCheckpoint("production-v1", source, 7, 6)).toThrow("INVALID");
+  expect(store.checkpoint("production-v1")?.sequence).toBe(7); store.close();
+});
