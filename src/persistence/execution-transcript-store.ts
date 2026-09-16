@@ -26,21 +26,20 @@ export class ExecutionTranscriptStore extends ThreadTranscriptStore {
     const session = this.container(input.sessionId);
     if (!session) return super.observeProviderTurns(input);
     try {
+      await this.init();
       const source = await this.containerSource.read(session);
-      const seen = new Set<string>();
-      let cursor = 0, committedThrough = 0;
-      for (;;) {
-        const page = await this.read(session.id, cursor, 1000);
-        for (const event of page.events) {
-          if (typeof event.data.semanticTurnId === "string") seen.add(event.data.semanticTurnId);
-          if (event.kind === "turn" && typeof event.data.turnNumber === "number") committedThrough = Math.max(committedThrough, event.data.turnNumber);
-        }
-        if (page.events.length < 1000) break;
-        cursor = page.nextCursor;
-      }
-      const turns = source.turns.filter((turn) => !seen.has(`${session.provider}:${turn.providerTurnId}`));
+      const turns = source.turns.filter((turn) => !this.hasSemanticTurn(session.id, `${session.provider}:${turn.providerTurnId}`));
       // The running turn's ordinal is only certain once every completed one is committed.
       if (source.pending && turns.length === 0 && this.capture) {
+        let cursor = 0, committedThrough = 0;
+        for (;;) {
+          const page = await this.read(session.id, cursor, 1000);
+          for (const event of page.events) {
+            if (event.kind === "turn" && typeof event.data.turnNumber === "number") committedThrough = Math.max(committedThrough, event.data.turnNumber);
+          }
+          if (page.events.length < 1000) break;
+          cursor = page.nextCursor;
+        }
         void this.capture.captureRunning(session, source.pending, committedThrough + 1).catch(() => undefined);
       }
       return { sessionId: session.id, provider: session.provider, turnNumber: input.turnNumber, turns };
@@ -66,14 +65,14 @@ export class ExecutionTranscriptStore extends ThreadTranscriptStore {
   }
   override async readTranscriptMessages(input: CaptureWorkerTurns) {
     const session = this.container(input.sessionId);
-    return session ? (await this.containerSource.read(session)).messages : super.readTranscriptMessages(input);
+    return session ? (await this.containerSource.read(session, "session", false)).messages : super.readTranscriptMessages(input);
   }
   override async readObservedModel(input: CaptureWorkerTurns) {
     const session = this.container(input.sessionId);
-    return session ? (await this.containerSource.read(session)).model : super.readObservedModel(input);
+    return session ? (await this.containerSource.read(session, "session", false)).model : super.readObservedModel(input);
   }
   override async readProviderBudgetTelemetry(input: CaptureWorkerTurns, window: ProviderBudgetWindow) {
     const session = this.container(input.sessionId);
-    return session ? (await this.containerSource.read(session, window)).budget : super.readProviderBudgetTelemetry(input, window);
+    return session ? (await this.containerSource.read(session, window, false)).budget : super.readProviderBudgetTelemetry(input, window);
   }
 }
