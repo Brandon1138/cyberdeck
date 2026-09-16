@@ -15,7 +15,7 @@ const request = (): IntegrationServiceRequest => ({ identity: { brokerId: random
   workerId: randomUUID(), sessionId: randomUUID(), generation: 1 }, attemptId: randomUUID(), leaseVersion: 1, recipe: "postgres-fixture-v1" });
 function fakeEngine() {
   const objects = new Map<string, any>();
-  const state = { unavailable: false, healthy: true, runnerExit: 0, oom: false, corruptNetwork: false, corruptLabel: false, siblingNetwork: false, failRemove: false, tick: 0 };
+  const state = { unavailable: false, healthy: true, runnerExit: 0, oom: false, corruptNetwork: false, corruptLabel: false, siblingNetwork: false, failRemove: false, startFails: false, logsUnavailable: false, tick: 0 };
   const run = vi.fn(async (argv: string[]) => {
     if (state.unavailable) throw new Error("daemon unreachable");
     const args = argv.slice(2), command = args[0];
@@ -39,7 +39,8 @@ function fakeEngine() {
     if (command === "create") {
       const name = value("--name"), runner = name.endsWith("-test"), id = (runner ? "c" : "b").repeat(64);
       objects.set(name, { Id: id, Name: `/${name}`, Config: { Labels: { ...labels(), ...(state.corruptLabel ? { "cyberdeck.attempt": randomUUID() } : {}) }, Image: image, User: "postgres" },
-        State: { Running: false, ExitCode: runner ? state.runnerExit : 0, OOMKilled: false },
+        State: { Running: false, ExitCode: runner ? state.runnerExit : 0, OOMKilled: false,
+          Status: "created", StartedAt: "0001-01-01T00:00:00Z", Pid: 0 },
         HostConfig: { Memory: Number(value("--memory")), MemorySwap: Number(value("--memory-swap")), NanoCpus: Number(value("--cpus")) * 1e9,
           PidsLimit: Number(value("--pids-limit")), Privileged: false, ReadonlyRootfs: true, NetworkMode: value("--network"),
           PidMode: "", IpcMode: "private", CapAdd: null, CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges"], PortBindings: null, Binds: null, Devices: [] },
@@ -48,11 +49,14 @@ function fakeEngine() {
     }
     const found = [...objects].find(([, item]) => item.Id === args.at(-1));
     if (command === "start" && found) {
+      if (state.startFails) throw new Error("logging driver initialization failed");
       const [name, item] = found; item.State.Running = !name.endsWith("-test"); item.State.OOMKilled = state.oom;
+      item.State.Status = item.State.Running ? "running" : "exited"; item.State.StartedAt = "2026-09-16T00:00:00Z";
+      item.State.Pid = item.State.Running ? 100 : 0;
       item.State.Health = { Status: state.healthy ? "healthy" : "starting" }; return item.Id;
     }
     if (command === "stop" && found) { found[1].State.Running = false; return found[1].Id; }
-    if (command === "logs") return "cyberdeck-integration-pass";
+    if (command === "logs") { if (state.logsUnavailable) throw new Error("log stream unavailable"); return "cyberdeck-integration-pass"; }
     if (command === "rm" || args[1] === "rm") {
       if (state.failRemove) throw new Error("engine lost while removing");
       objects.delete(found?.[0] ?? args.at(-1)!); return "";
@@ -88,6 +92,7 @@ describe("broker-owned integration services", () => {
     expect(creates).toHaveLength(2);
     for (const args of creates) {
       expect(args).toContain("--read-only"); expect(args).toContain("--pids-limit"); expect(args).toContain("--memory-swap");
+      expect(args).toContain("max-file=1"); expect(args).toContain("compress=false");
       expect(args).not.toContain("--publish"); expect(args.join(" ")).not.toContain("docker.sock");
     }
     expect(creates[1]?.join(" ")).toContain("rollback mismatch");
@@ -100,6 +105,19 @@ describe("broker-owned integration services", () => {
     expect(await f.backend.verifyTermination(held, evidence)).toBe(true);
     expect(await f.backend.verifyTermination({ ...held, reservationId: "sibling" }, evidence)).toBe(false);
     expect(await f.backend.verifyTermination(held, "wrong-hash")).toBe(false);
+  });
+  it("cleans an owned never-started container when logging initialization failed", async () => {
+    const f = await setup(), input = request(); f.state.startFails = true; f.state.logsUnavailable = true;
+    expect(await f.backend.run(input)).toMatchObject({ outcome: "infrastructure-error", cleanupComplete: true });
+    expect(f.objects.size).toBe(0); expect(f.admission.release).toHaveBeenCalledTimes(1);
+    expect(f.run.mock.calls.some(([args]) => args[2] === "logs")).toBe(false);
+    const manifest = JSON.parse(await readFile(join(f.directory, `${integrationNames(input).key}.json`), "utf8"));
+    expect(manifest.observations[0].logs).toBe("[container never started; no log stream]");
+  });
+  it("retains evidence and capacity if a previously started container has unreadable logs", async () => {
+    const f = await setup(); f.state.logsUnavailable = true;
+    expect(await f.backend.run(request())).toMatchObject({ outcome: "infrastructure-error", cleanupComplete: false });
+    expect(f.objects.size).toBeGreaterThan(0); expect(f.admission.release).not.toHaveBeenCalled();
   });
   it("refuses unpinned images and injected engine authority before touching Docker", async () => {
     const f = await setup();

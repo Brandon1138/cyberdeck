@@ -218,7 +218,13 @@ export class IntegrationServiceExecutor {
         const observation = manifest.observations.find(o => o.role === role);
         if (observation && observation.id !== current.Id) throw new Error("INTEGRATION_RECOVERY_IDENTITY_MISMATCH");
         if (!observation) {
-          let logs = (await engine.command(["logs", "--tail", "200", current.Id])).slice(-65536);
+          // Docker can reject the logging driver before the first task ever starts. There
+          // is then no log stream to retain; require all three independent state fields
+          // before skipping it. A stopped previously-running container still needs logs.
+          const neverStarted = current.State.Status === "created" && current.State.Pid === 0
+            && current.State.StartedAt === "0001-01-01T00:00:00Z";
+          let logs = neverStarted ? "[container never started; no log stream]"
+            : (await engine.command(["logs", "--tail", "200", current.Id])).slice(-65536);
           if (password) logs = logs.replaceAll(password, "[redacted]");
           manifest.observations.push({ role, id: current.Id, exitCode: current.State.ExitCode, oomKilled: current.State.OOMKilled, logs });
         }

@@ -48,7 +48,7 @@ export class EvaluatorEngine {
     return ["create", "--pull", "never", "--name", evaluatorName(state), ...labels, "--init", "--user", "1000:1000",
       "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--network", "none", "--restart", "no",
       "--memory", String(state.resource.demand.memoryBytes), "--memory-swap", String(state.resource.demand.memoryBytes), "--cpus", "0.5", "--pids-limit", "64",
-      "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=1",
+      "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=1", "--log-opt", "compress=false",
       "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=134217728", "--tmpfs", "/run/evaluation:rw,nosuid,nodev,noexec,size=16777216,mode=1777",
       "--mount", `type=bind,src=${source},dst=/run/input.json,readonly`, "--env", "HOME=/tmp/home", "--env", "PROMPTFOO_DISABLE_TELEMETRY=1",
       "--env", "PROMPTFOO_DISABLE_UPDATE=1", "--env", `NODE_OPTIONS=--max-old-space-size=${Math.floor(state.resource.demand.memoryBytes / 1024 ** 2 * 0.6)}`,

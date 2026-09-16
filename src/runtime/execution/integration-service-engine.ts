@@ -6,7 +6,8 @@ const labels = z.record(z.string(), z.string()).nullable();
 const ContainerSchema = z.object({
   Id: z.string().regex(/^[a-f0-9]{64}$/), Name: z.string(),
   Config: z.object({ Labels: labels, Image: z.string(), User: z.string() }),
-  State: z.object({ Running: z.boolean(), ExitCode: z.number().int(), OOMKilled: z.boolean(), Health: z.object({ Status: z.string() }).optional() }),
+  State: z.object({ Running: z.boolean(), ExitCode: z.number().int(), OOMKilled: z.boolean(), Health: z.object({ Status: z.string() }).optional(),
+    Status: z.string().optional(), StartedAt: z.string().optional(), Pid: z.number().int().nonnegative().optional() }),
   HostConfig: z.object({ Memory: z.number(), MemorySwap: z.number(), NanoCpus: z.number(), PidsLimit: z.number(),
     Privileged: z.boolean(), ReadonlyRootfs: z.boolean(), NetworkMode: z.string(), PidMode: z.string(), IpcMode: z.string(),
     CapAdd: z.array(z.string()).nullable(), CapDrop: z.array(z.string()).nullable(), SecurityOpt: z.array(z.string()).nullable(),

@@ -51,7 +51,7 @@ export function serviceContainerArgs(input: {
     "--pull", "never", "--init", "--user", "postgres", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
     "--pids-limit", String(limits.pids), "--cpus", String(limits.cpus), "--memory", String(limits.memoryBytes),
     "--memory-swap", String(limits.memoryBytes), "--network", names.network,
-    "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=1",
+    "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=1", "--log-opt", "compress=false",
     "--tmpfs", `/tmp:rw,nosuid,nodev,noexec,size=${recipe.tmpBytes}`, "--shm-size", String(recipe.tmpBytes)];
   if (runner) return [...common, "--tmpfs", `/var/lib/postgresql/data:rw,nosuid,nodev,noexec,size=${recipe.tmpBytes}`, "--env", "PGHOST=database", "--env", "PGPORT=5432", "--env", "PGUSER=cyberdeck",
     "--env", "PGDATABASE=cyberdeck", "--env", `PGPASSWORD=${password}`, "--env", "PGCONNECT_TIMEOUT=5",
