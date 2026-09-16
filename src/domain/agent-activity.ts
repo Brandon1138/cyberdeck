@@ -5,7 +5,7 @@ import { ControllerIdentitySchema, OwnershipOperationSchema } from "./worker-coo
 export const AgentActivityKindSchema = z.enum([
   "instruction.accepted", "instruction.queued", "instruction.rendered", "instruction.submitted", "instruction.acknowledged", "instruction.settled", "instruction.undelivered", "instruction.cancelled", "instruction.held",
   "worker.lifecycle", "worker.control", "worker.handoff", "execution.lifecycle", "provider.turn", "provider.response",
-  "tool.invocation", "tool.result", "worker.report", "capture.gap", "workspace.snapshot", "evaluation.result", "resource.summary", "resource.incident", "profile.settled", "job.settled",
+  "tool.invocation", "tool.result", "worker.report", "capture.gap", "workspace.snapshot", "evaluation.result", "resource.summary", "resource.incident", "profile.settled", "job.settled", "launch.settled",
 ]);
 export const AgentActivitySchema = z.object({
   schemaVersion: z.literal(1), eventId: z.uuid(), sequence: z.number().int().positive(),

@@ -11,6 +11,9 @@ export function evaluateEvidence(claim: EvaluationClaim, requiredChecks: readonl
   if (event.kind === "execution.lifecycle" && event.outcome === "failed") return { disposition: "infrastructure-error", reason: "execution-failed" };
   if (event.kind === "profile.settled" && event.outcome === "unknown") return { disposition: "infrastructure-error", reason: "profile-infrastructure-failure" };
   if (event.kind === "job.settled" && event.outcome === "unknown") return { disposition: "infrastructure-error", reason: "job-interrupted" };
+  if (event.kind === "launch.settled") return event.outcome === "failed"
+    ? { disposition: "infrastructure-error", reason: "launch-failed-before-provider" }
+    : { disposition: "unverified", reason: "launch-boundary-uncertain" };
   if (!manifest.complete || !requiredChecks.length || requiredChecks.some(id => manifest.checks.filter(c => c.id === id).length !== 1)) return { disposition: "unverified", reason: "missing-independent-evidence" };
   if (manifest.checks.some(c => c.source !== "host-verified" || !/^[a-f0-9]{64}$/.test(c.artifactHash))) return { disposition: "unverified", reason: "untrusted-check" };
   return { disposition: manifest.checks.filter(c => requiredChecks.includes(c.id)).every(c => c.passed) ? "verified-pass" : "verified-fail", reason: "independent-host-checks" };

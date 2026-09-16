@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "mode": "admitted-real-fixed-service-fixture",
+  "sourceSha": "9dde8c7764af8a2f9253dccafa549020a71afdd8",
+  "dirty": false,
+  "image": "sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3",
+  "suppliedConfigSha256": "872e9ed415dbe79b87bc894799f3beaa69a775cecbef3a5377c0ed78be59347d",
+  "effectiveResourceConfigSha256": "c7aec3834453a9a3f634fb6957c7e63b99c296be4c925b33f86966d2c60f8609",
+  "policyHash": "007e661ae610522a1553af1783f86197bed63dc5b0a7fb6e1ae9c419a5b9ae9a",
+  "node": "v24.18.0",
+  "startedAt": "2026-09-16T13:28:01.639Z",
+  "endedAt": "2026-09-16T13:28:12.183Z",
+  "outcome": "verified-pass",
+  "cleanupComplete": true,
+  "foreignInventoryUnchanged": true,
+  "sampleRows": 12,
+  "uniqueSamples": 3,
+  "sampledPeakConservativePhysicalBytes": 6249262616,
+  "finalReservedBytes": 0,
+  "observations": [
+    {
+      "role": "runner",
+      "id": "12c1f43f3365b6db7989144b2715e6c02c853872412dff3152120d6de6180824",
+      "exitCode": 0,
+      "oomKilled": false
+    },
+    {
+      "role": "service",
+      "id": "ce4aa7f58ca8a258cc2405feca5e8d09f7091ee0fd894afb1841b0d6c2ce3b21",
+      "exitCode": 0,
+      "oomKilled": false
+    }
+  ],
+  "artifactDirectory": "/private/tmp/cyberdeck-resource-integration-03",
+  "artifactHashes": {
+    "manifest.json": "cf16dd40f808303f4a38bd91b2930985fefb34ce5e821e46808203831e78e225",
+    "service-proof.json": "b00d3c5608f52952f7c2fb8e1712d9d8772cc17b3f43ed2115371f3e1be6bdfc",
+    "resource-health.json": "6997536aa077efc4040a82146a3f287bc4d6ced71ea3912fb032451c268b4dc0"
+  },
+  "priorFailure": {
+    "sourceSha": "4b51f27dabef8058c1defd3dd8b1094a3b649967",
+    "outcome": "infrastructure-error",
+    "reason": "Docker local logging compression rejected max-file=1 before task start",
+    "proofSha256": "3fd8128dcfab8b9b81dd0d2620bb8d9354e2f08ec3ca449880060df95e7e4c6c",
+    "recoverySourceSha": "9dde8c7764af8a2f9253dccafa549020a71afdd8",
+    "cleanupComplete": true,
+    "foreignInventoryRestored": true,
+    "finalReservedBytes": 0,
+    "recoverySha256": "f964da0c5fb923d517d63b3447d0600d686cc9919c34750c2cfd3eeb289c6db7"
+  },
+  "limitations": [
+    "operator-fixed fixture authority; production lease/RPC composition not proven",
+    "no concurrent coding fleet in this profile baseline",
+    "external Fleet and implementation roots explicitly supplied; no complete installation census",
+    "native polling cannot establish full descendant lifetime",
+    "three unique five-second physical samples are not a lifetime memory peak",
+    "not final integrated-candidate or complete W10 evidence",
+    "production lease/RPC and automatic evaluation composition not exercised"
+  ]
+}

@@ -11,12 +11,15 @@ import { TaskEvaluationExecutor } from "../execution/task-evaluation-executor.js
 import { OrbStackClient } from "../execution/orbstack-client.js";
 import type { PersistedJobState } from "../../control-plane/job-control-plane.js";
 import { auditTerminalJobs, repairTerminalJobProjections } from "../../orchestration/job-terminal-activity.js";
+import { auditTerminalLaunches, repairTerminalLaunchProjections, retireCapturedLaunches } from "../../orchestration/launch-terminal-activity.js";
+import type { SessionLaunchIntent, SessionLaunchIntentPort } from "../../domain/session-launch-intent.js";
 
 /** Capture is independent of evaluator availability. Missing objective evidence stays unverified. */
 export async function brokerEvaluationRuntime(options: {
   directory: string; instructionSourceId: string; activity: AgentActivityPort; instructions(): Promise<InstructionRecord[]>;
   instructionVersion?(): number;
   jobs?: { load(): Promise<PersistedJobState[]>; version(): number };
+  launches?: SessionLaunchIntentPort;
   execution?: { config: BrokerRuntimeConfig; resource: NonNullable<Awaited<ReturnType<typeof brokerResourceRuntime>>> };
 }) {
   const store = new TaskEvaluationStore(join(options.directory, "task-evaluations.sqlite"));
@@ -35,6 +38,9 @@ export async function brokerEvaluationRuntime(options: {
   } }, { id: "production-attempt", version: "1" });
   let jobRevision: number | undefined;
   let jobSnapshot: PersistedJobState[] = [];
+  const launches = options.launches ?? options.execution?.resource.launchIntents;
+  let launchRevision: number | undefined;
+  let launchSnapshot: SessionLaunchIntent[] = [];
   const replay = new TaskEvaluationReconciliationService(options.activity, store, service, {
     consumer: "production-attempt-v1", pageSize: 100, maxPages: 4,
     auditCanonicalCoverage: async () => {
@@ -50,7 +56,15 @@ export async function brokerEvaluationRuntime(options: {
       const version = options.jobs.version();
       if (jobRevision !== version) { jobSnapshot = await options.jobs.load(); jobRevision = version; }
       await repairTerminalJobProjections(store, options.activity, jobSnapshot);
-      return auditTerminalJobs(store, jobSnapshot);
+      const jobAudit = await auditTerminalJobs(store, jobSnapshot);
+      if (jobAudit.state !== "complete") return jobAudit;
+      if (!launches) return options.execution ? { state: "gap", reason: "canonical-launch-coverage-unavailable" } : { state: "complete" };
+      const launchVersion = launches.version();
+      if (launchRevision !== launchVersion) { launchSnapshot = launches.list(); launchRevision = launchVersion; }
+      await repairTerminalLaunchProjections(store, options.activity, launchSnapshot);
+      const launchAudit = auditTerminalLaunches(store, launchSnapshot);
+      if (launchAudit.state === "complete") await retireCapturedLaunches(store, launches);
+      return launchAudit;
     },
   });
   let startupReady = false;
@@ -78,7 +92,7 @@ export async function brokerEvaluationRuntime(options: {
   const abort = new AbortController();
   let lastSignature = "", auditedAt = 0, nextEvaluationAt = 0;
   const timer = setInterval(() => {
-    const signature = JSON.stringify([options.activity.replayBounds?.(), options.instructionVersion?.(), options.jobs?.version()]);
+    const signature = JSON.stringify([options.activity.replayBounds?.(), options.instructionVersion?.(), options.jobs?.version(), launches?.version()]);
     if (!pending && (signature !== lastSignature || Date.now() - auditedAt >= 60000)) {
       lastSignature = signature; auditedAt = Date.now();
       pending = reconcile().finally(() => { pending = undefined; });

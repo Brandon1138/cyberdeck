@@ -10,11 +10,11 @@ Policy target: 8 GiB total. No production configuration changes or broker restar
 | A measurements | in progress | Native libproc and cgroup adapters; 10-minute active baseline and separate Claude/Codex subscription footprint canaries (JSON summaries here). Idle/W1 calibration pending |
 | B efficiency | in progress | Native projection, semantic index and Fleet frame reuse committed; synthetic benchmarks in docs/evidence/resource-efficiency; live plateau/delta refresh incomplete |
 | C admission | in progress | Durable shared admission wired into session preparation/spawn; per-generation container envelopes, observed-budget holds, helper caps. Whole-VM upper-bound calibration, native lifetime cleanup remain open; all four native job adapters now use the shared gate |
-| D lifecycle / native / services | unverified | D3/D4 and D1 parking source integrated; durable parking composition wired; D2 refresh transport still pending. Real service attempt held by observed-budget; native/service success pending |
+| D lifecycle / native / services | partial service proof | Real fixed PostgreSQL service fixture passed after a logging/cleanup correction; production lease/RPC, concurrent fleet, native and refresh gates remain open |
 | E observability | partial proof | Fresh synthetic receipt matched through authenticated Zen session; see sentry-resource-probe.json. Durable monitor-to-activity bridge wired; final workload receipt pending |
 | F evaluation | unverified | Durable retention/replay, historical instruction outbox and broker capture composition implemented; admitted offline evaluator wired but image/live automatic final dispositions pending |
 | G operating package | unverified | Exact image/config, recovery and rollout pending |
-| H independent review | in progress | Clean e6cc020: 234 files / 2,585 tests, CI-equivalent source checks and isolated installed-package smoke passed. Subsequent review found queued interactive launch task loss; correction and final rerun pending |
+| H independent review | in progress | Clean e6cc020: 234 files / 2,585 tests, CI-equivalent source checks and isolated installed-package smoke passed. Queued launch correction integrated through 369001b; final follow-up review and exact rerun pending |
 | W0 idle 10 minutes | unverified | Live snapshot is active workload, not idle acceptance |
 | W1 eight authenticated workers x3 | unverified | No capacity claim from configured limits or thread count |
 | W2 two families | unverified | Shared policy and real fair service pending |
@@ -25,7 +25,7 @@ Policy target: 8 GiB total. No production configuration changes or broker restar
 | W7 evaluation load | unverified | Attempt reconciliation and queue progress pending |
 | W8 24-hour soak | unverified | Not started; cannot infer from unit tests |
 | W9 native | unverified | Unsigned simulator fixture plus representative project pending |
-| W10 services | capacity-held | Fixed service proof refused before provisioning under observed-budget; foreign inventory unchanged. Successful service test and fault cleanup pending |
+| W10 services | partial proof | Clean 9dde8c7 fixed SQL fixture succeeded under shared admission; failed-start recovery and scoped cleanup proved. Production lease/RPC, automatic evaluation and final concurrent fleet run pending |
 | Live activation | not performed | Original broker preserved; no production build/config/restart changes. Earlier isolated baseline broker safely retired after its active-session set was confirmed empty |
 | Physical M4 mini | pending hardware | Independent of MacBook delivery |
 
@@ -152,3 +152,41 @@ image build was attempted, and no VM/container restart was performed. The live b
 and Fleet 85652 retained their September 14 start identities. Current foreign-service state
 must be re-inspected once the Engine is available; older bracketed inventories are not a
 claim that external state stayed unchanged throughout the session.
+
+The operator restored OrbStack. Fresh read-only census at `2026-09-16T13:17:47.849Z`
+used the new VM birth identity and measured 6,375,214,136 bytes conservative physical usage
+with normal pressure and matching immediate inventories. This opened capacity for a serialized
+640 MiB service reservation; it is still not W1 feasibility evidence.
+
+The clean `4b51f27` service attempt failed before PostgreSQL started because Docker's local
+logging compression rejects `max-file=1`. Cleanup also retained the owned resources because
+that never-started container had no log stream. `7c32069` explicitly disables compression in
+service/evaluator arguments and permits evidence-preserving cleanup only with Docker's exact
+never-started state. Previously started containers still require their logs. All 58 focused
+service/evaluator tests passed. Recovery through the corrected executor restored the original
+foreign inventory and released the held reservation; no foreign object was stopped or removed.
+
+Clean proof leaf `9dde8c7764af8a2f9253dccafa549020a71afdd8` then passed actual PostgreSQL
+readiness and SQL rollback assertions from `2026-09-16T13:28:01.639Z` through
+`2026-09-16T13:28:12.183Z`. Both owned containers exited zero without OOM; scoped teardown
+completed, foreign inventory matched, and reserved bytes returned to zero. Three distinct
+five-second physical samples peaked at 6,249,262,616 bytes (about 5.82 GiB); this is a sampled
+peak, not a lifetime maximum. `integration-service-proof.json` records exact source, image,
+config/policy hashes, artifact hashes and preserved failure/recovery provenance. The fixture
+uses fixed operator authority, so production lease/RPC, automatic evaluation and final W10
+composition remain unverified.
+
+Queued interactive launches now persist private input and a public metadata-only receipt
+before capacity waiting. Recovery preserves the original identity/FIFO, checks canonical
+authority without replaying grants, and fences ambiguous launch boundaries. `369001b`
+adds durable terminal catalog-projection acknowledgement and a post-preparation authority
+recheck; 460 focused worker tests, TypeScript and architecture checks passed on the leaf.
+
+Task F follow-up captures cancelled/failed/interrupted initial-prompt launches as canonical
+attempts, without inventing instructions or grading infrastructure failures as model quality.
+Outbox ownership and the durable catalog projection are both required before private launch
+input retirement. Root tests cover startup after store reopen, automatic capture of later
+terminal launches, restart deduplication, and delayed catalog projection. The focused
+20-test evaluation suite and TypeScript passed; automatic real-container execution remains
+unverified. The first new timing check observed outbox capture before async retirement
+completed; it now waits for complete reconciliation and preserves the durability assertions.

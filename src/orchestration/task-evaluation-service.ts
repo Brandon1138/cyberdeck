@@ -18,7 +18,7 @@ export class TaskEvaluationService {
     const instruction = ["instruction.settled", "instruction.cancelled", "instruction.undelivered"].includes(event.kind);
     const turn = event.kind === "provider.turn" && ["succeeded", "failed", "cancelled"].includes(event.outcome) && !event.instructionId;
     const execution = event.kind === "execution.lifecycle" && ["failed", "cancelled"].includes(event.outcome) && !event.instructionId;
-    if (!instruction && !turn && !execution && event.kind !== "profile.settled" && event.kind !== "job.settled") return;
+    if (!instruction && !turn && !execution && event.kind !== "profile.settled" && event.kind !== "job.settled" && event.kind !== "launch.settled") return;
     // A current session snapshot is never evidence of a historical attempt's generation.
     if (!Number.isSafeInteger(event.generation) || event.generation! < 1) throw new Error("EVALUATION_GENERATION_UNKNOWN");
     const identity = instruction ? `instruction:${event.instructionId ?? event.eventId}` : `event:${event.eventId}`;
