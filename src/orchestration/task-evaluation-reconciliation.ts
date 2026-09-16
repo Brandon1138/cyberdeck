@@ -2,6 +2,7 @@ import type { AgentActivityPort } from "./agent-activity-port.js";
 import type { EvaluationReplayStorePort } from "./task-evaluation-ports.js";
 import type { TaskEvaluationService } from "./task-evaluation-service.js";
 import type { InstructionRecord } from "../domain/instruction.js";
+import type { LegacyEvaluationCoveragePort } from "./task-evaluation-legacy.js";
 
 export type EvaluationCoverageAudit = { state: "complete" } | { state: "gap"; reason: string };
 export interface EvaluationReplayHealth {
@@ -89,9 +90,9 @@ export class TaskEvaluationReconciliationService {
 
 /** Latest canonical instruction snapshots can detect a missing projection, but cannot recreate
  * its historical generation. The caller supplies a bounded/pageable journal reader. */
-export async function auditTerminalInstructions(
-  outbox: Pick<EvaluationReplayStorePort, "hasTerminalSource">,
-  records: AsyncIterable<{ id: string; status: string; updatedAt: string }> | Iterable<{ id: string; status: string; updatedAt: string }>,
+export async function auditTerminalInstructions<T extends { id: string; status: string; updatedAt: string }>(
+  outbox: Pick<EvaluationReplayStorePort, "hasTerminalSource"> & Partial<LegacyEvaluationCoveragePort>,
+  records: AsyncIterable<T> | Iterable<T>,
   maxRecords = 10000,
 ): Promise<EvaluationCoverageAudit> {
   if (!Number.isSafeInteger(maxRecords) || maxRecords < 1 || maxRecords > 100000) throw new Error("EVALUATION_AUDIT_LIMIT_INVALID");
@@ -99,7 +100,8 @@ export async function auditTerminalInstructions(
   for await (const record of records) {
     if (++count > maxRecords) return { state: "gap", reason: "canonical-instruction-audit-limit" };
     if (["completed", "cancelled", "undelivered"].includes(record.status)
-      && !outbox.hasTerminalSource(`instruction:${record.id}:${record.status}:${record.updatedAt}`))
+      && !outbox.hasTerminalSource(`instruction:${record.id}:${record.status}:${record.updatedAt}`)
+      && !outbox.hasLegacyTerminalSnapshot?.(record))
       return { state: "gap", reason: "canonical-instruction-projection-missing" };
   }
   return { state: "complete" };

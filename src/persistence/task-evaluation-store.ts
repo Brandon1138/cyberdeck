@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { TaskEvaluationIntentSchema, TaskEvaluationResultSchema, type TaskEvaluationIntent, type TaskEvaluationResult } from "../domain/task-evaluation.js";
 
 import { evidenceHash, type EvaluationEvidenceManifest, type EvaluationReplayCheckpoint } from "../orchestration/task-evaluation-ports.js";
+import { legacySnapshotHash, terminalInstructionSource, type LegacyInstructionSnapshot, type LegacyEvaluationMigration, type LegacyEvaluationDisposition } from "../orchestration/task-evaluation-legacy.js";
 export { evidenceHash, type EvaluationEvidenceManifest } from "../orchestration/task-evaluation-ports.js";
 export const evaluationKey = (intent: TaskEvaluationIntent): string => createHash("sha256").update(JSON.stringify([intent.attemptId, intent.rubricId, intent.rubricVersion])).digest("hex");
 export interface EvaluationClaim { key: string; token: string; expiresAt: number; intent: TaskEvaluationIntent; manifest: EvaluationEvidenceManifest }
@@ -58,6 +59,56 @@ export class TaskEvaluationStore {
   }
   hasTerminalSource(sourceKey: string): boolean {
     return Boolean(this.db.prepare("SELECT 1 FROM evaluation_sources WHERE source=? LIMIT 1").get(sourceKey));
+  }
+  legacyMigration(): LegacyEvaluationMigration | undefined {
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='evaluation_legacy_migration'").get()) return undefined;
+    const row = this.db.prepare("SELECT manifest FROM evaluation_legacy_migration WHERE singleton=1").get();
+    return row ? JSON.parse(String(row.manifest)) as LegacyEvaluationMigration : undefined;
+  }
+  /** Invoke before any admission, replay checkpoint, or new instruction writes at FIRST
+   * initialization. A single FULL transaction seals the allowlist including the empty case.
+   * Failure rolls back everything and MUST keep startup/admission closed. Restart never widens it. */
+  initializeLegacyTerminalSnapshot(sourceId: string, records: Iterable<LegacyInstructionSnapshot>, maxRecords = 10000): LegacyEvaluationMigration {
+    if (!sourceId || sourceId.length > 256 || !Number.isSafeInteger(maxRecords) || maxRecords < 1 || maxRecords > 100000)
+      throw new Error("EVALUATION_LEGACY_OPTIONS_INVALID");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const prior = this.legacyMigration();
+      if (prior) {
+        if (prior.sourceId !== sourceId) throw new Error("EVALUATION_LEGACY_SOURCE_CONFLICT");
+        this.db.exec("COMMIT"); return prior;
+      }
+      if (this.db.prepare("SELECT 1 FROM evaluation_checkpoints LIMIT 1").get()) throw new Error("EVALUATION_LEGACY_INITIALIZATION_TOO_LATE");
+      this.db.exec(`CREATE TABLE evaluation_legacy_migration (singleton INTEGER PRIMARY KEY CHECK(singleton=1), manifest TEXT NOT NULL);
+        CREATE TABLE evaluation_legacy_snapshots (source TEXT PRIMARY KEY, hash TEXT NOT NULL, result TEXT NOT NULL) WITHOUT ROWID;`);
+      let count = 0;
+      const hashes: string[] = [];
+      for (const record of records) {
+        if (++count > maxRecords) throw new Error("EVALUATION_LEGACY_SNAPSHOT_LIMIT");
+        if (!["completed", "cancelled", "undelivered"].includes(record.status)
+          || (record.attemptGeneration !== undefined && record.terminalActivity !== undefined)) continue;
+        const sourceKey = terminalInstructionSource(record), snapshotHash = legacySnapshotHash(record);
+        if (sourceKey.length > 1024) throw new Error("EVALUATION_LEGACY_SOURCE_INVALID");
+        const result: LegacyEvaluationDisposition = { sourceKey, snapshotHash, disposition: "unverified", reason: "legacy-terminal-attempt-identity-unavailable" };
+        this.db.prepare("INSERT INTO evaluation_legacy_snapshots VALUES (?,?,?)").run(sourceKey, snapshotHash, JSON.stringify(result));
+        hashes.push(`${sourceKey}:${snapshotHash}`);
+      }
+      const manifest: LegacyEvaluationMigration = { schemaVersion: 1, sourceId, snapshots: hashes.length,
+        snapshotHash: createHash("sha256").update(JSON.stringify([sourceId, hashes.sort()])).digest("hex") };
+      this.db.prepare("INSERT INTO evaluation_legacy_migration VALUES (1,?)").run(JSON.stringify(manifest));
+      this.db.exec("COMMIT"); return manifest;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  hasLegacyTerminalSnapshot(record: LegacyInstructionSnapshot): boolean {
+    if (!this.legacyMigration()) return false;
+    const row = this.db.prepare("SELECT hash FROM evaluation_legacy_snapshots WHERE source=?").get(terminalInstructionSource(record));
+    return row?.hash === legacySnapshotHash(record);
+  }
+  legacyDispositions(afterSource = "", limit = 100): LegacyEvaluationDisposition[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("EVALUATION_PAGE_LIMIT");
+    if (!this.legacyMigration()) return [];
+    return this.db.prepare("SELECT result FROM evaluation_legacy_snapshots WHERE source>? ORDER BY source LIMIT ?").all(afterSource, limit)
+      .map(row => JSON.parse(String(row.result)) as LegacyEvaluationDisposition);
   }
   checkpoint(consumer: string): EvaluationReplayCheckpoint | undefined {
     const row = this.db.prepare("SELECT source,sequence FROM evaluation_checkpoints WHERE consumer=?").get(consumer);

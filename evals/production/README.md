@@ -1,5 +1,25 @@
 # Production evaluation
 
+## Historical instruction migration
+
+Before the first evaluation replay or new instruction admission, initialize
+`store.initializeLegacyTerminalSnapshot(sourceId, fullInstructionSnapshot)`. The installation
+and canonical instruction journal identity determine `sourceId`. The caller must hold startup
+closed until this FULL transaction commits. Failure, including disk exhaustion or snapshot
+limits, is backpressure; it is not permission to begin accepting new work and retry later with
+a larger historical allowlist.
+
+The transaction seals the exact preexisting terminal records missing historical generation or
+terminal projection, including the empty set. It retains full-snapshot SHA-256 identities and
+explicit `unverified` migration dispositions. It records snapshot counts, never inferred attempt
+counts, generations, provider/model metadata or quality scores. These rows cannot be claimed by
+the evaluator. `legacyDispositions` exposes bounded pages for inspection; no rows are deleted.
+Changes to any snapshot field, newly terminal records, and future missing projections still
+fail the canonical audit. Restart only reads the sealed set and refuses a changed source identity.
+Initialization after a replay checkpoint already exists fails closed; migrating an installation
+that has already enabled replay requires a separately reviewed frozen historical boundary.
+
+
 The broker records intents through `TaskEvaluationService` after canonical activity fsync.
 Startup must replay retained canonical activity and recovered instruction terminal receipts;
 the service consumes an async iterator one event at a time. Failed enqueue is backpressure,
