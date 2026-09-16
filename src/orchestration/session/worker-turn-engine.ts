@@ -140,6 +140,15 @@ export class WorkerTurnEngine {
     return this.canonicalTurnCount;
   }
 
+  /** Canonical settlement guard for parking; an idle/done projection alone is insufficient. */
+  parkingState(): { revision: string; settled: boolean } {
+    return { revision: `${this.observationEpoch}:${this.observationRevision}:${this.activityRevision}`,
+      settled: !this.terminalFinalizing && !this.awaitingResumeReady && !this.suppressSemanticTurns
+        && this.pendingTurnCaptures.size === 0 && this.pendingTurnCommit === undefined
+        && this.turnCaptureOwner === undefined && this.armedScreenReplay === undefined
+        && this.deferredScreenCompletionTarget === undefined && this.rendered.length === 0 };
+  }
+
   /**
    * Best token reading currently exposed by an interactive provider.
    *

@@ -10,6 +10,7 @@ import {
 } from "./session-registry-ports.js";
 import {
   requireInteractiveInput,
+  requireParkingAvailable,
   requireSessionRuntime,
   requireTerminalFinalizationComplete,
   updateAttachmentState,
@@ -47,6 +48,7 @@ export class SessionIoSurface {
     failed: FailureSink = () => {},
   ): Promise<Buffer> {
     const runtime = this.catalog.requireRuntime(sessionId);
+    requireParkingAvailable(runtime);
     requireTerminalFinalizationComplete(runtime);
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active; resume it before attaching");
@@ -119,10 +121,13 @@ export class SessionIoSurface {
     requireInteractiveInput(runtime);
     const adapter = this.catalog.requireAdapter(runtime.record.provider);
     const data = adapter.submitInput?.(message, runtime.record) ?? Buffer.from(`${message}\n`);
-    runtime.turns.resetStallObservation();
-    await this.catalog.appendTranscript(sessionId, "prompt", "human", message, {});
-    await this.catalog.setAttention(runtime, "working", true);
-    await this.write(sessionId, clientId, data);
+    runtime.parkingInputOperations = (runtime.parkingInputOperations ?? 0) + 1;
+    try {
+      runtime.turns.resetStallObservation();
+      await this.catalog.appendTranscript(sessionId, "prompt", "human", message, {});
+      await this.catalog.setAttention(runtime, "working", true);
+      await this.write(sessionId, clientId, data);
+    } finally { runtime.parkingInputOperations--; }
   }
 
   /**
@@ -148,6 +153,10 @@ export class SessionIoSurface {
   ): Promise<InstructionDelivery> {
     this.catalog.assertMayConsume(sessionId);
     const runtime = this.catalog.requireRuntime(sessionId);
+    if (runtime.parkingClaim || runtime.parkingStopped) {
+      runtime.parkingInput?.();
+      return { state: "queued", hold: "provider-busy", at: new Date().toISOString() };
+    }
     if (runtime.record.executionState === "active" && runtime.controller !== undefined) {
       throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
     }
@@ -201,6 +210,7 @@ export class SessionIoSurface {
 
   resize(sessionId: string, clientId: string | undefined, cols: number, rows: number): void {
     const runtime = this.catalog.requireRuntime(sessionId);
+    requireParkingAvailable(runtime);
     requireTerminalFinalizationComplete(runtime);
     if (runtime.record.executionState !== "active") {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Session is not active");

@@ -99,6 +99,11 @@ export interface RuntimeSession {
   terminalFinalizing?: boolean;
   /** Serializes resume ownership before the first asynchronous turn-settlement boundary. */
   resuming?: boolean;
+  /** Broker parking fence; held input stays in the existing durable instruction queue. */
+  parkingClaim?: string;
+  parkingStopped?: boolean;
+  parkingInput?: () => void;
+  parkingInputOperations?: number;
 }
 
 /**
