@@ -102,8 +102,13 @@ const PROVIDER_KEYS: Readonly<Record<string, readonly string[]>> = {
  * Remote Control belongs to the providers' first-party account sessions. The operator routes
  * workers through local compression/headroom proxies but drives orchestrators from a phone, so
  * orchestrator launches go direct while every other role keeps inherited provider routing.
- * Claude also launches orchestrators with `--setting-sources project,local`, so user settings
- * cannot re-inject its dropped value.
+ *
+ * Scrubbing the process environment is necessary, not sufficient. Claude applies the `env` block
+ * of every admitted settings file over `process.env`, and `--setting-sources project,local` still
+ * admits `<cwd>/.claude/settings.json`, which for an orchestrator spawned in `$HOME` *is* the
+ * operator's user settings file, proxy URL included. `claudeLaunchSettings` closes that hole by
+ * pinning the first-party endpoint from command-line scope; this list stays so a scrubbed value
+ * is never what the pin has to fight.
  */
 const ORCHESTRATOR_WITHHELD_KEYS = [
   "ANTHROPIC_BASE_URL",

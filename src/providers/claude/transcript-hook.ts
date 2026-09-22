@@ -26,18 +26,28 @@ export interface ClaudeTranscriptHookCommand {
  * and neither is inferred from the other.
  */
 export function claudeTranscriptHookSettings(command: ClaudeTranscriptHookCommand): string {
-  return JSON.stringify({
-    hooks: {
-      SessionStart: [{
-        matcher: CLAUDE_TRANSCRIPT_HOOK_MATCHER,
-        hooks: [{
-          type: "command",
-          command: claudeTranscriptHookCommandLine(command),
-          timeout: CLAUDE_TRANSCRIPT_HOOK_TIMEOUT_SECONDS,
-        }],
+  return JSON.stringify({ hooks: claudeTranscriptHooks(command) });
+}
+
+/** The `hooks` block alone, for composition into one launch settings file. */
+export function claudeTranscriptHooks(command: ClaudeTranscriptHookCommand): ClaudeTranscriptHooks {
+  return {
+    SessionStart: [{
+      matcher: CLAUDE_TRANSCRIPT_HOOK_MATCHER,
+      hooks: [{
+        type: "command",
+        command: claudeTranscriptHookCommandLine(command),
+        timeout: CLAUDE_TRANSCRIPT_HOOK_TIMEOUT_SECONDS,
       }],
-    },
-  });
+    }],
+  };
+}
+
+export interface ClaudeTranscriptHooks {
+  SessionStart: Array<{
+    matcher: string;
+    hooks: Array<{ type: "command"; command: string; timeout: number }>;
+  }>;
 }
 
 export function claudeTranscriptHookCommandLine(command: ClaudeTranscriptHookCommand): string {

@@ -21,7 +21,11 @@ import {
   CLAUDE_ORCHESTRATOR_TOOL_DENIALS,
   CLAUDE_NO_SUBAGENT_ENV,
 } from "./claude/no-subagents.js";
-import { claudeTranscriptHookSettings } from "./claude/transcript-hook.js";
+import { claudeLaunchSettings } from "./claude/launch-settings.js";
+import type { ClaudeTranscriptHookCommand } from "./claude/transcript-hook.js";
+
+/** One `--settings` file per session: transcript hook and, for orchestrators, the endpoint pin. */
+const LAUNCH_SETTINGS_FILE = "launch-settings.json";
 
 export interface ClaudeProviderAdapterOptions extends SessionLaunchFilesOptions {
   mcp?: CyberdeckMcpLaunch;
@@ -92,7 +96,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     this.addOrchestratorIsolation(args, session);
     this.addCyberdeckMcp(args, session);
     this.useMcpConfigFile(args, session);
-    this.addTranscriptHook(args, session);
+    this.addLaunchSettings(args, session);
     if (initialPrompt !== undefined) {
       args.push("--", initialPrompt);
     }
@@ -133,7 +137,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     this.addOrchestratorIsolation(args, session);
     this.addCyberdeckMcp(args, session);
     this.useMcpConfigFile(args, session);
-    this.addTranscriptHook(args, session);
+    this.addLaunchSettings(args, session);
     return {
       executable: "claude",
       args,
@@ -196,16 +200,12 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
         this.options,
       ));
     }
-    if (this.transcriptHookInstallable()) {
+    const launchSettings = this.launchSettings(session);
+    if (launchSettings !== undefined) {
       writes.push(writeSessionLaunchFile(
         session.id,
-        "transcript-hook-settings.json",
-        claudeTranscriptHookSettings({
-          nodePath: this.options.mcp!.nodePath,
-          cliPath: this.options.mcp!.cliPath,
-          sessionId: session.id,
-          stateDirectory: this.options.stateDirectory!,
-        }),
+        LAUNCH_SETTINGS_FILE,
+        launchSettings,
         this.options,
       ));
     }
@@ -321,13 +321,32 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
    * `--settings` *adds* a settings source, so the operator's own hooks still run. It is emitted for
    * every session kind, including a top-level one with no MCP server: transcript capture is not an
    * orchestration feature.
+   *
+   * The same file carries an orchestrator's first-party `ANTHROPIC_BASE_URL` pin, so an
+   * orchestrator is launched with `--settings` even when no transcript hook is installable. See
+   * `claudeLaunchSettings` for why the pin lives in command-line scope and nowhere lower.
    */
-  private addTranscriptHook(args: string[], session: SessionRecord): void {
-    if (!this.transcriptHookInstallable()) return;
-    args.push(
-      "--settings",
-      sessionLaunchFilePath(session.id, "transcript-hook-settings.json", this.options),
-    );
+  private addLaunchSettings(args: string[], session: SessionRecord): void {
+    if (this.launchSettings(session) === undefined) return;
+    args.push("--settings", sessionLaunchFilePath(session.id, LAUNCH_SETTINGS_FILE, this.options));
+  }
+
+  private launchSettings(session: SessionRecord): string | undefined {
+    return claudeLaunchSettings({
+      ...(this.transcriptHookInstallable()
+        ? { transcriptHook: this.transcriptHookCommand(session) }
+        : {}),
+      orchestrator: session.kind === "orchestrator",
+    });
+  }
+
+  private transcriptHookCommand(session: SessionRecord): ClaudeTranscriptHookCommand {
+    return {
+      nodePath: this.options.mcp!.nodePath,
+      cliPath: this.options.mcp!.cliPath,
+      sessionId: session.id,
+      stateDirectory: this.options.stateDirectory!,
+    };
   }
 
   private transcriptHookInstallable(): boolean {
