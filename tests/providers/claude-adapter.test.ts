@@ -215,6 +215,72 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(adapter.buildLaunchSpec(session({ kind: "worker" })).args).not.toContain("--settings");
   });
 
+  it("pins an orchestrator to the first-party endpoint from command-line scope", async () => {
+    // Scrubbing ANTHROPIC_BASE_URL from the process environment is not enough: an orchestrator
+    // spawned in $HOME reads ~/.claude/settings.json as its *project* file, which
+    // `--setting-sources project,local` admits, and Claude applies that file's `env` over the
+    // scrubbed value. Command-line settings outrank every admitted scope, so the pin goes there,
+    // and it goes there even when no transcript hook is installable.
+    const directory = tempDir();
+    const record = session({ kind: "orchestrator" });
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      mcpAllowlist: { allowlistPath: join(directory, "no-allowlist.json") },
+    });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+
+    const settingsPath = spec.args[spec.args.indexOf("--settings") + 1]!;
+    expect(adapter.buildResumeSpec(record).args).toContain(settingsPath);
+    expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toEqual({
+      env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" },
+    });
+    expect(spec.env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("carries the endpoint pin and the transcript hook in one settings file", async () => {
+    const directory = tempDir();
+    const stateDirectory = tempDir();
+    const record = session({ kind: "orchestrator" });
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      stateDirectory,
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      mcpAllowlist: { allowlistPath: join(directory, "no-allowlist.json") },
+    });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+
+    const settingsPath = spec.args[spec.args.indexOf("--settings") + 1]!;
+    expect(spec.args.filter((arg) => arg === "--settings")).toHaveLength(1);
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+      env: Record<string, string>;
+      hooks: { SessionStart: unknown[] };
+    };
+    expect(settings.env).toEqual({ ANTHROPIC_BASE_URL: "https://api.anthropic.com" });
+    expect(settings.hooks.SessionStart).toHaveLength(1);
+  });
+
+  it("leaves a worker's endpoint routing to its environment", async () => {
+    // Workers keep the operator's proxy; only the transcript hook reaches their settings file.
+    const directory = tempDir();
+    const record = session({ kind: "worker" });
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      stateDirectory: tempDir(),
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      mcpAllowlist: { allowlistPath: join(directory, "no-allowlist.json") },
+    });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+
+    const settingsPath = spec.args[spec.args.indexOf("--settings") + 1]!;
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as { env?: unknown };
+    expect(settings.env).toBeUndefined();
+  });
+
   it("merges allowlisted operator servers into an orchestrator's exclusive config", async () => {
     const directory = tempDir();
     const allowlistPath = join(directory, "orchestrator-mcp.json");

@@ -431,6 +431,11 @@ describe("ClaudeProviderAdapter", () => {
       "--mcp-config",
       expect.stringContaining(record.id),
       "--strict-mcp-config",
+      // An orchestrator is always launched with command-line settings: they pin the first-party
+      // endpoint above whatever `<cwd>/.claude/settings.json` declares, so `/rc` survives a
+      // home-directory cwd. No state directory here, so the file carries no transcript hook.
+      "--settings",
+      expect.stringContaining(`${record.id}/launch-settings.json`),
     ]);
   });
 });
