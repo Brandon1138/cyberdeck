@@ -690,4 +690,3 @@ export async function pruneLegacyTranscript(
     throw error;
   }
 }
-
