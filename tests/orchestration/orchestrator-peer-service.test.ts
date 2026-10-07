@@ -268,6 +268,17 @@ describe("OrchestratorPeerService", () => {
     expect(MAX_LIVE_PEERS_PER_CREATOR).toBe(2);
   });
 
+  it("does not count an errored peer whose dead process still has no exit code", async () => {
+    const errored = { ...actorRecord, id: OTHER_PEER, executionState: "errored" as const, exitCode: null };
+    const { service } = harness({
+      bindings: [peerBinding(OTHER_PEER)],
+      records: [errored],
+      maxLivePeers: 1,
+    });
+
+    await expect(service.create(request)).resolves.toMatchObject({ outcome: "CREATED" });
+  });
+
   it("does not count peers another orchestrator created", async () => {
     const live = { ...actorRecord, id: OTHER_PEER };
     const { service } = harness({

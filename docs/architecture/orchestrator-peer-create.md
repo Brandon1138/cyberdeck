@@ -107,8 +107,10 @@ These rules live in `OrchestratorPeerService`, never in the prompt.
    when it carries the same `mutationId`.
 8. **The caller cannot name its actor.** The MCP server drops any `actorSessionId` argument and
    injects the identity it was launched for, so a peer cannot act with its creator's grant.
-9. **A deleted peer counts as terminal.** A binding whose session the registry no longer knows was
-   deleted by the operator; it does not hold a slot forever.
+9. **Live means running.** A peer counts against the cap only while its execution state is
+   `starting` or `active`. An `errored` session keeps `exitCode: null` while its dead process
+   lingers and must not hold a slot; neither does a deleted peer, whose session the registry no
+   longer knows.
 
 ## Why the grant invariant holds
 

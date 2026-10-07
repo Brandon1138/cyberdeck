@@ -355,17 +355,19 @@ export class OrchestratorPeerService {
   }
 
   /**
-   * Peers this creator asked for whose provider process has not ended. A binding whose session the
-   * registry no longer knows was deleted by the operator, which is terminal; it is not a peer that
-   * is still starting, because creates from one actor are serialized and the binding is written
-   * inside the launch the registry already holds a record for.
+   * Peers this creator asked for that are still running. Live means the execution state says so:
+   * an `errored` session keeps `exitCode: null` while its unusable process lingers, so judging by
+   * the exit code alone would let two errored peers hold their creator's slots forever. A binding
+   * whose session the registry no longer knows was deleted by the operator, which is terminal; it
+   * is not a peer that is still starting, because creates from one actor are serialized and the
+   * binding is written inside the launch the registry already holds a record for.
    */
   private async livePeerIds(creator: string): Promise<string[]> {
     const bindings = await this.deps.bindings.list();
     return bindings
       .filter((binding) => binding.createdBy?.sessionId === creator)
       .map((binding) => binding.sessionId)
-      .filter((sessionId) => this.sessionRecord(sessionId)?.exitCode === null);
+      .filter((sessionId) => isLiveSession(this.sessionRecord(sessionId)));
   }
 
   private sessionRecord(sessionId: string): SessionRecord | undefined {
@@ -393,4 +395,9 @@ export class OrchestratorPeerService {
 
 function replayKey(request: ParsedCreate): string {
   return `${request.actorSessionId}:${request.mutationId}`;
+}
+
+function isLiveSession(record: SessionRecord | undefined): boolean {
+  if (record === undefined || record.exitCode !== null) return false;
+  return record.executionState === "active" || record.executionState === "starting";
 }
