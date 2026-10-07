@@ -10,7 +10,16 @@ const WORKER = "22222222-2222-4222-8222-222222222222";
 const SOCKET = "/tmp/cyberdeck-test.sock";
 
 function context(transport: McpBrokerTransport): McpServerContext {
-  return { identity: { actorSessionId: ACTOR, brokerSocketPath: SOCKET }, transport };
+  // The notice piggyback asks the broker after every tool call; answer it empty here so the
+  // routing assertions below see only the method each tool maps to.
+  return {
+    identity: { actorSessionId: ACTOR, brokerSocketPath: SOCKET },
+    transport: {
+      request: <T,>(method: string, params: unknown): Promise<T> => method === "agent.notifications.notice"
+        ? Promise.resolve(undefined as T)
+        : transport.request<T>(method, params),
+    },
+  };
 }
 
 async function call(

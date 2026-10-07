@@ -181,6 +181,24 @@ export class InstructionQueue {
   }
 
   /**
+   * Withdraw one instruction that the provider has not been shown yet.
+   *
+   * `docs/architecture/worker-truth.md` allows `accepted|queued --withdrawn--> cancelled` and
+   * nothing else: a rendered payload is bytes in a composer and cannot be unwritten. The broker's
+   * notification wake uses this when the orchestrator started a turn on its own before the wake
+   * was written, so the same notice never arrives twice. Any other state is returned unchanged.
+   */
+  withdraw(targetSessionId: string, messageId: string): Promise<InstructionRecord | undefined> {
+    return this.serialize(targetSessionId, async () => {
+      const record = (await this.store.list(targetSessionId))
+        .find((candidate) => candidate.messageId === messageId);
+      if (record === undefined) return undefined;
+      if (record.status !== "accepted" && record.status !== "queued") return record;
+      return this.persistState(record, "cancelled", {});
+    });
+  }
+
+  /**
    * Carry a broker-observed lifecycle step onto the durable record.
    *
    * The broker is the only thing that can see submission and completion, and it reports them long

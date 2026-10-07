@@ -174,3 +174,62 @@ describe("InstructionQueue", () => {
     });
   });
 });
+
+describe("InstructionQueue.withdraw", () => {
+  function harness(initial: InstructionRecord[]) {
+    const records = new Map(initial.map((record) => [record.id, record]));
+    const sessions = {
+      get: vi.fn(() => ({ id: TARGET, cwd: "/repo" } as SessionRecord)),
+      onControllerReleased: vi.fn(() => () => undefined),
+      onDeliveryBoundary: vi.fn(() => () => undefined),
+      onInstructionState: vi.fn(() => () => undefined),
+      submitInstruction: vi.fn(),
+    } satisfies SessionInstructionPort;
+    const queue = new InstructionQueue(
+      sessions,
+      { findBySessionId: vi.fn(async () => binding) } satisfies OrchestratorBindingReader,
+      {
+        put: vi.fn(async (record: InstructionRecord) => { records.set(record.id, record); }),
+        list: vi.fn(async (target?: string) => [...records.values()].filter((record) => target === undefined || record.targetSessionId === target)),
+      } satisfies InstructionRepository,
+    );
+    return { queue, records };
+  }
+
+  function record(status: InstructionRecord["status"], messageId = crypto.randomUUID()): InstructionRecord {
+    const now = "2026-10-07T10:00:00.000Z";
+    return {
+      id: crypto.randomUUID(),
+      actorSessionId: ACTOR,
+      targetSessionId: TARGET,
+      message: "notice",
+      status,
+      createdAt: now,
+      updatedAt: now,
+      messageId,
+      hop: 0,
+      brokerOwned: true,
+    };
+  }
+
+  it("cancels an accepted or queued instruction and leaves every other state alone", async () => {
+    const accepted = record("accepted");
+    const queued = record("queued");
+    const rendered = record("rendered");
+    const { queue, records } = harness([accepted, queued, rendered]);
+    await expect(queue.withdraw(TARGET, accepted.messageId)).resolves.toMatchObject({ status: "cancelled" });
+    await expect(queue.withdraw(TARGET, queued.messageId)).resolves.toMatchObject({ status: "cancelled" });
+    await expect(queue.withdraw(TARGET, rendered.messageId)).resolves.toMatchObject({ status: "rendered" });
+    await expect(queue.withdraw(TARGET, crypto.randomUUID())).resolves.toBeUndefined();
+    expect(records.get(rendered.id)?.status).toBe("rendered");
+    expect(records.get(accepted.id)?.status).toBe("cancelled");
+  });
+
+  it("is idempotent: a second withdrawal returns the cancelled record unchanged", async () => {
+    const accepted = record("accepted");
+    const { queue } = harness([accepted]);
+    const first = await queue.withdraw(TARGET, accepted.messageId);
+    const second = await queue.withdraw(TARGET, accepted.messageId);
+    expect(second).toEqual(first);
+  });
+});
