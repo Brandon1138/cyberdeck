@@ -11,8 +11,13 @@ import {
 import type { Readable, Writable } from "node:stream";
 import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
 import { diagnoseAgent } from "../orchestration/agent-diagnostics.js";
+import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
+import { PEER_BRIEF_MAX_CHARS } from "../orchestration/orchestrator-peer-service.js";
 import { readWorkerCapabilities } from "../orchestration/worker-capabilities.js";
 import { CYBERDECK_VERSION } from "../broker/version.js";
+
+/** The providers the orchestrator catalog can host the Cyberdeck MCP server in. */
+const ORCHESTRATOR_PROVIDER_IDS = ORCHESTRATOR_CATALOG.map(({ provider }) => provider);
 
 export interface McpBrokerTransport {
   request<T = unknown>(method: string, params: unknown): Promise<T>;
@@ -200,6 +205,26 @@ const TOOLS = [
         reason: { type: "string", minLength: 1, maxLength: 500 },
       },
       required: ["targetSessionId", "expectedGeneration", "reason"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_orchestrator_create",
+    description: "Start a peer orchestrator and return its sessionId. The peer launches detached with the provider's Remote Control surface, so the operator can open it from their phone; the broker does not return the link. The peer receives your grant minus orchestrator.create (it cannot create peers), a workspace caller may only create in its own cwd, and at most 2 of your peers may be live at once (PEER_LIMIT names them). Refusals are outcomes: DENIED, PEER_LIMIT, SELECTION_UNSUPPORTED, LAUNCH_FAILED. An optional brief is enqueued as the peer's first instruction; reuse mutationId to retry idempotently.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", enum: [...ORCHESTRATOR_PROVIDER_IDS] },
+        model: { type: "string", minLength: 1 },
+        effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+        cwd: { type: "string", minLength: 1 },
+        scope: { type: "string", enum: ["fleet", "workspace"], default: "fleet" },
+        name: { type: "string", minLength: 1, maxLength: 120 },
+        brief: { type: "string", minLength: 1, maxLength: PEER_BRIEF_MAX_CHARS },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+        mutationId: { type: "string", minLength: 1, maxLength: 200 },
+      },
+      required: ["provider", "model", "cwd", "reason"],
       additionalProperties: false,
     },
   },
@@ -844,6 +869,9 @@ async function callTool(
   }
   if (name === "cyberdeck_orchestrator_force_stop") {
     return transport.request("agent.orchestrator.forceStop", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_orchestrator_create") {
+    return transport.request("agent.orchestrator.create", { actorSessionId, ...args });
   }
   if (name === "cyberdeck_threads_list") {
     return transport.request("agent.thread.list", { actorSessionId, ...args });

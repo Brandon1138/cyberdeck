@@ -19,6 +19,11 @@ describe("CyberdeckCapabilitySchema", () => {
     expect(CyberdeckCapabilitySchema.options).not.toContain("worker.start.cursor");
     expect(CyberdeckCapabilitySchema.options).toContain("worker.start.fable");
   });
+
+  // MIK-256: peer creation is a named capability so the operator can switch it per scope.
+  it("names the peer-creation capability", () => {
+    expect(CyberdeckCapabilitySchema.options).toContain("orchestrator.create");
+  });
 });
 
 describe("CapabilityGrantSchema", () => {

@@ -43,6 +43,9 @@ export const BrokerEventTypeSchema = z.enum([
   "scout.canary.failed",
   "orchestrator.stop.requested",
   "orchestrator.stop.result",
+  /** An orchestrator asked the broker for a peer. `data` names the creator, the selection and the reason. */
+  "orchestrator.create.requested",
+  "orchestrator.create.result",
   // Control-plane job/delegation/result/report events. Event `data` carries neutral identifiers and
   // outcome metadata only — never the instruction (prompt) body or any secret.
   "job.submitted",

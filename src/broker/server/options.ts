@@ -5,6 +5,7 @@ import type { JobControlPlane } from "../../control-plane/job-control-plane.js";
 import type { ControlPlaneRuntime } from "../../control-plane/runtime.js";
 import type { LocalWorkerTelemetrySnapshot } from "../../domain/local-worker-control.js";
 import type { AgentControlService } from "../../orchestration/agent-control-service.js";
+import type { OrchestratorPeerService } from "../../orchestration/orchestrator-peer-service.js";
 import type { InstructionQueue } from "../../orchestration/instruction-queue.js";
 import type { LocalWorkerControlService } from "../../orchestration/local-worker-control-service.js";
 import type { OrchestratorManager } from "../../orchestration/orchestrator-manager.js";
@@ -51,6 +52,7 @@ export interface BrokerServerOptions {
   transcripts?: ThreadTranscriptReadPort;
   orchestrators?: OrchestratorManager;
   agentControl?: AgentControlService;
+  orchestratorPeers?: OrchestratorPeerService;
   instructions?: InstructionQueue;
   workflows?: WorkflowService;
   controlPlane?: JobControlPlane;

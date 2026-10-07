@@ -72,6 +72,7 @@ describe("Cyberdeck MCP server", () => {
           expect.objectContaining({ name: "cyberdeck_orchestrator_inspect" }),
           expect.objectContaining({ name: "cyberdeck_orchestrator_stop" }),
           expect.objectContaining({ name: "cyberdeck_orchestrator_force_stop" }),
+          expect.objectContaining({ name: "cyberdeck_orchestrator_create" }),
           expect.objectContaining({ name: "cyberdeck_signal_exception" }),
           expect.objectContaining({ name: "cyberdeck_report_progress" }),
           expect.objectContaining({ name: "cyberdeck_respond_checkpoint" }),
@@ -245,6 +246,43 @@ describe("Cyberdeck MCP server", () => {
       expectedGeneration: 4,
       reason: "stale controller",
     });
+  });
+
+  it("routes peer-orchestrator creation through the broker with the caller's actor identity", async () => {
+    const request = vi.fn(async () => ({ outcome: "CREATED" }));
+    await handleMcpRequest(context({ request: request as never }), {
+      jsonrpc: "2.0",
+      id: "create-orc",
+      method: "tools/call",
+      params: {
+        name: "cyberdeck_orchestrator_create",
+        arguments: {
+          provider: "codex",
+          model: "gpt-6.1-sol",
+          cwd: "/repo/two",
+          brief: "pick up PR #61",
+          reason: "continue from the phone",
+        },
+      },
+    });
+
+    expect(request).toHaveBeenCalledWith("agent.orchestrator.create", {
+      actorSessionId: ACTOR,
+      provider: "codex",
+      model: "gpt-6.1-sol",
+      cwd: "/repo/two",
+      brief: "pick up PR #61",
+      reason: "continue from the phone",
+    });
+    const listed = (await handleMcpRequest(context({ request: vi.fn() }), {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    }))?.result as { tools: Array<{ name: string; inputSchema: JsonSchema }> };
+    const create = listed.tools.find(({ name }) => name === "cyberdeck_orchestrator_create");
+    // Only providers the orchestrator catalog can host the MCP server in; never Antigravity.
+    expect(create?.inputSchema.properties?.provider?.enum).toEqual(["codex", "claude", "cursor"]);
+    expect(create?.inputSchema.required).toEqual(["provider", "model", "cwd", "reason"]);
   });
 
   it("reads one semantic thread event per page by default", async () => {
@@ -531,7 +569,7 @@ describe("Cyberdeck MCP server", () => {
     const tools = (response?.result as { tools: Array<{ name: string }> }).tools;
     expect(tools.map(({ name }) => name)).toContain("cyberdeck_diagnose");
     expect(tools.map(({ name }) => name)).toContain("cyberdeck_scout_read");
-    expect(tools).toHaveLength(25);
+    expect(tools).toHaveLength(26);
   });
 
   it("distinguishes an orphaned scope from an unbound actor by code and remedy", async () => {
