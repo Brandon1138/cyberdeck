@@ -274,6 +274,25 @@ describe("Cyberdeck MCP server", () => {
       brief: "pick up PR #61",
       reason: "continue from the phone",
     });
+    // A peer naming its creator's id would otherwise act with the creator's grant.
+    await handleMcpRequest(context({ request: request as never }), {
+      jsonrpc: "2.0",
+      id: "create-orc-spoof",
+      method: "tools/call",
+      params: {
+        name: "cyberdeck_orchestrator_create",
+        arguments: {
+          actorSessionId: "99999999-9999-4999-8999-999999999999",
+          provider: "codex",
+          model: "gpt-6.1-sol",
+          cwd: "/repo/two",
+          reason: "spoof",
+        },
+      },
+    });
+    expect(request).toHaveBeenLastCalledWith("agent.orchestrator.create", expect.objectContaining({
+      actorSessionId: ACTOR,
+    }));
     const listed = (await handleMcpRequest(context({ request: vi.fn() }), {
       jsonrpc: "2.0",
       id: 2,

@@ -6,7 +6,10 @@ import {
   type OrchestratorBinding,
 } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
-import { OrchestratorPeerService } from "../../src/orchestration/orchestrator-peer-service.js";
+import {
+  OrchestratorPeerService,
+  peerRemoteControlNote,
+} from "../../src/orchestration/orchestrator-peer-service.js";
 import type { OrchestratorManagerResult } from "../../src/orchestration/orchestrator-manager.js";
 
 const ACTOR = "11111111-1111-4111-8111-111111111111";
@@ -69,6 +72,8 @@ function harness(overrides: {
   records?: SessionRecord[];
   createPeer?: OrchestratorManagerResult | Error;
   instructions?: boolean;
+  briefStatus?: string;
+  failAudit?: (event: BrokerEvent) => boolean;
   maxLivePeers?: number;
 } = {}) {
   const binding = overrides.binding ?? fleetBinding;
@@ -78,31 +83,38 @@ function harness(overrides: {
   ]);
   const stored = [binding, ...(overrides.bindings ?? [])];
   const events: BrokerEvent[] = [];
+  let launched = 0;
   const createPeer = vi.fn(async (request: { cwd: string; model: string; provider: string; capabilities: string[]; }) => {
     if (overrides.createPeer instanceof Error) throw overrides.createPeer;
     if (overrides.createPeer !== undefined) return overrides.createPeer;
-    const session = { ...actorRecord, id: PEER, cwd: request.cwd, name: "peer" };
-    records.set(PEER, session);
+    // The real manager writes the binding during launch, before `start` resolves; a second create
+    // that queued behind this one must see it, which is what the cap test relies on.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const id = launched++ === 0 ? PEER : `${launched}${PEER.slice(1)}`;
+    const session = { ...actorRecord, id, cwd: request.cwd, name: "peer" };
+    records.set(id, session);
     const created: OrchestratorManagerResult = {
       session,
       created: true,
       binding: {
-        ...peerBinding(PEER),
+        ...peerBinding(id),
         provider: request.provider as OrchestratorBinding["provider"],
         cwd: request.cwd,
         grant: {
-          subjectSessionId: PEER,
+          subjectSessionId: id,
           capabilities: ORCHESTRATOR_GRANT_CAPABILITIES.filter((entry) => entry !== "orchestrator.create"),
           scope: { kind: "fleet" },
         },
       },
     };
+    stored.push(created.binding);
     return created;
   });
   const enqueue = vi.fn(async (input: { targetSessionId: string; message: string; }) => ({
     id: "44444444-4444-4444-8444-444444444444",
     targetSessionId: input.targetSessionId,
     message: input.message,
+    status: overrides.briefStatus ?? "accepted",
   }));
   const service = new OrchestratorPeerService({
     registry: {
@@ -118,11 +130,16 @@ function harness(overrides: {
     },
     manager: { createPeer: createPeer as never },
     ...(overrides.instructions === false ? {} : { instructions: { enqueue: enqueue as never } }),
-    audit: { append: async (event) => { events.push(event); } },
+    audit: {
+      append: async (event) => {
+        if (overrides.failAudit?.(event)) throw new Error("journal disk full");
+        events.push(event);
+      },
+    },
     now: () => Date.parse(now),
     ...(overrides.maxLivePeers === undefined ? {} : { maxLivePeers: overrides.maxLivePeers }),
   });
-  return { service, createPeer, enqueue, events };
+  return { service, createPeer, enqueue, events, stored };
 }
 
 const request = {
@@ -149,6 +166,7 @@ describe("OrchestratorPeerService", () => {
       scope: { kind: "fleet" },
       createdBy: ACTOR,
       brief: { delivery: "queued", instructionId: "44444444-4444-4444-8444-444444444444" },
+      remoteControl: peerRemoteControlNote("codex"),
       warnings: [],
     });
     expect((result as { grant: string[] }).grant).not.toContain("orchestrator.create");
@@ -161,6 +179,8 @@ describe("OrchestratorPeerService", () => {
       name: "codex successor",
       createdBy: { sessionId: ACTOR },
     }));
+    expect(events[0]!.data).not.toHaveProperty("brief");
+    expect(JSON.stringify(events)).not.toContain("Pick up PR #61");
     const granted = (createPeer.mock.calls[0]![0] as { capabilities: string[] }).capabilities;
     expect(granted).toEqual(ORCHESTRATOR_GRANT_CAPABILITIES.filter((entry) => entry !== "orchestrator.create"));
     expect(enqueue).toHaveBeenCalledWith({ actorSessionId: ACTOR, targetSessionId: PEER, message: "Pick up PR #61" });
@@ -294,6 +314,87 @@ describe("OrchestratorPeerService", () => {
       outcome: "CREATED",
       brief: { delivery: "failed", detail: expect.stringContaining("cyberdeck_thread_message") },
     });
+  });
+
+  it("serializes concurrent creates from one actor so the cap cannot be raced", async () => {
+    const { service, createPeer } = harness({ maxLivePeers: 1 });
+
+    const [first, second] = await Promise.all([
+      service.create({ ...request, mutationId: "a" }),
+      service.create({ ...request, mutationId: "b" }),
+    ]);
+
+    expect(first).toMatchObject({ outcome: "CREATED", sessionId: PEER });
+    expect(second).toMatchObject({ outcome: "PEER_LIMIT", livePeerIds: [PEER] });
+    expect(createPeer).toHaveBeenCalledOnce();
+  });
+
+  it("makes an in-flight retry with the same mutationId wait for, then replay, the first result", async () => {
+    const { service, createPeer } = harness();
+
+    const [first, retry] = await Promise.all([
+      service.create({ ...request, mutationId: "m-2" }),
+      service.create({ ...request, mutationId: "m-2" }),
+    ]);
+
+    expect(first).toMatchObject({ outcome: "CREATED" });
+    expect(retry).toEqual({ ...first, retrieval: "replay" });
+    expect(createPeer).toHaveBeenCalledOnce();
+  });
+
+  it("persists the mutationId on the binding and replays from the log after the broker forgot", async () => {
+    const first = harness();
+    const created = await first.service.create({ ...request, mutationId: "durable", brief: "hello" });
+    expect(created).toMatchObject({ outcome: "CREATED" });
+    expect(first.createPeer).toHaveBeenCalledWith(expect.objectContaining({
+      createdBy: { sessionId: ACTOR, mutationId: "durable" },
+    }));
+
+    // A fresh service with an empty replay map, reading the same binding log.
+    const restarted = harness({ bindings: first.stored.filter((entry) => entry.sessionId !== ACTOR) });
+    const peer = first.stored.find((entry) => entry.sessionId === PEER)!;
+    peer.createdBy = { sessionId: ACTOR, mutationId: "durable" };
+    await expect(restarted.service.create({ ...request, mutationId: "durable", brief: "hello" })).resolves.toMatchObject({
+      outcome: "CREATED",
+      sessionId: PEER,
+      bindingKey: `fleet:peer:${PEER}`,
+      brief: { delivery: "replayed" },
+      retrieval: "replay",
+    });
+    expect(restarted.createPeer).not.toHaveBeenCalled();
+    expect(restarted.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("records the replay before journaling, so a failed result audit cannot launch a second peer", async () => {
+    const { service, createPeer } = harness({
+      failAudit: (event) => event.type === "orchestrator.create.result",
+    });
+
+    const first = await service.create({ ...request, mutationId: "m-3" });
+    expect(first).toMatchObject({
+      outcome: "CREATED",
+      warnings: [expect.stringContaining("could not be journaled")],
+    });
+    await expect(service.create({ ...request, mutationId: "m-3" })).resolves.toMatchObject({
+      outcome: "CREATED",
+      retrieval: "replay",
+    });
+    expect(createPeer).toHaveBeenCalledOnce();
+  });
+
+  it("reports a brief the peer went terminal before consuming as failed, not queued", async () => {
+    const { service } = harness({ briefStatus: "undelivered" });
+
+    await expect(service.create({ ...request, brief: "hello" })).resolves.toMatchObject({
+      outcome: "CREATED",
+      brief: { delivery: "failed", detail: expect.stringContaining("undelivered") },
+    });
+  });
+
+  it("tells the caller which providers reach the phone", () => {
+    expect(peerRemoteControlNote("claude")).toContain("Remote Control");
+    expect(peerRemoteControlNote("codex")).toContain("Codex app");
+    expect(peerRemoteControlNote("cursor")).toContain("no phone-reachable surface");
   });
 
   it("replays a recorded result for the same mutationId instead of starting a second peer", async () => {

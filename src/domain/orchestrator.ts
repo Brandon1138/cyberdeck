@@ -56,7 +56,11 @@ const OrchestratorBindingRecordSchema = z.object({
    * The orchestrator that asked for this peer through `cyberdeck_orchestrator_create`. Absent on
    * every primary and on peers Fleet created by hand; present only on peers an orchestrator made.
    */
-  createdBy: z.object({ sessionId: z.uuid() }).optional(),
+  createdBy: z.object({
+    sessionId: z.uuid(),
+    /** The creator's idempotency key, so a retry after a restart finds this peer instead of launching another. */
+    mutationId: z.string().min(1).max(200).optional(),
+  }).optional(),
   /** Legacy field retained only so pre-box-preference binding records remain readable. */
   workerPreferences: z.object({
     caveman: z.boolean().optional(),
@@ -145,7 +149,7 @@ export const PeerCreateRequestSchema = OrchestratorGrantToggleRequestSchema;
 /** A peer an orchestrator asked for: `create`'s selection plus who asked and what it may hold. */
 export const CreatePeerOrchestratorRequestSchema = CreateOrchestratorRequestSchema.extend({
   name: z.string().trim().min(1).max(120).optional(),
-  createdBy: z.object({ sessionId: z.uuid() }),
+  createdBy: z.object({ sessionId: z.uuid(), mutationId: z.string().min(1).max(200).optional() }),
   capabilities: z.array(CyberdeckCapabilitySchema),
 });
 

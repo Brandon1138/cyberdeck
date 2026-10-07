@@ -210,7 +210,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_orchestrator_create",
-    description: "Start a peer orchestrator and return its sessionId. The peer launches detached with the provider's Remote Control surface, so the operator can open it from their phone; the broker does not return the link. The peer receives your grant minus orchestrator.create (it cannot create peers), a workspace caller may only create in its own cwd, and at most 2 of your peers may be live at once (PEER_LIMIT names them). Refusals are outcomes: DENIED, PEER_LIMIT, SELECTION_UNSUPPORTED, LAUNCH_FAILED. An optional brief is enqueued as the peer's first instruction; reuse mutationId to retry idempotently.",
+    description: "Start a peer orchestrator and return its sessionId. The peer launches detached; a Claude peer carries Remote Control and a Codex peer its remote app-server, so the operator can open either from their phone, while a Cursor peer has no phone surface. The result's remoteControl field says which; the broker does not return a link. The peer receives your grant minus orchestrator.create (it cannot create peers), a workspace caller may only create in its own cwd, and at most 2 of your peers may be live at once (PEER_LIMIT names them). Refusals are outcomes: DENIED, PEER_LIMIT, SELECTION_UNSUPPORTED, LAUNCH_FAILED. An optional brief is enqueued as the peer's first instruction; reuse mutationId to retry idempotently.",
     inputSchema: {
       type: "object",
       properties: {
@@ -628,7 +628,11 @@ export async function handleMcpRequest(
     if (request.method === "tools/list") return success(request.id, { tools: TOOLS });
     if (request.method === "tools/call") {
       const name = request.params?.name;
-      const args = isRecord(request.params?.arguments) ? request.params.arguments : {};
+      // The actor is the identity this server was launched for, never something a caller may
+      // name: a peer handing in its creator's id would otherwise act with the creator's grant.
+      const { actorSessionId: _suppliedActor, ...args } = isRecord(request.params?.arguments)
+        ? request.params.arguments
+        : {};
       const result = await callTool(context, name, args);
       const content: Array<Record<string, unknown>> = [
         { type: "text", text: JSON.stringify(result) },
@@ -811,40 +815,40 @@ async function callTool(
   const actorSessionId = context.identity.actorSessionId;
   if (name === "cyberdeck_signal_exception") {
     return transport.request("worker.event.submit", {
-      workerId: actorSessionId,
       kind: "EXCEPTION",
       severity: "error",
       interventionRequired: false,
       continuation: "continuing",
       ...args,
+      workerId: actorSessionId,
     });
   }
   if (name === "cyberdeck_report_progress") {
     return transport.request("worker.event.submit", {
-      workerId: actorSessionId,
       kind: "PROGRESS",
       severity: "info",
       interventionRequired: false,
       continuation: "continuing",
       ...args,
+      workerId: actorSessionId,
     });
   }
   if (name === "cyberdeck_signal_risk") {
     return transport.request("worker.event.submit", {
-      workerId: actorSessionId,
       kind: "RISK",
       severity: "warning",
       interventionRequired: false,
       continuation: "continuing",
       ...args,
+      workerId: actorSessionId,
     });
   }
   if (name === "cyberdeck_request_decision") {
     return transport.request("worker.event.submit", {
-      workerId: actorSessionId,
       kind: "DECISION_REQUEST",
       severity: "warning",
       ...args,
+      workerId: actorSessionId,
       interventionRequired: true,
       continuation: "awaiting-response",
     });
@@ -852,12 +856,12 @@ async function callTool(
   if (name === "cyberdeck_respond_checkpoint") {
     const { correlationId, ...event } = args;
     return transport.request("worker.event.submit", {
-      workerId: actorSessionId,
       kind: "CHECKPOINT",
       severity: "info",
       interventionRequired: false,
       continuation: "continuing",
       ...event,
+      workerId: actorSessionId,
       checkpointCorrelationId: correlationId,
     });
   }

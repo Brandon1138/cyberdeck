@@ -56,7 +56,7 @@ Inputs:
 | `name` | no | shown in Fleet and returned so the caller can name the session on the phone |
 | `brief` | no | the peer's first instruction, delivered through the instruction queue |
 | `reason` | yes | audited verbatim |
-| `mutationId` | no | reuse to retry idempotently; a replay returns the recorded result |
+| `mutationId` | no | reuse to retry idempotently; a replay returns the recorded result. The id is persisted on the peer's binding, so the replay survives a broker restart and an audit write that failed after launch |
 
 Result:
 
@@ -70,10 +70,16 @@ Result:
   "scope": { "kind": "fleet" },
   "grant": ["thread.list", "thread.read", "thread.enqueue", "worker.start", "orchestrator.inspect", "orchestrator.stop", "workflow.run"],
   "brief": { "delivery": "queued", "instructionId": "..." },
-  "remoteControl": "launched with the provider's Remote Control surface; it appears in the phone's session list once its first turn starts",
+  "remoteControl": "Launched with Claude Remote Control; it appears in the operator's phone session list once its first turn starts. ...",
   "warnings": []
 }
 ```
+
+`brief.delivery` is `queued` (the broker holds it for the peer's first safe boundary), `failed`
+(with the reason and the fallback, `cyberdeck_thread_message`; a peer that went terminal before
+consuming it reports the queue's `undelivered`), `replayed` (a durable replay; the brief went with
+the original call) or `not-requested`. `remoteControl` is per provider: Claude peers carry Remote
+Control, Codex peers their remote app-server, and Cursor peers have no phone surface at all.
 
 Refusals come back as `outcome` values, not thrown errors, so a phone-side orchestrator can read
 them: `DENIED` (no capability, inactive caller, scope outside the caller's), `PEER_LIMIT` (with the
@@ -95,6 +101,14 @@ These rules live in `OrchestratorPeerService`, never in the prompt.
    peers. Past that the call returns `PEER_LIMIT` naming them.
 5. **Selection is validated** by the manager's existing catalog check before any process starts.
 6. **Stop is unchanged.** A healthy live peer still answers `APPROVAL_REQUIRED` to its creator.
+7. **Creates are serialized per creator.** The cap is read from the binding log and the new
+   binding is written during launch, so two concurrent creates from one actor would both pass;
+   queueing the second behind the first makes it see the first's binding, or its recorded result
+   when it carries the same `mutationId`.
+8. **The caller cannot name its actor.** The MCP server drops any `actorSessionId` argument and
+   injects the identity it was launched for, so a peer cannot act with its creator's grant.
+9. **A deleted peer counts as terminal.** A binding whose session the registry no longer knows was
+   deleted by the operator; it does not hold a slot forever.
 
 ## Why the grant invariant holds
 

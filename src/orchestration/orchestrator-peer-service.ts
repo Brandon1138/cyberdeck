@@ -10,7 +10,12 @@ import {
   type OrchestratorBinding,
   type OrchestratorScope,
 } from "../domain/orchestrator.js";
-import { ProviderIdSchema, ReasoningEffortSchema, type SessionRecord } from "../domain/session.js";
+import {
+  ProviderIdSchema,
+  ReasoningEffortSchema,
+  type ProviderId,
+  type SessionRecord,
+} from "../domain/session.js";
 import type { EnqueueInstructionParamsSchema } from "./instruction-queue.js";
 import type { OrchestratorManagerResult } from "./orchestrator-manager.js";
 import type { OrchestratorBindingLookup } from "./persistence-ports.js";
@@ -37,14 +42,26 @@ export type AgentCreateOrchestratorParams = z.input<typeof AgentCreateOrchestrat
 /**
  * How the brief reached the peer. `queued` is the honest ceiling: the broker holds it and will
  * deliver it at the peer's first safe boundary, which `cyberdeck_thread_read` can confirm later.
+ * `replayed` is a durable replay's answer: the brief went with the original create and this call
+ * did not touch it.
  */
 export type PeerBriefDelivery =
   | { delivery: "queued"; instructionId: string }
   | { delivery: "failed"; detail: string }
+  | { delivery: "replayed"; detail: string }
   | { delivery: "not-requested" };
 
-export const PEER_REMOTE_CONTROL_NOTE =
-  "Launched with the provider's Remote Control surface; it appears in the operator's phone session list once its first turn starts. The broker does not observe the link itself.";
+/** What the phone can expect, per provider. Cursor orchestrators have no phone-reachable surface. */
+export function peerRemoteControlNote(provider: ProviderId): string {
+  switch (provider) {
+    case "claude":
+      return "Launched with Claude Remote Control; it appears in the operator's phone session list once its first turn starts. The broker does not observe the link itself.";
+    case "codex":
+      return "Launched with Codex remote control through its managed app-server; open it from the Codex app. The broker does not observe the link itself.";
+    default:
+      return `${provider} orchestrators have no phone-reachable surface; open this peer from Fleet on the machine.`;
+  }
+}
 
 export type OrchestratorCreateResult =
   | {
@@ -91,6 +108,8 @@ export interface OrchestratorPeerServiceDeps {
   maxLivePeers?: number;
 }
 
+type ParsedCreate = z.output<typeof AgentCreateOrchestratorParamsSchema>;
+
 /**
  * The one path from an orchestrator's MCP tools to a new orchestrator (MIK-256).
  *
@@ -101,6 +120,14 @@ export interface OrchestratorPeerServiceDeps {
  */
 export class OrchestratorPeerService {
   private readonly replays = new Map<string, OrchestratorCreateResult>();
+  /**
+   * One create at a time per creator. The live-peer cap is read from the binding log and the new
+   * binding is written during launch, so two creates racing from one actor would both count the
+   * same peers and both pass; a retry carrying the same `mutationId` while the first is still in
+   * flight would start a second peer for the same intent. Queueing behind the actor's previous
+   * create closes both: the second sees the first's binding, or its recorded result.
+   */
+  private readonly inFlight = new Map<string, Promise<unknown>>();
   private readonly now: () => number;
   private readonly maxLivePeers: number;
 
@@ -111,21 +138,148 @@ export class OrchestratorPeerService {
 
   async create(input: AgentCreateOrchestratorParams): Promise<OrchestratorCreateResult> {
     const request = AgentCreateOrchestratorParamsSchema.parse(input);
-    const replayKey = request.mutationId === undefined
-      ? undefined
-      : `${request.actorSessionId}:${request.mutationId}`;
-    if (replayKey !== undefined) {
-      const recorded = this.replays.get(replayKey);
-      if (recorded !== undefined) return { ...recorded, retrieval: "replay" };
+    const previous = this.inFlight.get(request.actorSessionId) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(async () => {
+      const replayed = await this.replay(request);
+      if (replayed !== undefined) return replayed;
+      return this.decide(request);
+    });
+    this.inFlight.set(request.actorSessionId, run);
+    try {
+      return await run;
+    } finally {
+      if (this.inFlight.get(request.actorSessionId) === run) this.inFlight.delete(request.actorSessionId);
     }
-    const result = await this.decide(request);
-    if (replayKey !== undefined) this.replays.set(replayKey, result);
+  }
+
+  /**
+   * A retry's answer, from memory first and the binding log second. The log is what survives a
+   * broker restart or an audit write that failed after the peer was already running: the mutation
+   * id is persisted on the binding at launch, so the same intent can never launch twice.
+   */
+  private async replay(request: ParsedCreate): Promise<OrchestratorCreateResult | undefined> {
+    if (request.mutationId === undefined) return undefined;
+    const recorded = this.replays.get(replayKey(request));
+    if (recorded !== undefined) return { ...recorded, retrieval: "replay" };
+    const bindings = await this.deps.bindings.list();
+    const existing = bindings.find((binding) =>
+      binding.createdBy?.sessionId === request.actorSessionId
+      && binding.createdBy.mutationId === request.mutationId);
+    if (existing === undefined) return undefined;
+    const session = this.sessionRecord(existing.sessionId);
+    const result: OrchestratorCreateResult = {
+      outcome: "CREATED",
+      sessionId: existing.sessionId,
+      bindingKey: existing.key,
+      ...(session?.name === undefined ? {} : { name: session.name }),
+      provider: existing.provider,
+      model: existing.model ?? request.model,
+      ...(existing.effort === undefined ? {} : { effort: existing.effort }),
+      scope: existing.scope,
+      createdBy: request.actorSessionId,
+      grant: [...existing.grant.capabilities],
+      brief: {
+        delivery: "replayed",
+        detail: "Any brief went with the original create; read the peer thread to confirm it arrived",
+      },
+      remoteControl: peerRemoteControlNote(existing.provider),
+      warnings: [],
+      retrieval: "replay",
+    };
+    this.replays.set(replayKey(request), result);
     return result;
   }
 
-  private async decide(
-    request: z.output<typeof AgentCreateOrchestratorParamsSchema>,
-  ): Promise<OrchestratorCreateResult> {
+  private async decide(request: ParsedCreate): Promise<OrchestratorCreateResult> {
+    const actor = request.actorSessionId;
+    const refusal = await this.admission(request);
+    if (refusal !== undefined) return this.record(request, refusal);
+
+    const binding = (await this.deps.bindings.findBySessionId(actor))!;
+    const capabilities = peerGrantCapabilities(binding.grant.capabilities);
+    const selection = {
+      provider: request.provider,
+      model: request.model,
+      ...(request.effort === undefined ? {} : { effort: request.effort }),
+      cwd: request.cwd,
+      scope: request.scope,
+    };
+    await this.appendAudit("orchestrator.create.requested", actor, {
+      actorSessionId: actor,
+      reason: request.reason,
+      selection,
+      ...(request.name === undefined ? {} : { name: request.name }),
+      ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
+      capabilities,
+      briefRequested: request.brief !== undefined,
+    });
+
+    let created: OrchestratorManagerResult;
+    try {
+      created = await this.deps.manager.createPeer({
+        ...selection,
+        ...(request.name === undefined ? {} : { name: request.name }),
+        createdBy: {
+          sessionId: actor,
+          ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
+        },
+        capabilities,
+      });
+    } catch (error) {
+      const code = error instanceof Error && "code" in error && typeof error.code === "string"
+        ? error.code
+        : undefined;
+      const outcome = code === "ORCHESTRATOR_SELECTION_UNSUPPORTED" || code === "ORCHESTRATOR_PROVIDER_UNSUPPORTED"
+        ? "SELECTION_UNSUPPORTED"
+        : "LAUNCH_FAILED";
+      const reason = error instanceof Error ? error.message : String(error);
+      await this.appendAudit("orchestrator.create.result", actor, {
+        actorSessionId: actor,
+        reason: request.reason,
+        outcome,
+        detail: reason,
+      });
+      return this.record(request, { outcome, reason, ...(code === undefined ? {} : { code }) });
+    }
+
+    // From here the peer exists. Everything below is reporting, and none of it may turn a
+    // running peer into a retry that launches another: the replay is recorded before the brief
+    // and the audit, and their failures are carried in the result rather than thrown.
+    const warnings = [...(created.warnings ?? [])];
+    const result: OrchestratorCreateResult = {
+      outcome: "CREATED",
+      sessionId: created.session.id,
+      bindingKey: created.binding.key,
+      ...(created.session.name === undefined ? {} : { name: created.session.name }),
+      provider: created.binding.provider,
+      model: request.model,
+      ...(created.binding.effort === undefined ? {} : { effort: created.binding.effort }),
+      scope: created.binding.scope,
+      createdBy: actor,
+      grant: [...created.binding.grant.capabilities],
+      brief: { delivery: "not-requested" },
+      remoteControl: peerRemoteControlNote(created.binding.provider),
+      warnings,
+    };
+    this.record(request, result);
+    result.brief = await this.deliverBrief(actor, created.session.id, request.brief);
+    try {
+      await this.appendAudit("orchestrator.create.result", created.session.id, {
+        actorSessionId: actor,
+        targetSessionId: created.session.id,
+        bindingKey: created.binding.key,
+        reason: request.reason,
+        outcome: "CREATED",
+        brief: result.brief.delivery,
+      });
+    } catch (error) {
+      warnings.push(`The create result could not be journaled: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return result;
+  }
+
+  /** Every refusal that needs no launch, in the order a caller would want to hear about them. */
+  private async admission(request: ParsedCreate): Promise<OrchestratorCreateResult | undefined> {
     const actor = request.actorSessionId;
     const binding = await this.deps.bindings.findBySessionId(actor);
     if (binding === undefined) {
@@ -160,73 +314,11 @@ export class OrchestratorPeerService {
         limit: this.maxLivePeers,
       };
     }
+    return undefined;
+  }
 
-    const capabilities = peerGrantCapabilities(binding.grant.capabilities);
-    const selection = {
-      provider: request.provider,
-      model: request.model,
-      ...(request.effort === undefined ? {} : { effort: request.effort }),
-      cwd: request.cwd,
-      scope: request.scope,
-    };
-    await this.appendAudit("orchestrator.create.requested", actor, {
-      actorSessionId: actor,
-      reason: request.reason,
-      selection,
-      ...(request.name === undefined ? {} : { name: request.name }),
-      capabilities,
-      briefRequested: request.brief !== undefined,
-    });
-
-    let created: OrchestratorManagerResult;
-    try {
-      created = await this.deps.manager.createPeer({
-        ...selection,
-        ...(request.name === undefined ? {} : { name: request.name }),
-        createdBy: { sessionId: actor },
-        capabilities,
-      });
-    } catch (error) {
-      const code = error instanceof Error && "code" in error && typeof error.code === "string"
-        ? error.code
-        : undefined;
-      const outcome = code === "ORCHESTRATOR_SELECTION_UNSUPPORTED" || code === "ORCHESTRATOR_PROVIDER_UNSUPPORTED"
-        ? "SELECTION_UNSUPPORTED"
-        : "LAUNCH_FAILED";
-      const reason = error instanceof Error ? error.message : String(error);
-      await this.appendAudit("orchestrator.create.result", actor, {
-        actorSessionId: actor,
-        reason: request.reason,
-        outcome,
-        detail: reason,
-      });
-      return { outcome, reason, ...(code === undefined ? {} : { code }) };
-    }
-
-    const brief = await this.deliverBrief(actor, created.session.id, request.brief);
-    const result: OrchestratorCreateResult = {
-      outcome: "CREATED",
-      sessionId: created.session.id,
-      bindingKey: created.binding.key,
-      ...(created.session.name === undefined ? {} : { name: created.session.name }),
-      provider: created.binding.provider,
-      model: request.model,
-      ...(created.binding.effort === undefined ? {} : { effort: created.binding.effort }),
-      scope: created.binding.scope,
-      createdBy: actor,
-      grant: [...created.binding.grant.capabilities],
-      brief,
-      remoteControl: PEER_REMOTE_CONTROL_NOTE,
-      warnings: created.warnings ?? [],
-    };
-    await this.appendAudit("orchestrator.create.result", created.session.id, {
-      actorSessionId: actor,
-      targetSessionId: created.session.id,
-      bindingKey: created.binding.key,
-      reason: request.reason,
-      outcome: "CREATED",
-      brief: brief.delivery,
-    });
+  private record<T extends OrchestratorCreateResult>(request: ParsedCreate, result: T): T {
+    if (request.mutationId !== undefined) this.replays.set(replayKey(request), result);
     return result;
   }
 
@@ -245,6 +337,14 @@ export class OrchestratorPeerService {
         targetSessionId,
         message: brief,
       });
+      // The queue answers after its first delivery attempt, so a peer that already went terminal
+      // comes back `undelivered` here rather than silently queued.
+      if (record.status === "undelivered" || record.status === "cancelled") {
+        return {
+          delivery: "failed",
+          detail: `The brief was ${record.status}: the peer reached a terminal state before consuming it`,
+        };
+      }
       return { delivery: "queued", instructionId: record.id };
     } catch (error) {
       return {
@@ -254,7 +354,12 @@ export class OrchestratorPeerService {
     }
   }
 
-  /** Peers this creator asked for whose provider process has not ended. */
+  /**
+   * Peers this creator asked for whose provider process has not ended. A binding whose session the
+   * registry no longer knows was deleted by the operator, which is terminal; it is not a peer that
+   * is still starting, because creates from one actor are serialized and the binding is written
+   * inside the launch the registry already holds a record for.
+   */
   private async livePeerIds(creator: string): Promise<string[]> {
     const bindings = await this.deps.bindings.list();
     return bindings
@@ -284,4 +389,8 @@ export class OrchestratorPeerService {
       data,
     });
   }
+}
+
+function replayKey(request: ParsedCreate): string {
+  return `${request.actorSessionId}:${request.mutationId}`;
 }
