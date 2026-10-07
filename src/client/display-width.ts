@@ -64,8 +64,16 @@ export function graphemeWidth(grapheme: string): number {
 }
 
 /** The cells a string prints, summed over its grapheme clusters. */
+const WIDTH_CACHE = new Map<string, number>();
 export function displayWidth(value: string): number {
+  if (/^[\x20-\x7e]*$/u.test(value)) return value.length;
+  const cached = WIDTH_CACHE.get(value);
+  if (cached !== undefined) return cached;
   let total = 0;
   for (const { segment } of GRAPHEME_SEGMENTER.segment(value)) total += graphemeWidth(segment);
+  if (value.length <= 512) {
+    if (WIDTH_CACHE.size >= 2048) WIDTH_CACHE.delete(WIDTH_CACHE.keys().next().value!);
+    WIDTH_CACHE.set(value, total);
+  }
   return total;
 }

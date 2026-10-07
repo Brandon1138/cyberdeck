@@ -1,3 +1,4 @@
+import { prepared } from "./frame-cache.js";
 import { basename } from "node:path";
 import { displayWidth } from "../display-width.js";
 import { pullRequestLabel } from "../pr-status.js";
@@ -181,68 +182,70 @@ export function renderFleetFooter(
   state: FleetState,
   options: ResolvedFleetRenderOptions,
 ): string[] {
-  const threads = orderedThreads(snapshot);
-  const selected = threads.find(({ record }) => record.id === state.selectedSessionId);
-  const terminal = selected !== undefined && isTerminalSession(selected.record);
-  const stopAcknowledged = selected !== undefined
-    && state.stopAcknowledgement?.sessionId === selected.record.id;
-  const destructiveHint = terminal && stopAcknowledged ? "ctrl+x delete thread" : "ctrl+x stop agent";
-  const cwd = composerCwd(state, snapshot);
-  const profile = state.launchProfiles[cwd];
-  const composerLines = renderComposerLines(
-    state.rename?.draft ?? state.projectPrompt?.draft ?? state.shellMode?.draft ?? state.draft,
-    state.rename !== undefined
-      ? "rename"
-      : state.projectPrompt !== undefined
-        ? "project"
-        : state.shellMode !== undefined ? "shell" : "task",
-    options,
-  );
-  const launchContext = state.shellMode !== undefined
-    ? contextLine(
-      `▶ ${shellName()} -lc${state.shellMode.running === true ? " · running" : ""}`,
-      shortPath(cwd, options.home),
-      `enter runs · ${state.shellMode.running === true ? "ctrl+g stops and leaves" : "esc or ctrl+g leaves"}`,
-      options.width,
-    )
-    : profile === undefined
+  return prepared([snapshot, state, options, "renderFleetFooter"], () => {
+    const threads = orderedThreads(snapshot);
+    const selected = threads.find(({ record }) => record.id === state.selectedSessionId);
+    const terminal = selected !== undefined && isTerminalSession(selected.record);
+    const stopAcknowledged = selected !== undefined
+      && state.stopAcknowledgement?.sessionId === selected.record.id;
+    const destructiveHint = terminal && stopAcknowledged ? "ctrl+x delete thread" : "ctrl+x stop agent";
+    const cwd = composerCwd(state, snapshot);
+    const profile = state.launchProfiles[cwd];
+    const composerLines = renderComposerLines(
+      state.rename?.draft ?? state.projectPrompt?.draft ?? state.shellMode?.draft ?? state.draft,
+      state.rename !== undefined
+        ? "rename"
+        : state.projectPrompt !== undefined
+          ? "project"
+          : state.shellMode !== undefined ? "shell" : "task",
+      options,
+    );
+    const launchContext = state.shellMode !== undefined
       ? contextLine(
-        `▶ /model required · ${selected?.record.sandbox ?? "read-only"}`,
+        `▶ ${shellName()} -lc${state.shellMode.running === true ? " · running" : ""}`,
         shortPath(cwd, options.home),
-        "ctrl+s change",
+        `enter runs · ${state.shellMode.running === true ? "ctrl+g stops and leaves" : "esc or ctrl+g leaves"}`,
         options.width,
       )
-      : contextLine(
-        `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"}`,
-        shortPath(cwd, options.home),
-        "ctrl+s change",
-        options.width,
-      );
-  const helpLines = state.helpOpen === true
-    ? shortcutHelp(options.width, terminal && stopAcknowledged ? "delete" : "stop")
-    : [];
-  const notice = state.notice === undefined
-    ? undefined
-    : renderNotice(state.notice, state.noticeTone, options.width, options.color);
-  const footer = [
-    ...(notice === undefined ? [] : [notice]),
-    paint("─".repeat(options.width), "dim", options.color),
-    ...composerLines,
-    paint("─".repeat(options.width), "dim", options.color),
-    ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
-    paint(fit(launchContext, options.width), "dim", options.color),
-    paint(fit(`↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
-  ];
-  if (footer.length <= options.height) return footer;
+      : profile === undefined
+        ? contextLine(
+          `▶ /model required · ${selected?.record.sandbox ?? "read-only"}`,
+          shortPath(cwd, options.home),
+          "ctrl+s change",
+          options.width,
+        )
+        : contextLine(
+          `▶ ${friendlyModel(profile.provider, profile.model)} · ${friendlyEffort(profile.effort ?? "provider-managed")} · ${selected?.record.sandbox ?? "read-only"}`,
+          shortPath(cwd, options.home),
+          "ctrl+s change",
+          options.width,
+        );
+    const helpLines = state.helpOpen === true
+      ? shortcutHelp(options.width, terminal && stopAcknowledged ? "delete" : "stop")
+      : [];
+    const notice = state.notice === undefined
+      ? undefined
+      : renderNotice(state.notice, state.noticeTone, options.width, options.color);
+    const footer = [
+      ...(notice === undefined ? [] : [notice]),
+      paint("─".repeat(options.width), "dim", options.color),
+      ...composerLines,
+      paint("─".repeat(options.width), "dim", options.color),
+      ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
+      paint(fit(launchContext, options.width), "dim", options.color),
+      paint(fit(`↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
+    ];
+    if (footer.length <= options.height) return footer;
 
-  // In a pane shorter than the fixed footer, interaction content outranks its chrome and hints.
-  // The active composer always owns one row. A fresh notice owns the next row when one exists;
-  // height one deliberately keeps the editor because hiding it would make typed interaction blind.
-  const noticeRows = notice === undefined || options.height === 1 ? [] : [notice];
-  const visibleComposerRows = composerLines.slice(
-    -Math.max(1, options.height - noticeRows.length),
-  );
-  return [...noticeRows, ...visibleComposerRows].slice(-options.height);
+    // In a pane shorter than the fixed footer, interaction content outranks its chrome and hints.
+    // The active composer always owns one row. A fresh notice owns the next row when one exists;
+    // height one deliberately keeps the editor because hiding it would make typed interaction blind.
+    const noticeRows = notice === undefined || options.height === 1 ? [] : [notice];
+    const visibleComposerRows = composerLines.slice(
+      -Math.max(1, options.height - noticeRows.length),
+    );
+    return [...noticeRows, ...visibleComposerRows].slice(-options.height);
+  });
 }
 
 /** What `!` mode runs the operator's lines through, named so the footer is never a guess. */
@@ -265,47 +268,49 @@ export function renderHeader(
   state: FleetState,
   options: ResolvedFleetRenderOptions,
 ): string[] {
-  const statuses = threads.map(threadStatus);
-  const count = (status: ThreadStatus) => statuses.filter((candidate) => candidate === status).length;
-  // "agents" counts agents that are actually running. Finished threads stay listed as history and
-  // that history is now durable across restarts, so counting them here would report a fleet far
-  // busier than it is — done means an agent finished a task, not that one is consuming resources.
-  const running = threads.filter(({ record }) =>
-    record.executionState === "active" || record.executionState === "starting").length;
-  const counts = [
-    `${running} agents`,
-    `${count("Needs input")} needs input`,
-    `${count("Working")} working`,
-    `${count("Done")} done`,
-    ...(count("Interrupted") === 0 ? [] : [`${count("Interrupted")} interrupted`]),
-    ...(count("Failed") === 0 ? [] : [`${count("Failed")} failed`]),
-  ].join(" · ");
-  const orchestrator = threads.find(({ record }) =>
-    record.kind === "orchestrator" && record.orchestratorScope === "fleet")?.record
-    ?? threads.find(({ record }) =>
-      record.kind === "orchestrator" && record.cwd === state.fallbackCwd)?.record
-    ?? threads.find(({ record }) => record.kind === "orchestrator")?.record;
-  const scope = orchestrator?.orchestratorScope === "fleet"
-    ? "fleet"
-    : shortPath(orchestrator?.cwd ?? state.fallbackCwd, options.home);
-  const context = orchestrator === undefined
-    ? `No orchestrator · ctrl+o to choose · ${shortPath(state.fallbackCwd, options.home)}`
-    : `${friendlyModel(orchestrator.provider, orchestrator.model)} · ${friendlyEffort(orchestrator.effort ?? "provider-managed")} · ${scope}`;
-  const mark = options.color ? options.mascot : undefined;
-  const markWidth = mark?.columns ?? 0;
-  const showsMark = mark !== undefined && options.width >= markWidth + 2 + 32;
-  const textWidth = Math.max(1, options.width - (showsMark ? markWidth + 2 : 0));
-  const textLines = [
-    paint("Cyberdeck", "bold", options.color),
-    paint(fit(context, textWidth), "dim", options.color),
-    paint(fit(counts, textWidth), "dim", options.color),
-  ];
-  // Keep the header's four-row footprint stable whether graphics are available or not.
-  if (!showsMark) return [...textLines, ""];
-  return Array.from(
-    { length: Math.max(mark.rows.length, textLines.length) },
-    (_, index) => `${mark.rows[index] ?? " ".repeat(markWidth)}  ${textLines[index] ?? ""}`,
-  );
+  return prepared([threads, state, options, "renderHeader"], () => {
+    const statuses = threads.map(threadStatus);
+    const count = (status: ThreadStatus) => statuses.filter((candidate) => candidate === status).length;
+    // "agents" counts agents that are actually running. Finished threads stay listed as history and
+    // that history is now durable across restarts, so counting them here would report a fleet far
+    // busier than it is — done means an agent finished a task, not that one is consuming resources.
+    const running = threads.filter(({ record }) =>
+      record.executionState === "active" || record.executionState === "starting").length;
+    const counts = [
+      `${running} agents`,
+      `${count("Needs input")} needs input`,
+      `${count("Working")} working`,
+      `${count("Done")} done`,
+      ...(count("Interrupted") === 0 ? [] : [`${count("Interrupted")} interrupted`]),
+      ...(count("Failed") === 0 ? [] : [`${count("Failed")} failed`]),
+    ].join(" · ");
+    const orchestrator = threads.find(({ record }) =>
+      record.kind === "orchestrator" && record.orchestratorScope === "fleet")?.record
+      ?? threads.find(({ record }) =>
+        record.kind === "orchestrator" && record.cwd === state.fallbackCwd)?.record
+      ?? threads.find(({ record }) => record.kind === "orchestrator")?.record;
+    const scope = orchestrator?.orchestratorScope === "fleet"
+      ? "fleet"
+      : shortPath(orchestrator?.cwd ?? state.fallbackCwd, options.home);
+    const context = orchestrator === undefined
+      ? `No orchestrator · ctrl+o to choose · ${shortPath(state.fallbackCwd, options.home)}`
+      : `${friendlyModel(orchestrator.provider, orchestrator.model)} · ${friendlyEffort(orchestrator.effort ?? "provider-managed")} · ${scope}`;
+    const mark = options.color ? options.mascot : undefined;
+    const markWidth = mark?.columns ?? 0;
+    const showsMark = mark !== undefined && options.width >= markWidth + 2 + 32;
+    const textWidth = Math.max(1, options.width - (showsMark ? markWidth + 2 : 0));
+    const textLines = [
+      paint("Cyberdeck", "bold", options.color),
+      paint(fit(context, textWidth), "dim", options.color),
+      paint(fit(counts, textWidth), "dim", options.color),
+    ];
+    // Keep the header's four-row footprint stable whether graphics are available or not.
+    if (!showsMark) return [...textLines, ""];
+    return Array.from(
+      { length: Math.max(mark.rows.length, textLines.length) },
+      (_, index) => `${mark.rows[index] ?? " ".repeat(markWidth)}  ${textLines[index] ?? ""}`,
+    );
+  });
 }
 
 export function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
