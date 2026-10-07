@@ -1,3 +1,5 @@
+import { ThreadPageOptionsSchema, type ThreadPageOptions } from "../domain/thread.js";
+import { readThreadPage } from "./thread-read-page.js";
 import { AgentStandardWorkerInputSchema, AgentScoutWorkerInputSchema } from "./worker-launch-input.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -83,6 +85,7 @@ import type {
 
 export const AgentActorParamsSchema = z.object({ actorSessionId: z.uuid() });
 export const AgentReadParamsSchema = AgentActorParamsSchema.extend({
+  ...ThreadPageOptionsSchema.shape,
   sessionId: z.uuid(),
   afterCursor: z.number().int().nonnegative().default(0),
   limit: z.number().int().positive().max(100).default(50),
@@ -647,6 +650,7 @@ export class AgentControlService {
     sessionId: string,
     afterCursor = 0,
     limit = 200,
+    options: ThreadPageOptions = {},
   ): Promise<ThreadReadResult> {
     const binding = await this.requireBinding(actorSessionId);
     const target = this.registry.get(sessionId);
@@ -659,7 +663,7 @@ export class AgentControlService {
         `Thread ${sessionId} was already read through cursor ${previous}; continue from that cursor instead of rereading history`,
       );
     }
-    const result = await this.transcripts.read(sessionId, afterCursor, limit);
+    const result = await readThreadPage(this.transcripts, sessionId, afterCursor, limit, options);
     this.threadCursors.set(cursorKey, Math.max(previous ?? 0, result.nextCursor));
     return result;
   }

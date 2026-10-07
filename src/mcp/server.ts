@@ -106,7 +106,7 @@ interface JsonRpcRequest {
 const TOOLS = [
   {
     name: "cyberdeck_diagnose",
-    description: "Report this Cyberdeck MCP server's live identity, broker reachability, and capability binding. Call this first whenever a cyberdeck_* tool appears missing or returns nothing: it distinguishes an unreachable broker, an unbound or orphaned actor session, and a stale conversation. It never fails and needs no grant.",
+    description: "Check live identity, broker reachability, binding and conversation drift. Use first for missing or failing tools. No grant required.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -232,12 +232,17 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_thread_read",
-    description: "Incrementally read semantic worker turns, not PTY write chunks. afterCursor is mandatory; continue from returned nextCursor. Prefer cyberdeck_workers_wait for normal result collection.",
+    description: "Incrementally read semantic worker turns, not PTY write chunks. Use nextCursor and continuation together. Concatenate fragment.json until continuation is absent to recover an oversized event; its cursor advances only at completion. Prefer workers_wait.",
     inputSchema: {
       type: "object",
       properties: {
         sessionId: { type: "string" },
         afterCursor: { type: "integer", minimum: 0 },
+        maxBytes: { type: "integer", minimum: 1024, maximum: 65536, default: 16384 },
+        continuation: { type: "object", properties: {
+          eventId: { type: "string" }, cursor: { type: "integer", minimum: 1 },
+          byteOffset: { type: "integer", minimum: 1 }, digest: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        }, required: ["eventId", "cursor", "byteOffset", "digest"], additionalProperties: false },
         limit: { type: "integer", minimum: 1, maximum: 100, default: 1 },
       },
       required: ["sessionId", "afterCursor"],
@@ -557,6 +562,30 @@ const TOOLS = [
   },
 ] as const;
 
+const TOOL_CAPABILITIES: Record<string, string> = {
+  cyberdeck_threads_list: "thread.list", cyberdeck_thread_read: "thread.read", cyberdeck_scout_read: "thread.read",
+  cyberdeck_worker_start: "worker.start", cyberdeck_workers_start: "worker.start", cyberdeck_workers_wait: "thread.read",
+  cyberdeck_thread_message: "thread.enqueue", cyberdeck_lease: "thread.read", cyberdeck_worker_ctl: "thread.read",
+  cyberdeck_worker_events: "thread.read", cyberdeck_orchestrator_inspect: "orchestrator.inspect",
+  cyberdeck_orchestrator_stop: "orchestrator.stop", cyberdeck_orchestrator_force_stop: "orchestrator.stop",
+  cyberdeck_workflow_create: "workflow.run", cyberdeck_workflow_status: "workflow.run", cyberdeck_workflow_changes: "workflow.run",
+  cyberdeck_workflow_send: "workflow.run", cyberdeck_workflow_cancel: "workflow.run",
+};
+async function exposedTools(context: McpServerContext): Promise<readonly (typeof TOOLS)[number][]> {
+  if (context.transport === undefined) return TOOLS;
+  try {
+    const actor = await context.transport.request<unknown>("agent.actor.describe", { actorSessionId: context.identity.actorSessionId });
+    if (!isRecord(actor)) return TOOLS;
+    if (actor.status === "bound" && Array.isArray(actor.capabilities) && actor.capabilities.every((value) => typeof value === "string")) {
+      return TOOLS.filter((tool) => TOOL_CAPABILITIES[tool.name] === undefined || (actor.capabilities as string[]).includes(TOOL_CAPABILITIES[tool.name]!));
+    }
+    if (["unbound", "orphaned", "unknown-session"].includes(String(actor.status))) {
+      return TOOLS.filter((tool) => TOOL_CAPABILITIES[tool.name] === undefined);
+    }
+  } catch { /* Recovery on an unavailable or older broker retains the universal catalog. */ }
+  return TOOLS;
+}
+
 /** JSON Schema mirror of `WorkerBudgetDeclarationSchema` for MCP clients. */
 export async function runMcpServer(
   context: McpServerContext,
@@ -600,7 +629,7 @@ export async function handleMcpRequest(
       });
     }
     if (request.method === "ping") return success(request.id, {});
-    if (request.method === "tools/list") return success(request.id, { tools: TOOLS });
+    if (request.method === "tools/list") return success(request.id, { tools: await exposedTools(context) });
     if (request.method === "tools/call") {
       const name = request.params?.name;
       const args = isRecord(request.params?.arguments) ? request.params.arguments : {};
