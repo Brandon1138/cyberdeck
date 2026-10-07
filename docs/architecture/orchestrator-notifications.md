@@ -33,9 +33,13 @@ Plan: identify the registry surface the enforcer and reconciler already use; ext
   change (turn completion, exit, fault, attention change, modal open or close) and
   `registry.workerTruth(sessionId)` projects the one truth. The producer keeps the last truth it saw
   per session and emits on edges, exactly as `WorkerBudgetEnforcer` does.
-- Instruction transitions: `registry.onInstructionState(update)` carries `undelivered` and the
-  `queued` holds; the record (actor, target, `expectedTurn`, `brokerOwned`, `holdReason`) is read
-  back through `InstructionQueue.list(targetSessionId)`.
+- Instruction transitions: `registry.onInstructionState(update)` only announces transitions the
+  provider was observed to take (rendered, submitted, acknowledged, completed). The holds and the
+  `undelivered` verdict are written by `InstructionQueue` itself through its `InstructionRepository`,
+  so the producer watches the repository instead: `observeInstructionRepository(store, onPut)` in
+  `src/orchestration/observed-instruction-repository.ts` wraps the repository main.ts hands the
+  queue and reports every persisted record after the write. One write path, one observer, every
+  state.
 
 ### D4. Observing worker events and handoffs without forking the event path
 
@@ -94,8 +98,8 @@ The producer tracks outstanding completion targets per worker: `1` at start, plu
 `expectedTurn` of every instruction rendered for that worker by its controller. When
 `truth.completedTurns` reaches an outstanding target, one `settled` record is written with
 `dedupeKey = settled:<sessionId>:<target>` (write-once). When truth reaches a terminal state, one
-`settled` record with `dedupeKey = settled:<sessionId>:terminal` is written, carrying the highest
-unreached target when there is one. `cyberdeck_workers_wait` acknowledges the matching key when it
+`settled` record with `dedupeKey = settled:<sessionId>:terminal` is written, carrying the lowest
+unreached target when there is one (the one a waiting orchestrator is most likely blocked on). `cyberdeck_workers_wait` acknowledges the matching key when it
 delivers a completed or terminal result (`deliveredVia: ["wait"]`), and a drained `settled` record
 calls `waitForWorkerResults` for its single target so the completion ledger counts the delivery and
 a later wait answers `retrieval: "replay"`.

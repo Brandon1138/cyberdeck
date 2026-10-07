@@ -26,6 +26,8 @@ export const NoticeFileSchema = z.object({
   /** The rendered one-line notice, already bounded by the domain renderer. */
   text: z.string().min(1).max(400),
   writtenAt: z.iso.datetime(),
+  /** The controller's quiet interval: a hook may repeat an unchanged notice after this long. */
+  quietMinutes: z.number().int().min(1).max(120).optional(),
 });
 
 export const NoticeShownFileSchema = z.object({
@@ -46,10 +48,18 @@ export type NoticeHookFormat = z.infer<typeof NoticeHookFormatSchema>;
  * True when the file holds something a hook should print: a newer head than the hook itself last
  * showed and newer than the broker last piggybacked.
  */
-export function noticeIsUnseen(file: NoticeFile, shown: NoticeShownFile | undefined): boolean {
+export function noticeIsUnseen(
+  file: NoticeFile,
+  shown: NoticeShownFile | undefined,
+  now?: string,
+): boolean {
   if (file.pending === 0 && file.dropped === 0) return false;
   if (file.cursor <= file.noticedCursor) return false;
-  return shown === undefined || file.cursor > shown.cursor;
+  if (shown === undefined || file.cursor > shown.cursor) return true;
+  if (file.quietMinutes === undefined || now === undefined) return false;
+  const quietMs = file.quietMinutes * 60_000;
+  const elapsed = Date.parse(now) - Date.parse(shown.shownAt);
+  return Number.isFinite(elapsed) && elapsed >= quietMs;
 }
 
 /**
