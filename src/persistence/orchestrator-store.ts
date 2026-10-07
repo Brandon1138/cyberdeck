@@ -1,32 +1,33 @@
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   OrchestratorBindingResetSchema,
   OrchestratorBindingSchema,
   type OrchestratorBinding,
 } from "../domain/orchestrator.js";
-import { openPrivateAppendFile } from "./private-files.js";
+import { ValidatedJournal } from "./validated-journal.js";
 
 /** Append-only latest-binding registry. Rebinding never erases the prior audit trail. */
 export class OrchestratorStore {
   readonly path: string;
+  private readonly journal: ValidatedJournal<Map<string, OrchestratorBinding>>;
 
   constructor(stateDirectory: string) {
     this.path = join(stateDirectory, "orchestration", "bindings.jsonl");
+    this.journal = new ValidatedJournal(this.path, projectBindings);
   }
 
   async get(key: string): Promise<OrchestratorBinding | undefined> {
     const bindings = await this.load();
-    return bindings.get(key);
+    return structuredClone(bindings.get(key));
   }
 
   async list(): Promise<OrchestratorBinding[]> {
-    return [...(await this.load()).values()];
+    return structuredClone([...(await this.load()).values()]);
   }
 
   async findBySessionId(sessionId: string): Promise<OrchestratorBinding | undefined> {
     const bindings = await this.load();
-    return [...bindings.values()].find((binding) => binding.sessionId === sessionId);
+    return structuredClone([...bindings.values()].find((binding) => binding.sessionId === sessionId));
   }
 
   async put(binding: OrchestratorBinding): Promise<void> {
@@ -40,20 +41,13 @@ export class OrchestratorStore {
   }
 
   private async append(record: OrchestratorBinding | { recordType: "reset"; key: string; resetAt: string }): Promise<void> {
-    const handle = await openPrivateAppendFile(this.path);
-    try {
-      await handle.write(`${JSON.stringify(record)}\n`, undefined, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
+    await this.journal.append(record);
   }
 
-  private async load(): Promise<Map<string, OrchestratorBinding>> {
-    const content = await readFile(this.path, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    });
+  private load(): Promise<Map<string, OrchestratorBinding>> { return this.journal.read(); }
+}
+
+function projectBindings(content: string): Map<string, OrchestratorBinding> {
     const latest = new Map<string, OrchestratorBinding>();
     const lines = content.split("\n");
     if (!content.endsWith("\n")) lines.pop();
@@ -69,5 +63,4 @@ export class OrchestratorStore {
       latest.set(binding.key, binding);
     }
     return latest;
-  }
 }
