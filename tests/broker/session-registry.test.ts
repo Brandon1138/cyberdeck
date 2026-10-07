@@ -969,6 +969,128 @@ describe("SessionRegistry", () => {
     });
   });
 
+  // The 2026-09-11 grok freezes: the Cursor TUI keeps repainting its status line with a
+  // near-static token counter, so the session reads "working" forever and the idle stall clock,
+  // which resets on every PTY chunk, never runs.
+  it("returns stalled when a Cursor turn's token counter stays pinned while it claims to work", async () => {
+    let now = 0;
+    const cursor: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session, initialPrompt) => ({
+        executable: "fake",
+        args: initialPrompt === undefined ? [] : [initialPrompt],
+        cwd: session.cwd,
+        env: {},
+      }),
+      buildResumeSpec: () => {
+        throw new Error("not used");
+      },
+      submitInput: (message) => Buffer.from(`${message}\r`),
+    };
+    const { registry, ptys } = harness({
+      workerStallSeconds: 60,
+      now: () => now,
+      adapters: { ...adapters, cursor },
+    });
+    const record = await registry.start(
+      request({ provider: "cursor", model: "cursor-grok-4.6-xhigh" }),
+      "Review the diff",
+    );
+    ptys[0]!.emitOutput("⠘⠤ Working 52.53k tokens\nctrl+c to stop");
+
+    now = 200_000;
+    ptys[0]!.emitOutput("\n⠘⠆ Working 52.55k tokens\nctrl+c to stop");
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 0, 500)).resolves.toMatchObject({
+      timedOut: true,
+      results: [{ status: "working" }],
+    });
+
+    now = 301_000;
+    ptys[0]!.emitOutput("\n⠘⠣ Working 52.56k tokens\nctrl+c to stop");
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 0, 500)).resolves.toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "stalled",
+        stalledForSeconds: 301,
+        stallReason: "token-counter-pinned-while-working",
+        tokenCount: 52_530,
+      }],
+    });
+  });
+
+  it("keeps a Cursor turn working while its token counter makes real progress", async () => {
+    let now = 0;
+    const cursor: ProviderAdapter = {
+      id: "cursor",
+      buildLaunchSpec: (session, initialPrompt) => ({
+        executable: "fake",
+        args: initialPrompt === undefined ? [] : [initialPrompt],
+        cwd: session.cwd,
+        env: {},
+      }),
+      buildResumeSpec: () => {
+        throw new Error("not used");
+      },
+      submitInput: (message) => Buffer.from(`${message}\r`),
+    };
+    const { registry, ptys } = harness({
+      workerStallSeconds: 60,
+      now: () => now,
+      adapters: { ...adapters, cursor },
+    });
+    const record = await registry.start(
+      request({ provider: "cursor", model: "cursor-grok-4.6-xhigh" }),
+      "Review the diff",
+    );
+    ptys[0]!.emitOutput("⠘⠤ Thinking 52.53k tokens\nctrl+c to stop");
+
+    // 2,370 tokens of progress restarts the clock, so 301s after launch is not a stall.
+    now = 250_000;
+    ptys[0]!.emitOutput("\n⠘⠆ Thinking 54.9k tokens\nctrl+c to stop");
+    now = 301_000;
+    ptys[0]!.emitOutput("\n⠘⠣ Thinking 54.93k tokens\nctrl+c to stop");
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 0, 500)).resolves.toMatchObject({
+      timedOut: true,
+      results: [{ status: "working" }],
+    });
+
+    // Pinned since the 250s reset: the stall fires 300s later, anchored to the reset.
+    now = 551_000;
+    ptys[0]!.emitOutput("\n⠘⠤ Thinking 54.95k tokens\nctrl+c to stop");
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 0, 500)).resolves.toMatchObject({
+      timedOut: false,
+      results: [{
+        status: "stalled",
+        stallReason: "token-counter-pinned-while-working",
+        tokenCount: 54_900,
+      }],
+    });
+  });
+
+  it("never applies the working-state stall to a token-quiet Codex turn", async () => {
+    let now = 0;
+    const { registry, ptys } = harness({ workerStallSeconds: 60, now: () => now });
+    const record = await registry.start(request(), "Run the long suite");
+    ptys[0]!.emitOutput("Working 5.53k tokens\nesc to interrupt");
+
+    now = 400_000;
+    ptys[0]!.emitOutput("\nWorking 5.53k tokens\nesc to interrupt");
+    await expect(registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 0, 500)).resolves.toMatchObject({
+      timedOut: true,
+      results: [{ status: "working" }],
+    });
+  });
+
   it("projects the model a Claude session switched to mid-session onto its record", async () => {
     // MIK-80: launched on Sonnet, switched to Opus inside the provider's CLI. The switch becomes a
     // fact when the first turn the new model produced is written, so that is when it is read.

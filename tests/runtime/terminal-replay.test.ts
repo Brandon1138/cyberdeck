@@ -177,4 +177,29 @@ describe("terminal replay semantics", () => {
     expect(result).not.toContain("DISTINCTIVE-END");
     expect(result).toHaveLength(240);
   });
+
+  it("salvages a frozen Cursor session's composed verdict from under the status repaints", () => {
+    // The 2026-09-11 freeze shape: the findings box is printed once, then the status trio —
+    // model banner, pane line, spinner with a pinned token counter — repaints for the rest of
+    // the session. The composed content must survive a bounded result; the repaints must not.
+    const verdict = [
+      "│ Findings │",
+      "│ 1. P1 029_admin_surface_adversarial_coverage.test.sql:436 — catalog │",
+      "│ LIKE on named polqual is under-constrained. │",
+    ].join("\n");
+    const repaint = [
+      "Cursor Grok 4.6 Extra High · 40.9%",
+      "~/code/work/sp-cov-db · brandonaron38/admin-cov-db-20260911 · #27",
+      "⠘⠤ Working 59.55k tokens",
+      "Tip: Hit shift+tab to enable Plan Mode for large or complex changes.",
+    ].join("\n");
+    const replay = `${verdict}\n${`${repaint}\n`.repeat(120)}`;
+
+    const result = compactTerminalResult(replay, 1_200);
+    expect(result).toContain("LIKE on named polqual");
+    expect(result).not.toContain("59.55k tokens");
+    expect(result).not.toContain("Extra High · 40.9%");
+    expect(result).not.toContain("Tip:");
+    expect(result).not.toContain("brandonaron38/admin-cov-db-20260911");
+  });
 });

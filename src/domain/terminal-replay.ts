@@ -424,7 +424,15 @@ function isTerminalChrome(line: string): boolean {
   const content = line
     .replace(/^[\s─━═╭╰│┌└┐┘▀▄]+/u, "")
     .replace(/[\s─━═╭╰│┌└┐┘▀▄]+$/u, "");
-  return /^(CYBERDECK|Claude Code|OpenAI Codex|Tips for getting|Tip:\s*(?:Use|Try the Desktop app|Paste an image with Ctrl\+V)|What's new|Use \/skills|Try "|← for agents|Starting MCP|Running .* hook|No output yet)/i.test(content)
+  // Cursor repaints a three-line status block (model banner with context percentage, cwd·branch
+  // pane line, braille spinner with verb and token counter) on every tick. A frozen session emits
+  // thousands of these and nothing else, and they would otherwise crowd the composed output out of
+  // any bounded fallback result.
+  if (/^[⠀-⣿]/u.test(content)) return true;
+  if (/^Cursor .{0,80} · \d+(?:\.\d+)?%$/u.test(content)) return true;
+  if (/^~\/\S* · \S+(?: · #\d+)?$/u.test(content)) return true;
+  if (/^(?:Thinking|Working|Grepping|Reading|Globbing|Searching|Composing)(?: [\d,.]+k? tokens?)?$/iu.test(content)) return true;
+  return /^(CYBERDECK|Claude Code|OpenAI Codex|Tips for getting|Tip:\s|What's new|Use \/skills|Try "|← for agents|Starting MCP|Running .* hook|No output yet)/i.test(content)
     || /^https:\/\/chatgpt\.com\/codex\?app-landing-page=true$/i.test(content)
     || /^(?:model|directory):\s+/i.test(content)
     || /^(?:tab to queue message|\d+% context left)$/i.test(content)

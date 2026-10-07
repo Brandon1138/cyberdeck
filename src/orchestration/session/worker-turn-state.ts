@@ -1,4 +1,4 @@
-import type { InstructionLifecycleState } from "../../domain/worker-truth.js";
+import type { InstructionLifecycleState, WorkerStallReason } from "../../domain/worker-truth.js";
 import type { WorkerResultSnapshot } from "./session-ports.js";
 import type { WorkerTurnTranscript } from "./worker-turn-ports.js";
 
@@ -22,9 +22,26 @@ export interface StallObservation {
   unchangedSinceMs: number;
 }
 
+/**
+ * A frozen Cursor session never goes byte-quiet: the TUI keeps repainting its status line, so
+ * {@link StallObservation}'s version check resets on every chunk and the idle stall clock never
+ * runs. This observation ages on token *progress* instead — the counter must advance meaningfully
+ * for the turn to count as live.
+ */
+export interface WorkingStallObservation {
+  tokenCount: number;
+  unchangedSinceMs: number;
+}
+
+export interface StallReading {
+  stalledForSeconds: number;
+  tokenCount: number;
+  reason: WorkerStallReason;
+}
+
 export interface WorkerStatusReading {
   status: WorkerResultSnapshot["status"];
-  stalled?: { stalledForSeconds: number; tokenCount: number };
+  stalled?: StallReading;
 }
 
 export interface TurnCaptureClaim {

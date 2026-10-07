@@ -22,6 +22,17 @@ export const MAX_WAIT_SEGMENT_SECONDS = 90;
 /** Frozen idle worker threshold before waits return a diagnosable stalled state. */
 export const DEFAULT_WORKER_STALL_SECONDS = 60;
 
+/**
+ * A frozen Cursor session keeps repainting its status line with a near-static token counter, so
+ * activity reads "working" and the idle stall clock never runs. The working-state stall instead
+ * measures token *progress*: fewer than {@link CURSOR_STALL_TOKEN_PROGRESS} tokens over
+ * {@link CURSOR_WORKING_STALL_MULTIPLIER} × workerStallSeconds is a freeze, not a slow turn. The
+ * multiplier keeps a long silent tool run from tripping it: observed 2026-09-11 freezes sat for
+ * 10-25 minutes gaining under 50 tokens, while healthy turns gained thousands per minute.
+ */
+export const CURSOR_WORKING_STALL_MULTIPLIER = 5;
+export const CURSOR_STALL_TOKEN_PROGRESS = 200;
+
 /** Thread listing must stay answerable inside a caller's token budget at 64 concurrent workers. */
 export const DEFAULT_THREAD_PAGE = 50;
 export const MAX_THREAD_PAGE = 200;

@@ -65,13 +65,19 @@ subsequent focused results do not rewrite it as a passing full suite.
 
 This is a repeated benchmark, not automatic correctness grading of every arbitrary production task. Production container activity remains recorded per worker; benchmark results apply only to the named provider/model/image/scenarios. Baseline failures must remain visible.
 
-The whole-container OOM rubric remains strict. Codex refused the unbounded allocation command.
-Claude ran the allocator and reported child-process exit 137 while its worker container survived.
-Neither outcome proves the whole-container kill required by this scenario. Each failed row reports
-`GUEST_NOT_OOM_KILLED` and retains its failure codes; the harness does not claim successful cleanup
-or capacity evidence when it exits early. The separate scripted
-container suite verifies that lifecycle; these live cases remain errors rather than being converted
-to passes. Revisit the fault-injection design separately before using its pass rate to rank models.
+The whole-container OOM rubric remained strict in that baseline. Codex refused the unbounded
+allocation command. Claude ran the allocator and reported child-process exit 137 while its worker
+container survived. Neither outcome proves the whole-container kill the scenario required, because
+no provider can arrange one from inside: the kernel kills the allocating child, not the container's
+init. Those six rows are preserved as recorded.
+
+**Resolved 2026-09-11:** the OOM scenario is now fault injection in every mode. A live run keeps
+the real container, cgroup limit, kill, classification, capacity release and retained evidence, but
+its guest is always the scripted allocator (PID 1 allocates in-process), so the row is
+deterministic, spends no subscription budget, and no longer counts against any model's score. Its
+facts carry `guest: "scripted-oom-injection"`. Model-facing memory behaviour, if it is ever worth
+grading, needs its own scenario with a rubric a model can actually satisfy (refuse-and-report or
+run-and-report-the-child-kill, worker container surviving either way).
 
 ## Activation and rollback
 

@@ -14,6 +14,7 @@ import type {
   DeliveryHoldReason,
   InstructionLifecycleState,
   ProviderLimitTermination,
+  WorkerStallReason,
   WorkerTruth,
 } from "../../domain/worker-truth.js";
 
@@ -93,7 +94,7 @@ export interface WorkerResultSnapshot {
   retrieval?: "fresh" | "replay";
   completedAt?: string;
   stalledForSeconds?: number;
-  stallReason?: "transcript-and-token-count-unchanged-while-idle";
+  stallReason?: WorkerStallReason;
   tokenCount?: number;
   profile?: "scout";
   effectiveState?: SessionRecord["effectiveState"];
