@@ -14,6 +14,7 @@ import {
   type BrokerMethodContext,
 } from "./server/method-context.js";
 import { BROKER_METHODS } from "./server/methods.js";
+import { FleetProjection } from "./fleet-projection.js";
 import type { BrokerServerOptions, ConnectionContext } from "./server/options.js";
 import { RegistryError, type AttachmentMode } from "./session-registry.js";
 
@@ -27,6 +28,7 @@ export type { BrokerServerOptions } from "./server/options.js";
 export class BrokerServer {
   private readonly server: Server;
   private readonly sockets = new Set<Socket>();
+  private readonly fleetConnections = new Set<ConnectionContext>();
   private listening = false;
   private closePromise: Promise<void> | undefined;
   /** The half of this server a method handler is allowed to see. Built once, per server. */
@@ -36,6 +38,9 @@ export class BrokerServer {
     this.server = createServer((socket) => this.accept(socket));
     this.methodContext = {
       options,
+      fleetProjection: new FleetProjection(options),
+      subscribeFleet: (context) => this.subscribeFleet(context),
+      unsubscribeFleet: (context) => this.unsubscribeFleet(context),
       attach: (context, sessionId, mode, detachIdentity) =>
         this.attach(context, sessionId, mode, detachIdentity),
       subscribeLocalWorkerTelemetry: (context) => this.subscribeLocalWorkerTelemetry(context),
@@ -109,6 +114,7 @@ export class BrokerServer {
     socket.on("close", () => {
       this.sockets.delete(socket);
       this.unsubscribeLocalWorkerTelemetry(context);
+      this.unsubscribeFleet(context);
       void this.options.registry.releaseClient(context.id);
     });
     socket.on("error", () => {
@@ -121,6 +127,10 @@ export class BrokerServer {
       try {
         const result = await this.routeRequest(context, frame);
         this.send(context.socket, { type: "response", id: frame.id, ok: true, result });
+        if (/^(session|fleet|orchestrator|agent|worker)\./u.test(frame.method)
+          && /(?:start|startWithPrompt|startMany|stop|stopOne|forceStop|resume|delete|rename|pin|reorder|set|add|remove|reset|create|workerHandoff|control|enqueue|submit)$/iu.test(frame.method)) {
+          for (const subscriber of this.fleetConnections) this.invalidateFleet(subscriber);
+        }
         if (frame.method === "broker.shutdown") {
           setImmediate(() => this.options.onShutdown?.());
         }
@@ -170,6 +180,36 @@ export class BrokerServer {
     }
     const handler = BROKER_METHODS[frame.method]!;
     return handler(this.methodContext, context, frame);
+  }
+
+  private subscribeFleet(context: ConnectionContext): void {
+    if (context.fleetSubscription !== undefined) return;
+    context.fleetSubscription = {
+      unsubscribe: this.options.registry.onSessionUpdate(() => this.invalidateFleet(context)),
+    };
+    this.fleetConnections.add(context);
+  }
+
+  private invalidateFleet(context: ConnectionContext): void {
+    const subscription = context.fleetSubscription;
+    if (subscription === undefined || subscription.timer !== undefined) return;
+    subscription.timer = setTimeout(() => {
+      delete subscription.timer;
+      // Invalidations carry no row data. A slow peer gets the periodic resync instead of a queue.
+      if (!context.socket.destroyed && context.socket.writableLength < 64 * 1024) {
+        this.send(context.socket, { type: "fleet-invalidated" });
+      }
+    }, 100);
+    subscription.timer.unref();
+  }
+
+  private unsubscribeFleet(context: ConnectionContext): void {
+    const subscription = context.fleetSubscription;
+    delete context.fleetSubscription;
+    delete context.fleetProjection;
+    this.fleetConnections.delete(context);
+    subscription?.unsubscribe();
+    if (subscription?.timer !== undefined) clearTimeout(subscription.timer);
   }
 
   private subscribeLocalWorkerTelemetry(context: ConnectionContext): void {

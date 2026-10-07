@@ -17,6 +17,7 @@ import type { NvimBindingService } from "../nvim-binding-service.js";
 import type { AttachmentMode, SessionRegistry } from "../session-registry.js";
 import type { WorkerCoordinationService } from "../worker-coordination.js";
 import type { WorkerEventChannel } from "../worker-event-channel.js";
+import type { RetainedFleetProjection } from "../fleet-projection.js";
 import type {
   FleetDetachRecordPort,
   FleetPreferenceReadPort,
@@ -40,6 +41,8 @@ export interface ConnectionContext {
     pending?: LocalWorkerTelemetrySnapshot;
     timer?: ReturnType<typeof setTimeout>;
   };
+  fleetProjection?: RetainedFleetProjection;
+  fleetSubscription?: { unsubscribe: () => void; timer?: ReturnType<typeof setTimeout> };
 }
 export interface BrokerServerOptions {
   activity?: AgentActivityPort;

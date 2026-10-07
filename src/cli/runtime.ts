@@ -302,6 +302,7 @@ export async function runCyberdeck(
     ...(process.env.PATH === undefined ? {} : { hookPath: process.env.PATH }),
   });
   await runFleet(client, process.stdin, process.stdout, process, {
+    reconnectTransport: async () => { client = await RpcClient.connect(brokerSocketPath); return client; },
     ...fleetRuntimeDeps,
     changeDirectory: toolkit.openInteractiveShell,
     detachIdentity: `operator:${process.getuid?.() ?? "local"}`,

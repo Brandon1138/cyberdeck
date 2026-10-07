@@ -14,6 +14,7 @@ import type { NvimBindingService } from "../nvim-binding-service.js";
 import type { RequestFrame } from "../protocol/frames.js";
 import type { AttachmentMode } from "../session-registry.js";
 import type { WorkerEventChannel } from "../worker-event-channel.js";
+import type { FleetProjection } from "../fleet-projection.js";
 import type { BrokerServerOptions, ConnectionContext } from "./options.js";
 import type {
   FleetDetachRecordPort,
@@ -33,6 +34,9 @@ import type {
  */
 export interface BrokerMethodContext {
   readonly options: BrokerServerOptions;
+  readonly fleetProjection: FleetProjection;
+  subscribeFleet(context: ConnectionContext): void;
+  unsubscribeFleet(context: ConnectionContext): void;
   attach(
     context: ConnectionContext,
     sessionId: string,

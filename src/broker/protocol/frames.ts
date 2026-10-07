@@ -93,6 +93,7 @@ export const ProtocolErrorFrameSchema = z.object({
 });
 
 export const ServerFrameSchema = z.union([
+  z.object({ type: z.literal("fleet-invalidated") }),
   ResponseFrameSchema,
   OutputFrameSchema,
   SessionEndedFrameSchema,

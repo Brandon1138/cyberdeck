@@ -1,39 +1,8 @@
 import { orchestratorControllerId, type OrchestratorBinding } from "../domain/orchestrator.js";
-import { TERMINAL_WORKER_LIFECYCLES, type LeaseState, type OwnershipSubject } from "../domain/worker-coordination.js";
+import { TERMINAL_WORKER_LIFECYCLES, type OwnershipSubject } from "../domain/worker-coordination.js";
 
-export interface FleetWorkerCoordinationView {
-  sessionId: string;
-  subjectId: string;
-  origin: {
-    creatorControllerId: string;
-    creatorSessionId?: string;
-    taskId: string;
-    waveId?: string;
-    threadId: string;
-    createdAt: string;
-  };
-  currentController?: {
-    controllerId: string;
-    familyId: string;
-    scope: string;
-  };
-  leaseHealth: LeaseState;
-  orphaned: boolean;
-  adoptable: boolean;
-}
-
-/**
- * The durable controller family each bound orchestrator session speaks for.
- *
- * This is the other half of a worker's `currentController`: Fleet joins the two to say which
- * row on the roster owns which worker row. Sessions are named rather than bindings because a
- * rebound scope moves the identity onto the new session, and a session only appears while it is
- * the one its family's binding points at.
- */
-export interface FleetOrchestratorOwnershipView {
-  sessionId: string;
-  controllerId: string;
-}
+import type { FleetWorkerCoordinationView, FleetOrchestratorOwnershipView } from "../domain/fleet-projection.js";
+export type { FleetWorkerCoordinationView, FleetOrchestratorOwnershipView } from "../domain/fleet-projection.js";
 
 /** Read-only Fleet projection. Lease tokens, hashes, and audit details stay broker-private. */
 export function fleetWorkerCoordinationView(

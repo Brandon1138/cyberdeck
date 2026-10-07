@@ -19,6 +19,7 @@ export class RpcError extends Error {
 }
 
 export class RpcClient {
+  readonly fleetProjection = true;
   private readonly decoder = new JsonlDecoder(ServerFrameSchema);
   private readonly pending = new Map<number, PendingRequest>();
   private readonly listeners = new Set<(frame: ServerFrame) => void>();
