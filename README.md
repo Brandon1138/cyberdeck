@@ -344,6 +344,33 @@ be deleted.
 Bounded control-plane jobs are different: their records and terminal results are rebuilt on restart,
 while unverifiable nonterminal jobs become `interrupted` and are never automatically redispatched.
 
+## Notifications
+
+An orchestrator keeps working after `cyberdeck_workers_start`. The broker tells it when a worker
+it controls settles, blocks on a provider prompt, asks for a decision, or loses an instruction,
+through a one-line notice that never carries the payload:
+
+- beside any `cyberdeck_*` tool result, as a `cyberdeckNotice` text block, while the orchestrator
+  is mid-turn;
+- after other tools, through the provider's own hooks where the provider has them (Claude and
+  Cursor orchestrators; Codex orchestrators use the first channel only);
+- at the prompt, as a `[cyberdeck notice]` line sent through the ordinary instruction queue, when
+  the orchestrator is idle. The wake waits a few seconds to coalesce, is withdrawn if the
+  orchestrator starts a turn first, is held while a human controls the thread, and is capped per
+  rolling hour.
+
+The orchestrator drains with `cyberdeck_notifications_read` and acknowledges each page by passing
+its `nextCursor` as `acknowledgeThrough` on the next call; an unacknowledged page replays, so a lost
+response loses nothing. `cyberdeck_notifications_configure` sets the wake policy (`all`,
+`steering-only`, `off`), the quiet interval, the hourly wake cap and the coalescing window.
+`cyberdeck_workers_wait` stays the deliberate synchronous join and agrees with the feed: a target
+drained from the feed makes a later wait answer `retrieval: "replay"`.
+
+Operators can read the same inbox: `cyberdeck notifications read --actor-session <id>` and
+`cyberdeck notifications configure --actor-session <id> --wake off`. Records live in
+`orchestration/orchestrator-notifications-v1.jsonl` under the state directory, replayed on restart.
+Design: [`docs/architecture/orchestrator-notifications.md`](docs/architecture/orchestrator-notifications.md).
+
 ## Start a session
 
 Every start requires an explicit provider. The model and opaque role string are optional and independent.

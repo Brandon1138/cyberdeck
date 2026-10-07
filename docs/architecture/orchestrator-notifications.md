@@ -166,4 +166,78 @@ asyncRewake is the fallback if that wake proves unreliable in practice.
 
 ## Design
 
-(Filled in as tasks land: domain and store, producer, delivery, control plane, hooks, prompt.)
+```text
+registry truth edges ─┐
+worker events ────────┤  OrchestratorNotificationProducer      OrchestratorNotificationDelivery
+handoffs ─────────────┼──► (src/broker) ──append──► inbox ──onChange──► (src/broker)
+budget soft limit ────┤                              │                    ├─ notice.json (hook reads)
+instruction holds ────┘                              │                    ├─ agent.notifications.notice (tool result)
+                                                     │                    └─ enqueueBroker wake (idle) / withdraw
+                         cyberdeck_notifications_read ┘◄── OrchestratorNotificationControlPlane (src/orchestration)
+```
+
+### Domain (`src/domain/orchestrator-notification.ts`)
+
+Kinds, the record schema (`cursor` per controller, `dedupeKey`, `wakeEligible`, `deliveredVia`),
+the policy, `buildNotice` and `renderNotice` (≤200 chars, ≤400 with one inlined intervention or
+critical summary, always naming the drain tool), `wakeEligible`, and the two key makers
+`settledDedupeKey` and `coalescedDedupeKey`. `src/domain/orchestrator-notice-file.ts` is the hook
+side: the `notice.json` and `notice-shown.json` shapes and the provider envelope renderer.
+
+### Inbox (`src/persistence/orchestrator-notification-store.ts`)
+
+Append-only JSONL, one fsynced record per mutation (`append`, `replace`, `acknowledge`, `deliver`,
+`drop`, `notice`, `policy`), replayed by `load()` and failing closed on corruption like the
+coordination log. `dedupe: "once"` makes `settled` idempotent across restarts; `dedupe: "replace"`
+coalesces `progress` and stalled `attention` to the latest per worker. Over the 200-record cap the
+oldest notice-only records are dropped first and every drop is counted and reported on the next
+notice and drain. `onChange` fires after the fsync; application code sees the store only through
+`NotificationInboxPort`.
+
+### Producer (`src/broker/orchestrator-notification-producer.ts`)
+
+Subscribes to `registry.onSessionUpdate` (truth edges per worker: targets reached, terminal, modal,
+stalled), to the observed coordination substrate (`onEventSubmitted`, `onHandoffCommitted`,
+`onBudgetUpdate`), and to the observed instruction repository (holds and `undelivered`). Routes to
+the lease holder, then the origin creator, then the parent binding. Worker sessions only. A
+start-time sweep re-emits reached and terminal settlements (idempotent) and seeds the rest.
+
+### Delivery (`src/broker/orchestrator-notification-delivery.ts`)
+
+On every inbox change: rewrite or remove the controller's `notice.json`; if a wake-eligible record
+is newer than the last notice and the policy allows, start one coalescing timer per controller.
+When it fires: no wake if the orchestrator is `working` (the tool-result path carries it) or the
+hook sidecar already showed the head; otherwise `enqueueBroker` a `[cyberdeck notice]` line with
+`messageId = stableUuid("notice:<controller>:<head>")`. A `rendered` or later record counts as
+delivered (`deliveredVia: ["wake"]`); a `queued` one is remembered and withdrawn through
+`InstructionQueue.withdraw` if the orchestrator starts a turn or drains first. The busy path,
+`notice(controllerId)`, applies the debounce (head moved past the last notice from either channel,
+or the quiet interval elapsed), marks the page delivered via `tool-result`, and returns the rendered
+notice. Wakes are counted per rolling hour; the ceiling writes one `budget` record and suppresses
+wakes until the window moves.
+
+### Control plane (`src/orchestration/orchestrator-notification-control.ts`)
+
+`agent.notifications.read` (cursor, limit ≤50, `acknowledgeThrough`, kind and severity filters,
+`thread.read` grant filtering per worker, settled records embed the single-target wait result with
+`retrieval: "notification"`), `agent.notifications.configure` (explicit partial patch merged over the
+stored policy), `agent.notifications.notice` (the busy path). The MCP server exposes the first two
+as `cyberdeck_notifications_read` and `cyberdeck_notifications_configure` and calls the third after
+every other tool call, appending `{cyberdeckNotice}` when there is one and swallowing failures.
+`AgentControlService.waitForWorkers` consumes the settled record of every target it delivers.
+
+### Hooks
+
+`cli/notice-hook-entry.js --actor-session <id> --state-directory <dir> --format <provider> --event <E>`
+reads `notice.json` and the sidecar, prints the provider envelope at most once per inbox head (or
+again after the quiet interval), guards Claude's `Stop` re-entry, and always exits 0. Provider
+generation is in `src/providers/claude/launch-settings.ts` (orchestrators only) and the Cursor
+session plugin written by `src/providers/cursor/mcp-hosting.ts`.
+
+### Composition
+
+`composeOrchestratorNotificationFeed` in `src/broker/orchestrator-notification-feed.ts` builds the
+three services from ports; `src/broker/main.ts` constructs the inbox store, the notice-file
+adapter, the observed coordination service and the observed instruction repository, starts the
+feed after the instruction queue, hands the inbox to `AgentControlService` and the control plane to
+the broker server, and stops the feed on shutdown.
