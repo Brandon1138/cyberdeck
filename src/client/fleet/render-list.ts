@@ -1,6 +1,5 @@
 import { basename } from "node:path";
 import { displayWidth } from "../display-width.js";
-import { OCTOPUS_MARK, OCTOPUS_SPLASH, pixelArtHeight, pixelArtWidth, renderPixelArt, } from "../octopus.js";
 import { pullRequestLabel } from "../pr-status.js";
 import { PULL_REQUEST_CELL_WIDTH, WORKTREE_TAG_WIDTH } from "./constants.js";
 import { scrollFocusedRowIntoView } from "./list-groups.js";
@@ -252,31 +251,13 @@ export function shellName(): string {
   return shell === undefined || shell === "" ? "shell" : basename(shell);
 }
 
-/**
- * The empty fleet: the octopus at full size, over the one line of copy that explains it.
- *
- * This is the only surface with room for the whole animal and the only moment nothing is competing
- * for that room, which is the entire argument for spending it here. A viewport too short or too
- * narrow drops the art whole and keeps the sentence — a cropped octopus reads as a rendering fault
- * rather than as art, so there is no partial version of this.
- */
+/** The native mascot lives in the header; the empty list keeps its explanatory sentence. */
 export function renderEmptyFleet(
   viewportHeight: number,
   options: ResolvedFleetRenderOptions,
 ): string[] {
   const caption = "No durable agent threads yet.";
-  const width = pixelArtWidth(OCTOPUS_SPLASH);
-  const height = pixelArtHeight(OCTOPUS_SPLASH);
-  if (viewportHeight < height + 2 || options.width < width) {
-    return [caption].slice(0, viewportHeight);
-  }
-  const center = (span: number) => " ".repeat(Math.max(0, Math.floor((options.width - span) / 2)));
-  const indent = center(width);
-  return [
-    ...renderPixelArt(OCTOPUS_SPLASH, options.color, options.background).map((line) => `${indent}${line}`),
-    "",
-    `${center(caption.length)}${paint(caption, "dim", options.color)}`,
-  ];
+  return [paint(fit(caption, options.width), "dim", options.color)].slice(0, viewportHeight);
 }
 
 export function renderHeader(
@@ -310,22 +291,20 @@ export function renderHeader(
   const context = orchestrator === undefined
     ? `No orchestrator · ctrl+o to choose · ${shortPath(state.fallbackCwd, options.home)}`
     : `${friendlyModel(orchestrator.provider, orchestrator.model)} · ${friendlyEffort(orchestrator.effort ?? "provider-managed")} · ${scope}`;
-  // The mark is taller than the three lines of text beside it. Eight pixel rows is the floor at
-  // which the octopus is still the octopus — below it the tentacles have nowhere to hang and the
-  // silhouette reads as a space invader — so the header is as tall as the animal, not the copy.
-  const showsMark = options.width >= 64;
-  const markWidth = pixelArtWidth(OCTOPUS_MARK);
+  const mark = options.color ? options.mascot : undefined;
+  const markWidth = mark?.columns ?? 0;
+  const showsMark = mark !== undefined && options.width >= markWidth + 2 + 32;
   const textWidth = Math.max(1, options.width - (showsMark ? markWidth + 2 : 0));
   const textLines = [
     paint("Cyberdeck", "bold", options.color),
     paint(fit(context, textWidth), "dim", options.color),
     paint(fit(counts, textWidth), "dim", options.color),
   ];
-  if (!showsMark) return textLines;
-  const mark = renderPixelArt(OCTOPUS_MARK, options.color, options.background);
+  // Keep the header's four-row footprint stable whether graphics are available or not.
+  if (!showsMark) return [...textLines, ""];
   return Array.from(
-    { length: Math.max(mark.length, textLines.length) },
-    (_, index) => `${mark[index] ?? " ".repeat(markWidth)}  ${textLines[index] ?? ""}`,
+    { length: Math.max(mark.rows.length, textLines.length) },
+    (_, index) => `${mark.rows[index] ?? " ".repeat(markWidth)}  ${textLines[index] ?? ""}`,
   );
 }
 

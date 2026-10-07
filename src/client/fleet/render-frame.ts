@@ -24,7 +24,7 @@ export function renderFleet(
   const color = options.color ?? true;
   const home = options.home ?? homedir();
   const pullRequests = options.pullRequests ?? new Map();
-  const resolved = { width, height, now, color, home, pullRequests, background: options.background };
+  const resolved = { width, height, now, color, home, pullRequests, background: options.background, mascot: options.mascot };
   const state = normalizeState(current, snapshot, now);
   if (state.workerPicker !== undefined) {
     return renderWorkerPicker(state, resolved);
