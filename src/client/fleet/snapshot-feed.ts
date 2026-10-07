@@ -7,6 +7,7 @@ export class FleetSnapshotFeed {
   snapshot: FleetSnapshot = { threads: [] };
   error: string | undefined;
   private version: string | undefined;
+  private generation = 0;
   private compact = true;
   private inFlight: Promise<void> | undefined;
   private pending = false;
@@ -49,6 +50,12 @@ export class FleetSnapshotFeed {
     }, 100);
   }
 
+  /** Actions may return a newer full snapshot. Fence pending replies and resync its wire version. */
+  resync(snapshot: FleetSnapshot): void {
+    this.snapshot = snapshot; this.version = undefined; this.generation++;
+    this.invalidate();
+  }
+
   refresh(): Promise<void> {
     if (this.inFlight !== undefined) { this.pending = true; return this.inFlight; }
     this.pending = false;
@@ -76,27 +83,42 @@ export class FleetSnapshotFeed {
       this.client = client; this.disconnected = false; this.version = undefined; this.compact = client.fleetProjection === true;
       this.connected(client); this.listen();
     }
-    if (!this.compact) { this.snapshot = await collectFleetSnapshot(this.client); return; }
+    const generation = this.generation;
+    if (!this.compact) {
+      await this.collectLegacy(generation);
+      return;
+    }
     let reply: FleetProjectionReply;
     try { reply = await this.client.request("fleet.snapshot", { version: this.version }); }
     catch (error) {
       if (!(typeof error === "object" && error !== null && "code" in error && error.code === "METHOD_NOT_FOUND")) throw error;
-      this.compact = false; this.snapshot = await collectFleetSnapshot(this.client); return;
+      this.compact = false; await this.collectLegacy(generation); return;
     }
     // Structural fallback also supports simple older transports; only the wire broker sends versions.
     if (typeof reply !== "object" || reply === null || !("kind" in reply)) {
-      this.compact = false; this.snapshot = await collectFleetSnapshot(this.client); return;
+      this.compact = false; await this.collectLegacy(generation); return;
     }
     if (this.disposed) return;
+    if (generation !== this.generation) { this.pending = true; return; }
     if (reply.kind === "full") this.snapshot = reply.snapshot;
     else if (reply.kind === "delta") {
       if (reply.baseVersion !== this.version) { this.version = undefined; this.pending = true; return; }
       const threads = new Map(this.snapshot.threads.map((thread) => [thread.record.id, thread]));
       for (const id of reply.remove) threads.delete(id);
       for (const thread of reply.upsert) threads.set(thread.record.id, thread);
-      this.snapshot = { threads: [...threads.values()], ...(reply.projects === undefined ? {} : { projects: reply.projects }) };
+      if (reply.order !== undefined && (reply.order.length !== threads.size || new Set(reply.order).size !== threads.size || reply.order.some((id) => !threads.has(id)))) {
+        this.version = undefined; this.pending = true; return;
+      }
+      this.snapshot = { threads: reply.order === undefined ? [...threads.values()] : reply.order.map((id) => threads.get(id)!),
+        ...(reply.projects === undefined ? {} : { projects: reply.projects }) };
     } else if (reply.version !== this.version) { this.version = undefined; this.pending = true; return; }
     this.version = reply.version;
+  }
+
+  private async collectLegacy(generation: number): Promise<void> {
+    const snapshot = await collectFleetSnapshot(this.client);
+    if (generation === this.generation && !this.disposed) this.snapshot = snapshot;
+    else this.pending = true;
   }
 
   private listen(): void {
@@ -104,7 +126,7 @@ export class FleetSnapshotFeed {
     this.unsubscribe.push(this.client.onFrame((frame) => {
       if (frame.type === "fleet-invalidated") this.invalidate();
     }), this.client.onClose(() => {
-      this.disconnected = true; this.version = undefined;
+      this.disconnected = true; this.version = undefined; this.generation++;
       if (this.reconnect === undefined) this.closed();
       else { this.error = "Broker disconnected; showing cached Fleet while reconnecting."; this.notify(); this.invalidate(); }
     }));

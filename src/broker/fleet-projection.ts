@@ -43,6 +43,8 @@ export class FleetProjection {
       kind: "delta", version, baseVersion,
       upsert: snapshot.threads.filter((thread) => old.get(thread.record.id) !== JSON.stringify(thread)),
       remove: previous.snapshot.threads.filter((thread) => !ids.has(thread.record.id)).map((thread) => thread.record.id),
+      ...(JSON.stringify(previous.snapshot.threads.map((thread) => thread.record.id)) === JSON.stringify(sessions.map((record) => record.id))
+        ? {} : { order: sessions.map((record) => record.id) }),
       ...(projects === undefined ? {} : { projects }),
     };
     // A burst affecting most rows is cheaper as a full resync. Retain only one previous generation.

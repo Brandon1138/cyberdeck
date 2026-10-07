@@ -43,5 +43,5 @@ export interface FleetProjectionSnapshot {
 }
 export type FleetProjectionReply =
   | { kind: "full"; version: string; snapshot: FleetProjectionSnapshot }
-  | { kind: "delta"; version: string; baseVersion: string; upsert: FleetProjectionSnapshot["threads"]; remove: string[]; projects?: readonly string[] }
+  | { kind: "delta"; version: string; baseVersion: string; upsert: FleetProjectionSnapshot["threads"]; remove: string[]; order?: string[]; projects?: readonly string[] }
   | { kind: "unchanged"; version: string };

@@ -278,6 +278,7 @@ export interface ActorDescription {
   scope?: OrchestratorScope;
   capabilities?: CyberdeckCapability[];
   executionState?: string;
+  sessionKind?: "worker" | "orchestrator";
   remedy: string;
 }
 
@@ -664,7 +665,9 @@ export class AgentControlService {
       );
     }
     const result = await readThreadPage(this.transcripts, sessionId, afterCursor, limit, options);
-    this.threadCursors.set(cursorKey, Math.max(previous ?? 0, result.nextCursor));
+    // Fragment delivery is acknowledged by the next request's afterCursor. Holding the internal
+    // cursor until then permits an exact retry when even the final fragment's response is lost.
+    this.threadCursors.set(cursorKey, Math.max(previous ?? 0, result.fragment === undefined ? result.nextCursor : afterCursor));
     return result;
   }
 
@@ -1161,6 +1164,7 @@ export class AgentControlService {
       status: "unbound",
       bound: false,
       ...(familyKey === undefined ? {} : { familyKey }),
+      sessionKind: record.kind ?? "worker",
       executionState: record.executionState,
       remedy:
         `Session ${actorSessionId} exists but holds no orchestrator binding. Bind it with \`cyberdeck cockpit\`, or run Cyberdeck tools from a session Cyberdeck launched as an orchestrator.`,

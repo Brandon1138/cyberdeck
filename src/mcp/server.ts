@@ -579,7 +579,9 @@ async function exposedTools(context: McpServerContext): Promise<readonly (typeof
     if (actor.status === "bound" && Array.isArray(actor.capabilities) && actor.capabilities.every((value) => typeof value === "string")) {
       return TOOLS.filter((tool) => TOOL_CAPABILITIES[tool.name] === undefined || (actor.capabilities as string[]).includes(TOOL_CAPABILITIES[tool.name]!));
     }
-    if (["unbound", "orphaned", "unknown-session"].includes(String(actor.status))) {
+    // An Orc can start MCP before its activation append finishes. Do not narrow an unbound
+    // or unknown Orc and strand its harness with a pre-grant catalog. Only known workers narrow.
+    if (actor.status === "unbound" && actor.sessionKind === "worker") {
       return TOOLS.filter((tool) => TOOL_CAPABILITIES[tool.name] === undefined);
     }
   } catch { /* Recovery on an unavailable or older broker retains the universal catalog. */ }

@@ -334,7 +334,7 @@ export async function runFleet(
     });
     state = executed.state;
     snapshot = executed.snapshot;
-    if (action !== undefined) { snapshotFeed.snapshot = snapshot; snapshotFeed.invalidate(); }
+    if (action !== undefined) snapshotFeed.resync(snapshot);
     nvimLayoutHookInstalled = executed.nvimLayoutHookInstalled;
     notify();
   };

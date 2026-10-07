@@ -70,6 +70,39 @@ it("keeps one request in flight and one follow-up when updates arrive during a s
   feed.dispose();
 });
 
+it("applies insertion, removal, and explicit order deltas without leaving a version-matched stale row", async () => {
+  const client = transport(), feed = new FleetSnapshotFeed(client as never);
+  await feed.refresh();
+  const second = { ...record, id: "22222222-2222-4222-8222-222222222222" };
+  client.request.mockImplementationOnce(async () => ({ kind: "delta", baseVersion: "epoch:1", version: "epoch:2",
+    upsert: [{ record: second }], remove: [], order: [second.id, record.id] }));
+  await feed.refresh();
+  expect(feed.snapshot.threads.map((thread) => thread.record.id)).toEqual([second.id, record.id]);
+  client.request.mockImplementationOnce(async () => ({ kind: "delta", baseVersion: "epoch:2", version: "epoch:3",
+    upsert: [], remove: [record.id], order: [second.id] }));
+  await feed.refresh();
+  expect(feed.snapshot.threads.map((thread) => thread.record.id)).toEqual([second.id]);
+  feed.dispose();
+});
+
+it("fences a refresh response started before an action and fully resyncs the action snapshot", async () => {
+  vi.useFakeTimers();
+  const client = transport(), feed = new FleetSnapshotFeed(client as never);
+  await feed.refresh(); feed.start(vi.fn()); await vi.advanceTimersByTimeAsync(200);
+  let finish: (value: unknown) => void = () => {};
+  client.request.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  const slow = feed.refresh(), latest = { threads: [{ record: { ...record, name: "action result" } }] };
+  feed.resync(latest);
+  finish({ kind: "full", version: "epoch:old", snapshot: { threads: [{ record }] } });
+  await slow;
+  expect(feed.snapshot).toEqual(latest);
+  client.request.mockImplementationOnce(async () => ({ kind: "full", version: "epoch:new", snapshot: latest }));
+  await vi.advanceTimersByTimeAsync(100);
+  expect(client.request).toHaveBeenLastCalledWith("fleet.snapshot", { version: undefined });
+  expect(feed.snapshot).toEqual(latest);
+  feed.dispose();
+});
+
 it("renders keyboard and resize wakeups from cached data and periodically resyncs missed events", async () => {
   vi.useFakeTimers();
   class Input extends EventEmitter { isTTY = true; setRawMode() {} }
