@@ -108,18 +108,57 @@ inside `waitForWorkers` over the set of targets the caller named; there is no br
 record per Scout (summary notes the profile and the decision-card state) and leaves the digest to
 `cyberdeck_workers_wait`. Revisit if waves become a broker-side object.
 
-### D12. Codex orchestrator hooks
+### D12. Codex orchestrator hooks: tier A only in v1
 
 On the committed tree there is no managed Codex orchestrator `hooks.json` (the file the plan cites,
 `src/providers/codex/orchestrator-home.ts`, is an uncommitted local edit in the operator's main
-checkout). Task E scopes Codex hooks to what the branch can own; the spike's matrix decides whether
-that is a managed `hooks.json` written next to the orchestrator's `CODEX_HOME` by the Codex adapter,
-or tier A only until that file lands.
+checkout; Codex sessions run with the operator's own `CODEX_HOME`). The spike could not exercise a
+Codex hook either: an untrusted `hooks.json` is skipped silently and `--dangerously-bypass-hook-trust`
+was refused to the spike session. Codex orchestrators therefore get the universal channels only
+(tool-result piggyback and instruction-queue wake). The provisional Codex hook JSON and the scripted
+host tests are recorded in `docs/architecture/provider-parity.md`; building it needs a managed
+`CODEX_HOME` and an operator decision on hook trust.
 
 ### D13. Unacknowledged-record cap
 
-Settled by Task A in `NOTIFICATION_LIMITS.maxUnacknowledgedPerController`, with the reasoning in its
-doc comment.
+Settled by Task A: `NOTIFICATION_LIMITS.maxUnacknowledgedPerController = 200`, below the
+worker-event active queue's default of 256 and four drain pages deep; progress and other
+notice-only kinds are dropped first, and every drop is counted and reported.
+
+### D14. Cursor orchestrators get hooks through the session plugin
+
+The plan's default (spec open question 3) was tier A only for Cursor. The spike found a per-launch
+mechanism Cyberdeck already owns: `--plugin-dir` on the session-scoped plugin that
+`src/providers/cursor/mcp-hosting.ts` builds to host the MCP server. A `hooks/hooks.json` in that
+plugin loads for that launch only, headless and interactive, with no write to the workspace,
+`~/.cursor` or `~/.claude`. v1 generates `postToolUse` and `postToolUseFailure` there (Shell
+failures fire the failure event, MCP `isError` results fire `postToolUse`), no `stop` hook (it never
+fired from a plugin, and its `followup_message` is only a user turn, which the tier A wake already
+sends).
+
+### D15. The hook entry point imports nothing from the CLI graph
+
+Measured on this host: bare `node` ≈0.2 s, `node dist/src/cli.js --version` ≈1.3 s, the pnpm
+wrapper 3.5 to 5.2 s cold. PostToolUse runs on every tool call with a 2 s budget, so the hook
+command is a dedicated entry, `src/cli/notice-hook-entry.ts`, that imports only the notice-file
+reader and the domain module; `cyberdeck notifications notice` stays as the operator-facing form of
+the same code.
+
+### D16. What the hook repeats
+
+The spike's reading was that a read-only hook must repeat the notice on every tool call until the
+drain empties the file. The shipped hook writes one sidecar (`notice-shown.json`) and so repeats a
+notice only when the inbox head moved past the cursor it last showed, or when the quiet interval
+the broker wrote into `notice.json` has elapsed since it showed it. The broker's tool-result path
+reads the same sidecar, so the two channels never show one change twice. Claude's `Stop` hook is
+guarded by `stop_hook_active` so a pending notice buys exactly one extra turn, never a loop.
+
+### D17. No asyncRewake in v1
+
+It works (an idle interactive Claude session woke about 10 ms after the hook exited 2), but a wake
+from it needs a hook process that stays alive until a notice exists, which breaks the read-and-print
+rule and re-enters Stop. The instruction-queue wake covers idle sessions for every provider;
+asyncRewake is the fallback if that wake proves unreliable in practice.
 
 ## Design
 

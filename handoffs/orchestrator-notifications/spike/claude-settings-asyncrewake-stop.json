@@ -1,0 +1,1 @@
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs claude Stop r1b --once-file /private/tmp/cyberdeck-hook-spike/r1b.once --sleep-ms 8000 --stderr --exit 2 --print-nothing","asyncRewake":true,"timeout":30}]}]}}

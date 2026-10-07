@@ -1,0 +1,6 @@
+{"version":1,"hooks":{
+ "postToolUse":[{"command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs cursor postToolUse u1","timeout":5}],
+ "postToolUseFailure":[{"command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs cursor postToolUseFailure u1x","timeout":5}],
+ "afterMCPExecution":[{"command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs cursor afterMCPExecution u1","timeout":5}],
+ "afterShellExecution":[{"command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs cursor afterShellExecution u1","timeout":5}]
+}}

@@ -1,0 +1,11 @@
+exit=0
+2026-10-07T15:08:38.334Z system init {"type":"system","subtype":"init","apiKeySource":"login","cwd":"/private/tmp/cyberdeck-hook-spike/cursor-u3","session_id":"2590e2f4-dba0-4daf-889c-3145ce06cfd4","model":"Composer 2.5","permissionMode":"default"}
+2026-10-07T15:08:38.336Z user  {"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply with the single word ready. If at any point you see text matching CYBERDECK-SPIKE-NOTICE-*, reply with exactly that text on its own line, then stop."}]},"session_id":"259
+2026-10-07T15:08:50.310Z thinking delta {"type":"thinking","subtype":"delta","text":"The user wants a single-word","session_id":"2590e2f4-dba0-4daf-889c-3145ce06cfd4","timestamp_ms":1791385730309}
+2026-10-07T15:08:51.095Z thinking delta {"type":"thinking","subtype":"delta","text":" reply: \"ready\".","session_id":"2590e2f4-dba0-4daf-889c-3145ce06cfd4","timestamp_ms":1791385731095}
+2026-10-07T15:08:51.096Z thinking delta {"type":"thinking","subtype":"delta","text":"\n\nNo matching notice","session_id":"2590e2f4-dba0-4daf-889c-3145ce06cfd4","timestamp_ms":1791385731096}
+2026-10-07T15:08:51.097Z thinking delta {"type":"thinking","subtype":"delta","text":" text was found. The","session_id":"2590e2f4-dba0-4daf-889c-3145ce06cfd4","timestamp_ms":1791385731096}
+2026-10-07T15:08:51.097Z thinking delta {"type":"thinking","subtype":"delta","text":" reply is \"ready\".","session_id":"2590e2f4-dba0-4daf-889c-3145ce06cfd4","timestamp_ms":1791385731096}
+2026-10-07T15:08:51.098Z thinking completed {"type":"thinking","subtype":"completed","session_id":"2590e2f4-dba0-4daf-889c-3145ce06cfd4","timestamp_ms":1791385731097}
+2026-10-07T15:08:51.486Z ASSIST ["ready"]
+2026-10-07T15:08:51.487Z RESULT success "ready"

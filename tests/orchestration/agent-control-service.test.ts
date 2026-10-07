@@ -2004,3 +2004,60 @@ describe("AgentControlService Orc peer control", () => {
     });
   });
 });
+
+describe("AgentControlService.waitForWorkers and the notification feed", () => {
+  it("consumes the settled record for every target it delivers, completed or terminal (row 12)", async () => {
+    const results = [
+      {
+        sessionId: WORKER,
+        provider: "codex",
+        status: "completed",
+        completedTurns: 2,
+        text: "done",
+        truth: { state: "idle", terminal: false, completedTurns: 2, canonicalTurns: 1, pendingInstructions: 0, composerOccupied: false, modalOpen: false, detail: "Idle" },
+        retrieval: "fresh",
+      },
+      {
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        provider: "codex",
+        status: "failed",
+        completedTurns: 0,
+        text: "exit 1",
+        truth: { state: "failed", terminal: true, completedTurns: 0, canonicalTurns: 0, pendingInstructions: 0, composerOccupied: false, modalOpen: false, detail: "exited 1" },
+      },
+    ];
+    const acknowledgeByDedupeKey = vi.fn(async () => undefined);
+    const service = new AgentControlService(
+      { get: () => worker, waitForWorkerResults: vi.fn(async () => ({ timedOut: false, results })) } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read: vi.fn() } as never,
+      undefined,
+      { notifications: { acknowledgeByDedupeKey } },
+    );
+    await service.waitForWorkers({
+      actorSessionId: ACTOR,
+      targets: [{ sessionId: WORKER, completionTarget: 2 }, { sessionId: "33333333-3333-4333-8333-333333333333", completionTarget: 1 }],
+    });
+    const controllerId = orchestratorController(binding).controllerId;
+    expect(acknowledgeByDedupeKey.mock.calls).toEqual([
+      [controllerId, `settled:${WORKER}:2`, "wait"],
+      [controllerId, "settled:33333333-3333-4333-8333-333333333333:terminal", "wait"],
+    ]);
+  });
+
+  it("survives an inbox that refuses the acknowledgement", async () => {
+    const results = [{
+      sessionId: WORKER, provider: "codex", status: "completed", completedTurns: 1, text: "done",
+      truth: { state: "idle", terminal: false, completedTurns: 1, canonicalTurns: 1, pendingInstructions: 0, composerOccupied: false, modalOpen: false, detail: "Idle" },
+    }];
+    const service = new AgentControlService(
+      { get: () => worker, waitForWorkerResults: vi.fn(async () => ({ timedOut: false, results })) } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read: vi.fn() } as never,
+      undefined,
+      { notifications: { acknowledgeByDedupeKey: vi.fn(async () => { throw new Error("store closed"); }) } },
+    );
+    await expect(service.waitForWorkers({ actorSessionId: ACTOR, targets: [{ sessionId: WORKER, completionTarget: 1 }] }))
+      .resolves.toMatchObject({ wait: { state: "settled" } });
+  });
+});

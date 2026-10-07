@@ -1,0 +1,1 @@
+{"hooks":{"PostToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs claude PostToolUse r2b --once-file /private/tmp/cyberdeck-hook-spike/r2b.once --sleep-ms 8000 --stderr --exit 2 --print-nothing","asyncRewake":true,"timeout":30}]}]}}

@@ -144,7 +144,9 @@ describe("OrchestratorManager", () => {
     const instructions = startedRequest.providerInstructions;
     expect(instructions).toContain("cyberdeck_provider_capabilities");
     expect(instructions).toContain("cyberdeck_workers_start once");
-    expect(instructions).toContain("cyberdeck_workers_wait once");
+    expect(instructions).toContain("cyberdeck_notifications_read");
+    expect(instructions).toContain("Never call cyberdeck_notifications_read on a timer");
+    expect(instructions).toContain("cyberdeck_workers_wait remains the deliberate synchronous join");
     expect(instructions).toContain("never reread from cursor zero");
     // Request, no initial prompt, and the activation the grant is written from.
     expect(start.mock.calls[0]).toHaveLength(3);

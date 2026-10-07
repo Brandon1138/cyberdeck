@@ -1,0 +1,9 @@
+exit=0
+2026-10-07T14:54:17.295Z init
+2026-10-07T14:54:18.701Z ASSIST text "ready"
+2026-10-07T14:54:18.711Z system hook_started {"n":"Stop"}
+2026-10-07T14:54:18.803Z system hook_response {"n":"Stop","o":"{\"hookSpecificOutput\":{\"hookEventName\":\"Stop\",\"additionalContext\":\"CYBERDECK-SPIKE-NOTICE-c2 (cyberdeck notice: 1 pending; drain with cyberdeck_notifications_read)\"}}\n","e":"","x":0,"outcome":"success"}
+2026-10-07T14:54:20.041Z ASSIST text "CYBERDECK-SPIKE-NOTICE-c2"
+2026-10-07T14:54:20.114Z system hook_started {"n":"Stop"}
+2026-10-07T14:54:20.318Z system hook_response {"n":"Stop","o":"","e":"","x":0,"outcome":"success"}
+2026-10-07T14:54:20.328Z RESULT success 1 "CYBERDECK-SPIKE-NOTICE-c2"

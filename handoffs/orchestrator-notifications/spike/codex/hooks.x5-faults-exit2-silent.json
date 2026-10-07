@@ -1,0 +1,1 @@
+{"hooks":{"PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs codex PostToolUse x5 --exit 2 --stderr --print-nothing","timeout":5}]},{"matcher":"mcp__.*|^echo$","hooks":[{"type":"command","command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs codex PostToolUse x5 --print-nothing","timeout":5}]}]}}
