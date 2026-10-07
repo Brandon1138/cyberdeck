@@ -18,12 +18,7 @@ import {
   type FleetSnapshot,
   type FleetState,
 } from "../../src/client/fleet.js";
-import {
-  OCTOPUS_MARK,
-  OCTOPUS_SPLASH,
-  pixelArtWidth,
-  renderPixelArt,
-} from "../../src/client/octopus.js";
+import { imagePlacement } from "../../src/client/terminal-mascot.js";
 import type { PasteboardImageResult } from "../../src/client/clipboard-image.js";
 import { displayWidth } from "../../src/client/display-width.js";
 import type { PullRequestState, PullRequestSummary } from "../../src/client/pr-status.js";
@@ -1352,45 +1347,47 @@ describe("fleet presentation", () => {
     expect(rendered).not.toMatch(/[│┃]/u);
   });
 
-  it("gives an empty fleet the whole octopus, and drops it whole when the pane is short", () => {
+  it("keeps an empty fleet readable without a block-art splash", () => {
     const snapshot = fleet();
     const state = createFleetState(snapshot);
-    const splash = renderPixelArt(OCTOPUS_SPLASH, false);
 
     const tall = renderFleet(snapshot, state, {
       color: false, width: 100, height: 40, now: NOW_MS,
     });
-    for (const line of splash) expect(tall).toContain(line);
     expect(tall).toContain("No durable agent threads yet.");
+    expect(tall).not.toMatch(/[▀▄█]/u);
 
-    // Half an octopus reads as a rendering fault rather than as art, so there is no cropped
-    // version of it: a pane with no room keeps the sentence and nothing else.
     const short = renderFleet(snapshot, state, {
       color: false, width: 100, height: 16, now: NOW_MS,
     });
     expect(short).toContain("No durable agent threads yet.");
-    expect(short).not.toContain(splash[0]);
+    expect(short).not.toMatch(/[▀▄█]/u);
   });
 
-  it("stands the header mark beside the header text, and drops it in a narrow pane", () => {
+  it("stands a native image beside the header and uses a wordmark without image support", () => {
     const snapshot = fleet({ record: session({ cwd: "/repo/one" }) });
     const state = createFleetState(snapshot);
-    const mark = renderPixelArt(OCTOPUS_MARK, false);
+    const mark = imagePlacement(42);
 
     const lines = renderFleet(snapshot, state, {
-      color: false, width: 100, height: 30, now: NOW_MS,
+      color: true, width: 57, height: 30, now: NOW_MS, mascot: mark,
     }).split("\n");
-    expect(lines.slice(0, mark.length).map((line) => line.slice(0, pixelArtWidth(OCTOPUS_MARK))))
-      .toEqual(mark);
+    for (const [index, row] of mark.rows.entries()) expect(lines[index]).toContain(row);
     expect(lines[0]).toContain("Cyberdeck");
 
-    // The mark is four rows to the text's three, so the header is as tall as the animal.
-    expect(lines[mark.length - 1]?.trim()).toBe(mark.at(-1)?.trim());
+    // The native image is four rows beside three lines of text.
+    expect(lines[mark.rows.length - 1]?.trim()).toBe(mark.rows.at(-1)?.trim());
 
     const narrow = renderFleet(snapshot, state, {
-      color: false, width: 60, height: 30, now: NOW_MS,
+      color: true, width: 43, height: 30, now: NOW_MS, mascot: mark,
     });
-    expect(narrow.split("\n")[0]).toBe("Cyberdeck");
+    expect(narrow.split("\n")[0]).toContain("Cyberdeck");
+    expect(narrow).not.toContain("\u{10EEEE}");
+    const unsupported = renderFleet(snapshot, state, {
+      color: false, width: 57, height: 30, now: NOW_MS,
+    });
+    expect(unsupported.split("\n")[0]).toBe("Cyberdeck");
+    expect(unsupported).not.toMatch(/[▀▄█\u{10EEEE}]/u);
   });
 
   it("reorders orcs as their activity changes while folder groups stay put", () => {
@@ -4830,6 +4827,55 @@ describe("fleet repaint", () => {
       close: vi.fn(),
     };
   }
+
+  it("drives a finite mascot pulse from orchestrator attention and cancels its timer on exit", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+    const input = new Input();
+    const output = new Output();
+    const signals = new EventEmitter();
+    let record = session({ kind: "orchestrator", attentionState: "done" });
+    let placement = imagePlacement(42);
+    const setCursorVisible = vi.fn((visible: boolean) => {
+      placement = imagePlacement(visible ? 42 : 43);
+    });
+    const enter = vi.fn();
+    const dispose = vi.fn();
+    const running = runFleet(transport(() => [record]) as never, input, output, signals, {
+      nativeMascot: { get placement() { return placement; }, setCursorVisible, enter, dispose },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(enter).toHaveBeenCalledTimes(1);
+      expect(setCursorVisible).toHaveBeenLastCalledWith(true);
+      record = { ...record, attentionState: "working" };
+      signals.emit("SIGWINCH");
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(350);
+      expect(setCursorVisible).toHaveBeenLastCalledWith(false);
+      await vi.advanceTimersByTimeAsync(350);
+      expect(setCursorVisible).toHaveBeenLastCalledWith(true);
+      await vi.advanceTimersByTimeAsync(1400);
+      setCursorVisible.mockClear();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(setCursorVisible.mock.calls.every(([visible]) => visible)).toBe(true);
+      record = { ...record, attentionState: "done" };
+      signals.emit("SIGWINCH");
+      await vi.advanceTimersByTimeAsync(0);
+      record = { ...record, attentionState: "working" };
+      signals.emit("SIGWINCH");
+      await vi.advanceTimersByTimeAsync(350);
+      expect(setCursorVisible).toHaveBeenLastCalledWith(false);
+      signals.emit("SIGTERM");
+      await running;
+      expect(dispose).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      signals.emit("SIGTERM");
+      await running;
+      vi.useRealTimers();
+    }
+  });
 
   it("hides the caret for the whole repaint and restores it once the frame is written", async () => {
     const input = new Input();

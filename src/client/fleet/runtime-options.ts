@@ -5,6 +5,7 @@ import { type ResolvedWorkerCapability } from "../../orchestration/worker-capabi
 import { type PasteboardImageAttachment } from "../clipboard-image.js";
 import { type PullRequestStatusPort, type PullRequestSummary } from "../pr-status.js";
 import { type TerminalBackground } from "../terminal-background.js";
+import type { TerminalMascot, TerminalMascotPlacement } from "../terminal-mascot.js";
 
 interface ShellCommandResult {
   exitStatus: number;
@@ -28,6 +29,7 @@ export interface ResolvedFleetRenderOptions {
   home: string;
   pullRequests: ReadonlyMap<string, PullRequestSummary>;
   background: TerminalBackground | undefined;
+  mascot?: TerminalMascotPlacement | undefined;
 }
 
 export interface WorkerModelChoice {
@@ -80,6 +82,7 @@ export interface SlashCommandValue {
 }
 
 export interface FleetRuntimeOptions {
+  nativeMascot?: TerminalMascot | undefined;
   changeDirectory?: ((cwd: string) => Promise<string | undefined>) | undefined;
   /** Runs one `!` line. Output arrives through `onOutput` as the shell writes it. */
   runShellCommand?: ((request: {
