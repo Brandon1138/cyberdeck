@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { CapabilityGrantSchema, type CyberdeckCapability } from "./capability.js";
+import {
+  CapabilityGrantSchema,
+  CyberdeckCapabilitySchema,
+  type CyberdeckCapability,
+} from "./capability.js";
 import {
   ApprovalModeSchema,
   ProviderIdSchema,
@@ -48,6 +52,15 @@ const OrchestratorBindingRecordSchema = z.object({
   sandbox: SandboxSchema,
   scope: OrchestratorScopeSchema,
   grant: CapabilityGrantSchema,
+  /**
+   * The orchestrator that asked for this peer through `cyberdeck_orchestrator_create`. Absent on
+   * every primary and on peers Fleet created by hand; present only on peers an orchestrator made.
+   */
+  createdBy: z.object({
+    sessionId: z.uuid(),
+    /** The creator's idempotency key, so a retry after a restart finds this peer instead of launching another. */
+    mutationId: z.string().min(1).max(200).optional(),
+  }).optional(),
   /** Legacy field retained only so pre-box-preference binding records remain readable. */
   workerPreferences: z.object({
     caveman: z.boolean().optional(),
@@ -83,8 +96,25 @@ export const ORCHESTRATOR_GRANT_CAPABILITIES: readonly CyberdeckCapability[] = [
   "worker.start",
   "orchestrator.inspect",
   "orchestrator.stop",
+  "orchestrator.create",
   "workflow.run",
 ];
+
+/** How many non-terminal peers one creator may hold before `cyberdeck_orchestrator_create` refuses. */
+export const MAX_LIVE_PEERS_PER_CREATOR = 2;
+
+/**
+ * The grant a peer created by an orchestrator receives: its creator's, minus the one capability
+ * that would let it create peers of its own. This is the only place that subset is derived, so the
+ * controller identity `orchestratorController` proves for it stays the same total function every
+ * other binding goes through; nothing here can hand a peer a capability the lease substrate would
+ * refuse (see the MIK-98 invariant in CLAUDE.md).
+ */
+export function peerGrantCapabilities(
+  creator: readonly CyberdeckCapability[],
+): CyberdeckCapability[] {
+  return creator.filter((capability) => capability !== "orchestrator.create");
+}
 
 export const EnsureOrchestratorRequestSchema = z.object({
   provider: ProviderIdSchema.optional(),
@@ -114,6 +144,14 @@ export const OrchestratorGrantToggleRequestSchema = ResetOrchestratorRequestSche
 });
 
 export const FableWorkersRequestSchema = OrchestratorGrantToggleRequestSchema;
+export const PeerCreateRequestSchema = OrchestratorGrantToggleRequestSchema;
+
+/** A peer an orchestrator asked for: `create`'s selection plus who asked and what it may hold. */
+export const CreatePeerOrchestratorRequestSchema = CreateOrchestratorRequestSchema.extend({
+  name: z.string().trim().min(1).max(120).optional(),
+  createdBy: z.object({ sessionId: z.uuid(), mutationId: z.string().min(1).max(200).optional() }),
+  capabilities: z.array(CyberdeckCapabilitySchema),
+});
 
 export const CavemanWorkersRequestSchema = z.object({
   enabled: z.boolean().optional(),
@@ -133,6 +171,8 @@ export type CreateOrchestratorRequest = z.infer<typeof CreateOrchestratorRequest
 export type ResetOrchestratorRequest = z.infer<typeof ResetOrchestratorRequestSchema>;
 export type OrchestratorGrantToggleRequest = z.infer<typeof OrchestratorGrantToggleRequestSchema>;
 export type FableWorkersRequest = z.infer<typeof FableWorkersRequestSchema>;
+export type PeerCreateRequest = z.infer<typeof PeerCreateRequestSchema>;
+export type CreatePeerOrchestratorRequest = z.infer<typeof CreatePeerOrchestratorRequestSchema>;
 export type CavemanWorkersRequest = z.infer<typeof CavemanWorkersRequestSchema>;
 export type OrchestratorBindingReset = z.infer<typeof OrchestratorBindingResetSchema>;
 
@@ -144,6 +184,7 @@ export interface OrchestratorGrantToggleResult {
 }
 
 export type FableWorkersResult = OrchestratorGrantToggleResult;
+export type PeerCreateResult = OrchestratorGrantToggleResult;
 
 export interface CavemanWorkersResult {
   scope: "box";

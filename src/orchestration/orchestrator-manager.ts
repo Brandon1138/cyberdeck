@@ -1,17 +1,22 @@
 import {
   CavemanWorkersRequestSchema,
   CreateOrchestratorRequestSchema,
+  CreatePeerOrchestratorRequestSchema,
   EnsureOrchestratorRequestSchema,
   FableWorkersRequestSchema,
   ORCHESTRATOR_GRANT_CAPABILITIES,
+  PeerCreateRequestSchema,
   orchestratorKey,
   peerOrchestratorKey,
   type CavemanWorkersRequest,
   type CavemanWorkersResult,
   type CreateOrchestratorRequest,
+  type CreatePeerOrchestratorRequest,
   type EnsureOrchestratorRequest,
   type FableWorkersRequest,
   type FableWorkersResult,
+  type PeerCreateRequest,
+  type PeerCreateResult,
   type OrchestratorBinding,
   type OrchestratorGrantToggleRequest,
   type OrchestratorGrantToggleResult,
@@ -29,6 +34,7 @@ import type {
 import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
 import { ORCHESTRATOR_CATALOG, orchestratorCatalog, orchestratorModelEfforts, type OrchestratorCatalogEntry } from "./orchestrator-catalog.js";
 import { fallbackWorkerCapabilities, type ResolvedWorkerCapability } from "./worker-capabilities.js";
+import { orchestratorPrompt } from "./orchestrator-prompt.js";
 import type {
   SessionLookupPort,
   SessionResumePort,
@@ -62,6 +68,13 @@ export interface OrchestratorSessionResetResult {
 type BoundOrchestratorRequest = EnsureOrchestratorRequest & {
   provider: CreateOrchestratorRequest["provider"];
 };
+
+/** What a peer made by an orchestrator carries beyond Fleet's own `create`: lineage and a bounded grant. */
+interface PeerOrigin {
+  createdBy: { sessionId: string };
+  capabilities: readonly CyberdeckCapability[];
+  name?: string;
+}
 
 export class OrchestratorManager {
   constructor(
@@ -120,12 +133,34 @@ export class OrchestratorManager {
   /** Always creates a distinct bound peer; it never consults or replaces the scope's primary binding. */
   async create(input: CreateOrchestratorRequest): Promise<OrchestratorManagerResult> {
     const request = CreateOrchestratorRequestSchema.parse(input);
+    return this.createValidatedPeer(request);
+  }
+
+  /**
+   * A peer another orchestrator asked for. Same validation and launch as Fleet's `create`; the
+   * differences are the binding's lineage and a grant the caller derived (`peerGrantCapabilities`)
+   * instead of the full default list. Policy — who may ask, for what scope, how many — is the
+   * peer service's; this only records what it decided.
+   */
+  async createPeer(input: CreatePeerOrchestratorRequest): Promise<OrchestratorManagerResult> {
+    const { createdBy, capabilities, name, ...request } = CreatePeerOrchestratorRequestSchema.parse(input);
+    return this.createValidatedPeer(request, {
+      createdBy,
+      capabilities,
+      ...(name === undefined ? {} : { name }),
+    });
+  }
+
+  private async createValidatedPeer(
+    request: CreateOrchestratorRequest,
+    origin?: PeerOrigin,
+  ): Promise<OrchestratorManagerResult> {
     const capabilities = request.provider === "codex" ? await this.capabilities() : undefined;
     validateCreateSelection(request, orchestratorCatalog(capabilities));
     const scope: OrchestratorScope = request.scope === "fleet"
       ? { kind: "fleet" }
       : { kind: "workspace", cwd: request.cwd };
-    return this.createBound(request, scope, true);
+    return this.createBound(request, scope, true, undefined, origin);
   }
 
   /** Fleet and creation validate against the same first-party Codex discovery context. */
@@ -153,7 +188,9 @@ export class OrchestratorManager {
     scope: OrchestratorScope,
     peer: boolean,
     previous?: OrchestratorBinding,
+    origin?: PeerOrigin,
   ): Promise<OrchestratorManagerResult> {
+    const capabilities = origin?.capabilities ?? ORCHESTRATOR_GRANT_CAPABILITIES;
     const approvalMode = request.approvalMode
       ?? await this.configuredApprovalMode(request.provider);
     const sandbox = orchestratorSandbox(request.provider);
@@ -184,8 +221,9 @@ export class OrchestratorManager {
         role: "orchestrator",
         kind: "orchestrator",
         orchestratorScope: request.scope,
-        name: `Cyberdeck orchestrator (${request.provider}${request.model === undefined ? "" : `:${request.model}`})`,
-        providerInstructions: orchestratorPrompt(scope),
+        name: origin?.name
+          ?? `Cyberdeck orchestrator (${request.provider}${request.model === undefined ? "" : `:${request.model}`})`,
+        providerInstructions: orchestratorPrompt(scope, capabilities),
       }, undefined, async (started) => {
         const now = new Date().toISOString();
         binding = {
@@ -200,9 +238,10 @@ export class OrchestratorManager {
           scope,
           grant: {
             subjectSessionId: started.id,
-            capabilities: [...ORCHESTRATOR_GRANT_CAPABILITIES],
+            capabilities: [...capabilities],
             scope,
           },
+          ...(origin === undefined ? {} : { createdBy: origin.createdBy }),
           createdAt: now,
           updatedAt: now,
         };
@@ -267,6 +306,14 @@ export class OrchestratorManager {
     );
   }
 
+  /** Whether the scope's primary may create peer orchestrators; on by default for new bindings. */
+  async peerCreate(input: PeerCreateRequest): Promise<PeerCreateResult> {
+    return this.toggleGrantCapability(
+      "orchestrator.create",
+      PeerCreateRequestSchema.parse(input),
+    );
+  }
+
   /**
    * Read or rewrite one delegation capability on the scope's primary binding.
    *
@@ -275,7 +322,7 @@ export class OrchestratorManager {
    * acquire subtly different scope, persistence, or unconfigured-binding behavior.
    */
   private async toggleGrantCapability(
-    capability: Extract<CyberdeckCapability, `worker.start.${string}`>,
+    capability: Extract<CyberdeckCapability, `worker.start.${string}` | "orchestrator.create">,
     request: OrchestratorGrantToggleRequest,
   ): Promise<OrchestratorGrantToggleResult> {
     const scope: OrchestratorScope = request.scope === "fleet"
@@ -432,26 +479,6 @@ function validateCreateSelection(request: CreateOrchestratorRequest, catalog: re
       { code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" },
     );
   }
-}
-
-function orchestratorPrompt(scope: OrchestratorScope): string {
-  const description = scope.kind === "fleet" ? "the full Cyberdeck fleet" : `threads in ${scope.cwd}`;
-  return [
-    "You are the user's Cyberdeck orchestrator.",
-    `Your authority is scoped to ${description}.`,
-    "Use Cyberdeck's semantic tools to inspect changes, summarize workers, and enqueue complete instructions.",
-    "Treat cyberdeck_provider_capabilities as authoritative for model IDs and effort support; never inspect repository source, config, or memory to discover Cyberdeck behavior.",
-    "For fan-out, call cyberdeck_workers_start once. Then call cyberdeck_workers_wait once with successful sessionId and completionTarget values; do not poll and do not read raw transcripts for ordinary result collection.",
-    "A wait result carries wait.state. \"settled\" means every target is terminal, \"intervention-required\" means an opted-in wait returned bounded EXCEPTION or DECISION_REQUEST summaries, \"timed-out\" means your own timeoutSeconds elapsed, and \"incomplete\" means only the transport segment ended: resume that same logical wait by calling cyberdeck_workers_wait again with wait.resume.waitId and the same targets. That resume is not polling.",
-    "If a wait call fails outright, worker state is unknown, not failed. Re-wait the same sessionId and completionTarget, or call cyberdeck_threads_list, before starting any replacement worker; a result marked retrieval \"replay\" proves the work already ran.",
-    "cyberdeck_thread_read is a bounded debugging escape hatch only. Always continue from its returned cursor and never reread from cursor zero.",
-    "Scout waves return contradiction-first digests and scout:// artifact handles. Use cyberdeck_scout_read only for deliberate drill-down, prefer card then evidence, use trace only for transport debugging, and continue from nextByte rather than rereading zero.",
-    "Cursor Scout source egress requires a durable exact-repository operator grant. You cannot grant it through MCP; if denied, report the exact cyberdeck scout-egress command in the error instead of substituting a worker or widening scope.",
-    "To load a deferred MCP tool such as mcp__cyberdeck__*, use ToolSearch with query select:<name>; tool_search_tool_regex only indexes native harness tools and never contains MCP tools, so an empty result from it is not evidence of an MCP outage.",
-    "Never manipulate tmux panes or type through tmux send-keys.",
-    "Any MCP server the operator allowlisted for you is registered but deferred: its tools are absent from your tool list until you search for them by name, so search before concluding a capability is unavailable.",
-    "Do not stop, delete, or widen a worker's permissions without explicit human approval.",
-  ].join(" ");
 }
 
 function addCleanupContext(primary: unknown, cleanup: unknown, action: string): Error {

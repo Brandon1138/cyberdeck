@@ -2,7 +2,7 @@ import type { FleetProjectAddResult, FleetProjectRemoveResult } from "../broker/
 import type { WorkerEventSubmitParams } from "../broker/worker-event-channel.js";
 import type { FleetRuntimeDeps } from "../client/fleet/deps.js";
 import type { ModalAnswerGrantStatus } from "../domain/modal-answer.js";
-import type { CavemanWorkersRequest, CavemanWorkersResult, EnsureOrchestratorRequest, FableWorkersRequest, FableWorkersResult, ResetOrchestratorRequest } from "../domain/orchestrator.js";
+import type { CavemanWorkersRequest, CavemanWorkersResult, EnsureOrchestratorRequest, FableWorkersRequest, FableWorkersResult, PeerCreateRequest, PeerCreateResult, ResetOrchestratorRequest } from "../domain/orchestrator.js";
 import type { EventAck } from "../domain/worker-coordination.js";
 import type { OrchestratorManagerResult, OrchestratorResetResult } from "../orchestration/orchestrator-manager.js";
 import type {
@@ -22,6 +22,7 @@ export interface CreateProgramOptions {
   stopSession?: (sessionId: string) => Promise<void>;
   resetOrchestrator?: (request: ResetOrchestratorRequest) => Promise<OrchestratorResetResult>;
   fableWorkers?: (request: FableWorkersRequest) => Promise<FableWorkersResult>;
+  peerCreate?: (request: PeerCreateRequest) => Promise<PeerCreateResult>;
   cavemanWorkers?: (request: CavemanWorkersRequest) => Promise<CavemanWorkersResult>;
   pruneLegacyTranscript?: () => Promise<{ path: string; removed: boolean }>;
   /** Reads the SessionStart payload itself, so the command has no stdin of its own to stub. */

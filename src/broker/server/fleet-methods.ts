@@ -5,6 +5,7 @@ import {
   CreateOrchestratorRequestSchema,
   EnsureOrchestratorRequestSchema,
   FableWorkersRequestSchema,
+  PeerCreateRequestSchema,
   ResetOrchestratorRequestSchema,
 } from "../../domain/orchestrator.js";
 import { WorkerHandoffParamsSchema } from "../../orchestration/worker-handoff-service.js";
@@ -43,6 +44,9 @@ export const fleetMethods: Record<string, BrokerMethodHandler> = {
   },
   "orchestrator.fableWorkers": async (server, _context, frame) => {
     return requireOrchestrators(server.options).fableWorkers(FableWorkersRequestSchema.parse(frame.params));
+  },
+  "orchestrator.peerCreate": async (server, _context, frame) => {
+    return requireOrchestrators(server.options).peerCreate(PeerCreateRequestSchema.parse(frame.params));
   },
   "orchestrator.cavemanWorkers": async (server, _context, frame) => {
     return requireOrchestrators(server.options).cavemanWorkers(CavemanWorkersRequestSchema.parse(frame.params));

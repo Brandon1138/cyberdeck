@@ -54,6 +54,7 @@ import { ProviderPermissionPreferenceStore } from "../persistence/provider-permi
 import { ensurePrivateDirectory } from "../persistence/private-files.js";
 import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import { AgentControlService } from "../orchestration/agent-control-service.js";
+import { OrchestratorPeerService } from "../orchestration/orchestrator-peer-service.js";
 import { GitWorkspaceProbe } from "../orchestration/git-workspace-probe.js";
 import { GitWorktreeProvisioner } from "../orchestration/git-worktree-provisioner.js";
 import { WorkerCapabilityCatalog } from "../orchestration/worker-capability-catalog.js";
@@ -305,6 +306,14 @@ export async function runBroker(
       workerBudgets,
     },
   );
+  // Policy for orchestrator-created peers lives beside agent control; the manager only launches.
+  const orchestratorPeers = new OrchestratorPeerService({
+    registry,
+    bindings: orchestratorStore,
+    manager: orchestrators,
+    instructions,
+    audit: journal,
+  });
   const workerControl = new WorkerControlService({
     coordination: workerCoordination.service,
     credentials: workerLeaseCredentials,
@@ -400,6 +409,7 @@ export async function runBroker(
     transcripts,
     orchestrators,
     agentControl,
+    orchestratorPeers,
     instructions,
     workflows,
     controlPlane: runtime.controlPlane,

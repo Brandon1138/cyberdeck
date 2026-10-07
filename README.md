@@ -103,6 +103,13 @@ Fleet controls:
   advertises Cursor's whole model list to every orchestrator, so every one of those slugs dispatches
   from a fresh binding. A Cursor Fable slug such as `claude-fable-5-high` is the one exception, and
   it needs the same `/fable-workers on` grant every other Fable model does.
+- A bound orchestrator may start a peer orchestrator itself with `cyberdeck_orchestrator_create`,
+  which is how orchestration continues from a phone: the peer launches with the provider's Remote
+  Control surface and appears in the phone's session list. The peer gets its creator's grant minus
+  the right to create peers, cannot reach wider than its creator's scope, and one creator may hold
+  at most two live peers. The grant is on by default for new bindings and is switched per scope
+  with `cyberdeck orchestrator peer-create status|on|off`; bindings made before the grant existed
+  need one `on`. See `docs/architecture/orchestrator-peer-create.md`.
 - Enter `/caveman-workers status`, `/caveman-workers on`, or `/caveman-workers off` to control the
   durable, default-off box preference for orchestrator-spawned workers. Composer-launched workers
   (started from Fleet's bottom composer) always use normal mode, regardless of this preference. It
@@ -168,6 +175,9 @@ cyberdeck orchestrator reset
 cyberdeck orchestrator fable-workers status
 cyberdeck orchestrator fable-workers on
 cyberdeck orchestrator fable-workers off
+cyberdeck orchestrator peer-create status
+cyberdeck orchestrator peer-create on
+cyberdeck orchestrator peer-create off
 cyberdeck orchestrator caveman-workers status
 cyberdeck orchestrator caveman-workers on
 cyberdeck orchestrator caveman-workers off
