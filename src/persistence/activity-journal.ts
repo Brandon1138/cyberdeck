@@ -36,15 +36,24 @@ export async function recoverActivityJournal(directory: string, visit: (event: A
   } finally { await file.close(); }
 }
 export async function readActivityLocation(path: string, location: ActivityLocation): Promise<AgentActivity> {
-  if (location.bytes > FRAME_LIMIT) throw new Error("ACTIVITY_FRAME_LIMIT");
+  return (await readActivityLocations(path, [location]))[0]!;
+}
+/** One descriptor for a serialized page, with bounded memory and the same validation per row. */
+export async function readActivityLocations(path: string, locations: readonly ActivityLocation[]): Promise<AgentActivity[]> {
+  if (locations.length === 0) return [];
   const file = await open(path, "r");
   try {
-    const buffer = Buffer.alloc(location.bytes);
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, location.offset);
-    if (bytesRead !== buffer.length) throw new Error("ACTIVITY_JOURNAL_TRUNCATED");
-    const event = AgentActivitySchema.parse(JSON.parse(buffer.toString("utf8")));
-    if (event.sequence !== location.sequence) throw new Error("ACTIVITY_INDEX_CONFLICT");
-    return event;
+    const events: AgentActivity[] = [];
+    for (const location of locations) {
+      if (location.bytes > FRAME_LIMIT) throw new Error("ACTIVITY_FRAME_LIMIT");
+      const buffer = Buffer.alloc(location.bytes);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, location.offset);
+      if (bytesRead !== buffer.length) throw new Error("ACTIVITY_JOURNAL_TRUNCATED");
+      const event = AgentActivitySchema.parse(JSON.parse(buffer.toString("utf8")));
+      if (event.sequence !== location.sequence) throw new Error("ACTIVITY_INDEX_CONFLICT");
+      events.push(event);
+    }
+    return events;
   } finally { await file.close(); }
 }
 export async function copyActivitySuffix(path: string, temporary: string, start: number): Promise<void> {

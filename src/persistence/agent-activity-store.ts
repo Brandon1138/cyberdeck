@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { ActivityDiskIndex } from "./activity-disk-index.js";
-import { recoverActivityJournal, readActivityLocation, copyActivitySuffix } from "./activity-journal.js";
+import { recoverActivityJournal, readActivityLocation, readActivityLocations, copyActivitySuffix } from "./activity-journal.js";
 import { writeAtomicPrivateFile } from "./atomic-private-file.js";
 import { open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
@@ -43,10 +43,12 @@ export class AgentActivityStore implements AgentActivityPort {
   /** Rebuild every in-memory and index fact from the journal alone; a torn tail is preserved and counted. */
   private async load(): Promise<void> {
     this.index.reset(); this.sequence = 0;
-    const recovered = await recoverActivityJournal(this.directory, (event, offset, bytes) => {
+    // One transaction for the whole replay: per-row commits make startup grow to minutes on a
+    // journal this machine already has, and the broker is not listening until this returns.
+    const recovered = await this.index.bulk(() => recoverActivityJournal(this.directory, (event, offset, bytes) => {
       if (event.sequence <= this.sequence) throw new Error("ACTIVITY_JOURNAL_CONFLICT");
       this.index.add(event, offset, bytes); this.sequence = event.sequence;
-    });
+    }));
     this.bytes = recovered.bytes;
     if (recovered.torn) { this.degraded = true; this.dropped++; }
   }
@@ -90,7 +92,7 @@ export class AgentActivityStore implements AgentActivityPort {
   private readPage(locations: () => ReturnType<ActivityDiskIndex["page"]>, afterSequence: number, limit: number): Promise<AgentActivity[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("ACTIVITY_READ_LIMIT");
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new Error("ACTIVITY_READ_CURSOR");
-    const operation = this.tail.then(() => Promise.all(locations().map((location) => readActivityLocation(this.path, location))));
+    const operation = this.tail.then(() => readActivityLocations(this.path, locations()));
     this.tail = operation.then(() => {}, () => {});
     return operation;
   }
@@ -113,6 +115,7 @@ export class AgentActivityStore implements AgentActivityPort {
     // The row this append adds can grow the index by up to a page per b-tree; reserve for it.
     const indexBytes = this.index.bytes() + 2048, cap = this.retention.maxBytes - indexBytes;
     const target = this.bytes + incoming > cap ? cap - Math.max(incoming, Math.floor(this.retention.maxBytes / 64)) : cap;
+    if (this.bytes + incoming <= cap && (this.index.oldestObserved() ?? Infinity) >= cutoff) return;
     let remove = 0, removedBytes = 0, through = 0;
     outer: for (;;) {
       const page = this.index.oldest(through);
