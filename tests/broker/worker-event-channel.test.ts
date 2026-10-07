@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { WorkerEventChannel } from "../../src/broker/worker-event-channel.js";
 import { WorkerCoordinationService } from "../../src/broker/worker-coordination.js";
-import { createProgram } from "../../src/cli.js";
+import { createProgram } from "../../src/cli/full-program.js";
 import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import type { InstructionQueue } from "../../src/orchestration/instruction-queue.js";

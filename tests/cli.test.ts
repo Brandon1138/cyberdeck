@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createProgram, openFleetCockpit } from "../src/cli.js";
+import { createProgram, openFleetCockpit } from "../src/cli/full-program.js";
 import {
   cliEntrypointFromModulePath,
   projectRootFromModulePath,
