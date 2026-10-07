@@ -1,8 +1,9 @@
+import { JsonlOffsetReader } from "./jsonl-offset-reader.js";
+import { ThreadSegmentIndex, parseThreadEvent } from "./thread-segment-index.js";
+import { claudeProjectSlug, candidateDayDirectories, readCodexMetadata, parseClaudeTurn, parseCodexTurn, compareNativeTurns, visitLines, ignoreMissing, readCompleteLinesFromOffset, type NativeTurn } from "./thread-transcript-lines.js";
 import { randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { homedir } from "node:os";
 import { readdir, rename, stat, unlink } from "node:fs/promises";
-import { createInterface } from "node:readline";
 import { join } from "node:path";
 import {
   ThreadEventSchema,
@@ -53,11 +54,6 @@ export interface ThreadTranscriptStoreOptions {
   claudeConversations?: ClaudeConversationBindingStore;
 }
 
-interface NativeTurn {
-  id: string;
-  occurredAt: string;
-  text: string;
-}
 
 /**
  * Whether a Claude session's semantic capture is following a file, and why it is not.
@@ -84,6 +80,13 @@ export type ClaudeTranscriptStatus =
  * newest frame simply leaves the offset short until the next call — never past a line whose bytes
  * arrived incomplete.
  */
+interface NativeProjection {
+  reader: JsonlOffsetReader;
+  messages: TranscriptMessage[];
+  turns: Map<string, NativeTurn>;
+  cleared: boolean;
+}
+
 interface ObservedModelCursor {
   path: string;
   offset: number;
@@ -110,6 +113,8 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   private initialization: Promise<void> | undefined;
   private writeTail = Promise.resolve();
   private nextCursor = 0;
+  private readonly segments = new ThreadSegmentIndex();
+  private readonly nativeProjections = new Map<string, NativeProjection>();
   private readonly semanticTurnIds = new Set<string>();
   private readonly nativePaths = new Map<string, string>();
   private readonly observedModelCursors = new Map<string, ObservedModelCursor>();
@@ -256,30 +261,12 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
         ? parseCodexRolloutLine
         : undefined;
     if (parse === undefined) return [];
-    const collect = (line: string): void => {
-      const message = parse(line);
-      if (message !== undefined) {
-        messages.push(message);
-        if (messages.length > PREVIEW_MESSAGE_WINDOW) messages.shift();
-      }
-    };
-    const messages: TranscriptMessage[] = [];
-    if (input.provider === "claude") {
-      const claudePath = await this.resolveClaudeTranscript(input);
-      if (claudePath === undefined) return [];
-      // A preview that keeps rendering the pre-`/clear` conversation is the stale record MIK-46
-      // reported, so an abandoned file yields nothing and the caller falls back to the pane.
-      const usable = await this.visitClaudeTranscript(input.sessionId, claudePath, collect);
-      return usable ? messages : [];
-    }
-    const path = this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
+    const path = input.provider === "claude"
+      ? await this.resolveClaudeTranscript(input)
+      : this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
     if (path === undefined) return [];
-    await visitLines(path, (line) => {
-      collect(line);
-      return true;
-    });
-    if (messages.length > 0) this.nativePaths.set(input.sessionId, path);
-    return messages;
+    const projection = await this.nativeProjection(input, path, "preview");
+    return projection.cleared ? [] : [...projection.messages];
   }
 
   /**
@@ -394,38 +381,12 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   async read(sessionId: string, afterCursor = 0, limit = 200): Promise<ThreadReadResult> {
     await this.init();
     const boundedLimit = Math.max(1, Math.min(limit, 1_000));
-    return this.streamEvents(
-      (event) => event.sessionId === sessionId && event.cursor > afterCursor,
-      afterCursor,
-      boundedLimit,
-    );
+    return this.enqueueWrite(() => this.segments.read(this.segmentPathsOldestFirst(), afterCursor, boundedLimit, sessionId));
   }
 
   async changes(afterCursor = 0, limit = 500): Promise<ThreadReadResult> {
     await this.init();
-    const boundedLimit = Math.max(1, Math.min(limit, 2_000));
-    return this.streamEvents(
-      (event) => event.cursor > afterCursor,
-      afterCursor,
-      boundedLimit,
-    );
-  }
-
-  private async streamEvents(
-    include: (event: ThreadEvent) => boolean,
-    afterCursor: number,
-    limit: number,
-  ): Promise<ThreadReadResult> {
-    const events: ThreadEvent[] = [];
-    for (const path of this.segmentPathsOldestFirst()) {
-      await visitLines(path, (line) => {
-        const event = parseThreadEvent(line);
-        if (event !== undefined && include(event)) events.push(event);
-        return events.length < limit;
-      });
-      if (events.length >= limit) break;
-    }
-    return { events, nextCursor: events.at(-1)?.cursor ?? afterCursor };
+    return this.enqueueWrite(() => this.segments.read(this.segmentPathsOldestFirst(), afterCursor, Math.max(1, Math.min(limit, 2_000))));
   }
 
   private async loadMetadata(): Promise<void> {
@@ -635,60 +596,50 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     return undefined;
   }
 
-  /**
-   * One pass over a Claude transcript that also answers whether the conversation left it.
-   *
-   * `/clear` is written into the file being abandoned as a final `<command-name>/clear</command-name>`
-   * user frame, so the file states its own death. Reading it is what turns a silent stop into a
-   * detected one, and it costs nothing: every caller already streams the whole file.
-   */
-  private async visitClaudeTranscript(
-    sessionId: string,
-    path: string,
-    visitor: (line: string) => void,
-  ): Promise<boolean> {
-    let cleared = false;
-    await visitLines(path, (line) => {
-      if (isClaudeClearFrame(line)) {
-        cleared = true;
-        return true;
-      }
-      visitor(line);
-      return true;
-    });
-    if (cleared) {
-      this.refuseClaudeTranscript(sessionId, "cleared-unbound");
-      return false;
+  private async nativeProjection(input: CaptureProviderTurns, path: string, purpose: "turns" | "preview"): Promise<NativeProjection> {
+    const key = `${purpose}:${input.sessionId}`;
+    let projection = this.nativeProjections.get(key);
+    if (projection === undefined) {
+      const messages: TranscriptMessage[] = [], turns = new Map<string, NativeTurn>();
+      projection = { messages, turns, cleared: false, reader: undefined! };
+      const value = projection;
+      value.reader = new JsonlOffsetReader(() => { messages.length = 0; turns.clear(); value.cleared = false; });
     }
-    this.claimedClaudePaths.set(path, sessionId);
-    this.claudeStatuses.set(sessionId, "bound");
-    return true;
+    this.nativeProjections.delete(key); this.nativeProjections.set(key, projection);
+    // Eviction only forgets an acceleration; semantic receipt dedup remains authoritative.
+    while (this.nativeProjections.size > 256) this.nativeProjections.delete(this.nativeProjections.keys().next().value!);
+    const value = projection;
+    for (const id of value.turns.keys()) {
+      if (this.semanticTurnIds.has(this.semanticKey(input.sessionId, `${input.provider}:${id}`))) value.turns.delete(id);
+    }
+    await value.reader.scan(path, (line) => {
+      if (input.provider === "claude" && isClaudeClearFrame(line)) { value.cleared = true; return; }
+      if (purpose === "preview") {
+        const message = input.provider === "claude" ? parseClaudeTranscriptLine(line) : parseCodexRolloutLine(line);
+        if (message !== undefined) { value.messages.push(message); if (value.messages.length > PREVIEW_MESSAGE_WINDOW) value.messages.shift(); }
+      } else {
+        const turn = input.provider === "claude" ? parseClaudeTurn(line, this.options.now) : parseCodexTurn(line, this.options.now);
+        if (turn !== undefined && !this.semanticTurnIds.has(this.semanticKey(input.sessionId, `${input.provider}:${turn.id}`))) value.turns.set(turn.id, turn);
+      }
+    });
+    if (input.provider === "claude") {
+      if (value.cleared) this.refuseClaudeTranscript(input.sessionId, "cleared-unbound");
+      else { this.claimedClaudePaths.set(path, input.sessionId); this.claudeStatuses.set(input.sessionId, "bound"); }
+    } else { this.nativePaths.set(input.sessionId, path); this.claimedCodexPaths.set(path, input.sessionId); }
+    return value;
   }
 
   private async readClaudeTurns(input: CaptureProviderTurns): Promise<NativeTurn[]> {
     const path = await this.resolveClaudeTranscript(input);
     if (path === undefined) return [];
-    const byId = new Map<string, NativeTurn>();
-    const usable = await this.visitClaudeTranscript(input.sessionId, path, (line) => {
-      const turn = parseClaudeTurn(line, this.options.now);
-      if (turn !== undefined) byId.set(turn.id, turn);
-    });
-    if (!usable) return [];
-    return [...byId.values()].sort(compareNativeTurns);
+    const projection = await this.nativeProjection(input, path, "turns");
+    return projection.cleared ? [] : [...projection.turns.values()].sort(compareNativeTurns);
   }
 
   private async readCodexTurns(input: CaptureProviderTurns): Promise<NativeTurn[]> {
     const path = this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
     if (path === undefined) return [];
-    this.nativePaths.set(input.sessionId, path);
-    this.claimedCodexPaths.set(path, input.sessionId);
-    const byId = new Map<string, NativeTurn>();
-    await visitLines(path, (line) => {
-      const turn = parseCodexTurn(line, this.options.now);
-      if (turn !== undefined) byId.set(turn.id, turn);
-      return true;
-    });
-    return [...byId.values()].sort(compareNativeTurns);
+    return [...(await this.nativeProjection(input, path, "turns")).turns.values()].sort(compareNativeTurns);
   }
 
   private async findCodexTranscript(input: CaptureProviderTurns): Promise<string | undefined> {
@@ -740,200 +691,3 @@ export async function pruneLegacyTranscript(
   }
 }
 
-function claudeProjectSlug(cwd: string): string {
-  return cwd.replace(/[^A-Za-z0-9-]/gu, "-");
-}
-
-function candidateDayDirectories(root: string, timestamp: number): string[] {
-  const directories = new Set<string>();
-  for (const offset of [-86_400_000, 0, 86_400_000]) {
-    const date = new Date(timestamp + offset);
-    directories.add(join(
-      root,
-      String(date.getUTCFullYear()),
-      String(date.getUTCMonth() + 1).padStart(2, "0"),
-      String(date.getUTCDate()).padStart(2, "0"),
-    ));
-  }
-  return [...directories];
-}
-
-async function readCodexMetadata(
-  path: string,
-): Promise<{ id: string; timestamp: string; cwd: string } | undefined> {
-  let metadata: { id: string; timestamp: string; cwd: string } | undefined;
-  await visitLines(path, (line) => {
-    try {
-      const frame = JSON.parse(line) as {
-        type?: unknown;
-        payload?: {
-          id?: unknown;
-          timestamp?: unknown;
-          cwd?: unknown;
-          originator?: unknown;
-        };
-      };
-      const payload = frame.payload;
-      if (
-        frame.type === "session_meta"
-        && payload?.originator === "codex-tui"
-        && typeof payload.id === "string"
-        && typeof payload.timestamp === "string"
-        && typeof payload.cwd === "string"
-      ) {
-        metadata = { id: payload.id, timestamp: payload.timestamp, cwd: payload.cwd };
-      }
-    } catch {
-      // Ignore incomplete or unrelated provider frames.
-    }
-    return false;
-  });
-  return metadata;
-}
-
-function parseClaudeTurn(line: string, now: (() => string) | undefined): NativeTurn | undefined {
-  try {
-    const frame = JSON.parse(line) as {
-      type?: unknown;
-      timestamp?: unknown;
-      uuid?: unknown;
-      message?: {
-        id?: unknown;
-        role?: unknown;
-        stop_reason?: unknown;
-        content?: unknown;
-      };
-    };
-    const message = frame.message;
-    if (
-      frame.type !== "assistant"
-      || message?.role !== "assistant"
-      || message.stop_reason !== "end_turn"
-      || !Array.isArray(message.content)
-    ) return undefined;
-    const text = message.content
-      .filter((block): block is { type: "text"; text: string } =>
-        typeof block === "object"
-        && block !== null
-        && (block as { type?: unknown }).type === "text"
-        && typeof (block as { text?: unknown }).text === "string"
-      )
-      .map((block) => block.text)
-      .join("\n\n")
-      .trim();
-    const id = typeof message.id === "string"
-      ? message.id
-      : typeof frame.uuid === "string"
-        ? frame.uuid
-        : undefined;
-    if (id === undefined || text === "") return undefined;
-    return {
-      id,
-      occurredAt: typeof frame.timestamp === "string"
-        ? frame.timestamp
-        : now?.() ?? new Date().toISOString(),
-      text,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function parseCodexTurn(line: string, now: (() => string) | undefined): NativeTurn | undefined {
-  try {
-    const frame = JSON.parse(line) as {
-      type?: unknown;
-      timestamp?: unknown;
-      payload?: {
-        type?: unknown;
-        turn_id?: unknown;
-        last_agent_message?: unknown;
-      };
-    };
-    const payload = frame.payload;
-    if (
-      frame.type !== "event_msg"
-      || payload?.type !== "task_complete"
-      || typeof payload.turn_id !== "string"
-      || typeof payload.last_agent_message !== "string"
-      || payload.last_agent_message.trim() === ""
-    ) return undefined;
-    return {
-      id: payload.turn_id,
-      occurredAt: typeof frame.timestamp === "string"
-        ? frame.timestamp
-        : now?.() ?? new Date().toISOString(),
-      text: payload.last_agent_message,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function parseThreadEvent(line: string): ThreadEvent | undefined {
-  try {
-    const parsed = ThreadEventSchema.safeParse(JSON.parse(line));
-    return parsed.success ? parsed.data : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function compareNativeTurns(left: NativeTurn, right: NativeTurn): number {
-  return left.occurredAt.localeCompare(right.occurredAt) || left.id.localeCompare(right.id);
-}
-
-async function visitLines(
-  path: string,
-  visitor: (line: string) => boolean,
-): Promise<void> {
-  const stream = createReadStream(path, { encoding: "utf8" });
-  const lines = createInterface({ input: stream, crlfDelay: Infinity });
-  try {
-    for await (const line of lines) {
-      if (line.trim() !== "" && !visitor(line)) break;
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  } finally {
-    lines.close();
-    stream.destroy();
-  }
-}
-
-function ignoreMissing(error: NodeJS.ErrnoException): void {
-  if (error.code !== "ENOENT") throw error;
-}
-
-/**
- * The complete newline-terminated lines appended after `offset`, and the offset just past the last
- * one. A trailing line with no terminating `\n` yet — the writer mid-append — is left unread and
- * `nextOffset` stops before it, so the next call picks it back up whole rather than parsing a
- * half-written frame.
- */
-async function readCompleteLinesFromOffset(
-  path: string,
-  offset: number,
-): Promise<{ lines: string[]; nextOffset: number }> {
-  const chunks: Buffer[] = [];
-  await new Promise<void>((resolve, reject) => {
-    const stream = createReadStream(path, { start: offset });
-    stream.on("data", (chunk) => chunks.push(chunk as Buffer));
-    stream.on("end", resolve);
-    stream.on("error", (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") resolve();
-      else reject(error);
-    });
-  });
-  if (chunks.length === 0) return { lines: [], nextOffset: offset };
-  const buffer = Buffer.concat(chunks);
-  const lastNewline = buffer.lastIndexOf(0x0a);
-  if (lastNewline === -1) return { lines: [], nextOffset: offset };
-  const lines = buffer
-    .subarray(0, lastNewline + 1)
-    .toString("utf8")
-    .split("\n")
-    .slice(0, -1)
-    .map((line) => line.replace(/\r$/u, ""));
-  return { lines, nextOffset: offset + lastNewline + 1 };
-}
