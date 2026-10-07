@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "start": "2026-09-16T09:26:28.648Z",
+  "end": "2026-09-16T09:36:28.799Z",
+  "samples": 120,
+  "failures": 0,
+  "node": "v24.18.0",
+  "mode": "read-only-baseline",
+  "ownCpuMicros": 2312275,
+  "ownEventLoopP99Ms": 31.080447,
+  "sourceSha": "f14e157fc91384f6ea07da1893626c04f2b9693a",
+  "dirty": true,
+  "seriesSha256": "2418a4a840082164ff44d2bc5d9becc2e3b212700fa223bfbbdec7c30c75ea31",
+  "correction": "manifest sourceSha is source HEAD at end, not loaded sampler identity; head moved during baseline; not exact-candidate acceptance",
+  "brokerCpuMeanCoreFraction": 0.1266,
+  "brokerRssPeak": 350502912,
+  "combinedStatusAndSessionListP95Ms": 26.321708000003127,
+  "sampleCollectionP95Ms": 166.10862499999348,
+  "limitations": [
+    "active main broker baseline, not settled W0",
+    "Fleet unregistered",
+    "VM attribution unavailable",
+    "ps CPU decayed average; RSS not physical footprint",
+    "Node CPU excludes sampler child ps processes"
+  ],
+  "rawLocalDirectory": "/private/tmp/cyberdeck-resource-baseline-20260916"
+}

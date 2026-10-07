@@ -1,3 +1,5 @@
+import type { SessionLaunchIntentPort } from "../../domain/session-launch-intent.js";
+import type { ResourceSessionLaunchPort } from "../../domain/resource-runtime.js";
 import type { SessionExecutionPort } from "./execution-ports.js";
 import type { BrokerRuntimeConfig } from "../../config.js";
 import type { BrokerEvent } from "../../domain/events.js";
@@ -98,6 +100,11 @@ export interface RuntimeSession {
   terminalFinalizing?: boolean;
   /** Serializes resume ownership before the first asynchronous turn-settlement boundary. */
   resuming?: boolean;
+  /** Broker parking fence; held input stays in the existing durable instruction queue. */
+  parkingClaim?: string;
+  parkingStopped?: boolean;
+  parkingInput?: () => void;
+  parkingInputOperations?: number;
 }
 
 /**
@@ -129,6 +136,8 @@ export interface SessionRegistryOptions {
   adapters: Record<string, ProviderAdapter>;
   sessionRuntimeFactory: SessionRuntimeFactory<ProviderLaunchSpec>;
   executions?: SessionExecutionPort;
+  resourceExecution?: ResourceSessionLaunchPort;
+  launchIntents?: SessionLaunchIntentPort;
   journal: JournalLike;
   transcripts?: TranscriptLike;
   workerTurnObservation: WorkerTurnObservationPort & WorkerTurnPreviewPort;

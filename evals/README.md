@@ -72,6 +72,12 @@ mount checks use an explicitly scripted Engine behind the production OrbStack ad
 rows prove the boundary and the lifecycle with a scripted guest; they say nothing about what a model
 would do. Only live rows carry agent decisions, and they carry them per repetition.
 
+The offline Engine also supplies the current network-boundary image label, a scripted bounded
+DNS-helper result, and an inert proxy port. Production preparation writes each worker's private
+network policy and restricted launch record, and the fixture inspection preserves the requested
+host mapping. This applies to read-only workers too. Container start remains forbidden in this
+fixture: policy preparation does not prove firewall activation, network isolation, or proxy traffic.
+
 To turn an incident into a regression: select the local run and source event IDs, preserve/hash the
 original evidence, copy only a sanitized minimal fixture, record provider/version and source
 provenance, demonstrate the failure against an independent invariant, fix it, and retain both

@@ -1,3 +1,12 @@
+import { brokerEvaluationRuntime } from "../runtime/resources/broker-evaluation-runtime.js";
+import { brokerParkingRuntime } from "../runtime/resources/broker-parking-runtime.js";
+import { brokerResourceActivity } from "../runtime/resources/broker-resource-activity.js";
+import { InstructionParkingReadModel } from "../orchestration/instruction-parking-read-model.js";
+import { brokerAuxiliaryRuntime } from "../runtime/resources/broker-auxiliary-runtime.js";
+import { auxiliaryProfileAuthorizer } from "./auxiliary-profile-authority.js";
+import { sessionLaunchAuthority } from "./session-launch-authority.js";
+import { brokerResourceRuntime } from "../runtime/resources/broker-resource-runtime.js";
+import { orchestratorController } from "../domain/orchestrator.js";
 import { ContainerNativeSource } from "../runtime/activity/container-native-source.js";
 import { TurnNativeCapture } from "../runtime/activity/turn-native-capture.js";
 import { ExecutionTranscriptStore } from "../persistence/execution-transcript-store.js";
@@ -6,32 +15,29 @@ import { SentrySink } from "../observability/sentry-sink.js";
 import { withActivitySink, type ActivitySinkPort } from "../orchestration/activity-sink.js";
 import { openActivityRecorder } from "../persistence/agent-activity-store.js";
 import { activityInstructionStore } from "../orchestration/activity-instruction-store.js";
-import { enforceJobExecutionPolicy } from "../orchestration/job-execution-policy.js";
-import type { WorkerExecutionPolicy } from "../domain/worker-execution.js";
-import { randomUUID } from "node:crypto";
+import { composeJobDispatchAdapters as composeRuntimeJobAdapters } from "../runtime/job-dispatch-composition.js";
+import { AppServerJobDispatchAdapter } from "../app-server/dispatch-adapter.js";
+import type { WorktreeLeaseManager } from "../control-plane/worktree-lease-manager.js";
+import { jobLaunchEnvironment } from "../providers/launch-environment.js";
+import { applyWorkerMode } from "../providers/worker-mode.js";
+import { ResourceJobLaunch } from "../orchestration/resource-job-launch.js";
+import { resourceJobRecord } from "../orchestration/resource-job-record.js";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ControlPlaneRuntime } from "../control-plane/runtime.js";
-import type { WorktreeLeaseManager } from "../control-plane/worktree-lease-manager.js";
 import { ArtifactStore } from "../persistence/artifact-store.js";
 import { JobStore } from "../persistence/job-store.js";
 import { LeaseStore } from "../persistence/lease-store.js";
-import { AppServerJobDispatchAdapter } from "../app-server/dispatch-adapter.js";
-import type { JobDispatchAdapter } from "../domain/dispatch.js";
 import type { BrokerEvent } from "../domain/events.js";
 import { appStateDirectory, brokerSocketPath } from "../paths.js";
-import { AntigravityJobDispatchAdapter } from "../providers/antigravity/dispatch-adapter.js";
 import { AntigravityProviderAdapter } from "../providers/antigravity/session-adapter.js";
 import { ClaudeProviderAdapter } from "../providers/claude.js";
-import { ClaudeJobDispatchAdapter } from "../providers/claude/dispatch-adapter.js";
 import { ClaudeWorkspaceTrust } from "../providers/claude/workspace-trust.js";
 import { CodexProviderAdapter } from "../providers/codex.js";
 import { CodexWorkspaceTrust } from "../providers/codex/workspace-trust.js";
-import { CursorJobDispatchAdapter } from "../providers/cursor/dispatch-adapter.js";
 import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
 import { captureScoutWorkspaceStateHash } from "../providers/cursor/workspace-state.js";
-import { jobLaunchEnvironment } from "../providers/launch-environment.js";
-import { applyWorkerMode } from "../providers/worker-mode.js";
 import { createSessionRuntime } from "../runtime/session-runtime-adapter.js";
 import { WorkerTurnObservationAdapter } from "../runtime/worker-turn-observation-adapter.js";
 import { Journal } from "../persistence/journal.js";
@@ -99,6 +105,16 @@ import { runClaudeTranscriptRebind } from "../providers/claude/transcript-hook.j
 import type { CliToolkit } from "../cli/toolkit.js";
 import type { FleetRuntimeDeps } from "../client/fleet/deps.js";
 
+export function composeJobDispatchAdapters(context: Omit<Parameters<typeof composeRuntimeJobAdapters>[0], "codex"> & {
+  leases: WorktreeLeaseManager; artifacts: ArtifactStore;
+}) {
+  return composeRuntimeJobAdapters({ ...context, codex: new AppServerJobDispatchAdapter({
+    leaseManager: context.leases, artifactStore: context.artifacts,
+    launchEnvironment: jobLaunchEnvironment, workerMode: applyWorkerMode,
+    ...(context.resourceLaunch ? { resourceLaunch: context.resourceLaunch } : {}),
+  }) });
+}
+
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
     id: randomUUID(),
@@ -140,30 +156,6 @@ export function createCliToolkit(): CliToolkit {
   };
 }
 
-/**
- * The neutral backend composition for the job plane: one dispatch adapter per canonical provider id,
- * each selected only when a request names it explicitly. Registration order carries no ranking,
- * priority, or preference, and nothing here routes, substitutes, or falls back between providers.
- * The Agent B adapter implementations are consumed as-is through the frozen dispatch port.
- */
-export function composeJobDispatchAdapters(context: {
-  leases: WorktreeLeaseManager;
-  artifacts: ArtifactStore;
-  executionPolicy?: WorkerExecutionPolicy | undefined;
-}): JobDispatchAdapter[] {
-  return [
-    new AppServerJobDispatchAdapter({
-      leaseManager: context.leases,
-      artifactStore: context.artifacts,
-      launchEnvironment: jobLaunchEnvironment,
-      workerMode: applyWorkerMode,
-    }),
-    new ClaudeJobDispatchAdapter(),
-    new CursorJobDispatchAdapter(),
-    new AntigravityJobDispatchAdapter(),
-  ].map((adapter) => enforceJobExecutionPolicy(adapter, context.executionPolicy));
-}
-
 export async function runBroker(
   socketPath = brokerSocketPath,
   stateDirectory = appStateDirectory,
@@ -193,6 +185,12 @@ export async function runBroker(
     }
   }
   const activity = withActivitySink(localActivity, telemetry);
+  const instructionStore = new InstructionStore(stateDirectory);
+  const jobStore = new JobStore(stateDirectory);
+  let evaluationRuntime: Awaited<ReturnType<typeof brokerEvaluationRuntime>> | undefined;
+  let auxiliaryRuntime: Awaited<ReturnType<typeof brokerAuxiliaryRuntime>> | undefined;
+  let parkingRuntime: Awaited<ReturnType<typeof brokerParkingRuntime>> | undefined;
+  const instructionFacts = config.resourceManagement ? new InstructionParkingReadModel(await instructionStore.list()) : undefined;
   const sessionStore = new SessionStore(stateDirectory);
   const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
@@ -225,8 +223,20 @@ export async function runBroker(
     config.threadRetention,
     Date.now(),
   );
+  const orchestratorStore = new OrchestratorStore(stateDirectory);
+  let workerCoordination: WorkerCoordinationRuntime<WorkerCoordinationService>;
+  const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
+  let resourceRuntime: Awaited<ReturnType<typeof brokerResourceRuntime>>;
   let workerEvents: WorkerEventChannel;
   const executionRuntime = await brokerExecutionRuntime({ stateDirectory, config, activity,
+    ...(config.resourceManagement?.auxiliaryProfiles ? { profileRequest: async (binding, request) => {
+      if (!auxiliaryRuntime) throw new Error("AUXILIARY_RUNTIME_UNAVAILABLE");
+      return auxiliaryRuntime.request(binding, request);
+    } } : {}),
+    ...(config.resourceManagement ? { grantedEnvelope: (input) => {
+      if (!resourceRuntime) throw new Error("RESOURCE_RUNTIME_UNAVAILABLE");
+      return resourceRuntime.envelope(input.record, input.identity.generation);
+    } } : {}),
     allowsWorkspaceTrust: (source) => modalAnswerPolicy.allowsWorkspaceTrust(source),
     adapters: { codex: new CodexProviderAdapter({ mcp, workspaceTrust: grantGatedTrust(codexTrust) }),
       claude: new ClaudeProviderAdapter({ mcp, stateDirectory, workspaceTrust: grantGatedTrust(claudeTrust) }),
@@ -234,7 +244,35 @@ export async function runBroker(
     lookupSession: (id) => { try { return registry?.get(id); } catch { return undefined; } },
     submitEvent: (input) => workerEvents.submit(input),
   });
+  resourceRuntime = await brokerResourceRuntime({ config, brokerId: executionRuntime.brokerId,
+    execution: executionRuntime.execution,
+    assertAuthority: sessionLaunchAuthority({ orchestrators: orchestratorStore, credentials: workerLeaseCredentials,
+      coordination: () => workerCoordination?.service, session: id => { try { return registry?.get(id); } catch { return undefined; } } }),
+    captureHold: () => auxiliaryRuntime?.admissionHold() ?? (evaluationRuntime ? evaluationRuntime.admissionHold() : "evaluation-capture-gap"),
+    resolveFamily: async (record) => {
+      const lease = workerCoordination?.service.getSubject(record.id)?.lease
+        ?? (record.parentSessionId ? workerCoordination?.service.getSubject(record.parentSessionId)?.lease : undefined);
+      if (lease?.controller) return lease.controller.familyId;
+      const binding = await orchestratorStore.findBySessionId(record.kind === "orchestrator" ? record.id : record.parentSessionId ?? record.id);
+      if (binding) return orchestratorController(binding).familyId;
+      if (record.kind === "orchestrator" || record.parentSessionId) throw new Error("RESOURCE_CANONICAL_FAMILY_UNAVAILABLE");
+      // Operator-launched sessions have no controller grant; this is a scheduling bucket only.
+      return "operator";
+    },
+  });
+  // The installation owner lock precedes every evaluation-store mutation and replay timer.
+  if (config.resourceManagement) {
+    try {
+      evaluationRuntime = await brokerEvaluationRuntime({ directory: config.resourceManagement.directory,
+        instructionSourceId: createHash("sha256").update(config.resourceManagement.installationId + "\0" + instructionStore.path).digest("hex"), activity, instructions: () => instructionStore.list(), instructionVersion: () => instructionStore.version(), jobs: jobStore,
+        ...(resourceRuntime ? { execution: { config, resource: resourceRuntime } } : {}) });
+    } catch (error) {
+      await resourceRuntime?.close();
+      throw error;
+    }
+  }
   registry = new SessionRegistry({
+    ...(resourceRuntime ? { resourceExecution: resourceRuntime.gate, launchIntents: resourceRuntime.launchIntents } : {}),
     adapters: executionRuntime.adapters,
     sessionRuntimeFactory: createSessionRuntime,
     executions: executionRuntime.executions,
@@ -249,22 +287,18 @@ export async function runBroker(
     config,
   });
   await registry.ready();
-  // One pass, on the first broker start that has this code: the directories threads already live
-  // in are the only evidence of the operator's projects that predates the registry. It runs before
-  // the socket is listening so the first Fleet render never sees a half-seeded list.
+  // Seed legacy thread projects before the socket can expose an incomplete Fleet list.
   await fleetProjects.seed(recoveredSessions.map((record) => record.cwd)).catch(() => {
     // A machine without git, or with none of these directories left on disk, starts empty. The
     // operator registers projects by hand from there; refusing to boot over it would be worse.
   });
-  const orchestratorStore = new OrchestratorStore(stateDirectory);
-  const workerCoordination = new WorkerCoordinationRuntime({
+  workerCoordination = new WorkerCoordinationRuntime({
     stateDirectory,
     recoveredSessions,
     orchestrators: orchestratorStore,
     createService: (store) => new WorkerCoordinationService({ store: activityCoordinationStore(store, activity) }),
   });
   await workerCoordination.start();
-  // Each launch context has its own cached catalog; orchestrators force first-party Codex.
   const workerCapabilities = new WorkerCapabilityCatalog();
   const orchestratorCapabilities = new WorkerCapabilityCatalog({ probe: new CodexOrchestratorModelProbe() });
   const orchestrators = new OrchestratorManager(
@@ -274,14 +308,11 @@ export async function runBroker(
     providerPermissions,
     (provider) => orchestratorCapabilities.resolve(provider),
   );
-  const instructionStore = new InstructionStore(stateDirectory);
   const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
   transcripts.attachNativeCapture(nativeCapture);
   const instructions = new InstructionQueue(registry, orchestratorStore, activityInstructionStore(instructionStore, activity, (id) => {
     try { return registry.get(id); } catch { return undefined; }
-  }, (record, worker) => nativeCapture.captureInstruction(record, worker)));
-  instructions.start();
-  const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
+  }, (record, worker) => nativeCapture.captureInstruction(record, worker), instructionFacts));
   const workerBudgets = new WorkerBudgetEnforcer({
     registry,
     coordination: workerCoordination.service,
@@ -290,7 +321,6 @@ export async function runBroker(
     credentials: workerLeaseCredentials,
   });
   registry.setWorkerBudgetGate(workerBudgets);
-  await workerBudgets.start();
   const agentControl = new AgentControlService(
     registry,
     orchestratorStore,
@@ -339,6 +369,20 @@ export async function runBroker(
     undefined,
     workerLeaseCredentials,
   );
+  if (resourceRuntime && config.resourceManagement && instructionFacts) {
+    parkingRuntime = await brokerParkingRuntime({ directory: resolve(config.resourceManagement.directory, "parking"),
+      assertOwner: resourceRuntime.assertOwner, registry, transcripts, coordination: workerCoordination.service,
+      instructions, instructionFacts, inFlightReports: id => workerEvents.inFlightReports(id), ...config.resourceManagement.parking });
+  }
+  if (resourceRuntime && config.resourceManagement?.auxiliaryProfiles) {
+    auxiliaryRuntime = await brokerAuxiliaryRuntime({ config, resource: resourceRuntime, activity,
+      authorize: auxiliaryProfileAuthorizer({ brokerId: executionRuntime.brokerId, session: id => registry.get(id),
+        coordination: workerCoordination.service, credentials: workerLeaseCredentials,
+        instructions: id => instructionStore.list(id) }) });
+  }
+  await resourceRuntime?.completeRecovery();
+  instructions.start();
+  await workerBudgets.start();
   const workflows = new WorkflowService(
     registry,
     orchestratorStore,
@@ -364,17 +408,24 @@ export async function runBroker(
   // runtime enforces the ordering: persistence, then recovery, then reconciliation, and only then is
   // admission opened. The B-owned dispatch adapters are composed in without being modified.
   const artifactStore = new ArtifactStore(stateDirectory);
-  const runtime = new ControlPlaneRuntime({
+  const resourceLaunch = resourceRuntime ? new ResourceJobLaunch({ gate: resourceRuntime.gate,
+    resolveRecord: request => resourceJobRecord(runtime.controlPlane.dispatchContext(request.jobId), request) }) : undefined;
+  const runtime: ControlPlaneRuntime = new ControlPlaneRuntime({
     stateDirectory,
     config,
     journal,
-    jobStore: new JobStore(stateDirectory),
+    jobStore,
     artifacts: artifactStore,
     leaseStore: new LeaseStore(stateDirectory),
     adapters: (context) =>
-      composeJobDispatchAdapters({ leases: context.leases, artifacts: artifactStore, executionPolicy: config.workerExecution }),
+      composeJobDispatchAdapters({ leases: context.leases, artifacts: artifactStore, executionPolicy: config.workerExecution,
+        resourceManaged: resourceRuntime !== undefined, ...(resourceLaunch ? { resourceLaunch } : {}) }),
   });
   await runtime.start();
+  const resourceActivity = resourceRuntime && config.resourceManagement ? await brokerResourceActivity({
+    directory: config.resourceManagement.directory, installationId: config.resourceManagement.installationId,
+    brokerId: executionRuntime.brokerId, activity, resource: resourceRuntime,
+    parked: () => parkingRuntime?.health().records.filter(r => r.phase === "parked").length ?? 0 }) : undefined;
 
   let shuttingDown = false;
   let server: BrokerServer;
@@ -382,7 +433,10 @@ export async function runBroker(
     if (shuttingDown) return;
     shuttingDown = true;
     // Admission stops first, then in-flight jobs drain and persist, then live sessions stop.
+    resourceRuntime?.drain();
     await runtime.shutdown(reason);
+    await Promise.all([resourceRuntime?.closeAdmission(), executionRuntime.closeAdmission()]);
+    await parkingRuntime?.close();
     localWorkerControl.close();
     workerBudgets.close();
     instructions.stop();
@@ -390,6 +444,10 @@ export async function runBroker(
     await executionRuntime.closeAdmission();
     await registry.stopAll();
     await executionRuntime.close();
+    await auxiliaryRuntime?.close();
+    await resourceActivity?.close();
+    await evaluationRuntime?.close();
+    await resourceRuntime?.close();
     await sentry?.close().catch(() => undefined);
     await journal.append(brokerEvent("broker.shutdown", { reason, pid: process.pid }));
     await server.close();
@@ -397,6 +455,11 @@ export async function runBroker(
 
   server = new BrokerServer({
     activity, executionHealth: executionRuntime.health,
+    ...(resourceRuntime ? { resourceHealth: () => ({ ...resourceRuntime.health(), activity: resourceActivity?.health() }),
+      resourceDrain: () => { resourceRuntime!.drain(); runtime.scheduler.closeAdmission(); return resourceRuntime!.health(); } } : {}),
+    ...(auxiliaryRuntime ? { auxiliaryHealth: auxiliaryRuntime.health } : {}),
+    ...(parkingRuntime ? { parkingHealth: parkingRuntime.health } : {}),
+    ...(evaluationRuntime ? { evaluationHealth: evaluationRuntime.health } : {}),
     renewExecutionAttempt: async (input) => {
       const lease = workerCoordination.service.getSubject(input.sessionId)?.lease;
       if (lease?.state !== "active" || lease.version !== input.leaseVersion || lease.expiresAt !== input.leaseExpiresAt

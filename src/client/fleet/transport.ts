@@ -55,6 +55,11 @@ export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.
 }
 
 export function threadStatus(thread: FleetThread): ThreadStatus {
+  switch (thread.record.pendingLaunch?.state) {
+    case "waiting-capacity": return "Queued";
+    case "waiting-authority": return "Awaiting authority";
+    case "preparing": case "launching": return "Starting";
+  }
   const persisted = thread.record.attentionState;
   if (persisted !== undefined) {
     return ({

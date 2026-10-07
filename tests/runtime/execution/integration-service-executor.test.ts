@@ -1,0 +1,290 @@
+import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { IntegrationServiceExecutor } from "../../../src/runtime/execution/integration-service-executor.js";
+import { integrationNames, type IntegrationServiceRequest } from "../../../src/runtime/execution/integration-service-recipe.js";
+import { OrbStackClient } from "../../../src/runtime/execution/orbstack-client.js";
+import type { ResourceAdmissionPort, ResourceRequest, ResourceReservation } from "../../../src/domain/resource-budget.js";
+import { realAuxiliaryAdmission } from "./auxiliary-admission-fixture.js";
+
+const roots: string[] = [], image = `sha256:${"a".repeat(64)}`;
+afterEach(async () => { for (const path of roots.splice(0)) await rm(path, { recursive: true, force: true }); });
+const request = (): IntegrationServiceRequest => ({ identity: { brokerId: randomUUID(), executionId: randomUUID(),
+  workerId: randomUUID(), sessionId: randomUUID(), generation: 1 }, attemptId: randomUUID(), leaseVersion: 1, recipe: "postgres-fixture-v1" });
+function fakeEngine() {
+  const objects = new Map<string, any>();
+  const state = { unavailable: false, healthy: true, runnerExit: 0, oom: false, corruptNetwork: false, corruptLabel: false, siblingNetwork: false, failRemove: false, startFails: false, logsUnavailable: false, tick: 0 };
+  const run = vi.fn(async (argv: string[]) => {
+    if (state.unavailable) throw new Error("daemon unreachable");
+    const args = argv.slice(2), command = args[0];
+    const value = (flag: string) => args[args.indexOf(flag) + 1]!;
+    const values = (flag: string) => args.flatMap((s, index) => s === flag ? [args[index + 1]!] : []);
+    const labels = () => Object.fromEntries(values("--label").map(s => [s.slice(0, s.indexOf("=")), s.slice(s.indexOf("=") + 1)]));
+    if (command === "context") return JSON.stringify([{ Name: "orbstack", Endpoints: { docker: { Host: "unix:///tmp/integration-test.sock" } } }]);
+    if (command === "ps" || args[1] === "ls") {
+      const match = value("--filter").replace(/^name=(?:\^\/)?/, "").replace(/\$$/, "");
+      return objects.has(match) ? match : "";
+    }
+    if (command === "inspect" || args[1] === "inspect") return JSON.stringify([objects.get(args.at(-1)!) ]);
+    if (command === "network" && args[1] === "create") {
+      const name = args.at(-1)!;
+      objects.set(name, { Name: name, Id: name, Labels: labels(), Internal: !state.corruptNetwork, Driver: "bridge", Containers: {} }); return name;
+    }
+    if (command === "volume" && args[1] === "create") {
+      const name = args.at(-1)!; objects.set(name, { Name: name, Labels: labels(), Driver: "local",
+        Options: Object.fromEntries(values("--opt").map(s => [s.slice(0, s.indexOf("=")), s.slice(s.indexOf("=") + 1)])) }); return name;
+    }
+    if (command === "create") {
+      const name = value("--name"), runner = name.endsWith("-test"), id = (runner ? "c" : "b").repeat(64);
+      objects.set(name, { Id: id, Name: `/${name}`, Config: { Labels: { ...labels(), ...(state.corruptLabel ? { "cyberdeck.attempt": randomUUID() } : {}) }, Image: image, User: "postgres" },
+        State: { Running: false, ExitCode: runner ? state.runnerExit : 0, OOMKilled: false,
+          Status: "created", StartedAt: "0001-01-01T00:00:00Z", Pid: 0 },
+        HostConfig: { Memory: Number(value("--memory")), MemorySwap: Number(value("--memory-swap")), NanoCpus: Number(value("--cpus")) * 1e9,
+          PidsLimit: Number(value("--pids-limit")), Privileged: false, ReadonlyRootfs: true, NetworkMode: value("--network"),
+          PidMode: "", IpcMode: "private", CapAdd: null, CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges"], PortBindings: null, Binds: null, Devices: [] },
+        Mounts: runner ? [] : [{ Type: "volume", Name: value("--mount").split("src=")[1]!.split(",")[0], Destination: "/var/lib/postgresql/data" }],
+        NetworkSettings: { Networks: { [value("--network")]: {}, ...(state.siblingNetwork ? { "sibling-network": {} } : {}) } } }); return id;
+    }
+    const found = [...objects].find(([, item]) => item.Id === args.at(-1));
+    if (command === "start" && found) {
+      if (state.startFails) throw new Error("logging driver initialization failed");
+      const [name, item] = found; item.State.Running = !name.endsWith("-test"); item.State.OOMKilled = state.oom;
+      item.State.Status = item.State.Running ? "running" : "exited"; item.State.StartedAt = "2026-09-16T00:00:00Z";
+      item.State.Pid = item.State.Running ? 100 : 0;
+      item.State.Health = { Status: state.healthy ? "healthy" : "starting" }; return item.Id;
+    }
+    if (command === "stop" && found) { found[1].State.Running = false; return found[1].Id; }
+    if (command === "logs") { if (state.logsUnavailable) throw new Error("log stream unavailable"); return "cyberdeck-integration-pass"; }
+    if (command === "rm" || args[1] === "rm") {
+      if (state.failRemove) throw new Error("engine lost while removing");
+      objects.delete(found?.[0] ?? args.at(-1)!); return "";
+    }
+    throw new Error(`Unexpected command ${command}`);
+  });
+  return { run, objects, state };
+}
+async function setup(realLedger = false) {
+  const directory = await mkdtemp(join(tmpdir(), "integration-executor-")); roots.push(directory);
+  const fake = fakeEngine();
+  let backend!: IntegrationServiceExecutor;
+  const real = realLedger ? await realAuxiliaryAdmission(directory, "installation", (reservation, evidence) => backend.verifyTermination(reservation, evidence)) : undefined;
+  const admission: ResourceAdmissionPort = real?.admission ?? { request: vi.fn(async (input: ResourceRequest) => ({ state: "admitted" as const, reservationId: "reserved", demand: input.demand })),
+    cancel: vi.fn(async () => {}), release: vi.fn(async () => {}) };
+  const authorize = vi.fn(async () => ({ installationId: "installation", familyId: "canonical-family" }));
+  const options = { client: new OrbStackClient("unix:///tmp/integration-test.sock", fake.run),
+    admission, image, evidenceDirectory: directory, authorize, now: () => fake.state.tick, pause: async (ms: number) => { fake.state.tick += ms; } };
+  backend = new IntegrationServiceExecutor(options);
+  return { backend, options, admission, authorize, directory, real, ...fake };
+}
+describe("broker-owned integration services", () => {
+  it("runs the accounted fixed SQL recipe and preserves evidence before selective teardown", async () => {
+    const f = await setup(), input = request();
+    const result = await f.backend.run(input);
+    expect(result).toMatchObject({ state: "completed", outcome: "verified-pass", cleanupComplete: true });
+    expect(f.admission.request).toHaveBeenCalledWith(expect.objectContaining({ owner: expect.objectContaining({ familyId: "canonical-family", kind: "service" }),
+      demand: expect.objectContaining({ memoryBytes: 640 * 1024 ** 2, pidLimit: 128 }) }));
+    expect(f.objects.size).toBe(0);
+    const manifest = JSON.parse(await readFile(join(f.directory, `${integrationNames(input).key}.json`), "utf8"));
+    expect(manifest.observations).toHaveLength(2); expect(manifest.cleanupComplete).toBe(true);
+    const creates = f.run.mock.calls.map(([args]) => args).filter(args => args[2] === "create");
+    expect(creates).toHaveLength(2);
+    for (const args of creates) {
+      expect(args).toContain("--read-only"); expect(args).toContain("--pids-limit"); expect(args).toContain("--memory-swap");
+      expect(args).toContain("max-file=1"); expect(args).toContain("compress=false");
+      expect(args).not.toContain("--publish"); expect(args.join(" ")).not.toContain("docker.sock");
+    }
+    expect(creates[1]?.join(" ")).toContain("rollback mismatch");
+    const credentials = creates[0]!.find(s => s.startsWith("POSTGRES_PASSWORD="))!.slice("POSTGRES_PASSWORD=".length);
+    expect(JSON.stringify(manifest)).not.toContain(credentials);
+    expect(f.admission.release).toHaveBeenCalledTimes(1);
+    const resource = vi.mocked(f.admission.request).mock.calls[0]![0];
+    const held = { request: resource, reservationId: "reserved" } as ResourceReservation;
+    const evidence = vi.mocked(f.admission.release).mock.calls[0]![0].terminationEvidenceId;
+    expect(await f.backend.verifyTermination(held, evidence)).toBe(true);
+    expect(await f.backend.verifyTermination({ ...held, reservationId: "sibling" }, evidence)).toBe(false);
+    expect(await f.backend.verifyTermination(held, "wrong-hash")).toBe(false);
+  });
+  it("cleans an owned never-started container when logging initialization failed", async () => {
+    const f = await setup(), input = request(); f.state.startFails = true; f.state.logsUnavailable = true;
+    expect(await f.backend.run(input)).toMatchObject({ outcome: "infrastructure-error", cleanupComplete: true });
+    expect(f.objects.size).toBe(0); expect(f.admission.release).toHaveBeenCalledTimes(1);
+    expect(f.run.mock.calls.some(([args]) => args[2] === "logs")).toBe(false);
+    const manifest = JSON.parse(await readFile(join(f.directory, `${integrationNames(input).key}.json`), "utf8"));
+    expect(manifest.observations[0].logs).toBe("[container never started; no log stream]");
+  });
+  it("retains evidence and capacity if a previously started container has unreadable logs", async () => {
+    const f = await setup(); f.state.logsUnavailable = true;
+    expect(await f.backend.run(request())).toMatchObject({ outcome: "infrastructure-error", cleanupComplete: false });
+    expect(f.objects.size).toBeGreaterThan(0); expect(f.admission.release).not.toHaveBeenCalled();
+  });
+  it("refuses unpinned images and injected engine authority before touching Docker", async () => {
+    const f = await setup();
+    expect(() => new IntegrationServiceExecutor({ client: new OrbStackClient("unix:///tmp/integration-test.sock", f.run), admission: f.admission,
+      image: "postgres:latest", evidenceDirectory: f.directory, authorize: f.authorize })).toThrow("INTEGRATION_IMAGE_NOT_PINNED");
+    await expect(f.backend.run({ ...request(), network: "host", command: ["docker", "ps"] } as IntegrationServiceRequest)).rejects.toThrow();
+    await expect(f.backend.run({ ...request(), attemptId: "../../foreign" })).rejects.toThrow();
+    expect(f.run).not.toHaveBeenCalled(); expect(f.authorize).not.toHaveBeenCalled();
+  });
+  it("refuses an unexpected sibling network before the service starts", async () => {
+    const f = await setup(); f.state.siblingNetwork = true;
+    expect(await f.backend.run(request())).toMatchObject({ outcome: "infrastructure-error", cleanupComplete: true });
+    expect(f.run.mock.calls.some(([args]) => args[2] === "start")).toBe(false);
+  });
+  it("issues distinct credentials and isolated endpoints for sibling runs", async () => {
+    const f = await setup(), first = request(), second = { ...first, attemptId: randomUUID() };
+    await f.backend.run(first); await f.backend.run(second);
+    const services = f.run.mock.calls.map(([args]) => args).filter(args => args[2] === "create" && args.some(s => s.startsWith("POSTGRES_PASSWORD=")));
+    expect(services).toHaveLength(2);
+    expect(services[0]!.find(s => s.startsWith("POSTGRES_PASSWORD="))).not.toBe(services[1]!.find(s => s.startsWith("POSTGRES_PASSWORD=")));
+    expect(integrationNames(first).network).not.toBe(integrationNames(second).network);
+  });
+  it("honors capacity queue and cancellation without provisioning", async () => {
+    const f = await setup(), input = request();
+    vi.mocked(f.admission.request).mockResolvedValue({ state: "waiting-capacity", reason: "reserved-capacity", queuedAt: new Date().toISOString() });
+    expect(await f.backend.run(input)).toMatchObject({ state: "waiting-capacity" });
+    expect(f.run).not.toHaveBeenCalled();
+    expect(await f.backend.recover(input)).toMatchObject({ state: "pending" });
+    expect(f.admission.cancel).not.toHaveBeenCalled();
+    await f.backend.cancelPending(input);
+    expect(f.admission.cancel).toHaveBeenCalledWith(integrationNames(input).key);
+    expect(f.admission.release).not.toHaveBeenCalled();
+  });
+  it.each([false, true])("preserves queued FIFO identity across ledger restart, auto-admitted=%s", async admitted => {
+    const f = await setup(true), first = request(), second = { ...first, attemptId: randomUUID() };
+    f.real!.control.available = false;
+    await f.backend.run(first); await f.backend.run(second);
+    if (admitted) { f.real!.control.available = true; await f.real!.admission.refresh(); }
+    const before = f.real!.store.read();
+    await f.real!.store.close();
+    const reopened = await realAuxiliaryAdmission(f.directory, "installation", (reservation, evidence) => f.backend.verifyTermination(reservation, evidence));
+    try {
+      const executor = new IntegrationServiceExecutor({ ...f.options, admission: reopened.admission });
+      const admissionRequest = vi.spyOn(reopened.admission, "request"), cancel = vi.spyOn(reopened.admission, "cancel");
+      expect((await executor.reconcileAll()).map(r => r.result.state)).toEqual(["pending", "pending"]);
+      expect(reopened.store.read()).toEqual(before); expect(admissionRequest).not.toHaveBeenCalled(); expect(cancel).not.toHaveBeenCalled();
+      expect(f.run).not.toHaveBeenCalled();
+      for (const entry of before.entries) expect(await executor.recoveryReady(entry)).toBe(true);
+      await reopened.admission.reconcile(async held => (await Promise.all(held.map(entry => executor.recoveryReady(entry)))).every(Boolean));
+      expect(reopened.store.read()).toEqual(before);
+      // Normal authorized polling resumes the original request; reconciliation itself never starts SQL.
+      expect(await executor.run(first)).toMatchObject({ state: "completed", outcome: "verified-pass" });
+      expect(reopened.store.read().entries[0]!.request).toEqual(before.entries[0]!.request);
+      expect(reopened.store.read().entries[0]!.sequence).toBe(before.entries[0]!.sequence);
+    } finally { await reopened.store.close(); }
+  });
+  it.each(["corruptNetwork", "corruptLabel"] as const)("retains reservation on malicious %s ownership/boundary", async field => {
+    const f = await setup(); f.state[field] = true;
+    expect(await f.backend.run(request())).toMatchObject({ outcome: "infrastructure-error", cleanupComplete: false });
+    expect(f.admission.release).not.toHaveBeenCalled();
+    expect(f.run.mock.calls.some(([args]) => args[2] === "start")).toBe(false);
+  });
+  it("retains capacity while teardown is incomplete and recovers the exact run after restart", async () => {
+    const f = await setup(), input = request(); f.state.failRemove = true;
+    expect(await f.backend.run(input)).toMatchObject({ cleanupComplete: false });
+    expect(f.admission.release).not.toHaveBeenCalled();
+    f.state.unavailable = true;
+    expect(await f.backend.recover(input)).toMatchObject({ cleanupComplete: false });
+    expect(f.admission.release).not.toHaveBeenCalled();
+    const resource = vi.mocked(f.admission.request).mock.calls[0]![0];
+    expect(await f.backend.recoveryReady({ request: resource, reservationId: "reserved" } as ResourceReservation)).toBe(false);
+    f.state.unavailable = false; f.state.failRemove = false;
+    expect(await f.backend.recover(input)).toMatchObject({ cleanupComplete: true });
+    expect(f.objects.size).toBe(0); expect(f.admission.release).toHaveBeenCalledTimes(1);
+  });
+  it.each([false, true])("retires a stale authority wait with real admission, already-admitted=%s", async admitted => {
+    const f = await setup(true), input = request();
+    try {
+      f.real!.control.available = false;
+      expect(await f.backend.run(input)).toMatchObject({ state: "waiting-capacity" });
+      f.authorize.mockRejectedValue(new Error("stale authority"));
+      if (admitted) { f.real!.control.available = true; await f.real!.admission.refresh(); }
+      await expect(f.backend.run(input)).rejects.toThrow("stale authority");
+      expect(await f.backend.cancelPending(input)).toMatchObject({ cleanupComplete: true });
+      expect(f.real!.admission.health()).toMatchObject({ reservedBytes: 0, queue: [] });
+      expect(f.run.mock.calls.some(([args]) => ["create", "start"].includes(args[2]!))).toBe(false);
+      expect(await f.backend.recover(input)).toMatchObject({ cleanupComplete: true });
+    } finally { await f.real!.store.close(); }
+  });
+  it("transient cleanup retry preserves the verified result and original evidence without rerunning SQL", async () => {
+    const f = await setup(true), input = request();
+    try {
+      f.state.failRemove = true;
+      expect(await f.backend.run(input)).toMatchObject({ outcome: "verified-pass", cleanupComplete: false });
+      expect(f.real!.admission.health().reservedBytes).toBeGreaterThan(0);
+      const path = join(f.directory, `${integrationNames(input).key}.json`), original = JSON.parse(await readFile(path, "utf8"));
+      const creates = f.run.mock.calls.filter(([args]) => args[2] === "create").length;
+      f.authorize.mockRejectedValue(new Error("stale authority")); f.state.failRemove = false;
+      expect(await f.backend.recover(input)).toMatchObject({ outcome: "verified-pass", cleanupComplete: true });
+      const recovered = JSON.parse(await readFile(path, "utf8"));
+      expect(recovered.observations).toEqual(expect.arrayContaining(original.observations));
+      expect(recovered.cleanupAttempts).toBe(2); expect(recovered.outcome).toBe(original.outcome);
+      expect(f.run.mock.calls.filter(([args]) => args[2] === "create")).toHaveLength(creates);
+      expect(f.real!.admission.health().reservedBytes).toBe(0);
+    } finally { await f.real!.store.close(); }
+  });
+  it("does not recover a sibling attempt or reveal its credentials", async () => {
+    const f = await setup(), input = request(); f.state.failRemove = true;
+    await f.backend.run(input); const count = f.run.mock.calls.length;
+    expect(await f.backend.recover({ ...input, attemptId: randomUUID() })).toEqual({ state: "pending", resource: null });
+    expect(f.run.mock.calls).toHaveLength(count);
+    const privateManifest = JSON.parse(await readFile(join(f.directory, `${integrationNames(input).key}.credentials.json`), "utf8"));
+    expect(privateManifest.network).toBe(integrationNames(input).network);
+    expect(privateManifest.password).toHaveLength(64);
+  });
+  it.each(["invalid", "dangling-symlink"])("does not confuse %s intent with a missing prelaunch manifest", async mode => {
+    const f = await setup(), input = request(), path = join(f.directory, `${integrationNames(input).key}.json`);
+    if (mode === "invalid") await writeFile(path, "not valid JSON");
+    else await symlink(join(f.directory, "missing-target"), path);
+    await expect(f.backend.recover(input)).rejects.toThrow();
+    expect(f.admission.request).not.toHaveBeenCalled(); expect(f.admission.cancel).not.toHaveBeenCalled();
+    expect(f.run).not.toHaveBeenCalled();
+  });
+  it("held reconciliation blocks auto-admitted prelaunch work while exact cleanup lookup remains available", async () => {
+    // Depends on the composition root's concurrent lookupReservation/request-hold remediation.
+    const f = await setup(true), first = request(), second = { ...first, attemptId: randomUUID() };
+    try {
+      f.real!.control.available = false; await f.backend.run(first); await f.backend.run(second);
+      f.real!.control.available = true; await f.real!.admission.refresh();
+      const before = f.real!.store.read(), owned = before.entries.find(entry => entry.request.requestId === integrationNames(first).key)!;
+      await expect(f.real!.admission.reconcile(async () => false)).rejects.toThrow("RESOURCE_RECONCILIATION_REQUIRED");
+      expect(await f.backend.run(first)).toMatchObject({ state: "waiting-capacity", reason: "reconciliation" });
+      expect(f.run).not.toHaveBeenCalled(); expect(f.real!.store.read()).toEqual(before);
+      const admission = f.real!.admission as unknown as ResourceAdmissionPort & { lookupReservation(input: ResourceRequest): Promise<string | undefined> };
+      expect(await admission.lookupReservation(owned.request)).toBe(owned.reservationId);
+      expect(f.real!.store.read()).toEqual(before);
+      await f.real!.admission.reconcile(async held => (await Promise.all(held.map(entry => f.backend.recoveryReady(entry)))).every(Boolean));
+      expect(await f.backend.run(first)).toMatchObject({ state: "completed", outcome: "verified-pass" });
+      expect(f.real!.store.read().entries[0]!.request).toEqual(before.entries[0]!.request);
+    } finally { await f.real!.store.close(); }
+  });
+  it("enumerates exact persisted bindings and rejects malformed inventory before any recovery mutation", async () => {
+    const f = await setup(), input = request(); f.state.failRemove = true;
+    await f.backend.run(input); f.state.failRemove = false;
+    const malformed = join(f.directory, `${"0".repeat(64)}.json`);
+    await writeFile(malformed, "{}"); const count = f.run.mock.calls.length;
+    await expect(f.backend.reconcileAll()).rejects.toThrow();
+    expect(f.run.mock.calls).toHaveLength(count);
+    await rm(malformed);
+    expect(await f.backend.reconcileAll()).toEqual([{ request: input, result: expect.objectContaining({ cleanupComplete: true }) }]);
+    expect(f.objects.size).toBe(0);
+  });
+  it("rechecks current lease authority before starting any test and cleans after revocation", async () => {
+    const f = await setup(); f.authorize.mockResolvedValueOnce({ installationId: "installation", familyId: "canonical-family" }).mockRejectedValue(new Error("stale lease"));
+    expect(await f.backend.run(request())).toMatchObject({ outcome: "infrastructure-error", cleanupComplete: true });
+    expect(f.run.mock.calls.some(([args]) => args[2] === "create")).toBe(false);
+  });
+  it.each(["oom", "deadline", "test-failure", "cancel"])("classifies %s and cleans only its resources", async mode => {
+    const f = await setup(), controller = new AbortController();
+    f.objects.set("supabase_db_deuce", { Name: "supabase_db_deuce", Id: "foreign", State: { Running: true } });
+    if (mode === "oom") f.state.oom = true;
+    if (mode === "deadline") f.state.healthy = false;
+    if (mode === "test-failure") f.state.runnerExit = 1;
+    if (mode === "cancel") f.authorize.mockImplementation(async () => { if (f.objects.size > 1) controller.abort(); return { installationId: "installation", familyId: "canonical-family" }; });
+    expect(await f.backend.run(request(), controller.signal)).toMatchObject({ cleanupComplete: true,
+      outcome: mode === "cancel" ? "cancelled" : mode === "test-failure" ? "verified-fail" : "infrastructure-error" });
+    expect([...f.objects.keys()]).toEqual(["supabase_db_deuce"]);
+    expect(f.run.mock.calls.some(([args]) => args.includes("foreign") || args.includes("prune"))).toBe(false);
+  });
+});

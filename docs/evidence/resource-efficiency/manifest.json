@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "sourceSha": "ffc32f03b221a6a08eb8495ba0c654cb08d81e5e",
+  "baseSha": "af8d19ecda9e16ece12c4b713e9867c66984920b",
+  "runtimeSourcesCommitted": true,
+  "evidencePendingCommit": true,
+  "testMode": "offline-synthetic",
+  "node": "24.18.0",
+  "pnpm": "11.5.0",
+  "provider": null,
+  "model": null,
+  "authMode": null,
+  "imageDigest": null,
+  "assertions": {
+    "typecheck": "passed",
+    "focusedTests": 265,
+    "focusedFiles": 8,
+    "liveW0": "unverified",
+    "completeW5": "unmet-linear-prefix-io",
+    "fullPrefixIntegrity": "preserved"
+  },
+  "cleanup": {
+    "fixtureRoots": "removed",
+    "liveResourcesCreated": []
+  },
+  "failures": [],
+  "reports": {
+    "after-fleet.json": "3ab6727cc18f217e2305781926c8b5b5e1255467b23b04a77095a183da04c487",
+    "after-semantic.json": "1810775085419f37af377e63f46a0a4222682c5d30b928c23e133430cb711439",
+    "after.json": "b2670488188948d720e2838ad66cf28b9fcb3ef95fb510b728b77092e508ff95",
+    "baseline-exact.json": "32a848e14d164a12a7fe5406469afe66de7dd8497d6c8a146b58cc4ae68a2349",
+    "before-fleet.json": "addf5ca4d85d579464cf5238aae118440c63a5f6ea00a28ce70fab414ceaa77b",
+    "before-semantic.json": "2aa5f0e0dc1a159dfb438c32404694c7118840a32c5df46dd72de691fefadf3c",
+    "before.json": "cbfdc9ede3b03861e3faa98eb5294890cdec54a8ed1bc6bda801641eaece51ab",
+    "candidate-exact.json": "0c30b8e9a7963b5614944c5be2f35277d33ab3c1c69e3be6af41dbc762e4721b",
+    "final.json": "ac45ed80a2b8aa3d387d6ba0c2e3ab56436e364722d3d051e209749e5d62d0d6"
+  }
+}

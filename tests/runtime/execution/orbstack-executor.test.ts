@@ -33,15 +33,16 @@ describe("OrbStack network profiles", () => {
     const inspection: ContainerInspection = { Id: "c".repeat(64), Name: "fixture", Config: { Labels: {}, User: "1000:1000", Image: image },
       State: { Running: false, ExitCode: 0, OOMKilled: false },
       HostConfig: { Memory: 256 * 1024 ** 2, MemorySwap: 256 * 1024 ** 2, NanoCpus: 1e9, Privileged: false,
-        ReadonlyRootfs: true, PidsLimit: 512, PidMode: "", IpcMode: "private", NetworkMode: "bridge", CapAdd: null, Devices: [],
+        ExtraHosts: ["host.docker.internal:0.250.250.254"], ReadonlyRootfs: true, PidsLimit: 512, PidMode: "", IpcMode: "private", NetworkMode: "bridge", CapAdd: null, Devices: [],
         CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges"], ...altered },
       Mounts: [{ Source: context.workspace.hostPath, Destination: "/workspace", RW: false },
         { Source: context.hostState, Destination: "/home/worker", RW: true }, { Source: context.hostCredentials, Destination: "/run/credentials", RW: false }] };
     const client = new OrbStackClient("unix:///tmp/fixture");
     vi.spyOn(client, "capacity").mockResolvedValue({ cpus: 4, memory: 4 * 1024 ** 3 });
     vi.spyOn(client, "inspect").mockResolvedValue(inspection);
+    vi.spyOn(client, "command").mockImplementation(async args => args[0] === "image" ? "1" : "0.250.250.254");
     const backend = new OrbStackExecutor({ client, profile: { image, cpus: 1, memoryBytes: 256 * 1024 ** 2, slots: 1, network: "egress" },
-      contexts: { prepare: async () => context, get: async () => context }, attach: () => { throw new Error("NO_START"); }, evidenceDirectory: root, onFailure: () => {} });
+      writableProxyPort: 1235, contexts: { prepare: async () => context, get: async () => context }, attach: () => { throw new Error("NO_START"); }, evidenceDirectory: root, onFailure: () => {} });
     await expect(backend.prepare({ identity, record: { id, sandbox: "read-only" } as SessionRecord,
       request: { executor: "orbstack-container", profile: "ordinary" }, launch: { executable: "node", args: [], cwd: "/workspace", env: {} } })).rejects.toThrow("CONTAINER_BOUNDARY_MISMATCH");
     expect(backend.slots.snapshot().running).toEqual([]);

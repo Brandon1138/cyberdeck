@@ -1,0 +1,94 @@
+{
+  "observedAt": "2026-09-16T09:36:30.115Z",
+  "method": "read-only Engine raw memory_stats.usage; nested allocation view",
+  "rows": [
+    {
+      "containerId": "0799171c4028d5f2684164445c2faf62b47e46a37d8acd3d4314a32019c72efc",
+      "observedAt": "2026-09-16T09:36:30.092386924Z",
+      "memoryBytes": 252547072,
+      "memoryLimitBytes": 12599844864,
+      "cpuNanos": 41282458000,
+      "pids": 43
+    },
+    {
+      "containerId": "c31fbbae5f1bcef4d9ca626b63d48c5204cb941f52764d650997190c74894173",
+      "observedAt": "2026-09-16T09:36:30.102765552Z",
+      "memoryBytes": 238657536,
+      "memoryLimitBytes": 12599844864,
+      "cpuNanos": 2329012603000,
+      "pids": 14
+    },
+    {
+      "containerId": "ebbe5f40bba2cb1aa4d0320c8fa312417372ed9f305db409364f225d66c05c3d",
+      "observedAt": "2026-09-16T09:36:30.104253469Z",
+      "memoryBytes": 137977856,
+      "memoryLimitBytes": 12599844864,
+      "cpuNanos": 3482584662000,
+      "pids": 14
+    },
+    {
+      "containerId": "8cb8ba69cd4d431922c8cf309169d8960fbab047a98b075721db52acfdb20251",
+      "observedAt": "2026-09-16T09:36:30.105182095Z",
+      "memoryBytes": 174329856,
+      "memoryLimitBytes": 12599844864,
+      "cpuNanos": 15332603000,
+      "pids": 12
+    },
+    {
+      "containerId": "e6b348dfecddfbfd1c5653ccfe09d1d44f120205d3d02f65483103cb08949248",
+      "observedAt": "2026-09-16T09:36:30.106488179Z",
+      "memoryBytes": 213934080,
+      "memoryLimitBytes": 12599844864,
+      "cpuNanos": 370990595000,
+      "pids": 56
+    },
+    {
+      "containerId": "10aea0745caed89f6e1660ad896b6306dd665a9265b45da7ca18972607a95e1e",
+      "observedAt": "2026-09-16T09:36:30.107441679Z",
+      "memoryBytes": 270651392,
+      "memoryLimitBytes": 12599844864,
+      "cpuNanos": 17673201000,
+      "pids": 48
+    },
+    {
+      "containerId": "f8f979f9cf486782c4a8831d96d398f526c31334906ff48df7c2024de20e8a85",
+      "observedAt": "2026-09-16T09:36:30.108527013Z",
+      "memoryBytes": 33886208,
+      "memoryLimitBytes": 12599844864,
+      "cpuNanos": 695865175000,
+      "pids": 15
+    },
+    {
+      "containerId": "e295bf659d3c8833965c7294cf43bd84f29aa8e0aec5c67199efa25ae896cf9a",
+      "observedAt": "2026-09-16T09:36:30.109383471Z",
+      "memoryBytes": 38936576,
+      "memoryLimitBytes": 12599844864,
+      "cpuNanos": 6642275000,
+      "pids": 15
+    },
+    {
+      "containerId": "ec8740bc703c2278e354b676edab641666eb2654bdff522ad2e7e87e7dffd729",
+      "observedAt": "2026-09-16T09:36:30.110445013Z",
+      "memoryBytes": 121966592,
+      "memoryLimitBytes": 12599844864,
+      "cpuNanos": 2018332122000,
+      "pids": 3
+    },
+    {
+      "containerId": "273ff0e5ea6d500ead4cb44aee8eb601ea8050b9ce8afd6f46164a69d96857f7",
+      "observedAt": "2026-09-16T09:36:30.111278055Z",
+      "memoryBytes": 162455552,
+      "memoryLimitBytes": 12599844864,
+      "cpuNanos": 928649384000,
+      "pids": 14
+    },
+    {
+      "containerId": "a52d7a955143b5e69a6c8b575972457e3a9dfab6ee7e8774ae1127b76ad57d18",
+      "observedAt": "2026-09-16T09:36:30.112213806Z",
+      "memoryBytes": 674615296,
+      "memoryLimitBytes": 12599844864,
+      "cpuNanos": 102531822000,
+      "pids": 61
+    }
+  ]
+}

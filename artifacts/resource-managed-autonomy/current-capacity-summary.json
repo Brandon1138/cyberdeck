@@ -1,0 +1,24 @@
+{
+  "sourceSha": "e87d381e1604fd3291deb1493f0871c6b34a221e",
+  "dirty": false,
+  "node": "v24.18.0",
+  "mode": "read-only-current-capacity",
+  "budgetBytes": 8589934592,
+  "missingPids": [],
+  "inventoryUnchanged": true,
+  "limitations": [
+    "single snapshot; not idle, concurrency or soak acceptance",
+    "external control roots explicitly supplied; no full installation census",
+    "native ancestry polling cannot prove full lifetime ownership",
+    "whole VM upper bound; residual attribution uncalibrated"
+  ],
+  "observedAt": "2026-09-16T12:38:42.476Z",
+  "managedNativePhysicalBytes": 7432675288,
+  "conservativePhysicalUpperBytes": 9193203312,
+  "pressure": "normal",
+  "vmPhysicalBytes": 1760528024,
+  "rawEvidenceSha256": "273a17f5501cb1b62001d66f6ddf4347b7bd26b9c1b9f6ef72656f78e3e51f1e",
+  "rawEvidencePath": "/private/tmp/cyberdeck-resource-capacity-03/capacity.json",
+  "budgetExcessBytes": 603268720,
+  "foreignInventoryNote": "Running foreign container set is now empty; original IDs remain stopped and one DB ID differs from earlier baseline. No stop/restart/prune was performed by this work. Actor/cause of change unverified."
+}

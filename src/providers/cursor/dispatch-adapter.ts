@@ -1,4 +1,5 @@
 import { spawn as spawnChildProcess } from "node:child_process";
+import type { ResourceJobLaunchPort } from "../../orchestration/resource-job-launch.js";
 import { CONTROL_PLANE_SCHEMA_VERSION } from "../../domain/control-plane.js";
 import {
   CancellationResultSchema,
@@ -25,6 +26,7 @@ export const CURSOR_PROVIDER_DESCRIPTOR = {
 } as const satisfies ProviderDescriptor;
 
 export interface CursorProcessHandle {
+  readonly pid?: number | undefined;
   onStdout(listener: (chunk: Buffer) => void): void;
   onStderr(listener: (chunk: Buffer) => void): void;
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
@@ -62,6 +64,7 @@ export const unverifiedCursorResultInterpreter: CursorResultInterpreter = () => 
 });
 
 export interface CursorJobDispatchAdapterOptions {
+  resourceLaunch?: ResourceJobLaunchPort;
   spawn?: CursorSpawn;
   interpreter?: CursorResultInterpreter;
   headless?: CursorHeadlessOptions;
@@ -106,9 +109,12 @@ export class CursorJobDispatchAdapter implements JobDispatchAdapter {
     if (this.seen.has(request.jobId)) {
       throw new Error(`Job ${request.jobId} was already dispatched`);
     }
-    const command = buildCursorHeadlessCommand(request.request, this.options.headless);
-    this.seen.add(request.jobId);
-    const handle = this.spawn(command);
+    const prepare = () => {
+      const command = buildCursorHeadlessCommand(request.request, this.options.headless);
+      this.seen.add(request.jobId); return this.spawn(command);
+    };
+    const handle = this.options.resourceLaunch
+      ? await this.options.resourceLaunch.start(request, prepare) : prepare();
     const entry: RunningJob = {
       handle,
       settled: false,
@@ -184,6 +190,7 @@ export class CursorJobDispatchAdapter implements JobDispatchAdapter {
   }
 
   async cancel(request: CancellationRequest): Promise<CancellationResult> {
+    if (this.options.resourceLaunch?.cancelStart(request.jobId)) return { accepted: true, jobId: request.jobId };
     const entry = this.running.get(request.jobId);
     if (entry === undefined) {
       const code = this.seen.has(request.jobId) ? "JOB_ALREADY_TERMINAL" : "JOB_NOT_FOUND";
@@ -242,6 +249,7 @@ const defaultCursorSpawn: CursorSpawn = (command) => {
     stdio: ["pipe", "pipe", "pipe"],
   });
   return {
+    get pid() { return child.pid; },
     onStdout: (listener) => child.stdout?.on("data", listener),
     onStderr: (listener) => child.stderr?.on("data", listener),
     onExit: (listener) => child.on("exit", listener),

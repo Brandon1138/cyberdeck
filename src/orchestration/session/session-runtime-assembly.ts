@@ -118,20 +118,34 @@ export class SessionRuntimeAssembly {
     spec: ProviderLaunchSpec,
     beforeSpawn?: () => Promise<void>,
     onPhase?: (phase: "prepare" | "spawn") => void,
+    assertLaunch?: () => void | Promise<void>,
+    launchFence?: () => Promise<void>,
+    onWaiting?: (state: "waiting-capacity" | "waiting-authority") => Promise<void>,
   ): Promise<SessionRuntime> {
     try {
-      onPhase?.("prepare");
-      if (record.executor === "orbstack-container" && this.catalog.options.executions === undefined) {
-        throw new Error("EXECUTOR_UNAVAILABLE");
-      }
-      if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
+      // Persist canonical controller/lease authority before resolving resource ownership.
+      // This callback performs no provider preparation or runtime launch.
       await beforeSpawn?.();
-      const replayBytes = this.catalog.replayBytesFor(record);
-      onPhase?.("spawn");
-      if (record.kind !== "orchestrator" && this.catalog.options.executions !== undefined) {
-        return await this.catalog.options.executions.start(record, spec, replayBytes);
-      }
-      return this.catalog.options.sessionRuntimeFactory(spec, replayBytes);
+      await assertLaunch?.();
+      const launch = async (): Promise<SessionRuntime> => {
+        if (!this.catalog.options.resourceExecution) await launchFence?.();
+        await assertLaunch?.();
+        onPhase?.("prepare");
+        if (record.executor === "orbstack-container" && this.catalog.options.executions === undefined) {
+          throw new Error("EXECUTOR_UNAVAILABLE");
+        }
+        if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
+        await assertLaunch?.();
+        const replayBytes = this.catalog.replayBytesFor(record);
+        onPhase?.("spawn");
+        if (record.kind !== "orchestrator" && this.catalog.options.executions !== undefined) {
+          return await this.catalog.options.executions.start(record, spec, replayBytes);
+        }
+        return this.catalog.options.sessionRuntimeFactory(spec, replayBytes);
+      };
+      return this.catalog.options.resourceExecution
+        ? await this.catalog.options.resourceExecution.start(record, launch, launchFence, onWaiting)
+        : await launch();
     } catch (error) {
       await this.cleanupLaunchArtifacts(record, "launch-failed");
       throw error;
@@ -249,9 +263,10 @@ export class SessionRuntimeAssembly {
     record: SessionRecord,
     spec: ProviderLaunchSpec,
     previousRuntime: SessionRuntime | undefined,
+    assertLaunch?: () => void | Promise<void>,
   ): Promise<SessionRuntime> {
     try {
-      return await this.spawnPreparedLaunch(adapter, record, spec);
+      return await this.spawnPreparedLaunch(adapter, record, spec, undefined, undefined, assertLaunch);
     } catch (error) {
       if (runtime.sessionRuntime === undefined && previousRuntime !== undefined) {
         runtime.sessionRuntime = previousRuntime;

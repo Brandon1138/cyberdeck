@@ -32,12 +32,19 @@ export function requireTerminalFinalizationComplete(runtime: RuntimeSession): vo
 }
 
 export function requireInteractiveInput(runtime: RuntimeSession): void {
+  requireParkingAvailable(runtime);
   if (runtime.record.scout?.transport === "headless-stream-json") {
     throw new RegistryError(
       "SESSION_BUSY",
       "A headless Scout is one-shot and accepts no follow-up input; launch a new Scout probe",
     );
   }
+}
+
+export function requireParkingAvailable(runtime: RuntimeSession): void {
+  if (!runtime.parkingClaim && !runtime.parkingStopped) return;
+  runtime.parkingInput?.();
+  throw new RegistryError("SESSION_BUSY", "Session runtime is parked or changing state; wake is required");
 }
 
 export function updateAttachmentState(runtime: RuntimeSession): void {

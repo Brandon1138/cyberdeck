@@ -38,7 +38,7 @@ export class ContainerProviderAdapter implements ProviderAdapter {
       if (spec.args[spec.args.indexOf("--permission-mode") + 1] === "auto") {
         // The writable container enforces filesystem/network scope. Approve only routine tools;
         // unknown tools, login and trust prompts retain their existing operator boundary.
-        spec.args.unshift("--allowedTools", "Bash,Read,Edit,Write,Glob,Grep,mcp__cyberdeck__cyberdeck_report_progress,mcp__cyberdeck__cyberdeck_signal_exception,mcp__cyberdeck__cyberdeck_signal_risk,mcp__cyberdeck__cyberdeck_request_decision,mcp__cyberdeck__cyberdeck_respond_checkpoint");
+        spec.args.unshift("--allowedTools", "Bash,Read,Edit,Write,Glob,Grep,mcp__cyberdeck__cyberdeck_report_progress,mcp__cyberdeck__cyberdeck_signal_exception,mcp__cyberdeck__cyberdeck_signal_risk,mcp__cyberdeck__cyberdeck_request_decision,mcp__cyberdeck__cyberdeck_respond_checkpoint,mcp__cyberdeck__cyberdeck_run_profile");
       }
       // Baked guest helper writes only provider-owned state. Host attribution validates the file.
       const end = spec.args.indexOf("--");

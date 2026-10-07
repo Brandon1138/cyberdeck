@@ -1,3 +1,5 @@
+import type { SessionLaunchIntent } from "../../domain/session-launch-intent.js";
+import { SessionPendingLaunchCoordinator } from "./session-pending-launch-coordinator.js";
 import { resolveWorkerExecution } from "../../domain/worker-execution.js";
 import { randomUUID } from "node:crypto";
 import { evaluateStart } from "../../domain/policy.js";
@@ -53,6 +55,7 @@ export class SessionLaunchCoordinator {
   private readonly observer: SessionRuntimeObserver;
   /** Starts admitted by policy but not yet represented in the catalog. */
   private pendingWorkerStarts = 0;
+  private readonly pendingLaunch: SessionPendingLaunchCoordinator;
 
   constructor(options: SessionLaunchCoordinatorOptions) {
     this.catalog = options.catalog;
@@ -60,6 +63,10 @@ export class SessionLaunchCoordinator {
     this.scoutSupervision = options.scoutSupervision;
     this.assembly = options.assembly;
     this.observer = options.observer;
+    this.pendingLaunch = new SessionPendingLaunchCoordinator({ catalog: this.catalog, assembly: this.assembly,
+      requireActiveParent: id => this.requireActiveParent(id),
+      launch: (record, input, fence, assert, waiting) => this.performLaunch(record, input, undefined,
+        undefined, undefined, fence, assert, waiting) });
   }
 
   /**
@@ -167,6 +174,42 @@ export class SessionLaunchCoordinator {
           }
         : {}),
     };
+    if (this.catalog.options.launchIntents && this.catalog.options.resourceExecution) {
+      const requestId = randomUUID();
+      provisional.pendingLaunch = { requestId, state: "preparing" };
+      const intent: SessionLaunchIntent = { record: cloneRecord(provisional), requestId,
+        ...(initialPrompt === undefined ? {} : { initialPrompt }), phase: "preparing" };
+      try {
+        await this.catalog.options.launchIntents.put(intent);
+        await activate?.(cloneRecord(provisional));
+        provisional.pendingLaunch.state = "waiting-capacity";
+        await this.catalog.options.launchIntents.put({ ...intent, record: cloneRecord(provisional), phase: "ready" });
+        await this.pendingLaunch.publish(provisional, releaseReservation);
+        this.pendingLaunch.arm({ ...intent, record: provisional, phase: "ready" });
+        return cloneRecord(provisional);
+      } catch (error) {
+        releaseReservation();
+        // An activation/persistence ambiguity is never replayed; preserve its worktree as evidence.
+        const current = this.catalog.options.launchIntents.get(id);
+        if (current && current.phase !== "terminal")
+          await this.pendingLaunch.finish(current, "interrupted").catch(() => undefined);
+        throw error;
+      }
+    }
+    return this.performLaunch(provisional, initialPrompt, activate, provisioned, releaseReservation);
+  }
+
+  private async performLaunch(
+    provisional: SessionRecord,
+    initialPrompt?: string,
+    activate?: (record: SessionRecord) => Promise<void>,
+    provisioned?: ProvisionedWorktree,
+    releaseReservation: () => void = () => {},
+    fence?: () => Promise<void>,
+    assertPending?: () => void,
+    onWaiting?: (state: "waiting-capacity" | "waiting-authority") => Promise<void>,
+  ): Promise<SessionRecord> {
+    const parsed = provisional, id = provisional.id;
     let adapter: ProviderAdapter;
     let preparedInitialPrompt: string | undefined;
     let deferredInitialPrompt: boolean;
@@ -211,7 +254,7 @@ export class SessionLaunchCoordinator {
         launchSpec,
         async () => {
           this.requireActiveParent(parsed.parentSessionId);
-          if (initialPrompt !== undefined && !deferredInitialPrompt) {
+          if (!fence && initialPrompt !== undefined && !deferredInitialPrompt) {
             await this.catalog.options.transcripts?.append({
               sessionId: id,
               kind: "prompt",
@@ -223,7 +266,21 @@ export class SessionLaunchCoordinator {
           this.requireActiveParent(parsed.parentSessionId);
         },
         (phase) => { scoutLaunchPhase = phase; },
+        async () => {
+          assertPending?.(); this.requireActiveParent(parsed.parentSessionId);
+          if (provisional.pendingLaunch) await this.catalog.options.resourceExecution?.assertAuthority?.(provisional);
+          assertPending?.(); this.requireActiveParent(parsed.parentSessionId);
+        },
+        fence ? async () => {
+          await fence();
+          if (initialPrompt !== undefined && !deferredInitialPrompt) {
+            await this.catalog.options.transcripts?.append({ sessionId: id, kind: "prompt", source: "human",
+              text: initialPrompt, data: { initial: true } });
+          }
+        } : undefined,
+        onWaiting,
       );
+      try { assertPending?.(); } catch (error) { sessionRuntime.kill(); throw error; }
     } catch (error) {
       releaseReservation();
       // The worktree was made for a worker that never started, so it holds nothing and belongs to
@@ -247,6 +304,7 @@ export class SessionLaunchCoordinator {
       updatedAt: new Date().toISOString(),
       launchRecord: resolvedLaunchRecord(launchSpec, "launch"),
     };
+    delete record.pendingLaunch;
     const runtime = this.assembly.createRuntimeSession(record, {
       sessionRuntime,
       watchers: new Map(),
@@ -273,7 +331,9 @@ export class SessionLaunchCoordinator {
         write: (data) => sessionRuntime.write(data),
         wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
       };
+      assertPending?.();
       await adapter.initializeSession?.(record, sessionTerminal);
+      assertPending?.();
       if (
         runtime.record.profile !== "scout"
         && runtime.record.executionState !== "active"
@@ -334,6 +394,9 @@ export class SessionLaunchCoordinator {
 
     return cloneRecord(runtime.record);
   }
+
+  recover(): Promise<void> { return this.pendingLaunch.recover(); }
+  cancel(sessionId: string): Promise<boolean> { return this.pendingLaunch.cancel(sessionId); }
 
   requireActiveParent(parentSessionId: string | undefined): void {
     if (parentSessionId === undefined) return;

@@ -6,6 +6,9 @@ import { openPrivateAppendFile } from "./private-files.js";
 /** Append-only instruction snapshots. Latest record per id is the current mailbox state. */
 export class InstructionStore {
   readonly path: string;
+  private revision = 0;
+  /** Process-local invalidation only; durable journal remains the recovery source. */
+  version(): number { return this.revision; }
 
   constructor(stateDirectory: string) {
     this.path = join(stateDirectory, "orchestration", "instructions.jsonl");
@@ -17,6 +20,7 @@ export class InstructionStore {
     try {
       await handle.write(`${JSON.stringify(parsed)}\n`, undefined, "utf8");
       await handle.sync();
+      this.revision++;
     } finally {
       await handle.close();
     }

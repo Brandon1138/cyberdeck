@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-16T09:28:59.038644+00:00",
+  "mode": "read-only-host-collector-comparison",
+  "os": "27.0",
+  "architecture": "arm64",
+  "helperSha256": "4885e1311c0699356929fbe5f315293b779e11e2e64869e84ac4309ad39ab7a7",
+  "warmupPairs": 3,
+  "measuredPairs": 20,
+  "results": {
+    "native": {
+      "wallMs": {
+        "min": 11.599875000000036,
+        "median": 22.253270500000035,
+        "p95": 74.77966700000005,
+        "max": 86.80904099999998
+      },
+      "childCpuMs": {
+        "min": 7.948999999999998,
+        "median": 10.040499999999998,
+        "p95": 12.241999999999976,
+        "max": 12.664000000000092
+      },
+      "outputBytes": {
+        "min": 46285,
+        "median": 47244.5,
+        "p95": 47440,
+        "max": 47447
+      },
+      "processRows": {
+        "min": 592,
+        "median": 604.0,
+        "p95": 607,
+        "max": 607
+      },
+      "inaccessibleProcesses": {
+        "min": 303,
+        "median": 303.0,
+        "p95": 304,
+        "max": 305
+      },
+      "collectorRssBytes": {
+        "min": 1785856,
+        "median": 1785856.0,
+        "p95": 1802240,
+        "max": 1802240
+      },
+      "collectorPhysicalBytes": {
+        "min": 1327488,
+        "median": 1327488.0,
+        "p95": 1343872,
+        "max": 1343872
+      }
+    },
+    "ps": {
+      "wallMs": {
+        "min": 42.46875000000003,
+        "median": 90.91729199999988,
+        "p95": 162.31787499999984,
+        "max": 167.9029999999999
+      },
+      "childCpuMs": {
+        "min": 36.708000000000006,
+        "median": 42.889500000000005,
+        "p95": 47.74000000000003,
+        "max": 48.20700000000003
+      },
+      "outputBytes": {
+        "min": 48331,
+        "median": 48979.0,
+        "p95": 49033,
+        "max": 49141
+      },
+      "processRows": {
+        "min": 895,
+        "median": 907.0,
+        "p95": 908,
+        "max": 910
+      },
+      "collectorRssBytes": {
+        "min": 1769472,
+        "median": 1785856.0,
+        "p95": 1802240,
+        "max": 1818624
+      }
+    }
+  },
+  "limitations": [
+    "short-burst-comparison-not-idle-acceptance",
+    "host-load-not-controlled",
+    "child-cpu-excludes-python-driver",
+    "ps-memory-is-rss",
+    "native-output-is-physical-and-rss",
+    "no-vm-attribution",
+    "no-provider-or-container-launch"
+  ],
+  "sourceCommit": "fe9dea3275d966a714aacea8805db9df5c74d278",
+  "sourceDirty": true,
+  "helperSourceSha256": "e53ce4d1736231022fd3d35f9e89b2d8a4d811897e4fff02377d19a18bce01bc",
+  "benchmarkSourceSha256": "5c345b7bbaa67c2cdf6d565a996f2682dd891091c3211103ffc8bcf8771b7e89"
+}

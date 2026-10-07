@@ -49,3 +49,17 @@ it("drops permanent refusals and continues with the next envelope", async () => 
     expect(send).toHaveBeenCalledTimes(2);
   } finally { queue.close(); }
 });
+
+it("flush callers await an already active bounded send", async () => {
+  let finish!: (value: { status: number }) => void;
+  const queue = new BoundedExportQueue(() => new Promise(resolve => { finish = resolve; }));
+  try {
+    queue.enqueue("one");
+    let flushed = false;
+    const pending = queue.pump().then(() => { flushed = true; });
+    await Promise.resolve(); expect(flushed).toBe(false);
+    finish({ status: 200 }); await pending;
+    expect(queue.transportHealth().accepted).toBe(1);
+    expect(queue.health().queued).toBe(0);
+  } finally { queue.close(); }
+});

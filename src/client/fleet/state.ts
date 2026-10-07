@@ -310,7 +310,7 @@ export interface FleetTransition {
 
 export type StartFleetAction = Extract<FleetAction, { type: "start"; }>;
 
-export type ThreadStatus = "Working" | "Needs input" | "Done" | "Stopping" | "Stopped" | "Interrupted" | "Failed";
+export type ThreadStatus = "Queued" | "Awaiting authority" | "Starting" | "Working" | "Needs input" | "Done" | "Stopping" | "Stopped" | "Interrupted" | "Failed";
 
 export interface FleetRenderOptions {
   /** A full-resolution image placement, available only when the terminal supports native graphics. */

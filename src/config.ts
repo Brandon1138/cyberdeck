@@ -8,6 +8,8 @@ import {
   DEFAULT_WORKER_STALL_SECONDS,
 } from "./limits.js";
 import { ThreadRetentionPolicySchema } from "./domain/thread-retention.js";
+import { ResourceDemandSchema, ResourcePolicySchema } from "./domain/resource-budget.js";
+import { NativeToolRecipeSchema } from "./domain/auxiliary-profile.js";
 
 /**
  * Broker-wide runtime configuration.
@@ -21,10 +23,30 @@ export const BrokerRuntimeConfigSchema = z.object({
   /** Active workers only; orchestrators are excluded. `null` explicitly disables the ceiling. */
   maxConcurrentWorkers: z.number().int().positive().nullable().default(DEFAULT_MAX_CONCURRENT_WORKERS),
   workerExecution: WorkerExecutionPolicySchema.optional(),
+  resourceManagement: z.object({
+    installationId: z.uuid(), directory: z.string().startsWith("/"), nativeHelper: z.string().startsWith("/"),
+    ownerLockHelper: z.string().startsWith("/"), policy: ResourcePolicySchema,
+    parking: z.object({ idleGraceMs: z.number().int().min(1000).max(86400000).default(60000),
+      maxWakeAttempts: z.number().int().min(1).max(3).default(1) }).strict().prefault({}),
+    evaluation: z.object({ image: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+      memoryBytes: z.number().int().min(512 * 1024 ** 2).max(8 * 1024 ** 3).default(768 * 1024 ** 2),
+      retentionBytes: z.number().int().min(4 * 1024 ** 2).max(128 * 1024 ** 2).default(32 * 1024 ** 2) }).strict().optional(),
+    auxiliaryProfiles: z.object({ integrationImage: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(),
+      nativeRecipes: z.array(NativeToolRecipeSchema).max(16).default([]) }).strict().optional(),
+    vmIdentity: z.object({ pid: z.number().int().positive(), startTime: z.string().regex(/^libproc:\d+\.\d{6}$/) }).strict(),
+    externalRoots: z.array(z.object({ pid: z.number().int().positive(), startTime: z.string().regex(/^libproc:\d+\.\d{6}$/),
+      workloadId: z.string().min(1).max(128) }).strict()).max(128).default([]),
+    profiles: z.record(z.string().regex(/^(codex|claude|cursor|antigravity):(worker|orchestrator)$/), z.object({
+      demand: ResourceDemandSchema,
+      containerMemoryBytes: z.number().int().min(64 * 1024 ** 2).optional(),
+      containerCpuCores: z.number().positive().max(16).optional(),
+    }).strict().refine(p => p.containerMemoryBytes === undefined || p.containerMemoryBytes + 128 * 1024 ** 2 <= p.demand.memoryBytes,
+      "Container envelope must include transient network helper memory")),
+  }).strict().optional(),
   containerRuntime: z.object({
     endpoint: z.string().startsWith("unix:///"), image: z.string().regex(/^sha256:[a-f0-9]{64}$/),
     cpus: z.number().positive().default(2), memoryBytes: z.number().int().positive().default(4 * 1024 ** 3),
-    slots: z.number().int().min(1).max(4).default(2), network: z.enum(["egress", "none"]).default("egress"),
+    slots: z.number().int().min(1).max(64).default(2), network: z.enum(["egress", "none"]).default("egress"),
     attemptTimeoutMinutes: z.number().int().min(1).max(1440).default(60),
     codexWorkspaceIsolation: z.enum(["native", "container"]).default("native"),
     credentialFiles: z.record(z.string(), z.string().startsWith("/")).default({}),

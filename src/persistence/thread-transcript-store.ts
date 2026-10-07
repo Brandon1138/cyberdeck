@@ -458,6 +458,11 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     return `${sessionId}:${semanticTurnId}`;
   }
 
+  /** The same durable, bounded dedupe index used by commit; subclasses must initialize first. */
+  protected hasSemanticTurn(sessionId: string, semanticTurnId: string): boolean {
+    return this.semanticTurnIds.has(this.semanticKey(sessionId, semanticTurnId));
+  }
+
   /** Reconstruct the exact bounded semantic payload acknowledged by an append or dedupe hit. */
   private providerTurnReceipt(
     observation: WorkerTurnObservation,

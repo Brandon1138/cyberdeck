@@ -15,7 +15,7 @@ import { clampRowWidth, printedWidth } from "./render-composer.js";
 import { normalizeThreadListViewport, renderFleet, threadListViewportHeight } from "./render-frame.js";
 import { layoutOrchestratorSessionIds } from "./render-rows.js";
 import { executeFleetAction } from "./runtime-actions.js";
-import { fleetFrameLayout, readWorkerModels, type FleetFrameLayout, type RetainedFleetFrame } from "./runtime-frame.js";
+import { FleetFrameCache, readWorkerModels, type FleetFrameLayout, type RetainedFleetFrame } from "./runtime-frame.js";
 import { FleetRuntimeOptions, OrchestratorCockpitTarget, ResolvedFleetRenderOptions } from "./runtime-options.js";
 import { paint, renderNotice } from "./slash-commands.js";
 import { FleetInput, FleetOutput, FleetSignals, FolderDisposition, InteractiveFleetTransport, LaunchProfile } from "./state.js";
@@ -109,6 +109,7 @@ export async function runFleet(
     ? undefined : new MascotActivityPulse(snapshot.threads);
   let mascotFrameTimer: ReturnType<typeof setTimeout> | undefined;
   let paintedFrame: RetainedFleetFrame | undefined;
+  const frameCache = new FleetFrameCache();
   const enterFleetScreen = () => {
     output.write(ENTER_FLEET_SCREEN);
     nativeMascot?.enter();
@@ -430,11 +431,11 @@ export async function runFleet(
           mascot: nativeMascot?.placement,
         };
         state = normalizeThreadListViewport(snapshot, state, renderOptions);
-        const rendered = renderFleet(snapshot, state, renderOptions);
+        const { body: rendered, layout } = frameCache.render(snapshot, state, renderOptions);
         writeFrame(
           rendered,
           composerCursor(rendered, state, width),
-          fleetFrameLayout(snapshot, state, renderOptions),
+          layout,
         );
       }
       if (pulse?.nextFrameIn !== undefined) {

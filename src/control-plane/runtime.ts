@@ -101,6 +101,7 @@ export class ControlPlaneRuntime {
       scheduler: this.scheduler,
       budgets: this.budgets,
       maxDelegationDepth: options.config.maxDelegationDepth,
+      deferDispatchAcknowledgment: options.config.resourceManagement !== undefined,
       ...(options.journal !== undefined ? { journal: options.journal } : {}),
       ...(options.now !== undefined ? { now: options.now } : {}),
       ...(options.idFactory !== undefined ? { idFactory: options.idFactory } : {}),

@@ -16,6 +16,7 @@ export function cloneRecord(record: SessionRecord): SessionRecord {
   return {
     ...record,
     childIds: [...record.childIds],
+    ...(record.pendingLaunch ? { pendingLaunch: { ...record.pendingLaunch } } : {}),
     ...(record.brief === undefined
       ? {}
       : {

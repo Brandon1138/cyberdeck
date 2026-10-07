@@ -1,0 +1,4 @@
+# Exact false positive: SHA-256 of the local redacted scan report, verified against
+# /private/tmp/cyberdeck-resource-candidate-e6cc020/secret-scan.json. No credential.
+# Keep this exception tied to its original commit, file, rule and line.
+05eeb4c385458ddd49002230121fa58c5b95b596:artifacts/resource-managed-autonomy/candidate-e6cc020-checks.json:generic-api-key:88

@@ -1,4 +1,5 @@
 import { spawn as spawnChildProcess } from "node:child_process";
+import type { ResourceJobLaunchPort } from "../../orchestration/resource-job-launch.js";
 import { CONTROL_PLANE_SCHEMA_VERSION } from "../../domain/control-plane.js";
 import {
   CancellationResultSchema,
@@ -24,6 +25,7 @@ export const ANTIGRAVITY_PROVIDER_DESCRIPTOR = {
 } as const satisfies ProviderDescriptor;
 
 export interface AntigravityProcessHandle {
+  readonly pid?: number | undefined;
   onStdout(listener: (chunk: Buffer) => void): void;
   onStderr(listener: (chunk: Buffer) => void): void;
   onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
@@ -58,6 +60,7 @@ export const unverifiedAntigravityResultInterpreter: AntigravityResultInterprete
 });
 
 export interface AntigravityJobDispatchAdapterOptions {
+  resourceLaunch?: ResourceJobLaunchPort;
   spawn?: AntigravitySpawn;
   interpreter?: AntigravityResultInterpreter;
   timeoutMs?: number;
@@ -102,15 +105,13 @@ export class AntigravityJobDispatchAdapter implements JobDispatchAdapter {
       throw new Error(`Job ${request.jobId} was already dispatched`);
     }
 
-    // Unsupported sandboxes and unsafe explicit models fail before process construction.
-    const command = buildAntigravityHeadlessCommand(
-      request.request,
-      this.options.sourceEnvironment === undefined
-        ? {}
-        : { sourceEnvironment: this.options.sourceEnvironment },
-    );
-    this.seen.add(request.jobId);
-    const handle = this.spawn(command);
+    const prepare = () => {
+      const command = buildAntigravityHeadlessCommand(request.request,
+        this.options.sourceEnvironment === undefined ? {} : { sourceEnvironment: this.options.sourceEnvironment });
+      this.seen.add(request.jobId); return this.spawn(command);
+    };
+    const handle = this.options.resourceLaunch
+      ? await this.options.resourceLaunch.start(request, prepare) : prepare();
     const entry: RunningJob = {
       handle,
       stdout: new AntigravityTextCollector(this.options.maxOutputBytes),
@@ -161,6 +162,7 @@ export class AntigravityJobDispatchAdapter implements JobDispatchAdapter {
   }
 
   async cancel(request: CancellationRequest): Promise<CancellationResult> {
+    if (this.options.resourceLaunch?.cancelStart(request.jobId)) return { accepted: true, jobId: request.jobId };
     const entry = this.running.get(request.jobId);
     if (entry === undefined) {
       const code = this.seen.has(request.jobId) ? "JOB_ALREADY_TERMINAL" : "JOB_NOT_FOUND";
@@ -313,6 +315,7 @@ const defaultAntigravitySpawn: AntigravitySpawn = (command) => {
     stdio: ["pipe", "pipe", "pipe"],
   });
   return {
+    get pid() { return child.pid; },
     onStdout: (listener) => child.stdout?.on("data", listener),
     onStderr: (listener) => child.stderr?.on("data", listener),
     // `close` waits for stdio EOF, retaining all bounded output before interpretation.

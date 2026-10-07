@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { InstructionLifecycleStateSchema } from "./worker-truth.js";
+import { AgentActivitySchema } from "./agent-activity.js";
 
 /**
  * The instruction's own state, drawn from the single worker state machine.
@@ -44,6 +45,11 @@ export const InstructionRecordSchema = z.preprocess(
      * A `completionTarget` below it names a turn that finished before the instruction existed.
      */
     expectedTurn: z.number().int().positive().optional(),
+    /** Historical dispatch identity; never reconstructed from a newer live session. */
+    attemptGeneration: z.number().int().positive().optional(),
+    attemptExecutionId: z.uuid().optional(),
+    /** Recoverable activity outbox, committed in the same fsynced terminal snapshot. */
+    terminalActivity: AgentActivitySchema.omit({ sequence: true }).optional(),
     /** Why the instruction is being held rather than written. */
     holdReason: z.string().optional(),
     workflowRunId: z.uuid().optional(),

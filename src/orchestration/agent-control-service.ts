@@ -133,6 +133,7 @@ export interface ThreadStatusRecord {
   provider: string;
   executionState: SessionRecord["executionState"];
   attentionState?: SessionRecord["attentionState"];
+  pendingLaunch?: SessionRecord["pendingLaunch"];
   /**
    * The broker projection of what this worker is doing, identical to the one `workers_wait` settles
    * from. `executionState` and `attentionState` are inputs to it, and reading them separately is how
@@ -175,6 +176,7 @@ export interface OrchestratorInspection {
     provider: string;
     executionState: SessionRecord["executionState"];
     attentionState?: SessionRecord["attentionState"];
+  pendingLaunch?: SessionRecord["pendingLaunch"];
     attachmentState: SessionRecord["attachmentState"];
     cwd: string;
     processOwnedByBroker: boolean;
@@ -239,6 +241,7 @@ interface PendingWait {
 const WAIT_TICKET_GRACE_MS = 60_000;
 
 export interface WorkerStartResult {
+  pendingLaunch?: SessionRecord["pendingLaunch"];
   sessionId: string;
   /**
    * Capabilities the request asked for that this provider cannot deliver. Present means the worker
@@ -817,6 +820,7 @@ export class AgentControlService {
     const warnings = plan.value.shortfalls.map((shortfall) => shortfall.message);
     return {
       sessionId: worker.id,
+      ...(worker.pendingLaunch ? { pendingLaunch: worker.pendingLaunch } : {}),
       name,
       provider: worker.provider,
       ...(worker.model === undefined ? {} : { model: worker.model }),
@@ -872,6 +876,7 @@ export class AgentControlService {
     }, scoutDispatchPrompt(request.brief));
     return {
       sessionId: worker.id,
+      ...(worker.pendingLaunch ? { pendingLaunch: worker.pendingLaunch } : {}),
       name,
       provider: worker.provider,
       ...(worker.model === undefined ? {} : { model: worker.model }),
@@ -1283,6 +1288,7 @@ function statusRecord(record: SessionRecord, truth: WorkerTruth | undefined): Th
     provider: record.provider,
     executionState: record.executionState,
     ...(record.attentionState === undefined ? {} : { attentionState: record.attentionState }),
+    ...(record.pendingLaunch ? { pendingLaunch: record.pendingLaunch } : {}),
     ...(truth === undefined ? {} : { truth }),
     ...(record.termination === undefined ? {} : { termination: record.termination }),
   };

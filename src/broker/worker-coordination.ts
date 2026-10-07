@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { hashToken, isControlled, workerLeaseAuthCode } from "../domain/worker-lease-auth.js";
 import { z } from "zod";
 import {
   CheckpointRequestSchema,
@@ -1988,6 +1989,16 @@ export class WorkerCoordinationService {
       && Date.parse(now) >= Date.parse(observed.observedAt) + this.gracePeriodMs;
   }
 
+  /** Internal narrow capabilities reuse the same fencing predicate as worker control/events.
+   * This read grants no lease, renews nothing, and never reconstructs a controller identity. */
+  authenticateCurrentLease(input: { workerId: string; controller: ControllerIdentity; leaseToken: string; leaseVersion: number }): ControllerIdentity {
+    this.assertReady();
+    const subject = this.requireSubject(input.workerId);
+    const failure = this.authCode(subject, input.controller, input.leaseToken, input.leaseVersion, this.now());
+    if (failure) throw new WorkerCoordinationError(failure, "Auxiliary capability lease is no longer current");
+    return structuredClone(subject.lease.controller!);
+  }
+
   private authCode(
     subject: OwnershipSubject,
     controller: ControllerIdentity,
@@ -1995,18 +2006,7 @@ export class WorkerCoordinationService {
     leaseVersion: number | undefined,
     now: string,
   ): "OWNERSHIP_LOST" | "LEASE_TOKEN_INVALID" | "LEASE_EXPIRED" | undefined {
-    if (this.isExpired(subject, now) || subject.lease.state === "orphaned") return "LEASE_EXPIRED";
-    if (
-      !isControlled(subject)
-      || subject.lease.controller?.controllerId !== controller.controllerId
-      || (leaseVersion !== undefined && subject.lease.version !== leaseVersion)
-    ) {
-      return "OWNERSHIP_LOST";
-    }
-    if (subject.lease.tokenHash === undefined || subject.lease.tokenHash !== hashToken(token)) {
-      return "LEASE_TOKEN_INVALID";
-    }
-    return undefined;
+    return workerLeaseAuthCode(subject, controller, token, leaseVersion, this.isExpired(subject, now));
   }
 
   private tokenFor(input: AuthenticatedLeaseInput, subjectId: string): string {
@@ -2661,10 +2661,6 @@ function enforcementReachedAt(enforcement: WorkerBudgetEnforcement): string {
   throw new Error(`Budget enforcement state ${enforcement.state} has no threshold timestamp`);
 }
 
-function hashToken(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
-}
-
 function hashEvent(event: WorkerEvent): string {
   return createHash("sha256").update(JSON.stringify(event)).digest("hex");
 }
@@ -2749,11 +2745,6 @@ function canonicalJson(value: unknown): string {
 
 function checkpointKey(workerId: string, correlationId: string): string {
   return `${workerId}\0${correlationId}`;
-}
-
-function isControlled(subject: OwnershipSubject): boolean {
-  return (subject.lease.state === "active" || subject.lease.state === "contested")
-    && subject.lease.controller !== undefined;
 }
 
 function isPinned(event: StoredWorkerEvent): boolean {

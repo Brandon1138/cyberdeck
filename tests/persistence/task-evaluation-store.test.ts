@@ -1,0 +1,50 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { afterEach, expect, test } from "vitest";
+import { TaskEvaluationStore, evidenceHash, type EvaluationEvidenceManifest } from "../../src/persistence/task-evaluation-store.js";
+const directories: string[] = [];
+afterEach(() => { for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+export const manifest: EvaluationEvidenceManifest = { schemaVersion: 1, terminalEvent: { outcome: "succeeded" }, checks: [], complete: false, metadata: { modelSource: "unknown" } };
+const intent = () => ({ attemptId: randomUUID(), sessionId: randomUUID(), generation: 1, attribution: "initial-prompt" as const, rubricId: "task", rubricVersion: "1", evidenceManifestHash: evidenceHash(manifest) });
+const path = (): string => { const dir = mkdtempSync(join(tmpdir(), "task-eval-")); directories.push(dir); return join(dir, "store.sqlite"); };
+test("claim expiry fences stale evaluator; result survives crash before ack", () => {
+  const file = path(); let store = new TaskEvaluationStore(file);
+  const input = intent(), key = store.enqueue(input, manifest);
+  expect(store.enqueue(input, manifest)).toBe(key);
+  const old = store.claim(0, 10)!; store.close(); store = new TaskEvaluationStore(file);
+  expect(store.claim(9, 10)).toBeUndefined();
+  const fresh = store.claim(10, 10)!;
+  expect(() => store.finish(old, { disposition: "verified-pass", reason: "forged" }, 11)).toThrow("STALE");
+  store.finish(fresh, { disposition: "unverified", reason: "missing" }, 11); store.close();
+  store = new TaskEvaluationStore(file);
+  expect(store.claim(30, 10)).toBeUndefined();
+  expect(store.result(key)?.disposition).toBe("unverified");
+  expect(store.unacknowledged()).toEqual([{ key, result: { disposition: "unverified", reason: "missing" } }]);
+  expect(store.health().pinned).toBe(1);
+  store.acknowledge(key); store.acknowledge(key);
+  expect(store.health().pinned).toBe(0);
+  store.enqueue({ ...input, rubricVersion: "2" }, manifest);
+  expect(store.health().pending).toBe(1); store.close();
+});
+test("concurrent database connections serialize claims", () => {
+  const file = path(), a = new TaskEvaluationStore(file), b = new TaskEvaluationStore(file);
+  a.enqueue(intent(), manifest); expect(a.claim(0, 100)).toBeDefined(); expect(b.claim(0, 100)).toBeUndefined(); a.close(); b.close();
+});
+test("disk cap refuses rather than deleting pending evidence", () => {
+  const store = new TaskEvaluationStore(path(), 65536);
+  let accepted = 0;
+  expect(() => { for (let i = 0; i < 1000; i++) { store.enqueue(intent(), manifest); accepted++; } }).toThrow();
+  expect(accepted).toBeGreaterThan(0); expect(store.health().pending).toBe(accepted); expect(store.health().bytes).toBeLessThanOrEqual(32768); store.close();
+});
+test("replay checkpoints survive restart and fence stale cursors or source replacement", () => {
+  const file = path(), source = randomUUID(); let store = new TaskEvaluationStore(file);
+  store.advanceCheckpoint("production-v1", source, 0, 0); store.advanceCheckpoint("production-v1", source, 0, 7); store.close();
+  store = new TaskEvaluationStore(file);
+  expect(store.checkpoint("production-v1")).toEqual({ sourceId: source, sequence: 7 });
+  expect(() => store.advanceCheckpoint("production-v1", source, 0, 8)).toThrow("CONFLICT");
+  expect(() => store.advanceCheckpoint("production-v1", randomUUID(), 7, 8)).toThrow("CONFLICT");
+  expect(() => store.advanceCheckpoint("production-v1", source, 7, 6)).toThrow("INVALID");
+  expect(store.checkpoint("production-v1")?.sequence).toBe(7); store.close();
+});

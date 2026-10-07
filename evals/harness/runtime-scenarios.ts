@@ -57,10 +57,16 @@ export async function backendScenario(root: string, scenario: "oom" | "cross-wor
   if (mode !== "offline-scripted") return scenario === "oom" ? containerOom(root, mode, live) : containerCrossWorker(root, mode, live);
   const broker = await brokerFixture(root), commands: string[][] = [], inspections = new Map<string, ContainerInspection>();
   const endpoint = "unix:///scripted/orbstack.sock", image = `sha256:${"a".repeat(64)}`;
+  // Inert fixture endpoints: every engine call is injected and container start is forbidden.
+  // Read-only guests require the same narrow network preparation as writable guests.
+  const proxyPort = 1235, hostAddress = "192.0.2.1";
   const client = new OrbStackClient(endpoint, async (args) => {
     const command = args.slice(2); commands.push(command);
     if (command[0] === "context") return JSON.stringify([{ Name: "orbstack", Endpoints: { docker: { Host: endpoint } } }]);
     if (command[0] === "info") return JSON.stringify({ NCPU: 4, MemTotal: 4 * 1024 ** 3, MemoryLimit: true });
+    if (JSON.stringify(command) === JSON.stringify(["image", "inspect", image, "--format", '{{index .Config.Labels "cyberdeck.network-boundary"}}'])) return "1";
+    if (command[0] === "run" && command.at(-1) === 'require("dns").lookup("host.docker.internal",{family:4},(e,a)=>{if(e)process.exit(1);console.log(a)})')
+      return hostAddress;
     if (command[0] === "ps") {
       const filter = command[command.indexOf("--filter") + 1]!;
       return [...inspections.values()].find((item) => filter === `name=^/${item.Name}$`)?.Id ?? "";
@@ -79,6 +85,7 @@ export async function backendScenario(root: string, scenario: "oom" | "cross-wor
         State: { Running: false, ExitCode: scenario === "oom" ? 137 : 0, OOMKilled: scenario === "oom" },
         HostConfig: { Memory: Number(value("--memory")), MemorySwap: Number(value("--memory-swap")), NanoCpus: Number(value("--cpus")) * 1e9,
           ReadonlyRootfs: command.includes("--read-only"), PidsLimit: Number(value("--pids-limit")), PidMode: "", IpcMode: "private",
+          ExtraHosts: command.flatMap((arg, index) => arg === "--add-host" ? [command[index + 1]!] : []),
           CapAdd: null, Devices: [], Privileged: false, NetworkMode: value("--network"), CapDrop: [value("--cap-drop")], SecurityOpt: [value("--security-opt")] }, Mounts: mounts });
       return id;
     }
@@ -86,6 +93,7 @@ export async function backendScenario(root: string, scenario: "oom" | "cross-wor
   });
   const contexts = new Map<string, ReturnType<typeof containerLaunchContext>>();
   const backend = new OrbStackExecutor({ client, profile: { image, cpus: 1, memoryBytes: 256 * 1024 ** 2, slots: 2, network: "egress" },
+    writableProxyPort: proxyPort,
     attach: () => { throw new Error("OFFLINE_CONTAINER_START_FORBIDDEN"); }, evidenceDirectory: join(root, "evidence"), onFailure: () => {},
     contexts: { get: async (ref) => contexts.get(ref.executionId)!, prepare: async (input) => {
       const owned = join(root, input.identity.executionId), workspace = join(owned, "workspace"), state = join(owned, "state"), credentials = join(owned, "credentials");
@@ -107,11 +115,17 @@ export async function backendScenario(root: string, scenario: "oom" | "cross-wor
     const inspected = await backend.inspect(refs[0]!);
     for (const ref of refs) await backend.stop(ref, true);
     const records = [...inspections.values()];
+    const networkPolicies = await Promise.all([...contexts.values()].map(async context =>
+      JSON.parse(await readFile(join(context.hostCredentials, "network-policy.json"), "utf8")) as { hostAddress: string; proxyPort: number; reportPort: number; nonce: string }));
+    const networkPrepared = networkPolicies.length === 2 && networkPolicies.every(policy => policy.hostAddress === hostAddress
+      && policy.proxyPort === proxyPort && policy.reportPort === 1234)
+      && records.every(record => record.HostConfig.ExtraHosts?.[0] === `host.docker.internal:${hostAddress}`);
     const disjoint = records[0]!.Mounts.every((a) => records[1]!.Mounts.every((b) => a.Source !== b.Source));
-    return { brokerId: broker.brokerId, facts: { commands, records, inspected, slots: backend.slots.snapshot(), fixtureMode: "scripted-engine-no-containers" }, checks: scenario === "oom" ? {
+    return { brokerId: broker.brokerId, facts: { commands, records, inspected, networkPolicies, slots: backend.slots.snapshot(), fixtureMode: "scripted-engine-no-containers" }, checks: scenario === "oom" ? {
+      "network-policy-prepared": networkPrepared,
       "oom-classified": inspected.oomKilled === true && inspected.guestExitCode === 137,
       "capacity-released": backend.slots.snapshot().running.length === 0, "evidence-retained": records.length === 2,
-    } : { "private-workspaces": contexts.size === 2 && disjoint,
+    } : { "network-policy-prepared": networkPrepared, "private-workspaces": contexts.size === 2 && disjoint,
       "other-worker-not-mounted": disjoint && records.every((record) => record.Mounts.length === 3),
       "credentials-not-shared": disjoint && records.every((record) => record.Mounts.some((mount) => mount.Destination === "/run/credentials" && !mount.RW)),
     } };

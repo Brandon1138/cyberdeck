@@ -18,6 +18,7 @@ export interface SessionLifecycleControllerOptions {
   bus: SessionUpdateBus;
   assembly: SessionRuntimeAssembly;
   observer: SessionRuntimeObserver;
+  cancelPendingLaunch?: (sessionId: string) => Promise<boolean>;
 }
 
 /**
@@ -35,16 +36,25 @@ export class SessionLifecycleController {
   private readonly observer: SessionRuntimeObserver;
   /** Set by `stopAll` so the shutdown kill is distinguishable from an operator stop. */
   private shuttingDown = false;
+  private readonly cancelPendingLaunch;
 
   constructor(options: SessionLifecycleControllerOptions) {
+    this.cancelPendingLaunch = options.cancelPendingLaunch;
     this.catalog = options.catalog;
     this.bus = options.bus;
     this.assembly = options.assembly;
     this.observer = options.observer;
   }
 
-  async stop(sessionId: string): Promise<void> {
-    if (this.catalog.options.executions?.cancelStart?.(sessionId)) return;
+  private cancelPendingStart(sessionId: string): boolean {
+    const resourceCancelled = this.catalog.options.resourceExecution?.cancelStart(sessionId) ?? false;
+    const executionCancelled = this.catalog.options.executions?.cancelStart?.(sessionId) ?? false;
+    return resourceCancelled || executionCancelled;
+  }
+
+  async stop(sessionId: string, preserveOutcome = false): Promise<void> {
+    if (await this.cancelPendingLaunch?.(sessionId)) return;
+    if (this.cancelPendingStart(sessionId)) return;
     const runtime = this.catalog.requireRuntime(sessionId);
     if (runtime.terminalFinalizing === true) return;
     if (runtime.record.exitCode !== null) {
@@ -73,7 +83,7 @@ export class SessionLifecycleController {
     // Shutting the broker down does not undo what an agent already delivered. A thread that had
     // finished its task keeps that outcome through the kill, so it rehydrates as Done rather than
     // as Stopped. An operator-initiated stop still reads as Stopped — that is their action.
-    runtime.outcomePreserved = this.shuttingDown && runtime.record.attentionState === "done";
+    runtime.outcomePreserved = (this.shuttingDown || preserveOutcome) && runtime.record.attentionState === "done";
     // Stop authority rejects any unbanked screen synchronously, before journaling or process kill
     // can yield long enough for the 200 ms bank to reinterpret it as a completed turn.
     runtime.turns.discardPendingScreenTurns();
@@ -85,6 +95,7 @@ export class SessionLifecycleController {
 
   /** Force only one already-stopping session. Child sessions are deliberately untouched. */
   forceStop(sessionId: string): void {
+    if (this.cancelPendingStart(sessionId)) return;
     const runtime = this.catalog.requireRuntime(sessionId);
     if (runtime.terminalFinalizing === true) return;
     if (runtime.record.exitCode !== null) return;
@@ -112,13 +123,16 @@ export class SessionLifecycleController {
   async stopAll(): Promise<void> {
     this.shuttingDown = true;
     for (const [sessionId, runtime] of this.catalog.sessions) {
-      if (runtime.record.exitCode !== null) continue;
+      if (runtime.record.exitCode !== null) { this.cancelPendingStart(sessionId); continue; }
       await this.stop(sessionId);
     }
   }
 
-  async resume(sessionId: string): Promise<SessionRecord> {
+  async resume(sessionId: string, parkingToken?: string, assertLaunch?: () => void): Promise<SessionRecord> {
     const runtime = this.catalog.requireRuntime(sessionId);
+    if (runtime.record.pendingLaunch) throw new RegistryError("SESSION_BUSY", "Pending or interrupted launch cannot be resumed as an existing provider conversation");
+    if ((runtime.parkingClaim || runtime.parkingStopped) && (!parkingToken || runtime.parkingClaim !== parkingToken))
+      throw new RegistryError("SESSION_BUSY", "Session parking transition owns resume");
     this.catalog.assertMayConsume(sessionId);
     if (runtime.terminalFinalizing === true) {
       throw new RegistryError(
@@ -134,13 +148,13 @@ export class SessionLifecycleController {
     }
     runtime.resuming = true;
     try {
-      return await this.resumeRuntime(runtime);
+      return await this.resumeRuntime(runtime, assertLaunch);
     } finally {
       runtime.resuming = false;
     }
   }
 
-  async resumeRuntime(runtime: RuntimeSession): Promise<SessionRecord> {
+  async resumeRuntime(runtime: RuntimeSession, assertLaunch?: () => void): Promise<SessionRecord> {
     const sessionId = runtime.record.id;
 
     // The outgoing runtime stops speaking for this session here, before anything is awaited. A kill is
@@ -189,6 +203,7 @@ export class SessionLifecycleController {
       record,
       resumeSpec,
       previousRuntime,
+      assertLaunch,
     );
     runtime.stopRequested = false;
     delete runtime.stopRequestedAt;
@@ -225,6 +240,12 @@ export class SessionLifecycleController {
   }
 
   async delete(sessionId: string, beforeDelete?: () => Promise<void>): Promise<void> {
+    const intent = this.catalog.options.launchIntents?.get(sessionId);
+    if (intent?.phase === "terminal" && !intent.terminalProjectionCommitted)
+      throw new RegistryError("SESSION_BUSY", "Terminal launch projection must settle before deletion");
+    if (this.cancelPendingStart(sessionId)) {
+      throw new RegistryError("SESSION_STILL_ACTIVE", "Launch cancellation is pending; retry after it settles");
+    }
     const runtime = this.catalog.requireRuntime(sessionId);
     if (
       runtime.record.executionState === "active"
