@@ -44,7 +44,7 @@
     "cyberdeck": "dist/src/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-client-assets.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "prepack": "pnpm run build",
     "prepublishOnly": "pnpm test && pnpm check",

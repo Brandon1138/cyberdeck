@@ -6,8 +6,10 @@ import { capturePasteboardImage } from "../clipboard-image.js";
 import { collectDashboardSnapshot, renderDashboard } from "../dashboard.js";
 import { NO_PULL_REQUEST_STATUS, PullRequestStatusCache } from "../pr-status.js";
 import { queryTerminalBackground } from "../terminal-background.js";
+import { createTerminalMascot } from "../terminal-mascot.js";
 import { ENTER_FLEET_SCREEN, LEAVE_FLEET_SCREEN, UNREGISTERED_SECTION_KEY } from "./constants.js";
 import { FleetKeyDecoder, composerCursor, waitForRefresh } from "./key-decoder.js";
+import { MascotActivityPulse } from "./mascot-pulse.js";
 import { normalizeState } from "./normalize.js";
 import { clampRowWidth, printedWidth } from "./render-composer.js";
 import { normalizeThreadListViewport, renderFleet, threadListViewportHeight } from "./render-frame.js";
@@ -101,9 +103,15 @@ export async function runFleet(
   const pasteboardImage = runtime.pasteboardImage
     ?? (() => capturePasteboardImage({ directory: join(appStateDirectory, "pasted-images") }));
   const previousRawMode = input.isRaw === true;
+  const nativeMascot = runtime.nativeMascot
+    ?? (input === process.stdin && output === process.stdout ? createTerminalMascot(output) : undefined);
+  const mascotPulse = nativeMascot?.setCursorVisible === undefined
+    ? undefined : new MascotActivityPulse(snapshot.threads);
+  let mascotFrameTimer: ReturnType<typeof setTimeout> | undefined;
   let paintedFrame: RetainedFleetFrame | undefined;
   const enterFleetScreen = () => {
     output.write(ENTER_FLEET_SCREEN);
+    nativeMascot?.enter();
     paintedFrame = undefined;
   };
   const writeFrame = (
@@ -361,6 +369,10 @@ export async function runFleet(
       }
       snapshot = await collectFleetSnapshot(client);
       state = normalizeState(state, snapshot, Date.now());
+      if (mascotFrameTimer !== undefined) clearTimeout(mascotFrameTimer);
+      mascotFrameTimer = undefined;
+      const pulse = mascotPulse?.update(snapshot.threads, Date.now());
+      if (pulse !== undefined) nativeMascot?.setCursorVisible?.(pulse.cursorVisible);
       pullRequestStatus.refresh(snapshot.threads.map(({ record }) => ({
         threadId: record.id,
         cwd: record.cwd,
@@ -415,6 +427,7 @@ export async function runFleet(
           home: homedir(),
           pullRequests: pullRequestStatus.states(),
           background: terminalBackground,
+          mascot: nativeMascot?.placement,
         };
         state = normalizeThreadListViewport(snapshot, state, renderOptions);
         const rendered = renderFleet(snapshot, state, renderOptions);
@@ -423,6 +436,9 @@ export async function runFleet(
           composerCursor(rendered, state, width),
           fleetFrameLayout(snapshot, state, renderOptions),
         );
+      }
+      if (pulse?.nextFrameIn !== undefined) {
+        mascotFrameTimer = setTimeout(notify, pulse.nextFrameIn);
       }
       await waitForNextFrame();
     }
@@ -442,6 +458,8 @@ export async function runFleet(
     input.pause?.();
     input.setRawMode?.(previousRawMode);
     if (decoderFlushTimer !== undefined) clearTimeout(decoderFlushTimer);
+    if (mascotFrameTimer !== undefined) clearTimeout(mascotFrameTimer);
+    nativeMascot?.dispose();
     output.write(LEAVE_FLEET_SCREEN);
     client.close();
     if (layoutCleanupError !== undefined) throw layoutCleanupError;
