@@ -70,7 +70,7 @@ function tmux(args: string[]): string | undefined {
 /**
  * Use native graphics only on known compatible terminals. In tmux, capability replies can reach
  * a different focused pane, so identify the attached terminal without probing its input stream.
- * Passthrough is enabled only on this pane and its prior local setting is restored on exit.
+ * Passthrough is enabled only for a graphics transfer and restored before provider output.
  */
 export function createTerminalMascot(
   output: ImageOutput,
@@ -91,22 +91,29 @@ export function createTerminalMascot(
   } catch {
     return undefined;
   }
-  let restorePassthrough: (() => void) | undefined;
-  if (inTmux) {
-    const original = tmux(["show-options", "-p", "-t", pane!, "allow-passthrough"]);
-    const effective = tmux(["show-options", "-pAv", "-t", pane!, "allow-passthrough"]);
-    if (original === undefined || effective === undefined) return undefined;
-    if (effective !== "on" && effective !== "all") {
-      if (tmux(["set-option", "-p", "-t", pane!, "allow-passthrough", "on"]) === undefined) return undefined;
-      restorePassthrough = () => {
-        if (tmux(["show-options", "-pv", "-t", pane!, "allow-passthrough"]) !== "on") return;
-        const previous = /^allow-passthrough (off|on|all)$/u.exec(original)?.[1];
-        tmux(previous === undefined
-          ? ["set-option", "-pu", "-t", pane!, "allow-passthrough"]
-          : ["set-option", "-p", "-t", pane!, "allow-passthrough", previous]);
-      };
+  const writeGraphics = (sequence: string) => {
+    let restorePassthrough: (() => void) | undefined;
+    if (inTmux) {
+      const original = tmux(["show-options", "-p", "-t", pane!, "allow-passthrough"]);
+      const effective = tmux(["show-options", "-pAv", "-t", pane!, "allow-passthrough"]);
+      if (original === undefined || effective === undefined) return;
+      if (effective !== "on" && effective !== "all") {
+        if (tmux(["set-option", "-p", "-t", pane!, "allow-passthrough", "on"]) === undefined) return;
+        restorePassthrough = () => {
+          if (tmux(["show-options", "-pv", "-t", pane!, "allow-passthrough"]) !== "on") return;
+          const previous = /^allow-passthrough (off|on|all)$/u.exec(original)?.[1];
+          tmux(previous === undefined
+            ? ["set-option", "-pu", "-t", pane!, "allow-passthrough"]
+            : ["set-option", "-p", "-t", pane!, "allow-passthrough", previous]);
+        };
+      }
     }
-  }
+    try {
+      output.write(sequence);
+    } finally {
+      restorePassthrough?.();
+    }
+  };
   const imageId = randomInt(1, 0x1000000);
   const visible = imagePlacement(imageId);
   const hidden = imagePlacement(imageId, false);
@@ -116,13 +123,7 @@ export function createTerminalMascot(
   return {
     get placement() { return cursorVisible ? visible : hidden; },
     setCursorVisible: (value) => { cursorVisible = value; },
-    enter: () => { output.write(transmission); },
-    dispose: () => {
-      try {
-        output.write(graphicsEscape(`a=d,d=I,i=${imageId},q=2`, inTmux));
-      } finally {
-        restorePassthrough?.();
-      }
-    },
+    enter: () => { writeGraphics(transmission); },
+    dispose: () => { writeGraphics(graphicsEscape(`a=d,d=I,i=${imageId},q=2`, inTmux)); },
   };
 }

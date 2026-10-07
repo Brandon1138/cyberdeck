@@ -91,29 +91,54 @@ describe("native terminal mascot", () => {
     expect(deleted).toEqual(ids);
   });
 
-  it("restores only its own pane's inherited passthrough setting", () => {
-    let local = "";
+  it.each([undefined, "off", "on", "all"])("restores pane passthrough %s after every graphics transfer", (initial) => {
+    let local = initial;
     vi.mocked(spawnSync).mockImplementation((_command, args) => {
       const command = args as string[];
       let stdout = "";
       if (command[0] === "display-message") stdout = "xterm-ghostty";
       else if (command[0] === "show-options") {
-        stdout = command.includes("-pAv") ? "off" : command.includes("-pv") ? "on" : local;
-      } else if (command[0] === "set-option") local = "allow-passthrough on";
+        stdout = command.includes("-pAv") ? local ?? "off" : command.includes("-pv") ? local ?? "off"
+          : local === undefined ? "" : `allow-passthrough ${local}`;
+      } else if (command[0] === "set-option") {
+        local = command.includes("-pu") ? undefined : command.at(-1);
+      }
       return { status: 0, stdout } as ReturnType<typeof spawnSync>;
     });
-    const write = vi.fn();
+    const write = vi.fn((_chunk: string | Uint8Array) => { expect(["on", "all"]).toContain(local); });
     const mascot = createTerminalMascot({ isTTY: true, write }, { TMUX: "/tmp/example,1,0", TMUX_PANE: "%7" });
     expect(mascot).toBeDefined();
+    expect(local).toBe(initial);
     mascot!.enter();
+    expect(local).toBe(initial);
     expect(write.mock.calls[0]![0]).toContain("a=T,f=100");
     mascot!.dispose();
+    expect(local).toBe(initial);
     expect(write.mock.calls[1]![0]).toMatch(/a=d,d=I,i=\d+,q=2/u);
     const mutations = vi.mocked(spawnSync).mock.calls
       .map((call) => call[1] as string[]).filter((args) => args[0] === "set-option");
-    expect(mutations).toEqual([
+    const restore = initial === undefined
+      ? ["set-option", "-pu", "-t", "%7", "allow-passthrough"]
+      : ["set-option", "-p", "-t", "%7", "allow-passthrough", initial];
+    const cycle = [
       ["set-option", "-p", "-t", "%7", "allow-passthrough", "on"],
-      ["set-option", "-pu", "-t", "%7", "allow-passthrough"],
-    ]);
+      restore,
+    ];
+    expect(mutations).toEqual(initial === "on" || initial === "all" ? [] : [...cycle, ...cycle]);
+  });
+
+  it("restores passthrough even when the graphics write throws", () => {
+    let local = "off";
+    vi.mocked(spawnSync).mockImplementation((_command, args) => {
+      const command = args as string[];
+      if (command[0] === "display-message") return { status: 0, stdout: "xterm-ghostty" } as ReturnType<typeof spawnSync>;
+      if (command[0] === "set-option") local = command.at(-1)!;
+      return { status: 0, stdout: command.includes("-p") && command[0] === "show-options"
+        ? `allow-passthrough ${local}` : local } as ReturnType<typeof spawnSync>;
+    });
+    const mascot = createTerminalMascot({ isTTY: true, write: () => { throw new Error("closed output"); } },
+      { TMUX: "/tmp/example,1,0", TMUX_PANE: "%7" })!;
+    expect(() => mascot.enter()).toThrow("closed output");
+    expect(local).toBe("off");
   });
 });
