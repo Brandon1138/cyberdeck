@@ -230,9 +230,22 @@ every other tool call, appending `{cyberdeckNotice}` when there is one and swall
 
 `cli/notice-hook-entry.js --actor-session <id> --state-directory <dir> --format <provider> --event <E>`
 reads `notice.json` and the sidecar, prints the provider envelope at most once per inbox head (or
-again after the quiet interval), guards Claude's `Stop` re-entry, and always exits 0. Provider
-generation is in `src/providers/claude/launch-settings.ts` (orchestrators only) and the Cursor
-session plugin written by `src/providers/cursor/mcp-hosting.ts`.
+again after the quiet interval), guards Claude's `Stop` re-entry, and always exits 0.
+
+Generation (Task E), for orchestrator sessions only, never workers or top-level sessions:
+
+- **Claude** (`src/providers/claude/notice-hooks.ts`, composed by `launch-settings.ts` into the one
+  `--settings` file beside the SessionStart transcript hook and the first-party endpoint pin):
+  `PostToolUse` and `PostToolUseFailure` with matcher `.*`, and `Stop` without a matcher, each
+  `{"type":"command","command":<notice-hook … --format claude --event <E>>,"timeout":2}`. Both tool
+  events are needed because a failed call fires only the failure event. Requires the same MCP
+  `nodePath`/`cliPath` and `stateDirectory` as the transcript hook; without them no notice hooks.
+- **Cursor** (`writeCursorNoticeHooks` in `src/providers/cursor/mcp-hosting.ts`): `hooks/hooks.json`
+  inside the session plugin passed with `--plugin-dir`, version 1, `postToolUse` and
+  `postToolUseFailure` with `--format cursor`, timeout 2, no `stop`. Rewritten on launch and resume;
+  removed for workers, top-level sessions, or when MCP or the state directory is unknown. The
+  Cursor adapter takes an optional `stateDirectory` for this, wired in `main.ts`.
+- **Codex**: nothing generated (D12).
 
 ### Composition
 

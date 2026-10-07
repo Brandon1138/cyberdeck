@@ -234,7 +234,7 @@ export async function runBroker(
     allowsWorkspaceTrust: (source) => modalAnswerPolicy.allowsWorkspaceTrust(source),
     adapters: { codex: new CodexProviderAdapter({ mcp, workspaceTrust: grantGatedTrust(codexTrust) }),
       claude: new ClaudeProviderAdapter({ mcp, stateDirectory, workspaceTrust: grantGatedTrust(claudeTrust) }),
-      cursor: new CursorProviderAdapter({ mcp }), antigravity: new AntigravityProviderAdapter() },
+      cursor: new CursorProviderAdapter({ mcp, stateDirectory }), antigravity: new AntigravityProviderAdapter() },
     lookupSession: (id) => { try { return registry?.get(id); } catch { return undefined; } },
     submitEvent: (input) => workerEvents.submit(input),
   });
