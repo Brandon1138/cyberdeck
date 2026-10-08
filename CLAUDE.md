@@ -10,23 +10,6 @@ These are accepted, deliberate gaps. Do not treat them as bugs to fix on sight, 
 around them as if they were already solved. Each one names the trigger that would make it real work.
 If a task runs into one, say so out loud to the operator before building past it.
 
-### The nvim module is found by a hardcoded local path
-
-`contrib/nvim/lua/cyberdeck/` ships in this repository, and the operator's nvim config points at it
-with an absolute `dir=` path (guarded, so a machine without the checkout is silent rather than
-broken). This was chosen so Fleet's Ctrl+N and the Lua it drives version together — the RPC socket
-convention is mirrored by hand across `src/nvim/server-address.ts` and the Lua module, and a skew
-between them strands every open request on a socket nobody is listening to.
-
-**That version-lock is conditional, not guaranteed.** It holds only while Cyberdeck is run from the
-same checkout the nvim path points at. Running an installed binary, or a worktree, or a second
-clone, silently pairs a new Cyberdeck with whatever Lua that one path happens to hold. Nothing
-detects this today: there is no version handshake in the RPC call.
-
-Deferred because the operator runs one checkout. **Trigger:** running Cyberdeck from somewhere other
-than the checkout the nvim config points at. The fix is a version handshake in the `--remote-expr`
-payload that fails loudly on mismatch, not more path-guessing.
-
 ### One socket namespace for all concurrent Cyberdecks
 
 `nvimServerAddress` keys the socket on the tmux pane index alone:
@@ -113,6 +96,12 @@ row in `PROVIDER_MODEL_LISTING_COMMANDS` and a parser case, not widening the acc
 until prose starts parsing as a model id.
 
 ## Things that are not deferred
+
+- The nvim module ships in the npm package. The operator chooses its explicit runtime path;
+  Cyberdeck never guesses another checkout. Every `--remote-expr` checks the loaded module's
+  protocol version before applying a request, and Lua checks the payload version. Keep the
+  TypeScript and Lua versions together when changing the wire contract. See
+  `docs/linux-nvim.md` for installed paths and `docs/architecture/nvim-surface.md` for ownership.
 
 - A peer binding is a controller, and its grant and its lease are derived from one place. MIK-98
   settled what a `:peer:` binding is: a controller in its own right, holding its own `controllerId`

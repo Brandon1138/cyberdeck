@@ -207,7 +207,9 @@ endpoints/profiles, and worker processes keep native routing. `--check` reports 
 restarting services. Activation evidence is written under `~/.local/share/cyberdeck/rc-coexistence-20261006`.
 The shell integration sources `~/.local/share/cyberdeck/codex-remote-shell.zsh`; existing shells need
 to source that file once after activation. Pair the phone with the dedicated identity using
-`node ~/.local/share/cyberdeck/codex-remote.mjs pair`; it opens a short-lived QR in Preview. Scan it
+`node ~/.local/share/cyberdeck/codex-remote.mjs pair`; it opens a short-lived QR in Preview on macOS
+or the host's default image viewer on Linux/WSL. Keep the companion `desktop-open.mjs` alongside
+the launcher when copying it. Scan it
 with the phone's Camera and complete setup in ChatGPT, then verify that phone input reaches the intended
 CLI and Orc conversations while Desktop stays connected. Pairing and message delivery are separate
 checks from a relay reporting `connected`.
@@ -492,11 +494,14 @@ the final change set and releases the lock — one transition, one message, so t
 outlive the run. Locks are tracked per worker, not per path, so a worktree nested inside another
 open worktree keeps its own files locked for as long as its own worker runs.
 
-The nvim side ships in this repository and installs nothing on its own. Point your own config at it
-and call `listen()` once:
+The nvim side ships in this repository and in the npm package, and installs nothing on its own.
+Point your config at the `contrib/nvim` directory of the installation you run and call `listen()`
+once. For a global npm install, the directory is `$(npm root -g)/@ishmael38/cyberdeck/contrib/nvim`;
+replace the example path below with its absolute value. See the [Neovim setup guide](docs/linux-nvim.md)
+for source installs, custom prefixes and Linux distributions with an older Neovim package.
 
 ```lua
-vim.opt.runtimepath:append("/absolute/path/to/cyberdeck/contrib/nvim")
+vim.opt.runtimepath:prepend("/absolute/path/to/cyberdeck/contrib/nvim")
 require("cyberdeck").listen()
 ```
 
@@ -514,9 +519,12 @@ same address Cyberdeck derives — neither side is ever told where the other is.
 0.10 or newer and does nothing outside tmux. The association between a worker and an nvim address is
 held in memory only: if the broker restarts, press `Ctrl-N` again.
 
-Changed files are computed against the upstream branch git itself recorded for the worktree, or
-against `HEAD` when there is none. With no upstream configured, work the agent committed and left
-clean does not appear in the list.
+Every RPC checks the loaded Lua module's protocol version before changing tabs, lists or buffer
+locks. An older, missing or incompatible module produces setup guidance. Choose the module from
+the client installation you run; updating files does not replace Lua cached in an existing Neovim.
+
+Changed files are computed against the merge base of `origin/HEAD` and the worktree's HEAD. When
+`origin/HEAD` is absent, only untracked files appear and the title says `no baseline`.
 
 ## Delegate one explicitly selected worker
 
