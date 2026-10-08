@@ -1794,6 +1794,7 @@ describe("AgentControlService Orc peer control", () => {
     actor?: SessionRecord;
     target?: SessionRecord;
     child?: SessionRecord;
+    targetBinding?: OrchestratorBinding;
     stopRequested?: boolean;
     onAudit?: (event: BrokerEvent, records: Map<string, SessionRecord>) => void;
   } = {}) {
@@ -1837,7 +1838,7 @@ describe("AgentControlService Orc peer control", () => {
       } as never,
       {
         findBySessionId: vi.fn(async (sessionId: string) =>
-          sessionId === ACTOR ? controlBinding : sessionId === TARGET ? targetBinding : undefined),
+          sessionId === ACTOR ? controlBinding : sessionId === TARGET ? overrides.targetBinding ?? targetBinding : undefined),
       } as never,
       {} as never,
       undefined,
@@ -1871,6 +1872,21 @@ describe("AgentControlService Orc peer control", () => {
       binding: { bound: true, key: `fleet:peer:${TARGET}` },
       impact: { childCount: 1, nonTerminalChildIds: [CHILD] },
     });
+  });
+
+  it("inspects the peer's full persisted creator, mutation, approval and lineage depth", async () => {
+    const createdBy = {
+      sessionId: ACTOR,
+      mutationId: "inspect-approved-peer",
+      depth: 1,
+      approval: { kind: "per-create" as const, quote: "yes, create it", channel: "remote-control" as const },
+    };
+    const { service } = control({ targetBinding: { ...targetBinding, createdBy } });
+    const result = await service.inspectOrchestrator({ actorSessionId: ACTOR, targetSessionId: TARGET });
+    expect(result).toMatchObject({
+      outcome: "INSPECTED", binding: { bound: true, key: targetBinding.key, createdBy, controlLease: null },
+    });
+    expect(result.binding?.createdBy).toEqual(createdBy);
   });
 
   it("fails closed on generation races and healthy live targets", async () => {

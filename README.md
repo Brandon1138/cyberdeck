@@ -105,11 +105,17 @@ Fleet controls:
   it needs the same `/fable-workers on` grant every other Fable model does.
 - A bound orchestrator may start a peer orchestrator itself with `cyberdeck_orchestrator_create`,
   which is how orchestration continues from a phone: the peer launches with the provider's Remote
-  Control surface and appears in the phone's session list. The peer gets its creator's grant minus
-  the right to create peers, cannot reach wider than its creator's scope, and one creator may hold
-  at most two live peers. The grant is on by default for new bindings and is switched per scope
+  Control surface for Claude and Codex. The peer keeps its creator's full grant, may create and
+  manage peers under the same approval rule, and cannot reach wider than its creator's scope.
+  There is no live-peer cap or depth limit. The grant is on by default for new bindings and is switched per scope
   with `cyberdeck orchestrator peer-create status|on|off`; bindings made before the grant existed
-  need one `on`. See `docs/architecture/orchestrator-peer-create.md`.
+  need one `on`. Every create requires asking the operator in the current conversation and waiting
+  for express approval, quoted verbatim in `approval.quote`; absent or blank approval returns
+  `APPROVAL_REQUIRED`. Standing approval from that conversation must be repeated on each covered
+  create. Approval is journaled with lineage depth, persisted on the peer binding and returned by
+  create and inspect. The broker validates this model-asserted field; it cannot verify chat consent.
+  Legacy narrowed peers keep their durable grants until retired and recreated.
+  See `docs/architecture/orchestrator-peer-create.md`.
 - Enter `/caveman-workers status`, `/caveman-workers on`, or `/caveman-workers off` to control the
   durable, default-off box preference for orchestrator-spawned workers. Composer-launched workers
   (started from Fleet's bottom composer) always use normal mode, regardless of this preference. It

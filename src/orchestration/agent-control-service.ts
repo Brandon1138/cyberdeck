@@ -15,6 +15,7 @@ import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
 import { isFableModel } from "../domain/policy.js";
 import {
   orchestratorController,
+  orchestratorInspectionBinding,
   orchestratorKey,
   type OrchestratorBinding,
   type OrchestratorScope,
@@ -187,12 +188,7 @@ export interface OrchestratorInspection {
     /** MIK-55 will supply a real renewable heartbeat/lease. Null must never be treated as stale. */
     lastHeartbeatAt: null;
   };
-  binding?: {
-    bound: boolean;
-    key?: string;
-    /** Worker-control leases arrive with MIK-55; null is explicit rather than inferred. */
-    controlLease: null;
-  };
+  binding?: ReturnType<typeof orchestratorInspectionBinding>;
   impact?: {
     childCount: number;
     nonTerminalChildIds: string[];
@@ -1248,11 +1244,7 @@ export class AgentControlService {
         ...(stopRequestedAt === undefined ? {} : { stopRequestedAt }),
         lastHeartbeatAt: null,
       },
-      binding: {
-        bound: targetBinding !== undefined,
-        ...(targetBinding === undefined ? {} : { key: targetBinding.key }),
-        controlLease: null,
-      },
+      binding: orchestratorInspectionBinding(targetBinding),
       impact: {
         childCount: children.length,
         nonTerminalChildIds: children.filter(({ exitCode }) => exitCode === null).map(({ id }) => id),

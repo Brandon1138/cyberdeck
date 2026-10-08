@@ -487,6 +487,7 @@ describe("Cyberdeck CLI", () => {
 
     try {
       await command.parseAsync(["off"], { from: "user" });
+      expect(write).toHaveBeenCalledWith(expect.stringContaining("approval: required per create (operator quote journaled)"));
     } finally {
       write.mockRestore();
     }

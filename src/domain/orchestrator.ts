@@ -28,6 +28,14 @@ export const OrchestratorScopeSchema = z.discriminatedUnion("kind", [
  */
 export const OrchestratorBindingKindSchema = z.enum(["primary", "peer"]);
 
+/** Model-asserted operator approval; validate presence without rewriting the verbatim quote. */
+export const PeerApprovalSchema = z.object({
+  kind: z.enum(["per-create", "standing"]),
+  quote: z.string().min(1).max(500).refine((quote) => quote.trim().length > 0, "Approval quote must not be blank"),
+  channel: z.enum(["remote-control", "terminal", "fleet", "other"]),
+  grantedAt: z.iso.datetime().optional(),
+});
+
 /** The marker a peer key carries between its scope's key and the peer session's own id. */
 const PEER_KEY_MARKER = ":peer:";
 const CONTROLLER_ID_PREFIX = "orchestrator:";
@@ -60,6 +68,8 @@ const OrchestratorBindingRecordSchema = z.object({
     sessionId: z.uuid(),
     /** The creator's idempotency key, so a retry after a restart finds this peer instead of launching another. */
     mutationId: z.string().min(1).max(200).optional(),
+    approval: PeerApprovalSchema.optional(),
+    depth: z.number().int().nonnegative().optional(),
   }).optional(),
   /** Legacy field retained only so pre-box-preference binding records remain readable. */
   workerPreferences: z.object({
@@ -100,12 +110,9 @@ export const ORCHESTRATOR_GRANT_CAPABILITIES: readonly CyberdeckCapability[] = [
   "workflow.run",
 ];
 
-/** How many non-terminal peers one creator may hold before `cyberdeck_orchestrator_create` refuses. */
-export const MAX_LIVE_PEERS_PER_CREATOR = 2;
-
 /**
- * The grant a peer created by an orchestrator receives: its creator's, minus the one capability
- * that would let it create peers of its own. This is the only place that subset is derived, so the
+ * The grant a peer created by an orchestrator receives: its creator's capabilities unchanged.
+ * This is the only place that list is derived, including any future narrowing, so the
  * controller identity `orchestratorController` proves for it stays the same total function every
  * other binding goes through; nothing here can hand a peer a capability the lease substrate would
  * refuse (see the MIK-98 invariant in CLAUDE.md).
@@ -113,7 +120,7 @@ export const MAX_LIVE_PEERS_PER_CREATOR = 2;
 export function peerGrantCapabilities(
   creator: readonly CyberdeckCapability[],
 ): CyberdeckCapability[] {
-  return creator.filter((capability) => capability !== "orchestrator.create");
+  return [...creator];
 }
 
 export const EnsureOrchestratorRequestSchema = z.object({
@@ -149,7 +156,12 @@ export const PeerCreateRequestSchema = OrchestratorGrantToggleRequestSchema;
 /** A peer an orchestrator asked for: `create`'s selection plus who asked and what it may hold. */
 export const CreatePeerOrchestratorRequestSchema = CreateOrchestratorRequestSchema.extend({
   name: z.string().trim().min(1).max(120).optional(),
-  createdBy: z.object({ sessionId: z.uuid(), mutationId: z.string().min(1).max(200).optional() }),
+  createdBy: z.object({
+    sessionId: z.uuid(),
+    mutationId: z.string().min(1).max(200).optional(),
+    approval: PeerApprovalSchema.optional(),
+    depth: z.number().int().nonnegative().optional(),
+  }),
   capabilities: z.array(CyberdeckCapabilitySchema),
 });
 
@@ -165,6 +177,7 @@ export const OrchestratorBindingResetSchema = z.object({
 
 export type OrchestratorScope = z.infer<typeof OrchestratorScopeSchema>;
 export type OrchestratorBindingKind = z.infer<typeof OrchestratorBindingKindSchema>;
+export type PeerApproval = z.infer<typeof PeerApprovalSchema>;
 export type OrchestratorBinding = z.infer<typeof OrchestratorBindingSchema>;
 export type EnsureOrchestratorRequest = z.infer<typeof EnsureOrchestratorRequestSchema>;
 export type CreateOrchestratorRequest = z.infer<typeof CreateOrchestratorRequestSchema>;
@@ -189,6 +202,22 @@ export type PeerCreateResult = OrchestratorGrantToggleResult;
 export interface CavemanWorkersResult {
   scope: "box";
   enabled: boolean;
+}
+
+/** Inspect exposes the durable lineage in full, including legacy records with missing fields. */
+export function orchestratorInspectionBinding(binding: OrchestratorBinding | undefined): {
+  bound: boolean;
+  key?: string;
+  createdBy?: OrchestratorBinding["createdBy"];
+  /** Worker-control leases arrive separately; null must not be inferred as stale. */
+  controlLease: null;
+} {
+  return {
+    bound: binding !== undefined,
+    ...(binding === undefined ? {} : { key: binding.key }),
+    ...(binding?.createdBy === undefined ? {} : { createdBy: binding.createdBy }),
+    controlLease: null,
+  };
 }
 
 export function orchestratorKey(scope: OrchestratorScope): string {

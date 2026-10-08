@@ -211,7 +211,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_orchestrator_create",
-    description: "Start a peer orchestrator and return its sessionId. The peer launches detached; a Claude peer carries Remote Control and a Codex peer its remote app-server, so the operator can open either from their phone, while a Cursor peer has no phone surface. The result's remoteControl field says which; the broker does not return a link. The peer receives your grant minus orchestrator.create (it cannot create peers), a workspace caller may only create in its own cwd, and at most 2 of your peers may be live at once (PEER_LIMIT names them). Refusals are outcomes: DENIED, PEER_LIMIT, SELECTION_UNSUPPORTED, LAUNCH_FAILED. An optional brief is enqueued as the peer's first instruction; reuse mutationId to retry idempotently.",
+    description: "Start a peer orchestrator and return its sessionId. Ask the operator first: every create needs their express approval from your current conversation, quoted verbatim in approval.quote; without it the call returns APPROVAL_REQUIRED. The peer receives your grant unchanged and may create peers under the same rule; a workspace caller may only create in its own cwd. The peer launches detached; a Claude peer carries Remote Control and a Codex peer its remote app-server so the operator can open either from their phone; a Cursor peer has no phone surface. Refusals are outcomes: DENIED, APPROVAL_REQUIRED, SELECTION_UNSUPPORTED, LAUNCH_FAILED. An optional brief is enqueued as the peer's first instruction; reuse mutationId to retry idempotently.",
     inputSchema: {
       type: "object",
       properties: {
@@ -224,6 +224,17 @@ const TOOLS = [
         brief: { type: "string", minLength: 1, maxLength: PEER_BRIEF_MAX_CHARS },
         reason: { type: "string", minLength: 1, maxLength: 500 },
         mutationId: { type: "string", minLength: 1, maxLength: 200 },
+        approval: {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["per-create", "standing"] },
+            quote: { type: "string", minLength: 1, maxLength: 500 },
+            channel: { type: "string", enum: ["remote-control", "terminal", "fleet", "other"] },
+            grantedAt: { type: "string", format: "date-time" },
+          },
+          required: ["kind", "quote", "channel"],
+          additionalProperties: false,
+        },
       },
       required: ["provider", "model", "cwd", "reason"],
       additionalProperties: false,

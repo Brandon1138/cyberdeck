@@ -263,6 +263,7 @@ describe("Cyberdeck MCP server", () => {
 
   it("routes peer-orchestrator creation through the broker with the caller's actor identity", async () => {
     const request = vi.fn(async () => ({ outcome: "CREATED" }));
+    const approval = { kind: "per-create", quote: "yes, create it", channel: "remote-control" };
     await handleMcpRequest(context({ request: request as never }), {
       jsonrpc: "2.0",
       id: "create-orc",
@@ -275,6 +276,7 @@ describe("Cyberdeck MCP server", () => {
           cwd: "/repo/two",
           brief: "pick up PR #61",
           reason: "continue from the phone",
+          approval,
         },
       },
     });
@@ -286,6 +288,7 @@ describe("Cyberdeck MCP server", () => {
       cwd: "/repo/two",
       brief: "pick up PR #61",
       reason: "continue from the phone",
+      approval,
     });
     // A peer naming its creator's id would otherwise act with the creator's grant.
     await handleMcpRequest(context({ request: request as never }), {
@@ -306,15 +309,33 @@ describe("Cyberdeck MCP server", () => {
     expect(request).toHaveBeenLastCalledWith("agent.orchestrator.create", expect.objectContaining({
       actorSessionId: ACTOR,
     }));
+  });
+
+  it("advertises bounded optional approval and the express-approval contract for peer creation", async () => {
     const listed = (await handleMcpRequest(context({ request: vi.fn() }), {
       jsonrpc: "2.0",
       id: 2,
       method: "tools/list",
-    }))?.result as { tools: Array<{ name: string; inputSchema: JsonSchema }> };
+    }))?.result as { tools: Array<{ name: string; description: string; inputSchema: JsonSchema }> };
     const create = listed.tools.find(({ name }) => name === "cyberdeck_orchestrator_create");
     // Only providers the orchestrator catalog can host the MCP server in; never Antigravity.
     expect(create?.inputSchema.properties?.provider?.enum).toEqual(["codex", "claude", "cursor"]);
     expect(create?.inputSchema.required).toEqual(["provider", "model", "cwd", "reason"]);
+    expect(create?.inputSchema.properties?.approval).toEqual({
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["per-create", "standing"] },
+        quote: { type: "string", minLength: 1, maxLength: 500 },
+        channel: { type: "string", enum: ["remote-control", "terminal", "fleet", "other"] },
+        grantedAt: { type: "string", format: "date-time" },
+      },
+      required: ["kind", "quote", "channel"],
+      additionalProperties: false,
+    });
+    expect(create?.description).toContain("APPROVAL_REQUIRED");
+    expect(create?.description).toContain("quoted verbatim in approval.quote");
+    expect(create?.description).toContain("your grant unchanged and may create peers under the same rule");
+    expect(create?.description).not.toMatch(/\bat most\b|\bcap\b|\blimit\b/);
   });
 
   it("reads one semantic thread event per page by default", async () => {

@@ -29,6 +29,36 @@ const binding: OrchestratorBinding = {
 };
 
 describe("InstructionQueue", () => {
+  it("lets a fleet creator enqueue complete instructions to its peer orchestrator in another workspace", async () => {
+    const records = new Map<string, InstructionRecord>();
+    const peer = { id: TARGET, cwd: "/another/repo", kind: "orchestrator" } as SessionRecord;
+    const sessions = {
+      get: vi.fn(() => peer),
+      onControllerReleased: vi.fn(() => () => undefined),
+      onDeliveryBoundary: vi.fn(() => () => undefined),
+      onInstructionState: vi.fn(() => () => undefined),
+      submitInstruction: vi.fn(async () => ({ state: "rendered" as const, expectedTurn: 1, at: binding.createdAt })),
+    } satisfies SessionInstructionPort;
+    const creator: OrchestratorBinding = {
+      ...binding, key: "fleet", scope: { kind: "fleet" },
+      grant: { ...binding.grant, scope: { kind: "fleet" } },
+    };
+    const peerBinding: OrchestratorBinding = {
+      ...creator, key: `fleet:peer:${TARGET}`, kind: "peer", sessionId: TARGET, cwd: peer.cwd,
+      grant: { ...creator.grant, subjectSessionId: TARGET },
+      createdBy: { sessionId: ACTOR, depth: 1, approval: { kind: "per-create", quote: "yes, create it", channel: "terminal" } },
+    };
+    const queue = new InstructionQueue(sessions, {
+      findBySessionId: vi.fn(async (sessionId) => sessionId === ACTOR ? creator : peerBinding),
+    }, {
+      put: vi.fn(async (record) => { records.set(record.id, record); }),
+      list: vi.fn(async () => [...records.values()]),
+    });
+    const result = await queue.enqueue({ actorSessionId: ACTOR, targetSessionId: TARGET, message: "Review this worker report and coordinate the next step." });
+    expect(result).toMatchObject({ actorSessionId: ACTOR, targetSessionId: TARGET, status: "rendered" });
+    expect(sessions.submitInstruction).toHaveBeenCalledWith(TARGET, result.message, "orchestrator", expect.objectContaining({ actorSessionId: ACTOR }), result.id);
+  });
+
   it("keeps input queued while a human owns the worker and delivers it after release", async () => {
     let available: ((sessionId: string) => void) | undefined;
     let busy = true;
