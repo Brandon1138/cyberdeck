@@ -144,6 +144,28 @@ function threadFleet(count: number, cwd = "/repo/one"): FleetSnapshot {
 }
 
 describe("fleet presentation", () => {
+  it.each([80, 120])("renders bounded peer creator lineage within a %i-column row", (width) => {
+    const record = session({ kind: "orchestrator", latestPreview: "Latest useful response" });
+    const snapshot: FleetSnapshot = {
+      threads: [{ record, createdBy: { sessionId: "22222222-2222-4222-8222-222222222222" } }],
+    };
+    const rendered = renderFleet(snapshot, createFleetState(snapshot), { color: false, width, now: NOW_MS });
+    const row = rendered.split("\n").find((line) => line.includes("by 22222222"));
+    expect(row).toBeDefined();
+    expect(row).not.toContain("2222-4222");
+    expect(displayWidth(row!)).toBeLessThanOrEqual(width);
+  });
+
+  it("keeps creator lineage out of primary and worker rows", () => {
+    const primary = session({ kind: "orchestrator", latestPreview: "Primary response" });
+    const worker = session({ id: "33333333-3333-4333-8333-333333333333", kind: "worker", role: "worker" });
+    const snapshot: FleetSnapshot = {
+      threads: [{ record: primary }, { record: worker, createdBy: { sessionId: primary.id } }],
+    };
+    expect(renderFleet(snapshot, createFleetState(snapshot), { color: false, width: 120, now: NOW_MS }))
+      .not.toContain("by 11111111");
+  });
+
   it("lists every orchestrator once, at the top, above the folders its workers live in", () => {
     const worker = session({
       id: "22222222-2222-4222-8222-222222222222",
@@ -3214,6 +3236,24 @@ describe("fleet controls", () => {
 });
 
 describe("collectFleetSnapshot", () => {
+  it("carries a peer's projected creator onto its FleetThread", async () => {
+    const record = session({ kind: "orchestrator" });
+    const createdBy = { sessionId: "22222222-2222-4222-8222-222222222222" };
+    const request = vi.fn(async (method: string) => {
+      if (method === "session.list") return [record];
+      if (method === "fleet.workerCoordination") return [];
+      if (method === "fleet.orchestratorOwnership") {
+        return [{ sessionId: record.id, controllerId: "orchestrator:fleet:peer", createdBy }];
+      }
+      if (method === "fleet.projects") throw new Error("no registry");
+      throw new Error(`unexpected ${method}`);
+    });
+
+    await expect(collectFleetSnapshot({ request } as never)).resolves.toEqual({
+      threads: [{ record, controllerId: "orchestrator:fleet:peer", createdBy }],
+    });
+  });
+
   it("builds the thread list from records alone, without a byte of replay", async () => {
     // Every per-thread question the list asks — status, preview, recency — is answered by the
     // session record the broker already maintains. Replay bytes scale with worker output and are

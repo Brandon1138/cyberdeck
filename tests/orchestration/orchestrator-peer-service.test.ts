@@ -1,16 +1,23 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import {
-  MAX_LIVE_PEERS_PER_CREATOR,
   ORCHESTRATOR_GRANT_CAPABILITIES,
+  orchestratorKey,
+  type CreatePeerOrchestratorRequest,
+  type PeerApproval,
   type OrchestratorBinding,
 } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import {
+  AgentCreateOrchestratorParamsSchema,
   OrchestratorPeerService,
   peerRemoteControlNote,
 } from "../../src/orchestration/orchestrator-peer-service.js";
-import type { OrchestratorManagerResult } from "../../src/orchestration/orchestrator-manager.js";
+import { OrchestratorManager, type OrchestratorManagerResult } from "../../src/orchestration/orchestrator-manager.js";
+import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 
 const ACTOR = "11111111-1111-4111-8111-111111111111";
 const PEER = "22222222-2222-4222-8222-222222222222";
@@ -74,7 +81,6 @@ function harness(overrides: {
   instructions?: boolean;
   briefStatus?: string;
   failAudit?: (event: BrokerEvent) => boolean;
-  maxLivePeers?: number;
 } = {}) {
   const binding = overrides.binding ?? fleetBinding;
   const records = new Map<string, SessionRecord>([
@@ -84,13 +90,15 @@ function harness(overrides: {
   const stored = [binding, ...(overrides.bindings ?? [])];
   const events: BrokerEvent[] = [];
   let launched = 0;
-  const createPeer = vi.fn(async (request: { cwd: string; model: string; provider: string; capabilities: string[]; }) => {
+  let launchesInFlight = 0;
+  let maxConcurrentLaunches = 0;
+  const createPeer = vi.fn(async (request: CreatePeerOrchestratorRequest) => {
     if (overrides.createPeer instanceof Error) throw overrides.createPeer;
     if (overrides.createPeer !== undefined) return overrides.createPeer;
-    // The real manager writes the binding during launch, before `start` resolves; a second create
-    // that queued behind this one must see it, which is what the cap test relies on.
+    // The real manager writes the binding before launch resolves, which durable retries observe.
+    maxConcurrentLaunches = Math.max(maxConcurrentLaunches, ++launchesInFlight);
     await new Promise((resolve) => setTimeout(resolve, 5));
-    const id = launched++ === 0 ? PEER : `${launched}${PEER.slice(1)}`;
+    const id = launched++ === 0 ? PEER : `${launched + 1}${PEER.slice(1)}`;
     const session = { ...actorRecord, id, cwd: request.cwd, name: "peer" };
     records.set(id, session);
     const created: OrchestratorManagerResult = {
@@ -100,14 +108,17 @@ function harness(overrides: {
         ...peerBinding(id),
         provider: request.provider as OrchestratorBinding["provider"],
         cwd: request.cwd,
+        createdBy: request.createdBy,
+        scope: request.scope === "fleet" ? { kind: "fleet" } : { kind: "workspace", cwd: request.cwd },
         grant: {
           subjectSessionId: id,
-          capabilities: ORCHESTRATOR_GRANT_CAPABILITIES.filter((entry) => entry !== "orchestrator.create"),
-          scope: { kind: "fleet" },
+          capabilities: [...request.capabilities],
+          scope: request.scope === "fleet" ? { kind: "fleet" } : { kind: "workspace", cwd: request.cwd },
         },
       },
     };
     stored.push(created.binding);
+    launchesInFlight--;
     return created;
   });
   const enqueue = vi.fn(async (input: { targetSessionId: string; message: string; }) => ({
@@ -125,6 +136,7 @@ function harness(overrides: {
       },
     },
     bindings: {
+      get: async (key: string) => stored.find((entry) => entry.key === key),
       findBySessionId: async (sessionId: string) => stored.find((entry) => entry.sessionId === sessionId),
       list: async () => stored,
     },
@@ -137,10 +149,16 @@ function harness(overrides: {
       },
     },
     now: () => Date.parse(now),
-    ...(overrides.maxLivePeers === undefined ? {} : { maxLivePeers: overrides.maxLivePeers }),
   });
-  return { service, createPeer, enqueue, events, stored };
+  return { service, createPeer, enqueue, events, stored, get maxConcurrentLaunches() { return maxConcurrentLaunches; } };
 }
+
+const approval: PeerApproval = {
+  kind: "per-create",
+  quote: "  yes, create it  ",
+  channel: "remote-control",
+  grantedAt: now,
+};
 
 const request = {
   actorSessionId: ACTOR,
@@ -149,11 +167,12 @@ const request = {
   effort: "high" as const,
   cwd: "/repo/two",
   reason: "continue from the phone on a fresh provider",
+  approval,
 };
 
 describe("OrchestratorPeerService", () => {
-  it("creates a peer with the creator's grant minus orchestrator.create, delivers the brief, and audits both halves", async () => {
-    const { service, createPeer, enqueue, events } = harness();
+  it("creates a peer with per-create approval and the full grant, persists lineage, delivers the brief, and audits both halves", async () => {
+    const { service, createPeer, enqueue, events, stored } = harness();
 
     const result = await service.create({ ...request, name: "codex successor", brief: "Pick up PR #61" });
 
@@ -164,12 +183,14 @@ describe("OrchestratorPeerService", () => {
       provider: "codex",
       model: "gpt-6.1-sol",
       scope: { kind: "fleet" },
-      createdBy: ACTOR,
+      createdBy: { sessionId: ACTOR, approval, depth: 1 },
       brief: { delivery: "queued", instructionId: "44444444-4444-4444-8444-444444444444" },
       remoteControl: peerRemoteControlNote("codex"),
       warnings: [],
     });
-    expect((result as { grant: string[] }).grant).not.toContain("orchestrator.create");
+    expect((result as { grant: string[] }).grant).toEqual(ORCHESTRATOR_GRANT_CAPABILITIES);
+    expect(stored.find(({ sessionId }) => sessionId === PEER)?.createdBy)
+      .toEqual({ sessionId: ACTOR, approval, depth: 1 });
     expect(createPeer).toHaveBeenCalledWith(expect.objectContaining({
       provider: "codex",
       model: "gpt-6.1-sol",
@@ -177,18 +198,18 @@ describe("OrchestratorPeerService", () => {
       cwd: "/repo/two",
       scope: "fleet",
       name: "codex successor",
-      createdBy: { sessionId: ACTOR },
+      createdBy: { sessionId: ACTOR, approval, depth: 1 },
     }));
     expect(events[0]!.data).not.toHaveProperty("brief");
     expect(JSON.stringify(events)).not.toContain("Pick up PR #61");
     const granted = (createPeer.mock.calls[0]![0] as { capabilities: string[] }).capabilities;
-    expect(granted).toEqual(ORCHESTRATOR_GRANT_CAPABILITIES.filter((entry) => entry !== "orchestrator.create"));
+    expect(granted).toEqual(ORCHESTRATOR_GRANT_CAPABILITIES);
     expect(enqueue).toHaveBeenCalledWith({ actorSessionId: ACTOR, targetSessionId: PEER, message: "Pick up PR #61" });
     expect(events.map(({ type }) => type)).toEqual([
       "orchestrator.create.requested",
       "orchestrator.create.result",
     ]);
-    expect(events[0]).toMatchObject({ sessionId: ACTOR, data: { reason: request.reason, briefRequested: true } });
+    expect(events[0]).toMatchObject({ sessionId: ACTOR, data: { reason: request.reason, approval, depth: 1, briefRequested: true } });
     expect(events[1]).toMatchObject({ sessionId: PEER, data: { outcome: "CREATED", brief: "queued" } });
   });
 
@@ -212,15 +233,115 @@ describe("OrchestratorPeerService", () => {
     expect(events).toEqual([]);
   });
 
+  it.each(["fleet", "workspace"] as const)("enforces the durable %s scope kill-switch for primary, peer and descendant across service reloads", async (scope) => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-peer-create-switch-"));
+    const store = new OrchestratorStore(directory);
+    const records = new Map<string, SessionRecord>();
+    let sequence = 0;
+    const registry = {
+      get: (sessionId: string) => records.get(sessionId)!,
+      start: vi.fn(async (
+        input: Partial<SessionRecord>,
+        _initialPrompt?: string,
+        activate?: (record: SessionRecord) => Promise<void>,
+      ) => {
+        const session = {
+          ...actorRecord, ...input,
+          id: `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`,
+        };
+        records.set(session.id, session);
+        await activate?.(session);
+        return session;
+      }),
+    };
+    const manager = new OrchestratorManager(registry as never, store);
+    const service = new OrchestratorPeerService({ registry, bindings: store, manager });
+    const standing: PeerApproval = {
+      kind: "standing", quote: "create orchestrators as you need for this task", channel: "terminal",
+    };
+    try {
+      const primary = await manager.ensure({ provider: "claude", model: "fable", cwd: "/repo/one", scope });
+      const create = (actorSessionId: string, mutationId: string) => ({
+        ...request, provider: "claude" as const, model: "fable", effort: undefined,
+        cwd: "/repo/one", scope, actorSessionId, mutationId, approval: standing,
+      });
+      const peer = await service.create(create(primary.session.id, "peer"));
+      if (peer.outcome !== "CREATED") throw new Error(`Peer creation failed: ${peer.outcome}`);
+      const descendant = await service.create(create(peer.sessionId, "descendant"));
+      if (descendant.outcome !== "CREATED") throw new Error(`Descendant creation failed: ${descendant.outcome}`);
+      expect(descendant.createdBy.depth).toBe(2);
+      const peerGrant = (await store.findBySessionId(peer.sessionId))!.grant;
+      const descendantGrant = (await store.findBySessionId(descendant.sessionId))!.grant;
+
+      await expect(manager.peerCreate({ scope, cwd: "/repo/one", enabled: false }))
+        .resolves.toMatchObject({ enabled: false });
+      const startsBeforeOff = registry.start.mock.calls.length;
+      await expect(service.create(create(primary.session.id, "primary-off")))
+        .resolves.toMatchObject({ outcome: "DENIED", code: "CAPABILITY_DENIED" });
+      const scopeDenied = {
+        outcome: "DENIED", code: "SCOPE_PEER_CREATE_OFF",
+        reason: expect.stringContaining("cyberdeck orchestrator peer-create off"),
+      };
+      for (const sessionId of [peer.sessionId, descendant.sessionId]) {
+        await expect(service.create(create(sessionId, "off"))).resolves.toMatchObject(scopeDenied);
+      }
+      const reloadedStore = new OrchestratorStore(directory);
+      const freshService = new OrchestratorPeerService({ registry, bindings: reloadedStore, manager });
+      for (const sessionId of [peer.sessionId, descendant.sessionId]) {
+        await expect(freshService.create(create(sessionId, "reloaded-off"))).resolves.toMatchObject(scopeDenied);
+      }
+      // Replaying an existing peer while OFF does not admit or launch a fresh create.
+      await expect(freshService.create(create(primary.session.id, "peer")))
+        .resolves.toMatchObject({ outcome: "CREATED", sessionId: peer.sessionId, retrieval: "replay" });
+      expect(registry.start).toHaveBeenCalledTimes(startsBeforeOff);
+      expect((await reloadedStore.findBySessionId(peer.sessionId))!.grant).toEqual(peerGrant);
+      expect((await reloadedStore.findBySessionId(descendant.sessionId))!.grant).toEqual(descendantGrant);
+
+      await manager.peerCreate({ scope, cwd: "/repo/one", enabled: true });
+      for (const actorSessionId of [primary.session.id, peer.sessionId, descendant.sessionId]) {
+        await expect(service.create(create(actorSessionId, "on"))).resolves.toMatchObject({ outcome: "CREATED" });
+        await expect(freshService.create(create(actorSessionId, "reloaded-on"))).resolves.toMatchObject({ outcome: "CREATED" });
+      }
+
+      const legacy = (await store.findBySessionId(peer.sessionId))!;
+      await store.put({
+        ...legacy,
+        createdBy: { sessionId: primary.session.id },
+        grant: { ...legacy.grant, capabilities: legacy.grant.capabilities.filter((entry) => entry !== "orchestrator.create") },
+      });
+      await manager.peerCreate({ scope, cwd: "/repo/one", enabled: false });
+      await manager.peerCreate({ scope, cwd: "/repo/one", enabled: true });
+      await expect(freshService.create(create(peer.sessionId, "legacy-on")))
+        .resolves.toMatchObject({ outcome: "DENIED", code: "CAPABILITY_DENIED" });
+      expect((await reloadedStore.findBySessionId(peer.sessionId))!.grant.capabilities).not.toContain("orchestrator.create");
+      expect((await reloadedStore.get(orchestratorKey(primary.binding.scope)))!.grant.capabilities).toContain("orchestrator.create");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts an RFC 3339 offset through the create-request schema and preserves it through admission", async () => {
+    const { service, createPeer, events, stored } = harness();
+    const offsetApproval = { ...approval, grantedAt: "2026-10-08T15:00:00+03:00" };
+    const parsed = AgentCreateOrchestratorParamsSchema.parse({ ...request, approval: offsetApproval });
+    expect(parsed.approval).toEqual(offsetApproval);
+    await expect(service.create(parsed)).resolves.toMatchObject({
+      outcome: "CREATED", createdBy: { approval: offsetApproval },
+    });
+    expect(createPeer).toHaveBeenCalledWith(expect.objectContaining({ createdBy: expect.objectContaining({ approval: offsetApproval }) }));
+    expect(events[0]?.data.approval).toEqual(offsetApproval);
+    expect(stored.at(-1)?.createdBy?.approval).toEqual(offsetApproval);
+  });
+
   it("refuses an inactive or unbound caller", async () => {
     const stopped = harness({ actor: { ...actorRecord, executionState: "cancelled", exitCode: 0 } });
-    await expect(stopped.service.create(request)).resolves.toMatchObject({
+    await expect(stopped.service.create({ ...request, approval: undefined })).resolves.toMatchObject({
       outcome: "DENIED",
       code: "ACTOR_NOT_ACTIVE",
     });
 
     const unbound = harness({ binding: peerBinding(OTHER_PEER, OTHER_PEER) });
-    await expect(unbound.service.create(request)).resolves.toMatchObject({
+    await expect(unbound.service.create({ ...request, approval: undefined })).resolves.toMatchObject({
       outcome: "DENIED",
       code: "ACTOR_NOT_AUTHORIZED",
     });
@@ -249,45 +370,109 @@ describe("OrchestratorPeerService", () => {
     expect(createPeer).toHaveBeenCalledOnce();
   });
 
-  it("caps live peers per creator and names the ones still running", async () => {
-    const live = { ...actorRecord, id: OTHER_PEER };
-    const ended = { ...actorRecord, id: PEER, executionState: "exited" as const, exitCode: 0 };
-    const { service, createPeer } = harness({
-      bindings: [peerBinding(OTHER_PEER), peerBinding(PEER)],
-      records: [live, ended],
-      maxLivePeers: 1,
-    });
+  it.each([undefined, "", " \t\n "])("refuses absent or blank approval (%j) without launching or journaling", async (quote) => {
+    const { service, createPeer, events } = harness();
+    const result = await service.create({ ...request, approval: quote === undefined ? undefined : { ...approval, quote } });
 
-    await expect(service.create(request)).resolves.toEqual({
-      outcome: "PEER_LIMIT",
-      reason: expect.stringContaining("1 live peer"),
-      livePeerIds: [OTHER_PEER],
-      limit: 1,
+    expect(result).toEqual({
+      outcome: "APPROVAL_REQUIRED",
+      reason: "ask the operator in your current conversation and pass their express approval verbatim as approval.quote",
     });
     expect(createPeer).not.toHaveBeenCalled();
-    expect(MAX_LIVE_PEERS_PER_CREATOR).toBe(2);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("orchestrator.create.result");
+    expect(JSON.stringify(events[0])).toContain("APPROVAL_REQUIRED");
   });
 
-  it("does not count an errored peer whose dead process still has no exit code", async () => {
-    const errored = { ...actorRecord, id: OTHER_PEER, executionState: "errored" as const, exitCode: null };
-    const { service } = harness({
-      bindings: [peerBinding(OTHER_PEER)],
-      records: [errored],
-      maxLivePeers: 1,
-    });
+  it("admits the same mutationId after approval and replays only the created peer", async () => {
+    const { service, createPeer, events, stored } = harness();
+    const input = { ...request, mutationId: "approval-retry" };
 
-    await expect(service.create(request)).resolves.toMatchObject({ outcome: "CREATED" });
+    await expect(service.create({ ...input, approval: undefined }))
+      .resolves.toMatchObject({ outcome: "APPROVAL_REQUIRED" });
+    expect(createPeer).not.toHaveBeenCalled();
+    expect(events).toHaveLength(1);
+    expect(stored).toHaveLength(1);
+
+    const created = await service.create(input);
+    expect(created).toMatchObject({ outcome: "CREATED", sessionId: PEER });
+    expect(created).not.toHaveProperty("retrieval");
+    await expect(service.create(input)).resolves.toEqual({ ...created, retrieval: "replay" });
+    expect(createPeer).toHaveBeenCalledOnce();
+    expect(events).toHaveLength(3);
   });
 
-  it("does not count peers another orchestrator created", async () => {
-    const live = { ...actorRecord, id: OTHER_PEER };
-    const { service } = harness({
-      bindings: [peerBinding(OTHER_PEER, OTHER_PEER)],
-      records: [live],
-      maxLivePeers: 1,
+  it.each(["primary", "peer"] as const)("admits the same mutationId after the toggle is re-enabled for a %s", async (kind) => {
+    const caller = kind === "primary" ? { ...fleetBinding } : peerBinding(ACTOR, OTHER_PEER);
+    const primary = kind === "primary" ? caller : { ...fleetBinding, sessionId: OTHER_PEER };
+    const { service, createPeer, events, stored } = harness({
+      binding: caller,
+      ...(kind === "primary" ? {} : { bindings: [primary] }),
     });
+    const input = { ...request, mutationId: "toggle-retry" };
+    const capabilities = primary.grant.capabilities;
+    primary.grant = { ...primary.grant, capabilities: capabilities.filter((entry) => entry !== "orchestrator.create") };
 
-    await expect(service.create(request)).resolves.toMatchObject({ outcome: "CREATED" });
+    await expect(service.create(input)).resolves.toMatchObject({
+      outcome: "DENIED", code: kind === "primary" ? "CAPABILITY_DENIED" : "SCOPE_PEER_CREATE_OFF",
+    });
+    expect(createPeer).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    expect(stored).toHaveLength(kind === "primary" ? 1 : 2);
+
+    primary.grant = { ...primary.grant, capabilities };
+    const created = await service.create(input);
+    expect(created).toMatchObject({ outcome: "CREATED", sessionId: PEER });
+    expect(created).not.toHaveProperty("retrieval");
+    await expect(service.create(input)).resolves.toEqual({ ...created, retrieval: "replay" });
+    expect(createPeer).toHaveBeenCalledOnce();
+  });
+
+  it("asks for approval before checking the creation capability", async () => {
+    const { service, createPeer } = harness({
+      binding: { ...fleetBinding, grant: { ...fleetBinding.grant, capabilities: [] } },
+    });
+    await expect(service.create({ ...request, approval: undefined })).resolves.toMatchObject({ outcome: "APPROVAL_REQUIRED" });
+    expect(createPeer).not.toHaveBeenCalled();
+  });
+
+  it("accepts and journals standing approval on every covered create", async () => {
+    const { service, events, stored } = harness();
+    const standing: PeerApproval = { kind: "standing", quote: "create orchestrators as you need for this task", channel: "terminal" };
+    for (const mutationId of ["standing-1", "standing-2"]) {
+      await expect(service.create({ ...request, approval: standing, mutationId })).resolves.toMatchObject({
+        outcome: "CREATED", createdBy: { sessionId: ACTOR, depth: 1, approval: standing },
+      });
+    }
+    expect(events.filter(({ type }) => type === "orchestrator.create.requested").map(({ data }) => data.approval))
+      .toEqual([standing, standing]);
+    expect(stored.filter(({ kind }) => kind === "peer").map(({ createdBy }) => createdBy?.approval))
+      .toEqual([standing, standing]);
+  });
+
+  it("creates three live peers from one creator without a ceiling", async () => {
+    const { service, createPeer, stored } = harness();
+    const results = await Promise.all(["one", "two", "three"].map((mutationId) => service.create({ ...request, mutationId })));
+    expect(results.map(({ outcome }) => outcome)).toEqual(["CREATED", "CREATED", "CREATED"]);
+    expect(new Set(stored.filter(({ kind }) => kind === "peer").map(({ sessionId }) => sessionId)).size).toBe(3);
+    expect(createPeer).toHaveBeenCalledTimes(3);
+  });
+
+  it("lets a peer with its creator's full grant create a third orchestrator at depth two with its own approval", async () => {
+    const { service, events, stored } = harness();
+    await service.create(request);
+    const peer = stored.find(({ sessionId }) => sessionId === PEER)!;
+    expect(peer.grant.capabilities).toEqual(fleetBinding.grant.capabilities);
+    expect(peer.grant.capabilities).toContain("orchestrator.create");
+    await expect(service.create({ ...request, actorSessionId: PEER, approval: undefined }))
+      .resolves.toMatchObject({ outcome: "APPROVAL_REQUIRED" });
+    const peerApproval: PeerApproval = { kind: "per-create", quote: "yes, create another orchestrator", channel: "fleet" };
+    const result = await service.create({ ...request, actorSessionId: PEER, approval: peerApproval });
+    expect(result).toMatchObject({ outcome: "CREATED", createdBy: { sessionId: PEER, approval: peerApproval, depth: 2 } });
+    expect(stored.at(-1)?.createdBy).toEqual({ sessionId: PEER, approval: peerApproval, depth: 2 });
+    expect(stored.at(-1)?.grant.capabilities).toEqual(fleetBinding.grant.capabilities);
+    expect(events.filter(({ type }) => type === "orchestrator.create.requested").at(-1))
+      .toMatchObject({ sessionId: PEER, data: { approval: peerApproval, depth: 2 } });
   });
 
   it("reports an unsupported selection as an outcome and audits the failure", async () => {
@@ -318,6 +503,19 @@ describe("OrchestratorPeerService", () => {
     });
   });
 
+  it.each([
+    ["SELECTION_UNSUPPORTED", Object.assign(new Error("Unsupported selection"), { code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" })],
+    ["LAUNCH_FAILED", new Error("pty spawn failed")],
+  ] as const)("replays a %s result that reached the manager", async (outcome, error) => {
+    const { service, createPeer, events } = harness({ createPeer: error });
+    const input = { ...request, mutationId: "manager-refusal" };
+    const first = await service.create(input);
+    expect(first).toMatchObject({ outcome });
+    await expect(service.create(input)).resolves.toEqual({ ...first, retrieval: "replay" });
+    expect(createPeer).toHaveBeenCalledOnce();
+    expect(events).toHaveLength(2);
+  });
+
   it("keeps the peer when the brief cannot be queued and says how to send it", async () => {
     const { service } = harness({ instructions: false });
 
@@ -327,8 +525,9 @@ describe("OrchestratorPeerService", () => {
     });
   });
 
-  it("serializes concurrent creates from one actor so the cap cannot be raced", async () => {
-    const { service, createPeer } = harness({ maxLivePeers: 1 });
+  it("serializes concurrent creates from one actor so each launch records before the next can replay", async () => {
+    const state = harness();
+    const { service, createPeer } = state;
 
     const [first, second] = await Promise.all([
       service.create({ ...request, mutationId: "a" }),
@@ -336,8 +535,9 @@ describe("OrchestratorPeerService", () => {
     ]);
 
     expect(first).toMatchObject({ outcome: "CREATED", sessionId: PEER });
-    expect(second).toMatchObject({ outcome: "PEER_LIMIT", livePeerIds: [PEER] });
-    expect(createPeer).toHaveBeenCalledOnce();
+    expect(second).toMatchObject({ outcome: "CREATED", sessionId: `3${PEER.slice(1)}` });
+    expect(createPeer).toHaveBeenCalledTimes(2);
+    expect(state.maxConcurrentLaunches).toBe(1);
   });
 
   it("makes an in-flight retry with the same mutationId wait for, then replay, the first result", async () => {
@@ -358,19 +558,18 @@ describe("OrchestratorPeerService", () => {
     const created = await first.service.create({ ...request, mutationId: "durable", brief: "hello" });
     expect(created).toMatchObject({ outcome: "CREATED" });
     expect(first.createPeer).toHaveBeenCalledWith(expect.objectContaining({
-      createdBy: { sessionId: ACTOR, mutationId: "durable" },
+      createdBy: { sessionId: ACTOR, mutationId: "durable", approval, depth: 1 },
     }));
 
     // A fresh service with an empty replay map, reading the same binding log.
     const restarted = harness({ bindings: first.stored.filter((entry) => entry.sessionId !== ACTOR) });
-    const peer = first.stored.find((entry) => entry.sessionId === PEER)!;
-    peer.createdBy = { sessionId: ACTOR, mutationId: "durable" };
-    await expect(restarted.service.create({ ...request, mutationId: "durable", brief: "hello" })).resolves.toMatchObject({
+    await expect(restarted.service.create({ ...request, approval: { ...approval, quote: "a later quote" }, mutationId: "durable", brief: "hello" })).resolves.toMatchObject({
       outcome: "CREATED",
       sessionId: PEER,
       bindingKey: `fleet:peer:${PEER}`,
       brief: { delivery: "replayed" },
       retrieval: "replay",
+      createdBy: { sessionId: ACTOR, approval, depth: 1 },
     });
     expect(restarted.createPeer).not.toHaveBeenCalled();
     expect(restarted.enqueue).not.toHaveBeenCalled();

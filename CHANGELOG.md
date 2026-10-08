@@ -38,13 +38,27 @@ and persisted schemas remain under active alpha development.
   `orchestrator.create` capability, granted by default to every new binding and
   switched per scope with `cyberdeck orchestrator peer-create on|off`. The peer
   launches detached with the provider's Remote Control surface, receives its
-  creator's grant minus `orchestrator.create` (a peer cannot create peers), may
-  not reach wider than its creator's scope, and at most two of one creator's
-  peers may be live at once. An optional brief is queued as the peer's first
+  creator's full grant and may create peers under the same approval rule, and may
+  not reach wider than its creator's scope. An optional brief is queued as the peer's first
   instruction, the binding records who asked for it, and the broker journal
   carries `orchestrator.create.requested` / `orchestrator.create.result`.
   Bindings written before this change lack the capability until the operator
   runs `peer-create on` once for that scope (MIK-256, first slice of MIK-254).
+
+- Peer creation now requires the operator's express approval from the current
+  conversation, quoted verbatim in a bounded `approval` argument on every create;
+  absent or blank approval returns `APPROVAL_REQUIRED`. Standing approval repeats
+  its quote on each covered create. There is no live-peer cap or lineage depth limit,
+  and peers inherit their creator's capabilities unchanged, including
+  `orchestrator.create`. Approval and depth are journaled, persisted on the binding
+  and reported by create and inspect. Creator and peer prompts require asking first;
+  the broker validates the model-asserted field and cannot verify chat consent.
+  Legacy peers keep their durable grants. Per-creator serialization, scope narrowing,
+  mutation replay and brief delivery remain intact. The scope's durable `peer-create off`
+  kill-switch stops fresh creates by its primary, existing peers and descendants, including
+  peers whose grants retain `orchestrator.create`; admission reads the primary binding on
+  each create. Re-enabling the scope does not widen legacy narrowed peer grants. Optional
+  approval timestamps accept RFC 3339 numeric offsets and remain verbatim (MIK-257).
 
 ### Fixed
 

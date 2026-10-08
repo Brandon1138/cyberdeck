@@ -23,12 +23,13 @@ export class FleetProjection {
         .filter((subject) => ids.has(subject.resources.sessionId ?? "")),
     ).map((entry) => [entry.sessionId, entry]));
     const owners = new Map(fleetOrchestratorOwnership(bindings.filter((binding) => ids.has(binding.sessionId)))
-      .map((entry) => [entry.sessionId, entry.controllerId]));
+      .map((entry) => [entry.sessionId, entry]));
     const snapshot: FleetProjectionSnapshot = {
       threads: sessions.map(({ launchRecord: _launch, providerInstructions: _instructions, imageAttachments: _images, ...record }) => ({
         record: structuredClone(record),
         ...(coordination.has(record.id) ? { coordination: coordination.get(record.id)! } : {}),
-        ...(owners.has(record.id) ? { controllerId: owners.get(record.id)! } : {}),
+        ...(owners.has(record.id) ? { controllerId: owners.get(record.id)!.controllerId } : {}),
+        ...(owners.get(record.id)?.createdBy === undefined ? {} : { createdBy: owners.get(record.id)!.createdBy }),
       })),
       ...(projects === undefined ? {} : { projects }),
     };

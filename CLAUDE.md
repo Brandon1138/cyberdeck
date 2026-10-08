@@ -124,12 +124,15 @@ until prose starts parsing as a model id.
   `worker_events` from ever again disagreeing about the same binding, which is what the MIK-71
   incident was. Do not add a second derivation of a controller identity from a binding, and do not
   re-introduce a per-tool refusal of peer keys; if peer authority should narrow, narrow the one
-  capability list. The one sanctioned narrowing is `peerGrantCapabilities` in
+  capability list. The one sanctioned peer-grant derivation is `peerGrantCapabilities` in
   `src/domain/orchestrator.ts`: a peer an orchestrator creates through
-  `cyberdeck_orchestrator_create` gets its creator's list minus `orchestrator.create`, derived in
+  `cyberdeck_orchestrator_create` gets its creator's list unchanged, derived in
   that one function, and its controller identity still comes from the same total
-  `orchestratorController()`. Policy for that path (who may ask, scope narrowing, the live-peer
-  cap) lives in `src/orchestration/orchestrator-peer-service.ts`, never in the prompt (MIK-256).
+  `orchestratorController()`. The sanctioned narrowing is now the identity; any future narrowing
+  must go in `peerGrantCapabilities`. Broker policy (who may ask, scope narrowing, approval presence
+  and lineage) lives in `src/orchestration/orchestrator-peer-service.ts`; every create requires the
+  operator's express approval quoted verbatim, and creator and peer prompts require asking first.
+  Peers may create peers under that same rule without a live-peer cap or depth limit (MIK-257).
 
 - A directed handoff is the operator's own authority, and it is atomic. Fleet's ctrl+d marks
   workers and `/handoff` names a live Orc and a directive; the broker moves every named lease onto

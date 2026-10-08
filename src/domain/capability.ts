@@ -10,8 +10,8 @@ export const CyberdeckCapabilitySchema = z.enum([
   "orchestrator.stop",
   /**
    * Start a peer orchestrator through `cyberdeck_orchestrator_create`. Granted by default and
-   * never passed on: a peer created through that path receives its creator's grant minus this one
-   * entry, so creation is non-transitive by construction (MIK-256).
+   * passed on unchanged with its creator's other capabilities. Every create requires the operator's
+   * express approval, including a peer creating another peer (MIK-257).
    */
   "orchestrator.create",
   "workflow.run",

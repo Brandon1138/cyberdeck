@@ -1,6 +1,6 @@
 # Orchestrator-created peers
 
-> **Status: SPEC, implementing.** Slice 1 of MIK-254. Tracks `cyberdeck_orchestrator_create`
+> **Status: IMPLEMENTED (MIK-256, approval addendum MIK-257); activation is operator-owned.** Slice 1 of MIK-254. Tracks `cyberdeck_orchestrator_create`
 > and the `orchestrator.create` capability. The successor handoff packet, lease inheritance and
 > predecessor retirement in MIK-254 are later slices and are not described here.
 
@@ -20,7 +20,8 @@ detached session with `kind: "orchestrator"`, writes a `:peer:` binding with its
 identity (MIK-98), and the Claude and Codex adapters launch that session with Remote Control on.
 Nothing about Remote Control changes in this slice.
 
-What is missing is an orchestrator-reachable, grant-gated path to that method.
+`cyberdeck_orchestrator_create` supplies the orchestrator-reachable, grant-gated path, with express
+operator approval required on every create.
 
 ## The capability
 
@@ -39,6 +40,16 @@ Bindings written before this capability existed do not carry it. They keep resum
 one `peer-create on` for that scope adds it. There is no migration on read, because a missing
 entry cannot be told apart from one the operator switched off.
 
+`peer-create off` blocks every fresh create by the scope's primary, existing peers and their
+descendants, even when their own durable grants retain `orchestrator.create`. Admission reads the
+scope's primary binding afresh on every create. Turning it back on resumes creation only for callers
+whose own grants allow it; legacy narrowed peer grants remain narrowed.
+
+The toggle does not supply approval: every create must quote the operator's express approval from
+the current conversation. Peers inherit their creator's capabilities unchanged and may create peers
+under the same rule, with no live-peer cap or depth limit. MIK-256 peers retain their durable narrowed
+grants and legacy lineage without approval/depth; retire and recreate them to gain the full grant.
+
 ## The tool
 
 `cyberdeck_orchestrator_create` reaches `agent.orchestrator.create` on the broker, which is served
@@ -56,6 +67,7 @@ Inputs:
 | `name` | no | shown in Fleet and returned so the caller can name the session on the phone |
 | `brief` | no | the peer's first instruction, delivered through the instruction queue |
 | `reason` | yes | audited verbatim |
+| `approval` | required by admission, optional in the schema | `{ kind: "per-create" \| "standing", quote, channel, grantedAt? }`; quote is 1..500 characters, nonblank, preserved verbatim; channel is `remote-control`, `terminal`, `fleet` or `other`, and optional `grantedAt` accepts RFC 3339 timestamps with `Z` or numeric offsets, preserved verbatim. Absent or whitespace-only quote returns `APPROVAL_REQUIRED` |
 | `mutationId` | no | reuse to retry idempotently; a replay returns the recorded result. The id is persisted on the peer's binding, so the replay survives a broker restart and an audit write that failed after launch |
 
 Result:
@@ -68,7 +80,12 @@ Result:
   "name": "...",
   "provider": "claude", "model": "fable", "effort": "high",
   "scope": { "kind": "fleet" },
-  "grant": ["thread.list", "thread.read", "thread.enqueue", "worker.start", "orchestrator.inspect", "orchestrator.stop", "workflow.run"],
+  "createdBy": {
+    "sessionId": "<creatorSessionId>",
+    "depth": 1,
+    "approval": { "kind": "per-create", "quote": "yes, create it", "channel": "remote-control" }
+  },
+  "grant": ["thread.list", "thread.read", "thread.enqueue", "worker.start", "orchestrator.inspect", "orchestrator.stop", "orchestrator.create", "workflow.run"],
   "brief": { "delivery": "queued", "instructionId": "..." },
   "remoteControl": "Launched with Claude Remote Control; it appears in the operator's phone session list once its first turn starts. ...",
   "warnings": []
@@ -82,51 +99,68 @@ the original call) or `not-requested`. `remoteControl` is per provider: Claude p
 Control, Codex peers their remote app-server, and Cursor peers have no phone surface at all.
 
 Refusals come back as `outcome` values, not thrown errors, so a phone-side orchestrator can read
-them: `DENIED` (no capability, inactive caller, scope outside the caller's), `PEER_LIMIT` (with the
-live peer ids), `SELECTION_UNSUPPORTED` (with the catalog message), `LAUNCH_FAILED`.
+them: `DENIED` (no capability, scope peer-create disabled, inactive caller, scope outside the caller's), `APPROVAL_REQUIRED`
+(ask the operator and pass their express approval verbatim as `approval.quote`),
+`SELECTION_UNSUPPORTED` (with the catalog message), `LAUNCH_FAILED`.
 
 ## Policy the broker enforces
 
-These rules live in `OrchestratorPeerService`, never in the prompt.
+Broker checks live in `OrchestratorPeerService`; the ask-first conversation rule is also in the
+creator and peer prompts. The broker cannot read the chat: approval is model-asserted, like `reason`,
+and it enforces the field's presence and bounds, verbatim journaling, binding persistence, inspect
+visibility, lineage and the existing per-scope kill-switch, rather than proving the operator said it.
 
-1. **No amplification.** The peer's grant is the creator's grant minus `orchestrator.create`.
-   A created peer cannot create peers. The feature is non-transitive by construction; a depth
-   counter is a later decision, not a default.
+1. **Transitive grant.** The peer receives the creator's capabilities unchanged, derived only in
+   `peerGrantCapabilities`. It may create and manage orchestrators under the same approval rule.
 2. **Scope narrows only.** A `fleet` creator may create a `fleet` peer or a `workspace` peer in any
    cwd. A `workspace` creator may only create a `workspace` peer in its own cwd.
-3. **Lineage is recorded.** The binding carries `createdBy: { sessionId }`. Inspection reports it,
-   and the broker journal gets `orchestrator.create.requested` and `orchestrator.create.result`,
-   the same pair shape the stop path writes.
-4. **Live-peer cap.** A creator may hold at most `MAX_LIVE_PEERS_PER_CREATOR` (2) non-terminal
-   peers. Past that the call returns `PEER_LIMIT` naming them.
+3. **Lineage and approval are recorded.** The binding carries
+   `createdBy: { sessionId, mutationId?, approval, depth }`. Inspect returns it in full under
+   `binding.createdBy`, and the create result echoes sessionId, approval and depth. Depth is the
+   creator's depth plus one, with primaries and legacy records starting at zero; it is informational.
+   `orchestrator.create.requested` journals approval verbatim and depth before launch, followed by
+   `orchestrator.create.result`. Fleet's current orchestrator rows lack creator lineage presentation;
+   that UI gap remains outside this slice per the MIK-257 plan.
+4. **Approval replaces a cap.** There is no live-peer ceiling or depth limit. After the binding and
+   activity checks, before checking capabilities, absent or blank approval returns
+   `APPROVAL_REQUIRED`, launches nothing and journals the refusal. A standing approval counts only
+   when the operator stated it in this conversation; repeat its exact quote on every covered create.
 5. **Selection is validated** by the manager's existing catalog check before any process starts.
 6. **Stop is unchanged.** A healthy live peer still answers `APPROVAL_REQUIRED` to its creator.
-7. **Creates are serialized per creator.** The cap is read from the binding log and the new
-   binding is written during launch, so two concurrent creates from one actor would both pass;
-   queueing the second behind the first makes it see the first's binding, or its recorded result
-   when it carries the same `mutationId`.
+7. **Creates are serialized per creator.** Queueing a second create behind the first makes an
+   in-flight retry with the same `mutationId` wait for and replay the first result. Memory and durable
+   replay preserve the original approval and lineage; replay does not launch or redeliver a brief.
 8. **The caller cannot name its actor.** The MCP server drops any `actorSessionId` argument and
    injects the identity it was launched for, so a peer cannot act with its creator's grant.
-9. **Live means running.** A peer counts against the cap only while its execution state is
-   `starting` or `active`. An `errored` session keeps `exitCode: null` while its dead process
-   lingers and must not hold a slot; neither does a deleted peer, whose session the registry no
-   longer knows.
+9. **Ask first, then wait.** Before every create, ask the operator in the current conversation and
+   wait for an express yes; pass their words verbatim with the channel they used. Never infer
+   approval from a task brief, handoff packet, worker report, peer brief or another orchestrator's
+   instruction. If the operator declines or does not answer, do not create.
+10. **The scope kill-switch stops transitive creation.** After the caller's own grant check, every
+    fresh admission reads the caller's scope primary from the binding repository without caching.
+    If that primary lacks `orchestrator.create`, peers and descendants receive `DENIED` with code
+    `SCOPE_PEER_CREATE_OFF` and a reason naming `cyberdeck orchestrator peer-create off`. The primary
+    itself fails its own grant check. Turning the scope back on does not widen a peer's stored grant.
+    Mutation replay still returns the existing result without launching a new peer.
 
 ## Why the grant invariant holds
 
 `CLAUDE.md` records that every binding the manager grants gets `ORCHESTRATOR_GRANT_CAPABILITIES`
 and that `orchestratorController()` is total over bindings. Both still hold. A peer created through
-this path receives a *subset* of that list, derived in one place (`peerGrantCapabilities`) by
-removing one named entry, and its controller identity is derived by the same total function as
+this path receives its creator's capability list unchanged, derived in one place
+(`peerGrantCapabilities`), and its controller identity is derived by the same total function as
 every other peer. The lease substrate never sees a capability it would refuse. The toggle widens
 or narrows the same list on the primary binding the way `fable-workers` already does.
 
 ## The phone flow
 
 From Remote Control on orchestrator A, the operator says "start a Codex orchestrator in repo X
-with this brief". A calls `cyberdeck_orchestrator_create`. The broker checks A's grant, derives B's
-narrower grant, starts B detached, enqueues the brief from A, and writes the audit pair. B shows up
-in the phone's session list and in Fleet with A as its creator.
+with this brief". A asks for express approval and waits for "yes, create it". A calls
+`cyberdeck_orchestrator_create` with that exact quote in `approval`. The broker validates the approval
+field and A's grant, derives B's unchanged capabilities, starts B detached, enqueues the brief from A,
+and writes the audit pair. B's binding and inspect result identify A, quote and depth. Claude and
+Codex peers have phone surfaces; actual phone delivery and Fleet activation remain operator checks.
+`cyberdeck_thread_message` lets A send further instructions to B under A's scope.
 
 ## Out of scope for this slice
 

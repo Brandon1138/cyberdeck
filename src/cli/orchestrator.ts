@@ -59,11 +59,11 @@ export function registerOrchestratorCommands(program: Command, context: CliProgr
         ...(mode === "status" ? {} : { enabled: mode === "on" }),
       });
       if (!result.configured) {
-        process.stdout.write(`Peer create: OFF · no orchestrator bound for ${result.key}\n`);
+        process.stdout.write(`Peer create: OFF · no orchestrator bound for ${result.key} · approval: required per create (operator quote journaled)\n`);
         return;
       }
       process.stdout.write(
-        `Peer create: ${result.enabled ? "ON" : "OFF"} · ${result.key} · ${result.sessionId}\n`,
+        `Peer create: ${result.enabled ? "ON" : "OFF"} · ${result.key} · ${result.sessionId} · approval: required per create (operator quote journaled)\n`,
       );
     });
 
@@ -83,5 +83,4 @@ export function registerOrchestratorCommands(program: Command, context: CliProgr
     });
 
 }
-
 

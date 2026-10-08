@@ -47,6 +47,8 @@ export interface FleetThread {
    * lease, not the roster, is what says who owns a worker.
    */
   controllerId?: string;
+  /** The creator of a peer orchestrator, projected without private approval or mutation metadata. */
+  createdBy?: { sessionId: string };
 }
 
 export interface FleetSnapshot {

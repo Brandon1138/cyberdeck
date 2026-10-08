@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   ORCHESTRATOR_GRANT_CAPABILITIES,
   OrchestratorBindingSchema,
+  PeerApprovalSchema,
+  peerGrantCapabilities,
   orchestratorController,
   peerOrchestratorKey,
   primaryOrchestratorKey,
@@ -73,6 +75,45 @@ describe("OrchestratorBindingSchema", () => {
 
   it("refuses an explicit peer whose key lacks its structural session suffix", () => {
     expect(() => OrchestratorBindingSchema.parse(record({ key: "fleet", kind: "peer" }))).toThrow();
+  });
+
+  it("reads MIK-256 lineage without approval or depth and preserves its durable narrowed grant", () => {
+    const createdBy = { sessionId: PRIMARY_SESSION, mutationId: "legacy" };
+    const legacy = OrchestratorBindingSchema.parse(record({
+      key: PEER_KEY, kind: "peer", sessionId: PEER_SESSION, createdBy,
+      grant: { subjectSessionId: PEER_SESSION, capabilities: ["thread.enqueue"], scope: { kind: "fleet" } },
+    }));
+    expect(legacy.createdBy).toEqual(createdBy);
+    expect(legacy.grant.capabilities).toEqual(["thread.enqueue"]);
+  });
+
+  it.each([-1, 1.5])("rejects invalid lineage depth %s", (depth) => {
+    expect(OrchestratorBindingSchema.safeParse(record({ createdBy: { sessionId: PRIMARY_SESSION, depth } })).success).toBe(false);
+  });
+});
+
+describe("PeerApprovalSchema", () => {
+  const approval = { kind: "per-create", quote: " yes, create it ", channel: "remote-control", grantedAt: "2026-10-08T12:00:00.000Z" };
+
+  it("preserves the operator's exact words while accepting the maximum quote length", () => {
+    expect(PeerApprovalSchema.parse(approval)).toEqual(approval);
+    expect(PeerApprovalSchema.parse({ ...approval, quote: "x".repeat(500) }).quote).toHaveLength(500);
+  });
+
+  it.each([
+    { quote: "" }, { quote: " \t\n " }, { quote: "x".repeat(501) },
+    { kind: "inferred" }, { channel: "worker-report" }, { grantedAt: "yesterday" },
+  ])("rejects invalid approval field %j", (invalid) => {
+    expect(PeerApprovalSchema.safeParse({ ...approval, ...invalid }).success).toBe(false);
+  });
+
+  it("copies the creator's full capability list without mutating it", () => {
+    const creator = [...ORCHESTRATOR_GRANT_CAPABILITIES];
+    const peer = peerGrantCapabilities(creator);
+    expect(peer).toEqual(creator);
+    expect(peer).not.toBe(creator);
+    peer.pop();
+    expect(creator).toEqual(ORCHESTRATOR_GRANT_CAPABILITIES);
   });
 });
 

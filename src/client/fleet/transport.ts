@@ -19,7 +19,7 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
   const orchestratorOwnership = new Map(
     (await client.request<FleetOrchestratorOwnershipView[]>("fleet.orchestratorOwnership", {})
       .catch(() => []))
-      .map((entry) => [entry.sessionId, entry.controllerId] as const),
+      .map((entry) => [entry.sessionId, entry] as const),
   );
   // Undefined rather than empty when the broker has no registry: an empty list is an answer, and
   // grouping every thread under "Unregistered" is the wrong answer to a question nobody asked.
@@ -27,11 +27,12 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
     .then((roots) => roots as readonly string[] | undefined, () => undefined);
   const threads = sessions.map((record): FleetThread => {
     const workerCoordination = coordinationBySession.get(record.id);
-    const controllerId = orchestratorOwnership.get(record.id);
+    const ownership = orchestratorOwnership.get(record.id);
     return {
       record,
       ...(workerCoordination === undefined ? {} : { coordination: workerCoordination }),
-      ...(controllerId === undefined ? {} : { controllerId }),
+      ...(ownership === undefined ? {} : { controllerId: ownership.controllerId }),
+      ...(ownership?.createdBy === undefined ? {} : { createdBy: ownership.createdBy }),
     };
   });
   return {
@@ -94,4 +95,3 @@ export async function startFleetSession(
     approvalMode: "auto",
   });
 }
-

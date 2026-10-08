@@ -33,12 +33,19 @@ export interface FleetWorkerCoordinationView {
 export interface FleetOrchestratorOwnershipView {
   sessionId: string;
   controllerId: string;
+  /** The orchestrator that created this peer through cyberdeck_orchestrator_create, when recorded. */
+  createdBy?: { sessionId: string };
 }
 
 
 /** Display data only. Full launch details remain available through session.get. */
 export interface FleetProjectionSnapshot {
-  threads: Array<{ record: SessionRecord; coordination?: FleetWorkerCoordinationView; controllerId?: string }>;
+  threads: Array<{
+    record: SessionRecord;
+    coordination?: FleetWorkerCoordinationView;
+    controllerId?: string;
+    createdBy?: { sessionId: string };
+  }>;
   projects?: readonly string[];
 }
 export type FleetProjectionReply =

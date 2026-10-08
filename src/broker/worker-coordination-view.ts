@@ -62,5 +62,8 @@ export function fleetOrchestratorOwnership(
   return bindings.map((binding) => ({
     sessionId: binding.sessionId,
     controllerId: orchestratorControllerId(binding.key),
+    ...(binding.kind !== "peer" || binding.createdBy === undefined
+      ? {}
+      : { createdBy: { sessionId: binding.createdBy.sessionId } }),
   }));
 }

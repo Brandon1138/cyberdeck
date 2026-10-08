@@ -4,7 +4,8 @@ import { grantAllows, type CyberdeckCapability } from "../domain/capability.js";
 import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
 import type { InstructionRecord } from "../domain/instruction.js";
 import {
-  MAX_LIVE_PEERS_PER_CREATOR,
+  PeerApprovalSchema,
+  orchestratorKey,
   peerGrantCapabilities,
   type CreatePeerOrchestratorRequest,
   type OrchestratorBinding,
@@ -18,7 +19,7 @@ import {
 } from "../domain/session.js";
 import type { EnqueueInstructionParamsSchema } from "./instruction-queue.js";
 import type { OrchestratorManagerResult } from "./orchestrator-manager.js";
-import type { OrchestratorBindingLookup } from "./persistence-ports.js";
+import type { OrchestratorBindingReader } from "./persistence-ports.js";
 import type { SessionLookupPort } from "./session/session-ports.js";
 
 /** Long enough for a real brief, short enough that a transcript cannot be pasted in as one. */
@@ -34,10 +35,18 @@ export const AgentCreateOrchestratorParamsSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   brief: z.string().trim().min(1).max(PEER_BRIEF_MAX_CHARS).optional(),
   reason: z.string().trim().min(1).max(500),
+  // Blank quotes are readable approval refusals, just like an absent approval.
+  approval: z.preprocess((approval) => {
+    if (approval !== null && typeof approval === "object" && "quote" in approval
+      && typeof approval.quote === "string" && approval.quote.trim().length === 0) return undefined;
+    return approval;
+  }, PeerApprovalSchema.optional()),
   mutationId: z.string().min(1).max(200).optional(),
 });
 
-export type AgentCreateOrchestratorParams = z.input<typeof AgentCreateOrchestratorParamsSchema>;
+export type AgentCreateOrchestratorParams = Omit<z.input<typeof AgentCreateOrchestratorParamsSchema>, "approval"> & {
+  approval?: z.input<typeof PeerApprovalSchema> | undefined;
+};
 
 /**
  * How the brief reached the peer. `queued` is the honest ceiling: the broker holds it and will
@@ -73,7 +82,7 @@ export type OrchestratorCreateResult =
     model: string;
     effort?: string;
     scope: OrchestratorScope;
-    createdBy: string;
+    createdBy: Pick<NonNullable<OrchestratorBinding["createdBy"]>, "sessionId" | "depth" | "approval">;
     grant: CyberdeckCapability[];
     brief: PeerBriefDelivery;
     remoteControl: string;
@@ -81,22 +90,15 @@ export type OrchestratorCreateResult =
     retrieval?: "replay";
   }
   | {
-    outcome: "DENIED" | "SELECTION_UNSUPPORTED" | "LAUNCH_FAILED";
+    outcome: "DENIED" | "APPROVAL_REQUIRED" | "SELECTION_UNSUPPORTED" | "LAUNCH_FAILED";
     reason: string;
     code?: string;
-    retrieval?: "replay";
-  }
-  | {
-    outcome: "PEER_LIMIT";
-    reason: string;
-    livePeerIds: string[];
-    limit: number;
     retrieval?: "replay";
   };
 
 export interface OrchestratorPeerServiceDeps {
   registry: SessionLookupPort;
-  bindings: OrchestratorBindingLookup & { list(): Promise<OrchestratorBinding[]> };
+  bindings: OrchestratorBindingReader & { list(): Promise<OrchestratorBinding[]> };
   manager: {
     createPeer(input: CreatePeerOrchestratorRequest): Promise<OrchestratorManagerResult>;
   };
@@ -105,7 +107,6 @@ export interface OrchestratorPeerServiceDeps {
   };
   audit?: { append(event: BrokerEvent): Promise<void> };
   now?: () => number;
-  maxLivePeers?: number;
 }
 
 type ParsedCreate = z.output<typeof AgentCreateOrchestratorParamsSchema>;
@@ -113,27 +114,22 @@ type ParsedCreate = z.output<typeof AgentCreateOrchestratorParamsSchema>;
 /**
  * The one path from an orchestrator's MCP tools to a new orchestrator (MIK-256).
  *
- * Policy lives here, never in the prompt: who may ask, what scope the peer may take, how many may
- * be alive at once, and what the peer is granted. The manager only launches and records what this
+ * Broker policy lives here: who may ask, approval presence, scope and the peer's grant. The prompt
+ * requires asking the operator; the broker cannot read that conversation. The manager records what this
  * decided. Refusals are outcomes rather than thrown errors so a caller steering from a phone can
  * read them and act, the same way the stop path answers.
  */
 export class OrchestratorPeerService {
   private readonly replays = new Map<string, OrchestratorCreateResult>();
   /**
-   * One create at a time per creator. The live-peer cap is read from the binding log and the new
-   * binding is written during launch, so two creates racing from one actor would both count the
-   * same peers and both pass; a retry carrying the same `mutationId` while the first is still in
-   * flight would start a second peer for the same intent. Queueing behind the actor's previous
-   * create closes both: the second sees the first's binding, or its recorded result.
+   * One create at a time per creator. A retry carrying the same `mutationId` while the first is
+   * still in flight must wait for its binding or recorded result rather than launch a second peer.
    */
   private readonly inFlight = new Map<string, Promise<unknown>>();
   private readonly now: () => number;
-  private readonly maxLivePeers: number;
 
   constructor(private readonly deps: OrchestratorPeerServiceDeps) {
     this.now = deps.now ?? Date.now;
-    this.maxLivePeers = deps.maxLivePeers ?? MAX_LIVE_PEERS_PER_CREATOR;
   }
 
   async create(input: AgentCreateOrchestratorParams): Promise<OrchestratorCreateResult> {
@@ -176,7 +172,11 @@ export class OrchestratorPeerService {
       model: existing.model ?? request.model,
       ...(existing.effort === undefined ? {} : { effort: existing.effort }),
       scope: existing.scope,
-      createdBy: request.actorSessionId,
+      createdBy: {
+        sessionId: existing.createdBy!.sessionId,
+        ...(existing.createdBy!.depth === undefined ? {} : { depth: existing.createdBy!.depth }),
+        ...(existing.createdBy!.approval === undefined ? {} : { approval: existing.createdBy!.approval }),
+      },
       grant: [...existing.grant.capabilities],
       brief: {
         delivery: "replayed",
@@ -193,10 +193,25 @@ export class OrchestratorPeerService {
   private async decide(request: ParsedCreate): Promise<OrchestratorCreateResult> {
     const actor = request.actorSessionId;
     const refusal = await this.admission(request);
-    if (refusal !== undefined) return this.record(request, refusal);
+    // Admission has not reached the manager. Keep it out of the replay map so the caller can reuse
+    // its mutationId after obtaining approval or a changed operator toggle; a missing approval is
+    // still journaled, because an unapproved attempt is exactly what the operator wants to see.
+    if (refusal !== undefined) {
+      if (refusal.outcome === "APPROVAL_REQUIRED") {
+        await this.appendAudit("orchestrator.create.result", actor, {
+          actorSessionId: actor,
+          reason: request.reason,
+          outcome: refusal.outcome,
+          detail: refusal.reason,
+        });
+      }
+      return refusal;
+    }
 
     const binding = (await this.deps.bindings.findBySessionId(actor))!;
     const capabilities = peerGrantCapabilities(binding.grant.capabilities);
+    const depth = (binding.createdBy?.depth ?? 0) + 1;
+    const approval = request.approval!;
     const selection = {
       provider: request.provider,
       model: request.model,
@@ -211,6 +226,8 @@ export class OrchestratorPeerService {
       ...(request.name === undefined ? {} : { name: request.name }),
       ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
       capabilities,
+      approval,
+      depth,
       briefRequested: request.brief !== undefined,
     });
 
@@ -221,6 +238,8 @@ export class OrchestratorPeerService {
         ...(request.name === undefined ? {} : { name: request.name }),
         createdBy: {
           sessionId: actor,
+          approval,
+          depth,
           ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
         },
         capabilities,
@@ -255,7 +274,7 @@ export class OrchestratorPeerService {
       model: request.model,
       ...(created.binding.effort === undefined ? {} : { effort: created.binding.effort }),
       scope: created.binding.scope,
-      createdBy: actor,
+      createdBy: { sessionId: actor, depth, approval },
       grant: [...created.binding.grant.capabilities],
       brief: { delivery: "not-requested" },
       remoteControl: peerRemoteControlNote(created.binding.provider),
@@ -289,6 +308,12 @@ export class OrchestratorPeerService {
     if (record?.kind !== "orchestrator" || record.executionState !== "active" || record.exitCode !== null) {
       return { outcome: "DENIED", code: "ACTOR_NOT_ACTIVE", reason: `${actor} is not an active Cyberdeck orchestrator` };
     }
+    if (request.approval === undefined) {
+      return {
+        outcome: "APPROVAL_REQUIRED",
+        reason: "ask the operator in your current conversation and pass their express approval verbatim as approval.quote",
+      };
+    }
     // `grantAllows` already narrows a workspace creator to its own cwd; the one case it cannot see
     // is a workspace creator asking for a fleet peer, whose cwd matches but whose reach does not.
     if (!grantAllows(binding.grant, "orchestrator.create", { cwd: request.cwd })) {
@@ -298,20 +323,21 @@ export class OrchestratorPeerService {
         reason: "orchestrator.create is outside this orchestrator's grant; the operator can run `cyberdeck orchestrator peer-create on`",
       };
     }
+    // The operator toggle writes only the scope's primary. Read it fresh for every admission:
+    // peers and descendants retain their own grants, but must obey that durable scope hard stop.
+    const primary = await this.deps.bindings.get(orchestratorKey(binding.scope));
+    if (primary !== undefined && !primary.grant.capabilities.includes("orchestrator.create")) {
+      return {
+        outcome: "DENIED",
+        code: "SCOPE_PEER_CREATE_OFF",
+        reason: "Peer creation is disabled for this scope by `cyberdeck orchestrator peer-create off`; the operator can run `cyberdeck orchestrator peer-create on`",
+      };
+    }
     if (binding.scope.kind === "workspace" && request.scope === "fleet") {
       return {
         outcome: "DENIED",
         code: "SCOPE_WIDENS",
         reason: `A workspace orchestrator may only create peers in its own workspace ${binding.scope.cwd}, not fleet-wide`,
-      };
-    }
-    const livePeerIds = await this.livePeerIds(actor);
-    if (livePeerIds.length >= this.maxLivePeers) {
-      return {
-        outcome: "PEER_LIMIT",
-        reason: `${actor} already holds ${livePeerIds.length} live peer orchestrator(s); stop or wait on one before creating another`,
-        livePeerIds,
-        limit: this.maxLivePeers,
       };
     }
     return undefined;
@@ -354,22 +380,6 @@ export class OrchestratorPeerService {
     }
   }
 
-  /**
-   * Peers this creator asked for that are still running. Live means the execution state says so:
-   * an `errored` session keeps `exitCode: null` while its unusable process lingers, so judging by
-   * the exit code alone would let two errored peers hold their creator's slots forever. A binding
-   * whose session the registry no longer knows was deleted by the operator, which is terminal; it
-   * is not a peer that is still starting, because creates from one actor are serialized and the
-   * binding is written inside the launch the registry already holds a record for.
-   */
-  private async livePeerIds(creator: string): Promise<string[]> {
-    const bindings = await this.deps.bindings.list();
-    return bindings
-      .filter((binding) => binding.createdBy?.sessionId === creator)
-      .map((binding) => binding.sessionId)
-      .filter((sessionId) => isLiveSession(this.sessionRecord(sessionId)));
-  }
-
   private sessionRecord(sessionId: string): SessionRecord | undefined {
     try {
       return this.deps.registry.get(sessionId);
@@ -395,9 +405,4 @@ export class OrchestratorPeerService {
 
 function replayKey(request: ParsedCreate): string {
   return `${request.actorSessionId}:${request.mutationId}`;
-}
-
-function isLiveSession(record: SessionRecord | undefined): boolean {
-  if (record === undefined || record.exitCode !== null) return false;
-  return record.executionState === "active" || record.executionState === "starting";
 }
