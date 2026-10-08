@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -893,13 +893,17 @@ function violationKey(violation: Violation): string {
   return `${violation.from} imports ${violation.to}`;
 }
 
-function currentViolations(): Violation[] {
+function currentViolations(additionalSources: ReadonlyMap<string, string> = new Map()): Violation[] {
   const violations = new Map<string, Violation>();
 
-  for (const importer of sourceFiles(SOURCE_ROOT)) {
+  for (const importer of [...sourceFiles(SOURCE_ROOT), ...additionalSources.keys()]) {
     const importerLayer = layerFor(importer);
 
-    for (const specifier of staticModuleSpecifiers(importer)) {
+    const additionalSource = additionalSources.get(importer);
+    const specifiers = additionalSource === undefined
+      ? staticModuleSpecifiers(importer)
+      : staticModuleSpecifiersFromSource(additionalSource);
+    for (const specifier of specifiers) {
       const forbidden = importerLayer === "domain"
         ? forbiddenDomainModule(specifier)
         : undefined;
@@ -1129,27 +1133,24 @@ describe("architecture dependency rule", () => {
       SOURCE_ROOT,
       "domain/dependency-rule-bare-builtins-regression.ts",
     );
-    writeFileSync(regressionFile, [
+    const source = [
       'import "fs";',
       'import "fs/promises";',
       'import "child_process";',
       'import "cluster";',
       'import "worker_threads";',
-    ].join("\n"));
+    ].join("\n");
 
-    try {
-      expect(
-        currentViolations().filter((violation) => violation.from === sourcePath(regressionFile)),
-      ).toEqual([
-        { from: sourcePath(regressionFile), to: "node:child_process" },
-        { from: sourcePath(regressionFile), to: "node:cluster" },
-        { from: sourcePath(regressionFile), to: "node:fs" },
-        { from: sourcePath(regressionFile), to: "node:fs/promises" },
-        { from: sourcePath(regressionFile), to: "node:worker_threads" },
-      ]);
-    } finally {
-      rmSync(regressionFile, { force: true });
-    }
+    expect(
+      currentViolations(new Map([[regressionFile, source]]))
+        .filter((violation) => violation.from === sourcePath(regressionFile)),
+    ).toEqual([
+      { from: sourcePath(regressionFile), to: "node:child_process" },
+      { from: sourcePath(regressionFile), to: "node:cluster" },
+      { from: sourcePath(regressionFile), to: "node:fs" },
+      { from: sourcePath(regressionFile), to: "node:fs/promises" },
+      { from: sourcePath(regressionFile), to: "node:worker_threads" },
+    ]);
   }, WHOLE_TREE_WALK_TIMEOUT_MS);
 
   it("keeps baseline sorted and unique", () => {
