@@ -80,6 +80,7 @@ export class ContainerProviderAdapter implements ProviderAdapter {
     const text = session?.executor === "orbstack-container" ? `\u001b[200~${message}\u001b[201~` : message;
     return this.host.submitInput?.(text) ?? Buffer.from(`${text}\n`);
   }
+  submitKey(): Buffer { return this.host.submitKey?.() ?? Buffer.from("\r"); }
   deferInitialPrompt(session: SessionRecord): boolean { return this.host.deferInitialPrompt?.(session) ?? false; }
   async initializeSession(session: SessionRecord, terminal: Parameters<NonNullable<ProviderAdapter["initializeSession"]>>[1]): Promise<void> {
     await this.host.initializeSession?.(session, terminal);

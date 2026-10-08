@@ -36,10 +36,13 @@ function currentFrame(replay: string): string {
  */
 const UNSENT_BUFFER_HINTS: Readonly<Record<string, readonly RegExp[]>> = {
   claude: [/^tab to queue message$/iu, /^\d+ queued messages?$/iu],
-  // Codex and the rest have no verified hint of their own; they fall through to the boxed-composer
-  // reading below. Adding a guess here would be worse than nothing: it would make `occupied` fire on
-  // ordinary chrome and hold every instruction the broker was asked to deliver.
-  codex: [],
+  // Codex prints the same hint at the left of its footer line, only while the composer holds a
+  // draft (`tui/src/bottom_pane/footer.rs`, `FooterMode::ComposerHasDraft`). The right side of that
+  // line carries the context meter, so the hint is anchored to the line start rather than matched
+  // whole. Cursor and Antigravity have no verified hint of their own; they fall through to the
+  // composer readings below. Adding a guess here would be worse than nothing: it would make
+  // `occupied` fire on ordinary chrome and hold every instruction the broker was asked to deliver.
+  codex: [/^tab to queue(?: message)?\b/iu],
   cursor: [],
   antigravity: [],
 };
@@ -52,6 +55,25 @@ const UNSENT_BUFFER_HINTS: Readonly<Record<string, readonly RegExp[]>> = {
  * not sent" from "text you already sent", and is the only reason this can be read at all.
  */
 const BOXED_COMPOSER_LINE = /^[│┃┆┊║▌▏▕]\s*(?:›|❯|>)\s+(\S.*?)\s*[│┃┆┊║▌▏▕]?$/u;
+
+/**
+ * Codex's composer, which has no box at all.
+ *
+ * Since 0.1xx Codex draws its input line as a bare `› ` prompt, and it draws every *submitted*
+ * prompt in the history with the very same glyph (`tui/src/history_cell/messages.rs`). The glyph
+ * therefore says nothing on its own; position does. The composer is the bottom-most thing on the
+ * screen above the footer, so the reading below walks up from the footer and accepts a `›` line only
+ * when nothing but the composer's own wrapped continuation lines sit between them. A `›` line with
+ * an assistant answer under it is history and is never read as unsent text.
+ */
+const BARE_COMPOSER_LINE = /^›\s+(\S.*)$/u;
+
+/** Footer chrome Codex draws under its composer: hints, the context meter, the status line. */
+const CODEX_FOOTER_LINE =
+  /(?:% context left|\btokens? used\b|\d+[KkMm]? used\b|tab to queue|\? for shortcuts|\bfor agents\b|again to quit|to edit previous message|reverse-i-search|Plan mode|IDE context|⚠|·)/iu;
+
+/** How many wrapped continuation lines of one composer draft the bare reading walks through. */
+const BARE_COMPOSER_MAX_CONTINUATIONS = 12;
 
 /**
  * Placeholder text a provider paints into an *empty* composer.
@@ -106,6 +128,19 @@ export function frameComposerState(
   // every observed frame, so it walks the lines rather than building a trimmed copy of them first.
   const first = Math.max(0, lines.length - COMPOSER_SCAN_LINES);
 
+  // The composer's own line is read before any hint beside it: a hint proves something is unsent,
+  // the line says what, and the engine needs the what before it will press Enter on it.
+  if (provider === "codex") {
+    const bare = bareComposerContent(lines, first);
+    if (bare !== undefined) {
+      if (COMPOSER_PLACEHOLDERS.some((placeholder) => placeholder.test(bare))) {
+        return { modalOpen, occupied: false };
+      }
+      const content = bare.slice(0, 120);
+      return { modalOpen, occupied: true, evidence: content, content };
+    }
+  }
+
   for (const hint of UNSENT_BUFFER_HINTS[provider] ?? []) {
     for (let index = lines.length - 1; index >= first; index -= 1) {
       const line = lines[index]!.trim();
@@ -119,8 +154,36 @@ export function frameComposerState(
     const content = BOXED_COMPOSER_LINE.exec(lines[index]!.trim())?.[1];
     if (content === undefined) continue;
     if (COMPOSER_PLACEHOLDERS.some((placeholder) => placeholder.test(content))) break;
-    return { modalOpen, occupied: true, evidence: content.slice(0, 120) };
+    const bounded = content.slice(0, 120);
+    return { modalOpen, occupied: true, evidence: bounded, content: bounded };
   }
 
   return { modalOpen, occupied: false };
+}
+
+/**
+ * The text on Codex's bare `›` input line, or undefined when the bottom of the frame is not a
+ * composer at all (a picker, a dialog, an older boxed layout).
+ *
+ * Walks up from the bottom: blank lines and footer chrome are skipped, indented lines are taken as
+ * the draft's own wrapped continuations, and the first flush-left line decides. Only a `›` line
+ * there is the composer; anything else means the composer is not where it would have to be.
+ */
+function bareComposerContent(lines: readonly string[], first: number): string | undefined {
+  let continuations = 0;
+  for (let index = lines.length - 1; index >= first; index -= 1) {
+    const raw = lines[index]!;
+    const line = raw.trim();
+    // The prompt glyph decides before any footer word can: a draft that mentions `Plan mode` or
+    // carries a `·` is still the composer, and skipping it would leave the instruction unverified.
+    const bare = BARE_COMPOSER_LINE.exec(line);
+    if (bare !== undefined && bare !== null) return bare[1]!;
+    if (line === "" || CODEX_FOOTER_LINE.test(line)) continue;
+    if (/^\s/u.test(raw) && continuations < BARE_COMPOSER_MAX_CONTINUATIONS) {
+      continuations += 1;
+      continue;
+    }
+    return undefined;
+  }
+  return undefined;
 }

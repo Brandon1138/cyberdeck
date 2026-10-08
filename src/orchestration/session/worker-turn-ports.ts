@@ -131,6 +131,8 @@ export interface RenderedWorkerInstruction {
 export interface SubmitWorkerInstruction {
   message: string;
   encoded: Buffer | (() => Buffer);
+  /** The provider's bare submit keystroke, pressed again if the composer is later seen still holding the text. */
+  submitKey?: Buffer;
   source: "orchestrator" | "worker" | "broker";
   metadata?: Record<string, unknown>;
   instructionId?: string;

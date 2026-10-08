@@ -14,6 +14,18 @@ export interface RenderedInstruction {
   expectedTurn: number;
   renderedAt: string;
   state: InstructionLifecycleState;
+  /**
+   * The head of the message as written, normalized the way the composer reading normalizes what
+   * it sees. Submit verification presses Enter only for a composer whose content matches this;
+   * an entry restored without one (older persisted records) is never pressed for.
+   */
+  messageHead?: string;
+  /** The message's length, so a provider's `[Pasted Content N chars]` placeholder can stand for it. */
+  messageLength?: number;
+  /** The provider's bare submit keystroke; absent means a carriage return. */
+  submitKey?: Buffer;
+  /** How many times verification has pressed Enter for this entry. */
+  submitPresses?: number;
 }
 
 export interface StallObservation {

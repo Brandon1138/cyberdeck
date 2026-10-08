@@ -178,6 +178,121 @@ describe("WorkerTurnEngine", () => {
     expect(engine.waitResult(1)).toMatchObject({ status: "working" });
   });
 
+  describe("submit verification", () => {
+    const ENTER = Buffer.from("\u001b[13u");
+    const instruction = (instructionId = "i-standby") => ({
+      message: "Standby. Reply with one line confirming you are on standby.",
+      encoded: Buffer.from("\u001b[200~Standby. Reply with one line confirming you are on standby.\u001b[201~\u001b[13u"),
+      submitKey: ENTER,
+      source: "orchestrator" as const,
+      instructionId,
+    });
+
+    function idleHarness() {
+      vi.useFakeTimers();
+      const h = harness();
+      h.observations.activity = "awaiting-input";
+      h.engine.appendOutput(Buffer.from("› Ask Codex to do anything"), h.replay);
+      return h;
+    }
+
+    it("presses Enter again when the composer still shows the instruction it wrote", async () => {
+      const { engine, observations, writes, effects } = idleHarness();
+      await expect(engine.submitInstruction(instruction())).resolves.toMatchObject({ state: "rendered" });
+      expect(writes).toHaveLength(1);
+      // The screen from MIK-260: the text landed, the Enter did not.
+      observations.composer = { occupied: true, modalOpen: false, content: "Standby. Reply with one line confirming you are on" };
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(writes).toHaveLength(2);
+      expect(writes[1]).toEqual(ENTER);
+      expect(effects.appendEvent).toHaveBeenCalledWith("session.input", expect.objectContaining({
+        source: "broker", resubmit: true, instructionId: "i-standby",
+      }));
+
+      // The press worked: the composer cleared, so nothing more is pressed.
+      observations.composer = { occupied: false, modalOpen: false };
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(writes).toHaveLength(2);
+    });
+
+    it("stops after two extra presses and says so", async () => {
+      const { engine, observations, writes } = idleHarness();
+      await engine.submitInstruction(instruction());
+      observations.composer = { occupied: true, modalOpen: false, content: "Standby. Reply with one line" };
+
+      await vi.advanceTimersByTimeAsync(1_500 * 4);
+      expect(writes).toHaveLength(3);
+      expect(engine.projectTruth()).toMatchObject({ pendingInstructions: 1, composerOccupied: true });
+    });
+
+    it("never submits text it did not write", async () => {
+      const { engine, observations, writes } = idleHarness();
+      await engine.submitInstruction(instruction());
+      observations.composer = { occupied: true, modalOpen: false, content: "the operator typed this draft" };
+
+      await vi.advanceTimersByTimeAsync(1_500 * 3);
+      expect(writes).toHaveLength(1);
+    });
+
+    it("never presses Enter at a dialog, but checks again once it clears", async () => {
+      const { engine, observations, writes } = idleHarness();
+      await engine.submitInstruction(instruction());
+      observations.composer = { occupied: true, modalOpen: true, content: "Standby. Reply with one line" };
+      await vi.advanceTimersByTimeAsync(1_500 * 2);
+      expect(writes).toHaveLength(1);
+
+      observations.composer = { occupied: true, modalOpen: false, content: "Standby. Reply with one line" };
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(writes).toHaveLength(2);
+      expect(writes[1]).toEqual(ENTER);
+    });
+
+    it("never presses Enter on a hint-only reading", async () => {
+      const { engine, observations, writes } = idleHarness();
+      await engine.submitInstruction(instruction());
+      observations.composer = { occupied: true, modalOpen: false, evidence: "tab to queue message" };
+      await vi.advanceTimersByTimeAsync(1_500 * 3);
+      expect(writes).toHaveLength(1);
+    });
+
+    it("gives up checking a dialog that never clears", async () => {
+      const { engine, observations, writes } = idleHarness();
+      await engine.submitInstruction(instruction());
+      observations.composer = { occupied: true, modalOpen: true, content: "Standby. Reply with one line" };
+      await vi.advanceTimersByTimeAsync(1_500 * 12);
+      observations.composer = { occupied: true, modalOpen: false, content: "Standby. Reply with one line" };
+      await vi.advanceTimersByTimeAsync(1_500 * 2);
+      expect(writes).toHaveLength(1);
+    });
+
+    it("waits out a running turn before deciding", async () => {
+      const { engine, observations, replay, writes } = idleHarness();
+      await engine.submitInstruction(instruction());
+      observations.composer = { occupied: true, modalOpen: false, content: "Standby. Reply with one line" };
+      observations.activity = "working";
+      engine.appendOutput(Buffer.from("Working"), replay);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(writes).toHaveLength(1);
+
+      observations.activity = "awaiting-input";
+      engine.appendOutput(Buffer.from("idle again"), replay);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(writes).toHaveLength(2);
+      expect(writes[1]).toEqual(ENTER);
+    });
+
+    it("accepts a provider's large-paste placeholder as the instruction it wrote", async () => {
+      const { engine, observations, writes } = idleHarness();
+      const message = `Review every file in this list:\n${"- src/file.ts\n".repeat(80)}`;
+      await engine.submitInstruction({ ...instruction(), message });
+      observations.composer = { occupied: true, modalOpen: false, content: "[Pasted Content 1125 chars]" };
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(writes).toHaveLength(2);
+    });
+  });
+
   it("holds delivery at a provider modal without writing", async () => {
     const { engine, observations, writes } = harness();
     observations.composer = { occupied: false, modalOpen: true };

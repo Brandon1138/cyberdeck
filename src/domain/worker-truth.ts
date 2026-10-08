@@ -125,6 +125,12 @@ export interface ComposerObservation {
   occupied: boolean;
   /** The exact rendered line that proved `occupied`, for diagnostics. */
   evidence?: string;
+  /**
+   * The text read out of the input line itself, when `occupied` was proved by reading it rather
+   * than by a hint beside it. This is what the broker compares against the instruction it rendered
+   * before it presses Enter again: a hint says *something* is unsent, the content says *what*.
+   */
+  content?: string;
 }
 
 export interface WorkerTruthInput {
