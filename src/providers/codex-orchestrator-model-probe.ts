@@ -4,18 +4,25 @@ import {
 } from "../orchestration/worker-capability-catalog.js";
 import { CODEX_ORCHESTRATOR_CONFIG_ARGS } from "./codex-orchestrator-config.js";
 import { buildProviderChildEnvironment } from "./launch-environment.js";
+import type { CodexOrchestratorHomePort } from "./codex/orchestrator-home.js";
 
 /** Separate discovery context: workers may use a proxy, while remote orchestrators use OpenAI. */
 export class CodexOrchestratorModelProbe implements ProviderModelProbe {
-  constructor(private readonly run: typeof runListingCommand = runListingCommand) {}
+  constructor(
+    private readonly run: typeof runListingCommand = runListingCommand,
+    private readonly home?: CodexOrchestratorHomePort,
+  ) {}
 
   async list(provider: ProviderId): Promise<ProviderModelListing> {
     if (provider !== "codex") return { unavailable: "Only Codex orchestrator discovery is configured" };
     try {
+      await this.home?.prepare();
       const { stdout } = await this.run("codex", ["debug", "models", ...CODEX_ORCHESTRATOR_CONFIG_ARGS], {
         cwd: "/",
         env: buildProviderChildEnvironment({
-          source: process.env,
+          source: this.home === undefined
+            ? process.env
+            : { ...process.env, CODEX_HOME: this.home.directory },
           provider: "codex",
           cwd: "/",
           terminal: "pipe",

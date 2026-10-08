@@ -43,10 +43,12 @@ export class AgentActivityStore implements AgentActivityPort {
   /** Rebuild every in-memory and index fact from the journal alone; a torn tail is preserved and counted. */
   private async load(): Promise<void> {
     this.index.reset(); this.sequence = 0;
-    const recovered = await recoverActivityJournal(this.directory, (event, offset, bytes) => {
+    // One transaction for the whole replay: per-row commits make startup grow to minutes on a
+    // journal this machine already has, and the broker is not listening until this returns.
+    const recovered = await this.index.bulk(() => recoverActivityJournal(this.directory, (event, offset, bytes) => {
       if (event.sequence <= this.sequence) throw new Error("ACTIVITY_JOURNAL_CONFLICT");
       this.index.add(event, offset, bytes); this.sequence = event.sequence;
-    });
+    }));
     this.bytes = recovered.bytes;
     if (recovered.torn) { this.degraded = true; this.dropped++; }
   }

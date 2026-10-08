@@ -7,7 +7,10 @@ import {
   type LegacyWorkerCoordinationPort,
   type LegacyWorkerMigrationResult,
 } from "./migrations/0001-worker-coordination.js";
-import { WorkerCoordinationStore } from "./worker-coordination-store.js";
+import {
+  WorkerCoordinationStore,
+  type WorkerCoordinationCompaction,
+} from "./worker-coordination-store.js";
 
 export interface WorkerCoordinationRuntimeService extends LegacyWorkerCoordinationPort {
   initialize(): Promise<void>;
@@ -26,6 +29,7 @@ export class WorkerCoordinationRuntime<Service extends WorkerCoordinationRuntime
   readonly service: Service;
   private started = false;
   private migration: LegacyWorkerMigrationResult | undefined;
+  private compaction: WorkerCoordinationCompaction | undefined;
 
   constructor(private readonly options: WorkerCoordinationRuntimeOptions<Service>) {
     this.store = new WorkerCoordinationStore(options.stateDirectory);
@@ -35,6 +39,9 @@ export class WorkerCoordinationRuntime<Service extends WorkerCoordinationRuntime
   async start(): Promise<LegacyWorkerMigrationResult> {
     if (this.started) throw new Error("Worker coordination runtime is already started");
     this.started = true;
+    // Before the fold, not after: an uncompacted log is what makes the fold expensive, and past
+    // V8's string cap it is what stops the broker from starting at all.
+    this.compaction = await this.store.compactIfLarge();
     await this.service.initialize();
     this.migration = await migrateLegacyWorkerSessions({
       sessions: this.options.recoveredSessions ?? [],
@@ -47,6 +54,10 @@ export class WorkerCoordinationRuntime<Service extends WorkerCoordinationRuntime
 
   migrationResult(): LegacyWorkerMigrationResult | undefined {
     return this.migration;
+  }
+
+  compactionResult(): WorkerCoordinationCompaction | undefined {
+    return this.compaction;
   }
 
   /**

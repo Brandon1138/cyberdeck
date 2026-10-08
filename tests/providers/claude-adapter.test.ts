@@ -240,6 +240,17 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
   });
 
+  it.each(["orchestrator", "worker", undefined] as const)(
+    "enables Remote Control on launch and resume only for orchestrators: %s",
+    (kind) => {
+      const adapter = new ClaudeProviderAdapter();
+      const record = session(kind === undefined ? {} : { kind });
+      for (const spec of [adapter.buildLaunchSpec(record), adapter.buildResumeSpec(record)]) {
+        expect(spec.args.includes("--remote-control")).toBe(kind === "orchestrator");
+      }
+    },
+  );
+
   it("carries the endpoint pin and the transcript hook in one settings file", async () => {
     const directory = tempDir();
     const stateDirectory = tempDir();

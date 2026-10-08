@@ -4,6 +4,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkerCoordinationRuntime } from "../../src/persistence/worker-coordination-runtime.js";
 import type { SessionRecord } from "../../src/domain/session.js";
+import type {
+  MutationReceipt,
+  OwnershipAuditRecord,
+  OwnershipSubject,
+} from "../../src/domain/worker-coordination.js";
 import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 import {
   WorkerCoordinationService,
@@ -241,5 +246,136 @@ describe("WorkerCoordinationStore and migration", () => {
         code: "DUPLICATE_TRANSACTION_ID",
       }),
     );
+  });
+});
+
+function subjectRecord(overrides: Partial<OwnershipSubject> = {}): OwnershipSubject {
+  const subjectId = crypto.randomUUID();
+  return {
+    schemaVersion: 1,
+    subjectId,
+    subjectKind: "worker",
+    origin: {
+      creatorControllerId: "orchestrator:fleet",
+      taskId: "task-1",
+      threadId: "thread-1",
+      createdAt: NOW,
+    },
+    lifecycle: "working",
+    resources: { eventStreamId: subjectId },
+    lease: {
+      leaseId: crypto.randomUUID(),
+      version: 1,
+      state: "active",
+      controller: {
+        controllerId: "orchestrator:fleet",
+        familyId: "orchestrator:fleet",
+        scope: { kind: "fleet", scopeId: "fleet" },
+      },
+      issuedAt: NOW,
+      renewedAt: NOW,
+      expiresAt: NOW,
+    },
+    decisionGate: { state: "none" },
+    updatedAt: NOW,
+    ...overrides,
+  };
+}
+
+function auditRecord(subjectId: string, index: number): OwnershipAuditRecord {
+  return {
+    auditId: crypto.randomUUID(),
+    mutationId: `mutation-${index}`,
+    operation: "acquire",
+    subjectId,
+    actor: {
+      controllerId: "orchestrator:fleet",
+      familyId: "orchestrator:fleet",
+      scope: { kind: "fleet", scopeId: "fleet" },
+    },
+    occurredAt: NOW,
+    reason: `audit ${index}`,
+    outcome: "ACQUIRED",
+  };
+}
+
+function receiptRecord(index: number): MutationReceipt {
+  return {
+    mutationId: `mutation-${index}`,
+    operation: "acquire",
+    recordedAt: new Date(Date.parse(NOW) + index * 1000).toISOString(),
+    result: { index },
+  };
+}
+
+describe("WorkerCoordinationStore compaction", () => {
+  it("folds the log to one record, bounds receipts, and archives audits", async () => {
+    const stateDirectory = await directory();
+    const store = new WorkerCoordinationStore(stateDirectory, {
+      compactionThresholdBytes: 1,
+      retainedReceipts: 3,
+    });
+    const subject = subjectRecord();
+    // The same subject rewritten each round: the fold must keep only the last version of it.
+    for (let index = 0; index < 10; index += 1) {
+      await store.append({
+        subjects: [{ ...subject, lifecycle: index === 9 ? "done" : "working", updatedAt: NOW }],
+        audits: [auditRecord(subject.subjectId, index)],
+        receipts: [receiptRecord(index)],
+      });
+    }
+    const before = await store.load();
+    expect(before.subjects).toHaveLength(1);
+    expect(before.audits).toHaveLength(10);
+    expect(before.receipts).toHaveLength(10);
+
+    const result = await store.compactIfLarge();
+    expect(result.compacted).toBe(true);
+    expect(result.records).toBe(10);
+    expect(result.archivedAudits).toBe(10);
+    expect(result.afterBytes).toBeLessThan(result.beforeBytes);
+
+    // One physical record now, and it replays to the same live state.
+    const raw = await readFile(store.path, "utf8");
+    expect(raw.trimEnd().split("\n")).toHaveLength(1);
+    const after = await store.load();
+    expect(after.subjects).toEqual(before.subjects);
+    expect(after.subjects[0]!.lifecycle).toBe("done");
+    expect(after.receipts.map((receipt) => receipt.mutationId))
+      .toEqual(["mutation-7", "mutation-8", "mutation-9"]);
+    expect(after.audits).toEqual([]);
+
+    const archived = (await readFile(store.auditArchivePath, "utf8")).trimEnd().split("\n");
+    expect(archived).toHaveLength(10);
+    expect(JSON.parse(archived[0]!).reason).toBe("audit 0");
+
+    // Appends after a compaction still fold onto the compacted base.
+    await store.append({ subjects: [{ ...subject, lifecycle: "stopped", updatedAt: NOW }] });
+    await expect(store.load().then((state) => state.subjects[0]!.lifecycle)).resolves.toBe("stopped");
+  });
+
+  it("leaves a log below the threshold untouched", async () => {
+    const stateDirectory = await directory();
+    const store = new WorkerCoordinationStore(stateDirectory, {
+      compactionThresholdBytes: 64 * 1024 * 1024,
+    });
+    await store.append({ subjects: [subjectRecord()] });
+    const original = await readFile(store.path, "utf8");
+    const result = await store.compactIfLarge();
+    expect(result.compacted).toBe(false);
+    expect(result.archivedAudits).toBe(0);
+    await expect(readFile(store.path, "utf8")).resolves.toBe(original);
+  });
+
+  it("reads a log whose final record was lost to a crash", async () => {
+    const stateDirectory = await directory();
+    const store = new WorkerCoordinationStore(stateDirectory);
+    const subject = subjectRecord();
+    await store.append({ subjects: [subject] });
+    // A torn tail: bytes with no terminating newline are not a record yet.
+    await appendFile(store.path, '{"schemaVersion":1,"recordType":"worker-coord');
+    const state = await store.load();
+    expect(state.subjects).toHaveLength(1);
+    expect(state.subjects[0]!.subjectId).toBe(subject.subjectId);
   });
 });

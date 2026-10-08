@@ -158,6 +158,42 @@ that guidance and the session-scoped MCP configuration are retained by provider-
 has no system-prompt flag, so a Cursor orchestrator receives its guidance as the first submitted
 message, visible in the transcript, and the conversation is reopened afterwards by chat id.
 
+Claude and Codex orchestrators enable native Remote Control on launch and resume, using the
+first-party provider rather than the operator's Headroom routing. Claude receives
+`--remote-control`; Codex starts its managed RC daemon and requires its connection to report
+`connected` before opening the cockpit. A successful daemon command that reports `connecting`
+does not establish phone access. If native Codex logs report HTTP 409 with `Remote app server
+already online`, another app-server owns that installation's RC connection. Cyberdeck gives Codex
+orchestrators a distinct `CODEX_HOME` at `<operator Codex home>/cyberdeck-orchestrator`, with its own
+installation identity, enrollment, daemon, and SQLite state. ChatGPT desktop can keep its RC
+connection. The new home links the existing file-backed login, instructions, plugins, and native
+conversations rather than copying credentials or stranding resume/transcript discovery. It derives
+its own config and hooks from the operator's settings: the daemon defaults to OpenAI, the Headroom
+plugin is disabled, and Headroom repair hooks are omitted. Native folder and hook trust saved in
+the dedicated home is preserved across refreshes; the original worker/Desktop files are unchanged.
+Workspace trust and model discovery use those same linked settings. Existing independent files in
+the new home are preserved and reported as a setup error. Codex may ask for a one-time review of
+existing hooks because their source path changed; native confirmation saves trust for the new path.
+The first daemon start can take longer while indexing existing conversations; retry after it
+finishes loading. If a previous shared CLI daemon competes with desktop for the operator's identity,
+`codex app-server daemon disable-remote-control` releases that daemon's RC connection while retaining
+its local service. Run that command in the operator's original Codex home, not the isolated home.
+Workers retain their configured provider routing and RTK integration; Caveman stays worker-scoped.
+
+For a local checkout, `scripts/activate-codex-remote.mjs` waits for native conversations and broker
+work to become idle, records the restart targets, and activates the managed config through the
+supported daemon/broker lifecycle. It resumes the same Cyberdeck sessions and installs an interactive
+zsh launcher for regular `codex`, `codex resume`, and `codex fork`. Native `codex remote-control`
+administration targets that same dedicated identity. Other utility commands, explicit remote
+endpoints/profiles, and worker processes keep native routing. `--check` reports blockers without
+restarting services. Activation evidence is written under `~/.local/share/cyberdeck/rc-coexistence-20261006`.
+The shell integration sources `~/.local/share/cyberdeck/codex-remote-shell.zsh`; existing shells need
+to source that file once after activation. Pair the phone with the dedicated identity using
+`node ~/.local/share/cyberdeck/codex-remote.mjs pair`; it opens a short-lived QR in Preview. Scan it
+with the phone's Camera and complete setup in ChatGPT, then verify that phone input reaches the intended
+CLI and Orc conversations while Desktop stays connected. Pairing and message delivery are separate
+checks from a relay reporting `connected`.
+
 Bindings are append-only but explicitly recoverable. Reset refuses an active orchestrator and tells
 the operator which session to stop; after it is inactive, invalidate the latest workspace or fleet
 binding without editing JSONL files:
