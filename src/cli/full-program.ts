@@ -91,6 +91,10 @@ export function createProgram(options: CreateProgramOptions = {}) {
   const removeProject = options.removeProject
     ?? ((request: { path: string }) =>
       withClient((client) => client.request<FleetProjectRemoveResult>("fleet.project.remove", request)));
+  const readNotifications = options.readNotifications
+    ?? ((request) => withClient((client) => client.request("agent.notifications.read", request)));
+  const configureNotifications = options.configureNotifications
+    ?? ((request) => withClient((client) => client.request("agent.notifications.configure", request)));
   const program = new Command()
     .name("cyberdeck")
     .version(CYBERDECK_VERSION)
@@ -113,6 +117,8 @@ export function createProgram(options: CreateProgramOptions = {}) {
     fableWorkers,
     peerCreate,
     cavemanWorkers,
+    readNotifications,
+    configureNotifications,
     pruneLegacyTranscript,
     rebindClaudeTranscript,
     submitWorkerEvent,
