@@ -1,6 +1,6 @@
 # Runs only on the disposable Windows CI host. No provider, account or model call is made.
 $ErrorActionPreference = 'Stop'
-if ($env:GITHUB_ACTIONS -ne 'true' -or -not $env:RUNNER_TEMP) {
+if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or -not $env:RUNNER_TEMP) {
     throw 'This installation and clipboard fixture is for the disposable GitHub Actions host only'
 }
 $distro = 'Ubuntu-24.04'

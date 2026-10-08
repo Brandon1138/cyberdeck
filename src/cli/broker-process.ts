@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appStateDirectory, brokerSocketPath } from "../broker/app-paths.js";
 import { RpcClient } from "../client/rpc-client.js";
+import { openPrivateAppendFile } from "../persistence/private-files.js";
 
 export async function withClient<T>(operation: (client: RpcClient) => Promise<T>): Promise<T> {
   const client = await RpcClient.connect(brokerSocketPath);
@@ -88,22 +89,23 @@ export async function startDetachedBroker(announce = true): Promise<void> {
   if (!existsSync(brokerEntry)) {
     throw new Error("Built broker is missing; run `pnpm build` first");
   }
-  mkdirSync(appStateDirectory, { recursive: true });
   const logPath = resolve(appStateDirectory, "broker.log");
+  // Repair privacy before a child can write, including failures before broker startup.
+  const logFile = await openPrivateAppendFile(logPath);
   // Where this child's output begins, so a failure quotes what it wrote and not the whole history.
-  const logStart = existsSync(logPath) ? statSync(logPath).size : 0;
-  const logDescriptor = openSync(logPath, "a");
   let exited = false;
+  let logStart: number;
   try {
+    logStart = (await logFile.stat()).size;
     const child = spawn(process.execPath, [brokerEntry], {
       cwd: projectRoot(),
       detached: true,
-      stdio: ["ignore", logDescriptor, logDescriptor],
+      stdio: ["ignore", logFile.fd, logFile.fd],
     });
     child.once("exit", () => { exited = true; });
     child.unref();
   } finally {
-    closeSync(logDescriptor);
+    await logFile.close();
   }
   try {
     await waitForBroker(BROKER_READY_TIMEOUT_MS, () => exited);
