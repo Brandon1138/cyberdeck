@@ -11,7 +11,7 @@ import {
 } from "../broker/main.js";
 import { CYBERDECK_VERSION } from "../broker/version.js";
 import type { ModalAnswerGrantStatus } from "../domain/modal-answer.js";
-import type { CavemanWorkersResult, FableWorkersResult } from "../domain/orchestrator.js";
+import type { CavemanWorkersResult, FableWorkersResult, PeerCreateResult } from "../domain/orchestrator.js";
 import type { EventAck } from "../domain/worker-coordination.js";
 import type { OrchestratorManagerResult, OrchestratorResetResult } from "../orchestration/orchestrator-manager.js";
 import { registerBrokerCommands } from "./broker.js";
@@ -52,6 +52,8 @@ export function createProgram(options: CreateProgramOptions = {}) {
     withClient((client) => client.request<OrchestratorResetResult>("orchestrator.reset", request)));
   const fableWorkers = options.fableWorkers ?? ((request) =>
     withClient((client) => client.request<FableWorkersResult>("orchestrator.fableWorkers", request)));
+  const peerCreate = options.peerCreate ?? ((request) =>
+    withClient((client) => client.request<PeerCreateResult>("orchestrator.peerCreate", request)));
   const cavemanWorkers = options.cavemanWorkers ?? ((request) =>
     withClient((client) => client.request<CavemanWorkersResult>("orchestrator.cavemanWorkers", request)));
   const pruneLegacyTranscript = options.pruneLegacyTranscript
@@ -108,6 +110,7 @@ export function createProgram(options: CreateProgramOptions = {}) {
     stopSession,
     resetOrchestrator,
     fableWorkers,
+    peerCreate,
     cavemanWorkers,
     pruneLegacyTranscript,
     rebindClaudeTranscript,

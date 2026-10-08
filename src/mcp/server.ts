@@ -11,8 +11,13 @@ import {
 import type { Readable, Writable } from "node:stream";
 import { CANONICAL_PROVIDER_IDS } from "../domain/provider-registration.js";
 import { diagnoseAgent } from "../orchestration/agent-diagnostics.js";
+import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
+import { PEER_BRIEF_MAX_CHARS } from "../orchestration/orchestrator-peer-service.js";
 import { readWorkerCapabilities } from "../orchestration/worker-capabilities.js";
 import { CYBERDECK_VERSION } from "../broker/version.js";
+
+/** The providers the orchestrator catalog can host the Cyberdeck MCP server in. */
+const ORCHESTRATOR_PROVIDER_IDS = ORCHESTRATOR_CATALOG.map(({ provider }) => provider);
 
 export interface McpBrokerTransport {
   request<T = unknown>(method: string, params: unknown): Promise<T>;
@@ -200,6 +205,26 @@ const TOOLS = [
         reason: { type: "string", minLength: 1, maxLength: 500 },
       },
       required: ["targetSessionId", "expectedGeneration", "reason"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cyberdeck_orchestrator_create",
+    description: "Start a peer orchestrator and return its sessionId. The peer launches detached; a Claude peer carries Remote Control and a Codex peer its remote app-server, so the operator can open either from their phone, while a Cursor peer has no phone surface. The result's remoteControl field says which; the broker does not return a link. The peer receives your grant minus orchestrator.create (it cannot create peers), a workspace caller may only create in its own cwd, and at most 2 of your peers may be live at once (PEER_LIMIT names them). Refusals are outcomes: DENIED, PEER_LIMIT, SELECTION_UNSUPPORTED, LAUNCH_FAILED. An optional brief is enqueued as the peer's first instruction; reuse mutationId to retry idempotently.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", enum: [...ORCHESTRATOR_PROVIDER_IDS] },
+        model: { type: "string", minLength: 1 },
+        effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+        cwd: { type: "string", minLength: 1 },
+        scope: { type: "string", enum: ["fleet", "workspace"], default: "fleet" },
+        name: { type: "string", minLength: 1, maxLength: 120 },
+        brief: { type: "string", minLength: 1, maxLength: PEER_BRIEF_MAX_CHARS },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+        mutationId: { type: "string", minLength: 1, maxLength: 200 },
+      },
+      required: ["provider", "model", "cwd", "reason"],
       additionalProperties: false,
     },
   },
@@ -568,6 +593,7 @@ const TOOL_CAPABILITIES: Record<string, string> = {
   cyberdeck_thread_message: "thread.enqueue", cyberdeck_lease: "thread.read", cyberdeck_worker_ctl: "thread.read",
   cyberdeck_worker_events: "thread.read", cyberdeck_orchestrator_inspect: "orchestrator.inspect",
   cyberdeck_orchestrator_stop: "orchestrator.stop", cyberdeck_orchestrator_force_stop: "orchestrator.stop",
+  cyberdeck_orchestrator_create: "orchestrator.create",
   cyberdeck_workflow_create: "workflow.run", cyberdeck_workflow_status: "workflow.run", cyberdeck_workflow_changes: "workflow.run",
   cyberdeck_workflow_send: "workflow.run", cyberdeck_workflow_cancel: "workflow.run",
 };
@@ -634,7 +660,11 @@ export async function handleMcpRequest(
     if (request.method === "tools/list") return success(request.id, { tools: await exposedTools(context) });
     if (request.method === "tools/call") {
       const name = request.params?.name;
-      const args = isRecord(request.params?.arguments) ? request.params.arguments : {};
+      // The actor is the identity this server was launched for, never something a caller may
+      // name: a peer handing in its creator's id would otherwise act with the creator's grant.
+      const { actorSessionId: _suppliedActor, ...args } = isRecord(request.params?.arguments)
+        ? request.params.arguments
+        : {};
       const result = await callTool(context, name, args);
       const content: Array<Record<string, unknown>> = [
         { type: "text", text: JSON.stringify(result) },
@@ -817,40 +847,40 @@ async function callTool(
   const actorSessionId = context.identity.actorSessionId;
   if (name === "cyberdeck_signal_exception") {
     return transport.request("worker.event.submit", {
-      workerId: actorSessionId,
       kind: "EXCEPTION",
       severity: "error",
       interventionRequired: false,
       continuation: "continuing",
       ...args,
+      workerId: actorSessionId,
     });
   }
   if (name === "cyberdeck_report_progress") {
     return transport.request("worker.event.submit", {
-      workerId: actorSessionId,
       kind: "PROGRESS",
       severity: "info",
       interventionRequired: false,
       continuation: "continuing",
       ...args,
+      workerId: actorSessionId,
     });
   }
   if (name === "cyberdeck_signal_risk") {
     return transport.request("worker.event.submit", {
-      workerId: actorSessionId,
       kind: "RISK",
       severity: "warning",
       interventionRequired: false,
       continuation: "continuing",
       ...args,
+      workerId: actorSessionId,
     });
   }
   if (name === "cyberdeck_request_decision") {
     return transport.request("worker.event.submit", {
-      workerId: actorSessionId,
       kind: "DECISION_REQUEST",
       severity: "warning",
       ...args,
+      workerId: actorSessionId,
       interventionRequired: true,
       continuation: "awaiting-response",
     });
@@ -858,12 +888,12 @@ async function callTool(
   if (name === "cyberdeck_respond_checkpoint") {
     const { correlationId, ...event } = args;
     return transport.request("worker.event.submit", {
-      workerId: actorSessionId,
       kind: "CHECKPOINT",
       severity: "info",
       interventionRequired: false,
       continuation: "continuing",
       ...event,
+      workerId: actorSessionId,
       checkpointCorrelationId: correlationId,
     });
   }
@@ -875,6 +905,9 @@ async function callTool(
   }
   if (name === "cyberdeck_orchestrator_force_stop") {
     return transport.request("agent.orchestrator.forceStop", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_orchestrator_create") {
+    return transport.request("agent.orchestrator.create", { actorSessionId, ...args });
   }
   if (name === "cyberdeck_threads_list") {
     return transport.request("agent.thread.list", { actorSessionId, ...args });

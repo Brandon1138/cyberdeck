@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import type { CliProgramContext } from "./program.js";
 
 export function registerOrchestratorCommands(program: Command, context: CliProgramContext): void {
-  const { resetOrchestrator, fableWorkers, cavemanWorkers } = context;
+  const { resetOrchestrator, fableWorkers, peerCreate, cavemanWorkers } = context;
   const orchestrator = program.command("orchestrator").description("manage durable orchestrator bindings");
   orchestrator.command("reset")
     .description("invalidate an inactive fleet or workspace orchestrator binding")
@@ -41,6 +41,29 @@ export function registerOrchestratorCommands(program: Command, context: CliProgr
       }
       process.stdout.write(
         `Fable workers: ${result.enabled ? "ON" : "OFF"} · ${result.key} · ${result.sessionId}\n`,
+      );
+    });
+
+  orchestrator.command("peer-create")
+    .description("inspect or change whether one orchestrator binding may create peer orchestrators")
+    .argument("[mode]", "status, on, or off", "status")
+    .option("--cwd <absolute-path>", "workspace path (defaults to the current directory)")
+    .addOption(new Option("--scope <scope>").choices(["workspace", "fleet"]).default("fleet"))
+    .action(async (mode: string, options: { cwd?: string; scope: "workspace" | "fleet"; }) => {
+      if (mode !== "status" && mode !== "on" && mode !== "off") {
+        throw new Error("mode must be status, on, or off");
+      }
+      const result = await peerCreate({
+        cwd: resolve(options.cwd ?? process.cwd()),
+        scope: options.scope,
+        ...(mode === "status" ? {} : { enabled: mode === "on" }),
+      });
+      if (!result.configured) {
+        process.stdout.write(`Peer create: OFF · no orchestrator bound for ${result.key}\n`);
+        return;
+      }
+      process.stdout.write(
+        `Peer create: ${result.enabled ? "ON" : "OFF"} · ${result.key} · ${result.sessionId}\n`,
       );
     });
 

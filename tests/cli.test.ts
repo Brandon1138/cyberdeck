@@ -473,6 +473,27 @@ describe("Cyberdeck CLI", () => {
     }));
   });
 
+  it("switches peer creation off on the fleet binding through the operator CLI", async () => {
+    const peerCreate = vi.fn(async () => ({
+      key: "fleet",
+      configured: true,
+      enabled: false,
+      sessionId: "11111111-1111-4111-8111-111111111111",
+    }));
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const program = createProgram({ peerCreate });
+    const orchestrator = program.commands.find((candidate) => candidate.name() === "orchestrator")!;
+    const command = orchestrator.commands.find((candidate) => candidate.name() === "peer-create")!;
+
+    try {
+      await command.parseAsync(["off"], { from: "user" });
+    } finally {
+      write.mockRestore();
+    }
+
+    expect(peerCreate).toHaveBeenCalledWith(expect.objectContaining({ scope: "fleet", enabled: false }));
+  });
+
   it("offers no Cursor worker toggle at all through the operator CLI", () => {
     const program = createProgram({});
     const orchestrator = program.commands.find((candidate) => candidate.name() === "orchestrator")!;

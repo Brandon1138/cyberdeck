@@ -29,7 +29,7 @@ it("retains the launch catalog for an unbound Orc, and scopes a known worker to 
     request: (async () => ({ status: "unbound", sessionKind })) as never,
   } };
   const list = async () => (await handleMcpRequest(context, { jsonrpc: "2.0", id: 1, method: "tools/list" }))!.result as { tools: Array<{ name: string }> };
-  expect((await list()).tools).toHaveLength(25);
+  expect((await list()).tools).toHaveLength(26);
   sessionKind = "worker";
   const tools = (await list()).tools.map((tool) => tool.name);
   expect(tools).toHaveLength(7);

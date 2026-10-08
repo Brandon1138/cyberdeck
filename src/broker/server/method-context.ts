@@ -2,6 +2,7 @@ import { z } from "zod";
 import { SubmitJobParamsSchema, type JobControlPlane } from "../../control-plane/job-control-plane.js";
 import { StartSessionRequestSchema } from "../../domain/session.js";
 import type { AgentControlService } from "../../orchestration/agent-control-service.js";
+import type { OrchestratorPeerService } from "../../orchestration/orchestrator-peer-service.js";
 import type { InstructionQueue } from "../../orchestration/instruction-queue.js";
 import type { LocalWorkerControlService } from "../../orchestration/local-worker-control-service.js";
 import type { OrchestratorManager } from "../../orchestration/orchestrator-manager.js";
@@ -106,6 +107,13 @@ export function requireAgentControl(options: BrokerServerOptions): AgentControlS
     throw Object.assign(new Error("Agent control service is not available"), { code: "METHOD_NOT_FOUND" });
   }
   return options.agentControl;
+}
+
+export function requireOrchestratorPeers(options: BrokerServerOptions): OrchestratorPeerService {
+  if (options.orchestratorPeers === undefined) {
+    throw Object.assign(new Error("Orchestrator peer service is not available"), { code: "METHOD_NOT_FOUND" });
+  }
+  return options.orchestratorPeers;
 }
 
 export function requireNvimBindings(options: BrokerServerOptions): NvimBindingService {

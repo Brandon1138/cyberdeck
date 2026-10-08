@@ -6,6 +6,22 @@ and persisted schemas remain under active alpha development.
 
 ## [Unreleased]
 
+### Added
+
+- An orchestrator can start a peer orchestrator from its own tools, so
+  orchestration can continue from the phone. `cyberdeck_orchestrator_create`
+  reaches the broker's existing peer-creation path behind a new
+  `orchestrator.create` capability, granted by default to every new binding and
+  switched per scope with `cyberdeck orchestrator peer-create on|off`. The peer
+  launches detached with the provider's Remote Control surface, receives its
+  creator's grant minus `orchestrator.create` (a peer cannot create peers), may
+  not reach wider than its creator's scope, and at most two of one creator's
+  peers may be live at once. An optional brief is queued as the peer's first
+  instruction, the binding records who asked for it, and the broker journal
+  carries `orchestrator.create.requested` / `orchestrator.create.result`.
+  Bindings written before this change lack the capability until the operator
+  runs `peer-create on` once for that scope (MIK-256, first slice of MIK-254).
+
 ### Fixed
 
 - A peer orchestrator binding is a controller. Every binding — primary or

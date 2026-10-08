@@ -515,6 +515,94 @@ describe("OrchestratorManager", () => {
     })).rejects.toMatchObject({ code: "ORCHESTRATOR_NOT_CONFIGURED" });
   });
 
+  it("grants peer creation by default and lets the operator switch it off on the binding", async () => {
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const start = activatingStart(() => record);
+    const manager = new OrchestratorManager(
+      { start, get: vi.fn(() => record) } as never,
+      { get: vi.fn(async () => undefined), put } as never,
+    );
+
+    const result = await manager.ensure({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      cwd: "/repo/one",
+      scope: "workspace",
+    });
+    expect(result.binding.grant.capabilities).toContain("orchestrator.create");
+    expect(result.binding).not.toHaveProperty("createdBy");
+    const prompt = (start.mock.calls[0]![0] as { providerInstructions: string }).providerInstructions;
+    expect(prompt).toContain("cyberdeck_orchestrator_create");
+    expect(prompt).toContain("a peer you create cannot create peers");
+
+    const toggling = new OrchestratorManager(
+      {} as never,
+      { get: vi.fn(async () => result.binding), put } as never,
+    );
+    await expect(toggling.peerCreate({ cwd: "/repo/one", scope: "workspace", enabled: false }))
+      .resolves.toMatchObject({ configured: true, enabled: false, sessionId: SESSION_ID });
+    const rewritten = put.mock.calls.at(-1)![0] as OrchestratorBinding;
+    expect(rewritten.grant.capabilities).not.toContain("orchestrator.create");
+    expect(rewritten.grant.capabilities).toContain("worker.start");
+  });
+
+  it("creates an orchestrator-requested peer with the caller's grant, lineage, name, and a prompt that says it cannot create peers", async () => {
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const peerRecord = { ...record, id: "22222222-2222-4222-8222-222222222222", cwd: "/repo/two" };
+    const start = activatingStart(() => peerRecord);
+    const manager = new OrchestratorManager(
+      { start, get: vi.fn(() => peerRecord) } as never,
+      { get: vi.fn(async () => undefined), put } as never,
+    );
+    const capabilities = ["thread.list", "thread.read", "thread.enqueue", "worker.start"] as const;
+
+    const result = await manager.createPeer({
+      provider: "codex",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      cwd: "/repo/two",
+      scope: "fleet",
+      name: "codex successor",
+      createdBy: { sessionId: SESSION_ID },
+      capabilities: [...capabilities],
+    });
+
+    expect(result.created).toBe(true);
+    expect(result.binding).toMatchObject({
+      key: `fleet:peer:${peerRecord.id}`,
+      kind: "peer",
+      createdBy: { sessionId: SESSION_ID },
+      grant: { subjectSessionId: peerRecord.id, capabilities: [...capabilities], scope: { kind: "fleet" } },
+    });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "orchestrator",
+      orchestratorScope: "fleet",
+      cwd: "/repo/two",
+      name: "codex successor",
+      providerInstructions: expect.stringContaining("cannot create peer orchestrators"),
+    }), undefined, expect.any(Function));
+    const prompt = (start.mock.calls[0]![0] as { providerInstructions: string }).providerInstructions;
+    expect(prompt).not.toContain("cyberdeck_orchestrator_create starts");
+  });
+
+  it("validates an orchestrator-requested peer against the catalog before launching", async () => {
+    const start = vi.fn();
+    const manager = new OrchestratorManager(
+      { start } as never,
+      { get: vi.fn(async () => undefined), put: vi.fn() } as never,
+    );
+
+    await expect(manager.createPeer({
+      provider: "claude",
+      model: "not-a-model",
+      cwd: "/repo/two",
+      scope: "fleet",
+      createdBy: { sessionId: SESSION_ID },
+      capabilities: ["thread.list"],
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it("leaves the Fable delegation grant off when an orchestrator is created", async () => {
     const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
     const manager = new OrchestratorManager(

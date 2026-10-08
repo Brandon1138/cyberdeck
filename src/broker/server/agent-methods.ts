@@ -11,6 +11,7 @@ import {
   AgentWaitWorkersParamsSchema,
 } from "../../orchestration/agent-control-service.js";
 import { EnqueueInstructionParamsSchema } from "../../orchestration/instruction-queue.js";
+import { AgentCreateOrchestratorParamsSchema } from "../../orchestration/orchestrator-peer-service.js";
 import {
   AgentLeaseParamsSchema,
   AgentWorkerControlParamsSchema,
@@ -31,6 +32,7 @@ import {
   type BrokerMethodHandler,
   requireAgentControl,
   requireInstructions,
+  requireOrchestratorPeers,
   requireWorkerControl,
   requireWorkerEvents,
   requireWorkflows,
@@ -56,6 +58,11 @@ export const agentMethods: Record<string, BrokerMethodHandler> = {
     return requireAgentControl(server.options).stopOrchestrator(
       AgentStopOrchestratorParamsSchema.parse(frame.params),
       "graceful",
+    );
+  },
+  "agent.orchestrator.create": async (server, _context, frame) => {
+    return requireOrchestratorPeers(server.options).create(
+      AgentCreateOrchestratorParamsSchema.parse(frame.params),
     );
   },
   "agent.orchestrator.forceStop": async (server, _context, frame) => {
