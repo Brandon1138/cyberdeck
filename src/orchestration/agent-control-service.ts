@@ -1,5 +1,6 @@
 import { ThreadPageOptionsSchema, type ThreadPageOptions } from "../domain/thread.js";
 import { readThreadPage } from "./thread-read-page.js";
+import { consumeSettledNotifications } from "./wait-settlement.js";
 import { AgentStandardWorkerInputSchema, AgentScoutWorkerInputSchema } from "./worker-launch-input.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -31,7 +32,6 @@ import {
 } from "../domain/session.js";
 import type { ThreadReadResult } from "../domain/thread.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
-import { settledDedupeKey } from "../domain/orchestrator-notification.js";
 import type { NotificationInboxPort } from "./orchestrator-notification-ports.js";
 import {
   WorkerBudgetDeclarationSchema,
@@ -1023,7 +1023,9 @@ export class AgentControlService {
 
     // One truth, two readers: a target this wait delivered is a settled record the feed no longer
     // needs to announce, so it is consumed here with `deliveredVia: ["wait"]`.
-    await this.consumeSettledNotifications(binding, request.targets, outcome.results);
+    if (this.notifications !== undefined) {
+      await consumeSettledNotifications(this.notifications, orchestratorController(binding).controllerId, request.targets, outcome.results);
+    }
     const endMs = this.now();
     const remainingAfterMs = Math.max(0, pending.wait.deadlineMs - endMs);
     const state: WaitState = intervention !== undefined
@@ -1081,27 +1083,6 @@ export class AgentControlService {
           : {}),
       },
     };
-  }
-
-  private async consumeSettledNotifications(
-    binding: OrchestratorBinding,
-    targets: readonly { sessionId: string; completionTarget: number }[],
-    results: readonly WorkerResultSnapshot[],
-  ): Promise<void> {
-    if (this.notifications === undefined) return;
-    const controllerId = orchestratorController(binding).controllerId;
-    // Only the ordinal the caller asked for is consumed; turns completed since are work the feed still owes.
-    const requested = new Map(targets.map((target) => [target.sessionId, target.completionTarget]));
-    for (const result of results) {
-      const target = requested.get(result.sessionId);
-      const keys = [
-        ...(result.status === "completed" && target !== undefined ? [settledDedupeKey(result.sessionId, target)] : []),
-        ...(result.truth.terminal ? [settledDedupeKey(result.sessionId)] : []),
-      ];
-      for (const key of keys) {
-        await this.notifications.acknowledgeByDedupeKey(controllerId, key, "wait").catch(() => undefined);
-      }
-    }
   }
 
   /**

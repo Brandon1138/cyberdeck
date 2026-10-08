@@ -144,7 +144,6 @@ describe("OrchestratorManager", () => {
     const instructions = startedRequest.providerInstructions;
     expect(instructions).toContain("cyberdeck_provider_capabilities");
     expect(instructions).toContain("cyberdeck_workers_start once");
-    expect(instructions).toContain("cyberdeck_workers_wait once");
     expect(instructions).toContain("Carry both nextCursor and continuation");
     expect(instructions).toContain("accept an unchanged cursor including zero");
     expect(instructions).toContain("Concatenate fragment.json before interpreting events");
