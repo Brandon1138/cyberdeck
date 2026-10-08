@@ -27,6 +27,7 @@ import { ClaudeJobDispatchAdapter } from "../providers/claude/dispatch-adapter.j
 import { ClaudeWorkspaceTrust } from "../providers/claude/workspace-trust.js";
 import { CodexProviderAdapter } from "../providers/codex.js";
 import { CodexWorkspaceTrust } from "../providers/codex/workspace-trust.js";
+import { CodexOrchestratorHome } from "../providers/codex/orchestrator-home.js";
 import { CursorJobDispatchAdapter } from "../providers/cursor/dispatch-adapter.js";
 import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
 import { captureScoutWorkspaceStateHash } from "../providers/cursor/workspace-state.js";
@@ -215,7 +216,10 @@ export async function runBroker(
   // worktrees) has its cwd written into the provider's own trust store before the process exists,
   // so the folder-trust dialog never appears. Ungranted repositories keep today's behavior.
   const claudeTrust = new ClaudeWorkspaceTrust();
-  const codexTrust = new CodexWorkspaceTrust();
+  const codexOrchestratorHome = new CodexOrchestratorHome();
+  const codexTrust = new CodexWorkspaceTrust({
+    configPath: resolve(codexOrchestratorHome.sourceDirectory, "config.toml"),
+  });
   const grantGatedTrust = (writer: { trust(cwd: string): Promise<string> }) =>
     async (cwd: string): Promise<void> => {
       if (await modalAnswerPolicy.allowsWorkspaceTrust(cwd)) await writer.trust(cwd);
@@ -232,7 +236,8 @@ export async function runBroker(
   let workerEvents: WorkerEventChannel;
   const executionRuntime = await brokerExecutionRuntime({ stateDirectory, config, activity,
     allowsWorkspaceTrust: (source) => modalAnswerPolicy.allowsWorkspaceTrust(source),
-    adapters: { codex: new CodexProviderAdapter({ mcp, workspaceTrust: grantGatedTrust(codexTrust) }),
+    adapters: { codex: new CodexProviderAdapter({ mcp, workspaceTrust: grantGatedTrust(codexTrust),
+      orchestratorHome: codexOrchestratorHome }),
       claude: new ClaudeProviderAdapter({ mcp, stateDirectory, workspaceTrust: grantGatedTrust(claudeTrust) }),
       cursor: new CursorProviderAdapter({ mcp, stateDirectory }), antigravity: new AntigravityProviderAdapter() },
     lookupSession: (id) => { try { return registry?.get(id); } catch { return undefined; } },
@@ -275,7 +280,9 @@ export async function runBroker(
   await notificationInbox.load();
   // Each launch context has its own cached catalog; orchestrators force first-party Codex.
   const workerCapabilities = new WorkerCapabilityCatalog();
-  const orchestratorCapabilities = new WorkerCapabilityCatalog({ probe: new CodexOrchestratorModelProbe() });
+  const orchestratorCapabilities = new WorkerCapabilityCatalog({
+    probe: new CodexOrchestratorModelProbe(undefined, codexOrchestratorHome),
+  });
   const orchestrators = new OrchestratorManager(
     registry,
     orchestratorStore,

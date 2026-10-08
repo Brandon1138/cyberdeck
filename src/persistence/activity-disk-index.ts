@@ -14,6 +14,7 @@ const row = (record: Record<string, unknown>): ActivityLocation => ({ sequence: 
  */
 export class ActivityDiskIndex {
   private readonly db: DatabaseSync;
+  private insert: ReturnType<DatabaseSync["prepare"]> | undefined;
   constructor(private readonly path: string) {
     for (const stale of [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]) {
       try { unlinkSync(stale); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -24,6 +25,8 @@ export class ActivityDiskIndex {
   }
   /** Empty the index in place so an in-process journal re-scan can rebuild it. */
   reset(): void {
+    // The cached statement is compiled against the table this drops; it must not outlive it.
+    this.insert = undefined;
     this.db.exec(`DROP TABLE IF EXISTS activity;
       CREATE TABLE activity(sequence INTEGER PRIMARY KEY, source BLOB UNIQUE NOT NULL, run BLOB NOT NULL,
         offset INTEGER NOT NULL, bytes INTEGER NOT NULL, observed REAL NOT NULL, session BLOB NOT NULL);
@@ -32,8 +35,30 @@ export class ActivityDiskIndex {
       VACUUM;`);
   }
   add(event: AgentActivity, offset: number, bytes: number): void {
-    this.db.prepare("INSERT INTO activity VALUES (?, ?, ?, ?, ?, ?, ?)").run(event.sequence,
+    this.insert ??= this.db.prepare("INSERT INTO activity VALUES (?, ?, ?, ?, ?, ?, ?)");
+    this.insert.run(event.sequence,
       createHash("sha256").update(event.sourceKey).digest(), uuidBlob(event.runId), offset, bytes, Date.parse(event.observedAt), uuidBlob(event.sessionId));
+  }
+  /**
+   * Run a whole-index rebuild as one transaction.
+   *
+   * Without it each `add` is its own implicit transaction, and `PRAGMA journal_mode=OFF` does not
+   * take effect on this driver — the mode stays `delete`, so every row pays a rollback journal
+   * create, write, fsync and unlink. Measured on a 287k-event journal that is ~256s of startup
+   * against ~1.6s here, which is the difference between a broker that starts and one that looks
+   * hung. Nothing else touches this database while a rebuild runs, so holding the transaction
+   * across the journal read is safe; a throw rolls back and leaves no half-built index.
+   */
+  async bulk<T>(work: () => Promise<T>): Promise<T> {
+    this.db.exec("BEGIN");
+    try {
+      const result = await work();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* the failure below is the one worth reporting */ }
+      throw error;
+    }
   }
   source(key: string): ActivityLocation | undefined {
     const found = this.db.prepare("SELECT sequence, offset, bytes, observed, run FROM activity WHERE source=?").get(createHash("sha256").update(key).digest());

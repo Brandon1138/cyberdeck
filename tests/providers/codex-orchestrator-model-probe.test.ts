@@ -17,7 +17,8 @@ describe("first-party Codex orchestrator discovery", () => {
       .resolves.toEqual({ models: [{ id: "gpt-6-astra", efforts: ["high"] }] });
     const [executable, args, options] = run.mock.calls[0]!;
     expect(executable).toBe("codex");
-    expect(args).toEqual(["debug", "models", "-c", 'model_provider="openai"']);
+    expect(args).toEqual(["debug", "models", "-c", 'model_provider="openai"',
+      "-c", 'plugins."headroom@headroom-marketplace".enabled=false']);
     expect(options).toMatchObject({ cwd: "/", timeout: 10_000 });
     expect(options.env).toMatchObject({ CODEX_HOME: "/tmp/custom-codex-config", CYBERDECK_PROCESS_ROLE: "orchestrator" });
     expect(options.env).not.toHaveProperty("OPENAI_BASE_URL");
@@ -38,5 +39,22 @@ describe("first-party Codex orchestrator discovery", () => {
     await expect(probe.list("codex")).resolves.toHaveProperty("unavailable", "First-party Codex model discovery printed no recognizable model ids");
     run.mockRejectedValueOnce(new Error("timeout"));
     await expect(probe.list("codex")).resolves.toHaveProperty("unavailable", "First-party Codex model discovery failed: timeout");
+  });
+
+  it("prepares and uses the broker's separate RC home for model discovery", async () => {
+    const prepare = vi.fn(async () => undefined);
+    const home = { directory: "/operator/codex/cyberdeck-orchestrator", prepare };
+    const run = vi.fn<typeof runListingCommand>(async () => ({ stdout: JSON.stringify({ models: [
+      { slug: "gpt-6-astra", visibility: "list", supported_reasoning_levels: [{ effort: "high" }] },
+    ] }) }));
+    const probe = new CodexOrchestratorModelProbe(run, home);
+    await expect(probe.list("claude")).resolves.toHaveProperty("unavailable");
+    expect(prepare).not.toHaveBeenCalled();
+    await expect(probe.list("codex")).resolves.toHaveProperty("models");
+    expect(run.mock.calls[0]?.[2].env?.CODEX_HOME).toBe(home.directory);
+    expect(prepare.mock.invocationCallOrder[0]).toBeLessThan(run.mock.invocationCallOrder[0]!);
+    prepare.mockRejectedValueOnce(new Error("independent login"));
+    await expect(probe.list("codex")).resolves.toHaveProperty("unavailable", expect.stringContaining("independent login"));
+    expect(run).toHaveBeenCalledOnce();
   });
 });
