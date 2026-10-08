@@ -193,6 +193,9 @@ export class OrchestratorPeerService {
   private async decide(request: ParsedCreate): Promise<OrchestratorCreateResult> {
     const actor = request.actorSessionId;
     const refusal = await this.admission(request);
+    // Admission has not reached the manager. Keep it out of the replay map so the caller can reuse
+    // its mutationId after obtaining approval or a changed operator toggle; a missing approval is
+    // still journaled, because an unapproved attempt is exactly what the operator wants to see.
     if (refusal !== undefined) {
       if (refusal.outcome === "APPROVAL_REQUIRED") {
         await this.appendAudit("orchestrator.create.result", actor, {
@@ -202,7 +205,7 @@ export class OrchestratorPeerService {
           detail: refusal.reason,
         });
       }
-      return this.record(request, refusal);
+      return refusal;
     }
 
     const binding = (await this.deps.bindings.findBySessionId(actor))!;

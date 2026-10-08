@@ -370,7 +370,7 @@ describe("OrchestratorPeerService", () => {
     expect(createPeer).toHaveBeenCalledOnce();
   });
 
-  it.each([undefined, "", " \t\n "])("refuses absent or blank approval (%j), launches nothing, and audits the refusal", async (quote) => {
+  it.each([undefined, "", " \t\n "])("refuses absent or blank approval (%j) without launching or journaling", async (quote) => {
     const { service, createPeer, events } = harness();
     const result = await service.create({ ...request, approval: quote === undefined ? undefined : { ...approval, quote } });
 
@@ -380,11 +380,52 @@ describe("OrchestratorPeerService", () => {
     });
     expect(createPeer).not.toHaveBeenCalled();
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      type: "orchestrator.create.result",
-      sessionId: ACTOR,
-      data: { outcome: "APPROVAL_REQUIRED", detail: result.outcome === "APPROVAL_REQUIRED" ? result.reason : "" },
+    expect(events[0]?.type).toBe("orchestrator.create.result");
+    expect(JSON.stringify(events[0])).toContain("APPROVAL_REQUIRED");
+  });
+
+  it("admits the same mutationId after approval and replays only the created peer", async () => {
+    const { service, createPeer, events, stored } = harness();
+    const input = { ...request, mutationId: "approval-retry" };
+
+    await expect(service.create({ ...input, approval: undefined }))
+      .resolves.toMatchObject({ outcome: "APPROVAL_REQUIRED" });
+    expect(createPeer).not.toHaveBeenCalled();
+    expect(events).toHaveLength(1);
+    expect(stored).toHaveLength(1);
+
+    const created = await service.create(input);
+    expect(created).toMatchObject({ outcome: "CREATED", sessionId: PEER });
+    expect(created).not.toHaveProperty("retrieval");
+    await expect(service.create(input)).resolves.toEqual({ ...created, retrieval: "replay" });
+    expect(createPeer).toHaveBeenCalledOnce();
+    expect(events).toHaveLength(3);
+  });
+
+  it.each(["primary", "peer"] as const)("admits the same mutationId after the toggle is re-enabled for a %s", async (kind) => {
+    const caller = kind === "primary" ? { ...fleetBinding } : peerBinding(ACTOR, OTHER_PEER);
+    const primary = kind === "primary" ? caller : { ...fleetBinding, sessionId: OTHER_PEER };
+    const { service, createPeer, events, stored } = harness({
+      binding: caller,
+      ...(kind === "primary" ? {} : { bindings: [primary] }),
     });
+    const input = { ...request, mutationId: "toggle-retry" };
+    const capabilities = primary.grant.capabilities;
+    primary.grant = { ...primary.grant, capabilities: capabilities.filter((entry) => entry !== "orchestrator.create") };
+
+    await expect(service.create(input)).resolves.toMatchObject({
+      outcome: "DENIED", code: kind === "primary" ? "CAPABILITY_DENIED" : "SCOPE_PEER_CREATE_OFF",
+    });
+    expect(createPeer).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    expect(stored).toHaveLength(kind === "primary" ? 1 : 2);
+
+    primary.grant = { ...primary.grant, capabilities };
+    const created = await service.create(input);
+    expect(created).toMatchObject({ outcome: "CREATED", sessionId: PEER });
+    expect(created).not.toHaveProperty("retrieval");
+    await expect(service.create(input)).resolves.toEqual({ ...created, retrieval: "replay" });
+    expect(createPeer).toHaveBeenCalledOnce();
   });
 
   it("asks for approval before checking the creation capability", async () => {
@@ -460,6 +501,19 @@ describe("OrchestratorPeerService", () => {
       outcome: "LAUNCH_FAILED",
       reason: "pty spawn failed",
     });
+  });
+
+  it.each([
+    ["SELECTION_UNSUPPORTED", Object.assign(new Error("Unsupported selection"), { code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" })],
+    ["LAUNCH_FAILED", new Error("pty spawn failed")],
+  ] as const)("replays a %s result that reached the manager", async (outcome, error) => {
+    const { service, createPeer, events } = harness({ createPeer: error });
+    const input = { ...request, mutationId: "manager-refusal" };
+    const first = await service.create(input);
+    expect(first).toMatchObject({ outcome });
+    await expect(service.create(input)).resolves.toEqual({ ...first, retrieval: "replay" });
+    expect(createPeer).toHaveBeenCalledOnce();
+    expect(events).toHaveLength(2);
   });
 
   it("keeps the peer when the brief cannot be queued and says how to send it", async () => {

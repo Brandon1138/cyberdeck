@@ -233,3 +233,97 @@ PROGRESS submissions used stable event IDs `mik257-review-fixes-start-4225679d` 
 `mik257-review-fixes-gates-green-4225679d`. Both MCP calls were rejected with
 `MCP tool call requires approval, but approval policy is never`. No CLI fallback or live socket
 attempt was made. Worker stops after this report.
+
+## Review fixes 2
+
+Date: 2026-10-08. Worker: `765229f0-f583-4a2f-b207-458af5d2e02a`.
+Both remaining P2 findings are fixed in
+`/Users/brandon/code/personal/cyberdeck-worktrees/orc-peer-approval`, branch
+`brandonaron38/mik-257-peer-orchestrator-approval`. HEAD remains
+`f4d8d02641f9daf1830d411212da1c59f32816ee`; changes are uncommitted for the host orchestrator.
+The requested test suites and architecture gates pass. The complete gate is **not green**:
+`pnpm check` is blocked by a missing dependency from the merged main branch, described below.
+
+```sh
+cd /Users/brandon/code/personal/cyberdeck-worktrees/orc-peer-approval
+```
+
+Changes:
+
+- Admission returns `APPROVAL_REQUIRED` and `DENIED` directly, without recording the refusal in
+  the mutation replay map, audit journal, or binding store. The approval-refusal audit was removed
+  to meet the explicit no-durable-refusal requirement. The same mutationId can therefore be
+  admitted after approval is supplied or the scope toggle is re-enabled. Manager results still
+  replay: `CREATED`, `SELECTION_UNSUPPORTED`, and `LAUNCH_FAILED`. Existing concurrent-create,
+  durable-binding, and failed-result-audit replay tests remain green.
+- `fleetOrchestratorOwnership` projects `createdBy: { sessionId }` only for peers with recorded
+  creators. Approval, depth, and mutation metadata are excluded. Legacy lineage without approval
+  or depth remains usable; primaries and manually created peers have no creator marker.
+- `collectFleetSnapshot` carries that projection onto `FleetThread`. Orchestrator rows prefix
+  their existing preview cell with `by <first 8 creator ID characters>`. The existing cell-width
+  budget bounds the marker and row; worker rows do not render it.
+
+New tests: **12 executed cases added**, no cases removed.
+
+- Peer service: **5 added**, final **29**.
+  - `admits the same mutationId after approval and replays only the created peer` (1).
+  - `admits the same mutationId after the toggle is re-enabled for a %s` (2: primary and peer).
+  - `replays a %s result that reached the manager` (2: unsupported selection and launch failure).
+  - The existing three absent/blank-approval cases were retitled
+    `refuses absent or blank approval (%j) without launching or journaling` and now assert no audit.
+- Fleet: **4 added**, final **197**.
+  - `renders bounded peer creator lineage within a %i-column row` (2: 80 and 120 columns).
+  - `keeps creator lineage out of primary and worker rows` (1).
+  - `carries a peer's projected creator onto its FleetThread` (1).
+- New `tests/broker/fleet-projection.test.ts`: **3 added**, final **3**.
+  - `projects only the peer creator sessionId, without approval or mutation metadata`.
+  - `projects legacy peer lineage without requiring approval or depth`.
+  - `omits creator markers for primaries and peers created by hand`.
+
+Before the production changes, the selected regression run failed **11 cases**, including the
+same-mutation toggle retries, creator projection/transport/rendering, and no-durable-refusal
+assertions. The final focused run passed **229 tests in 3 files**.
+
+Required test gate: **PASS**, **337 tests in 7 files**, zero failures or skips:
+peer service **29**, agent control **66**, MCP **27**, Fleet **197**, Fleet projection **3**,
+architecture dependency rules **13**, and architecture file sizes **2**.
+
+```sh
+export PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:$PATH
+pnpm --config.verify-deps-before-run=false check
+pnpm --config.verify-deps-before-run=false exec vitest run tests/orchestration/orchestrator-peer-service.test.ts tests/orchestration/agent-control-service.test.ts tests/mcp/server.test.ts tests/client/fleet*.test.ts tests/broker/fleet-projection.test.ts tests/architecture --reporter=default --reporter=json --outputFile.json=/tmp/mik257-review-fixes-2-gates.json
+git diff --check
+```
+
+Verification limits and dependency state:
+
+- The first unmodified pnpm invocation attempted automatic dependency installation and aborted with
+  `[ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY]`. Subsequent commands disable that automatic
+  installation and use the existing modules; no dependencies were purged or reinstalled.
+- `pnpm check`: **FAIL**, exit 1. The installed modules lack declared, locked `smol-toml@1.9.0`.
+  Errors are confined to unchanged `src/providers/codex/orchestrator-home.ts` and
+  `tests/providers/codex-orchestrator-home.test.ts`: two `TS2307` missing-module errors and ten
+  cascading `TS18046` unknown-type errors. Exact-version local cache lookup found no tarball;
+  a bounded registry download failed with `Could not resolve host: registry.npmjs.org`.
+  No package manifest, lockfile, source stub, or unrelated provider file was changed.
+- This checkout contains no snapshot-feed source or test suite. Existing Fleet snapshot-collection
+  tests pass; snapshot-feed coverage cannot be claimed. The requested Fleet projection test path
+  was absent and is now the new three-case projection suite.
+- `git diff --check`: **PASS**.
+- Architecture baseline unchanged. No extraction was needed: peer service **397/500** lines;
+  ownership projection **101/500**; Fleet state **337/500**; transport **97/500**; row renderer
+  **379/500**. `agent-control-service.ts` is unchanged at **1,381/1,391** lines.
+- Evidence: `/tmp/mik257-review-fixes-2-before.json`,
+  `/tmp/mik257-review-fixes-2-focused.json`, `/tmp/mik257-review-fixes-2-gates.json`,
+  `/tmp/mik257-review-fixes-2-gates.log`, and `/tmp/mik257-review-fixes-2-check.log`.
+
+PROGRESS reporting could not be delivered. MCP event ID `mik-257-review-fixes-2-start` returned
+`MCP tool call requires approval, but approval policy is never`. The explicitly authorized CLI
+fallback used worker `765229f0-f583-4a2f-b207-458af5d2e02a`, kind `PROGRESS`, and stable event ID
+`mik-257-review-fixes-2-cli-start`; it returned `connect EPERM /tmp/cyberdeck-501.sock`.
+No further socket attempts were made.
+
+Host next step: install the locked dependencies in this worktree (`pnpm install --frozen-lockfile`)
+and rerun `pnpm check` with Node 24.18.0 first in PATH before committing. Live broker processes,
+shared application state, other checkouts, and Codex configuration were untouched. No commit,
+push, stash, checkout, rebase, worktree command, build, or activation was performed. Worker stops.

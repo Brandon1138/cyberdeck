@@ -33,6 +33,7 @@ export interface FleetWorkerCoordinationView {
 export interface FleetOrchestratorOwnershipView {
   sessionId: string;
   controllerId: string;
+  createdBy?: { sessionId: string };
 }
 
 /** Read-only Fleet projection. Lease tokens, hashes, and audit details stay broker-private. */
@@ -93,5 +94,8 @@ export function fleetOrchestratorOwnership(
   return bindings.map((binding) => ({
     sessionId: binding.sessionId,
     controllerId: orchestratorControllerId(binding.key),
+    ...(binding.kind !== "peer" || binding.createdBy === undefined
+      ? {}
+      : { createdBy: { sessionId: binding.createdBy.sessionId } }),
   }));
 }

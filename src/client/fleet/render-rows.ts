@@ -128,7 +128,10 @@ export function renderThreadRow(
     worktreeWidth,
     ownerSigilWidth,
   );
-  const preview = threadPreview(thread, layout.preview);
+  const creator = thread.record.kind === "orchestrator" ? thread.createdBy?.sessionId : undefined;
+  const preview = creator === undefined
+    ? threadPreview(thread, layout.preview)
+    : fit(`by ${creator.slice(0, 8)} · ${threadPreview(thread, layout.preview)}`, layout.preview);
   const row = [
     `${rowGutter(selected, options.color, scrollbar, isHandoffMarked(state, thread.record.id))
     }${statusMarker(status, selected, options.color)}`,
