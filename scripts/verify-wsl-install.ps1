@@ -48,9 +48,13 @@ try {
 } finally { $image.Dispose() }
 '@
 foreach ($phase in @('empty', 'image')) {
+    Write-Host "Preparing synthetic Windows clipboard phase: $phase"
+    $fixtureTimer = [Diagnostics.Stopwatch]::StartNew()
     $fixture = if ($phase -eq 'empty') { $clear } else { $setImage }
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($fixture))
     & powershell.exe -NoLogo -NoProfile -NonInteractive -STA -EncodedCommand $encoded
     if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the Windows clipboard fixture' }
+    $fixtureTimer.Stop()
+    Write-Host "Windows clipboard fixture ready after $($fixtureTimer.ElapsedMilliseconds) ms; testing installed WSL capture"
     Invoke-Wsl -Arguments @('/home/cyberdeck-ci/node/bin/node', '/home/cyberdeck-ci/source/scripts/verify-wsl-clipboard.mjs', $phase)
 }

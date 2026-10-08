@@ -5,11 +5,13 @@ import {pathToFileURL} from 'node:url';
 
 const root = '/home/cyberdeck-ci/installed/lib/node_modules/@ishmael38/cyberdeck';
 const {capturePasteboardImage} = await import(pathToFileURL(`${root}/dist/src/client/clipboard-image.js`).href);
+const captureStarted = performance.now();
 const result = await capturePasteboardImage({directory: '/home/cyberdeck-ci/clipboard'});
+const diagnostic = JSON.stringify({...result, elapsedMs: Math.round(performance.now() - captureStarted)});
 if (process.argv[2] === 'empty') {
-  assert.equal(result.status, 'no-image');
+  assert.equal(result.status, 'no-image', diagnostic);
 } else {
-  assert.equal(result.status, 'captured', JSON.stringify(result));
+  assert.equal(result.status, 'captured', diagnostic);
   const png = await readFile(result.path);
   assert.ok(png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])));
   assert.equal(png.readUInt32BE(16), 3);
