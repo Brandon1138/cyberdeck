@@ -5,6 +5,7 @@ import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
 import type { InstructionRecord } from "../domain/instruction.js";
 import {
   PeerApprovalSchema,
+  orchestratorKey,
   peerGrantCapabilities,
   type CreatePeerOrchestratorRequest,
   type OrchestratorBinding,
@@ -18,7 +19,7 @@ import {
 } from "../domain/session.js";
 import type { EnqueueInstructionParamsSchema } from "./instruction-queue.js";
 import type { OrchestratorManagerResult } from "./orchestrator-manager.js";
-import type { OrchestratorBindingLookup } from "./persistence-ports.js";
+import type { OrchestratorBindingReader } from "./persistence-ports.js";
 import type { SessionLookupPort } from "./session/session-ports.js";
 
 /** Long enough for a real brief, short enough that a transcript cannot be pasted in as one. */
@@ -97,7 +98,7 @@ export type OrchestratorCreateResult =
 
 export interface OrchestratorPeerServiceDeps {
   registry: SessionLookupPort;
-  bindings: OrchestratorBindingLookup & { list(): Promise<OrchestratorBinding[]> };
+  bindings: OrchestratorBindingReader & { list(): Promise<OrchestratorBinding[]> };
   manager: {
     createPeer(input: CreatePeerOrchestratorRequest): Promise<OrchestratorManagerResult>;
   };
@@ -317,6 +318,16 @@ export class OrchestratorPeerService {
         outcome: "DENIED",
         code: "CAPABILITY_DENIED",
         reason: "orchestrator.create is outside this orchestrator's grant; the operator can run `cyberdeck orchestrator peer-create on`",
+      };
+    }
+    // The operator toggle writes only the scope's primary. Read it fresh for every admission:
+    // peers and descendants retain their own grants, but must obey that durable scope hard stop.
+    const primary = await this.deps.bindings.get(orchestratorKey(binding.scope));
+    if (primary !== undefined && !primary.grant.capabilities.includes("orchestrator.create")) {
+      return {
+        outcome: "DENIED",
+        code: "SCOPE_PEER_CREATE_OFF",
+        reason: "Peer creation is disabled for this scope by `cyberdeck orchestrator peer-create off`; the operator can run `cyberdeck orchestrator peer-create on`",
       };
     }
     if (binding.scope.kind === "workspace" && request.scope === "fleet") {

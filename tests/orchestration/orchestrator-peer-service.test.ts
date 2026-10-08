@@ -1,17 +1,23 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { BrokerEvent } from "../../src/domain/events.js";
 import {
   ORCHESTRATOR_GRANT_CAPABILITIES,
+  orchestratorKey,
   type CreatePeerOrchestratorRequest,
   type PeerApproval,
   type OrchestratorBinding,
 } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import {
+  AgentCreateOrchestratorParamsSchema,
   OrchestratorPeerService,
   peerRemoteControlNote,
 } from "../../src/orchestration/orchestrator-peer-service.js";
-import type { OrchestratorManagerResult } from "../../src/orchestration/orchestrator-manager.js";
+import { OrchestratorManager, type OrchestratorManagerResult } from "../../src/orchestration/orchestrator-manager.js";
+import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 
 const ACTOR = "11111111-1111-4111-8111-111111111111";
 const PEER = "22222222-2222-4222-8222-222222222222";
@@ -130,6 +136,7 @@ function harness(overrides: {
       },
     },
     bindings: {
+      get: async (key: string) => stored.find((entry) => entry.key === key),
       findBySessionId: async (sessionId: string) => stored.find((entry) => entry.sessionId === sessionId),
       list: async () => stored,
     },
@@ -224,6 +231,106 @@ describe("OrchestratorPeerService", () => {
     });
     expect(createPeer).not.toHaveBeenCalled();
     expect(events).toEqual([]);
+  });
+
+  it.each(["fleet", "workspace"] as const)("enforces the durable %s scope kill-switch for primary, peer and descendant across service reloads", async (scope) => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-peer-create-switch-"));
+    const store = new OrchestratorStore(directory);
+    const records = new Map<string, SessionRecord>();
+    let sequence = 0;
+    const registry = {
+      get: (sessionId: string) => records.get(sessionId)!,
+      start: vi.fn(async (
+        input: Partial<SessionRecord>,
+        _initialPrompt?: string,
+        activate?: (record: SessionRecord) => Promise<void>,
+      ) => {
+        const session = {
+          ...actorRecord, ...input,
+          id: `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`,
+        };
+        records.set(session.id, session);
+        await activate?.(session);
+        return session;
+      }),
+    };
+    const manager = new OrchestratorManager(registry as never, store);
+    const service = new OrchestratorPeerService({ registry, bindings: store, manager });
+    const standing: PeerApproval = {
+      kind: "standing", quote: "create orchestrators as you need for this task", channel: "terminal",
+    };
+    try {
+      const primary = await manager.ensure({ provider: "claude", model: "fable", cwd: "/repo/one", scope });
+      const create = (actorSessionId: string, mutationId: string) => ({
+        ...request, provider: "claude" as const, model: "fable", effort: undefined,
+        cwd: "/repo/one", scope, actorSessionId, mutationId, approval: standing,
+      });
+      const peer = await service.create(create(primary.session.id, "peer"));
+      if (peer.outcome !== "CREATED") throw new Error(`Peer creation failed: ${peer.outcome}`);
+      const descendant = await service.create(create(peer.sessionId, "descendant"));
+      if (descendant.outcome !== "CREATED") throw new Error(`Descendant creation failed: ${descendant.outcome}`);
+      expect(descendant.createdBy.depth).toBe(2);
+      const peerGrant = (await store.findBySessionId(peer.sessionId))!.grant;
+      const descendantGrant = (await store.findBySessionId(descendant.sessionId))!.grant;
+
+      await expect(manager.peerCreate({ scope, cwd: "/repo/one", enabled: false }))
+        .resolves.toMatchObject({ enabled: false });
+      const startsBeforeOff = registry.start.mock.calls.length;
+      await expect(service.create(create(primary.session.id, "primary-off")))
+        .resolves.toMatchObject({ outcome: "DENIED", code: "CAPABILITY_DENIED" });
+      const scopeDenied = {
+        outcome: "DENIED", code: "SCOPE_PEER_CREATE_OFF",
+        reason: expect.stringContaining("cyberdeck orchestrator peer-create off"),
+      };
+      for (const sessionId of [peer.sessionId, descendant.sessionId]) {
+        await expect(service.create(create(sessionId, "off"))).resolves.toMatchObject(scopeDenied);
+      }
+      const reloadedStore = new OrchestratorStore(directory);
+      const freshService = new OrchestratorPeerService({ registry, bindings: reloadedStore, manager });
+      for (const sessionId of [peer.sessionId, descendant.sessionId]) {
+        await expect(freshService.create(create(sessionId, "reloaded-off"))).resolves.toMatchObject(scopeDenied);
+      }
+      // Replaying an existing peer while OFF does not admit or launch a fresh create.
+      await expect(freshService.create(create(primary.session.id, "peer")))
+        .resolves.toMatchObject({ outcome: "CREATED", sessionId: peer.sessionId, retrieval: "replay" });
+      expect(registry.start).toHaveBeenCalledTimes(startsBeforeOff);
+      expect((await reloadedStore.findBySessionId(peer.sessionId))!.grant).toEqual(peerGrant);
+      expect((await reloadedStore.findBySessionId(descendant.sessionId))!.grant).toEqual(descendantGrant);
+
+      await manager.peerCreate({ scope, cwd: "/repo/one", enabled: true });
+      for (const actorSessionId of [primary.session.id, peer.sessionId, descendant.sessionId]) {
+        await expect(service.create(create(actorSessionId, "on"))).resolves.toMatchObject({ outcome: "CREATED" });
+        await expect(freshService.create(create(actorSessionId, "reloaded-on"))).resolves.toMatchObject({ outcome: "CREATED" });
+      }
+
+      const legacy = (await store.findBySessionId(peer.sessionId))!;
+      await store.put({
+        ...legacy,
+        createdBy: { sessionId: primary.session.id },
+        grant: { ...legacy.grant, capabilities: legacy.grant.capabilities.filter((entry) => entry !== "orchestrator.create") },
+      });
+      await manager.peerCreate({ scope, cwd: "/repo/one", enabled: false });
+      await manager.peerCreate({ scope, cwd: "/repo/one", enabled: true });
+      await expect(freshService.create(create(peer.sessionId, "legacy-on")))
+        .resolves.toMatchObject({ outcome: "DENIED", code: "CAPABILITY_DENIED" });
+      expect((await reloadedStore.findBySessionId(peer.sessionId))!.grant.capabilities).not.toContain("orchestrator.create");
+      expect((await reloadedStore.get(orchestratorKey(primary.binding.scope)))!.grant.capabilities).toContain("orchestrator.create");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts an RFC 3339 offset through the create-request schema and preserves it through admission", async () => {
+    const { service, createPeer, events, stored } = harness();
+    const offsetApproval = { ...approval, grantedAt: "2026-10-08T15:00:00+03:00" };
+    const parsed = AgentCreateOrchestratorParamsSchema.parse({ ...request, approval: offsetApproval });
+    expect(parsed.approval).toEqual(offsetApproval);
+    await expect(service.create(parsed)).resolves.toMatchObject({
+      outcome: "CREATED", createdBy: { approval: offsetApproval },
+    });
+    expect(createPeer).toHaveBeenCalledWith(expect.objectContaining({ createdBy: expect.objectContaining({ approval: offsetApproval }) }));
+    expect(events[0]?.data.approval).toEqual(offsetApproval);
+    expect(stored.at(-1)?.createdBy?.approval).toEqual(offsetApproval);
   });
 
   it("refuses an inactive or unbound caller", async () => {

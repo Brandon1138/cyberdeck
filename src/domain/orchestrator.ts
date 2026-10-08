@@ -23,8 +23,8 @@ export const OrchestratorScopeSchema = z.discriminatedUnion("kind", [
  *
  * `primary` is the one binding a scope answers with: exactly one per `fleet` or
  * `workspace:<cwd>` key, replaced by rebinding. `peer` is an additional orchestrator bound to that
- * same scope alongside it — `cyberdeck_orchestrator_create` makes one, and it never consults or
- * replaces the primary.
+ * same scope alongside it — `cyberdeck_orchestrator_create` makes one without replacing the
+ * primary, whose grant also carries the scope's peer-create kill-switch.
  */
 export const OrchestratorBindingKindSchema = z.enum(["primary", "peer"]);
 
@@ -33,7 +33,7 @@ export const PeerApprovalSchema = z.object({
   kind: z.enum(["per-create", "standing"]),
   quote: z.string().min(1).max(500).refine((quote) => quote.trim().length > 0, "Approval quote must not be blank"),
   channel: z.enum(["remote-control", "terminal", "fleet", "other"]),
-  grantedAt: z.iso.datetime().optional(),
+  grantedAt: z.iso.datetime({ offset: true }).optional(),
 });
 
 /** The marker a peer key carries between its scope's key and the peer session's own id. */

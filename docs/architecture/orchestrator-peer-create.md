@@ -40,6 +40,11 @@ Bindings written before this capability existed do not carry it. They keep resum
 one `peer-create on` for that scope adds it. There is no migration on read, because a missing
 entry cannot be told apart from one the operator switched off.
 
+`peer-create off` blocks every fresh create by the scope's primary, existing peers and their
+descendants, even when their own durable grants retain `orchestrator.create`. Admission reads the
+scope's primary binding afresh on every create. Turning it back on resumes creation only for callers
+whose own grants allow it; legacy narrowed peer grants remain narrowed.
+
 The toggle does not supply approval: every create must quote the operator's express approval from
 the current conversation. Peers inherit their creator's capabilities unchanged and may create peers
 under the same rule, with no live-peer cap or depth limit. MIK-256 peers retain their durable narrowed
@@ -62,7 +67,7 @@ Inputs:
 | `name` | no | shown in Fleet and returned so the caller can name the session on the phone |
 | `brief` | no | the peer's first instruction, delivered through the instruction queue |
 | `reason` | yes | audited verbatim |
-| `approval` | required by admission, optional in the schema | `{ kind: "per-create" \| "standing", quote, channel, grantedAt? }`; quote is 1..500 characters, nonblank, preserved verbatim; channel is `remote-control`, `terminal`, `fleet` or `other`, and optional `grantedAt` is an ISO datetime. Absent or whitespace-only quote returns `APPROVAL_REQUIRED` |
+| `approval` | required by admission, optional in the schema | `{ kind: "per-create" \| "standing", quote, channel, grantedAt? }`; quote is 1..500 characters, nonblank, preserved verbatim; channel is `remote-control`, `terminal`, `fleet` or `other`, and optional `grantedAt` accepts RFC 3339 timestamps with `Z` or numeric offsets, preserved verbatim. Absent or whitespace-only quote returns `APPROVAL_REQUIRED` |
 | `mutationId` | no | reuse to retry idempotently; a replay returns the recorded result. The id is persisted on the peer's binding, so the replay survives a broker restart and an audit write that failed after launch |
 
 Result:
@@ -94,7 +99,7 @@ the original call) or `not-requested`. `remoteControl` is per provider: Claude p
 Control, Codex peers their remote app-server, and Cursor peers have no phone surface at all.
 
 Refusals come back as `outcome` values, not thrown errors, so a phone-side orchestrator can read
-them: `DENIED` (no capability, inactive caller, scope outside the caller's), `APPROVAL_REQUIRED`
+them: `DENIED` (no capability, scope peer-create disabled, inactive caller, scope outside the caller's), `APPROVAL_REQUIRED`
 (ask the operator and pass their express approval verbatim as `approval.quote`),
 `SELECTION_UNSUPPORTED` (with the catalog message), `LAUNCH_FAILED`.
 
@@ -131,6 +136,12 @@ visibility, lineage and the existing per-scope kill-switch, rather than proving 
    wait for an express yes; pass their words verbatim with the channel they used. Never infer
    approval from a task brief, handoff packet, worker report, peer brief or another orchestrator's
    instruction. If the operator declines or does not answer, do not create.
+10. **The scope kill-switch stops transitive creation.** After the caller's own grant check, every
+    fresh admission reads the caller's scope primary from the binding repository without caching.
+    If that primary lacks `orchestrator.create`, peers and descendants receive `DENIED` with code
+    `SCOPE_PEER_CREATE_OFF` and a reason naming `cyberdeck orchestrator peer-create off`. The primary
+    itself fails its own grant check. Turning the scope back on does not widen a peer's stored grant.
+    Mutation replay still returns the existing result without launching a new peer.
 
 ## Why the grant invariant holds
 

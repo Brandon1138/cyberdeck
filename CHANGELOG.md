@@ -54,7 +54,11 @@ and persisted schemas remain under active alpha development.
   and reported by create and inspect. Creator and peer prompts require asking first;
   the broker validates the model-asserted field and cannot verify chat consent.
   Legacy peers keep their durable grants. Per-creator serialization, scope narrowing,
-  mutation replay, brief delivery and the operator kill-switch remain intact (MIK-257).
+  mutation replay and brief delivery remain intact. The scope's durable `peer-create off`
+  kill-switch stops fresh creates by its primary, existing peers and descendants, including
+  peers whose grants retain `orchestrator.create`; admission reads the primary binding on
+  each create. Re-enabling the scope does not widen legacy narrowed peer grants. Optional
+  approval timestamps accept RFC 3339 numeric offsets and remain verbatim (MIK-257).
 
 ### Fixed
 

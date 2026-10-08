@@ -109,7 +109,10 @@ Fleet controls:
   manage peers under the same approval rule, and cannot reach wider than its creator's scope.
   There is no live-peer cap or depth limit. The grant is on by default for new bindings and is switched per scope
   with `cyberdeck orchestrator peer-create status|on|off`; bindings made before the grant existed
-  need one `on`. Every create requires asking the operator in the current conversation and waiting
+  need one `on`. `off` stops every fresh create by that scope's primary, existing peers and their
+  descendants, even when peer grants retain `orchestrator.create`; admission reads the durable primary
+  binding afresh each time. `on` resumes creation only where the caller's own grant permits it.
+  Every create requires asking the operator in the current conversation and waiting
   for express approval, quoted verbatim in `approval.quote`; absent or blank approval returns
   `APPROVAL_REQUIRED`. Standing approval from that conversation must be repeated on each covered
   create. Approval is journaled with lineage depth, persisted on the peer binding and returned by

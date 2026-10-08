@@ -162,3 +162,74 @@ grep -rn "PEER_LIMIT\|MAX_LIVE_PEERS\|cannot create peers" src tests docs README
 
 Open implementation questions: **none**. Outstanding work: host full gate, acknowledged Fleet lineage
 presentation gap, and operator activation/phone proof. Worker stopped after this report.
+
+## Review fixes
+
+Date: 2026-10-08. Worker: `4225679d-2c43-491b-84bb-3dada9148cb5`.
+Reviewed `reviews/mik257-review.md`, this addendum's `00-spec.md`, and the original worker report.
+Both review findings are fixed in the assigned worktree. HEAD remains
+`a809603a7c94dbb11f8ad0c6032ab55af1aa0ce7` on
+`brandonaron38/mik-257-peer-orchestrator-approval`. Changes remain uncommitted for the host orchestrator.
+
+```sh
+cd /Users/brandon/code/personal/cyberdeck-worktrees/orc-peer-approval
+```
+
+- After the caller's own grant check, fresh peer-create admission reads the caller's scope primary
+  through the binding repository's `get(orchestratorKey(binding.scope))` on every request. No toggle
+  state is cached. A primary without `orchestrator.create` blocks its peers and descendants with
+  `DENIED`, code `SCOPE_PEER_CREATE_OFF`, and a reason naming
+  `cyberdeck orchestrator peer-create off`. The primary itself fails its own grant check. The toggle
+  continues to modify only the primary; existing peer grants are preserved, and re-enabling does
+  not widen legacy narrowed grants. Existing mutation replay still returns an existing peer without
+  launching a fresh one.
+- `PeerApprovalSchema.grantedAt` now uses `z.iso.datetime({ offset: true })`. The submitted timestamp
+  is kept verbatim, including `2026-10-08T15:00:00+03:00` through request parsing, admission,
+  manager input, requested audit, binding lineage and create result.
+- Architecture policy, README and CHANGELOG now describe the transitive scope hard stop;
+  architecture and CHANGELOG also document offset timestamps. New production logic is confined to
+  `src/domain/orchestrator.ts` and `src/orchestration/orchestrator-peer-service.ts`.
+  `src/orchestration/agent-control-service.ts` is unchanged.
+
+New tests in `tests/orchestration/orchestrator-peer-service.test.ts`: **3 cases added**, final **24**.
+
+- `enforces the durable fleet scope kill-switch for primary, peer and descendant across service reloads`.
+- `enforces the durable workspace scope kill-switch for primary, peer and descendant across service reloads`.
+  Both scope cases use the real `OrchestratorManager`, `OrchestratorPeerService` and a temporary
+  `OrchestratorStore` binding log. A creates B with standing approval; B creates a depth-two
+  descendant. OFF denies A, B and the descendant, including B and the descendant through a fresh
+  service and fresh store reading the same log, without increasing the launch count. ON allows
+  fresh creates from all three through both service instances. A subsequently narrowed legacy peer
+  stays denied after an OFF/ON cycle. Durable replay remains available while OFF without a launch.
+- `accepts an RFC 3339 offset through the create-request schema and preserves it through admission`.
+  Parses the actual `AgentCreateOrchestratorParamsSchema`, reaches successful admission, and checks
+  verbatim approval in manager input, audit, stored lineage and result.
+
+Before the production fixes, these three cases failed on the reviewed behavior: both scope tests
+received `CREATED` while OFF, and the offset timestamp failed request validation.
+
+Required gates: **GREEN**, with Node 24.18.0 placed first in PATH before each pnpm command.
+
+```sh
+export PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:$PATH
+pnpm check
+pnpm exec vitest run tests/domain/orchestrator.test.ts tests/orchestration/orchestrator-peer-service.test.ts tests/orchestration/orchestrator-manager.test.ts tests/orchestration/agent-control-service.test.ts tests/mcp/server.test.ts tests/cli.test.ts tests/architecture --reporter=default --reporter=json --outputFile.json=/tmp/mik257-review-fixes-gates.json
+git diff --check
+```
+
+- `pnpm check`: **PASS**, exit 0.
+- Focused suites plus full `tests/architecture`: **8 files passed, 235 tests passed**, no failed or
+  skipped tests. Domain **23**; peer service **24**; manager **45**; agent control **66**; MCP **27**;
+  CLI **35**; architecture dependency rule **13** and file size **2**. Architecture baselines unchanged.
+- `git diff --check`: **PASS**.
+- Result artifact: `/tmp/mik257-review-fixes-gates.json`.
+
+These gates prove offline admission and persistence behavior, not live activation or phone delivery.
+The earlier full-suite host gate and Fleet lineage presentation gap remain outside this review-fix task.
+No live broker, provider process, shared application state, other checkout, commit or branch operation
+was used.
+
+PROGRESS submissions used stable event IDs `mik257-review-fixes-start-4225679d` and
+`mik257-review-fixes-gates-green-4225679d`. Both MCP calls were rejected with
+`MCP tool call requires approval, but approval policy is never`. No CLI fallback or live socket
+attempt was made. Worker stops after this report.
