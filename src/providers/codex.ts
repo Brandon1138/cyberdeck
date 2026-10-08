@@ -10,6 +10,7 @@ import { sessionLaunchEnvironment } from "./launch-environment.js";
 import { CODEX_ORCHESTRATOR_CONFIG_ARGS } from "./codex-orchestrator-config.js";
 import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
 import { workspaceWritableRoots } from "../domain/worker-workspace.js";
+import type { CodexOrchestratorHomePort } from "./codex/orchestrator-home.js";
 
 /**
  * Codex workers name both permission dimensions independently. Top-level orchestrators use the
@@ -45,6 +46,7 @@ export interface CodexProviderAdapterOptions {
   mcp?: CyberdeckMcpLaunch;
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
   runCommand?: CodexCommandRunner;
+  orchestratorHome?: CodexOrchestratorHomePort;
   /**
    * Pre-spawn workspace trust for the session cwd. The broker supplies a policy-gated hook — trust
    * is written only for repositories the operator granted (`cyberdeck modal-answers on`), so the
@@ -57,19 +59,20 @@ export type CodexCommandRunner = (
   executable: string,
   args: readonly string[],
   options: { cwd: string; env: NodeJS.ProcessEnv },
-) => Promise<void>;
+) => Promise<string>;
 
 const execFileAsync = promisify(execFile);
 const CODEX_REMOTE_ADDRESS = "unix://";
 const MAX_CODEX_COMMAND_ERROR = 2_000;
 
 const runCodexCommand: CodexCommandRunner = async (executable, args, options) => {
-  await execFileAsync(executable, [...args], {
+  const { stdout } = await execFileAsync(executable, [...args], {
     cwd: options.cwd,
     env: options.env,
     timeout: 30_000,
     maxBuffer: 1024 * 1024,
   });
+  return stdout;
 };
 
 export class CodexProviderAdapter implements ProviderAdapter {
@@ -111,13 +114,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
       executable: "codex",
       args,
       cwd: session.cwd,
-      env: sessionLaunchEnvironment(
-        this.options.sourceEnvironment ?? process.env,
-        this.id,
-        session.cwd,
-        session,
-      ),
+      env: this.launchEnvironment(session),
     };
+  }
+
+  private launchEnvironment(session: SessionRecord): NodeJS.ProcessEnv {
+    const environment = sessionLaunchEnvironment(
+      this.options.sourceEnvironment ?? process.env,
+      this.id,
+      session.cwd,
+      session,
+    );
+    if (session.kind === "orchestrator" && this.options.orchestratorHome !== undefined) {
+      environment.CODEX_HOME = this.options.orchestratorHome.directory;
+    }
+    return environment;
   }
 
   buildResumeSpec(session: SessionRecord): ProviderLaunchSpec {
@@ -141,19 +152,15 @@ export class CodexProviderAdapter implements ProviderAdapter {
       executable: "codex",
       args,
       cwd: session.cwd,
-      env: sessionLaunchEnvironment(
-        this.options.sourceEnvironment ?? process.env,
-        this.id,
-        session.cwd,
-        session,
-      ),
+      env: this.launchEnvironment(session),
     };
   }
 
   /**
    * Codex Remote Control is hosted by its managed app-server daemon. Starting it is idempotent, so
    * every orchestrator launch and resume can establish the prerequisite before the remote TUI
-   * connects. Workers remain direct provider processes and never touch this machine-wide daemon.
+   * connects. The broker supplies a separate home so desktop keeps its own RC ownership. Workers
+   * remain direct provider processes and never touch the orchestrator daemon.
    */
   async prepareLaunch(session: SessionRecord, spec: ProviderLaunchSpec): Promise<void> {
     // Before anything else: an untrusted cwd parks the session at Codex's folder-trust dialog at
@@ -161,17 +168,27 @@ export class CodexProviderAdapter implements ProviderAdapter {
     await this.options.workspaceTrust?.(session.cwd);
     if (session.kind !== "orchestrator") return;
     try {
-      await (this.options.runCommand ?? runCodexCommand)(
+      await this.options.orchestratorHome?.prepare();
+      const stdout = await (this.options.runCommand ?? runCodexCommand)(
         spec.executable,
         ["remote-control", "start", "--json"],
         { cwd: spec.cwd, env: spec.env },
       );
+      // The native CLI exits successfully even when its connection attempt times out. A running
+      // local daemon is not proof of phone access; do not open an orchestrator without ready RC.
+      const result = JSON.parse(stdout) as { status?: unknown } | null;
+      if (result?.status !== "connected") {
+        throw new Error(
+          `connection is ${String(result?.status ?? "unknown")}; check the Codex daemon's RC status`
+            + " and whether another app already owns this installation's remote connection",
+        );
+      }
     } catch (cause) {
       const detail = codexCommandFailure(cause);
       throw Object.assign(
         new Error(
-          `Could not start Codex Remote Control for orchestrator ${session.id}`
-            + (detail === undefined ? "" : `:\n${detail}`),
+          `Could not start Codex Remote Control${detail === undefined ? "" : `: ${detail}`}`
+            + ` (orchestrator ${session.id})`,
           { cause },
         ),
         { code: "CODEX_REMOTE_CONTROL_UNAVAILABLE" },
@@ -246,10 +263,16 @@ export class CodexProviderAdapter implements ProviderAdapter {
 }
 
 function codexCommandFailure(cause: unknown): string | undefined {
-  const value = typeof cause === "object" && cause !== null && "stderr" in cause
-    ? String((cause as { stderr: unknown }).stderr)
-    : cause instanceof Error ? cause.message : String(cause);
-  const detail = value.trim().slice(0, MAX_CODEX_COMMAND_ERROR);
+  const output = typeof cause === "object" && cause !== null
+    ? cause as { stderr?: unknown; stdout?: unknown }
+    : {};
+  const value = [output.stderr, output.stdout, cause instanceof Error ? cause.message : String(cause)]
+    .find((candidate) => typeof candidate === "string" && candidate.trim() !== "");
+  // Fleet's notice is one row. Keep the cause ahead of the UUID and collapse line breaks so the
+  // native error survives that row's clipping, including JSON errors written only to stdout.
+  const detail = typeof value === "string"
+    ? value.trim().replace(/\s+/gu, " ").slice(0, MAX_CODEX_COMMAND_ERROR)
+    : "";
   return detail === "" ? undefined : detail;
 }
 

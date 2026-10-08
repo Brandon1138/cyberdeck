@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
-import { CodexProviderAdapter } from "../../src/providers/codex.js";
+import { CodexProviderAdapter, type CodexCommandRunner } from "../../src/providers/codex.js";
 import { CursorProviderAdapter } from "../../src/providers/cursor/session-adapter.js";
 import { AntigravityProviderAdapter } from "../../src/providers/antigravity/session-adapter.js";
 
@@ -110,6 +110,8 @@ describe("CodexProviderAdapter", () => {
       "--remote",
       "unix://",
       "model_provider=\"openai\"",
+      "-c",
+      'plugins."headroom@headroom-marketplace".enabled=false',
       "--approve-for-me",
     ]));
     expect(spec.args).not.toContain("-a");
@@ -120,15 +122,17 @@ describe("CodexProviderAdapter", () => {
       .not.toContain("mcp_servers.cyberdeck");
   });
 
-  it("starts the managed Remote Control daemon before an orchestrator connects", async () => {
-    const runCommand = vi.fn(async () => undefined);
+  it.each(["launch", "resume"] as const)("requires connected Remote Control before an orchestrator %s", async (operation) => {
+    const runCommand = vi.fn(async () => JSON.stringify({ status: "connected", timedOut: false }));
     const orchestrator = session({
       kind: "orchestrator",
       sandbox: "workspace-write",
       approvalMode: "auto",
     });
-    const adapter = new CodexProviderAdapter({ runCommand });
-    const spec = adapter.buildLaunchSpec(orchestrator);
+    const adapter = new CodexProviderAdapter({ runCommand, nativeSessionId: "native-conversation" });
+    const spec = operation === "launch"
+      ? adapter.buildLaunchSpec(orchestrator)
+      : adapter.buildResumeSpec(orchestrator);
 
     await adapter.prepareLaunch(orchestrator, spec);
 
@@ -137,6 +141,49 @@ describe("CodexProviderAdapter", () => {
       ["remote-control", "start", "--json"],
       { cwd: "/tmp/repo", env: spec.env },
     );
+  });
+
+  it.each(["launch", "resume"] as const)("uses the separate RC home for orchestrator %s and its daemon", async (operation) => {
+    const prepare = vi.fn(async () => undefined);
+    const runCommand = vi.fn<CodexCommandRunner>(async () => JSON.stringify({ status: "connected" }));
+    const adapter = new CodexProviderAdapter({
+      sourceEnvironment: { CODEX_HOME: "/operator/codex", OPENAI_BASE_URL: "http://headroom" },
+      orchestratorHome: { directory: "/operator/codex/cyberdeck-orchestrator", prepare },
+      nativeSessionId: "existing-native-conversation",
+      runCommand,
+    });
+    const orchestrator = session({ kind: "orchestrator", sandbox: "workspace-write", approvalMode: "auto" });
+    const spec = operation === "launch"
+      ? adapter.buildLaunchSpec(orchestrator)
+      : adapter.buildResumeSpec(orchestrator);
+    await adapter.prepareLaunch(orchestrator, spec);
+    expect(spec.env.CODEX_HOME).toBe("/operator/codex/cyberdeck-orchestrator");
+    expect(spec.env.OPENAI_BASE_URL).toBeUndefined();
+    expect(runCommand.mock.calls[0]?.[2].env.CODEX_HOME).toBe(spec.env.CODEX_HOME);
+    expect(prepare.mock.invocationCallOrder[0]).toBeLessThan(runCommand.mock.invocationCallOrder[0]!);
+    if (operation === "resume") expect(spec.args.at(-1)).toBe("existing-native-conversation");
+    const worker = session({ kind: "worker" });
+    const workerSpec = adapter.buildLaunchSpec(worker);
+    await adapter.prepareLaunch(worker, workerSpec);
+    expect(workerSpec.env.CODEX_HOME).toBe("/operator/codex");
+    expect(workerSpec.env.OPENAI_BASE_URL).toBe("http://headroom");
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(runCommand).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { status: "connecting", timedOut: true },
+    { status: "errored", timedOut: false },
+    { status: "disabled", timedOut: false },
+    {},
+  ])("refuses a successful native command whose RC connection is not ready: %j", async (result) => {
+    const adapter = new CodexProviderAdapter({ runCommand: async () => JSON.stringify(result) });
+    const orchestrator = session({ kind: "orchestrator", sandbox: "workspace-write", approvalMode: "auto" });
+    await expect(adapter.prepareLaunch(orchestrator, adapter.buildLaunchSpec(orchestrator)))
+      .rejects.toMatchObject({
+        code: "CODEX_REMOTE_CONTROL_UNAVAILABLE",
+        message: expect.stringContaining("Could not start Codex Remote Control: connection is"),
+      });
   });
 
   it("fails an orchestrator launch loudly when Remote Control cannot start", async () => {
@@ -160,7 +207,7 @@ describe("CodexProviderAdapter", () => {
   });
 
   it("keeps workers on the direct CLI and never starts Remote Control", async () => {
-    const runCommand = vi.fn(async () => undefined);
+    const runCommand = vi.fn(async () => JSON.stringify({ status: "connected" }));
     const worker = session({
       kind: "worker",
       sandbox: "workspace-write",
@@ -175,6 +222,22 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args).toEqual(expect.arrayContaining(["-s", "workspace-write", "-a", "never"]));
     expect(spec.args).not.toContain("--approve-for-me");
     expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { stderr: "\n  native startup failed\n\n", stdout: "", detail: "native startup failed" },
+    { stderr: "", stdout: '{"error":"daemon unavailable"}\n', detail: '{"error":"daemon unavailable"}' },
+    { stderr: "", stdout: "", detail: "Command failed" },
+  ])("puts the available startup error ahead of the orchestrator identity: $detail", async ({ stderr, stdout, detail }) => {
+    const adapter = new CodexProviderAdapter({
+      runCommand: async () => { throw Object.assign(new Error("Command failed"), { stderr, stdout }); },
+    });
+    const orchestrator = session({ kind: "orchestrator", sandbox: "workspace-write", approvalMode: "auto" });
+    await expect(adapter.prepareLaunch(orchestrator, adapter.buildLaunchSpec(orchestrator)))
+      .rejects.toMatchObject({
+        code: "CODEX_REMOTE_CONTROL_UNAVAILABLE",
+        message: `Could not start Codex Remote Control: ${detail} (orchestrator ${orchestrator.id})`,
+      });
   });
 
   it("passes a new thread's initial task as one positional argument", () => {
@@ -276,6 +339,8 @@ describe("CodexProviderAdapter", () => {
       "unix://",
       "-c",
       "model_provider=\"openai\"",
+      "-c",
+      'plugins."headroom@headroom-marketplace".enabled=false',
       "--approve-for-me",
       "-m",
       "gpt-test",
@@ -426,6 +491,7 @@ describe("ClaudeProviderAdapter", () => {
       "haiku",
       "--append-system-prompt-file",
       expect.stringContaining(record.id),
+      "--remote-control",
       "--setting-sources",
       "project,local",
       "--mcp-config",
