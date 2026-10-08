@@ -82,7 +82,6 @@ import type {
   SessionLookupPort,
   SessionProcessControlPort,
   SessionStartPort,
-  WorkerResultSnapshot,
   WorkerTruthQueryPort,
 } from "./session/session-ports.js";
 

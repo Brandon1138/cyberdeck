@@ -149,6 +149,7 @@ describe("OrchestratorManager", () => {
     expect(instructions).toContain("Concatenate fragment.json before interpreting events");
     expect(instructions).toContain("acknowledge completion");
     expect(instructions).toContain("On STALE_THREAD_DETAIL, discard partial reconstruction and restart");
+    expect(instructions).toContain("for the first event that cursor is zero, and that restart is allowed");
     expect(instructions).toContain("cyberdeck_notifications_read");
     expect(instructions).toContain("Never call cyberdeck_notifications_read on a timer");
     expect(instructions).toContain("cyberdeck_workers_wait remains the deliberate synchronous join");
