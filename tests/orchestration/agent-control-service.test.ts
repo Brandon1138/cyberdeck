@@ -2045,6 +2045,26 @@ describe("AgentControlService.waitForWorkers and the notification feed", () => {
     ]);
   });
 
+  it("acknowledges the completion target the wait asked for, not the turns completed since", async () => {
+    const results = [{
+      sessionId: WORKER, provider: "codex", status: "completed", completedTurns: 2, text: "done",
+      truth: { state: "idle", terminal: false, completedTurns: 2, canonicalTurns: 2, pendingInstructions: 0, composerOccupied: false, modalOpen: false, detail: "Idle" },
+    }];
+    const acknowledgeByDedupeKey = vi.fn(async () => undefined);
+    const service = new AgentControlService(
+      { get: () => worker, waitForWorkerResults: vi.fn(async () => ({ timedOut: false, results })) } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never,
+      { read: vi.fn() } as never,
+      undefined,
+      { notifications: { acknowledgeByDedupeKey } },
+    );
+    await service.waitForWorkers({ actorSessionId: ACTOR, targets: [{ sessionId: WORKER, completionTarget: 1 }] });
+    // Turn 2's settled record is new work the feed still owes; only the requested turn is consumed.
+    expect(acknowledgeByDedupeKey.mock.calls).toEqual([
+      [orchestratorController(binding).controllerId, `settled:${WORKER}:1`, "wait"],
+    ]);
+  });
+
   it("survives an inbox that refuses the acknowledgement", async () => {
     const results = [{
       sessionId: WORKER, provider: "codex", status: "completed", completedTurns: 1, text: "done",

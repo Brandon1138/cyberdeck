@@ -283,6 +283,16 @@ describe("OrchestratorNotificationDelivery", () => {
     expect(files.notices.get(SESSION)!.pending).toBe(5);
   });
 
+  it("writes the controller's quiet interval into the notice file so a hook can repeat after it", async () => {
+    await store.setPolicy(CONTROLLER, { ...DEFAULT_NOTIFICATION_POLICY, coalesceMs: 100, quietMinutes: 3 });
+    await append(false);
+    const file = files.notices.get(SESSION)!;
+    expect(NoticeFileSchema.safeParse(file).success).toBe(true);
+    expect(file.quietMinutes).toBe(3);
+    await delivery.notice(CONTROLLER);
+    expect(files.notices.get(SESSION)!.quietMinutes).toBe(3);
+  });
+
   it("row 16: long inline intervention is bounded in the notice file", async () => {
     await store.append({ controllerId: CONTROLLER, sessionId: SESSION, kind: "intervention",
       severity: "critical", summary: "x".repeat(512), wakeEligible: true }); await settle();

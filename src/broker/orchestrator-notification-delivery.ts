@@ -159,6 +159,9 @@ export class OrchestratorNotificationDelivery {
       noticedCursor: this.options.inbox.noticeState(controllerId).lastNoticedCursor,
       pending: result.notice.pending, dropped: result.notice.dropped, text: result.text,
       writtenAt: new Date(this.now()).toISOString(),
+      // A hook repeats an unchanged notice only after this interval; without it in the file the
+      // hook has no interval to measure and the configured reminder never fires.
+      quietMinutes: this.options.inbox.policy(controllerId).quietMinutes,
     });
   }
 
