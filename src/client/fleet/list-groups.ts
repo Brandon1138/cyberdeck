@@ -74,7 +74,7 @@ export function scrollFocusedRowIntoView(
     offset = focusedIndex - viewportHeight + 1;
   }
   offset = clampThreadListScrollOffset(offset, rows.length, viewportHeight);
-  return { ...state, threadListScrollOffset: offset };
+  return state.threadListScrollOffset === offset ? state : { ...state, threadListScrollOffset: offset };
 }
 
 export function setCollapsed(state: FleetState, cwd: string, collapsed: boolean): FleetState {

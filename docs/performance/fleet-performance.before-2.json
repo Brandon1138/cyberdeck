@@ -1,0 +1,125 @@
+{
+  "node": "v24.18.0",
+  "moduleRoot": "/private/tmp/cyberdeck-fleet-performance-evidence/baseline/dist",
+  "workloads": {
+    "fleet": {
+      "sessions": 71,
+      "subjects": 601,
+      "bindings": 176,
+      "projects": 5,
+      "legacyRpcCalls": 4
+    },
+    "renderer": {
+      "width": 86,
+      "height": 24,
+      "sessions": 71,
+      "writesIncluded": false,
+      "changingDraft": true
+    },
+    "persistence": {
+      "bindingRecords": 10000,
+      "preferenceRecords": 10000,
+      "warmedReads": true
+    },
+    "transcript": {
+      "events": 10000,
+      "afterCursor": 9999,
+      "limit": 1,
+      "nativeLines": 10000,
+      "warmedReads": true
+    },
+    "mcpRead": {
+      "storedTextBytes": 204000,
+      "storedDataBytes": 60013,
+      "allContentConsumed": true
+    },
+    "activity": {
+      "replayRows": 5000,
+      "appendedRows": 101,
+      "readPage": 100,
+      "fsyncEnabled": true
+    },
+    "startup": {
+      "command": "node cli.js mcp --help",
+      "runs": 6,
+      "brokerConnected": false,
+      "providerLaunched": false
+    }
+  },
+  "metrics": {
+    "fleetFullBytes": 657457,
+    "fleetIdleBytes": 657457,
+    "fleetProjection": {
+      "iterations": 50,
+      "meanMs": 0.8096866000000023,
+      "medianMs": 0.6005829999999719,
+      "p95Ms": 2.1839580000000183
+    },
+    "framePreparation": {
+      "iterations": 250,
+      "meanMs": 3.467331475999997,
+      "medianMs": 3.1081249999999727,
+      "p95Ms": 6.8882919999999785
+    },
+    "bindingLookup": {
+      "iterations": 25,
+      "meanMs": 87.88775328000001,
+      "medianMs": 84.31720800000039,
+      "p95Ms": 105.00587499999983
+    },
+    "projectProjection": {
+      "iterations": 25,
+      "meanMs": 16.199924999999986,
+      "medianMs": 15.521582999999737,
+      "p95Ms": 19.941291000000092
+    },
+    "transcriptTailRead": {
+      "iterations": 25,
+      "meanMs": 39.20615332000005,
+      "medianMs": 37.87316699999974,
+      "p95Ms": 48.105374999999185
+    },
+    "nativePreviewRead": {
+      "iterations": 25,
+      "meanMs": 20.584548239999858,
+      "medianMs": 19.752958999999464,
+      "p95Ms": 26.000583000000006
+    },
+    "mcpFullSchemaBytes": 29821,
+    "mcpFullTools": 25,
+    "mcpScopedSchemaBytes": 29821,
+    "mcpScopedTools": 25,
+    "mcpWorkerSchemaBytes": 29821,
+    "mcpWorkerTools": 25,
+    "mcpRead": {
+      "responseCount": 1,
+      "maximumWireBytes": 360357,
+      "aggregateWireBytes": 360357
+    },
+    "activityOpenMs": 4408.9922910000005,
+    "activityPage": {
+      "iterations": 25,
+      "meanMs": 3.999400000000096,
+      "medianMs": 3.910916000000725,
+      "p95Ms": 5.235584000000017
+    },
+    "activityAppend": {
+      "iterations": 100,
+      "meanMs": 7.598864219999923,
+      "medianMs": 7.081333000000086,
+      "p95Ms": 11.329124999998385
+    },
+    "mcpHelpStartup": {
+      "meanMs": 760.6202431666667,
+      "meanPeakRssBytes": 144362154.66666666,
+      "samplesMs": [
+        866.6566249999996,
+        585.2934590000004,
+        650.1325840000009,
+        989.1063749999994,
+        778.5532079999994,
+        693.9792080000007
+      ]
+    }
+  }
+}

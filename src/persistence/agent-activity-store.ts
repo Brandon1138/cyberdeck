@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { ActivityDiskIndex } from "./activity-disk-index.js";
-import { recoverActivityJournal, readActivityLocation, copyActivitySuffix } from "./activity-journal.js";
+import { recoverActivityJournal, readActivityLocation, readActivityLocations, copyActivitySuffix } from "./activity-journal.js";
 import { writeAtomicPrivateFile } from "./atomic-private-file.js";
 import { open, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
@@ -92,7 +92,7 @@ export class AgentActivityStore implements AgentActivityPort {
   private readPage(locations: () => ReturnType<ActivityDiskIndex["page"]>, afterSequence: number, limit: number): Promise<AgentActivity[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("ACTIVITY_READ_LIMIT");
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new Error("ACTIVITY_READ_CURSOR");
-    const operation = this.tail.then(() => Promise.all(locations().map((location) => readActivityLocation(this.path, location))));
+    const operation = this.tail.then(() => readActivityLocations(this.path, locations()));
     this.tail = operation.then(() => {}, () => {});
     return operation;
   }
@@ -115,6 +115,7 @@ export class AgentActivityStore implements AgentActivityPort {
     // The row this append adds can grow the index by up to a page per b-tree; reserve for it.
     const indexBytes = this.index.bytes() + 2048, cap = this.retention.maxBytes - indexBytes;
     const target = this.bytes + incoming > cap ? cap - Math.max(incoming, Math.floor(this.retention.maxBytes / 64)) : cap;
+    if (this.bytes + incoming <= cap && (this.index.oldestObserved() ?? Infinity) >= cutoff) return;
     let remove = 0, removedBytes = 0, through = 0;
     outer: for (;;) {
       const page = this.index.oldest(through);

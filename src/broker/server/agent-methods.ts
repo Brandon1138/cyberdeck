@@ -81,8 +81,8 @@ export const agentMethods: Record<string, BrokerMethodHandler> = {
     return requireAgentControl(server.options).listThreads(AgentListThreadsParamsSchema.parse(frame.params));
   },
   "agent.thread.read": async (server, _context, frame) => {
-    const { actorSessionId, sessionId, afterCursor, limit } = AgentReadParamsSchema.parse(frame.params);
-    return requireAgentControl(server.options).readThread(actorSessionId, sessionId, afterCursor, limit);
+    const { actorSessionId, sessionId, afterCursor, limit, ...options } = AgentReadParamsSchema.parse(frame.params);
+    return requireAgentControl(server.options).readThread(actorSessionId, sessionId, afterCursor, limit, options);
   },
   "agent.scout.read": async (server, _context, frame) => {
     return requireAgentControl(server.options).readScoutArtifact(

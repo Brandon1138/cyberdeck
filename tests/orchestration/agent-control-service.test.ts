@@ -1090,6 +1090,31 @@ describe("AgentControlService", () => {
     expect(read).toHaveBeenCalledOnce();
   });
 
+  it("retries a lost final detail fragment until the caller acknowledges its event cursor", async () => {
+    const event = { id: WORKER, sessionId: WORKER, cursor: 1, occurredAt: now, kind: "turn" as const,
+      source: "provider" as const, text: "large result".repeat(3000), data: {} };
+    let authorized = true;
+    const service = new AgentControlService(
+      { get: () => worker } as never,
+      { findBySessionId: async () => authorized ? binding : undefined } as never,
+      { read: async (_session: string, after: number) => ({ events: after < 1 ? [event] : [], nextCursor: Math.max(1, after) }) } as never,
+    );
+    let continuation, lastOptions = {};
+    let page;
+    do {
+      lastOptions = { maxBytes: 1024, ...(continuation === undefined ? {} : { continuation }) };
+      page = await service.readThread(ACTOR, WORKER, 0, 1, lastOptions);
+      continuation = page.continuation;
+    } while (continuation !== undefined);
+    expect(page.nextCursor).toBe(1);
+    expect(await service.readThread(ACTOR, WORKER, 0, 1, lastOptions)).toEqual(page);
+    authorized = false;
+    await expect(service.readThread(ACTOR, WORKER, 0, 1, lastOptions)).rejects.toMatchObject({ code: "ACTOR_NOT_AUTHORIZED" });
+    authorized = true;
+    await service.readThread(ACTOR, WORKER, 1, 1);
+    await expect(service.readThread(ACTOR, WORKER, 0, 1, lastOptions)).rejects.toMatchObject({ code: "STALE_THREAD_CURSOR" });
+  });
+
   it("waits for several worker results through the broker instead of reading transcripts", async () => {
     const waitForWorkerResults = vi.fn(async () => ({ timedOut: false, results: [] }));
     const service = new AgentControlService(

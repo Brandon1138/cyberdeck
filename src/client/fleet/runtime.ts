@@ -1,3 +1,4 @@
+import { prepareFleetFrame } from "./prepare-frame.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { appStateDirectory } from "../../broker/app-paths.js";
@@ -20,7 +21,8 @@ import { FleetRuntimeOptions, OrchestratorCockpitTarget, ResolvedFleetRenderOpti
 import { paint, renderNotice } from "./slash-commands.js";
 import { FleetInput, FleetOutput, FleetSignals, FolderDisposition, InteractiveFleetTransport, LaunchProfile } from "./state.js";
 import { transitionFleet } from "./transition.js";
-import { collectFleetSnapshot, createFleetState } from "./transport.js";
+import { createFleetState } from "./transport.js";
+import { FleetSnapshotFeed } from "./snapshot-feed.js";
 export async function runFleet(
   client: InteractiveFleetTransport,
   input: FleetInput = process.stdin,
@@ -28,7 +30,10 @@ export async function runFleet(
   signals: FleetSignals = process,
   runtime: FleetRuntimeOptions = {},
 ): Promise<void> {
-  let snapshot = await collectFleetSnapshot(client);
+  const snapshotFeed = new FleetSnapshotFeed(client);
+  try { await snapshotFeed.refresh(); }
+  catch (error) { snapshotFeed.dispose(); throw error; }
+  let snapshot = snapshotFeed.snapshot;
   let state = createFleetState(snapshot);
   const permissionPreferences = runtime.permissionPreferences;
   try {
@@ -79,7 +84,7 @@ export async function runFleet(
   }
   if (input.isTTY !== true) {
     output.write(`${renderFleet(snapshot, state, { color: false, width: output.columns, height: output.rows })}\n`);
-    client.close();
+    snapshotFeed.dispose(); client.close();
     return;
   }
   const terminalBackground = await queryTerminalBackground(input, output);
@@ -204,7 +209,11 @@ export async function runFleet(
     if (attaching) client.close();
     notify();
   };
-  const unsubscribeClose = client.onClose(stop);
+  snapshotFeed.start(notify, {
+    ...(runtime.reconnectTransport === undefined ? {} : { reconnect: runtime.reconnectTransport }),
+    connected: (replacement) => { client = replacement; },
+    closed: stop,
+  });
   const openNativeThread = async (sessionId: string) => {
     attaching = true;
     notify();
@@ -235,7 +244,7 @@ export async function runFleet(
         input.on("data", onInput);
         input.resume?.();
         enterFleetScreen();
-        snapshot = await collectFleetSnapshot(client);
+        snapshot = snapshotFeed.snapshot;
       }
       notify();
     }
@@ -267,7 +276,7 @@ export async function runFleet(
         input.on("data", onInput);
         input.resume?.();
         enterFleetScreen();
-        snapshot = await collectFleetSnapshot(client);
+        snapshot = snapshotFeed.snapshot;
       }
       notify();
     }
@@ -326,6 +335,7 @@ export async function runFleet(
     });
     state = executed.state;
     snapshot = executed.snapshot;
+    if (action !== undefined) snapshotFeed.resync(snapshot);
     nvimLayoutHookInstalled = executed.nvimLayoutHookInstalled;
     notify();
   };
@@ -361,13 +371,21 @@ export async function runFleet(
   signals.on("SIGTERM", stop);
   signals.on("SIGWINCH", onResize);
   enterFleetScreen();
+  let refreshNotice: string | undefined;
   try {
     while (!stopped) {
       if (attaching) {
         await waitForNextFrame();
         continue;
       }
-      snapshot = await collectFleetSnapshot(client);
+      snapshot = snapshotFeed.snapshot;
+      if (snapshotFeed.error !== undefined && (state.notice === undefined || state.notice === refreshNotice)) {
+        state = { ...state, notice: snapshotFeed.error, noticeTone: "error" };
+      } else if (snapshotFeed.error === undefined && refreshNotice !== undefined && state.notice === refreshNotice) {
+        const { notice: _notice, noticeTone: _tone, ...current } = state;
+        state = current;
+      }
+      refreshNotice = snapshotFeed.error;
       state = normalizeState(state, snapshot, Date.now());
       if (mascotFrameTimer !== undefined) clearTimeout(mascotFrameTimer);
       mascotFrameTimer = undefined;
@@ -429,13 +447,9 @@ export async function runFleet(
           background: terminalBackground,
           mascot: nativeMascot?.placement,
         };
-        state = normalizeThreadListViewport(snapshot, state, renderOptions);
-        const rendered = renderFleet(snapshot, state, renderOptions);
-        writeFrame(
-          rendered,
-          composerCursor(rendered, state, width),
-          fleetFrameLayout(snapshot, state, renderOptions),
-        );
+        const frame = prepareFleetFrame(snapshot, state, renderOptions);
+        state = frame.state;
+        writeFrame(frame.body, frame.cursor, frame.layout);
       }
       if (pulse?.nextFrameIn !== undefined) {
         mascotFrameTimer = setTimeout(notify, pulse.nextFrameIn);
@@ -450,7 +464,7 @@ export async function runFleet(
     } catch (error) {
       layoutCleanupError = error;
     }
-    unsubscribeClose();
+    snapshotFeed.dispose();
     signals.off("SIGINT", onSigint);
     signals.off("SIGTERM", stop);
     signals.off("SIGWINCH", onResize);

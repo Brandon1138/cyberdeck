@@ -20,7 +20,8 @@ const BASELINE_PATH = resolve(
   REPOSITORY_ROOT,
   "docs/architecture/dependency-rule-baseline.json",
 );
-const CLI_ENTRYPOINT = resolve(SOURCE_ROOT, "cli.ts");
+// The thin executable delegates non-MCP commands to this existing composition boundary.
+const CLI_ENTRYPOINT = resolve(SOURCE_ROOT, "cli/full-program.ts");
 const BROKER_COMPOSITION_ROOT = resolve(SOURCE_ROOT, "broker/main.ts");
 
 const ALLOWED_IMPORTS: Readonly<Record<Layer, ReadonlySet<Layer>>> = {
@@ -941,7 +942,7 @@ describe("architecture dependency rule", () => {
     expect(layerFor(resolve(SOURCE_ROOT, "broker/main.ts"))).toBe("composition");
     expect(layerFor(resolve(SOURCE_ROOT, "broker/server.ts"))).toBe("application");
     expect(isAllowedLocalImport(
-      resolve(SOURCE_ROOT, "cli.ts"),
+      resolve(SOURCE_ROOT, "cli/full-program.ts"),
       resolve(SOURCE_ROOT, "broker/main.ts"),
     )).toBe(true);
     expect(isAllowedLocalImport(
