@@ -7,7 +7,7 @@ suite, build, isolated offline Promptfoo evaluations, and the production depende
 
 Before tests, `scripts/ci-native-preflight.mjs` requires tmux **>=3.3**, Neovim **>=0.10**, zsh,
 Bash, Git, Python, make, and a C++ compiler. Missing native dependencies fail the job instead of
-allowing existing `skipIf` suites to pass without running. Both native gates install Neovim
+allowing existing `skipIf` suites to pass without running. All three native gates install Neovim
 **0.11.5** from official tarballs with checked, committed SHA-256 digests; macOS retains its native
 state paths and runtime behavior.
 
@@ -36,8 +36,7 @@ model, or authentication gate is invoked. Reports, broker status, and broker log
 small acceptance artifacts.
 
 The Lua assertion accepts either `contrib/nvim/lua/cyberdeck/init.lua` or a build-contained Lua
-layout. It fails if packaging omits or duplicates the module. Integrate the nvim worker's packaging
-patch before expecting this gate to pass; do not weaken the assertion to hide missing assets.
+layout. It fails if packaging omits or duplicates the module.
 
 ## Distro install and compiler fallback
 
