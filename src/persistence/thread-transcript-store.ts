@@ -84,8 +84,11 @@ interface NativeProjection {
   reader: JsonlOffsetReader;
   messages: TranscriptMessage[];
   turns: Map<string, NativeTurn>;
+  hasNativeTurns: boolean;
   cleared: boolean;
 }
+
+interface NativeTurnRead { turns: NativeTurn[]; available: boolean; }
 
 interface ObservedModelCursor {
   path: string;
@@ -116,6 +119,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   private readonly segments = new ThreadSegmentIndex();
   private readonly nativeProjections = new Map<string, NativeProjection>();
   private readonly semanticTurnIds = new Set<string>();
+  private readonly nativeTurnOrdinals = new Set<string>();
   private readonly nativePaths = new Map<string, string>();
   private readonly observedModelCursors = new Map<string, ObservedModelCursor>();
   private readonly providerBudgetTelemetryCursors = new Map<string, ProviderBudgetTelemetryCursor>();
@@ -163,19 +167,20 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   /** Read and prepare provider turns without mutating the semantic transcript. */
   async observeProviderTurns(input: CaptureProviderTurns): Promise<WorkerTurnObservation> {
     await this.init();
-    const nativeTurns = input.provider === "claude"
+    const { turns: nativeTurns, available: nativeAvailable } = input.provider === "claude"
       ? await this.readClaudeTurns(input)
       : input.provider === "codex"
         ? await this.readCodexTurns(input)
-        : [];
+        : { turns: [], available: false };
     // Cursor and Antigravity have no native transcript at all, so a fallback is their only turn and
     // is always allowed. For Claude and Codex the caller controls it, and only permits one after the
     // native read has been retried and come back empty.
     const fallbackAllowed = input.allowFallback
       ?? (input.provider === "cursor" || input.provider === "antigravity");
-    const turns = nativeTurns.length > 0
+    const nativeOrdinal = this.semanticKey(input.sessionId, `${input.provider}:${input.turnNumber}`);
+    const turns = nativeAvailable
       ? nativeTurns
-      : fallbackAllowed
+      : fallbackAllowed && !this.nativeTurnOrdinals.has(nativeOrdinal)
         ? [{
             id: `fallback:${input.turnNumber}`,
             occurredAt: this.options.now?.() ?? new Date().toISOString(),
@@ -200,7 +205,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
         providerTurnId: turn.id,
         providerOccurredAt: turn.occurredAt,
         text: turn.text,
-        transport: nativeTurns.length > 0
+        transport: nativeAvailable
           ? "provider-native" as const
           : "terminal-replay-fallback" as const,
         ...(claudeStatus === undefined || claudeStatus === "bound"
@@ -218,6 +223,8 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
       for (const [index, turn] of observation.turns.entries()) {
         const semanticTurnId = `${observation.provider}:${turn.providerTurnId}`;
         const turnNumber = observation.turnNumber + index;
+        if (turn.transport === "terminal-replay-fallback"
+          && this.nativeTurnOrdinals.has(this.semanticKey(observation.sessionId, `${observation.provider}:${turnNumber}`))) continue;
         const receipt = this.providerTurnReceipt(observation, turn, turnNumber);
         if (this.semanticTurnIds.has(this.semanticKey(observation.sessionId, semanticTurnId))) {
           receipts.push(receipt);
@@ -402,6 +409,13 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   }
 
   private rememberSemanticTurn(event: ThreadEvent): void {
+    if (event.data.transport === "provider-native" && typeof event.data.provider === "string"
+      && typeof event.data.turnNumber === "number") {
+      this.nativeTurnOrdinals.add(this.semanticKey(event.sessionId, `${event.data.provider}:${event.data.turnNumber}`));
+      while (this.nativeTurnOrdinals.size > MAX_REMEMBERED_TURN_IDS) {
+        this.nativeTurnOrdinals.delete(this.nativeTurnOrdinals.values().next().value!);
+      }
+    }
     const semanticTurnId = event.data.semanticTurnId;
     if (typeof semanticTurnId === "string") {
       const key = this.semanticKey(event.sessionId, semanticTurnId);
@@ -601,9 +615,9 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     let projection = this.nativeProjections.get(key);
     if (projection === undefined) {
       const messages: TranscriptMessage[] = [], turns = new Map<string, NativeTurn>();
-      projection = { messages, turns, cleared: false, reader: undefined! };
+      projection = { messages, turns, hasNativeTurns: false, cleared: false, reader: undefined! };
       const value = projection;
-      value.reader = new JsonlOffsetReader(() => { messages.length = 0; turns.clear(); value.cleared = false; });
+      value.reader = new JsonlOffsetReader(() => { messages.length = 0; turns.clear(); value.hasNativeTurns = false; value.cleared = false; });
     }
     this.nativeProjections.delete(key); this.nativeProjections.set(key, projection);
     // Eviction only forgets an acceleration; semantic receipt dedup remains authoritative.
@@ -619,27 +633,34 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
         if (message !== undefined) { value.messages.push(message); if (value.messages.length > PREVIEW_MESSAGE_WINDOW) value.messages.shift(); }
       } else {
         const turn = input.provider === "claude" ? parseClaudeTurn(line, this.options.now) : parseCodexTurn(line, this.options.now);
-        if (turn !== undefined && !this.semanticTurnIds.has(this.semanticKey(input.sessionId, `${input.provider}:${turn.id}`))) value.turns.set(turn.id, turn);
+        if (turn !== undefined) {
+          value.hasNativeTurns = true;
+          if (!this.semanticTurnIds.has(this.semanticKey(input.sessionId, `${input.provider}:${turn.id}`))) value.turns.set(turn.id, turn);
+        }
       }
     });
     if (input.provider === "claude") {
       if (value.cleared) this.refuseClaudeTranscript(input.sessionId, "cleared-unbound");
       else { this.claimedClaudePaths.set(path, input.sessionId); this.claudeStatuses.set(input.sessionId, "bound"); }
-    } else { this.nativePaths.set(input.sessionId, path); this.claimedCodexPaths.set(path, input.sessionId); }
+    } else if (purpose === "turns" || value.messages.length > 0) {
+      this.nativePaths.set(input.sessionId, path); this.claimedCodexPaths.set(path, input.sessionId);
+    }
     return value;
   }
 
-  private async readClaudeTurns(input: CaptureProviderTurns): Promise<NativeTurn[]> {
+  private async readClaudeTurns(input: CaptureProviderTurns): Promise<NativeTurnRead> {
     const path = await this.resolveClaudeTranscript(input);
-    if (path === undefined) return [];
+    if (path === undefined) return { turns: [], available: false };
     const projection = await this.nativeProjection(input, path, "turns");
-    return projection.cleared ? [] : [...projection.turns.values()].sort(compareNativeTurns);
+    return projection.cleared ? { turns: [], available: false }
+      : { turns: [...projection.turns.values()].sort(compareNativeTurns), available: projection.hasNativeTurns };
   }
 
-  private async readCodexTurns(input: CaptureProviderTurns): Promise<NativeTurn[]> {
+  private async readCodexTurns(input: CaptureProviderTurns): Promise<NativeTurnRead> {
     const path = this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
-    if (path === undefined) return [];
-    return [...(await this.nativeProjection(input, path, "turns")).turns.values()].sort(compareNativeTurns);
+    if (path === undefined) return { turns: [], available: false };
+    const projection = await this.nativeProjection(input, path, "turns");
+    return { turns: [...projection.turns.values()].sort(compareNativeTurns), available: projection.hasNativeTurns };
   }
 
   private async findCodexTranscript(input: CaptureProviderTurns): Promise<string | undefined> {

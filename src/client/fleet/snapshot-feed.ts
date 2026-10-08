@@ -13,6 +13,7 @@ export class FleetSnapshotFeed {
   private pending = false;
   private disposed = false;
   private disconnected = false;
+  private started = false;
   private timer: ReturnType<typeof setInterval> | undefined;
   private coalesce: ReturnType<typeof setTimeout> | undefined;
   private unsubscribe: (() => void)[] = [];
@@ -21,7 +22,10 @@ export class FleetSnapshotFeed {
   private reconnect: (() => Promise<InteractiveFleetTransport>) | undefined;
   private connected = (_client: InteractiveFleetTransport) => {};
   private closed = () => {};
-  constructor(private client: InteractiveFleetTransport) { this.compact = client.fleetProjection === true; }
+  constructor(private client: InteractiveFleetTransport) {
+    this.compact = client.fleetProjection === true;
+    this.observeClosure();
+  }
 
   start(notify: () => void, options: {
     reconnect?: () => Promise<InteractiveFleetTransport>;
@@ -30,7 +34,9 @@ export class FleetSnapshotFeed {
   } = {}): void {
     this.notify = notify; this.reconnect = options.reconnect;
     this.connected = options.connected ?? this.connected; this.closed = options.closed ?? this.closed;
+    this.started = true;
     this.listen();
+    if (this.disconnected) this.disconnect();
     // Periodic validation covers external journal edits, lease expiry, and lost invalidations.
     this.timer = setInterval(() => {
       if (Date.now() - this.lastRefresh >= (this.compact ? 2_000 : 100)) {
@@ -63,6 +69,7 @@ export class FleetSnapshotFeed {
       this.error = undefined;
       if (!this.disposed) this.notify();
     }).catch((error: unknown) => {
+      if (isDisconnected(error)) this.disconnect();
       this.error = `Fleet refresh failed; showing cached data: ${error instanceof Error ? error.message : String(error)}`;
       if (!this.disposed) this.notify();
       throw error;
@@ -123,14 +130,30 @@ export class FleetSnapshotFeed {
 
   private listen(): void {
     for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
+    this.observeClosure();
+    if (this.disconnected) return;
     this.unsubscribe.push(this.client.onFrame((frame) => {
       if (frame.type === "fleet-invalidated") this.invalidate();
-    }), this.client.onClose(() => {
-      this.disconnected = true; this.version = undefined; this.generation++;
-      if (this.reconnect === undefined) this.closed();
-      else { this.error = "Broker disconnected; showing cached Fleet while reconnecting."; this.notify(); this.invalidate(); }
     }));
-    void this.client.request("fleet.subscribe", {}).then(() => this.invalidate()).catch(() => {});
+    const client = this.client;
+    void client.request("fleet.subscribe", {}).then(() => { if (client === this.client) this.invalidate(); }).catch((error: unknown) => {
+      if (client === this.client && isDisconnected(error)) this.disconnect();
+    });
+  }
+
+  private observeClosure(): void {
+    this.unsubscribe.push(this.client.onClose(() => this.disconnect()));
+  }
+
+  private disconnect(): void {
+    if (this.disposed) return;
+    if (!this.disconnected) {
+      this.disconnected = true; this.version = undefined; this.generation++;
+    }
+    // Initial loading can outlive its transport. Retain closure until start supplies callbacks.
+    if (!this.started) return;
+    if (this.reconnect === undefined) this.closed();
+    else { this.error = "Broker disconnected; showing cached Fleet while reconnecting."; this.notify(); this.invalidate(); }
   }
 
   dispose(): void {
@@ -140,4 +163,7 @@ export class FleetSnapshotFeed {
     for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();
     if (!this.disconnected) void this.client.request("fleet.unsubscribe", {}).catch(() => {});
   }
+}
+function isDisconnected(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "BROKER_DISCONNECTED";
 }

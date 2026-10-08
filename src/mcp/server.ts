@@ -257,7 +257,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_thread_read",
-    description: "Incrementally read semantic worker turns, not PTY write chunks. Use nextCursor and continuation together. Concatenate fragment.json until continuation is absent to recover an oversized event; its cursor advances only at completion. Prefer workers_wait.",
+    description: "Incrementally read semantic worker turns, not PTY write chunks. Carry both nextCursor and continuation; accept an unchanged cursor including zero. Concatenate fragment.json before interpreting events. When continuation is absent, acknowledge completion with the next request's afterCursor set to nextCursor. On STALE_THREAD_DETAIL, discard partial reconstruction and restart from the cursor before that event without continuation. Older brokers may return complete events instead. Prefer cyberdeck_workers_wait.",
     inputSchema: {
       type: "object",
       properties: {
@@ -587,28 +587,22 @@ const TOOLS = [
   },
 ] as const;
 
-const TOOL_CAPABILITIES: Record<string, string> = {
-  cyberdeck_threads_list: "thread.list", cyberdeck_thread_read: "thread.read", cyberdeck_scout_read: "thread.read",
-  cyberdeck_worker_start: "worker.start", cyberdeck_workers_start: "worker.start", cyberdeck_workers_wait: "thread.read",
-  cyberdeck_thread_message: "thread.enqueue", cyberdeck_lease: "thread.read", cyberdeck_worker_ctl: "thread.read",
-  cyberdeck_worker_events: "thread.read", cyberdeck_orchestrator_inspect: "orchestrator.inspect",
-  cyberdeck_orchestrator_stop: "orchestrator.stop", cyberdeck_orchestrator_force_stop: "orchestrator.stop",
-  cyberdeck_orchestrator_create: "orchestrator.create",
-  cyberdeck_workflow_create: "workflow.run", cyberdeck_workflow_status: "workflow.run", cyberdeck_workflow_changes: "workflow.run",
-  cyberdeck_workflow_send: "workflow.run", cyberdeck_workflow_cancel: "workflow.run",
-};
+const UNBOUND_WORKER_TOOLS = new Set<(typeof TOOLS)[number]["name"]>([
+  "cyberdeck_diagnose", "cyberdeck_provider_capabilities", "cyberdeck_report_progress",
+  "cyberdeck_request_decision", "cyberdeck_respond_checkpoint", "cyberdeck_signal_exception", "cyberdeck_signal_risk",
+  // WorkflowService authorizes these by participation. Creation requires a bound Orc;
+  // cancellation requires the owner, so neither belongs to a non-owner worker's surface.
+  "cyberdeck_workflow_status", "cyberdeck_workflow_changes", "cyberdeck_workflow_send",
+]);
 async function exposedTools(context: McpServerContext): Promise<readonly (typeof TOOLS)[number][]> {
   if (context.transport === undefined) return TOOLS;
   try {
     const actor = await context.transport.request<unknown>("agent.actor.describe", { actorSessionId: context.identity.actorSessionId });
     if (!isRecord(actor)) return TOOLS;
-    if (actor.status === "bound" && Array.isArray(actor.capabilities) && actor.capabilities.every((value) => typeof value === "string")) {
-      return TOOLS.filter((tool) => TOOL_CAPABILITIES[tool.name] === undefined || (actor.capabilities as string[]).includes(TOOL_CAPABILITIES[tool.name]!));
-    }
     // An Orc can start MCP before its activation append finishes. Do not narrow an unbound
     // or unknown Orc and strand its harness with a pre-grant catalog. Only known workers narrow.
     if (actor.status === "unbound" && actor.sessionKind === "worker") {
-      return TOOLS.filter((tool) => TOOL_CAPABILITIES[tool.name] === undefined);
+      return TOOLS.filter((tool) => UNBOUND_WORKER_TOOLS.has(tool.name));
     }
   } catch { /* Recovery on an unavailable or older broker retains the universal catalog. */ }
   return TOOLS;
@@ -917,6 +911,7 @@ async function callTool(
       actorSessionId,
       ...args,
       limit: args.limit ?? 1,
+      maxBytes: args.maxBytes ?? 16 * 1024,
     });
   }
   if (name === "cyberdeck_scout_read") {

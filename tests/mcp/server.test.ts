@@ -321,6 +321,7 @@ describe("Cyberdeck MCP server", () => {
       sessionId,
       afterCursor: 0,
       limit: 1,
+      maxBytes: 16 * 1024,
     });
   });
 

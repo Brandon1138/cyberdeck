@@ -85,6 +85,7 @@ export class RpcClient {
   }
 
   onClose(listener: () => void): () => void {
+    if (this.closed) { listener(); return () => {}; }
     this.closeListeners.add(listener);
     return () => this.closeListeners.delete(listener);
   }

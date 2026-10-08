@@ -145,7 +145,11 @@ describe("OrchestratorManager", () => {
     expect(instructions).toContain("cyberdeck_provider_capabilities");
     expect(instructions).toContain("cyberdeck_workers_start once");
     expect(instructions).toContain("cyberdeck_workers_wait once");
-    expect(instructions).toContain("never reread from cursor zero");
+    expect(instructions).toContain("Carry both nextCursor and continuation");
+    expect(instructions).toContain("accept an unchanged cursor including zero");
+    expect(instructions).toContain("Concatenate fragment.json before interpreting events");
+    expect(instructions).toContain("acknowledge completion");
+    expect(instructions).toContain("On STALE_THREAD_DETAIL, discard partial reconstruction and restart");
     // Request, no initial prompt, and the activation the grant is written from.
     expect(start.mock.calls[0]).toHaveLength(3);
     expect(start.mock.calls[0]![1]).toBeUndefined();

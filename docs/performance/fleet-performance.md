@@ -79,19 +79,28 @@ dirty/untracked and `dist` file hashes unchanged, and its HEAD still at the base
    CLI composition; its violation baseline was not widened.
 
 5. **Thread tool pages bound bytes without silently discarding content.** The default budget
-   is 16 KiB of serialized thread-result JSON, configurable from 1 to 64 KiB. Oversized events
+   for the new MCP implementation is 16 KiB of serialized thread-result JSON, configurable
+   from 1 to 64 KiB. Broker fragmentation is opt-in through an explicit `maxBytes`; older
+   requests receive complete events with the pre-existing storage limits. New MCP callers
+   also accept complete events from older brokers that ignore the budget. Oversized events
    return UTF-8-safe fragments of the event's complete JSON and a digest-bound continuation.
    The cursor stays before the event until its final fragment. The internal cursor awaits the
    caller's acknowledgement, so a lost final response can be retried. A changed or rotated-out
    event fails with `STALE_THREAD_DETAIL`; fresh authorization applies to every fragment.
    This response budget does not change pre-existing storage limits.
 
-   `tools/list` filters known capability grants while retaining diagnostics, provider capabilities
-   and worker recovery/event tools. Known unbound workers receive that smaller surface.
-   Unbound/unknown Orcs and unavailable/older brokers retain the universal catalog, because
-   MCP can initialize before a durable Orc grant finishes activating. Tool calls retain
-   server-side authorization even when a tool was hidden. Existing compact worker wait/status
-   behavior is unchanged.
+   `tools/list` retains a universal, stable catalog for bound and unbound Orcs, unknown actors,
+   and unavailable/older brokers. Only known unbound workers narrow to an explicit allowlist:
+   diagnostics, provider capabilities, five reporting tools, and workflow status/changes/send.
+   Those workflow operations authorize participants; creation requires a bound Orc and
+   cancellation requires the owner. Grant changes do not strand cached Orc catalogs. Tool
+   calls retain server-side authorization even when a tool was hidden. Existing compact worker
+   wait/status behavior is unchanged.
+
+   Thread readers carry both cursor and continuation, accept an unchanged cursor including zero,
+   concatenate fragments before interpreting events, and acknowledge completion with a following
+   cursor request. `STALE_THREAD_DETAIL` discards partial reconstruction and restarts at the
+   cursor before that event without continuation.
 
 6. **Activity retention skips ineligible scans and reads pages through one handle.** A cheap
    oldest-row/space check avoids materializing 1,000 locations when pruning cannot apply.
@@ -133,7 +142,9 @@ tails/rotation/rebind/attribution/ordinals/receipts, activity pins/dedup/pruning
 and existing cursor/resize/ANSI/Unicode/mascot behavior.
 
 The benchmark script is `scripts/bench-fleet-performance.mjs`. Raw round 1 and round 2
-results are the four adjacent `fleet-performance.{before,after}-{1,2}.json` files. Results
+results are the four adjacent `fleet-performance.{before,after}-{1,2}.json` files. These measurements
+precede the PR #133 review fixes: grant-based catalog narrowing was removed, the unbound-worker
+allowlist now includes participant workflow operations, and broker fragmentation is opt-in. Results
 below show **round 2 means**, followed by the range of means across both runs where useful.
 These are synthetic local measurements, not live acceptance or projected provider savings.
 
@@ -211,10 +222,10 @@ retains all historical display rows. Legacy brokers continue polling, and dashbo
 actions may still request full data. Authority caches intentionally reparse on every detected
 external change and after own writes. Native offset readers assume append-oriented provider
 logs, with inode/size/stamp plus prefix/boundary checks; they do not promise adversarial
-whole-prefix integrity and are not substituted into container capture. A harness that caches
-`tools/list` may need a new list/reconnect after its capabilities change; every call still gets
-fresh authorization. Continuation rereads only the selected event but serializes/hashes it
-again; it does not cache transcript contents across requests.
+whole-prefix integrity and are not substituted into container capture. Orc harnesses retain a
+universal `tools/list` catalog across capability changes; every call still gets fresh authorization.
+Continuation rereads only the selected event but serializes/hashes it again; it does not cache
+transcript contents across requests.
 
 Separate activation requires an operator-approved runtime rollout: finish the network audit
 and clean-install smoke on a disposable host/CI runner, choose a broker change window that

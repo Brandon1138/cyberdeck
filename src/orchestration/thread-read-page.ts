@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import { ThreadPageOptionsSchema, type ThreadPageOptions, type ThreadReadResult } from "../domain/thread.js";
 import type { ThreadTranscriptReader } from "./persistence-ports.js";
 
-/** Bounded JSON pages; an oversized event stays before nextCursor until its last byte is returned. */
+/** Explicit byte budgets opt into fragments; legacy callers retain complete storage events. */
 export async function readThreadPage(
   transcripts: ThreadTranscriptReader, sessionId: string, afterCursor: number, limit: number,
   options: ThreadPageOptions = {},
 ): Promise<ThreadReadResult> {
   const { maxBytes, continuation } = ThreadPageOptionsSchema.parse(options);
+  if (maxBytes === undefined) return transcripts.read(sessionId, afterCursor, limit);
   const result: ThreadReadResult = { events: [], nextCursor: afterCursor };
   const fits = (value: ThreadReadResult) => Buffer.byteLength(JSON.stringify(value)) <= maxBytes;
   for (let index = 0; index < Math.max(1, Math.min(limit, 100)); index++) {

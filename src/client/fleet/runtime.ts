@@ -31,7 +31,8 @@ export async function runFleet(
   runtime: FleetRuntimeOptions = {},
 ): Promise<void> {
   const snapshotFeed = new FleetSnapshotFeed(client);
-  await snapshotFeed.refresh();
+  try { await snapshotFeed.refresh(); }
+  catch (error) { snapshotFeed.dispose(); throw error; }
   let snapshot = snapshotFeed.snapshot;
   let state = createFleetState(snapshot);
   const permissionPreferences = runtime.permissionPreferences;
@@ -83,7 +84,7 @@ export async function runFleet(
   }
   if (input.isTTY !== true) {
     output.write(`${renderFleet(snapshot, state, { color: false, width: output.columns, height: output.rows })}\n`);
-    client.close();
+    snapshotFeed.dispose(); client.close();
     return;
   }
   const terminalBackground = await queryTerminalBackground(input, output);

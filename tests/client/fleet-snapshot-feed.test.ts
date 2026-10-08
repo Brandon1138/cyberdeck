@@ -10,9 +10,11 @@ const record = { id: "11111111-1111-4111-8111-111111111111", provider: "claude",
   executionState: "active", attachmentState: "detached", pid: 1, exitCode: null, childIds: [] } as SessionRecord;
 function transport(version = "epoch:1") {
   const frames = new Set<(frame: ServerFrame) => void>(), closes = new Set<() => void>();
+  let closed = false;
   return {
     fleetProjection: true,
     request: vi.fn(async (method: string): Promise<unknown> => {
+      if (closed) throw Object.assign(new Error("Broker connection is closed"), { code: "BROKER_DISCONNECTED" });
       if (method === "fleet.snapshot") return { kind: "full", version, snapshot: { threads: [{ record }] } };
       if (method === "fleet.preferences" || method === "fleet.folderDispositions") return {};
       if (method === "fleet.nvimLayout") return false;
@@ -23,7 +25,8 @@ function transport(version = "epoch:1") {
     onClose: (fn: () => void) => { closes.add(fn); return () => { closes.delete(fn); }; },
     sendFrame: vi.fn(), close: vi.fn(),
     invalidate: () => { for (const fn of frames) fn({ type: "fleet-invalidated" }); },
-    disconnect: () => { for (const fn of closes) fn(); },
+    disconnect: () => { closed = true; for (const fn of closes) fn(); },
+    disconnectSilently: () => { closed = true; },
   };
 }
 afterEach(() => { vi.useRealTimers(); });
@@ -50,6 +53,61 @@ it("coalesces bursts, resyncs version gaps and reconnects with a full snapshot",
   expect(replacement.request).toHaveBeenCalledWith("fleet.snapshot", { version: undefined });
   expect(feed.error).toBeUndefined();
   feed.dispose();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("reconnects when closure occurs after the first snapshot but before start installs subscription listeners", async () => {
+  vi.useFakeTimers();
+  const first = transport(), replacement = transport("replacement:1"), reconnect = vi.fn(async () => replacement as never);
+  const closed = vi.fn(), feed = new FleetSnapshotFeed(first as never);
+  try {
+    await feed.refresh();
+    first.disconnect();
+    feed.start(vi.fn(), { reconnect, closed });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(reconnect).toHaveBeenCalledOnce();
+    expect(closed).not.toHaveBeenCalled();
+    expect(replacement.request).toHaveBeenCalledWith("fleet.snapshot", { version: undefined });
+    expect(feed.error).toBeUndefined();
+  } finally { feed.dispose(); }
+});
+
+it.each(["collection", "subscription"])("reconnects on BROKER_DISCONNECTED from %s even without a close notification", async (source) => {
+  vi.useFakeTimers();
+  const first = transport(), replacement = transport("replacement:1"), reconnect = vi.fn(async () => replacement as never);
+  const feed = new FleetSnapshotFeed(first as never);
+  try {
+    await feed.refresh();
+    if (source === "subscription") first.disconnectSilently();
+    feed.start(vi.fn(), { reconnect });
+    await vi.advanceTimersByTimeAsync(200);
+    if (source === "collection") {
+      first.disconnectSilently();
+      await expect(feed.refresh()).rejects.toMatchObject({ code: "BROKER_DISCONNECTED" });
+      await vi.advanceTimersByTimeAsync(200);
+    }
+    expect(reconnect).toHaveBeenCalledOnce();
+    expect(replacement.request).toHaveBeenCalledWith("fleet.snapshot", { version: undefined });
+    expect(feed.error).toBeUndefined();
+  } finally { feed.dispose(); }
+});
+
+it("reconnects runFleet when the broker closes while initial preferences are loading", async () => {
+  vi.useFakeTimers();
+  class Input extends EventEmitter { isTTY = true; setRawMode() {} }
+  const first = transport(), replacement = transport("replacement:1"), signals = new EventEmitter();
+  const request = first.request.getMockImplementation()!;
+  first.request.mockImplementation(async (method) => {
+    if (method === "fleet.preferences") { first.disconnect(); return {}; }
+    return request(method);
+  });
+  const reconnectTransport = vi.fn(async () => replacement as never);
+  const running = runFleet(first as never, new Input(), { isTTY: false, columns: 86, rows: 24, write: vi.fn() }, signals, { reconnectTransport });
+  try {
+    await vi.advanceTimersByTimeAsync(200);
+    expect(reconnectTransport).toHaveBeenCalledOnce();
+    expect(replacement.request).toHaveBeenCalledWith("fleet.snapshot", { version: undefined });
+  } finally { signals.emit("SIGTERM"); await running; }
   expect(vi.getTimerCount()).toBe(0);
 });
 

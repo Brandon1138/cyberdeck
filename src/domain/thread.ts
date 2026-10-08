@@ -42,7 +42,7 @@ export const ThreadReadResultSchema = z.object({
 });
 
 export const ThreadPageOptionsSchema = z.object({
-  maxBytes: z.number().int().min(1_024).max(64 * 1024).default(16 * 1024),
+  maxBytes: z.number().int().min(1_024).max(64 * 1024).optional(),
   continuation: ThreadReadResultSchema.shape.continuation,
 });
 export type ThreadPageOptions = z.input<typeof ThreadPageOptionsSchema>;
