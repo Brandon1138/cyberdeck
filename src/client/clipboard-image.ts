@@ -1,6 +1,10 @@
-import { execFile } from "node:child_process";
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdir, open, opendir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { createPasteboardCapture } from "./clipboard-platform.js";
+import { MAX_CLIPBOARD_IMAGE_BYTES, PNG_SIGNATURE } from "./clipboard-process.js";
+export { capturePasteboardImageWithOsascript } from "./clipboard-platform.js";
 
 /**
  * Reading an image out of the composer's paste path is not a decoding problem, it is an
@@ -14,7 +18,7 @@ export type PasteboardCaptureOutcome =
   | { status: "captured" }
   | { status: "no-image" }
   /**
-   * The pasteboard could not be read at all — no binary, a denied read, a wedged `osascript`.
+   * The clipboard could not be read at all — missing integration, a denied read or a timeout.
    * Separated from `no-image` because the two are not the same event: an empty pasteboard is the
    * operator pressing a chord over nothing, while an unreadable one may well be the screenshot
    * they just took going nowhere. The first is quiet and the second is said out loud.
@@ -33,69 +37,16 @@ export type PasteboardImageResult =
 export type PasteboardImageAttachment = () => Promise<PasteboardImageResult>;
 
 /**
- * macOS synthesizes a PNG flavor for every image on the pasteboard — a TIFF-only screenshot, a
- * copied Photoshop layer, a dragged GIF all coerce — so one flavor covers the surface and the
- * written file always has the extension its bytes claim. A pasteboard holding text, files, or
- * nothing at all fails the coercion, which is the `no-image` branch and the whole of the
- * degrade-quietly path.
- */
-const CAPTURE_SCRIPT: readonly string[] = [
-  "on run argv",
-  "set destination to item 1 of argv",
-  "try",
-  "set pasteboardImage to the clipboard as «class PNGf»",
-  "on error",
-  "return \"no-image\"",
-  "end try",
-  "set handle to open for access (POSIX file destination) with write permission",
-  "set eof handle to 0",
-  "write pasteboardImage to handle",
-  "close access handle",
-  "return \"captured\"",
-  "end run",
-];
-
-/**
- * Bounds a wedged `osascript`. Captures run on the composer's serialized input queue, so this is
- * also the longest a keystroke can queue behind a paste; a megabyte screenshot settles in a
- * fraction of it.
- */
-const CAPTURE_TIMEOUT_MS = 5_000;
-
-/**
  * Images the directory keeps. An operator pastes a screenshot to get a worker to look at it once;
  * the file only has to outlive the worker's read, so the newest handful is generous and the cap
  * runs on every paste rather than on a schedule nothing would trigger.
  */
 const RETAINED_IMAGES = 20;
+const CLEANUP_SCAN_LIMIT = 256;
+const CLEANUP_DELETE_LIMIT = 20;
 
 /** Only files this module wrote are ever pruned. */
 const PASTED_IMAGE_PATTERN = /^paste-\d{8}T\d{6}Z-[0-9a-f]{4}\.png$/u;
-
-export const capturePasteboardImageWithOsascript: PasteboardCapture = (destination) =>
-  new Promise((resolve) => {
-    // Every other platform has no pasteboard to read and no `osascript` to read it with. Nothing
-    // failed there, so this stays the quiet branch rather than an error the operator cannot act on.
-    if (process.platform !== "darwin") {
-      resolve({ status: "no-image" });
-      return;
-    }
-    execFile(
-      "osascript",
-      [...CAPTURE_SCRIPT.flatMap((line) => ["-e", line]), destination],
-      { timeout: CAPTURE_TIMEOUT_MS, windowsHide: true },
-      (error, stdout) => {
-        // A missing binary, a denied read, a timeout: the script never got to answer, so the
-        // pasteboard's contents are unknown. Reporting that as "no image" would drop a screenshot
-        // silently, which is the one outcome this feature may not have.
-        if (error !== null) {
-          resolve({ status: "unavailable", reason: error.message });
-          return;
-        }
-        resolve(stdout.trim() === "captured" ? { status: "captured" } : { status: "no-image" });
-      },
-    );
-  });
 
 export interface PasteboardImageOptions {
   /** Directory the image is written to. Created on demand. */
@@ -107,8 +58,7 @@ export interface PasteboardImageOptions {
 }
 
 /**
- * Capture the pasteboard image to a file and return its path, or `undefined` when the pasteboard
- * holds no image.
+ * Capture the clipboard into private storage. Unknown integration failures remain visible.
  *
  * The path is the point: a worker launches in its own process and cannot see the operator's
  * pasteboard, so the only thing worth putting in the composer is somewhere it can open.
@@ -116,15 +66,60 @@ export interface PasteboardImageOptions {
 export async function capturePasteboardImage(
   options: PasteboardImageOptions,
 ): Promise<PasteboardImageResult> {
-  const capture = options.capture ?? capturePasteboardImageWithOsascript;
+  const capture = options.capture ?? createPasteboardCapture();
   const now = options.now ?? Date.now;
   const suffix = options.suffix ?? randomSuffix;
-  await mkdir(options.directory, { recursive: true });
-  const destination = join(options.directory, `paste-${timestamp(now())}-${suffix()}.png`);
-  const outcome = await capture(destination);
-  if (outcome.status !== "captured") return outcome;
-  await prune(options.directory);
-  return { status: "captured", path: destination };
+  let destination: string | undefined;
+  try {
+    await mkdir(options.directory, { recursive: true, mode: 0o700 });
+    const directory = await lstat(options.directory);
+    if (!directory.isDirectory() || (process.getuid && directory.uid !== process.getuid())) {
+      return { status: "unavailable", reason: "Clipboard image storage is not a private directory" };
+    }
+    await chmod(options.directory, 0o700);
+    const time = timestamp(now());
+    // Exclusive reservation preserves an existing image even when a filename collides.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const id = suffix();
+      if (!/^[0-9a-f]{4}$/u.test(id)) throw new Error("Invalid image suffix");
+      const candidate = join(options.directory, `paste-${time}-${id}.png`);
+      try {
+        const file = await open(candidate, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+        destination = candidate;
+        await file.close();
+        break;
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    }
+    if (destination === undefined) return { status: "unavailable", reason: "Could not reserve a clipboard image file" };
+    const outcome = await capture(destination);
+    if (outcome.status !== "captured") return outcome;
+    const invalid = await validateImage(destination);
+    if (invalid !== undefined) return { status: "unavailable", reason: invalid };
+    await prune(options.directory, destination);
+    const path = destination;
+    destination = undefined; // The validated attachment now owns this file.
+    return { status: "captured", path };
+  } catch {
+    return { status: "unavailable", reason: "Could not capture the clipboard image in private storage" };
+  } finally {
+    if (destination !== undefined) await rm(destination, { force: true }).catch(() => undefined);
+  }
+}
+
+async function validateImage(path: string): Promise<string | undefined> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.nlink !== 1 || (process.getuid && stat.uid !== process.getuid())) {
+      return "Clipboard image destination is not a private file";
+    }
+    if (stat.size > MAX_CLIPBOARD_IMAGE_BYTES) return "Clipboard image exceeds 20 MiB";
+    const header = Buffer.alloc(PNG_SIGNATURE.length);
+    const { bytesRead } = await file.read(header, 0, header.length, 0);
+    if (bytesRead !== header.length || !header.equals(PNG_SIGNATURE)) return "Clipboard image is not a PNG";
+    await file.chmod(0o600);
+    return undefined;
+  } finally { await file.close(); }
 }
 
 /**
@@ -136,13 +131,20 @@ function timestamp(millis: number): string {
 }
 
 function randomSuffix(): string {
-  return Math.floor(Math.random() * 0x10000).toString(16).padStart(4, "0");
+  return randomBytes(2).toString("hex");
 }
 
-async function prune(directory: string): Promise<void> {
+async function prune(directory: string, current: string): Promise<void> {
   try {
-    const pasted = (await readdir(directory)).filter((name) => PASTED_IMAGE_PATTERN.test(name)).sort();
-    for (const stale of pasted.slice(0, Math.max(0, pasted.length - RETAINED_IMAGES))) {
+    const pasted: string[] = [];
+    let scanned = 0;
+    for await (const entry of await opendir(directory)) {
+      if (entry.isFile() && PASTED_IMAGE_PATTERN.test(entry.name)) pasted.push(entry.name);
+      if (++scanned >= CLEANUP_SCAN_LIMIT) break;
+    }
+    pasted.sort();
+    const staleCount = Math.min(CLEANUP_DELETE_LIMIT, Math.max(0, pasted.length - RETAINED_IMAGES));
+    for (const stale of pasted.filter((name) => join(directory, name) !== current).slice(0, staleCount)) {
       await rm(join(directory, stale), { force: true });
     }
   } catch {
