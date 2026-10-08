@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import {
@@ -8,7 +7,7 @@ import {
   type FleetFolderDisposition,
   type FleetLaunchProfile,
 } from "../domain/fleet-preferences.js";
-import { openPrivateAppendFile } from "./private-files.js";
+import { ValidatedJournal } from "./validated-journal.js";
 
 export {
   FleetFolderDispositionSchema,
@@ -98,8 +97,10 @@ type FleetPreferenceRecord = z.infer<typeof FleetPreferenceRecordSchema>;
 /** Append-only per-project explicit worker launch selections. */
 export class FleetPreferenceStore {
   readonly path: string;
+  private readonly journal: ValidatedJournal<PreferenceProjection>;
   constructor(stateDirectory: string) {
     this.path = join(stateDirectory, "ui", "fleet-preferences.jsonl");
+    this.journal = new ValidatedJournal(this.path, projectPreferences);
   }
 
   async set(cwd: string, profile: FleetLaunchProfile): Promise<void> {
@@ -161,67 +162,40 @@ export class FleetPreferenceStore {
 
   /** Every root the registry has an opinion about, registered or explicitly removed. */
   async projectDispositions(): Promise<Map<string, boolean>> {
-    const dispositions = new Map<string, boolean>();
-    for (const record of await this.load()) {
-      if (record.recordType === "fleet.project") dispositions.set(record.root, record.registered);
-    }
-    return dispositions;
+    return new Map((await this.journal.read()).projects);
   }
 
-  async projectMigrationCompleted(): Promise<boolean> {
-    return (await this.load()).some((record) => record.recordType === "fleet.project-migration");
-  }
+  async projectMigrationCompleted(): Promise<boolean> { return (await this.journal.read()).migrated; }
+  async list(): Promise<Record<string, FleetLaunchProfile>> { return structuredClone((await this.journal.read()).profiles); }
+  async listFolderDispositions(): Promise<Record<string, FleetFolderDisposition>> { return structuredClone((await this.journal.read()).folders); }
+  async nvimLayoutEnabled(): Promise<boolean> { return (await this.journal.read()).enabled; }
+  private append(record: FleetPreferenceRecord): Promise<void> { return this.journal.append(record); }
+}
 
-  async list(): Promise<Record<string, FleetLaunchProfile>> {
-    const profiles: Record<string, FleetLaunchProfile> = {};
-    for (const record of await this.load()) {
-      if (record.recordType === "fleet.launch-profile") profiles[record.cwd] = record.profile;
-    }
-    return profiles;
-  }
+interface PreferenceProjection {
+  projects: Map<string, boolean>;
+  profiles: Record<string, FleetLaunchProfile>;
+  folders: Record<string, FleetFolderDisposition>;
+  enabled: boolean;
+  migrated: boolean;
+}
 
-  async listFolderDispositions(): Promise<Record<string, FleetFolderDisposition>> {
-    const dispositions: Record<string, FleetFolderDisposition> = {};
-    for (const record of await this.load()) {
-      if (record.recordType === "fleet.folder-collapse") dispositions[record.key] = record.disposition;
-    }
-    return dispositions;
-  }
-
-  async nvimLayoutEnabled(): Promise<boolean> {
-    let enabled = true;
-    for (const record of await this.load()) {
-      if (record.recordType === "fleet.nvim-layout") enabled = record.enabled;
-    }
-    return enabled;
-  }
-
-  private async append(record: FleetPreferenceRecord): Promise<void> {
-    const handle = await openPrivateAppendFile(this.path);
+function projectPreferences(content: string): PreferenceProjection {
+  const result: PreferenceProjection = { projects: new Map(), profiles: {}, folders: {}, enabled: true, migrated: false };
+  const lines = content.split("\n");
+  if (!content.endsWith("\n")) lines.pop();
+  for (const [index, line] of lines.entries()) {
+    if (line.trim() === "") continue;
     try {
-      await handle.write(`${JSON.stringify(record)}\n`, undefined, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-  }
-
-  private async load(): Promise<readonly FleetPreferenceRecord[]> {
-    const content = await readFile(this.path, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    });
-    const lines = content.split("\n");
-    if (!content.endsWith("\n")) lines.pop();
-    const records: FleetPreferenceRecord[] = [];
-    for (const [index, line] of lines.entries()) {
-      if (line.trim() === "") continue;
-      try {
-        records.push(FleetPreferenceRecordSchema.parse(JSON.parse(line)));
-      } catch (error) {
-        throw new Error(`Invalid Fleet preference at line ${index + 1}`, { cause: error });
+      const record = FleetPreferenceRecordSchema.parse(JSON.parse(line));
+      switch (record.recordType) {
+        case "fleet.project": result.projects.set(record.root, record.registered); break;
+        case "fleet.launch-profile": result.profiles[record.cwd] = record.profile; break;
+        case "fleet.folder-collapse": result.folders[record.key] = record.disposition; break;
+        case "fleet.nvim-layout": result.enabled = record.enabled; break;
+        case "fleet.project-migration": result.migrated = true; break;
       }
-    }
-    return records;
+    } catch (error) { throw new Error(`Invalid Fleet preference at line ${index + 1}`, { cause: error }); }
   }
+  return result;
 }

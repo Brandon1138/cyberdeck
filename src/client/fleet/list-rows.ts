@@ -1,3 +1,4 @@
+import { prepared } from "./frame-cache.js";
 import type { FleetWorkerCoordinationView } from "../../broker/worker-coordination-view.js";
 import type { SessionRecord } from "../../domain/session.js";
 import { leaseCustody, leaseCustodyBadge, leaseCustodySummary, uniformLeaseCustody, type LeaseCustody, type LeaseCustodyBadge, } from "../lease-custody.js";
@@ -12,10 +13,12 @@ export function isTerminalSession(record: SessionRecord): boolean {
 }
 
 export function orderedThreads(snapshot: FleetSnapshot): FleetThread[] {
-  return [
-    ...orchestratorThreads(snapshot.threads),
-    ...groupThreads(snapshot).flatMap(({ threads }) => threads),
-  ];
+  return prepared([snapshot, "orderedThreads"], () => {
+    return [
+      ...orchestratorThreads(snapshot.threads),
+      ...groupThreads(snapshot).flatMap(({ threads }) => threads),
+    ];
+  });
 }
 
 /**
@@ -75,38 +78,40 @@ export function isExpanded(state: FleetState, cwd: string): boolean {
  * folders below hold workers only.
  */
 export function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow[] {
-  const orcs = orchestratorThreads(snapshot.threads);
-  // One assignment for the whole frame, so an Orc's row and its workers' rows cannot disagree.
-  const provenance: FleetProvenance = {
-    sigils: snapshotOwnerSigils(snapshot),
-    lens: ownershipLensControllerId(snapshot, state),
-  };
-  const orcRows: FleetListRow[] = orcs.length === 0
-    ? []
-    : orcSectionRows(orcs, state, provenance);
-  const folderRows = groupThreads(snapshot).flatMap(({ cwd, label, threads }, groupIndex): FleetListRow[] => {
-    const header: FleetRow = {
-      kind: "folder",
-      cwd,
-      threadCount: threads.length,
-      ...(label === undefined ? {} : { label }),
+  return prepared([snapshot, state, "fleetListRows"], () => {
+    const orcs = orchestratorThreads(snapshot.threads);
+    // One assignment for the whole frame, so an Orc's row and its workers' rows cannot disagree.
+    const provenance: FleetProvenance = {
+      sigils: snapshotOwnerSigils(snapshot),
+      lens: ownershipLensControllerId(snapshot, state),
     };
-    const spacer: FleetListRow[] = groupIndex === 0 && orcRows.length === 0
+    const orcRows: FleetListRow[] = orcs.length === 0
       ? []
-      : [{ kind: "spacer" }];
-    if (isCollapsed(state, cwd)) return [...spacer, header];
-    const visible = isExpanded(state, cwd) ? threads : threads.slice(0, FOLDER_THREAD_CAP);
-    return [
-      ...spacer,
-      header,
-      ...sectionRows(WORKERS_SECTION_LABEL, visible, threads, state, provenance, cwd),
-      // The row survives expansion so the folder can be rolled back up from the same place.
-      ...(threads.length > FOLDER_THREAD_CAP
-        ? [{ kind: "show-more" as const, cwd, hiddenCount: threads.length - visible.length }]
-        : []),
-    ];
+      : orcSectionRows(orcs, state, provenance);
+    const folderRows = groupThreads(snapshot).flatMap(({ cwd, label, threads }, groupIndex): FleetListRow[] => {
+      const header: FleetRow = {
+        kind: "folder",
+        cwd,
+        threadCount: threads.length,
+        ...(label === undefined ? {} : { label }),
+      };
+      const spacer: FleetListRow[] = groupIndex === 0 && orcRows.length === 0
+        ? []
+        : [{ kind: "spacer" }];
+      if (isCollapsed(state, cwd)) return [...spacer, header];
+      const visible = isExpanded(state, cwd) ? threads : threads.slice(0, FOLDER_THREAD_CAP);
+      return [
+        ...spacer,
+        header,
+        ...sectionRows(WORKERS_SECTION_LABEL, visible, threads, state, provenance, cwd),
+        // The row survives expansion so the folder can be rolled back up from the same place.
+        ...(threads.length > FOLDER_THREAD_CAP
+          ? [{ kind: "show-more" as const, cwd, hiddenCount: threads.length - visible.length }]
+          : []),
+      ];
   });
   return [...orcRows, ...folderRows];
+  });
 }
 
 /**

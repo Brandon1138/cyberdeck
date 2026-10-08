@@ -115,7 +115,19 @@ export function printedWidth(value: string): number {
  * carried across whole and a cut inside painted text closes its own color: a row truncated
  * mid-sequence would leak the rest of the pane's paint, and one left open would leak its hue.
  */
+const ROW_CACHE = new Map<string, string>();
 export function clampRowWidth(value: string, width: number): string {
+  const key = value.length <= 512 ? `${width}:${value}` : undefined;
+  const cached = key === undefined ? undefined : ROW_CACHE.get(key);
+  if (cached !== undefined) return cached;
+  const result = clampRowWidthUncached(value, width);
+  if (key !== undefined) {
+    if (ROW_CACHE.size >= 512) ROW_CACHE.delete(ROW_CACHE.keys().next().value!);
+    ROW_CACHE.set(key, result);
+  }
+  return result;
+}
+function clampRowWidthUncached(value: string, width: number): string {
   if (width <= 0) return "";
   const parts = value.split(ANSI_SEQUENCE);
   let printed = 0;

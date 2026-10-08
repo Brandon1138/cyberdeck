@@ -1,3 +1,6 @@
+import { ThreadPageOptionsSchema, type ThreadPageOptions } from "../domain/thread.js";
+import { readThreadPage } from "./thread-read-page.js";
+import { consumeSettledNotifications } from "./wait-settlement.js";
 import { AgentStandardWorkerInputSchema, AgentScoutWorkerInputSchema } from "./worker-launch-input.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -30,7 +33,6 @@ import {
 } from "../domain/session.js";
 import type { ThreadReadResult } from "../domain/thread.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
-import { settledDedupeKey } from "../domain/orchestrator-notification.js";
 import type { NotificationInboxPort } from "./orchestrator-notification-ports.js";
 import {
   WorkerBudgetDeclarationSchema,
@@ -81,12 +83,12 @@ import type {
   SessionLookupPort,
   SessionProcessControlPort,
   SessionStartPort,
-  WorkerResultSnapshot,
   WorkerTruthQueryPort,
 } from "./session/session-ports.js";
 
 export const AgentActorParamsSchema = z.object({ actorSessionId: z.uuid() });
 export const AgentReadParamsSchema = AgentActorParamsSchema.extend({
+  ...ThreadPageOptionsSchema.shape,
   sessionId: z.uuid(),
   afterCursor: z.number().int().nonnegative().default(0),
   limit: z.number().int().positive().max(100).default(50),
@@ -274,6 +276,7 @@ export interface ActorDescription {
   scope?: OrchestratorScope;
   capabilities?: CyberdeckCapability[];
   executionState?: string;
+  sessionKind?: "worker" | "orchestrator";
   remedy: string;
 }
 
@@ -650,6 +653,7 @@ export class AgentControlService {
     sessionId: string,
     afterCursor = 0,
     limit = 200,
+    options: ThreadPageOptions = {},
   ): Promise<ThreadReadResult> {
     const binding = await this.requireBinding(actorSessionId);
     const target = this.registry.get(sessionId);
@@ -662,8 +666,10 @@ export class AgentControlService {
         `Thread ${sessionId} was already read through cursor ${previous}; continue from that cursor instead of rereading history`,
       );
     }
-    const result = await this.transcripts.read(sessionId, afterCursor, limit);
-    this.threadCursors.set(cursorKey, Math.max(previous ?? 0, result.nextCursor));
+    const result = await readThreadPage(this.transcripts, sessionId, afterCursor, limit, options);
+    // Fragment delivery is acknowledged by the next request's afterCursor. Holding the internal
+    // cursor until then permits an exact retry when even the final fragment's response is lost.
+    this.threadCursors.set(cursorKey, Math.max(previous ?? 0, result.fragment === undefined ? result.nextCursor : afterCursor));
     return result;
   }
 
@@ -1012,7 +1018,9 @@ export class AgentControlService {
 
     // One truth, two readers: a target this wait delivered is a settled record the feed no longer
     // needs to announce, so it is consumed here with `deliveredVia: ["wait"]`.
-    await this.consumeSettledNotifications(binding, request.targets, outcome.results);
+    if (this.notifications !== undefined) {
+      await consumeSettledNotifications(this.notifications, orchestratorController(binding).controllerId, request.targets, outcome.results);
+    }
     const endMs = this.now();
     const remainingAfterMs = Math.max(0, pending.wait.deadlineMs - endMs);
     const state: WaitState = intervention !== undefined
@@ -1070,27 +1078,6 @@ export class AgentControlService {
           : {}),
       },
     };
-  }
-
-  private async consumeSettledNotifications(
-    binding: OrchestratorBinding,
-    targets: readonly { sessionId: string; completionTarget: number }[],
-    results: readonly WorkerResultSnapshot[],
-  ): Promise<void> {
-    if (this.notifications === undefined) return;
-    const controllerId = orchestratorController(binding).controllerId;
-    // Only the ordinal the caller asked for is consumed; turns completed since are work the feed still owes.
-    const requested = new Map(targets.map((target) => [target.sessionId, target.completionTarget]));
-    for (const result of results) {
-      const target = requested.get(result.sessionId);
-      const keys = [
-        ...(result.status === "completed" && target !== undefined ? [settledDedupeKey(result.sessionId, target)] : []),
-        ...(result.truth.terminal ? [settledDedupeKey(result.sessionId)] : []),
-      ];
-      for (const key of keys) {
-        await this.notifications.acknowledgeByDedupeKey(controllerId, key, "wait").catch(() => undefined);
-      }
-    }
   }
 
   /**
@@ -1184,6 +1171,7 @@ export class AgentControlService {
       status: "unbound",
       bound: false,
       ...(familyKey === undefined ? {} : { familyKey }),
+      sessionKind: record.kind ?? "worker",
       executionState: record.executionState,
       remedy:
         `Session ${actorSessionId} exists but holds no orchestrator binding. Bind it with \`cyberdeck cockpit\`, or run Cyberdeck tools from a session Cyberdeck launched as an orchestrator.`,

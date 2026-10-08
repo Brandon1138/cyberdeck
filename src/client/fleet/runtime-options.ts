@@ -82,6 +82,7 @@ export interface SlashCommandValue {
 }
 
 export interface FleetRuntimeOptions {
+  reconnectTransport?: () => Promise<import("./state.js").InteractiveFleetTransport>;
   nativeMascot?: TerminalMascot | undefined;
   changeDirectory?: ((cwd: string) => Promise<string | undefined>) | undefined;
   /** Runs one `!` line. Output arrives through `onOutput` as the shell writes it. */

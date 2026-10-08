@@ -2,9 +2,10 @@ import { Command } from "commander";
 import { brokerSocketPath } from "../broker/app-paths.js";
 import { RpcClient } from "../client/rpc-client.js";
 import { resolveLaunchConversationId, runMcpServer } from "../mcp/server.js";
+import { CYBERDECK_VERSION } from "../broker/version.js";
 import type { CliProgramContext } from "./program.js";
 
-export function registerMcpCommands(program: Command, _context: CliProgramContext): void {
+export function registerMcpCommands(program: Command, _context?: CliProgramContext): void {
   program.command("mcp")
     .description("serve capability-scoped Cyberdeck tools over stdio MCP")
     .requiredOption("--actor-session <id>", "bound orchestrator session UUID")
@@ -38,3 +39,8 @@ export function registerMcpCommands(program: Command, _context: CliProgramContex
 
 }
 
+export function createMcpProgram(): Command {
+  const program = new Command().name("cyberdeck").version(CYBERDECK_VERSION);
+  registerMcpCommands(program);
+  return program;
+}

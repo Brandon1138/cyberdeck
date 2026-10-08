@@ -30,7 +30,22 @@ export const ThreadEventSchema = z.object({
 export const ThreadReadResultSchema = z.object({
   events: z.array(ThreadEventSchema),
   nextCursor: z.number().int().nonnegative(),
+  fragment: z.object({
+    eventId: z.uuid(), cursor: z.number().int().positive(),
+    byteOffset: z.number().int().nonnegative(), nextByteOffset: z.number().int().positive(),
+    totalBytes: z.number().int().positive(), json: z.string(),
+  }).optional(),
+  continuation: z.object({
+    eventId: z.uuid(), cursor: z.number().int().positive(),
+    byteOffset: z.number().int().positive(), digest: z.string().regex(/^[a-f0-9]{64}$/u),
+  }).optional(),
 });
+
+export const ThreadPageOptionsSchema = z.object({
+  maxBytes: z.number().int().min(1_024).max(64 * 1024).optional(),
+  continuation: ThreadReadResultSchema.shape.continuation,
+});
+export type ThreadPageOptions = z.input<typeof ThreadPageOptionsSchema>;
 
 export type ThreadEvent = z.infer<typeof ThreadEventSchema>;
 export type ThreadEventKind = z.infer<typeof ThreadEventKindSchema>;

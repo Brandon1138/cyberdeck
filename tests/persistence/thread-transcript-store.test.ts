@@ -475,6 +475,7 @@ describe("ThreadTranscriptStore", () => {
     const store = new ThreadTranscriptStore(root, { codexSessionsDirectory: codexRoot });
     const input = { sessionId: SESSION_ONE, provider: "codex", cwd, createdAt, turnNumber: 1 };
 
+    await expect(store.readTranscriptMessages(input)).resolves.toEqual([]);
     await expect(store.readObservedModel(input)).resolves.toBeUndefined();
 
     // A second, exactly-timestamped rollout appears for the same session — the case a Claude
@@ -496,9 +497,12 @@ describe("ThreadTranscriptStore", () => {
         timestamp: "2026-07-25T10:00:01.000Z",
         payload: { model: "gpt-6-codex", effort: "medium" },
       }),
+      JSON.stringify({ type: "response_item", timestamp: "2026-07-25T10:00:02.000Z",
+        payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "closer preview" }] } }),
       "",
     ].join("\n"));
 
+    await expect(store.readTranscriptMessages(input)).resolves.toMatchObject([{ text: "closer preview" }]);
     await expect(store.readObservedModel({ ...input, turnNumber: 2 })).resolves.toEqual({
       model: "gpt-6-codex",
       effort: "medium",

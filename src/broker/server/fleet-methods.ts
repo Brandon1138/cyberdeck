@@ -26,6 +26,14 @@ import {
 
 /** Fleet's own surface: operator preferences, the project registry, and orchestrator rosters. */
 export const fleetMethods: Record<string, BrokerMethodHandler> = {
+  "fleet.snapshot": async (server, context, frame) => {
+    const { version } = z.object({ version: z.string().optional() }).parse(frame.params);
+    const result = await server.fleetProjection.read(version, context.fleetProjection);
+    context.fleetProjection = result.retained;
+    return result.reply;
+  },
+  "fleet.subscribe": async (server, context) => { server.subscribeFleet(context); return { subscribed: true }; },
+  "fleet.unsubscribe": async (server, context) => { server.unsubscribeFleet(context); return { subscribed: false }; },
   "orchestrator.ensure": async (server, _context, frame) => {
     return requireOrchestrators(server.options).ensure(EnsureOrchestratorRequestSchema.parse(frame.params));
   },

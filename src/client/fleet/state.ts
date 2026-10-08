@@ -9,6 +9,8 @@ import { FOLDER_THREAD_CAP } from "./constants.js";
 import { ProviderPermissionPreferences, SlashCommandName, WorkerModelCatalog } from "./runtime-options.js";
 
 export interface FleetTransport {
+  /** Updated RPC transports may probe the compact Fleet protocol; legacy embedders keep polling. */
+  readonly fleetProjection?: boolean;
   request<T = unknown>(method: string, params: unknown): Promise<T>;
 }
 

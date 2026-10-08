@@ -72,6 +72,10 @@ export class ActivityDiskIndex {
     return this.db.prepare("SELECT sequence, offset, bytes, observed, run FROM activity WHERE session=? AND sequence>? ORDER BY sequence LIMIT ?")
       .all(uuidBlob(session), after, limit).map(row);
   }
+  oldestObserved(): number | undefined {
+    const found = this.db.prepare("SELECT observed FROM activity ORDER BY sequence LIMIT 1").get();
+    return found === undefined ? undefined : Number(found.observed);
+  }
   oldest(after = 0): ActivityLocation[] {
     return this.db.prepare("SELECT sequence, offset, bytes, observed, run FROM activity WHERE sequence>? ORDER BY sequence LIMIT 1000").all(after).map(row);
   }

@@ -4890,7 +4890,7 @@ describe("fleet repaint", () => {
       expect(setCursorVisible).toHaveBeenLastCalledWith(true);
       record = { ...record, attentionState: "working" };
       signals.emit("SIGWINCH");
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100); // Legacy transport refresh; resize renders cached data.
       await vi.advanceTimersByTimeAsync(350);
       expect(setCursorVisible).toHaveBeenLastCalledWith(false);
       await vi.advanceTimersByTimeAsync(350);
@@ -4901,9 +4901,10 @@ describe("fleet repaint", () => {
       expect(setCursorVisible.mock.calls.every(([visible]) => visible)).toBe(true);
       record = { ...record, attentionState: "done" };
       signals.emit("SIGWINCH");
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100);
       record = { ...record, attentionState: "working" };
       signals.emit("SIGWINCH");
+      await vi.advanceTimersByTimeAsync(100);
       await vi.advanceTimersByTimeAsync(350);
       expect(setCursorVisible).toHaveBeenLastCalledWith(false);
       signals.emit("SIGTERM");
