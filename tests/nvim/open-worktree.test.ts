@@ -121,8 +121,9 @@ describe("openWorktreeInNvim", () => {
 
     const nvimCall = calls.find(({ command }) => command === "nvim");
     expect(nvimCall?.args[1]).toBe("/tmp/cyberdeck-nvim-501/pane-2.sock");
-    const payload = /\.open\('([A-Za-z0-9+/=]+)'\)$/u.exec(nvimCall?.args[3] ?? "")?.[1] ?? "";
+    const payload = /\.open\('([A-Za-z0-9+/=]+)'\)/u.exec(nvimCall?.args[3] ?? "")?.[1] ?? "";
     expect(decodeNvimPayload(payload)).toEqual({
+      protocolVersion: 1,
       session: "11111111-1111-4111-8111-111111111111",
       worktree: "/work/tree",
       title: "Cyberdeck · worker-one · since origin/main",
@@ -262,7 +263,7 @@ describe("openWorktreeInNvim", () => {
     });
 
     const nvimCall = calls.find(({ command }) => command === "nvim");
-    const payload = /\.open\('([A-Za-z0-9+/=]+)'\)$/u.exec(nvimCall?.args[3] ?? "")?.[1] ?? "";
+    const payload = /\.open\('([A-Za-z0-9+/=]+)'\)/u.exec(nvimCall?.args[3] ?? "")?.[1] ?? "";
     const request = decodeNvimPayload(payload);
     // A checkout that reused a worker's identity would release that worker's files the moment the
     // operator opened the repository beside it.
@@ -290,7 +291,7 @@ describe("openWorktreeInNvim", () => {
     expect(opened.live).toBe(true);
 
     const nvimCall = calls.find(({ command }) => command === "nvim");
-    const payload = /\.open\('([A-Za-z0-9+/=]+)'\)$/u.exec(nvimCall?.args[3] ?? "")?.[1] ?? "";
+    const payload = /\.open\('([A-Za-z0-9+/=]+)'\)/u.exec(nvimCall?.args[3] ?? "")?.[1] ?? "";
     const request = decodeNvimPayload(payload);
     expect(request.live).toBe(true);
     // Still the checkout's own identity: a guard keyed by the worker's would be dropped by that

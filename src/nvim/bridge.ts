@@ -2,6 +2,7 @@ import { spawnSync as nodeSpawnSync } from "node:child_process";
 import type { SpawnSyncLike } from "../tmux/cockpit.js";
 import type { NvimEntryPoint, NvimWorktreeRequest } from "../domain/worktree-review.js";
 import { encodeNvimPayload } from "./quickfix.js";
+import { NVIM_PROTOCOL_VERSION } from "./protocol.js";
 
 export type { NvimEntryPoint } from "../domain/worktree-review.js";
 
@@ -17,11 +18,24 @@ export function remoteExprArgs(
   entryPoint: NvimEntryPoint,
   payload: string,
 ): string[] {
+  // Check and apply inside one remote expression. A separate probe could validate a module that
+  // the operator replaces before the open, and an older module has no guard of its own to call.
+  const setup = "load contrib/nvim from this Cyberdeck installation and restart nvim in this pane";
+  const lua = [
+    "(function()",
+    "local ok, module = pcall(require, 'cyberdeck')",
+    `if not ok then return 'error: Cyberdeck nvim module is missing or failed to load; ${setup}: ' .. tostring(module) end`,
+    `if type(module) ~= 'table' or module.protocol_version == nil then return 'error: Cyberdeck nvim module has no protocol_version export (older module); ${setup}' end`,
+    `if module.protocol_version ~= ${NVIM_PROTOCOL_VERSION} then return 'error: Cyberdeck nvim protocol mismatch (client ${NVIM_PROTOCOL_VERSION}, module ' .. tostring(module.protocol_version) .. '); ${setup}' end`,
+    `if type(module.${entryPoint}) ~= 'function' then return 'error: Cyberdeck nvim module has no ${entryPoint} export; ${setup}' end`,
+    `return module.${entryPoint}('${payload}')`,
+    "end)()",
+  ].join(" ");
   return [
     "--server",
     address,
     "--remote-expr",
-    `v:lua.require'cyberdeck'.${entryPoint}('${payload}')`,
+    `luaeval(${JSON.stringify(lua)})`,
   ];
 }
 

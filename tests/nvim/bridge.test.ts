@@ -13,13 +13,13 @@ const request: NvimWorktreeRequest = {
 };
 
 describe("remoteExprArgs", () => {
-  it("calls one function instead of sending keystrokes", () => {
+  it("checks the loaded module before calling one function, without sending keystrokes", () => {
     const args = remoteExprArgs("/tmp/sock", "open", "PAYLOAD");
 
-    expect(args).toEqual([
-      "--server", "/tmp/sock",
-      "--remote-expr", "v:lua.require'cyberdeck'.open('PAYLOAD')",
-    ]);
+    expect(args.slice(0, 3)).toEqual(["--server", "/tmp/sock", "--remote-expr"]);
+    expect(args[3]).toMatch(/^luaeval\(/u);
+    expect(args[3]).toContain("module.protocol_version");
+    expect(args[3]).toContain("module.open('PAYLOAD')");
     // --remote-send would depend on the operator's current mode and mappings.
     expect(args).not.toContain("--remote-send");
   });

@@ -37,6 +37,7 @@ local answers = {}
 
 local function payload(session, worktree, live, file)
   return vim.base64.encode(vim.json.encode({
+    protocolVersion = cyberdeck.protocol_version,
     session = session,
     worktree = worktree,
     title = "Cyberdeck · " .. session,
@@ -183,6 +184,7 @@ local mode = "none"
 
 local function payload(session, worktree, entries, live)
   return vim.base64.encode(vim.json.encode({
+    protocolVersion = cyberdeck.protocol_version,
     session = session,
     worktree = worktree,
     title = "Cyberdeck · " .. session,

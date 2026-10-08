@@ -75,27 +75,34 @@ export async function verifyInstalledPty(packageRoot, environment, cwd) {
   console.log("Installed node-pty passed real Bash and zsh input/output");
 }
 
-function verifyInstalledLua(packageRoot, modulePath, environment, root) {
+async function verifyInstalledLua(packageRoot, modulePath, environment, root) {
   const worktree = join(root, "lua-worktree");
   mkdirSync(worktree);
   writeFileSync(join(worktree, "proof.txt"), "packed Lua proof\n");
+  const { remoteExprArgs } = await import(pathToFileURL(join(packageRoot, "dist/src/nvim/bridge.js")));
+  const { encodeNvimPayload } = await import(pathToFileURL(join(packageRoot, "dist/src/nvim/quickfix.js")));
+  const request = { session: "packed-proof", worktree, title: "Packed acceptance", live: true, entries: [{ filename: join(worktree, "proof.txt"), lnum: 1, col: 1, text: "proof" }] };
+  const expression = (entryPoint, live) => remoteExprArgs("/unused", entryPoint, encodeNvimPayload({ ...request, live }))[3];
   const script = join(root, "packed-lua.lua");
   writeFileSync(script, `
 package.path = os.getenv("CYBERDECK_TEST_LUA_ROOT") .. "/?.lua;" .. os.getenv("CYBERDECK_TEST_LUA_ROOT") .. "/?/init.lua;" .. package.path
 local cyberdeck = require("cyberdeck")
 local file = os.getenv("CYBERDECK_TEST_WORKTREE") .. "/proof.txt"
-local request = { session = "packed-proof", worktree = os.getenv("CYBERDECK_TEST_WORKTREE"), title = "Packed acceptance", live = true, entries = { { filename = file, lnum = 1, col = 1, text = "proof" } } }
-local function encoded() return vim.base64.encode(vim.json.encode(request)) end
-assert(cyberdeck.open(encoded()) == "ok:1")
+assert(vim.fn.eval(os.getenv("CYBERDECK_TEST_OPEN_EXPR")) == "ok:1")
 vim.cmd("edit " .. vim.fn.fnameescape(file))
 assert(vim.bo.modifiable == false, "packaged module did not lock live buffer")
-request.live = false
-assert(cyberdeck.refresh(encoded()) == "ok:1")
+local version = cyberdeck.protocol_version
+cyberdeck.protocol_version = version + 1
+assert(vim.fn.eval(os.getenv("CYBERDECK_TEST_REFRESH_EXPR")):match("protocol mismatch"), "packaged RPC accepted a mismatched module")
+assert(vim.bo.modifiable == false, "rejected refresh released the live buffer")
+cyberdeck.protocol_version = version
+assert(vim.fn.eval(os.getenv("CYBERDECK_TEST_REFRESH_EXPR")) == "ok:1")
 assert(vim.bo.modifiable == true, "packaged module did not release completed buffer")
 io.write("cyberdeck-installed-lua:ok\\n")
 `);
   const output = run("nvim", ["--headless", "-u", "NONE", "-i", "NONE", "-l", script], {
     ...environment, CYBERDECK_TEST_LUA_ROOT: dirname(dirname(join(packageRoot, modulePath))), CYBERDECK_TEST_WORKTREE: worktree,
+    CYBERDECK_TEST_OPEN_EXPR: expression("open", true), CYBERDECK_TEST_REFRESH_EXPR: expression("refresh", false),
   }, root, 30_000);
   assert(output.includes("cyberdeck-installed-lua:ok"), "Installed Lua acceptance marker is missing");
   console.log("Installed Lua module passed real Neovim lock/release");
@@ -142,7 +149,7 @@ export async function packedAcceptance(artifact) {
     assert(run(cli, ["--help"], environment, root).includes("broker"));
     const packageRoot = join(prefix, "lib/node_modules/@ishmael38/cyberdeck");
     await verifyInstalledPty(packageRoot, environment, root);
-    verifyInstalledLua(packageRoot, modulePath, environment, root);
+    await verifyInstalledLua(packageRoot, modulePath, environment, root);
     const { resolveAppPaths } = await import(pathToFileURL(join(packageRoot, "dist/src/broker/app-paths.js")));
     // Homedir stays native, including macOS's unchanged Application Support location.
     const { homedir } = await import("node:os");

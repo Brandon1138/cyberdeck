@@ -48,7 +48,10 @@ const PRELUDE = `
 package.path = os.getenv("CYBERDECK_LUA") .. "/?.lua;" .. os.getenv("CYBERDECK_LUA") .. "/?/init.lua;" .. package.path
 local cyberdeck = require("cyberdeck")
 local root = os.getenv("CD_ROOT")
-local function payload(request) return vim.base64.encode(vim.json.encode(request)) end
+local function payload(request)
+  request.protocolVersion = cyberdeck.protocol_version
+  return vim.base64.encode(vim.json.encode(request))
+end
 local function say(name, value) io.write(name .. "=" .. tostring(value) .. "\\n") end
 `;
 

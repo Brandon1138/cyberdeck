@@ -2,7 +2,7 @@
 
 Fleet's Ctrl+N opens a directory in the nvim running in Fleet's own tmux window. Two pieces of
 software have to agree for that to work: Cyberdeck, in `src/nvim/`, and the Lua module in
-`contrib/nvim/lua/cyberdeck/`. They ship in the same repository and version together, but only one
+`contrib/nvim/lua/cyberdeck/`. They ship in the same repository and npm artifact, but only one
 of them is Cyberdeck's — the operator's own nvim config is the third party here, and most of what
 an open *looks* like is theirs.
 
@@ -24,6 +24,7 @@ docks where, how a diff is rendered, and which key does any of it.
 | Socket address convention | Cyberdeck, mirrored by hand | `src/nvim/server-address.ts` ↔ `init.lua`'s `SOCKET_PREFIX` |
 | Finding or spawning the nvim to talk to | Cyberdeck | `src/nvim/pane.ts` — Fleet's window only, never another |
 | RPC transport | Cyberdeck | `src/nvim/bridge.ts` — `--remote-expr` only, never `--remote-send` |
+| Wire version handshake | Cyberdeck, mirrored by the module | `src/nvim/protocol.ts` ↔ `init.lua`'s `protocol_version` |
 | Payload shape | Cyberdeck | `src/nvim/quickfix.ts` |
 | Which baseline the changes are measured from | Cyberdeck | `src/nvim/worktree-changes.ts` |
 | Resolving that baseline to a commit | Cyberdeck | `baseline.rev` in the same file |
@@ -35,12 +36,42 @@ docks where, how a diff is rendered, and which key does any of it.
 | How a change is rendered | the operator's config, with a plain default | `diff()` / `:CyberdeckDiff` |
 | Keymaps | the operator's config | nothing here binds a key |
 
+## Installed module and version handshake
+
+The npm artifact includes `contrib/nvim/lua/cyberdeck/init.lua`, its module guide, and platform
+installation guides. The operator deliberately points their config at the installed runtime root
+`<npm-root>/@ishmael38/cyberdeck/contrib/nvim`, or at the source checkout they chose. Cyberdeck does
+not edit Neovim config, install plugins, or search for checkouts. See
+[`docs/linux-nvim.md`](../linux-nvim.md) for exact npm-prefix lookup, manual config and Neovim >=0.10
+installation on Linux, macOS and WSL2, including older Ubuntu/Debian package repositories.
+
+Each `--remote-expr` evaluates a Lua wrapper that requires `cyberdeck` with `pcall`, checks its
+explicit `protocol_version` against `NVIM_PROTOCOL_VERSION`, and checks the requested entry point
+exists before calling `open` or `refresh`. Check and application are one expression, so there is no
+probe/apply gap. Missing modules, older modules without the export, and mismatches answer with
+`error:` and installation guidance before any tab, list or guard changes. A completion refresh
+that fails this check leaves the existing guard intact; an operator can explicitly unlock after
+checking the worker's state.
+
+The wire version is not the npm release version. Source and installed clients can differ while
+their package version stays the same; incompatible socket conventions, payload shapes or RPC
+semantics require a bump on both sides. A missing export is never assumed compatible. Compatible
+releases may share a wire version. The encoder adds `protocolVersion` at this infrastructure
+boundary, leaving the domain's worktree request unchanged. Lua rejects missing or mismatched
+payload versions before applying either entry point, so an older client cannot bypass the guard
+by calling `open` or `refresh` directly.
+
+The module's presentation callbacks, commands and keymaps remain operator-owned as before. Its
+per-uid/pane socket namespace and the origin/HEAD-only baseline ladder remain unchanged and their
+gaps remain deferred in `CLAUDE.md`.
+
 ## What an open sends
 
 One base64-encoded JSON object per call, to `open` or `refresh`:
 
 | Field | Meaning |
 | --- | --- |
+| `protocolVersion` | Explicit wire version, checked before either entry point changes state. |
 | `session` | Who this request is about. A worker's session id, or `checkout:<path>` for a repository's primary checkout. |
 | `worktree` | Absolute path the tab is scoped to. |
 | `title` | The list title, baseline phrase included. Written to be read. |
