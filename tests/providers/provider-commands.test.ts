@@ -224,6 +224,32 @@ describe("CodexProviderAdapter", () => {
     expect(runCommand).not.toHaveBeenCalled();
   });
 
+  it.each(["launch", "resume"] as const)("owns the MCP bridge in the durable terminal launcher for orchestrator %s", async (operation) => {
+    const mcp = { nodePath: "/node", cliPath: "/cyberdeck.js" };
+    const adapter = new CodexProviderAdapter({
+      mcp,
+      orchestratorHome: { directory: "/operator/codex/cyberdeck-orchestrator", prepare: async () => undefined },
+      nativeSessionId: "native-conversation",
+      runCommand: async () => JSON.stringify({ status: "connected" }),
+    });
+    const orchestrator = session({ kind: "orchestrator", sandbox: "workspace-write", approvalMode: "auto" });
+    const spec = operation === "launch" ? adapter.buildLaunchSpec(orchestrator) : adapter.buildResumeSpec(orchestrator);
+    const nativeArgs = [...spec.args];
+    await adapter.prepareLaunch(orchestrator, spec);
+    expect(spec.executable).toBe("/node");
+    expect(spec.args[0]).toMatch(/\/codex\/remote-mcp-launch\.js$/u);
+    expect(spec.args.slice(1, 8)).toEqual([
+      "--actor-session", orchestrator.id, "--mcp-node", "/node", "--mcp-cli", "/cyberdeck.js", "--",
+    ]);
+    expect(spec.args.slice(8)).toEqual(nativeArgs);
+    expect(spec.args).toContain("--approve-for-me");
+    const worker = session({ kind: "worker" });
+    const workerSpec = adapter.buildLaunchSpec(worker);
+    await adapter.prepareLaunch(worker, workerSpec);
+    expect(workerSpec.executable).toBe("codex");
+    expect(workerSpec.args.join(" ")).not.toContain("remote-mcp-launch");
+  });
+
   it.each([
     { stderr: "\n  native startup failed\n\n", stdout: "", detail: "native startup failed" },
     { stderr: "", stdout: '{"error":"daemon unavailable"}\n', detail: '{"error":"daemon unavailable"}' },

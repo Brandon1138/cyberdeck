@@ -3,6 +3,7 @@ import { closeSync, openSync, readSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import type { CyberdeckMcpLaunch, ProviderAdapter, ProviderLaunchSpec } from "./provider.js";
 import type { SessionRecord } from "../domain/session.js";
 import { providerImageLaunchArgs } from "./image-input.js";
@@ -170,7 +171,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     try {
       await this.options.orchestratorHome?.prepare();
       const stdout = await (this.options.runCommand ?? runCodexCommand)(
-        spec.executable,
+        "codex",
         ["remote-control", "start", "--json"],
         { cwd: spec.cwd, env: spec.env },
       );
@@ -193,6 +194,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
         ),
         { code: "CODEX_REMOTE_CONTROL_UNAVAILABLE" },
       );
+    }
+    if (this.options.mcp !== undefined) {
+      // The PTY owns this launcher and its private bridge, so a broker restart leaves both alive.
+      const launcher = fileURLToPath(new URL("./codex/remote-mcp-launch.js", import.meta.url));
+      if (spec.args[0] === launcher) return;
+      spec.args.unshift(launcher, "--actor-session", session.id,
+        "--mcp-node", this.options.mcp.nodePath, "--mcp-cli", this.options.mcp.cliPath, "--");
+      spec.executable = this.options.mcp.nodePath;
     }
   }
 

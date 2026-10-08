@@ -204,8 +204,14 @@ options.mcp === undefined` returns early (`src/providers/codex.ts:98`, `src/prov
 
 Injection shape:
 
-- Codex: two `-c` overrides, `mcp_servers.cyberdeck.command` and `.args`
-  (`src/providers/codex.ts:99-109`).
+- Codex workers: two `-c` overrides, `mcp_servers.cyberdeck.command` and `.args`.
+  Remote orchestrators also use a terminal-owned launcher and a private Unix WebSocket bridge
+  (`src/providers/codex/remote-mcp-launch.ts`, `remote-mcp-bridge.ts`). The native TUI drops
+  `mcp_servers` from the config it forwards to its shared app-server, so the bridge adds exactly
+  `mcp_servers.cyberdeck` to `thread/start`, `thread/resume`, and `thread/fork` requests. Each bridge
+  fixes `--actor-session` to its own Cyberdeck session; other servers and native settings pass
+  through. It writes no shared daemon configuration. Its lifetime follows the native terminal,
+  including signal forwarding and cleanup, so a broker restart does not sever the connection.
 - Claude: one `--mcp-config` with an inline stdio server JSON (`src/providers/claude.ts:97-105`).
 - Cursor: no flag exists, so `prepareLaunch` writes a session-scoped plugin whose `.mcp.json` names
   the server, `--plugin-dir` loads it, and a session-scoped `CURSOR_CONFIG_DIR` pre-approves exactly
