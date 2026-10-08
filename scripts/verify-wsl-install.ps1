@@ -6,7 +6,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or -not $env:RUNNER_TEMP) {
 $distro = 'Ubuntu-24.04'
 
 function Invoke-Wsl([string[]] $Arguments) {
-    & wsl.exe --distribution $distro --user cyberdeck-ci -- @Arguments
+    & wsl.exe --distribution $distro --user cyberdeck-ci --exec @Arguments
     if ($LASTEXITCODE -ne 0) { throw "WSL command failed with exit code $LASTEXITCODE" }
 }
 
@@ -28,9 +28,9 @@ chown -R cyberdeck-ci:cyberdeck-ci /home/cyberdeck-ci/source
 '@
 $setupFile = Join-Path $env:RUNNER_TEMP 'cyberdeck-wsl-setup.sh'
 [IO.File]::WriteAllText($setupFile, ($setup -replace "`r", ''), [Text.UTF8Encoding]::new($false))
-$linuxSetup = (& wsl.exe --distribution $distro --user root -- wslpath -u $setupFile).Trim()
+$linuxSetup = (& wsl.exe --distribution $distro --user root --exec wslpath -u $setupFile).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Could not map the setup script into WSL' }
-& wsl.exe --distribution $distro --user root -- bash $linuxSetup $env:GITHUB_WORKSPACE
+& wsl.exe --distribution $distro --user root --exec bash $linuxSetup $env:GITHUB_WORKSPACE
 if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the disposable Linux workspace' }
 
 Invoke-Wsl -Arguments @('bash', '/home/cyberdeck-ci/source/scripts/verify-wsl-install.sh')
