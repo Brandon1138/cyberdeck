@@ -49,6 +49,13 @@ export class CodexOrchestratorHome implements CodexOrchestratorHomePort {
     if (!auth?.isFile()) {
       throw new Error(`Codex orchestrator RC needs the existing file-backed login at ${this.sourceDirectory}/auth.json`);
     }
+    const directoryEntry = await lstat(this.directory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (directoryEntry && !directoryEntry.isDirectory()) {
+      throw new Error(`Codex orchestrator home is not an independent directory: ${this.directory}`);
+    }
     await ensurePrivateDirectory(this.directory);
     // Codex creates these directories on demand; an absent source behind a dangling directory
     // link cannot be created that way. Their shared locations also preserve old native resumes.
@@ -86,7 +93,7 @@ export class CodexOrchestratorHome implements CodexOrchestratorHomePort {
     await this.managedEntry("hooks.json", async () =>
       (await readFile(join(this.directory, HOOKS_MARKER), "utf8").catch(missingText)) === this.sourceDirectory);
 
-    const config = parse(configSource);
+    const config = parsePrivateSettings(parse, configSource, join(this.sourceDirectory, "config.toml"));
     // Keep preferences and MCP configuration, while the daemon itself defaults to OpenAI.
     // CLI -c overrides alone do not change the daemon's default thread-list provider.
     config.model_provider = "openai";
@@ -98,14 +105,14 @@ export class CodexOrchestratorHome implements CodexOrchestratorHomePort {
       if (id.split("@")[0] === "headroom") plugin.enabled = false;
     }
     if (existingConfig) {
-      const existing = parse(await readFile(configPath, "utf8"));
+      const existing = parsePrivateSettings(parse, await readFile(configPath, "utf8"), configPath);
       // Native confirmations and additional folder-trust decisions belong to this home.
       config.projects = { ...config.projects as object, ...existing.projects as object };
       const hooks = config.hooks as Record<string, unknown> | undefined;
       const savedHooks = existing.hooks as Record<string, unknown> | undefined;
       if (savedHooks?.state) config.hooks = { ...hooks, state: { ...hooks?.state as object, ...savedHooks.state as object } };
     }
-    const hooks = hooksSource ? JSON.parse(hooksSource) as { hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>> } : { hooks: {} };
+    const hooks = hooksSource ? parsePrivateSettings(JSON.parse, hooksSource, join(this.sourceDirectory, "hooks.json")) as { hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>> } : { hooks: {} };
     for (const [event, groups] of Object.entries(hooks.hooks ?? {})) {
       hooks.hooks![event] = groups.map((group) => ({
         ...group,
@@ -145,6 +152,13 @@ export class CodexOrchestratorHome implements CodexOrchestratorHomePort {
         if (error.code !== "ENOENT") throw error;
       });
     }
+  }
+}
+
+function parsePrivateSettings<T>(parser: (text: string) => T, text: string, path: string): T {
+  try { return parser(text); } catch {
+    // Parser diagnostics can quote adjacent API keys or hook environment values.
+    throw new Error(`Invalid Codex settings at ${path}; check the file syntax`);
   }
 }
 

@@ -216,6 +216,7 @@ export class WorkerCoordinationStore {
    */
   private async rewrite(): Promise<WorkerCoordinationCompaction> {
     const beforeBytes = await this.size();
+    const directory = dirname(this.path);
     const subjects = new Map<string, OwnershipSubject>();
     const events = new Map<string, StoredWorkerEvent>();
     const checkpoints = new Map<string, CheckpointRequest>();
@@ -249,15 +250,18 @@ export class WorkerCoordinationStore {
           archivedAudits += 1;
         }
         if (batch.length > 1024 * 1024) {
-          await archive.write(batch, undefined, "utf8");
+          await archive.writeFile(batch, "utf8");
           batch = "";
         }
       }
-      if (batch.length > 0) await archive.write(batch, undefined, "utf8");
+      if (batch.length > 0) await archive.writeFile(batch, "utf8");
       await archive.sync();
     } finally {
       await archive.close();
     }
+    // Persist a newly created archive's directory entry before replacing its source log.
+    const archiveParent = await open(directory, "r");
+    try { await archiveParent.sync(); } finally { await archiveParent.close(); }
 
     const retained = new Map<string, MutationReceipt>();
     for (const receipt of window) retained.set(receipt.mutationId, receipt);
@@ -280,7 +284,6 @@ export class WorkerCoordinationStore {
     });
     assertSupportedVersions(envelope);
 
-    const directory = dirname(this.path);
     const temporary = `${this.path}.${randomUUID()}.compacting`;
     try {
       const file = await open(temporary, "wx", 0o600);

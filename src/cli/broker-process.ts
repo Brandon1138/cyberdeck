@@ -123,7 +123,7 @@ export async function startDetachedBroker(announce = true): Promise<void> {
 function brokerStartupOutput(logPath: string, from: number): string | undefined {
   let written: string;
   try {
-    written = readFileSync(logPath, "utf8").slice(from);
+    written = readFileSync(logPath).subarray(from).toString("utf8");
   } catch {
     return undefined;
   }

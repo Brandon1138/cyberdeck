@@ -15,6 +15,7 @@ describe("interactive Codex RC routing", () => {
       [["remote-control", "pair"], false], [["--remote", "unix:///custom.sock"], false],
       [["plugin", "list"], false], [["doctor"], false], [["update"], false],
       [["--profile", "custom"], false], [["--oss"], false],
+      [["-pcustom"], false], [["--local-provider=ollama"], false],
       [["--remote=unix:///custom.sock"], false], [["--no-daemon"], false],
       [["-m", "review", "resume", "--last"], true],
       [["--", "--help"], true],
@@ -22,7 +23,7 @@ describe("interactive Codex RC routing", () => {
     const script = `import { interactiveInvocation } from './scripts/codex-remote.mjs';
       const cases = ${JSON.stringify(cases)};
       console.log(JSON.stringify(cases.map(([args]) => interactiveInvocation(args))));`;
-    // The launcher imports its built home module, while this verifies routing without starting Codex.
+    // Routing can be inspected without a build or starting Codex.
     const actual = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" }));
     expect(actual).toEqual(cases.map(([, expected]) => expected));
   });
@@ -34,6 +35,7 @@ describe("interactive Codex RC routing", () => {
       [["remote-control", "pair", "--json"], true],
       [["exec", "remote-control start"], false], [["--", "remote-control"], false],
       [["--profile", "custom", "remote-control", "start"], false],
+      [["-pcustom", "remote-control", "start"], false],
       [["--remote", "unix:///custom.sock", "remote-control", "start"], false],
     ] as const;
     const script = `import { dedicatedRemoteControlInvocation } from './scripts/codex-remote.mjs';

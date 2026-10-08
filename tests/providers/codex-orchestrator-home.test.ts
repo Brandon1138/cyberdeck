@@ -132,4 +132,29 @@ describe("Codex orchestrator RC ownership", () => {
     await expect(home.prepare()).rejects.toThrow("existing file-backed login");
     await expect(stat(home.directory)).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("refuses a linked home before changing its target or sharing login files", async () => {
+    const { source, home } = await fixture();
+    const target = join(source, "independent-home");
+    await mkdir(target, { mode: 0o755 });
+    const originalMode = (await stat(target)).mode;
+    await symlink(target, home.directory);
+    await expect(home.prepare()).rejects.toThrow("not an independent directory");
+    expect((await stat(target)).mode).toBe(originalMode);
+    await expect(lstat(join(target, "auth.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(join(source, "sessions"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each([
+    ["config.toml", 'api_key = "FIXTURE_SECRET"\nbroken = "unterminated'],
+    ["hooks.json", '{"token":"FIXTURE_SECRET",}'],
+  ])("does not expose private settings through %s parser errors", async (name, contents) => {
+    const { source, home } = await fixture();
+    await writeFile(join(source, name), contents);
+    const error = await home.prepare().catch((cause: Error) => cause);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(`Invalid Codex settings at ${join(source, name)}`);
+    expect((error as Error).message).not.toContain("FIXTURE_SECRET");
+    expect((error as Error).cause).toBeUndefined();
+  });
 });

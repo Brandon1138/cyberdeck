@@ -6,11 +6,8 @@ import { realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
-import { CodexOrchestratorHome } from "../dist/src/providers/codex/orchestrator-home.js";
 
 const native = join(homedir(), ".local", "bin", "codex");
-const source = process.env.CODEX_HOME ?? join(homedir(), ".codex");
-const home = new CodexOrchestratorHome(source);
 const [operation, separator, ...args] = process.argv.slice(2);
 const utilityCommands = new Set([
   "exec", "e", "review", "login", "logout", "mcp", "mcp-server", "app-server", "debug",
@@ -26,7 +23,8 @@ export function interactiveInvocation(argv) {
     const arg = argv[i];
     if (["--help", "-h", "--version", "-V", "--no-daemon"].includes(arg)) return false;
     if (arg === "--remote" || arg.startsWith("--remote=")) return false;
-    if (["-p", "--profile", "--oss", "--local-provider"].includes(arg) || arg.startsWith("--profile=")) return false;
+    if (["-p", "--profile", "--oss", "--local-provider"].includes(arg)
+      || arg.startsWith("--profile=") || arg.startsWith("--local-provider=") || arg.startsWith("-p")) return false;
     if (arg === "--") return true;
     if (valueFlags.has(arg)) { i++; continue; }
     if (!commandFound && !arg.startsWith("-")) {
@@ -42,7 +40,7 @@ export function dedicatedRemoteControlInvocation(argv) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (["--help", "-h", "--version", "-V", "-p", "--profile", "--remote"].includes(arg)
-      || arg.startsWith("--profile=") || arg.startsWith("--remote=")) return false;
+      || arg.startsWith("--profile=") || arg.startsWith("-p") || arg.startsWith("--remote=")) return false;
     if (arg === "--") break;
     if (valueFlags.has(arg)) { i++; continue; }
     if (!subcommand && !arg.startsWith("-")) subcommand = arg;
@@ -79,6 +77,8 @@ async function main() {
     return;
   }
   if (!["prepare", "run", "pair"].includes(operation)) throw new Error("Usage: codex-remote.mjs prepare | pair | run -- [Codex arguments]");
+  const { CodexOrchestratorHome } = await import("../dist/src/providers/codex/orchestrator-home.js");
+  const home = new CodexOrchestratorHome(process.env.CODEX_HOME ?? join(homedir(), ".codex"));
   // Refreshing pairing must not migrate configuration underneath a running old broker.
   if (operation !== "pair") await home.prepare();
   if (operation === "prepare") { process.stdout.write(`${home.directory}\n`); return; }
