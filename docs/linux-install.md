@@ -60,6 +60,22 @@ for private state, native dependencies, and Unix sockets: permissions and filesy
 differ. WSLg supplies graphical services when enabled; browser authentication through Windows
 also depends on WSL interoperability being enabled.
 
+Windows Terminal intercepts Ctrl+V for terminal paste and Alt+Enter for fullscreen by default.
+To let Fleet receive its image-attachment and multiline gestures, merge these entries into the
+terminal's `settings.json` `keybindings` array:
+
+```json
+{
+  "keybindings": [
+    { "id": null, "keys": "ctrl+v" },
+    { "id": null, "keys": "alt+enter" }
+  ]
+}
+```
+
+See Microsoft's [Windows Terminal keybindings](https://learn.microsoft.com/en-us/windows/terminal/customize-settings/actions#unbind-keys-disable-keybindings).
+Ctrl+Shift+V remains the default text-paste binding. Cyberdeck's detach gesture remains Ctrl+].
+
 ## Private durable state
 
 Linux defaults to `~/.local/state/cyberdeck/`. An absolute `XDG_STATE_HOME` changes this to
