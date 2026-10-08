@@ -174,9 +174,11 @@ function bareComposerContent(lines: readonly string[], first: number): string | 
   for (let index = lines.length - 1; index >= first; index -= 1) {
     const raw = lines[index]!;
     const line = raw.trim();
-    if (line === "" || CODEX_FOOTER_LINE.test(line)) continue;
+    // The prompt glyph decides before any footer word can: a draft that mentions `Plan mode` or
+    // carries a `·` is still the composer, and skipping it would leave the instruction unverified.
     const bare = BARE_COMPOSER_LINE.exec(line);
     if (bare !== undefined && bare !== null) return bare[1]!;
+    if (line === "" || CODEX_FOOTER_LINE.test(line)) continue;
     if (/^\s/u.test(raw) && continuations < BARE_COMPOSER_MAX_CONTINUATIONS) {
       continuations += 1;
       continue;

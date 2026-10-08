@@ -235,16 +235,34 @@ describe("WorkerTurnEngine", () => {
       expect(writes).toHaveLength(1);
     });
 
-    it("never presses Enter at a dialog or on a hint-only reading", async () => {
+    it("never presses Enter at a dialog, but checks again once it clears", async () => {
       const { engine, observations, writes } = idleHarness();
       await engine.submitInstruction(instruction());
       observations.composer = { occupied: true, modalOpen: true, content: "Standby. Reply with one line" };
-      await vi.advanceTimersByTimeAsync(1_500);
+      await vi.advanceTimersByTimeAsync(1_500 * 2);
       expect(writes).toHaveLength(1);
 
-      await engine.submitInstruction(instruction("i-2"));
+      observations.composer = { occupied: true, modalOpen: false, content: "Standby. Reply with one line" };
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(writes).toHaveLength(2);
+      expect(writes[1]).toEqual(ENTER);
+    });
+
+    it("never presses Enter on a hint-only reading", async () => {
+      const { engine, observations, writes } = idleHarness();
+      await engine.submitInstruction(instruction());
       observations.composer = { occupied: true, modalOpen: false, evidence: "tab to queue message" };
       await vi.advanceTimersByTimeAsync(1_500 * 3);
+      expect(writes).toHaveLength(1);
+    });
+
+    it("gives up checking a dialog that never clears", async () => {
+      const { engine, observations, writes } = idleHarness();
+      await engine.submitInstruction(instruction());
+      observations.composer = { occupied: true, modalOpen: true, content: "Standby. Reply with one line" };
+      await vi.advanceTimersByTimeAsync(1_500 * 12);
+      observations.composer = { occupied: true, modalOpen: false, content: "Standby. Reply with one line" };
+      await vi.advanceTimersByTimeAsync(1_500 * 2);
       expect(writes).toHaveLength(1);
     });
 

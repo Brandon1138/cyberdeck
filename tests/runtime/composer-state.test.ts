@@ -91,6 +91,21 @@ describe("terminalComposerState", () => {
     });
   });
 
+  it("reads a Codex draft that happens to mention footer words", () => {
+    // The prompt glyph wins over any footer token on the same line; otherwise a draft like this
+    // would be skipped as chrome, read as occupied only by hint, and never re-submitted.
+    const replay = [
+      `${CLEAR}• Earlier answer.`,
+      "› Switch to Plan mode · then report every ⚠ warning",
+      "  tab to queue message                               99% context left",
+    ].join("\n");
+
+    expect(terminalComposerState("codex", replay)).toMatchObject({
+      occupied: true,
+      content: "Switch to Plan mode · then report every ⚠ warning",
+    });
+  });
+
   it("does not read Codex's empty bare composer or its placeholder as unsent text", () => {
     const replay = [
       `${CLEAR}› earlier prompt that was submitted`,

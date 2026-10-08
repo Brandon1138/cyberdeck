@@ -9,7 +9,7 @@ import type { RenderedInstruction } from "./worker-turn-state.js";
 export const SUBMIT_VERIFY_MS = 1_500;
 /** Enter is pressed again at most this many times for one instruction; after that it is reported. */
 export const SUBMIT_VERIFY_MAX_PRESSES = 2;
-/** Verification re-checks a busy screen at most this many times before giving up. */
+/** Verification re-checks a busy screen or an open dialog at most this many times before giving up. */
 export const SUBMIT_VERIFY_MAX_CHECKS = 8;
 /** The composer and the rendered message are compared over at most this many normalized characters. */
 export const SUBMIT_VERIFY_HEAD_CHARS = 48;
@@ -97,10 +97,10 @@ export class SubmitVerifier {
     if (pending.length === 0) return;
     this.checks += 1;
     const { activity, composer } = this.host.observe();
-    // A dialog owns the keyboard: Enter here would answer it, not submit anything.
-    if (composer.modalOpen || activity === "needs-input") return;
-    if (activity === "working") {
-      // A turn is running — perhaps this one. Look again once the screen settles.
+    // A dialog owns the keyboard, so Enter here would answer it rather than submit anything; and a
+    // running turn may be this very instruction. Either way, look again once the screen settles,
+    // a bounded number of times, rather than leaving the instruction unverified forever.
+    if (composer.modalOpen || activity === "needs-input" || activity === "working") {
       if (this.checks < SUBMIT_VERIFY_MAX_CHECKS) this.schedule();
       return;
     }
