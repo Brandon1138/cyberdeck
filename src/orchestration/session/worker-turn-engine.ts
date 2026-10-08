@@ -38,6 +38,7 @@ import type {
 
 import type { CompletionLedgerEntry, RenderedInstruction, StallObservation, WorkerStatusReading,
   TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
+import { normalizedHead, SubmitVerifier } from "./worker-submit-verification.js";
 
 export interface WorkerTurnAppendResult {
   fatal: boolean;
@@ -86,6 +87,21 @@ export class WorkerTurnEngine {
   private composer: ComposerObservation = { modalOpen: false, occupied: false };
   private rendered: RenderedInstruction[] = [];
   private deliveryHeld = false;
+  /** Presses Enter again for an instruction the screen shows still sitting in the composer. */
+  private readonly submitVerifier = new SubmitVerifier({
+    epoch: () => this.observationEpoch,
+    active: () => this.record.executionState === "active" && !this.terminalFinalizing,
+    pending: () => this.rendered,
+    observe: () => ({ activity: this.activity, composer: this.observeComposer() }),
+    press: (entry, key) => this.pressSubmitAgain(entry, key),
+    exhausted: (entry, composer) => {
+      void this.appendTranscript("lifecycle", "broker",
+        `instruction still unsent after ${entry.submitPresses ?? 0} extra Enter presses; the composer holds its text`,
+        { instructionId: entry.instructionId, expectedTurn: entry.expectedTurn, composer: composer.content },
+      ).catch(() => undefined);
+      this.options.effects.notifySessionUpdate();
+    },
+  });
   private currentProviderLimit: ProviderLimitTermination | undefined;
   private currentLatestResult: string | undefined;
   private fatalReported = false;
@@ -307,9 +323,14 @@ export class WorkerTurnEngine {
         expectedTurn,
         renderedAt: at,
         state: "rendered",
+        messageHead: normalizedHead(input.message),
+        messageLength: input.message.length,
+        ...(input.submitKey === undefined ? {} : { submitKey: input.submitKey }),
+        submitPresses: 0,
       });
     }
     this.options.effects.write(encoded);
+    this.submitVerifier.arm();
     await this.appendTranscript("instruction", input.source, input.message, {
       ...(input.metadata ?? {}),
       instructionState: "rendered" satisfies InstructionLifecycleState,
@@ -651,8 +672,24 @@ export class WorkerTurnEngine {
     delete this.armedScreenActivityRevision;
     if (this.canonicalReconcileTimer !== undefined) clearTimeout(this.canonicalReconcileTimer);
     delete this.canonicalReconcileTimer;
+    this.submitVerifier.release();
     delete this.turnCaptureOwner;
     delete this.deferredScreenCompletionTarget;
+  }
+
+  /** The one place verification touches the keyboard: the bare Enter, recorded as broker input. */
+  private pressSubmitAgain(entry: RenderedInstruction, key: Buffer): void {
+    entry.submitPresses = (entry.submitPresses ?? 0) + 1;
+    this.activityRevision += 1;
+    this.options.effects.write(key);
+    delete this.stallObservation;
+    void this.appendTranscript("lifecycle", "broker",
+      "instruction re-submitted: the composer still held its text after the write",
+      { instructionId: entry.instructionId, expectedTurn: entry.expectedTurn, press: entry.submitPresses },
+    ).catch(() => undefined);
+    void this.options.effects.appendEvent("session.input", {
+      bytes: key.length, source: "broker", resubmit: true, instructionId: entry.instructionId,
+    }).catch(() => undefined);
   }
 
   private armedScreenReservationTarget(claim: TurnCaptureClaim | undefined): number {

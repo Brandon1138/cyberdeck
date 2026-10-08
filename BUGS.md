@@ -29,6 +29,28 @@ constraint understood.
 
 # Dated bug log
 
+## Resolved: instructions sat unsent in the Codex composer and were banked as turns (MIK-260)
+
+Found on 2026-10-08 on a Codex peer orchestrator: its `Standby.` brief and a later re-send both
+landed as `› Standby.` and were never submitted, no `turn/start` reached the app-server, no rollout
+was written, and the thread never appeared in ChatGPT Remote Control — while the broker had marked
+the instruction `completed` from a terminal scrape. The operator had seen the same intermittent
+swallow on follow-ups to Codex workers.
+
+Two causes. `CodexProviderAdapter.submitInput` wrote `<text>CSI 13 u` in one chunk, and Codex's
+paste-burst heuristic (`tui/src/bottom_pane/paste_burst.rs`: three characters under 8 ms apart
+start a burst, Enter inside it becomes a newline, Enter is suppressed for 120 ms after it) ate the
+Enter. And `runtime/composer-state.ts` only knew a boxed composer or Claude's hint, so Codex's bare
+`› ` composer always read as empty: the instruction advanced to `submitted` on the first working
+frame and the 200 ms screen bank recorded a "turn" with the text still on screen.
+
+Fixed by framing host Codex writes as a bracketed paste ahead of the Enter (what the container
+adapter already did), reading Codex's bare composer by position (the last `›` line with only footer
+under it, placeholder-aware, with Codex's own `tab to queue` hint as a fallback), and verifying
+every rendered instruction: 1.5 s after the write, a composer still showing *that* instruction's
+text with nothing running and no dialog up gets the provider's bare Enter pressed again, at most
+twice, each press recorded as broker input. Text the broker did not write is never submitted.
+
 ## Resolved: `/clear` moved Claude's transcript and semantic capture never followed (MIK-46)
 
 Found on 2026-08-16. `ThreadTranscriptStore` derived a Claude session's transcript from the identity

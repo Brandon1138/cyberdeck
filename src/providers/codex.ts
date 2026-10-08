@@ -76,15 +76,35 @@ const runCodexCommand: CodexCommandRunner = async (executable, args, options) =>
   return stdout;
 };
 
+const CODEX_SUBMIT_KEY = "\u001b[13u";
+const PASTE_START = "\u001b[200~";
+const PASTE_END = "\u001b[201~";
+
+/** Idempotent: a caller that already framed the body (the container adapter) is not framed twice. */
+function framedAsPaste(message: string): string {
+  return message.startsWith(PASTE_START) && message.endsWith(PASTE_END)
+    ? message
+    : `${PASTE_START}${message}${PASTE_END}`;
+}
+
 export class CodexProviderAdapter implements ProviderAdapter {
   readonly id = "codex" as const;
 
   constructor(private readonly options: CodexProviderAdapterOptions = {}) {}
 
   submitInput(message: string): Buffer {
-    // Codex enables Kitty keyboard disambiguation in its PTY. A literal CR/LF edits the composer;
-    // CSI 13 u is the negotiated Enter key that submits it.
-    return Buffer.from(`${message}\u001b[13u`);
+    // Codex groups keystrokes that arrive faster than a person types into a paste burst and turns
+    // the Enter inside that burst into a newline (`tui/src/bottom_pane/paste_burst.rs`: three
+    // characters under 8 ms apart start one, and Enter is suppressed for 120 ms after it ends). A
+    // single PTY write is always that fast, so the whole instruction used to land in the composer
+    // with its Enter eaten. Explicit bracketed-paste framing bypasses the heuristic: the TUI takes
+    // the body as one paste event, and the negotiated Kitty Enter (CSI 13 u) then submits it. A
+    // literal CR/LF would only edit the composer.
+    return Buffer.from(`${framedAsPaste(message)}${CODEX_SUBMIT_KEY}`);
+  }
+
+  submitKey(): Buffer {
+    return Buffer.from(CODEX_SUBMIT_KEY);
   }
 
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec {

@@ -51,6 +51,12 @@ export interface ProviderAdapter {
   /** Encode one logical prompt submission for the provider's negotiated interactive terminal. */
   submitInput?(message: string, session?: SessionRecord): Buffer;
   /**
+   * The bare keystroke that submits whatever the composer already holds, with no text. The broker
+   * presses it again when it can see that a rendered instruction is still sitting in the composer.
+   * Absent means a carriage return.
+   */
+  submitKey?(): Buffer;
+  /**
    * Submit one logical prompt when the provider requires paced terminal interaction rather than a
    * single encoded buffer. Takes precedence over `submitInput` for deferred initial prompts.
    */

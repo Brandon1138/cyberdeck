@@ -49,6 +49,8 @@ export interface ClaudeProviderAdapterOptions extends SessionLaunchFilesOptions 
  * `./claude/dispatch-adapter.js`; interactive versus headless is an execution dimension of one
  * provider, not two providers.
  */
+const CLAUDE_SUBMIT_KEY = "\u001b[13u";
+
 export class ClaudeProviderAdapter implements ProviderAdapter {
   readonly id = "claude" as const;
 
@@ -57,7 +59,11 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
   submitInput(message: string): Buffer {
     // Claude enables Kitty keyboard disambiguation in its PTY (`CSI > 1 u`). A legacy carriage
     // return is then only text-editing input; synthesize the negotiated Enter key to submit.
-    return Buffer.from(`${message}\u001b[13u`);
+    return Buffer.from(`${message}${CLAUDE_SUBMIT_KEY}`);
+  }
+
+  submitKey(): Buffer {
+    return Buffer.from(CLAUDE_SUBMIT_KEY);
   }
 
   buildLaunchSpec(session: SessionRecord, initialPrompt?: string): ProviderLaunchSpec {

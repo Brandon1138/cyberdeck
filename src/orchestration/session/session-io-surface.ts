@@ -152,12 +152,12 @@ export class SessionIoSurface {
       throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
     }
     if (runtime.record.executionState === "active") requireInteractiveInput(runtime);
+    const adapter = this.catalog.requireAdapter(runtime.record.provider);
+    const submitKey = adapter.submitKey?.();
     return runtime.turns.submitInstruction({
       message,
-      encoded: () => {
-        const adapter = this.catalog.requireAdapter(runtime.record.provider);
-        return adapter.submitInput?.(message, runtime.record) ?? Buffer.from(`${message}\n`);
-      },
+      encoded: () => adapter.submitInput?.(message, runtime.record) ?? Buffer.from(`${message}\n`),
+      ...(submitKey === undefined ? {} : { submitKey }),
       source,
       metadata,
       ...(instructionId === undefined ? {} : { instructionId }),

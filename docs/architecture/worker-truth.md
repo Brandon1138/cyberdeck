@@ -79,6 +79,15 @@ Precise meanings, because the incident was caused by two of these being used int
   turn ordinal that will answer it. This is the strongest claim an enqueue call may return. It is
   explicitly *not* delivery: at a permission modal these are exactly the bytes the operator found
   sitting in the composer.
+
+  A rendered instruction is also *verified* (`worker-submit-verification.ts`, MIK-260). A provider
+  can take the text and drop the Enter — Codex's paste-burst heuristic did exactly that — so 1.5 s
+  after the write the engine reads the composer again. If the composer's own content matches the
+  head of the message the engine wrote, nothing is running and no dialog is up, it presses the
+  provider's bare Enter again, at most twice, and records each press in the thread transcript as
+  broker input. A draft the broker did not write is never submitted; a hint-only reading ("tab to
+  queue message" with no readable line) is never enough; after the last press the entry stays
+  `rendered` and the transcript says so.
 - **submitted / acknowledged** — the provider was observed taking the payload and starting a turn.
   `submittedAt` is the only timestamp a delivery claim may cite.
 - **completed** — the canonical turn for `expectedTurn` finished. `completedAt` is stamped here.
@@ -98,7 +107,11 @@ which is the honest translation: bytes were written and nothing stronger was eve
 - a replay of an already-delivered result is exempt from that floor, so re-waiting the same
   `sessionId` and `completionTarget` still returns `retrieval: "replay"` and stays idempotent;
 - a composer holding unsent text is not a completed turn, so the idle timer refuses to increment
-  `completedTurns` while one is observed.
+  `completedTurns` while one is observed. That reading has to know each provider's composer:
+  Claude's is a box and prints `tab to queue message`; Codex's is a bare `› ` line, the same glyph
+  it draws submitted prompts with, so it is recognised by position — the last `›` line with only
+  the footer under it (`runtime/composer-state.ts`). Before MIK-260 the Codex composer was invisible
+  to this reading, and an instruction the model never saw was banked as a scraped turn.
 
 Delivery claims are backed by a provider turn or reported as undelivered. There is no third answer.
 

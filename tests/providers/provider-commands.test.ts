@@ -318,9 +318,20 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args).not.toContain("-i");
   });
 
-  it("encodes one logical submit using Codex's negotiated terminal Enter key", () => {
+  it("frames a Codex submit as a bracketed paste ahead of its negotiated terminal Enter key", () => {
+    // A single PTY write is faster than Codex's paste-burst threshold, and an Enter inside a burst
+    // becomes a newline. Explicit paste framing is what keeps the Enter an Enter.
     expect(new CodexProviderAdapter().submitInput("ping").toString("utf8"))
-      .toBe("ping\u001b[13u");
+      .toBe("\u001b[200~ping\u001b[201~\u001b[13u");
+  });
+
+  it("does not frame a Codex submit twice when the caller already framed it", () => {
+    expect(new CodexProviderAdapter().submitInput("\u001b[200~line one\nline two\u001b[201~").toString("utf8"))
+      .toBe("\u001b[200~line one\nline two\u001b[201~\u001b[13u");
+  });
+
+  it("exposes Codex's bare submit key for re-pressing a composer that kept the text", () => {
+    expect(new CodexProviderAdapter().submitKey().toString("utf8")).toBe("\u001b[13u");
   });
 
   it("resumes the exact Codex conversation resolved from native session metadata", async () => {
@@ -487,6 +498,10 @@ describe("ClaudeProviderAdapter", () => {
   it("encodes one logical submit using Claude's terminal Enter key", () => {
     expect(new ClaudeProviderAdapter().submitInput("ping").toString("utf8"))
       .toBe("ping\u001b[13u");
+  });
+
+  it("exposes Claude's bare submit key for re-pressing a composer that kept the text", () => {
+    expect(new ClaudeProviderAdapter().submitKey().toString("utf8")).toBe("\u001b[13u");
   });
 
   it("resumes the exact Claude conversation using the UUID Cyberdeck assigned at launch", () => {

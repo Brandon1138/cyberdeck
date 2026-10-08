@@ -29,7 +29,8 @@ and `docs/architecture/antigravity-adapter.md`.
 | Explicit model required | no | **yes** (`domain/policy.ts:47-56`) | no | no (but Fable is refused, `antigravity/commands.ts:107-109`) |
 | `buildResumeSpec` | filesystem scan for the native rollout id (`codex.ts:65-90`) | `--resume <cyberdeck session id>` (`claude.ts:63-88`) | `--resume <cyberdeck session id>`, refused without launch-record evidence (`cursor/session-adapter.ts:83-94`) | throws `SESSION_RESUME_UNAVAILABLE` (`antigravity/session-adapter.ts:34-36`) |
 | `prepareLaunch` | none | none | writes the session-scoped MCP plugin and permission config, or isolates a Scout (`cursor/session-adapter.ts:123-131`) | writes the exact cwd to `agy`'s trust store (`antigravity/session-adapter.ts:30-32`) |
-| `submitInput` | `CSI 13 u` (`codex.ts:29-33`) | `CSI 13 u` (`claude.ts:18-22`) | paced `\r` through the terminal (`cursor/session-adapter.ts:167-177`) | `\r` (`antigravity/session-adapter.ts:38-40`) |
+| `submitInput` | bracketed paste (`CSI 200 ~` … `CSI 201 ~`) then `CSI 13 u` (`codex.ts`) — Codex's paste-burst heuristic turns the Enter of a fast unframed write into a newline | `CSI 13 u` (`claude.ts`) | paced `\r` through the terminal (`cursor/session-adapter.ts:167-177`) | `\r` (`antigravity/session-adapter.ts:38-40`) |
+| `submitKey` | `CSI 13 u` | `CSI 13 u` | absent (`\r`) | absent (`\r`) — pressed again by submit verification when the composer is seen still holding the instruction (`worker-submit-verification.ts`) |
 | Advertised worker models | 3 (`worker-capabilities.ts:21-28`) | 4 (`worker-capabilities.ts:29-39`) | 28, one per model-and-effort pair (`worker-capabilities.ts:40-84`) | 3 (`worker-capabilities.ts:85-95`) |
 
 ## Permission / approval mode, and how it is resolved

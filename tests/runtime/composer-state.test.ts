@@ -59,6 +59,70 @@ describe("terminalComposerState", () => {
     expect(terminalComposerState("claude", replay).occupied).toBe(false);
   });
 
+  it("reads Codex's bare composer line and hands back what it holds", () => {
+    // The screen from MIK-260: Codex 0.161 draws no box, and the submitted history prompt above
+    // uses the very same glyph. Position decides — the composer is the line above the footer.
+    const replay = [
+      `${CLEAR}› earlier prompt that was submitted`,
+      "• Done. Nothing else to do.",
+      "",
+      "› Standby.",
+      "  tab to queue message                               100% context left",
+    ].join("\n");
+
+    expect(terminalComposerState("codex", replay)).toMatchObject({
+      occupied: true,
+      evidence: "Standby.",
+      content: "Standby.",
+    });
+  });
+
+  it("reads a wrapped Codex draft through its indented continuation lines", () => {
+    const replay = [
+      `${CLEAR}• Earlier answer.`,
+      "› Re-run the failing suite and report which",
+      "  assertions changed since the last green run.",
+      "  ? for shortcuts                                    97% context left",
+    ].join("\n");
+
+    expect(terminalComposerState("codex", replay)).toMatchObject({
+      occupied: true,
+      content: "Re-run the failing suite and report which",
+    });
+  });
+
+  it("does not read Codex's empty bare composer or its placeholder as unsent text", () => {
+    const replay = [
+      `${CLEAR}› earlier prompt that was submitted`,
+      "• Done.",
+      "› Ask Codex to do anything",
+      "  ? for shortcuts                                   100% context left",
+    ].join("\n");
+
+    expect(terminalComposerState("codex", replay).occupied).toBe(false);
+  });
+
+  it("does not read a submitted Codex prompt as the composer when something else is at the bottom", () => {
+    // A picker or dialog replaces the composer; the last `›` line is then history, not a draft.
+    const replay = [
+      `${CLEAR}› earlier prompt that was submitted`,
+      "• Working on it.",
+      "Select a model",
+      "  1. gpt-6.1-sol",
+    ].join("\n");
+
+    expect(terminalComposerState("codex", replay).occupied).toBe(false);
+  });
+
+  it("reads Codex's own queue hint when the composer line itself is not readable", () => {
+    const replay = `${CLEAR}output\n│ typing… │\ntab to queue message        100% context left\n`;
+
+    expect(terminalComposerState("codex", replay)).toMatchObject({
+      occupied: true,
+      evidence: "tab to queue message        100% context left",
+    });
+  });
+
   it("reports a clear composer for an idle screen", () => {
     expect(terminalComposerState("claude", `${CLEAR}All checks passed.\n`)).toEqual({
       modalOpen: false,
