@@ -14,6 +14,11 @@ const COMPATIBILITY_KEYS = [
   "SECURITYSESSIONID",
 ] as const;
 
+const LINUX_SESSION_KEYS = [
+  "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
+  "DBUS_SESSION_BUS_ADDRESS", "XDG_DATA_HOME", "WSL_INTEROP", "WSL_DISTRO_NAME",
+] as const;
+
 const PROXY_AND_TLS_KEYS = [
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
   "all_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
@@ -31,9 +36,13 @@ export function defaultJobLaunchEnvironment(
   source: Readonly<NodeJS.ProcessEnv>,
   provider: ProviderId,
   request: Pick<JobRequest, "cwd" | "workerMode">,
+  controls: { platform?: NodeJS.Platform } = {},
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   copyExact(environment, source, COMPATIBILITY_KEYS);
+  if ((controls.platform ?? process.platform) === "linux") {
+    copyExact(environment, source, LINUX_SESSION_KEYS);
+  }
   copyExact(environment, source, PROVIDER_KEYS[provider] ?? []);
   copyExact(environment, source, PROXY_AND_TLS_KEYS);
   environment.PWD = request.cwd;

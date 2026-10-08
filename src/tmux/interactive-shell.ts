@@ -70,10 +70,14 @@ fi
 builtin unset CYBERDECK_SHELL_BASH_OPTIONS CYBERDECK_SHELL_ENV_SET CYBERDECK_SHELL_ENV
 if [[ -r /etc/profile ]]; then
   builtin source /etc/profile
+  cyberdeck_shell_startup_status=$?
+else
+  cyberdeck_shell_startup_status=0
 fi
 for cyberdeck_shell_profile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
   if [[ -r "$cyberdeck_shell_profile" && ! -d "$cyberdeck_shell_profile" ]]; then
     builtin source -- "$cyberdeck_shell_profile"
+    cyberdeck_shell_startup_status=$?
     break
   fi
 done
@@ -98,6 +102,16 @@ builtin trap -- 'if cyberdeck_record_shell_cwd; then
 else
   builtin eval -- "$cyberdeck_shell_exit_command"
 fi' EXIT
+# Native Bash presents the login file's final status to the first prompt and bare exit.
+# A top-level return jumps out of the ENV file without updating Bash's last command status.
+# Finish with a function invocation, whose result Bash records like an ordinary command.
+cyberdeck_shell_finish_startup() {
+  builtin local cyberdeck_shell_saved_status=$cyberdeck_shell_startup_status
+  builtin unset cyberdeck_shell_startup_status
+  builtin unset -f cyberdeck_shell_finish_startup
+  builtin return "$cyberdeck_shell_saved_status"
+}
+cyberdeck_shell_finish_startup
 `.replaceAll("\\${", "${");
 
 /** Only an exec launcher: Bash owns the popup's terminal and interactive input loop. */

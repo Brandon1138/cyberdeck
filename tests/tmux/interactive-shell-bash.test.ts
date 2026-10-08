@@ -86,6 +86,29 @@ async function popup(
 }
 
 describe.skipIf(version.error !== undefined || major < 4)("GNU Bash popup cwd handoff", () => {
+  it("matches native Bash's first prompt status and immediate bare exit after a failing profile", async () => {
+    const paths = await fixture();
+    const prompts = join(paths.root, "prompts");
+    await writeFile(join(paths.home, ".bash_profile"), String.raw`
+PROMPT_COMMAND='printf "%s\n" "$?" >> "$CYBERDECK_TEST_ROOT/prompts"'
+false
+`);
+    const native = spawnSync(bash, ["-li"], {
+      cwd: paths.root,
+      env: { ...process.env, HOME: paths.home, TERM: "dumb", CYBERDECK_TEST_ROOT: paths.root },
+      input: "exit\n", encoding: "utf8", timeout: 5_000,
+    });
+    expect(native.error).toBeUndefined();
+    expect(native.status).toBe(1);
+    const nativePrompts = await readFile(prompts, "utf8");
+    expect(nativePrompts).toBe("1\n");
+    await writeFile(prompts, "");
+    const result = await popup(paths, "exit\n");
+    expect(result.status).toBe(native.status);
+    expect(await readFile(prompts, "utf8")).toBe(nativePrompts);
+    expect(result.selected).toBe(paths.root);
+  });
+
   it("loads the real login files once, preserves aliases, and captures direct exit with quoted/newline paths", async () => {
     const paths = await fixture();
     await writeFile(join(paths.home, ".bash_profile"), String.raw`
