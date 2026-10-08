@@ -1,0 +1,7 @@
+{
+  "hooks": {
+    "PostToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node /private/tmp/cyberdeck-hook-spike/hook.mjs claude PostToolUse c1", "timeout": 5 }] }],
+    "PostToolUseFailure": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "node /private/tmp/cyberdeck-hook-spike/hook.mjs claude PostToolUseFailure c1", "timeout": 5 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "node /private/tmp/cyberdeck-hook-spike/hook.mjs claude Stop c2 --once", "timeout": 5 }] }]
+  }
+}

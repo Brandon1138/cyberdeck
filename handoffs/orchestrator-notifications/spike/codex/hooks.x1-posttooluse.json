@@ -1,0 +1,1 @@
+{"hooks":{"PostToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs codex PostToolUse x1","timeout":5}]}]}}

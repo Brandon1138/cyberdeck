@@ -1,0 +1,17 @@
+exit=0
+2026-10-07T14:54:40.025Z init
+2026-10-07T14:54:42.424Z ASSIST text "I'll run the shell command and then call the MCP echo tool."
+2026-10-07T14:54:42.746Z ASSIST server_tool_use {"pattern":"^echo$","limit":1}
+2026-10-07T14:54:43.072Z ASSIST tool_search_tool_result ""
+2026-10-07T14:54:43.872Z ASSIST server_tool_use {"pattern":"echo","limit":5}
+2026-10-07T14:54:44.229Z ASSIST tool_search_tool_result ""
+2026-10-07T14:54:46.547Z ASSIST tool_use {"command":"echo spike","description":"Run echo spike command"}
+2026-10-07T14:54:46.738Z ASSIST tool_use {"text":"spike"}
+2026-10-07T14:54:46.881Z system hook_started {"n":"PostToolUse:Bash"}
+2026-10-07T14:54:47.025Z system hook_response {"n":"PostToolUse:Bash","o":"CYBERDECK-SPIKE-NOTICE-c4\n{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"CYBERDECK-SPIKE-NOTICE-c4 (cyberdeck notice: 1 pending; drain with cyberdeck_notifications_read)\"}}\n","e":"CYBERDECK-SPIKE-NOTICE-c4\n","x":1,"outcome":"error"}
+2026-10-07T14:54:47.036Z USER tool_result  "spike"
+2026-10-07T14:54:47.052Z system hook_started {"n":"PostToolUse:mcp__echo__echo"}
+2026-10-07T14:54:49.088Z system hook_response {"n":"PostToolUse:mcp__echo__echo","o":"","e":"","x":1,"outcome":"cancelled"}
+2026-10-07T14:54:49.091Z USER tool_result  [{"type":"text","text":"spike"}]
+2026-10-07T14:54:51.249Z ASSIST text "CYBERDECK-SPIKE-NOTICE-c4\n\nPostToolUse:Bash hook additional context: CYBERDECK-SPIKE-NOTICE-c4 (cyberdeck notice: 1 pending; drain with cyberdeck_notifications_read)"
+2026-10-07T14:54:51.272Z RESULT success 3 "CYBERDECK-SPIKE-NOTICE-c4\n\nPostToolUse:Bash hook additional context: CYBERDECK-SPIKE-NOTICE-c4 (cyberdeck notice: 1 pending; drain with cyberdeck_notifications_read)"

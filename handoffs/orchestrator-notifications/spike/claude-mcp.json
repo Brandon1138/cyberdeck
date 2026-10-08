@@ -1,0 +1,1 @@
+{"mcpServers":{"echo":{"type":"stdio","command":"node","args":["/private/tmp/cyberdeck-hook-spike/echo-mcp.mjs"]}}}

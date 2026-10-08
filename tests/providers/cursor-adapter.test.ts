@@ -608,6 +608,7 @@ describe("Cursor interactive session adapter", () => {
     expect(config.permissions.allow).toEqual([`Mcp(${CURSOR_CYBERDECK_MCP_IDENTIFIER}:*)`]);
     expect(readFileSync(join(paths.pluginDirectory, ".cursor-plugin", "plugin.json"), "utf8"))
       .toContain("cyberdeck");
+    expect(existsSync(join(paths.pluginDirectory, "hooks", "hooks.json"))).toBe(false);
 
     // Rebuildable and removable any number of times: the broker prepares on every resume and
     // cleans up on every exit.
@@ -617,6 +618,50 @@ describe("Cursor interactive session adapter", () => {
     expect(existsSync(paths.pluginDirectory)).toBe(false);
     await adapter.prepareLaunch(record, spec);
     expect(existsSync(join(paths.pluginDirectory, ".mcp.json"))).toBe(true);
+  });
+
+  it("installs orchestrator notice hooks on launch/resume and removes them on worker launch", async () => {
+    const directory = tempDir();
+    const adapter = new CursorProviderAdapter({
+      directory,
+      stateDirectory: "/state/dir",
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+    });
+    const record = sessionRecord({ kind: "orchestrator" });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+    const plugin = cursorMcpHostPaths(record.id, { directory }).pluginDirectory;
+    const hooksPath = join(plugin, "hooks", "hooks.json");
+    const contents = readFileSync(hooksPath, "utf8");
+    expect(JSON.parse(contents)).toEqual({ version: 1, hooks: {
+      postToolUse: [{
+        command: `/node /cli/notice-hook-entry.js --actor-session ${record.id}`
+          + " --state-directory /state/dir --format cursor --event postToolUse",
+        timeout: 2,
+      }],
+      postToolUseFailure: [{
+        command: `/node /cli/notice-hook-entry.js --actor-session ${record.id}`
+          + " --state-directory /state/dir --format cursor --event postToolUseFailure",
+        timeout: 2,
+      }],
+    } });
+    const resumed = boundLaunchRecord(record, spec.args);
+    await adapter.prepareLaunch(resumed, adapter.buildResumeSpec(resumed));
+    expect(readFileSync(hooksPath, "utf8")).toBe(contents);
+    const worker = { ...record, kind: "worker" } as const;
+    await adapter.prepareLaunch(worker, adapter.buildLaunchSpec(worker));
+    expect(existsSync(hooksPath)).toBe(false);
+    expect(existsSync(join(plugin, ".mcp.json"))).toBe(true);
+  });
+
+  it("omits notice hooks without MCP even with a state directory", async () => {
+    const directory = tempDir();
+    const adapter = new CursorProviderAdapter({ directory, stateDirectory: "/state/dir" });
+    const record = sessionRecord({ kind: "orchestrator" });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+    expect(spec.args).not.toContain("--plugin-dir");
+    expect(existsSync(cursorMcpHostPaths(record.id, { directory }).pluginDirectory)).toBe(false);
   });
 
   it("offers the MCP server only to sessions Cyberdeck orchestrates", async () => {

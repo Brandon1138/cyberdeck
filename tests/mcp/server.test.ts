@@ -19,8 +19,21 @@ function context(
 ): McpServerContext {
   return {
     identity: { actorSessionId: ACTOR, brokerSocketPath: SOCKET, ...identity },
-    ...(transport === undefined ? {} : { transport }),
+    ...(transport === undefined ? {} : { transport: withoutNoticePiggyback(transport) }),
     ...(brokerUnavailable === undefined ? {} : { brokerUnavailable }),
+  };
+}
+
+/**
+ * Every tool result asks the broker for a pending notice afterwards. The routing tests below
+ * assert the one broker method a tool maps to, so the notice round trip is answered here, empty,
+ * without reaching the scripted transport; the piggyback has its own tests.
+ */
+function withoutNoticePiggyback(transport: McpBrokerTransport): McpBrokerTransport {
+  return {
+    request: <T,>(method: string, params: unknown): Promise<T> => method === "agent.notifications.notice"
+      ? Promise.resolve(undefined as T)
+      : transport.request<T>(method, params),
   };
 }
 
@@ -588,7 +601,7 @@ describe("Cyberdeck MCP server", () => {
     const tools = (response?.result as { tools: Array<{ name: string }> }).tools;
     expect(tools.map(({ name }) => name)).toContain("cyberdeck_diagnose");
     expect(tools.map(({ name }) => name)).toContain("cyberdeck_scout_read");
-    expect(tools).toHaveLength(26);
+    expect(tools).toHaveLength(28);
   });
 
   it("distinguishes an orphaned scope from an unbound actor by code and remedy", async () => {

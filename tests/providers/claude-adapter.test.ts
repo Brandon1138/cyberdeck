@@ -240,7 +240,7 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
   });
 
-  it("carries the endpoint pin and the transcript hook in one settings file", async () => {
+  it("carries the endpoint pin, transcript and notice hooks on launch and resume", async () => {
     const directory = tempDir();
     const stateDirectory = tempDir();
     const record = session({ kind: "orchestrator" });
@@ -257,10 +257,47 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     expect(spec.args.filter((arg) => arg === "--settings")).toHaveLength(1);
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
       env: Record<string, string>;
-      hooks: { SessionStart: unknown[] };
+      hooks: Record<string, unknown>;
     };
     expect(settings.env).toEqual({ ANTHROPIC_BASE_URL: "https://api.anthropic.com" });
-    expect(settings.hooks.SessionStart).toHaveLength(1);
+    expect(settings.hooks).toEqual({
+      SessionStart: [{ matcher: "startup|resume|clear|compact", hooks: [{
+        type: "command",
+        command: `/node /cyberdeck.js transcript rebind --actor-session ${record.id}`
+          + ` --state-directory ${stateDirectory}`,
+        timeout: 5,
+      }] }],
+      PostToolUse: [{ matcher: ".*", hooks: [{
+        type: "command",
+        command: `/node /cli/notice-hook-entry.js --actor-session ${record.id}`
+          + ` --state-directory ${stateDirectory} --format claude --event PostToolUse`,
+        timeout: 2,
+      }] }],
+      PostToolUseFailure: [{ matcher: ".*", hooks: [{
+        type: "command",
+        command: `/node /cli/notice-hook-entry.js --actor-session ${record.id}`
+          + ` --state-directory ${stateDirectory} --format claude --event PostToolUseFailure`,
+        timeout: 2,
+      }] }],
+      Stop: [{ hooks: [{
+        type: "command",
+        command: `/node /cli/notice-hook-entry.js --actor-session ${record.id}`
+          + ` --state-directory ${stateDirectory} --format claude --event Stop`,
+        timeout: 2,
+      }] }],
+    });
+    const serialized = readFileSync(settingsPath, "utf8");
+    await adapter.prepareLaunch(record, adapter.buildResumeSpec(record));
+    expect(readFileSync(settingsPath, "utf8")).toBe(serialized);
+  });
+
+  it("omits notice hooks without MCP even with a broker state directory", async () => {
+    const adapter = new ClaudeProviderAdapter({ directory: tempDir(), stateDirectory: tempDir() });
+    const record = session({ kind: "orchestrator" });
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+    expect(JSON.parse(readFileSync(spec.args[spec.args.indexOf("--settings") + 1]!, "utf8")))
+      .toEqual({ env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } });
   });
 
   it("leaves a worker's endpoint routing to its environment", async () => {
@@ -277,8 +314,9 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
     await adapter.prepareLaunch(record, spec);
 
     const settingsPath = spec.args[spec.args.indexOf("--settings") + 1]!;
-    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as { env?: unknown };
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as { hooks: Record<string, unknown>; env?: unknown };
     expect(settings.env).toBeUndefined();
+    expect(Object.keys(settings.hooks)).toEqual(["SessionStart"]);
   });
 
   it("merges allowlisted operator servers into an orchestrator's exclusive config", async () => {

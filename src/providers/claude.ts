@@ -336,6 +336,9 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       ...(this.transcriptHookInstallable()
         ? { transcriptHook: this.transcriptHookCommand(session) }
         : {}),
+      ...(session.kind === "orchestrator" && this.transcriptHookInstallable()
+        ? { noticeHook: this.transcriptHookCommand(session) }
+        : {}),
       orchestrator: session.kind === "orchestrator",
     });
   }

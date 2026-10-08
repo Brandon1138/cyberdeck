@@ -22,6 +22,7 @@ import { registerCockpitCommands } from "./cli/cockpit.js";
 import { registerEventCommands } from "./cli/event.js";
 import { registerMcpCommands } from "./cli/mcp.js";
 import { registerModalAnswerCommands } from "./cli/modal-answers.js";
+import { registerNotificationCommands } from "./cli/notifications.js";
 import { registerNvimLayoutCommands } from "./cli/nvim-layout.js";
 import { registerOrchestratorCommands } from "./cli/orchestrator.js";
 import type { CliProgramContext, CreateProgramOptions } from "./cli/program.js";
@@ -93,6 +94,10 @@ export function createProgram(options: CreateProgramOptions = {}) {
   const removeProject = options.removeProject
     ?? ((request: { path: string }) =>
       withClient((client) => client.request<FleetProjectRemoveResult>("fleet.project.remove", request)));
+  const readNotifications = options.readNotifications
+    ?? ((request) => withClient((client) => client.request("agent.notifications.read", request)));
+  const configureNotifications = options.configureNotifications
+    ?? ((request) => withClient((client) => client.request("agent.notifications.configure", request)));
   const program = new Command()
     .name("cyberdeck")
     .version(CYBERDECK_VERSION)
@@ -124,11 +129,14 @@ export function createProgram(options: CreateProgramOptions = {}) {
     listProjects,
     addProject,
     removeProject,
+    readNotifications,
+    configureNotifications,
     toolkit,
     fleetRuntimeDeps,
   };
   registerActivityCommands(program);
   registerBrokerCommands(program, context);
+  registerNotificationCommands(program, context);
   registerNvimLayoutCommands(program, context);
   registerProjectCommands(program, context);
   registerWorktreeCommands(program, context);

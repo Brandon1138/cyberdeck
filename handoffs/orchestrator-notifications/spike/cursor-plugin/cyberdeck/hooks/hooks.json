@@ -1,0 +1,1 @@
+{"version":1,"hooks":{"postToolUse":[{"command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs cursor postToolUse u2","timeout":5}],"stop":[{"command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs cursor stop u2 --shape followup --once","timeout":5}]}}

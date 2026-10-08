@@ -3,6 +3,7 @@ import {
   ClaudeSessionStartHookPayloadSchema,
   type ClaudeConversationBinding,
 } from "../../persistence/claude-conversation-bindings.js";
+import { shellQuote } from "../shell-quote.js";
 
 /** Every SessionStart source, so a rebind is recorded whether the conversation moved or not. */
 export const CLAUDE_TRANSCRIPT_HOOK_MATCHER = "startup|resume|clear|compact";
@@ -97,6 +98,3 @@ export async function runClaudeTranscriptRebind(
   return { recorded: true, binding };
 }
 
-function shellQuote(value: string): string {
-  return /^[A-Za-z0-9_./:@-]+$/u.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
-}

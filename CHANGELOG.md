@@ -8,6 +8,30 @@ and persisted schemas remain under active alpha development.
 
 ### Added
 
+- Orchestrator notification feed. An orchestrator no longer has to sit inside
+  `cyberdeck_workers_wait` to learn that a worker settled, blocked on a
+  provider prompt, asked for a decision, or lost an instruction. The broker
+  writes every such transition, from the same worker truth every other
+  surface projects, into a durable per-controller inbox
+  (`orchestration/orchestrator-notifications-v1.jsonl`, fsynced, replayed on
+  restart, capped with counted drops). The orchestrator sees a one-line
+  notice, never the payload: beside any `cyberdeck_*` tool result
+  (`cyberdeckNotice`), after other tools through a provider hook (Claude
+  `PostToolUse`/`PostToolUseFailure`/`Stop`, Cursor plugin
+  `postToolUse`/`postToolUseFailure`; Codex is tier A only), or as a
+  `[cyberdeck notice]` line at its prompt through the existing instruction
+  queue when it is idle, coalesced, withdrawn if it starts a turn first, held
+  behind a human controller, and capped per hour. It drains with
+  `cyberdeck_notifications_read` (cursor-acknowledged, at-least-once) and
+  tunes wakes with `cyberdeck_notifications_configure`. A settled record
+  embeds the bounded result a wait would return, and the wait and the feed
+  agree: a drained target makes the later wait answer `retrieval: "replay"`,
+  and a wait that delivers a target consumes its record. New CLI:
+  `cyberdeck notifications notice|read|configure`; the hook command is the
+  lean `cli/notice-hook-entry.js`, which imports nothing from the CLI graph.
+  Design and decisions: `docs/architecture/orchestrator-notifications.md`;
+  provider hook evidence: `docs/architecture/provider-parity.md`.
+
 - An orchestrator can start a peer orchestrator from its own tools, so
   orchestration can continue from the phone. `cyberdeck_orchestrator_create`
   reaches the broker's existing peer-creation path behind a new
