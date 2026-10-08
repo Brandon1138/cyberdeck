@@ -31,6 +31,8 @@ import {
 } from "../domain/session.js";
 import type { ThreadReadResult } from "../domain/thread.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
+import { settledDedupeKey } from "../domain/orchestrator-notification.js";
+import type { NotificationInboxPort } from "./orchestrator-notification-ports.js";
 import {
   WorkerBudgetDeclarationSchema,
   type WorkerBudgetDeclaration,
@@ -80,6 +82,7 @@ import type {
   SessionLookupPort,
   SessionProcessControlPort,
   SessionStartPort,
+  WorkerResultSnapshot,
   WorkerTruthQueryPort,
 } from "./session/session-ports.js";
 
@@ -343,6 +346,8 @@ export interface AgentControlOptions {
   workerCapabilities?: WorkerCapabilityCatalog;
   /** Broker coordination substrate that owns scoped worker budgets. */
   workerBudgets?: WorkerBudgetRegistrationPort;
+  /** The notification inbox: a wait that delivers a target consumes its settled record. */
+  notifications?: Pick<NotificationInboxPort, "acknowledgeByDedupeKey">;
 }
 
 export class AgentControlService {
@@ -360,6 +365,7 @@ export class AgentControlService {
   private readonly workspaceProbe: WorkspaceProbe | undefined;
   private readonly workerCapabilities: WorkerCapabilityCatalog | undefined;
   private readonly workerBudgets: WorkerBudgetRegistrationPort | undefined;
+  private readonly notifications: AgentControlOptions["notifications"];
 
   constructor(
     private readonly registry: SessionLookupPort
@@ -383,6 +389,7 @@ export class AgentControlService {
     this.workspaceProbe = options.workspaceProbe;
     this.workerCapabilities = options.workerCapabilities;
     this.workerBudgets = options.workerBudgets;
+    this.notifications = options.notifications;
   }
 
   /**
@@ -1014,6 +1021,9 @@ export class AgentControlService {
       );
     }
 
+    // One truth, two readers: a target this wait delivered is a settled record the feed no longer
+    // needs to announce, so it is consumed here with `deliveredVia: ["wait"]`.
+    await this.consumeSettledNotifications(binding, request.targets, outcome.results);
     const endMs = this.now();
     const remainingAfterMs = Math.max(0, pending.wait.deadlineMs - endMs);
     const state: WaitState = intervention !== undefined
@@ -1071,6 +1081,27 @@ export class AgentControlService {
           : {}),
       },
     };
+  }
+
+  private async consumeSettledNotifications(
+    binding: OrchestratorBinding,
+    targets: readonly { sessionId: string; completionTarget: number }[],
+    results: readonly WorkerResultSnapshot[],
+  ): Promise<void> {
+    if (this.notifications === undefined) return;
+    const controllerId = orchestratorController(binding).controllerId;
+    // Only the ordinal the caller asked for is consumed; turns completed since are work the feed still owes.
+    const requested = new Map(targets.map((target) => [target.sessionId, target.completionTarget]));
+    for (const result of results) {
+      const target = requested.get(result.sessionId);
+      const keys = [
+        ...(result.status === "completed" && target !== undefined ? [settledDedupeKey(result.sessionId, target)] : []),
+        ...(result.truth.terminal ? [settledDedupeKey(result.sessionId)] : []),
+      ];
+      for (const key of keys) {
+        await this.notifications.acknowledgeByDedupeKey(controllerId, key, "wait").catch(() => undefined);
+      }
+    }
   }
 
   /**

@@ -1,0 +1,53 @@
+exit=0
+2026-10-07T15:08:38.354Z system init {"type":"system","subtype":"init","apiKeySource":"login","cwd":"/private/tmp/cyberdeck-hook-spike/cursor-u4","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","model":"Composer 2.5","permissionMode":"default"}
+2026-10-07T15:08:38.357Z user  {"type":"user","message":{"role":"user","content":[{"type":"text","text":"Run the shell command `echo spike`, then call the MCP tool echo with text 'spike'. After each tool result, if you see any text matching CYBERDECK-SPIKE-NOTICE-*, reply with exa
+2026-10-07T15:08:50.531Z thinking delta {"type":"thinking","subtype":"delta","text":"Running `echo spike`","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385730531}
+2026-10-07T15:08:50.624Z thinking delta {"type":"thinking","subtype":"delta","text":" and calling the MCP","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385730624}
+2026-10-07T15:08:50.735Z thinking delta {"type":"thinking","subtype":"delta","text":" echo tool. Will reply","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385730735}
+2026-10-07T15:08:50.846Z thinking delta {"type":"thinking","subtype":"delta","text":" with any matching CYBERDECK-SPIKE-NOTICE-*","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385730846}
+2026-10-07T15:08:50.948Z thinking delta {"type":"thinking","subtype":"delta","text":" text or quote verbatim","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385730947}
+2026-10-07T15:08:51.071Z thinking delta {"type":"thinking","subtype":"delta","text":" any hook messages.","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385731071}
+2026-10-07T15:08:51.748Z thinking completed {"type":"thinking","subtype":"completed","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385731747}
+2026-10-07T15:08:51.751Z ASSIST ["Running the shell command and invoking the MCP echo tool.\n"]
+2026-10-07T15:08:51.752Z TOOL started {"shellToolCall":{"args":{"command":"echo spike","workingDirectory":"","timeout":30000,"toolCallId":"tool_6d11fa23-202c-4dc6-afe5-4cb2e66ea7d","simpleCommands":["echo"],"hasInputRedirect":false,"hasOutputRedirect":false,"parsingResult":{"parsingFailed":false,"executableCommands":[{"name":"echo","arg
+2026-10-07T15:08:51.753Z TOOL started {"getMcpToolsToolCall":{"args":{"server":"echo","toolCallId":"tool_0d86514f-d693-488d-95dd-a4076231bf2"}},"hookAdditionalContexts":[],"toolCallId":"tool_0d86514f-d693-488d-95dd-a4076231bf2","startedAtMs":"1791385731720"}
+2026-10-07T15:08:51.804Z TOOL completed {"getMcpToolsToolCall":{"args":{"server":"echo","toolCallId":"tool_0d86514f-d693-488d-95dd-a4076231bf2"},"result":{"success":{"content":"{\n  \"mode\": \"namespace\",\n  \"namespace\": \"echo\",\n  \"namespaceStatus\": \"ready\",\n  \"tools\": [\n    {\n      \"tool\": \"echo\",\n      \"description
+2026-10-07T15:09:00.281Z TOOL completed {"shellToolCall":{"args":{"command":"echo spike","workingDirectory":"","timeout":30000,"toolCallId":"tool_6d11fa23-202c-4dc6-afe5-4cb2e66ea7d","simpleCommands":["echo"],"hasInputRedirect":false,"hasOutputRedirect":false,"parsingResult":{"parsingFailed":false,"executableCommands":[{"name":"echo","arg
+2026-10-07T15:09:02.148Z thinking delta {"type":"thinking","subtype":"delta","text":"The shell command returned","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385742148}
+2026-10-07T15:09:02.715Z thinking delta {"type":"thinking","subtype":"delta","text":" only \"spike\". No matching","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385742715}
+2026-10-07T15:09:02.716Z thinking delta {"type":"thinking","subtype":"delta","text":" notice was found.","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385742716}
+2026-10-07T15:09:02.716Z thinking delta {"type":"thinking","subtype":"delta","text":"\n\nProceeding to call","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385742716}
+2026-10-07T15:09:02.716Z thinking delta {"type":"thinking","subtype":"delta","text":" the MCP echo tool with","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385742716}
+2026-10-07T15:09:02.716Z thinking delta {"type":"thinking","subtype":"delta","text":" text 'spike'.","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385742716}
+2026-10-07T15:09:02.716Z thinking completed {"type":"thinking","subtype":"completed","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385742716}
+2026-10-07T15:09:02.718Z TOOL started {"mcpToolCall":{"args":{"name":"echo-echo","args":{"text":"spike"},"toolCallId":"tool_7669fd8e-d571-4836-a381-739336cab5f","providerIdentifier":"echo","toolName":"echo","smartModeApprovalOnly":false,"skipApproval":false,"serverIdentifier":"echo"},"description":"Echo the text 'spike' back through the
+2026-10-07T15:09:04.812Z TOOL completed {"mcpToolCall":{"args":{"name":"echo-echo","args":{"text":"spike"},"toolCallId":"tool_7669fd8e-d571-4836-a381-739336cab5f","providerIdentifier":"echo","toolName":"echo","smartModeApprovalOnly":false,"skipApproval":false,"serverIdentifier":"echo"},"result":{"success":{"content":[{"text":{"text":"spik
+2026-10-07T15:09:07.849Z thinking delta {"type":"thinking","subtype":"delta","text":"The shell command returned","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385747848}
+2026-10-07T15:09:08.123Z thinking delta {"type":"thinking","subtype":"delta","text":" \"spike\". No CYBERDECK-SPIKE-NOTICE-*","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385748123}
+2026-10-07T15:09:08.318Z thinking delta {"type":"thinking","subtype":"delta","text":" text appeared.","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385748318}
+2026-10-07T15:09:08.997Z thinking delta {"type":"thinking","subtype":"delta","text":"\n\nThe MCP echo tool ","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385748996}
+2026-10-07T15:09:09.149Z thinking delta {"type":"thinking","subtype":"delta","text":"also returned \"spike\".","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385749145}
+2026-10-07T15:09:09.303Z thinking delta {"type":"thinking","subtype":"delta","text":" No CYBERDECK-SPIKE-NOTICE-*","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385749302}
+2026-10-07T15:09:09.437Z thinking delta {"type":"thinking","subtype":"delta","text":" text appeared.","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385749435}
+2026-10-07T15:09:11.281Z thinking delta {"type":"thinking","subtype":"delta","text":"\n\nNo CYBERDECK-SPIKE-NOTICE-*","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385751281}
+2026-10-07T15:09:11.410Z thinking delta {"type":"thinking","subtype":"delta","text":" text or hook messages","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385751409}
+2026-10-07T15:09:11.535Z thinking delta {"type":"thinking","subtype":"delta","text":" appeared in either ","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385751534}
+2026-10-07T15:09:11.667Z thinking delta {"type":"thinking","subtype":"delta","text":"result. I will stop ","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385751667}
+2026-10-07T15:09:11.782Z thinking delta {"type":"thinking","subtype":"delta","text":"without further output.","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385751782}
+2026-10-07T15:09:14.494Z thinking delta {"type":"thinking","subtype":"delta","text":"\n\nReconsidering whether","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385754493}
+2026-10-07T15:09:15.319Z thinking delta {"type":"thinking","subtype":"delta","text":" the sandbox warning","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755318}
+2026-10-07T15:09:15.319Z thinking delta {"type":"thinking","subtype":"delta","text":" from the shell result","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755319}
+2026-10-07T15:09:15.321Z thinking delta {"type":"thinking","subtype":"delta","text":" counts as a hook or","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755319}
+2026-10-07T15:09:15.321Z thinking delta {"type":"thinking","subtype":"delta","text":" system message. If ","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755319}
+2026-10-07T15:09:15.321Z thinking delta {"type":"thinking","subtype":"delta","text":"so, it should be quoted","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755319}
+2026-10-07T15:09:15.321Z thinking delta {"type":"thinking","subtype":"delta","text":" verbatim.","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755319}
+2026-10-07T15:09:15.321Z thinking delta {"type":"thinking","subtype":"delta","text":"\n\nThe shell result contains","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755319}
+2026-10-07T15:09:15.321Z thinking delta {"type":"thinking","subtype":"delta","text":" a sandbox allowlist","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755319}
+2026-10-07T15:09:15.321Z thinking delta {"type":"thinking","subtype":"delta","text":" message that should","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755319}
+2026-10-07T15:09:15.322Z thinking delta {"type":"thinking","subtype":"delta","text":" be quoted verbatim.","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755319}
+2026-10-07T15:09:15.322Z thinking delta {"type":"thinking","subtype":"delta","text":" The MCP result has ","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755320}
+2026-10-07T15:09:15.322Z thinking delta {"type":"thinking","subtype":"delta","text":"no matching notices ","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755320}
+2026-10-07T15:09:15.322Z thinking delta {"type":"thinking","subtype":"delta","text":"or other hook messages.","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755320}
+2026-10-07T15:09:15.322Z thinking completed {"type":"thinking","subtype":"completed","session_id":"58d562c4-1ef9-42ec-8daa-30bec2e6d47a","timestamp_ms":1791385755320}
+2026-10-07T15:09:15.706Z ASSIST ["This command ran outside the sandbox (no restrictions) because it matched the user's command allowlist."]
+2026-10-07T15:09:15.706Z RESULT success "Running the shell command and invoking the MCP echo tool.\nThis command ran outside the sandbox (no restrictions) because it matched the user's command allowlist."

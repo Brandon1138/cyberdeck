@@ -36,6 +36,16 @@ export interface CreateProgramOptions {
   listProjects?: () => Promise<string[]>;
   addProject?: (request: { path: string; acceptParent?: boolean }) => Promise<FleetProjectAddResult>;
   removeProject?: (request: { path: string }) => Promise<FleetProjectRemoveResult>;
+  readNotifications?: (request: {
+    actorSessionId: string;
+    cursor?: number;
+    limit?: number;
+    acknowledgeThrough?: number;
+  }) => Promise<unknown>;
+  configureNotifications?: (request: {
+    actorSessionId: string;
+    policy: Record<string, unknown>;
+  }) => Promise<unknown>;
 }
 
 export type CliProgramContext = Omit<

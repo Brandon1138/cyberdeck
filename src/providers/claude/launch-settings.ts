@@ -3,6 +3,11 @@ import {
   type ClaudeTranscriptHookCommand,
   type ClaudeTranscriptHooks,
 } from "./transcript-hook.js";
+import {
+  claudeNoticeHooks,
+  type ClaudeNoticeHookCommand,
+  type ClaudeNoticeHooks,
+} from "./notice-hooks.js";
 
 /**
  * The endpoint Remote Control is gated to. Claude accepts a base URL whose host is exactly this
@@ -14,11 +19,13 @@ export const CLAUDE_FIRST_PARTY_BASE_URL = "https://api.anthropic.com";
 export interface ClaudeLaunchSettingsInput {
   /** Present when the broker can receive transcript rebinds; absent on a bare adapter. */
   transcriptHook?: ClaudeTranscriptHookCommand;
+  /** Present only when an orchestrator can read the broker's notice files. */
+  noticeHook?: ClaudeNoticeHookCommand;
   orchestrator: boolean;
 }
 
 export interface ClaudeLaunchSettings {
-  hooks?: ClaudeTranscriptHooks;
+  hooks?: Partial<ClaudeTranscriptHooks & ClaudeNoticeHooks>;
   env?: { ANTHROPIC_BASE_URL: typeof CLAUDE_FIRST_PARTY_BASE_URL };
 }
 
@@ -45,6 +52,9 @@ export function claudeLaunchSettings(input: ClaudeLaunchSettingsInput): string |
     settings.hooks = claudeTranscriptHooks(input.transcriptHook);
   }
   if (input.orchestrator) {
+    if (input.noticeHook !== undefined) {
+      settings.hooks = { ...settings.hooks, ...claudeNoticeHooks(input.noticeHook) };
+    }
     settings.env = { ANTHROPIC_BASE_URL: CLAUDE_FIRST_PARTY_BASE_URL };
   }
   if (settings.hooks === undefined && settings.env === undefined) return undefined;

@@ -150,6 +150,10 @@ describe("OrchestratorManager", () => {
     expect(instructions).toContain("Concatenate fragment.json before interpreting events");
     expect(instructions).toContain("acknowledge completion");
     expect(instructions).toContain("On STALE_THREAD_DETAIL, discard partial reconstruction and restart");
+    expect(instructions).toContain("cyberdeck_notifications_read");
+    expect(instructions).toContain("Never call cyberdeck_notifications_read on a timer");
+    expect(instructions).toContain("cyberdeck_workers_wait remains the deliberate synchronous join");
+    expect(instructions).toContain("never reread from cursor zero");
     // Request, no initial prompt, and the activation the grant is written from.
     expect(start.mock.calls[0]).toHaveLength(3);
     expect(start.mock.calls[0]![1]).toBeUndefined();

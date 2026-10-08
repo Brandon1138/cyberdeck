@@ -11,6 +11,11 @@ import {
   AgentWaitWorkersParamsSchema,
 } from "../../orchestration/agent-control-service.js";
 import { EnqueueInstructionParamsSchema } from "../../orchestration/instruction-queue.js";
+import {
+  AgentNotificationsConfigureParamsSchema,
+  AgentNotificationsNoticeParamsSchema,
+  AgentNotificationsReadParamsSchema,
+} from "../../orchestration/orchestrator-notification-control.js";
 import { AgentCreateOrchestratorParamsSchema } from "../../orchestration/orchestrator-peer-service.js";
 import {
   AgentLeaseParamsSchema,
@@ -32,6 +37,7 @@ import {
   type BrokerMethodHandler,
   requireAgentControl,
   requireInstructions,
+  requireNotifications,
   requireOrchestratorPeers,
   requireWorkerControl,
   requireWorkerEvents,
@@ -91,6 +97,15 @@ export const agentMethods: Record<string, BrokerMethodHandler> = {
   },
   "agent.worker.wait": async (server, _context, frame) => {
     return requireAgentControl(server.options).waitForWorkers(AgentWaitWorkersParamsSchema.parse(frame.params));
+  },
+  "agent.notifications.read": async (server, _context, frame) => {
+    return requireNotifications(server.options).read(AgentNotificationsReadParamsSchema.parse(frame.params));
+  },
+  "agent.notifications.configure": async (server, _context, frame) => {
+    return requireNotifications(server.options).configure(AgentNotificationsConfigureParamsSchema.parse(frame.params));
+  },
+  "agent.notifications.notice": async (server, _context, frame) => {
+    return requireNotifications(server.options).notice(AgentNotificationsNoticeParamsSchema.parse(frame.params));
   },
   "agent.thread.enqueue": async (server, _context, frame) => {
     return requireInstructions(server.options).enqueue(EnqueueInstructionParamsSchema.parse(frame.params));

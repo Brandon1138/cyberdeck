@@ -32,6 +32,61 @@ describe("claudeLaunchSettings", () => {
     expect(settings.hooks.SessionStart).toHaveLength(1);
   });
 
+  it("composes the exact orchestrator notice hooks, transcript hook and endpoint pin", () => {
+    expect(JSON.parse(claudeLaunchSettings({
+      orchestrator: true,
+      transcriptHook: HOOK,
+      noticeHook: HOOK,
+    })!)).toEqual({
+      hooks: {
+        SessionStart: [{
+          matcher: "startup|resume|clear|compact",
+          hooks: [{
+            type: "command",
+            command: "/usr/bin/node /opt/cyberdeck/cli.js transcript rebind"
+              + " --actor-session session-1 --state-directory /state/dir",
+            timeout: 5,
+          }],
+        }],
+        PostToolUse: [{ matcher: ".*", hooks: [{
+          type: "command",
+          command: "/usr/bin/node /opt/cyberdeck/cli/notice-hook-entry.js"
+            + " --actor-session session-1 --state-directory /state/dir --format claude --event PostToolUse",
+          timeout: 2,
+        }] }],
+        PostToolUseFailure: [{ matcher: ".*", hooks: [{
+          type: "command",
+          command: "/usr/bin/node /opt/cyberdeck/cli/notice-hook-entry.js"
+            + " --actor-session session-1 --state-directory /state/dir --format claude --event PostToolUseFailure",
+          timeout: 2,
+        }] }],
+        Stop: [{ hooks: [{
+          type: "command",
+          command: "/usr/bin/node /opt/cyberdeck/cli/notice-hook-entry.js"
+            + " --actor-session session-1 --state-directory /state/dir --format claude --event Stop",
+          timeout: 2,
+        }] }],
+      },
+      env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" },
+    });
+  });
+
+  it("keeps the exact worker settings even if a notice command is supplied", () => {
+    expect(JSON.parse(claudeLaunchSettings({
+      orchestrator: false,
+      transcriptHook: HOOK,
+      noticeHook: HOOK,
+    })!)).toEqual({ hooks: { SessionStart: [{
+      matcher: "startup|resume|clear|compact",
+      hooks: [{
+        type: "command",
+        command: "/usr/bin/node /opt/cyberdeck/cli.js transcript rebind"
+          + " --actor-session session-1 --state-directory /state/dir",
+        timeout: 5,
+      }],
+    }] } });
+  });
+
   it("never pins a worker or top-level session", () => {
     // Everything that is not an orchestrator keeps the operator's routing, proxy included.
     const settings = JSON.parse(

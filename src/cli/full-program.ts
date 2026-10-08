@@ -19,6 +19,7 @@ import { registerCockpitCommands } from "./cockpit.js";
 import { registerEventCommands } from "./event.js";
 import { registerMcpCommands } from "./mcp.js";
 import { registerModalAnswerCommands } from "./modal-answers.js";
+import { registerNotificationCommands } from "./notifications.js";
 import { registerNvimLayoutCommands } from "./nvim-layout.js";
 import { registerOrchestratorCommands } from "./orchestrator.js";
 import type { CliProgramContext, CreateProgramOptions } from "./program.js";
@@ -131,6 +132,7 @@ export function createProgram(options: CreateProgramOptions = {}) {
   registerWorktreeCommands(program, context);
   registerScoutEgressCommands(program, context);
   registerModalAnswerCommands(program, context);
+  registerNotificationCommands(program, context);
   registerEventCommands(program, context);
   registerTranscriptCommands(program, context);
   registerSessionCommands(program, context);

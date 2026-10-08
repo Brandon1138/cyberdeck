@@ -263,7 +263,8 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
    */
   private addOrchestratorIsolation(args: string[], session: SessionRecord): void {
     if (session.kind !== "orchestrator") return;
-    args.push("--setting-sources", "project,local");
+    // Endpoint pinning makes RC available; the native flag also enables it on launch and resume.
+    args.push("--remote-control", "--setting-sources", "project,local");
   }
 
   /**
@@ -335,6 +336,9 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     return claudeLaunchSettings({
       ...(this.transcriptHookInstallable()
         ? { transcriptHook: this.transcriptHookCommand(session) }
+        : {}),
+      ...(session.kind === "orchestrator" && this.transcriptHookInstallable()
+        ? { noticeHook: this.transcriptHookCommand(session) }
         : {}),
       orchestrator: session.kind === "orchestrator",
     });

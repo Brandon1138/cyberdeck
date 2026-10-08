@@ -1,0 +1,11 @@
+# scratch CODEX_HOME for the hook spike; no operator config is loaded from here
+model = "gpt-6.1-sol"
+model_reasoning_effort = "low"
+
+[features]
+hooks = true
+
+[mcp_servers.echo]
+command = "node"
+args = ["/private/tmp/cyberdeck-hook-spike/echo-mcp.mjs"]
+default_tools_approval_mode = "approve"

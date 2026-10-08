@@ -27,6 +27,7 @@ import { ClaudeJobDispatchAdapter } from "../providers/claude/dispatch-adapter.j
 import { ClaudeWorkspaceTrust } from "../providers/claude/workspace-trust.js";
 import { CodexProviderAdapter } from "../providers/codex.js";
 import { CodexWorkspaceTrust } from "../providers/codex/workspace-trust.js";
+import { CodexOrchestratorHome } from "../providers/codex/orchestrator-home.js";
 import { CursorJobDispatchAdapter } from "../providers/cursor/dispatch-adapter.js";
 import { CursorProviderAdapter } from "../providers/cursor/session-adapter.js";
 import { captureScoutWorkspaceStateHash } from "../providers/cursor/workspace-state.js";
@@ -77,7 +78,11 @@ import { ModalAnswerPolicy } from "../orchestration/modal-answer-policy.js";
 import { WorkerCoordinationRuntime } from "../persistence/worker-coordination-runtime.js";
 import { WorkerEventChannel } from "./worker-event-channel.js";
 import { BrokerWorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
-import { WorkerCoordinationService } from "./worker-coordination.js";
+import { ObservedWorkerCoordinationService } from "./observed-worker-coordination.js";
+import { composeOrchestratorNotificationFeed } from "./orchestrator-notification-feed.js";
+import { observeInstructionRepository } from "../orchestration/observed-instruction-repository.js";
+import { OrchestratorNotificationStore } from "../persistence/orchestrator-notification-store.js";
+import { OrchestratorNoticeFiles } from "../persistence/orchestrator-notice-files.js";
 import {
   detachCockpit,
   launchCockpit,
@@ -211,7 +216,10 @@ export async function runBroker(
   // worktrees) has its cwd written into the provider's own trust store before the process exists,
   // so the folder-trust dialog never appears. Ungranted repositories keep today's behavior.
   const claudeTrust = new ClaudeWorkspaceTrust();
-  const codexTrust = new CodexWorkspaceTrust();
+  const codexOrchestratorHome = new CodexOrchestratorHome();
+  const codexTrust = new CodexWorkspaceTrust({
+    configPath: resolve(codexOrchestratorHome.sourceDirectory, "config.toml"),
+  });
   const grantGatedTrust = (writer: { trust(cwd: string): Promise<string> }) =>
     async (cwd: string): Promise<void> => {
       if (await modalAnswerPolicy.allowsWorkspaceTrust(cwd)) await writer.trust(cwd);
@@ -228,9 +236,10 @@ export async function runBroker(
   let workerEvents: WorkerEventChannel;
   const executionRuntime = await brokerExecutionRuntime({ stateDirectory, config, activity,
     allowsWorkspaceTrust: (source) => modalAnswerPolicy.allowsWorkspaceTrust(source),
-    adapters: { codex: new CodexProviderAdapter({ mcp, workspaceTrust: grantGatedTrust(codexTrust) }),
+    adapters: { codex: new CodexProviderAdapter({ mcp, workspaceTrust: grantGatedTrust(codexTrust),
+      orchestratorHome: codexOrchestratorHome }),
       claude: new ClaudeProviderAdapter({ mcp, stateDirectory, workspaceTrust: grantGatedTrust(claudeTrust) }),
-      cursor: new CursorProviderAdapter({ mcp }), antigravity: new AntigravityProviderAdapter() },
+      cursor: new CursorProviderAdapter({ mcp, stateDirectory }), antigravity: new AntigravityProviderAdapter() },
     lookupSession: (id) => { try { return registry?.get(id); } catch { return undefined; } },
     submitEvent: (input) => workerEvents.submit(input),
   });
@@ -257,16 +266,23 @@ export async function runBroker(
     // operator registers projects by hand from there; refusing to boot over it would be worse.
   });
   const orchestratorStore = new OrchestratorStore(stateDirectory);
+  let observedCoordination!: ObservedWorkerCoordinationService;
   const workerCoordination = new WorkerCoordinationRuntime({
     stateDirectory,
     recoveredSessions,
     orchestrators: orchestratorStore,
-    createService: (store) => new WorkerCoordinationService({ store: activityCoordinationStore(store, activity) }),
+    createService: (store) => (observedCoordination = new ObservedWorkerCoordinationService({ store: activityCoordinationStore(store, activity) })),
   });
   await workerCoordination.start();
+  // The notification feed replays its inbox before anything can write to it, and observes the
+  // coordination substrate and the instruction repository through the two seams composed above.
+  const notificationInbox = new OrchestratorNotificationStore(stateDirectory);
+  await notificationInbox.load();
   // Each launch context has its own cached catalog; orchestrators force first-party Codex.
   const workerCapabilities = new WorkerCapabilityCatalog();
-  const orchestratorCapabilities = new WorkerCapabilityCatalog({ probe: new CodexOrchestratorModelProbe() });
+  const orchestratorCapabilities = new WorkerCapabilityCatalog({
+    probe: new CodexOrchestratorModelProbe(undefined, codexOrchestratorHome),
+  });
   const orchestrators = new OrchestratorManager(
     registry,
     orchestratorStore,
@@ -277,10 +293,19 @@ export async function runBroker(
   const instructionStore = new InstructionStore(stateDirectory);
   const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
   transcripts.attachNativeCapture(nativeCapture);
-  const instructions = new InstructionQueue(registry, orchestratorStore, activityInstructionStore(instructionStore, activity, (id) => {
+  const notificationFeed = composeOrchestratorNotificationFeed({
+    inbox: notificationInbox,
+    noticeFiles: new OrchestratorNoticeFiles(stateDirectory),
+    bindings: orchestratorStore,
+    registry,
+    coordination: observedCoordination,
+    instructionRepository: instructionStore,
+  });
+  const instructions = new InstructionQueue(registry, orchestratorStore, observeInstructionRepository(activityInstructionStore(instructionStore, activity, (id) => {
     try { return registry.get(id); } catch { return undefined; }
-  }, (record, worker) => nativeCapture.captureInstruction(record, worker)));
+  }, (record, worker) => nativeCapture.captureInstruction(record, worker)), (record) => notificationFeed.observeInstruction(record)));
   instructions.start();
+  await notificationFeed.start(instructions);
   const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerBudgets = new WorkerBudgetEnforcer({
     registry,
@@ -298,6 +323,7 @@ export async function runBroker(
     workerPreferences,
     {
       audit: journal,
+      notifications: notificationInbox,
       providerPermissions,
       workerCoordination: workerCoordination.service,
       scoutEgress,
@@ -385,6 +411,7 @@ export async function runBroker(
     await runtime.shutdown(reason);
     localWorkerControl.close();
     workerBudgets.close();
+    notificationFeed.stop();
     instructions.stop();
     nvimBindings.stop();
     await executionRuntime.closeAdmission();
@@ -409,6 +436,7 @@ export async function runBroker(
     transcripts,
     orchestrators,
     agentControl,
+    notifications: notificationFeed.control,
     orchestratorPeers,
     instructions,
     workflows,

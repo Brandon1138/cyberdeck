@@ -1,0 +1,1 @@
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node /private/tmp/cyberdeck-hook-spike/hook.mjs claude Stop c3 --shape block --once","timeout":5}]}]}}

@@ -1,9 +1,7 @@
 import { Command, Option } from "commander";
-import { spawnSync as nodeSpawnSync, spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
-import { basename, dirname, extname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { appStateDirectory, brokerSocketPath } from "../broker/app-paths.js";
+import { spawnSync as nodeSpawnSync } from "node:child_process";
+import { basename, resolve } from "node:path";
+import { brokerSocketPath } from "../broker/app-paths.js";
 import { attachSession } from "../client/attach.js";
 import { runFleet, type OrchestratorCockpitTarget } from "../client/fleet.js";
 import type { FleetRuntimeDeps } from "../client/fleet/deps.js";
@@ -100,14 +98,25 @@ export function addSessionOptions(command: Command, allowAttach: boolean): Comma
   return command;
 }
 
-export async function withClient<T>(operation: (client: RpcClient) => Promise<T>): Promise<T> {
-  const client = await RpcClient.connect(brokerSocketPath);
-  try {
-    return await operation(client);
-  } finally {
-    client.close();
-  }
-}
+import {
+  cliEntrypoint,
+  isBrokerUnavailable,
+  startDetachedBroker,
+  withClient,
+} from "./broker-process.js";
+
+export {
+  withClient,
+  projectRoot,
+  projectRootFromModulePath,
+  cliEntrypoint,
+  cliEntrypointFromModulePath,
+  isBrokerUnavailable,
+  waitForBroker,
+  waitForBrokerStop,
+  startDetachedBroker,
+  restartDetachedBroker,
+} from "./broker-process.js";
 
 /**
  * Where a worker process may still be running, so pruning never pulls a directory out from under
@@ -119,94 +128,6 @@ export async function liveSessionCwds(): Promise<Map<string, string>> {
   const sessions = await withClient((client) => client.request<SessionRecord[]>("session.list", {}))
     .catch(() => [] as SessionRecord[]);
   return liveWorktreeCwds(sessions);
-}
-
-export function projectRootFromModulePath(modulePath: string): string {
-  // This module compiles to <root>/dist/src/cli/runtime.js and runs from <root>/src/cli/runtime.ts
-  // under tsx — one directory deeper than the src/cli.ts entry this logic originally lived in.
-  const sourceDirectory = dirname(modulePath);
-  const grandparent = dirname(dirname(sourceDirectory));
-  const isCompiledLayout = extname(modulePath) === ".js" && basename(grandparent) === "dist";
-  return isCompiledLayout ? dirname(grandparent) : grandparent;
-}
-
-export function projectRoot(): string {
-  return projectRootFromModulePath(fileURLToPath(import.meta.url));
-}
-
-export function cliEntrypointFromModulePath(modulePath: string): string {
-  return resolve(dirname(dirname(modulePath)), `cli${extname(modulePath)}`);
-}
-
-function cliEntrypoint(): string {
-  return resolve(process.argv[1] ?? cliEntrypointFromModulePath(fileURLToPath(import.meta.url)));
-}
-
-export async function waitForBroker(timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown;
-  while (Date.now() < deadline) {
-    try {
-      await withClient((client) => client.request("broker.status", {}));
-      return;
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-  }
-  throw new Error(`Broker did not become ready: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
-}
-
-export async function waitForBrokerStop(timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      await withClient((client) => client.request("broker.status", {}));
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    } catch (error) {
-      if (isBrokerUnavailable(error)) return;
-      throw error;
-    }
-  }
-  throw new Error("Broker did not stop before the restart timeout");
-}
-
-export async function startDetachedBroker(announce = true): Promise<void> {
-  const brokerEntry = resolve(projectRoot(), "dist", "src", "broker", "main.js");
-  if (!existsSync(brokerEntry)) {
-    throw new Error("Built broker is missing; run `pnpm build` first");
-  }
-  mkdirSync(appStateDirectory, { recursive: true });
-  const logPath = resolve(appStateDirectory, "broker.log");
-  const logDescriptor = openSync(logPath, "a");
-  try {
-    const child = spawn(process.execPath, [brokerEntry], {
-      cwd: projectRoot(),
-      detached: true,
-      stdio: ["ignore", logDescriptor, logDescriptor],
-    });
-    child.unref();
-  } finally {
-    closeSync(logDescriptor);
-  }
-  await waitForBroker();
-  if (announce) process.stdout.write(`Cyberdeck broker is running at ${brokerSocketPath}\n`);
-}
-
-export function isBrokerUnavailable(error: unknown): boolean {
-  if (!(error instanceof Error) || !("code" in error)) return false;
-  return error.code === "ENOENT" || error.code === "ECONNREFUSED";
-}
-
-export async function restartDetachedBroker(): Promise<void> {
-  try {
-    await withClient((client) => client.request("broker.shutdown", {}));
-    await waitForBrokerStop();
-  } catch (error) {
-    if (!isBrokerUnavailable(error)) throw error;
-  }
-  await startDetachedBroker(false);
-  process.stdout.write(`Cyberdeck broker restarted at ${brokerSocketPath}\n`);
 }
 
 /**

@@ -375,3 +375,174 @@ relying on a row.
 
 Grade: `help-advertised` / `metadata-observed`. No live model call was made to produce this
 document, and no row claims `live-proven`.
+
+## Orchestrator notice hooks (spike, 2026-10-07)
+
+What each provider CLI actually does with a hook that prints a notice, measured live against
+`claude` 2.1.280, `codex-cli` 0.160.1 and Cursor `agent` 2026.10.01-e373342. Every config, script
+and log lived in a scratch root, `/private/tmp/cyberdeck-hook-spike/`. The copies that matter are in
+`handoffs/orchestrator-notifications/spike/`. Evidence references below are run ids: they appear
+in `spike/hooks.log.excerpt` (the `runId` field) and, where a summary was kept, in
+`spike/evidence/<run>.sum`. No operator config was written. No run went through the broker or tmux.
+
+Grades: **yes** / **no** = verified live in this spike; **untested** = not run, with the reason.
+
+| # | Question | Claude 2.1.280 | Codex 0.160.1 | Cursor 2026.10.01 |
+| --- | --- | --- | --- | --- |
+| Q1 | PostToolUse on a native tool reaches the model | **yes**: matcher `.*` fires for `Bash`, `additionalContext` echoed by the model (c1, r2) | **untested**: hooks in an untrusted `hooks.json` are skipped silently (x0); `--dangerously-bypass-hook-trust` was refused to this session; scripted in `spike/codex/codex-tests.sh` | **yes**: `postToolUse` fires for `Shell`, `additional_context` echoed (u1, u2, u2-interactive) |
+| Q2 | PostToolUse on an MCP tool; name seen | **yes**: `tool_name` is `mcp__echo__echo` and the payload adds `mcp_server`; `.*` covers it (c1) | **untested**, same reason. The `--json` stream names the call server `echo`, tool `echo` (x0b); the hook-side name is unknown | **yes**: `tool_name` is `MCP:echo` (`MCP:<tool>`, no server), for a plugin-hosted server too (u1, u2). `afterMCPExecution` also fires, with `tool_name` `echo` and `mcp_server_name` |
+| Q3 | Stop: continue the session; loop guard | **yes**: Stop `hookSpecificOutput.additionalContext` continues the turn (c2); `decision:block` injects a user-role "Stop hook feedback:\n<reason>" and continues (c3). Re-fires with `stop_hook_active:true` (c2, c3) | **untested**. `hooks` is a *stable* feature, already `true` in `codex features list`; the file is `$CODEX_HOME/hooks.json` | **partial**: a project `stop` hook fires only **interactively**, not under `-p` (u3 vs u3-interactive). `followup_message` arrives as a new `<user_query>` turn; it re-fires with `loop_count:1`. A **plugin** `stop` hook never fired (u2-interactive, twice) |
+| Q4 | Claude `asyncRewake` wakes an idle session | **yes**: Stop (r1b) and PostToolUse (r2b) async hooks that exit 2 after 8 s inject `<task-notification>…Stop hook blocking error from command "Stop": <stderr>` into an idle interactive session, which then answers | n/a | n/a |
+| Q5 | Latency | sync hook ≈80 ms first-log→`tool_result` plus ≈0.2 s node cold start; model sees it on its next request (≈1.5 s later). asyncRewake: exit→injected ≈10 ms, →reply ≈1.8 s | **untested** | `postToolUse` ran *before* the tool's `completed` event (77 ms ahead, u1); interactive `stop`→next turn immediate (u3-interactive) |
+| Q6 | Faults | exit 1: outcome `error`, **stdout still delivered**. Timeout: `cancelled` at 2 s, nothing delivered, tool intact. Exit 2 (sync): stderr delivered **with the full command line**. Silent exit 0: nothing (c4, c5) | **untested** (x4, x5 scripted) | exit 1: stdout **dropped**. Timeout 2 s: nothing delivered, tool intact. Exit 2 / silent: nothing reaches the model (u4, u5) |
+| Q6b | Timeout field | `timeout`, seconds | `timeout`, seconds (accepted by the parser; not exercised) | `timeout`, seconds |
+| Q7 | Hook on tool failure | **yes**: `PostToolUseFailure` fires for a failed MCP call (`isError`) and for a non-zero `Bash`; `PostToolUse` does **not**. A permission-denied call fires neither (c6, c7) | **untested** (x6 scripted) | **yes, split**: `postToolUseFailure` fires for `Shell` `false` (u6x); an MCP `isError:true` fires `postToolUse`, **not** the failure event (u6) |
+| Q8 | Cursor per-launch hooks | n/a | n/a | **yes**: `--plugin-dir <p>` with `<p>/hooks/hooks.json` loads hooks for that launch only, `-p` (u2) and interactive (u2-interactive). Project `<ws>/.cursor/hooks.json` is honoured under `-p --trust` (u1). `CURSOR_CONFIG_DIR` does **not** move `hooks.json` |
+
+### Exact hook JSON that worked
+
+Claude, passed with `--settings <file>` (`spike/claude-settings.json`, which is c1 and c2 merged):
+
+```json
+{"hooks":{
+  "PostToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"node …/hook.mjs claude PostToolUse c1","timeout":5}]}],
+  "PostToolUseFailure":[{"matcher":".*","hooks":[{"type":"command","command":"node …/hook.mjs claude PostToolUseFailure c1","timeout":5}]}],
+  "Stop":[{"hooks":[{"type":"command","command":"node …/hook.mjs claude Stop c2 --once","timeout":5}]}]
+}}
+```
+
+The hook prints `{"hookSpecificOutput":{"hookEventName":"<event>","additionalContext":"<text>"}}`.
+For Stop, `--once` makes it print nothing when `stop_hook_active` is true. asyncRewake
+(`spike/claude-settings-asyncrewake-stop.json`) uses
+`{"type":"command","command":"… --sleep-ms 8000 --stderr --exit 2 --print-nothing","asyncRewake":true,"timeout":30}`.
+
+Cursor, as a plugin (`spike/cursor-plugin/cyberdeck/hooks/hooks.json`, beside `.cursor-plugin/plugin.json` and `.mcp.json`):
+
+```json
+{"version":1,"hooks":{
+  "postToolUse":[{"command":"node …/hook.mjs cursor postToolUse u2","timeout":5}],
+  "stop":[{"command":"node …/hook.mjs cursor stop u2 --shape followup --once","timeout":5}]
+}}
+```
+
+The hook prints `{"additional_context":"<text>"}` (or `{"followup_message":"<text>"}` for stop).
+There is no matcher: an event hook sees every tool.
+
+Codex (`spike/codex/hooks.x1-posttooluse.json`; untested, schema accepted): the same shape as
+Claude, `{"hooks":{"PostToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"…","timeout":5}]}]}}`,
+with `[features] hooks = true` in `config.toml` (`spike/codex/config.toml.fragment`). Its MCP
+server also needs `default_tools_approval_mode = "approve"` under `[mcp_servers.<name>]`, or
+`exec` cancels the call under approval policy `never`.
+
+### Exact command lines
+
+```bash
+# Claude, headless (spike/run-claude.sh)
+env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT claude -p --setting-sources local --settings "$settings" \
+  --mcp-config mcp.json --strict-mcp-config --allowedTools "Bash(echo spike)" "Bash(ls /nonexistent-spike)" "Bash(false)" "mcp__echo__echo" \
+  --max-turns 4 --model haiku --no-session-persistence --output-format stream-json --verbose --include-hook-events \
+  "$prompt" < /dev/null
+# Claude, interactive asyncRewake (spike/pty-claude.mjs, node-pty): the same flags minus -p/stream-json,
+# with CLAUDE_CODE_CHILD_SESSION unset and CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1. An inherited
+# CLAUDE_CODE_CHILD_SESSION silently disables transcript writes.
+
+# Cursor, headless (spike/run-cursor.sh); interactive is spike/pty-cursor.mjs with the same env
+CURSOR_CONFIG_DIR=$S/cursor-config CURSOR_DATA_DIR=$S/cursor-data agent -p --trust --approve-mcps \
+  --workspace "$ws" --model composer-2.5 --output-format stream-json [--plugin-dir $S/cursor-plugin/cyberdeck] "$prompt" < /dev/null
+
+# Codex (spike/codex/codex-tests.sh — scripted, not run in this spike)
+CODEX_HOME=$S/codex-home-x1 codex exec --skip-git-repo-check --ephemeral -C $S/codex-work --json \
+  --dangerously-bypass-hook-trust "$prompt" < /dev/null
+```
+
+### Observations that shape the design
+
+- **Startup cost decides the hook entry point.** Bare `node` takes ≈0.2 s. `cyberdeck --version`
+  through the pnpm wrapper took 3.5–5.2 s cold, and `node dist/src/cli.js --version` took ≈1.3 s.
+  Every tool call runs PostToolUse, so a notice hook that boots the full CLI adds about a second
+  per tool call and risks a 2 s timeout. Importing a single module costs ≈0.2 s.
+- **Fault handling differs by provider.** On exit 1 with JSON on stdout, Claude delivers the JSON
+  and Cursor drops it. Only exit 0 behaves the same everywhere. Claude's sync exit 2 shows the
+  model the hook's entire command line, including `--state-directory` paths.
+- **Stop is a re-entry loop on both providers that support it.** Claude re-fires with
+  `stop_hook_active:true` and Cursor with `loop_count ≥ 1`. A hook that prints whenever a notice
+  is pending gets exactly one extra turn per stop if it keys on those fields, and runs without
+  bound if it does not.
+- **Cursor also reads Claude's hooks.** Cursor's hook loader (from its bundle; not exercised here)
+  merges enterprise `/Library/Application Support/Cursor/hooks.json`, user `~/.cursor/hooks.json`,
+  project `.cursor/hooks.json`, Claude's user/project/local `settings.json` hooks, and plugin
+  `hooks/hooks.json`. A notice hook placed in a project `.claude/settings.json` would fire in
+  Cursor too, so put none there.
+- **Codex trust is per hook and silent.** Trust is recorded in `config.toml` as
+  `[hooks.state."<hooks.json path>:<event>:<group>:<handler>"] trusted_hash = …`. An untrusted
+  hook is skipped with no warning (x0). `--dangerously-bypass-hook-trust` is described by Codex as
+  "Intended only for automation that already vets hook sources". Strings in the 0.160.1 binary
+  also show a `hooks` key in `config.toml` itself, plugin `hooks/hooks.json` with "materialized
+  plugin hook trust", and project-local hook layers. Those are unverified leads for a per-launch
+  route that avoids writing a shared `hooks.json`.
+- **The planning pack's Codex premise does not hold on this branch.** `01-implementation-plan.md`
+  says Task E extends the managed `hooks.json` written by
+  `CodexOrchestratorHome.prepareFirstPartyConfiguration`. No such class exists in `src/` on this
+  branch or in any reachable commit. Codex sessions run with the operator's `CODEX_HOME`
+  (`src/providers/codex.ts:215`), and the only `hooks.json` Cyberdeck could write today is the
+  operator's own `~/.codex/hooks.json`.
+
+### Decision for Task E
+
+Constraint for every provider: the hook only **reads** a notice file and prints, and it always
+exits 0. It cannot record that it delivered anything. The broker must therefore keep the notice
+file as a short, idempotent summary (for example `"N notices pending (newest: <kind> <subject>);
+drain with cyberdeck_notifications_read"`), rewritten when notices arrive and **truncated or
+removed when the orchestrator drains**. Until the drain, every tool call repeats the same line;
+that repetition is the nag, and the drain is the only thing that stops it. If the file is missing,
+empty, or unparseable, the hook prints nothing and exits 0. The entry point is a dedicated small
+script, `node <dist>/notice-hook.js --actor-session <id> --state-directory <dir> --event <E>`,
+shell-quoted the same way as `transcript-hook.ts`. It must import nothing from the CLI graph.
+
+**Claude.** Generate three hooks next to the existing SessionStart hook in the launch settings:
+
+```json
+{"hooks":{
+  "PostToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"<notice-hook> --event PostToolUse","timeout":2}]}],
+  "PostToolUseFailure":[{"matcher":".*","hooks":[{"type":"command","command":"<notice-hook> --event PostToolUseFailure","timeout":2}]}],
+  "Stop":[{"hooks":[{"type":"command","command":"<notice-hook> --event Stop","timeout":2}]}]
+}}
+```
+
+Output is `{"hookSpecificOutput":{"hookEventName":"<event>","additionalContext":"<summary>"}}`.
+For Stop, use additionalContext rather than `decision:block`, and print nothing when
+`stop_hook_active` is true. That guard is read from stdin, so no write is needed. `PostToolUseFailure`
+is required: without it, a failing tool call hides the notice. The 2 s timeout is safe because
+the hook measured well under 0.5 s. **No asyncRewake in v1.** It works, but an idle wake needs a
+hook that stays alive until a notice exists, then exits 2. That is a long-poll process per stop,
+it breaks the read-and-print rule, and its wake re-enters Stop. The tier A instruction-queue wake
+already covers idle sessions; revisit asyncRewake only if that wake proves unreliable.
+
+**Codex.** Provisional: Claude's JSON verbatim (PostToolUse `.*`, Stop with the same guard,
+`timeout: 2`). The event names and `matcher` shape match Claude's and its config accepted them,
+but this spike never saw a Codex hook run.
+**Do not build it yet.** Two things block it. First, a host run of `spike/codex/codex-tests.sh` must confirm
+delivery, the hook-side MCP tool name, and the fault behaviour. Second, there is nowhere to put
+the file: Cyberdeck must not write `~/.codex/hooks.json`, and the managed `CODEX_HOME` the plan
+assumes does not exist. Trust also has to be settled: either Cyberdeck writes a `trusted_hash` it
+computes, or it launches with `--dangerously-bypass-hook-trust`, which also stops vetting the
+operator's own hooks. That choice belongs to the operator. Until both are resolved, Codex is
+tier A only.
+
+**Cursor.** Use **a hooks file, not tier A only**. This reverses the planning pack's default
+(spec open question 3), because a per-launch mechanism exists and Cyberdeck already owns it: add
+`hooks/hooks.json` to the session-scoped plugin directory that `src/providers/cursor/mcp-hosting.ts`
+already passes with `--plugin-dir`. This needs no write to the workspace, `~/.cursor` or `~/.claude`.
+
+```json
+{"version":1,"hooks":{
+  "postToolUse":[{"command":"<notice-hook> --event postToolUse","timeout":2}],
+  "postToolUseFailure":[{"command":"<notice-hook> --event postToolUseFailure","timeout":2}]
+}}
+```
+
+Output is `{"additional_context":"<summary>"}`, exit 0. Cursor drops stdout on any non-zero exit.
+Both events are needed: `Shell` failures go to `postToolUseFailure`, while MCP `isError` results
+go to `postToolUse`. **No stop hook.** It never fired from the plugin. A project `stop` hook fires
+only interactively, and its `followup_message` is just a user turn, which is what the tier A
+instruction-queue wake already sends.

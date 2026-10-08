@@ -16,6 +16,7 @@ const universalOnly = [
   "cyberdeck_threads_list", "cyberdeck_thread_read", "cyberdeck_scout_read", "cyberdeck_worker_start", "cyberdeck_workers_start",
   "cyberdeck_workers_wait", "cyberdeck_thread_message", "cyberdeck_lease", "cyberdeck_worker_ctl", "cyberdeck_worker_events",
   "cyberdeck_workflow_create", "cyberdeck_workflow_cancel",
+  "cyberdeck_notifications_read", "cyberdeck_notifications_configure",
 ];
 const universal = [...workerAllowlist, ...universalOnly].sort();
 async function names(context: McpServerContext): Promise<string[]> {

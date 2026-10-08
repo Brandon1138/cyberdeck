@@ -1,3 +1,4 @@
+import { NOTICE_EXEMPT_TOOLS, NOTIFICATION_TOOLS } from "./notification-tools.js";
 import { workerBudgetInputSchema, workerWorkspaceInputSchema, scoutBriefInputSchema } from "./worker-input-schemas.js";
 import { createInterface } from "node:readline";
 import {
@@ -585,6 +586,7 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  ...NOTIFICATION_TOOLS,
 ] as const;
 
 const UNBOUND_WORKER_TOOLS = new Set<(typeof TOOLS)[number]["name"]>([
@@ -670,6 +672,10 @@ export async function handleMcpRequest(
       if (drift !== undefined && name !== "cyberdeck_diagnose") {
         content.push({ type: "text", text: JSON.stringify({ cyberdeckWarning: drift }) });
       }
+      const notice = await pendingNotice(context, name);
+      if (notice !== undefined) {
+        content.push({ type: "text", text: JSON.stringify({ cyberdeckNotice: notice }) });
+      }
       return success(request.id, { content });
     }
     return errorResponse(request.id, -32601, `Method not found: ${request.method}`);
@@ -711,6 +717,30 @@ function toolFailure(context: McpServerContext, error: unknown): Record<string, 
     }],
     isError: true,
   };
+}
+
+/**
+ * The busy-path notice: one line beside a tool result when the orchestrator's inbox changed.
+ *
+ * The broker owns the inbox and the debounce, so this is one local RPC after every tool call that
+ * is not itself the drain. Anything that goes wrong here is swallowed: a tool result is never
+ * failed, delayed or decorated with a fabricated notice because the broker could not be asked.
+ */
+async function pendingNotice(
+  context: McpServerContext,
+  name: unknown,
+): Promise<Record<string, unknown> | undefined> {
+  if (context.transport === undefined || typeof name !== "string" || NOTICE_EXEMPT_TOOLS.has(name)) {
+    return undefined;
+  }
+  try {
+    const result = await context.transport.request("agent.notifications.notice", {
+      actorSessionId: context.identity.actorSessionId,
+    });
+    return isRecord(result) && isRecord(result.notice) ? result.notice : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function failureCode(error: unknown): string {
@@ -922,6 +952,12 @@ async function callTool(
   }
   if (name === "cyberdeck_workers_start") {
     return transport.request("agent.worker.startMany", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_notifications_read") {
+    return transport.request("agent.notifications.read", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_notifications_configure") {
+    return transport.request("agent.notifications.configure", { actorSessionId, policy: args });
   }
   if (name === "cyberdeck_workers_wait") {
     return transport.request("agent.worker.wait", { actorSessionId, ...args });

@@ -17,7 +17,7 @@ import {
 } from "./run-everything.js";
 import { submitCursorPastedInput } from "./input.js";
 import { isolateCursorScoutMcp } from "./mcp-isolation.js";
-import { cursorMcpHostPaths, writeCursorMcpHost } from "./mcp-hosting.js";
+import { cursorMcpHostPaths, writeCursorMcpHost, writeCursorNoticeHooks } from "./mcp-hosting.js";
 import {
   removeSessionLaunchFiles,
   type SessionLaunchFilesOptions,
@@ -41,6 +41,8 @@ export class CursorResumeError extends Error {
 export interface CursorProviderAdapterOptions
   extends CursorRunEverythingOptions, SessionLaunchFilesOptions {
   mcp?: CyberdeckMcpLaunch;
+  /** Broker state root for orchestrator notice files; absent adapters install no notice hooks. */
+  stateDirectory?: string;
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
   isolateMcp?: (session: SessionRecord, spec: ProviderLaunchSpec) => Promise<void>;
   inputCommitDelayMs?: number;
@@ -126,8 +128,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
       await (this.options.isolateMcp ?? isolateCursorScoutMcp)(session, spec);
       return;
     }
-    if (!this.hostsMcp(session)) return;
-    await writeCursorMcpHost(session, this.options.mcp!, this.options);
+    if (this.hostsMcp(session)) {
+      await writeCursorMcpHost(session, this.options.mcp!, this.options);
+    }
+    await writeCursorNoticeHooks(session, this.options.mcp, this.options.stateDirectory, this.options);
   }
 
   /** Session-scoped only; the Scout drop box is owned and cleaned by the Scout report store. */

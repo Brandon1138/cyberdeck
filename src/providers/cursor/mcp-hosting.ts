@@ -1,6 +1,8 @@
 import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import type { SessionRecord } from "../../domain/session.js";
 import type { CyberdeckMcpLaunch } from "../provider.js";
+import { noticeHookCommandLine, NOTICE_HOOK_TIMEOUT_SECONDS } from "../notice-hook-command.js";
 import {
   sessionLaunchFilePath,
   writeSessionLaunchFile,
@@ -111,4 +113,36 @@ export async function writeCursorMcpHost(
       options,
     ),
   ]);
+}
+
+/** Rewrite notice hooks on every launch/resume; never retain them for a worker or bare adapter. */
+export async function writeCursorNoticeHooks(
+  session: SessionRecord,
+  mcp: CyberdeckMcpLaunch | undefined,
+  stateDirectory: string | undefined,
+  options: SessionLaunchFilesOptions = {},
+): Promise<void> {
+  const name = join("cursor-mcp", PLUGIN_DIRECTORY_NAME, "hooks", "hooks.json");
+  if (session.kind !== "orchestrator" || mcp === undefined || stateDirectory === undefined) {
+    await rm(sessionLaunchFilePath(session.id, name, options), { force: true });
+    return;
+  }
+  const hooks = (event: string) => [{
+    command: noticeHookCommandLine({
+      nodePath: mcp.nodePath,
+      cliPath: mcp.cliPath,
+      sessionId: session.id,
+      stateDirectory,
+      format: "cursor",
+      event,
+    }),
+    timeout: NOTICE_HOOK_TIMEOUT_SECONDS,
+  }];
+  await writeSessionLaunchFile(session.id, name, `${JSON.stringify({
+    version: 1,
+    hooks: {
+      postToolUse: hooks("postToolUse"),
+      postToolUseFailure: hooks("postToolUseFailure"),
+    },
+  }, null, 2)}\n`, options);
 }
