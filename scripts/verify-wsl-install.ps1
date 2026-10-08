@@ -17,7 +17,7 @@ set -euo pipefail
 uname -r | grep -qi 'microsoft.*wsl2'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y build-essential python3 curl ca-certificates git tmux zsh
+apt-get install -y build-essential python3 curl ca-certificates git tmux zsh xz-utils
 useradd --create-home --shell /bin/bash cyberdeck-ci
 source_path=$(wslpath -u "$1")
 cp -a "$source_path" /home/cyberdeck-ci/source

@@ -7,8 +7,9 @@ Windows Node.js, Windows provider executables, and WSL1 are not supported by thi
 
 Fleet needs a terminal and the provider CLI. The tmux cockpit needs **tmux 3.3 or newer**; the
 editor integration needs **Neovim 0.10 or newer**. Cyberdeck does not bundle these tools. Desktop
-clipboard and browser helpers depend on the capabilities available in your Linux desktop or WSLg
-session; a headless terminal does not acquire a desktop by installing Cyberdeck.
+clipboard and browser helpers depend on the capabilities available in your desktop session.
+WSL can read the Windows clipboard through its interoperability bridge without WSLg; a headless
+native Linux terminal does not acquire a desktop by installing Cyberdeck.
 
 ## System dependencies
 
@@ -95,7 +96,7 @@ Once a release containing Linux support is published, install it with Linux npm 
 Node installation:
 
 ```sh
-npm install -g @ishmael38/cyberdeck
+npm install -g @ishmael38/cyberdeck@next
 cyberdeck --help
 ```
 
@@ -116,7 +117,13 @@ cyberdeck --help
 
 The installed `cyberdeck` command runs the package's `dist/src/cli.js` entry point. Use that
 command for normal operation; source `pnpm dev` is not the installed entry point. `cyberdeck`
-opens Fleet, and `cyberdeck cockpit --cwd /absolute/path/to/repository` opens the tmux cockpit.
+opens Fleet. To open the tmux cockpit, change to your repository first:
+
+```sh
+cd /absolute/path/to/repository
+cyberdeck cockpit --orchestrator codex
+```
+
 Authenticate providers before launching their sessions. Detach from an attached provider with
 `Ctrl+]`; `Ctrl+[` remains Esc and is never a detach binding. No forced Kitty keyboard protocol
 is required.
