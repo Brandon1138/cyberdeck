@@ -11,6 +11,11 @@ clipboard and browser helpers depend on the capabilities available in your deskt
 WSL can read the Windows clipboard through its interoperability bridge without WSLg; a headless
 native Linux terminal does not acquire a desktop by installing Cyberdeck.
 
+Fleet's Ctrl+S popup returns its final cwd for zsh and ordinary GNU Bash 4+ login shells. See the
+[shell setup guide](linux-shell.md) for startup behavior and the remaining Fish, legacy Bash and
+POSIX-mode limitations. See the [Neovim setup guide](linux-nvim.md) for packaged Lua and verified
+binaries when a distribution supplies an older Neovim.
+
 ## System dependencies
 
 Install Python 3, make, and a C/C++ compiler before installing Cyberdeck. The native `node-pty`

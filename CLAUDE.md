@@ -56,17 +56,19 @@ and a stale hook neither resizes nor prints when Fleet's pane is absent. **Trigg
 replacing that global symlink path while keeping a SIGKILL-surviving Fleet window. The fix is durable
 hook ownership and reconciliation, not a global tmux hook or another executable-path guess.
 
-### Ctrl+S only hands back a cwd when the login shell is zsh
+### Ctrl+S does not capture cwd for Fish, legacy Bash, or POSIX-mode Bash
 
 `src/tmux/interactive-shell.ts` opens `$SHELL -li` in a `tmux display-popup` and learns where the
-operator ended up from a zsh `zshexit`/`chpwd` hook installed through a one-file `ZDOTDIR`. A popup
+operator ended up from zsh `zshexit`/`chpwd` hooks or a GNU Bash 4+ startup/EXIT hook. A popup
 is **not a pane** — `list-panes -a` omits it, and `#{pane_current_path}` read inside one reports the
-*launching* pane's directory — so there is no tmux-side answer to fall back on. A non-zsh `$SHELL`
-gets the popup and no capture: Fleet's spawn cwd is simply left where it was.
+*launching* pane's directory — so there is no tmux-side answer to fall back on. Fish, Apple Bash 3.2,
+and explicitly selected POSIX-mode Bash get their native popup without cwd capture: Fleet's spawn
+cwd is left where it was. GNU Bash's hook preserves login files, native prompt commands, history,
+and existing EXIT handlers; see `docs/linux-shell.md` for its supported startup boundary.
 
-Deferred because the operator's shell is zsh. **Trigger:** changing `$SHELL` to bash or fish. The
-fix is that shell's own exit hook (`PROMPT_COMMAND`, `fish_exit`) writing the same file, not a wrapper
-REPL and not a pane query that cannot see the popup.
+These remaining shells are deferred. **Trigger:** requiring cwd handoff from one of them. The fix
+is that shell's startup/exit hook writing the same private result file, preserving its own startup
+semantics, not a wrapper REPL or a pane query that cannot see the popup.
 
 ### Cursor and Antigravity model columns can only ever be launch values
 
