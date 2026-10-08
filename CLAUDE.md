@@ -56,7 +56,7 @@ and a stale hook neither resizes nor prints when Fleet's pane is absent. **Trigg
 replacing that global symlink path while keeping a SIGKILL-surviving Fleet window. The fix is durable
 hook ownership and reconciliation, not a global tmux hook or another executable-path guess.
 
-### Ctrl+S does not capture cwd for Fish, legacy Bash, or POSIX-mode Bash
+### Ctrl+S shell handoff has remaining startup boundaries
 
 `src/tmux/interactive-shell.ts` opens `$SHELL -li` in a `tmux display-popup` and learns where the
 operator ended up from zsh `zshexit`/`chpwd` hooks or a GNU Bash 4+ startup/EXIT hook. A popup
@@ -69,6 +69,12 @@ and existing EXIT handlers; see `docs/linux-shell.md` for its supported startup 
 These remaining shells are deferred. **Trigger:** requiring cwd handoff from one of them. The fix
 is that shell's startup/exit hook writing the same private result file, preserving its own startup
 semantics, not a wrapper REPL or a pane query that cannot see the popup.
+
+GNU Bash also evaluates an explicit top-level `return N` in a login file with `source` semantics,
+which can differ from its automatic loader's first-prompt status. Ordinary final-command status
+matches native Bash. This narrow distinction is documented in `docs/linux-shell.md` and deferred.
+**Trigger:** requiring exact automatic-loader behavior for that top-level return; preserve the
+operator's prompt and tracing traps when addressing it.
 
 ### Cursor and Antigravity model columns can only ever be launch values
 

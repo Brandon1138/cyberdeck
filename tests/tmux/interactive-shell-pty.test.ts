@@ -26,9 +26,10 @@ transcript = bytearray()
 pending = bytearray()
 waited = False
 
-def receive():
+def receive(stage):
     if time.monotonic() >= deadline:
-        raise TimeoutError("disposable shell PTY timed out")
+        output = transcript[-8192:].decode("utf-8", errors="replace")
+        raise TimeoutError("disposable shell PTY timed out during " + stage + ": " + repr(output))
     if select.select([terminal], [], [], 0.05)[0]:
         try:
             data = os.read(terminal, 65536)
@@ -41,23 +42,23 @@ def receive():
         return bool(data)
     return True
 
-def prompt():
+def prompt(stage):
     marker = b"CYBERDECK_PTY_READY> "
     while marker not in pending:
-        if not receive():
-            raise RuntimeError("shell exited before its prompt")
+        if not receive(stage):
+            raise RuntimeError("shell exited before " + stage)
     end = pending.index(marker) + len(marker)
     del pending[:end]
 
 try:
-    prompt()
+    prompt("startup prompt")
     os.write(terminal, b"if [[ -t 0 && -t 1 ]]; then printf 'CYBERDECK_PTY_OK\\n'; fi\r")
-    prompt()
+    prompt("terminal assertion prompt")
     os.write(terminal, b"chosen\r")
-    prompt()
+    prompt("cwd change prompt")
     os.write(terminal, b"\x04" if case["eof"] else b"exit 11\r")
     while True:
-        receive()
+        receive("shell exit")
         ended, status = os.waitpid(pid, os.WNOHANG)
         if ended:
             waited = True
@@ -97,7 +98,9 @@ PROMPT_COMMAND='printf "%s\n" "$?" >> "$CYBERDECK_TEST_ROOT/prompts"'
 trap 'printf "%s" "$?" > "$CYBERDECK_TEST_ROOT/exit-status"' EXIT
 `);
       } else {
-        await writeFile(join(home, ".zshenv"), 'printf sourced > "$CYBERDECK_TEST_ROOT/zshenv"\n');
+        // Ubuntu's global zshrc runs compinit before this fixture's zshrc. Its completion audit
+        // can wait for input on a fresh HOME; use its documented opt-out in our private zshenv.
+        await writeFile(join(home, ".zshenv"), 'skip_global_compinit=1\nprintf sourced > "$CYBERDECK_TEST_ROOT/zshenv"\n');
         await writeFile(join(home, ".zshrc"), startup);
       }
       let shellStatus: number | undefined;

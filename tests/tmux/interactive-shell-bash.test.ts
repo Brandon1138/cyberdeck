@@ -109,6 +109,31 @@ false
     expect(result.selected).toBe(paths.root);
   });
 
+  it.each([
+    { commands: "return 7", nativeStatus: 0, popupStatus: 7 },
+    { commands: "false\nreturn 0", nativeStatus: 1, popupStatus: 0 },
+  ])("documents the startup boundary for an explicit top-level profile return: $commands", async ({ commands, nativeStatus, popupStatus }) => {
+    const paths = await fixture();
+    const prompts = join(paths.root, "prompts");
+    await writeFile(join(paths.home, ".bash_profile"),
+      `PROMPT_COMMAND='printf "%s\\n" "$?" >> "$CYBERDECK_TEST_ROOT/prompts"'\n${commands}\n`);
+    const native = spawnSync(bash, ["-li"], {
+      cwd: paths.root,
+      env: { ...process.env, HOME: paths.home, TERM: "dumb", CYBERDECK_TEST_ROOT: paths.root },
+      input: "exit\n", encoding: "utf8", timeout: 5_000,
+    });
+    expect(native.error).toBeUndefined();
+    expect(native.status).toBe(nativeStatus);
+    expect(await readFile(prompts, "utf8")).toBe(`${nativeStatus}\n`);
+    await writeFile(prompts, "");
+    // Bash's automatic startup loader and builtin source handle top-level return
+    // differently. This accepted boundary is explained in docs/linux-shell.md.
+    const result = await popup(paths, "exit\n");
+    expect(result.status).toBe(popupStatus);
+    expect(await readFile(prompts, "utf8")).toBe(`${popupStatus}\n`);
+    expect(result.selected).toBe(paths.root);
+  });
+
   it("loads the real login files once, preserves aliases, and captures direct exit with quoted/newline paths", async () => {
     const paths = await fixture();
     await writeFile(join(paths.home, ".bash_profile"), String.raw`

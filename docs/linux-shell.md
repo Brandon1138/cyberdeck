@@ -36,6 +36,14 @@ on EXIT, so force-killing it or replacing its EXIT trap after startup can preven
 Startup files that exit before the bootstrap installs the hook can also prevent handoff.
 Using `exec` to replace Bash also bypasses EXIT capture.
 
+One GNU Bash startup distinction remains: an explicit top-level `return N` in `/etc/profile` or
+the selected login profile uses `source` semantics in the bootstrap, so `N` reaches the first
+prompt and an immediate bare `exit`. Bash's automatic startup loader ignores that return value
+and can retain the preceding command's status instead. Ordinary final-command status is preserved,
+as are returns from a `.bashrc` sourced by the login profile. Strict equivalence for a top-level
+profile `return` remains deferred; it requires preserving the automatic loader's behavior without
+replacing the operator's prompt or tracing traps.
+
 Focused tests support `CYBERDECK_TEST_BASH=/absolute/path/to/bash` for modern GNU Bash proofs on
 macOS. Real shell/PTY proofs on macOS are separate from native Linux/WSL2 and actual tmux popup
 validation. Close the popup with `exit` or Ctrl+D. Provider detach remains Ctrl+]; Ctrl+[ and Kitty
