@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows } from "../domain/capability.js";
-import { InstructionRecordSchema, type InstructionRecord } from "../domain/instruction.js";
+import { InstructionRecordSchema, WakeContextSchema, WakeHeldError, type InstructionRecord } from "../domain/instruction.js";
 import { instructionReachedProvider, type InstructionLifecycleState } from "../domain/worker-truth.js";
 import type {
   InstructionRepository,
@@ -27,6 +27,12 @@ export const EnqueueBrokerInstructionParamsSchema = z.object({
   targetSessionId: z.uuid(),
   message: z.string().trim().min(1),
   messageId: z.uuid(),
+  submissionKind: z.literal("wake").optional(),
+  wake: WakeContextSchema.optional(),
+}).refine((request) => (request.submissionKind === "wake") === (request.wake !== undefined), {
+  message: "Wake submissions require durable notification context",
+}).refine((request) => request.submissionKind !== "wake" || request.actorSessionId === request.targetSessionId, {
+  message: "A broker wake must target its own orchestrator",
 });
 
 export class InstructionQueue {
@@ -120,7 +126,13 @@ export class InstructionQueue {
     this.registry.get(request.targetSessionId);
     const existing = await this.store.list(request.targetSessionId);
     const duplicate = existing.find((record) => record.messageId === request.messageId);
-    if (duplicate !== undefined) return duplicate;
+    if (duplicate !== undefined) {
+      if (duplicate.submissionKind === "wake" && ["accepted", "queued"].includes(duplicate.status)) {
+        await this.flush(request.targetSessionId);
+        return (await this.store.list(request.targetSessionId)).find(({ id }) => id === duplicate.id) ?? duplicate;
+      }
+      return duplicate;
+    }
     const now = new Date().toISOString();
     const record = InstructionRecordSchema.parse({
       id: randomUUID(),
@@ -133,6 +145,7 @@ export class InstructionQueue {
       messageId: request.messageId,
       hop: 0,
       brokerOwned: true,
+      ...(request.submissionKind === undefined ? {} : { submissionKind: request.submissionKind, wake: request.wake }),
     });
     await this.store.put(record);
     await this.flush(record.targetSessionId);
@@ -147,9 +160,9 @@ export class InstructionQueue {
       for (const [index, record] of pending.entries()) {
         const attempted = await this.tryDeliver(record);
         results.push(attempted);
-        // Still held: the boundary that stopped this one stops everything behind it, and order is
-        // the whole point of a queue. Everything behind it is held for a reason it can be told —
-        // leaving it `accepted` would read as "the broker has not looked at this yet".
+        // Ordinary instructions preserve FIFO. A human-controller hold is the sole exception:
+        // the distinct wake channel may pass it, using its own turn/composer/operator gate.
+        // Everything else behind this head receives an explicit hold instead of staying accepted.
         if (instructionReachedProvider(attempted.status)) continue;
         // A terminal worker holds nothing back: the next record hits the same dead session and
         // resolves itself the same way, each with its own honest terminal state.
@@ -158,7 +171,13 @@ export class InstructionQueue {
           ? "composer-occupied"
           : attempted.holdReason ?? "composer-occupied";
         for (const behind of pending.slice(index + 1)) {
-          results.push(await this.persistState(behind, "queued", { holdReason }));
+          if (behind.submissionKind === "wake" && holdReason === "human-controller") {
+            results.push(await this.tryDeliver(behind));
+          } else {
+            results.push(await this.persistState(behind, "queued", {
+              holdReason: behind.submissionKind === "wake" && !holdReason.startsWith("wake-") ? `wake-${holdReason}` : holdReason,
+            }));
+          }
         }
         break;
       }
@@ -242,8 +261,12 @@ export class InstructionQueue {
         messageId: record.messageId,
         workflowRunId: record.workflowRunId ?? null,
         brokerOwned: record.brokerOwned === true,
+        ...(record.submissionKind === undefined ? {} : { submissionKind: record.submissionKind }),
       }, record.id);
     } catch (error) {
+      if (error instanceof WakeHeldError) {
+        return this.persistState(record, "queued", { holdReason: error.holdReason });
+      }
       const code = typeof error === "object" && error !== null && "code" in error
         ? error.code
         : undefined;
@@ -266,12 +289,13 @@ export class InstructionQueue {
     // provider's input surface. Whether the provider took them is observed later, or never.
     if (delivery.state === "undelivered") {
       return this.persistState(record, "undelivered", {
-        ...(delivery.hold === undefined ? {} : { holdReason: delivery.hold }),
+        ...(delivery.hold === undefined ? {} : { holdReason: record.submissionKind === "wake" ? `wake-${delivery.hold}` : delivery.hold }),
       });
     }
     return delivery.state === "queued"
-      ? this.persistState(record, "queued", { ...(delivery.hold === undefined ? {} : { holdReason: delivery.hold }) })
+      ? this.persistState(record, "queued", { ...(delivery.hold === undefined ? {} : { holdReason: record.submissionKind === "wake" ? `wake-${delivery.hold}` : delivery.hold }) })
       : this.persistState(record, "rendered", {
+          holdReason: undefined,
           renderedAt: delivery.at,
           ...(delivery.expectedTurn === undefined ? {} : { expectedTurn: delivery.expectedTurn }),
         });

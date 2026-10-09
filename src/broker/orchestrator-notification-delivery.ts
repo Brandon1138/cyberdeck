@@ -17,7 +17,7 @@ export interface OrchestratorNotificationDeliveryOptions {
     onSessionUpdate(listener: (sessionId: string) => void): () => void;
     get(sessionId: string): SessionRecord;
   };
-  instructions: Pick<InstructionQueue, "enqueueBroker" | "withdraw" | "list">;
+  instructions: Pick<InstructionQueue, "enqueueBroker" | "withdraw" | "list" | "flush">;
   noticeFiles: NoticeFilePort;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
@@ -64,9 +64,12 @@ export class OrchestratorNotificationDelivery {
     this.subscriptions.push(
       this.options.inbox.onChange((controllerId) => this.background(controllerId, () => this.changed(controllerId))),
       this.options.registry.onSessionUpdate((sessionId) => {
-        for (const [controllerId, wake] of this.pendingWakes) {
-          if (wake.sessionId === sessionId) this.background(controllerId, () => this.reconcile(controllerId));
-        }
+        // Resolve only the updated session; worker output must not scan every controller's inbox.
+        const generation = this.generation;
+        void this.options.controllers.forSession(sessionId).then((controller) => {
+          // Output updates recheck wake delivery; only inbox changes/recovery rebuild notice files.
+          if (this.started && generation === this.generation && controller !== undefined) this.background(controller.controllerId, () => this.reconcile(controller.controllerId));
+        }).catch(() => undefined);
       }),
     );
     try {
@@ -167,14 +170,8 @@ export class OrchestratorNotificationDelivery {
 
   private async changed(controllerId: string): Promise<void> {
     await this.rewrite(controllerId);
+    await this.recoverWake(controllerId);
     await this.reconcile(controllerId);
-    if (this.options.inbox.pendingCount(controllerId) === 0) {
-      this.cancelTimer(controllerId);
-      return;
-    }
-    if (!this.pendingWakes.has(controllerId) && this.hasEligible(controllerId)) {
-      this.schedule(controllerId, this.options.inbox.policy(controllerId).coalesceMs);
-    }
   }
 
   private hasEligible(controllerId: string): boolean {
@@ -214,18 +211,46 @@ export class OrchestratorNotificationDelivery {
     await this.rewrite(controllerId);
   }
 
+  /** Restore the original coalesced wake, including its cursor even if the inbox grew offline. */
+  private async recoverWake(controllerId: string): Promise<void> {
+    if (this.pendingWakes.has(controllerId)) return;
+    const controller = await this.options.controllers.forController(controllerId);
+    if (controller === undefined) return;
+    const lastNoticed = this.options.inbox.noticeState(controllerId).lastNoticedCursor;
+    const record = (await this.options.instructions.list(controller.sessionId)).find((entry) =>
+      entry.brokerOwned === true && entry.submissionKind === "wake" && entry.wake?.controllerId === controllerId
+      && (["accepted", "queued"].includes(entry.status)
+        || (delivered(entry) && entry.wake.cursor > lastNoticed)));
+    if (record?.wake === undefined) return;
+    this.pendingWakes.set(controllerId, {
+      sessionId: controller.sessionId, messageId: record.messageId,
+      head: record.wake.cursor, ids: record.wake.notificationIds,
+    });
+  }
+
   private async reconcile(controllerId: string): Promise<void> {
     const wake = this.pendingWakes.get(controllerId);
-    if (wake === undefined) return;
     const inbox = this.options.inbox;
-    const withdraw = inbox.pendingCount(controllerId) === 0
-      || this.options.registry.workerTruth(wake.sessionId).state === "working";
-    const record = withdraw
-      ? await this.options.instructions.withdraw(wake.sessionId, wake.messageId)
-      : (await this.options.instructions.list(wake.sessionId)).find((entry) => entry.messageId === wake.messageId);
-    if (record !== undefined && delivered(record)) await this.finishWake(controllerId, wake);
-    else if (withdraw || record === undefined || ["cancelled", "undelivered"].includes(record.status)) {
-      this.pendingWakes.delete(controllerId);
+    if (wake !== undefined) {
+      const withdraw = inbox.pendingCount(controllerId) === 0
+        || this.options.registry.workerTruth(wake.sessionId).state === "working";
+      if (!withdraw) await this.options.instructions.flush(wake.sessionId);
+      const record = withdraw
+        ? await this.options.instructions.withdraw(wake.sessionId, wake.messageId)
+        : (await this.options.instructions.list(wake.sessionId)).find((entry) => entry.messageId === wake.messageId);
+      if (record !== undefined && delivered(record)) await this.finishWake(controllerId, wake);
+      else if (withdraw || record === undefined || ["cancelled", "undelivered"].includes(record.status)) {
+        this.pendingWakes.delete(controllerId);
+      }
+    }
+    if (inbox.pendingCount(controllerId) === 0) {
+      this.cancelTimer(controllerId);
+      return;
+    }
+    // A busy session can outlast the coalescing timer without ever enqueuing a wake.
+    // Session updates must retry that wake even when there is no pending instruction to flush.
+    if (!this.pendingWakes.has(controllerId) && this.hasEligible(controllerId)) {
+      this.schedule(controllerId, inbox.policy(controllerId).coalesceMs);
     }
   }
 
@@ -262,6 +287,7 @@ export class OrchestratorNotificationDelivery {
     const record = await this.options.instructions.enqueueBroker({
       actorSessionId: sessionId, targetSessionId: sessionId,
       message: `[cyberdeck notice] ${result.text}`, messageId: wake.messageId,
+      submissionKind: "wake", wake: { controllerId, cursor: head, notificationIds: ids },
     });
     // Returned held/undelivered records entered the queue; a thrown enqueue has no such proof.
     this.budget.record(controllerId, this.now());
