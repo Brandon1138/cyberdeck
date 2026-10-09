@@ -227,6 +227,7 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
       directory,
       mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
       mcpAllowlist: { allowlistPath: join(directory, "no-allowlist.json") },
+      operatorSettingsPath: join(directory, "no-user-settings.json"),
     });
     const spec = adapter.buildLaunchSpec(record);
     await adapter.prepareLaunch(record, spec);
@@ -260,6 +261,7 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
       stateDirectory,
       mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
       mcpAllowlist: { allowlistPath: join(directory, "no-allowlist.json") },
+      operatorSettingsPath: join(directory, "no-user-settings.json"),
     });
     const spec = adapter.buildLaunchSpec(record);
     await adapter.prepareLaunch(record, spec);
@@ -303,12 +305,60 @@ describe("ClaudeProviderAdapter interactive launch safety", () => {
   });
 
   it("omits notice hooks without MCP even with a broker state directory", async () => {
-    const adapter = new ClaudeProviderAdapter({ directory: tempDir(), stateDirectory: tempDir() });
+    const directory = tempDir();
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      stateDirectory: tempDir(),
+      operatorSettingsPath: join(directory, "no-user-settings.json"),
+    });
     const record = session({ kind: "orchestrator" });
     const spec = adapter.buildLaunchSpec(record);
     await adapter.prepareLaunch(record, spec);
     expect(JSON.parse(readFileSync(spec.args[spec.args.indexOf("--settings") + 1]!, "utf8")))
       .toEqual({ env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } });
+  });
+
+  it("carries the operator's voice preference into an orchestrator and nowhere else", async () => {
+    // `/voice` persists to user settings, which `--setting-sources project,local` never loads, so
+    // an orchestrator's hold-to-talk stayed disarmed while a fresh terminal's worked.
+    const directory = tempDir();
+    const operatorSettingsPath = join(directory, "settings.json");
+    writeFileSync(operatorSettingsPath, JSON.stringify({
+      model: "opus",
+      env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8787" },
+      voiceEnabled: true,
+      voice: { enabled: true, mode: "hold" },
+    }));
+    const adapter = new ClaudeProviderAdapter({
+      directory,
+      stateDirectory: tempDir(),
+      mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
+      mcpAllowlist: { allowlistPath: join(directory, "no-allowlist.json") },
+      operatorSettingsPath,
+    });
+    const settingsOf = async (record: SessionRecord, spec = adapter.buildLaunchSpec(record)) => {
+      await adapter.prepareLaunch(record, spec);
+      return JSON.parse(readFileSync(spec.args[spec.args.indexOf("--settings") + 1]!, "utf8")) as
+        Record<string, unknown>;
+    };
+
+    const orchestrator = session({ kind: "orchestrator" });
+    const launched = await settingsOf(orchestrator);
+    expect(launched).toMatchObject({
+      env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" },
+      voiceEnabled: true,
+      voice: { enabled: true, mode: "hold" },
+    });
+    expect(launched.model).toBeUndefined();
+    // A resume rereads the file, which is when an operator's `/voice` change reaches the orc.
+    writeFileSync(operatorSettingsPath, JSON.stringify({ voiceEnabled: false }));
+    const resumed = await settingsOf(orchestrator, adapter.buildResumeSpec(orchestrator));
+    expect(resumed.voiceEnabled).toBe(false);
+    expect(resumed.voice).toBeUndefined();
+
+    const worker = await settingsOf(session({ kind: "worker" }));
+    expect(worker.voiceEnabled).toBeUndefined();
+    expect(worker.voice).toBeUndefined();
   });
 
   it("leaves a worker's endpoint routing to its environment", async () => {
