@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,9 @@ import {
   draftWithImageReference,
   type PasteboardCapture,
 } from "../../src/client/clipboard-image.js";
+import { MAX_CLIPBOARD_IMAGE_BYTES } from "../../src/client/clipboard-process.js";
+
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==", "base64");
 
 const directories: string[] = [];
 
@@ -19,7 +22,7 @@ async function scratch(): Promise<string> {
 }
 
 /** Stands in for the pasteboard: writes the bytes a real capture would have written. */
-function withImage(bytes = "png-bytes"): PasteboardCapture {
+function withImage(bytes: Buffer | string = PNG): PasteboardCapture {
   return async (destination) => {
     await writeFile(destination, bytes);
     return { status: "captured" };
@@ -52,7 +55,9 @@ describe("capturePasteboardImage", () => {
     const path = join(directory, "paste-20260729T143355Z-abcd.png");
     expect(result).toEqual({ status: "captured", path });
     expect(capture).toHaveBeenCalledWith(path);
-    await expect(readFile(path, "utf8")).resolves.toBe("png-bytes");
+    await expect(readFile(path)).resolves.toEqual(PNG);
+    expect((await stat(directory)).mode & 0o777).toBe(0o700);
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 
   it("reports nothing and leaves no file behind for a pasteboard without an image", async () => {
@@ -95,15 +100,115 @@ describe("capturePasteboardImage", () => {
     expect(pasted[0]).toBe("paste-20260729T140005Z-0000.png");
     expect(pasted.at(-1)).toBe("paste-20260729T140024Z-0000.png");
   });
+
+  it("makes existing clipboard storage private before the reader writes", async () => {
+    const directory = await scratch();
+    await chmod(directory, 0o755);
+    const capture: PasteboardCapture = async (destination) => {
+      expect((await stat(directory)).mode & 0o777).toBe(0o700);
+      expect((await stat(destination)).mode & 0o777).toBe(0o600);
+      return withImage()(destination);
+    };
+    expect((await capturePasteboardImage({ directory, capture })).status).toBe("captured");
+  });
+
+  it.each(["", "JPEG data", "clipboard text containing secrets"])("rejects invalid PNG bytes and removes failed capture: %j", async (bytes) => {
+    const directory = await scratch();
+    await expect(capturePasteboardImage({ directory, capture: withImage(bytes) }))
+      .resolves.toEqual({ status: "unavailable", reason: "Clipboard image is not a PNG" });
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it("rejects oversized captured files without reading their full contents", async () => {
+    const directory = await scratch();
+    const capture: PasteboardCapture = async (path) => {
+      const file = await open(path, "w");
+      try { await file.write(PNG); await file.truncate(MAX_CLIPBOARD_IMAGE_BYTES + 1); }
+      finally { await file.close(); }
+      return { status: "captured" };
+    };
+    await expect(capturePasteboardImage({ directory, capture }))
+      .resolves.toEqual({ status: "unavailable", reason: "Clipboard image exceeds 20 MiB" });
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it.each(["no-image", "unavailable", "throw"] as const)("removes a partial capture when reader reports %s", async (outcome) => {
+    const directory = await scratch();
+    const capture: PasteboardCapture = async (path) => {
+      await writeFile(path, PNG);
+      if (outcome === "throw") throw new Error("secret clipboard output");
+      return outcome === "no-image" ? { status: outcome } : { status: outcome, reason: "Reader unavailable" };
+    };
+    const result = await capturePasteboardImage({ directory, capture });
+    expect(result.status).toBe(outcome === "no-image" ? "no-image" : "unavailable");
+    expect(JSON.stringify(result)).not.toContain("secret clipboard output");
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it("preserves an existing image on filename collision", async () => {
+    const directory = await scratch();
+    const now = () => Date.UTC(2026, 6, 29, 14, 33, 55);
+    const existing = join(directory, "paste-20260729T143355Z-abcd.png");
+    await writeFile(existing, "existing attachment");
+    const ids = ["abcd", "1234"];
+    const result = await capturePasteboardImage({ directory, capture: withImage(), now, suffix: () => ids.shift()! });
+    expect(result).toEqual({ status: "captured", path: join(directory, "paste-20260729T143355Z-1234.png") });
+    expect(await readFile(existing, "utf8")).toBe("existing attachment");
+  });
+
+  it("rejects a linked directory without touching its files", async () => {
+    const directory = await scratch();
+    const target = await scratch();
+    await writeFile(join(target, "keep.txt"), "keep");
+    const linked = join(directory, "linked");
+    await symlink(target, linked);
+    const capture = vi.fn(withImage());
+    expect((await capturePasteboardImage({ directory: linked, capture })).status).toBe("unavailable");
+    expect(capture).not.toHaveBeenCalled();
+    expect(await readdir(target)).toEqual(["keep.txt"]);
+  });
+
+  it.each(["symlink", "hardlink"] as const)("rejects a substituted %s without changing external file permissions", async (kind) => {
+    const directory = await scratch();
+    const external = join(await scratch(), "external.png");
+    await writeFile(external, PNG, { mode: 0o644 });
+    const capture: PasteboardCapture = async (path) => {
+      await rm(path);
+      if (kind === "symlink") await symlink(external, path);
+      else await link(external, path);
+      return { status: "captured" };
+    };
+    expect((await capturePasteboardImage({ directory, capture })).status).toBe("unavailable");
+    expect(await readdir(directory)).toEqual([]);
+    expect(await readFile(external)).toEqual(PNG);
+    expect((await stat(external)).mode & 0o777).toBe(0o644);
+  });
+
+  it("caps housekeeping work and leaves unrelated entries and links alone", async () => {
+    const directory = await scratch();
+    for (let index = 0; index < 90; index++) {
+      const time = String(index).padStart(6, "0");
+      await writeFile(join(directory, `paste-20260101T${time}Z-0000.png`), PNG);
+    }
+    const external = join(await scratch(), "external.png");
+    await writeFile(external, PNG);
+    const linked = join(directory, "paste-20200101T000000Z-0000.png");
+    await symlink(external, linked);
+    await writeFile(join(directory, "notes.txt"), "keep");
+    expect((await capturePasteboardImage({ directory, capture: withImage() })).status).toBe("captured");
+    expect((await readdir(directory)).filter((name) => name.startsWith("paste-"))).toHaveLength(72);
+    expect(await readFile(linked)).toEqual(PNG);
+    expect(await readFile(join(directory, "notes.txt"), "utf8")).toBe("keep");
+  });
 });
 
 describe("capturePasteboardImageWithOsascript", () => {
-  it("reports no image rather than failing when the platform has no pasteboard to read", async () => {
+  it("reports unavailable rather than claiming an empty clipboard on another platform", async () => {
     const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     try {
       await expect(capturePasteboardImageWithOsascript("/nowhere/paste.png"))
-        .resolves.toEqual({ status: "no-image" });
+        .resolves.toEqual({ status: "unavailable", reason: "osascript clipboard integration requires macOS" });
     } finally {
       Object.defineProperty(process, "platform", platform);
     }

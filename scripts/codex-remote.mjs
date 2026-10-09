@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { realpathSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
+import { openDesktop } from "./desktop-open.mjs";
 
-const native = join(homedir(), ".local", "bin", "codex");
 const [operation, separator, ...args] = process.argv.slice(2);
 const utilityCommands = new Set([
   "exec", "e", "review", "login", "logout", "mcp", "mcp-server", "app-server", "debug",
@@ -48,8 +48,34 @@ export function dedicatedRemoteControlInvocation(argv) {
   return subcommand === "remote-control";
 }
 
+export function resolveNativeCodex(options = {}) {
+  const env = options.env ?? process.env;
+  const home = options.home ?? homedir();
+  const platform = options.platform ?? process.platform;
+  const self = fileURLToPath(import.meta.url);
+  const executable = (path) => {
+    try {
+      accessSync(path, constants.X_OK);
+      return statSync(path).isFile() && realpathSync(path) !== self;
+    } catch { return false; }
+  };
+  if (env.CYBERDECK_NATIVE_CODEX) {
+    if (isAbsolute(env.CYBERDECK_NATIVE_CODEX) && executable(env.CYBERDECK_NATIVE_CODEX)) return env.CYBERDECK_NATIVE_CODEX;
+    throw new Error("CYBERDECK_NATIVE_CODEX must name an absolute native Codex executable");
+  }
+  const legacy = join(home, ".local", "bin", "codex");
+  // Preserve the installer-managed macOS path. Linux also accepts npm/system/PATH installs.
+  if (platform === "darwin" || executable(legacy)) return legacy;
+  for (const directory of (env.PATH ?? "").split(":")) {
+    if (!isAbsolute(directory)) continue;
+    const candidate = join(directory, "codex");
+    if (executable(candidate)) return candidate;
+  }
+  throw new Error("Native Codex executable not found; install codex on PATH or set CYBERDECK_NATIVE_CODEX");
+}
+
 function nativeCommand(argv, env = process.env, capture = false) {
-  const result = spawnSync(native, argv, { env, stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit", encoding: "utf8" });
+  const result = spawnSync(resolveNativeCodex(), argv, { env, stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit", encoding: "utf8" });
   if (result.error) throw result.error;
   return result;
 }
@@ -115,9 +141,13 @@ async function main() {
   process.exitCode = nativeCommand(nativeArgs, env).status ?? 1;
 }
 
+export function openPairingQr(path, options = {}) {
+  return openDesktop({ kind: "file", value: path }, { ...options, application: "Preview" });
+}
+
 function nativeCommandForPreview(path) {
-  const opened = spawnSync("open", ["-a", "Preview", path], { encoding: "utf8" });
-  if (opened.error || opened.status !== 0) process.stderr.write(`Open the QR image manually: ${path}\n`);
+  const opened = openPairingQr(path);
+  if (opened.status === "unavailable") process.stderr.write(`QR preview unavailable: ${opened.reason}\nOpen the QR image manually: ${path}\n`);
 }
 
 if (process.argv[1] && process.argv[1] !== "-" && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) {

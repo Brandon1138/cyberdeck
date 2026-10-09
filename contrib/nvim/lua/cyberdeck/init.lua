@@ -16,6 +16,10 @@
 
 local M = {}
 
+--- Wire contract, mirrored in src/nvim/protocol.ts. An older module with no export is incompatible.
+--- Cyberdeck checks this in the same remote expression that calls open/refresh, before either runs.
+M.protocol_version = 1
+
 --- One convention, mirrored in src/nvim/server-address.ts. Both sides derive the address from the
 --- tmux pane id alone, so neither has to be told where the other is. Changing it here without
 --- changing it there strands every open request on a socket nobody is listening to.
@@ -237,7 +241,15 @@ local function set_list(win, request, action)
 end
 
 local function decode(encoded)
-  return vim.json.decode(vim.base64.decode(encoded))
+  local request = vim.json.decode(vim.base64.decode(encoded))
+  if type(request) ~= "table" or request.protocolVersion == nil then
+    error("request has no protocolVersion; use a Cyberdeck client matching this module")
+  end
+  if request.protocolVersion ~= M.protocol_version then
+    error("Cyberdeck nvim protocol mismatch (client " .. tostring(request.protocolVersion)
+      .. ", module " .. tostring(M.protocol_version) .. "); use a Cyberdeck client matching this module")
+  end
+  return request
 end
 
 --- Every request names the worker it belongs to, and a request that does not is refused rather
@@ -519,6 +531,9 @@ end
 --- config error the operator sees when they reload is worth far more than one that surfaces hours
 --- later as a rejected request from a worker.
 function M.listen(opts)
+  if vim.fn.has("nvim-0.10") ~= 1 then
+    error("cyberdeck.listen: Neovim >=0.10 is required; see docs/linux-nvim.md")
+  end
   opts = opts or {}
   if opts.on_open ~= nil and type(opts.on_open) ~= "function" then
     error("cyberdeck.listen: on_open must be a function, got " .. type(opts.on_open))

@@ -5,10 +5,9 @@ worktree from its row, or a repository's main checkout from its folder header �
 in Fleet's own tmux window, drops what changed there into that tab's location list, and holds every
 buffer under a running worker's worktree read-only while the agent is still writing to it.
 
-The module ships in this repository rather than as a plugin because it and `src/nvim/` version
-together: the RPC socket convention is mirrored by hand across `src/nvim/server-address.ts` and this
-file, and a skew between them strands every open request on a socket nobody is listening to. See
-CLAUDE.md for what that means for running Cyberdeck from anywhere other than this checkout.
+The module ships in the repository and npm package. Each RPC checks its explicit `protocol_version`
+before applying an open or refresh. Missing modules, older modules without that export and version
+mismatches fail clearly instead of applying a request to incompatible Lua.
 
 Which half decides what — Cyberdeck or your config — is written down in
 [`docs/architecture/nvim-surface.md`](../../docs/architecture/nvim-surface.md). Short version:
@@ -16,21 +15,26 @@ Cyberdeck decides what is true, this module enforces it, and your config decides
 
 ## Installing
 
-Point your plugin manager at the checkout. With lazy.nvim:
+Neovim >=0.10 is required. Use `npm root -g` from the npm installation that installed Cyberdeck;
+the runtime root is `<npm-root>/@ishmael38/cyberdeck/contrib/nvim`. For a source client, deliberately
+choose its checkout's `contrib/nvim` directory. See the [platform setup guide](../../docs/linux-nvim.md)
+for manual config, custom prefixes and current Neovim on older Ubuntu/Debian releases.
+
+Point your plugin manager at that absolute runtime root. With lazy.nvim:
 
 ```lua
 {
-  dir = vim.fn.expand("~/code/personal/cyberdeck/contrib/nvim"),
-  cond = function()
-    return vim.uv.fs_stat(vim.fn.expand("~/code/personal/cyberdeck/contrib/nvim")) ~= nil
-  end,
+  dir = "/absolute/npm/root/@ishmael38/cyberdeck/contrib/nvim",
+  name = "cyberdeck",
+  lazy = false,
   config = function()
     require("cyberdeck").listen()
   end,
 }
 ```
 
-The `cond` guard is what keeps a machine without the checkout silent rather than broken.
+Configuration is yours to edit. Installing Cyberdeck never modifies your config or installs live
+plugins. Use a deliberate path and surface a missing module rather than silently skipping it.
 
 ## `listen(opts)`
 

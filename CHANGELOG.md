@@ -6,6 +6,8 @@ and persisted schemas remain under active alpha development.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-10-09
+
 ### Added
 
 - Orchestrator notification feed. An orchestrator no longer has to sit inside
@@ -265,6 +267,7 @@ and persisted schemas remain under active alpha development.
 - Provider CLI behavior and supported model identifiers can change independently
   of Cyberdeck.
 
-[Unreleased]: https://github.com/Brandon1138/cyberdeck/compare/v0.1.0-alpha.2...HEAD
+[Unreleased]: https://github.com/Brandon1138/cyberdeck/compare/v0.1.0-alpha.3...HEAD
+[0.1.0-alpha.3]: https://github.com/Brandon1138/cyberdeck/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/Brandon1138/cyberdeck/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/Brandon1138/cyberdeck/releases/tag/v0.1.0-alpha.1

@@ -1,4 +1,5 @@
 import type { NvimWorktreeRequest } from "../domain/worktree-review.js";
+import { NVIM_PROTOCOL_VERSION } from "./protocol.js";
 
 export {
   quickfixEntries,
@@ -15,9 +16,11 @@ export {
  * contains none of them, so there is nothing left to get wrong.
  */
 export function encodeNvimPayload(request: NvimWorktreeRequest): string {
-  return Buffer.from(JSON.stringify(request), "utf8").toString("base64");
+  return Buffer.from(JSON.stringify({ ...request, protocolVersion: NVIM_PROTOCOL_VERSION }), "utf8").toString("base64");
 }
 
-export function decodeNvimPayload(encoded: string): NvimWorktreeRequest {
-  return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as NvimWorktreeRequest;
+export type NvimWireRequest = NvimWorktreeRequest & { protocolVersion: number };
+
+export function decodeNvimPayload(encoded: string): NvimWireRequest {
+  return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as NvimWireRequest;
 }

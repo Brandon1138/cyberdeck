@@ -1,0 +1,101 @@
+name: Native Linux packed acceptance
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  distro:
+    name: packed-${{ matrix.distro }}-${{ matrix.arch }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu-24.04
+            image: ubuntu:noble-20260917
+            runner: ubuntu-24.04
+            arch: x64
+          - distro: ubuntu-24.04
+            image: ubuntu:noble-20260917
+            runner: ubuntu-24.04-arm
+            arch: arm64
+          - distro: debian-13
+            image: debian:trixie-20261005-slim
+            runner: ubuntu-24.04
+            arch: x64
+          - distro: debian-13
+            image: debian:trixie-20261005-slim
+            runner: ubuntu-24.04-arm
+            arch: arm64
+          # Official Arch Linux image supports x64; Arch arm64 remains unproved.
+          - distro: arch
+            image: archlinux:base-20261004.0.606936
+            runner: ubuntu-24.04
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    # Plain distro test hosts only; no Cyberdeck provider-container machinery.
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+      - name: Install distro tools and compiler fallback dependencies
+        shell: sh
+        run: |
+          if command -v apt-get >/dev/null; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              ca-certificates curl xz-utils tar gzip git tmux zsh bash build-essential python3
+          else
+            pacman -Syu --noconfirm --needed \
+              ca-certificates curl xz git tmux zsh bash base-devel python tar gzip
+          fi
+
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.0
+          architecture: ${{ matrix.arch }}
+
+      - name: Enable locked pnpm and pinned Neovim
+        shell: bash
+        run: |
+          corepack enable
+          corepack install --global pnpm@11.5.0
+          bash scripts/ci-install-neovim.sh "$RUNNER_TEMP/cyberdeck-nvim"
+          echo "$RUNNER_TEMP/cyberdeck-nvim/bin" >> "$GITHUB_PATH"
+
+      - name: Require native dependencies before acceptance
+        run: node scripts/ci-native-preflight.mjs
+
+      - name: Download the full gate's packed artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-package-${{ matrix.arch }}
+          path: ${{ runner.temp }}/cyberdeck-artifact
+
+      - name: Force native compilation and exercise installed CLI, PTY, Lua, and broker
+        id: packed
+        shell: bash
+        run: |
+          package_files=("$RUNNER_TEMP"/cyberdeck-artifact/*.tgz)
+          test "${#package_files[@]}" -eq 1
+          node scripts/ci-packed-acceptance.mjs "${package_files[0]}"
+        env:
+          CYBERDECK_NATIVE_EXPECT_ARCH: ${{ matrix.arch }}
+          CYBERDECK_NATIVE_BUILD_FROM_SOURCE: '1'
+
+      - name: Upload packed acceptance evidence
+        if: always() && steps.packed.outputs.evidence-root != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-${{ matrix.distro }}-${{ matrix.arch }}-evidence
+          path: |
+            ${{ steps.packed.outputs.evidence-root }}/report.json
+            ${{ steps.packed.outputs.evidence-root }}/broker-status.json
+            ${{ steps.packed.outputs.evidence-root }}/broker.log

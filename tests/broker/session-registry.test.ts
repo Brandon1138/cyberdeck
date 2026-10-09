@@ -41,7 +41,9 @@ class FakePty implements SessionRuntime {
   readonly writes: Buffer[] = [];
   private readonly outputListeners = new Set<(chunk: Buffer) => void>();
   private readonly exitListeners = new Set<(exitCode: number, signal?: number) => void>();
-  private replay = "";
+  // The general registry fixture starts input-ready. Blank and unknown startup frames have their
+  // own fixture in provider-startup-readiness.test.ts and must remain held there.
+  private replay = "│ > │\n? for shortcuts\n";
 
   constructor(pid: number, private readonly exitOnKill = true) {
     this.pid = pid;
@@ -738,7 +740,7 @@ describe("SessionRegistry", () => {
       deferInitialPrompt: () => true,
       initializeSession: async () => {
         ptys[0]!.emitOutput("Composing 5.53k tokens\nctrl+c to stop");
-        ptys[0]!.emitOutput("\nRun Everything enabled\n→ \n");
+        ptys[0]!.emitOutput("\nRun Everything enabled\n→ Add a follow-up\n");
         await new Promise((resolve) => setTimeout(resolve, 250));
       },
       buildResumeSpec: () => {
