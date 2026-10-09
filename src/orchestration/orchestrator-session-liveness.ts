@@ -24,15 +24,16 @@ export class OrchestratorSessionLiveness {
   }) {}
 
   async start(): Promise<void> {
-    // Old bindings may have been reset/replaced. Recheck their durable observations too, so a
-    // connected record from the previous broker cannot grant immortality to a missing session.
-    for (const entry of this.options.coordination.listControllerLiveness()) {
-      if (entry.session !== undefined) this.controllers.set(entry.controller.controllerId, {
-        controller: entry.controller, sessionId: entry.session.sessionId,
-      });
-    }
     for (const entry of await this.options.directory.listControllers()) {
       this.controllers.set(entry.controller.controllerId, entry);
+    }
+    // A durable observation cannot restore authority after its binding was reset/replaced,
+    // even if the old process is still alive. Only current bindings receive session updates.
+    for (const entry of this.options.coordination.listControllerLiveness()) {
+      if (entry.session !== undefined && !this.controllers.has(entry.controller.controllerId)) {
+        await this.enqueue(() => this.observe(entry.controller, entry.session!.sessionId, undefined,
+          "broker confirmed orchestrator binding removal"));
+      }
     }
     this.unsubscribe = this.options.registry.onSessionUpdate((sessionId) => {
       // Capture this edge synchronously; a death followed by resume must not become two live reads.
@@ -58,6 +59,14 @@ export class OrchestratorSessionLiveness {
     await this.enqueue(() => this.observe(controller, binding.sessionId, record));
   }
 
+  /** Losing the binding revokes ownership even when the session's process is still alive. */
+  async bindingRemoved(binding: OrchestratorBinding): Promise<void> {
+    const controller = orchestratorController(binding);
+    this.controllers.delete(controller.controllerId);
+    await this.enqueue(() => this.observe(controller, binding.sessionId, undefined,
+      "broker confirmed orchestrator binding removal"));
+  }
+
   async flush(): Promise<void> { await this.tail; }
 
   dispose(): void { this.unsubscribe?.(); }
@@ -71,7 +80,8 @@ export class OrchestratorSessionLiveness {
     }
   }
 
-  private async observe(controller: ControllerIdentity, sessionId: string, record?: SessionRecord): Promise<void> {
+  private async observe(controller: ControllerIdentity, sessionId: string, record?: SessionRecord,
+    disconnectedReason = "broker confirmed orchestrator session exit or absence"): Promise<void> {
     const previous = this.options.coordination.listControllerLiveness()
       .find((entry) => entry.controller.controllerId === controller.controllerId);
     // Execution/attention labels alone are not death: stop/fatal bookkeeping can precede exit.
@@ -87,7 +97,7 @@ export class OrchestratorSessionLiveness {
       state,
       session,
       reason: state === "connected" ? "broker-managed orchestrator session alive"
-        : "broker confirmed orchestrator session exit or absence",
+        : disconnectedReason,
     });
   }
 

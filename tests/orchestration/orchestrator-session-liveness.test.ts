@@ -10,6 +10,7 @@ import { fleetWorkerCoordinationView } from "../../src/broker/worker-coordinatio
 import { orchestratorController, type OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { OrchestratorControllerDirectory } from "../../src/orchestration/orchestrator-controller-directory.js";
+import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
 import { OrchestratorSessionLiveness } from "../../src/orchestration/orchestrator-session-liveness.js";
 import { WorkerControlService } from "../../src/orchestration/worker-control-service.js";
 import { WorkerCoordinationStore } from "../../src/persistence/worker-coordination-store.js";
@@ -71,6 +72,12 @@ async function harness() {
   const bindingDirectory = {
     list: async () => [...bindings.values()],
     findBySessionId: async (id: string) => bindings.get(id),
+    get: async (key: string) => [...bindings.values()].find((entry) => entry.key === key),
+    put: async (entry: OrchestratorBinding) => { bindings.set(entry.sessionId, entry); },
+    reset: async (key: string) => {
+      const entry = [...bindings.values()].find((entry) => entry.key === key);
+      if (entry !== undefined) bindings.delete(entry.sessionId);
+    },
   };
   const errors = vi.fn();
   const createMonitor = (service = coordination) => {
@@ -82,6 +89,8 @@ async function harness() {
   };
   const monitor = createMonitor();
   await monitor.start();
+  const manager = new OrchestratorManager(registry as never, bindingDirectory, undefined, undefined, undefined,
+    (entry, record) => monitor.bindingSession(entry, record), (entry) => monitor.bindingRemoved(entry));
   const credentials = new BrokerWorkerLeaseCredentialCustodian();
   const channel = new WorkerEventChannel(coordination, registry, bindingDirectory, {} as never, now, credentials);
   const control = new WorkerControlService({
@@ -89,7 +98,7 @@ async function harness() {
     instructions: {} as never, now: () => nowMs, credentials,
   });
   return {
-    coordination, store, monitor, records, bindings, now, errors, createCoordination, createMonitor, channel, control,
+    coordination, store, monitor, manager, records, bindings, now, errors, createCoordination, createMonitor, channel, control,
     advance: (ms: number) => { nowMs += ms; },
     notify: (id: string) => { for (const listener of listeners) listener(id); },
     async dispatch(owner = orchestratorController(binding())) {
@@ -164,6 +173,53 @@ describe("orchestrator session lease liveness", () => {
     expect(bench.coordination.listControllerLiveness().find((entry) => entry.controller.controllerId === worker.owner.controllerId)?.state).toBe("connected");
   });
 
+  it.each(["failed", "cancelled"] as const)("disconnects a living %s session on reset while a bound peer keeps its leases", async (executionState) => {
+    const bench = await harness();
+    const record = { ...session(ORC), executionState, exitCode: null };
+    bench.records.set(ORC, record);
+    await bench.monitor.bindingSession(binding(), record);
+    const worker = await bench.dispatch();
+    const peer = await bench.dispatch(orchestratorController(bench.bindings.get(PEER)!));
+    bench.advance(300_000);
+    expect(bench.coordination.getSubject(worker.id)?.lease.state).toBe("active");
+
+    await expect(bench.manager.reset({ cwd: "/repo", scope: "fleet" })).resolves.toMatchObject({ reset: true });
+    expect(bench.bindings.has(ORC)).toBe(false);
+    expect(bench.records.get(ORC)?.exitCode).toBeNull();
+    expect(bench.coordination.listControllerLiveness().find((entry) => entry.controller.controllerId === worker.owner.controllerId))
+      .toMatchObject({ state: "disconnected", session: { sessionId: ORC, generation: 1 } });
+    const deadline = new Date(Date.parse(bench.now()) + 5_000).toISOString();
+    expect(bench.coordination.getSubject(worker.id)?.lease).toMatchObject({ state: "active", expiresAt: deadline });
+    const before = await bench.control.lease({ actorSessionId: PEER, action: "adopt", scope: "worker", workerId: worker.id, preview: true, reason: "recover" });
+    expect(before.plan?.blocked[0]?.code).toBe("LEASE_CONFLICT");
+
+    // A later live session update must not put the removed controller back into authority.
+    bench.records.set(ORC, { ...record, generation: 2 });
+    bench.notify(ORC);
+    bench.notify(PEER);
+    await bench.monitor.flush();
+    expect(bench.coordination.listControllerLiveness().find((entry) => entry.controller.controllerId === worker.owner.controllerId)?.state).toBe("disconnected");
+    expect(bench.coordination.listControllerLiveness().find((entry) => entry.controller.controllerId === peer.owner.controllerId)?.state).toBe("connected");
+    bench.advance(5_000);
+    expect(bench.coordination.getSubject(worker.id)?.lease).toMatchObject({ state: "orphaned", expiresAt: deadline });
+    expect(bench.coordination.getSubject(peer.id)?.lease.state).toBe("active");
+    const adopted = await bench.control.lease({ actorSessionId: PEER, action: "adopt", scope: "worker", workerId: worker.id, reason: "recover" });
+    expect(adopted.results[0]).toMatchObject({ code: "ACQUIRED", leaseVersion: worker.version + 1 });
+    expect(bench.errors).not.toHaveBeenCalled();
+  });
+
+  it("disconnects a living session when its binding is removed before session deletion", async () => {
+    const bench = await harness();
+    const worker = await bench.dispatch();
+    await expect(bench.manager.resetSessionBinding(ORC)).resolves.toEqual({ reset: true, key: "fleet" });
+    expect(bench.records.get(ORC)?.exitCode).toBeNull();
+    bench.notify(ORC);
+    await bench.monitor.flush();
+    expect(bench.coordination.listControllerLiveness().find((entry) => entry.controller.controllerId === worker.owner.controllerId)?.state).toBe("disconnected");
+    bench.advance(5_000);
+    expect(bench.coordination.getSubject(worker.id)?.lease.state).toBe("orphaned");
+  });
+
   it("expires external holders on the original 30-second schedule and projects honest lease and adopt reads", async () => {
     const bench = await harness();
     const external = { controllerId: "external", familyId: "external", scope: { kind: "fleet" as const, scopeId: "external" } };
@@ -216,6 +272,31 @@ describe("orchestrator session lease liveness", () => {
     expect(restarted.getSubject(worker.id)?.lease.state).toBe("active");
     bench.advance(5_000);
     expect(restarted.getSubject(worker.id)?.lease.state).toBe("orphaned");
+  });
+
+  it("disconnects removed living bindings at restart and ignores their later session updates", async () => {
+    const bench = await harness();
+    const worker = await bench.dispatch();
+    bench.monitor.dispose();
+    bench.bindings.delete(ORC);
+    bench.advance(300_000);
+    const restarted = await bench.createCoordination();
+    const monitor = bench.createMonitor(restarted);
+    await monitor.start();
+    expect(bench.records.get(ORC)?.exitCode).toBeNull();
+    expect(restarted.listControllerLiveness().find((entry) => entry.controller.controllerId === worker.owner.controllerId)?.state).toBe("disconnected");
+    const deadline = new Date(Date.parse(bench.now()) + 5_000).toISOString();
+    bench.advance(4_000);
+    bench.records.set(ORC, { ...session(ORC), generation: 2 });
+    bench.notify(ORC);
+    await monitor.flush();
+    monitor.dispose();
+    const again = bench.createMonitor(restarted);
+    await again.start();
+    expect(restarted.getSubject(worker.id)?.lease).toMatchObject({ state: "active", expiresAt: deadline });
+    bench.advance(1_000);
+    expect(restarted.getSubject(worker.id)?.lease.state).toBe("orphaned");
+    expect(bench.errors).not.toHaveBeenCalled();
   });
 
   it("observes binding before launch, failed creation, and a resumed generation without reviving orphaned tokens", async () => {

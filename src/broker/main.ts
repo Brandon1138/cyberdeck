@@ -299,6 +299,7 @@ export async function runBroker(
     providerPermissions,
     (provider) => orchestratorCapabilities.resolve(provider),
     (binding, session) => orchestratorLiveness.bindingSession(binding, session),
+    (binding) => orchestratorLiveness.bindingRemoved(binding),
   );
   const instructionStore = new InstructionStore(stateDirectory);
   const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
