@@ -16,7 +16,7 @@ every surface renders.
 termination into one value:
 
 ```text
-starting                      launched, no provider frame observed yet
+starting                      waiting for a recognized input surface in this process generation
 working                       provider is running a turn
 blocked-modal                 provider is holding a prompt the operator must answer
 blocked-composer              input surface holds text the provider has not taken
@@ -69,7 +69,7 @@ Precise meanings, because the incident was caused by two of these being used int
 - **accepted** — the broker holds the instruction and has not attempted delivery. Durable; survives
   a busy worker.
 - **queued** — delivery was attempted and refused. `holdReason` names which boundary refused it:
-  `provider-modal`, `composer-occupied`, `provider-busy`, `human-controller`, `worker-terminal`.
+  `provider-starting`, `provider-modal`, `composer-occupied`, `provider-busy`, `human-controller`, `worker-terminal`.
   Everything behind a hold is queued with the blocker's reason rather than left reading as
   `accepted`. A held instruction is retried automatically at the next safe boundary; nothing else
   retries it. `provider-busy` is the ordinal boundary: an instruction written into a turn that was
@@ -96,6 +96,21 @@ Precise meanings, because the incident was caused by two of these being used int
 
 `delivered` is gone from the vocabulary. Records written before the rename are read as `rendered`,
 which is the honest translation: bytes were written and nothing stronger was ever observed.
+
+Automated interactive input also requires positive startup evidence from the current process:
+a recognized empty composer, outside a modal and a running turn. Blank output and idle titles are
+insufficient. The runtime observation adapter reads a bounded screen for this purpose, including
+cursor positioning and erasure; incomplete synchronized redraws and unsupported screen edits hold
+safely. Unknown startup remains `provider-starting` with the durable instruction queued. A wait
+timeout never authorizes a write: inspect the provider if startup does not finish.
+
+Launch and resume reset that evidence; callbacks from the replaced process cannot release it.
+Startup repainting is not a model completion. Provider-native argv prompts and Cursor's direct,
+suppressed initialization retain their existing transport and turn semantics. Claude headless
+dispatch uses its native pipe/stream receipts and does not pass through this composer gate.
+One-shot headless Scout truth is also excluded; its supervisor owns native stream completion.
+This does not promise compatibility with every future provider UI; a changed input surface needs a
+verified parser update, rather than a speculative submission or trust decision.
 
 ## Waits
 
