@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -13,7 +14,6 @@ const files = {
     name: "@ishmael38/cyberdeck",
     version: "0.1.0-alpha.1",
   }, null, 2)}\n`,
-  "README.md": "`0.1.0-alpha.1` is a macOS developer preview\n",
   ".github/ISSUE_TEMPLATE/bug_report.yml": "placeholder: 0.1.0-alpha.1\n",
   "CHANGELOG.md": [
     "# Changelog",
@@ -52,7 +52,7 @@ describe("alpha release automation", () => {
       "2026-08-14",
     );
     expect(JSON.parse(updated["package.json"]!).version).toBe("0.1.0-alpha.2");
-    expect(updated["README.md"]).toContain("`0.1.0-alpha.2` is a macOS developer preview");
+    expect(updated).not.toHaveProperty("README.md");
     expect(updated[".github/ISSUE_TEMPLATE/bug_report.yml"])
       .toContain("placeholder: 0.1.0-alpha.2");
     expect(updated["CHANGELOG.md"]).toContain("## [Unreleased]\n\n## [0.1.0-alpha.2] - 2026-08-14");
@@ -62,6 +62,21 @@ describe("alpha release automation", () => {
     expect(updated["CHANGELOG.md"]).toContain(
       "[0.1.0-alpha.2]: https://github.com/Brandon1138/cyberdeck/compare/v0.1.0-alpha.1...v0.1.0-alpha.2",
     );
+  });
+
+  it("can prepare the repository's current release documents without versioned README prose", () => {
+    const paths = ["package.json", "CHANGELOG.md", ".github/ISSUE_TEMPLATE/bug_report.yml"];
+    const currentFiles = Object.fromEntries(paths.map((path) => [
+      path,
+      readFileSync(new URL(`../../${path}`, import.meta.url), "utf8"),
+    ]));
+    const currentVersion = JSON.parse(currentFiles["package.json"]!).version as string;
+    const targetVersion = nextAlphaVersion(currentVersion);
+    const updated = updateReleaseDocuments(currentFiles, currentVersion, targetVersion, "2026-10-09");
+    expect(Object.keys(updated).sort()).toEqual(paths.sort());
+    expect(JSON.parse(updated["package.json"]!).version).toBe(targetVersion);
+    expect(updated["CHANGELOG.md"]).toContain(`## [${targetVersion}] - 2026-10-09`);
+    expect(updated[".github/ISSUE_TEMPLATE/bug_report.yml"]).toContain(`placeholder: ${targetVersion}`);
   });
 
   it("requires the runnable CLI and rejects development-only package files", () => {
