@@ -182,6 +182,50 @@ describe("OrchestratorNotificationDelivery", () => {
     expect(await delivery.notice(CONTROLLER)).toBeDefined();
   });
 
+  it.each(["empty", "busy", "held"] as const)("session updates do not write or remove notice files with an unchanged %s inbox", async (scenario) => {
+    state = scenario === "busy" ? "working" : "idle";
+    status = "queued";
+    if (scenario !== "empty") {
+      await append();
+      await advance(100);
+      expect(files.notices.has(SESSION)).toBe(true);
+    }
+    files.write.mockClear();
+    files.remove.mockClear();
+
+    for (let i = 0; i < 64; i++) {
+      await update(state);
+      await advance(16);
+    }
+
+    expect(files.write).not.toHaveBeenCalled();
+    expect(files.remove).not.toHaveBeenCalled();
+    expect(store.pendingCount(CONTROLLER)).toBe(scenario === "empty" ? 0 : 1);
+    expect(instructions.enqueueBroker).toHaveBeenCalledTimes(scenario === "held" ? 1 : 0);
+    if (scenario === "held") expect(instructions.flush).toHaveBeenCalled();
+  });
+
+  it("retries a busy-gated wake when the session becomes idle after the coalescing timer expires", async () => {
+    state = "working";
+    const notification = await append();
+    await advance(100);
+    expect(instructions.enqueueBroker).not.toHaveBeenCalled();
+    expect(clock.timers.size).toBe(0);
+
+    files.write.mockClear();
+    files.remove.mockClear();
+    await update("idle");
+    expect(files.write).not.toHaveBeenCalled();
+    expect(files.remove).not.toHaveBeenCalled();
+    expect(clock.timers.size).toBe(1);
+    await advance(99);
+    expect(instructions.enqueueBroker).not.toHaveBeenCalled();
+    await advance(1);
+    expect(instructions.enqueueBroker).toHaveBeenCalledTimes(1);
+    expect(store.noticeState(CONTROLLER).lastNoticedCursor).toBe(notification.cursor);
+    expect(store.listPending(CONTROLLER, 0, 50)[0]!.deliveredVia).toEqual(["wake"]);
+  });
+
   it("row 4: queued wake is withdrawn and forgotten when the orchestrator becomes working", async () => {
     status = "queued";
     await append();

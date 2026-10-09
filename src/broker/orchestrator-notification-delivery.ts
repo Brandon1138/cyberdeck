@@ -67,7 +67,8 @@ export class OrchestratorNotificationDelivery {
         // Resolve only the updated session; worker output must not scan every controller's inbox.
         const generation = this.generation;
         void this.options.controllers.forSession(sessionId).then((controller) => {
-          if (this.started && generation === this.generation && controller !== undefined) this.background(controller.controllerId, () => this.changed(controller.controllerId));
+          // Output updates recheck wake delivery; only inbox changes/recovery rebuild notice files.
+          if (this.started && generation === this.generation && controller !== undefined) this.background(controller.controllerId, () => this.reconcile(controller.controllerId));
         }).catch(() => undefined);
       }),
     );
@@ -171,13 +172,6 @@ export class OrchestratorNotificationDelivery {
     await this.rewrite(controllerId);
     await this.recoverWake(controllerId);
     await this.reconcile(controllerId);
-    if (this.options.inbox.pendingCount(controllerId) === 0) {
-      this.cancelTimer(controllerId);
-      return;
-    }
-    if (!this.pendingWakes.has(controllerId) && this.hasEligible(controllerId)) {
-      this.schedule(controllerId, this.options.inbox.policy(controllerId).coalesceMs);
-    }
   }
 
   private hasEligible(controllerId: string): boolean {
@@ -236,17 +230,27 @@ export class OrchestratorNotificationDelivery {
 
   private async reconcile(controllerId: string): Promise<void> {
     const wake = this.pendingWakes.get(controllerId);
-    if (wake === undefined) return;
     const inbox = this.options.inbox;
-    const withdraw = inbox.pendingCount(controllerId) === 0
-      || this.options.registry.workerTruth(wake.sessionId).state === "working";
-    if (!withdraw) await this.options.instructions.flush(wake.sessionId);
-    const record = withdraw
-      ? await this.options.instructions.withdraw(wake.sessionId, wake.messageId)
-      : (await this.options.instructions.list(wake.sessionId)).find((entry) => entry.messageId === wake.messageId);
-    if (record !== undefined && delivered(record)) await this.finishWake(controllerId, wake);
-    else if (withdraw || record === undefined || ["cancelled", "undelivered"].includes(record.status)) {
-      this.pendingWakes.delete(controllerId);
+    if (wake !== undefined) {
+      const withdraw = inbox.pendingCount(controllerId) === 0
+        || this.options.registry.workerTruth(wake.sessionId).state === "working";
+      if (!withdraw) await this.options.instructions.flush(wake.sessionId);
+      const record = withdraw
+        ? await this.options.instructions.withdraw(wake.sessionId, wake.messageId)
+        : (await this.options.instructions.list(wake.sessionId)).find((entry) => entry.messageId === wake.messageId);
+      if (record !== undefined && delivered(record)) await this.finishWake(controllerId, wake);
+      else if (withdraw || record === undefined || ["cancelled", "undelivered"].includes(record.status)) {
+        this.pendingWakes.delete(controllerId);
+      }
+    }
+    if (inbox.pendingCount(controllerId) === 0) {
+      this.cancelTimer(controllerId);
+      return;
+    }
+    // A busy session can outlast the coalescing timer without ever enqueuing a wake.
+    // Session updates must retry that wake even when there is no pending instruction to flush.
+    if (!this.pendingWakes.has(controllerId) && this.hasEligible(controllerId)) {
+      this.schedule(controllerId, inbox.policy(controllerId).coalesceMs);
     }
   }
 
