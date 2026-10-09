@@ -49,6 +49,9 @@ artifacts below:
 ~/Library/Application Support/Cyberdeck/
 ```
 
+On Linux and WSL2 the state directory is `${XDG_STATE_HOME:-~/.local/state}/cyberdeck/`.
+Keep it on the Linux filesystem in WSL so Unix ownership and private permissions apply.
+
 Transcripts and artifacts may contain source code, prompts, tool output, file
 paths, or other sensitive material. Back up, retain, and delete this directory
 according to the sensitivity of the projects you operate. Package upgrades and

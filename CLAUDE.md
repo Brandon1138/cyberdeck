@@ -10,23 +10,6 @@ These are accepted, deliberate gaps. Do not treat them as bugs to fix on sight, 
 around them as if they were already solved. Each one names the trigger that would make it real work.
 If a task runs into one, say so out loud to the operator before building past it.
 
-### The nvim module is found by a hardcoded local path
-
-`contrib/nvim/lua/cyberdeck/` ships in this repository, and the operator's nvim config points at it
-with an absolute `dir=` path (guarded, so a machine without the checkout is silent rather than
-broken). This was chosen so Fleet's Ctrl+N and the Lua it drives version together — the RPC socket
-convention is mirrored by hand across `src/nvim/server-address.ts` and the Lua module, and a skew
-between them strands every open request on a socket nobody is listening to.
-
-**That version-lock is conditional, not guaranteed.** It holds only while Cyberdeck is run from the
-same checkout the nvim path points at. Running an installed binary, or a worktree, or a second
-clone, silently pairs a new Cyberdeck with whatever Lua that one path happens to hold. Nothing
-detects this today: there is no version handshake in the RPC call.
-
-Deferred because the operator runs one checkout. **Trigger:** running Cyberdeck from somewhere other
-than the checkout the nvim config points at. The fix is a version handshake in the `--remote-expr`
-payload that fails loudly on mismatch, not more path-guessing.
-
 ### One socket namespace for all concurrent Cyberdecks
 
 `nvimServerAddress` keys the socket on the tmux pane index alone:
@@ -73,17 +56,25 @@ and a stale hook neither resizes nor prints when Fleet's pane is absent. **Trigg
 replacing that global symlink path while keeping a SIGKILL-surviving Fleet window. The fix is durable
 hook ownership and reconciliation, not a global tmux hook or another executable-path guess.
 
-### Ctrl+S only hands back a cwd when the login shell is zsh
+### Ctrl+S shell handoff has remaining startup boundaries
 
 `src/tmux/interactive-shell.ts` opens `$SHELL -li` in a `tmux display-popup` and learns where the
-operator ended up from a zsh `zshexit`/`chpwd` hook installed through a one-file `ZDOTDIR`. A popup
+operator ended up from zsh `zshexit`/`chpwd` hooks or a GNU Bash 4+ startup/EXIT hook. A popup
 is **not a pane** — `list-panes -a` omits it, and `#{pane_current_path}` read inside one reports the
-*launching* pane's directory — so there is no tmux-side answer to fall back on. A non-zsh `$SHELL`
-gets the popup and no capture: Fleet's spawn cwd is simply left where it was.
+*launching* pane's directory — so there is no tmux-side answer to fall back on. Fish, Apple Bash 3.2,
+and explicitly selected POSIX-mode Bash get their native popup without cwd capture: Fleet's spawn
+cwd is left where it was. GNU Bash's hook preserves login files, native prompt commands, history,
+and existing EXIT handlers; see `docs/linux-shell.md` for its supported startup boundary.
 
-Deferred because the operator's shell is zsh. **Trigger:** changing `$SHELL` to bash or fish. The
-fix is that shell's own exit hook (`PROMPT_COMMAND`, `fish_exit`) writing the same file, not a wrapper
-REPL and not a pane query that cannot see the popup.
+These remaining shells are deferred. **Trigger:** requiring cwd handoff from one of them. The fix
+is that shell's startup/exit hook writing the same private result file, preserving its own startup
+semantics, not a wrapper REPL or a pane query that cannot see the popup.
+
+GNU Bash also evaluates an explicit top-level `return N` in a login file with `source` semantics,
+which can differ from its automatic loader's first-prompt status. Ordinary final-command status
+matches native Bash. This narrow distinction is documented in `docs/linux-shell.md` and deferred.
+**Trigger:** requiring exact automatic-loader behavior for that top-level return; preserve the
+operator's prompt and tracing traps when addressing it.
 
 ### Cursor and Antigravity model columns can only ever be launch values
 
@@ -113,6 +104,12 @@ row in `PROVIDER_MODEL_LISTING_COMMANDS` and a parser case, not widening the acc
 until prose starts parsing as a model id.
 
 ## Things that are not deferred
+
+- The nvim module ships in the npm package. The operator chooses its explicit runtime path;
+  Cyberdeck never guesses another checkout. Every `--remote-expr` checks the loaded module's
+  protocol version before applying a request, and Lua checks the payload version. Keep the
+  TypeScript and Lua versions together when changing the wire contract. See
+  `docs/linux-nvim.md` for installed paths and `docs/architecture/nvim-surface.md` for ownership.
 
 - A peer binding is a controller, and its grant and its lease are derived from one place. MIK-98
   settled what a `:peer:` binding is: a controller in its own right, holding its own `controllerId`

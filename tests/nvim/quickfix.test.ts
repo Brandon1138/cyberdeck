@@ -6,6 +6,7 @@ import {
   worktreeRequest,
 } from "../../src/nvim/quickfix.js";
 import type { WorktreeBaseline } from "../../src/nvim/worktree-changes.js";
+import { NVIM_PROTOCOL_VERSION } from "../../src/nvim/protocol.js";
 
 const FORK_POINT: WorktreeBaseline = { kind: "fork-point", label: "since origin/main" };
 
@@ -94,6 +95,6 @@ describe("encodeNvimPayload", () => {
 
     // A single Vim string literal is only safe if the payload cannot contain a quote at all.
     expect(encoded).toMatch(/^[A-Za-z0-9+/=]+$/u);
-    expect(decodeNvimPayload(encoded)).toEqual(request);
+    expect(decodeNvimPayload(encoded)).toEqual({ ...request, protocolVersion: NVIM_PROTOCOL_VERSION });
   });
 });

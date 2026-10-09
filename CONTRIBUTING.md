@@ -13,7 +13,8 @@ documentation corrections, tests, and implementation changes.
 
 ## Development setup
 
-Cyberdeck currently supports macOS and pins Node.js 24.18.0 through mise.
+Cyberdeck supports macOS and glibc Linux, including WSL2, and pins Node.js 24.18.0 through mise.
+See [Linux installation](docs/linux-install.md) for the native compiler prerequisites.
 
 ```bash
 git clone https://github.com/Brandon1138/cyberdeck.git

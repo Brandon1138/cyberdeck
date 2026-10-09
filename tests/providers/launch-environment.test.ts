@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildProviderChildEnvironment,
+  jobLaunchEnvironment,
   sessionLaunchEnvironment,
 } from "../../src/providers/launch-environment.js";
 
@@ -23,6 +24,18 @@ const SOURCE: NodeJS.ProcessEnv = {
   XDG_CACHE_HOME: "/xdg/cache",
   XDG_STATE_HOME: "/xdg/state",
   SECURITYSESSIONID: "session-compatibility",
+  DISPLAY: ":0",
+  WAYLAND_DISPLAY: "wayland-0",
+  XAUTHORITY: "/run/user/1000/Xauthority",
+  XDG_RUNTIME_DIR: "/run/user/1000",
+  DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+  XDG_DATA_HOME: "/xdg/data",
+  WSL_INTEROP: "/run/WSL/123_interop",
+  WSL_DISTRO_NAME: "Ubuntu",
+  WSLENV: "AWS_SESSION_TOKEN/u",
+  XDG_UNREVIEWED: "drop-this",
+  DBUS_UNREVIEWED: "drop-this",
+  AWS_SESSION_TOKEN: "drop-this",
   CLAUDE_CONFIG_DIR: "/provider/claude",
   ANTHROPIC_BASE_URL: "https://claude-routing.invalid",
   CODEX_HOME: "/provider/codex",
@@ -59,6 +72,7 @@ describe("provider child environment", () => {
       cwd: "/workspace/claude",
       terminal: "pty",
       identity: { role: "orchestrator", workerMode: "caveman" },
+      platform: "darwin",
       disableUpdates: true,
       enableToolSearch: true,
     });
@@ -100,9 +114,114 @@ describe("provider child environment", () => {
       "CODEX_HOME",
       "OPENAI_BASE_URL",
       "ANTHROPIC_BASE_URL",
+      "DISPLAY",
+      "WAYLAND_DISPLAY",
+      "XAUTHORITY",
+      "XDG_RUNTIME_DIR",
+      "DBUS_SESSION_BUS_ADDRESS",
+      "XDG_DATA_HOME",
+      "WSL_INTEROP",
+      "WSL_DISTRO_NAME",
+      "WSLENV",
+      "XDG_UNREVIEWED",
+      "DBUS_UNREVIEWED",
+      "AWS_SESSION_TOKEN",
     ]) {
       expect(environment[key]).toBeUndefined();
     }
+  });
+
+  it.each(["claude", "codex", "cursor", "antigravity", "future-provider"])(
+    "passes only exact Linux session names for %s across terminal and role contexts",
+    (provider) => {
+      for (const terminal of ["pty", "pipe"] as const) {
+        for (const role of ["worker", "orchestrator", "session"] as const) {
+          const source = { ...SOURCE };
+          const linux = buildProviderChildEnvironment({
+            source,
+            provider,
+            cwd: "/workspace/linux",
+            terminal,
+            identity: { role },
+            platform: "linux",
+          });
+          const darwin = buildProviderChildEnvironment({
+            source,
+            provider,
+            cwd: "/workspace/linux",
+            terminal,
+            identity: { role },
+            platform: "darwin",
+          });
+
+          expect(linux).toEqual({
+            ...darwin,
+            DISPLAY: SOURCE.DISPLAY,
+            WAYLAND_DISPLAY: SOURCE.WAYLAND_DISPLAY,
+            XAUTHORITY: SOURCE.XAUTHORITY,
+            XDG_RUNTIME_DIR: SOURCE.XDG_RUNTIME_DIR,
+            DBUS_SESSION_BUS_ADDRESS: SOURCE.DBUS_SESSION_BUS_ADDRESS,
+            XDG_DATA_HOME: SOURCE.XDG_DATA_HOME,
+            WSL_INTEROP: SOURCE.WSL_INTEROP,
+            WSL_DISTRO_NAME: SOURCE.WSL_DISTRO_NAME,
+          });
+          expect(source).toEqual(SOURCE);
+          for (const key of [
+            "WSLENV", "XDG_UNREVIEWED", "DBUS_UNREVIEWED", "AWS_SESSION_TOKEN",
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "SSH_AUTH_SOCK", "UNRELATED_SENTINEL",
+          ]) {
+            expect(linux[key]).toBeUndefined();
+          }
+        }
+      }
+    },
+  );
+
+  it("uses the host platform by default and does not invent absent Linux session values", () => {
+    const options = {
+      source: {},
+      provider: "codex",
+      cwd: "/workspace/default",
+      terminal: "pipe" as const,
+      identity: { role: "worker" as const },
+    };
+    expect(buildProviderChildEnvironment(options)).toEqual(
+      buildProviderChildEnvironment({ ...options, platform: process.platform }),
+    );
+    expect(buildProviderChildEnvironment({ ...options, platform: "linux" })).toEqual({
+      PWD: "/workspace/default",
+      CYBERDECK_PROCESS_ROLE: "worker",
+      CYBERDECK_WORKER_MODE: "normal",
+    });
+    expect(buildProviderChildEnvironment({ ...options, source: SOURCE })).toEqual(
+      buildProviderChildEnvironment({ ...options, source: SOURCE, platform: process.platform }),
+    );
+  });
+
+  it("preserves Linux session values through session and job launch boundaries", () => {
+    const session = sessionLaunchEnvironment(
+      SOURCE, "codex", "/workspace/session", { kind: "orchestrator" }, { platform: "linux" },
+    );
+    const job = jobLaunchEnvironment(
+      SOURCE, "codex", { cwd: "/workspace/job", workerMode: "caveman" }, { platform: "linux" },
+    );
+    expect(session).toMatchObject({
+      DBUS_SESSION_BUS_ADDRESS: SOURCE.DBUS_SESSION_BUS_ADDRESS,
+      WSL_INTEROP: SOURCE.WSL_INTEROP,
+      TERM: "xterm-256color",
+      PWD: "/workspace/session",
+      CYBERDECK_PROCESS_ROLE: "orchestrator",
+    });
+    expect(session.OPENAI_BASE_URL).toBeUndefined();
+    expect(job).toMatchObject({
+      DBUS_SESSION_BUS_ADDRESS: SOURCE.DBUS_SESSION_BUS_ADDRESS,
+      WSL_INTEROP: SOURCE.WSL_INTEROP,
+      OPENAI_BASE_URL: SOURCE.OPENAI_BASE_URL,
+      TERM: SOURCE.TERM,
+      PWD: "/workspace/job",
+      CYBERDECK_PROCESS_ROLE: "worker",
+      CYBERDECK_WORKER_MODE: "caveman",
+    });
   });
 
   it("withholds provider routing from orchestrators only", () => {

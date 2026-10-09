@@ -26,10 +26,14 @@
     "node": ">=24.18.0 <25"
   },
   "os": [
-    "darwin"
+    "darwin",
+    "linux"
   ],
   "files": [
     "dist/src",
+    "contrib/nvim",
+    "docs/linux-*.md",
+    "docs/architecture/nvim-surface.md",
     "README.md",
     "LICENSE",
     "NOTICE",

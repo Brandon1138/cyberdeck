@@ -8,11 +8,13 @@ Cyberdeck is a neutral local broker for durable Codex, Claude, Cursor, and Antig
 
 > **Stop and detach are different.** `cyberdeck stop <session-id>` terminates the selected provider process and, for an orchestrator, its owned worker tree. Pressing `Ctrl-]`, closing an attached terminal, or closing a tmux pane only detaches that view; the session keeps running while the broker is alive. In Fleet, `Ctrl-]` reattaches the exact most recently explicitly detached live session.
 
-> **Alpha software.** `0.1.0-alpha.2` is a macOS developer preview. Persisted schemas and provider compatibility may change before the first stable release.
+> **Alpha software.** Persisted schemas and provider compatibility may change before the first stable release.
 
 ## Requirements and installation
 
-Cyberdeck requires macOS and Node.js 24.18 or newer in the Node 24 release line. Install and authenticate each provider CLI you intend to use. The cockpit also requires the native system `tmux` binary; Cyberdeck does not bundle, build, silently install, or emulate tmux. The plain Fleet remains usable without it.
+Cyberdeck supports native macOS and glibc Linux (Ubuntu, Debian and Arch), including Linux distributions running in WSL2. It requires Node.js 24.18 or newer in the Node 24 release line. Install and authenticate each provider CLI inside the system running Cyberdeck. The cockpit requires the native system `tmux` binary, version 3.3 or newer; Cyberdeck does not bundle or silently install it. The plain Fleet remains usable without it. The optional nvim integration requires Neovim 0.10 or newer.
+
+See the [Linux and WSL installation guide](docs/linux-install.md) for native build prerequisites and installation from source or a packed release artifact. Until a Linux-enabled version is published, use that route on Linux and WSL rather than the existing npm prerelease. Desktop clipboard setup is described in [Linux desktop integration](docs/linux-desktop.md).
 
 Install the public prerelease from npm:
 
@@ -205,7 +207,9 @@ endpoints/profiles, and worker processes keep native routing. `--check` reports 
 restarting services. Activation evidence is written under `~/.local/share/cyberdeck/rc-coexistence-20261006`.
 The shell integration sources `~/.local/share/cyberdeck/codex-remote-shell.zsh`; existing shells need
 to source that file once after activation. Pair the phone with the dedicated identity using
-`node ~/.local/share/cyberdeck/codex-remote.mjs pair`; it opens a short-lived QR in Preview. Scan it
+`node ~/.local/share/cyberdeck/codex-remote.mjs pair`; it opens a short-lived QR in Preview on macOS
+or the host's default image viewer on Linux/WSL. Keep the companion `desktop-open.mjs` alongside
+the launcher when copying it. Scan it
 with the phone's Camera and complete setup in ChatGPT, then verify that phone input reaches the intended
 CLI and Orc conversations while Desktop stays connected. Pairing and message delivery are separate
 checks from a relay reporting `connected`.
@@ -311,10 +315,11 @@ A human attachment always owns the only writer lease: orchestrator input remains
 controller detaches. Cyberdeck never steers a worker through tmux.
 
 Interactive prompts, normalized provider output, orchestrator instructions, and lifecycle changes
-are stored locally in an append-only transcript at:
+are stored locally in an append-only transcript below the platform state directory:
 
 ```text
-~/Library/Application Support/Cyberdeck/threads/transcript.jsonl
+macOS: ~/Library/Application Support/Cyberdeck/threads/transcript.jsonl
+Linux: ${XDG_STATE_HOME:-~/.local/state}/cyberdeck/threads/transcript.jsonl
 ```
 
 This is a deliberate change from metadata-only journaling. The transcript is created with user-only
@@ -348,8 +353,7 @@ cyberdeck broker stop
 the built broker in the background, and waits for the replacement to report healthy.
 
 Cyberdeck admits 64 active workers by default. Orchestrators do not consume worker slots. Override
-the ceiling persistently in `~/Library/Application Support/Cyberdeck/config.json`, then restart the
-broker:
+the ceiling persistently in `config.json` inside the platform state directory, then restart the broker:
 
 ```json
 {
@@ -490,11 +494,14 @@ the final change set and releases the lock — one transition, one message, so t
 outlive the run. Locks are tracked per worker, not per path, so a worktree nested inside another
 open worktree keeps its own files locked for as long as its own worker runs.
 
-The nvim side ships in this repository and installs nothing on its own. Point your own config at it
-and call `listen()` once:
+The nvim side ships in this repository and in the npm package, and installs nothing on its own.
+Point your config at the `contrib/nvim` directory of the installation you run and call `listen()`
+once. For a global npm install, the directory is `$(npm root -g)/@ishmael38/cyberdeck/contrib/nvim`;
+replace the example path below with its absolute value. See the [Neovim setup guide](docs/linux-nvim.md)
+for source installs, custom prefixes and Linux distributions with an older Neovim package.
 
 ```lua
-vim.opt.runtimepath:append("/absolute/path/to/cyberdeck/contrib/nvim")
+vim.opt.runtimepath:prepend("/absolute/path/to/cyberdeck/contrib/nvim")
 require("cyberdeck").listen()
 ```
 
@@ -512,9 +519,12 @@ same address Cyberdeck derives — neither side is ever told where the other is.
 0.10 or newer and does nothing outside tmux. The association between a worker and an nvim address is
 held in memory only: if the broker restarts, press `Ctrl-N` again.
 
-Changed files are computed against the upstream branch git itself recorded for the worktree, or
-against `HEAD` when there is none. With no upstream configured, work the agent committed and left
-clean does not appear in the list.
+Every RPC checks the loaded Lua module's protocol version before changing tabs, lists or buffer
+locks. An older, missing or incompatible module produces setup guidance. Choose the module from
+the client installation you run; updating files does not replace Lua cached in an existing Neovim.
+
+Changed files are computed against the merge base of `origin/HEAD` and the worktree's HEAD. When
+`origin/HEAD` is absent, only untracked files appear and the title says `no baseline`.
 
 ## Delegate one explicitly selected worker
 
@@ -622,7 +632,8 @@ provisioning modes, the naming policy, the retention/cleanup policy behind
 ## Security, privacy, and contributing
 
 Cyberdeck stores local session metadata and transcripts below
-`~/Library/Application Support/Cyberdeck/`. These files can contain sensitive
+`~/Library/Application Support/Cyberdeck/` on macOS and
+`${XDG_STATE_HOME:-~/.local/state}/cyberdeck/` on Linux and WSL. These files can contain sensitive
 prompts, source code, paths, and provider output. Provider processes inherit the
 launching environment and remain governed by their own sandbox, network,
 telemetry, authentication, and service terms.

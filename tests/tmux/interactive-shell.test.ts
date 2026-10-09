@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,7 +86,7 @@ describe("tmux interactive shell", () => {
     })).resolves.toBe(await realpath(selected));
   });
 
-  it("runs a shell that is not zsh without pretending to capture its cwd", async () => {
+  it("runs an unsupported cwd-handoff shell without pretending to capture its cwd", async () => {
     const start = await temporaryDirectory();
     const calls: string[][] = [];
     const spawnSync = vi.fn<InteractiveShellSpawnSync>((_command, args) => {
@@ -95,11 +95,11 @@ describe("tmux interactive shell", () => {
     });
 
     await expect(openInteractiveShell(start, {
-      shell: "/bin/bash",
+      shell: "/usr/bin/fish",
       insideTmux: true,
       spawnSync,
     })).resolves.toBeUndefined();
-    expect(calls[0]?.slice(-2)).toEqual(["/bin/bash", "-li"]);
+    expect(calls[0]?.slice(-2)).toEqual(["/usr/bin/fish", "-li"]);
     expect(popupArguments(calls[0] ?? []).size).toBe(0);
   });
 
@@ -114,7 +114,7 @@ describe("tmux interactive shell", () => {
     })).rejects.toMatchObject({ code: "INTERACTIVE_SHELL_REQUIRES_TMUX" });
   });
 
-  it("records the cwd on exit and on every cd, and still runs the operator's own .zshenv", async () => {
+  it.skipIf(!existsSync("/bin/zsh"))("records the cwd on exit and on every cd, and still runs the operator's own .zshenv", async () => {
     const root = await realpath(await temporaryDirectory());
     const real = join(root, "real-zdotdir");
     const ours = join(root, "our-zdotdir");

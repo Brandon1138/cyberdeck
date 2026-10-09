@@ -27,6 +27,8 @@ export interface ProviderChildEnvironmentOptions {
   cwd: string;
   terminal: ProviderChildTerminal;
   identity: LaunchIdentity;
+  /** Defaults to the host platform; explicit values allow platform contract tests. */
+  platform?: NodeJS.Platform;
   grant?: Readonly<ProviderChildEnvironmentGrant>;
   disableUpdates?: boolean;
   enableToolSearch?: boolean;
@@ -67,6 +69,20 @@ const COMPATIBILITY_KEYS = [
   "XDG_STATE_HOME",
   // Retained provisionally until post-restart Claude/macOS Keychain testing proves it unnecessary.
   "SECURITYSESSIONID",
+] as const;
+
+const LINUX_SESSION_KEYS = [
+  // Browser-based provider login and desktop helpers need display endpoints, not credential values.
+  "DISPLAY",
+  "WAYLAND_DISPLAY",
+  "XAUTHORITY",
+  "XDG_RUNTIME_DIR",
+  // Desktop keyring/session services and their user data location.
+  "DBUS_SESSION_BUS_ADDRESS",
+  "XDG_DATA_HOME",
+  // WSL's Windows-browser bridge needs its IPC endpoint and the originating distro name.
+  "WSL_INTEROP",
+  "WSL_DISTRO_NAME",
 ] as const;
 
 const PROXY_AND_TLS_KEYS = [
@@ -119,14 +135,17 @@ const ORCHESTRATOR_WITHHELD_KEYS = [
  * Build one provider/app-server child environment from reviewed exact-name layers.
  *
  * No source spread, pattern matching, family prefix, or inherit-all path exists. Unknown provider
- * ids receive only the compatibility and proxy/TLS layers. PWD and PTY TERM are launch facts, not
- * inherited shell state.
+ * ids receive only the compatibility, host-platform session, and proxy/TLS layers. PWD and PTY
+ * TERM are launch facts, not inherited shell state.
  */
 export function buildProviderChildEnvironment(
   options: ProviderChildEnvironmentOptions,
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   copyExact(environment, options.source, COMPATIBILITY_KEYS);
+  if ((options.platform ?? process.platform) === "linux") {
+    copyExact(environment, options.source, LINUX_SESSION_KEYS);
+  }
   copyExact(environment, options.source, PROVIDER_KEYS[options.provider] ?? []);
   copyExact(environment, options.source, PROXY_AND_TLS_KEYS);
 
@@ -172,7 +191,7 @@ export function sessionLaunchEnvironment(
   session: Pick<SessionRecord, "kind" | "workerMode">,
   controls: Pick<
     ProviderChildEnvironmentOptions,
-    "disableUpdates" | "enableToolSearch" | "grant"
+    "disableUpdates" | "enableToolSearch" | "grant" | "platform"
   > = {},
 ): NodeJS.ProcessEnv {
   return buildProviderChildEnvironment({
@@ -194,7 +213,7 @@ export function jobLaunchEnvironment(
   request: Pick<JobRequest, "cwd" | "workerMode">,
   controls: Pick<
     ProviderChildEnvironmentOptions,
-    "disableUpdates" | "enableToolSearch" | "grant"
+    "disableUpdates" | "enableToolSearch" | "grant" | "platform"
   > = {},
 ): NodeJS.ProcessEnv {
   return buildProviderChildEnvironment({
