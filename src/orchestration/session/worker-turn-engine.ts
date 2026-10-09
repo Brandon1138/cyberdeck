@@ -375,7 +375,7 @@ export class WorkerTurnEngine {
       exitCode: this.record.exitCode,
       activity: this.activity,
       composer: this.composer,
-      awaitingInputReady: this.inputReadiness.pending,
+      awaitingInputReady: this.record.scout?.transport !== "headless-stream-json" && this.inputReadiness.pending,
       completedTurns: this.completedTurnCount,
       canonicalTurns: this.canonicalTurnCount,
       pendingInstructions: this.rendered.length,

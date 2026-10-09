@@ -107,8 +107,9 @@ timeout never authorizes a write: inspect the provider if startup does not finis
 Launch and resume reset that evidence; callbacks from the replaced process cannot release it.
 Startup repainting is not a model completion. Provider-native argv prompts and Cursor's direct,
 suppressed initialization retain their existing transport and turn semantics. Claude headless
-dispatch uses its native pipe/stream receipts and does not pass through this composer gate. This
-does not promise compatibility with every future provider UI; a changed input surface needs a
+dispatch uses its native pipe/stream receipts and does not pass through this composer gate.
+One-shot headless Scout truth is also excluded; its supervisor owns native stream completion.
+This does not promise compatibility with every future provider UI; a changed input surface needs a
 verified parser update, rather than a speculative submission or trust decision.
 
 ## Waits
