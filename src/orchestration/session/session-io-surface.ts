@@ -1,3 +1,4 @@
+import { WakeHeldError, type WakeHoldReason } from "../../domain/instruction.js";
 import type { ModalAnswerAttempt } from "../../domain/modal-descriptor.js";
 import { SessionCatalog } from "./session-catalog.js";
 import type { InstructionDelivery } from "./session-ports.js";
@@ -7,6 +8,7 @@ import {
   type ExitSink,
   type FailureSink,
   type OutputSink,
+  type RuntimeSession,
 } from "./session-registry-ports.js";
 import {
   requireInteractiveInput,
@@ -15,6 +17,9 @@ import {
   updateAttachmentState,
 } from "./session-runtime-guards.js";
 import { SessionUpdateBus } from "./session-update-bus.js";
+
+/** Operator inactivity tuning knob. Correctness also requires idle turn and empty composer. */
+export const WAKE_OPERATOR_QUIET_MS = 3_000;
 
 export interface SessionIoSurfaceOptions {
   catalog: SessionCatalog;
@@ -32,10 +37,29 @@ export interface SessionIoSurfaceOptions {
 export class SessionIoSurface {
   private readonly catalog: SessionCatalog;
   private readonly bus: SessionUpdateBus;
+  private readonly lastOperatorInput = new WeakMap<RuntimeSession, number>();
+  private readonly humanSubmissions = new WeakMap<RuntimeSession, number>();
+  private readonly heldWakes = new Map<string, WakeHoldReason>();
+  private readonly quietTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly startedAt: number;
+
+  private now(): number { return this.catalog.options.now?.() ?? Date.now(); }
 
   constructor(options: SessionIoSurfaceOptions) {
     this.catalog = options.catalog;
     this.bus = options.bus;
+    // After restart, old operator input times are unknown. Wait one window conservatively.
+    this.startedAt = this.now();
+    this.bus.onSessionUpdate((sessionId) => {
+      const previous = this.heldWakes.get(sessionId);
+      if (previous === undefined) return;
+      const runtime = this.catalog.sessions.get(sessionId);
+      if (runtime === undefined || runtime.record.executionState !== "active"
+        || this.wakeHold(runtime) !== previous) {
+        this.clearWakeHold(sessionId);
+        this.bus.notifyDeliveryBoundary(sessionId);
+      }
+    });
   }
 
   async attach(
@@ -108,6 +132,10 @@ export class SessionIoSurface {
     if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
       throw new RegistryError("NOT_SESSION_CONTROLLER", "Another client controls this session");
     }
+    // Record admitted controller bytes synchronously, before the PTY can echo them.
+    if (data.length > 0 && runtime.controller?.clientId === clientId && clientId !== undefined) {
+      this.lastOperatorInput.set(runtime, this.now());
+    }
     requireSessionRuntime(runtime).write(data);
     await this.catalog.appendEvent("session.input", sessionId, { bytes: data.length });
   }
@@ -117,12 +145,25 @@ export class SessionIoSurface {
     const runtime = this.catalog.requireRuntime(sessionId);
     requireTerminalFinalizationComplete(runtime);
     requireInteractiveInput(runtime);
+    if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
+      throw new RegistryError("NOT_SESSION_CONTROLLER", "Another client controls this session");
+    }
     const adapter = this.catalog.requireAdapter(runtime.record.provider);
     const data = adapter.submitInput?.(message, runtime.record) ?? Buffer.from(`${message}\n`);
-    runtime.turns.resetStallObservation();
-    await this.catalog.appendTranscript(sessionId, "prompt", "human", message, {});
-    await this.catalog.setAttention(runtime, "working", true);
-    await this.write(sessionId, clientId, data);
+    // Human submit persists its prompt before writing. Reserve that in-flight input synchronously
+    // so a wake cannot use its empty composer while the persistence await is outstanding.
+    this.humanSubmissions.set(runtime, (this.humanSubmissions.get(runtime) ?? 0) + 1);
+    try {
+      runtime.turns.resetStallObservation();
+      await this.catalog.appendTranscript(sessionId, "prompt", "human", message, {});
+      await this.catalog.setAttention(runtime, "working", true);
+      await this.write(sessionId, clientId, data);
+    } finally {
+      const remaining = (this.humanSubmissions.get(runtime) ?? 1) - 1;
+      if (remaining === 0) this.humanSubmissions.delete(runtime);
+      else this.humanSubmissions.set(runtime, remaining);
+      if (this.heldWakes.has(sessionId)) this.bus.notifyDeliveryBoundary(sessionId);
+    }
   }
 
   /**
@@ -148,10 +189,25 @@ export class SessionIoSurface {
   ): Promise<InstructionDelivery> {
     this.catalog.assertMayConsume(sessionId);
     const runtime = this.catalog.requireRuntime(sessionId);
-    if (runtime.record.executionState === "active" && runtime.controller !== undefined) {
+    const wake = source === "broker" && metadata.brokerOwned === true
+      && metadata.submissionKind === "wake" && metadata.actorSessionId === sessionId
+      && runtime.record.kind === "orchestrator";
+    if (!wake && runtime.record.executionState === "active" && runtime.controller !== undefined) {
       throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
     }
-    if (runtime.record.executionState === "active") requireInteractiveInput(runtime);
+    if (runtime.record.executionState === "active") {
+      requireInteractiveInput(runtime);
+      if (wake) {
+        requireTerminalFinalizationComplete(runtime);
+        const hold = this.wakeHold(runtime);
+        if (hold !== undefined) {
+          this.heldWakes.set(sessionId, hold);
+          if (hold === "wake-operator-active") this.armQuietBoundary(sessionId, runtime);
+          throw new WakeHeldError(hold);
+        }
+        this.clearWakeHold(sessionId);
+      }
+    }
     const adapter = this.catalog.requireAdapter(runtime.record.provider);
     const submitKey = adapter.submitKey?.();
     return runtime.turns.submitInstruction({
@@ -162,6 +218,48 @@ export class SessionIoSurface {
       metadata,
       ...(instructionId === undefined ? {} : { instructionId }),
     });
+  }
+
+  /**
+   * Same session-scoped synchronous exclusion as the engine's deliveryHold/check/write path:
+   * no await from this reading through submitInstruction's PTY write. Controller write also has
+   * no await before recording bytes and writing them, so input cannot interleave with the gate.
+   * The engine revalidates its turn/capture/readiness reservations and arms the existing verifier.
+   */
+  private wakeHold(runtime: RuntimeSession): WakeHoldReason | undefined {
+    const truth = runtime.turns.projectTruth(); // Uses the provider composer reading from MIK-260.
+    if (truth.state === "working" || truth.pendingInstructions > 0 || this.humanSubmissions.has(runtime)) {
+      return "wake-turn-in-flight";
+    }
+    if (truth.composerOccupied) return "wake-composer-occupied";
+    if (this.now() - (this.lastOperatorInput.get(runtime) ?? this.startedAt) < WAKE_OPERATOR_QUIET_MS) {
+      return "wake-operator-active";
+    }
+    return undefined;
+  }
+
+  private clearWakeHold(sessionId: string): void {
+    this.heldWakes.delete(sessionId);
+    const timer = this.quietTimers.get(sessionId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.quietTimers.delete(sessionId);
+  }
+
+  private armQuietBoundary(sessionId: string, runtime: RuntimeSession): void {
+    if (this.quietTimers.has(sessionId)) return;
+    const remaining = WAKE_OPERATOR_QUIET_MS - (this.now() - (this.lastOperatorInput.get(runtime) ?? this.startedAt));
+    const timer = setTimeout(() => {
+      this.quietTimers.delete(sessionId);
+      if (this.catalog.sessions.get(sessionId) !== runtime || !this.heldWakes.has(sessionId)) return;
+      const quiet = this.now() - (this.lastOperatorInput.get(runtime) ?? this.startedAt) >= WAKE_OPERATOR_QUIET_MS;
+      if (!quiet) this.armQuietBoundary(sessionId, runtime);
+      else {
+        this.clearWakeHold(sessionId);
+        this.bus.notifyDeliveryBoundary(sessionId);
+      }
+    }, Math.max(1, remaining));
+    timer.unref?.();
+    this.quietTimers.set(sessionId, timer);
   }
 
   /**

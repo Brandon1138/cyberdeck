@@ -63,7 +63,7 @@ describe("OrchestratorNotificationDelivery", () => {
   let status: InstructionRecord["status"];
   let holdReason: string;
   let records: InstructionRecord[];
-  let instructions: Pick<InstructionQueue, "enqueueBroker" | "withdraw" | "list">;
+  let instructions: Pick<InstructionQueue, "enqueueBroker" | "withdraw" | "list" | "flush">;
   let registry: {
     get: ReturnType<typeof vi.fn<(sessionId: string) => SessionRecord>>;
     workerTruth: ReturnType<typeof vi.fn<(sessionId: string) => WorkerTruth>>;
@@ -79,6 +79,8 @@ describe("OrchestratorNotificationDelivery", () => {
   // Await application background work without advancing the injected clock or consuming a notice.
   // The queue is private in production; this barrier exists only to make no-side-effect checks exact.
   const settle = async () => {
+    await Promise.resolve();
+    await Promise.resolve();
     const tails = (delivery as unknown as { tails: Map<string, Promise<unknown>> }).tails;
     while (tails.size > 0) await Promise.allSettled([...tails.values()]);
   };
@@ -106,7 +108,7 @@ describe("OrchestratorNotificationDelivery", () => {
     bindings = [binding];
     listeners = new Set();
     status = "rendered";
-    holdReason = "human-controller";
+    holdReason = "wake-operator-active";
     records = [];
     registry = {
       get: vi.fn(() => ({ id: SESSION }) as SessionRecord),
@@ -115,6 +117,7 @@ describe("OrchestratorNotificationDelivery", () => {
       onSessionUpdate: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     };
     instructions = {
+      flush: vi.fn(async () => records),
       enqueueBroker: vi.fn(async (input) => {
         const record: InstructionRecord = { ...input, id: randomUUID(), status, holdReason, hop: 0,
           createdAt: new Date(clock.now).toISOString(), updatedAt: new Date(clock.now).toISOString(), brokerOwned: true };
@@ -162,6 +165,7 @@ describe("OrchestratorNotificationDelivery", () => {
       actorSessionId: SESSION, targetSessionId: SESSION,
       message: `[cyberdeck notice] ${files.notices.get(SESSION)!.text}`,
       messageId: stableUuid(`notice:${CONTROLLER}:${notification.cursor}`),
+      submissionKind: "wake", wake: { controllerId: CONTROLLER, cursor: notification.cursor, notificationIds: [notification.id] },
     });
     expect(store.listPending(CONTROLLER, 0, 50)[0]!.deliveredVia).toEqual(["wake"]);
     expect(store.pendingCount(CONTROLLER)).toBe(1);
@@ -191,11 +195,11 @@ describe("OrchestratorNotificationDelivery", () => {
     expect(await delivery.notice(CONTROLLER)).toBeUndefined();
   });
 
-  it("row 5: human-controller holds stay queued and do not block tool-result notices", async () => {
+  it("row 5: wake-specific holds stay queued and do not block tool-result notices", async () => {
     status = "queued";
     await append();
     await advance(100);
-    expect(records[0]).toMatchObject({ status: "queued", holdReason: "human-controller" });
+    expect(records[0]).toMatchObject({ status: "queued", holdReason: "wake-operator-active" });
     await append();
     await advance(100);
     expect(instructions.enqueueBroker).toHaveBeenCalledTimes(1);
