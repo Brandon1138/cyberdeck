@@ -83,6 +83,7 @@ export class OrchestratorManager {
     private readonly workerPreferences?: WorkerPreferenceRepository,
     private readonly providerPermissions?: ProviderPermissionPreferenceReader,
     private readonly readCapabilities?: (provider: ProviderId) => Promise<ResolvedWorkerCapability[]>,
+    private readonly observeBindingSession?: (binding: OrchestratorBinding, session?: SessionRecord) => Promise<void>,
   ) {}
 
   async ensure(input: EnsureOrchestratorRequest): Promise<OrchestratorManagerResult> {
@@ -246,9 +247,13 @@ export class OrchestratorManager {
           updatedAt: now,
         };
         await this.store.put(binding);
+        await this.observeBindingSession?.(binding, started);
       });
     } catch (error) {
-      if (binding !== undefined) await this.restoreBinding(binding.key, previous, error);
+      if (binding !== undefined) {
+        try { await this.observeBindingSession?.(binding); }
+        finally { await this.restoreBinding(binding.key, previous, error); }
+      }
       throw error;
     }
     if (binding === undefined) {
