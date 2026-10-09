@@ -28,8 +28,8 @@ The command fails closed unless local `main` exactly matches `origin/main`, the
 checkout is clean, the current version exists on npm, and the target version and
 tag do not. It then:
 
-1. increments the alpha version in package metadata, README, issue template, and
-   changelog;
+1. increments the alpha version in package metadata, issue template, and changelog;
+   the README describes platform support without a release-specific version;
 2. runs the frozen install, typecheck, full tests, build, package inspection, and
    a clean install of the packed CLI;
 3. commits and pushes `main`, waits for CI, creates and pushes the annotated tag;

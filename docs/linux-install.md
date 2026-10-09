@@ -1,5 +1,8 @@
 # Linux and WSL2 installation
 
+For a fresh Ubuntu 24.04 installation on Windows, start with the
+[WSL2 quickstart](linux-wsl-quickstart.md), including Codex, Claude Code and Cursor setup.
+
 Cyberdeck supports native Linux and Linux distributions running under WSL2. Use Linux Node.js
 24.18.0 or newer in the Node 24 release line (`>=24.18.0 <25`), and install and authenticate the
 Linux versions of the provider CLIs you intend to use. The package retains native macOS support.

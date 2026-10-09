@@ -119,6 +119,8 @@ export function providerLimitFromTermination(
 
 /** What the input surface of the provider TUI is holding. */
 export interface ComposerObservation {
+  /** Positive recognition of an empty input surface, distinct from an unrecognized screen. */
+  inputReady?: boolean;
   /** A blocking prompt (permission, trust, approval) owns the UI. */
   modalOpen: boolean;
   /** Unsent text is sitting in the composer. Best-effort; see `runtime/composer-state.ts`. */
@@ -139,6 +141,8 @@ export interface WorkerTruthInput {
   /** Derived from the PTY replay by `providerTerminalActivity`. */
   activity: "working" | "awaiting-input" | "needs-input" | "unknown";
   composer: ComposerObservation;
+  /** This process generation has not yet exposed a safe terminal input boundary. */
+  awaitingInputReady?: boolean;
   /** Turns the broker has counted, canonical or replay-derived. */
   completedTurns: number;
   /** Subset of `completedTurns` backed by a provider-native transcript turn. */
@@ -251,6 +255,9 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
       "Unsent text is sitting in the provider composer; no turn is running",
     );
   }
+  if (input.awaitingInputReady === true) {
+    return settle("starting", "Waiting for a recognized provider input surface; automated instructions remain queued");
+  }
   if (input.stalledForSeconds !== undefined) {
     return {
       ...settle("stalled", `No transcript or token movement for ${input.stalledForSeconds}s`),
@@ -343,6 +350,8 @@ export const DeliveryHoldReasonSchema = z.enum([
   "provider-modal",
   /** The composer already holds text; appending would corrupt whatever is there. */
   "composer-occupied",
+  /** This process generation has not positively established an input-ready terminal. */
+  "provider-starting",
   /**
    * A turn is already in flight. Writing now would give the instruction the ordinal of a turn that
    * started before it existed, so that older turn's answer would settle the wait asking about it.
@@ -358,6 +367,7 @@ export const DELIVERY_HOLD_DETAIL: Readonly<Record<DeliveryHoldReason, string>> 
   "human-controller": "A human controller currently owns this thread",
   "provider-modal": "The worker is blocked at a provider prompt; the instruction is held until it clears",
   "composer-occupied": "The worker's composer already holds unsent text; the instruction is held until it clears",
+  "provider-starting": "Provider input readiness is unconfirmed; the instruction remains queued until a recognized empty composer appears. Inspect the provider if startup does not finish",
   "provider-busy": "The worker is mid-turn; the instruction is held until that turn finishes so it is answered by its own turn",
   "worker-terminal": "The worker is terminal and cannot consume this instruction",
 };
