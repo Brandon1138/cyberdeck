@@ -82,6 +82,14 @@ describe("WorkerTurnObservationAdapter", () => {
     expect(adapter.composer("claude", replay)).toMatchObject({ inputReady: false, modalOpen: true });
   });
 
+  it("recognizes Claude's real cursor-positioned trust wording as a modal", () => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    replay.appendBytes(Buffer.from("Quick\u001b[8Gsafety\u001b[15Gcheck:\u001b[22GIs\u001b[25Gthis\u001b[30Ga\u001b[32Gproject\u001b[40Gyou\u001b[44Gcreated\u001b[52Gor\u001b[55Gone\u001b[59Gyou\u001b[63Gtrust?\n❯\u001b[3GNo,\u001b[7Gexit\nYes,\u001b[6GI\u001b[8Gtrust\u001b[14Gthis\u001b[19Gfolder\nEnter\u001b[7Gto\u001b[10Gconfirm\n"));
+    expect(adapter.activity("claude", replay)).toBe("needs-input");
+    expect(adapter.composer("claude", replay)).toMatchObject({ inputReady: false, modalOpen: true });
+  });
+
   it("fails closed after unsupported screen edits until a full redraw, and resets per process", () => {
     const adapter = new WorkerTurnObservationAdapter();
     const replay = adapter.createReplay(128 * 1024);
