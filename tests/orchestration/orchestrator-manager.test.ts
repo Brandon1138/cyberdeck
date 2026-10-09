@@ -77,6 +77,37 @@ const binding: OrchestratorBinding = {
 };
 
 describe("OrchestratorManager", () => {
+  it("observes binding liveness durably before the launch prompt can act", async () => {
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const observe = vi.fn(async (_binding: OrchestratorBinding, started?: SessionRecord) => {
+      expect(put).toHaveBeenCalledOnce();
+      expect(started).toEqual(record);
+    });
+    const start = vi.fn(async (_request, _prompt, activate: (session: SessionRecord) => Promise<void>) => {
+      await activate(record);
+      expect(observe).toHaveBeenCalledOnce();
+      return record;
+    });
+    const manager = new OrchestratorManager({ start } as never,
+      { get: async () => undefined, put } as never, undefined, undefined, undefined, observe);
+    await manager.ensure({ provider: "codex", cwd: record.cwd, scope: "workspace" });
+  });
+
+  it("closes liveness and restores the prior binding when creation fails after activation", async () => {
+    const put = vi.fn(async (_binding: OrchestratorBinding) => undefined);
+    const reset = vi.fn(async (_key: string) => undefined);
+    const observe = vi.fn(async (_binding: OrchestratorBinding, _started?: SessionRecord) => undefined);
+    const start = vi.fn(async (_request, _prompt, activate: (session: SessionRecord) => Promise<void>) => {
+      await activate(record);
+      throw new Error("spawn failed");
+    });
+    const manager = new OrchestratorManager({ start } as never,
+      { get: async () => undefined, put, reset } as never, undefined, undefined, undefined, observe);
+    await expect(manager.ensure({ provider: "codex", cwd: record.cwd, scope: "workspace" })).rejects.toThrow("spawn failed");
+    expect(observe.mock.calls.map(([, started]) => started)).toEqual([record, undefined]);
+    expect(reset).toHaveBeenCalledWith(`workspace:${record.cwd}`);
+  });
+
   it("creates and round-trips a primary whose workspace path contains peer marker text", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-orchestrator-marker-path-"));
     const cwd = "/tmp/repo:peer:archive";

@@ -196,6 +196,8 @@ export const ControllerLivenessSchema = z.object({
   state: z.enum(["connected", "disconnected"]),
   observedAt: z.iso.datetime(),
   reason: z.string().min(1).max(1_024),
+  /** Present only when the broker vouches for a managed session, never a client heartbeat. */
+  session: z.object({ sessionId: z.uuid(), generation: z.number().int().positive() }).optional(),
 });
 
 export const WorkerEventKindSchema = z.enum([
