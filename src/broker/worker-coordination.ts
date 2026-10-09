@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   CheckpointRequestSchema,
   ControllerIdentitySchema,
+  ControllerLivenessSchema,
   EventAckSchema,
   OwnershipMutationResultSchema,
   OwnershipSelectorSchema,
@@ -52,6 +53,8 @@ import {
 } from "../domain/worker-handoff.js";
 import type { CoordinationTransaction } from "../domain/worker-coordination-state.js";
 import type { WorkerCoordinationRepository } from "./worker-coordination-ports.js";
+import { controllerLiveness, heartbeatObservation, isControlled, leaseHasExpired, observedLeaseCopy,
+  storedLeaseMatches, type CurrentLeaseObservation } from "./worker-lease-liveness.js";
 
 type OwnershipOperation = z.infer<typeof OwnershipOperationSchema>;
 
@@ -336,11 +339,22 @@ export class WorkerCoordinationService {
   }
 
   getSubject(subjectId: string): OwnershipSubject | undefined {
-    return this.subjects.get(subjectId);
+    const subject = this.subjects.get(subjectId);
+    return subject === undefined ? undefined : this.expiredCopy(subject, this.now());
   }
 
   listSubjects(): OwnershipSubject[] {
-    return [...this.subjects.values()];
+    const now = this.now();
+    return [...this.subjects.values()].map((subject) => this.expiredCopy(subject, now));
+  }
+
+  listControllerLiveness(): ControllerLiveness[] {
+    return [...this.liveness.values()];
+  }
+
+  hasCurrentLease(input: CurrentLeaseObservation): boolean {
+    const subject = this.subjects.get(input.sessionId);
+    return storedLeaseMatches(subject, input, this.now()) && !this.isExpired(subject!, this.now());
   }
 
   getBudget(subjectId: string): WorkerBudgetRecord | undefined {
@@ -1187,23 +1201,33 @@ export class WorkerCoordinationService {
     controller: ControllerIdentity;
     state: "connected" | "disconnected";
     reason: string;
+    session?: ControllerLiveness["session"];
   }): Promise<OwnershipMutationResult> {
     return this.exclusive(async () => {
       this.assertReady();
       const replay = this.replayOwnership(input.mutationId, "liveness");
       if (replay !== undefined) return replay;
       const now = this.now();
-      const entry: ControllerLiveness = {
+      const entry = ControllerLivenessSchema.parse({
         controller: ControllerIdentitySchema.parse(input.controller),
         state: input.state,
         observedAt: now,
         reason: input.reason,
-      };
-      const outcomes = [...this.subjects.values()]
+        ...(input.session === undefined ? {} : { session: input.session }),
+      });
+      // Evaluate the outgoing session observation before replacing it. A resume after grace
+      // cannot resurrect an expired token simply because expiry had not yet been persisted.
+      const subjects = [...this.subjects.values()]
         .filter((subject) => subject.lease.controller?.controllerId === input.controller.controllerId)
-        .map((subject) => this.outcome(subject, isControlled(subject) ? "ALREADY_CONTROLLED" : "ORPHANED"));
+        .map((subject) => input.session !== undefined && controllerLiveness(subject, this.liveness)?.session === undefined
+          ? subject : this.expiredCopy(subject, now));
+      const outcomes = subjects.map((subject) => {
+        const projected = observedLeaseCopy(subject, entry, now, this.leaseDurationMs, this.gracePeriodMs);
+        return this.outcome(projected, isControlled(projected) ? "ALREADY_CONTROLLED" : "ORPHANED");
+      });
       const result = this.result(input.mutationId, "liveness", outcomes);
-      await this.commitWithReceipt(result, { liveness: [entry] });
+      await this.commitWithReceipt(result, { liveness: [entry],
+        subjects: subjects.filter((subject) => subject.lease.state === "orphaned") });
       return result;
     });
   }
@@ -1304,7 +1328,7 @@ export class WorkerCoordinationService {
     return this.exclusive(async () => {
       this.assertReady();
       const subject = this.requireSubject(input.subjectId);
-      if (subject.lifecycle === input.lifecycle) return subject;
+      if (subject.lifecycle === input.lifecycle) return this.expiredCopy(subject, this.now());
       const updated = OwnershipSubjectSchema.parse({
         ...subject,
         lifecycle: input.lifecycle,
@@ -1325,7 +1349,7 @@ export class WorkerCoordinationService {
           "RECONCILED",
         )],
       });
-      return updated;
+      return this.expiredCopy(updated, this.now());
     });
   }
 
@@ -1963,29 +1987,11 @@ export class WorkerCoordinationService {
   }
 
   private expiredCopy(subject: OwnershipSubject, now: string): OwnershipSubject {
-    if (!this.isExpired(subject, now)) return subject;
-    return {
-      ...subject,
-      lease: {
-        ...subject.lease,
-        state: "orphaned",
-        tokenHash: undefined,
-        orphanedAt: now,
-        reason: "lease expired after broker-observed liveness/heartbeat deadline",
-        contest: undefined,
-      },
-      updatedAt: now,
-    };
+    return observedLeaseCopy(subject, controllerLiveness(subject, this.liveness), now, this.leaseDurationMs, this.gracePeriodMs);
   }
 
   private isExpired(subject: OwnershipSubject, now: string): boolean {
-    if (!isControlled(subject)) return false;
-    if (Date.parse(now) >= Date.parse(subject.lease.expiresAt)) return true;
-    const observed = subject.lease.controller === undefined
-      ? undefined
-      : this.liveness.get(subject.lease.controller.controllerId);
-    return observed?.state === "disconnected"
-      && Date.parse(now) >= Date.parse(observed.observedAt) + this.gracePeriodMs;
+    return leaseHasExpired(subject, controllerLiveness(subject, this.liveness), now, this.gracePeriodMs);
   }
 
   private authCode(
@@ -2335,12 +2341,7 @@ export class WorkerCoordinationService {
     observedAt: string,
     reason: string,
   ): ControllerLiveness {
-    return {
-      controller,
-      state: "connected",
-      observedAt,
-      reason,
-    };
+    return heartbeatObservation(controller, this.liveness.get(controller.controllerId), observedAt, reason);
   }
 
   private async commitWithReceipt(
@@ -2749,11 +2750,6 @@ function canonicalJson(value: unknown): string {
 
 function checkpointKey(workerId: string, correlationId: string): string {
   return `${workerId}\0${correlationId}`;
-}
-
-function isControlled(subject: OwnershipSubject): boolean {
-  return (subject.lease.state === "active" || subject.lease.state === "contested")
-    && subject.lease.controller !== undefined;
 }
 
 function isPinned(event: StoredWorkerEvent): boolean {
