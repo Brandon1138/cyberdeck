@@ -41,6 +41,9 @@ function harness(
   let composer: ReturnType<WorkerTurnObservationPort["composer"]> = {
     modalOpen: false,
     occupied: false,
+    // These scenarios exercise an already recognized input surface. Startup uses real terminal
+    // observations in provider-startup-readiness.test.ts.
+    inputReady: true,
   };
   const replay: ReplayObservation = {
     appendBytes: (chunk) => { frame += chunk.toString("utf8"); },
@@ -333,14 +336,16 @@ describe("WorkerTurnEngine", () => {
   it("holds resumed container input through startup without inventing a completed turn", async () => {
     vi.useFakeTimers();
     const { engine, observations, replay, writes } = harness({ executor: "orbstack-container" });
+    observations.composer = { modalOpen: false, occupied: false, inputReady: false };
     engine.resetForResume();
     const input = { message: "resume work", encoded: Buffer.from("resume work\n"), source: "orchestrator" as const, instructionId: "resume-input" };
-    expect(engine.projectTruth().state).toBe("working");
+    expect(engine.projectTruth().state).toBe("starting");
     expect((await engine.submitInstruction(input)).state).toBe("queued");
     observations.activity = "working";
     engine.appendOutput(Buffer.from("Resuming session; starting MCP"), replay);
     expect((await engine.submitInstruction(input)).state).toBe("queued");
     observations.activity = "awaiting-input";
+    observations.composer = { modalOpen: false, occupied: false, inputReady: true };
     engine.appendOutput(Buffer.from("READY from history; empty composer"), replay);
     await vi.advanceTimersByTimeAsync(3000);
     expect(engine.completedTurns).toBe(0);
@@ -464,7 +469,7 @@ describe("WorkerTurnEngine", () => {
     await expect(engine.settleForResume(replay())).resolves.toBeUndefined();
     record.executionState = "active";
     engine.resetForResume();
-    observations.composer = { modalOpen: false, occupied: false };
+    observations.composer = { modalOpen: false, occupied: false, inputReady: true };
     await expect(engine.submitInstruction({
       message: "work after fatal resume",
       encoded: Buffer.from("work after fatal resume\n"),
