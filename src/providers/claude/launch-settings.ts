@@ -8,6 +8,7 @@ import {
   type ClaudeNoticeHookCommand,
   type ClaudeNoticeHooks,
 } from "./notice-hooks.js";
+import type { ClaudeOperatorVoice } from "./operator-voice.js";
 
 /**
  * The endpoint Remote Control is gated to. Claude accepts a base URL whose host is exactly this
@@ -21,10 +22,12 @@ export interface ClaudeLaunchSettingsInput {
   transcriptHook?: ClaudeTranscriptHookCommand;
   /** Present only when an orchestrator can read the broker's notice files. */
   noticeHook?: ClaudeNoticeHookCommand;
+  /** The operator's user-scope voice keys; carried for orchestrators only. */
+  operatorVoice?: ClaudeOperatorVoice;
   orchestrator: boolean;
 }
 
-export interface ClaudeLaunchSettings {
+export interface ClaudeLaunchSettings extends ClaudeOperatorVoice {
   hooks?: Partial<ClaudeTranscriptHooks & ClaudeNoticeHooks>;
   env?: { ANTHROPIC_BASE_URL: typeof CLAUDE_FIRST_PARTY_BASE_URL };
 }
@@ -45,6 +48,12 @@ export interface ClaudeLaunchSettings {
  *
  * Orchestrator-only, deliberately. Workers and top-level sessions keep the operator's routing,
  * proxy included, exactly as `launch-environment.ts` copies it.
+ *
+ * The orchestrator's copy of the operator's voice keys rides in the same file, for the same reason
+ * in reverse: user scope is excluded, so a preference that only exists there has to be carried up.
+ * The cost is that command-line scope also outranks the user file `/voice` writes to, so `/voice`
+ * run *inside* an orchestrator reports the toggle but changes nothing until that orchestrator is
+ * launched or resumed again. Workers read user scope directly and need no copy.
  */
 export function claudeLaunchSettings(input: ClaudeLaunchSettingsInput): string | undefined {
   const settings: ClaudeLaunchSettings = {};
@@ -56,6 +65,7 @@ export function claudeLaunchSettings(input: ClaudeLaunchSettingsInput): string |
       settings.hooks = { ...settings.hooks, ...claudeNoticeHooks(input.noticeHook) };
     }
     settings.env = { ANTHROPIC_BASE_URL: CLAUDE_FIRST_PARTY_BASE_URL };
+    Object.assign(settings, input.operatorVoice);
   }
   if (settings.hooks === undefined && settings.env === undefined) return undefined;
   return JSON.stringify(settings);
