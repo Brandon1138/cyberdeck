@@ -1,6 +1,21 @@
 import { z } from "zod";
 import { InstructionLifecycleStateSchema } from "./worker-truth.js";
 
+export const WakeContextSchema = z.object({
+  controllerId: z.string().min(1),
+  cursor: z.number().int().positive(),
+  notificationIds: z.array(z.uuid()),
+});
+
+export type WakeHoldReason = "wake-turn-in-flight" | "wake-composer-occupied" | "wake-operator-active";
+
+/** Internal refusal, caught by the durable queue rather than mapped to human-controller. */
+export class WakeHeldError extends Error {
+  constructor(readonly holdReason: WakeHoldReason) {
+    super(holdReason);
+  }
+}
+
 /**
  * The instruction's own state, drawn from the single worker state machine.
  *
@@ -52,6 +67,9 @@ export const InstructionRecordSchema = z.preprocess(
     hop: z.number().int().nonnegative().default(0),
     /** Broker policy instruction (for example, budget wrap-up), never caller-minted authority. */
     brokerOwned: z.boolean().optional(),
+    /** Only the internal broker enqueue can mint a wake submission. Legacy records are ordinary. */
+    submissionKind: z.literal("wake").optional(),
+    wake: WakeContextSchema.optional(),
   }),
 );
 

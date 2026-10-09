@@ -54,6 +54,8 @@ import { WorkerPreferenceStore } from "../persistence/worker-preference-store.js
 import { ProviderPermissionPreferenceStore } from "../persistence/provider-permission-preference-store.js";
 import { ensurePrivateDirectory } from "../persistence/private-files.js";
 import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
+import { OrchestratorControllerDirectory } from "../orchestration/orchestrator-controller-directory.js";
+import { OrchestratorSessionLiveness } from "../orchestration/orchestrator-session-liveness.js";
 import { AgentControlService } from "../orchestration/agent-control-service.js";
 import { OrchestratorPeerService } from "../orchestration/orchestrator-peer-service.js";
 import { GitWorkspaceProbe } from "../orchestration/git-workspace-probe.js";
@@ -274,6 +276,13 @@ export async function runBroker(
     createService: (store) => (observedCoordination = new ObservedWorkerCoordinationService({ store: activityCoordinationStore(store, activity) })),
   });
   await workerCoordination.start();
+  const orchestratorLiveness = new OrchestratorSessionLiveness({
+    directory: new OrchestratorControllerDirectory(orchestratorStore),
+    registry,
+    coordination: workerCoordination.service,
+    onError: (error) => console.error("Orchestrator lease liveness observation failed", error),
+  });
+  await orchestratorLiveness.start();
   // The notification feed replays its inbox before anything can write to it, and observes the
   // coordination substrate and the instruction repository through the two seams composed above.
   const notificationInbox = new OrchestratorNotificationStore(stateDirectory);
@@ -289,6 +298,8 @@ export async function runBroker(
     workerPreferences,
     providerPermissions,
     (provider) => orchestratorCapabilities.resolve(provider),
+    (binding, session) => orchestratorLiveness.bindingSession(binding, session),
+    (binding) => orchestratorLiveness.bindingRemoved(binding),
   );
   const instructionStore = new InstructionStore(stateDirectory);
   const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
@@ -417,6 +428,8 @@ export async function runBroker(
     await executionRuntime.closeAdmission();
     await registry.stopAll();
     await executionRuntime.close();
+    await orchestratorLiveness.flush();
+    orchestratorLiveness.dispose();
     await sentry?.close().catch(() => undefined);
     await journal.append(brokerEvent("broker.shutdown", { reason, pid: process.pid }));
     await server.close();
@@ -425,9 +438,7 @@ export async function runBroker(
   server = new BrokerServer({
     activity, executionHealth: executionRuntime.health,
     renewExecutionAttempt: async (input) => {
-      const lease = workerCoordination.service.getSubject(input.sessionId)?.lease;
-      if (lease?.state !== "active" || lease.version !== input.leaseVersion || lease.expiresAt !== input.leaseExpiresAt
-        || lease.controller?.controllerId !== input.controllerId || Date.parse(lease.expiresAt) <= Date.now()) return "not-running";
+      if (!workerCoordination.service.hasCurrentLease(input)) return "not-running";
       return executionRuntime.executions.renewAttempt(input.sessionId, input.leaseExpiresAt);
     },
     ...(telemetry === undefined ? {} : { telemetry }),

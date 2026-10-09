@@ -274,7 +274,7 @@ describe("orchestrator notification feed on a test broker", () => {
     expect(again.filter((record) => record.brokerOwned === true)).toHaveLength(1);
   });
 
-  it("holds the wake while a human controls the orchestrator and still answers the busy-path notice (row 5)", async () => {
+  it("holds the wake during operator activity and still answers the busy-path notice (row 5)", async () => {
     const broker = await testBroker();
     const orc = (await broker.ensure("fleet")).session.id;
     await broker.client.request("agent.notifications.configure", { actorSessionId: orc, policy: { coalesceMs: 0 } });
@@ -282,11 +282,12 @@ describe("orchestrator notification feed on a test broker", () => {
     open.push(() => human.close());
     await human.request("session.attach", { sessionId: orc });
     const worker = (await broker.startWorker(orc)).sessionId;
+    human.socket.write(encodeFrame({ type: "input", sessionId: orc, data: Buffer.from("x").toString("base64") }));
     await broker.settle(orc, worker);
     const wake = await vi.waitFor(async () => {
       const records = await broker.client.request<InstructionRecord[]>("agent.instruction.list", { targetSessionId: orc });
       const found = records.find((record) => record.brokerOwned === true);
-      expect(found).toMatchObject({ status: "queued", holdReason: "human-controller" });
+      expect(found).toMatchObject({ status: "queued", holdReason: "wake-operator-active" });
       return found!;
     }, { timeout: 4_000 });
     expect(wake.message.startsWith("[cyberdeck notice] ")).toBe(true);
