@@ -1,6 +1,6 @@
 import { JsonlOffsetReader } from "./jsonl-offset-reader.js";
 import { ThreadSegmentIndex, parseThreadEvent } from "./thread-segment-index.js";
-import { claudeProjectSlug, candidateDayDirectories, readCodexMetadata, parseClaudeTurn, parseCodexTurn, compareNativeTurns, visitLines, ignoreMissing, readCompleteLinesFromOffset, type NativeTurn } from "./thread-transcript-lines.js";
+import { claudeProjectSlug, candidateDayDirectories, readCodexMetadata, ClaudeTurnStops, parseCodexTurn, compareNativeTurns, visitLines, ignoreMissing, readCompleteLinesFromOffset, type NativeTurn } from "./thread-transcript-lines.js";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { readdir, rename, stat, unlink } from "node:fs/promises";
@@ -22,6 +22,7 @@ import type {
   WorkerTurnObservation,
   WorkerTurnTranscript,
   WorkerTurnTranscriptPort,
+  WorkerTurnLedger,
 } from "../orchestration/session/worker-turn-ports.js";
 import { ClaudeConversationBindingStore } from "./claude-conversation-bindings.js";
 import { observedModelParser, type ObservedModel } from "../runtime/observed-model.js";
@@ -86,9 +87,10 @@ interface NativeProjection {
   turns: Map<string, NativeTurn>;
   hasNativeTurns: boolean;
   cleared: boolean;
+  claudeStops: ClaudeTurnStops;
 }
 
-interface NativeTurnRead { turns: NativeTurn[]; available: boolean; }
+interface NativeTurnRead { turns: NativeTurn[]; available: boolean; activityVersion?: string; }
 
 interface ObservedModelCursor {
   path: string;
@@ -119,6 +121,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   private readonly segments = new ThreadSegmentIndex();
   private readonly nativeProjections = new Map<string, NativeProjection>();
   private readonly semanticTurnIds = new Set<string>();
+  private readonly completionLedgers = new Map<string, WorkerTurnLedger>();
   private readonly nativeTurnOrdinals = new Set<string>();
   private readonly nativePaths = new Map<string, string>();
   private readonly observedModelCursors = new Map<string, ObservedModelCursor>();
@@ -167,7 +170,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   /** Read and prepare provider turns without mutating the semantic transcript. */
   async observeProviderTurns(input: CaptureProviderTurns): Promise<WorkerTurnObservation> {
     await this.init();
-    const { turns: nativeTurns, available: nativeAvailable } = input.provider === "claude"
+    const { turns: nativeTurns, available: nativeAvailable, activityVersion } = input.provider === "claude"
       ? await this.readClaudeTurns(input)
       : input.provider === "codex"
         ? await this.readCodexTurns(input)
@@ -193,7 +196,10 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     const claudeStatus = input.provider === "claude"
       ? this.claudeStatuses.get(input.sessionId)
       : undefined;
-    const unseenTurns = turns.filter((turn) => !this.semanticTurnIds.has(this.semanticKey(
+    const committedThrough = this.completionLedgers.get(input.sessionId)?.providerOccurredThrough;
+    const unseenTurns = turns.filter((turn) => !(input.provider === "claude" && nativeAvailable
+      && committedThrough !== undefined && turn.occurredAt <= committedThrough)
+      && !this.semanticTurnIds.has(this.semanticKey(
       input.sessionId,
       `${input.provider}:${turn.id}`,
     )));
@@ -201,6 +207,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
       sessionId: input.sessionId,
       provider: input.provider,
       turnNumber: input.turnNumber,
+      ...(activityVersion === undefined ? {} : { activityVersion }),
       turns: unseenTurns.map((turn) => ({
         providerTurnId: turn.id,
         providerOccurredAt: turn.occurredAt,
@@ -213,6 +220,13 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
           : { data: { claudeTranscriptStatus: claudeStatus } }),
       })),
     };
+  }
+
+  async readCompletionLedger(sessionId: string): Promise<WorkerTurnLedger> {
+    await this.init();
+    const ledger = this.completionLedgers.get(sessionId);
+    return ledger === undefined ? { completedTurns: 0, canonicalTurns: 0, turns: [] }
+      : { ...ledger, turns: [...ledger.turns] };
   }
 
   /** Serialize append-once dedupe while acknowledging every observed turn as durably owned. */
@@ -409,6 +423,22 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   }
 
   private rememberSemanticTurn(event: ThreadEvent): void {
+    if (event.kind === "turn" && typeof event.data.turnNumber === "number"
+      && typeof event.data.semanticTurnId === "string"
+      && !this.semanticTurnIds.has(this.semanticKey(event.sessionId, event.data.semanticTurnId))) {
+      const previous = this.completionLedgers.get(event.sessionId)
+        ?? { completedTurns: 0, canonicalTurns: 0, turns: [] };
+      const canonicalTurns = previous.canonicalTurns + (event.data.transport === "provider-native" ? 1 : 0);
+      this.completionLedgers.set(event.sessionId, {
+        completedTurns: Math.max(previous.completedTurns, event.data.turnNumber),
+        canonicalTurns: Math.max(canonicalTurns,
+          typeof event.data.canonicalTurns === "number" ? event.data.canonicalTurns : 0),
+        ...(event.data.transport === "provider-native" && typeof event.data.providerOccurredAt === "string"
+          ? { providerOccurredThrough: [previous.providerOccurredThrough ?? "", event.data.providerOccurredAt].sort().at(-1)! }
+          : previous.providerOccurredThrough === undefined ? {} : { providerOccurredThrough: previous.providerOccurredThrough }),
+        turns: [...previous.turns, event].slice(-64),
+      });
+    }
     if (event.data.transport === "provider-native" && typeof event.data.provider === "string"
       && typeof event.data.turnNumber === "number") {
       this.nativeTurnOrdinals.add(this.semanticKey(event.sessionId, `${event.data.provider}:${event.data.turnNumber}`));
@@ -448,6 +478,11 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
       originalLength: turn.text.length,
       turnNumber,
       providerOccurredAt: turn.providerOccurredAt,
+      // Carry the aggregate through semantic journal rotation, not only process memory.
+      ...(observation.provider === "claude" ? {
+        canonicalTurns: (this.completionLedgers.get(observation.sessionId)?.canonicalTurns ?? 0)
+          + (turn.transport === "provider-native" ? 1 : 0),
+      } : {}),
       ...(turn.data ?? {}),
     };
     return {
@@ -615,9 +650,9 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     let projection = this.nativeProjections.get(key);
     if (projection === undefined) {
       const messages: TranscriptMessage[] = [], turns = new Map<string, NativeTurn>();
-      projection = { messages, turns, hasNativeTurns: false, cleared: false, reader: undefined! };
+      projection = { messages, turns, hasNativeTurns: false, cleared: false, claudeStops: new ClaudeTurnStops(), reader: undefined! };
       const value = projection;
-      value.reader = new JsonlOffsetReader(() => { messages.length = 0; turns.clear(); value.hasNativeTurns = false; value.cleared = false; });
+      value.reader = new JsonlOffsetReader(() => { messages.length = 0; turns.clear(); value.claudeStops.reset(); value.hasNativeTurns = false; value.cleared = false; });
     }
     this.nativeProjections.delete(key); this.nativeProjections.set(key, projection);
     // Eviction only forgets an acceleration; semantic receipt dedup remains authoritative.
@@ -632,8 +667,10 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
         const message = input.provider === "claude" ? parseClaudeTranscriptLine(line) : parseCodexRolloutLine(line);
         if (message !== undefined) { value.messages.push(message); if (value.messages.length > PREVIEW_MESSAGE_WINDOW) value.messages.shift(); }
       } else {
-        const turn = input.provider === "claude" ? parseClaudeTurn(line, this.options.now) : parseCodexTurn(line, this.options.now);
-        if (turn !== undefined) {
+        const codexTurn = input.provider === "codex" ? parseCodexTurn(line, this.options.now) : undefined;
+        const turns = input.provider === "claude" ? value.claudeStops.observe(line, this.options.now)
+          : codexTurn === undefined ? [] : [codexTurn];
+        for (const turn of turns) {
           value.hasNativeTurns = true;
           if (!this.semanticTurnIds.has(this.semanticKey(input.sessionId, `${input.provider}:${turn.id}`))) value.turns.set(turn.id, turn);
         }
@@ -651,9 +688,13 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   private async readClaudeTurns(input: CaptureProviderTurns): Promise<NativeTurnRead> {
     const path = await this.resolveClaudeTranscript(input);
     if (path === undefined) return { turns: [], available: false };
+    // Retain explicit terminal fallback when no provider transcript exists at all.
+    if (await stat(path).catch(ignoreMissing) === undefined) return { turns: [], available: false };
     const projection = await this.nativeProjection(input, path, "turns");
     return projection.cleared ? { turns: [], available: false }
-      : { turns: [...projection.turns.values()].sort(compareNativeTurns), available: projection.hasNativeTurns };
+      // An exact Claude binding owns completion even while its first frame is still being written.
+      : { turns: [...projection.turns.values()].sort(compareNativeTurns), available: true,
+        activityVersion: `${path}:${projection.reader.offset}` };
   }
 
   private async readCodexTurns(input: CaptureProviderTurns): Promise<NativeTurnRead> {

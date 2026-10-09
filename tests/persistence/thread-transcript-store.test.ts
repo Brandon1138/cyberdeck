@@ -27,6 +27,32 @@ const SESSION_ONE = "11111111-1111-4111-8111-111111111111";
 const SESSION_TWO = "22222222-2222-4222-8222-222222222222";
 
 describe("ThreadTranscriptStore", () => {
+  it("restores Claude aggregate canonical counts after semantic journal rotation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const projects = join(root, "projects");
+    const project = join(projects, "-tmp-repo");
+    await mkdir(project, { recursive: true });
+    const frames: string[] = [];
+    const options = { maxBytes: 1024, retainedFiles: 1, claudeProjectsDirectory: projects };
+    const store = new ThreadTranscriptStore(root, options);
+    for (let turn = 1; turn <= 70; turn++) {
+      const timestamp = new Date(Date.parse("2026-08-20T12:00:00.000Z") + turn * 1_000).toISOString();
+      frames.push(JSON.stringify({ type: "assistant", timestamp,
+        message: { id: `native-${turn}`, role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "result" }] } }),
+      JSON.stringify({ type: "system", subtype: "turn_duration", timestamp }));
+      await store.commitProviderTurns({ sessionId: SESSION_ONE, provider: "claude", turnNumber: turn,
+        turns: [{ providerTurnId: `native-${turn}`, providerOccurredAt: timestamp,
+          text: "result ".repeat(80), transport: "provider-native" }] });
+    }
+    expect((await store.readCompletionLedger(SESSION_ONE)).turns).toHaveLength(64);
+    const reopened = new ThreadTranscriptStore(root, options);
+    const restored = await reopened.readCompletionLedger(SESSION_ONE);
+    expect(restored).toMatchObject({ completedTurns: 70, canonicalTurns: 70 });
+    expect(restored.turns.length).toBeLessThan(64);
+    await writeFile(join(project, `${SESSION_ONE}.jsonl`), frames.join("\n") + "\n");
+    await expect(reopened.observeProviderTurns({ sessionId: SESSION_ONE, provider: "claude", cwd: "/tmp/repo",
+      createdAt: "2026-08-20T12:00:00.000Z", turnNumber: 71 })).resolves.toMatchObject({ turns: [] });
+  });
   it("persists ordered thread events and reads global changes by cursor", async () => {
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
     let id = 0;

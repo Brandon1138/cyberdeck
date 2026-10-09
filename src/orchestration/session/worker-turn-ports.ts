@@ -88,12 +88,23 @@ export interface WorkerTurnObservation {
   provider: string;
   turnNumber: number;
   turns: readonly ObservedWorkerTurn[];
+  /** Bound native file plus complete-line offset; movement is independent of terminal bytes. */
+  activityVersion?: string;
+}
+
+export interface WorkerTurnLedger {
+  completedTurns: number;
+  canonicalTurns: number;
+  providerOccurredThrough?: string;
+  turns: readonly WorkerTurnTranscript[];
 }
 
 /** Provider transcript access expressed only in application and domain values. */
 export interface WorkerTurnTranscriptPort {
   append(event: AppendWorkerTurnTranscriptEvent): Promise<unknown>;
   observeProviderTurns?(input: CaptureWorkerTurns): Promise<WorkerTurnObservation>;
+  /** Durable high-water and recent receipts, restored before assigning new Claude ordinals. */
+  readCompletionLedger?(sessionId: string): Promise<WorkerTurnLedger>;
   /** Return one ordered durable acknowledgement per observed turn, including deduped turns. */
   commitProviderTurns?(observation: WorkerTurnObservation): Promise<WorkerTurnTranscript[]>;
   /** Compatibility composition for callers that have not adopted explicit observation ownership. */

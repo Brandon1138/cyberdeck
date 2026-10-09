@@ -1015,6 +1015,7 @@ describe("SessionRegistry", () => {
           content: [{ type: "text", text: "Answered on the new model." }],
         },
       }),
+      JSON.stringify({ type: "system", subtype: "turn_duration", timestamp: "2026-07-25T10:00:04.100Z" }),
       "",
     ].join("\n"));
 
@@ -1048,8 +1049,9 @@ describe("SessionRegistry", () => {
       "utf8",
     );
     const lines = fixture.trimEnd().split("\n");
-    const firstTurn = `${lines.slice(0, 5).join("\n")}\n`;
-    const secondTurn = `${lines.slice(5).join("\n")}\n`;
+    const duration = (timestamp: string) => JSON.stringify({ type: "system", subtype: "turn_duration", timestamp });
+    const firstTurn = `${lines.slice(0, 5).join("\n")}\n${duration("2026-07-25T10:00:04.100Z")}\n`;
+    const secondTurn = `${lines.slice(5).join("\n")}\n${duration("2026-07-25T10:01:04.100Z")}\n`;
     const transcripts = new ThreadTranscriptStore(join(root, "state"), {
       claudeProjectsDirectory: claudeProjects,
     });
@@ -2718,8 +2720,9 @@ describe("SessionRegistry", () => {
     await new Promise((resolve) => setTimeout(resolve, 2_500));
     expect(registry.workerTruth(record.id).completedTurns).toBe(1);
     expect(events.filter(({ type }) => type === "session.turn_reconciled")).toHaveLength(1);
-    // The screen path stood down rather than starting a competing read of the same turn.
-    expect(captureCalls).toEqual(["native-only"]);
+    // The screen path stood down; ongoing native polling never falls back or banks it twice.
+    expect(captureCalls.length).toBeGreaterThanOrEqual(1);
+    expect(captureCalls.every((call) => call === "native-only")).toBe(true);
   });
 
   it("does not bank a turn the provider transcript has nothing to say about", async () => {

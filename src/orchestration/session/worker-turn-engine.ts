@@ -36,7 +36,8 @@ import type {
   WorkerTurnTranscriptPort,
 } from "./worker-turn-ports.js";
 
-import type { CompletionLedgerEntry, RenderedInstruction, StallObservation, WorkerStatusReading,
+import { WorkerCompletionLedger, WorkerTurnReconciler, WorkerStallTracker } from "./worker-turn-state.js";
+import type { CompletionLedgerEntry, RenderedInstruction, WorkerStatusReading,
   TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
 import { normalizedHead, SubmitVerifier } from "./worker-submit-verification.js";
 import { WorkerInputReadiness } from "./worker-input-readiness.js";
@@ -55,7 +56,6 @@ export interface WorkerTurnEngineFactoryOptions {
   now?: () => number;
 }
 
-const MAX_COMPLETION_LEDGER_ENTRIES = 64;
 const TRANSCRIPT_RETRY_BASE_MS = 50;
 const CANONICAL_RECONCILE_QUIET_MS = 1_500;
 const SCREEN_TURN_BANK_MS = 200;
@@ -82,8 +82,9 @@ export class WorkerTurnEngine {
   private activity: ReturnType<WorkerTurnObservationPort["activity"]> = "unknown";
   private observedWorking = false;
   private readonly inputReadiness = new WorkerInputReadiness();
-  private completedTurnCount = 0;
-  private canonicalTurnCount = 0;
+  private readonly completionLedger = new WorkerCompletionLedger();
+  private get completedTurnCount(): number { return this.completionLedger.completedTurns; }
+  private get canonicalTurnCount(): number { return this.completionLedger.canonicalTurns; }
   private turnsBeforeLatestInstruction = 0;
   private composer: ComposerObservation = { modalOpen: false, occupied: false };
   private rendered: RenderedInstruction[] = [];
@@ -106,9 +107,20 @@ export class WorkerTurnEngine {
   private currentProviderLimit: ProviderLimitTermination | undefined;
   private currentLatestResult: string | undefined;
   private fatalReported = false;
-  private readonly completions = new Map<number, CompletionLedgerEntry>();
+  private readonly completions = this.completionLedger.completions;
   private idleTimer?: ReturnType<typeof setTimeout>;
-  private canonicalReconcileTimer?: ReturnType<typeof setTimeout>;
+  private readonly reconciler = new WorkerTurnReconciler({
+    interval: CANONICAL_RECONCILE_QUIET_MS,
+    epoch: () => this.observationEpoch,
+    canPoll: () => this.record.provider === "claude" && this.record.executor !== "orbstack-container"
+      && this.record.profile !== "scout" && this.hasNativeTurnPort(),
+    canReconcile: () => this.hasNativeTurnPort() && this.canReconcileCanonicalTurns(),
+    active: () => !this.terminalFinalizing
+      && (this.record.executionState === "active" || this.record.executionState === "starting"),
+    reconcile: () => this.reconcileCanonicalTurns(),
+  });
+  private transcriptActivityVersion?: string;
+  private nativeTurnSettled = false;
   /** Fences every asynchronous observation against terminal release and process replacement. */
   private observationEpoch = 0;
   /** Latest process epoch whose screen/fallback work was rejected by terminal authority. */
@@ -138,7 +150,7 @@ export class WorkerTurnEngine {
   /** The process exited, but its last exact semantic receipt has not finished settling yet. */
   private terminalFinalizing = false;
   private suppressSemanticTurns?: boolean;
-  private stallObservation?: StallObservation;
+  private readonly stallTracker = new WorkerStallTracker();
 
   constructor(
     private readonly record: SessionRecord,
@@ -147,6 +159,7 @@ export class WorkerTurnEngine {
   ) {
     this.replay = options.observations.createReplay(replayChars);
     this.currentProviderLimit = providerLimitFromTermination(record.termination);
+    this.reconciler.armPoll();
   }
 
   get completedTurns(): number {
@@ -187,8 +200,9 @@ export class WorkerTurnEngine {
     this.observedWorking = false;
     this.inputReadiness.finishInitialization(initialPromptInFlight);
     this.observeComposer();
-    delete this.stallObservation;
+    this.stallTracker.reset();
     delete this.suppressSemanticTurns;
+    this.reconciler.armPoll();
   }
 
   /** Reset only the replay observation when a new process generation is adopted. */
@@ -205,9 +219,11 @@ export class WorkerTurnEngine {
     this.observedWorking = false;
     this.fatalReported = false;
     this.currentProviderLimit = undefined;
-    delete this.stallObservation;
+    this.stallTracker.reset();
     this.releaseTimers();
     this.terminalScreenReservationsDiscarded = false;
+    this.nativeTurnSettled = false;
+    this.reconciler.armPoll();
   }
 
   setLatestResult(result: string | undefined): void {
@@ -218,9 +234,7 @@ export class WorkerTurnEngine {
     this.currentLatestResult ??= result;
   }
 
-  resetStallObservation(): void {
-    delete this.stallObservation;
-  }
+  resetStallObservation(): void { this.stallTracker.reset(); }
 
   appendOutput(
     chunk: Buffer,
@@ -251,6 +265,7 @@ export class WorkerTurnEngine {
       return { fatal: false };
     }
     if (activity === "working") {
+      this.nativeTurnSettled = false;
       this.observedWorking = true;
       if (this.idleTimer !== undefined) clearTimeout(this.idleTimer);
       delete this.idleTimer;
@@ -314,7 +329,7 @@ export class WorkerTurnEngine {
     // awaiting I/O. It must synchronously fence those effects before this method performs any await.
     this.activityRevision += 1;
     const encoded = typeof input.encoded === "function" ? input.encoded() : input.encoded;
-    delete this.stallObservation;
+    this.stallTracker.reset();
     const at = new Date().toISOString();
     const completionFloor = this.completionReservationFloor();
     const expectedTurn = completionFloor + 1;
@@ -375,7 +390,8 @@ export class WorkerTurnEngine {
       exitCode: this.record.exitCode,
       activity: this.activity,
       composer: this.composer,
-      awaitingInputReady: this.record.scout?.transport !== "headless-stream-json" && this.inputReadiness.pending,
+      awaitingInputReady: this.record.scout?.transport !== "headless-stream-json" && this.inputReadiness.pending
+        && !this.nativeTurnSettled,
       completedTurns: this.completedTurnCount,
       canonicalTurns: this.canonicalTurnCount,
       pendingInstructions: this.rendered.length,
@@ -516,22 +532,7 @@ export class WorkerTurnEngine {
     text: string,
     provenance: CompletionLedgerEntry["provenance"] = "terminal-replay",
   ): CompletionLedgerEntry {
-    this.completedTurnCount = Math.max(this.completedTurnCount, completionTarget);
-    const existing = this.completions.get(completionTarget);
-    if (existing !== undefined) return existing;
-    if (provenance === "provider-transcript") this.canonicalTurnCount += 1;
-    const entry: CompletionLedgerEntry = {
-      text,
-      completedAt: new Date().toISOString(),
-      deliveries: 0,
-      provenance,
-    };
-    this.completions.set(completionTarget, entry);
-    while (this.completions.size > MAX_COMPLETION_LEDGER_ENTRIES) {
-      const oldest = Math.min(...this.completions.keys());
-      this.completions.delete(oldest);
-    }
-    return entry;
+    return this.completionLedger.record(completionTarget, text, provenance);
   }
 
   stopPendingInstructions(): void {
@@ -673,8 +674,7 @@ export class WorkerTurnEngine {
     delete this.idleTimer;
     delete this.armedScreenReplay;
     delete this.armedScreenActivityRevision;
-    if (this.canonicalReconcileTimer !== undefined) clearTimeout(this.canonicalReconcileTimer);
-    delete this.canonicalReconcileTimer;
+    this.reconciler.release();
     this.submitVerifier.release();
     delete this.turnCaptureOwner;
     delete this.deferredScreenCompletionTarget;
@@ -685,7 +685,7 @@ export class WorkerTurnEngine {
     entry.submitPresses = (entry.submitPresses ?? 0) + 1;
     this.activityRevision += 1;
     this.options.effects.write(key);
-    delete this.stallObservation;
+    this.stallTracker.reset();
     void this.appendTranscript("lifecycle", "broker",
       "instruction re-submitted: the composer still held its text after the write",
       { instructionId: entry.instructionId, expectedTurn: entry.expectedTurn, press: entry.submitPresses },
@@ -857,25 +857,12 @@ export class WorkerTurnEngine {
   }
 
   private updateStallObservation(): void {
-    const tokenCount = this.replay.tokenCount();
-    if (tokenCount === undefined) {
-      delete this.stallObservation;
-      return;
-    }
-    const previous = this.stallObservation;
-    const version = this.replay.version;
-    if (
-      previous === undefined
-      || previous.version !== version
-      || previous.tokenCount !== tokenCount
-    ) {
-      this.stallObservation = { version, tokenCount, unchangedSinceMs: this.now() };
-    }
+    this.stallTracker.update(this.replay.version, this.replay.tokenCount(), this.transcriptActivityVersion, this.now());
   }
 
   private stalledWorker(): { stalledForSeconds: number; tokenCount: number } | undefined {
     this.updateStallObservation();
-    const observation = this.stallObservation;
+    const observation = this.stallTracker.observation;
     if (
       observation === undefined
       || this.record.executionState !== "active"
@@ -945,6 +932,7 @@ export class WorkerTurnEngine {
 
   private async completeSemanticTurn(replay: string, claim: TurnCaptureClaim): Promise<void> {
     if (!this.isCurrentCapture(claim)) return;
+    if (this.completionLedger.needsRestore(this.record.provider, this.options.transcripts) && !await this.restoreCompletionLedger(claim)) return;
     if (this.record.profile === "scout" && this.record.scout?.terminalState !== "complete") {
       this.currentLatestResult = this.options.observations.fallbackTerminal(replay);
       const effectActivityRevision = this.activityRevision;
@@ -991,6 +979,7 @@ export class WorkerTurnEngine {
           this.reserveFencedObservation(claim, observation);
           return;
         }
+        if (observation.turnNumber !== claim.completionTarget) return;
         if (observation.turns.length > 0) break;
         if (attempt + 1 < transcriptAttempts) {
           await new Promise((resolve) =>
@@ -1028,6 +1017,9 @@ export class WorkerTurnEngine {
           data: { transport: "terminal-replay-fallback" },
         }], claim);
       }
+    } else if (this.record.provider === "claude" && observation?.activityVersion !== undefined) {
+      // A bound Claude transcript owns completion. A repaint before turn_duration is not a turn.
+      return;
     } else {
       banked = this.bankTurnReceipt([{
         text: fallback,
@@ -1414,27 +1406,29 @@ export class WorkerTurnEngine {
     );
   }
 
-  private armCanonicalReconcile(): void {
-    if (
-      this.options.transcripts?.observeProviderTurns === undefined
-      || this.options.transcripts.commitProviderTurns === undefined
-      || !this.canReconcileCanonicalTurns()
-    ) return;
-    if (this.canonicalReconcileTimer !== undefined) clearTimeout(this.canonicalReconcileTimer);
-    const epoch = this.observationEpoch;
-    this.canonicalReconcileTimer = setTimeout(() => {
-      if (this.observationEpoch !== epoch) return;
-      delete this.canonicalReconcileTimer;
-      void this.reconcileCanonicalTurns();
-    }, CANONICAL_RECONCILE_QUIET_MS);
-    this.canonicalReconcileTimer.unref?.();
+  private armCanonicalReconcile(): void { this.reconciler.armQuiet(); }
+
+  private hasNativeTurnPort(): boolean {
+    return this.options.transcripts?.observeProviderTurns !== undefined
+      && this.options.transcripts.commitProviderTurns !== undefined;
+  }
+
+  private async restoreCompletionLedger(claim: TurnCaptureClaim): Promise<boolean> {
+    const ledger = await this.completionLedger.restore(this.options.transcripts!, this.record.id,
+      () => this.isCurrentCapture(claim));
+    if (ledger === undefined) return false;
+    this.currentLatestResult ??= ledger.turns.at(-1)?.text;
+    claim.completionTarget = this.completedTurnCount + 1;
+    if (ledger.completedTurns > 0) this.options.effects.notifySessionUpdate();
+    return true;
   }
 
   private canReconcileCanonicalTurns(): boolean {
     if (this.record.executionState !== "active") return false;
     if (this.suppressSemanticTurns === true || this.record.profile === "scout") return false;
     if (this.record.provider !== "claude" && this.record.provider !== "codex") return false;
-    return this.record.executor === "orbstack-container" || this.observedWorking || this.rendered.length > 0; // Exact native bindings need no spinner match.
+    return this.record.provider === "claude" || this.record.executor === "orbstack-container"
+      || this.observedWorking || this.rendered.length > 0; // Claude launch turns need no spinner or rendered instruction.
   }
 
   async reconcileCanonicalTurns(): Promise<void> {
@@ -1453,6 +1447,7 @@ export class WorkerTurnEngine {
     if (!this.canReconcileCanonicalTurns() || this.idleTimer !== undefined) return;
     const claim = this.acquireTurnCapture("reconcile", this.completedTurnCount + 1);
     try {
+      if (this.completionLedger.needsRestore(this.record.provider, this.options.transcripts) && !await this.restoreCompletionLedger(claim)) return;
       const before = this.completedTurnCount;
       let observation: WorkerTurnObservation;
       try {
@@ -1471,8 +1466,12 @@ export class WorkerTurnEngine {
         this.reserveFencedObservation(claim, observation);
         return;
       }
+      if (observation.activityVersion !== undefined) {
+        this.transcriptActivityVersion = observation.activityVersion;
+        this.updateStallObservation();
+      }
       const nativeTurns = observation.turns.filter((turn) => turn.transport === "provider-native");
-      if (nativeTurns.length === 0 || this.completedTurnCount !== before) return;
+      if (nativeTurns.length === 0 || this.completedTurnCount !== before || observation.turnNumber !== before + 1) return;
       const nativeObservation: WorkerTurnObservation = {
         ...observation,
         turns: nativeTurns,
@@ -1491,6 +1490,7 @@ export class WorkerTurnEngine {
       this.applyCurrentTurnReceipt(outcome.banked);
       if (this.isCurrentCompletionHead(claim, outcome.banked)) {
         this.observedWorking = false;
+        this.nativeTurnSettled = true;
         if (this.activity === "working") this.activity = "awaiting-input";
         this.observeComposer();
       }

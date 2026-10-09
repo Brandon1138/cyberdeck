@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ThreadTranscriptStore } from "../../../src/persistence/thread-transcript-store.js";
 import type { SessionRecord } from "../../../src/domain/session.js";
 import { DELIVERY_HOLD_DETAIL } from "../../../src/domain/worker-truth.js";
 import type {
@@ -34,7 +38,7 @@ function sessionRecord(): SessionRecord {
 
 function harness(
   recordOverrides: Partial<SessionRecord> = {},
-  options: { preview?: WorkerTurnPreviewPort } = {},
+  options: { preview?: WorkerTurnPreviewPort; transcripts?: WorkerTurnTranscriptPort; tokenCount?: number } = {},
 ) {
   let frame = "";
   let activity: ReturnType<WorkerTurnObservationPort["activity"]> = "unknown";
@@ -53,7 +57,7 @@ function harness(
       text: frame.slice(-maxChars),
       truncated: frame.length > maxChars,
     }),
-    tokenCount: () => undefined,
+    tokenCount: () => options.tokenCount,
     get version() { return frame.length; },
   };
   const fatalTermination = vi.fn<WorkerTurnObservationPort["fatalTermination"]>()
@@ -121,7 +125,7 @@ function harness(
   const record: SessionRecord = { ...sessionRecord(), ...recordOverrides };
   const engine = new WorkerTurnEngineFactory({
     observations,
-    transcripts,
+    transcripts: options.transcripts ?? transcripts,
     effects,
     workerStallSeconds: 120,
     ...(options.preview === undefined ? {} : { preview: options.preview }),
@@ -162,13 +166,177 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 const engines: WorkerTurnEngine[] = [];
+const roots: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   while (engines.length > 0) engines.pop()?.releaseTimers();
   vi.useRealTimers();
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+describe("Claude transcript Stop settlement without screen bytes", () => {
+  const frame = (id: string, second: number, text = id) => ({
+    type: "assistant", timestamp: `2026-08-20T09:00:0${second}.000Z`,
+    message: { id, role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] },
+  });
+  const stop = (id: string, second: number) => ({
+    type: "system", subtype: "turn_duration", uuid: id,
+    timestamp: `2026-08-20T09:00:0${second}.100Z`, durationMs: 100,
+  });
+  const lines = (...frames: unknown[]) => frames.map((value) => JSON.stringify(value)).join("\n") + "\n";
+  async function nativeHarness() {
+    vi.useFakeTimers();
+    const root = await mkdtemp(join(tmpdir(), "claude-stop-"));
+    roots.push(root);
+    const projects = join(root, "projects");
+    const directory = join(projects, "-tmp-repo");
+    await mkdir(directory, { recursive: true });
+    const store = new ThreadTranscriptStore(root, { claudeProjectsDirectory: projects });
+    const current = harness({ provider: "claude", kind: "worker" }, { transcripts: store, tokenCount: 10 });
+    current.engine.finishInitialization(true);
+    // Native completion must settle truth even when no input surface has ever been drawn.
+    current.observations.composer = { occupied: false, modalOpen: false, inputReady: false };
+    const path = join(directory, `${current.record.id}.jsonl`);
+    await store.append({ sessionId: current.record.id, kind: "prompt", source: "human", text: "launch", data: { initial: true } });
+    const poll = vi.spyOn(current.engine, "reconcileCanonicalTurns");
+    async function tick() {
+      await vi.advanceTimersByTimeAsync(1_500);
+      await poll.mock.results.at(-1)?.value;
+    }
+    return { ...current, root, projects, store, path, tick, poll };
+  }
+
+  it("settles one launch prompt on turn_duration and publishes the notification producer's session update", async () => {
+    const f = await nativeHarness();
+    await writeFile(f.path, lines(frame("first", 1)));
+    await f.tick();
+    expect(f.engine.completedTurns).toBe(0);
+    expect(f.effects.notifySessionUpdate).not.toHaveBeenCalled();
+    await appendFile(f.path, lines(stop("stop-first", 1)));
+    await f.tick();
+    expect(f.engine.waitResult(1)).toMatchObject({ status: "completed", completedTurns: 1, provenance: "provider-transcript" });
+    expect(f.engine.projectTruth()).toMatchObject({ state: "idle", completedTurns: 1, canonicalTurns: 1 });
+    expect(f.effects.notifySessionUpdate).toHaveBeenCalledOnce();
+    expect(f.effects.setAttention).toHaveBeenCalledWith("done", true);
+    expect(f.replay()).toBe("");
+    expect(f.writes).toEqual([]);
+  });
+
+  it("ignores duplicate Stop markers and already committed semanticTurnIds", async () => {
+    const f = await nativeHarness();
+    const completed = lines(frame("first", 1), stop("stop-first", 1));
+    await writeFile(f.path, completed);
+    await f.tick();
+    await appendFile(f.path, completed);
+    await f.tick();
+    await f.tick();
+    // Reader invalidation/replay still defers to durable semanticTurnIds.
+    await writeFile(f.path, completed);
+    await f.tick();
+    expect(f.engine.completedTurns).toBe(1);
+    expect(f.engine.canonicalTurns).toBe(1);
+    expect((await f.store.read(f.record.id)).events.filter((event) => event.kind === "turn")).toHaveLength(1);
+    expect(f.effects.notifySessionUpdate).toHaveBeenCalledOnce();
+  });
+
+  it("holds an early Stop marker until preceding text arrives without skipping ordinals", async () => {
+    const f = await nativeHarness();
+    await writeFile(f.path, lines(stop("stop-first", 1), frame("second", 2), stop("stop-second", 2)));
+    await f.tick();
+    expect(f.engine.completedTurns).toBe(0);
+    await appendFile(f.path, lines(frame("first", 1)));
+    await f.tick();
+    expect(f.engine.completedTurns).toBe(2);
+    expect(f.engine.canonicalTurns).toBe(2);
+    expect((await f.store.read(f.record.id)).events.filter((event) => event.kind === "turn")
+      .map((event) => [event.data.turnNumber, event.text])).toEqual([[1, "first"], [2, "second"]]);
+  });
+
+  it("restores canonical counts on restart replay and assigns the next unseen turn ordinal", async () => {
+    const f = await nativeHarness();
+    await writeFile(f.path, lines(frame("first", 1), stop("stop-first", 1)));
+    await f.tick();
+    f.engine.releaseTimers();
+    const store = new ThreadTranscriptStore(f.root, { claudeProjectsDirectory: f.projects });
+    const restarted = harness({ provider: "claude", kind: "worker" }, { transcripts: store });
+    const poll = vi.spyOn(restarted.engine, "reconcileCanonicalTurns");
+    await vi.advanceTimersByTimeAsync(1_500);
+    await poll.mock.results.at(-1)?.value;
+    expect(restarted.engine.completedTurns).toBe(1);
+    expect(restarted.engine.canonicalTurns).toBe(1);
+    await appendFile(f.path, lines(frame("first", 1), stop("stop-first", 1), frame("second", 2), stop("stop-second", 2)));
+    await vi.advanceTimersByTimeAsync(1_500);
+    await poll.mock.results.at(-1)?.value;
+    expect(restarted.engine.completedTurns).toBe(2);
+    expect(restarted.engine.canonicalTurns).toBe(2);
+    expect((await store.read(f.record.id)).events.filter((event) => event.kind === "turn")
+      .map((event) => event.data.turnNumber)).toEqual([1, 2]);
+  });
+
+  it("ignores sidechain stops and waits for a complete duration line", async () => {
+    const f = await nativeHarness();
+    const duration = JSON.stringify(stop("stop-first", 1));
+    await writeFile(f.path, lines(frame("first", 1), { ...stop("subagent", 1), isSidechain: true }) + duration);
+    await f.tick();
+    expect(f.engine.completedTurns).toBe(0);
+    await appendFile(f.path, "\n");
+    await f.tick();
+    expect(f.engine.completedTurns).toBe(1);
+  });
+
+  it("releases transcript polling at lifecycle fences", async () => {
+    const f = await nativeHarness();
+    f.engine.releaseTimers();
+    await writeFile(f.path, lines(frame("first", 1), stop("stop-first", 1)));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(f.poll).not.toHaveBeenCalled();
+    expect(f.engine.completedTurns).toBe(0);
+  });
+
+  it("uses transcript movement to reset the stall clock without token or screen movement", async () => {
+    const f = await nativeHarness();
+    await writeFile(f.path, lines(frame("first", 1)));
+    await f.tick();
+    vi.setSystemTime(Date.now() + 120_000);
+    expect(f.engine.waitResult(1).status).toBe("stalled");
+    await appendFile(f.path, lines({ type: "system", subtype: "stop_hook_summary" }));
+    await f.tick();
+    expect(f.engine.waitResult(1).status).toBe("waiting");
+    expect(f.engine.completedTurns).toBe(0);
+    expect(f.replay()).toBe("");
+  });
+
+  it("waits through a Stop-hook continuation and records only the final assistant text", async () => {
+    const f = await nativeHarness();
+    await writeFile(f.path, lines(frame("continued", 1), { type: "system", subtype: "stop_hook_summary" }));
+    await f.tick();
+    expect(f.engine.completedTurns).toBe(0);
+    await appendFile(f.path, lines(frame("final", 2), stop("stop-final", 2)));
+    await f.tick();
+    expect(f.engine.waitResult(1)).toMatchObject({ text: "final", provenance: "provider-transcript" });
+    expect(f.engine.canonicalTurns).toBe(1);
+  });
 });
 
 describe("WorkerTurnEngine", () => {
+  it("refuses a future observation ordinal until the preceding turns can be observed", async () => {
+    const f = harness({ provider: "claude" });
+    f.observeProviderTurns.mockResolvedValueOnce({
+      sessionId: f.record.id, provider: "claude", turnNumber: 2,
+      turns: [{ providerTurnId: "second", providerOccurredAt: "2026-08-20T09:00:02.000Z",
+        text: "second", transport: "provider-native" }],
+    });
+    await f.engine.reconcileCanonicalTurns();
+    expect(f.engine.completedTurns).toBe(0);
+    expect(f.commitProviderTurns).not.toHaveBeenCalled();
+    f.captureProviderTurns.mockResolvedValueOnce([
+      { text: "first", data: { transport: "provider-native" } },
+      { text: "second", data: { transport: "provider-native" } },
+    ]);
+    await f.engine.reconcileCanonicalTurns();
+    expect(f.engine.completedTurns).toBe(2);
+    expect(f.engine.canonicalTurns).toBe(2);
+  });
   it("never settles an instruction from a turn completed before it was rendered", () => {
     const { engine, observations, replay } = harness();
     const now = "2026-08-20T09:01:00.000Z";
@@ -387,12 +555,12 @@ describe("WorkerTurnEngine", () => {
     });
   });
 
-  it.each(["host", "orbstack-container"] as const)("uses exact container transcripts without requiring a recognized spinner (%s)", async (executor) => {
+  it.each(["host", "orbstack-container"] as const)("uses exact Claude transcripts without requiring a recognized spinner (%s)", async (executor) => {
     const { engine, captureProviderTurns, replay } = harness({ provider: "claude", executor });
     engine.appendOutput(Buffer.from("new provider display format"), replay);
     captureProviderTurns.mockResolvedValue([{ text: "native completion", data: { transport: "provider-native" } }]);
     await engine.reconcileCanonicalTurns();
-    expect(engine.canonicalTurns).toBe(executor === "orbstack-container" ? 1 : 0);
+    expect(engine.canonicalTurns).toBe(1);
   });
 
   it.each([

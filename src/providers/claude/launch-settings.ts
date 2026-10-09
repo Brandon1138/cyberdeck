@@ -52,6 +52,8 @@ export function claudeLaunchSettings(input: ClaudeLaunchSettingsInput): string |
     settings.hooks = claudeTranscriptHooks(input.transcriptHook);
   }
   if (input.orchestrator) {
+    // Notice Stop hooks drain an orchestrator inbox; they do not report worker completion.
+    // Workers settle from their native turn_duration record after all Stop hooks have finished.
     if (input.noticeHook !== undefined) {
       settings.hooks = { ...settings.hooks, ...claudeNoticeHooks(input.noticeHook) };
     }
