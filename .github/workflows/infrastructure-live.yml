@@ -61,7 +61,7 @@ jobs:
           PROMPTFOO_DISABLE_UPDATE: '1'
           PROMPTFOO_CONFIG_DIR: ${{ runner.temp }}/cyberdeck-promptfoo
       # Reports stay on the runner and in the workflow artifact; nothing is shared automatically.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: infrastructure-eval-${{ inputs.suite }}-${{ github.run_id }}
