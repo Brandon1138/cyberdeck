@@ -283,7 +283,7 @@ export class SessionLaunchCoordinator {
           runtime.turns.latestResult ?? "Provider session exited during initialization",
         );
       }
-      runtime.turns.finishInitialization();
+      runtime.turns.finishInitialization(initialPrompt !== undefined);
       if (
         deferredInitialPrompt
         && initialPrompt !== undefined

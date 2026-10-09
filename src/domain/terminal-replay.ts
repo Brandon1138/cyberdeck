@@ -293,6 +293,8 @@ export function blockedPromptIndexInTail(provider: ProviderId, tail: string): nu
     : provider === "claude"
       ? Math.max(
           lastRegexIndex(tail, /Claude needs your permission[\s\S]{0,2400}?(?:Do you want to proceed\?|Allow)/giu),
+          // Claude 2.1.280 positions the words with CSI G; stripping it can remove every space.
+          lastRegexIndex(tail, /Quick\s*safety\s*check:\s*Is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust\?/giu),
           lastRegexIndex(tail, /Do you want to proceed\?[\s\S]{0,1600}?(?:Yes|Esc to cancel)/giu),
         )
       : -1;
