@@ -1,4 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
+import { InputScreen } from "./input-screen.js";
 
 import type { ProviderId } from "../domain/session.js";
 import {
@@ -97,6 +98,7 @@ export class ReplayDigest implements TerminalMarkerSource {
   readonly #replayChars: number;
 
   #decoder = new StringDecoder("utf8");
+  readonly #inputScreen = new InputScreen();
   readonly #markers = new Map<ActivityMarker, number>();
   readonly #rawMarkers = new Map<ActivityMarker, number>();
   /** Enough of the previous raw chunk to re-find a marker that straddled the boundary. */
@@ -150,6 +152,7 @@ export class ReplayDigest implements TerminalMarkerSource {
   /** Drop everything and read one replay from the start. Used when a session adopts a new PTY. */
   reset(replay = ""): void {
     this.#decoder = new StringDecoder("utf8");
+    this.#inputScreen.reset();
     this.#markers.clear();
     this.#rawMarkers.clear();
     this.#rawSeam = "";
@@ -261,6 +264,8 @@ export class ReplayDigest implements TerminalMarkerSource {
     return start <= 0 ? this.#normalized : this.#normalized.slice(start);
   }
 
+  inputFrameText(): string { return this.#inputScreen.text(); }
+
   /** Last token counter the provider rendered, or undefined if it has never rendered one. */
   tokenCount(): number | undefined {
     return this.#tokens;
@@ -316,6 +321,7 @@ export class ReplayDigest implements TerminalMarkerSource {
   #ingest(segment: string, startsFrame: boolean): void {
     if (startsFrame) this.#frameOffset = this.#normalizedOffset + this.#normalized.length;
     if (segment.length === 0) return;
+    this.#inputScreen.append(segment);
 
     const stripped = stripTerminalControl(segment);
     const normalized = plainTerminalText(segment);

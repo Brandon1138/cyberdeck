@@ -143,7 +143,7 @@ describe("instruction delivery at a blocked worker", () => {
     expect(pty.writes).toEqual([]);
 
     // That turn lands in the ledger. Now the next ordinal is unclaimed and the queue flushes itself.
-    pty.emitOutput("\u001b[2Jchecks passed\r\n\u001b]0;modal-worker\u0007");
+    pty.emitOutput("\u001b[2Jchecks passed\r\n❯ \r\n? for shortcuts\r\n\u001b]0;modal-worker\u0007");
     await vi.waitFor(async () =>
       expect((await queue.list(worker.id))[0]).toMatchObject({ status: "rendered", expectedTurn: 2 }));
     expect(pty.writes.at(-1)?.toString()).toBe("When the tests finish, run the linter and report back.\n");
@@ -196,7 +196,7 @@ describe("instruction delivery at a blocked worker", () => {
 
     // The modal clears into the turn it was blocking, and then that turn finishes.
     pty.emitOutput("\u001b]0;⠹ modal-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
-    pty.emitOutput("\u001b[2Jfirst task done\r\n\u001b]0;modal-worker\u0007");
+    pty.emitOutput("\u001b[2Jfirst task done\r\n❯ \r\n? for shortcuts\r\n\u001b]0;modal-worker\u0007");
     await vi.waitFor(async () => {
       const records = await queue.list(worker.id);
       expect(records.map(({ status }) => status)).toEqual(["rendered", "queued"]);
