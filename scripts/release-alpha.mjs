@@ -16,7 +16,6 @@ const PACKAGE_NAME = "@ishmael38/cyberdeck";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RELEASE_FILES = [
   "package.json",
-  "README.md",
   "CHANGELOG.md",
   ".github/ISSUE_TEMPLATE/bug_report.yml",
 ];
@@ -88,12 +87,6 @@ export function updateReleaseDocuments(files, currentVersion, targetVersion, dat
   }
   packageMetadata.version = targetVersion;
 
-  const readme = replaceExactly(
-    files["README.md"],
-    `\`${currentVersion}\` is a macOS developer preview`,
-    `\`${targetVersion}\` is a macOS developer preview`,
-    "README.md",
-  );
   const issueTemplate = replaceExactly(
     files[".github/ISSUE_TEMPLATE/bug_report.yml"],
     `placeholder: ${currentVersion}`,
@@ -116,7 +109,6 @@ export function updateReleaseDocuments(files, currentVersion, targetVersion, dat
 
   return {
     "package.json": `${JSON.stringify(packageMetadata, null, 2)}\n`,
-    "README.md": readme,
     "CHANGELOG.md": changelog,
     ".github/ISSUE_TEMPLATE/bug_report.yml": issueTemplate,
   };
