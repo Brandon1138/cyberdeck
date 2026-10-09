@@ -22,9 +22,17 @@ import {
   CLAUDE_NO_SUBAGENT_ENV,
 } from "./claude/no-subagents.js";
 import { claudeLaunchSettings } from "./claude/launch-settings.js";
+import {
+  claudeUserSettingsPath,
+  readClaudeOperatorVoice,
+  type ClaudeOperatorVoice,
+} from "./claude/operator-voice.js";
 import type { ClaudeTranscriptHookCommand } from "./claude/transcript-hook.js";
 
-/** One `--settings` file per session: transcript hook and, for orchestrators, the endpoint pin. */
+/**
+ * One `--settings` file per session: transcript hook and, for orchestrators, the endpoint pin and
+ * the operator's voice keys.
+ */
 const LAUNCH_SETTINGS_FILE = "launch-settings.json";
 
 export interface ClaudeProviderAdapterOptions extends SessionLaunchFilesOptions {
@@ -32,6 +40,8 @@ export interface ClaudeProviderAdapterOptions extends SessionLaunchFilesOptions 
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
   /** Overrides the operator state `resolveAllowlistedMcpServers` reads; for tests. */
   mcpAllowlist?: McpAllowlistPaths;
+  /** Overrides the user settings file an orchestrator's voice keys are copied from; for tests. */
+  operatorSettingsPath?: string;
   /** Where the transcript-rebind hook writes its binding. Omitted, no hook is installed. */
   stateDirectory?: string;
   /** Explicit execution-owned native conversation for resume after clear/compact. */
@@ -206,7 +216,7 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
         this.options,
       ));
     }
-    const launchSettings = this.launchSettings(session);
+    const launchSettings = this.launchSettings(session, await this.operatorVoice(session));
     if (launchSettings !== undefined) {
       writes.push(writeSessionLaunchFile(
         session.id,
@@ -266,6 +276,9 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
    * `--setting-sources project,local` 7,703; adding `--disable-slash-commands` 5,837. User scope is
    * worth 5,300 tokens and this code still excludes it; the flag's remaining 1,866 tokens are the
    * built-in command surface itself, under 1% of a 200k window, and are the operator's cockpit.
+   *
+   * Dropping user scope also drops the preferences Claude keeps there. The one that broke a feature
+   * — `/voice` — is carried back through the launch settings file; see `ClaudeOperatorVoice`.
    */
   private addOrchestratorIsolation(args: string[], session: SessionRecord): void {
     if (session.kind !== "orchestrator") return;
@@ -338,7 +351,10 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
     args.push("--settings", sessionLaunchFilePath(session.id, LAUNCH_SETTINGS_FILE, this.options));
   }
 
-  private launchSettings(session: SessionRecord): string | undefined {
+  private launchSettings(
+    session: SessionRecord,
+    operatorVoice?: ClaudeOperatorVoice,
+  ): string | undefined {
     return claudeLaunchSettings({
       ...(this.transcriptHookInstallable()
         ? { transcriptHook: this.transcriptHookCommand(session) }
@@ -346,8 +362,21 @@ export class ClaudeProviderAdapter implements ProviderAdapter {
       ...(session.kind === "orchestrator" && this.transcriptHookInstallable()
         ? { noticeHook: this.transcriptHookCommand(session) }
         : {}),
+      ...(operatorVoice === undefined ? {} : { operatorVoice }),
       orchestrator: session.kind === "orchestrator",
     });
+  }
+
+  /**
+   * Read on every launch and resume, so a `/voice` change made in any ordinary session reaches an
+   * orchestrator the next time it starts. See `ClaudeOperatorVoice` for why it is copied at all.
+   */
+  private async operatorVoice(session: SessionRecord): Promise<ClaudeOperatorVoice | undefined> {
+    if (session.kind !== "orchestrator") return undefined;
+    return readClaudeOperatorVoice(
+      this.options.operatorSettingsPath
+        ?? claudeUserSettingsPath(this.options.sourceEnvironment ?? process.env),
+    );
   }
 
   private transcriptHookCommand(session: SessionRecord): ClaudeTranscriptHookCommand {
