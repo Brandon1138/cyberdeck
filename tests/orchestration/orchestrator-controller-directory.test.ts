@@ -44,4 +44,11 @@ describe("OrchestratorControllerDirectory", () => {
     await expect(directory.forSession("33333333-3333-4333-8333-333333333333")).resolves.toBeUndefined();
     await expect(directory.forController("orchestrator:nowhere")).resolves.toBeUndefined();
   });
+
+  it("lists primary and peer liveness owners using the total domain derivation", async () => {
+    await expect(directory.listControllers()).resolves.toEqual([
+      { controller: orchestratorController(primary), sessionId: PRIMARY },
+      { controller: orchestratorController(peer), sessionId: PEER },
+    ]);
+  });
 });

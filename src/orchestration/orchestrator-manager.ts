@@ -83,6 +83,8 @@ export class OrchestratorManager {
     private readonly workerPreferences?: WorkerPreferenceRepository,
     private readonly providerPermissions?: ProviderPermissionPreferenceReader,
     private readonly readCapabilities?: (provider: ProviderId) => Promise<ResolvedWorkerCapability[]>,
+    private readonly observeBindingSession?: (binding: OrchestratorBinding, session?: SessionRecord) => Promise<void>,
+    private readonly observeBindingRemoval?: (binding: OrchestratorBinding) => Promise<void>,
   ) {}
 
   async ensure(input: EnsureOrchestratorRequest): Promise<OrchestratorManagerResult> {
@@ -246,9 +248,13 @@ export class OrchestratorManager {
           updatedAt: now,
         };
         await this.store.put(binding);
+        await this.observeBindingSession?.(binding, started);
       });
     } catch (error) {
-      if (binding !== undefined) await this.restoreBinding(binding.key, previous, error);
+      if (binding !== undefined) {
+        try { await this.observeBindingSession?.(binding); }
+        finally { await this.restoreBinding(binding.key, previous, error); }
+      }
       throw error;
     }
     if (binding === undefined) {
@@ -399,6 +405,7 @@ export class OrchestratorManager {
       );
     }
     await this.store.reset(key);
+    await this.observeBindingRemoval?.(binding);
     return { key, reset: true, sessionId: binding.sessionId };
   }
 
@@ -407,6 +414,7 @@ export class OrchestratorManager {
     const binding = await this.store.findBySessionId(sessionId);
     if (binding === undefined) return { reset: false };
     await this.store.reset(binding.key);
+    await this.observeBindingRemoval?.(binding);
     return { reset: true, key: binding.key };
   }
 

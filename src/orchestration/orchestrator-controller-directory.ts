@@ -1,4 +1,5 @@
 import { orchestratorController, type OrchestratorBinding } from "../domain/orchestrator.js";
+import type { ControllerIdentity } from "../domain/worker-coordination.js";
 
 export interface OrchestratorBindingDirectory {
   list(): Promise<OrchestratorBinding[]>;
@@ -22,6 +23,12 @@ export interface ControllerSession {
  */
 export class OrchestratorControllerDirectory {
   constructor(private readonly bindings: OrchestratorBindingDirectory) {}
+
+  async listControllers(): Promise<Array<{ controller: ControllerIdentity; sessionId: string }>> {
+    return (await this.bindings.list()).map((binding) => ({
+      controller: orchestratorController(binding), sessionId: binding.sessionId,
+    }));
+  }
 
   async forSession(sessionId: string): Promise<ControllerSession | undefined> {
     const binding = await this.bindings.findBySessionId(sessionId);
