@@ -96,6 +96,27 @@ describe("claudeLaunchSettings", () => {
     expect(settings.hooks).toBeDefined();
   });
 
+  it("carries the operator's voice keys into an orchestrator's file, whole", () => {
+    expect(JSON.parse(claudeLaunchSettings({
+      orchestrator: true,
+      operatorVoice: { voiceEnabled: true, voice: { enabled: true, mode: "hold", autoSubmit: false } },
+    })!)).toEqual({
+      env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" },
+      voiceEnabled: true,
+      voice: { enabled: true, mode: "hold", autoSubmit: false },
+    });
+  });
+
+  it("never carries voice keys to a worker, which reads user scope itself", () => {
+    const operatorVoice = { voiceEnabled: true, voice: { enabled: true } };
+    expect(claudeLaunchSettings({ orchestrator: false, operatorVoice })).toBeUndefined();
+    expect(JSON.parse(claudeLaunchSettings({
+      orchestrator: false,
+      transcriptHook: HOOK,
+      operatorVoice,
+    })!)).not.toHaveProperty("voiceEnabled");
+  });
+
   it("is absent when there is nothing to declare", () => {
     expect(claudeLaunchSettings({ orchestrator: false })).toBeUndefined();
   });
