@@ -14,7 +14,8 @@ async function fixture(provider: "claude" | "codex") {
   const path = join(directory, provider === "claude" ? `${sessionId}.jsonl` : "rollout.jsonl");
   const lines = provider === "claude"
     ? [{ type: "assistant", timestamp: createdAt, message: { id: "native-turn", role: "assistant", stop_reason: "end_turn",
-      content: [{ type: "text", text: "native completion" }] } }]
+      content: [{ type: "text", text: "native completion" }] } },
+      { type: "system", subtype: "turn_duration", timestamp: createdAt }]
     : [{ type: "session_meta", payload: { id: "rollout", timestamp: createdAt, cwd, originator: "codex-tui" } },
       { type: "event_msg", timestamp: createdAt, payload: { type: "task_complete", turn_id: "native-turn", last_agent_message: "native completion" } }];
   await writeFile(path, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");

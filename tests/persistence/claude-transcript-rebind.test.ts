@@ -36,7 +36,7 @@ function assistantFrame(id: string, text: string, at: string): string {
       stop_reason: "end_turn",
       content: [{ type: "text", text }],
     },
-  });
+  }) + "\n" + JSON.stringify({ type: "system", subtype: "turn_duration", timestamp: at });
 }
 
 function clearFrame(at: string): string {
