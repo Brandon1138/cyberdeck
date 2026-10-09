@@ -22,7 +22,7 @@ const probe = async (route, body) => {
   } catch { return 'error'; }
 };
 const lines = (n) => { try { return readdirSync(n).length; } catch { return -1; } };
-output('SCRIPT_READY\n');
+output('SCRIPT_READY\n❯ \n? for shortcuts\n');
 for await (const line of createInterface({ input: process.stdin })) {
   appendFileSync('commands.jsonl', JSON.stringify({ input: line, observedAt: new Date().toISOString() }) + '\n');
   if (line.startsWith('emit:')) { output(JSON.parse(line.slice(5))); continue; }

@@ -6,7 +6,7 @@ import type {
   WorkerTurnPreviewInput,
   WorkerTurnPreviewPort,
 } from "../orchestration/session/worker-turn-ports.js";
-import { frameComposerState } from "./composer-state.js";
+import { frameComposerState, frameInputReady } from "./composer-state.js";
 import { conversationPreview } from "./conversation-preview.js";
 import { ReplayDigest } from "./replay-digest.js";
 import {
@@ -61,9 +61,14 @@ implements WorkerTurnObservationPort, WorkerTurnPreviewPort {
   }
 
   composer(provider: string, replay: ReplayObservation) {
-    return frameComposerState(provider as ProviderId, replay.frameText(), {
+    const composer = frameComposerState(provider as ProviderId, replay.frameText(), {
       modalOpen: this.activity(provider, replay) === "needs-input",
     });
+    return {
+      ...composer,
+      inputReady: !composer.modalOpen && !composer.occupied
+        && frameInputReady(provider as ProviderId, this.digest(replay).inputFrameText()),
+    };
   }
 
   fatalTermination(tail: BoundedReplayTail, at: string) {

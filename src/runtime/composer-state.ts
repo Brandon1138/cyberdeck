@@ -54,7 +54,7 @@ const UNSENT_BUFFER_HINTS: Readonly<Record<string, readonly RegExp[]>> = {
  * the conversation with no border. The border character is therefore what separates "text you have
  * not sent" from "text you already sent", and is the only reason this can be read at all.
  */
-const BOXED_COMPOSER_LINE = /^[│┃┆┊║▌▏▕]\s*(?:›|❯|>)\s+(\S.*?)\s*[│┃┆┊║▌▏▕]?$/u;
+const BOXED_COMPOSER_LINE = /^[│┃┆┊║▌▏▕]\s*(?:›|❯|>)\s*(.*?)\s*[│┃┆┊║▌▏▕]?$/u;
 
 /**
  * Codex's composer, which has no box at all.
@@ -86,6 +86,8 @@ const COMPOSER_PLACEHOLDERS: readonly RegExp[] = [
   /^(?:Explain this codebase|Describe a task for a new session|Ask about this codebase)$/iu,
   /^(?:Ask|Message|Tell) (?:Codex|Claude|Cursor|Gemini)\b/iu,
   /^Plan mode:/iu,
+  /^Plan, search, build anything$/iu,
+  /^Add a follow-up$/iu,
   /^\/\S+ for /iu,
 ];
 
@@ -98,6 +100,39 @@ const COMPOSER_PLACEHOLDERS: readonly RegExp[] = [
  * scrollback being mistaken for the live input surface either way.
  */
 const COMPOSER_SCAN_LINES = 200;
+
+/**
+ * Positive startup evidence, read from the bottom of the current frame. Titles and idle activity
+ * are not input surfaces. Unknown lines stop this scan: a prompt in history must not authorize a
+ * write into a picker, startup notice, or a future UI this parser does not understand.
+ */
+export function frameInputReady(provider: ProviderId, frame: string): boolean {
+  if (!["codex", "claude", "cursor", "antigravity"].includes(provider)) return false;
+  const lines = frame.split("\n");
+  const first = Math.max(0, lines.length - COMPOSER_SCAN_LINES);
+  const prompt = provider === "codex" ? /^›(?:\s+(.*))?$/u
+    : provider === "claude" ? /^❯(?:\s+(.*))?$/u
+    : provider === "cursor" ? /^[→›❯](?:\s+(.*))?$/u
+    : /^>(?:\s+(.*))?$/u;
+  let footer = false;
+  if (/^\s*loading(?:…|\.{3})?\s*$/imu.test(frame)) return false;
+  for (let index = lines.length - 1; index >= first; index -= 1) {
+    const line = lines[index]!.trim();
+    const boxed = /^[│┃┆┊║▌▏▕]\s*(?:›|❯|>)\s*(.*?)\s*[│┃┆┊║▌▏▕]$/u.exec(line);
+    const match = boxed ?? prompt.exec(line);
+    if (match !== null) {
+      const content = (match[1] ?? "").trim();
+      const empty = content === "" || COMPOSER_PLACEHOLDERS.some((placeholder) => placeholder.test(content));
+      return empty && (boxed !== null || footer || provider === "cursor");
+    }
+    if (line === "" || /^[─━═╭╮╰╯┌┐└┘]+$/u.test(line)) continue;
+    if (/^\? for shortcuts\b/iu.test(line)) { footer = true; continue; }
+    if (provider === "codex" && /^(?:\d+% context left\b|[\d.,]+[KkMm]? (?:tokens? )?used\b|← for agents\b|(?:gpt-[\w.-]+|o[134](?:-[\w.-]+)?)\s+(?:minimal|low|medium|high|xhigh|default)\s+·\s+(?:\/|~|[a-z]:\\))/iu.test(line)) { footer = true; continue; }
+    if (provider === "claude" && /^(?:[⏵⏸]+\s*)?(?:bypass permissions on|accept edits on|plan mode on)\b.*shift\+tab/iu.test(line)) { footer = true; continue; }
+    return false;
+  }
+  return false;
+}
 
 export function terminalComposerState(
   provider: ProviderId,
@@ -153,6 +188,7 @@ export function frameComposerState(
   for (let index = lines.length - 1; index >= first; index -= 1) {
     const content = BOXED_COMPOSER_LINE.exec(lines[index]!.trim())?.[1];
     if (content === undefined) continue;
+    if (content === "") break;
     if (COMPOSER_PLACEHOLDERS.some((placeholder) => placeholder.test(content))) break;
     const bounded = content.slice(0, 120);
     return { modalOpen, occupied: true, evidence: bounded, content: bounded };
