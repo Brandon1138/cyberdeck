@@ -39,6 +39,7 @@ import type {
 import type { CompletionLedgerEntry, RenderedInstruction, StallObservation, WorkerStatusReading,
   TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
 import { normalizedHead, SubmitVerifier } from "./worker-submit-verification.js";
+import { WorkerInputReadiness } from "./worker-input-readiness.js";
 
 export interface WorkerTurnAppendResult {
   fatal: boolean;
@@ -80,7 +81,7 @@ export class WorkerTurnEngine {
   private readonly replay: ReplayObservation;
   private activity: ReturnType<WorkerTurnObservationPort["activity"]> = "unknown";
   private observedWorking = false;
-  private awaitingResumeReady = false;
+  private readonly inputReadiness = new WorkerInputReadiness();
   private completedTurnCount = 0;
   private canonicalTurnCount = 0;
   private turnsBeforeLatestInstruction = 0;
@@ -181,9 +182,11 @@ export class WorkerTurnEngine {
   }
 
   /** Start interpreting provider output after initialization without carrying setup activity over. */
-  finishInitialization(): void {
-    this.activity = "unknown";
+  finishInitialization(initialPromptInFlight = false): void {
+    this.activity = this.options.observations.activity(this.record.provider, this.replay);
     this.observedWorking = false;
+    this.inputReadiness.finishInitialization(initialPromptInFlight);
+    this.observeComposer();
     delete this.stallObservation;
     delete this.suppressSemanticTurns;
   }
@@ -191,12 +194,12 @@ export class WorkerTurnEngine {
   /** Reset only the replay observation when a new process generation is adopted. */
   resetReplay(replay: string): void {
     this.replay.reset(replay);
+    this.inputReadiness.reset();
   }
 
   /** Reset generation-local truth while preserving the durable completion ledger. */
   resetForResume(): void {
-    // Container resume returns when the process attaches, before the provider composer is ready.
-    this.awaitingResumeReady = this.record.executor === "orbstack-container";
+    this.inputReadiness.reset();
     this.terminalFinalizing = false;
     this.activity = "unknown";
     this.observedWorking = false;
@@ -238,12 +241,11 @@ export class WorkerTurnEngine {
     if (this.terminalScreenReservationsDiscarded) return { fatal: false };
 
     const activity = this.options.observations.activity(this.record.provider, this.replay);
-    if (this.awaitingResumeReady) {
+    if (this.inputReadiness.starting) {
       // Loading history and MCP startup can spin then become idle without any model turn.
       // Keep queued input off that startup surface and never bank it as a completion.
       this.activity = activity;
       this.observeComposer();
-      if (activity === "awaiting-input") this.awaitingResumeReady = false;
       this.notifyDeliveryBoundary();
       this.options.effects.scheduleSessionUpdate?.();
       return { fatal: false };
@@ -371,8 +373,9 @@ export class WorkerTurnEngine {
     return projectWorkerTruth({
       executionState: this.record.executionState,
       exitCode: this.record.exitCode,
-      activity: this.awaitingResumeReady && this.activity !== "needs-input" ? "working" : this.activity,
+      activity: this.activity,
       composer: this.composer,
+      awaitingInputReady: this.inputReadiness.pending,
       completedTurns: this.completedTurnCount,
       canonicalTurns: this.canonicalTurnCount,
       pendingInstructions: this.rendered.length,
@@ -763,7 +766,6 @@ export class WorkerTurnEngine {
     this.observeComposer();
     if (this.composer.modalOpen || this.activity === "needs-input") return "provider-modal";
     if (this.composer.occupied) return "composer-occupied";
-    if (this.awaitingResumeReady) return "provider-busy";
     // A rendered container instruction owns the next turn even before the TUI repaints.
     if (this.record.executor === "orbstack-container" && this.rendered.length > 0) return "provider-busy";
     // An indeterminate or incomplete durable receipt has no automatic recovery path. Accepting
@@ -779,6 +781,7 @@ export class WorkerTurnEngine {
     // drained, so keep it queued until the exact per-target evidence is accounted for.
     if ((this.deferredScreenCompletionTarget ?? 0) > captureFloor) return "provider-busy";
     if (this.activity === "working" || this.observedWorking) return "provider-busy";
+    if (this.inputReadiness.pending) return "provider-starting";
     return undefined;
   }
 
@@ -893,6 +896,7 @@ export class WorkerTurnEngine {
   private observeComposer(): ComposerObservation {
     if (this.options.effects.hasRuntime?.() === false) return this.composer;
     this.composer = this.options.observations.composer(this.record.provider, this.replay);
+    this.inputReadiness.observe(this.activity, this.composer);
     return this.composer;
   }
 

@@ -292,7 +292,7 @@ export function blockedPromptIndexInTail(provider: ProviderId, tail: string): nu
       )
     : provider === "claude"
       ? Math.max(
-          lastRegexIndex(tail, /Claude needs your permission[\s\S]{0,2400}?(?:Do you want to proceed\?|Allow)/giu),
+          lastRegexIndex(tail, /Claude needs your permission[\s\S]{0,2400}?(?:Do you want to proceed\?|Allow)|Quick safety check: Is this a project you created or one you trust\?/giu),
           lastRegexIndex(tail, /Do you want to proceed\?[\s\S]{0,1600}?(?:Yes|Esc to cancel)/giu),
         )
       : -1;

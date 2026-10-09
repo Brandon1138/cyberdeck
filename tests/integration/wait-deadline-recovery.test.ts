@@ -19,7 +19,7 @@ const TIMEOUT_SECONDS = 5;
 
 class FakePty implements SessionRuntime {
   readonly pid = 4242;
-  private replay = "";
+  private replay = "› \n? for shortcuts\n";
   private readonly outputListeners = new Set<(chunk: Buffer) => void>();
   private readonly exitListeners = new Set<(exitCode: number, signal?: number) => void>();
 
