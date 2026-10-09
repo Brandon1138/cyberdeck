@@ -11,6 +11,7 @@ import type {
   WorkerTurnObservationPort,
   WorkerTurnPreviewPort,
   WorkerTurnTranscript,
+  WorkerTurnLedger,
   WorkerTurnTranscriptPort,
 } from "../../../src/orchestration/session/worker-turn-ports.js";
 import {
@@ -273,6 +274,70 @@ describe("Claude transcript Stop settlement without screen bytes", () => {
       .map((event) => event.data.turnNumber)).toEqual([1, 2]);
   });
 
+  it("restores the Claude ledger before an instruction submitted ahead of restart reconciliation assigns its ordinal", async () => {
+    const f = await nativeHarness();
+    await writeFile(f.path, lines(frame("first", 1), stop("stop-first", 1), frame("second", 2), stop("stop-second", 2)));
+    await f.tick();
+    expect(f.engine.completedTurns).toBe(2);
+    f.engine.releaseTimers();
+
+    const store = new ThreadTranscriptStore(f.root, { claudeProjectsDirectory: f.projects });
+    const restarted = harness({ provider: "claude", kind: "worker" }, { transcripts: store });
+    const reconcile = vi.spyOn(restarted.engine, "reconcileCanonicalTurns");
+    const delivery = await restarted.engine.submitInstruction({
+      message: "third turn", encoded: Buffer.from("third turn\n"),
+      source: "orchestrator", instructionId: "third-instruction",
+    });
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(delivery).toMatchObject({ state: "rendered", expectedTurn: 3 });
+    expect(restarted.engine.completedTurns).toBe(2);
+    expect(restarted.engine.canonicalTurns).toBe(2);
+    expect(restarted.engine.waitResult(delivery.expectedTurn!).status).not.toBe("completed");
+
+    // Replaying historical receipts must not complete the newly rendered instruction.
+    await restarted.engine.reconcileCanonicalTurns();
+    expect(restarted.engine.waitResult(delivery.expectedTurn!).status).not.toBe("completed");
+    expect(restarted.effects.notifyInstructionState).not.toHaveBeenCalledWith(
+      expect.objectContaining({ instructionId: "third-instruction", state: "completed" }),
+    );
+
+    await appendFile(f.path, lines(frame("third", 3), stop("stop-third", 3)));
+    await restarted.engine.reconcileCanonicalTurns();
+    expect(restarted.engine.waitResult(delivery.expectedTurn!)).toMatchObject({
+      status: "completed", completedTurns: 3, text: "third", provenance: "provider-transcript",
+    });
+    expect(restarted.effects.notifyInstructionState).toHaveBeenCalledWith(
+      expect.objectContaining({ instructionId: "third-instruction", state: "completed", turn: 3 }),
+    );
+  });
+
+  it.each([
+    ["tool-only", { stop_reason: "tool_use", content: [{ type: "tool_use", id: "tool", name: "Read", input: {} }] }, "stop-textless"],
+    ["empty", { stop_reason: "end_turn", content: [{ type: "text", text: "  " }] }, undefined],
+  ] as const)("settles a %s Claude turn and the following text turn in order", async (_kind, message, stopId) => {
+    const f = await nativeHarness();
+    const textlessStop = { ...stop("stop-textless", 1), uuid: stopId };
+    await writeFile(f.path, lines({
+      type: "assistant", timestamp: "2026-08-20T09:00:01.000Z",
+      message: { id: "textless", role: "assistant", ...message },
+    }, textlessStop, frame("second", 2), stop("stop-second", 2)));
+    await f.tick();
+    expect(f.engine.waitResult(1)).toMatchObject({ status: "completed", text: "", provenance: "provider-transcript" });
+    expect(f.engine.waitResult(2)).toMatchObject({ status: "completed", text: "second", completedTurns: 2 });
+    expect(f.engine.canonicalTurns).toBe(2);
+    const turns = (await f.store.read(f.record.id)).events.filter((event) => event.kind === "turn");
+    expect(turns.map((event) => [event.data.turnNumber, event.text, event.data.semanticTurnId]))
+      .toEqual([[1, "", `claude:stop:${stopId ?? textlessStop.timestamp}`], [2, "second", "claude:second"]]);
+
+    f.engine.releaseTimers();
+    const reopened = new ThreadTranscriptStore(f.root, { claudeProjectsDirectory: f.projects });
+    const restarted = harness({ provider: "claude", kind: "worker" }, { transcripts: reopened });
+    await restarted.engine.reconcileCanonicalTurns();
+    expect(restarted.engine.waitResult(2)).toMatchObject({ status: "completed", text: "second", completedTurns: 2 });
+    expect(restarted.engine.canonicalTurns).toBe(2);
+    expect((await reopened.read(f.record.id)).events.filter((event) => event.kind === "turn")).toEqual(turns);
+  });
+
   it("ignores sidechain stops and waits for a complete duration line", async () => {
     const f = await nativeHarness();
     const duration = JSON.stringify(stop("stop-first", 1));
@@ -319,6 +384,53 @@ describe("Claude transcript Stop settlement without screen bytes", () => {
 });
 
 describe("WorkerTurnEngine", () => {
+  it.each(["composer-occupied", "worker-terminal", "lifecycle-fence"] as const)(
+    "rechecks %s before writing an instruction after ledger restoration",
+    async (boundary) => {
+      const ledger = deferred<WorkerTurnLedger>();
+      const transcripts: WorkerTurnTranscriptPort = {
+        append: vi.fn(async () => undefined),
+        readCompletionLedger: vi.fn(() => ledger.promise),
+      };
+      const f = harness({ provider: "claude" }, { transcripts });
+      const submission = f.engine.submitInstruction({
+        message: "new turn", encoded: Buffer.from("new turn\n"), source: "orchestrator", instructionId: "new",
+      });
+      expect(f.writes).toEqual([]);
+      if (boundary === "composer-occupied") f.observations.composer = { occupied: true, modalOpen: false };
+      if (boundary === "worker-terminal") f.record.executionState = "exited";
+      if (boundary === "lifecycle-fence") f.engine.releaseTimers();
+      ledger.resolve({ completedTurns: 2, canonicalTurns: 2, turns: [] });
+      await expect(submission).resolves.toMatchObject(boundary === "worker-terminal"
+        ? { state: "undelivered", hold: "worker-terminal" }
+        : { state: "queued", hold: boundary === "composer-occupied" ? "composer-occupied" : "provider-busy" });
+      expect(f.writes).toEqual([]);
+      if (boundary === "lifecycle-fence") expect(f.engine.completedTurns).toBe(0);
+    },
+  );
+
+  it("waits for capture-owned Claude ledger restoration before submitting a new instruction", async () => {
+    const ledger = deferred<WorkerTurnLedger>();
+    const transcripts: WorkerTurnTranscriptPort = {
+      append: vi.fn(async () => undefined),
+      readCompletionLedger: vi.fn(() => ledger.promise),
+      observeProviderTurns: vi.fn(async (input) => ({ ...input, turns: [] })),
+      commitProviderTurns: vi.fn(async () => []),
+    };
+    const f = harness({ provider: "claude" }, { transcripts });
+    const reconciliation = f.engine.reconcileCanonicalTurns();
+    const submission = f.engine.submitInstruction({
+      message: "new turn", encoded: Buffer.from("new turn\n"), source: "orchestrator", instructionId: "new",
+    });
+    expect(f.writes).toEqual([]);
+    ledger.resolve({ completedTurns: 2, canonicalTurns: 2, turns: [] });
+    await reconciliation;
+    await expect(submission).resolves.toMatchObject({ state: "rendered", expectedTurn: 3 });
+    expect(transcripts.readCompletionLedger).toHaveBeenCalledOnce();
+    expect(f.engine.waitResult(3).status).not.toBe("completed");
+    expect(f.writes).toHaveLength(1);
+  });
+
   it("refuses a future observation ordinal until the preceding turns can be observed", async () => {
     const f = harness({ provider: "claude" });
     f.observeProviderTurns.mockResolvedValueOnce({

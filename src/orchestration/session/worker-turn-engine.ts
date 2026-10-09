@@ -35,7 +35,6 @@ import type {
   WorkerTurnTranscriptMessage,
   WorkerTurnTranscriptPort,
 } from "./worker-turn-ports.js";
-
 import { WorkerCompletionLedger, WorkerTurnReconciler, WorkerStallTracker } from "./worker-turn-state.js";
 import type { CompletionLedgerEntry, RenderedInstruction, WorkerStatusReading,
   TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
@@ -306,12 +305,7 @@ export class WorkerTurnEngine {
           owner,
           activityRevision,
         ).catch(() => undefined);
-        void this.refreshObservedModel(
-          epoch,
-          revision,
-          owner,
-          activityRevision,
-        ).catch(() => undefined);
+        void this.refreshObservedModel(epoch, revision, owner, activityRevision).catch(() => undefined);
       }
     }
     this.armCanonicalReconcile();
@@ -328,6 +322,20 @@ export class WorkerTurnEngine {
     // Accepted input is newer than every completion-side preview/model/attention effect currently
     // awaiting I/O. It must synchronously fence those effects before this method performs any await.
     this.activityRevision += 1;
+    if (this.completionLedger.needsRestore(this.record.provider, this.options.transcripts)) {
+      const epoch = this.observationEpoch;
+      // An existing capture owns restoration and its next ordinal until it has fully settled.
+      if (this.turnCaptureOwner !== undefined) await this.turnCaptureOwner.settlement;
+      if (this.observationEpoch === epoch && this.completionLedger.needsRestore(this.record.provider, this.options.transcripts)) {
+        await this.restoreCompletionLedger();
+      }
+      if (this.record.executionState !== "active" || this.terminalFinalizing) return this.terminalDelivery(input.source, input.instructionId);
+      if (this.observationEpoch !== epoch || this.completionLedger.needsRestore(this.record.provider, this.options.transcripts)) {
+        return this.holdInstruction("provider-busy", input.source, input.instructionId);
+      }
+      const restoredHold = this.deliveryHold();
+      if (restoredHold !== undefined) return this.holdInstruction(restoredHold, input.source, input.instructionId);
+    }
     const encoded = typeof input.encoded === "function" ? input.encoded() : input.encoded;
     this.stallTracker.reset();
     const at = new Date().toISOString();
@@ -1040,12 +1048,7 @@ export class WorkerTurnEngine {
       effectActivityRevision,
     );
     if (!this.isCurrentCompletionEffect(claim, banked, effectActivityRevision)) return;
-    await this.refreshObservedModel(
-      claim.epoch,
-      claim.revision,
-      claim,
-      effectActivityRevision,
-    );
+    await this.refreshObservedModel(claim.epoch, claim.revision, claim, effectActivityRevision);
     if (!this.isCurrentCompletionEffect(claim, banked, effectActivityRevision)) return;
     await this.options.effects.setAttention("done", true);
     if (!this.isCurrentCompletionEffect(claim, banked, effectActivityRevision)) return;
@@ -1413,12 +1416,15 @@ export class WorkerTurnEngine {
       && this.options.transcripts.commitProviderTurns !== undefined;
   }
 
-  private async restoreCompletionLedger(claim: TurnCaptureClaim): Promise<boolean> {
+  private async restoreCompletionLedger(claim?: TurnCaptureClaim): Promise<boolean> {
+    const epoch = this.observationEpoch, revision = this.observationRevision;
     const ledger = await this.completionLedger.restore(this.options.transcripts!, this.record.id,
-      () => this.isCurrentCapture(claim));
+      () => claim === undefined
+        ? this.observationEpoch === epoch && this.observationRevision === revision && this.turnCaptureOwner === undefined
+        : this.isCurrentCapture(claim));
     if (ledger === undefined) return false;
     this.currentLatestResult ??= ledger.turns.at(-1)?.text;
-    claim.completionTarget = this.completedTurnCount + 1;
+    if (claim !== undefined) claim.completionTarget = this.completedTurnCount + 1;
     if (ledger.completedTurns > 0) this.options.effects.notifySessionUpdate();
     return true;
   }
@@ -1521,13 +1527,7 @@ export class WorkerTurnEngine {
         effectActivityRevision,
       ).catch(() => undefined);
       if (!this.isCurrentCompletionEffect(claim, outcome.banked, effectActivityRevision)) return;
-      await this.refreshObservedModel(
-        claim.epoch,
-        claim.revision,
-        claim,
-        effectActivityRevision,
-      )
-        .catch(() => undefined);
+      await this.refreshObservedModel(claim.epoch, claim.revision, claim, effectActivityRevision).catch(() => undefined);
       if (!this.isCurrentCompletionEffect(claim, outcome.banked, effectActivityRevision)) return;
       await this.options.effects.setAttention(
         this.activity === "needs-input" ? "needs-input" : "done",

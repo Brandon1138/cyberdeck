@@ -141,16 +141,18 @@ export function parseCodexTurn(line: string, now: (() => string) | undefined): N
 
 /**
  * Claude's final text is a candidate, not a completion: Stop hooks can continue the turn.
- * Only turn_duration closes it. Keep early markers pending until their text arrives, draining
+ * Only turn_duration closes it. Keep early markers pending until their assistant frame arrives, draining
  * oldest first so a later marker cannot claim an earlier completion ordinal.
  */
 export class ClaudeTurnStops {
   private readonly candidates = new Map<string, NativeTurn>();
+  private readonly textlessAssistantTimes = new Set<string>();
   private readonly stops = new Map<string, string>();
   private closedThrough = "";
 
   reset(): void {
     this.candidates.clear();
+    this.textlessAssistantTimes.clear();
     this.stops.clear();
     this.closedThrough = "";
   }
@@ -160,11 +162,16 @@ export class ClaudeTurnStops {
       const frame = JSON.parse(line) as {
         type?: unknown; subtype?: unknown; timestamp?: unknown; uuid?: unknown;
         isSidechain?: unknown;
+        message?: { role?: unknown; content?: unknown };
       };
       if (frame.isSidechain === true) return [];
       const candidate = parseClaudeTurn(line, now);
       if (candidate !== undefined && candidate.occurredAt > this.closedThrough) {
         this.candidates.set(candidate.id, candidate);
+      } else if (frame.type === "assistant" && frame.message?.role === "assistant"
+        && Array.isArray(frame.message.content) && typeof frame.timestamp === "string"
+        && frame.timestamp > this.closedThrough) {
+        this.textlessAssistantTimes.add(frame.timestamp);
       }
       if (frame.type === "system" && frame.subtype === "turn_duration"
         && typeof frame.timestamp === "string" && frame.timestamp > this.closedThrough) {
@@ -180,12 +187,15 @@ export class ClaudeTurnStops {
         .filter((turn) => turn.occurredAt > this.closedThrough && turn.occurredAt <= at)
         .sort(compareNativeTurns);
       const final = candidates.at(-1);
-      if (final === undefined) break;
+      const textlessTimes = [...this.textlessAssistantTimes].filter((time) => time > this.closedThrough && time <= at);
+      if (final === undefined && textlessTimes.length === 0) break;
       // Preserve the assistant id used by semanticTurnIds across broker versions/restarts.
-      turns.push({ ...final, occurredAt: at });
+      // A completed tool-only/empty response still owns an ordinal, with a stable stop-derived id.
+      turns.push(final === undefined ? { id: `stop:${id}`, occurredAt: at, text: "" } : { ...final, occurredAt: at });
       this.closedThrough = at;
       this.stops.delete(id);
       for (const candidate of candidates) this.candidates.delete(candidate.id);
+      for (const time of textlessTimes) this.textlessAssistantTimes.delete(time);
     }
     return turns;
   }
