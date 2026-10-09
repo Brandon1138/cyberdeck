@@ -175,3 +175,15 @@ enabled until the next launch. That needs to be stated in the code comment. Re-a
    the same root cause and are worth a sweep.
 4. Hypothesis 4 (broker stalls over 200 ms) is only worth acting on if early cut-offs appear after
    the fix.
+
+## DELIVERY
+
+- Fix commit: `6fe1053` on `work/voice-keys-opus` — `fix(orchestrators): carry the operator's voice
+  preference into Claude orchestrators`.
+- PR: https://github.com/Brandon1138/cyberdeck/pull/142 (non-draft, base `main`). Not merged; the
+  merge is the operator's.
+- Shape: orchestrator `prepareLaunch` copies `voiceEnabled` / `voice` from the operator's user
+  settings into the existing `--settings` file. User scope stays excluded. Trade-off: `/voice` inside
+  a running orchestrator takes effect only on its next launch or resume.
+- Evidence: `tsc --noEmit` clean; `vitest run` 225 files / 2751 tests passed. Not verified live —
+  needs `pnpm build`, broker + Fleet restart, orchestrator resume, then hold space.
