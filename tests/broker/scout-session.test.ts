@@ -219,6 +219,27 @@ function request(
 }
 
 describe("Scout session lifecycle", () => {
+  it("keeps headless Scout truth independent of interactive startup readiness", async () => {
+    const { registry, pty, repo } = await harness();
+    const record = await registry.start(
+      request(repo, { maxWallClockMs: 10_000, maxTokens: 10_000 }), "Scout prompt",
+    );
+    try {
+      expect(record.scout?.transport).toBe("headless-stream-json");
+      // Preserve the stream supervisor's existing truth instead of waiting for a terminal
+      // composer that this one-shot transport never renders, before or after native JSON output.
+      expect(registry.workerTruth(record.id)).toMatchObject({ state: "idle", terminal: false });
+      pty.emit(streamText("Partial native response, not a decision card."));
+      expect(registry.workerTruth(record.id)).toMatchObject({ state: "idle", terminal: false });
+      expect(registry.workerTruth(record.id).completedTurns).toBe(0);
+      await expect(registry.submitInstruction(record.id, "Follow-up", "orchestrator"))
+        .rejects.toMatchObject({ code: "SESSION_BUSY" });
+      expect(pty.writes).toEqual([]);
+    } finally {
+      await registry.stop(record.id);
+    }
+  });
+
   it("cancels the wall-clock cutoff when a legacy interactive Scout exits", async () => {
     vi.useFakeTimers();
     const { registry, pty, repo } = await harness({ interactiveScout: true });
