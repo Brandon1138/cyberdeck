@@ -23,6 +23,14 @@ The replacement is fsynced through its file and parent directory. Appends and
 checkpointing share one queue, and a detected external source change aborts the
 checkpoint. Archives are history, not replay inputs.
 
+Every append and load/checkpoint also holds SQLite's cross-process writer lock
+on an adjacent private `.lock.sqlite` file. This covers opening an append
+descriptor through fsync/close, and checkpoint validation through replacement.
+A second process waits asynchronously, so a write cannot be acknowledged on an
+inode that a concurrent checkpoint has retired. The OS releases the lock on
+process death, including SIGKILL; the persistent lock file is never unlinked to
+reclaim ownership. No authority data is stored in it.
+
 Checkpoint failure is reported but does not turn an already-fsynced mutation
 into a failed RPC. A failed replacement leaves the original authority intact;
 a failed directory sync after replacement leaves an equivalent checkpoint and

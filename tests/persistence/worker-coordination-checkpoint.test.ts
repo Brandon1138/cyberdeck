@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { appendFile, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -97,4 +98,77 @@ it("an acknowledged append remains successful when maintenance fails", async () 
   await expect(checkpointed.append({ subjects: [{ ...subject, lease: { ...subject.lease, version: 99 } }] })).resolves.toBeUndefined();
   expect(onCheckpointError).toHaveBeenCalledOnce();
   expect((await store.load()).subjects[0]?.lease.version).toBe(99);
+});
+
+it("waits for another process's open append before checkpointing, retaining its acknowledged mutation", async () => {
+  const { root, store, subject } = await fixture();
+  const originalInode = (await stat(store.path)).ino;
+  const module = new URL("../../src/persistence/journal-exclusivity.ts", import.meta.url).href;
+  const envelope = JSON.stringify({ schemaVersion: 1, recordType: "worker-coordination.transaction",
+    transactionId: randomUUID(), persistedAt: new Date().toISOString(),
+    subjects: [{ ...subject, lease: { ...subject.lease, version: 99 } }] }) + "\n";
+  const code = `import {withJournalExclusivity} from ${JSON.stringify(module)};
+    import {open} from 'node:fs/promises';
+    await withJournalExclusivity(${JSON.stringify(store.path)}, async () => {
+      const file = await open(${JSON.stringify(store.path)}, 'a');
+      process.send('opened');
+      await new Promise(resolve => process.once('message', resolve));
+      try { await file.writeFile(${JSON.stringify(envelope)}); await file.sync(); }
+      finally { await file.close(); }
+      process.send('acknowledged');
+    }); process.disconnect();`;
+  const child = spawn(process.execPath, ["--no-warnings", "--import", import.meta.resolve("tsx"), "--input-type=module", "-e", code],
+    { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  let error = "";
+  child.stderr!.on("data", (data) => { error += data; });
+  const exited = new Promise<number | null>((resolve) => child.once("exit", resolve));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once("message", (message) => message === "opened" ? resolve() : reject(new Error(String(message))));
+      child.once("error", reject);
+      child.once("exit", (code) => reject(new Error(`Writer exited ${code}: ${error}`)));
+    });
+    const checkpointed = new WorkerCoordinationStore(root, { checkpointBytes: 1 });
+    let settled = false;
+    const pending = checkpointed.load().finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    expect((await stat(store.path)).ino).toBe(originalInode);
+    child.send("release");
+    expect((await pending).subjects[0]?.lease.version).toBe(99);
+    expect(await exited, error).toBe(0);
+    expect((await store.load()).subjects[0]?.lease.version).toBe(99);
+    const archive = (await readdir(join(root, "orchestration"))).find((name) => name.endsWith(".archive"));
+    expect(await readFile(join(root, "orchestration", archive!), "utf8")).toContain(envelope);
+  } finally { if (child.exitCode === null) { child.kill(); await exited; } }
+});
+
+it("blocks an append behind another process and recovers its lock after SIGKILL", async () => {
+  const { root, store, subject } = await fixture();
+  const module = new URL("../../src/persistence/journal-exclusivity.ts", import.meta.url).href;
+  const code = `import {withJournalExclusivity} from ${JSON.stringify(module)};
+    await withJournalExclusivity(${JSON.stringify(store.path)}, async () => {
+      process.send('locked'); await new Promise(resolve => process.once('message', resolve));
+    });`;
+  const child = spawn(process.execPath, ["--no-warnings", "--import", import.meta.resolve("tsx"), "--input-type=module", "-e", code],
+    { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once("message", () => resolve());
+      child.once("error", reject);
+      child.once("exit", () => reject(new Error("Lock holder exited before acquisition")));
+    });
+    let settled = false;
+    const writer = new WorkerCoordinationStore(root);
+    const pending = writer.append({ subjects: [{ ...subject, lease: { ...subject.lease, version: 99 } }] })
+      .finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    child.kill("SIGKILL");
+    await exited;
+    await pending;
+    expect((await store.load()).subjects[0]?.lease.version).toBe(99);
+    expect((await stat(`${store.path}.lock.sqlite`)).mode & 0o777).toBe(0o600);
+  } finally { if (child.exitCode === null && child.signalCode === null) { child.kill(); await exited; } }
 });

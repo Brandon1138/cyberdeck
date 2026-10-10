@@ -24,6 +24,7 @@ import type {
 import { WorkerHandoffSchema, type WorkerHandoff } from "../domain/worker-handoff.js";
 import { ensurePrivateDirectory, openPrivateAppendFile } from "./private-files.js";
 import { completeJsonlLines } from "./complete-jsonl-lines.js";
+import { withJournalExclusivity } from "./journal-exclusivity.js";
 
 const CoordinationTransactionSchema = z.object({
   schemaVersion: z.literal(WORKER_COORDINATION_SCHEMA_VERSION),
@@ -102,7 +103,7 @@ export class WorkerCoordinationStore {
       receipts: transaction.receipts ?? [],
     });
     assertSupportedVersions(envelope);
-    const write = async (): Promise<void> => {
+    const write = (): Promise<void> => withJournalExclusivity(this.path, async () => {
       const handle = await openPrivateAppendFile(this.path);
       try {
         await handle.write(`${JSON.stringify(envelope)}\n`, undefined, "utf8");
@@ -112,18 +113,18 @@ export class WorkerCoordinationStore {
       }
       // Maintenance cannot turn an already-fsynced mutation into a reported failure.
       await this.maybeCheckpoint();
-    };
+    });
     // Chain on settle, not on success: one failed append must not poison every later append.
     this.writeTail = this.writeTail.then(write, write);
     await this.writeTail;
   }
 
   async load(): Promise<WorkerCoordinationState> {
-    const load = async () => {
+    const load = () => withJournalExclusivity(this.path, async () => {
       const state = await this.replay();
       await this.maybeCheckpoint();
       return state;
-    };
+    });
     const operation = this.writeTail.then(load, load);
     this.writeTail = operation.then(() => {}, () => {});
     return operation;

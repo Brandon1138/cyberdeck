@@ -12,7 +12,9 @@ and persisted schemas remain under active alpha development.
   limit after long-running budget observation history. Automatic lossless
   checkpoints archive the original journal and remove intermediate snapshots
   while preserving leases, handoffs, audits, mutation receipts, and transaction
-  identities. Budget polling coalesces overlapping checks, and startup failures
+  identities. Appends and checkpoints hold a crash-safe cross-process lock so
+  a second broker cannot hide an acknowledged mutation during replacement.
+  Budget polling coalesces overlapping checks, and startup failures
   include their stack trace.
 
 ## [0.1.0-alpha.3] - 2026-10-09
