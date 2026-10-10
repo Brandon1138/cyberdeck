@@ -31,6 +31,7 @@ type BrokerInstructionInput = {
 };
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
@@ -188,6 +189,53 @@ async function registerBudget(
 }
 
 describe("WorkerBudgetEnforcer", () => {
+  it("coalesces periodic checks and observation callbacks into one check per interval", async () => {
+    const context = await harness();
+    const subject = enforcer(context);
+    await registerBudget(subject, context.registry.worker, declaration("wall-clock-ms", 1_000_000));
+    // Preserve real service notifications while making the timer test independent of disk latency.
+    vi.spyOn(context.store, "append").mockResolvedValue(undefined);
+    const observe = vi.spyOn(context.coordination, "observeBudget");
+    vi.useFakeTimers();
+    try {
+      await subject.start();
+      expect(observe).toHaveBeenCalledTimes(1);
+      for (let tick = 1; tick <= 4; tick++) {
+        context.advance(5_000);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(observe).toHaveBeenCalledTimes(tick + 1);
+      }
+    } finally { subject.close(); }
+  });
+
+  it("does not pile up scheduled checks while provider telemetry is slow", async () => {
+    const context = await harness();
+    let release: (() => void) | undefined;
+    let slow = false;
+    const telemetry = vi.fn(async () => {
+      if (slow) await new Promise<void>((resolve) => { release = resolve; });
+      return {};
+    });
+    const subject = enforcer({ ...context, telemetry });
+    await registerBudget(subject, context.registry.worker, declaration("wall-clock-ms", 1_000_000));
+    vi.spyOn(context.store, "append").mockResolvedValue(undefined);
+    vi.useFakeTimers();
+    try {
+      await subject.start();
+      slow = true;
+      for (let tick = 0; tick < 4; tick++) {
+        context.advance(5_000);
+        await vi.advanceTimersByTimeAsync(5_000);
+      }
+      expect(telemetry).toHaveBeenCalledTimes(2);
+      subject.close();
+      release?.();
+      // Wait for the in-flight refresh before teardown.
+      slow = false;
+      await subject.refresh(WORKER_ID);
+    } finally { subject.close(); release?.(); }
+  });
+
   it("registers budget durably and captures issued lease credential", async () => {
     const context = await harness();
     const credentialSet = vi.fn();
