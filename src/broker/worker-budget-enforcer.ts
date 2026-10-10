@@ -127,9 +127,11 @@ export class WorkerBudgetEnforcer implements WorkerBudgetGate {
       throw error;
     }
     this.interval = setInterval(() => {
-      void this.refreshAll().catch((error) => {
-        this.options.onBackgroundError?.("*", error);
-      });
+      // Use the same scheduler as registry/budget notifications; a second direct refreshAll
+      // used to race each observation's follow-up timer and persist duplicate measurements.
+      for (const subject of this.options.coordination.listSubjects()) {
+        if (subject.subjectKind === "worker" && subject.budget !== undefined) this.schedule(subject.subjectId);
+      }
     }, this.intervalMs);
     this.interval.unref();
   }
@@ -416,9 +418,16 @@ export class WorkerBudgetEnforcer implements WorkerBudgetGate {
     if (!this.started || this.options.coordination.getBudget(workerId) === undefined) return;
     if (this.scheduled.has(workerId)) return;
     const elapsed = this.now() - (this.lastCheckedAt.get(workerId) ?? 0);
-    const delay = immediate ? 0 : Math.max(0, this.intervalMs - elapsed);
+    const delay = this.tails.has(workerId) ? this.intervalMs
+      : immediate ? 0 : Math.max(0, this.intervalMs - elapsed);
     const timer = setTimeout(() => {
       this.scheduled.delete(workerId);
+      // A slow in-flight read or another trigger may have refreshed since this timer was armed.
+      if (this.tails.has(workerId) || (!immediate
+        && this.now() - (this.lastCheckedAt.get(workerId) ?? 0) < this.intervalMs)) {
+        this.schedule(workerId);
+        return;
+      }
       void this.refresh(workerId).catch((error) => {
         this.options.onBackgroundError?.(workerId, error);
       });

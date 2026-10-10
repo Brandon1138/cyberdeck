@@ -242,4 +242,21 @@ describe("WorkerCoordinationStore and migration", () => {
       }),
     );
   });
+
+  it("preserves UTF-8 records across stream boundaries and rejects committed blank or malformed lines", async () => {
+    const stateDirectory = await directory();
+    const store = new WorkerCoordinationStore(stateDirectory);
+    await store.append({});
+    const original = JSON.parse((await readFile(store.path, "utf8")).trim());
+    // Put the first byte of a multibyte character at the final byte of a stream chunk.
+    const json = JSON.stringify(original);
+    const prefix = json.slice(0, -1) + ',"extra":"';
+    const body = " ".repeat(64 * 1024 - 1 - prefix.length) + prefix + '€"}\r\n';
+    await writeFile(store.path, body);
+    await expect(store.load()).resolves.toMatchObject({ subjects: [] });
+    await appendFile(store.path, "\n");
+    await expect(store.load()).rejects.toMatchObject({ code: "STORE_CORRUPT", line: 2 });
+    await writeFile(store.path, body + "{bad}\n");
+    await expect(store.load()).rejects.toMatchObject({ code: "STORE_CORRUPT", line: 2 });
+  });
 });
