@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { basename, dirname } from "node:path";
-import { ANSWERABLE_MODAL_KINDS, type ModalKind } from "../domain/modal-descriptor.js";
+import { ANSWERABLE_MODAL_KINDS, SCOPED_MODAL_ANSWERS, type ModalKind } from "../domain/modal-descriptor.js";
 
 /** The two git questions root resolution needs; `GitWorkspaceProbe` satisfies it structurally. */
 export interface ModalAnswerRepositoryProbe {
@@ -30,22 +30,39 @@ export interface ModalAnswerPolicyOptions {
 /**
  * The one place an automated answer is allowed or refused.
  *
- * Two independent conditions, both operator-legible: the modal kind must be in the domain's
- * answerable set (a per-action permission approval or a login prompt never is), and the worker's
- * cwd must resolve to a repository whose primary checkout root the operator granted. A linked
- * worktree resolves to the repository it belongs to — `git rev-parse --git-common-dir` from any
- * worktree names the primary `.git` — which is precisely how a grant on a repository covers the
- * worktrees Cyberdeck provisions into it. Prompts failing either condition surface to the operator
- * exactly as before; nothing here widens silently.
+ * Three independent conditions, all operator-legible: the modal kind must be in the domain's
+ * answerable set (a per-action permission approval or a login prompt never is); a kind the domain
+ * scopes must be answered inside that scope, so a hook review is only ever continued without its
+ * hooks — a grant never trusts them, and a request that names no answer is refused rather than
+ * assumed to be the safe one; and the worker's cwd must resolve to a repository whose primary
+ * checkout root the operator granted. A linked worktree resolves to the repository it belongs to —
+ * `git rev-parse --git-common-dir` from any worktree names the primary `.git` — which is precisely
+ * how a grant on a repository covers the worktrees Cyberdeck provisions into it. Prompts failing
+ * any condition surface to the operator exactly as before; nothing here widens silently.
  */
 export class ModalAnswerPolicy {
   constructor(private readonly options: ModalAnswerPolicyOptions) {}
 
-  async evaluate(input: { cwd: string; kind: ModalKind; sessionId?: string }): Promise<ModalAnswerPolicyDecision> {
+  async evaluate(input: {
+    cwd: string;
+    kind: ModalKind;
+    answer?: string | undefined;
+    sessionId?: string;
+  }): Promise<ModalAnswerPolicyDecision> {
     if (!ANSWERABLE_MODAL_KINDS.has(input.kind)) {
       return {
         allowed: false,
         reason: `Modal kind ${input.kind} is never answerable by policy; it stays with the operator`,
+      };
+    }
+    const scope = SCOPED_MODAL_ANSWERS[input.kind];
+    if (scope !== undefined && (input.answer === undefined || !scope.has(input.answer))) {
+      const permitted = [...scope].join(" or ");
+      return {
+        allowed: false,
+        reason: input.answer === undefined
+          ? `A ${input.kind} prompt is answerable only with ${permitted}, and this request named no answer to check`
+          : `A ${input.kind} prompt is answerable only with ${permitted}; every other answer stays with the operator`,
       };
     }
     const cwd = input.sessionId !== undefined && this.options.resolveSessionCwd

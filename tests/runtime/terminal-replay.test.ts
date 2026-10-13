@@ -5,6 +5,17 @@ import {
   terminalTokenCount,
   truncateResult,
 } from "../../src/runtime/terminal-replay.js";
+import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
+import {
+  CODEX_DIRECTORY_TRUST,
+  CODEX_FOLDER_ACCESS,
+  CODEX_FOLDER_ACCESS_EXISTING_TASK,
+  CODEX_FOLDER_ACCESS_RESTRICTED,
+  CODEX_FOLDER_ACCESS_SUBDIRECTORY,
+  CODEX_HOOK_REVIEW,
+  CODEX_HOOK_REVIEW_0_153,
+  codexRendered,
+} from "../fixtures/provider-startup-dialogs.js";
 
 describe("terminal replay semantics", () => {
   it("uses the latest provider title rather than stale spinner frames", () => {
@@ -38,6 +49,38 @@ describe("terminal replay semantics", () => {
       "antigravity",
       "Do you trust the contents of this project? > Yes, I trust this folder",
     )).toBe("needs-input");
+  });
+
+  it("surfaces Codex's startup dialogs as blocked however ratatui placed their words", () => {
+    // Their footers ("enter continue · esc quit", "enter confirm · esc skip") give the affordance
+    // grammar no "to" to key on, and the restricted variants must block too: nothing answers them.
+    // Codex 0.120 through 0.153 asks in a paragraph that says "Working", and a folder path can too:
+    // both are working markers drawn inside the dialog, not the provider working.
+    const adapter = new WorkerTurnObservationAdapter();
+    for (const frame of [
+      CODEX_FOLDER_ACCESS,
+      CODEX_FOLDER_ACCESS.replace("/workspace/project", "/Users/op/Working/project"),
+      CODEX_FOLDER_ACCESS_SUBDIRECTORY,
+      CODEX_FOLDER_ACCESS_RESTRICTED,
+      CODEX_FOLDER_ACCESS_EXISTING_TASK,
+      CODEX_HOOK_REVIEW,
+      CODEX_HOOK_REVIEW_0_153,
+      CODEX_DIRECTORY_TRUST,
+    ]) {
+      for (const rendered of [codexRendered(frame), codexRendered(frame, "rows")]) {
+        expect(providerTerminalActivity("codex", rendered)).toBe("needs-input");
+        const replay = adapter.createReplay(128 * 1024);
+        replay.appendBytes(Buffer.from(rendered));
+        expect(adapter.activity("codex", replay)).toBe("needs-input");
+      }
+    }
+  });
+
+  it("lets Codex's working status after a startup dialog read as working", () => {
+    for (const frame of [CODEX_FOLDER_ACCESS, CODEX_DIRECTORY_TRUST]) {
+      const answered = `${codexRendered(frame)}\u001b[2J\u001b[1;1H• Working (2s • esc to interrupt)`;
+      expect(providerTerminalActivity("codex", answered)).toBe("working");
+    }
   });
 
   it("recognizes current Codex and Claude provider approval surfaces", () => {

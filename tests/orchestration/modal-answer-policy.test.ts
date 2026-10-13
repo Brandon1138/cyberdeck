@@ -71,6 +71,32 @@ describe("ModalAnswerPolicy", () => {
     }
   });
 
+  it("answers a hook review only by continuing without its hooks, and only under a grant", async () => {
+    const guarded = policy({ grantedRoots: ["/repo"], commonDir: { "/repo": "/repo/.git" } });
+    const input = { cwd: "/repo", kind: "hook-review" as const };
+    expect(await guarded.evaluate({ ...input, answer: "continue-without-hooks" }))
+      .toMatchObject({ allowed: true, root: "/repo" });
+    // Folder trust is granted here, and it says nothing about the hooks the folder brings with it.
+    expect(await guarded.allowsWorkspaceTrust("/repo")).toBe(true);
+    // Refused answers are not echoed back: a caller's string never reaches the operator's record.
+    for (const answer of ["trust", "trust-all", "review", "approve", "2", "Trust all and continue"]) {
+      expect(await guarded.evaluate({ ...input, answer })).toEqual({
+        allowed: false,
+        reason: "A hook-review prompt is answerable only with continue-without-hooks; every other answer stays with the operator",
+      });
+    }
+    const unnamed = await guarded.evaluate(input);
+    expect(unnamed.allowed).toBe(false);
+    expect(unnamed.reason).toContain("named no answer to check");
+  });
+
+  it("refuses even the scoped hook answer in a repository the operator did not grant", async () => {
+    const decision = await policy({ grantedRoots: ["/other"], commonDir: { "/repo": "/repo/.git" } })
+      .evaluate({ cwd: "/repo", kind: "hook-review", answer: "continue-without-hooks" });
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain("cyberdeck modal-answers on --root /repo");
+  });
+
   it("denies when no grant covers the resolved root, naming the fix", async () => {
     const decision = await policy({ commonDir: { "/repo": "/repo/.git" } })
       .evaluate({ cwd: "/repo", kind: "workspace-trust" });

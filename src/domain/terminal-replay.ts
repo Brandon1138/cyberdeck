@@ -278,7 +278,8 @@ export function blockedPromptIndexInTail(provider: ProviderId, tail: string): nu
   const common = Math.max(
     lastRegexIndex(
       tail,
-      /Do you trust the contents of this project\?|workspace-trust|needs authentication|permission prompt/giu,
+      // Codex 0.120 through 0.153 says "directory" where older providers say "project".
+      /Do\s*you\s*trust\s*the\s*contents\s*of\s*this\s*(?:project|directory)\?|workspace-trust|needs authentication|permission prompt/giu,
     ),
     dialogAffordanceIndexInTail(tail),
   );
@@ -289,6 +290,17 @@ export function blockedPromptIndexInTail(provider: ProviderId, tail: string): nu
           /Would you like to (?:run the following command|apply the following changes)\?[\s\S]{0,2400}?Yes, proceed/giu,
         ),
         lastRegexIndex(tail, /Codex needs (?:your )?(?:approval|permission)[\s\S]{0,1600}?(?:Allow|Yes)/giu),
+        // Codex 0.158+ startup dialogs: folder access (every variant, including the restricted ones
+        // nothing may answer) and the hook review that can follow it. Their footers read
+        // "enter continue · esc quit" and "enter confirm · esc skip" with no "to" for the affordance
+        // grammar to key on, and ratatui positions words with CSI H, which stripping removes along
+        // with the spaces it skipped — so every gap is optional.
+        lastRegexEnd(tail, /Folder\s*access[\s\S]{0,1600}?enter\s*continue[\s\S]{0,40}?esc\s*(?:quit|back|cancel)/giu),
+        lastRegexIndex(tail, /Hooks\s*need\s*review[\s\S]{0,1200}?Continue\s*without\s*trusting/giu),
+        lastRegexEnd(
+          tail,
+          /Do\s*you\s*trust\s*the\s*contents\s*of\s*this\s*directory\?[\s\S]{0,1600}?Press\s*enter\s*to\s*continue/giu,
+        ),
       )
     : provider === "claude"
       ? Math.max(
@@ -305,6 +317,19 @@ function lastRegexIndex(value: string, pattern: RegExp): number {
   let index = -1;
   for (const match of value.matchAll(pattern)) index = match.index;
   return index;
+}
+
+/**
+ * Offset just past the last match: where a dialog whose body can hold an activity marker ends.
+ *
+ * A folder dialog prints its folder, and a path can say "Working" as readily as Codex 0.120 through
+ * 0.153's own trust paragraph does ("Working with untrusted contents…"). Placed at its title, such
+ * a dialog reads as older than the marker drawn inside it, and a blocked worker reads as busy.
+ */
+function lastRegexEnd(value: string, pattern: RegExp): number {
+  let end = -1;
+  for (const match of value.matchAll(pattern)) end = match.index + match[0].length;
+  return end;
 }
 
 /**
