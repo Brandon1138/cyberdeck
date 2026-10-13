@@ -6,7 +6,7 @@ import type { ScoutSessionSupervisorFactory } from "./scout-session-supervisor.j
 import { SessionCatalog } from "./session-catalog.js";
 import { cloneRecord, recoverRecord } from "./session-record-projection.js";
 import { resolvedLaunchRecord } from "./launch-record.js";
-import { initialInstructionCompleted } from "./recover-initial-instruction.js";
+import { recoverInitialInstruction } from "./recover-initial-instruction.js";
 import type { RuntimeSession } from "./session-registry-ports.js";
 import { requireSessionRuntime } from "./session-runtime-guards.js";
 import { SessionUpdateBus } from "./session-update-bus.js";
@@ -31,6 +31,7 @@ export class SessionRuntimeAssembly {
   private readonly catalog: SessionCatalog;
   private readonly bus: SessionUpdateBus;
   private readonly scoutSupervision: ScoutSessionSupervisorFactory;
+  private readonly initialRecoveryFailures = new Map<string, string>();
 
   constructor(options: SessionRuntimeAssemblyOptions) {
     this.catalog = options.catalog;
@@ -50,7 +51,12 @@ export class SessionRuntimeAssembly {
     for (const original of stored) {
       // Check the provider's persisted first turn before recovery terminalizes a live record.
       // Its argv prompt must never be resent, and a completed receipt must not be re-armed.
-      const initialCompleted = await initialInstructionCompleted(original, this.catalog.options.transcripts);
+      const initial = await recoverInitialInstruction(original, this.catalog.options.transcripts);
+      if (initial.unavailable !== undefined) {
+        this.initialRecoveryFailures.set(original.id, initial.unavailable);
+        await this.catalog.appendTranscript(original.id, "lifecycle", "broker", initial.unavailable,
+          { instructionId: original.initialInstructionId, provider: original.provider });
+      }
       const record = recoverRecord(original);
       // A provider limit is the one piece of runtime truth that survives the process that observed
       // it, because the cap belongs to the account rather than to the runtime. Recovery folds `errored`
@@ -60,7 +66,7 @@ export class SessionRuntimeAssembly {
         watchers: new Map(),
         stopRequested: false,
         launchTail: Promise.resolve(),
-      }, !initialCompleted));
+      }, !initial.completed));
       const rewritten = record.executionState !== original.executionState
         || record.attentionState !== original.attentionState
         || record.exitCode !== original.exitCode;
@@ -70,6 +76,10 @@ export class SessionRuntimeAssembly {
     }
     await Promise.all(writes);
     await this.catalog.recoverScoutReports();
+  }
+
+  initialInstructionRecoveryFailure(sessionId: string): string | undefined {
+    return this.initialRecoveryFailures.get(sessionId);
   }
 
   createRuntimeSession(

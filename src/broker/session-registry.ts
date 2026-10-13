@@ -145,6 +145,10 @@ export class SessionRegistry {
     await this.recovery;
   }
 
+  initialInstructionRecoveryFailure(sessionId: string): string | undefined {
+    return this.assembly.initialInstructionRecoveryFailure(sessionId);
+  }
+
   setWorkerBudgetGate(gate: WorkerBudgetGate): void {
     return this.catalog.setWorkerBudgetGate(gate);
   }

@@ -111,11 +111,14 @@ async function harness(creator: "claude" | "codex") {
   });
   const restart = async (sessionId: string, recoveredTranscripts = transcripts) => {
     queue.stop();
-    const recovered = new SessionRegistry({ ...registryOptions, transcripts: recoveredTranscripts, recoveredSessions: [registry.get(sessionId)] });
+    const recovered = new SessionRegistry({ ...registryOptions, transcripts: recoveredTranscripts, recoveredSessions: [registry.get(sessionId), registry.get(actor.session.id)] });
     await recovered.ready();
     const recoveredQueue = new InstructionQueue(recovered, bindings, new InstructionStore(directory));
     recoveredQueue.start();
-    await recoveredQueue.recoverLaunchInstructions(async (id) => (await recoveredTranscripts.readCompletionLedger(id)).canonicalTurns);
+    await recoveredQueue.recoverLaunchInstructions(async (id) => ({
+      canonicalTurns: (await recoveredTranscripts.readCompletionLedger(id)).canonicalTurns,
+      pending: recovered.initialInstructionRecoveryFailure(id),
+    }));
     cleanups.push(async () => {
       await recovered.stop(sessionId);
       await recoveredQueue.flush(sessionId);
@@ -127,6 +130,25 @@ async function harness(creator: "claude" | "codex") {
 }
 
 describe("peer first-instruction lifecycle", () => {
+  it.each(["claude", "codex"] as const)("contains a %s native-read recovery failure and retries without resending the brief", async (provider) => {
+    const h = await harness("codex"); const created = await h.create(provider);
+    if (created.outcome !== "CREATED") throw new Error(created.reason);
+    const recoveredTranscripts = new FixtureTranscripts(h.directory);
+    recoveredTranscripts.complete(created.sessionId, "FIRST_ACK");
+    vi.spyOn(recoveredTranscripts, "observeProviderTurns").mockRejectedValueOnce(new Error("Transcript changed during read"));
+    const first = await h.restart(created.sessionId, recoveredTranscripts);
+    expect(first.registry.get(h.actor.session.id).id).toBe(h.actor.session.id);
+    expect(first.registry.initialInstructionRecoveryFailure(created.sessionId)).toContain("without resending the brief");
+    await first.queue.flush(created.sessionId);
+    expect((await first.queue.list(created.sessionId))[0]).toMatchObject({ status: "queued", holdReason: "native-recovery-unavailable" });
+    first.queue.stop();
+    const retried = await h.restart(created.sessionId, recoveredTranscripts);
+    expect(retried.registry.initialInstructionRecoveryFailure(created.sessionId)).toBeUndefined();
+    expect((await retried.queue.list(created.sessionId))[0]?.status).toBe("completed");
+    expect(h.handles).toHaveLength(2);
+    expect(h.handles[1]!.handle.writes).toEqual([]);
+  });
+
   it.each(["claude", "codex"] as const)("keeps a completed %s brief completed across broker recovery, resume, and stop", async (provider) => {
     const h = await harness("codex"); const created = await h.create(provider);
     if (created.outcome !== "CREATED") throw new Error(created.reason);

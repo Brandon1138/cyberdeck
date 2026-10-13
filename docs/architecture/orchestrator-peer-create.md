@@ -97,7 +97,11 @@ Result:
 For Claude and Codex, the initial prompt is persisted during activation before spawn and is never
 retyped by recovery. Early messages remain behind that receipt until the native first turn completes.
 Cursor retains verified queue delivery and its explicitly attributed terminal fallback. Mutation retries
-read the same receipt, including after restart. `failed` reports an unconsumed terminal receipt;
+read the same receipt, including after restart. Recovery checks native first-turn evidence before
+classifying an unresolved launch receipt and never regresses completed receipts. If a provider log
+cannot be read, only that receipt stays queued with `native-recovery-unavailable`; its lifecycle
+evidence explains that resume or restart retries the read without resending the brief. Broker ledger
+or commit failures remain startup failures. `failed` reports an unconsumed terminal receipt;
 inspect before sending another instruction. `replayed` is only for legacy bindings without a
 receipt, whose delivery is unknown. No brief means `not-requested`. `remoteControl` is per provider: Claude peers carry Remote
 Control, Codex peers their remote app-server, and Cursor peers have no phone surface at all.
@@ -174,8 +178,9 @@ or narrows the same list on the primary binding the way `fable-workers` already 
 From Remote Control on orchestrator A, the operator says "start a Codex orchestrator in repo X
 with this brief". A asks for express approval and waits for "yes, create it". A calls
 `cyberdeck_orchestrator_create` with that exact quote in `approval`. The broker validates the approval
-field and A's grant, derives B's unchanged capabilities, starts B detached, enqueues the brief from A,
-and writes the audit pair. B's binding and inspect result identify A, quote and depth. Claude and
+field and A's grant, derives B's unchanged capabilities, persists the brief receipt before spawning B
+with its native initial prompt, and writes the audit pair. B's binding and inspect result identify A,
+quote and depth. Claude and
 Codex peers have phone surfaces; actual phone delivery and Fleet activation remain operator checks.
 `cyberdeck_thread_message` lets A send further instructions to B under A's scope.
 

@@ -109,15 +109,21 @@ export class InstructionQueue {
   }
 
   /** Account for a native launch receipt after restart without ever resending its prompt. */
-  async recoverLaunchInstructions(readCanonicalTurns: (sessionId: string) => Promise<number>): Promise<void> {
+  async recoverLaunchInstructions(readCanonicalTurns: (sessionId: string) => Promise<number | { canonicalTurns: number; pending?: string | undefined }>): Promise<void> {
     for (const record of await this.store.list()) {
       if (record.launch !== true || ["completed", "undelivered", "cancelled"].includes(record.status)) continue;
       await this.serialize(record.targetSessionId, async () => {
         const current = (await this.store.list(record.targetSessionId)).find(({ id }) => id === record.id)!;
         if (["completed", "undelivered", "cancelled"].includes(current.status)) return;
-        if (await readCanonicalTurns(record.targetSessionId) >= (record.expectedTurn ?? 1)) {
+        const recovery = await readCanonicalTurns(record.targetSessionId);
+        const canonicalTurns = typeof recovery === "number" ? recovery : recovery.canonicalTurns;
+        if (canonicalTurns >= (record.expectedTurn ?? 1)) {
           const at = new Date().toISOString();
           await this.persistState(current, "completed", { submittedAt: current.submittedAt ?? at, completedAt: at, holdReason: undefined });
+          return;
+        }
+        if (typeof recovery !== "number" && recovery.pending !== undefined) {
+          await this.persistState(current, "queued", { holdReason: "native-recovery-unavailable" });
           return;
         }
         let target: SessionRecord | undefined;
@@ -314,6 +320,7 @@ export class InstructionQueue {
       let target: SessionRecord | undefined;
       try { target = this.registry.get(record.targetSessionId); } catch { /* Failed before catalog registration. */ }
       if (target === undefined || !["starting", "active"].includes(target.executionState)) {
+        if (record.holdReason === "native-recovery-unavailable") return record;
         return this.persistState(record, "undelivered", { holdReason: "worker-terminal" });
       }
       if (target.initialInstructionId === record.id && target.pid > 0 && target.executionState === "active") {
