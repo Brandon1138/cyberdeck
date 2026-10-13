@@ -197,13 +197,13 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_orchestrator_answer_modal",
-    description: "Answer a blocking startup prompt on a bound orchestrator within your thread.enqueue scope. Inspect its truth.modal first, then pass that exact fingerprint and one enumerated answer id. Uses the same repository and modal-answer policy as workers, rechecks the dialog before pressing, and audits the actor and choice. Returns PRESSED, MODAL_NOT_PRESENT, MODAL_UNRECOGNIZED, MODAL_MISMATCH, MODAL_ANSWER_UNSUPPORTED, MODAL_POLICY_DENIED, or DENIED.",
+    description: "Answer a blocking startup prompt on a bound orchestrator within your thread.enqueue scope. Inspect its truth.modal first, then pass that exact fingerprint and one enumerated answer id. Uses the same repository and modal-answer policy as workers, rechecks the dialog before pressing, and audits the actor and choice. Hook reviews offer only continue-without-hooks; hook trust is never answerable. Returns PRESSED, MODAL_NOT_PRESENT, MODAL_UNRECOGNIZED, MODAL_MISMATCH, MODAL_ANSWER_UNSUPPORTED, MODAL_POLICY_DENIED, or DENIED.",
     inputSchema: {
       type: "object",
       properties: {
         targetSessionId: { type: "string", format: "uuid" },
         fingerprint: { type: "string", minLength: 8, maxLength: 64 },
-        answer: { type: "string", minLength: 1, maxLength: 64 },
+        answer: { type: "string", minLength: 1, maxLength: 64, description: "Use an id from truth.modal.answers, such as trust, decline, continue-without-permissions, or continue-without-hooks. Never a key or label." },
         reason: { type: "string", minLength: 1, maxLength: 500 },
       },
       required: ["targetSessionId", "fingerprint", "answer", "reason"],
@@ -511,7 +511,7 @@ const TOOLS = [
         },
         answer: {
           type: "string",
-          description: "Required for answer_modal: one answer id enumerated by the descriptor. Never free text.",
+          description: "Required for answer_modal: one id from truth.modal.answers, such as trust, decline, continue-without-permissions, or continue-without-hooks. Hook trust is never answerable. Never a key, label, or free text.",
         },
       },
       required: ["action", "workerId", "reason"],

@@ -9,6 +9,9 @@ import type { WorkerLifecycle } from "../../src/domain/worker-coordination.js";
 import type { ModalAnswerAttempt, WorkerModalDescriptor } from "../../src/domain/modal-descriptor.js";
 import type { WorkerTruth } from "../../src/domain/worker-truth.js";
 import { WorkerControlService } from "../../src/orchestration/worker-control-service.js";
+import { ModalAnswerPolicy } from "../../src/orchestration/modal-answer-policy.js";
+import { describeBlockedModal } from "../../src/domain/modal-descriptor.js";
+import { CODEX_HOOK_REVIEW } from "../fixtures/provider-startup-dialogs.js";
 import { WorkerCoordinationStore } from "../../src/persistence/worker-coordination-store.js";
 
 const baseMs = Date.parse("2026-07-27T10:00:00.000Z");
@@ -61,6 +64,7 @@ async function harness(options: {
   leaseDurationMs?: number;
   enqueueStatus?: "queued" | "rendered";
   eventRateLimit?: number;
+  modalPolicy?: Pick<ModalAnswerPolicy, "evaluate">;
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-worker-control-"));
   directories.push(directory);
@@ -140,7 +144,7 @@ async function harness(options: {
     registry: registry as never,
     orchestrators: { findBySessionId: async (id: string) => bindings.get(id) } as never,
     instructions: instructions as never,
-    modalPolicy: {
+    modalPolicy: options.modalPolicy ?? {
       evaluate: async (input: { cwd: string; kind: string }) => {
         policyEvaluations.push(input);
         return policyDecision;
@@ -1066,8 +1070,8 @@ describe("WorkerControlService answer_modal", () => {
     };
   }
 
-  async function blockedWorker(modal = trustDescriptor()) {
-    const bench = await harness();
+  async function blockedWorker(modal = trustDescriptor(), modalPolicy?: Pick<ModalAnswerPolicy, "evaluate">) {
+    const bench = await harness(modalPolicy === undefined ? {} : { modalPolicy });
     const workerId = bench.addSession();
     await bench.register({ workerId });
     await bench.control.lease({
@@ -1100,7 +1104,7 @@ describe("WorkerControlService answer_modal", () => {
     ]);
     // Policy saw the worker's own cwd and the descriptor's kind, nothing wider.
     expect(bench.policyEvaluations).toEqual([
-      { cwd: "/repo/worktrees/w", kind: "workspace-trust", sessionId: workerId },
+      { cwd: "/repo/worktrees/w", kind: "workspace-trust", sessionId: workerId, answer: "trust" },
     ]);
     // The durable journal names the dialog and the answer, beyond the renew's actor/reason audit.
     const audit = bench.coordination.listAudits(workerId)
@@ -1126,6 +1130,22 @@ describe("WorkerControlService answer_modal", () => {
     });
 
     expect(result.code).toBe("MODAL_NOT_PRESENT");
+    expect(bench.modalPresses).toEqual([]);
+  });
+
+  it.each([true, false])("checks the exact hook choice through the real repository policy, granted=%s", async (granted) => {
+    const policy = new ModalAnswerPolicy({ grants: { allowsRoot: async () => granted },
+      probe: { gitCommonDirectory: async () => "/repo/.git", primaryWorktree: async () => "/repo" }, canonicalize: async (path) => path });
+    const modal = describeBlockedModal("codex", CODEX_HOOK_REVIEW);
+    const { bench, workerId } = await blockedWorker(modal, policy);
+    const answer = modal.answers[0]!;
+    bench.setModalAttempt({ status: "pressed", descriptor: modal, answer });
+    const input = { actorSessionId: ORC, action: "answer_modal" as const, workerId,
+      fingerprint: modal.fingerprint, answer: answer.id, reason: "Continue with new hooks disabled" };
+    expect(await bench.control.control(input)).toMatchObject({ code: granted ? "MODAL_ANSWERED" : "MODAL_POLICY_DENIED" });
+    expect(bench.modalPresses).toHaveLength(granted ? 1 : 0);
+    bench.modalPresses.length = 0;
+    expect(await bench.control.control({ ...input, answer: "trust-all" })).toMatchObject({ code: "MODAL_POLICY_DENIED" });
     expect(bench.modalPresses).toEqual([]);
   });
 

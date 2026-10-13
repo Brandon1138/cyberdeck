@@ -116,7 +116,13 @@ with bounded screen evidence while instructions remain held.
 `cyberdeck_orchestrator_answer_modal` accepts that exact fingerprint and one enumerated answer id,
 using the existing `thread.enqueue` scope and the common repository modal policy. The broker
 rechecks the prompt at press time and audits the actor and choice; no worker lease is invented for
-a peer. `cyberdeck_thread_message.messageId` is an optional standard-variant UUID; omit it to let
+a peer. Current Claude and Codex folder dialogs enumerate only source-verified answers. Codex hook
+review offers only `continue-without-hooks`: the repository grant never trusts new or changed hooks.
+The operator can inspect and grant one repository with `cyberdeck modal-answers status --root <repo>`
+and `cyberdeck modal-answers on --root <repo>`; linked worktrees share their primary repository grant.
+Fingerprints cover the rendered dialog. The descriptor API also supports native hook identities,
+but this change does not query that inventory; no automated answer can approve hooks.
+`cyberdeck_thread_message.messageId` is an optional standard-variant UUID; omit it to let
 the broker generate one.
 
 Refusals come back as `outcome` values, not thrown errors, so a phone-side orchestrator can read

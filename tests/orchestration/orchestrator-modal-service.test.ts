@@ -5,6 +5,7 @@ import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { ModalAnswerPolicy } from "../../src/orchestration/modal-answer-policy.js";
 import { answerOrchestratorModal } from "../../src/orchestration/orchestrator-modal-service.js";
+import { CLAUDE_TRUST, CODEX_HOOK_REVIEW } from "../fixtures/provider-startup-dialogs.js";
 
 const ACTOR = "11111111-1111-4111-8111-111111111111";
 const TARGET = "22222222-2222-4222-8222-222222222222";
@@ -16,8 +17,8 @@ const binding: OrchestratorBinding = { key: `fleet:peer:${ACTOR}`, kind: "peer",
   provider: "codex", cwd: "/repo", sandbox: "workspace-write", scope: { kind: "fleet" },
   grant: { subjectSessionId: ACTOR, capabilities: ["thread.enqueue"], scope: { kind: "fleet" } }, createdAt: at, updatedAt: at };
 
-function harness(allowed = true) {
-  let modal = describeBlockedModal("claude", "Do you trust the files in this folder?\n1. Yes, proceed\n2. No, exit");
+function harness(allowed = true, provider = "claude", text = CLAUDE_TRUST) {
+  let modal = describeBlockedModal(provider, text);
   const records = new Map([[ACTOR, { ...record, id: ACTOR }], [TARGET, { ...record }]]);
   const targetBinding = { ...binding, key: `fleet:peer:${TARGET}`, sessionId: TARGET };
   const findBySessionId = vi.fn(async (id: string) => id === ACTOR ? binding : targetBinding);
@@ -33,11 +34,20 @@ function harness(allowed = true) {
     bindings: { findBySessionId }, policy, audit: { append } };
   const input = { actorSessionId: ACTOR, targetSessionId: TARGET, fingerprint: modal.fingerprint, answer: "trust", reason: "Approved repository startup" };
   return { deps, input, press, append, records, findBySessionId, replace: () => {
-    modal = describeBlockedModal("claude", "Do you trust the files in this folder?\nA different folder\n1. Yes, proceed");
+    modal = describeBlockedModal("claude", CLAUDE_TRUST.replace("/Users/op/repos/api/worktrees/fix-races", "/a/different/folder"));
   } };
 }
 
 describe("orchestrator startup modal answers", () => {
+  it.each([true, false])("uses the shared hook policy for a bound peer, granted=%s", async (granted) => {
+    const h = harness(granted, "codex", CODEX_HOOK_REVIEW);
+    expect(await answerOrchestratorModal({ ...h.input, answer: "continue-without-hooks" }, h.deps))
+      .toMatchObject({ code: granted ? "PRESSED" : "MODAL_POLICY_DENIED" });
+    expect(h.press).toHaveBeenCalledTimes(granted ? 1 : 0);
+    h.press.mockClear();
+    expect(await answerOrchestratorModal({ ...h.input, answer: "trust-all" }, h.deps)).toMatchObject({ code: "MODAL_ANSWER_UNSUPPORTED" });
+    expect(h.press).not.toHaveBeenCalled();
+  });
   it("lets a bound peer use its existing input grant and the common repository policy without a worker lease", async () => {
     const h = harness();
     expect(await answerOrchestratorModal(h.input, h.deps)).toMatchObject({ code: "PRESSED", status: "pressed" });
