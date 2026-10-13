@@ -63,6 +63,9 @@ export class InputScreen {
 
   private control(parameters: string, intermediate: string, command: string): void {
     // Colors, cursor style, queries and keyboard/mouse modes do not edit the screen.
+    // Kitty keyboard push/pop/set flags use CSI >u / <u / =u. Claude emits <u during
+    // startup; treating that mode change as an unknown screen edit strands a ready composer.
+    if (command === "u" && /^[<=>][\d;]*$/u.test(parameters)) return;
     if (parameters.startsWith("?") || parameters.startsWith(">") || intermediate !== "") {
       if (parameters === "?2026" && (command === "h" || command === "l")) {
         this.updating = command === "h";
