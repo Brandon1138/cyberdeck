@@ -106,6 +106,8 @@ interface ModalRecognitionRule {
   pattern: RegExp;
   /** The dialog's last line, without the `g` flag; evidence ends where it first matches. */
   through?: RegExp;
+  /** Context retained for fingerprints, never used as a dialog heading or answer grammar. */
+  evidencePrefix?: RegExp;
   /** Fixed, or read off the fingerprinted evidence for a dialog whose rows vary. */
   answers: readonly ModalAnswerOption[] | ((evidence: string) => readonly ModalAnswerOption[]);
 }
@@ -182,7 +184,8 @@ const RULES: Readonly<Record<string, readonly ModalRecognitionRule[]>> = {
   claude: [
     {
       kind: "workspace-trust",
-      pattern: /(?:Accessing\s*workspace:?[\s\S]{0,600}?)?Quick\s*safety\s*check:\s*Is\s*this\s*a\s*project/giu,
+      pattern: /Quick\s*safety\s*check:\s*Is\s*this\s*a\s*project/giu,
+      evidencePrefix: /Accessing\s*workspace:?/giu,
       through: /Enter\s*to\s*confirm(?:[\s\S]{0,24}?Esc\s*to\s*cancel)?|Press[\s\S]{0,24}?again\s*to\s*exit/iu,
       answers: claudeTrustAnswers,
     },
@@ -310,13 +313,16 @@ export function describeBlockedModal(
 ): WorkerModalDescriptor {
   const plain = plainTerminalText(tail);
   const rules = [...(RULES[provider] ?? []), LOGIN_RULE];
-  let winner: { rule: ModalRecognitionRule; index: number } | undefined;
+  let winner: { rule: ModalRecognitionRule; index: number; rank: number } | undefined;
   for (const rule of rules) {
     const index = lastMatchIndex(plain, rule.pattern);
-    // A modal is the last thing drawn, so the rule matching latest in the tail is the one on
-    // screen. Strictly-greater keeps rule order as the tiebreak: specific rules are listed first.
-    if (index >= 0 && (winner === undefined || index > winner.index)) {
-      winner = { rule, index };
+    if (index < 0) continue;
+    // A known dialog ends at its footer. Words in its path, warnings, or choice labels cannot
+    // outrank that complete dialog. A later real heading after its footer still wins.
+    const footer = rule.through?.exec(plain.slice(index, index + BOUNDED_EVIDENCE_WINDOW_CHARS));
+    const rank = footer === undefined || footer === null ? index : index + footer.index + footer[0].length;
+    if (winner === undefined || rank > winner.rank) {
+      winner = { rule, index, rank };
     }
   }
   if (winner === undefined) {
@@ -335,18 +341,25 @@ export function describeBlockedModal(
     index + (rule.through === undefined ? EVIDENCE_WINDOW_CHARS : BOUNDED_EVIDENCE_WINDOW_CHARS),
   );
   const end = rule.through?.exec(window);
-  const evidence = normalizeEvidence(
-    end === undefined || end === null ? window : window.slice(0, end.index + end[0].length),
-  );
-  const kind = reclassify(rule.kind, evidence);
+  const dialog = end === undefined || end === null ? window : window.slice(0, end.index + end[0].length);
+  let start = index;
+  if (rule.evidencePrefix !== undefined) {
+    const before = Math.max(0, index - 600);
+    const prefix = lastMatchIndex(plain.slice(before, index), rule.evidencePrefix);
+    if (prefix >= 0) start = before + prefix;
+  }
+  const fullEvidence = normalizeEvidence(plain.slice(start, index) + dialog, BOUNDED_EVIDENCE_WINDOW_CHARS + 600);
+  const evidence = fullEvidence.slice(0, EVIDENCE_CHARS);
+  const dialogEvidence = normalizeEvidence(dialog, BOUNDED_EVIDENCE_WINDOW_CHARS);
+  const kind = reclassify(rule.kind, dialogEvidence);
   const answers = kind === rule.kind
-    ? answersOf(rule, evidence)
-    : answersFor(provider, kind) ?? answersOf(rule, evidence);
+    ? answersOf(rule, dialogEvidence)
+    : answersFor(provider, kind) ?? answersOf(rule, dialogEvidence);
   const hooks = kind === "hook-review" ? hooksUnderReview(context.hooks) : undefined;
   return {
     provider,
     kind,
-    fingerprint: fingerprintOf(provider, kind, evidence, hooks),
+    fingerprint: fingerprintOf(provider, kind, fullEvidence, hooks),
     evidence,
     answers: [...answers],
     ...(hooks === undefined ? {} : { hooks: hooks.slice(0, MAX_DESCRIBED_HOOKS) }),
@@ -408,10 +421,10 @@ function lastMatchIndex(value: string, pattern: RegExp): number {
  * (they are part of what the operator would see), bounded so a fingerprint is over the dialog and
  * not over whatever scrolled by beneath it.
  */
-function normalizeEvidence(slice: string): string {
+function normalizeEvidence(slice: string, maxChars = EVIDENCE_CHARS): string {
   const lines = plainTerminalLines(slice);
   let evidence = lines.join("\n");
-  if (evidence.length > EVIDENCE_CHARS) evidence = evidence.slice(0, EVIDENCE_CHARS);
+  if (evidence.length > maxChars) evidence = evidence.slice(0, maxChars);
   return evidence;
 }
 

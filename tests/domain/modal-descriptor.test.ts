@@ -111,6 +111,22 @@ describe("describeBlockedModal", () => {
     expect(ids("claude", CLAUDE_TRUST_WARNED)).toEqual(["exit"]);
   });
 
+  it("keeps workspace path text out of Claude's dialog and answer selection", () => {
+    for (const fixture of [CLAUDE_TRUST_WARNED, CLAUDE_TRUST_BACKSTOP]) {
+      const expected = describeBlockedModal("claude", fixture);
+      for (const name of ["Would you like to proceed?", "Authentication required", "Claude needs your permission"]) {
+        const path = `/repo/worktrees/${name}`;
+        const modal = describeBlockedModal("claude", fixture.replace("/Users/op/repos/api/worktrees/fix-races", path));
+        expect(modal.kind).toBe("workspace-trust");
+        expect(modal.answers).toEqual(expected.answers);
+        expect(modal.evidence).toContain(path);
+        expect(modal.fingerprint).not.toBe(expected.fingerprint);
+      }
+    }
+    const injected = CLAUDE_TRUST_BACKSTOP.replace("/Users/op/repos/api/worktrees/fix-races", "/repo/No, exit/Yes, I trust this folder");
+    expect(ids("claude", injected)).toEqual(["continue-without-permissions"]);
+  });
+
   it("offers only declining the grants at Claude's backstop, never enabling them", () => {
     expect(describeBlockedModal("claude", CLAUDE_TRUST_BACKSTOP).answers).toEqual([
       { id: "continue-without-permissions", label: "No, continue without these permissions" },

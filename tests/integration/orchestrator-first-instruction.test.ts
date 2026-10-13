@@ -20,6 +20,9 @@ import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-s
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
 import { CodexProviderAdapter } from "../../src/providers/codex.js";
 import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
+import { ModalAnswerPolicy } from "../../src/orchestration/modal-answer-policy.js";
+import { answerOrchestratorModal } from "../../src/orchestration/orchestrator-modal-service.js";
+import { CLAUDE_TRUST_WARNED, CLAUDE_TRUST_BACKSTOP } from "../fixtures/provider-startup-dialogs.js";
 
 class FixtureRuntime implements SessionRuntime {
   readonly pid = 4242;
@@ -130,6 +133,24 @@ async function harness(creator: "claude" | "codex") {
 }
 
 describe("peer first-instruction lifecycle", () => {
+  it.each([CLAUDE_TRUST_WARNED, CLAUDE_TRUST_BACKSTOP])("never enables Claude's folder permissions through plan wording in its path", async (fixture) => {
+    const h = await harness("codex"); const created = await h.create("claude");
+    if (created.outcome !== "CREATED") throw new Error(created.reason);
+    const handle = h.handles[1]!.handle;
+    handle.emit(fixture.replace("/Users/op/repos/api/worktrees/fix-races", "/repo/worktrees/Would you like to proceed?"));
+    const modal = h.registry.workerTruth(created.sessionId).modal!;
+    expect(modal.kind).toBe("workspace-trust");
+    const policy = new ModalAnswerPolicy({ grants: { allowsRoot: async () => true },
+      probe: { gitCommonDirectory: async () => `${h.directory}/.git`, primaryWorktree: async () => h.directory }, canonicalize: async (path) => path });
+    const deps = { registry: h.registry, bindings: h.bindings, policy, audit: { append: async () => undefined } };
+    const input = { actorSessionId: h.actor.session.id, targetSessionId: created.sessionId,
+      fingerprint: modal.fingerprint, answer: "proceed-manual", reason: "Regression: no permission approval through workspace text" };
+    expect(await answerOrchestratorModal(input, deps)).toMatchObject({ code: "MODAL_ANSWER_UNSUPPORTED" });
+    expect(handle.writes).toEqual([]);
+    expect(await answerOrchestratorModal({ ...input, answer: modal.answers[0]!.id }, deps)).toMatchObject({ code: "PRESSED" });
+    expect(handle.writes.map((bytes) => bytes.toString())).toEqual(["1"]);
+  });
+
   it.each(["claude", "codex"] as const)("retries unresolved %s launch evidence before resuming without discarding its receipt", async (provider) => {
     const h = await harness("codex"); const created = await h.create(provider);
     if (created.outcome !== "CREATED") throw new Error(created.reason);
