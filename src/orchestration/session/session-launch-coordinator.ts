@@ -74,6 +74,7 @@ export class SessionLaunchCoordinator {
     request: StartSessionRequest,
     initialPrompt?: string,
     activate?: (record: SessionRecord) => Promise<void>,
+    initialInstructionId?: string,
   ): Promise<SessionRecord> {
     const validated = StartSessionRequestSchema.parse(request);
     const execution = resolveWorkerExecution(validated, this.catalog.options.config.workerExecution);
@@ -160,6 +161,7 @@ export class SessionLaunchCoordinator {
       childIds: [],
       attentionState: initialPrompt === undefined ? "done" : "working",
       meaningfulUpdatedAt: now,
+      ...(initialInstructionId === undefined ? {} : { initialInstructionId }),
       ...(parsed.profile === "scout"
         ? {
             effectiveState: resolveScoutEffectiveState(parsed.leasePolicy),
@@ -205,6 +207,8 @@ export class SessionLaunchCoordinator {
       // it spawns, so whatever the caller must make durable — a worker's budget above all — gets
       // its chance before any provider process exists, not merely before initialization.
       await activate?.(cloneRecord(provisional));
+      // Keep the exact launch attempt discoverable if the broker dies immediately after spawn.
+      if (initialInstructionId !== undefined) await this.catalog.options.store?.put(cloneRecord(provisional));
       sessionRuntime = await this.assembly.spawnPreparedLaunch(
         adapter,
         provisional,
@@ -215,9 +219,9 @@ export class SessionLaunchCoordinator {
             await this.catalog.options.transcripts?.append({
               sessionId: id,
               kind: "prompt",
-              source: "human",
+              source: initialInstructionId === undefined ? "human" : "orchestrator",
               text: initialPrompt,
-              data: { initial: true },
+              data: { initial: true, ...(initialInstructionId === undefined ? {} : { instructionId: initialInstructionId, expectedTurn: 1 }) },
             });
           }
           this.requireActiveParent(parsed.parentSessionId);
@@ -292,9 +296,9 @@ export class SessionLaunchCoordinator {
         await this.catalog.options.transcripts?.append({
           sessionId: id,
           kind: "prompt",
-          source: "human",
+          source: initialInstructionId === undefined ? "human" : "orchestrator",
           text: initialPrompt,
-          data: { initial: true },
+          data: { initial: true, ...(initialInstructionId === undefined ? {} : { instructionId: initialInstructionId, expectedTurn: 1 }) },
         });
         this.requireActiveParent(parsed.parentSessionId);
         runtime.scout?.armBudget();

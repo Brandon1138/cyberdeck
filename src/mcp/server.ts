@@ -196,6 +196,21 @@ const TOOLS = [
     },
   },
   {
+    name: "cyberdeck_orchestrator_answer_modal",
+    description: "Answer a blocking startup prompt on a bound orchestrator within your thread.enqueue scope. Inspect its truth.modal first, then pass that exact fingerprint and one enumerated answer id. Uses the same repository and modal-answer policy as workers, rechecks the dialog before pressing, and audits the actor and choice. Returns PRESSED, MODAL_NOT_PRESENT, MODAL_UNRECOGNIZED, MODAL_MISMATCH, MODAL_ANSWER_UNSUPPORTED, MODAL_POLICY_DENIED, or DENIED.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        targetSessionId: { type: "string", format: "uuid" },
+        fingerprint: { type: "string", minLength: 8, maxLength: 64 },
+        answer: { type: "string", minLength: 1, maxLength: 64 },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+      },
+      required: ["targetSessionId", "fingerprint", "answer", "reason"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "cyberdeck_orchestrator_stop",
     description: "Request a broker-mediated graceful stop of an inspected stale or failed Orc. Requires the exact generation returned by inspect and never stops child workers. Healthy live Orcs return APPROVAL_REQUIRED; non-terminal children return REQUIRES_HANDOFF.",
     inputSchema: {
@@ -443,13 +458,13 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_thread_message",
-    description: "Queue one complete instruction for a worker. Human control always has priority. Returns the instruction record; read its status. \"accepted\" means the broker holds it and has not tried yet; \"queued\" means delivery was attempted and refused at an unsafe boundary (holdReason: provider-modal, composer-occupied, provider-busy, human-controller, worker-terminal) and it will be retried automatically at the next safe one; \"rendered\" means the bytes are in the provider's input surface and expectedTurn names the turn that will answer it — it is NOT proof the provider took them; \"submitted\"/\"acknowledged\" mean the provider was observed consuming the payload; \"completed\" means the canonical turn for expectedTurn finished; \"undelivered\" means the worker reached a terminal state with the payload still unconsumed. There is no \"delivered\": never treat a return from this tool as proof the worker ran anything. To confirm the work, wait on expectedTurn with cyberdeck_workers_wait.",
+    description: "Queue one complete instruction for a worker. Optional messageId must be an RFC 9562 UUID with the standard variant (for example a UUID v4); omit it to let the broker generate one. Human control always has priority. Returns the instruction record; read its status. \"accepted\" means the broker holds it and has not tried yet; \"queued\" means delivery was attempted and refused at an unsafe boundary (holdReason: provider-starting, provider-modal, composer-occupied, provider-busy, human-controller, worker-terminal) and it will be retried automatically at the next safe one; \"rendered\" means the bytes are in the provider's input surface and expectedTurn names the turn that will answer it — it is NOT proof the provider took them; \"submitted\"/\"acknowledged\" mean the provider was observed consuming the payload; \"completed\" means the canonical turn for expectedTurn finished; \"undelivered\" means the worker reached a terminal state with the payload still unconsumed. There is no \"delivered\": never treat a return from this tool as proof the worker ran anything. To confirm the work, wait on expectedTurn with cyberdeck_workers_wait.",
     inputSchema: {
       type: "object",
       properties: {
         targetSessionId: { type: "string" },
         message: { type: "string" },
-        messageId: { type: "string" },
+        messageId: { type: "string", format: "uuid", description: "Optional RFC 9562 UUID with standard variant; omit to generate one." },
       },
       required: ["targetSessionId", "message"],
       additionalProperties: false,
@@ -485,7 +500,7 @@ const TOOLS = [
         reason: { type: "string", minLength: 1, maxLength: 500 },
         mode: { type: "string", enum: ["graceful", "force"], default: "graceful" },
         instruction: { type: "string", description: "Required for redirect." },
-        messageId: { type: "string" },
+        messageId: { type: "string", format: "uuid", description: "Optional RFC 9562 UUID with standard variant; omit to generate one." },
         correlationId: { type: "string", description: "Required for request_checkpoint." },
         focus: { type: "string" },
         question: { type: "string" },
@@ -580,7 +595,7 @@ const TOOLS = [
         targetSessionId: { type: "string" },
         text: { type: "string" },
         wake: { type: "boolean", default: false },
-        messageId: { type: "string" },
+        messageId: { type: "string", format: "uuid", description: "Optional RFC 9562 UUID with standard variant; omit to generate one." },
         causationId: { type: "string" },
       },
       required: ["runId", "targetSessionId", "text"],
@@ -943,6 +958,9 @@ async function callTool(
   }
   if (name === "cyberdeck_orchestrator_create") {
     return transport.request("agent.orchestrator.create", { actorSessionId, ...args });
+  }
+  if (name === "cyberdeck_orchestrator_answer_modal") {
+    return transport.request("agent.orchestrator.answerModal", { ...args, actorSessionId });
   }
   if (name === "cyberdeck_threads_list") {
     return transport.request("agent.thread.list", { actorSessionId, ...args });

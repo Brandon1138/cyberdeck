@@ -1858,6 +1858,8 @@ describe("AgentControlService Orc peer control", () => {
         ownsProcess: (sessionId: string) => records.get(sessionId)?.exitCode === null,
         isStopRequested: () => stopRequested,
         stopRequestedAt: () => stopRequested ? "2026-07-22T11:59:00.000Z" : undefined,
+        workerTruth: () => ({ state: "idle", completedTurns: 0, canonicalTurns: 0, pendingInstructions: 0,
+          modalOpen: false, composerOccupied: false, terminal: false, detail: "Fixture orchestrator is idle" }),
         stop,
         forceStop,
       } as never,

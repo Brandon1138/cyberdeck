@@ -17,6 +17,7 @@ import type {
   WorkerTurnObservationPort,
   WorkerTurnPreviewPort,
   WorkerTurnTranscript,
+  WorkerTurnLedger,
   WorkerTurnTranscriptMessage,
 } from "./worker-turn-ports.js";
 
@@ -57,6 +58,7 @@ export interface TranscriptLike {
   dropClaudeBinding?(sessionId: string): Promise<void>;
   observeProviderTurns?(input: CaptureWorkerTurns): Promise<WorkerTurnObservation>;
   commitProviderTurns?(observation: WorkerTurnObservation): Promise<WorkerTurnTranscript[]>;
+  readCompletionLedger?(sessionId: string): Promise<WorkerTurnLedger>;
   /** Compatibility only; WorkerTurnEngine requires the explicit observation/commit pair. */
   captureProviderTurns?(input: CaptureWorkerTurns): Promise<WorkerTurnTranscript[]>;
   readTranscriptMessages?(input: CaptureWorkerTurns): Promise<WorkerTurnTranscriptMessage[]>;

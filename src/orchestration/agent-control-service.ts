@@ -3,6 +3,8 @@ import { readThreadPage } from "./thread-read-page.js";
 import { consumeSettledNotifications } from "./wait-settlement.js";
 import { AgentStandardWorkerInputSchema, AgentScoutWorkerInputSchema } from "./worker-launch-input.js";
 import { randomUUID } from "node:crypto";
+import { answerOrchestratorModal, type AnswerOrchestratorModalParamsSchema } from "./orchestrator-modal-service.js";
+import type { ModalAnswerPolicy } from "./modal-answer-policy.js";
 import { z } from "zod";
 import {
   DEFAULT_THREAD_PAGE,
@@ -189,6 +191,9 @@ export interface OrchestratorInspection {
     stopRequestedAt?: string;
     /** MIK-55 will supply a real renewable heartbeat/lease. Null must never be treated as stale. */
     lastHeartbeatAt: null;
+    truth?: WorkerTruth;
+    exitCode?: number | null;
+    termination?: SessionRecord["termination"];
   };
   binding?: ReturnType<typeof orchestratorInspectionBinding>;
   impact?: {
@@ -343,6 +348,7 @@ export interface AgentControlOptions {
   workerBudgets?: WorkerBudgetRegistrationPort;
   /** The notification inbox: a wait that delivers a target consumes its settled record. */
   notifications?: Pick<NotificationInboxPort, "acknowledgeByDedupeKey">;
+  modalPolicy?: Pick<ModalAnswerPolicy, "evaluate">;
 }
 
 export class AgentControlService {
@@ -361,6 +367,7 @@ export class AgentControlService {
   private readonly workerCapabilities: WorkerCapabilityCatalog | undefined;
   private readonly workerBudgets: WorkerBudgetRegistrationPort | undefined;
   private readonly notifications: AgentControlOptions["notifications"];
+  private readonly modalPolicy: AgentControlOptions["modalPolicy"];
 
   constructor(
     private readonly registry: SessionLookupPort
@@ -385,6 +392,7 @@ export class AgentControlService {
     this.workerCapabilities = options.workerCapabilities;
     this.workerBudgets = options.workerBudgets;
     this.notifications = options.notifications;
+    this.modalPolicy = options.modalPolicy;
   }
 
   /**
@@ -458,6 +466,12 @@ export class AgentControlService {
       };
     }
     return this.orchestratorInspection(target);
+  }
+
+  async answerOrchestratorModal(input: z.input<typeof AnswerOrchestratorModalParamsSchema>) {
+    return answerOrchestratorModal(input, { registry: this.registry, bindings: this.orchestrators,
+      ...(this.modalPolicy === undefined ? {} : { policy: this.modalPolicy }),
+      ...(this.audit === undefined ? {} : { audit: this.audit }) });
   }
 
   async stopOrchestrator(
@@ -1231,6 +1245,9 @@ export class AgentControlService {
           : { lastMeaningfulActivityAt: target.meaningfulUpdatedAt }),
         ...(stopRequestedAt === undefined ? {} : { stopRequestedAt }),
         lastHeartbeatAt: null,
+        truth: this.registry.workerTruth(target.id),
+        exitCode: target.exitCode,
+        ...(target.termination === undefined ? {} : { termination: target.termination }),
       },
       binding: orchestratorInspectionBinding(targetBinding),
       impact: {

@@ -316,6 +316,7 @@ export async function runBroker(
     try { return registry.get(id); } catch { return undefined; }
   }, (record, worker) => nativeCapture.captureInstruction(record, worker)), (record) => notificationFeed.observeInstruction(record)));
   instructions.start();
+  await instructions.recoverLaunchInstructions(async (id) => (await transcripts.readCompletionLedger(id)).canonicalTurns);
   await notificationFeed.start(instructions);
   const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerBudgets = new WorkerBudgetEnforcer({
@@ -341,6 +342,7 @@ export async function runBroker(
       workspaceProbe: new GitWorkspaceProbe(),
       workerCapabilities,
       workerBudgets,
+      modalPolicy: modalAnswerPolicy,
     },
   );
   // Policy for orchestrator-created peers lives beside agent control; the manager only launches.

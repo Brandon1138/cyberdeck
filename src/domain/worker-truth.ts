@@ -94,7 +94,7 @@ export type ProviderLimitTermination = z.infer<typeof ProviderLimitTerminationSc
  * switch over execution states keep working unchanged.
  */
 export const SessionTerminationSchema = z.object({
-  kind: z.enum(["session-limit", "prompt-too-long", "provider-fault"]),
+  kind: z.enum(["session-limit", "prompt-too-long", "provider-fault", "startup-exit"]),
   reason: z.string().max(240),
   detail: z.string().max(240),
   at: z.iso.datetime(),
@@ -113,7 +113,7 @@ export type SessionTermination = z.infer<typeof SessionTerminationSchema>;
 export function providerLimitFromTermination(
   termination: SessionTermination | undefined,
 ): ProviderLimitTermination | undefined {
-  if (termination === undefined || termination.kind === "provider-fault") return undefined;
+  if (termination === undefined || termination.kind === "provider-fault" || termination.kind === "startup-exit") return undefined;
   return { kind: termination.kind, reason: termination.reason, detail: termination.detail };
 }
 
@@ -143,6 +143,10 @@ export interface WorkerTruthInput {
   composer: ComposerObservation;
   /** This process generation has not yet exposed a safe terminal input boundary. */
   awaitingInputReady?: boolean;
+  /** An unrecognized startup screen exceeded the bounded startup window. */
+  startupStalledForSeconds?: number;
+  startupEvidence?: string;
+  terminationReason?: string;
   /** Turns the broker has counted, canonical or replay-derived. */
   completedTurns: number;
   /** Subset of `completedTurns` backed by a provider-native transcript turn. */
@@ -227,7 +231,7 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
   if (input.executionState === "exited") {
     return settle(
       input.stopRequested === true ? "stopped" : "exited",
-      input.stopRequested === true ? "Stopped on request" : "Provider process exited cleanly",
+      input.stopRequested === true ? "Stopped on request" : input.terminationReason ?? "Provider process exited cleanly",
     );
   }
   if (input.executionState === "starting") {
@@ -256,6 +260,10 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
     );
   }
   if (input.awaitingInputReady === true) {
+    if (input.startupStalledForSeconds !== undefined) return {
+      ...settle("stalled", `Provider startup needs attention after ${input.startupStalledForSeconds}s: no recognized input surface${input.startupEvidence ? `; ${input.startupEvidence}` : ""}`),
+      stalledForSeconds: input.startupStalledForSeconds,
+    };
     return settle("starting", "Waiting for a recognized provider input surface; automated instructions remain queued");
   }
   if (input.stalledForSeconds !== undefined) {

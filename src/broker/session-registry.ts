@@ -157,8 +157,9 @@ export class SessionRegistry {
     request: StartSessionRequest,
     initialPrompt?: string,
     activate?: (record: SessionRecord) => Promise<void>,
+    initialInstructionId?: string,
   ): Promise<SessionRecord> {
-    return this.launch.start(request, initialPrompt, activate);
+    return this.launch.start(request, initialPrompt, activate, initialInstructionId);
   }
 
   list(): SessionRecord[] {

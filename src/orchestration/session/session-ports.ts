@@ -26,7 +26,16 @@ export interface SessionStartPort {
     request: StartSessionRequest,
     initialPrompt?: string,
     activate?: (record: SessionRecord) => Promise<void>,
+    initialInstructionId?: string,
   ): Promise<SessionRecord>;
+}
+
+export interface PeerStartupInstruction {
+  id: string;
+  message: string;
+  native?: boolean;
+  /** Persist the instruction before the native provider process exists. */
+  prepare(session: SessionRecord): Promise<void>;
 }
 
 export interface SessionResumePort {

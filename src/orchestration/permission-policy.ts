@@ -4,6 +4,11 @@ import type { ApprovalMode, ProviderId, Sandbox } from "../domain/session.js";
 export const ProviderPermissionPolicySchema = z.enum(["permissioned", "automatic"]);
 export type ProviderPermissionPolicy = z.infer<typeof ProviderPermissionPolicySchema>;
 
+/** Orchestrators need writable native modes; a Claude read-only request forces plan mode. */
+export function orchestratorSandbox(provider: ProviderId): Sandbox {
+  return provider === "codex" || provider === "claude" ? "workspace-write" : "read-only";
+}
+
 export const CONFIGURABLE_PERMISSION_PROVIDERS = [
   "codex",
   "claude",

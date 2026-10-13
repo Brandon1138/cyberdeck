@@ -111,7 +111,7 @@ export class WorkerCompletionLedger {
   }
 
   needsRestore(provider: string, transcripts: WorkerTurnTranscriptPort | undefined): boolean {
-    return !this.restored && provider === "claude" && transcripts?.readCompletionLedger !== undefined;
+    return !this.restored && (provider === "claude" || provider === "codex") && transcripts?.readCompletionLedger !== undefined;
   }
 
   async restore(transcripts: WorkerTurnTranscriptPort, sessionId: string,

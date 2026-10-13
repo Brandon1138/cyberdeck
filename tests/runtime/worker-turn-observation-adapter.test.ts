@@ -7,6 +7,7 @@ describe("WorkerTurnObservationAdapter", () => {
     ["codex", "› Ask Codex to do anything\n100% context left\n"],
     ["claude", "─────────────────\n❯ \n─────────────────\n? for shortcuts\n"],
     ["claude", "❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)\n"],
+    ["claude", "❯ \n⏵⏵ auto mode on (shift+tab to cycle)\n"],
     ["claude", "❯ Try \"write a test for cli.ts\"\n────────────────────\n⏸ plan mode on (shift+tab to cycle)\n"],
     ["cursor", "→ Plan, search, build anything\n"],
     ["cursor", "→ Add a follow-up\n"],

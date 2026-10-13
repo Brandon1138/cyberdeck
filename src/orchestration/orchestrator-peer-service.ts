@@ -17,8 +17,7 @@ import {
   type ProviderId,
   type SessionRecord,
 } from "../domain/session.js";
-import type { EnqueueInstructionParamsSchema } from "./instruction-queue.js";
-import type { OrchestratorManagerResult } from "./orchestrator-manager.js";
+import type { OrchestratorManagerResult, PeerStartupInstruction } from "./orchestrator-manager.js";
 import type { OrchestratorBindingReader } from "./persistence-ports.js";
 import type { SessionLookupPort } from "./session/session-ports.js";
 
@@ -49,13 +48,12 @@ export type AgentCreateOrchestratorParams = Omit<z.input<typeof AgentCreateOrche
 };
 
 /**
- * How the brief reached the peer. `queued` is the honest ceiling: the broker holds it and will
- * deliver it at the peer's first safe boundary, which `cyberdeck_thread_read` can confirm later.
- * `replayed` is a durable replay's answer: the brief went with the original create and this call
- * did not touch it.
+ * The durable first-instruction receipt's current state. Launch is rendering, not consumption;
+ * completion needs the native first turn. `replayed` is reserved for legacy bindings without a
+ * receipt, whose original brief status cannot be recovered safely.
  */
 export type PeerBriefDelivery =
-  | { delivery: "queued"; instructionId: string }
+  | { delivery: "queued" | "rendered" | "submitted" | "acknowledged" | "completed"; instructionId: string; expectedTurn?: number; holdReason?: string }
   | { delivery: "failed"; detail: string }
   | { delivery: "replayed"; detail: string }
   | { delivery: "not-requested" };
@@ -100,10 +98,12 @@ export interface OrchestratorPeerServiceDeps {
   registry: SessionLookupPort;
   bindings: OrchestratorBindingReader & { list(): Promise<OrchestratorBinding[]> };
   manager: {
-    createPeer(input: CreatePeerOrchestratorRequest): Promise<OrchestratorManagerResult>;
+    createPeer(input: CreatePeerOrchestratorRequest, startup?: PeerStartupInstruction): Promise<OrchestratorManagerResult>;
   };
   instructions?: {
-    enqueue(input: z.input<typeof EnqueueInstructionParamsSchema>): Promise<InstructionRecord>;
+    prepareLaunch(input: { actorSessionId: string; target: SessionRecord; message: string; instructionId: string; native?: boolean }): Promise<InstructionRecord>;
+    list(targetSessionId?: string): Promise<InstructionRecord[]>;
+    flush(targetSessionId: string): Promise<InstructionRecord[]>;
   };
   audit?: { append(event: BrokerEvent): Promise<void> };
   now?: () => number;
@@ -156,7 +156,12 @@ export class OrchestratorPeerService {
   private async replay(request: ParsedCreate): Promise<OrchestratorCreateResult | undefined> {
     if (request.mutationId === undefined) return undefined;
     const recorded = this.replays.get(replayKey(request));
-    if (recorded !== undefined) return { ...recorded, retrieval: "replay" };
+    if (recorded !== undefined) {
+      if (recorded.outcome === "CREATED" && "instructionId" in recorded.brief) {
+        return { ...recorded, brief: await this.briefState(recorded.sessionId, recorded.brief.instructionId), retrieval: "replay" };
+      }
+      return { ...recorded, retrieval: "replay" };
+    }
     const bindings = await this.deps.bindings.list();
     const existing = bindings.find((binding) =>
       binding.createdBy?.sessionId === request.actorSessionId
@@ -178,10 +183,10 @@ export class OrchestratorPeerService {
         ...(existing.createdBy!.approval === undefined ? {} : { approval: existing.createdBy!.approval }),
       },
       grant: [...existing.grant.capabilities],
-      brief: {
+      brief: existing.initialInstructionId === undefined ? {
         delivery: "replayed",
-        detail: "Any brief went with the original create; read the peer thread to confirm it arrived",
-      },
+        detail: "The original create has no durable first-instruction receipt; read the peer thread before sending anything again",
+      } : await this.briefState(existing.sessionId, existing.initialInstructionId),
       remoteControl: peerRemoteControlNote(existing.provider),
       warnings: [],
       retrieval: "replay",
@@ -212,6 +217,9 @@ export class OrchestratorPeerService {
     const capabilities = peerGrantCapabilities(binding.grant.capabilities);
     const depth = (binding.createdBy?.depth ?? 0) + 1;
     const approval = request.approval!;
+    if (request.brief !== undefined && this.deps.instructions === undefined) {
+      return { outcome: "LAUNCH_FAILED", code: "INSTRUCTION_QUEUE_UNAVAILABLE", reason: "The initial brief cannot be persisted; no peer was launched" };
+    }
     const selection = {
       provider: request.provider,
       model: request.model,
@@ -232,6 +240,19 @@ export class OrchestratorPeerService {
     });
 
     let created: OrchestratorManagerResult;
+    let preparedBrief: InstructionRecord | undefined;
+    const instructionId = request.brief === undefined ? undefined : randomUUID();
+    const startup: PeerStartupInstruction | undefined = instructionId === undefined ? undefined : {
+      id: instructionId,
+      message: request.brief!,
+      native: request.provider === "claude" || request.provider === "codex",
+      prepare: async (target) => {
+        preparedBrief = await this.deps.instructions!.prepareLaunch({
+          actorSessionId: actor, target, message: request.brief!, instructionId,
+          native: request.provider === "claude" || request.provider === "codex",
+        });
+      },
+    };
     try {
       created = await this.deps.manager.createPeer({
         ...selection,
@@ -243,8 +264,9 @@ export class OrchestratorPeerService {
           ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
         },
         capabilities,
-      });
+      }, ...(startup === undefined ? [] : [startup]));
     } catch (error) {
+      if (preparedBrief !== undefined) await this.deps.instructions!.flush(preparedBrief.targetSessionId).catch(() => undefined);
       const code = error instanceof Error && "code" in error && typeof error.code === "string"
         ? error.code
         : undefined;
@@ -262,8 +284,8 @@ export class OrchestratorPeerService {
     }
 
     // From here the peer exists. Everything below is reporting, and none of it may turn a
-    // running peer into a retry that launches another: the replay is recorded before the brief
-    // and the audit, and their failures are carried in the result rather than thrown.
+    // running peer into a retry that launches another: record the replay before reading the
+    // brief receipt or journaling, and carry reporting failures in the result.
     const warnings = [...(created.warnings ?? [])];
     const result: OrchestratorCreateResult = {
       outcome: "CREATED",
@@ -281,7 +303,11 @@ export class OrchestratorPeerService {
       warnings,
     };
     this.record(request, result);
-    result.brief = await this.deliverBrief(actor, created.session.id, request.brief);
+    if (startup?.native === false) await this.deps.instructions!.flush(created.session.id).catch((error) => {
+      warnings.push(`Initial queue flush failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    result.brief = instructionId === undefined ? { delivery: "not-requested" }
+      : await this.briefState(created.session.id, instructionId);
     try {
       await this.appendAudit("orchestrator.create.result", created.session.id, {
         actorSessionId: actor,
@@ -348,34 +374,29 @@ export class OrchestratorPeerService {
     return result;
   }
 
-  private async deliverBrief(
-    actor: string,
+  private async briefState(
     targetSessionId: string,
-    brief: string | undefined,
+    instructionId: string,
   ): Promise<PeerBriefDelivery> {
-    if (brief === undefined) return { delivery: "not-requested" };
-    if (this.deps.instructions === undefined) {
-      return { delivery: "failed", detail: "Instruction queue is unavailable; send the brief with cyberdeck_thread_message" };
-    }
     try {
-      const record = await this.deps.instructions.enqueue({
-        actorSessionId: actor,
-        targetSessionId,
-        message: brief,
-      });
-      // The queue answers after its first delivery attempt, so a peer that already went terminal
-      // comes back `undelivered` here rather than silently queued.
+      const record = (await this.deps.instructions?.list(targetSessionId))?.find(({ id }) => id === instructionId);
+      if (record === undefined) return { delivery: "failed", detail: `Initial instruction receipt ${instructionId} is missing; inspect the peer before retrying` };
       if (record.status === "undelivered" || record.status === "cancelled") {
         return {
           delivery: "failed",
           detail: `The brief was ${record.status}: the peer reached a terminal state before consuming it`,
         };
       }
-      return { delivery: "queued", instructionId: record.id };
+      return {
+        delivery: record.status === "accepted" ? "queued" : record.status,
+        instructionId: record.id,
+        ...(record.expectedTurn === undefined ? {} : { expectedTurn: record.expectedTurn }),
+        ...(record.holdReason === undefined ? {} : { holdReason: record.holdReason }),
+      };
     } catch (error) {
       return {
         delivery: "failed",
-        detail: `${error instanceof Error ? error.message : String(error)}; the peer is running, send the brief with cyberdeck_thread_message`,
+        detail: `${error instanceof Error ? error.message : String(error)}; inspect the peer and receipt ${instructionId} before retrying`,
       };
     }
   }

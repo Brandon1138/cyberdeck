@@ -195,7 +195,7 @@ describe("OrchestratorManager", () => {
     expect(result.binding.grant.capabilities).not.toContain("worker.start.fable");
   });
 
-  it("keeps a persisted automatic Claude orchestrator inside its read-only sandbox", async () => {
+  it("launches a persisted automatic Claude orchestrator in native auto mode", async () => {
     let launchArgs: string[] = [];
     const start = activatingStart((request: object) => {
       const session = {
@@ -227,20 +227,19 @@ describe("OrchestratorManager", () => {
       session: {
         provider: "claude",
         approvalMode: "auto",
+        sandbox: "workspace-write",
       },
     });
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       provider: "claude",
       approvalMode: "auto",
     }), undefined, expect.any(Function));
-    // Orchestrator sessions hardcode `sandbox: "read-only"`. `--permission-mode auto` would answer
-    // the approval question by granting workspace writes, which is how the same stored request
-    // produced a sandboxed Codex orchestrator and an unsandboxed Claude one.
-    expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "plan"]));
-    expect(launchArgs).not.toContain("auto");
+    expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "auto"]));
+    expect(launchArgs).not.toContain("plan");
+    expect(launchArgs).not.toContain("--dangerously-skip-permissions");
   });
 
-  it("reports what an automatic orchestrator gave up to its read-only sandbox", async () => {
+  it("defaults a Claude orchestrator to auto without a plan-mode shortfall", async () => {
     const start = activatingStart((request: object) => ({
       ...record,
       ...request,
@@ -250,11 +249,6 @@ describe("OrchestratorManager", () => {
     const manager = new OrchestratorManager(
       { start, stop: vi.fn(async () => {}) } as never,
       { get: vi.fn(async () => undefined), put: vi.fn(async () => undefined) } as never,
-      undefined,
-      {
-        list: vi.fn(async () => ({ claude: "automatic" as const })),
-        set: vi.fn(async () => undefined),
-      },
     );
 
     const result = await manager.create({
@@ -264,7 +258,8 @@ describe("OrchestratorManager", () => {
       cwd: "/repo/one",
       scope: "fleet",
     });
-    expect(result.warnings?.join("\n")).toContain("plan");
+    expect(result.session).toMatchObject({ approvalMode: "auto", sandbox: "workspace-write" });
+    expect(result.warnings).toBeUndefined();
   });
 
   it("uses Codex automatic review without an MCP approval shortfall", async () => {
@@ -355,7 +350,7 @@ describe("OrchestratorManager", () => {
       provider: "claude",
       approvalMode: "prompt",
     }), undefined, expect.any(Function));
-    expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "plan"]));
+    expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "manual"]));
   });
 
   it("starts a Codex orchestrator with Remote Control and the reviewed approval preset", async () => {

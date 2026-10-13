@@ -95,6 +95,12 @@ export class SessionRuntimeAssembly {
       workerStallSeconds: this.catalog.options.config.workerStallSeconds,
       ...(this.catalog.options.now === undefined ? {} : { now: this.catalog.options.now }),
     }).create(record, this.catalog.replayBytesFor(record));
+    if (record.initialInstructionId !== undefined) {
+      turns.noteRenderedInstruction({ instructionId: record.initialInstructionId, expectedTurn: 1, renderedAt: record.updatedAt });
+      if (record.executionState === "active") this.bus.notifyInstructionState({
+        sessionId: record.id, instructionId: record.initialInstructionId, state: "rendered", at: record.updatedAt,
+      });
+    }
     // A Scout gets a supervisor; every other session gets `undefined` and carries no Scout state.
     const scout = this.scoutSupervision.create(record, {
       persist: () => this.catalog.persist(runtime),
