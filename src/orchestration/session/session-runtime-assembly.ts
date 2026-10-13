@@ -7,7 +7,7 @@ import { SessionCatalog } from "./session-catalog.js";
 import { cloneRecord, recoverRecord } from "./session-record-projection.js";
 import { resolvedLaunchRecord } from "./launch-record.js";
 import { recoverInitialInstruction } from "./recover-initial-instruction.js";
-import type { RuntimeSession } from "./session-registry-ports.js";
+import { RegistryError, type RuntimeSession } from "./session-registry-ports.js";
 import { requireSessionRuntime } from "./session-runtime-guards.js";
 import { SessionUpdateBus } from "./session-update-bus.js";
 import { WorkerTurnEngineFactory } from "./worker-turn-engine.js";
@@ -80,6 +80,20 @@ export class SessionRuntimeAssembly {
 
   initialInstructionRecoveryFailure(sessionId: string): string | undefined {
     return this.initialRecoveryFailures.get(sessionId);
+  }
+
+  /** Retry unavailable native evidence before resume can retire the launch receipt. */
+  async retryInitialInstructionRecovery(runtime: RuntimeSession): Promise<void> {
+    const initial = await recoverInitialInstruction(runtime.record, this.catalog.options.transcripts);
+    if (initial.unavailable !== undefined) {
+      this.initialRecoveryFailures.set(runtime.record.id, initial.unavailable);
+      throw new RegistryError("SESSION_RESUME_UNAVAILABLE", initial.unavailable, runtime.record.id);
+    }
+    this.initialRecoveryFailures.delete(runtime.record.id);
+    if (initial.completed && runtime.record.initialInstructionId !== undefined) {
+      this.bus.notifyInstructionState({ sessionId: runtime.record.id,
+        instructionId: runtime.record.initialInstructionId, state: "completed", at: new Date().toISOString() });
+    }
   }
 
   createRuntimeSession(

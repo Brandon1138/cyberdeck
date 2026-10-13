@@ -130,6 +130,28 @@ async function harness(creator: "claude" | "codex") {
 }
 
 describe("peer first-instruction lifecycle", () => {
+  it.each(["claude", "codex"] as const)("retries unresolved %s launch evidence before resuming without discarding its receipt", async (provider) => {
+    const h = await harness("codex"); const created = await h.create(provider);
+    if (created.outcome !== "CREATED") throw new Error(created.reason);
+    const recoveredTranscripts = new FixtureTranscripts(h.directory);
+    recoveredTranscripts.complete(created.sessionId, "FIRST_ACK");
+    const nativeRead = vi.spyOn(recoveredTranscripts, "observeProviderTurns")
+      .mockRejectedValueOnce(new Error("Transcript changed during read"))
+      .mockRejectedValueOnce(new Error("Transcript still changing"));
+    const restarted = await h.restart(created.sessionId, recoveredTranscripts);
+    await expect(restarted.registry.resume(created.sessionId)).rejects.toMatchObject({ code: "SESSION_RESUME_UNAVAILABLE" });
+    await restarted.queue.flush(created.sessionId);
+    expect((await restarted.queue.list(created.sessionId))[0]).toMatchObject({ status: "queued", holdReason: "native-recovery-unavailable" });
+    expect(h.handles).toHaveLength(2);
+    await restarted.registry.resume(created.sessionId);
+    await vi.waitFor(async () => expect((await restarted.queue.list(created.sessionId))[0]?.status).toBe("completed"));
+    expect(restarted.registry.initialInstructionRecoveryFailure(created.sessionId)).toBeUndefined();
+    expect(nativeRead).toHaveBeenCalledTimes(3);
+    expect((await recoveredTranscripts.readCompletionLedger(created.sessionId)).canonicalTurns).toBe(1);
+    expect(h.handles.at(-1)!.spec.args).not.toContain("Read the handoff. Reply FIRST_ACK once.");
+    expect(h.handles.at(-1)!.handle.writes).toEqual([]);
+  });
+
   it.each(["claude", "codex"] as const)("contains a %s native-read recovery failure and retries without resending the brief", async (provider) => {
     const h = await harness("codex"); const created = await h.create(provider);
     if (created.outcome !== "CREATED") throw new Error(created.reason);

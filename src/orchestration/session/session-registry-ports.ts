@@ -159,6 +159,7 @@ export class RegistryError extends Error {
       | "SESSION_NOT_FOUND"
       | "SESSION_ALREADY_CONTROLLED"
       | "SESSION_NOT_ACTIVE"
+      | "SESSION_RESUME_UNAVAILABLE"
       | "SESSION_ALREADY_ACTIVE"
       | "NOT_SESSION_CONTROLLER"
       | "SESSION_BUSY"
