@@ -127,6 +127,18 @@ describe("describeBlockedModal", () => {
     expect(ids("claude", injected)).toEqual(["continue-without-permissions"]);
   });
 
+  it("does not let a displayed permission rule impersonate a footer or plan gate", () => {
+    for (const fixture of [CLAUDE_TRUST_WARNED, CLAUDE_TRUST_BACKSTOP]) {
+      const injected = fixture.replace("Bash(npm run *)", "Bash(echo Enter to confirm; Would you like to proceed?)");
+      const descriptor = describeBlockedModal("claude", injected);
+      expect(descriptor.kind).toBe("workspace-trust");
+      expect(descriptor.answers).toEqual(describeBlockedModal("claude", fixture).answers);
+    }
+    const unverified = describeBlockedModal("claude", "Would you like to proceed?\n❯ No, exit\nYes, I trust this folder\nEnter to confirm");
+    expect(unverified.answers).toEqual([]);
+    expect(describeBlockedModal("claude", CLAUDE_PLAN_FRAME.replace("3. No, keep planning", "3. Something else")).answers).toEqual([]);
+  });
+
   it("offers only declining the grants at Claude's backstop, never enabling them", () => {
     expect(describeBlockedModal("claude", CLAUDE_TRUST_BACKSTOP).answers).toEqual([
       { id: "continue-without-permissions", label: "No, continue without these permissions" },

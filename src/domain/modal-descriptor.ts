@@ -3,6 +3,7 @@ import { z } from "zod";
 import { plainTerminalLines, plainTerminalText } from "./terminal-replay.js";
 import {
   claudeTrustAnswers,
+  claudePlanAnswers,
   codexFolderAccessAnswers,
   codexHookReviewAnswers,
 } from "./startup-dialog-answers.js";
@@ -186,7 +187,7 @@ const RULES: Readonly<Record<string, readonly ModalRecognitionRule[]>> = {
       kind: "workspace-trust",
       pattern: /Quick\s*safety\s*check:\s*Is\s*this\s*a\s*project/giu,
       evidencePrefix: /Accessing\s*workspace:?/giu,
-      through: /Enter\s*to\s*confirm(?:[\s\S]{0,24}?Esc\s*to\s*cancel)?|Press[\s\S]{0,24}?again\s*to\s*exit/iu,
+      through: /^[ \t]*Enter\s*to\s*confirm(?:[^\n]{0,24}?Esc\s*to\s*cancel)?[ \t]*$|^[ \t]*Press[^\n]{0,24}?again\s*to\s*exit[ \t]*$/imu,
       answers: claudeTrustAnswers,
     },
     {
@@ -200,12 +201,8 @@ const RULES: Readonly<Record<string, readonly ModalRecognitionRule[]>> = {
       // Plan mode asks "Would you like to proceed?"; the per-action permission prompt asks "Do you
       // want to proceed?". The wording difference is the classifier.
       kind: "plan-confirm",
-      pattern: /Would you like to proceed\?/giu,
-      answers: [
-        { id: "proceed-auto", label: "Yes, and auto-accept edits" },
-        { id: "proceed-manual", label: "Yes, and manually approve edits" },
-        { id: "keep-planning", label: "No, keep planning" },
-      ],
+      pattern: /^[ \t]*Would\s*you\s*like\s*to\s*proceed\?[ \t]*$/gimu,
+      answers: claudePlanAnswers,
     },
     {
       kind: "permission-approval",

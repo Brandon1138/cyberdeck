@@ -35,6 +35,27 @@ export function claudeTrustAnswers(evidence: string): readonly ModalAnswerOption
   return warned ? [exit] : [{ id: "trust", label: "Yes, I trust this folder" }, exit];
 }
 
+/** A question alone is not a plan gate: its verified numbered choices establish the key map. */
+export function claudePlanAnswers(evidence: string): readonly ModalAnswerOption[] {
+  const lines = evidence.split("\n").map((line) => line.trim().replace(/^[❯›>]\s*/u, ""));
+  const rows = [
+    /^1\.\s*Yes,\s*and\s*auto-accept\s*edits$/iu,
+    /^2\.\s*Yes,\s*and\s*manually\s*approve\s*edits$/iu,
+    /^3\.\s*No,\s*keep\s*planning$/iu,
+  ];
+  let after = -1;
+  for (const row of rows) {
+    const index = lines.findIndex((line, at) => at > after && row.test(line));
+    if (index < 0) return [];
+    after = index;
+  }
+  return [
+    { id: "proceed-auto", label: "Yes, and auto-accept edits" },
+    { id: "proceed-manual", label: "Yes, and manually approve edits" },
+    { id: "keep-planning", label: "No, keep planning" },
+  ];
+}
+
 const CODEX_FOLDER_DECLINES: readonly { pattern: RegExp; label: string }[] = [
   { pattern: /2\.\s*Quit/iu, label: "Quit" },
   { pattern: /2\.\s*Back\s*to\s*Agent\s*Command\s*Center/iu, label: "Back to Agent Command Center" },
