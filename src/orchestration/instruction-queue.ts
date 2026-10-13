@@ -283,7 +283,12 @@ export class InstructionQueue {
   private async applyState(update: InstructionStateUpdate): Promise<void> {
     await this.serialize(update.sessionId, async () => {
       const record = (await this.store.list(update.sessionId)).find(({ id }) => id === update.instructionId);
-      if (record === undefined || record.status === update.state) return;
+      // Recovered runtimes can emit stale generation-local observations. Durable terminal
+      // receipts never regress, including when that old runtime later stops or resumes.
+      if (record === undefined || record.status === update.state
+        || ["completed", "undelivered", "cancelled"].includes(record.status)) return;
+      const progress = ["accepted", "queued", "rendered", "submitted", "acknowledged", "completed"];
+      if (progress.indexOf(update.state) >= 0 && progress.indexOf(update.state) < progress.indexOf(record.status)) return;
       await this.store.put(InstructionRecordSchema.parse({
         ...record,
         status: update.state,

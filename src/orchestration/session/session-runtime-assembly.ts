@@ -6,6 +6,7 @@ import type { ScoutSessionSupervisorFactory } from "./scout-session-supervisor.j
 import { SessionCatalog } from "./session-catalog.js";
 import { cloneRecord, recoverRecord } from "./session-record-projection.js";
 import { resolvedLaunchRecord } from "./launch-record.js";
+import { initialInstructionCompleted } from "./recover-initial-instruction.js";
 import type { RuntimeSession } from "./session-registry-ports.js";
 import { requireSessionRuntime } from "./session-runtime-guards.js";
 import { SessionUpdateBus } from "./session-update-bus.js";
@@ -47,6 +48,9 @@ export class SessionRuntimeAssembly {
   async recover(stored: readonly SessionRecord[]): Promise<void> {
     const writes: Promise<void>[] = [];
     for (const original of stored) {
+      // Check the provider's persisted first turn before recovery terminalizes a live record.
+      // Its argv prompt must never be resent, and a completed receipt must not be re-armed.
+      const initialCompleted = await initialInstructionCompleted(original, this.catalog.options.transcripts);
       const record = recoverRecord(original);
       // A provider limit is the one piece of runtime truth that survives the process that observed
       // it, because the cap belongs to the account rather than to the runtime. Recovery folds `errored`
@@ -56,7 +60,7 @@ export class SessionRuntimeAssembly {
         watchers: new Map(),
         stopRequested: false,
         launchTail: Promise.resolve(),
-      }));
+      }, !initialCompleted));
       const rewritten = record.executionState !== original.executionState
         || record.attentionState !== original.attentionState
         || record.exitCode !== original.exitCode;
@@ -71,6 +75,7 @@ export class SessionRuntimeAssembly {
   createRuntimeSession(
     record: SessionRecord,
     state: Omit<RuntimeSession, "record" | "turns">,
+    trackInitialInstruction = true,
   ): RuntimeSession {
     let runtime!: RuntimeSession;
     const turns = new WorkerTurnEngineFactory({
@@ -95,7 +100,7 @@ export class SessionRuntimeAssembly {
       workerStallSeconds: this.catalog.options.config.workerStallSeconds,
       ...(this.catalog.options.now === undefined ? {} : { now: this.catalog.options.now }),
     }).create(record, this.catalog.replayBytesFor(record));
-    if (record.initialInstructionId !== undefined) {
+    if (record.initialInstructionId !== undefined && trackInitialInstruction) {
       turns.noteRenderedInstruction({ instructionId: record.initialInstructionId, expectedTurn: 1, renderedAt: record.updatedAt });
       if (record.executionState === "active") this.bus.notifyInstructionState({
         sessionId: record.id, instructionId: record.initialInstructionId, state: "rendered", at: record.updatedAt,

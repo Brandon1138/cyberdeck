@@ -7,6 +7,7 @@ import { SessionRegistry } from "../../src/broker/session-registry.js";
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import type { ProviderLaunchSpec } from "../../src/orchestration/session/provider-ports.js";
+import type { SessionRegistryOptions } from "../../src/orchestration/session/session-registry-ports.js";
 import type { CaptureWorkerTurns, ObservedWorkerTurn, WorkerTurnObservation } from "../../src/orchestration/session/worker-turn-ports.js";
 import { InstructionQueue } from "../../src/orchestration/instruction-queue.js";
 import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
@@ -66,17 +67,18 @@ async function harness(creator: "claude" | "codex") {
   const handles: Array<{ handle: FixtureRuntime; spec: ProviderLaunchSpec }> = [];
   const order: string[] = [];
   const sessionStore = new SessionStore(directory);
-  const registry = new SessionRegistry({
+  const registryOptions: SessionRegistryOptions = {
     config: BrokerRuntimeConfigSchema.parse({}), workerTurnObservation: new WorkerTurnObservationAdapter(),
     adapters: { claude: new ClaudeProviderAdapter({ directory: join(directory, "launch") }),
       cursor: { id: "cursor", buildLaunchSpec: (session) => ({ executable: "fixture", args: [], cwd: session.cwd, env: {} }),
         buildResumeSpec: (session) => ({ executable: "fixture", args: [], cwd: session.cwd, env: {} }) },
-      codex: new CodexProviderAdapter({ runCommand: async () => '{"status":"connected"}' }) },
+      codex: new CodexProviderAdapter({ nativeSessionId: randomUUID(), runCommand: async () => '{"status":"connected"}' }) },
     sessionRuntimeFactory: (spec) => {
       order.push("spawn"); const handle = new FixtureRuntime(); handles.push({ handle, spec }); return handle;
     },
     transcripts, store: sessionStore, validateCwd: async () => undefined, journal: { append: async () => undefined },
-  });
+  };
+  const registry = new SessionRegistry(registryOptions);
   const bindings = new OrchestratorStore(directory);
   const manager = new OrchestratorManager(registry, bindings, undefined, undefined, async () =>
     fallbackWorkerCapabilities("first-instruction fixture", "codex").map((capability) => ({
@@ -107,10 +109,55 @@ async function harness(creator: "claude" | "codex") {
     cwd: directory, reason: "first instruction regression", brief, mutationId: "first-instruction",
     approval: { kind: "per-create", quote: "Run the first-instruction regression", channel: "terminal" },
   });
-  return { directory, registry, transcripts, handles, queue, store, bindings, manager, service, actor, order, create };
+  const restart = async (sessionId: string, recoveredTranscripts = transcripts) => {
+    queue.stop();
+    const recovered = new SessionRegistry({ ...registryOptions, transcripts: recoveredTranscripts, recoveredSessions: [registry.get(sessionId)] });
+    await recovered.ready();
+    const recoveredQueue = new InstructionQueue(recovered, bindings, new InstructionStore(directory));
+    recoveredQueue.start();
+    await recoveredQueue.recoverLaunchInstructions(async (id) => (await recoveredTranscripts.readCompletionLedger(id)).canonicalTurns);
+    cleanups.push(async () => {
+      await recovered.stop(sessionId);
+      await recoveredQueue.flush(sessionId);
+      recoveredQueue.stop();
+    });
+    return { registry: recovered, queue: recoveredQueue };
+  };
+  return { directory, registry, transcripts, handles, queue, store, bindings, manager, service, actor, order, create, restart };
 }
 
 describe("peer first-instruction lifecycle", () => {
+  it.each(["claude", "codex"] as const)("keeps a completed %s brief completed across broker recovery, resume, and stop", async (provider) => {
+    const h = await harness("codex"); const created = await h.create(provider);
+    if (created.outcome !== "CREATED") throw new Error(created.reason);
+    h.transcripts.complete(created.sessionId, "FIRST_ACK");
+    await vi.waitFor(async () => expect((await h.queue.list(created.sessionId))[0]?.status).toBe("completed"), { timeout: 4_000 });
+    const restarted = await h.restart(created.sessionId);
+    await restarted.registry.resume(created.sessionId);
+    h.handles.at(-1)!.handle.emit(READY[provider]);
+    await restarted.registry.stop(created.sessionId);
+    await vi.waitFor(() => expect(restarted.registry.get(created.sessionId).exitCode).toBe(0));
+    await restarted.queue.flush(created.sessionId);
+    expect((await restarted.queue.list(created.sessionId))[0]?.status).toBe("completed");
+    expect(h.handles.at(-1)!.spec.args).not.toContain("Read the handoff. Reply FIRST_ACK once.");
+    expect(h.handles.at(-1)!.handle.writes).toEqual([]);
+  });
+
+  it.each(["claude", "codex"] as const)("recovers a persisted native %s first turn from before the broker committed it", async (provider) => {
+    const h = await harness("codex"); const created = await h.create(provider);
+    if (created.outcome !== "CREATED") throw new Error(created.reason);
+    const recoveredTranscripts = new FixtureTranscripts(h.directory);
+    recoveredTranscripts.complete(created.sessionId, "FIRST_ACK");
+    expect((await recoveredTranscripts.readCompletionLedger(created.sessionId)).canonicalTurns).toBe(0);
+    const nativeRead = vi.spyOn(recoveredTranscripts, "observeProviderTurns");
+    const restarted = await h.restart(created.sessionId, recoveredTranscripts);
+    expect(nativeRead).toHaveBeenCalledWith(expect.objectContaining({ sessionId: created.sessionId, allowFallback: false }));
+    expect((await recoveredTranscripts.readCompletionLedger(created.sessionId)).canonicalTurns).toBe(1);
+    expect((await restarted.queue.list(created.sessionId))[0]?.status).toBe("completed");
+    expect(h.handles).toHaveLength(2);
+    expect(h.handles[1]!.handle.writes).toEqual([]);
+  });
+
   it("keeps Cursor on verified queue delivery without a native transcript requirement", async () => {
     const h = await harness("codex"); const created = await h.create("cursor");
     if (created.outcome !== "CREATED") throw new Error(created.reason);

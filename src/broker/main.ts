@@ -200,6 +200,9 @@ export async function runBroker(
     }
   }
   const activity = withActivitySink(localActivity, telemetry);
+  const instructionStore = new InstructionStore(stateDirectory);
+  const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
+  transcripts.attachNativeCapture(nativeCapture);
   const sessionStore = new SessionStore(stateDirectory);
   const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
@@ -301,9 +304,6 @@ export async function runBroker(
     (binding, session) => orchestratorLiveness.bindingSession(binding, session),
     (binding) => orchestratorLiveness.bindingRemoved(binding),
   );
-  const instructionStore = new InstructionStore(stateDirectory);
-  const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
-  transcripts.attachNativeCapture(nativeCapture);
   const notificationFeed = composeOrchestratorNotificationFeed({
     inbox: notificationInbox,
     noticeFiles: new OrchestratorNoticeFiles(stateDirectory),

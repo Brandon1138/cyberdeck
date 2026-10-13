@@ -120,7 +120,7 @@ type ParsedCreate = z.output<typeof AgentCreateOrchestratorParamsSchema>;
  * read them and act, the same way the stop path answers.
  */
 export class OrchestratorPeerService {
-  private readonly replays = new Map<string, OrchestratorCreateResult>();
+  private readonly replays = new Map<string, { result: OrchestratorCreateResult; instructionId?: string }>();
   /**
    * One create at a time per creator. A retry carrying the same `mutationId` while the first is
    * still in flight must wait for its binding or recorded result rather than launch a second peer.
@@ -155,10 +155,11 @@ export class OrchestratorPeerService {
    */
   private async replay(request: ParsedCreate): Promise<OrchestratorCreateResult | undefined> {
     if (request.mutationId === undefined) return undefined;
-    const recorded = this.replays.get(replayKey(request));
-    if (recorded !== undefined) {
-      if (recorded.outcome === "CREATED" && "instructionId" in recorded.brief) {
-        return { ...recorded, brief: await this.briefState(recorded.sessionId, recorded.brief.instructionId), retrieval: "replay" };
+    const cached = this.replays.get(replayKey(request));
+    if (cached !== undefined) {
+      const recorded = cached.result;
+      if (recorded.outcome === "CREATED" && cached.instructionId !== undefined) {
+        return { ...recorded, brief: await this.briefState(recorded.sessionId, cached.instructionId), retrieval: "replay" };
       }
       return { ...recorded, retrieval: "replay" };
     }
@@ -191,7 +192,7 @@ export class OrchestratorPeerService {
       warnings: [],
       retrieval: "replay",
     };
-    this.replays.set(replayKey(request), result);
+    this.record(request, result, existing.initialInstructionId);
     return result;
   }
 
@@ -302,7 +303,7 @@ export class OrchestratorPeerService {
       remoteControl: peerRemoteControlNote(created.binding.provider),
       warnings,
     };
-    this.record(request, result);
+    this.record(request, result, instructionId);
     if (startup?.native === false) await this.deps.instructions!.flush(created.session.id).catch((error) => {
       warnings.push(`Initial queue flush failed: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -369,8 +370,8 @@ export class OrchestratorPeerService {
     return undefined;
   }
 
-  private record<T extends OrchestratorCreateResult>(request: ParsedCreate, result: T): T {
-    if (request.mutationId !== undefined) this.replays.set(replayKey(request), result);
+  private record<T extends OrchestratorCreateResult>(request: ParsedCreate, result: T, instructionId?: string): T {
+    if (request.mutationId !== undefined) this.replays.set(replayKey(request), { result, ...(instructionId === undefined ? {} : { instructionId }) });
     return result;
   }
 

@@ -83,6 +83,7 @@ function harness(overrides: {
   instructions?: boolean;
   briefStatus?: string;
   instructionRecords?: InstructionRecord[];
+  receiptRead?: () => void;
   failAudit?: (event: BrokerEvent) => boolean;
 } = {}) {
   const binding = overrides.binding ?? fleetBinding;
@@ -151,7 +152,7 @@ function harness(overrides: {
     },
     manager: { createPeer: createPeer as never },
     ...(overrides.instructions === false ? {} : { instructions: {
-      prepareLaunch: enqueue, list: async () => instructionRecords, flush: async () => instructionRecords,
+      prepareLaunch: enqueue, list: async () => { overrides.receiptRead?.(); return instructionRecords; }, flush: async () => instructionRecords,
     } }),
     audit: {
       append: async (event) => {
@@ -182,6 +183,18 @@ const request = {
 };
 
 describe("OrchestratorPeerService", () => {
+  it("refreshes a cached receipt after a transient read failure without launching or briefing twice", async () => {
+    const receiptRead = vi.fn().mockImplementationOnce(() => { throw new Error("temporary receipt read failure"); });
+    const h = harness({ receiptRead });
+    const input = { ...request, brief: "FIRST_ACK", mutationId: "receipt-read-retry" };
+    await expect(h.service.create(input)).resolves.toMatchObject({ outcome: "CREATED", brief: { delivery: "failed" } });
+    h.instructionRecords[0]!.status = "completed";
+    await expect(h.service.create(input)).resolves.toMatchObject({ outcome: "CREATED", retrieval: "replay", brief: { delivery: "completed" } });
+    expect(receiptRead).toHaveBeenCalledTimes(2);
+    expect(h.createPeer).toHaveBeenCalledOnce();
+    expect(h.enqueue).toHaveBeenCalledOnce();
+  });
+
   it("creates a peer with per-create approval and the full grant, persists lineage, delivers the brief, and audits both halves", async () => {
     const { service, createPeer, enqueue, events, stored } = harness();
 

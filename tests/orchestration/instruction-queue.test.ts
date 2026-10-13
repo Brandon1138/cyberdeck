@@ -5,6 +5,7 @@ import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import type {
   InstructionRepository,
+  InstructionStateUpdate,
   OrchestratorBindingReader,
   SessionInstructionPort,
 } from "../../src/orchestration/session/session-ports.js";
@@ -29,6 +30,34 @@ const binding: OrchestratorBinding = {
 };
 
 describe("InstructionQueue", () => {
+  it("ignores stale lifecycle observations after a receipt advances or completes", async () => {
+    const records = new Map<string, InstructionRecord>();
+    let lifecycle!: (update: InstructionStateUpdate) => void;
+    const sessions = {
+      get: () => ({ id: TARGET, cwd: "/repo" } as SessionRecord),
+      onControllerReleased: () => () => undefined,
+      onDeliveryBoundary: () => () => undefined,
+      onInstructionState: (listener: typeof lifecycle) => { lifecycle = listener; return () => undefined; },
+      submitInstruction: async () => ({ state: "rendered" as const, expectedTurn: 1, at: binding.createdAt }),
+    } satisfies SessionInstructionPort;
+    const queue = new InstructionQueue(sessions, { findBySessionId: async () => binding }, {
+      list: async () => [...records.values()], put: async (record) => { records.set(record.id, record); },
+    });
+    queue.start();
+    const receipt = await queue.enqueue({ actorSessionId: ACTOR, targetSessionId: TARGET, message: "FIRST_ACK" });
+    const observe = async (state: InstructionStateUpdate["state"]) => {
+      lifecycle({ sessionId: TARGET, instructionId: receipt.id, state, at: new Date().toISOString() });
+      await queue.flush(TARGET);
+    };
+    await observe("acknowledged");
+    await observe("submitted");
+    expect(records.get(receipt.id)?.status).toBe("acknowledged");
+    await observe("completed");
+    for (const stale of ["rendered", "undelivered", "cancelled"] as const) await observe(stale);
+    expect(records.get(receipt.id)).toMatchObject({ status: "completed", completedAt: expect.any(String) });
+    queue.stop();
+  });
+
   it("lets a fleet creator enqueue complete instructions to its peer orchestrator in another workspace", async () => {
     const records = new Map<string, InstructionRecord>();
     const peer = { id: TARGET, cwd: "/another/repo", kind: "orchestrator" } as SessionRecord;
