@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CodexOrchestratorHome } from "../../src/providers/codex/orchestrator-home.js";
 import { CodexProviderAdapter } from "../../src/providers/codex.js";
+import { codexSessionMarker } from "../../src/providers/codex/native-session-identity.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { parse } from "smol-toml";
 
@@ -113,11 +114,12 @@ describe("Codex orchestrator RC ownership", () => {
     await writeFile(join(day, `rollout-${nativeId}.jsonl`), JSON.stringify({
       type: "session_meta",
       payload: { id: nativeId, timestamp: createdAt, cwd: "/repo", originator: "codex-tui" },
-    }) + "\n");
+    }) + "\n" + JSON.stringify({ type: "response_item", payload: { type: "message", role: "developer",
+      content: [{ type: "input_text", text: codexSessionMarker("11111111-1111-4111-8111-111111111111") }] } }) + "\n");
     const spec = new CodexProviderAdapter({
       sourceEnvironment: { CODEX_HOME: source }, orchestratorHome: home,
     }).buildResumeSpec({
-      id: "existing-orchestrator", kind: "orchestrator", provider: "codex", cwd: "/repo",
+      id: "11111111-1111-4111-8111-111111111111", kind: "orchestrator", provider: "codex", cwd: "/repo",
       sandbox: "workspace-write", approvalMode: "auto", createdAt,
     } as SessionRecord);
     expect(spec.args.at(-1)).toBe(nativeId);

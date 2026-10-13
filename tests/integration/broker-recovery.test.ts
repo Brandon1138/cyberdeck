@@ -90,13 +90,14 @@ describe("broker durable startup", () => {
           id: sessionId,
           executionState: "cancelled",
           attentionState: "interrupted",
+          exitCode: -1,
           latestPreview: "The saved answer survives restart.",
         }),
       ]);
       await expect(client.request<{ data: string }>("session.snapshot", { sessionId })).resolves.toEqual({ data: "" });
       await expect(client.request("fleet.reattach", { detachIdentity: "operator:one" })).resolves.toMatchObject({
         status: "ready",
-        record: { id: sessionId, attentionState: "interrupted" },
+        record: { id: sessionId, executionState: "cancelled", attentionState: "interrupted", exitCode: -1 },
         requiresResume: true,
       });
       await expect(client.request("fleet.reattach", { detachIdentity: "operator:other" }))
@@ -108,7 +109,7 @@ describe("broker durable startup", () => {
     }
   });
 
-  it("brings finished threads back as Done, holding no worker slot, and retires aged history", async () => {
+  it("marks lost active generations interrupted regardless of saved Done, frees worker slots, and retires aged history", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-thread-durability-"));
     const socketPath = join(directory, "broker.sock");
     const store = new SessionStore(directory);
@@ -130,17 +131,19 @@ describe("broker durable startup", () => {
       const sessions = await client.request<SessionRecord[]>("session.list", {});
       const byId = new Map(sessions.map((record) => [record.id, record]));
 
-      // 1. The thread that had finished its task is Done again, not interrupted, not stopped.
+      // A saved Done label says nothing about how an active process generation exited. Neither
+      // generation has an observed exit, so both retain the loss instead of fabricating Done/0.
       expect(byId.get(finished.id)).toMatchObject({
-        executionState: "exited",
-        attentionState: "done",
-        exitCode: 0,
+        executionState: "cancelled",
+        attentionState: "interrupted",
+        exitCode: -1,
         latestPreview: "The saved answer survives restart.",
       });
       // A thread that was genuinely mid-turn still reports the work it lost.
       expect(byId.get(midTurn.id)).toMatchObject({
         executionState: "cancelled",
         attentionState: "interrupted",
+        exitCode: -1,
       });
       // 4. Retention retired the aged thread without anyone stopping and deleting it by hand.
       expect(byId.has(ancient.id)).toBe(false);
@@ -149,8 +152,8 @@ describe("broker durable startup", () => {
       await expect(client.request<{ workers: { activeWorkers: number } }>("broker.status", {}))
         .resolves.toMatchObject({ workers: { activeWorkers: 0 } });
 
-      // 3. The header counters agree with the rehydrated set: no live agents, one done, one
-      //    interrupted, and nothing counted as working or needing input.
+      // The header agrees with the recovered evidence: no live agents, no verified Done process,
+      // two lost generations, and nothing counted as working or needing input.
       const snapshot = await collectFleetSnapshot(client);
       const rendered = renderFleet(snapshot, createFleetState(snapshot), {
         color: false,
@@ -159,7 +162,7 @@ describe("broker durable startup", () => {
         now: Date.parse("2026-07-26T12:00:00.000Z"),
         home: "/Users/brandon",
       });
-      expect(rendered).toContain("0 agents · 0 needs input · 0 working · 1 done · 1 interrupted");
+      expect(rendered).toContain("0 agents · 0 needs input · 0 working · 2 interrupted");
       expect(rendered).toContain("Finished the task");
     } finally {
       client.close();
@@ -168,7 +171,7 @@ describe("broker durable startup", () => {
     }
   });
 
-  it("keeps a rehydrated finished thread Done across a second restart", async () => {
+  it("keeps a lost active generation interrupted across a second restart", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-thread-durability-"));
     const socketPath = join(directory, "broker.sock");
     const current = new Date().toISOString();
@@ -189,8 +192,9 @@ describe("broker durable startup", () => {
       await expect(client.request<SessionRecord[]>("session.list", {})).resolves.toEqual([
         expect.objectContaining({
           id: finished.id,
-          executionState: "exited",
-          attentionState: "done",
+          executionState: "cancelled",
+          attentionState: "interrupted",
+          exitCode: -1,
         }),
       ]);
     } finally {

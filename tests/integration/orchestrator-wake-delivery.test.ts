@@ -49,6 +49,8 @@ async function harness(instructionPersistence?: Promise<void>, humanPersistence?
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-wake-"));
   const pane = new Pane();
   let humanInputBlocked = false;
+  let instructionPersistenceStarted!: () => void;
+  const instructionPersisting = new Promise<void>((resolve) => { instructionPersistenceStarted = resolve; });
   const registry = new SessionRegistry({
     adapters: { codex: {
       id: "codex", buildLaunchSpec: (session) => ({ executable: "fake", args: [], cwd: session.cwd, env: {} }),
@@ -58,7 +60,10 @@ async function harness(instructionPersistence?: Promise<void>, humanPersistence?
     } },
     sessionRuntimeFactory: () => pane, journal: { append: async () => {} },
     transcripts: { append: async (event) => {
-      if (event.kind === "instruction") await instructionPersistence;
+      if (event.kind === "instruction") {
+        instructionPersistenceStarted();
+        await instructionPersistence;
+      }
       if (humanInputBlocked && event.kind === "prompt" && event.source === "human") await humanPersistence;
     } },
     validateCwd: async () => undefined, config: BrokerRuntimeConfigSchema.parse({}),
@@ -112,7 +117,7 @@ async function harness(instructionPersistence?: Promise<void>, humanPersistence?
     await settle();
     await rm(directory, { recursive: true, force: true });
   });
-  return { registry, pane, session, controllerId, append, advance, settle,
+  return { registry, pane, session, controllerId, append, advance, settle, instructionPersisting,
     queue: () => queue, inbox: () => inbox,
     restart: async () => {
       delivery.stop(); queue.stop(); await settle();
@@ -275,12 +280,18 @@ describe("broker wake channel with an attached operator", () => {
     const h = await harness(pending);
     await h.advance(WAKE_OPERATOR_QUIET_MS);
     const wake = wakeInput(h.session.id, h.controllerId);
+    let submissionSettled = false;
     const submit = h.registry.submitInstruction(h.session.id, wake.message, "broker", {
       actorSessionId: h.session.id, brokerOwned: true, submissionKind: "wake",
-    }, randomUUID());
-    // The synchronous session exclusion has already pasted before another admitted byte can write.
+    }, randomUUID()).then((delivery) => { submissionSettled = true; return delivery; });
+    // Native preflight may await before paste. Persistence starts after the atomic paste and
+    // remains blocked, so operator input below really arrives during that outstanding I/O.
+    await h.instructionPersisting;
     expect(h.pane.writes).toHaveLength(1);
+    expect(submissionSettled).toBe(false);
     await h.registry.write(h.session.id, "human", Buffer.from("x"));
+    expect(h.pane.writes).toHaveLength(2);
+    expect(submissionSettled).toBe(false);
     release();
     await submit;
     expect(h.pane.writes[0]).toContain(wake.message);

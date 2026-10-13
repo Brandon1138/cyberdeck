@@ -6,6 +6,7 @@ import { join } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openCodexRemoteMcpBridge, type CodexRemoteMcpBridge } from "../../src/providers/codex/remote-mcp-bridge.js";
+import { codexDeveloperInstructions } from "../../src/providers/codex/native-session-identity.js";
 
 describe("Codex remote MCP bridge", () => {
   let directory: string;
@@ -42,6 +43,7 @@ describe("Codex remote MCP bridge", () => {
   async function connect(sessionId = "orc-one") {
     const bridge = await openCodexRemoteMcpBridge({
       sessionId, homeDirectory, mcp, socketRoot: join(directory, "bridge"),
+      resolveDeveloperInstructions: async () => "inherited fixture instructions",
     });
     bridges.push(bridge);
     const client = new WebSocket("ws://localhost", {
@@ -77,7 +79,7 @@ describe("Codex remote MCP bridge", () => {
       expect(result).toEqual({
         id: 7, method,
         params: {
-          threadId: "native-thread", developerInstructions: "instructions", model: "gpt-6.1-sol",
+          threadId: "native-thread", developerInstructions: codexDeveloperInstructions("orc-one", "instructions"), model: "gpt-6.1-sol",
           config: {
             model_reasoning_effort: "xhigh",
             "mcp_servers.codex_tui": { url: "http://localhost:9000" },

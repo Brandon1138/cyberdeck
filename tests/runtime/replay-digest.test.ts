@@ -17,6 +17,7 @@ import {
   terminalTokenCount,
 } from "../../src/runtime/terminal-replay.js";
 import type { ProviderId } from "../../src/domain/session.js";
+import { PROVIDER_SCREENS, redraw } from "./provider-screen-fixtures.js";
 
 /** Feed a replay through the digest in fixed-size pieces, as a PTY would deliver it. */
 function fed(replay: string, size: number): ReplayDigest {
@@ -44,6 +45,45 @@ const REPLAYS = [
 ];
 
 describe("ReplayDigest", () => {
+  it.each(PROVIDER_SCREENS)("preserves ED2 cursor position while reading indented $provider controls at every seam", ({ provider, modal, working }) => {
+    const prefix = "\u001b[8;11Hprevious screen";
+    const blocked = prefix + "\u001b[2J" + modal.map((row) => `   ${row}`).join("\r\n");
+    const busy = blocked + "\u001b]0;⠹ busy\u0007\u001b[2J" + working.map((row) => `   ${row}`).join("\r\n");
+    for (const size of CHUNK_SIZES) {
+      const digest = fed(blocked, size);
+      expect(digest.inputFrameText()).toMatch(/^\n{7} {28}/u);
+      expect(markerTerminalActivity(provider, digest)).toBe("needs-input");
+      const resumed = fed(busy, size);
+      expect(markerTerminalActivity(provider, resumed)).toBe("working");
+      expect(markerTerminalActivity(provider, resumed)).toBe(providerTerminalActivity(provider, busy));
+    }
+  });
+
+  it("keeps visible UI between consecutive ST-terminated OSC titles at every seam", () => {
+    const replay = "\u001b]0;workspace\u001b\\" + redraw(["Working…", "esc to interrupt"])
+      + "\u001b]0;workspace\u001b\\";
+    for (const size of CHUNK_SIZES) {
+      const digest = fed(replay, size);
+      expect(digest.inputFrameText()).toBe("Working…\nesc to interrupt");
+      expect(digest.frameText()).toContain("Working…");
+      expect(markerTerminalActivity("codex", digest)).toBe("working");
+      expect(markerTerminalActivity("codex", digest)).toBe(providerTerminalActivity("codex", replay));
+    }
+  });
+
+  it.each(PROVIDER_SCREENS)("agrees with whole-replay $provider projection across cursor, erase and split controls", ({ provider, modal, working, idle, draft }) => {
+    const replay = redraw(modal) + "\u001b]0;⠋ Working\u001b\\" + redraw(working)
+      + redraw(draft) + redraw(idle, "\u001b[H\u001b[J");
+    for (const size of CHUNK_SIZES) {
+      const digest = fed(replay, size);
+      expect(digest.inputFrameText()).toBe(idle.map((row) => row.trimEnd()).join("\n"));
+      expect(markerTerminalActivity(provider, digest)).toBe("awaiting-input");
+      expect(markerTerminalActivity(provider, digest)).toBe(providerTerminalActivity(provider, replay));
+      expect(frameComposerState(provider, digest.inputFrameText(), { modalOpen: false }))
+        .toEqual(terminalComposerState(provider, replay));
+    }
+  });
+
   it("reads the same activity as a whole-replay scan, at every chunk boundary", () => {
     for (const replay of REPLAYS) {
       for (const provider of PROVIDERS) {
@@ -133,12 +173,12 @@ describe("ReplayDigest", () => {
   it("stops reporting a title once it has scrolled out of the replay window", () => {
     const window = 4_096;
     const head = "\u001b[2J\u001b]0;\u280b Working\u0007";
-    const tail = `${"x".repeat(window)}\n> ready\nAdd a follow-up\n`;
+    const tail = `${("x".repeat(80) + "\n").repeat(60)}❯ \n? for shortcuts\n`;
 
     const digest = new ReplayDigest(window);
     digest.append(head);
     expect(digest.lastTitle()).toBe("\u280b Working");
-    // A spinner named in the title outranks every marker, so the verdict is working while it lasts.
+    // A spinner named in the title is activity evidence until newer UI replaces it.
     expect(markerTerminalActivity("claude", digest)).toBe("working");
 
     for (let at = 0; at < tail.length; at += 64) digest.append(tail.slice(at, at + 64));
@@ -154,9 +194,9 @@ describe("ReplayDigest", () => {
   it("keeps a title that is still inside the replay window", () => {
     const digest = new ReplayDigest(4_096);
     digest.append("\u001b[2J\u001b]0;\u280b Working\u0007");
-    digest.append(`${"x".repeat(1_000)}\nAdd a follow-up\n`);
+    digest.append(`${("x".repeat(80) + "\n").repeat(12)}❯ \n? for shortcuts\n`);
     expect(digest.lastTitle()).toBe("\u280b Working");
-    expect(markerTerminalActivity("claude", digest)).toBe("working");
+    expect(markerTerminalActivity("claude", digest)).toBe("awaiting-input");
   });
 
   it("discards an oversized OSC payload instead of reading it as provider output", () => {
@@ -185,7 +225,7 @@ describe("ReplayDigest", () => {
     digest.append(`\u001b[2J⠋ Working (esc to interrupt)\n`);
     expect(markerTerminalActivity("claude", digest)).toBe("working");
 
-    digest.reset(`\u001b[2J> ready\nAdd a follow-up\n`);
+    digest.reset(`\u001b[2J❯ \n? for shortcuts\n`);
     expect(markerTerminalActivity("claude", digest)).toBe("awaiting-input");
     // The revision counter is monotonic across a reset: a reader holding an old value must never
     // see it come round again and read an unchanged stream.

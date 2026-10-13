@@ -1,7 +1,9 @@
+import { startupDialogPosition } from "./startup-dialog-activity.js";
 import type { ProviderId } from "./session.js";
+import { InputScreen, type RenderedTerminalScreen } from "./terminal-screen.js";
 
 export const OSC_TITLE = /\u001b\]0;([^\u0007\u001b]*)(?:\u0007|\u001b\\)/gu;
-const OSC_SEQUENCE = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)/gu;
+const OSC_SEQUENCE = /\u001b\](?:[^\u0007\u001b]|\u001b(?!\\))*(?:\u0007|\u001b\\)/gu;
 const HORIZONTAL_CURSOR_SEQUENCE = /\u001b\[(?:\d+)?[CG]/gu;
 const CSI_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/gu;
 const OTHER_ESCAPE = /\u001b(?:[()][0-9A-Z]|[@-_])/gu;
@@ -39,12 +41,9 @@ export type ActivityMarker = (typeof ACTIVITY_MARKERS)[number];
 /**
  * Where an activity verdict reads its evidence.
  *
- * Two implementations exist and have to agree: {@link replayMarkerSource}, which strips a whole
- * replay on every call, and `ReplayDigest`, which strips each PTY chunk once and remembers where
- * the markers landed. Both answer in the same coordinate space — offsets into the stripped stream —
- * so the decision below never learns which one it is talking to. That seam is the point: a broker
- * ingesting seven concurrent workers cannot afford the first implementation, and a second copy of
- * the decision would drift from this one within a release.
+ * One-shot replay projection and incremental ReplayDigest ingestion use the same rendered screen
+ * and raw write coordinates. Historical stream accessors remain for compatibility and diagnostics;
+ * they cannot establish current activity without a reliable screen projection.
  */
 export interface TerminalMarkerSource {
   /** Offset of the last occurrence of `marker` in the stripped stream, or -1. */
@@ -63,6 +62,11 @@ export interface TerminalMarkerSource {
   lastTitle(): string | undefined;
   /** Offset of the last blocked-prompt match in the stripped stream, or -1. */
   blockedPromptIndex(provider: ProviderId): number;
+  /** A reliable rendered screen; absent/unsupported projections cannot establish activity. */
+  currentScreen?(): RenderedTerminalScreen | undefined;
+  /** Raw coordinates, shared with currentScreen().writtenAt(). */
+  titlePosition?(): number;
+  waitingNotificationPosition?(): number;
 }
 
 /**
@@ -80,65 +84,103 @@ export function markerTerminalActivity(
   provider: ProviderId,
   markers: TerminalMarkerSource,
 ): ProviderTerminalActivity {
-  const blockedAt = markers.blockedPromptIndex(provider);
+  if (!["claude", "codex", "cursor", "antigravity"].includes(provider)) return "unknown";
+  const screen = markers.currentScreen?.();
+  if (screen === undefined) return "unknown";
 
-  if (provider === "cursor") {
-    if (blockedAt >= 0) return "needs-input";
-    const workingAt = Math.max(
-      markers.lastRawIndexOf("Composing"),
-      markers.lastRawIndexOf("ctrl+c to stop"),
-    );
-    const waitingAt = Math.max(
-      markers.lastRawIndexOf("Cursor is waiting for you"),
-      markers.lastRawIndexOf("Add a follow-up"),
-      markers.lastRawIndexOf("No matches"),
-      markers.lastRawIndexOf("/run-everything"),
-      markers.lastRawIndexOf("/model [filter]"),
-    );
-    if (workingAt >= 0 || waitingAt >= 0) return waitingAt > workingAt ? "awaiting-input" : "working";
+  // Positions come from the writes still visible on screen, not from append-only history. In-place
+  // redraws can update a footer above an older prompt, so row order is not chronological order.
+  const blocked = blockedPromptIndexInTail(provider, screen.text);
+  const blockedEnd = screen.text.indexOf("\n", blocked);
+  const blockedAt = blocked < 0 ? -1 : screen.writtenAt(blocked, blockedEnd < 0 ? screen.text.length : blockedEnd);
+  let workingAt = -1;
+  let waitingAt = -1;
+  for (const match of screen.text.matchAll(/[^\n]+/gu)) {
+    const line = match[0].replace(DIALOG_BORDER, "").trim();
+    const at = screen.writtenAt(match.index, match.index + match[0].length);
+    if (isWorkingLine(provider, line)) workingAt = Math.max(workingAt, at);
+    if (isWaitingLine(provider, line)) waitingAt = Math.max(waitingAt, at);
   }
-
-
-  if (provider === "antigravity") {
-    const workingAt = markers.lastBrailleIndex();
-    const waitingAt = Math.max(
-      markers.lastIndexOf("? for shortcuts"),
-      markers.lastIndexOf("> Plan mode:"),
-    );
-    if (blockedAt > Math.max(workingAt, waitingAt)) return "needs-input";
-    if (workingAt >= 0 || waitingAt >= 0) return waitingAt > workingAt ? "awaiting-input" : "working";
-  }
-
-  const workingAt = Math.max(
-    markers.lastIndexOf("esc to interrupt"),
-    markers.lastIndexOf("Composing"),
-    markers.lastIndexOf("Working"),
-  );
-  const waitingAt = Math.max(
-    markers.lastIndexOf("Cursor is waiting for you"),
-    markers.lastIndexOf("Add a follow-up"),
-    markers.lastIndexOf("Write tests for"),
-  );
+  // A working UI can retain and repaint its composer so an operator can queue a follow-up. That
+  // prompt is not an idle transition while a working control remains on this screen.
+  if (workingAt < 0) waitingAt = Math.max(waitingAt, currentComposerPosition(provider, screen));
   if (blockedAt > Math.max(workingAt, waitingAt)) return "needs-input";
 
-  const title = markers.lastTitle();
-  if (title !== undefined) return BRAILLE_SPINNER.test(title) ? "working" : "awaiting-input";
+  // Notifications are provider-owned but not rendered. They must lose to later visible work or a
+  // clear, and OSC clipboard/prose payloads are never notification evidence.
+  const notificationAt = provider === "cursor" ? markers.waitingNotificationPosition?.() ?? -1 : -1;
+  if (notificationAt > screen.clearedAt) waitingAt = Math.max(waitingAt, notificationAt);
 
+  // A static title says nothing about readiness. A spinner can supply activity only while newer
+  // than the current UI and its last clear; an old spinner cannot overrule an idle composer.
+  const title = markers.lastTitle();
+  const titleAt = markers.titlePosition?.() ?? -1;
+  if ((provider === "claude" || provider === "codex")
+      && title !== undefined && BRAILLE_SPINNER.test(title) && titleAt > screen.clearedAt) {
+    workingAt = Math.max(workingAt, titleAt);
+  }
+  if (blockedAt > Math.max(workingAt, waitingAt)) return "needs-input";
   if (workingAt >= 0 || waitingAt >= 0) return waitingAt > workingAt ? "awaiting-input" : "working";
   return "unknown";
 }
 
-/**
- * A marker source backed by one whole replay string.
- *
- * Every reading costs a full strip of that replay, so this belongs to callers that hold a snapshot
- * and ask once — the cockpit renderer, a test. The stripped text is computed at most once per
- * source, because the decision above asks for several markers and each one used to pay for its own
- * pass over the replay.
- */
+function isWorkingLine(provider: ProviderId, line: string): boolean {
+  if (provider === "cursor") {
+    return /^(?:[\u2800-\u28ff]\s*)?Composing(?:\s+[\d.,]+[km]?\s+tokens?)?(?:\s+(?:ctrl\+c to stop|[·(].*))?$/iu.test(line)
+      || /^ctrl\+c to stop(?:\s*[·)].*)?$/iu.test(line);
+  }
+  if (provider === "antigravity") {
+    return /^[\u2800-\u28ff]\s+(?:Thinking|Working|Composing|Generating|Running|Searching|Reading)\b/iu.test(line);
+  }
+  if (provider === "codex" && /^•\s+(?:Working|Thinking|Compacting|Reconnecting|Running|Searching)\b[^\n]*\besc to interrupt\b/iu.test(line)) return true;
+  return /^(?:[\u2800-\u28ff✻✽✶✢✳]\s*)?Working(?:…|\.{3})?(?:\s+[(*·].*)?$/iu.test(line)
+    || /^esc to interrupt(?:\s*[·)].*)?$/iu.test(line)
+    || /^[\u2800-\u28ff✻✽✶✢✳]\s+[^\n]*\besc to interrupt\b/iu.test(line);
+}
+
+function isWaitingLine(provider: ProviderId, line: string): boolean {
+  if (provider === "cursor") return /^(?:Add a follow-up|No matches|\/(?:run-everything|model \[filter\])(?:\s+.*)?)$/iu.test(line);
+  if (provider === "antigravity") return /^\? for shortcuts\b/iu.test(line) || /^> Plan mode:/iu.test(line);
+  return false;
+}
+
+/** A bottom composer is idle evidence even when it holds an operator draft, never task success. */
+function currentComposerPosition(provider: ProviderId, screen: RenderedTerminalScreen): number {
+  const rows = [...screen.text.matchAll(/[^\n]+/gu)];
+  let footer = false;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const match = rows[index]!;
+    const line = match[0].trim();
+    const prompt = provider === "codex" ? /^›(?:\s|$)/u
+      : provider === "claude" ? /^❯(?:\s|$)/u
+      : provider === "cursor" ? /^[→›❯](?:\s|$)/u : /^>(?:\s|$)/u;
+    const boxed = /^[│┃┆┊║▌▏▕]\s*(?:›|❯|>)\s*.*[│┃┆┊║▌▏▕]$/u.test(line);
+    if (boxed || prompt.test(line)) {
+      // A numbered/yes-no picker also uses the prompt glyph. Its choices are not a composer.
+      const content = line.replace(/^[│┃┆┊║▌▏▕]?\s*[→›❯>]\s*/u, "");
+      if (/^(?:\d+[.)]\s|Yes\b|No,?\s|Upgrade your plan)/iu.test(content)) return -1;
+      return boxed || footer || provider === "cursor"
+        ? screen.writtenAt(match.index, match.index + match[0].length) : -1;
+    }
+    if (/^[─━═╭╮╰╯┌┐└┘]+$/u.test(line)) continue;
+    if (/^\? for shortcuts\b/iu.test(line)
+        || (provider === "codex" && /^(?:\d+% context left|tab to queue|← for agents|(?:gpt-[\w.-]+|o[134](?:-[\w.-]+)?)\s+(?:minimal|low|medium|high|xhigh|default)\s+·)/iu.test(line))
+        || (provider === "claude" && /^(?:[⏵⏸]+\s*)?(?:bypass permissions on|accept edits on|plan mode on|auto mode on)\b.*shift\+tab|^tab to queue message$/iu.test(line))) { footer = true; continue; }
+    return -1;
+  }
+  return -1;
+}
+
+/** One-shot interpretation uses the same bounded screen as incremental broker ingestion. */
 export function replayMarkerSource(replay: string): TerminalMarkerSource {
+  const input = new InputScreen();
+  input.append(replay);
   let plain: string | undefined;
   const stripped = (): string => (plain ??= stripTerminalControl(replay));
+  let titleAt = -1;
+  for (const match of replay.matchAll(OSC_TITLE)) titleAt = match.index;
+  let notificationAt = -1;
+  for (const match of replay.matchAll(CURSOR_WAIT_NOTIFICATION)) notificationAt = match.index;
   return {
     lastIndexOf: (marker) => stripped().lastIndexOf(marker),
     lastRawIndexOf: (marker) => replay.lastIndexOf(marker),
@@ -146,12 +188,18 @@ export function replayMarkerSource(replay: string): TerminalMarkerSource {
     lastTitle: () => lastTerminalTitle(replay),
     blockedPromptIndex: (provider) => {
       const plainText = stripped();
-      const tailStart = Math.max(0, plainText.length - BLOCKED_PROMPT_TAIL_CHARS);
-      const index = blockedPromptIndexInTail(provider, plainText.slice(tailStart));
-      return index < 0 ? -1 : tailStart + index;
+      const start = Math.max(0, plainText.length - BLOCKED_PROMPT_TAIL_CHARS);
+      const at = blockedPromptIndexInTail(provider, plainText.slice(start));
+      return at < 0 ? -1 : start + at;
     },
+    currentScreen: () => input.snapshot(),
+    titlePosition: () => titleAt,
+    waitingNotificationPosition: () => notificationAt,
   };
 }
+
+/** Cursor's native OSC notification, excluding unrelated OSC payloads. */
+export const CURSOR_WAIT_NOTIFICATION = /\u001b\]777;notify;Cursor;Cursor is waiting for you(?:\u0007|\u001b\\)/gu;
 
 /**
  * PTY replay reduced to plain text with its line structure intact. Blank lines are preserved
@@ -276,38 +324,23 @@ export function lastTerminalTitle(replay: string): string | undefined {
  */
 export function blockedPromptIndexInTail(provider: ProviderId, tail: string): number {
   const common = Math.max(
-    lastRegexIndex(
-      tail,
-      // Codex 0.120 through 0.153 says "directory" where older providers say "project".
-      /Do\s*you\s*trust\s*the\s*contents\s*of\s*this\s*(?:project|directory)\?|workspace-trust|needs authentication|permission prompt/giu,
-    ),
+    lastRegexIndex(tail, /^\s*Do you trust the contents of this project\?(?:\s*> Yes, I trust this folder)?\s*$/gimu),
     dialogAffordanceIndexInTail(tail),
   );
   const providerPrompt = provider === "codex"
     ? Math.max(
         lastRegexIndex(
           tail,
-          /Would you like to (?:run the following command|apply the following changes)\?[\s\S]{0,2400}?Yes, proceed/giu,
+          /^\s*Would you like to (?:run the following command|apply the following changes)\?[\s\S]{0,2400}?^\s*›\s*\d+\. Yes, proceed/gimu,
         ),
-        lastRegexIndex(tail, /Codex needs (?:your )?(?:approval|permission)[\s\S]{0,1600}?(?:Allow|Yes)/giu),
-        // Codex 0.158+ startup dialogs: folder access (every variant, including the restricted ones
-        // nothing may answer) and the hook review that can follow it. Their footers read
-        // "enter continue · esc quit" and "enter confirm · esc skip" with no "to" for the affordance
-        // grammar to key on, and ratatui positions words with CSI H, which stripping removes along
-        // with the spaces it skipped — so every gap is optional.
-        lastRegexEnd(tail, /Folder\s*access[\s\S]{0,1600}?enter\s*continue[\s\S]{0,40}?esc\s*(?:quit|back|cancel)/giu),
-        lastRegexIndex(tail, /Hooks\s*need\s*review[\s\S]{0,1200}?Continue\s*without\s*trusting/giu),
-        lastRegexEnd(
-          tail,
-          /Do\s*you\s*trust\s*the\s*contents\s*of\s*this\s*directory\?[\s\S]{0,1600}?Press\s*enter\s*to\s*continue/giu,
-        ),
+        lastRegexIndex(tail, /^\s*Codex needs (?:your )?(?:approval|permission)[\s\S]{0,1600}?^\s*(?:›|\d+\.)\s*(?:Allow|Yes)/gimu),
+        startupDialogPosition(tail),
       )
     : provider === "claude"
       ? Math.max(
-          lastRegexIndex(tail, /Claude needs your permission[\s\S]{0,2400}?(?:Do you want to proceed\?|Allow)/giu),
-          // Claude 2.1.280 positions the words with CSI G; stripping it can remove every space.
-          lastRegexIndex(tail, /Quick\s*safety\s*check:\s*Is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust\?/giu),
-          lastRegexIndex(tail, /Do you want to proceed\?[\s\S]{0,1600}?(?:Yes|Esc to cancel)/giu),
+          lastRegexIndex(tail, /^\s*Claude needs your permission[^\n]*[\s\S]{0,2400}?^\s*(?:❯|\d+\.)\s*(?:\d+\. )?(?:Yes|Allow)/gimu),
+          lastRegexIndex(tail, /^\s*Quick\s*safety\s*check:\s*Is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust\?\s*$/gimu),
+          lastRegexIndex(tail, /^\s*Do you want to proceed\?[\s\S]{0,1600}?^\s*❯\s*(?:\d+\. )?Yes\b/gimu),
         )
       : -1;
   return Math.max(common, providerPrompt);
@@ -315,21 +348,12 @@ export function blockedPromptIndexInTail(provider: ProviderId, tail: string): nu
 
 function lastRegexIndex(value: string, pattern: RegExp): number {
   let index = -1;
-  for (const match of value.matchAll(pattern)) index = match.index;
+  for (const match of value.matchAll(pattern)) {
+    // A line-anchored modal can include blank rows/padding before its question. Evidence belongs
+    // to the rendered question, not an unwritten row ED2 left above the preserved cursor.
+    index = match.index + Math.max(0, match[0].search(/\S/u));
+  }
   return index;
-}
-
-/**
- * Offset just past the last match: where a dialog whose body can hold an activity marker ends.
- *
- * A folder dialog prints its folder, and a path can say "Working" as readily as Codex 0.120 through
- * 0.153's own trust paragraph does ("Working with untrusted contents…"). Placed at its title, such
- * a dialog reads as older than the marker drawn inside it, and a blocked worker reads as busy.
- */
-function lastRegexEnd(value: string, pattern: RegExp): number {
-  let end = -1;
-  for (const match of value.matchAll(pattern)) end = match.index + match[0].length;
-  return end;
 }
 
 /**
@@ -422,7 +446,12 @@ function dialogAffordanceIndexInTail(tail: string): number {
   // Matched rather than split so the offsets are exact: the tail keeps its carriage returns, and a
   // `\r\n` counted as one character would put every later marker comparison off by a line.
   for (const match of tail.matchAll(/[^\r\n]+/gu)) {
-    if (isDialogAffordanceLine(match[0])) index = match.index;
+    if (!isDialogAffordanceLine(match[0])) continue;
+    const context = tail.slice(Math.max(0, match.index - 2400), match.index);
+    // Provider-owned structure: boxed controls, selected choices, checkboxes or a trust gate.
+    // A short assistant instruction on its own still is prose, even if it resembles a footer.
+    if (/[│┃║].*[│┃║]|^[ \t]*[❯›→]\s+(?:\d+[.)]\s|Yes\b|No\b)|\[ \]|^.*trust\?\s*$/imu.test(context)
+        || /[│┃║]/u.test(match[0])) index = match.index;
   }
   return index;
 }
@@ -455,6 +484,8 @@ function isTerminalChrome(line: string): boolean {
     || /^https:\/\/chatgpt\.com\/codex\?app-landing-page=true$/i.test(content)
     || /^(?:model|directory):\s+/i.test(content)
     || /^(?:tab to queue message|\d+% context left)$/i.test(content)
+    || /^(?:›|❯|>)\s*$/u.test(content)
+    || /^\? for shortcuts\b/iu.test(content)
     || /^Working(?:…|\.\.\.)?$/i.test(content)
     || /esc to interrupt|ctrl\+g to edit|ctrl\+c to stop|permission mode|plan mode on|shift\+tab to cycle|Add a follow-up|Composing(?: \d+ tokens)?$/i.test(content)
     || /^(?:›\s*)?(?:Explain this codebase|Describe a task for a new session|Ask about this codebase)$/i.test(content)

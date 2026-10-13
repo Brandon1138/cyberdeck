@@ -1,4 +1,5 @@
-import { rm } from "node:fs/promises";
+import { appendFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-store.js";
 import { codexLaunchFixture } from "../fixtures/codex-launch.js";
 import { describe, expect, it, vi } from "vitest";
@@ -15,6 +16,22 @@ const transcripts = (): TranscriptLike => ({ append: vi.fn(), readCompletionLedg
   observeProviderTurns: vi.fn(async () => native), commitProviderTurns: vi.fn(async () => []) });
 
 describe("initial instruction recovery", () => {
+  it("banks an aborted native launch as cancelled across restart instead of completing its brief", async () => {
+    const h = await codexLaunchFixture();
+    try {
+      await h.metadata("A", h.a.createdAt);
+      await appendFile(join(h.root, "sessions", "2026", "10", "13", "A.jsonl"), [
+        { type: "event_msg", payload: { type: "user_message", message: "A BRIEF" } },
+        { type: "event_msg", timestamp: "2026-10-13T10:00:05.000Z", payload: { type: "turn_aborted", turn_id: "A" } },
+      ].map(frame => JSON.stringify(frame)).join("\n") + "\n");
+      await expect(recoverInitialInstruction(h.a, h.store)).resolves.toEqual({ completed: false, cancelled: true });
+      const restarted = new ThreadTranscriptStore(h.root, h.options);
+      await expect(recoverInitialInstruction(h.a, restarted)).resolves.toEqual({ completed: false, cancelled: true });
+      expect(await restarted.readCompletionLedger(h.a.id)).toMatchObject({ canonicalTurns: 1,
+        turns: [{ data: { turnNumber: 1, outcome: "cancelled", transport: "provider-native" } }] });
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+  });
+
   it("propagates broker ledger failures rather than disguising them as unavailable native evidence", async () => {
     const source = transcripts();
     vi.mocked(source.readCompletionLedger!).mockRejectedValue(new Error("broker ledger unreadable"));

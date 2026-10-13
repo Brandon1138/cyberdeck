@@ -315,10 +315,10 @@ export function relativeTime(timestamp: string, now: number): string {
 export function statusText(status: string, pendingDelete: boolean, color: boolean): string {
   const label = status.trim();
   if (pendingDelete || label === "Failed") return paint(status, "alert", color);
-  // Four states carry a hue: finished, blocked, failing, and the one live thread.
-  // Stopping, Stopped and Interrupted are inert, not a request, and stay greyscale.
+  // Verified completion stays green; input, stalls and provider limits call for attention.
+  // Uncertain and inert states stay greyscale; only observed work takes the live hue.
   if (label === "Done") return paint(status, "done", color);
-  if (label === "Needs input") return paint(status, "attention", color);
+  if (label === "Needs input" || label === "Stalled" || label === "Provider limit") return paint(status, "attention", color);
   if (label === "Working") return paint(status, "working", color);
   return paint(status, "muted", color);
 }

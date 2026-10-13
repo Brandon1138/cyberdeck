@@ -1,6 +1,7 @@
 import type { FleetWorkerCoordinationView } from "../../broker/worker-coordination-view.js";
 import type { CavemanWorkersRequest, CreateOrchestratorRequest, FableWorkersRequest } from "../../domain/orchestrator.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../../domain/session.js";
+import type { WorkerTruth } from "../../domain/worker-truth.js";
 import { type AttachTransport } from "../attach.js";
 import { type ConfigurablePermissionProvider, type ProviderPermissionPolicy, type ProviderPermissionResolution } from "../permission-policy.js";
 import { type PullRequestSummary } from "../pr-status.js";
@@ -40,6 +41,8 @@ export interface FleetSignals {
 
 export interface FleetThread {
   record: SessionRecord;
+  /** Current shared broker truth; absent when connected to a legacy broker. */
+  workerTruth?: WorkerTruth;
   coordination?: FleetWorkerCoordinationView;
   /**
    * The durable controller family this orchestrator row speaks for, from its binding. Absent on
@@ -314,7 +317,7 @@ export interface FleetTransition {
 
 export type StartFleetAction = Extract<FleetAction, { type: "start"; }>;
 
-export type ThreadStatus = "Working" | "Needs input" | "Done" | "Stopping" | "Stopped" | "Interrupted" | "Failed";
+export type ThreadStatus = "Starting" | "Working" | "Needs input" | "Idle" | "Stalled" | "Provider limit" | "Done" | "Stopping" | "Stopped" | "Interrupted" | "Exited" | "Failed" | "Unknown";
 
 export interface FleetRenderOptions {
   /** A full-resolution image placement, available only when the terminal supports native graphics. */

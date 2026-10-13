@@ -28,7 +28,7 @@ export const PROJECTS_UNAVAILABLE_NOTICE = "Project registry unavailable on this
 /** How much of a worktree path a row spends naming itself before the name is trimmed. */
 export const WORKTREE_TAG_WIDTH = 22;
 /** The state label's column. Fixed, because the state is one of a known set of words. */
-export const STATUS_CELL_WIDTH = 11;
+export const STATUS_CELL_WIDTH = 14;
 /**
  * A row at this width or more can afford the full layout. Below it the row keeps every column it
  * can pay for and yields the rest, in the order `threadRowLayout` spends its width.

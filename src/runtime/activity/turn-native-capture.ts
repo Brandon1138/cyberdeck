@@ -43,8 +43,9 @@ export class TurnNativeCapture {
       if (session?.executor !== "orbstack-container" || !record.expectedTurn || !session.generation) throw new Error("NATIVE_CAPTURE_UNAVAILABLE");
       const receipt = await this.receipt(session.id, record.expectedTurn);
       if (!receipt) { if (record.status === "completed") throw new Error("NATIVE_RECEIPT_AMBIGUOUS"); return; }
+      if (receipt.data.transport === "broker-lifecycle" && receipt.data.outcome === "cancelled") return;
       if (receipt.data.transport !== "provider-native") throw new Error("NATIVE_RECEIPT_AMBIGUOUS");
-      await this.captureCompleted(session, receipt, record.status === "completed" ? record : undefined);
+      await this.captureCompleted(session, receipt, (record.status === "completed" || (record.status === "cancelled" && receipt.data.outcome === "cancelled")) ? record : undefined);
     } catch {
       await this.recorder.append({ schemaVersion: 1, eventId: randomUUID(), sourceKey: `native-capture-failed:${record.id}`,
         runId: record.workflowRunId ?? record.id, instructionId: record.id, sessionId: record.targetSessionId, workerId: record.targetSessionId,
@@ -65,10 +66,12 @@ export class TurnNativeCapture {
     const attribution = { ...attributed.attribution, providerTurnId };
     await this.marker(session, interval, sourceId, attribution, attributed.turnParentId);
     const outstanding = await this.collect(session, interval, sourceId, attribution);
-    await this.recorder.append({ schemaVersion: 1, eventId: activityIdentity(`${sourceId}:turn:completed`), sourceKey: `${sourceId}:turn:completed`,
+    const outcome = receipt.data.outcome === "cancelled" ? "cancelled" : "succeeded";
+    const endKey = `${sourceId}:turn:${outcome === "cancelled" ? "cancelled" : "completed"}`;
+    await this.recorder.append({ schemaVersion: 1, eventId: activityIdentity(endKey), sourceKey: endKey,
       ...attribution, parentEventId: attribution.parentEventId!, provider: session.provider,
       observedAt: new Date().toISOString(), occurredAt: z.iso.datetime().parse(receipt.data.providerOccurredAt),
-      ...(interval.startedAt ? { startedAt: interval.startedAt } : {}), kind: "provider.turn", operation: "agent", outcome: "succeeded",
+      ...(interval.startedAt ? { startedAt: interval.startedAt } : {}), kind: "provider.turn", operation: "agent", outcome,
       coverage: "complete-for-source", provenance: "provider-native" });
     if (outstanding) await this.recorder.append({ schemaVersion: 1, eventId: randomUUID(), sourceKey: `${sourceId}:missing-result`,
       ...attribution, provider: session.provider, observedAt: new Date().toISOString(), kind: "capture.gap", operation: "capture",
@@ -101,7 +104,7 @@ export class TurnNativeCapture {
     if (claims.length > 1) return { conflict: true };
     if (claims.length === 1) {
       const record = claims[0]!;
-      if (!CONSUMED.has(record.status)) return { deferred: "rendered-only" };
+      if (!CONSUMED.has(record.status) && !(settled === record && record.status === "cancelled")) return { deferred: "rendered-only" };
       return { attribution: { ...base, runId: record.workflowRunId ?? record.id, instructionId: record.id, origin: "instruction",
         ...(record.causationId ? { causationId: record.causationId } : {}) }, turnParentId: record.id };
     }

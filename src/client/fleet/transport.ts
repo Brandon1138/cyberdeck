@@ -56,32 +56,63 @@ export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.
 }
 
 export function threadStatus(thread: FleetThread): ThreadStatus {
-  const persisted = thread.record.attentionState;
-  if (persisted !== undefined) {
-    return ({
-      working: "Working",
-      "needs-input": "Needs input",
-      done: "Done",
-      stopping: "Stopping",
-      stopped: "Stopped",
-      interrupted: "Interrupted",
-      failed: "Failed",
-    } as const)[persisted];
+  if (thread.workerTruth !== undefined) {
+    // Scout completion is a separately verified structured outcome, never inferred from idle
+    // or process exit. Current fault/stop/uncertainty still wins over an old successful report.
+    if ((thread.workerTruth.state === "idle" || thread.workerTruth.state === "exited")
+      && thread.workerTruth.taskOutcome === "succeeded") return "Done";
+    return TRUTH_STATUS[thread.workerTruth.state] ?? "Unknown";
+  }
+  // Legacy records describe process lifecycle, not current provider activity. Persisted turn
+  // attention can survive a restart and cannot prove current work, readiness, or task success.
+  if (thread.record.termination !== undefined) {
+    return thread.record.termination.kind === "provider-fault" ? "Failed" : "Provider limit";
   }
   switch (thread.record.executionState) {
-    case "starting": return "Working";
-    case "exited": return "Done";
+    case "starting": return "Starting";
+    case "exited": return thread.record.attentionState === "stopped" ? "Stopped"
+      : verifiedScoutOutcome(thread.record) ? "Done" : "Exited";
     case "failed": return "Failed";
     // A session that died inside a live process. It reads as Failed rather than as whatever its
     // last terminal frame happened to look like, so nobody is invited to type at it.
     case "errored": return "Failed";
-    case "cancelled": return thread.record.exitCode === null ? "Stopping" : "Stopped";
-    // The broker stamps attentionState at start and maintains it as output arrives, so an active
-    // record without one is a record the broker has not classified yet. "Working" is the answer
-    // that invites patience rather than input at a thread nothing has vouched for.
-    case "active": return "Working";
+    case "cancelled": return thread.record.attentionState === "interrupted" ? "Interrupted"
+      : thread.record.exitCode === null ? "Stopping" : "Stopped";
+    case "active": {
+      const attention = thread.record.attentionState;
+      if (attention === "stopping") return "Stopping";
+      if (attention === "stopped") return "Stopped";
+      if (attention === "interrupted") return "Interrupted";
+      if (attention === "failed") return "Failed";
+      return "Unknown";
+    }
   }
 }
+
+/** These flags are set by the broker after validating the Scout decision card and canary. */
+function verifiedScoutOutcome(record: SessionRecord): boolean {
+  return record.scout?.terminalState === "complete"
+    && record.scout.reportState === "complete"
+    && record.scout.canary.status === "verified";
+}
+
+/** Presentation vocabulary only: the broker owns all evidence and state decisions. */
+const TRUTH_STATUS: Readonly<Record<string, ThreadStatus>> = {
+  starting: "Starting",
+  working: "Working",
+  "blocked-modal": "Needs input",
+  "blocked-composer": "Needs input",
+  idle: "Idle",
+  stalled: "Stalled",
+  "provider-limit": "Provider limit",
+  errored: "Failed",
+  failed: "Failed",
+  stopping: "Stopping",
+  stopped: "Stopped",
+  interrupted: "Interrupted",
+  exited: "Exited",
+  unknown: "Unknown",
+};
 
 export async function startFleetSession(
   client: FleetTransport,

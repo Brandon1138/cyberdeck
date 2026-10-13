@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { terminalComposerState } from "../../src/runtime/composer-state.js";
+import { PROVIDER_SCREENS, redraw } from "./provider-screen-fixtures.js";
 
 const CLEAR = "\u001b[2J";
 
 describe("terminalComposerState", () => {
+  it.each(PROVIDER_SCREENS)("reads $provider drafts and their in-place erasure from current cells", ({ provider, draft, idle }) => {
+    const held = redraw(draft);
+    expect(terminalComposerState(provider, held)).toMatchObject({ occupied: true, content: "operator's unsent draft" });
+    // Home + erase-display discards the old prompt and hint without a literal CSI 2J boundary.
+    expect(terminalComposerState(provider, held + redraw(idle, "\u001b[H\u001b[J")).occupied).toBe(false);
+  });
+
+  it("erases a Codex draft and queue hint with cursor/line edits rather than a screen clear", () => {
+    const held = redraw(["• Earlier answer.", "› operator draft", "tab to queue message  98% context left"]);
+    const erased = held + "\u001b[2;3H\u001b[K\u001b[3;1H\u001b[2K? for shortcuts  98% context left";
+    expect(terminalComposerState("codex", erased)).toMatchObject({ occupied: false });
+  });
+
   it("reads the hint Claude prints under a composer holding unsent text", () => {
     // The exact screen from the MIK-64 report: the instruction was written at the PTY while a
     // permission modal was up, and this line is what the operator saw underneath it.

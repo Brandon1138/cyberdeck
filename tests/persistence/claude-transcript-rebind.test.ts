@@ -192,15 +192,11 @@ describe("Claude transcript rebinding after /clear", () => {
     ]);
     const store = context.store();
 
-    // `allowFallback` is the caller's last attempt after the native read came back empty.
+    // Even explicit terminal fallback cannot authorize a completion for a cleared/unbound source.
     const dark = { ...capture(WORKER_ONE, 1), allowFallback: true };
-    await expect(store.captureProviderTurns(dark)).resolves.toMatchObject([{
-      // Detected, not silent: the abandoned file is refused and the turn is labelled.
-      data: {
-        transport: "terminal-replay-fallback",
-        claudeTranscriptStatus: "cleared-unbound",
-      },
-    }]);
+    await expect(store.captureProviderTurns(dark)).resolves.toEqual([]);
+    await expect(store.observeProviderTurns(dark)).resolves.toMatchObject({ nativeSourceAvailable: false,
+      nativeSourceStatus: "unbound", nativeSourceReason: "cleared-unbound", nativeFallbackAllowed: false, turns: [] });
     expect(store.claudeTranscriptStatus(WORKER_ONE)).toBe("cleared-unbound");
 
     const rebound = await writeTranscript(

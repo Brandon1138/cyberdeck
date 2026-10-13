@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { grantAllows, type CapabilityGrant } from "../../src/domain/capability.js";
+import { codexSessionMarker } from "../../src/providers/codex/native-session-identity.js";
+import { CodexConversationBindingStore } from "../../src/persistence/codex-conversation-bindings.js";
 import {
   pruneLegacyTranscript,
   ThreadTranscriptStore,
@@ -48,7 +50,7 @@ describe("ThreadTranscriptStore", () => {
     const reopened = new ThreadTranscriptStore(root, options);
     const restored = await reopened.readCompletionLedger(SESSION_ONE);
     expect(restored).toMatchObject({ completedTurns: 70, canonicalTurns: 70 });
-    expect(restored.turns.length).toBeLessThan(64);
+    expect(restored.turns).toHaveLength(64);
     await writeFile(join(project, `${SESSION_ONE}.jsonl`), frames.join("\n") + "\n");
     await expect(reopened.observeProviderTurns({ sessionId: SESSION_ONE, provider: "claude", cwd: "/tmp/repo",
       createdAt: "2026-08-20T12:00:00.000Z", turnNumber: 71 })).resolves.toMatchObject({ turns: [] });
@@ -331,6 +333,8 @@ describe("ThreadTranscriptStore", () => {
           originator: "codex-tui",
         },
       }),
+      JSON.stringify({ type: "response_item", payload: { type: "message", role: "developer",
+        content: [{ type: "input_text", text: codexSessionMarker(SESSION_ONE) }] } }),
       JSON.stringify({
         type: "response_item",
         timestamp: "2026-07-25T10:00:03.000Z",
@@ -482,8 +486,7 @@ describe("ThreadTranscriptStore", () => {
     await mkdir(day, { recursive: true });
     const cwd = "/tmp/repo";
     const createdAt = "2026-07-25T10:00:00.000Z";
-    // The first-matched file carries no model frame at all, so the store never locks its
-    // `nativePaths` mapping onto it — leaving room for a later, closer-matching file to win.
+    // Explicit provider binding can move; timestamps cannot move it on their own.
     await writeFile(join(day, "rollout-a.jsonl"), [
       JSON.stringify({
         type: "session_meta",
@@ -499,14 +502,15 @@ describe("ThreadTranscriptStore", () => {
       "",
     ].join("\n"));
     const store = new ThreadTranscriptStore(root, { codexSessionsDirectory: codexRoot });
+    const bindings = new CodexConversationBindingStore(root);
+    await bindings.record({ sessionId: SESSION_ONE, nativeSessionId: "019f0000-0000-7000-8000-00000000000a",
+      cwd, transcriptPath: join(day, "rollout-a.jsonl") });
     const input = { sessionId: SESSION_ONE, provider: "codex", cwd, createdAt, turnNumber: 1 };
 
     await expect(store.readTranscriptMessages(input)).resolves.toEqual([]);
     await expect(store.readObservedModel(input)).resolves.toBeUndefined();
 
-    // A second, exactly-timestamped rollout appears for the same session — the case a Claude
-    // /clear rebind or a fresh Codex resume produces: the same session now resolves to a different
-    // physical file.
+    // A second file cannot win merely by being closer. A provider-owned rebind names it exactly.
     await writeFile(join(day, "rollout-b.jsonl"), [
       JSON.stringify({
         type: "session_meta",
@@ -527,6 +531,10 @@ describe("ThreadTranscriptStore", () => {
         payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "closer preview" }] } }),
       "",
     ].join("\n"));
+
+    await expect(store.readObservedModel(input)).resolves.toBeUndefined();
+    await bindings.record({ sessionId: SESSION_ONE, nativeSessionId: "019f0000-0000-7000-8000-00000000000b",
+      cwd, transcriptPath: join(day, "rollout-b.jsonl") });
 
     await expect(store.readTranscriptMessages(input)).resolves.toMatchObject([{ text: "closer preview" }]);
     await expect(store.readObservedModel({ ...input, turnNumber: 2 })).resolves.toEqual({

@@ -4,8 +4,6 @@ import {
 } from "../../domain/modal-descriptor.js";
 import type { SessionRecord } from "../../domain/session.js";
 import {
-  advanceInstruction,
-  DELIVERY_HOLD_DETAIL,
   providerLimitFromTermination,
   type ComposerObservation,
   type DeliveryHoldReason,
@@ -16,7 +14,6 @@ import {
 } from "../../domain/worker-truth.js";
 import type {
   InstructionDelivery,
-  InstructionStateUpdate,
   WorkerResultSnapshot,
 } from "./session-ports.js";
 import type {
@@ -31,12 +28,15 @@ import type {
   WorkerTurnTranscriptMessage,
   WorkerTurnTranscriptPort,
 } from "./worker-turn-ports.js";
-import { WorkerCompletionLedger, WorkerTurnReconciler, WorkerStallTracker } from "./worker-turn-state.js";
+import { WorkerInputRetirement, advanceRendered, settleRetiredInstruction } from "./worker-input-retirement.js";
+import { WorkerInputAdmission, heldInstructionDelivery, terminalInstructionDelivery } from "./worker-input-admission.js";
+import { WorkerCompletionLedger, WorkerTurnReconciler, WorkerStallTracker, completionReservationFloor } from "./worker-turn-state.js";
 import type { CompletionLedgerEntry, RenderedInstruction, WorkerStatusReading,
   TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
 import { normalizedHead, SubmitVerifier } from "./worker-submit-verification.js";
 import { WorkerInputReadiness } from "./worker-input-readiness.js";
 import { observeWorkerModal, projectWorkerTurnTruth } from "./worker-turn-truth.js";
+import { NativeTurnActivity, pendingExitTruth, supportsNativeTurnObservation, nativeReadFailure } from "./worker-turn-native-state.js";
 
 export interface WorkerTurnAppendResult {
   fatal: boolean;
@@ -78,6 +78,7 @@ export class WorkerTurnEngine {
   private activity: ReturnType<WorkerTurnObservationPort["activity"]> = "unknown";
   private observedWorking = false;
   private readonly inputReadiness: WorkerInputReadiness;
+  private readonly nativeActivity: NativeTurnActivity;
   private readonly completionLedger = new WorkerCompletionLedger();
   private get completedTurnCount(): number { return this.completionLedger.completedTurns; }
   private get canonicalTurnCount(): number { return this.completionLedger.canonicalTurns; }
@@ -108,13 +109,27 @@ export class WorkerTurnEngine {
   private readonly reconciler = new WorkerTurnReconciler({
     interval: CANONICAL_RECONCILE_QUIET_MS,
     epoch: () => this.observationEpoch,
-    canPoll: () => this.record.provider === "claude" && this.record.executor !== "orbstack-container"
+    canPoll: () => (this.record.provider === "claude" || this.record.provider === "codex"
+      && (this.record.initialInstructionId === undefined || this.canonicalTurnCount > 0))
       && this.record.profile !== "scout" && this.hasNativeTurnPort(),
-    canReconcile: () => this.hasNativeTurnPort() && this.canReconcileCanonicalTurns(),
+    canReconcile: () => this.hasNativeTurnPort() && supportsNativeTurnObservation(this.record, this.suppressSemanticTurns === true),
     active: () => !this.terminalFinalizing
       && (this.record.executionState === "active" || this.record.executionState === "starting"),
-    reconcile: () => this.reconcileCanonicalTurns(),
+    reconcile: () => this.reconcileCanonicalTurns().then(() => undefined),
   });
+  private readonly admission = new WorkerInputAdmission({
+    active: () => this.record.executionState === "active" && !this.terminalFinalizing,
+    epoch: () => this.observationEpoch, revision: () => this.activityRevision,
+    fence: () => { this.activityRevision += 1; this.nativeActivity.admit(this.activityRevision); },
+    hold: () => this.deliveryHold(), capture: () => this.turnCaptureOwner?.settlement,
+    needsRestore: () => this.completionLedger.needsRestore(this.record.provider, this.options.transcripts),
+    restore: () => this.restoreCompletionLedger(), reconcile: () => this.reconcileCanonicalTurns(),
+  });
+  private readonly inputTargets = new WorkerInputRetirement({ record: () => this.record,
+    completed: () => this.completedTurnCount, protect: (target) => this.completionLedger.protect(target),
+    needsSettlement: (target) => this.rendered.some(entry => entry.expectedTurn === target), finished: () => this.notifyDeliveryBoundary(),
+    settle: (target, abandoned) => this.finishRetiredInstruction(target, abandoned),
+    commit: (observation) => this.retireInstructionTarget(observation) });
   private transcriptActivityVersion?: string;
   private nativeTurnSettled = false;
   /** Fences every asynchronous observation against terminal release and process replacement. */
@@ -162,16 +177,19 @@ export class WorkerTurnEngine {
           options.effects.notifySessionUpdate();
         }
       } });
+    this.nativeActivity = new NativeTurnActivity(record.createdAt);
     this.currentProviderLimit = providerLimitFromTermination(record.termination);
     this.reconciler.armPoll();
   }
 
-  get completedTurns(): number {
-    return this.completedTurnCount;
-  }
+  get completedTurns(): number { return this.completedTurnCount; }
 
-  get canonicalTurns(): number {
-    return this.canonicalTurnCount;
+  get canonicalTurns(): number { return this.canonicalTurnCount; }
+
+  async restoreDurableCompletions(): Promise<void> {
+    if (this.completionLedger.needsRestore(this.record.provider, this.options.transcripts)) {
+      await this.restoreCompletionLedger();
+    }
   }
 
   /**
@@ -217,6 +235,7 @@ export class WorkerTurnEngine {
 
   /** Reset generation-local truth while preserving the durable completion ledger. */
   resetForResume(): void {
+    this.nativeActivity.reset(new Date(this.now()).toISOString());
     this.inputReadiness.reset();
     this.terminalFinalizing = false;
     this.activity = "unknown";
@@ -246,7 +265,7 @@ export class WorkerTurnEngine {
     interpret = true,
   ): WorkerTurnAppendResult {
     this.replay.appendBytes(chunk);
-    if (!interpret) return { fatal: false };
+    if (!interpret) { this.activity = this.nativeActivity.observeHeadless(chunk); return { fatal: false }; }
     if (this.record.executionState === "errored") {
       return {
         fatal: true,
@@ -259,6 +278,7 @@ export class WorkerTurnEngine {
     if (this.terminalScreenReservationsDiscarded) return { fatal: false };
 
     const activity = this.options.observations.activity(this.record.provider, this.replay);
+    this.nativeActivity.observeScreen(this.activityRevision, activity, this.now());
     if (this.inputReadiness.starting) {
       // Loading history and MCP startup can spin then become idle without any model turn.
       // Keep queued input off that startup surface and never bank it as a completion.
@@ -281,6 +301,11 @@ export class WorkerTurnEngine {
     }
     this.activity = activity;
     this.observeComposer();
+    if (activity !== "working" && activity !== "needs-input"
+      && !this.observedWorking && this.record.attentionState === "needs-input") {
+      delete this.record.attentionState;
+      void this.options.effects.persist();
+    }
     if (activity === "working" && !this.composer.occupied) {
       this.advanceRenderedInstructions("submitted");
       this.advanceRenderedInstructions("acknowledged");
@@ -319,28 +344,14 @@ export class WorkerTurnEngine {
   }
 
   async submitInstruction(input: SubmitWorkerInstruction): Promise<InstructionDelivery> {
-    if (this.record.executionState !== "active" || this.terminalFinalizing) {
-      return this.terminalDelivery(input.source, input.instructionId);
-    }
-    const hold = this.deliveryHold();
-    if (hold !== undefined) return this.holdInstruction(hold, input.source, input.instructionId);
-    // Accepted input is newer than every completion-side preview/model/attention effect currently
-    // awaiting I/O. It must synchronously fence those effects before this method performs any await.
-    this.activityRevision += 1;
-    if (this.completionLedger.needsRestore(this.record.provider, this.options.transcripts)) {
-      const epoch = this.observationEpoch;
-      // An existing capture owns restoration and its next ordinal until it has fully settled.
-      if (this.turnCaptureOwner !== undefined) await this.turnCaptureOwner.settlement;
-      if (this.observationEpoch === epoch && this.completionLedger.needsRestore(this.record.provider, this.options.transcripts)) {
-        await this.restoreCompletionLedger();
-      }
-      if (this.record.executionState !== "active" || this.terminalFinalizing) return this.terminalDelivery(input.source, input.instructionId);
-      if (this.observationEpoch !== epoch || this.completionLedger.needsRestore(this.record.provider, this.options.transcripts)) {
-        return this.holdInstruction("provider-busy", input.source, input.instructionId);
-      }
-      const restoredHold = this.deliveryHold();
-      if (restoredHold !== undefined) return this.holdInstruction(restoredHold, input.source, input.instructionId);
-    }
+    return this.admission.run(() => this.renderInstruction(input), (hold) => hold === "worker-terminal"
+      ? this.terminalDelivery(input.source, input.instructionId)
+      : this.holdInstruction(hold, input.source, input.instructionId));
+  }
+
+  noteHumanInput(): void { this.activityRevision += 1; this.nativeActivity.noteInput(new Date(this.now()).toISOString()); }
+
+  private async renderInstruction(input: SubmitWorkerInstruction): Promise<InstructionDelivery> {
     const encoded = typeof input.encoded === "function" ? input.encoded() : input.encoded;
     this.stallTracker.reset();
     const at = new Date().toISOString();
@@ -359,15 +370,20 @@ export class WorkerTurnEngine {
         submitPresses: 0,
       });
     }
+    // Rendering bytes does not prove consumption or an in-flight provider turn.
+    delete this.record.attentionState;
+    this.record.meaningfulUpdatedAt = at;
+    if (input.instructionId !== undefined) this.inputTargets.remember({ instructionId: input.instructionId, expectedTurn, renderedAt: at });
+    this.nativeActivity.noteInput(at);
     this.options.effects.write(encoded);
     this.submitVerifier.arm();
     await this.appendTranscript("instruction", input.source, input.message, {
       ...(input.metadata ?? {}),
       instructionState: "rendered" satisfies InstructionLifecycleState,
-      expectedTurn,
+      expectedTurn, renderedAt: at,
       ...(input.instructionId === undefined ? {} : { instructionId: input.instructionId }),
     });
-    await this.options.effects.setAttention("working", true);
+    await this.options.effects.persist();
     await this.options.effects.appendEvent("session.input", {
       bytes: encoded.length,
       source: input.source,
@@ -377,6 +393,8 @@ export class WorkerTurnEngine {
 
   noteRenderedInstruction(input: RenderedWorkerInstruction): void {
     this.activityRevision += 1;
+    if (input.instructionId !== this.record.initialInstructionId) this.inputTargets.remember(input);
+    this.nativeActivity.noteInput(input.renderedAt);
     this.turnsBeforeLatestInstruction = this.completionReservationFloor();
     this.rendered.push({
       ...input,
@@ -385,23 +403,30 @@ export class WorkerTurnEngine {
   }
 
   projectTruth(): WorkerTruth {
-    if (!this.terminalFinalizing) this.observeComposer();
+    if (this.terminalFinalizing) {
+      return pendingExitTruth(this.completedTurnCount, this.canonicalTurnCount, this.rendered.length);
+    }
+    this.observeComposer();
     return projectWorkerTurnTruth({
-      terminalFinalizing: this.terminalFinalizing,
+      terminalFinalizing: false,
       readiness: this.inputReadiness, deliveryHeld: this.deliveryHeld,
       nativeTurnSettled: this.nativeTurnSettled,
-      frameText: this.replay.frameText(),
+      frameText: this.replay.modalFrameText?.() ?? this.replay.frameText(),
       scoutTransport: this.record.scout?.transport,
       executionState: this.record.executionState,
       exitCode: this.record.exitCode,
-      activity: this.activity,
-      composer: this.composer,
+      ...(this.record.attentionState === undefined ? {} : { attentionState: this.record.attentionState }),
+      activity: this.nativeActivity.activity(this.activity, this.activityRevision),
+      composer: this.nativeActivity.refused ? { ...this.composer, inputReady: false } : this.composer,
       completedTurns: this.completedTurnCount,
       canonicalTurns: this.canonicalTurnCount,
       pendingInstructions: this.rendered.length,
       providerLimit: this.currentProviderLimit,
-      stalledForSeconds: this.terminalFinalizing ? undefined : this.stalledWorker()?.stalledForSeconds,
+      termination: this.record.termination,
+      stalledForSeconds: this.stalledWorker()?.stalledForSeconds,
       scoutTerminalState: this.record.scout?.terminalState,
+      scoutTaskSucceeded: this.record.scout?.reportState === "complete"
+        && this.record.scout.canary.status === "verified",
       stopRequested: this.options.effects.stopRequested?.(),
       modal: this.currentModalDescriptor(),
       ...(this.record.termination === undefined ? {} : { terminationReason: this.record.termination.reason }),
@@ -458,7 +483,9 @@ export class WorkerTurnEngine {
         : this.currentLatestResult === undefined
           ? this.fallbackResult(maxResultChars)
           : this.currentLatestResult);
-    const text = this.options.observations.truncateResult(result, maxResultChars);
+    const text = this.options.observations.truncateResult(recorded === undefined && completionTarget <= this.completedTurnCount
+      ? "Requested turn receipt is no longer retained; its outcome is unknown" : result, maxResultChars);
+    const truth = this.projectTruth();
     const base = {
       sessionId: this.record.id,
       ...(this.record.name === undefined ? {} : { name: this.record.name }),
@@ -480,13 +507,14 @@ export class WorkerTurnEngine {
           }),
       completedTurns: this.completedTurnCount,
       text,
-      truth: this.projectTruth(),
+      truth,
       ...(recorded === undefined ? {} : { provenance: recorded.provenance }),
+      ...(recorded?.outcome === undefined ? {} : { turnOutcome: recorded.outcome }),
       ...(this.currentProviderLimit === undefined
         ? {}
         : { providerLimit: this.currentProviderLimit }),
     };
-    const reading = this.workerResultStatus(completionTarget);
+    const reading = this.workerResultStatus(completionTarget, truth);
     if (reading.status === "completed") {
       return {
         ...base,
@@ -499,8 +527,8 @@ export class WorkerTurnEngine {
         ...base,
         status: "stalled",
         stalledForSeconds: reading.stalled.stalledForSeconds,
-        stallReason: "transcript-and-token-count-unchanged-while-idle",
-        tokenCount: reading.stalled.tokenCount,
+        stallReason: "no-observed-progress-while-turn-in-flight",
+        ...(reading.stalled.tokenCount === undefined ? {} : { tokenCount: reading.stalled.tokenCount }),
       };
     }
     return { ...base, status: reading.status };
@@ -525,19 +553,24 @@ export class WorkerTurnEngine {
   recordCompletion(
     completionTarget: number,
     text: string,
-    provenance: CompletionLedgerEntry["provenance"] = "terminal-replay",
+    provenance: CompletionLedgerEntry["provenance"] = "terminal-replay", outcome?: "cancelled",
   ): CompletionLedgerEntry {
-    return this.completionLedger.record(completionTarget, text, provenance);
+    return this.completionLedger.record(completionTarget, text, provenance, outcome);
   }
 
   stopPendingInstructions(): void {
-    this.advanceRenderedInstructions("undelivered");
+    const uncertain = this.pendingTurnCaptures.size > 0 || this.pendingTurnCommit !== undefined || this.completionBarrierFloor > this.completedTurnCount;
+    const pending = [...this.pendingTurnCaptures, this.pendingTurnCommit?.settlement];
+    if (!uncertain) for (const entry of [...this.rendered]) this.advanceRenderedInstructions(
+      entry.state === "submitted" || entry.state === "acknowledged" ? "cancelled" : "undelivered", entry.expectedTurn);
+    this.inputTargets.retire(() => Promise.all(pending).then(() => this.drainCompletionBarrier()));
     this.releaseDeliveryHolds();
   }
 
+  retire(): void { this.inputTargets.cancel(); this.discardPendingScreenTurns(); }
   /** Wait until an already-enqueued provider-turn commit is durably accounted for. */
   settlePendingTurnCommit(): Promise<void> {
-    return this.pendingTurnCommit?.settlement ?? Promise.resolve();
+    return Promise.all([this.pendingTurnCommit?.settlement, this.inputTargets.pending]).then(() => undefined);
   }
 
   /**
@@ -578,6 +611,7 @@ export class WorkerTurnEngine {
           bankedThrough: this.completedTurnCount,
           latest: latest.text,
           provenance: latest.provenance,
+          outcomes: this.completionLedger.outcomesSince(completedBeforeExit),
         });
       }
       this.forgetScreenCompletionsThrough(this.completedTurnCount);
@@ -770,12 +804,13 @@ export class WorkerTurnEngine {
     this.observeComposer();
     if (this.composer.modalOpen || this.activity === "needs-input") return "provider-modal";
     if (this.composer.occupied) return "composer-occupied";
-    // A rendered container instruction owns the next turn even before the TUI repaints.
-    if (this.initialInstructionPending() || this.record.executor === "orbstack-container" && this.rendered.length > 0) return "provider-busy";
+    // A launch receipt and any rendered input own the next turn before the TUI repaints.
+    if (this.initialInstructionPending() || (this.record.executor === "orbstack-container" && this.rendered.length > 0)
+      || this.rendered.some((entry) => entry.state === "rendered")) return "provider-busy";
     // An indeterminate or incomplete durable receipt has no automatic recovery path. Accepting
     // another instruction would write work whose completion can never be captured while the poisoned
     // reservation remains, so fail closed at the existing provider-busy delivery boundary.
-    if (this.pendingTurnCommit?.poisoned === true) return "provider-busy";
+    if (this.pendingTurnCommit?.poisoned === true || this.inputTargets.busy) return "provider-busy";
     const captureFloor = Math.max(
       this.completedTurnCount,
       this.turnCaptureOwner?.bankedThrough ?? this.turnCaptureOwner?.completionTarget ?? 0,
@@ -784,7 +819,9 @@ export class WorkerTurnEngine {
     // owns it yet. More input would create another turn behind an ordinal backlog the engine has not
     // drained, so keep it queued until the exact per-target evidence is accounted for.
     if ((this.deferredScreenCompletionTarget ?? 0) > captureFloor) return "provider-busy";
-    if (this.activity === "working" || this.observedWorking) return "provider-busy";
+    const activity = this.nativeActivity.activity(this.activity, this.activityRevision);
+    if (activity === "working" || this.observedWorking
+      || (this.nativeActivity.available && activity === "unknown")) return "provider-busy";
     if (this.inputReadiness.pending) return "provider-starting";
     return undefined;
   }
@@ -793,20 +830,8 @@ export class WorkerTurnEngine {
     source: "orchestrator" | "worker" | "broker",
     instructionId: string | undefined,
   ): Promise<InstructionDelivery> {
-    const at = new Date().toISOString();
-    await this.appendTranscript("lifecycle", "broker", "instruction undelivered", {
-      instructionState: "undelivered" satisfies InstructionLifecycleState,
-      holdReason: "worker-terminal" satisfies DeliveryHoldReason,
-      executionState: this.record.executionState,
-      source,
-      ...(instructionId === undefined ? {} : { instructionId }),
-    });
-    return {
-      state: "undelivered",
-      hold: "worker-terminal",
-      detail: DELIVERY_HOLD_DETAIL["worker-terminal"],
-      at,
-    };
+    return terminalInstructionDelivery(this.record.executionState, source, instructionId,
+      (data) => this.appendTranscript("lifecycle", "broker", "instruction undelivered", data));
   }
 
   private async holdInstruction(
@@ -816,43 +841,18 @@ export class WorkerTurnEngine {
   ): Promise<InstructionDelivery> {
     this.deliveryHeld = true;
     if (hold === "provider-starting") this.inputReadiness.hold();
-    const at = new Date().toISOString();
-    await this.appendTranscript("lifecycle", "broker", "instruction held", {
-      instructionState: "queued" satisfies InstructionLifecycleState,
-      holdReason: hold,
-      source,
-      ...(instructionId === undefined ? {} : { instructionId }),
-    });
-    await this.options.effects.appendEvent("session.input", { bytes: 0, source, held: hold });
-    return { state: "queued", hold, detail: DELIVERY_HOLD_DETAIL[hold], at };
+    return heldInstructionDelivery(hold, source, instructionId,
+      (data) => this.appendTranscript("lifecycle", "broker", "instruction held", data),
+      (data) => this.options.effects.appendEvent("session.input", data));
   }
 
-  private workerResultStatus(completionTarget: number): WorkerStatusReading {
-    const recorded = this.completions.get(completionTarget);
-    if (this.options.effects.scoutBudgetExhausting?.() === true) return { status: "working" };
-    if (this.record.scout?.terminalState === "budget_exhausted" && this.record.exitCode === null) {
-      return { status: "working" };
-    }
-    if (this.record.scout?.terminalState === "budget_exhausted") {
-      return { status: "budget_exhausted" };
-    }
-    const alreadyDelivered = (recorded?.deliveries ?? 0) > 0;
-    if (
-      this.completedTurnCount >= completionTarget
-      && (alreadyDelivered || completionTarget > this.turnsBeforeLatestInstruction)
-    ) {
-      return { status: "completed" };
-    }
-    if (this.terminalFinalizing) return { status: "working" };
-    if (this.currentProviderLimit !== undefined) return { status: "provider-limit" };
-    if (this.activity === "needs-input") return { status: "needs-input" };
-    if (this.record.executionState === "failed") return { status: "failed" };
-    if (this.record.executionState === "cancelled") return { status: "stopped" };
-    if (this.record.executionState === "exited") return { status: "exited" };
-    if (this.activity === "working") return { status: "working" };
-    const stalled = this.stalledWorker();
-    if (stalled !== undefined) return { status: "stalled", stalled };
-    return { status: "waiting" };
+  private workerResultStatus(completionTarget: number, truth = this.projectTruth()): WorkerStatusReading {
+    return this.completionLedger.wait({ truth, target: completionTarget,
+      turnsBeforeLatestInstruction: this.turnsBeforeLatestInstruction,
+      scoutBudgetExhausting: this.options.effects.scoutBudgetExhausting?.() === true,
+      ...(this.record.scout?.terminalState === undefined ? {} : { scoutTerminal: this.record.scout.terminalState }),
+      exitCode: this.record.exitCode, ...(this.tokenCount === undefined ? {} : { tokenCount: this.tokenCount }),
+    });
   }
 
   private fallbackResult(maxResultChars: number): string {
@@ -862,28 +862,21 @@ export class WorkerTurnEngine {
   }
 
   private updateStallObservation(): void {
-    this.stallTracker.update(this.replay.version, this.replay.tokenCount(), this.transcriptActivityVersion, this.now());
+    this.stallTracker.update(this.transcriptActivityVersion === undefined ? this.replay.version : 0,
+      this.replay.tokenCount(), this.transcriptActivityVersion, this.now());
   }
 
-  private stalledWorker(): { stalledForSeconds: number; tokenCount: number } | undefined {
+  private stalledWorker(): { stalledForSeconds: number; tokenCount?: number } | undefined {
     this.updateStallObservation();
     const observation = this.stallTracker.observation;
-    if (
-      observation === undefined
-      || this.record.executionState !== "active"
-      || this.activity === "working"
-      || this.activity === "needs-input"
-    ) {
-      return undefined;
-    }
+    if (observation === undefined || this.record.executionState !== "active" || !this.observedWorking
+      || this.nativeTurnSettled || this.nativeActivity.activity(this.activity, this.activityRevision) !== "working") return undefined;
     const stalledForSeconds = Math.floor((this.now() - observation.unchangedSinceMs) / 1_000);
     if (stalledForSeconds < this.options.workerStallSeconds) return undefined;
-    return { stalledForSeconds, tokenCount: observation.tokenCount };
+    return { stalledForSeconds, ...(observation.tokenCount === undefined ? {} : { tokenCount: observation.tokenCount }) };
   }
 
-  private now(): number {
-    return this.options.now?.() ?? Date.now();
-  }
+  private now(): number { return this.options.now?.() ?? Date.now(); }
 
   private observeComposer(): ComposerObservation {
     if (this.options.effects.hasRuntime?.() === false) return this.composer;
@@ -905,34 +898,24 @@ export class WorkerTurnEngine {
   }
 
   private advanceRenderedInstructions(state: InstructionLifecycleState, turn?: number): void {
-    if (this.rendered.length === 0) return;
-    const at = new Date().toISOString();
-    const remaining: RenderedInstruction[] = [];
-    for (const entry of this.rendered) {
-      const applies = state !== "completed" || turn === undefined || entry.expectedTurn <= turn;
-      const path = state === "completed"
-        ? (["submitted", "acknowledged", "completed"] as const)
-        : ([state] as const);
-      // A fast native turn can establish all three states in one observation. Preserve each
-      // reached transition so the durable activity stream includes submission before settlement.
-      if (applies) for (const step of path) {
-        const next = advanceInstruction(entry.state, step);
-        if (next === entry.state) continue;
-        entry.state = next;
-        const update: InstructionStateUpdate = {
-          sessionId: this.record.id,
-          instructionId: entry.instructionId,
-          state: next,
-          at,
-          ...(turn === undefined ? {} : { turn }),
-        };
-        this.options.effects.notifyInstructionState(update);
-      }
-      if (entry.state !== "completed" && entry.state !== "undelivered" && entry.state !== "cancelled") {
-        remaining.push(entry);
-      }
-    }
-    this.rendered = remaining;
+    if (state === "submitted") for (const entry of this.rendered) this.inputTargets.remember(entry);
+    this.rendered = advanceRendered(this.record.id, this.rendered, state, turn, (update) => this.options.effects.notifyInstructionState(update));
+  }
+
+  private finishRetiredInstruction(target: number, abandoned: boolean): void {
+    this.rendered = settleRetiredInstruction(this.record.id, this.rendered, target, abandoned,
+      this.completionLedger.outcome(target), update => this.options.effects.notifyInstructionState(update));
+    this.completionLedger.releaseOutcomes([target]);
+  }
+
+  private async retireInstructionTarget(observation: WorkerTurnObservation): Promise<void> {
+    const claim = this.acquireTurnCapture("reconcile", observation.turnNumber);
+    try {
+      const outcome = await this.commitObservedProviderTurns(observation, claim);
+      if (outcome.status !== "committed" || outcome.banked === undefined) throw new Error("INSTRUCTION_TARGET_RETIREMENT_FAILED");
+      this.completionLedger.releaseOutcomes([observation.turnNumber]);
+      this.options.effects.notifySessionUpdate();
+    } finally { this.finishTurnCapture(claim); }
   }
 
   private async completeSemanticTurn(replay: string, claim: TurnCaptureClaim): Promise<void> {
@@ -993,9 +976,10 @@ export class WorkerTurnEngine {
         }
       }
     } catch {
-      // Native transcript can lag its TUI frame. Completion remains usable from the replay.
+      observation = nativeReadFailure(this.record, claim.completionTarget);
     }
     if (!this.isCurrentCapture(claim)) return;
+    if (observation !== undefined) observation = this.mergeNativeObservation(observation, claim);
 
     let committedTurns: WorkerTurnTranscript[] = [];
     let banked: BankedTurnReceipt | undefined;
@@ -1014,7 +998,8 @@ export class WorkerTurnEngine {
       if (outcome.status === "committed") {
         committedTurns = outcome.turns;
         banked = outcome.banked;
-      } else if (this.isCurrentCapture(claim)) {
+      } else if (this.isCurrentCapture(claim) && observation.nativeFallbackAllowed !== false
+        && observation.nativeSourceAvailable !== true) {
         // A synchronous throw means no commit promise was registered and therefore no durable write
         // started. The current screen claim may retain the legacy in-memory terminal fallback.
         banked = this.bankTurnReceipt([{
@@ -1022,8 +1007,11 @@ export class WorkerTurnEngine {
           data: { transport: "terminal-replay-fallback" },
         }], claim);
       }
-    } else if (this.record.provider === "claude" && observation?.activityVersion !== undefined) {
-      // A bound Claude transcript owns completion. A repaint before turn_duration is not a turn.
+    } else if (observation?.nativeFallbackAllowed === false || observation?.nativeSourceAvailable === true
+      || (this.record.provider === "claude" && observation?.activityVersion !== undefined)
+      || (observation === undefined && this.hasNativeTurnPort()
+        && (this.record.provider === "claude" || this.record.provider === "codex"))) {
+      // A bound native source owns completion; missing receipts and read errors prove no completion.
       return;
     } else {
       banked = this.bankTurnReceipt([{
@@ -1047,7 +1035,7 @@ export class WorkerTurnEngine {
     if (!this.isCurrentCompletionEffect(claim, banked, effectActivityRevision)) return;
     await this.refreshObservedModel(claim.epoch, claim.revision, claim, effectActivityRevision);
     if (!this.isCurrentCompletionEffect(claim, banked, effectActivityRevision)) return;
-    await this.options.effects.setAttention("done", true);
+    await this.options.effects.setAttention(this.completions.get(banked.bankedThrough)?.outcome === "cancelled" ? "interrupted" : "done", true);
     if (!this.isCurrentCompletionEffect(claim, banked, effectActivityRevision)) return;
     this.options.effects.notifySessionUpdate();
     // Delivery is the final old-turn effect. A synchronous queue listener may render new input and
@@ -1153,9 +1141,9 @@ export class WorkerTurnEngine {
           ...(fallbackEvidence === undefined ? {} : { fallbackText: fallbackEvidence.text }),
           allowFallback,
         });
-        const turns = !allowFallback
-          ? candidate.turns.filter((turn) => turn.transport === "provider-native")
-          : candidate.turns;
+        const filtered = this.nativeActivity.turns(candidate, this.activityRevision, this.inputTargets.snapshot());
+        const turns = !allowFallback ? filtered.filter((turn) => turn.transport === "provider-native") : filtered;
+        if (candidate.turns.length > 0 && filtered.length === 0) { this.completionBarrierFloor = this.completedTurnCount; return; }
         if (turns.length > 0) {
           observation = { ...candidate, turnNumber: completionTarget, turns };
           break;
@@ -1190,14 +1178,17 @@ export class WorkerTurnEngine {
     claim: TurnCaptureClaim,
   ): BankedTurnReceipt | undefined {
     if (turns.length === 0 || this.completedTurnCount !== claim.completionTarget - 1) return undefined;
+    if (turns.some((turn, index) => typeof turn.data?.turnNumber === "number" && turn.data.turnNumber !== claim.completionTarget + index)) return undefined;
     const provenance = turns.some((turn) => turn.data?.transport === "provider-native")
       ? "provider-transcript" as const
-      : "terminal-replay" as const;
+      : turns.every(turn => turn.data?.transport === "broker-lifecycle") ? "broker-lifecycle" as const : "terminal-replay" as const;
     turns.forEach((turn, index) =>
-      this.recordCompletion(claim.completionTarget + index, turn.text ?? "", provenance));
+      this.recordCompletion(claim.completionTarget + index, turn.text ?? "", provenance, turn.data?.outcome === "cancelled" ? "cancelled" : undefined));
+    this.nativeActivity.committed(turns);
     claim.bankedThrough = this.completedTurnCount;
     const latest = turns.at(-1)?.text ?? "";
     return {
+      outcomes: turns.map((turn, index) => ({ turn: claim.completionTarget + index, state: turn.data?.outcome === "cancelled" ? "cancelled" : "completed" })),
       bankedThrough: this.completedTurnCount,
       latest,
       provenance,
@@ -1209,7 +1200,10 @@ export class WorkerTurnEngine {
     receipt: BankedTurnReceipt,
     scrapeAttempts = 1,
   ): void {
-    this.advanceRenderedInstructions("completed", receipt.bankedThrough);
+    for (const outcome of receipt.outcomes) this.advanceRenderedInstructions(outcome.state, outcome.turn);
+    this.completionLedger.releaseOutcomes(receipt.outcomes.map(outcome => outcome.turn));
+    if (!this.terminalFinalizing) this.reconciler.armPoll();
+    this.options.effects.notifySessionUpdate();
     this.currentLatestResult = receipt.latest;
     if (receipt.provenance === "terminal-replay") {
       void this.options.effects.appendEvent("session.turn_scraped", {
@@ -1378,6 +1372,7 @@ export class WorkerTurnEngine {
     receipt: BankedTurnReceipt,
   ): boolean {
     if (!this.isCurrentCapture(claim)) return false;
+    if (this.nativeActivity.available && !this.nativeActivity.ownsCurrentEnd(this.activityRevision)) return false;
     const deferredTarget = this.deferredScreenCompletionTarget;
     if (deferredTarget === undefined) return this.activityRevision === claim.activityRevision;
     const deferredEvidence = deferredTarget === undefined
@@ -1399,13 +1394,9 @@ export class WorkerTurnEngine {
   /** Highest completion ordinal already banked, capture-owned, or deferred behind that owner. */
   private completionReservationFloor(): number {
     const claim = this.turnCaptureOwner;
-    return Math.max(
-      this.completedTurnCount,
-      this.completionBarrierFloor,
-      this.deferredScreenCompletionTarget ?? 0,
-      this.pendingTurnCommit?.reservationThrough ?? 0,
-      claim !== undefined && this.isCurrentCapture(claim) ? claim.completionTarget : 0,
-    );
+    return completionReservationFloor(this.completedTurnCount, this.completionBarrierFloor,
+      this.deferredScreenCompletionTarget, this.pendingTurnCommit?.reservationThrough,
+      claim, claim !== undefined && this.isCurrentCapture(claim));
   }
 
   private armCanonicalReconcile(): void { this.reconciler.armQuiet(); }
@@ -1422,6 +1413,8 @@ export class WorkerTurnEngine {
         ? this.observationEpoch === epoch && this.observationRevision === revision && this.turnCaptureOwner === undefined
         : this.isCurrentCapture(claim));
     if (ledger === undefined) return false;
+    this.inputTargets.restore(ledger.instructionTargets);
+    this.nativeActivity.committed(ledger.turns);
     this.currentLatestResult ??= ledger.turns.at(-1)?.text;
     if (ledger.completedTurns > 0) this.advanceRenderedInstructions("completed", ledger.completedTurns);
     if (claim !== undefined) claim.completionTarget = this.completedTurnCount + 1;
@@ -1429,15 +1422,20 @@ export class WorkerTurnEngine {
     return true;
   }
 
-  private canReconcileCanonicalTurns(): boolean {
-    if (this.record.executionState !== "active") return false;
-    if (this.suppressSemanticTurns === true || this.record.profile === "scout") return false;
-    if (this.record.provider !== "claude" && this.record.provider !== "codex") return false;
-    return this.record.provider === "claude" || this.record.executor === "orbstack-container"
-      || this.observedWorking || this.rendered.length > 0; // Claude launch turns need no spinner or rendered instruction.
+  private mergeNativeObservation(observation: WorkerTurnObservation, claim: TurnCaptureClaim): WorkerTurnObservation {
+    if (observation.activityVersion !== undefined) {
+      this.transcriptActivityVersion = observation.activityVersion;
+      this.updateStallObservation();
+    }
+    const changed = this.nativeActivity.observe(observation, claim.activityRevision, this.activityRevision);
+    if (this.nativeActivity.activity(this.activity, this.activityRevision) === "working") {
+      this.observedWorking = true; this.nativeTurnSettled = false;
+    }
+    if (changed) this.options.effects.notifySessionUpdate();
+    return { ...observation, turns: this.nativeActivity.turns(observation, this.activityRevision, this.inputTargets.snapshot()) };
   }
 
-  async reconcileCanonicalTurns(): Promise<void> {
+  async reconcileCanonicalTurns(): Promise<boolean> {
     const transcripts = this.options.transcripts;
     const observe = transcripts?.observeProviderTurns;
     const commit = transcripts?.commitProviderTurns;
@@ -1448,12 +1446,13 @@ export class WorkerTurnEngine {
       || this.turnCaptureOwner !== undefined
       || this.pendingTurnCommit !== undefined
     ) {
-      return;
+      return !this.hasNativeTurnPort();
     }
-    if (!this.canReconcileCanonicalTurns() || this.idleTimer !== undefined) return;
+    if (!supportsNativeTurnObservation(this.record, this.suppressSemanticTurns === true)) return true;
+    if (this.idleTimer !== undefined) return false;
     const claim = this.acquireTurnCapture("reconcile", this.completedTurnCount + 1);
     try {
-      if (this.completionLedger.needsRestore(this.record.provider, this.options.transcripts) && !await this.restoreCompletionLedger(claim)) return;
+      if (this.completionLedger.needsRestore(this.record.provider, this.options.transcripts) && !await this.restoreCompletionLedger(claim)) return false;
       const before = this.completedTurnCount;
       let observation: WorkerTurnObservation;
       try {
@@ -1466,18 +1465,18 @@ export class WorkerTurnEngine {
           allowFallback: false,
         });
       } catch {
-        return;
+        this.mergeNativeObservation(nativeReadFailure(this.record, claim.completionTarget), claim);
+        return false;
       }
       if (!this.isCurrentCapture(claim)) {
         this.reserveFencedObservation(claim, observation);
-        return;
+        return false;
       }
-      if (observation.activityVersion !== undefined) {
-        this.transcriptActivityVersion = observation.activityVersion;
-        this.updateStallObservation();
-      }
+      observation = this.mergeNativeObservation(observation, claim);
       const nativeTurns = observation.turns.filter((turn) => turn.transport === "provider-native");
-      if (nativeTurns.length === 0 || this.completedTurnCount !== before || observation.turnNumber !== before + 1) return;
+      const readable = (observation.nativeSourceAvailable !== false || observation.nativeSourceStatus === "missing") && !this.nativeActivity.refused;
+      if (this.completedTurnCount !== before || observation.turnNumber !== before + 1) return false;
+      if (nativeTurns.length === 0) return readable;
       const nativeObservation: WorkerTurnObservation = {
         ...observation,
         turns: nativeTurns,
@@ -1486,18 +1485,18 @@ export class WorkerTurnEngine {
       try {
         outcome = await this.commitObservedProviderTurns(nativeObservation, claim);
       } catch {
-        return;
+        return false;
       }
-      if (outcome.status !== "committed" || outcome.banked === undefined) return;
+      if (outcome.status !== "committed" || outcome.banked === undefined) return false;
 
       // A receipt from a fenced generation owns ledger ordinals only. Reconcile events, instruction
       // state, preview/model, and attention all belong to the still-current process generation.
-      if (!this.isCurrentCapture(claim)) return;
+      if (!this.isCurrentCapture(claim)) return false;
       this.applyCurrentTurnReceipt(outcome.banked);
       if (this.isCurrentCompletionHead(claim, outcome.banked)) {
         this.observedWorking = false;
         this.nativeTurnSettled = true;
-        if (this.activity === "working") this.activity = "awaiting-input";
+        if (this.activity !== "needs-input") this.activity = "awaiting-input";
         this.observeComposer();
       }
       const native = outcome.turns.filter(
@@ -1508,15 +1507,15 @@ export class WorkerTurnEngine {
         completionTarget: outcome.banked.bankedThrough,
         turns: native.length,
       }).catch(() => undefined);
-      if (!this.isCurrentCapture(claim)) return;
+      if (!this.isCurrentCapture(claim)) return false;
       await this.appendTranscript(
         "lifecycle",
         "broker",
         "turn recorded from the provider transcript; the terminal never reported it finishing",
         { provider: this.record.provider, completionTarget: this.completedTurnCount },
       ).catch(() => undefined);
-      if (!this.isCurrentCapture(claim)) return;
-      if (!this.isCurrentCompletionHead(claim, outcome.banked)) return;
+      if (!this.isCurrentCapture(claim)) return false;
+      if (!this.isCurrentCompletionHead(claim, outcome.banked)) return readable;
       const effectActivityRevision = this.activityRevision;
       await this.refreshPreview(
         this.options.effects.snapshot() ?? "",
@@ -1526,16 +1525,17 @@ export class WorkerTurnEngine {
         claim,
         effectActivityRevision,
       ).catch(() => undefined);
-      if (!this.isCurrentCompletionEffect(claim, outcome.banked, effectActivityRevision)) return;
+      if (!this.isCurrentCompletionEffect(claim, outcome.banked, effectActivityRevision)) return false;
       await this.refreshObservedModel(claim.epoch, claim.revision, claim, effectActivityRevision).catch(() => undefined);
-      if (!this.isCurrentCompletionEffect(claim, outcome.banked, effectActivityRevision)) return;
+      if (!this.isCurrentCompletionEffect(claim, outcome.banked, effectActivityRevision)) return false;
       await this.options.effects.setAttention(
-        this.activity === "needs-input" ? "needs-input" : "done",
+        this.activity === "needs-input" ? "needs-input" : this.completions.get(outcome.banked.bankedThrough)?.outcome === "cancelled" ? "interrupted" : "done",
         true,
       );
-      if (!this.isCurrentCompletionEffect(claim, outcome.banked, effectActivityRevision)) return;
+      if (!this.isCurrentCompletionEffect(claim, outcome.banked, effectActivityRevision)) return false;
       this.options.effects.notifySessionUpdate();
       this.notifyDeliveryBoundary();
+      return readable;
     } finally {
       this.finishTurnCapture(claim);
     }

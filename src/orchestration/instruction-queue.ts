@@ -122,7 +122,7 @@ export class InstructionQueue {
    * exits in between leaves it `accepted` with no later boundary obliged to deliver it: recovery
    * delivers it to a live target or retires it as undelivered.
    */
-  async recoverLaunchInstructions(readCanonicalTurns: (sessionId: string) => Promise<number | { canonicalTurns: number; pending?: string | undefined }>): Promise<void> {
+  async recoverLaunchInstructions(readCanonicalTurns: (sessionId: string) => Promise<number | { canonicalTurns: number; cancelled?: boolean | undefined; pending?: string | undefined }>): Promise<void> {
     for (const record of await this.store.list()) {
       if (record.launch === undefined || ["completed", "undelivered", "cancelled"].includes(record.status)) continue;
       await this.serialize(record.targetSessionId, async () => {
@@ -131,6 +131,10 @@ export class InstructionQueue {
         if (record.launch === true) {
           const recovery = await readCanonicalTurns(record.targetSessionId);
           const canonicalTurns = typeof recovery === "number" ? recovery : recovery.canonicalTurns;
+          if (typeof recovery !== "number" && recovery.cancelled === true) {
+            await this.persistState(current, "cancelled", { holdReason: undefined });
+            return;
+          }
           if (canonicalTurns >= (record.expectedTurn ?? 1)) {
             const at = new Date().toISOString();
             await this.persistState(current, "completed", { submittedAt: current.submittedAt ?? at, completedAt: at, holdReason: undefined });

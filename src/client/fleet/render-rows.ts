@@ -326,6 +326,10 @@ export function pullRequestCell(
  * no reply yet shows the placeholder until its first result lands.
  */
 export function threadPreview(thread: FleetThread, width: number): string {
+  // A blocked row explains the current obstacle, rather than showing a previous turn's reply.
+  if (thread.workerTruth?.state === "blocked-modal" || thread.workerTruth?.state === "blocked-composer") {
+    return fit(thread.workerTruth.detail, width);
+  }
   return conversationPreview({
     storedPreview: thread.record.latestPreview,
     maxLength: width,
@@ -345,7 +349,7 @@ export function statusMarker(
 ): string {
   const tone = status === "Done"
     ? "done"
-    : status === "Needs input"
+    : status === "Needs input" || status === "Stalled" || status === "Provider limit"
       ? "attention"
       : status === "Failed"
         ? "alert"

@@ -34,6 +34,8 @@ import {
   type AppendThreadEvent,
 } from "../../src/persistence/thread-transcript-store.js";
 
+import { ClaudeConversationBindingStore } from "../../src/persistence/claude-conversation-bindings.js";
+
 class FakePty implements SessionRuntime {
   readonly pid: number;
   killCount = 0;
@@ -134,6 +136,8 @@ function harness(options: {
   failJournal?: (event: BrokerEvent) => boolean;
   /** Provider-native turns a side-effect-free observation can find. */
   providerTurns?: readonly { id: string; text: string }[];
+  /** The first instruction preflight sees no completed receipt; gated captures belong to later output. */
+  emptyFirstNativeRead?: boolean;
   /** Held open after side-effect-free observation, before the engine can enqueue its commit. */
   onProviderTurnsRead?: () => Promise<void>;
   /** Held inside the serialized durable commit after the engine has reserved its ordinals. */
@@ -145,6 +149,7 @@ function harness(options: {
   const events: BrokerEvent[] = [];
   const transcripts: AppendThreadEvent[] = [];
   const captured = new Set<string>();
+  const observedAtById = new Map<string, string>();
   const captureCalls: string[] = [];
   const commitCalls: WorkerTurnObservation[] = [];
   const observeProviderTurns = async (input: {
@@ -156,11 +161,19 @@ function harness(options: {
   }): Promise<WorkerTurnObservation> => {
     const pending = (options.providerTurns ?? []).filter((turn) => !captured.has(turn.id));
     captureCalls.push(input.allowFallback === true ? "fallback-allowed" : "native-only");
+    if (options.emptyFirstNativeRead === true && captureCalls.length === 1) {
+      return { sessionId: input.sessionId, provider: input.provider, turnNumber: input.turnNumber, turns: [] };
+    }
+    // These are fixture receipts produced by the current scripted turn, not historical August
+    // receipts arriving after October input. Keep the first observed time stable across rereads.
+    for (const turn of pending) if (!observedAtById.has(turn.id)) {
+      observedAtById.set(turn.id, new Date().toISOString());
+    }
     await options.onProviderTurnsRead?.();
     const observed = pending.length > 0
       ? pending.map((turn) => ({
           providerTurnId: turn.id,
-          providerOccurredAt: "2026-08-20T09:00:00.000Z",
+          providerOccurredAt: observedAtById.get(turn.id)!,
           text: turn.text,
           transport: "provider-native" as const,
         }))
@@ -409,6 +422,40 @@ describe("SessionRegistry worktree provisioning", () => {
 });
 
 describe("SessionRegistry", () => {
+  it.each(["worker", "orchestrator"] as const)("does not claim completion for a prompt-free %s or its bare zero exit", async (kind) => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ kind }));
+    expect(record.attentionState).toBeUndefined();
+    expect(registry.workerTruth(record.id).completedTurns).toBe(0);
+    ptys[0]!.emitExit(0);
+    expect(registry.get(record.id)).toMatchObject({ executionState: "exited", exitCode: 0 });
+    expect(registry.get(record.id).attentionState).toBeUndefined();
+    expect(registry.workerTruth(record.id)).toMatchObject({ state: "exited", taskOutcome: "unknown" });
+  });
+
+  it.each(["worker", "orchestrator"] as const)("preserves a %s provider fault through a later zero exit and agrees with waits", async (kind) => {
+    const { registry, ptys } = harness();
+    const record = await registry.start(request({ kind }));
+    ptys[0]!.emitOutput("API Error: 401 authentication_error\n");
+    expect(registry.workerTruth(record.id)).toMatchObject({ state: "errored", terminal: true });
+    expect((await registry.waitForWorkerResults([{ sessionId: record.id, completionTarget: 1 }], 0, 100)).results[0])
+      .toMatchObject({ status: "failed", truth: { state: "errored" } });
+    ptys[0]!.emitExit(0);
+    expect(registry.get(record.id)).toMatchObject({ executionState: "failed", attentionState: "failed", exitCode: 0 });
+    expect(registry.workerTruth(record.id).state).toBe("errored");
+  });
+
+  it("keeps a requested stop nonterminal until the process exit is observed", async () => {
+    const { registry, ptys } = harness({ exitOnKill: false });
+    const record = await registry.start(request());
+    await registry.stop(record.id);
+    expect(registry.workerTruth(record.id)).toMatchObject({ state: "stopping", terminal: false });
+    expect((await registry.waitForWorkerResults([{ sessionId: record.id, completionTarget: 1 }], 0, 100)).results[0])
+      .toMatchObject({ status: "waiting", truth: { state: "stopping" } });
+    ptys[0]!.emitExit(0);
+    expect(registry.workerTruth(record.id)).toMatchObject({ state: "stopped", terminal: true });
+  });
+
   it("requires the worker-turn observation boundary before recovery can start", () => {
     const recovered: SessionRecord = {
       id: "44444444-4444-4444-8444-444444444444",
@@ -512,7 +559,8 @@ describe("SessionRegistry", () => {
     expect(registry.snapshot(persisted.id)).toEqual(Buffer.alloc(0));
     await registry.resume(persisted.id);
     expect(ptys).toHaveLength(1);
-    expect(registry.get(persisted.id)).toMatchObject({ executionState: "active", attentionState: "done" });
+    expect(registry.get(persisted.id)).toMatchObject({ executionState: "active" });
+    expect(registry.get(persisted.id).attentionState).toBeUndefined();
     expect(puts.length).toBeGreaterThanOrEqual(2);
   });
 
@@ -740,7 +788,7 @@ describe("SessionRegistry", () => {
       deferInitialPrompt: () => true,
       initializeSession: async () => {
         ptys[0]!.emitOutput("Composing 5.53k tokens\nctrl+c to stop");
-        ptys[0]!.emitOutput("\nRun Everything enabled\n→ Add a follow-up\n");
+        ptys[0]!.emitOutput("\u001b[2J\u001b[HRun Everything enabled\r\n→ Add a follow-up\r\n");
         await new Promise((resolve) => setTimeout(resolve, 250));
       },
       buildResumeSpec: () => {
@@ -764,7 +812,7 @@ describe("SessionRegistry", () => {
     });
 
     ptys[0]!.emitOutput("Composing 6k tokens\nctrl+c to stop");
-    ptys[0]!.emitOutput("\nOpened pull request #7\nCursor is waiting for you\n");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[HOpened pull request #7\r\n→ Add a follow-up\r\n");
     await expect(setup.registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
     ], 5_000, 500)).resolves.toMatchObject({
@@ -826,8 +874,8 @@ describe("SessionRegistry", () => {
       { sessionId: record.id, completionTarget: 1 },
     ], 5_000, 300);
 
-    ptys[0]!.emitOutput("\u001b]0;⠹ math-worker\u0007\u001b[2JWorking");
-    ptys[0]!.emitOutput("\u001b[2J42 + 1000 = 1042\r\n\u001b]0;math-worker\u0007");
+    ptys[0]!.emitOutput("\u001b]0;⠹ math-worker\u0007\u001b[2J\u001b[HWorking");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[H42 + 1000 = 1042\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;math-worker\u0007");
 
     await expect(waiting).resolves.toEqual({
       timedOut: false,
@@ -858,8 +906,8 @@ describe("SessionRegistry", () => {
     // The orchestrator's transport dies while this wait is outstanding; the broker still resolves it.
     const abandoned = registry.waitForWorkerResults(target, 5_000, 300);
 
-    ptys[0]!.emitOutput("\u001b]0;⠹ install-worker\u0007\u001b[2JWorking");
-    ptys[0]!.emitOutput("\u001b[2Jdevice install applied once\r\n\u001b]0;install-worker\u0007");
+    ptys[0]!.emitOutput("\u001b]0;⠹ install-worker\u0007\u001b[2J\u001b[HWorking");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[Hdevice install applied once\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;install-worker\u0007");
     const lost = await abandoned;
     expect(lost.results[0]).toMatchObject({ status: "completed", retrieval: "fresh" });
 
@@ -875,8 +923,8 @@ describe("SessionRegistry", () => {
     });
 
     // A later turn must not rewrite the answer target 1 already recorded.
-    ptys[0]!.emitOutput("\u001b]0;⠹ install-worker\u0007\u001b[2JWorking");
-    ptys[0]!.emitOutput("\u001b[2Jsecond turn output\r\n\u001b]0;install-worker\u0007");
+    ptys[0]!.emitOutput("\u001b]0;⠹ install-worker\u0007\u001b[2J\u001b[HWorking");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[Hsecond turn output\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;install-worker\u0007");
     const second = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 2 },
     ], 5_000, 300);
@@ -891,7 +939,7 @@ describe("SessionRegistry", () => {
   it("returns a structured timeout instead of throwing when a worker is still working", async () => {
     const { registry, ptys } = harness();
     const record = await registry.start(request({ name: "slow-worker" }));
-    ptys[0]!.emitOutput("\u001b]0;⠹ slow-worker\u0007\u001b[2JWorking");
+    ptys[0]!.emitOutput("\u001b]0;⠹ slow-worker\u0007\u001b[2J\u001b[HWorking");
 
     await expect(registry.waitForWorkerResults(
       [{ sessionId: record.id, completionTarget: 1 }],
@@ -941,14 +989,14 @@ describe("SessionRegistry", () => {
     });
   });
 
-  it("returns stalled when idle transcript and token count stay byte-identical past threshold", async () => {
+  it("does not classify a recognized idle session as stalled merely because it stays quiet", async () => {
     let now = 0;
     const { registry, ptys } = harness({
       workerStallSeconds: 60,
       now: () => now,
     });
     const record = await registry.start(request(), "Finish the task");
-    ptys[0]!.emitOutput("Result may be complete\n5.53k tokens");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[HResult may be complete\r\n5.53k tokens\r\n› \r\n? for shortcuts\r\n");
 
     await expect(registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
@@ -961,13 +1009,8 @@ describe("SessionRegistry", () => {
     await expect(registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
     ], 0, 500)).resolves.toMatchObject({
-      timedOut: false,
-      results: [{
-        status: "stalled",
-        stalledForSeconds: 61,
-        stallReason: "transcript-and-token-count-unchanged-while-idle",
-        tokenCount: 5_530,
-      }],
+      timedOut: true,
+      results: [{ status: "waiting", truth: { state: "idle" } }],
     });
   });
 
@@ -1000,12 +1043,14 @@ describe("SessionRegistry", () => {
     );
     expect(registry.get(record.id).observedModel).toBeUndefined();
 
+    const responseAt = new Date(Date.parse(record.createdAt) + 1_000).toISOString();
+    const completedAt = new Date(Date.parse(record.createdAt) + 1_100).toISOString();
     await mkdir(project, { recursive: true });
     await writeFile(join(project, `${record.id}.jsonl`), [
       JSON.stringify({
         type: "assistant",
         uuid: "20000000-0000-4000-8000-000000000001",
-        timestamp: "2026-07-25T10:00:04.000Z",
+        timestamp: responseAt,
         effort: "high",
         message: {
           id: "msg_after_switch",
@@ -1015,7 +1060,7 @@ describe("SessionRegistry", () => {
           content: [{ type: "text", text: "Answered on the new model." }],
         },
       }),
-      JSON.stringify({ type: "system", subtype: "turn_duration", timestamp: "2026-07-25T10:00:04.100Z" }),
+      JSON.stringify({ type: "system", subtype: "turn_duration", timestamp: completedAt }),
       "",
     ].join("\n"));
 
@@ -1025,19 +1070,19 @@ describe("SessionRegistry", () => {
       4_000,
     );
     ptys[0]!.emitOutput("\u001b]0;⠹ worker\u0007Working\nesc to interrupt");
-    ptys[0]!.emitOutput("\n\u001b]0;worker\u0007");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[HAnswered on the new model.\r\n❯ \r\n? for shortcuts\r\n\u001b]0;worker\u0007");
     await expect(wait).resolves.toMatchObject({ timedOut: false });
 
     // The launch request is untouched — it still says what the session was started with.
-    expect(registry.get(record.id)).toMatchObject({
+    await vi.waitFor(() => expect(registry.get(record.id)).toMatchObject({
       model: "sonnet",
       effort: "low",
       observedModel: {
         model: "claude-opus-5",
         effort: "high",
-        observedAt: "2026-07-25T10:00:04.000Z",
+        observedAt: responseAt,
       },
-    });
+    }));
   });
 
   it("uses Claude native final responses for two gap-free semantic completion targets", async () => {
@@ -1083,7 +1128,7 @@ describe("SessionRegistry", () => {
       4_000,
     );
     ptys[0]!.emitOutput("\u001b]0;⠹ worker\u0007Working\nesc to interrupt");
-    ptys[0]!.emitOutput("\n\u001b[2J⠹ spinner text\n❯ prompt text\nRunning stop hook output\n\u001b]0;worker\u0007");
+    ptys[0]!.emitOutput("\n\u001b[2J\u001b[H⠹ spinner text\n❯ prompt text\nRunning stop hook output\n\u001b]0;worker\u0007");
     const first = await firstWait;
     expect(first.results[0]).toMatchObject({
       status: "completed",
@@ -1387,6 +1432,7 @@ describe("SessionRegistry", () => {
     const readGate = deferred<void>();
     const readStarted = deferred<void>();
     const { registry, ptys, captureCalls, commitCalls } = harness({
+      emptyFirstNativeRead: true,
       exitOnKill: false,
       providerTurns,
       onProviderTurnsRead: async () => {
@@ -1407,11 +1453,13 @@ describe("SessionRegistry", () => {
       {},
       instructionId,
     )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+    expect(captureCalls).toEqual(["native-only"]);
+    const preflightReads = captureCalls.length;
     ptys[0]!.emitOutput(
-      `\u001b]0;\u2839 terminal-${provenance}\u0007\u001b[2JWorking\r\nesc to interrupt`,
+      `\u001b]0;\u2839 terminal-${provenance}\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt`,
     );
     ptys[0]!.emitOutput(
-      `\u001b[2J${answer}\r\n\u001b]0;terminal-${provenance}\u0007`,
+      `\u001b[2J\u001b[H${answer}\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;terminal-${provenance}\u0007`,
     );
     await readStarted.promise;
 
@@ -1432,7 +1480,7 @@ describe("SessionRegistry", () => {
       generation: 1,
     });
     expect(registry.workerTruth(record.id)).toMatchObject({
-      state: "working",
+      state: "unknown",
       terminal: false,
       composerOccupied: false,
       modalOpen: false,
@@ -1460,7 +1508,7 @@ describe("SessionRegistry", () => {
         provenance,
       }],
     });
-    expect(captureCalls).toEqual(captureSequence);
+    expect(captureCalls.slice(preflightReads)).toEqual(captureSequence);
     expect(commitCalls).toHaveLength(1);
     expect(registry.get(record.id)).toMatchObject({
       executionState,
@@ -1481,6 +1529,7 @@ describe("SessionRegistry", () => {
   it("publishes terminal exit after a rejected final commit without fabricating completion", async () => {
     const commitGate = deferred<void>();
     const { registry, ptys, commitCalls } = harness({
+      emptyFirstNativeRead: true,
       exitOnKill: false,
       providerTurns: [{ id: "rejected-final", text: "must not be fabricated" }],
       onProviderTurnsCommit: () => commitGate.promise,
@@ -1497,10 +1546,10 @@ describe("SessionRegistry", () => {
       instructionId,
     );
     ptys[0]!.emitOutput(
-      "\u001b]0;\u2839 terminal-commit-rejection\u0007\u001b[2JWorking\r\nesc to interrupt",
+      "\u001b]0;\u2839 terminal-commit-rejection\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt",
     );
     ptys[0]!.emitOutput(
-      "\u001b[2Jmust not be fabricated\r\n\u001b]0;terminal-commit-rejection\u0007",
+      "\u001b[2J\u001b[Hmust not be fabricated\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;terminal-commit-rejection\u0007",
     );
     await vi.waitFor(() => expect(commitCalls).toHaveLength(1), { timeout: 2_000 });
 
@@ -1523,14 +1572,22 @@ describe("SessionRegistry", () => {
       results: [{ status: "exited", completedTurns: 0 }],
     });
     expect(registry.get(record.id)).toMatchObject({ executionState: "exited", exitCode: 0 });
-    expect(states).toContainEqual(expect.objectContaining({
-      instructionId,
-      state: "undelivered",
-    }));
+    expect(states.filter((update) => update.instructionId === instructionId).at(-1))
+      .toMatchObject({ state: "acknowledged" });
     expect(states).not.toContainEqual(expect.objectContaining({
       instructionId,
       state: "completed",
     }));
+    expect(states).not.toContainEqual(expect.objectContaining({ instructionId, state: "cancelled" }));
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      completedTurns: 0,
+      canonicalTurns: 0,
+      taskOutcome: "unknown",
+    });
+    // An asynchronous rejection can have persisted a prefix. Keep its ordinal reserved rather
+    // than inventing a negative receipt or letting a replacement generation reuse the target.
+    await expect(registry.resume(record.id)).rejects.toThrow("durable commit rejected");
+    expect(ptys).toHaveLength(1);
   });
 
   it("does not reinterpret an armed final screen after explicit stop", async () => {
@@ -1549,15 +1606,17 @@ describe("SessionRegistry", () => {
       {},
       instructionId,
     );
+    expect(captureCalls).toEqual(["native-only"]);
+    const preflightReads = captureCalls.length;
     ptys[0]!.emitOutput(
-      "\u001b]0;\u2839 stopped-final-screen\u0007\u001b[2JWorking\r\nesc to interrupt",
+      "\u001b]0;\u2839 stopped-final-screen\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt",
     );
     ptys[0]!.emitOutput(
-      "\u001b[2Jscreen must not become a completion\r\n\u001b]0;stopped-final-screen\u0007",
+      "\u001b[2J\u001b[Hscreen must not become a completion\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;stopped-final-screen\u0007",
     );
 
     await registry.stop(record.id);
-    expect(registry.workerTruth(record.id)).toMatchObject({ state: "stopped", terminal: true });
+    expect(registry.workerTruth(record.id)).toMatchObject({ state: "stopping", terminal: false });
     ptys[0]!.emitExit(0);
     const result = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
@@ -1571,11 +1630,18 @@ describe("SessionRegistry", () => {
         truth: { state: "stopped", terminal: true },
       }],
     });
-    expect(captureCalls).toEqual([]);
-    expect(commitCalls).toEqual([]);
+    expect(captureCalls.slice(preflightReads)).toEqual([]);
+    await vi.waitFor(() => {
+      expect(commitCalls).toHaveLength(1);
+      expect(states).toContainEqual(expect.objectContaining({ instructionId, state: "cancelled" }));
+    });
+    expect(commitCalls[0]).toMatchObject({ turnNumber: 1, turns: [{
+      providerTurnId: `broker-instruction:${instructionId}`, transport: "broker-lifecycle",
+      data: { outcome: "cancelled", instructionId },
+    }] });
     expect(states).toContainEqual(expect.objectContaining({
       instructionId,
-      state: "undelivered",
+      state: "cancelled",
     }));
     expect(states).not.toContainEqual(expect.objectContaining({
       instructionId,
@@ -1584,10 +1650,14 @@ describe("SessionRegistry", () => {
 
     const resumed = await registry.resume(record.id);
     expect(resumed).toMatchObject({ executionState: "active", generation: 2, pid: 1001 });
-    expect(captureCalls).toEqual([]);
-    expect(commitCalls).toEqual([]);
+    expect(captureCalls.slice(preflightReads)).toEqual([]);
+    expect(commitCalls).toHaveLength(1);
+    expect(commitCalls[0]).toMatchObject({ turnNumber: 1, turns: [{
+      providerTurnId: `broker-instruction:${instructionId}`, transport: "broker-lifecycle",
+      data: { outcome: "cancelled", instructionId },
+    }] });
     expect(registry.workerTruth(record.id)).toMatchObject({
-      completedTurns: 0,
+      completedTurns: 1,
       canonicalTurns: 0,
     });
     await expect(registry.submitInstruction(
@@ -1596,7 +1666,7 @@ describe("SessionRegistry", () => {
       "orchestrator",
       {},
       "11111111-1111-4111-8111-111111111118",
-    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
   });
 
   it("keeps provider-limit authority over an armed final screen and process exit", async () => {
@@ -1615,11 +1685,13 @@ describe("SessionRegistry", () => {
       {},
       instructionId,
     );
+    expect(captureCalls).toEqual(["native-only"]);
+    const preflightReads = captureCalls.length;
     ptys[0]!.emitOutput(
-      "\u001b]0;\u2839 limited-final-screen\u0007\u001b[2JWorking\r\nesc to interrupt",
+      "\u001b]0;\u2839 limited-final-screen\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt",
     );
     ptys[0]!.emitOutput(
-      "\u001b[2Jscreen must not outrank provider limit\r\n\u001b]0;limited-final-screen\u0007",
+      "\u001b[2J\u001b[Hscreen must not outrank provider limit\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;limited-final-screen\u0007",
     );
     ptys[0]!.emitOutput("Usage limit reached \u00b7 resets 3:00pm\r\n");
 
@@ -1640,11 +1712,18 @@ describe("SessionRegistry", () => {
         truth: { state: "provider-limit", terminal: true },
       }],
     });
-    expect(captureCalls).toEqual([]);
-    expect(commitCalls).toEqual([]);
+    expect(captureCalls.slice(preflightReads)).toEqual([]);
+    await vi.waitFor(() => {
+      expect(commitCalls).toHaveLength(1);
+      expect(states).toContainEqual(expect.objectContaining({ instructionId, state: "cancelled" }));
+    });
+    expect(commitCalls[0]).toMatchObject({ turnNumber: 1, turns: [{
+      providerTurnId: `broker-instruction:${instructionId}`, transport: "broker-lifecycle",
+      data: { outcome: "cancelled", instructionId },
+    }] });
     expect(states).toContainEqual(expect.objectContaining({
       instructionId,
-      state: "undelivered",
+      state: "cancelled",
     }));
     expect(states).not.toContainEqual(expect.objectContaining({
       instructionId,
@@ -1653,10 +1732,14 @@ describe("SessionRegistry", () => {
 
     const resumed = await registry.resume(record.id);
     expect(resumed).toMatchObject({ executionState: "active", generation: 2, pid: 1001 });
-    expect(captureCalls).toEqual([]);
-    expect(commitCalls).toEqual([]);
+    expect(captureCalls.slice(preflightReads)).toEqual([]);
+    expect(commitCalls).toHaveLength(1);
+    expect(commitCalls[0]).toMatchObject({ turnNumber: 1, turns: [{
+      providerTurnId: `broker-instruction:${instructionId}`, transport: "broker-lifecycle",
+      data: { outcome: "cancelled", instructionId },
+    }] });
     expect(registry.workerTruth(record.id)).toMatchObject({
-      completedTurns: 0,
+      completedTurns: 1,
       canonicalTurns: 0,
     });
     await expect(registry.submitInstruction(
@@ -1665,7 +1748,7 @@ describe("SessionRegistry", () => {
       "orchestrator",
       {},
       "11111111-1111-4111-8111-111111111119",
-    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
   });
 
   it("rolls back a controller claim when attachment journaling fails", async () => {
@@ -1678,25 +1761,36 @@ describe("SessionRegistry", () => {
   });
 
   it("keeps repeated graceful stops idempotent and reserves SIGKILL for explicit force", async () => {
-    const { registry, ptys } = harness({ exitOnKill: false });
+    const { registry, ptys, events, transcripts } = harness({ exitOnKill: false });
     const record = await registry.start(request());
+    const transcriptStart = transcripts.length;
     await registry.stop(record.id);
     await registry.stop(record.id);
     expect(ptys[0]!.killCount).toBe(1);
     expect(ptys[0]!.killSignals).toEqual(["SIGTERM"]);
+    const stopEvents = events.filter((event) =>
+      event.type === "session.stopped" && event.sessionId === record.id);
+    expect(stopEvents).toHaveLength(1);
+    expect(stopEvents[0]!.data).toEqual({ phase: "requested" });
+    const stopEntries = transcripts.slice(transcriptStart).filter((event) =>
+      event.kind === "lifecycle" && event.sessionId === record.id);
+    expect(stopEntries).toHaveLength(1);
+    expect(stopEntries[0]).toMatchObject({
+      text: "session stop requested",
+      data: { phase: "requested" },
+    });
 
     registry.forceStop(record.id);
     expect(ptys[0]!.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 
-  it("durably marks a naturally completed session as stopped without rewriting its exit result", async () => {
+  it("durably marks a naturally exited session as stopped without rewriting its exit result", async () => {
     const { registry, ptys, events, transcripts } = harness();
     const record = await registry.start(request());
     ptys[0]!.emitExit(0);
     expect(registry.get(record.id)).toMatchObject({
       executionState: "exited",
       exitCode: 0,
-      attentionState: "done",
     });
 
     await registry.stop(record.id);
@@ -1787,6 +1881,7 @@ describe("SessionRegistry", () => {
       },
     };
     const { registry, ptys, captureCalls, commitCalls } = harness({
+      emptyFirstNativeRead: true,
       adapters: { ...adapters, codex: gatedCodex },
       exitOnKill: false,
       providerTurns,
@@ -1808,11 +1903,13 @@ describe("SessionRegistry", () => {
       instructionId,
     )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
 
+    expect(captureCalls).toEqual(["native-only"]);
+    const preflightReads = captureCalls.length;
     ptys[0]!.emitOutput(
-      "\u001b]0;\u2839 resume-capture-race\u0007\u001b[2JWorking\r\nesc to interrupt",
+      "\u001b]0;\u2839 resume-capture-race\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt",
     );
     ptys[0]!.emitOutput(
-      "\u001b[2Jstale old-generation answer\r\n\u001b]0;resume-capture-race\u0007",
+      "\u001b[2J\u001b[Hstale old-generation answer\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;resume-capture-race\u0007",
     );
     await oldCaptureStarted.promise;
 
@@ -1827,20 +1924,22 @@ describe("SessionRegistry", () => {
     await oldCaptureReturned.promise;
     await resumeLaunchStarted.promise;
 
-    // The stale read itself did not commit. The resume barrier freshly observed and durably adopted
-    // the old native ID before provider launch could advance the generation.
-    expect(captureCalls).toEqual(["native-only", "native-only"]);
+    // The resume barrier freshly reads and durably adopts the exact native ID before launch.
+    // Its receipt settles only its own old instruction; current-generation UI stays fenced.
+    expect(captureCalls.slice(preflightReads)).toEqual(["native-only", "native-only"]);
     expect(commitCalls).toHaveLength(1);
     expect(commitCalls[0]).toMatchObject({
       turnNumber: 1,
       turns: [{ providerTurnId: "old-turn", text: "stale old-generation answer" }],
     });
-    expect(registry.workerTruth(record.id)).toMatchObject({ completedTurns: 1, canonicalTurns: 1 });
+    expect(registry.workerTruth(record.id)).toMatchObject({ completedTurns: 1, canonicalTurns: 1, taskOutcome: "unknown" });
     expect(registry.get(record.id)).toMatchObject({
       executionState: "cancelled",
       attentionState: "stopping",
     });
-    expect(states.filter(({ state }) => state === "completed")).toEqual([]);
+    expect(states.filter(({ state }) => state === "completed")).toEqual([
+      expect.objectContaining({ instructionId, state: "completed", turn: 1 }),
+    ]);
 
     resumeLaunchGate.resolve();
     const resumed = await resume;
@@ -1851,7 +1950,9 @@ describe("SessionRegistry", () => {
       pid: 1001,
     });
     expect(registry.workerTruth(record.id)).toMatchObject({ completedTurns: 1, canonicalTurns: 1 });
-    expect(states.filter(({ state }) => state === "completed")).toEqual([]);
+    expect(states.filter(({ state }) => state === "completed")).toEqual([
+      expect.objectContaining({ instructionId, state: "completed", turn: 1 }),
+    ]);
 
     const resumedInstructionId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     await expect(registry.submitInstruction(
@@ -1864,10 +1965,10 @@ describe("SessionRegistry", () => {
     providerTurns.push({ id: "new-turn", text: "new generation answer" });
 
     ptys[1]!.emitOutput(
-      "\u001b]0;\u2839 resume-capture-race\u0007\u001b[2JWorking\r\nesc to interrupt",
+      "\u001b]0;\u2839 resume-capture-race\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt",
     );
     ptys[1]!.emitOutput(
-      "\u001b[2Jnew generation answer\r\n\u001b]0;resume-capture-race\u0007",
+      "\u001b[2J\u001b[Hnew generation answer\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;resume-capture-race\u0007",
     );
     const result = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 2 },
@@ -1891,10 +1992,9 @@ describe("SessionRegistry", () => {
       state: "completed",
       turn: 2,
     }));
-    expect(states).not.toContainEqual(expect.objectContaining({
-      instructionId,
-      state: "completed",
-    }));
+    expect(states.filter((update) => update.instructionId === instructionId && update.state === "completed"))
+      .toHaveLength(1);
+    expect(states).not.toContainEqual(expect.objectContaining({ instructionId, state: "cancelled" }));
   });
 
   it("discards a frozen Codex screen when an explicit stop wins before the bank", async () => {
@@ -1904,10 +2004,10 @@ describe("SessionRegistry", () => {
     });
     const record = await registry.start(request({ name: "fast-screen-resume" }));
     ptys[0]!.emitOutput(
-      "\u001b]0;\u2839 fast-screen-resume\u0007\u001b[2JWorking\r\nesc to interrupt",
+      "\u001b]0;\u2839 fast-screen-resume\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt",
     );
     ptys[0]!.emitOutput(
-      "\u001b[2Jexact frozen answer before resume\r\n\u001b]0;fast-screen-resume\u0007",
+      "\u001b[2J\u001b[Hexact frozen answer before resume\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;fast-screen-resume\u0007",
     );
     expect(captureCalls).toEqual([]);
 
@@ -1941,6 +2041,7 @@ describe("SessionRegistry", () => {
     const commitGate = deferred<void>();
     const providerTurns = [{ id: "old-one", text: "old first answer" }];
     const { registry, ptys, commitCalls } = harness({
+      emptyFirstNativeRead: true,
       exitOnKill: false,
       providerTurns,
       onProviderTurnsCommit: () => commitGate.promise,
@@ -1959,26 +2060,31 @@ describe("SessionRegistry", () => {
       oldFirstInstruction,
     )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
     ptys[0]!.emitOutput(
-      "\u001b]0;\u2839 resume-commit-barrier\u0007\u001b[2JWorking\r\nesc to interrupt",
+      "\u001b]0;\u2839 resume-commit-barrier\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt",
     );
     ptys[0]!.emitOutput(
-      "\u001b[2Jold first answer\r\n\u001b]0;resume-commit-barrier\u0007",
+      "\u001b[2J\u001b[Hold first answer\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;resume-commit-barrier\u0007",
     );
     await vi.waitFor(() => expect(commitCalls).toHaveLength(1));
 
-    await expect(registry.submitInstruction(
+    const writesBeforeSecondInput = ptys[0]!.writes.length;
+    const secondAdmission = registry.submitInstruction(
       record.id,
       "old second task",
       "orchestrator",
       {},
       oldSecondInstruction,
-    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    );
+    await flushMicrotasks();
+    expect(ptys[0]!.writes).toHaveLength(writesBeforeSecondInput);
+    // The old provider can finish an autonomous follow-up while the prior durable commit waits.
+    // Its native receipt is historical truth; its deferred screen cannot deliver pending input.
     providerTurns.push({ id: "old-two", text: "old deferred second answer" });
     ptys[0]!.emitOutput(
-      "\u001b]0;\u2839 resume-commit-barrier\u0007\u001b[2JWorking again\r\nesc to interrupt",
+      "\u001b]0;\u2839 resume-commit-barrier\u0007\u001b[2J\u001b[HWorking again\r\nesc to interrupt",
     );
     ptys[0]!.emitOutput(
-      "\u001b[2Jold deferred second answer\r\n\u001b]0;resume-commit-barrier\u0007",
+      "\u001b[2J\u001b[Hold deferred second answer\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;resume-commit-barrier\u0007",
     );
     await new Promise((resolve) => setTimeout(resolve, 250));
     expect(commitCalls).toHaveLength(1);
@@ -1994,6 +2100,8 @@ describe("SessionRegistry", () => {
     expect(ptys).toHaveLength(1);
 
     commitGate.resolve();
+    await expect(secondAdmission).resolves.toMatchObject({ state: "undelivered", hold: "worker-terminal" });
+    expect(ptys[0]!.writes).toHaveLength(writesBeforeSecondInput);
     const resumed = await resume;
 
     expect(resumed).toMatchObject({ executionState: "active", generation: 2, pid: 1001 });
@@ -2004,15 +2112,20 @@ describe("SessionRegistry", () => {
       canonicalTurns: 1,
       pendingInstructions: 0,
     });
+    expect(states.filter((update) => update.instructionId === oldFirstInstruction).at(-1))
+      .toMatchObject({ state: "completed", turn: 1 });
     expect(states).toContainEqual(expect.objectContaining({
       instructionId: oldFirstInstruction,
-      state: "undelivered",
+      state: "completed",
+      turn: 1,
     }));
-    expect(states).toContainEqual(expect.objectContaining({
+    expect(states).not.toContainEqual(expect.objectContaining({
       instructionId: oldSecondInstruction,
-      state: "undelivered",
+      state: "submitted",
     }));
-    expect(states.filter(({ state }) => state === "completed")).toEqual([]);
+    expect(states.filter(({ state }) => state === "completed")).toEqual([
+      expect.objectContaining({ instructionId: oldFirstInstruction, state: "completed", turn: 1 }),
+    ]);
 
     const resumedInstruction = "33333333-cccc-4ccc-8ccc-cccccccccccc";
     await expect(registry.submitInstruction(
@@ -2021,7 +2134,14 @@ describe("SessionRegistry", () => {
       "orchestrator",
       {},
       resumedInstruction,
-    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 3 });
+    expect(commitCalls).toHaveLength(2);
+    expect(commitCalls[1]).toMatchObject({ turnNumber: 2,
+      turns: [{ providerTurnId: "old-two", text: "old deferred second answer" }] });
+    expect(registry.workerTruth(record.id)).toMatchObject({ completedTurns: 2, canonicalTurns: 2 });
+    expect(states.filter(({ state }) => state === "completed")).toEqual([
+      expect.objectContaining({ instructionId: oldFirstInstruction, state: "completed", turn: 1 }),
+    ]);
 
     // The replaced process may acknowledge its earlier SIGTERM after generation 2 is already live.
     ptys[0]!.emitExit(0);
@@ -2036,6 +2156,7 @@ describe("SessionRegistry", () => {
     const commitGate = deferred<void>();
     const failure = new Error("durable transcript write failed after enqueue");
     const { registry, ptys, commitCalls } = harness({
+      emptyFirstNativeRead: true,
       exitOnKill: false,
       providerTurns: [{ id: "indeterminate-old", text: "possibly durable old answer" }],
       onProviderTurnsCommit: () => commitGate.promise,
@@ -2049,10 +2170,10 @@ describe("SessionRegistry", () => {
       "88888888-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     );
     ptys[0]!.emitOutput(
-      "\u001b]0;\u2839 resume-commit-rejection\u0007\u001b[2JWorking\r\nesc to interrupt",
+      "\u001b]0;\u2839 resume-commit-rejection\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt",
     );
     ptys[0]!.emitOutput(
-      "\u001b[2Jpossibly durable old answer\r\n\u001b]0;resume-commit-rejection\u0007",
+      "\u001b[2J\u001b[Hpossibly durable old answer\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;resume-commit-rejection\u0007",
     );
     await vi.waitFor(() => expect(commitCalls).toHaveLength(1));
 
@@ -2213,41 +2334,66 @@ describe("SessionRegistry", () => {
     });
     const nativeTurn = (turnId: string, text: string) => JSON.stringify({
       type: "event_msg",
-      timestamp: new Date(Date.parse(record.createdAt) + 1_000).toISOString(),
+      timestamp: new Date().toISOString(),
       payload: { type: "task_complete", turn_id: turnId, last_agent_message: text },
     });
     await writeFile(rolloutPath, [
       sessionMeta,
+      JSON.stringify({ type: "response_item", payload: { type: "message", role: "developer",
+        content: [{ type: "input_text", text: `[cyberdeck-native-session:${record.id}]` }] } }),
       nativeTurn("019f0000-0000-7000-8000-000000000102", "old native answer"),
       "",
     ].join("\n"));
 
+    // This waiter names historical work before a newer instruction exists. Once that input is
+    // admitted, the same undelivered old receipt must not satisfy its completion boundary.
+    const preexistingReceiptWait = registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 1 },
+    ], 5_000, 300);
     const oldInstruction = "44444444-dddd-4ddd-8ddd-dddddddddddd";
+    const states: InstructionStateUpdate[] = [];
+    registry.onInstructionState((update) => states.push(update));
     await expect(registry.submitInstruction(
       record.id,
       "old native task",
       "orchestrator",
       {},
       oldInstruction,
-    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    expect(registry.workerTruth(record.id)).toMatchObject({ completedTurns: 1, canonicalTurns: 1, pendingInstructions: 1 });
+    expect(states).not.toContainEqual(expect.objectContaining({ instructionId: oldInstruction, state: "completed" }));
+    const beforeCurrentReceipt = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 2 },
+    ], 0, 300);
+    expect(beforeCurrentReceipt).toMatchObject({ timedOut: true, results: [{ completedTurns: 1 }] });
+    expect(beforeCurrentReceipt.results[0]?.status).not.toBe("completed");
+
+    const oldResult = await preexistingReceiptWait;
+    expect(oldResult).toMatchObject({ timedOut: false,
+      results: [{ status: "completed", text: "old native answer", retrieval: "fresh" }] });
+
     ptys[0]!.emitOutput(
-      "\u001b]0;\u2839 real-store-resume\u0007\u001b[2JWorking\r\nesc to interrupt",
+      "\u001b]0;\u2839 real-store-resume\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt",
     );
+    await appendFile(rolloutPath,
+      `${nativeTurn("019f0000-0000-7000-8000-000000000103", "current native answer")}\n`, "utf8");
     ptys[0]!.emitOutput(
-      "\u001b[2Jold native answer\r\n\u001b]0;real-store-resume\u0007",
+      "\u001b[2J\u001b[Hcurrent native answer\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;real-store-resume\u0007",
     );
-    const oldResult = await registry.waitForWorkerResults([
-      { sessionId: record.id, completionTarget: 1 },
+    const currentResult = await registry.waitForWorkerResults([
+      { sessionId: record.id, completionTarget: 2 },
     ], 5_000, 300);
-    expect(oldResult).toMatchObject({
-      timedOut: false,
-      results: [{ status: "completed", text: "old native answer", retrieval: "fresh" }],
-    });
+    expect(currentResult).toMatchObject({ timedOut: false,
+      results: [{ status: "completed", text: "current native answer", provenance: "provider-transcript" }] });
+    expect(states).toContainEqual(expect.objectContaining({ instructionId: oldInstruction, state: "completed", turn: 2 }));
+    expect(states).not.toContainEqual(expect.objectContaining({ instructionId: oldInstruction, state: "completed", turn: 1 }));
 
     await registry.stop(record.id);
     const resumed = await registry.resume(record.id);
     expect(resumed).toMatchObject({ executionState: "active", generation: 2, pid: 1001 });
 
+    ptys[1]!.emitOutput("\u001b[2J\u001b[H› Ask Codex to do anything\r\n? for shortcuts  100% context left\r\n");
+    expect(registry.workerTruth(record.id)).toMatchObject({ state: "idle", pendingInstructions: 0 });
     const newInstruction = "55555555-eeee-4eee-8eee-eeeeeeeeeeee";
     await expect(registry.submitInstruction(
       record.id,
@@ -2255,20 +2401,20 @@ describe("SessionRegistry", () => {
       "orchestrator",
       {},
       newInstruction,
-    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 3 });
     await appendFile(
       rolloutPath,
-      `${nativeTurn("019f0000-0000-7000-8000-000000000103", "new native answer")}\n`,
+      `${nativeTurn("019f0000-0000-7000-8000-000000000104", "new native answer")}\n`,
       "utf8",
     );
     ptys[1]!.emitOutput(
-      "\u001b]0;\u2839 real-store-resume\u0007\u001b[2JWorking\r\nesc to interrupt",
+      "\u001b]0;\u2839 real-store-resume\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt",
     );
     ptys[1]!.emitOutput(
-      "\u001b[2Jnew native answer\r\n\u001b]0;real-store-resume\u0007",
+      "\u001b[2J\u001b[Hnew native answer\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;real-store-resume\u0007",
     );
     const newResult = await registry.waitForWorkerResults([
-      { sessionId: record.id, completionTarget: 2 },
+      { sessionId: record.id, completionTarget: 3 },
     ], 5_000, 300);
     expect(newResult).toMatchObject({
       timedOut: false,
@@ -2289,11 +2435,12 @@ describe("SessionRegistry", () => {
         },
       },
       {
+        text: "current native answer",
+        data: { semanticTurnId: "codex:019f0000-0000-7000-8000-000000000103", turnNumber: 2 },
+      },
+      {
         text: "new native answer",
-        data: {
-          semanticTurnId: "codex:019f0000-0000-7000-8000-000000000103",
-          turnNumber: 2,
-        },
+        data: { semanticTurnId: "codex:019f0000-0000-7000-8000-000000000104", turnNumber: 3 },
       },
     ]);
     const replayedOld = await registry.waitForWorkerResults([
@@ -2305,8 +2452,8 @@ describe("SessionRegistry", () => {
       text: "old native answer",
     });
     expect(registry.workerTruth(record.id)).toMatchObject({
-      completedTurns: 2,
-      canonicalTurns: 2,
+      completedTurns: 3,
+      canonicalTurns: 3,
       pendingInstructions: 0,
     });
   });
@@ -2510,8 +2657,8 @@ describe("SessionRegistry", () => {
     const { registry, ptys } = harness();
     const record = await registry.start(request({ name: "stale-turn-worker" }), "First task");
 
-    ptys[0]!.emitOutput("\u001b]0;\u2839 stale-turn-worker\u0007\u001b[2JWorking");
-    ptys[0]!.emitOutput("\u001b[2Janswer to the first task\r\n\u001b]0;stale-turn-worker\u0007");
+    ptys[0]!.emitOutput("\u001b]0;\u2839 stale-turn-worker\u0007\u001b[2J\u001b[HWorking");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[Hanswer to the first task\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;stale-turn-worker\u0007");
     const first = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
     ], 5_000, 300);
@@ -2536,8 +2683,8 @@ describe("SessionRegistry", () => {
     ], 50, 300);
     expect(replay.results[0]).toMatchObject({ status: "completed", retrieval: "replay" });
 
-    ptys[0]!.emitOutput("\u001b]0;\u2839 stale-turn-worker\u0007\u001b[2JWorking");
-    ptys[0]!.emitOutput("\u001b[2Janswer to the second task\r\n\u001b]0;stale-turn-worker\u0007");
+    ptys[0]!.emitOutput("\u001b]0;\u2839 stale-turn-worker\u0007\u001b[2J\u001b[HWorking");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[Hanswer to the second task\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;stale-turn-worker\u0007");
     const second = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 2 },
     ], 5_000, 300);
@@ -2578,7 +2725,7 @@ describe("SessionRegistry", () => {
 
     // The operator answers the prompt and the worker resumes the tool call it was asking about.
     // That turn is still the *first task's*, so the instruction stays held rather than borrowing it.
-    ptys[0]!.emitOutput("\u001b]0;\u2839 modal-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b]0;\u2839 modal-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
     await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("working"));
     await expect(registry.submitInstruction(
       record.id, "Then run the linter", "orchestrator", {}, instructionId,
@@ -2587,7 +2734,7 @@ describe("SessionRegistry", () => {
 
     // The first task's turn lands in the ledger. Now the composer is free and the next ordinal is
     // one nothing else has a claim on.
-    ptys[0]!.emitOutput("\u001b[2Jchecks passed\r\n\u001b]0;modal-worker\u0007");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[Hchecks passed\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;modal-worker\u0007");
     await vi.waitFor(() => expect(boundaries).toContain(record.id));
 
     const rendered = await registry.submitInstruction(
@@ -2597,11 +2744,11 @@ describe("SessionRegistry", () => {
     expect(ptys[0]!.writes.at(-1)?.toString()).toBe("Then run the linter\n");
 
     // The provider consumes the composer and starts a turn. Only this is submission.
-    ptys[0]!.emitOutput("\u001b]0;\u2839 modal-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b]0;\u2839 modal-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
     await vi.waitFor(() =>
       expect(states.map(({ state }) => state)).toEqual(["submitted", "acknowledged"]));
 
-    ptys[0]!.emitOutput("\u001b[2Jlinter clean\r\n\u001b]0;modal-worker\u0007");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[Hlinter clean\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;modal-worker\u0007");
     const settled = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 2 },
     ], 5_000, 300);
@@ -2629,11 +2776,11 @@ describe("SessionRegistry", () => {
       "Land the fix",
     );
 
-    ptys[0]!.emitOutput("\u001b]0;⠹ reconcile-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b]0;⠹ reconcile-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
     await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("working"));
 
     ptys[0]!.emitOutput([
-      "\u001b[2J╭────────────────╮",
+      "\u001b[2J\u001b[H╭────────────────╮",
       "│ You've hit your session limit · resets 10:10pm │",
       "│ ❯ Upgrade your plan                          │",
       "│ Enter to confirm · Esc to cancel              │",
@@ -2686,7 +2833,7 @@ describe("SessionRegistry", () => {
       "Land the fix",
     );
 
-    ptys[0]!.emitOutput("\u001b]0;⠹ interleave-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b]0;⠹ interleave-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
     await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("working"));
 
     // The last spinner frame is never redrawn, so the screen keeps reading `working` and never arms
@@ -2694,7 +2841,7 @@ describe("SessionRegistry", () => {
     gate.redraw = async () => {
       // The dialog is dismissed and the prompt comes back while the read is still in flight. That is
       // exactly the transition the screen path banks on, and its timer is shorter than this wait.
-      ptys[0]!.emitOutput("\u001b[2Jpushed the branch\r\n\u001b]0;interleave-worker\u0007");
+      ptys[0]!.emitOutput("\u001b[2J\u001b[Hpushed the branch\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;interleave-worker\u0007");
       await new Promise((resolve) => setTimeout(resolve, 600));
     };
 
@@ -2735,9 +2882,9 @@ describe("SessionRegistry", () => {
       "Land the fix",
     );
 
-    ptys[0]!.emitOutput("\u001b]0;⠹ unfinished-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b]0;⠹ unfinished-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
     await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("working"));
-    ptys[0]!.emitOutput("\u001b[2JAlso scan your other repos [ ]\r\n←/→ to change · Enter to confirm");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[HAlso scan your other repos [ ]\r\n←/→ to change · Enter to confirm");
     await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("blocked-modal"));
 
     // Well past the quiet window the reconcile fires in, so its silence here is a decision and not
@@ -2764,7 +2911,7 @@ describe("SessionRegistry", () => {
     );
 
     ptys[0]!.emitOutput([
-      "\u001b[2JClaude Code can scan this repository for you",
+      "\u001b[2J\u001b[HClaude Code can scan this repository for you",
       "❯ 1. Yes",
       "  2. Not now",
       "  3. Don't show again",
@@ -2791,7 +2938,7 @@ describe("SessionRegistry", () => {
     const states: InstructionStateUpdate[] = [];
     registry.onInstructionState((update) => states.push(update));
 
-    ptys[0]!.emitOutput("\u001b]0;\u2839 busy-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b]0;\u2839 busy-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
     await vi.waitFor(() => expect(registry.workerTruth(record.id).state).toBe("working"));
 
     await expect(registry.submitInstruction(
@@ -2800,7 +2947,7 @@ describe("SessionRegistry", () => {
     expect(ptys[0]!.writes).toEqual([]);
 
     // The in-flight turn ends. It answered the first task, so it settles target 1 and nothing else.
-    ptys[0]!.emitOutput("\u001b[2Jfirst task done\r\n\u001b]0;busy-worker\u0007");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[Hfirst task done\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;busy-worker\u0007");
     const first = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
     ], 5_000, 300);
@@ -2813,8 +2960,8 @@ describe("SessionRegistry", () => {
     );
     expect(rendered).toMatchObject({ state: "rendered", expectedTurn: 2 });
 
-    ptys[0]!.emitOutput("\u001b]0;\u2839 busy-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
-    ptys[0]!.emitOutput("\u001b[2Jlinter clean\r\n\u001b]0;busy-worker\u0007");
+    ptys[0]!.emitOutput("\u001b]0;\u2839 busy-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[Hlinter clean\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;busy-worker\u0007");
     const second = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 2 },
     ], 5_000, 300);
@@ -2830,9 +2977,9 @@ describe("SessionRegistry", () => {
     const { registry, ptys } = harness();
     const record = await registry.start(request({ provider: "claude", name: "composer-worker" }));
 
-    ptys[0]!.emitOutput("\u001b]0;\u2839 composer-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b]0;\u2839 composer-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
     ptys[0]!.emitOutput([
-      "\u001b[2Jpartial output",
+      "\u001b[2J\u001b[Hpartial output",
       "\u2502 > queued follow-up \u2502",
       "tab to queue message",
       "\u001b]0;composer-worker\u0007",
@@ -2844,16 +2991,16 @@ describe("SessionRegistry", () => {
       { sessionId: record.id, completionTarget: 1 },
     ], 400, 300);
     expect(waiting).toMatchObject({
-      timedOut: true,
+      timedOut: false,
       results: [{
-        status: "waiting",
+        status: "needs-input",
         completedTurns: 0,
         truth: expect.objectContaining({ state: "blocked-composer", composerOccupied: true }),
       }],
     });
 
-    ptys[0]!.emitOutput("\u001b]0;\u2839 composer-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
-    ptys[0]!.emitOutput("\u001b[2Jfollow-up answered\r\n\u001b]0;composer-worker\u0007");
+    ptys[0]!.emitOutput("\u001b]0;\u2839 composer-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[Hfollow-up answered\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;composer-worker\u0007");
     const settled = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
     ], 5_000, 300);
@@ -2994,14 +3141,18 @@ describe("SessionRegistry", () => {
     const instructionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const record = await registry.start(
       request({ provider: "claude", name: "gap-worker" }),
-      "Initial task",
     );
-    await registry.submitInstruction(
+    await new ClaudeConversationBindingStore(join(root, "state")).record({
+      sessionId: record.id,
+      payload: { session_id: record.id, cwd: record.cwd, source: "startup",
+        transcript_path: join(root, "no-such-claude-projects", `${record.id}.jsonl`) },
+    });
+    await expect(registry.submitInstruction(
       record.id, "Run the suite", "orchestrator", {}, instructionId,
-    );
+    )).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
 
-    ptys[0]!.emitOutput("\u001b]0;\u2839 gap-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
-    ptys[0]!.emitOutput("\u001b[2Jsuite passed\r\n\u001b]0;gap-worker\u0007");
+    ptys[0]!.emitOutput("\u001b]0;\u2839 gap-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
+    ptys[0]!.emitOutput("\u001b[2J\u001b[Hsuite passed\r\n\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;gap-worker\u0007");
     const settled = await registry.waitForWorkerResults([
       { sessionId: record.id, completionTarget: 1 },
     ], 5_000, 400);
@@ -3517,7 +3668,7 @@ describe("SessionRegistry ingest cost", () => {
     const targets = records.map((record) => ({ sessionId: record.id, completionTarget: 1 }));
     const noisy = ptys[0]!;
     const quiet = ptys.slice(1);
-    for (const pty of ptys) pty.emitOutput("\u001b[2J⠋ Working (esc to interrupt)\n");
+    for (const pty of ptys) pty.emitOutput("\u001b[2J\u001b[H⠋ Working (esc to interrupt)\n");
     const counts = quiet.map((pty) => pty.snapshotCount);
 
     const waiting = registry.waitForWorkerResults(targets, 50);

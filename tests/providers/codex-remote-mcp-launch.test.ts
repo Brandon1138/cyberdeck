@@ -31,6 +31,14 @@ const { createConnection } = require('node:net');
 const { writeFileSync } = require('node:fs');
 const WebSocket = require(${JSON.stringify(require.resolve("ws"))});
 const args = process.argv.slice(2);
+if (args[0] === 'app-server') {
+  const { createInterface } = require('node:readline');
+  createInterface({input: process.stdin}).on('line', line => {
+    const request = JSON.parse(line);
+    if (request.method === 'initialize') console.log(JSON.stringify({id: request.id, result: {}}));
+    if (request.method === 'config/read') console.log(JSON.stringify({id: request.id, result: {config: {developer_instructions: 'inherited launcher rules'}}}));
+  });
+} else {
 const address = args[args.indexOf('--remote') + 1];
 const socket = new WebSocket('ws://localhost', { createConnection: () => createConnection(address.slice(7)) });
 socket.on('open', () => socket.send(JSON.stringify({id: 1, method: 'thread/start', params: {config: {model_reasoning_effort: 'xhigh'}}})));
@@ -40,6 +48,7 @@ socket.on('message', data => {
   if (!args.includes('--stay')) process.exit(7);
 });
 process.on('SIGTERM', () => process.exit(12));
+}
 `, { mode: 0o700 });
   });
 
@@ -65,6 +74,7 @@ process.on('SIGTERM', () => process.exit(12));
     const { request, args, address } = JSON.parse(await readFile(join(directory, "proof.json"), "utf8"));
     expect(request.params.config).toEqual({ model_reasoning_effort: "xhigh",
       "mcp_servers.cyberdeck": { command: "/node", args: ["/cyberdeck.js", "mcp", "--actor-session", "orc-terminal"] } });
+    expect(request.params.developerInstructions).toBe("inherited launcher rules\n\n[cyberdeck-native-session:orc-terminal]");
     expect(args.slice(2)).toEqual(["--no-alt-screen", "--", "Preserve --remote in this prompt"]);
     await expect(stat(address.slice("unix://".length))).rejects.toMatchObject({ code: "ENOENT" });
   });

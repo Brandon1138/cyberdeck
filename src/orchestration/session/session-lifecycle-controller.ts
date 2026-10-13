@@ -70,17 +70,16 @@ export class SessionLifecycleController {
     runtime.stopRequested = true;
     runtime.stopRequestedAt = new Date().toISOString();
     runtime.record.executionState = "cancelled";
-    // Shutting the broker down does not undo what an agent already delivered. A thread that had
-    // finished its task keeps that outcome through the kill, so it rehydrates as Done rather than
-    // as Stopped. An operator-initiated stop still reads as Stopped — that is their action.
+    // Preserve legacy attention for a settled turn during shutdown. Shared truth still reports
+    // the process lifecycle; this field never establishes successful task completion.
     runtime.outcomePreserved = this.shuttingDown && runtime.record.attentionState === "done";
     // Stop authority rejects any unbanked screen synchronously, before journaling or process kill
     // can yield long enough for the 200 ms bank to reinterpret it as a completed turn.
     runtime.turns.discardPendingScreenTurns();
     if (runtime.outcomePreserved !== true) await this.catalog.setAttention(runtime, "stopping", true);
     requireSessionRuntime(runtime).kill("SIGTERM");
-    await this.catalog.appendEvent("session.stopped", sessionId, {});
-    await this.catalog.appendTranscript(sessionId, "lifecycle", "broker", "session stopped", {});
+    await this.catalog.appendEvent("session.stopped", sessionId, { phase: "requested" });
+    await this.catalog.appendTranscript(sessionId, "lifecycle", "broker", "session stop requested", { phase: "requested" });
   }
 
   /** Force only one already-stopping session. Child sessions are deliberately untouched. */
@@ -204,7 +203,7 @@ export class SessionLifecycleController {
     runtime.record.attachmentState = "detached";
     runtime.record.exitCode = null;
     runtime.record.updatedAt = new Date().toISOString();
-    runtime.record.attentionState = "done";
+    delete runtime.record.attentionState;
     runtime.record.launchRecord = resolvedLaunchRecord(resumeSpec, "resume");
     runtime.turns.resetForResume();
     // The limit belonged to the generation that hit it. A resumed session is a new generation with
@@ -266,6 +265,7 @@ export class SessionLifecycleController {
       }
     }
     await runtime.launchTail;
+    runtime.turns.retire();
     await this.assembly.cleanupLaunchArtifacts(runtime.record, "session-deleted");
     await this.catalog.options.store?.delete(sessionId);
     this.catalog.sessions.delete(sessionId);

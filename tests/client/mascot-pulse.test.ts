@@ -3,10 +3,26 @@ import { MascotActivityPulse } from "../../src/client/fleet/mascot-pulse.js";
 import type { FleetThread } from "../../src/client/fleet/state.js";
 
 function thread(id: string, attentionState: "working" | "done", kind = "orchestrator", generation = 1): FleetThread {
-  return { record: { id, attentionState, kind, generation, pid: 42, executionState: "active" } } as FleetThread;
+  return { record: { id, attentionState, kind, generation, pid: 42, executionState: "active" },
+    workerTruth: { state: attentionState === "working" ? "working" : "idle", terminal: false,
+      completedTurns: 0, canonicalTurns: 0, pendingInstructions: 0, composerOccupied: false,
+      modalOpen: false, detail: "Current broker observation" } } as FleetThread;
 }
 
 describe("mascot start acknowledgement", () => {
+  it("does not pulse for unknown, startup, blocked, or idle activity or stale legacy attention", () => {
+    const pulse = new MascotActivityPulse([]);
+    for (const state of ["unknown", "starting", "blocked-modal", "blocked-composer", "idle", "stopping", "interrupted"] as const) {
+      const current = thread("orc", "working");
+      current.workerTruth = { ...current.workerTruth!, state };
+      expect(pulse.update([current], 0)).toEqual({ cursorVisible: true, nextFrameIn: undefined });
+    }
+    const legacy = thread("orc", "working");
+    delete legacy.workerTruth;
+    expect(pulse.update([legacy], 0)).toEqual({ cursorVisible: true, nextFrameIn: undefined });
+    expect(pulse.update([thread("orc", "working")], 0).nextFrameIn).toBe(350);
+  });
+
   it("starts settled around existing work and ignores worker activity", () => {
     const existing = thread("existing", "working");
     const pulse = new MascotActivityPulse([existing]);

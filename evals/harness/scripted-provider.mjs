@@ -22,16 +22,18 @@ const probe = async (route, body) => {
   } catch { return 'error'; }
 };
 const lines = (n) => { try { return readdirSync(n).length; } catch { return -1; } };
-output('SCRIPT_READY\n❯ \n? for shortcuts\n');
+const ready = (text) => output('\x1b[2J\x1b[H' + text + '\n❯ \n? for shortcuts\n\x1b]0;fixture\x07');
+const working = () => output('\x1b]0;⠹ fixture\x07\x1b[2J\x1b[HWorking\nesc to interrupt');
+ready('SCRIPT_READY');
 for await (const line of createInterface({ input: process.stdin })) {
   appendFileSync('commands.jsonl', JSON.stringify({ input: line, observedAt: new Date().toISOString() }) + '\n');
   if (line.startsWith('emit:')) { output(JSON.parse(line.slice(5))); continue; }
-  if (line === 'hang') { output('\x1b]0;⠹ fixture\x07\x1b[2JWorking\nesc to interrupt'); continue; }
+  if (line === 'hang') { working(); continue; }
   if (line === 'oom-fixture') {
     if (!inContainer) process.exit(137);
     const blocks = []; for (;;) blocks.push(Buffer.alloc(64 * 1024 * 1024, 1));
   }
-  output('\x1b]0;⠹ fixture\x07\x1b[2JWorking\nesc to interrupt');
+  working();
   let facts;
   if (line === 'probe-authority') {
     facts = inContainer ? { probe: 'authority',
@@ -51,5 +53,5 @@ for await (const line of createInterface({ input: process.stdin })) {
   record(facts);
   facts.reportExit = await report({ summary: `scripted: ${line}`, structuredFacts: facts });
   await new Promise((resolve) => setTimeout(resolve, 100));
-  output('\x1b[2J' + JSON.stringify(facts) + '\n\x1b]0;fixture\x07');
+  ready(JSON.stringify(facts));
 }

@@ -159,7 +159,6 @@ export class SessionLaunchCoordinator {
       pid: 0,
       exitCode: null,
       childIds: [],
-      attentionState: initialPrompt === undefined ? "done" : "working",
       meaningfulUpdatedAt: now,
       ...(initialInstructionId === undefined ? {} : { initialInstructionId }),
       ...(parsed.profile === "scout"

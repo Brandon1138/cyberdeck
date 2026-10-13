@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
+import type { WorkerTruth } from "../../src/domain/worker-truth.js";
 import {
   appendShellOutput,
   collectFleetSnapshot,
@@ -17,6 +18,7 @@ import {
   adoptWorkerModels,
   type FleetSnapshot,
   type FleetState,
+  type FleetThread,
 } from "../../src/client/fleet.js";
 import { imagePlacement } from "../../src/client/terminal-mascot.js";
 import type { PasteboardImageResult } from "../../src/client/clipboard-image.js";
@@ -69,15 +71,14 @@ function registryExit(record: SessionRecord): SessionRecord {
   return { ...record, exitCode: 0, attentionState: "stopped" };
 }
 
-function fleet(...records: Array<{
-  record: SessionRecord;
-  coordination?: FleetWorkerCoordinationView;
-}>): FleetSnapshot {
+function truth(state: WorkerTruth["state"]): WorkerTruth {
+  return { state, terminal: false, completedTurns: 0, canonicalTurns: 0, pendingInstructions: 0,
+    composerOccupied: false, modalOpen: false, detail: "Current broker observation" };
+}
+
+function fleet(...records: FleetThread[]): FleetSnapshot {
   return {
-    threads: records.map(({ record, coordination }) => ({
-      record,
-      ...(coordination === undefined ? {} : { coordination }),
-    })),
+    threads: records,
   };
 }
 
@@ -799,6 +800,7 @@ describe("fleet presentation", () => {
           attentionState: "done",
           latestPreview: "Latest useful response",
         }),
+        workerTruth: truth("idle"),
       },
       {
         record: session({
@@ -828,7 +830,7 @@ describe("fleet presentation", () => {
     // a running model, so the column shows what they were started with and says as much.
     expect(rendered).toContain("~Claude Provider Na…");
     expect(rendered).toContain("~Codex Another Mode…");
-    expect(rendered).toContain("Done");
+    expect(rendered).toContain("Idle");
     expect(rendered).toContain("Latest useful response");
     expect(rendered).toContain("14s");
     expect(rendered).not.toMatch(/recommend|preferred|fallback/i);
@@ -850,7 +852,7 @@ describe("fleet presentation", () => {
       updatedAt: "2026-07-22T09:58:00.000Z",
       displayOrder: 1,
     });
-    const snapshot = fleet({ record: done }, { record: needsInput });
+    const snapshot = fleet({ record: done, workerTruth: truth("idle") }, { record: needsInput, workerTruth: truth("blocked-modal") });
     const rendered = renderFleet(snapshot, createFleetState(snapshot), {
       color: false,
       width: 76,
@@ -867,9 +869,9 @@ describe("fleet presentation", () => {
     expect(needsInputLine).toMatch(/^  ·/u);
     // The preview yields to the model column at this width, rather than the other way round:
     // which agent is on a thread outranks the first words of what it last said.
-    expect(doneLine).toContain("The lates");
+    expect(doneLine).toContain("The…");
     expect(doneLine).toContain("~Claude Provi");
-    expect(doneLine).toContain("Done");
+    expect(doneLine).toContain("Idle");
     expect(doneLine).not.toContain("\n");
     expect(doneLine).toHaveLength(76);
     expect(needsInputLine).toHaveLength(76);
@@ -898,19 +900,19 @@ describe("fleet presentation", () => {
         writableRoots: [],
       },
     });
-    const snapshot: FleetSnapshot = { ...fleet({ record: worker }), projects: ["/repo"] };
+    const snapshot: FleetSnapshot = { ...fleet({ record: worker, workerTruth: truth("idle") }), projects: ["/repo"] };
     const rowAt = (width: number) => renderFleet(snapshot, createFleetState(snapshot), {
       color: false, width, height: 30, now: NOW_MS,
     }).split("\n").find((line) => line.includes("Claude Opus"))!;
 
     const wide = rowAt(140);
     expect(wide).toContain("repo-mik-76");
-    expect(wide).toContain("Done");
+    expect(wide).toContain("Idle");
 
     // At the 50-column dense-layout breakpoint, model and state still outrank worktree metadata.
     const narrow = rowAt(50);
     expect(narrow).not.toContain("repo-mik-76");
-    expect(narrow).toContain("Done");
+    expect(narrow).toContain("Idle");
     expect(narrow.length).toBeLessThanOrEqual(50);
   });
 
@@ -1006,12 +1008,12 @@ describe("fleet presentation", () => {
     });
 
     it("keeps the column at narrow widths, where the title is what yields instead", () => {
-      const rendered = render(new Map([[FIRST_ID, pr("merged", 42)]]), 60);
+      const rendered = render(new Map([[FIRST_ID, pr("merged", 42)]]), 63);
       const row = rowFor(rendered, "Ship indic");
 
       expect(row).toContain("#42");
-      expect(row).toHaveLength(60);
-      expect(rowFor(rendered, "No branch")).toHaveLength(60);
+      expect(row).toHaveLength(63);
+      expect(rowFor(rendered, "No branch")).toHaveLength(63);
     });
 
     it("ignores pull request state for threads not on screen", () => {
@@ -1043,11 +1045,11 @@ describe("fleet presentation", () => {
       );
       const rendered = renderFleet(snapshot, createFleetState(snapshot), {
         color: false,
-        // 63, not the original 61: MIK-85's owner sigil is budgeted ahead of every optional
+        // 66: the 14-cell status column and MIK-85's owner sigil are budgeted ahead of every optional
         // column, and the contested worker's held lease earns it one, so the two cells it costs
         // come off the top. The ordering this test guards — badge before pull request when only
         // one of them fits — is unchanged; it just starts two columns later.
-        width: 63,
+        width: 66,
         height: 28,
         now: NOW_MS,
         home: "/Users/brandon",
@@ -1059,7 +1061,7 @@ describe("fleet presentation", () => {
       const badgeRow = rows.find((line) => line.includes("conflict"));
 
       expect(badgeRow).toBeDefined();
-      expect(badgeRow).toHaveLength(63);
+      expect(badgeRow).toHaveLength(66);
       expect(rows.some((line) => /#1\b/u.test(line))).toBe(false);
     });
   });
@@ -1067,7 +1069,7 @@ describe("fleet presentation", () => {
   it("counts only running agents in the header while finished threads stay listed", () => {
     // The shape the fleet has right after a broker restart: durable history plus one live agent.
     const snapshot = fleet(
-      { record: session({ name: "Still running", attentionState: "working", displayOrder: 0 }) },
+      { record: session({ name: "Still running", attentionState: "working", displayOrder: 0 }), workerTruth: truth("working") },
       {
         record: session({
           id: "22222222-2222-4222-8222-222222222222",
@@ -1107,7 +1109,7 @@ describe("fleet presentation", () => {
       home: "/Users/brandon",
     });
 
-    expect(rendered).toContain("1 agents · 0 needs input · 1 working · 2 done · 1 failed");
+    expect(rendered).toContain("1 agents · 0 needs input · 1 working · 2 exited · 1 failed");
     expect(rendered).toContain("Finished earlier");
     expect(rendered).toContain("Finished before that");
   });
@@ -1119,14 +1121,14 @@ describe("fleet presentation", () => {
     expect(threadStatus({ record: session({ executionState: "errored" }) })).toBe("Failed");
   });
 
-  it("gives finished and blocked threads separate hues, and marks focus with a rule", () => {
+  it("gives idle and blocked threads separate hues, and marks focus with a rule", () => {
     const done = session({ attentionState: "done", displayOrder: 0 });
     const needsInput = session({
       id: "22222222-2222-4222-8222-222222222222",
       attentionState: "needs-input",
       displayOrder: 1,
     });
-    const snapshot = fleet({ record: done }, { record: needsInput });
+    const snapshot = fleet({ record: done, workerTruth: truth("idle") }, { record: needsInput, workerTruth: truth("blocked-modal") });
     const rendered = renderFleet(snapshot, createFleetState(snapshot), {
       color: true,
       width: 120,
@@ -1134,20 +1136,20 @@ describe("fleet presentation", () => {
       now: NOW_MS,
     });
 
-    // Done is Completion Green and Needs input is Attention Amber. The focused
+    // Idle is Cool Ash and Needs input is Attention Amber. The focused
     // row adds weight to the dot plus a selection rule in the gutter, never a colour.
-    expect(rendered).toContain("\u001b[1m\u001b[38;2;120;198;121m·\u001b[0m\u001b[0m");
+    expect(rendered).toContain("\u001b[1m\u001b[38;2;154;163;175m·\u001b[0m\u001b[0m");
     expect(rendered).toContain("\u001b[38;2;212;168;91m·\u001b[0m");
-    expect(rendered).toContain("\u001b[38;2;120;198;121mDone       \u001b[0m");
-    expect(rendered).toContain("\u001b[38;2;212;168;91mNeeds input\u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;154;163;175mIdle          \u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;212;168;91mNeeds input   \u001b[0m");
     expect(rendered).toContain("\u001b[38;2;154;163;175m▌\u001b[0m");
 
     // The regression this pins: "finished, go read it" and "blocked, go unblock it"
     // are different errands, so their rows must never resolve to the same hue.
     const rows = rendered.split("\n");
-    const doneRow = rows.find((row) => row.includes("Done       ")) ?? "";
+    const doneRow = rows.find((row) => row.includes("Idle          ")) ?? "";
     const blockedRow = rows.find((row) => row.includes("Needs input")) ?? "";
-    expect(doneRow).toContain("\u001b[38;2;120;198;121m");
+    expect(doneRow).toContain("\u001b[38;2;154;163;175m");
     expect(doneRow).not.toContain("\u001b[38;2;212;168;91m");
     expect(blockedRow).toContain("\u001b[38;2;212;168;91m");
     expect(blockedRow).not.toContain("\u001b[38;2;120;198;121m");
@@ -1160,20 +1162,20 @@ describe("fleet presentation", () => {
       attentionState: "stopped",
       displayOrder: 1,
     });
-    const snapshot = fleet({ record: working }, { record: stopped });
+    const snapshot = fleet({ record: working, workerTruth: truth("working") }, { record: stopped, workerTruth: truth("stopped") });
     const options = { color: true, width: 120, height: 28, now: NOW_MS };
     const rendered = renderFleet(snapshot, createFleetState(snapshot), options);
 
     // Working demands no action but is the one row an operator must find at a
     // glance, so it takes Live Ice rather than sitting in Cool Ash with Stopped.
     expect(rendered).toContain("\u001b[1m\u001b[38;2;169;198;214m•\u001b[0m\u001b[0m");
-    expect(rendered).toContain("\u001b[38;2;169;198;214mWorking    \u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;169;198;214mWorking       \u001b[0m");
     expect(rendered).toContain("\u001b[38;2;154;163;175m·\u001b[0m");
-    expect(rendered).toContain("\u001b[38;2;154;163;175mStopped    \u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;154;163;175mStopped       \u001b[0m");
 
     const rows = rendered.split("\n");
-    const liveRow = rows.find((row) => row.includes("Working    ")) ?? "";
-    const inertRow = rows.find((row) => row.includes("Stopped    ")) ?? "";
+    const liveRow = rows.find((row) => row.includes("Working       ")) ?? "";
+    const inertRow = rows.find((row) => row.includes("Stopped       ")) ?? "";
     expect(liveRow).toContain("\u001b[38;2;169;198;214m");
     expect(inertRow).not.toContain("\u001b[38;2;169;198;214m");
 
@@ -1494,13 +1496,13 @@ describe("fleet presentation", () => {
     expect(rendered).not.toContain("Tip: Try the Desktop app");
   });
 
-  it("renders status from the broker's attention state, never from replay bytes", () => {
-    // The broker classifies provider output once, on arrival, and persists the verdict on the
-    // record. The list is a reader of that verdict: there is no replay here to second-guess it.
-    expect(threadStatus({ record: session({ attentionState: "working" }) })).toBe("Working");
-    expect(threadStatus({ record: session({ attentionState: "done" }) })).toBe("Done");
+  it("renders status from shared broker truth and keeps legacy active uncertainty honest", () => {
+    expect(threadStatus({ record: session({ attentionState: "done" }), workerTruth: truth("working") })).toBe("Working");
+    expect(threadStatus({ record: session({ attentionState: "working" }), workerTruth: truth("idle") })).toBe("Idle");
+    expect(threadStatus({ record: session({ attentionState: "done" }) })).toBe("Unknown");
     const approval = fleet({
       record: session({ provider: "claude", model: "opus", attentionState: "needs-input" }),
+      workerTruth: truth("blocked-modal"),
     });
     expect(threadStatus(approval.threads[0]!)).toBe("Needs input");
     const rendered = renderFleet(approval, createFleetState(approval), {
@@ -1511,9 +1513,7 @@ describe("fleet presentation", () => {
     });
     expect(rendered).toContain("1 needs input");
     expect(rendered).toContain("Needs input");
-    // An active record the broker has not classified yet reads Working — the answer that invites
-    // patience — never Done, which would invite closing a thread that is still starting up.
-    expect(threadStatus({ record: session() })).toBe("Working");
+    expect(threadStatus({ record: session() })).toBe("Unknown");
     expect(threadStatus({ record: session({ executionState: "failed" }) })).toBe("Failed");
     expect(threadStatus({
       record: session({ executionState: "cancelled", exitCode: 0 }),
@@ -1722,7 +1722,7 @@ describe("fleet controls", () => {
     // but it wears its outcome rather than the "available" a joinable orchestrator wears.
     const endedRow = rendered.split("\n").find((line) => line.includes("Ended peer"));
     expect(endedRow).toBeDefined();
-    expect(endedRow).toContain("done");
+    expect(endedRow).toContain("exited");
     expect(endedRow).not.toContain("available");
   });
 
@@ -2451,7 +2451,7 @@ describe("fleet controls", () => {
 
     const terminal = fleet(
       { record: { ...root, executionState: "cancelled", attentionState: "stopped", exitCode: 0 } },
-      { record: { ...child, attentionState: "working" } },
+      { record: { ...child, attentionState: "working" }, workerTruth: truth("working") },
     );
     const armed = transitionFleet(stop.state, terminal, "ctrl+x", NOW_MS);
     expect(armed.state.notice).toBe("Delete orchestrator? press ctrl+x again");
@@ -4852,14 +4852,14 @@ describe("fleet repaint", () => {
   function transport(sessions: () => SessionRecord[] = () => []) {
     const closeListeners = new Set<() => void>();
     return {
-      request: vi.fn(async (method: string) => {
+      request: vi.fn(async (method: string): Promise<unknown> => {
         if (method === "session.list") return sessions();
         if (method === "fleet.preferences") return {};
         if (method === "session.snapshot") return { data: "" };
         throw new Error(`unexpected ${method}`);
       }),
       sendFrame: vi.fn(),
-      onFrame: vi.fn(() => () => undefined),
+      onFrame: vi.fn((_listener: (frame: { type: string }) => void) => () => undefined),
       onClose(listener: () => void) {
         closeListeners.add(listener);
         return () => closeListeners.delete(listener);
@@ -4868,20 +4868,34 @@ describe("fleet repaint", () => {
     };
   }
 
-  it("drives a finite mascot pulse from orchestrator attention and cancels its timer on exit", async () => {
+  it("drives a finite mascot pulse from orchestrator truth and cancels its timer on exit", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW_MS);
     const input = new Input();
     const output = new Output();
     const signals = new EventEmitter();
     let record = session({ kind: "orchestrator", attentionState: "done" });
+    let currentTruth = truth("idle");
+    let invalidate = () => {};
+    const client = Object.assign(transport(() => [record]), { fleetProjection: true });
+    const request = client.request.getMockImplementation()!;
+    client.request.mockImplementation(async (method) => {
+      if (method === "fleet.snapshot") return { kind: "full", version: JSON.stringify(currentTruth),
+        snapshot: { threads: [{ record, workerTruth: currentTruth }] } };
+      if (method === "fleet.subscribe" || method === "fleet.unsubscribe") return {};
+      return request(method);
+    });
+    client.onFrame.mockImplementation((listener: (frame: { type: string }) => void) => {
+      invalidate = () => listener({ type: "fleet-invalidated" });
+      return () => undefined;
+    });
     let placement = imagePlacement(42);
     const setCursorVisible = vi.fn((visible: boolean) => {
       placement = imagePlacement(visible ? 42 : 43);
     });
     const enter = vi.fn();
     const dispose = vi.fn();
-    const running = runFleet(transport(() => [record]) as never, input, output, signals, {
+    const running = runFleet(client as never, input, output, signals, {
       nativeMascot: { get placement() { return placement; }, setCursorVisible, enter, dispose },
     });
     try {
@@ -4889,8 +4903,10 @@ describe("fleet repaint", () => {
       expect(enter).toHaveBeenCalledTimes(1);
       expect(setCursorVisible).toHaveBeenLastCalledWith(true);
       record = { ...record, attentionState: "working" };
+      currentTruth = truth("working");
+      invalidate();
       signals.emit("SIGWINCH");
-      await vi.advanceTimersByTimeAsync(100); // Legacy transport refresh; resize renders cached data.
+      await vi.advanceTimersByTimeAsync(100); // Coalesced truth refresh; resize renders cached data.
       await vi.advanceTimersByTimeAsync(350);
       expect(setCursorVisible).toHaveBeenLastCalledWith(false);
       await vi.advanceTimersByTimeAsync(350);
@@ -4900,9 +4916,13 @@ describe("fleet repaint", () => {
       await vi.advanceTimersByTimeAsync(5000);
       expect(setCursorVisible.mock.calls.every(([visible]) => visible)).toBe(true);
       record = { ...record, attentionState: "done" };
+      currentTruth = truth("idle");
+      invalidate();
       signals.emit("SIGWINCH");
       await vi.advanceTimersByTimeAsync(100);
       record = { ...record, attentionState: "working" };
+      currentTruth = truth("working");
+      invalidate();
       signals.emit("SIGWINCH");
       await vi.advanceTimersByTimeAsync(100);
       await vi.advanceTimersByTimeAsync(350);
@@ -5360,7 +5380,7 @@ describe("fleet repaint", () => {
       wholeFrame: Buffer.byteLength(wholeFrame),
       rowDamage: Buffer.byteLength(damage),
     };
-    expect(bytes).toEqual({ wholeFrame: 851, rowDamage: 91 });
+    expect(bytes).toEqual({ wholeFrame: 853, rowDamage: 90 });
     expect(bytes.rowDamage).toBeLessThan(bytes.wholeFrame / 8);
 
     input.emit("data", Buffer.from([0x03, 0x03]));

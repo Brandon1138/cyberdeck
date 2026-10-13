@@ -6,6 +6,8 @@ import { once } from "node:events";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import type { CyberdeckMcpLaunch } from "../provider.js";
 import { ensurePrivateDirectory } from "../../persistence/private-files.js";
+import { codexDeveloperInstructions } from "./native-session-identity.js";
+import { readCodexDeveloperInstructions } from "./effective-instructions.js";
 
 export interface CodexRemoteMcpBridge {
   readonly address: string;
@@ -18,6 +20,8 @@ export interface CodexRemoteMcpBridgeOptions {
   mcp: CyberdeckMcpLaunch;
   /** Short private root: macOS Unix socket paths cannot use the longer system TMPDIR. */
   socketRoot?: string;
+  cwd?: string;
+  resolveDeveloperInstructions?: (cwd: string) => Promise<string | undefined>;
 }
 
 export type CodexRemoteMcpBridgeFactory = (
@@ -61,7 +65,7 @@ export const openCodexRemoteMcpBridge: CodexRemoteMcpBridgeFactory = async (opti
     upstream.on("close", () => { connections.delete(upstream); client.terminate(); });
     client.pause();
     upstream.once("open", () => {
-      forward(client, upstream, (data) => bindMcp(data, options));
+      forward(client, upstream, (data) => prepareCodexThreadMcp(data, options));
       forward(upstream, client);
       client.resume();
     });
@@ -86,12 +90,18 @@ export const openCodexRemoteMcpBridge: CodexRemoteMcpBridgeFactory = async (opti
   }
 };
 
-function bindMcp(data: RawData, options: CodexRemoteMcpBridgeOptions): RawData {
+/** Pure request transformation, also usable when a host cannot open a fixture socket. */
+export function bindCodexThreadMcp(data: RawData, options: CodexRemoteMcpBridgeOptions, inherited?: string): RawData {
   const message = JSON.parse(data.toString()) as { method?: string; params?: Record<string, unknown> };
   if (!THREAD_METHODS.has(message.method ?? "")) return data;
   const params = message.params ?? {};
+  const config = params.config as Record<string, unknown> | undefined;
   message.params = {
     ...params,
+    // Bind at the same native boundary as MCP: remote TUI config forwarding cannot omit identity.
+    developerInstructions: codexDeveloperInstructions(options.sessionId,
+      typeof params.developerInstructions === "string" ? params.developerInstructions
+        : typeof config?.developer_instructions === "string" ? config.developer_instructions : inherited),
     config: {
       ...params.config as object,
       "mcp_servers.cyberdeck": {
@@ -103,17 +113,28 @@ function bindMcp(data: RawData, options: CodexRemoteMcpBridgeOptions): RawData {
   return Buffer.from(JSON.stringify(message));
 }
 
-function forward(source: WebSocket, destination: WebSocket, transform?: (data: RawData) => RawData): void {
+export async function prepareCodexThreadMcp(data: RawData, options: CodexRemoteMcpBridgeOptions): Promise<RawData> {
+  const message = JSON.parse(data.toString()) as { method?: string; params?: Record<string, unknown> };
+  if (!THREAD_METHODS.has(message.method ?? "")) return data;
+  const params = message.params ?? {}, config = params.config as Record<string, unknown> | undefined;
+  let inherited: string | undefined;
+  if (typeof params.developerInstructions !== "string" && typeof config?.developer_instructions !== "string") {
+    const cwd = typeof params.cwd === "string" ? params.cwd : options.cwd ?? process.cwd();
+    inherited = await (options.resolveDeveloperInstructions ?? ((directory) => readCodexDeveloperInstructions({
+      cwd: directory, env: { ...process.env, CODEX_HOME: options.homeDirectory },
+    })))(cwd);
+  }
+  return bindCodexThreadMcp(data, options, inherited);
+}
+
+function forward(source: WebSocket, destination: WebSocket, transform?: (data: RawData) => RawData | Promise<RawData>): void {
+  let pending = Promise.resolve();
   source.on("message", (data, binary) => {
-    try {
-      source.pause();
-      destination.send(binary || !transform ? data : transform(data), { binary }, (error) => {
-        if (error) { source.terminate(); destination.terminate(); }
-        else source.resume();
-      });
-    } catch {
-      source.terminate();
-      destination.terminate();
-    }
+    source.pause();
+    pending = pending.then(async () => {
+      const forwarded = binary || !transform ? data : await transform(data);
+      await new Promise<void>((resolve, reject) => destination.send(forwarded, { binary }, error => error ? reject(error) : resolve()));
+      source.resume();
+    }).catch(() => { source.terminate(); destination.terminate(); });
   });
 }

@@ -271,16 +271,15 @@ export function renderHeader(
   return prepared([threads, state, options, "renderHeader"], () => {
     const statuses = threads.map(threadStatus);
     const count = (status: ThreadStatus) => statuses.filter((candidate) => candidate === status).length;
-    // "agents" counts agents that are actually running. Finished threads stay listed as history and
-    // that history is now durable across restarts, so counting them here would report a fleet far
-    // busier than it is — done means an agent finished a task, not that one is consuming resources.
+    // Process liveness is a separate fact from current activity and verified task outcomes.
     const running = threads.filter(({ record }) =>
       record.executionState === "active" || record.executionState === "starting").length;
     const counts = [
       `${running} agents`,
       `${count("Needs input")} needs input`,
       `${count("Working")} working`,
-      `${count("Done")} done`,
+      ...(["Starting", "Idle", "Stalled", "Provider limit", "Unknown", "Stopping", "Stopped", "Exited", "Done"] as const)
+        .flatMap((status) => count(status) === 0 ? [] : [`${count(status)} ${status.toLowerCase()}`]),
       ...(count("Interrupted") === 0 ? [] : [`${count("Interrupted")} interrupted`]),
       ...(count("Failed") === 0 ? [] : [`${count("Failed")} failed`]),
     ].join(" · ");

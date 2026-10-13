@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { WorkerModalDescriptor } from "./modal-descriptor.js";
-import type { SessionExecutionState } from "./session.js";
+import type { SessionExecutionState, ThreadAttentionState } from "./session.js";
 
 /**
  * The single authoritative per-worker state machine.
@@ -35,8 +35,14 @@ export const WorkerTruthStateSchema = z.enum([
   "blocked-composer",
   /** Alive, input surface clear, nothing in flight. Ready for the next instruction. */
   "idle",
-  /** Alive but neither transcript nor token count has moved for the configured stall window. */
+  /** A known in-flight turn has shown no observed progress for the configured window. */
   "stalled",
+  /** The available evidence does not establish current provider activity. */
+  "unknown",
+  /** Stop requested, but process termination has not been observed yet. */
+  "stopping",
+  /** The broker lost a live generation without observing its process exit. */
+  "interrupted",
   /** Terminal: the provider refused to continue on its own limits (session cap, prompt length). */
   "provider-limit",
   /** Terminal: an unrecoverable provider fault, possibly with the OS process still alive. */
@@ -57,6 +63,7 @@ const TERMINAL_STATES: ReadonlySet<WorkerTruthState> = new Set([
   "stopped",
   "exited",
   "failed",
+  "interrupted",
 ]);
 
 export function isTerminalWorkerTruth(state: WorkerTruthState): boolean {
@@ -138,6 +145,7 @@ export interface ComposerObservation {
 export interface WorkerTruthInput {
   executionState: SessionExecutionState;
   exitCode: number | null;
+  attentionState?: ThreadAttentionState;
   /** Derived from the PTY replay by `providerTerminalActivity`. */
   activity: "working" | "awaiting-input" | "needs-input" | "unknown";
   composer: ComposerObservation;
@@ -155,9 +163,11 @@ export interface WorkerTruthInput {
   pendingInstructions: number;
   /** Set once the provider stopped itself on its own limits. */
   providerLimit?: ProviderLimitTermination | undefined;
+  termination?: SessionTermination | undefined;
   stalledForSeconds?: number | undefined;
   /** A Scout's own terminal verdict, which outranks process-shaped guessing. */
   scoutTerminalState?: "complete" | "failed" | "budget_exhausted" | undefined;
+  scoutTaskSucceeded?: boolean;
   /** True once a stop was requested, so an exit is reported as `stopped` rather than `exited`. */
   stopRequested?: boolean | undefined;
   /** The structured reading of the blocking prompt, when the caller derived one. */
@@ -172,6 +182,8 @@ export interface WorkerTruth {
   pendingInstructions: number;
   composerOccupied: boolean;
   modalOpen: boolean;
+  /** Only a profile's verified structured result can establish task success. */
+  taskOutcome?: "unknown" | "succeeded";
   /**
    * Which prompt owns the UI and what answers it, present only in `blocked-modal`. Carrying it on
    * the truth is what lets every surface (threads_list, worker_events, workers_wait) describe the
@@ -199,6 +211,8 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
     pendingInstructions: input.pendingInstructions,
     composerOccupied: input.composer.occupied,
     modalOpen: input.composer.modalOpen,
+    taskOutcome: input.scoutTerminalState === "complete" && input.scoutTaskSucceeded === true
+      ? "succeeded" as const : "unknown" as const,
     ...(input.providerLimit === undefined ? {} : { providerLimit: input.providerLimit }),
   };
   const settle = (state: WorkerTruthState, detail: string): WorkerTruth => ({
@@ -222,20 +236,33 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
   if (input.executionState === "errored") {
     return settle("errored", "Provider session took an unrecoverable fault");
   }
+  if (input.termination?.kind === "provider-fault") {
+    return settle("errored", input.termination.reason);
+  }
   if (input.executionState === "cancelled") {
+    if (input.attentionState === "interrupted") {
+      return settle("interrupted", "Broker lost the previous process generation; its exit was not observed");
+    }
+    if (input.exitCode === null && (input.stopRequested === true || input.attentionState === "stopping")) {
+      return settle("stopping", "Stop requested; waiting for the provider process to exit");
+    }
     return settle("stopped", "Stopped on request");
   }
   if (input.executionState === "failed") {
     return settle("failed", `Provider process exited ${input.exitCode ?? "abnormally"}`);
   }
   if (input.executionState === "exited") {
+    const stopped = input.stopRequested === true || input.attentionState === "stopped";
     return settle(
-      input.stopRequested === true ? "stopped" : "exited",
-      input.stopRequested === true ? "Stopped on request" : input.terminationReason ?? "Provider process exited cleanly",
+      stopped ? "stopped" : "exited",
+      stopped ? "Stopped on request" : input.terminationReason ?? "Provider process exited cleanly",
     );
   }
   if (input.executionState === "starting") {
     return settle("starting", "Provider process launching");
+  }
+  if (input.stopRequested === true && input.exitCode === null) {
+    return settle("stopping", "Stop requested; waiting for the provider process to exit");
   }
 
   // A modal is drawn over whatever was on screen, so it outranks the activity underneath it. The
@@ -250,16 +277,13 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
     );
     return input.modal === undefined ? settled : { ...settled, modal: input.modal };
   }
-  if (input.activity === "working") {
-    return settle("working", "Provider turn in flight");
-  }
-  if (input.composer.occupied) {
+  if (input.composer.occupied && input.activity !== "working") {
     return settle(
       "blocked-composer",
       "Unsent text is sitting in the provider composer; no turn is running",
     );
   }
-  if (input.awaitingInputReady === true) {
+  if (input.awaitingInputReady === true && input.activity !== "working") {
     if (input.startupStalledForSeconds !== undefined) return {
       ...settle("stalled", `Provider startup needs attention after ${input.startupStalledForSeconds}s: no recognized input surface${input.startupEvidence ? `; ${input.startupEvidence}` : ""}`),
       stalledForSeconds: input.startupStalledForSeconds,
@@ -268,15 +292,21 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
   }
   if (input.stalledForSeconds !== undefined) {
     return {
-      ...settle("stalled", `No transcript or token movement for ${input.stalledForSeconds}s`),
+      ...settle("stalled", `No observed turn progress for ${input.stalledForSeconds}s; this does not prove a deadlock`),
       stalledForSeconds: input.stalledForSeconds,
     };
+  }
+  if (input.activity === "working") {
+    return settle("working", "Provider turn in flight");
+  }
+  if (input.activity !== "awaiting-input" && input.composer.inputReady !== true) {
+    return settle("unknown", "Current provider activity is unrecognized; no idle or completion claim is available");
   }
   return settle(
     "idle",
     input.pendingInstructions > 0
       ? `Idle with ${input.pendingInstructions} instruction(s) accepted but not yet submitted`
-      : `Idle after ${input.completedTurns} completed turn(s)`,
+      : `Idle after ${input.completedTurns} settled turn(s)`,
   );
 }
 
@@ -303,7 +333,7 @@ export const InstructionLifecycleStateSchema = z.enum([
   "completed",
   /** Terminal: the worker went terminal before the provider ever consumed it. */
   "undelivered",
-  /** Terminal: withdrawn before submission. */
+  /** Terminal: withdrawn before submission, or cancelled by an authoritative provider abort. */
   "cancelled",
 ]);
 
@@ -316,9 +346,9 @@ const INSTRUCTION_TRANSITIONS: Readonly<
   queued: ["rendered", "undelivered", "cancelled"],
   // Nothing goes back from `rendered`: bytes written at a terminal cannot be unwritten. The only
   // protection against a polluted composer is refusing to write, which is why `queued` exists.
-  rendered: ["submitted", "undelivered"],
-  submitted: ["acknowledged", "completed", "undelivered"],
-  acknowledged: ["completed", "undelivered"],
+  rendered: ["submitted", "undelivered", "cancelled"],
+  submitted: ["acknowledged", "completed", "undelivered", "cancelled"],
+  acknowledged: ["completed", "undelivered", "cancelled"],
   completed: [],
   undelivered: [],
   cancelled: [],
