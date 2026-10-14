@@ -71,8 +71,12 @@ export class InputScreen {
         this.control(token[1], token[2]!, token[3]!, offset + token.index);
       } else if (token[0] === "\u001bM") {
         if (this.row === this.top) {
+          this.lines.length = Math.max(this.lines.length, this.bottom + 1);
+          this.positions.length = Math.max(this.positions.length, this.bottom + 1);
           this.lines.splice(this.top, 0, []);
           this.positions.splice(this.top, 0, []);
+          this.lines.splice(this.bottom + 1, 1);
+          this.positions.splice(this.bottom + 1, 1);
         }
         else this.row = Math.max(0, this.row - 1);
         this.lines.length = Math.min(this.lines.length, 200);
@@ -94,6 +98,8 @@ export class InputScreen {
     if (character === "\n") {
       this.column = 0;
       if (this.row === this.bottom) {
+        this.lines.length = Math.max(this.lines.length, this.bottom + 1);
+        this.positions.length = Math.max(this.positions.length, this.bottom + 1);
         this.lines.splice(this.top, 1);
         this.lines.splice(this.bottom, 0, []);
         this.positions.splice(this.top, 1);

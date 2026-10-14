@@ -1,6 +1,7 @@
 import type { SessionRecord } from "../../domain/session.js";
 import type { TranscriptLike } from "./session-registry-ports.js";
 import type { WorkerTurnLedger, WorkerTurnObservation } from "./worker-turn-ports.js";
+import { nativeTurnIdentity } from "./worker-turn-native-state.js";
 
 export interface InitialInstructionRecovery {
   completed: boolean;
@@ -26,8 +27,7 @@ export async function recoverInitialInstruction(record: SessionRecord, transcrip
   let observation: WorkerTurnObservation;
   try {
     observation = await transcripts.observeProviderTurns({
-      sessionId: record.id, provider: record.provider, cwd: record.cwd,
-      createdAt: record.createdAt, initialInstructionId: record.initialInstructionId, turnNumber: ledger.completedTurns + 1, allowFallback: false,
+      ...nativeTurnIdentity(record), turnNumber: ledger.completedTurns + 1, allowFallback: false,
     });
   } catch {
     // A changing or unavailable provider log must not stop unrelated threads recovering. Do not

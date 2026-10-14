@@ -16,6 +16,36 @@ const transcripts = (): TranscriptLike => ({ append: vi.fn(), readCompletionLedg
   observeProviderTurns: vi.fn(async () => native), commitProviderTurns: vi.fn(async () => []) });
 
 describe("initial instruction recovery", () => {
+  it.each(["explicit", "inherited", "remote"])("requires an own marker on recovery of a %s marker-injected launch", async mode => {
+    const h = await codexLaunchFixture();
+    try {
+      if (mode === "explicit") h.a.providerInstructions = "explicit rules";
+      else h.a.launchRecord = { mode: "launch", transport: "pty", resolvedAt: h.a.createdAt, executable: "codex",
+        args: mode === "remote" ? ["bridge.js", "--actor-session", h.a.id, "--", "codex"]
+          : ["-c", 'developer_instructions="inherited rules\\n\\n[cyberdeck-native-session:' + h.a.id + ']"'],
+        cwd: h.root, cyberdeckEnv: {}, inheritedEnvCount: 0, truncated: false };
+      await h.metadata("FOREIGN", h.a.createdAt);
+      await h.complete("FOREIGN", "A BRIEF");
+      const restarted = new ThreadTranscriptStore(h.root, h.options);
+      await expect(recoverInitialInstruction(h.a, restarted)).resolves.toMatchObject({ completed: false, unavailable: expect.any(String) });
+      expect(await restarted.readCompletionLedger(h.a.id)).toMatchObject({ canonicalTurns: 0, turns: [] });
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a two-hour-old markerless rollout with the same brief after restart", async () => {
+    const h = await codexLaunchFixture();
+    try {
+      await h.metadata("FOREIGN", "2026-10-13T08:00:00.000Z");
+      await h.complete("FOREIGN", "A BRIEF");
+      const restarted = new ThreadTranscriptStore(h.root, h.options);
+      await expect(recoverInitialInstruction(h.a, restarted)).resolves.toEqual({
+        completed: false,
+        unavailable: "Exact native first-turn identity is unavailable; resume or restart to retry without resending the brief",
+      });
+      expect(await restarted.readCompletionLedger(h.a.id)).toMatchObject({ canonicalTurns: 0, turns: [] });
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+  });
+
   it("banks an aborted native launch as cancelled across restart instead of completing its brief", async () => {
     const h = await codexLaunchFixture();
     try {

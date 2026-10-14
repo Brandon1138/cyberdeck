@@ -2191,6 +2191,19 @@ describe("WorkerTurnEngine", () => {
 });
 
 describe("Codex launch attribution", () => {
+  it("refuses a markerless same-brief rollout on a live marker-injected launch", async () => {
+    const h = await codexLaunchFixture(); roots.push(h.root);
+    h.a.providerInstructions = "explicit developer rules";
+    vi.useFakeTimers();
+    const current = harness(h.a, { transcripts: h.store });
+    current.engine.noteRenderedInstruction({ instructionId: h.a.initialInstructionId!, expectedTurn: 1, renderedAt: h.a.createdAt });
+    await h.metadata("FOREIGN", h.a.createdAt);
+    await h.complete("FOREIGN", "A BRIEF");
+    await current.engine.reconcileCanonicalTurns();
+    expect(current.engine.canonicalTurns).toBe(0);
+    expect(await h.store.readCompletionLedger(h.a.id)).toMatchObject({ canonicalTurns: 0, turns: [] });
+  });
+
   it("leaves a metadata-only neighbour unclaimed and binds each live launch to its exact rollout", async () => {
     const h = await codexLaunchFixture(); roots.push(h.root);
     vi.useFakeTimers();

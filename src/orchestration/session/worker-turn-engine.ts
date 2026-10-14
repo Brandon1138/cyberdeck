@@ -36,7 +36,7 @@ import type { CompletionLedgerEntry, RenderedInstruction, WorkerStatusReading,
 import { normalizedHead, SubmitVerifier } from "./worker-submit-verification.js";
 import { WorkerInputReadiness } from "./worker-input-readiness.js";
 import { observeWorkerModal, projectWorkerTurnTruth } from "./worker-turn-truth.js";
-import { NativeTurnActivity, pendingExitTruth, supportsNativeTurnObservation, nativeReadFailure } from "./worker-turn-native-state.js";
+import { NativeTurnActivity, pendingExitTruth, supportsNativeTurnObservation, nativeReadFailure, nativeTurnIdentity } from "./worker-turn-native-state.js";
 
 export interface WorkerTurnAppendResult {
   fatal: boolean;
@@ -955,10 +955,7 @@ export class WorkerTurnEngine {
         attempt += 1
       ) {
         observation = await observe.call(transcripts, {
-          sessionId: this.record.id,
-          provider: this.record.provider,
-          cwd: this.record.cwd,
-          createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
+          ...nativeTurnIdentity(this.record),
           turnNumber: claim.completionTarget,
           fallbackText: fallback,
           allowFallback: attempt + 1 === transcriptAttempts,
@@ -1133,10 +1130,7 @@ export class WorkerTurnEngine {
         const allowFallback = fallbackEvidence !== undefined
           && (!nativeCapable || attempt + 1 === attempts);
         const candidate = await observe.call(transcripts, {
-          sessionId: this.record.id,
-          provider: this.record.provider,
-          cwd: this.record.cwd,
-          createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
+          ...nativeTurnIdentity(this.record),
           turnNumber: completionTarget,
           ...(fallbackEvidence === undefined ? {} : { fallbackText: fallbackEvidence.text }),
           allowFallback,
@@ -1457,10 +1451,7 @@ export class WorkerTurnEngine {
       let observation: WorkerTurnObservation;
       try {
         observation = await observe.call(transcripts, {
-          sessionId: this.record.id,
-          provider: this.record.provider,
-          cwd: this.record.cwd,
-          createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
+          ...nativeTurnIdentity(this.record),
           turnNumber: before + 1,
           allowFallback: false,
         });
@@ -1582,10 +1573,7 @@ export class WorkerTurnEngine {
     const read = transcripts?.readObservedModel;
     if (transcripts === undefined || read === undefined) return;
     const observed = await read.call(transcripts, {
-      sessionId: this.record.id,
-      provider: this.record.provider,
-      cwd: this.record.cwd,
-      createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
+      ...nativeTurnIdentity(this.record),
       turnNumber: this.completedTurnCount,
     }).catch(() => undefined);
     if (!this.isCurrentObservation(epoch, revision, owner, activityRevision)) return;
@@ -1615,10 +1603,7 @@ export class WorkerTurnEngine {
     const read = transcripts?.readTranscriptMessages;
     if (transcripts === undefined || read === undefined) return [];
     return read.call(transcripts, {
-      sessionId: this.record.id,
-      provider: this.record.provider,
-      cwd: this.record.cwd,
-      createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
+      ...nativeTurnIdentity(this.record),
       turnNumber: this.completedTurnCount,
     });
   }

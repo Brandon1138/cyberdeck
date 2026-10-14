@@ -7,6 +7,8 @@ import { CodexConversationBindingStore } from "../../src/persistence/codex-conve
 import { codexSessionMarker } from "../../src/providers/codex/native-session-identity.js";
 import { CodexProviderAdapter } from "../../src/providers/codex.js";
 import type { SessionRecord } from "../../src/domain/session.js";
+import { NativeTurnActivity } from "../../src/orchestration/session/worker-turn-native-state.js";
+import { codexLaunchFixture } from "../fixtures/codex-launch.js";
 
 const A = "11111111-1111-4111-8111-111111111111", B = "22222222-2222-4222-8222-222222222222";
 const cwd = "/tmp/repo", T = "2026-10-13T10:00:00.000Z";
@@ -38,6 +40,86 @@ async function fixture() {
 }
 
 describe("exact Codex native binding", () => {
+  it("does not bind or commit a two-hour-old markerless same-brief rollout on a live read", async () => {
+    const h = await codexLaunchFixture(); roots.push(h.root);
+    await h.metadata("LEGACY X", "2026-10-13T08:00:00.000Z");
+    await h.complete("LEGACY X", "A BRIEF");
+    const observation = await h.store.observeProviderTurns(h.input(h.a));
+    expect(observation).toMatchObject({ nativeSourceAvailable: false, nativeSourceStatus: "unbound", turns: [] });
+    await h.store.commitProviderTurns(observation);
+    expect(await new CodexConversationBindingStore(h.root).read(h.a.id)).toBeUndefined();
+    expect(await h.store.readCompletionLedger(h.a.id)).toMatchObject({ completedTurns: 0, canonicalTurns: 0, turns: [] });
+  });
+
+  it.each([-30_001, -30_000, 30_000, 30_001])("bounds legacy markerless launch matching to 30 seconds (%s ms)", async offset => {
+    const f = await fixture();
+    const instructionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await f.store.append({ sessionId: A, kind: "prompt", source: "orchestrator", text: "FIRST BRIEF",
+      data: { initial: true, instructionId, expectedTurn: 1 } });
+    await f.rollout("legacy", undefined, new Date(Date.parse(T) + offset).toISOString(), [
+      { type: "event_msg", payload: { type: "user_message", message: "FIRST BRIEF" } }, completed("first", "answer"),
+    ]);
+    expect((await f.store.observeProviderTurns({ ...f.input(), initialInstructionId: instructionId })).nativeSourceAvailable)
+      .toBe(Math.abs(offset) <= 30_000);
+  });
+
+  it("requires the own marker for a marker-injected launch even inside the legacy window", async () => {
+    const f = await fixture();
+    const instructionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await f.store.append({ sessionId: A, kind: "prompt", source: "orchestrator", text: "FIRST BRIEF",
+      data: { initial: true, instructionId, expectedTurn: 1 } });
+    await f.rollout("legacy", undefined, T, [
+      { type: "event_msg", payload: { type: "user_message", message: "FIRST BRIEF" } }, completed("first", "foreign"),
+    ]);
+    expect(await f.store.observeProviderTurns({ ...f.input(), initialInstructionId: instructionId, codexMarkerRequired: true }))
+      .toMatchObject({ nativeSourceAvailable: false, nativeSourceStatus: "unbound", turns: [] });
+    expect(await f.bindings.read(A)).toBeUndefined();
+  });
+
+  it("keeps a bound worker and its three-hour-later same-brief retry on their own marked rollouts", async () => {
+    const f = await fixture();
+    const retryAt = "2026-10-13T13:00:00.000Z";
+    const instructionIds = ["dddddddd-dddd-4ddd-8ddd-dddddddddddd", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"];
+    const prompt = { type: "event_msg", payload: { type: "user_message", message: "SAME BRIEF" } };
+    for (const [index, sessionId] of [A, B].entries()) await f.store.append({ sessionId, kind: "prompt", source: "orchestrator", text: "SAME BRIEF",
+      data: { initial: true, instructionId: instructionIds[index], expectedTurn: 1 } });
+    const inputs = [T, retryAt].map((at, index) => ({ ...f.input(index === 0 ? A : B, at),
+      initialInstructionId: instructionIds[index], codexMarkerRequired: true }));
+    const own = await f.rollout("native-x", A, T, [prompt, completed("x", "X ANSWER")]);
+    expect(await f.store.observeProviderTurns(inputs[0]!)).toMatchObject({ nativeSourceAvailable: true, nativeSessionId: "native-x" });
+    await f.rollout("native-y", B, retryAt, [prompt, { type: "event_msg", timestamp: "2026-10-13T13:00:04.000Z",
+      payload: { type: "task_complete", turn_id: "y", last_agent_message: "Y ANSWER" } }]);
+    for (const store of [f.store, new ThreadTranscriptStore(f.root, f.options)]) {
+      for (const [index, input] of inputs.entries()) {
+        const observation = await store.observeProviderTurns(input);
+        expect(observation).toMatchObject({ nativeSourceAvailable: true, nativeSourceStatus: "available",
+          nativeSessionId: index === 0 ? "native-x" : "native-y", turns: [{ text: index === 0 ? "X ANSWER" : "Y ANSWER" }] });
+        const native = new NativeTurnActivity(input.createdAt);
+        native.observeScreen(0, "awaiting-input");
+        native.observe(observation, 0, 0);
+        expect(native.refused).toBe(false);
+        expect(native.activity("awaiting-input", 0)).toBe("awaiting-input");
+      }
+    }
+    expect(await f.bindings.read(A)).toMatchObject({ transcriptPath: own, nativeSessionId: "native-x" });
+    expect(await f.bindings.read(B)).toMatchObject({ nativeSessionId: "native-y" });
+    const noScan = new ThreadTranscriptStore(f.root, { ...f.options, codexSessionsDirectory: join(f.root, "missing") });
+    for (const input of inputs) expect(await noScan.observeProviderTurns(input)).toMatchObject({ nativeSourceAvailable: true });
+  });
+
+  it("refuses two matching rollouts with the same actor marker before binding", async () => {
+    const f = await fixture();
+    const instructionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await f.store.append({ sessionId: A, kind: "prompt", source: "orchestrator", text: "FIRST BRIEF",
+      data: { initial: true, instructionId, expectedTurn: 1 } });
+    for (const nativeId of ["one", "two"]) await f.rollout(nativeId, A, T, [
+      { type: "event_msg", payload: { type: "user_message", message: "FIRST BRIEF" } }, completed(nativeId, "answer"),
+    ]);
+    expect(await f.store.observeProviderTurns({ ...f.input(), initialInstructionId: instructionId, codexMarkerRequired: true }))
+      .toMatchObject({ nativeSourceAvailable: false, nativeSourceStatus: "conflict", turns: [] });
+    expect(await f.bindings.read(A)).toBeUndefined();
+  });
+
   it("keeps duplicate exact launch identities ambiguous after a binding has been persisted", async () => {
     const f = await fixture();
     const instructionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -94,7 +176,7 @@ describe("exact Codex native binding", () => {
       .toMatchObject({ nativeSourceAvailable: false, turns: [] });
   });
 
-  it("refuses duplicate launch identities and foreign actor claims before persisting a binding", async () => {
+  it("refuses duplicate markerless launch identities but skips foreign actors before persisting a binding", async () => {
     for (const duplicate of [false, true]) {
       const f = await fixture();
       const instructionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -104,7 +186,7 @@ describe("exact Codex native binding", () => {
       await f.rollout("one", duplicate ? undefined : B, T, frames);
       if (duplicate) await f.rollout("two", undefined, T, frames);
       expect(await f.store.observeProviderTurns({ ...f.input(), initialInstructionId: instructionId, allowFallback: false }))
-        .toMatchObject({ nativeSourceAvailable: false, nativeSourceStatus: "conflict", turns: [] });
+        .toMatchObject({ nativeSourceAvailable: false, nativeSourceStatus: duplicate ? "conflict" : "unbound", turns: [] });
       expect(await f.bindings.read(A)).toBeUndefined();
     }
   });

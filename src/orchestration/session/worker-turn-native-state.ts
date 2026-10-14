@@ -1,7 +1,22 @@
 import type { SessionRecord } from "../../domain/session.js";
-import type { ProviderTerminalActivity, WorkerTurnObservation } from "./worker-turn-ports.js";
+import type { CaptureWorkerTurns, ProviderTerminalActivity, WorkerTurnObservation } from "./worker-turn-ports.js";
 import { projectWorkerTruth, type WorkerTruth } from "../../domain/worker-truth.js";
 import { StringDecoder } from "node:string_decoder";
+
+/** Carry the durable launch identity on every live and recovery source read. */
+export function nativeTurnIdentity(record: SessionRecord): Omit<CaptureWorkerTurns, "turnNumber" | "fallbackText" | "allowFallback"> {
+  const args = record.launchRecord?.args ?? [];
+  const positional = args.indexOf("--");
+  const options = positional < 0 ? args : args.slice(0, positional);
+  // Explicit instructions always pass through codexDeveloperInstructions. The override prefix
+  // survives launch-record truncation; remote bridges inject under their actor-session option.
+  const codexMarkerRequired = record.providerInstructions !== undefined
+    || options.some((value, index) => value.startsWith("developer_instructions=")
+      && (options[index - 1] === "-c" || options[index - 1] === "--config"))
+    || options.includes("--actor-session");
+  return { sessionId: record.id, provider: record.provider, cwd: record.cwd, createdAt: record.createdAt,
+    initialInstructionId: record.initialInstructionId, codexMarkerRequired };
+}
 
 export function pendingExitTruth(completedTurns: number, canonicalTurns: number, pendingInstructions: number): WorkerTruth {
   return { ...projectWorkerTruth({ executionState: "active", exitCode: null, activity: "unknown",

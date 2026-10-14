@@ -5,6 +5,14 @@ import { PROVIDER_SCREENS, redraw } from "./provider-screen-fixtures.js";
 const CLEAR = "\u001b[2J";
 
 describe("terminalComposerState", () => {
+  it("drops a draft scrolled off by reverse index inside a three-row region", () => {
+    const draft = "\u001b[2J\u001b[8;1H\u001b[2K\u001b[9;1H› stale unsent draft\u001b[10;1H  ? for shortcuts  98% context left";
+    expect(terminalComposerState("codex", draft)).toMatchObject({ occupied: true, content: "stale unsent draft" });
+    const scrolled = "\u001b[8;10r\u001b[8;1H\u001bM\u001bM\u001b[r";
+    const empty = "\u001b[8;1H\u001b[2K› Ask Codex to do anything\u001b[9;1H\u001b[2K  ? for shortcuts  98% context left";
+    expect(terminalComposerState("codex", draft + scrolled + empty)).toMatchObject({ occupied: false });
+  });
+
   it.each(PROVIDER_SCREENS)("reads $provider drafts and their in-place erasure from current cells", ({ provider, draft, idle }) => {
     const held = redraw(draft);
     expect(terminalComposerState(provider, held)).toMatchObject({ occupied: true, content: "operator's unsent draft" });

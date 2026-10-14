@@ -10,6 +10,8 @@ import { codexSessionClaims } from "../providers/codex/native-session-identity.j
 
 interface CodexTranscriptResolution { path?: string; status: NativeSourceStatus; reason?: string }
 
+const CODEX_SESSION_MATCH_WINDOW_MS = 30_000;
+
 /** One exact binding path for source reads, with an additional first-brief gate for launch receipts. */
 export class CodexConversationDiscovery {
   private readonly codexLaunchClaims = new Map<string, { reader: JsonlOffsetReader; claims: Set<string> }>();
@@ -39,7 +41,20 @@ export class CodexConversationDiscovery {
       if (identity !== undefined && !await codexLaunchMatches(binding.transcriptPath, identity)) {
         return this.refuse("unbound", "NATIVE_LAUNCH_IDENTITY_UNAVAILABLE");
       }
-      if (identity === undefined) return { status: "available", path: binding.transcriptPath };
+      const claims = await this.readCodexLaunchClaims(binding.transcriptPath);
+      if (claims.size > 0 && (!claims.has(input.sessionId) || claims.size !== 1)) {
+        return this.refuse("conflict", "NATIVE_BINDING_CONFLICT");
+      }
+      if (input.codexMarkerRequired && !claims.has(input.sessionId)) {
+        return this.refuse("unbound", "NATIVE_CONVERSATION_UNBOUND");
+      }
+      if (claims.size === 0 && identity !== undefined
+        && !(Math.abs(Date.parse(metadata.timestamp) - Date.parse(input.createdAt)) <= CODEX_SESSION_MATCH_WINDOW_MS)) {
+        return this.refuse("unbound", "NATIVE_LAUNCH_IDENTITY_UNAVAILABLE");
+      }
+      if (identity === undefined || claims.size === 1 && claims.has(input.sessionId)) {
+        return { status: "available", path: binding.transcriptPath };
+      }
     }
     const createdAt = Date.parse(input.createdAt);
     const textHash = identity?.text === undefined ? identity?.textHash : codexLaunchFingerprint(identity.text);
@@ -62,15 +77,19 @@ export class CodexConversationDiscovery {
         const metadata = await readCodexMetadata(path);
         if (metadata === undefined || metadata.cwd !== input.cwd) continue;
         const claims = await this.readCodexLaunchClaims(path);
-        const launchMatches = identity !== undefined && await codexLaunchMatches(path, identity);
-        // Exact first-brief identity can establish a binding for launches without an actor marker.
-        // Foreign or multiple developer claims still refuse attribution, even with matching text.
-        if (launchMatches && claims.size === 0) claims.add(input.sessionId);
-        if (launchMatches && (!claims.has(input.sessionId) || claims.size !== 1)) conflictingActorClaim = true;
-        if (claims.has(input.sessionId) && claims.size !== 1) conflictingActorClaim = true;
         const nativeOwners = owners.get(metadata.id) ?? new Set<string>();
         for (const claim of claims) nativeOwners.add(claim);
         owners.set(metadata.id, nativeOwners);
+        // Another actor's exact marker is proof this rollout is foreign, not an ambiguity.
+        if (claims.size > 0 && !claims.has(input.sessionId)) continue;
+        const launchMatches = identity !== undefined && await codexLaunchMatches(path, identity);
+        // Preserve #148's narrow legacy rule. New launches must carry their own actor marker.
+        if (!input.codexMarkerRequired && launchMatches && claims.size === 0
+          && Math.abs(Date.parse(metadata.timestamp) - createdAt) <= CODEX_SESSION_MATCH_WINDOW_MS) {
+          claims.add(input.sessionId);
+          nativeOwners.add(input.sessionId);
+        }
+        if (claims.has(input.sessionId) && claims.size !== 1) conflictingActorClaim = true;
         if (claims.size === 1 && claims.has(input.sessionId)
           && (identity === undefined || launchMatches) && path !== binding?.transcriptPath) candidates.push({
           sessionId: input.sessionId, nativeSessionId: metadata.id, transcriptPath: path, cwd: metadata.cwd,

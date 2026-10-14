@@ -868,19 +868,15 @@ describe("independent ledger safety and cost controls",()=>{
     }finally{read.mockRestore();write.mockRestore();}
   });
 
-  it("preserves last native boundary outside the64 receipts through79 broker negatives and rotation",async()=>{
+  it("preserves last native boundary outside the 64 receipts through 79 broker negatives and rotation",async()=>{
     const source=await actualCodexStore({maxBytes:4096,retainedFiles:1});const input={sessionId:sessionRecord().id,provider:"codex",cwd:sessionRecord().cwd,createdAt:sessionRecord().createdAt,turnNumber:1};
     await appendFile(source.path,source.lines([source.frame("task_complete","native-before-negatives","2026-08-20T09:00:02.000Z")]));
     await source.store.captureProviderTurns(input);
-    const before=performance.now();
     await source.store.commitProviderTurns({...input,turnNumber:2,turns:Array.from({length:79},(_,i)=>({providerTurnId:`broker-instruction:${i}`,providerOccurredAt:"2026-08-20T09:00:03.000Z",text:"cancelled",transport:"broker-lifecycle" as const,data:{outcome:"cancelled"}}))});
-    const elapsedMs=performance.now()-before;
-    const file=join(source.root,"threads","turn-ledgers",`${input.sessionId}.json`);const size=(await stat(file)).size;
     const reopened=new ThreadTranscriptStore(source.root,source.options);const ledger=await reopened.readCompletionLedger(input.sessionId);
     expect(ledger).toMatchObject({completedTurns:80,canonicalTurns:1,lastNativeTurn:{data:{semanticTurnId:"codex:native-before-negatives",turnNumber:1}}});expect(ledger.turns).toHaveLength(64);
     await appendFile(source.path,source.lines([source.frame("task_complete","native-after-negatives","2026-08-20T09:00:04.000Z")]));
     const next=await reopened.observeProviderTurns({...input,turnNumber:81});expect(next.turns.map(t=>t.providerTurnId)).toEqual(["native-after-negatives"]);
     await reopened.commitProviderTurns(next);expect(await reopened.readCompletionLedger(input.sessionId)).toMatchObject({completedTurns:81,canonicalTurns:2});
-    await writeFile("/private/tmp/status-independent-ledger-cost.json",JSON.stringify({method:"One local temporary-store batch of79 short broker negative receipts, fsynced per receipt; no live broker/provider",elapsedMs,msPerReceipt:elapsedMs/79,sidecarBytes:size,retainedReceipts:ledger.turns.length},null,2));
   });
 });

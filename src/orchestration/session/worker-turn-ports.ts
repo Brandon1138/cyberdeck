@@ -74,6 +74,8 @@ export interface CaptureWorkerTurns {
   allowFallback?: boolean;
   /** Launch receipts require exact native attribution before any first-turn capture. */
   initialInstructionId?: string | undefined;
+  /** Marker-injected Codex launches cannot adopt legacy markerless rollouts. */
+  codexMarkerRequired?: boolean;
 }
 
 export type WorkerTurnTransport = "provider-native" | "terminal-replay-fallback" | "broker-lifecycle";
