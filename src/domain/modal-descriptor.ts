@@ -105,8 +105,10 @@ interface ModalRecognitionRule {
   kind: Exclude<ModalKind, "unknown">;
   /** Must carry the `g` flag: recognition wants the *last* occurrence, not the first. */
   pattern: RegExp;
-  /** The dialog's last line, without the `g` flag; evidence ends where it first matches. */
+  /** The dialog's last line, without the `g` flag; normally ends evidence at its first match. */
   through?: RegExp;
+  /** Variant guards must see all rows through the final footer in the bounded window. */
+  lastFooter?: boolean;
   /** Context retained for fingerprints, never used as a dialog heading or answer grammar. */
   evidencePrefix?: RegExp;
   /** Fixed, or read off the fingerprinted evidence for a dialog whose rows vary. */
@@ -218,8 +220,9 @@ const RULES: Readonly<Record<string, readonly ModalRecognitionRule[]>> = {
       // 0.158 onward. ratatui positions words with cursor moves, which stripping removes along with
       // the spaces they skipped. Anchored on the footer too, so prose about folder access is not it.
       kind: "workspace-trust",
-      pattern: /Folder\s*access(?=[\s\S]{0,1600}?enter\s*continue[\s\S]{0,40}?esc\s*(?:quit|back|cancel))/giu,
-      through: /enter\s*continue[\s\S]{0,40}?esc\s*(?:quit|back|cancel)/iu,
+      pattern: /^[ \t]*Folder[ \t]*access[ \t]*$(?=[\s\S]{0,1600}?^[ \t]*enter[ \t]*continue[^\n]{0,40}?esc[ \t]*(?:quit|back|cancel)[ \t]*$)/gimu,
+      through: /^[ \t]*enter[ \t]*continue[^\n]{0,40}?esc[ \t]*(?:quit|back|cancel)[ \t]*$/imu,
+      lastFooter: true,
       answers: codexFolderAccessAnswers,
     },
     {
@@ -316,7 +319,7 @@ export function describeBlockedModal(
     if (index < 0) continue;
     // A known dialog ends at its footer. Words in its path, warnings, or choice labels cannot
     // outrank that complete dialog. A later real heading after its footer still wins.
-    const footer = rule.through?.exec(plain.slice(index, index + BOUNDED_EVIDENCE_WINDOW_CHARS));
+    const footer = footerMatch(rule, plain.slice(index, index + BOUNDED_EVIDENCE_WINDOW_CHARS));
     const rank = footer === undefined || footer === null ? index : index + footer.index + footer[0].length;
     if (winner === undefined || rank > winner.rank) {
       winner = { rule, index, rank };
@@ -337,7 +340,7 @@ export function describeBlockedModal(
     index,
     index + (rule.through === undefined ? EVIDENCE_WINDOW_CHARS : BOUNDED_EVIDENCE_WINDOW_CHARS),
   );
-  const end = rule.through?.exec(window);
+  const end = footerMatch(rule, window);
   const dialog = end === undefined || end === null ? window : window.slice(0, end.index + end[0].length);
   let start = index;
   if (rule.evidencePrefix !== undefined) {
@@ -405,6 +408,13 @@ function hooksUnderReview(
     .filter((hook) => hook.trustStatus === "untrusted" || hook.trustStatus === "modified")
     .map(({ key, currentHash, trustStatus }) => ({ key, currentHash, trustStatus }))
     .sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
+}
+
+function footerMatch(rule: ModalRecognitionRule, window: string): RegExpExecArray | undefined | null {
+  if (rule.through === undefined) return undefined;
+  return rule.lastFooter === true
+    ? [...window.matchAll(new RegExp(rule.through.source, `${rule.through.flags}g`))].at(-1)
+    : rule.through.exec(window);
 }
 
 function lastMatchIndex(value: string, pattern: RegExp): number {

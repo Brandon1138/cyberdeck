@@ -43,12 +43,8 @@ export function claudePlanAnswers(evidence: string): readonly ModalAnswerOption[
     /^2\.\s*Yes,\s*and\s*manually\s*approve\s*edits$/iu,
     /^3\.\s*No,\s*keep\s*planning$/iu,
   ];
-  let after = -1;
-  for (const row of rows) {
-    const index = lines.findIndex((line, at) => at > after && row.test(line));
-    if (index < 0) return [];
-    after = index;
-  }
+  const numbered = lines.filter((line) => /^\d+\./u.test(line));
+  if (numbered.length !== rows.length || !rows.every((row, index) => row.test(numbered[index]!))) return [];
   return [
     { id: "proceed-auto", label: "Yes, and auto-accept edits" },
     { id: "proceed-manual", label: "Yes, and manually approve edits" },
@@ -57,9 +53,9 @@ export function claudePlanAnswers(evidence: string): readonly ModalAnswerOption[
 }
 
 const CODEX_FOLDER_DECLINES: readonly { pattern: RegExp; label: string }[] = [
-  { pattern: /2\.\s*Quit/iu, label: "Quit" },
-  { pattern: /2\.\s*Back\s*to\s*Agent\s*Command\s*Center/iu, label: "Back to Agent Command Center" },
-  { pattern: /2\.\s*Keep\s*current\s*directory/iu, label: "Keep current directory" },
+  { pattern: /^[ \t]*[›❯>]?[ \t]*2\.[ \t]*Quit[ \t]*$/imu, label: "Quit" },
+  { pattern: /^[ \t]*[›❯>]?[ \t]*2\.[ \t]*Back[ \t]*to[ \t]*Agent[ \t]*Command[ \t]*Center[ \t]*$/imu, label: "Back to Agent Command Center" },
+  { pattern: /^[ \t]*[›❯>]?[ \t]*2\.[ \t]*Keep[ \t]*current[ \t]*directory[ \t]*$/imu, label: "Keep current directory" },
 ];
 
 /**
@@ -70,7 +66,7 @@ const CODEX_FOLDER_DECLINES: readonly { pattern: RegExp; label: string }[] = [
 export function codexFolderAccessAnswers(evidence: string): readonly ModalAnswerOption[] {
   if (/Open\s*(?:restricted|existing\s*task)/iu.test(evidence)) return [];
   if (!/Trust\s*this\s*folder\?/iu.test(evidence)) return [];
-  if (!/1\.\s*Trust\s*and\s*continue/iu.test(evidence)) return [];
+  if (!/^[ \t]*[›❯>]?[ \t]*1\.[ \t]*Trust[ \t]*and[ \t]*continue[ \t]*$/imu.test(evidence)) return [];
   const trust = { id: "trust", label: "Trust and continue" };
   const decline = CODEX_FOLDER_DECLINES.find(({ pattern }) => pattern.test(evidence));
   return decline === undefined ? [trust] : [trust, { id: "decline", label: decline.label }];
@@ -83,7 +79,7 @@ export function codexFolderAccessAnswers(evidence: string): readonly ModalAnswer
 export function codexHookReviewAnswers(evidence: string): readonly ModalAnswerOption[] {
   // "Trust all" in flight disables every row until it settles.
   if (/Trusting\s*hooks\.{3}/iu.test(evidence)) return [];
-  return /3\.\s*Continue\s*without\s*trusting/iu.test(evidence)
+  return /^[ \t]*[›❯>]?[ \t]*3\.[ \t]*Continue[ \t]*without[ \t]*trusting/imu.test(evidence)
     ? [{ id: "continue-without-hooks", label: "Continue without trusting (hooks won't run)" }]
     : [];
 }
