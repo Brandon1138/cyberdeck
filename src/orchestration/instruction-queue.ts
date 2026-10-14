@@ -115,23 +115,31 @@ export class InstructionQueue {
     });
   }
 
-  /** Account for a native launch receipt after restart without ever resending its prompt. */
+  /**
+   * Account for a startup brief after restart without ever resending its prompt. A native launch
+   * receipt (Claude, Codex) settles from the provider's own transcript. A non-native one (Cursor)
+   * was persisted before the spawn and is flushed only after the create returns, so a broker that
+   * exits in between leaves it `accepted` with no later boundary obliged to deliver it: recovery
+   * delivers it to a live target or retires it as undelivered.
+   */
   async recoverLaunchInstructions(readCanonicalTurns: (sessionId: string) => Promise<number | { canonicalTurns: number; pending?: string | undefined }>): Promise<void> {
     for (const record of await this.store.list()) {
-      if (record.launch !== true || ["completed", "undelivered", "cancelled"].includes(record.status)) continue;
+      if (record.launch === undefined || ["completed", "undelivered", "cancelled"].includes(record.status)) continue;
       await this.serialize(record.targetSessionId, async () => {
         const current = (await this.store.list(record.targetSessionId)).find(({ id }) => id === record.id)!;
         if (["completed", "undelivered", "cancelled"].includes(current.status)) return;
-        const recovery = await readCanonicalTurns(record.targetSessionId);
-        const canonicalTurns = typeof recovery === "number" ? recovery : recovery.canonicalTurns;
-        if (canonicalTurns >= (record.expectedTurn ?? 1)) {
-          const at = new Date().toISOString();
-          await this.persistState(current, "completed", { submittedAt: current.submittedAt ?? at, completedAt: at, holdReason: undefined });
-          return;
-        }
-        if (typeof recovery !== "number" && recovery.pending !== undefined) {
-          await this.persistState(current, "queued", { holdReason: "native-recovery-unavailable" });
-          return;
+        if (record.launch === true) {
+          const recovery = await readCanonicalTurns(record.targetSessionId);
+          const canonicalTurns = typeof recovery === "number" ? recovery : recovery.canonicalTurns;
+          if (canonicalTurns >= (record.expectedTurn ?? 1)) {
+            const at = new Date().toISOString();
+            await this.persistState(current, "completed", { submittedAt: current.submittedAt ?? at, completedAt: at, holdReason: undefined });
+            return;
+          }
+          if (typeof recovery !== "number" && recovery.pending !== undefined) {
+            await this.persistState(current, "queued", { holdReason: "native-recovery-unavailable" });
+            return;
+          }
         }
         let target: SessionRecord | undefined;
         try { target = this.registry.get(record.targetSessionId); } catch { /* Missing launch attempt. */ }
