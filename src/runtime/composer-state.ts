@@ -128,7 +128,7 @@ export function frameInputReady(provider: ProviderId, frame: string): boolean {
     if (line === "" || /^[─━═╭╮╰╯┌┐└┘]+$/u.test(line)) continue;
     if (/^\? for shortcuts\b/iu.test(line)) { footer = true; continue; }
     if (provider === "codex" && /^(?:\d+% context left\b|[\d.,]+[KkMm]? (?:tokens? )?used\b|← for agents\b|(?:gpt-[\w.-]+|o[134](?:-[\w.-]+)?)\s+(?:minimal|low|medium|high|xhigh|default)\s+·\s+(?:\/|~|[a-z]:\\))/iu.test(line)) { footer = true; continue; }
-    if (provider === "claude" && /^(?:[⏵⏸]+\s*)?(?:bypass permissions on|accept edits on|plan mode on)\b.*shift\+tab/iu.test(line)) { footer = true; continue; }
+    if (provider === "claude" && /^(?:[⏵⏸]+\s*)?(?:bypass permissions on|accept edits on|plan mode on|auto mode on)\b.*shift\+tab/iu.test(line)) { footer = true; continue; }
     return false;
   }
   return false;

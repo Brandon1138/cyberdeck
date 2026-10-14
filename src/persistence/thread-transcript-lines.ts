@@ -60,6 +60,34 @@ export async function readCodexMetadata(
   return metadata;
 }
 
+/** Only the launch turn can identify a rollout; later prompts and assistant text cannot. */
+export async function codexLaunchMatches(path: string, identity: { id: string; text?: string }): Promise<boolean> {
+  const matches = (value: unknown): boolean => {
+    if (typeof value === "string") return value.trim() === identity.text?.trim()
+      || value.split(/[^a-zA-Z0-9-]+/u).includes(identity.id);
+    if (Array.isArray(value)) return value.some(matches);
+    return typeof value === "object" && value !== null && Object.values(value).some(matches);
+  };
+  let matched = false, sawContext = false;
+  await visitLines(path, (line) => {
+    let frame;
+    try { frame = JSON.parse(line); } catch { return true; }
+    if (frame.type === "turn_context" && !sawContext) {
+      sawContext = true;
+      // Context instructions can carry the broker's launch marker, never a model/assistant echo.
+      matched = matches(frame.payload?.developer_instructions) || matches(frame.payload?.user_instructions);
+      if (matched) return false;
+    }
+    if (frame.type === "event_msg" && frame.payload?.type === "user_message") {
+      matched = matches(frame.payload.message);
+      return false;
+    }
+    // A completion without an identifying launch prompt is unavailable, not canonical evidence.
+    return !(frame.type === "event_msg" && frame.payload?.type === "task_complete");
+  });
+  return matched;
+}
+
 export function parseClaudeTurn(line: string, now: (() => string) | undefined): NativeTurn | undefined {
   try {
     const frame = JSON.parse(line) as {

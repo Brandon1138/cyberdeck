@@ -1,6 +1,6 @@
 import { JsonlOffsetReader } from "./jsonl-offset-reader.js";
 import { ThreadSegmentIndex, parseThreadEvent } from "./thread-segment-index.js";
-import { claudeProjectSlug, candidateDayDirectories, readCodexMetadata, ClaudeTurnStops, parseCodexTurn, compareNativeTurns, visitLines, ignoreMissing, readCompleteLinesFromOffset, type NativeTurn } from "./thread-transcript-lines.js";
+import { claudeProjectSlug, candidateDayDirectories, readCodexMetadata, codexLaunchMatches, ClaudeTurnStops, parseCodexTurn, compareNativeTurns, visitLines, ignoreMissing, readCompleteLinesFromOffset, type NativeTurn } from "./thread-transcript-lines.js";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { readdir, rename, stat, unlink } from "node:fs/promises";
@@ -123,6 +123,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   private readonly semanticTurnIds = new Set<string>();
   private readonly completionLedgers = new Map<string, WorkerTurnLedger>();
   private readonly nativeTurnOrdinals = new Set<string>();
+  private readonly initialInstructions = new Map<string, { id: string; text?: string }>();
   private readonly nativePaths = new Map<string, string>();
   private readonly observedModelCursors = new Map<string, ObservedModelCursor>();
   private readonly providerBudgetTelemetryCursors = new Map<string, ProviderBudgetTelemetryCursor>();
@@ -207,6 +208,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
       sessionId: input.sessionId,
       provider: input.provider,
       turnNumber: input.turnNumber,
+      ...(input.provider === "codex" && this.launchIdentity(input) !== undefined ? { nativeAvailable } : {}),
       ...(activityVersion === undefined ? {} : { activityVersion }),
       turns: unseenTurns.map((turn) => ({
         providerTurnId: turn.id,
@@ -284,7 +286,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     if (parse === undefined) return [];
     const path = input.provider === "claude"
       ? await this.resolveClaudeTranscript(input)
-      : this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
+      : await this.resolveCodexTranscript(input);
     if (path === undefined) return [];
     const projection = await this.nativeProjection(input, path, "preview");
     return projection.cleared ? [] : [...projection.messages];
@@ -311,7 +313,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     if (parse === undefined) return undefined;
     const path = input.provider === "claude"
       ? await this.resolveClaudeTranscript(input)
-      : this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
+      : await this.resolveCodexTranscript(input);
     if (path === undefined) return undefined;
 
     const cached = this.observedModelCursors.get(input.sessionId);
@@ -337,7 +339,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     }
     cursor = { path, offset: nextOffset, observation };
     this.observedModelCursors.set(input.sessionId, cursor);
-    if (observation !== undefined) this.nativePaths.set(input.sessionId, path);
+    if (observation !== undefined && this.launchIdentity(input) !== undefined) this.nativePaths.set(input.sessionId, path);
     return observation;
   }
 
@@ -355,10 +357,12 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   ): Promise<ParsedProviderBudgetTelemetry> {
     await this.init();
     if (input.provider !== "codex") return {};
-    const path = this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
+    const path = await this.resolveCodexTranscript(input);
     if (path === undefined) return {};
-    this.nativePaths.set(input.sessionId, path);
-    this.claimedCodexPaths.set(path, input.sessionId);
+    if (this.launchIdentity(input) !== undefined) {
+      this.nativePaths.set(input.sessionId, path);
+      this.claimedCodexPaths.set(path, input.sessionId);
+    }
     const key = `${input.sessionId}\0${window}`;
     const cached = this.providerBudgetTelemetryCursors.get(key);
     let cursor: ProviderBudgetTelemetryCursor = cached !== undefined && cached.path === path
@@ -423,6 +427,14 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   }
 
   private rememberSemanticTurn(event: ThreadEvent): void {
+    if (event.kind === "prompt" && event.data.initial === true && typeof event.data.instructionId === "string") {
+      this.initialInstructions.set(event.sessionId, { id: event.data.instructionId,
+        ...(event.text === undefined || event.data.storageOriginalLength !== undefined ? {} : { text: event.text }) });
+      this.nativePaths.delete(event.sessionId);
+      for (const [path, owner] of this.claimedCodexPaths) {
+        if (owner === event.sessionId) this.claimedCodexPaths.delete(path);
+      }
+    }
     if (event.kind === "turn" && typeof event.data.turnNumber === "number"
       && typeof event.data.semanticTurnId === "string"
       && !this.semanticTurnIds.has(this.semanticKey(event.sessionId, event.data.semanticTurnId))) {
@@ -679,7 +691,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     if (input.provider === "claude") {
       if (value.cleared) this.refuseClaudeTranscript(input.sessionId, "cleared-unbound");
       else { this.claimedClaudePaths.set(path, input.sessionId); this.claudeStatuses.set(input.sessionId, "bound"); }
-    } else if (purpose === "turns" || value.messages.length > 0) {
+    } else if (this.launchIdentity(input) !== undefined && (purpose === "turns" || value.messages.length > 0)) {
       this.nativePaths.set(input.sessionId, path); this.claimedCodexPaths.set(path, input.sessionId);
     }
     return value;
@@ -698,16 +710,29 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   }
 
   private async readCodexTurns(input: CaptureProviderTurns): Promise<NativeTurnRead> {
-    const path = this.nativePaths.get(input.sessionId) ?? await this.findCodexTranscript(input);
+    const path = await this.resolveCodexTranscript(input);
     if (path === undefined) return { turns: [], available: false };
     const projection = await this.nativeProjection(input, path, "turns");
-    return { turns: [...projection.turns.values()].sort(compareNativeTurns), available: projection.hasNativeTurns };
+    return { turns: [...projection.turns.values()].sort(compareNativeTurns), available: this.launchIdentity(input) !== undefined || projection.hasNativeTurns };
+  }
+
+  private launchIdentity(input: CaptureProviderTurns): { id: string; text?: string } | undefined {
+    const stored = this.initialInstructions.get(input.sessionId);
+    return input.initialInstructionId === undefined || input.initialInstructionId === stored?.id
+      ? stored : { id: input.initialInstructionId };
+  }
+
+  private async resolveCodexTranscript(input: CaptureProviderTurns): Promise<string | undefined> {
+    // Never reuse a heuristic preview/model/budget binding as launch evidence.
+    return this.launchIdentity(input) !== undefined ? this.findCodexTranscript(input)
+      : this.nativePaths.get(input.sessionId) ?? this.findCodexTranscript(input);
   }
 
   private async findCodexTranscript(input: CaptureProviderTurns): Promise<string | undefined> {
     const root = this.options.codexSessionsDirectory
       ?? join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "sessions");
     const createdAt = Date.parse(input.createdAt);
+    const identity = this.launchIdentity(input);
     const candidates: Array<{ path: string; distance: number; id: string }> = [];
     for (const directory of candidateDayDirectories(root, createdAt)) {
       const entries = await readdir(directory, { withFileTypes: true }).catch(
@@ -724,7 +749,8 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
         const metadata = await readCodexMetadata(path);
         if (metadata === undefined || metadata.cwd !== input.cwd) continue;
         const distance = Math.abs(Date.parse(metadata.timestamp) - createdAt);
-        if (distance <= CODEX_SESSION_MATCH_WINDOW_MS) {
+        if (distance <= CODEX_SESSION_MATCH_WINDOW_MS
+          && (identity === undefined || await codexLaunchMatches(path, identity))) {
           candidates.push({ path, distance, id: metadata.id });
         }
       }
@@ -732,7 +758,8 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     candidates.sort((left, right) =>
       left.distance - right.distance || left.id.localeCompare(right.id)
     );
-    return candidates[0]?.path;
+    // Duplicate exact identities are ambiguous too; never decide their owner by timestamp.
+    return identity !== undefined && candidates.length !== 1 ? undefined : candidates[0]?.path;
   }
 }
 

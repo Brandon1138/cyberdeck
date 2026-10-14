@@ -36,6 +36,8 @@ class RuntimeReplayObservation implements ReplayObservation {
     return this.digest.frameText();
   }
 
+  modalFrameText(): string { return this.digest.inputFrameText(); }
+
   strippedTail(maxChars: number): BoundedReplayTail {
     return this.digest.strippedTail(maxChars);
   }
@@ -61,13 +63,14 @@ implements WorkerTurnObservationPort, WorkerTurnPreviewPort {
   }
 
   composer(provider: string, replay: ReplayObservation) {
-    const composer = frameComposerState(provider as ProviderId, replay.frameText(), {
+    const frame = this.digest(replay).inputFrameText();
+    const composer = frameComposerState(provider as ProviderId, frame || replay.frameText(), {
       modalOpen: this.activity(provider, replay) === "needs-input",
     });
     return {
       ...composer,
       inputReady: !composer.modalOpen && !composer.occupied
-        && frameInputReady(provider as ProviderId, this.digest(replay).inputFrameText()),
+        && frameInputReady(provider as ProviderId, frame),
     };
   }
 

@@ -24,8 +24,8 @@ import {
   type ResetOrchestratorRequest,
 } from "../domain/orchestrator.js";
 import type { CyberdeckCapability } from "../domain/capability.js";
-import type { ApprovalMode, ProviderId, Sandbox, SessionRecord } from "../domain/session.js";
-import { resolveProviderPermission } from "./permission-policy.js";
+import type { ApprovalMode, ProviderId, SessionRecord } from "../domain/session.js";
+import { orchestratorSandbox, resolveProviderPermission } from "./permission-policy.js";
 import type {
   OrchestratorBindingRepository,
   ProviderPermissionPreferenceReader,
@@ -39,17 +39,16 @@ import type {
   SessionLookupPort,
   SessionResumePort,
   SessionStartPort,
+  PeerStartupInstruction,
 } from "./session/session-ports.js";
+export type { PeerStartupInstruction } from "./session/session-ports.js";
 
 export interface OrchestratorManagerResult {
   binding: OrchestratorBinding;
   session: SessionRecord;
   created: boolean;
   /**
-   * Capabilities the resolved permission mode could not deliver. An orchestrator session hardcodes
-   * Claude orchestrators remain read-only, so automatic mode asks for something Claude has no
-   * write-denying mode to express without prompting. Codex orchestrators use its reviewed
-   * workspace-write preset. Any diminished request starts and says so.
+   * Capabilities the resolved permission mode could not deliver.
    */
   warnings?: string[];
 }
@@ -74,6 +73,7 @@ interface PeerOrigin {
   createdBy: { sessionId: string };
   capabilities: readonly CyberdeckCapability[];
   name?: string;
+  startup?: PeerStartupInstruction;
 }
 
 export class OrchestratorManager {
@@ -144,12 +144,13 @@ export class OrchestratorManager {
    * instead of the full default list. Policy — who may ask, for what scope, how many — is the
    * peer service's; this only records what it decided.
    */
-  async createPeer(input: CreatePeerOrchestratorRequest): Promise<OrchestratorManagerResult> {
+  async createPeer(input: CreatePeerOrchestratorRequest, startup?: PeerStartupInstruction): Promise<OrchestratorManagerResult> {
     const { createdBy, capabilities, name, ...request } = CreatePeerOrchestratorRequestSchema.parse(input);
     return this.createValidatedPeer(request, {
       createdBy,
       capabilities,
       ...(name === undefined ? {} : { name }),
+      ...(startup === undefined ? {} : { startup }),
     });
   }
 
@@ -194,7 +195,8 @@ export class OrchestratorManager {
   ): Promise<OrchestratorManagerResult> {
     const capabilities = origin?.capabilities ?? ORCHESTRATOR_GRANT_CAPABILITIES;
     const approvalMode = request.approvalMode
-      ?? await this.configuredApprovalMode(request.provider);
+      ?? await this.configuredApprovalMode(request.provider)
+      ?? (request.provider === "claude" ? "auto" : undefined);
     const sandbox = orchestratorSandbox(request.provider);
     // Resolved before the session exists so an unsatisfiable request is refused at create time,
     // and a satisfiable-but-diminished one is reported instead of discovered at a prompt.
@@ -226,7 +228,7 @@ export class OrchestratorManager {
         name: origin?.name
           ?? `Cyberdeck orchestrator (${request.provider}${request.model === undefined ? "" : `:${request.model}`})`,
         providerInstructions: orchestratorPrompt(scope, capabilities),
-      }, undefined, async (started) => {
+      }, origin?.startup?.native === false ? undefined : origin?.startup?.message, async (started) => {
         const now = new Date().toISOString();
         binding = {
           key: peer ? peerOrchestratorKey(primaryKey, started.id) : primaryKey,
@@ -244,12 +246,14 @@ export class OrchestratorManager {
             scope,
           },
           ...(origin === undefined ? {} : { createdBy: origin.createdBy }),
+          ...(origin?.startup === undefined ? {} : { initialInstructionId: origin.startup.id }),
           createdAt: now,
           updatedAt: now,
         };
         await this.store.put(binding);
         await this.observeBindingSession?.(binding, started);
-      });
+        await origin?.startup?.prepare(started);
+      }, ...(origin?.startup === undefined || origin.startup.native === false ? [] : [origin.startup.id]));
     } catch (error) {
       if (binding !== undefined) {
         try { await this.observeBindingSession?.(binding); }
@@ -445,10 +449,6 @@ export class OrchestratorManager {
     }
     return this.workerPreferences;
   }
-}
-
-function orchestratorSandbox(provider: ProviderId): Sandbox {
-  return provider === "codex" ? "workspace-write" : "read-only";
 }
 
 /** Single source of truth for which providers can host the Cyberdeck MCP server. */

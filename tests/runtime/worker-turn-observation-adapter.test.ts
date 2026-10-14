@@ -2,11 +2,29 @@ import { describe, expect, it } from "vitest";
 import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 
 describe("WorkerTurnObservationAdapter", () => {
+  it("keeps Claude's composer readable after Kitty keyboard mode changes", () => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    const frame = "\u001b[<u\u001b[>1u\u001b[=1u\u001b[1;1HClaude Code v2.1.280\u001b[4;1H❯ \u001b[5;1H────────────────\u001b[6;1H⏵⏵ auto mode on (shift+tab to cycle) ◈ max · /effort";
+    for (const byte of Buffer.from(frame)) replay.appendBytes(Buffer.from([byte]));
+    expect(adapter.composer("claude", replay)).toMatchObject({ inputReady: true, occupied: false });
+  });
+
+  it("reads Codex's repainted empty composer after submitting a wrapped draft", () => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    replay.appendBytes(Buffer.from("\u001b[1;1H› Reply with exactly SECOND_ACK. Do not use tools\u001b[2;1H  or make changes.\u001b[4;1HGPT-6.1-Sol high · /tmp/repo"));
+    expect(adapter.composer("codex", replay).occupied).toBe(true);
+    replay.appendBytes(Buffer.from("\u001b[1;1H\u001b[J› Reply with exactly SECOND_ACK. Do not use tools\u001b[2;1H  or make changes.\u001b[4;1H• SECOND_ACK\u001b[6;1H› Ask Codex to do anything\u001b[8;1HGPT-6.1-Sol high · /tmp/repo"));
+    expect(adapter.composer("codex", replay)).toMatchObject({ inputReady: true, occupied: false });
+  });
+
   it.each([
     ["codex", "› \n? for shortcuts  100% context left\n"],
     ["codex", "› Ask Codex to do anything\n100% context left\n"],
     ["claude", "─────────────────\n❯ \n─────────────────\n? for shortcuts\n"],
     ["claude", "❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)\n"],
+    ["claude", "❯ \n⏵⏵ auto mode on (shift+tab to cycle)\n"],
     ["claude", "❯ Try \"write a test for cli.ts\"\n────────────────────\n⏸ plan mode on (shift+tab to cycle)\n"],
     ["cursor", "→ Plan, search, build anything\n"],
     ["cursor", "→ Add a follow-up\n"],

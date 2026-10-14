@@ -71,6 +71,8 @@ const OrchestratorBindingRecordSchema = z.object({
     approval: PeerApprovalSchema.optional(),
     depth: z.number().int().nonnegative().optional(),
   }).optional(),
+  /** Durable first-instruction receipt, present only when a create included a brief. */
+  initialInstructionId: z.uuid().optional(),
   /** Legacy field retained only so pre-box-preference binding records remain readable. */
   workerPreferences: z.object({
     caveman: z.boolean().optional(),

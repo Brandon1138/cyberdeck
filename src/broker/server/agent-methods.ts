@@ -17,6 +17,7 @@ import {
   AgentNotificationsReadParamsSchema,
 } from "../../orchestration/orchestrator-notification-control.js";
 import { AgentCreateOrchestratorParamsSchema } from "../../orchestration/orchestrator-peer-service.js";
+import { AnswerOrchestratorModalParamsSchema } from "../../orchestration/orchestrator-modal-service.js";
 import {
   AgentLeaseParamsSchema,
   AgentWorkerControlParamsSchema,
@@ -70,6 +71,9 @@ export const agentMethods: Record<string, BrokerMethodHandler> = {
     return requireOrchestratorPeers(server.options).create(
       AgentCreateOrchestratorParamsSchema.parse(frame.params),
     );
+  },
+  "agent.orchestrator.answerModal": async (server, _context, frame) => {
+    return requireAgentControl(server.options).answerOrchestratorModal(AnswerOrchestratorModalParamsSchema.parse(frame.params));
   },
   "agent.orchestrator.forceStop": async (server, _context, frame) => {
     return requireAgentControl(server.options).stopOrchestrator(

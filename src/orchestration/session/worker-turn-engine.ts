@@ -1,15 +1,11 @@
 import {
-  describeBlockedModal,
   modalAnswerKeySequence,
   type ModalAnswerAttempt,
-  type WorkerModalDescriptor,
 } from "../../domain/modal-descriptor.js";
 import type { SessionRecord } from "../../domain/session.js";
-import { BLOCKED_PROMPT_TAIL_CHARS } from "../../domain/terminal-replay.js";
 import {
   advanceInstruction,
   DELIVERY_HOLD_DETAIL,
-  projectWorkerTruth,
   providerLimitFromTermination,
   type ComposerObservation,
   type DeliveryHoldReason,
@@ -40,6 +36,7 @@ import type { CompletionLedgerEntry, RenderedInstruction, WorkerStatusReading,
   TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
 import { normalizedHead, SubmitVerifier } from "./worker-submit-verification.js";
 import { WorkerInputReadiness } from "./worker-input-readiness.js";
+import { observeWorkerModal, projectWorkerTurnTruth } from "./worker-turn-truth.js";
 
 export interface WorkerTurnAppendResult {
   fatal: boolean;
@@ -80,7 +77,7 @@ export class WorkerTurnEngine {
   private readonly replay: ReplayObservation;
   private activity: ReturnType<WorkerTurnObservationPort["activity"]> = "unknown";
   private observedWorking = false;
-  private readonly inputReadiness = new WorkerInputReadiness();
+  private readonly inputReadiness: WorkerInputReadiness;
   private readonly completionLedger = new WorkerCompletionLedger();
   private get completedTurnCount(): number { return this.completionLedger.completedTurns; }
   private get canonicalTurnCount(): number { return this.completionLedger.canonicalTurns; }
@@ -157,6 +154,14 @@ export class WorkerTurnEngine {
     private readonly options: WorkerTurnEngineFactoryOptions,
   ) {
     this.replay = options.observations.createReplay(replayChars);
+    this.inputReadiness = new WorkerInputReadiness({ now: () => this.now(), windowSeconds: options.workerStallSeconds,
+      active: () => record.executionState === "active" && !this.terminalFinalizing,
+      expired: () => {
+        if (this.projectTruth().state === "stalled") {
+          void options.effects.setAttention("needs-input", true).catch(() => undefined);
+          options.effects.notifySessionUpdate();
+        }
+      } });
     this.currentProviderLimit = providerLimitFromTermination(record.termination);
     this.reconciler.armPoll();
   }
@@ -380,49 +385,31 @@ export class WorkerTurnEngine {
   }
 
   projectTruth(): WorkerTruth {
-    if (this.terminalFinalizing) {
-      return projectWorkerTruth({
-        executionState: "active",
-        exitCode: null,
-        activity: "working",
-        composer: { modalOpen: false, occupied: false },
-        completedTurns: this.completedTurnCount,
-        canonicalTurns: this.canonicalTurnCount,
-        pendingInstructions: this.rendered.length,
-      });
-    }
-    this.observeComposer();
-    const stalled = this.stalledWorker();
-    return projectWorkerTruth({
+    if (!this.terminalFinalizing) this.observeComposer();
+    return projectWorkerTurnTruth({
+      terminalFinalizing: this.terminalFinalizing,
+      readiness: this.inputReadiness, deliveryHeld: this.deliveryHeld,
+      nativeTurnSettled: this.nativeTurnSettled,
+      frameText: this.replay.frameText(),
+      scoutTransport: this.record.scout?.transport,
       executionState: this.record.executionState,
       exitCode: this.record.exitCode,
       activity: this.activity,
       composer: this.composer,
-      awaitingInputReady: this.record.scout?.transport !== "headless-stream-json" && this.inputReadiness.pending
-        && !this.nativeTurnSettled,
       completedTurns: this.completedTurnCount,
       canonicalTurns: this.canonicalTurnCount,
       pendingInstructions: this.rendered.length,
       providerLimit: this.currentProviderLimit,
-      stalledForSeconds: stalled?.stalledForSeconds,
+      stalledForSeconds: this.terminalFinalizing ? undefined : this.stalledWorker()?.stalledForSeconds,
       scoutTerminalState: this.record.scout?.terminalState,
       stopRequested: this.options.effects.stopRequested?.(),
       modal: this.currentModalDescriptor(),
+      ...(this.record.termination === undefined ? {} : { terminationReason: this.record.termination.reason }),
     });
   }
 
-  /**
-   * The structured reading of the prompt this worker is parked on, or undefined when nothing
-   * blocks. Derived from the same replay tail the blocked verdict came from, at read time, so the
-   * descriptor can never describe a dialog other than the one currently drawn.
-   */
-  private currentModalDescriptor(): WorkerModalDescriptor | undefined {
-    if (this.options.effects.hasRuntime?.() === false) return undefined;
-    if (!this.composer.modalOpen && this.activity !== "needs-input") return undefined;
-    return describeBlockedModal(
-      this.record.provider,
-      this.replay.strippedTail(BLOCKED_PROMPT_TAIL_CHARS).text,
-    );
+  private currentModalDescriptor() {
+    return observeWorkerModal(this.record.provider, this.composer, this.activity, this.replay, this.options.effects.hasRuntime?.());
   }
 
   /**
@@ -566,13 +553,16 @@ export class WorkerTurnEngine {
     this.terminalFinalizing = true;
     const frozenArmedReplay = this.idleTimer === undefined ? undefined : rawReplay();
     this.releaseTimers(frozenArmedReplay);
+    const initialNativeRead = this.initialInstructionPending() && this.hasNativeTurnPort()
+      ? this.reconcileCanonicalTurns() : undefined;
     const captures = [...this.pendingTurnCaptures];
-    const requiresSettlement = captures.length > 0
+    const requiresSettlement = initialNativeRead !== undefined || captures.length > 0
       || this.pendingTurnCommit !== undefined
       || this.completedTurnCount < this.completionBarrierFloor;
     if (!requiresSettlement) return undefined;
 
     return (async () => {
+      await initialNativeRead;
       await Promise.all(captures);
       await this.settlePendingTurnCommit();
       await this.drainCompletionBarrier();
@@ -645,6 +635,7 @@ export class WorkerTurnEngine {
   }
 
   releaseTimers(frozenOutgoingReplay?: string): void {
+    this.inputReadiness.release();
     const claim = this.turnCaptureOwner;
     const screenTurnsAreSemantic = !this.terminalScreenReservationsDiscarded
       && this.screenTurnsAreSemantic();
@@ -726,9 +717,14 @@ export class WorkerTurnEngine {
   }
 
   private screenTurnsAreSemantic(): boolean {
-    return this.record.profile !== "scout" || this.record.scout?.terminalState === "complete";
+    return !this.initialInstructionPending()
+      && (this.record.profile !== "scout" || this.record.scout?.terminalState === "complete");
   }
 
+  private initialInstructionPending(): boolean {
+    return this.record.initialInstructionId !== undefined
+      && this.rendered.some(({ instructionId }) => instructionId === this.record.initialInstructionId);
+  }
   private rememberScreenCompletion(
     completionTarget: number,
     replay: string,
@@ -775,7 +771,7 @@ export class WorkerTurnEngine {
     if (this.composer.modalOpen || this.activity === "needs-input") return "provider-modal";
     if (this.composer.occupied) return "composer-occupied";
     // A rendered container instruction owns the next turn even before the TUI repaints.
-    if (this.record.executor === "orbstack-container" && this.rendered.length > 0) return "provider-busy";
+    if (this.initialInstructionPending() || this.record.executor === "orbstack-container" && this.rendered.length > 0) return "provider-busy";
     // An indeterminate or incomplete durable receipt has no automatic recovery path. Accepting
     // another instruction would write work whose completion can never be captured while the poisoned
     // reservation remains, so fail closed at the existing provider-busy delivery boundary.
@@ -819,6 +815,7 @@ export class WorkerTurnEngine {
     instructionId: string | undefined,
   ): Promise<InstructionDelivery> {
     this.deliveryHeld = true;
+    if (hold === "provider-starting") this.inputReadiness.hold();
     const at = new Date().toISOString();
     await this.appendTranscript("lifecycle", "broker", "instruction held", {
       instructionState: "queued" satisfies InstructionLifecycleState,
@@ -978,7 +975,7 @@ export class WorkerTurnEngine {
           sessionId: this.record.id,
           provider: this.record.provider,
           cwd: this.record.cwd,
-          createdAt: this.record.createdAt,
+          createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
           turnNumber: claim.completionTarget,
           fallbackText: fallback,
           allowFallback: attempt + 1 === transcriptAttempts,
@@ -1151,7 +1148,7 @@ export class WorkerTurnEngine {
           sessionId: this.record.id,
           provider: this.record.provider,
           cwd: this.record.cwd,
-          createdAt: this.record.createdAt,
+          createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
           turnNumber: completionTarget,
           ...(fallbackEvidence === undefined ? {} : { fallbackText: fallbackEvidence.text }),
           allowFallback,
@@ -1230,6 +1227,8 @@ export class WorkerTurnEngine {
   }
 
   private armScreenTurnBank(rawReplay: () => string): void {
+    // A startup repaint is never proof that the native first prompt ran.
+    if (this.initialInstructionPending()) return;
     if (this.idleTimer !== undefined) clearTimeout(this.idleTimer);
     const epoch = this.observationEpoch;
     const evidenceActivityRevision = this.activityRevision;
@@ -1424,6 +1423,7 @@ export class WorkerTurnEngine {
         : this.isCurrentCapture(claim));
     if (ledger === undefined) return false;
     this.currentLatestResult ??= ledger.turns.at(-1)?.text;
+    if (ledger.completedTurns > 0) this.advanceRenderedInstructions("completed", ledger.completedTurns);
     if (claim !== undefined) claim.completionTarget = this.completedTurnCount + 1;
     if (ledger.completedTurns > 0) this.options.effects.notifySessionUpdate();
     return true;
@@ -1461,7 +1461,7 @@ export class WorkerTurnEngine {
           sessionId: this.record.id,
           provider: this.record.provider,
           cwd: this.record.cwd,
-          createdAt: this.record.createdAt,
+          createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
           turnNumber: before + 1,
           allowFallback: false,
         });
@@ -1585,7 +1585,7 @@ export class WorkerTurnEngine {
       sessionId: this.record.id,
       provider: this.record.provider,
       cwd: this.record.cwd,
-      createdAt: this.record.createdAt,
+      createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
       turnNumber: this.completedTurnCount,
     }).catch(() => undefined);
     if (!this.isCurrentObservation(epoch, revision, owner, activityRevision)) return;
@@ -1618,7 +1618,7 @@ export class WorkerTurnEngine {
       sessionId: this.record.id,
       provider: this.record.provider,
       cwd: this.record.cwd,
-      createdAt: this.record.createdAt,
+      createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
       turnNumber: this.completedTurnCount,
     });
   }

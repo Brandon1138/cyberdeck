@@ -142,6 +142,9 @@ export class SessionLifecycleController {
 
   async resumeRuntime(runtime: RuntimeSession): Promise<SessionRecord> {
     const sessionId = runtime.record.id;
+    if (this.assembly.initialInstructionRecoveryFailure(sessionId) !== undefined) {
+      await this.assembly.retryInitialInstructionRecovery(runtime);
+    }
 
     // The outgoing runtime stops speaking for this session here, before anything is awaited. A kill is
     // acknowledged asynchronously, so its exit would otherwise land in the middle of the respawn

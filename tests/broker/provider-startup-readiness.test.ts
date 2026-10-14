@@ -58,7 +58,7 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function harness(provider: ProviderId = "codex", initialPrompt?: string) {
+async function harness(provider: ProviderId = "codex", initialPrompt?: string, now?: () => number) {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-startup-test-"));
   const handles: ScriptedRuntime[] = [];
   const adapter: ProviderAdapter = provider === "claude"
@@ -74,7 +74,8 @@ async function harness(provider: ProviderId = "codex", initialPrompt?: string) {
           buildResumeSpec: (session) => ({ executable: "fixture", args: [], cwd: session.cwd, env: {} }),
         };
   const registry = new SessionRegistry({
-    config: BrokerRuntimeConfigSchema.parse({}),
+    config: BrokerRuntimeConfigSchema.parse(now === undefined ? {} : { workerStallSeconds: 1 }),
+    ...(now === undefined ? {} : { now }),
     workerTurnObservation: new WorkerTurnObservationAdapter(),
     adapters: { [provider]: adapter },
     sessionRuntimeFactory: () => {
@@ -110,6 +111,22 @@ async function harness(provider: ProviderId = "codex", initialPrompt?: string) {
 }
 
 describe("automated provider startup delivery", () => {
+  it("reports an unrecognized startup screen after a bounded wait and keeps the brief held", async () => {
+    let now = 0;
+    const { registry, record, handles, queue, enqueue } = await harness("claude", undefined, () => now);
+    await enqueue("Keep this instruction durable.");
+    handles[0]!.emit(`${CLEAR}Unrecognized provider setup screen\n`);
+    now = 1_001;
+    expect(registry.workerTruth(record.id)).toMatchObject({
+      state: "stalled", terminal: false, completedTurns: 0,
+      detail: expect.stringContaining("Unrecognized provider setup screen"),
+    });
+    expect((await queue.list(record.id))[0]).toMatchObject({ status: "queued", holdReason: "provider-starting" });
+    expect(handles[0]!.writes).toEqual([]);
+    handles[0]!.emit(READY.claude);
+    await vi.waitFor(async () => expect((await queue.list(record.id))[0]?.status).toBe("rendered"));
+    expect(handles[0]!.writes).toHaveLength(1);
+  });
   it.each(["codex", "claude", "cursor", "antigravity"] as const)(
     "keeps the first %s brief durable through blank output, idle titles, and wait timeout",
     async (provider) => {

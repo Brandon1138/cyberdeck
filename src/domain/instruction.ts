@@ -67,6 +67,8 @@ export const InstructionRecordSchema = z.preprocess(
     hop: z.number().int().nonnegative().default(0),
     /** Broker policy instruction (for example, budget wrap-up), never caller-minted authority. */
     brokerOwned: z.boolean().optional(),
+    /** Supplied once through native launch arguments; never retyped by queue recovery. */
+    launch: z.boolean().optional(),
     /** Only the internal broker enqueue can mint a wake submission. Legacy records are ordinary. */
     submissionKind: z.literal("wake").optional(),
     wake: WakeContextSchema.optional(),

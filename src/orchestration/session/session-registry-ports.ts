@@ -17,6 +17,7 @@ import type {
   WorkerTurnObservationPort,
   WorkerTurnPreviewPort,
   WorkerTurnTranscript,
+  WorkerTurnLedger,
   WorkerTurnTranscriptMessage,
 } from "./worker-turn-ports.js";
 
@@ -57,6 +58,7 @@ export interface TranscriptLike {
   dropClaudeBinding?(sessionId: string): Promise<void>;
   observeProviderTurns?(input: CaptureWorkerTurns): Promise<WorkerTurnObservation>;
   commitProviderTurns?(observation: WorkerTurnObservation): Promise<WorkerTurnTranscript[]>;
+  readCompletionLedger?(sessionId: string): Promise<WorkerTurnLedger>;
   /** Compatibility only; WorkerTurnEngine requires the explicit observation/commit pair. */
   captureProviderTurns?(input: CaptureWorkerTurns): Promise<WorkerTurnTranscript[]>;
   readTranscriptMessages?(input: CaptureWorkerTurns): Promise<WorkerTurnTranscriptMessage[]>;
@@ -157,6 +159,7 @@ export class RegistryError extends Error {
       | "SESSION_NOT_FOUND"
       | "SESSION_ALREADY_CONTROLLED"
       | "SESSION_NOT_ACTIVE"
+      | "SESSION_RESUME_UNAVAILABLE"
       | "SESSION_ALREADY_ACTIVE"
       | "NOT_SESSION_CONTROLLER"
       | "SESSION_BUSY"

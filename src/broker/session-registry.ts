@@ -145,6 +145,10 @@ export class SessionRegistry {
     await this.recovery;
   }
 
+  initialInstructionRecoveryFailure(sessionId: string): string | undefined {
+    return this.assembly.initialInstructionRecoveryFailure(sessionId);
+  }
+
   setWorkerBudgetGate(gate: WorkerBudgetGate): void {
     return this.catalog.setWorkerBudgetGate(gate);
   }
@@ -157,8 +161,9 @@ export class SessionRegistry {
     request: StartSessionRequest,
     initialPrompt?: string,
     activate?: (record: SessionRecord) => Promise<void>,
+    initialInstructionId?: string,
   ): Promise<SessionRecord> {
-    return this.launch.start(request, initialPrompt, activate);
+    return this.launch.start(request, initialPrompt, activate, initialInstructionId);
   }
 
   list(): SessionRecord[] {

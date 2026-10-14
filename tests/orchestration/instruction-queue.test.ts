@@ -5,6 +5,7 @@ import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import type {
   InstructionRepository,
+  InstructionStateUpdate,
   OrchestratorBindingReader,
   SessionInstructionPort,
 } from "../../src/orchestration/session/session-ports.js";
@@ -29,6 +30,88 @@ const binding: OrchestratorBinding = {
 };
 
 describe("InstructionQueue", () => {
+  it.each(["accepted", "queued", "rendered", "submitted", "acknowledged"] as const)("preserves %s progress when native launch recovery is unavailable", async (status) => {
+    const records = new Map<string, InstructionRecord>();
+    let lifecycle!: (update: InstructionStateUpdate) => void;
+    const target = { id: TARGET, cwd: "/repo", executionState: "active", pid: 4242 } as SessionRecord;
+    const sessions = { get: () => target, onControllerReleased: () => () => undefined,
+      onDeliveryBoundary: () => () => undefined,
+      onInstructionState: (listener: typeof lifecycle) => { lifecycle = listener; return () => undefined; },
+      submitInstruction: vi.fn() } satisfies SessionInstructionPort;
+    const queue = new InstructionQueue(sessions, { findBySessionId: async () => binding }, {
+      list: async () => [...records.values()], put: async (record) => { records.set(record.id, record); },
+    });
+    queue.start();
+    const receipt = await queue.prepareLaunch({ actorSessionId: ACTOR, target, message: "FIRST_ACK", instructionId: crypto.randomUUID() });
+    lifecycle({ sessionId: TARGET, instructionId: receipt.id, state: status, at: new Date().toISOString() });
+    await queue.flush(TARGET);
+    // Model the persisted pre-restart progress exactly, without a terminal runtime transition.
+    records.set(receipt.id, { ...records.get(receipt.id)!, status });
+    await queue.recoverLaunchInstructions(async () => ({ canonicalTurns: 0, pending: "native read failed" }));
+    expect(records.get(receipt.id)).toMatchObject({ status: status === "accepted" ? "queued" : status, holdReason: "native-recovery-unavailable" });
+    expect(sessions.submitInstruction).not.toHaveBeenCalled();
+    queue.stop();
+  });
+
+  it.each([
+    ["delivers", "active", "rendered"],
+    ["retires", undefined, "undelivered"],
+  ] as const)("%s a non-native startup brief left accepted by a restart between prepare and flush (target %s)", async (_verb, executionState, expected) => {
+    const records = new Map<string, InstructionRecord>();
+    const target = { id: TARGET, cwd: "/repo", executionState, pid: 4242 } as SessionRecord;
+    const sessions = {
+      get: () => { if (executionState === undefined) throw Object.assign(new Error("gone"), { code: "SESSION_NOT_FOUND" }); return target; },
+      onControllerReleased: () => () => undefined,
+      onDeliveryBoundary: () => () => undefined,
+      onInstructionState: () => () => undefined,
+      submitInstruction: vi.fn(async () => ({ state: "rendered" as const, expectedTurn: 1, at: binding.createdAt })),
+    } satisfies SessionInstructionPort;
+    const readNative = vi.fn(async () => ({ canonicalTurns: 0 }));
+    const queue = new InstructionQueue(sessions, { findBySessionId: async () => binding }, {
+      list: async () => [...records.values()], put: async (record) => { records.set(record.id, record); },
+    });
+    // A Cursor peer's brief: persisted before the spawn with launch:false, never flushed.
+    const receipt = await queue.prepareLaunch({ actorSessionId: ACTOR, target, message: "CURSOR_BRIEF", instructionId: crypto.randomUUID(), native: false });
+    expect(records.get(receipt.id)).toMatchObject({ status: "accepted", launch: false });
+    await queue.recoverLaunchInstructions(readNative);
+    expect(readNative).not.toHaveBeenCalled();
+    expect(records.get(receipt.id)?.status).toBe(expected);
+    if (expected === "rendered") {
+      expect(sessions.submitInstruction).toHaveBeenCalledWith(TARGET, "CURSOR_BRIEF", "orchestrator", expect.objectContaining({ actorSessionId: ACTOR }), receipt.id);
+    } else {
+      expect(sessions.submitInstruction).not.toHaveBeenCalled();
+      expect(records.get(receipt.id)?.holdReason).toBe("worker-terminal");
+    }
+  });
+
+  it("ignores stale lifecycle observations after a receipt advances or completes", async () => {
+    const records = new Map<string, InstructionRecord>();
+    let lifecycle!: (update: InstructionStateUpdate) => void;
+    const sessions = {
+      get: () => ({ id: TARGET, cwd: "/repo" } as SessionRecord),
+      onControllerReleased: () => () => undefined,
+      onDeliveryBoundary: () => () => undefined,
+      onInstructionState: (listener: typeof lifecycle) => { lifecycle = listener; return () => undefined; },
+      submitInstruction: async () => ({ state: "rendered" as const, expectedTurn: 1, at: binding.createdAt }),
+    } satisfies SessionInstructionPort;
+    const queue = new InstructionQueue(sessions, { findBySessionId: async () => binding }, {
+      list: async () => [...records.values()], put: async (record) => { records.set(record.id, record); },
+    });
+    queue.start();
+    const receipt = await queue.enqueue({ actorSessionId: ACTOR, targetSessionId: TARGET, message: "FIRST_ACK" });
+    const observe = async (state: InstructionStateUpdate["state"]) => {
+      lifecycle({ sessionId: TARGET, instructionId: receipt.id, state, at: new Date().toISOString() });
+      await queue.flush(TARGET);
+    };
+    await observe("acknowledged");
+    await observe("submitted");
+    expect(records.get(receipt.id)?.status).toBe("acknowledged");
+    await observe("completed");
+    for (const stale of ["rendered", "undelivered", "cancelled"] as const) await observe(stale);
+    expect(records.get(receipt.id)).toMatchObject({ status: "completed", completedAt: expect.any(String) });
+    queue.stop();
+  });
+
   it("lets a fleet creator enqueue complete instructions to its peer orchestrator in another workspace", async () => {
     const records = new Map<string, InstructionRecord>();
     const peer = { id: TARGET, cwd: "/another/repo", kind: "orchestrator" } as SessionRecord;

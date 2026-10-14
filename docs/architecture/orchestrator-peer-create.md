@@ -65,7 +65,7 @@ Inputs:
 | `cwd` | yes | absolute launch directory |
 | `scope` | no | `fleet` (default) or `workspace` |
 | `name` | no | shown in Fleet and returned so the caller can name the session on the phone |
-| `brief` | no | the peer's first instruction, delivered through the instruction queue |
+| `brief` | no | durable first instruction, registered before spawn and supplied once through the provider's native initial-prompt mechanism |
 | `reason` | yes | audited verbatim |
 | `approval` | required by admission, optional in the schema | `{ kind: "per-create" \| "standing", quote, channel, grantedAt? }`; quote is 1..500 characters, nonblank, preserved verbatim; channel is `remote-control`, `terminal`, `fleet` or `other`, and optional `grantedAt` accepts RFC 3339 timestamps with `Z` or numeric offsets, preserved verbatim. Absent or whitespace-only quote returns `APPROVAL_REQUIRED` |
 | `mutationId` | no | reuse to retry idempotently; a replay returns the recorded result. The id is persisted on the peer's binding, so the replay survives a broker restart and an audit write that failed after launch |
@@ -92,11 +92,38 @@ Result:
 }
 ```
 
-`brief.delivery` is `queued` (the broker holds it for the peer's first safe boundary), `failed`
-(with the reason and the fallback, `cyberdeck_thread_message`; a peer that went terminal before
-consuming it reports the queue's `undelivered`), `replayed` (a durable replay; the brief went with
-the original call) or `not-requested`. `remoteControl` is per provider: Claude peers carry Remote
+`brief.delivery` reports the instruction receipt's current state: `queued`, `rendered`,
+`submitted`, `acknowledged`, or `completed`, with `instructionId` and `expectedTurn: 1`.
+For Claude and Codex, the initial prompt is persisted during activation before spawn and is never
+retyped by recovery. Early messages remain behind that receipt until the native first turn completes.
+Cursor retains verified queue delivery and its explicitly attributed terminal fallback. Mutation retries
+read the same receipt, including after restart. Recovery checks native first-turn evidence before
+classifying an unresolved launch receipt and never regresses completed receipts. If a provider log
+cannot be read, only that receipt stays queued with `native-recovery-unavailable`; its lifecycle
+evidence explains that resume or restart retries the read without resending the brief. Broker ledger
+or commit failures remain startup failures. `failed` reports an unconsumed terminal receipt;
+inspect before sending another instruction. `replayed` is only for legacy bindings without a
+receipt, whose delivery is unknown. No brief means `not-requested`. `remoteControl` is per provider: Claude peers carry Remote
 Control, Codex peers their remote app-server, and Cursor peers have no phone surface at all.
+
+Claude orchestrators default to `workspace-write` with native `--permission-mode auto`.
+Explicit operator permission preferences remain authoritative. A clean provider exit before the
+initial native turn records `startup-exit`, including the exit evidence, instead of implying task
+completion. An unrecognized input surface beyond `workerStallSeconds` surfaces startup attention
+with bounded screen evidence while instructions remain held.
+
+`cyberdeck_orchestrator_inspect` includes `target.truth.modal`, exit code, and termination details.
+`cyberdeck_orchestrator_answer_modal` accepts that exact fingerprint and one enumerated answer id,
+using the existing `thread.enqueue` scope and the common repository modal policy. The broker
+rechecks the prompt at press time and audits the actor and choice; no worker lease is invented for
+a peer. Current Claude and Codex folder dialogs enumerate only source-verified answers. Codex hook
+review offers only `continue-without-hooks`: the repository grant never trusts new or changed hooks.
+The operator can inspect and grant one repository with `cyberdeck modal-answers status --root <repo>`
+and `cyberdeck modal-answers on --root <repo>`; linked worktrees share their primary repository grant.
+Fingerprints cover the rendered dialog. The descriptor API also supports native hook identities,
+but this change does not query that inventory; no automated answer can approve hooks.
+`cyberdeck_thread_message.messageId` is an optional standard-variant UUID; omit it to let
+the broker generate one.
 
 Refusals come back as `outcome` values, not thrown errors, so a phone-side orchestrator can read
 them: `DENIED` (no capability, scope peer-create disabled, inactive caller, scope outside the caller's), `APPROVAL_REQUIRED`
@@ -157,8 +184,9 @@ or narrows the same list on the primary binding the way `fable-workers` already 
 From Remote Control on orchestrator A, the operator says "start a Codex orchestrator in repo X
 with this brief". A asks for express approval and waits for "yes, create it". A calls
 `cyberdeck_orchestrator_create` with that exact quote in `approval`. The broker validates the approval
-field and A's grant, derives B's unchanged capabilities, starts B detached, enqueues the brief from A,
-and writes the audit pair. B's binding and inspect result identify A, quote and depth. Claude and
+field and A's grant, derives B's unchanged capabilities, persists the brief receipt before spawning B
+with its native initial prompt, and writes the audit pair. B's binding and inspect result identify A,
+quote and depth. Claude and
 Codex peers have phone surfaces; actual phone delivery and Fleet activation remain operator checks.
 `cyberdeck_thread_message` lets A send further instructions to B under A's scope.
 

@@ -167,6 +167,8 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
    * over-long prompt leaves the process alive, so `executionState` and `exitCode` cannot express it.
    */
   termination: SessionTerminationSchema.optional(),
+  /** Broker-only receipt for the native first prompt; not accepted by start RPC requests. */
+  initialInstructionId: z.uuid().optional(),
 });
 
 export type ProviderId = z.infer<typeof ProviderIdSchema>;

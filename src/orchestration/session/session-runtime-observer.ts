@@ -212,6 +212,15 @@ export class SessionRuntimeObserver {
               ? "exited"
               : "failed";
     runtime.record.exitCode = exitCode;
+    if (runtime.record.initialInstructionId !== undefined && runtime.turns.canonicalTurns === 0
+      && runtime.stopRequested !== true && runtime.record.termination === undefined) {
+      runtime.record.termination = {
+        kind: "startup-exit", reason: `Provider exited before its first canonical turn (exit ${exitCode}${signal ? `, signal ${signal}` : ""})`,
+        detail: runtime.turns.latestResult?.replace(/\s+/gu, " ").trim().slice(-240)
+          || "The native provider process closed before brief consumption was confirmed; the exit cause is unknown",
+        at: new Date().toISOString(),
+      };
+    }
     const controller = runtime.controller;
     const watchers = [...runtime.watchers.values()];
     delete runtime.controller;
@@ -230,6 +239,7 @@ export class SessionRuntimeObserver {
               ? "done"
               : "failed";
     runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
+    if (runtime.record.termination?.kind === "startup-exit") runtime.record.attentionState = "failed";
     // The record is terminal before either fence opens, so no input path can observe an active gap.
     runtime.turns.finishTerminalFinalization();
     delete runtime.terminalFinalizing;
@@ -238,6 +248,7 @@ export class SessionRuntimeObserver {
     void this.catalog.appendEvent("session.exited", runtime.record.id, {
       exitCode,
       signal: signal ?? null,
+      ...(runtime.record.termination === undefined ? {} : { termination: runtime.record.termination }),
     });
     void this.catalog.appendTranscript(runtime.record.id, "lifecycle", "broker", "session exited", {
       exitCode,

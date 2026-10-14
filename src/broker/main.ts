@@ -200,6 +200,9 @@ export async function runBroker(
     }
   }
   const activity = withActivitySink(localActivity, telemetry);
+  const instructionStore = new InstructionStore(stateDirectory);
+  const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
+  transcripts.attachNativeCapture(nativeCapture);
   const sessionStore = new SessionStore(stateDirectory);
   const fleetDetaches = new FleetDetachStore(stateDirectory);
   const fleetPreferences = new FleetPreferenceStore(stateDirectory);
@@ -301,9 +304,6 @@ export async function runBroker(
     (binding, session) => orchestratorLiveness.bindingSession(binding, session),
     (binding) => orchestratorLiveness.bindingRemoved(binding),
   );
-  const instructionStore = new InstructionStore(stateDirectory);
-  const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
-  transcripts.attachNativeCapture(nativeCapture);
   const notificationFeed = composeOrchestratorNotificationFeed({
     inbox: notificationInbox,
     noticeFiles: new OrchestratorNoticeFiles(stateDirectory),
@@ -316,6 +316,10 @@ export async function runBroker(
     try { return registry.get(id); } catch { return undefined; }
   }, (record, worker) => nativeCapture.captureInstruction(record, worker)), (record) => notificationFeed.observeInstruction(record)));
   instructions.start();
+  await instructions.recoverLaunchInstructions(async (id) => ({
+    canonicalTurns: (await transcripts.readCompletionLedger(id)).canonicalTurns,
+    pending: registry.initialInstructionRecoveryFailure(id),
+  }));
   await notificationFeed.start(instructions);
   const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerBudgets = new WorkerBudgetEnforcer({
@@ -341,6 +345,7 @@ export async function runBroker(
       workspaceProbe: new GitWorkspaceProbe(),
       workerCapabilities,
       workerBudgets,
+      modalPolicy: modalAnswerPolicy,
     },
   );
   // Policy for orchestrator-created peers lives beside agent control; the manager only launches.

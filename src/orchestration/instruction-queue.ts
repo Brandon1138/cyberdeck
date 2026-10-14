@@ -3,12 +3,20 @@ import { z } from "zod";
 import { grantAllows } from "../domain/capability.js";
 import { InstructionRecordSchema, WakeContextSchema, WakeHeldError, type InstructionRecord } from "../domain/instruction.js";
 import { instructionReachedProvider, type InstructionLifecycleState } from "../domain/worker-truth.js";
+import type { SessionRecord } from "../domain/session.js";
 import type {
   InstructionRepository,
   InstructionStateUpdate,
   OrchestratorBindingReader,
   SessionInstructionPort,
 } from "./session/session-ports.js";
+
+/** Every receipt writer shares the same monotonic lifecycle, including recovery-only holds. */
+function instructionProgress(current: InstructionLifecycleState, next: InstructionLifecycleState): InstructionLifecycleState {
+  const progress = ["accepted", "queued", "rendered", "submitted", "acknowledged", "completed"];
+  return ["completed", "undelivered", "cancelled"].includes(current)
+    || progress.indexOf(next) >= 0 && progress.indexOf(next) < progress.indexOf(current) ? current : next;
+}
 
 export const EnqueueInstructionParamsSchema = z.object({
   actorSessionId: z.uuid(),
@@ -73,6 +81,75 @@ export class InstructionQueue {
   stop(): void {
     for (const unsubscribe of this.subscriptions) unsubscribe();
     this.subscriptions = [];
+  }
+
+  /** Persist the first instruction during activation, before the target is in the live catalog. */
+  async prepareLaunch(input: {
+    actorSessionId: string;
+    target: SessionRecord;
+    message: string;
+    instructionId: string;
+    native?: boolean;
+  }): Promise<InstructionRecord> {
+    const request = EnqueueInstructionParamsSchema.parse({
+      actorSessionId: input.actorSessionId, targetSessionId: input.target.id,
+      message: input.message, messageId: input.instructionId,
+    });
+    const binding = await this.orchestrators.findBySessionId(request.actorSessionId);
+    if (binding === undefined) throw Object.assign(new Error("Actor is not a bound orchestrator"), { code: "ACTOR_NOT_AUTHORIZED" });
+    if (!grantAllows(binding.grant, "thread.enqueue", input.target)) {
+      throw Object.assign(new Error("Target thread is outside this orchestrator's enqueue grant"), { code: "CAPABILITY_DENIED" });
+    }
+    return this.serialize(input.target.id, async () => {
+      const existing = (await this.store.list(input.target.id)).find((record) => record.messageId === request.messageId);
+      if (existing !== undefined) return existing;
+      const at = new Date().toISOString();
+      const record = InstructionRecordSchema.parse({
+        id: input.instructionId, actorSessionId: request.actorSessionId,
+        targetSessionId: input.target.id, message: request.message, messageId: request.messageId,
+        status: "accepted", createdAt: at, updatedAt: at,
+        ...(input.native === false ? { launch: false } : { expectedTurn: 1, launch: true }),
+      });
+      await this.store.put(record);
+      return record;
+    });
+  }
+
+  /**
+   * Account for a startup brief after restart without ever resending its prompt. A native launch
+   * receipt (Claude, Codex) settles from the provider's own transcript. A non-native one (Cursor)
+   * was persisted before the spawn and is flushed only after the create returns, so a broker that
+   * exits in between leaves it `accepted` with no later boundary obliged to deliver it: recovery
+   * delivers it to a live target or retires it as undelivered.
+   */
+  async recoverLaunchInstructions(readCanonicalTurns: (sessionId: string) => Promise<number | { canonicalTurns: number; pending?: string | undefined }>): Promise<void> {
+    for (const record of await this.store.list()) {
+      if (record.launch === undefined || ["completed", "undelivered", "cancelled"].includes(record.status)) continue;
+      await this.serialize(record.targetSessionId, async () => {
+        const current = (await this.store.list(record.targetSessionId)).find(({ id }) => id === record.id)!;
+        if (["completed", "undelivered", "cancelled"].includes(current.status)) return;
+        if (record.launch === true) {
+          const recovery = await readCanonicalTurns(record.targetSessionId);
+          const canonicalTurns = typeof recovery === "number" ? recovery : recovery.canonicalTurns;
+          if (canonicalTurns >= (record.expectedTurn ?? 1)) {
+            const at = new Date().toISOString();
+            await this.persistState(current, "completed", { submittedAt: current.submittedAt ?? at, completedAt: at, holdReason: undefined });
+            return;
+          }
+          if (typeof recovery !== "number" && recovery.pending !== undefined) {
+            await this.persistState(current, "queued", { holdReason: "native-recovery-unavailable" });
+            return;
+          }
+        }
+        let target: SessionRecord | undefined;
+        try { target = this.registry.get(record.targetSessionId); } catch { /* Missing launch attempt. */ }
+        if (target === undefined || !["starting", "active"].includes(target.executionState)) {
+          await this.persistState(current, "undelivered", { holdReason: "worker-terminal" });
+        } else if (current.status === "accepted" || current.status === "queued") {
+          await this.tryDeliver(current);
+        }
+      });
+    }
   }
 
   async enqueue(input: z.input<typeof EnqueueInstructionParamsSchema>): Promise<InstructionRecord> {
@@ -227,7 +304,11 @@ export class InstructionQueue {
   private async applyState(update: InstructionStateUpdate): Promise<void> {
     await this.serialize(update.sessionId, async () => {
       const record = (await this.store.list(update.sessionId)).find(({ id }) => id === update.instructionId);
-      if (record === undefined || record.status === update.state) return;
+      // Recovered runtimes can emit stale generation-local observations. Durable terminal
+      // receipts never regress, including when that old runtime later stops or resumes.
+      if (record === undefined || record.status === update.state
+        || ["completed", "undelivered", "cancelled"].includes(record.status)) return;
+      if (instructionProgress(record.status, update.state) !== update.state) return;
       await this.store.put(InstructionRecordSchema.parse({
         ...record,
         status: update.state,
@@ -235,6 +316,7 @@ export class InstructionQueue {
         // A provider can be seen to have taken the payload only once, and the broker may report that
         // as `acknowledged` or straight through to `completed` if the turn was faster than a poll.
         // The stamp is about the fact, not about which frame carried the news.
+        ...(update.state === "rendered" ? { renderedAt: record.renderedAt ?? update.at, holdReason: undefined } : {}),
         ...(record.submittedAt === undefined && instructionReachedProvider(update.state)
           ? { submittedAt: update.at }
           : {}),
@@ -248,6 +330,18 @@ export class InstructionQueue {
   }
 
   private async tryDeliver(record: InstructionRecord): Promise<InstructionRecord> {
+    if (record.launch === true) {
+      let target: SessionRecord | undefined;
+      try { target = this.registry.get(record.targetSessionId); } catch { /* Failed before catalog registration. */ }
+      if (target === undefined || !["starting", "active"].includes(target.executionState)) {
+        if (record.holdReason === "native-recovery-unavailable") return record;
+        return this.persistState(record, "undelivered", { holdReason: "worker-terminal" });
+      }
+      if (target.initialInstructionId === record.id && target.pid > 0 && target.executionState === "active") {
+        return this.persistState(record, "rendered", { renderedAt: target.updatedAt, expectedTurn: 1, holdReason: undefined });
+      }
+      return this.persistState(record, "queued", { holdReason: "provider-starting" });
+    }
     const source = record.brokerOwned === true
       ? "broker"
       : record.senderSessionId !== undefined && record.senderSessionId !== record.actorSessionId
@@ -309,7 +403,7 @@ export class InstructionQueue {
     const updated = InstructionRecordSchema.parse({
       ...record,
       ...fields,
-      status,
+      status: instructionProgress(record.status, status),
       updatedAt: new Date().toISOString(),
     });
     await this.store.put(updated);

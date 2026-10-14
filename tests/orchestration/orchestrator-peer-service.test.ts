@@ -11,6 +11,8 @@ import {
   type OrchestratorBinding,
 } from "../../src/domain/orchestrator.js";
 import type { SessionRecord } from "../../src/domain/session.js";
+import type { InstructionRecord } from "../../src/domain/instruction.js";
+import type { PeerStartupInstruction } from "../../src/orchestration/orchestrator-manager.js";
 import {
   AgentCreateOrchestratorParamsSchema,
   OrchestratorPeerService,
@@ -80,6 +82,8 @@ function harness(overrides: {
   createPeer?: OrchestratorManagerResult | Error;
   instructions?: boolean;
   briefStatus?: string;
+  instructionRecords?: InstructionRecord[];
+  receiptRead?: () => void;
   failAudit?: (event: BrokerEvent) => boolean;
 } = {}) {
   const binding = overrides.binding ?? fleetBinding;
@@ -89,17 +93,19 @@ function harness(overrides: {
   ]);
   const stored = [binding, ...(overrides.bindings ?? [])];
   const events: BrokerEvent[] = [];
+  const instructionRecords = overrides.instructionRecords ?? [];
   let launched = 0;
   let launchesInFlight = 0;
   let maxConcurrentLaunches = 0;
-  const createPeer = vi.fn(async (request: CreatePeerOrchestratorRequest) => {
+  const createPeer = vi.fn(async (request: CreatePeerOrchestratorRequest, startup?: PeerStartupInstruction) => {
     if (overrides.createPeer instanceof Error) throw overrides.createPeer;
     if (overrides.createPeer !== undefined) return overrides.createPeer;
     // The real manager writes the binding before launch resolves, which durable retries observe.
     maxConcurrentLaunches = Math.max(maxConcurrentLaunches, ++launchesInFlight);
     await new Promise((resolve) => setTimeout(resolve, 5));
     const id = launched++ === 0 ? PEER : `${launched + 1}${PEER.slice(1)}`;
-    const session = { ...actorRecord, id, cwd: request.cwd, name: "peer" };
+    const session = { ...actorRecord, id, cwd: request.cwd, name: "peer", ...(startup === undefined ? {} : { initialInstructionId: startup.id }) };
+    await startup?.prepare({ ...session, executionState: "starting", pid: 0 });
     records.set(id, session);
     const created: OrchestratorManagerResult = {
       session,
@@ -109,6 +115,7 @@ function harness(overrides: {
         provider: request.provider as OrchestratorBinding["provider"],
         cwd: request.cwd,
         createdBy: request.createdBy,
+        ...(startup === undefined ? {} : { initialInstructionId: startup.id }),
         scope: request.scope === "fleet" ? { kind: "fleet" } : { kind: "workspace", cwd: request.cwd },
         grant: {
           subjectSessionId: id,
@@ -121,12 +128,15 @@ function harness(overrides: {
     launchesInFlight--;
     return created;
   });
-  const enqueue = vi.fn(async (input: { targetSessionId: string; message: string; }) => ({
-    id: "44444444-4444-4444-8444-444444444444",
-    targetSessionId: input.targetSessionId,
-    message: input.message,
-    status: overrides.briefStatus ?? "accepted",
-  }));
+  const enqueue = vi.fn(async (input: { target: SessionRecord; message: string; instructionId: string; actorSessionId: string }) => {
+    const record = {
+      id: input.instructionId, messageId: input.instructionId, actorSessionId: input.actorSessionId,
+      targetSessionId: input.target.id, message: input.message, launch: true, expectedTurn: 1,
+      status: overrides.briefStatus ?? "accepted", createdAt: now, updatedAt: now, hop: 0,
+    } as InstructionRecord;
+    instructionRecords.push(record);
+    return record;
+  });
   const service = new OrchestratorPeerService({
     registry: {
       get: (sessionId: string) => {
@@ -141,7 +151,9 @@ function harness(overrides: {
       list: async () => stored,
     },
     manager: { createPeer: createPeer as never },
-    ...(overrides.instructions === false ? {} : { instructions: { enqueue: enqueue as never } }),
+    ...(overrides.instructions === false ? {} : { instructions: {
+      prepareLaunch: enqueue, list: async () => { overrides.receiptRead?.(); return instructionRecords; }, flush: async () => instructionRecords,
+    } }),
     audit: {
       append: async (event) => {
         if (overrides.failAudit?.(event)) throw new Error("journal disk full");
@@ -150,7 +162,7 @@ function harness(overrides: {
     },
     now: () => Date.parse(now),
   });
-  return { service, createPeer, enqueue, events, stored, get maxConcurrentLaunches() { return maxConcurrentLaunches; } };
+  return { service, createPeer, enqueue, events, stored, instructionRecords, get maxConcurrentLaunches() { return maxConcurrentLaunches; } };
 }
 
 const approval: PeerApproval = {
@@ -171,6 +183,18 @@ const request = {
 };
 
 describe("OrchestratorPeerService", () => {
+  it("refreshes a cached receipt after a transient read failure without launching or briefing twice", async () => {
+    const receiptRead = vi.fn().mockImplementationOnce(() => { throw new Error("temporary receipt read failure"); });
+    const h = harness({ receiptRead });
+    const input = { ...request, brief: "FIRST_ACK", mutationId: "receipt-read-retry" };
+    await expect(h.service.create(input)).resolves.toMatchObject({ outcome: "CREATED", brief: { delivery: "failed" } });
+    h.instructionRecords[0]!.status = "completed";
+    await expect(h.service.create(input)).resolves.toMatchObject({ outcome: "CREATED", retrieval: "replay", brief: { delivery: "completed" } });
+    expect(receiptRead).toHaveBeenCalledTimes(2);
+    expect(h.createPeer).toHaveBeenCalledOnce();
+    expect(h.enqueue).toHaveBeenCalledOnce();
+  });
+
   it("creates a peer with per-create approval and the full grant, persists lineage, delivers the brief, and audits both halves", async () => {
     const { service, createPeer, enqueue, events, stored } = harness();
 
@@ -184,7 +208,7 @@ describe("OrchestratorPeerService", () => {
       model: "gpt-6.1-sol",
       scope: { kind: "fleet" },
       createdBy: { sessionId: ACTOR, approval, depth: 1 },
-      brief: { delivery: "queued", instructionId: "44444444-4444-4444-8444-444444444444" },
+      brief: { delivery: "queued", instructionId: expect.any(String), expectedTurn: 1 },
       remoteControl: peerRemoteControlNote("codex"),
       warnings: [],
     });
@@ -199,12 +223,12 @@ describe("OrchestratorPeerService", () => {
       scope: "fleet",
       name: "codex successor",
       createdBy: { sessionId: ACTOR, approval, depth: 1 },
-    }));
+    }), expect.objectContaining({ id: expect.any(String), message: "Pick up PR #61", prepare: expect.any(Function) }));
     expect(events[0]!.data).not.toHaveProperty("brief");
     expect(JSON.stringify(events)).not.toContain("Pick up PR #61");
     const granted = (createPeer.mock.calls[0]![0] as { capabilities: string[] }).capabilities;
     expect(granted).toEqual(ORCHESTRATOR_GRANT_CAPABILITIES);
-    expect(enqueue).toHaveBeenCalledWith({ actorSessionId: ACTOR, targetSessionId: PEER, message: "Pick up PR #61" });
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ actorSessionId: ACTOR, target: expect.objectContaining({ id: PEER, executionState: "starting", pid: 0 }), message: "Pick up PR #61" }));
     expect(events.map(({ type }) => type)).toEqual([
       "orchestrator.create.requested",
       "orchestrator.create.result",
@@ -516,13 +540,13 @@ describe("OrchestratorPeerService", () => {
     expect(events).toHaveLength(2);
   });
 
-  it("keeps the peer when the brief cannot be queued and says how to send it", async () => {
-    const { service } = harness({ instructions: false });
+  it("does not launch an empty peer when the brief cannot be persisted", async () => {
+    const { service, createPeer } = harness({ instructions: false });
 
     await expect(service.create({ ...request, brief: "hello" })).resolves.toMatchObject({
-      outcome: "CREATED",
-      brief: { delivery: "failed", detail: expect.stringContaining("cyberdeck_thread_message") },
+      outcome: "LAUNCH_FAILED", code: "INSTRUCTION_QUEUE_UNAVAILABLE",
     });
+    expect(createPeer).not.toHaveBeenCalled();
   });
 
   it("serializes concurrent creates from one actor so each launch records before the next can replay", async () => {
@@ -559,15 +583,16 @@ describe("OrchestratorPeerService", () => {
     expect(created).toMatchObject({ outcome: "CREATED" });
     expect(first.createPeer).toHaveBeenCalledWith(expect.objectContaining({
       createdBy: { sessionId: ACTOR, mutationId: "durable", approval, depth: 1 },
-    }));
+    }), expect.objectContaining({ message: "hello" }));
 
     // A fresh service with an empty replay map, reading the same binding log.
-    const restarted = harness({ bindings: first.stored.filter((entry) => entry.sessionId !== ACTOR) });
+    first.instructionRecords[0]!.status = "completed";
+    const restarted = harness({ bindings: first.stored.filter((entry) => entry.sessionId !== ACTOR), instructionRecords: first.instructionRecords });
     await expect(restarted.service.create({ ...request, approval: { ...approval, quote: "a later quote" }, mutationId: "durable", brief: "hello" })).resolves.toMatchObject({
       outcome: "CREATED",
       sessionId: PEER,
       bindingKey: `fleet:peer:${PEER}`,
-      brief: { delivery: "replayed" },
+      brief: { delivery: "completed", instructionId: first.instructionRecords[0]!.id, expectedTurn: 1 },
       retrieval: "replay",
       createdBy: { sessionId: ACTOR, approval, depth: 1 },
     });
