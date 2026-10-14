@@ -42,10 +42,12 @@ import { NvimBindingService } from "./nvim-binding-service.js";
 import { BrokerServer } from "./server.js";
 import { FleetProjectService } from "./fleet-project-service.js";
 import { SessionRegistry } from "./session-registry.js";
+import { initialInstructionReceipt } from "../orchestration/session/recover-initial-instruction.js";
 import {
   pruneLegacyTranscript,
 } from "../persistence/thread-transcript-store.js";
 import { ClaudeConversationBindingStore } from "../persistence/claude-conversation-bindings.js";
+import { CodexConversationBindingStore } from "../persistence/codex-conversation-bindings.js";
 import { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import { SessionStore } from "../persistence/session-store.js";
 import { FleetPreferenceStore } from "../persistence/fleet-preference-store.js";
@@ -179,9 +181,10 @@ export async function runBroker(
   const journal = new Journal(stateDirectory);
   const localActivity = await openActivityRecorder(resolve(stateDirectory, "activity"));
   const claudeConversations = new ClaudeConversationBindingStore(stateDirectory);
+  const codexConversations = new CodexConversationBindingStore(stateDirectory);
   let registry: SessionRegistry;
   const containerNativeSource = new ContainerNativeSource(resolve(stateDirectory, "containers"));
-  const transcripts = new ExecutionTranscriptStore(stateDirectory, { claudeConversations }, containerNativeSource, (id) => {
+  const transcripts = new ExecutionTranscriptStore(stateDirectory, { claudeConversations, codexConversations }, containerNativeSource, (id) => {
     try { return registry?.get(id); } catch { return undefined; }
   });
   await transcripts.init();
@@ -241,7 +244,7 @@ export async function runBroker(
   let workerEvents: WorkerEventChannel;
   const executionRuntime = await brokerExecutionRuntime({ stateDirectory, config, activity,
     allowsWorkspaceTrust: (source) => modalAnswerPolicy.allowsWorkspaceTrust(source),
-    adapters: { codex: new CodexProviderAdapter({ mcp, workspaceTrust: grantGatedTrust(codexTrust),
+    adapters: { codex: new CodexProviderAdapter({ mcp, codexConversations, workspaceTrust: grantGatedTrust(codexTrust),
       orchestratorHome: codexOrchestratorHome }),
       claude: new ClaudeProviderAdapter({ mcp, stateDirectory, workspaceTrust: grantGatedTrust(claudeTrust) }),
       cursor: new CursorProviderAdapter({ mcp, stateDirectory }), antigravity: new AntigravityProviderAdapter() },
@@ -316,10 +319,11 @@ export async function runBroker(
     try { return registry.get(id); } catch { return undefined; }
   }, (record, worker) => nativeCapture.captureInstruction(record, worker)), (record) => notificationFeed.observeInstruction(record)));
   instructions.start();
-  await instructions.recoverLaunchInstructions(async (id) => ({
-    canonicalTurns: (await transcripts.readCompletionLedger(id)).canonicalTurns,
-    pending: registry.initialInstructionRecoveryFailure(id),
-  }));
+  await instructions.recoverLaunchInstructions(async (id) => {
+    const ledger = await transcripts.readCompletionLedger(id);
+    return { canonicalTurns: ledger.canonicalTurns, cancelled: initialInstructionReceipt(ledger).cancelled,
+      pending: registry.initialInstructionRecoveryFailure(id) };
+  });
   await notificationFeed.start(instructions);
   const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerBudgets = new WorkerBudgetEnforcer({

@@ -4,6 +4,7 @@ import { FleetSnapshotFeed } from "../../src/client/fleet/snapshot-feed.js";
 import { runFleet } from "../../src/client/fleet/runtime.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import type { ServerFrame } from "../../src/broker/protocol/frames.js";
+import { threadStatus } from "../../src/client/fleet/transport.js";
 
 const record = { id: "11111111-1111-4111-8111-111111111111", provider: "claude", cwd: "/repo", detached: true,
   sandbox: "read-only", kind: "worker", createdAt: "2026-10-07T00:00:00.000Z", updatedAt: "2026-10-07T00:00:00.000Z",
@@ -30,6 +31,25 @@ function transport(version = "epoch:1") {
   };
 }
 afterEach(() => { vi.useRealTimers(); });
+
+it("applies truth-only deltas without stale attention or per-session truth requests", async () => {
+  const client = transport(), feed = new FleetSnapshotFeed(client as never);
+  const truth = { state: "idle", terminal: false, completedTurns: 1, canonicalTurns: 1,
+    pendingInstructions: 0, composerOccupied: false, modalOpen: false, detail: "Idle after one turn" };
+  client.request.mockImplementationOnce(async () => ({ kind: "full", version: "epoch:1",
+    snapshot: { threads: [{ record, workerTruth: truth }] } }));
+  try {
+    await feed.refresh();
+    expect(threadStatus(feed.snapshot.threads[0]!)).toBe("Idle");
+    client.request.mockImplementationOnce(async () => ({ kind: "delta", version: "epoch:2", baseVersion: "epoch:1",
+      upsert: [{ record, workerTruth: { ...truth, state: "blocked-composer", composerOccupied: true,
+        detail: "Rendered but not submitted" } }], remove: [] }));
+    await feed.refresh();
+    expect(threadStatus(feed.snapshot.threads[0]!)).toBe("Needs input");
+    expect(feed.snapshot.threads[0]?.workerTruth?.detail).toBe("Rendered but not submitted");
+    expect(client.request.mock.calls.map(([method]) => method)).toEqual(["fleet.snapshot", "fleet.snapshot"]);
+  } finally { feed.dispose(); }
+});
 
 it("coalesces bursts, resyncs version gaps and reconnects with a full snapshot", async () => {
   vi.useFakeTimers();

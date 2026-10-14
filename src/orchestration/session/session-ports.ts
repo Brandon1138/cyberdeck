@@ -84,9 +84,11 @@ export interface WorkerResultSnapshot {
     | "failed"
     | "stopped"
     | "exited"
+    | "interrupted"
     | "budget_exhausted"
     /** The provider stopped itself on its own limits. Terminal, and the process may still be alive. */
     | "provider-limit";
+  turnOutcome?: "cancelled";
   completedTurns: number;
   text: string;
   /**
@@ -96,13 +98,13 @@ export interface WorkerResultSnapshot {
    */
   truth: WorkerTruth;
   /** Whether the target turn's text is a provider turn or a screen scrape the broker settled for. */
-  provenance?: "provider-transcript" | "terminal-replay";
+  provenance?: "provider-transcript" | "terminal-replay" | "broker-lifecycle";
   providerLimit?: ProviderLimitTermination;
   /** Only on a completed target: whether this delivery is the first one for that completion. */
   retrieval?: "fresh" | "replay";
   completedAt?: string;
   stalledForSeconds?: number;
-  stallReason?: "transcript-and-token-count-unchanged-while-idle";
+  stallReason?: "no-observed-progress-while-turn-in-flight";
   tokenCount?: number;
   profile?: "scout";
   effectiveState?: SessionRecord["effectiveState"];

@@ -15,6 +15,8 @@ export interface StartupScoutReportCleanup {
 
 export interface StartupClaudeBindingCleanup {
   dropClaudeBinding(sessionId: string): Promise<void>;
+  dropTurnLedger?(sessionId: string): Promise<void>;
+  dropCodexBinding?(sessionId: string): Promise<void>;
 }
 
 export interface StartupThreadRetentionPorts {
@@ -38,6 +40,8 @@ export async function retainStartupThreads(
       .map(async (record) => {
         if (record.profile === "scout") await ports.scoutReports.remove(record.id);
         await ports.claudeBindings.dropClaudeBinding(record.id);
+        await ports.claudeBindings.dropCodexBinding?.(record.id);
+        await ports.claudeBindings.dropTurnLedger?.(record.id);
       }),
   );
 

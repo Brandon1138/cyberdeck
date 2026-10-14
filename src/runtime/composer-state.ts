@@ -1,6 +1,7 @@
 import type { ProviderId } from "../domain/session.js";
 import type { ComposerObservation } from "../domain/worker-truth.js";
 import { plainTerminalText, providerTerminalActivity } from "./terminal-replay.js";
+import { InputScreen } from "./input-screen.js";
 
 /**
  * Whether the provider's input surface is holding something.
@@ -48,16 +49,15 @@ const UNSENT_BUFFER_HINTS: Readonly<Record<string, readonly RegExp[]>> = {
 };
 
 /**
- * A composer prompt drawn *inside* the input box.
+ * A composer prompt drawn *inside* an input box.
  *
- * Every provider TUI draws its composer as a bordered box and echoes submitted prompts flush against
- * the conversation with no border. The border character is therefore what separates "text you have
+ * Boxed provider layouts echo submitted prompts flush against the conversation with no border. The border character is therefore what separates "text you have
  * not sent" from "text you already sent", and is the only reason this can be read at all.
  */
 const BOXED_COMPOSER_LINE = /^[│┃┆┊║▌▏▕]\s*(?:›|❯|>)\s*(.*?)\s*[│┃┆┊║▌▏▕]?$/u;
 
 /**
- * Codex's composer, which has no box at all.
+ * Bare composer prompts in the current provider layouts.
  *
  * Since 0.1xx Codex draws its input line as a bare `› ` prompt, and it draws every *submitted*
  * prompt in the history with the very same glyph (`tui/src/history_cell/messages.rs`). The glyph
@@ -66,7 +66,12 @@ const BOXED_COMPOSER_LINE = /^[│┃┆┊║▌▏▕]\s*(?:›|❯|>)\s*(.*?)
  * when nothing but the composer's own wrapped continuation lines sit between them. A `›` line with
  * an assistant answer under it is history and is never read as unsent text.
  */
-const BARE_COMPOSER_LINE = /^›\s+(\S.*)$/u;
+const BARE_COMPOSER_LINES: Readonly<Record<string, RegExp>> = {
+  codex: /^›(?:\s+(.*))?$/u,
+  claude: /^❯(?:\s+(.*))?$/u,
+  cursor: /^[→›❯](?:\s+(.*))?$/u,
+  antigravity: /^>(?:\s+(.*))?$/u,
+};
 
 /** Footer chrome Codex draws under its composer: hints, the context meter, the status line. */
 const CODEX_FOOTER_LINE =
@@ -142,7 +147,9 @@ export function terminalComposerState(
 ): ComposerObservation {
   const modalOpen = options.modalOpen
     ?? providerTerminalActivity(provider, replay) === "needs-input";
-  return frameComposerState(provider, plainTerminalText(currentFrame(replay)), { modalOpen });
+  const screen = new InputScreen();
+  screen.append(replay);
+  return frameComposerState(provider, screen.snapshot()?.text ?? plainTerminalText(currentFrame(replay)), { modalOpen });
 }
 
 /**
@@ -165,10 +172,10 @@ export function frameComposerState(
 
   // The composer's own line is read before any hint beside it: a hint proves something is unsent,
   // the line says what, and the engine needs the what before it will press Enter on it.
-  if (provider === "codex") {
-    const bare = bareComposerContent(lines, first);
+  if (!modalOpen) {
+    const bare = bareComposerContent(provider, lines, first);
     if (bare !== undefined) {
-      if (COMPOSER_PLACEHOLDERS.some((placeholder) => placeholder.test(bare))) {
+      if (bare === "" || COMPOSER_PLACEHOLDERS.some((placeholder) => placeholder.test(bare))) {
         return { modalOpen, occupied: false };
       }
       const content = bare.slice(0, 120);
@@ -198,24 +205,27 @@ export function frameComposerState(
 }
 
 /**
- * The text on Codex's bare `›` input line, or undefined when the bottom of the frame is not a
+ * Text on the provider's bare input line, or undefined when the bottom of the frame is not a
  * composer at all (a picker, a dialog, an older boxed layout).
  *
  * Walks up from the bottom: blank lines and footer chrome are skipped, indented lines are taken as
  * the draft's own wrapped continuations, and the first flush-left line decides. Only a `›` line
  * there is the composer; anything else means the composer is not where it would have to be.
  */
-function bareComposerContent(lines: readonly string[], first: number): string | undefined {
+function bareComposerContent(provider: ProviderId, lines: readonly string[], first: number): string | undefined {
   let continuations = 0;
   for (let index = lines.length - 1; index >= first; index -= 1) {
     const raw = lines[index]!;
     const line = raw.trim();
     // The prompt glyph decides before any footer word can: a draft that mentions `Plan mode` or
     // carries a `·` is still the composer, and skipping it would leave the instruction unverified.
-    const bare = BARE_COMPOSER_LINE.exec(line);
-    if (bare !== undefined && bare !== null) return bare[1]!;
-    if (line === "" || CODEX_FOOTER_LINE.test(line)) continue;
-    if (/^\s/u.test(raw) && continuations < BARE_COMPOSER_MAX_CONTINUATIONS) {
+    const bare = BARE_COMPOSER_LINES[provider]?.exec(line);
+    if (bare !== undefined && bare !== null) return bare[1] ?? "";
+    if (line === "" || /^[─━═╭╮╰╯┌┐└┘]+$/u.test(line)
+        || (provider === "codex" && CODEX_FOOTER_LINE.test(line))
+        || /^\? for shortcuts\b/iu.test(line)
+        || (provider === "claude" && /^(?:[⏵⏸]+\s*)?(?:bypass permissions on|accept edits on|plan mode on|auto mode on)\b.*shift\+tab|^tab to queue message$/iu.test(line))) continue;
+    if (provider === "codex" && /^\s/u.test(raw) && continuations < BARE_COMPOSER_MAX_CONTINUATIONS) {
       continuations += 1;
       continue;
     }

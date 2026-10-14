@@ -114,10 +114,10 @@ function harness(options: HarnessOptions = {}) {
   return { registry, ptys, events, stored, deleted };
 }
 
-/** Drive a session through a working turn to the idle state the broker reads as a finished task. */
+/** Drive an observed model turn to completion; this does not establish task success. */
 async function finishTurn(registry: SessionRegistry, pty: FakePty, sessionId: string): Promise<void> {
   pty.emitOutput("\u001b]0;\u2839 worker\u0007Working\nesc to interrupt");
-  pty.emitOutput("\n\u001b[2JDone. The patch is applied.\n\u001b]0;worker\u0007");
+  pty.emitOutput("\u001b[2J\u001b[HDone. The patch is applied.\r\n│ > │\r\n? for shortcuts\r\n\u001b]0;worker\u0007");
   await vi.waitFor(() => expect(registry.get(sessionId).attentionState).toBe("done"));
 }
 
@@ -128,19 +128,19 @@ async function settle(): Promise<void> {
 }
 
 describe("thread records survive the broker", () => {
-  it("rehydrates a thread that had finished its task as Done, not as interrupted", async () => {
+  it("preserves the previous answer while reporting an unobserved lost generation as interrupted", async () => {
     const { registry, stored } = harness({ recoveredSessions: [persisted()] });
     await registry.ready();
 
     expect(registry.list()).toEqual([expect.objectContaining({
       id: persisted().id,
-      executionState: "exited",
-      attentionState: "done",
-      exitCode: 0,
+      executionState: "cancelled",
+      attentionState: "interrupted",
+      exitCode: -1,
       latestPreview: "The finished answer.",
     })]);
-    // The rewrite is written back, so the finished state survives the *next* restart too.
-    expect(stored.get(persisted().id)).toMatchObject({ executionState: "exited", attentionState: "done" });
+    // Recovery records the lost generation without inventing a successful process exit.
+    expect(stored.get(persisted().id)).toMatchObject({ executionState: "cancelled", attentionState: "interrupted" });
   });
 
   it("rehydrates a thread that was mid-turn as interrupted", async () => {
@@ -165,7 +165,7 @@ describe("thread records survive the broker", () => {
     expect(registry.list()).toEqual([expect.objectContaining({
       executionState: "failed",
       attentionState: "failed",
-      exitCode: 0,
+      exitCode: -1,
     })]);
   });
 
@@ -174,12 +174,14 @@ describe("thread records survive the broker", () => {
     const record = await registry.start(request(), "do the work");
     ptys[0]!.emitExit(0);
     await settle();
-    expect(registry.get(record.id)).toMatchObject({ executionState: "exited", attentionState: "done" });
+    expect(registry.get(record.id)).toMatchObject({ executionState: "exited" });
+    expect(registry.get(record.id).attentionState).toBeUndefined();
 
     await registry.stopAll();
 
-    expect(registry.get(record.id)).toMatchObject({ executionState: "exited", attentionState: "done" });
-    expect(stored.get(record.id)).toMatchObject({ attentionState: "done" });
+    expect(registry.get(record.id)).toMatchObject({ executionState: "exited" });
+    expect(registry.get(record.id).attentionState).toBeUndefined();
+    expect(stored.get(record.id)?.attentionState).toBeUndefined();
   });
 
   it("keeps a finished thread Done when shutdown kills the idle agent still holding it", async () => {
@@ -219,7 +221,6 @@ describe("thread records survive the broker", () => {
     expect(second.registry.list()).toEqual([expect.objectContaining({
       id: record.id,
       executionState: "exited",
-      attentionState: "done",
     })]);
   });
 });
@@ -278,7 +279,7 @@ describe("a session that dies inside a live process", () => {
     const { registry, ptys } = harness({ exitOnKill: false });
     const record = await registry.start(request(), "do the work");
 
-    ptys[0]!.emitOutput("\r\nCodex needs your approval\r\nAllow\r\n");
+    ptys[0]!.emitOutput("\r\nWould you like to run the following command?\r\n$ npm test\r\n› 1. Yes, proceed\r\n  2. Yes, and don't ask again\r\n  3. No\r\n");
     await settle();
     expect(registry.get(record.id).attentionState).toBe("needs-input");
 
@@ -287,7 +288,7 @@ describe("a session that dies inside a live process", () => {
     expect(registry.get(record.id).attentionState).toBe("failed");
 
     // Further provider chatter must not resurrect it.
-    ptys[0]!.emitOutput("\r\nCodex needs your approval\r\nAllow\r\n");
+    ptys[0]!.emitOutput("\r\nWould you like to run the following command?\r\n$ npm test\r\n› 1. Yes, proceed\r\n  2. Yes, and don't ask again\r\n  3. No\r\n");
     await settle();
     expect(registry.get(record.id).attentionState).toBe("failed");
   });

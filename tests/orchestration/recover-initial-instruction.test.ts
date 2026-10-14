@@ -1,10 +1,12 @@
-import { rm } from "node:fs/promises";
+import { appendFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-store.js";
 import { codexLaunchFixture } from "../fixtures/codex-launch.js";
 import { describe, expect, it, vi } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { recoverInitialInstruction } from "../../src/orchestration/session/recover-initial-instruction.js";
 import type { TranscriptLike } from "../../src/orchestration/session/session-registry-ports.js";
+import { CodexProviderAdapter } from "../../src/providers/codex.js";
 
 const record = { id: crypto.randomUUID(), initialInstructionId: crypto.randomUUID(), provider: "claude", cwd: "/repo", createdAt: "2026-10-13T10:00:00Z" } as SessionRecord;
 const ledger = { completedTurns: 0, canonicalTurns: 0, turns: [] };
@@ -15,6 +17,76 @@ const transcripts = (): TranscriptLike => ({ append: vi.fn(), readCompletionLedg
   observeProviderTurns: vi.fn(async () => native), commitProviderTurns: vi.fn(async () => []) });
 
 describe("initial instruction recovery", () => {
+  it.each(["explicit", "inherited", "remote"])("requires an own marker on recovery of a %s marker-injected launch", async mode => {
+    const h = await codexLaunchFixture();
+    try {
+      if (mode === "explicit") h.a.providerInstructions = "explicit rules";
+      if (mode === "remote") h.a.kind = "orchestrator";
+      const adapter = new CodexProviderAdapter({ resolveDeveloperInstructions: async () => "inherited rules",
+        runCommand: async () => JSON.stringify({ status: "connected" }),
+        ...(mode === "remote" ? { mcp: { nodePath: "/node", cliPath: "/cli" } } : {}) });
+      const spec = adapter.buildLaunchSpec(h.a, "A BRIEF");
+      await adapter.prepareLaunch(h.a, spec);
+      expect(h.a.codexActorMarker).toBe(true);
+      h.a.launchRecord = { mode: "launch", transport: "pty", resolvedAt: h.a.createdAt, executable: spec.executable,
+        args: spec.args,
+        cwd: h.root, cyberdeckEnv: {}, inheritedEnvCount: 0, truncated: false };
+      await h.metadata("FOREIGN", h.a.createdAt);
+      await h.complete("FOREIGN", "A BRIEF");
+      const restarted = new ThreadTranscriptStore(h.root, h.options);
+      await expect(recoverInitialInstruction(h.a, restarted)).resolves.toMatchObject({ completed: false, unavailable: expect.any(String) });
+      expect(await restarted.readCompletionLedger(h.a.id)).toMatchObject({ canonicalTurns: 0, turns: [] });
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+  });
+
+  it.each(["orchestrator", "explicit"])("recovers a pre-upgrade markerless %s launch within the legacy window", async mode => {
+    const h = await codexLaunchFixture();
+    try {
+      if (mode === "orchestrator") h.a.kind = "orchestrator";
+      else h.a.providerInstructions = "explicit rules";
+      h.a.launchRecord = { mode: "launch", transport: "pty", resolvedAt: h.a.createdAt, executable: "/node",
+        args: mode === "orchestrator"
+          ? ["launcher.js", "--actor-session", h.a.id, "--mcp-node", "/node", "--mcp-cli", "/cli", "--", "--remote", "unix://", "--", "A BRIEF"]
+          : ["-c", 'developer_instructions="explicit rules"', "--", "A BRIEF"],
+        cwd: h.root, cyberdeckEnv: {}, inheritedEnvCount: 0, truncated: false };
+      await h.metadata("OWN", new Date(Date.parse(h.a.createdAt) + 1_000).toISOString());
+      await h.complete("OWN", "A BRIEF");
+      const restarted = new ThreadTranscriptStore(h.root, h.options);
+      await expect(recoverInitialInstruction(h.a, restarted)).resolves.toEqual({ completed: true });
+      expect(await restarted.readCompletionLedger(h.a.id)).toMatchObject({ canonicalTurns: 1, turns: [{ text: "OWN ANSWER" }] });
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+  });
+
+  it("refuses a two-hour-old markerless rollout with the same brief after restart", async () => {
+    const h = await codexLaunchFixture();
+    try {
+      await h.metadata("FOREIGN", "2026-10-13T08:00:00.000Z");
+      await h.complete("FOREIGN", "A BRIEF");
+      const restarted = new ThreadTranscriptStore(h.root, h.options);
+      await expect(recoverInitialInstruction(h.a, restarted)).resolves.toEqual({
+        completed: false,
+        unavailable: "Exact native first-turn identity is unavailable; resume or restart to retry without resending the brief",
+      });
+      expect(await restarted.readCompletionLedger(h.a.id)).toMatchObject({ canonicalTurns: 0, turns: [] });
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+  });
+
+  it("banks an aborted native launch as cancelled across restart instead of completing its brief", async () => {
+    const h = await codexLaunchFixture();
+    try {
+      await h.metadata("A", h.a.createdAt);
+      await appendFile(join(h.root, "sessions", "2026", "10", "13", "A.jsonl"), [
+        { type: "event_msg", payload: { type: "user_message", message: "A BRIEF" } },
+        { type: "event_msg", timestamp: "2026-10-13T10:00:05.000Z", payload: { type: "turn_aborted", turn_id: "A" } },
+      ].map(frame => JSON.stringify(frame)).join("\n") + "\n");
+      await expect(recoverInitialInstruction(h.a, h.store)).resolves.toEqual({ completed: false, cancelled: true });
+      const restarted = new ThreadTranscriptStore(h.root, h.options);
+      await expect(recoverInitialInstruction(h.a, restarted)).resolves.toEqual({ completed: false, cancelled: true });
+      expect(await restarted.readCompletionLedger(h.a.id)).toMatchObject({ canonicalTurns: 1,
+        turns: [{ data: { turnNumber: 1, outcome: "cancelled", transport: "provider-native" } }] });
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+  });
+
   it("propagates broker ledger failures rather than disguising them as unavailable native evidence", async () => {
     const source = transcripts();
     vi.mocked(source.readCompletionLedger!).mockRejectedValue(new Error("broker ledger unreadable"));

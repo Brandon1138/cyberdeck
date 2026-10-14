@@ -5,6 +5,7 @@ import type { ProviderId } from "../domain/session.js";
 import {
   ACTIVITY_MARKERS,
   BLOCKED_PROMPT_TAIL_CHARS,
+  CURSOR_WAIT_NOTIFICATION,
   OSC_TITLE,
   TOKEN_COUNT_MAX_SPAN,
   blockedPromptIndexInTail,
@@ -27,26 +28,15 @@ import {
  * round-trips through the same thread, and semantic turn capture lost its races against the
  * provider transcript and settled for a screen scrape. That was MIK-87.
  *
- * Nothing here changes what the broker concludes. It changes when the reading happens: each chunk
- * is stripped exactly once, on arrival, and what the readings need — where each activity marker
- * last landed, where the current frame starts, what the last token counter said — is kept as
- * running state instead of rediscovered. Per-chunk work is proportional to the chunk.
+ * Each chunk is stripped once on arrival. Bounded tails serve transcript/result and fatal-error
+ * readings; a separate bounded screen applies cursor moves and erases for current UI readings.
+ * Its cells retain raw write positions, so current provider controls can be ordered against OSC
+ * notifications and titles without re-reading the replay. Ingestion stays proportional to a chunk,
+ * and screen snapshots are cached until the next append.
  *
- * ## What this deliberately does not keep
- *
- * The raw replay. That still lives in the PTY handle, which is where an attaching client's replay
- * comes from and where anything needing the untouched bytes should ask. Mirroring it here would
- * double every session's memory to serve readers that are not on the hot path.
- *
- * ## Where it is approximate, and why that is safe
- *
- * Marker positions are remembered forever, in a stream coordinate that is never rebased. A replay
- * buffer forgets a marker once it scrolls past 128 KiB; this does not. The verdicts are decided by
- * comparing last-occurrence positions against each other, and a remembered-but-ancient marker loses
- * to every newer one exactly as a forgotten one would. The single difference is a worker that has
- * scrolled *every* marker out of its buffer: the replay-backed reading calls that `unknown`, this
- * one still answers from what it saw. Providers redraw their status line continuously while they
- * emit, so a marker only ages out while the session is quiet — and a quiet session is not scrolling.
+ * The raw replay remains owned by the PTY handle. Legacy marker accessors retain their stream
+ * coordinates for compatibility; activity no longer treats their historical occurrences as the UI.
+
  */
 export class ReplayDigest implements TerminalMarkerSource {
   /**
@@ -83,17 +73,9 @@ export class ReplayDigest implements TerminalMarkerSource {
   static readonly DEFAULT_REPLAY_CHARS = 128 * 1024;
 
   /**
-   * How much raw stream a title stays visible in.
-   *
-   * Marker positions may outlive the replay buffer — see the note above, they lose to every newer
-   * marker exactly as a forgotten one would. A title cannot: {@link markerTerminalActivity} gives it
-   * unconditional precedence over every marker, so a remembered-forever title is a verdict that
-   * never yields. A provider that names a spinner in its title once and then prints its way past the
-   * replay buffer would stay `working` for the rest of the session, ignoring every waiting marker
-   * after it. The replay-backed reading stops finding that title, and so does this.
-   *
-   * Counted in characters against a buffer bounded in bytes, which for UTF-8 can only make the
-   * window wider than the buffer — a title is dropped no earlier than the replay would drop it.
+   * Lifetime of non-rendered OSC evidence, bounded by the PTY replay window. Current screen writes
+   * and clears can supersede it sooner. Character counting makes this window no narrower than a
+   * byte-bounded UTF-8 replay window.
    */
   readonly #replayChars: number;
 
@@ -113,6 +95,7 @@ export class ReplayDigest implements TerminalMarkerSource {
   #braille = -1;
   #title: string | undefined;
   #titleAt = -1;
+  #waitingNotificationAt = -1;
   #tokens: number | undefined;
   #version = 0;
   /** Set while an oversized OSC payload is being thrown away; see {@link append}. */
@@ -166,6 +149,7 @@ export class ReplayDigest implements TerminalMarkerSource {
     this.#braille = -1;
     this.#title = undefined;
     this.#titleAt = -1;
+    this.#waitingNotificationAt = -1;
     this.#tokens = undefined;
     this.#discardingOsc = false;
     this.#oscSeam = "";
@@ -232,16 +216,19 @@ export class ReplayDigest implements TerminalMarkerSource {
       this.#title = match[1];
       this.#titleAt = consumableStart + match.index;
     }
+    for (const match of consumable.matchAll(CURSOR_WAIT_NOTIFICATION)) {
+      this.#waitingNotificationAt = consumableStart + match.index;
+    }
 
     // Split at the last clear-screen so the frame boundary is exact rather than chunk-aligned. The
     // split lands on the first byte of an escape sequence, so neither half loses a match.
     const clearAt = consumable.lastIndexOf(CLEAR_SCREEN);
     if (clearAt < 0) {
-      this.#ingest(consumable, false);
+      this.#ingest(consumable, false, consumableStart);
       return;
     }
-    this.#ingest(consumable.slice(0, clearAt), false);
-    this.#ingest(consumable.slice(clearAt), true);
+    this.#ingest(consumable.slice(0, clearAt), false, consumableStart);
+    this.#ingest(consumable.slice(clearAt), true, consumableStart + clearAt);
   }
 
   /** The stripped tail, at most `limit` characters, and whether anything was cut from its head. */
@@ -265,6 +252,13 @@ export class ReplayDigest implements TerminalMarkerSource {
   }
 
   inputFrameText(): string { return this.#inputScreen.text(); }
+
+  currentScreen() { return this.#inputScreen.snapshot(); }
+  titlePosition(): number { return this.lastTitle() === undefined ? -1 : this.#titleAt; }
+  waitingNotificationPosition(): number {
+    return this.#rawOffset - this.#waitingNotificationAt > this.#replayChars
+      ? -1 : this.#waitingNotificationAt;
+  }
 
   /** Last token counter the provider rendered, or undefined if it has never rendered one. */
   tokenCount(): number | undefined {
@@ -318,10 +312,10 @@ export class ReplayDigest implements TerminalMarkerSource {
     this.#rawSeam = search.slice(Math.max(0, search.length - ReplayDigest.#OVERLAP_CHARS));
   }
 
-  #ingest(segment: string, startsFrame: boolean): void {
+  #ingest(segment: string, startsFrame: boolean, rawStart: number): void {
     if (startsFrame) this.#frameOffset = this.#normalizedOffset + this.#normalized.length;
     if (segment.length === 0) return;
-    this.#inputScreen.append(segment);
+    this.#inputScreen.append(segment, rawStart);
 
     const stripped = stripTerminalControl(segment);
     const normalized = plainTerminalText(segment);
@@ -373,7 +367,7 @@ const OSC_BEL = "\u0007";
 const OSC_ST = "\u001b\\";
 
 /** An OSC that has arrived in full, anchored at its opener. */
-const TERMINATED_OSC = /^\u001b\][^\u0007]*(?:\u0007|\u001b\\)/u;
+const TERMINATED_OSC = /^\u001b\](?:[^\u0007\u001b]|\u001b(?!\\))*(?:\u0007|\u001b\\)/u;
 
 /**
  * A complete control sequence, anchored at the escape that opens it.
@@ -384,7 +378,7 @@ const TERMINATED_OSC = /^\u001b\][^\u0007]*(?:\u0007|\u001b\\)/u;
  * text. The whole-replay strip cannot make that mistake, because it never sees a cut sequence.
  */
 const COMPLETE_SEQUENCE =
-  /^(?:\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|\u001b(?:[()][0-9A-Z]|[@-Z\\^-_]))/u;
+  /^(?:\u001b\](?:[^\u0007\u001b]|\u001b(?!\\))*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|\u001b(?:[78c]|[()][0-9A-Z]|[@-Z\\^-_]))/u;
 
 /**
  * Where the withheld tail of a chunk begins, and whether an unterminated OSC is what put it there.

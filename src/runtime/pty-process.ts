@@ -89,6 +89,7 @@ export class PtyProcess implements SessionRuntime {
   private readonly exitListeners = new Set<ExitListener>();
   private readonly replay: PtyReplayBuffer;
   private exited = false;
+  private exit?: { exitCode: number; signal?: number };
 
   readonly pid: number;
 
@@ -117,6 +118,7 @@ export class PtyProcess implements SessionRuntime {
     this.terminal.onExit(({ exitCode, signal }) => {
       if (this.exited) return;
       this.exited = true;
+      this.exit = { exitCode, ...(signal === undefined ? {} : { signal }) };
       for (const listener of this.exitListeners) {
         listener(exitCode, signal);
       }
@@ -148,6 +150,12 @@ export class PtyProcess implements SessionRuntime {
   }
 
   onExit(listener: ExitListener): () => void {
+    if (this.exit !== undefined) {
+      const exit = this.exit;
+      let subscribed = true;
+      queueMicrotask(() => { if (subscribed) listener(exit.exitCode, exit.signal); });
+      return () => { subscribed = false; };
+    }
     this.exitListeners.add(listener);
     return () => {
       this.exitListeners.delete(listener);

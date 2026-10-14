@@ -1,11 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { ClaudeTurnStops } from "../../src/persistence/thread-transcript-lines.js";
+import { ClaudeTurnStops, parseCodexTurn } from "../../src/persistence/thread-transcript-lines.js";
 
 const timestamp = "2026-08-20T09:00:01.000Z";
 const stoppedAt = "2026-08-20T09:00:01.100Z";
 const assistant = (content: unknown[]) => JSON.stringify({
   type: "assistant", timestamp,
   message: { id: "assistant-id", role: "assistant", stop_reason: "end_turn", content },
+});
+
+describe("Codex completion authority", () => {
+  it.each(["task_started", "agent_message", "turn_aborted"])("does not promote %s to completion", (type) => {
+    expect(parseCodexTurn(JSON.stringify({ type: "event_msg", timestamp,
+      payload: { type, turn_id: "turn", last_agent_message: "text" } }), undefined)).toBeUndefined();
+  });
+  it.each([undefined, "", "   ", null])("accepts textless native completions (%s)", (text) => {
+    expect(parseCodexTurn(JSON.stringify({ type: "event_msg", timestamp,
+      payload: { type: "task_complete", turn_id: "turn", last_agent_message: text } }), undefined))
+      .toEqual({ id: "turn", occurredAt: timestamp, text: text ?? "", data: { nativeTimestampKnown: true } });
+  });
+  it.each(["", undefined])("requires an exact stable native turn ID (%s)", (turn_id) => {
+    expect(parseCodexTurn(JSON.stringify({ type: "event_msg", timestamp,
+      payload: { type: "task_complete", turn_id } }), undefined)).toBeUndefined();
+  });
 });
 const duration = (uuid?: string) => JSON.stringify({ type: "system", subtype: "turn_duration", timestamp: stoppedAt, uuid });
 

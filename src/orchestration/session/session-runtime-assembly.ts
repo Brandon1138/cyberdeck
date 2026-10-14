@@ -62,11 +62,13 @@ export class SessionRuntimeAssembly {
       // it, because the cap belongs to the account rather than to the runtime. Recovery folds `errored`
       // into `failed`, so without rehydrating this the operator is told the worker crashed when it
       // was actually told to come back at 3:00pm.
-      this.catalog.sessions.set(record.id, this.createRuntimeSession(record, {
+      const runtime = this.createRuntimeSession(record, {
         watchers: new Map(),
         stopRequested: false,
         launchTail: Promise.resolve(),
-      }, !initial.completed));
+      }, !initial.completed && initial.cancelled !== true);
+      this.catalog.sessions.set(record.id, runtime);
+      writes.push(runtime.turns.restoreDurableCompletions());
       const rewritten = record.executionState !== original.executionState
         || record.attentionState !== original.attentionState
         || record.exitCode !== original.exitCode;
@@ -90,9 +92,9 @@ export class SessionRuntimeAssembly {
       throw new RegistryError("SESSION_RESUME_UNAVAILABLE", initial.unavailable, runtime.record.id);
     }
     this.initialRecoveryFailures.delete(runtime.record.id);
-    if (initial.completed && runtime.record.initialInstructionId !== undefined) {
+    if ((initial.completed || initial.cancelled) && runtime.record.initialInstructionId !== undefined) {
       this.bus.notifyInstructionState({ sessionId: runtime.record.id,
-        instructionId: runtime.record.initialInstructionId, state: "completed", at: new Date().toISOString() });
+        instructionId: runtime.record.initialInstructionId, state: initial.cancelled ? "cancelled" : "completed", at: new Date().toISOString() });
     }
   }
 
@@ -206,6 +208,14 @@ export class SessionRuntimeAssembly {
       } catch (error) {
         cleanupFailures.push(error instanceof Error ? error.message : String(error));
       }
+    }
+    if (reason === "session-deleted" && transcripts?.dropCodexBinding !== undefined) {
+      try { await transcripts.dropCodexBinding(record.id); }
+      catch (error) { cleanupFailures.push(error instanceof Error ? error.message : String(error)); }
+    }
+    if (reason === "session-deleted" && transcripts?.dropTurnLedger !== undefined) {
+      try { await transcripts.dropTurnLedger(record.id); }
+      catch (error) { cleanupFailures.push(error instanceof Error ? error.message : String(error)); }
     }
     for (const message of cleanupFailures) {
       await this.catalog.appendTranscript(

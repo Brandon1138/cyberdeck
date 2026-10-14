@@ -200,10 +200,16 @@ export class SessionRuntimeObserver {
     // in the dead process's composer becomes undelivered now.
     runtime.turns.stopPendingInstructions();
     const scoutTerminal = runtime.record.scout?.terminalState;
+    const providerFailed = runtime.record.termination !== undefined
+      || runtime.record.executionState === "errored";
+    const completedCurrentTurn = runtime.turns.completedTurns > 0
+      && runtime.record.attentionState === "done";
     runtime.record.executionState = scoutTerminal === "complete"
       ? "exited"
       : scoutTerminal === "budget_exhausted"
         ? "cancelled"
+        : providerFailed
+          ? "failed"
         : runtime.stopRequested
           ? "cancelled"
           : scoutTerminal === "failed"
@@ -227,17 +233,21 @@ export class SessionRuntimeObserver {
     runtime.watchers.clear();
     runtime.record.attachmentState = "detached";
     runtime.record.updatedAt = new Date().toISOString();
-    runtime.record.attentionState = scoutTerminal === "complete"
+    const attention = scoutTerminal === "complete"
       ? "done"
       : scoutTerminal === "budget_exhausted"
         ? "stopped"
+        : providerFailed
+          ? "failed"
         : runtime.stopRequested
           ? (runtime.outcomePreserved === true ? "done" : "stopped")
           : scoutTerminal === "failed"
             ? "failed"
             : exitCode === 0
-              ? "done"
+              ? (completedCurrentTurn ? "done" : undefined)
               : "failed";
+    if (attention === undefined) delete runtime.record.attentionState;
+    else runtime.record.attentionState = attention;
     runtime.record.meaningfulUpdatedAt = runtime.record.updatedAt;
     if (runtime.record.termination?.kind === "startup-exit") runtime.record.attentionState = "failed";
     // The record is terminal before either fence opens, so no input path can observe an active gap.

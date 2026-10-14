@@ -27,6 +27,7 @@ export class FleetProjection {
     const snapshot: FleetProjectionSnapshot = {
       threads: sessions.map(({ launchRecord: _launch, providerInstructions: _instructions, imageAttachments: _images, ...record }) => ({
         record: structuredClone(record),
+        workerTruth: structuredClone(this.options.registry.workerTruth(record.id)),
         ...(coordination.has(record.id) ? { coordination: coordination.get(record.id)! } : {}),
         ...(owners.has(record.id) ? { controllerId: owners.get(record.id)!.controllerId } : {}),
         ...(owners.get(record.id)?.createdBy === undefined ? {} : { createdBy: owners.get(record.id)!.createdBy }),

@@ -61,6 +61,8 @@ it("waits for Claude's text block when thinking and text both carry end_turn", a
   await writeFile(f.path, lines([{ type: "user", timestamp, message: { role: "user", content: "canary" } }, thinking]));
   expect((await f.source.read(f.session)).turns).toHaveLength(0);
   await appendFile(f.path, lines([{ ...thinking, message: { ...thinking.message, content: [{ type: "text", text: "SUBSCRIPTION_CANARY_OK" }] } }]));
+  expect((await f.source.read(f.session)).turns).toHaveLength(0);
+  await appendFile(f.path, lines([{ type: "system", subtype: "turn_duration", timestamp: "2026-09-05T10:00:02.000Z", uuid: "stop-one" }]));
   expect((await f.source.read(f.session)).turns).toMatchObject([{ providerTurnId: "msg-one", text: "SUBSCRIPTION_CANARY_OK" }]);
 });
 
@@ -165,7 +167,7 @@ it("follows an exact Claude clear binding and resumes its native conversation", 
   const next = join(f.path, "..", `${nativeId}.jsonl`);
   await writeFile(next, JSON.stringify({ type: "assistant", timestamp: "2026-09-05T10:00:01.000Z", message: {
     id: "claude-message", role: "assistant", model: "claude-observed", stop_reason: "end_turn", content: [{ type: "text", text: "completed" }],
-  } }) + "\n");
+  } }) + "\n" + lines([{ type: "system", subtype: "turn_duration", timestamp: "2026-09-05T10:00:02.000Z", uuid: "clear-stop" }]));
   await writeFile(join(f.source.stateRoot(f.session.id), "cyberdeck-native-binding.json"), JSON.stringify({ nativeSessionId: nativeId, relativePath: `.claude/projects/-workspace/${nativeId}.jsonl` }));
   expect((await f.source.read(f.session)).turns[0]?.providerTurnId).toBe("claude-message");
   const adapter = new ContainerProviderAdapter(new ClaudeProviderAdapter(), join(f.root, "containers"));
@@ -181,8 +183,48 @@ it("detects Claude's own /clear in array content while ignoring a tool result th
   const quoted = { type: "user", timestamp: "2026-09-05T10:00:01.000Z", toolUseResult: { stdout: clear },
     message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: clear }] } };
   const final = { type: "assistant", timestamp: "2026-09-05T10:00:02.000Z", message: { id: "m1", role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "done" }] } };
-  await writeFile(f.path, lines([quoted, final]));
+  await writeFile(f.path, lines([quoted, final, { type: "system", subtype: "turn_duration", timestamp: "2026-09-05T10:00:02.500Z", uuid: "quoted-stop" }]));
   expect((await f.source.read(f.session)).turns).toHaveLength(1);
   await appendFile(f.path, lines([{ type: "user", timestamp: "2026-09-05T10:00:03.000Z", message: { role: "user", content: [{ type: "text", text: `  ${clear}\n<command-message>clear</command-message>` }] } }]));
   await expect(f.source.read(f.session)).rejects.toThrow("NATIVE_CONVERSATION_CLEARED");
+});
+
+it("retains a cancelled native closure's execution/ordinal and records cancellation instead of success", async () => {
+  const f = await fixture();
+  const instruction = f.instruction(1, "acknowledged");
+  await writeFile(f.path, lines([codex("session_meta", { id: f.nativeId, originator: "codex-tui", cwd: "/workspace" }),
+    codex("event_msg", { type: "task_started", turn_id: "cancelled-turn" }),
+    codex("event_msg", { type: "turn_aborted", turn_id: "cancelled-turn" })]));
+  const observation = await f.observe(1);
+  const evidence = observation.nativeActivityEvidence!;
+  const receipts = await f.transcripts.commitProviderTurns({ ...observation, turns: [{ providerTurnId: "cancelled-turn",
+    providerOccurredAt: evidence.occurredAt!, text: "cancelled", transport: "provider-native", data: {
+      ...evidence.receiptData, outcome: "cancelled", nativeActivityId: evidence.id,
+    } }] });
+  await f.settle(2);
+  instruction.status = "cancelled";
+  await f.capture.captureInstruction(instruction, f.session);
+  const records = await f.recorder.read(instruction.id, 0, 100);
+  expect(records.some((event) => event.kind === "provider.turn" && event.outcome === "cancelled")).toBe(true);
+  expect(records.some((event) => event.outcome === "succeeded")).toBe(false);
+  expect(records.filter((event) => event.kind === "provider.turn").every((event) => event.generation === 2
+    && event.executionId === f.session.execution!.executionId && event.providerTurnId === "cancelled-turn")).toBe(true);
+  expect(receipts[0]?.data).toMatchObject({ turnNumber: 1, outcome: "cancelled" });
+});
+
+it("retains a provider cancellation as a negative attributed turn through capture and restart", async () => {
+  const f = await fixture(), instruction = f.instruction(1, "acknowledged");
+  await writeFile(f.path, lines([codex("session_meta", { id: f.nativeId, originator: "codex-tui", cwd: "/workspace" }), ...codexTurn(1)]));
+  const observed = await f.observe(1);
+  await f.transcripts.commitProviderTurns({ ...observed, turns: observed.turns.map(turn => ({ ...turn,
+    text: "Provider turn was cancelled", data: { ...turn.data, outcome: "cancelled" } })) });
+  await f.settle(4);
+  instruction.status = "cancelled";
+  await f.capture.captureInstruction(instruction, f.session);
+  const restarted = new TurnNativeCapture(join(f.root, "cursors"), await AgentActivityStore.open(join(f.root, "activity")), f.transcripts, { list: async () => f.instructions });
+  await restarted.captureInstruction(instruction, f.session);
+  const events = await f.recorder.read(instruction.id, 0, 100);
+  expect(events.filter(event => event.kind === "provider.turn" && event.outcome === "cancelled")).toHaveLength(1);
+  expect(events.some(event => event.kind === "provider.turn" && event.outcome === "succeeded")).toBe(false);
+  expect(events.every(event => event.instructionId === instruction.id)).toBe(true);
 });

@@ -16,11 +16,81 @@ import {
   CODEX_HOOK_REVIEW_0_153,
   codexRendered,
 } from "../fixtures/provider-startup-dialogs.js";
+import { PROVIDER_SCREENS, redraw } from "./provider-screen-fixtures.js";
 
 describe("terminal replay semantics", () => {
-  it("uses the latest provider title rather than stale spinner frames", () => {
+  it.each(["codex", "claude"] as const)("recognizes %s busy controls after ED2 preserves a nonzero row and column", (provider) => {
+    const replay = "\u001b[8;11Hprevious screen\u001b]0;⠹ busy\u0007\u001b[2JWorking\r\n   esc to interrupt";
+    expect(providerTerminalActivity(provider, replay)).toBe("working");
+  });
+
+  it.each(PROVIDER_SCREENS)("recognizes indented $provider permission controls after a clear without home", ({ provider, modal }) => {
+    const replay = "\u001b[8;11Hprevious screen\u001b[2J" + modal.map((row) => `   ${row}`).join("\r\n");
+    expect(providerTerminalActivity(provider, replay)).toBe("needs-input");
+  });
+
+  it("recognizes a partial Claude trust gate below blank rows left by ED2", () => {
+    const replay = "\u001b[8;11Hprevious screen\u001b[2JQuick safety check: Is this a project you created or one you trust?\r\n❯ ";
+    expect(providerTerminalActivity("claude", replay)).toBe("needs-input");
+  });
+
+  it("recognizes Antigravity's current composing spinner and indented stop controls", () => {
+    const replay = "\u001b[8;11Hprevious screen\u001b]0;⠹ Working\u0007\u001b[2J   ⠹ Composing\r\n   esc to interrupt";
+    expect(providerTerminalActivity("antigravity", replay)).toBe("working");
+  });
+
+  it("keeps an empty composer and shortcut footer out of terminal result text", () => {
+    for (const composer of ["│ > │", "› ", "❯ "]) {
+      const replay = `\u001b[2J\u001b[Hactual provider answer\r\n${composer}\r\n? for shortcuts  100% context left\r\n`;
+      expect(compactTerminalResult(replay)).toBe("actual provider answer");
+    }
+  });
+
+  it.each(PROVIDER_SCREENS)("uses only the currently rendered $provider UI across modal, work and idle clears", ({ provider, modal, working, idle }) => {
+    const blocked = redraw(modal);
+    const resumed = blocked + redraw(working);
+    const ready = resumed + redraw(idle);
+    expect(providerTerminalActivity(provider, blocked)).toBe("needs-input");
+    expect(providerTerminalActivity(provider, resumed)).toBe("working");
+    expect(providerTerminalActivity(provider, ready)).toBe("awaiting-input");
+  });
+
+  it.each(["claude", "codex"] as const)("orders %s titles against current working and cleared idle UI", (provider) => {
+    const staticTitle = "\u001b]0;workspace\u0007";
+    const spinnerTitle = "\u001b]0;⠋ Working\u0007";
+    const currentWork = staticTitle + redraw(["Working…", "esc to interrupt"]);
+    expect(providerTerminalActivity(provider, currentWork)).toBe("working");
+    const idle = PROVIDER_SCREENS.find((fixture) => fixture.provider === provider)!.idle;
+    expect(providerTerminalActivity(provider, currentWork + spinnerTitle + redraw(idle))).toBe("awaiting-input");
+    expect(providerTerminalActivity(provider, staticTitle)).toBe("unknown");
+  });
+
+  it.each(PROVIDER_SCREENS)("does not infer $provider modals or activity from assistant prose", ({ provider }) => {
+    for (const prose of [
+      "I fixed the permission prompt parsing.",
+      "The workspace-trust option needs authentication in the docs.",
+      "Working on the permission prompt parsing was useful.",
+      "• I fixed the esc to interrupt footer parsing.",
+      "Enter to confirm",
+      "The text says: Would you like to run the following command? Yes, proceed.",
+    ]) {
+      expect(providerTerminalActivity(provider, redraw([prose]))).toBe("unknown");
+    }
+  });
+
+  it.each(["codex", "claude"] as const)("does not borrow Cursor's idle wording for %s", (provider) => {
+    expect(providerTerminalActivity(provider, redraw(["Add a follow-up"]))).toBe("unknown");
+  });
+
+  it.each(PROVIDER_SCREENS)("keeps unsupported $provider screen edits unknown until a full clear", ({ provider, idle, working }) => {
+    const unsupported = redraw(idle) + "\u001b[1P";
+    expect(providerTerminalActivity(provider, unsupported)).toBe("unknown");
+    expect(providerTerminalActivity(provider, unsupported + redraw(working))).toBe("working");
+  });
+
+  it("does not infer readiness from a static title and assistant text", () => {
     const replay = "\u001b]0;⠹ worker\u0007working\u001b]0;worker\u0007done";
-    expect(providerTerminalActivity("codex", replay)).toBe("awaiting-input");
+    expect(providerTerminalActivity("codex", replay)).toBe("unknown");
   });
 
   it("recognizes Cursor completion after composing without relying on its static title", () => {
@@ -150,7 +220,7 @@ describe("terminal replay semantics", () => {
     expect(providerTerminalActivity(
       "claude",
       "\u001b]0;worker\u0007I added a prompt where you press Enter to confirm the deletion.",
-    )).toBe("awaiting-input");
+    )).toBe("unknown");
   });
 
   it("does not read flush-left prose that opens with an affordance as a dialog", () => {
@@ -166,7 +236,7 @@ describe("terminal replay semantics", () => {
       "←/→ to change the sort order is documented in the README.",
     ]) {
       expect(providerTerminalActivity("claude", `\u001b]0;worker\u0007Done.\n${prose}`))
-        .toBe("awaiting-input");
+        .toBe("unknown");
     }
   });
 

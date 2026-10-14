@@ -20,7 +20,7 @@ import { CodexProviderAdapter } from "../../src/providers/codex.js";
 import type { ProviderAdapter } from "../../src/providers/provider.js";
 import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
 
-const CLEAR = "\u001b[2J";
+const CLEAR = "\u001b[2J\u001b[H";
 const READY = {
   codex: `\u001b]0;Codex\u0007${CLEAR}› Ask Codex to do anything\n  ? for shortcuts  100% context left\n`,
   claude: `\u001b]0;Claude\u0007${CLEAR}────────────────────\n❯ \n────────────────────\n  ? for shortcuts\n`,
@@ -66,6 +66,7 @@ async function harness(provider: ProviderId = "codex", initialPrompt?: string, n
     : provider === "codex"
       ? new CodexProviderAdapter({
           runCommand: async () => '{"status":"connected"}',
+          resolveDeveloperInstructions: async () => undefined,
           nativeSessionId: "11111111-1111-4111-8111-111111111111",
         })
       : {
@@ -173,7 +174,8 @@ describe("automated provider startup delivery", () => {
       expect(rendered.expectedTurn).toBe(1);
       expect(rendered.submittedAt).toBeUndefined();
       expect(registry.workerTruth(record.id).completedTurns).toBe(0);
-      handles[0]!.emit(`\u001b]0;⠹ Working\u0007${CLEAR}⠹ Composing\nesc to interrupt\n`);
+      handles[0]!.emit(provider === "antigravity" ? `${CLEAR}⠹ Working\r\n`
+        : `\u001b]0;⠹ Working\u0007${CLEAR}⠹ Composing\nesc to interrupt\n`);
       await vi.waitFor(async () => expect((await queue.list(record.id))[0]?.status).toBe("acknowledged"));
       expect(handles[0]!.writes).toHaveLength(1);
       handles[0]!.emit(`\u001b]0;Ready\u0007${READY[provider]}`);

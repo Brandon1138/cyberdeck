@@ -133,7 +133,8 @@ export async function brokerFixture(root: string, options: FixtureOptions = {}) 
     workers.push(record);
     if (mode === "live-container") await eventually(async () => (await nativeTranscripts!.read(record.id, 0, 100)).events
       .some((event) => event.kind === "turn" && event.data.transport === "provider-native") && registry.workerTruth(record.id).state === "idle", "LIVE_WORKER_START_TIMEOUT", timeoutFor(mode, live));
-    else await eventually(() => registry.snapshot(record.id).includes("SCRIPT_READY"), "SCRIPT_START_TIMEOUT", timeoutFor(mode));
+    else await eventually(() => registry.snapshot(record.id).includes("SCRIPT_READY")
+      && registry.workerTruth(record.id).state === "idle", "SCRIPT_START_TIMEOUT", timeoutFor(mode));
     return registry.get(record.id);
   };
   const worker = await startWorker(options.workerPrompt);

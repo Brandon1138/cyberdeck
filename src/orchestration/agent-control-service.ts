@@ -183,6 +183,7 @@ export interface OrchestratorInspection {
     provider: string;
     executionState: SessionRecord["executionState"];
     attentionState?: SessionRecord["attentionState"];
+    truth?: WorkerTruth;
     attachmentState: SessionRecord["attachmentState"];
     cwd: string;
     processOwnedByBroker: boolean;
@@ -191,7 +192,6 @@ export interface OrchestratorInspection {
     stopRequestedAt?: string;
     /** MIK-55 will supply a real renewable heartbeat/lease. Null must never be treated as stale. */
     lastHeartbeatAt: null;
-    truth?: WorkerTruth;
     exitCode?: number | null;
     termination?: SessionRecord["termination"];
   };
@@ -1224,6 +1224,7 @@ export class AgentControlService {
   private async orchestratorInspection(target: SessionRecord): Promise<OrchestratorInspection> {
     const targetBinding = await this.orchestrators.findBySessionId(target.id);
     const stopRequestedAt = this.registry.stopRequestedAt(target.id);
+    const truth = this.truthOf(target.id);
     const children = target.childIds
       .map((sessionId) => this.sessionRecord(sessionId))
       .filter((record): record is SessionRecord => record !== undefined);
@@ -1235,6 +1236,7 @@ export class AgentControlService {
         generation: target.generation ?? 1,
         provider: target.provider,
         executionState: target.executionState,
+        ...(truth === undefined ? {} : { truth }),
         ...(target.attentionState === undefined ? {} : { attentionState: target.attentionState }),
         attachmentState: target.attachmentState,
         cwd: target.cwd,
@@ -1245,7 +1247,6 @@ export class AgentControlService {
           : { lastMeaningfulActivityAt: target.meaningfulUpdatedAt }),
         ...(stopRequestedAt === undefined ? {} : { stopRequestedAt }),
         lastHeartbeatAt: null,
-        truth: this.registry.workerTruth(target.id),
         exitCode: target.exitCode,
         ...(target.termination === undefined ? {} : { termination: target.termination }),
       },

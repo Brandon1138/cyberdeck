@@ -1,11 +1,15 @@
 import { join } from "node:path";
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
+import { createHash } from "node:crypto";
 
 export interface NativeTurn {
   id: string;
   occurredAt: string;
   text: string;
+  /** Complete-frame boundary in this exactly bound native source; never a timestamp guess. */
+  sourceOffset?: number;
+  data?: Record<string, unknown>;
 }
 
 
@@ -40,12 +44,14 @@ export async function readCodexMetadata(
           timestamp?: unknown;
           cwd?: unknown;
           originator?: unknown;
+          source?: unknown;
         };
       };
       const payload = frame.payload;
       if (
         frame.type === "session_meta"
         && payload?.originator === "codex-tui"
+        && !(typeof payload.source === "object" && payload.source !== null && "subagent" in payload.source)
         && typeof payload.id === "string"
         && typeof payload.timestamp === "string"
         && typeof payload.cwd === "string"
@@ -60,10 +66,18 @@ export async function readCodexMetadata(
   return metadata;
 }
 
+export interface CodexLaunchIdentity { id: string; text?: string | undefined; textHash?: string | undefined }
+
+/** The same exact-text rule survives journal rotation without persisting the brief twice. */
+export function codexLaunchFingerprint(text: string): string {
+  return createHash("sha256").update(text.trim()).digest("hex");
+}
+
 /** Only the launch turn can identify a rollout; later prompts and assistant text cannot. */
-export async function codexLaunchMatches(path: string, identity: { id: string; text?: string }): Promise<boolean> {
+export async function codexLaunchMatches(path: string, identity: CodexLaunchIdentity): Promise<boolean> {
   const matches = (value: unknown): boolean => {
     if (typeof value === "string") return value.trim() === identity.text?.trim()
+      || identity.textHash !== undefined && codexLaunchFingerprint(value) === identity.textHash
       || value.split(/[^a-zA-Z0-9-]+/u).includes(identity.id);
     if (Array.isArray(value)) return value.some(matches);
     return typeof value === "object" && value !== null && Object.values(value).some(matches);
@@ -152,19 +166,71 @@ export function parseCodexTurn(line: string, now: (() => string) | undefined): N
       frame.type !== "event_msg"
       || payload?.type !== "task_complete"
       || typeof payload.turn_id !== "string"
-      || typeof payload.last_agent_message !== "string"
-      || payload.last_agent_message.trim() === ""
+      || payload.turn_id.length === 0
+      || (payload.last_agent_message !== undefined && payload.last_agent_message !== null
+        && typeof payload.last_agent_message !== "string")
     ) return undefined;
     return {
       id: payload.turn_id,
       occurredAt: typeof frame.timestamp === "string"
         ? frame.timestamp
         : now?.() ?? new Date().toISOString(),
-      text: payload.last_agent_message,
+      text: typeof payload.last_agent_message === "string" ? payload.last_agent_message : "",
+      data: { nativeTimestampKnown: typeof frame.timestamp === "string" && Number.isFinite(Date.parse(frame.timestamp)) },
     };
   } catch {
     return undefined;
   }
+}
+
+export interface NativeActivityEvidence {
+  id: string;
+  occurredAt?: string;
+  kind: string;
+  providerTurnId?: string;
+}
+
+/** Read activity from causal native lifecycle frames, never from output wording. */
+export function parseNativeActivity(
+  provider: string, line: string, offset: number, completed: NativeTurn[],
+): { state: "working" | "idle"; evidence: NativeActivityEvidence } | undefined {
+  try {
+    const frame = JSON.parse(line) as { type?: unknown; subtype?: unknown; timestamp?: unknown;
+      uuid?: unknown; isSidechain?: unknown; isMeta?: unknown;
+      payload?: { type?: unknown; turn_id?: unknown }; message?: { role?: unknown } };
+    if (frame.isSidechain === true || frame.isMeta === true) return undefined;
+    const turnId = typeof frame.payload?.turn_id === "string" ? frame.payload.turn_id : undefined;
+    let state: "working" | "idle", kind: string;
+    if (provider === "codex" && frame.type === "event_msg" && frame.payload?.type === "task_started") {
+      state = "working"; kind = "task_started";
+    } else if (provider === "codex" && frame.type === "event_msg" && frame.payload?.type === "turn_aborted") {
+      state = "idle"; kind = "turn_aborted";
+    } else if (provider === "codex" && completed.length > 0) {
+      state = "idle"; kind = "task_complete";
+    } else if (provider === "claude" && completed.length > 0) {
+      const last = completed.at(-1)!;
+      return { state: "idle", evidence: { id: last.id, ...(typeof frame.timestamp === "string" ? { occurredAt: frame.timestamp } : {}), kind: "turn_duration" } };
+    } else if (provider === "claude" && ((frame.type === "user" && frame.message?.role === "user")
+      || (frame.type === "assistant" && frame.message?.role === "assistant"))) {
+      state = "working"; kind = frame.type;
+    } else return undefined;
+    return { state, evidence: {
+      id: typeof frame.uuid === "string" ? frame.uuid : `${kind}:${turnId ?? offset}`,
+      kind, ...(typeof frame.timestamp === "string" ? { occurredAt: frame.timestamp } : {}),
+      ...(turnId === undefined ? {} : { providerTurnId: turnId }),
+    } };
+  } catch { return undefined; }
+}
+
+/** Every abort is a source-history negative receipt, even if later activity hides it. */
+export function parseCodexAbort(line: string, offset: number, now?: () => string): NativeTurn | undefined {
+  const activity = parseNativeActivity("codex", line, offset, []);
+  if (activity?.evidence.kind !== "turn_aborted") return undefined;
+  const evidence = activity.evidence;
+  const known = evidence.occurredAt !== undefined && Number.isFinite(Date.parse(evidence.occurredAt));
+  return { id: evidence.providerTurnId ?? `aborted:${evidence.id}`,
+    occurredAt: known ? evidence.occurredAt! : now?.() ?? new Date().toISOString(),
+    text: "Provider turn was cancelled", data: { outcome: "cancelled", nativeActivityId: evidence.id, nativeTimestampKnown: known } };
 }
 
 /**

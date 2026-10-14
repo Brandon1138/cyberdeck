@@ -169,6 +169,8 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
   termination: SessionTerminationSchema.optional(),
   /** Broker-only receipt for the native first prompt; not accepted by start RPC requests. */
   initialInstructionId: z.uuid().optional(),
+  /** Set only when the provider injects the actor marker into Codex developer instructions. */
+  codexActorMarker: z.boolean().optional(),
 });
 
 export type ProviderId = z.infer<typeof ProviderIdSchema>;

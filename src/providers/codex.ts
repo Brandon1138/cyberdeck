@@ -12,6 +12,9 @@ import { CODEX_ORCHESTRATOR_CONFIG_ARGS } from "./codex-orchestrator-config.js";
 import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
 import { workspaceWritableRoots } from "../domain/worker-workspace.js";
 import type { CodexOrchestratorHomePort } from "./codex/orchestrator-home.js";
+import { codexDeveloperInstructions, codexSessionClaims } from "./codex/native-session-identity.js";
+import type { CodexConversationBindingStore } from "../persistence/codex-conversation-bindings.js";
+import { readCodexDeveloperInstructions, type CodexDeveloperInstructionsReader } from "./codex/effective-instructions.js";
 
 /**
  * Codex workers name both permission dimensions independently. Top-level orchestrators use the
@@ -29,8 +32,6 @@ function codexPermissionArgs(session: SessionRecord): string[] {
   return [...plan.value.args];
 }
 
-const CODEX_SESSION_MATCH_WINDOW_MS = 30_000;
-
 export class CodexResumeError extends Error {
   readonly code = "SESSION_RESUME_UNAVAILABLE";
 
@@ -42,8 +43,9 @@ export class CodexResumeError extends Error {
 
 export interface CodexProviderAdapterOptions {
   sessionsDirectory?: string;
-  /** Explicit execution-owned conversation binding; host discovery remains unchanged. */
+  /** Explicit execution-owned conversation binding. No cwd/time inference is permitted. */
   nativeSessionId?: string;
+  codexConversations?: CodexConversationBindingStore;
   mcp?: CyberdeckMcpLaunch;
   sourceEnvironment?: Readonly<NodeJS.ProcessEnv>;
   runCommand?: CodexCommandRunner;
@@ -54,6 +56,7 @@ export interface CodexProviderAdapterOptions {
    * adapter never decides trust on its own. Omitted, the folder-trust dialog surfaces as before.
    */
   workspaceTrust?: (cwd: string) => Promise<void>;
+  resolveDeveloperInstructions?: CodexDeveloperInstructionsReader;
 }
 
 export type CodexCommandRunner = (
@@ -187,7 +190,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // Before anything else: an untrusted cwd parks the session at Codex's folder-trust dialog at
     // 0 turns, and a dialog that never appears beats any answering tool.
     await this.options.workspaceTrust?.(session.cwd);
-    if (session.kind !== "orchestrator") return;
+    if (session.kind !== "orchestrator") {
+      await this.prepareIdentity(session, spec);
+      return;
+    }
     try {
       await this.options.orchestratorHome?.prepare();
       const stdout = await (this.options.runCommand ?? runCodexCommand)(
@@ -215,6 +221,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         { code: "CODEX_REMOTE_CONTROL_UNAVAILABLE" },
       );
     }
+    await this.prepareIdentity(session, spec);
     if (this.options.mcp !== undefined) {
       // The PTY owns this launcher and its private bridge, so a broker restart leaves both alive.
       const launcher = fileURLToPath(new URL("./codex/remote-mcp-launch.js", import.meta.url));
@@ -236,8 +243,32 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   private addProviderInstructions(args: string[], session: SessionRecord): void {
+    // An implicit override would erase inherited instructions. Resolve them at pre-spawn instead.
     if (session.providerInstructions === undefined) return;
-    args.push("-c", `developer_instructions=${JSON.stringify(session.providerInstructions)}`);
+    args.push("-c", `developer_instructions=${JSON.stringify(
+      codexDeveloperInstructions(session.id, session.providerInstructions),
+    )}`);
+    session.codexActorMarker = true;
+  }
+
+  private async prepareIdentity(session: SessionRecord, spec: ProviderLaunchSpec): Promise<void> {
+    if (spec.args[0] === fileURLToPath(new URL("./codex/remote-mcp-launch.js", import.meta.url))) return;
+    // A container owns a private native source; never load the host's instructions into it.
+    if (session.providerInstructions !== undefined || session.executor === "orbstack-container") return;
+    const inherited = await (this.options.resolveDeveloperInstructions ?? readCodexDeveloperInstructions)({
+      cwd: spec.cwd, env: spec.env,
+    });
+    const override = `developer_instructions=${JSON.stringify(codexDeveloperInstructions(session.id, inherited))}`;
+    const positional = spec.args.indexOf("--");
+    const existing = spec.args.findIndex((value, index) => (positional < 0 || index < positional)
+      && (spec.args[index - 1] === "-c" || spec.args[index - 1] === "--config")
+      && value.startsWith("developer_instructions="));
+    if (existing >= 0) spec.args[existing] = override;
+    else {
+      spec.args.splice(positional >= 0 ? positional : spec.args[0] === "resume" ? spec.args.length - 1 : spec.args.length,
+        0, "-c", override);
+    }
+    session.codexActorMarker = true;
   }
 
   private addCyberdeckMcp(args: string[], session: SessionRecord): void {
@@ -256,13 +287,23 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   private findNativeSessionId(session: SessionRecord): string {
+    const binding = this.options.codexConversations?.readSync(session.id);
+    if (binding !== undefined) {
+      const metadata = readSessionMetadata(binding.transcriptPath);
+      if (binding.cwd === session.cwd && metadata?.id === binding.nativeSessionId && metadata.cwd === session.cwd
+        && !this.options.codexConversations!.claimantsSync(binding.nativeSessionId).some((id) => id !== session.id)) {
+        return binding.nativeSessionId;
+      }
+      throw new CodexResumeError(`The exact Codex conversation binding for Cyberdeck thread ${session.id} is unavailable`);
+    }
     const sessionsDirectory = this.options.sessionsDirectory
       ?? join(
         (this.options.sourceEnvironment ?? process.env).CODEX_HOME ?? join(homedir(), ".codex"),
         "sessions",
       );
     const createdAt = Date.parse(session.createdAt);
-    const candidates: Array<{ id: string; distance: number }> = [];
+    const candidates: string[] = [];
+    const owners = new Map<string, Set<string>>();
 
     for (const dayDirectory of candidateDayDirectories(sessionsDirectory, createdAt)) {
       let entries;
@@ -273,21 +314,24 @@ export class CodexProviderAdapter implements ProviderAdapter {
       }
       for (const entry of entries) {
         if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-        const metadata = readSessionMetadata(join(dayDirectory, entry.name));
+        const path = join(dayDirectory, entry.name);
+        const header = readSessionHeader(path);
+        const metadata = header?.metadata;
         if (metadata === undefined || metadata.cwd !== session.cwd) continue;
-        const distance = Math.abs(Date.parse(metadata.timestamp) - createdAt);
-        if (distance <= CODEX_SESSION_MATCH_WINDOW_MS) candidates.push({ id: metadata.id, distance });
+        const claims = header!.claims;
+        const nativeOwners = owners.get(metadata.id) ?? new Set<string>();
+        for (const claim of claims) nativeOwners.add(claim);
+        owners.set(metadata.id, nativeOwners);
+        if (claims.size === 1 && claims.has(session.id)) candidates.push(metadata.id);
       }
     }
 
-    candidates.sort((left, right) => left.distance - right.distance || left.id.localeCompare(right.id));
-    const match = candidates[0];
-    if (match === undefined) {
+    if (candidates.length !== 1 || owners.get(candidates[0]!)?.size !== 1) {
       throw new CodexResumeError(
-        `Could not locate the provider-native Codex conversation for Cyberdeck thread ${session.id}`,
+        `Could not identify one exact provider-native Codex conversation for Cyberdeck thread ${session.id}`,
       );
     }
-    return match.id;
+    return candidates[0]!;
   }
 }
 
@@ -319,27 +363,42 @@ function candidateDayDirectories(root: string, timestamp: number): string[] {
   return [...directories];
 }
 
-function readSessionMetadata(path: string): { id: string; timestamp: string; cwd: string } | undefined {
+interface CodexSessionHeader {
+  metadata: { id: string; timestamp: string; cwd: string };
+  claims: Set<string>;
+}
+
+function readSessionMetadata(path: string): CodexSessionHeader["metadata"] | undefined {
+  return readSessionHeader(path)?.metadata;
+}
+
+/** Synchronous resume never scans a growing rollout. Late markers require a durable binding. */
+function readSessionHeader(path: string): CodexSessionHeader | undefined {
   let descriptor: number | undefined;
   try {
     descriptor = openSync(path, "r");
     const buffer = Buffer.alloc(64 * 1024);
     const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0);
-    const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split("\n", 1)[0];
+    const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
+    // The trailing line may be cut by either the bound or a provider write. It has no authority.
+    lines.pop();
+    const firstLine = lines[0];
     if (firstLine === undefined || firstLine === "") return undefined;
     const frame = JSON.parse(firstLine) as {
       type?: unknown;
-      payload?: { id?: unknown; timestamp?: unknown; cwd?: unknown; originator?: unknown };
+      payload?: { id?: unknown; timestamp?: unknown; cwd?: unknown; originator?: unknown; source?: unknown };
     };
     const payload = frame.payload;
     if (
       frame.type !== "session_meta"
       || payload?.originator !== "codex-tui"
+      || (typeof payload.source === "object" && payload.source !== null && "subagent" in payload.source)
       || typeof payload.id !== "string"
       || typeof payload.timestamp !== "string"
       || typeof payload.cwd !== "string"
     ) return undefined;
-    return { id: payload.id, timestamp: payload.timestamp, cwd: payload.cwd };
+    return { metadata: { id: payload.id, timestamp: payload.timestamp, cwd: payload.cwd },
+      claims: new Set(lines.slice(1).flatMap(codexSessionClaims)) };
   } catch {
     return undefined;
   } finally {

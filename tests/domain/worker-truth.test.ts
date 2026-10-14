@@ -84,11 +84,43 @@ describe("projectWorkerTruth", () => {
       .toContain("2 instruction(s) accepted but not yet submitted");
   });
 
+  it("does not infer idle or completion from an unrecognized screen", () => {
+    expect(projectWorkerTruth(input({ activity: "unknown" }))).toMatchObject({
+      state: "unknown", terminal: false, completedTurns: 0,
+    });
+    expect(projectWorkerTruth(input({ activity: "unknown", composer: {
+      modalOpen: false, occupied: false, inputReady: true,
+    } })).state).toBe("idle");
+  });
+
+  it("reports a requested stop as stopping until its exit is observed", () => {
+    expect(projectWorkerTruth(input({ executionState: "cancelled", stopRequested: true })).state)
+      .toBe("stopping");
+    expect(projectWorkerTruth(input({ executionState: "cancelled", stopRequested: true, exitCode: 0 })).state)
+      .toBe("stopped");
+  });
+
+  it("distinguishes an interrupted generation from an operator stop", () => {
+    expect(projectWorkerTruth(input({ executionState: "cancelled", exitCode: -1,
+      attentionState: "interrupted" }))).toMatchObject({ state: "interrupted", terminal: true });
+  });
+
+  it("preserves provider fault evidence after a subsequent zero process exit", () => {
+    expect(projectWorkerTruth(input({ executionState: "exited", exitCode: 0, termination: {
+      kind: "provider-fault", reason: "Authentication failed", detail: "API error", at: "2026-10-13T12:00:00.000Z",
+    } })).state).toBe("errored");
+  });
+
+  it("exposes missing progress on an in-flight turn rather than hiding it behind a spinner", () => {
+    expect(projectWorkerTruth(input({ activity: "working", stalledForSeconds: 120 })))
+      .toMatchObject({ state: "stalled", stalledForSeconds: 120 });
+  });
+
   it("agrees with its own terminal set", () => {
-    for (const state of ["provider-limit", "errored", "stopped", "exited", "failed"] as const) {
+    for (const state of ["provider-limit", "errored", "stopped", "exited", "failed", "interrupted"] as const) {
       expect(isTerminalWorkerTruth(state)).toBe(true);
     }
-    for (const state of ["starting", "working", "blocked-modal", "blocked-composer", "idle", "stalled"] as const) {
+    for (const state of ["starting", "working", "blocked-modal", "blocked-composer", "idle", "stalled", "unknown", "stopping"] as const) {
       expect(isTerminalWorkerTruth(state)).toBe(false);
     }
   });

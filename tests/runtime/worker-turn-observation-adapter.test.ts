@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-observation-adapter.js";
+import { PROVIDER_SCREENS, redraw } from "./provider-screen-fixtures.js";
 
 describe("WorkerTurnObservationAdapter", () => {
   it("keeps Claude's composer readable after Kitty keyboard mode changes", () => {
@@ -17,6 +18,94 @@ describe("WorkerTurnObservationAdapter", () => {
     expect(adapter.composer("codex", replay).occupied).toBe(true);
     replay.appendBytes(Buffer.from("\u001b[1;1H\u001b[J› Reply with exactly SECOND_ACK. Do not use tools\u001b[2;1H  or make changes.\u001b[4;1H• SECOND_ACK\u001b[6;1H› Ask Codex to do anything\u001b[8;1HGPT-6.1-Sol high · /tmp/repo"));
     expect(adapter.composer("codex", replay)).toMatchObject({ inputReady: true, occupied: false });
+  });
+
+  it.each(PROVIDER_SCREENS)("projects indented $provider busy/permission controls without homing an ED2 clear", ({ provider, modal, working }) => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    replay.appendBytes(Buffer.from("\u001b[8;11Hprevious screen\u001b[2J" + modal.map((row) => `   ${row}`).join("\r\n")));
+    expect(adapter.activity(provider, replay)).toBe("needs-input");
+    expect(adapter.composer(provider, replay)).toMatchObject({ modalOpen: true, inputReady: false });
+    replay.appendBytes(Buffer.from("\u001b]0;⠹ busy\u0007\u001b[2J" + working.map((row) => `   ${row}`).join("\r\n")));
+    expect(adapter.activity(provider, replay)).toBe("working");
+    expect(adapter.composer(provider, replay).modalOpen).toBe(false);
+  });
+
+  it.each(["界", "e\u0301", "👩‍💻"])("does not authorize a cursor-addressed prompt after unmodeled glyph widths %j", (glyph) => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    replay.appendBytes(Buffer.from(redraw([`Answer ${glyph}`, "› ", "? for shortcuts"])));
+    expect(adapter.activity("codex", replay)).toBe("unknown");
+    expect(adapter.composer("codex", replay).inputReady).toBe(false);
+    replay.appendBytes(Buffer.from(redraw(["Answer", "› ", "? for shortcuts"])));
+    expect(adapter.composer("codex", replay).inputReady).toBe(true);
+  });
+
+  it.each(["\u001b[?1047h", "\u001b[1;2;3;4$z", "\u001b7"])("fails closed on unmodeled screen control %j", (control) => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    replay.appendBytes(Buffer.from(redraw(["› ", "? for shortcuts"]) + control));
+    expect(adapter.activity("codex", replay)).toBe("unknown");
+    expect(adapter.composer("codex", replay).inputReady).toBe(false);
+  });
+
+  it.each(PROVIDER_SCREENS)("removes a $provider modal via row erasure without a frame clear", ({ provider, modal, working }) => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    replay.appendBytes(Buffer.from(redraw(modal)));
+    const eraseRows = modal.map((_, index) => `\u001b[${index + 1};1H\u001b[2K`).join("");
+    replay.appendBytes(Buffer.from(eraseRows + redraw(working, "")));
+    expect(adapter.activity(provider, replay)).toBe("working");
+    expect(adapter.composer(provider, replay).modalOpen).toBe(false);
+  });
+
+  it.each(PROVIDER_SCREENS)("tracks $provider redraws without historical modal or composer evidence", ({ provider, modal, working, idle, draft }) => {
+    for (const chunkSize of [1, 3, 7, 4096]) {
+      const adapter = new WorkerTurnObservationAdapter();
+      const replay = adapter.createReplay(128 * 1024);
+      const append = (text: string) => {
+        const bytes = Buffer.from(text);
+        for (let index = 0; index < bytes.length; index += chunkSize) replay.appendBytes(bytes.subarray(index, index + chunkSize));
+      };
+      append(redraw(modal));
+      expect(adapter.activity(provider, replay)).toBe("needs-input");
+      expect(adapter.composer(provider, replay)).toMatchObject({ modalOpen: true, inputReady: false });
+      append(redraw(working));
+      expect(adapter.activity(provider, replay)).toBe("working");
+      expect(adapter.composer(provider, replay).modalOpen).toBe(false);
+      append(redraw(draft));
+      expect(adapter.composer(provider, replay)).toMatchObject({ occupied: true, content: "operator's unsent draft", inputReady: false });
+      // Row replacement and EL erase the draft without any display clear/frame boundary.
+      append(redraw(idle, ""));
+      expect(adapter.activity(provider, replay)).toBe("awaiting-input");
+      expect(adapter.composer(provider, replay)).toMatchObject({ modalOpen: false, occupied: false, inputReady: true });
+    }
+  });
+
+  it.each(["codex", "claude", "cursor", "antigravity"])("returns unknown activity after unsupported %s editing", (provider) => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    replay.appendBytes(Buffer.from(redraw(["Working", "esc to interrupt"]) + "\u001b[1P"));
+    expect(adapter.activity(provider, replay)).toBe("unknown");
+    expect(adapter.composer(provider, replay).inputReady).toBe(false);
+  });
+
+  it("orders Cursor notifications against a newer redraw and ignores clipboard payloads", () => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    replay.appendBytes(Buffer.from("\u001b]777;notify;Cursor;Cursor is waiting for you\u0007"));
+    expect(adapter.activity("cursor", replay)).toBe("awaiting-input");
+    replay.appendBytes(Buffer.from(redraw(["Composing 12 tokens", "ctrl+c to stop"])));
+    expect(adapter.activity("cursor", replay)).toBe("working");
+    replay.appendBytes(Buffer.from("\u001b]52;c;Cursor is waiting for you\u0007"));
+    expect(adapter.activity("cursor", replay)).toBe("working");
+  });
+
+  it("does not let a working composer's repaint imply an idle transition", () => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    replay.appendBytes(Buffer.from(redraw(["Working… (esc to interrupt)", "› ", "? for shortcuts  98% context left"])));
+    expect(adapter.activity("codex", replay)).toBe("working");
   });
 
   it.each([

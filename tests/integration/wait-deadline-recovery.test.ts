@@ -89,10 +89,10 @@ function harness() {
   return { registry, service, ptys, ptyFactory };
 }
 
-/** Marks a worker turn as started and then finished, the way a provider's title bar does. */
+/** Marks a worker turn as started and then finished, with current busy and ready provider UI. */
 function runTurn(pty: FakePty, name: string, output: string): void {
-  pty.emitOutput(`\u001b]0;⠹ ${name}\u0007\u001b[2JWorking`);
-  pty.emitOutput(`\u001b[2J${output}\r\n\u001b]0;${name}\u0007`);
+  pty.emitOutput(`\u001b]0;⠹ ${name}\u0007\u001b[2J\u001b[HWorking`);
+  pty.emitOutput(`\u001b[2J\u001b[H${output}\r\n› \r\n? for shortcuts\r\n\u001b]0;${name}\u0007`);
 }
 
 async function startInstallWorker(registry: SessionRegistry) {
@@ -110,7 +110,7 @@ describe("worker wait deadlines", () => {
     const { registry, service, ptys } = harness();
     const record = await startInstallWorker(registry);
     const pty = ptys[0]!;
-    pty.emitOutput("\u001b]0;⠹ device-install\u0007\u001b[2JWorking");
+    pty.emitOutput("\u001b]0;⠹ device-install\u0007\u001b[2J\u001b[HWorking");
     // Finishes well after a single segment would have been killed, as the 300s repro did.
     setTimeout(() => runTurn(pty, "device-install", "device install applied"), 2_400);
 
@@ -144,7 +144,7 @@ describe("worker wait deadlines", () => {
   it("reports an exhausted budget as a normal timeout carrying the worker's live status", async () => {
     const { registry, service, ptys } = harness();
     const record = await startInstallWorker(registry);
-    ptys[0]!.emitOutput("\u001b]0;⠹ device-install\u0007\u001b[2JWorking");
+    ptys[0]!.emitOutput("\u001b]0;⠹ device-install\u0007\u001b[2J\u001b[HWorking");
 
     let outcome = await service.waitForWorkers({
       actorSessionId: ACTOR,
@@ -170,7 +170,7 @@ describe("worker wait deadlines", () => {
   it("answers threads_list promptly while a wait is in flight", async () => {
     const { registry, service, ptys } = harness();
     const record = await startInstallWorker(registry);
-    ptys[0]!.emitOutput("\u001b]0;⠹ device-install\u0007\u001b[2JWorking");
+    ptys[0]!.emitOutput("\u001b]0;⠹ device-install\u0007\u001b[2J\u001b[HWorking");
     const waiting = service.waitForWorkers({
       actorSessionId: ACTOR,
       targets: [{ sessionId: record.id, completionTarget: 1 }],

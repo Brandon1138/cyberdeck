@@ -213,12 +213,17 @@ describe("Claude transcript Stop settlement without screen bytes", () => {
     await writeFile(f.path, lines(frame("first", 1)));
     await f.tick();
     expect(f.engine.completedTurns).toBe(0);
-    expect(f.effects.notifySessionUpdate).not.toHaveBeenCalled();
+    expect(f.engine.projectTruth().state).toBe("working");
+    vi.mocked(f.effects.notifySessionUpdate).mockClear();
+    const notifications: ReturnType<WorkerTurnEngine["projectTruth"]>[] = [];
+    vi.mocked(f.effects.notifySessionUpdate).mockImplementation(() => {
+      notifications.push(f.engine.projectTruth());
+    });
     await appendFile(f.path, lines(stop("stop-first", 1)));
     await f.tick();
     expect(f.engine.waitResult(1)).toMatchObject({ status: "completed", completedTurns: 1, provenance: "provider-transcript" });
     expect(f.engine.projectTruth()).toMatchObject({ state: "idle", completedTurns: 1, canonicalTurns: 1 });
-    expect(f.effects.notifySessionUpdate).toHaveBeenCalledOnce();
+    expect(notifications.at(-1)).toMatchObject({ state: "idle", completedTurns: 1, canonicalTurns: 1 });
     expect(f.effects.setAttention).toHaveBeenCalledWith("done", true);
     expect(f.replay()).toBe("");
     expect(f.writes).toEqual([]);
@@ -226,6 +231,10 @@ describe("Claude transcript Stop settlement without screen bytes", () => {
 
   it("ignores duplicate Stop markers and already committed semanticTurnIds", async () => {
     const f = await nativeHarness();
+    const notifications: ReturnType<WorkerTurnEngine["projectTruth"]>[] = [];
+    vi.mocked(f.effects.notifySessionUpdate).mockImplementation(() => {
+      notifications.push(f.engine.projectTruth());
+    });
     const completed = lines(frame("first", 1), stop("stop-first", 1));
     await writeFile(f.path, completed);
     await f.tick();
@@ -238,7 +247,7 @@ describe("Claude transcript Stop settlement without screen bytes", () => {
     expect(f.engine.completedTurns).toBe(1);
     expect(f.engine.canonicalTurns).toBe(1);
     expect((await f.store.read(f.record.id)).events.filter((event) => event.kind === "turn")).toHaveLength(1);
-    expect(f.effects.notifySessionUpdate).toHaveBeenCalledOnce();
+    expect(notifications.at(-1)).toMatchObject({ state: "idle", completedTurns: 1, canonicalTurns: 1 });
   });
 
   it("holds an early Stop marker until preceding text arrives without skipping ordinals", async () => {
@@ -282,6 +291,9 @@ describe("Claude transcript Stop settlement without screen bytes", () => {
     expect(f.engine.completedTurns).toBe(2);
     f.engine.releaseTimers();
 
+    // Historical Stop receipts end at 09:00:02.100; this input precedes the third turn at 03.000.
+    const renderedAt = "2026-08-20T09:00:02.500Z";
+    vi.setSystemTime(new Date(renderedAt));
     const store = new ThreadTranscriptStore(f.root, { claudeProjectsDirectory: f.projects });
     const restarted = harness({ provider: "claude", kind: "worker" }, { transcripts: store });
     const reconcile = vi.spyOn(restarted.engine, "reconcileCanonicalTurns");
@@ -289,8 +301,8 @@ describe("Claude transcript Stop settlement without screen bytes", () => {
       message: "third turn", encoded: Buffer.from("third turn\n"),
       source: "orchestrator", instructionId: "third-instruction",
     });
-    expect(reconcile).not.toHaveBeenCalled();
-    expect(delivery).toMatchObject({ state: "rendered", expectedTurn: 3 });
+    expect(reconcile).toHaveBeenCalledOnce(); // Native preflight runs before the new ordinal is reserved.
+    expect(delivery).toMatchObject({ state: "rendered", expectedTurn: 3, at: renderedAt });
     expect(restarted.engine.completedTurns).toBe(2);
     expect(restarted.engine.canonicalTurns).toBe(2);
     expect(restarted.engine.waitResult(delivery.expectedTurn!).status).not.toBe("completed");
@@ -302,6 +314,7 @@ describe("Claude transcript Stop settlement without screen bytes", () => {
       expect.objectContaining({ instructionId: "third-instruction", state: "completed" }),
     );
 
+    vi.setSystemTime(new Date("2026-08-20T09:00:03.100Z"));
     await appendFile(f.path, lines(frame("third", 3), stop("stop-third", 3)));
     await restarted.engine.reconcileCanonicalTurns();
     expect(restarted.engine.waitResult(delivery.expectedTurn!)).toMatchObject({
@@ -367,7 +380,7 @@ describe("Claude transcript Stop settlement without screen bytes", () => {
     expect(f.engine.waitResult(1).status).toBe("stalled");
     await appendFile(f.path, lines({ type: "system", subtype: "stop_hook_summary" }));
     await f.tick();
-    expect(f.engine.waitResult(1).status).toBe("waiting");
+    expect(f.engine.waitResult(1).status).toBe("working");
     expect(f.engine.completedTurns).toBe(0);
     expect(f.replay()).toBe("");
   });
@@ -385,6 +398,52 @@ describe("Claude transcript Stop settlement without screen bytes", () => {
 });
 
 describe("WorkerTurnEngine", () => {
+  it("keeps an input-ready idle session idle even after a long quiet interval", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const f = harness({}, { tokenCount: 42 });
+    f.observations.activity = "awaiting-input";
+    f.engine.finishInitialization(false);
+    expect(f.engine.projectTruth().state).toBe("idle");
+    vi.setSystemTime(300_000);
+    expect(f.engine.projectTruth().state).toBe("idle");
+    expect(f.engine.waitResult(1).status).toBe("waiting");
+  });
+
+  it("reports no observed progress for a known busy turn, including without a token counter", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const f = harness();
+    f.observations.activity = "awaiting-input";
+    f.engine.finishInitialization(false);
+    f.observations.activity = "working";
+    f.engine.appendOutput(Buffer.from("provider turn started"));
+    vi.setSystemTime(125_000);
+    expect(f.engine.waitResult(1)).toMatchObject({
+      status: "stalled", truth: { state: "stalled" },
+      stallReason: "no-observed-progress-while-turn-in-flight",
+    });
+  });
+
+  it("uses the same terminal fault verdict for wait results and current truth", () => {
+    const f = harness();
+    f.fatalTermination.mockReturnValue({ kind: "provider-fault", reason: "Authentication failed",
+      detail: "API Error: 401 authentication_error", at: "2026-10-13T12:00:00.000Z" });
+    f.engine.appendOutput(Buffer.from("API Error: 401 authentication_error"));
+    f.record.executionState = "errored";
+    expect(f.engine.waitResult(1)).toMatchObject({
+      status: "failed", truth: { state: "errored", terminal: true },
+    });
+  });
+
+  it("reports an occupied unsent composer as an intervention rather than completed or running", async () => {
+    const f = harness();
+    await f.engine.submitInstruction({ message: "do work", encoded: Buffer.from("do work\r"), source: "orchestrator" });
+    f.observations.composer = { modalOpen: false, occupied: true, inputReady: false, content: "do work" };
+    expect(f.engine.waitResult(1)).toMatchObject({ status: "needs-input", truth: { state: "blocked-composer" } });
+    expect(f.effects.setAttention).not.toHaveBeenCalledWith("working", true);
+  });
+
   it.each(["composer-occupied", "worker-terminal", "lifecycle-fence"] as const)(
     "rechecks %s before writing an instruction after ledger restoration",
     async (boundary) => {
@@ -711,6 +770,8 @@ describe("WorkerTurnEngine", () => {
       source: "orchestrator",
       instructionId: "pending-rendered",
     });
+    expect(captureProviderTurns).toHaveBeenCalledWith(expect.objectContaining({ allowFallback: false }));
+    captureProviderTurns.mockClear(); // Initial admission is allowed; fatal output must cancel later work.
     observations.activity = "working";
     engine.appendOutput(Buffer.from("working"), replay);
     observations.activity = "awaiting-input";
@@ -734,15 +795,15 @@ describe("WorkerTurnEngine", () => {
 
     expect(effects.notifyInstructionState).toHaveBeenLastCalledWith(expect.objectContaining({
       instructionId: "pending-rendered",
-      state: "undelivered",
+      state: "cancelled",
     }));
     expect(effects.notifyDeliveryBoundary).toHaveBeenCalledOnce();
     expect(engine.projectTruth()).toMatchObject({ pendingInstructions: 0 });
 
     await vi.runAllTimersAsync();
     expect(captureProviderTurns).not.toHaveBeenCalled();
-    expect(commitProviderTurns).not.toHaveBeenCalled();
-    expect(engine.completedTurns).toBe(0);
+    expect(commitProviderTurns).toHaveBeenCalledWith(expect.objectContaining({ turns: [expect.objectContaining({ transport: "broker-lifecycle", data: expect.objectContaining({ outcome: "cancelled" }) })] }));
+    expect(engine.completedTurns).toBe(1);
     expect(engine.canonicalTurns).toBe(0);
     expect(engine.waitResult(1).status).not.toBe("completed");
 
@@ -756,7 +817,7 @@ describe("WorkerTurnEngine", () => {
       encoded: Buffer.from("work after fatal resume\n"),
       source: "orchestrator",
       instructionId: "post-fatal-resume",
-    })).resolves.toMatchObject({ state: "rendered", expectedTurn: 1 });
+    })).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
   });
 
   it("fences a late fallback receipt after terminal authority rejects its screen", async () => {
@@ -960,6 +1021,7 @@ describe("WorkerTurnEngine", () => {
       captureProviderTurns,
       effects,
       replay,
+      writes,
     } = harness({ provider: "cursor" });
     captureProviderTurns
       .mockReturnValueOnce(firstCapture.promise)
@@ -972,12 +1034,24 @@ describe("WorkerTurnEngine", () => {
     await vi.advanceTimersByTimeAsync(200);
     expect(captureProviderTurns).toHaveBeenCalledOnce();
 
-    await expect(engine.submitInstruction({
-      message: "run the second turn",
-      encoded: Buffer.from("run the second turn\n"),
+    let brokerDeliverySettled = false;
+    const brokerDelivery = engine.submitInstruction({
+      message: "broker must wait for the first receipt",
+      encoded: Buffer.from("broker must wait for the first receipt\n"),
       source: "orchestrator",
+      instructionId: "waiting-for-first-receipt",
+    }).then((delivery) => { brokerDeliverySettled = true; return delivery; });
+    await flushMicrotasks();
+    expect(brokerDeliverySettled).toBe(false);
+    expect(writes).toEqual([]);
+
+    // A human can enter the next turn while the first screen receipt is still being read.
+    // Broker submission now waits for that receipt, so model external input explicitly here.
+    engine.noteRenderedInstruction({
       instructionId: "second-turn-instruction",
-    })).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+      expectedTurn: 2,
+      renderedAt: "2026-08-20T10:01:00.000Z",
+    });
     observations.activity = "working";
     engine.appendOutput(Buffer.from("second turn working"), replay);
     observations.activity = "awaiting-input";
@@ -990,6 +1064,7 @@ describe("WorkerTurnEngine", () => {
       data: { transport: "terminal-replay-fallback" },
     }]);
     await flushMicrotasks();
+    await expect(brokerDelivery).resolves.toMatchObject({ state: "queued", hold: "provider-busy" });
 
     expect(engine.completedTurns).toBe(1);
     expect(captureProviderTurns).toHaveBeenCalledTimes(2);
@@ -1046,12 +1121,12 @@ describe("WorkerTurnEngine", () => {
     await vi.advanceTimersByTimeAsync(200);
     expect(captureProviderTurns).toHaveBeenCalledOnce();
 
-    await expect(engine.submitInstruction({
-      message: "run the second turn",
-      encoded: Buffer.from("run the second turn\n"),
-      source: "orchestrator",
+    // External input preserves the screen backlog scenario while broker admission is fenced.
+    engine.noteRenderedInstruction({
       instructionId: "high-water-second",
-    })).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+      expectedTurn: 2,
+      renderedAt: "2026-08-20T10:01:00.000Z",
+    });
     observations.activity = "working";
     engine.appendOutput(Buffer.from("second turn working"), replay);
     observations.activity = "awaiting-input";
@@ -1163,12 +1238,12 @@ describe("WorkerTurnEngine", () => {
       "session.turn_reconciled",
       expect.objectContaining({ completionTarget: 1 }),
     );
-    await expect(engine.submitInstruction({
-      message: "run the second turn",
-      encoded: Buffer.from("run the second turn\n"),
-      source: "orchestrator",
+    // This input is external: a broker render must await the still-pending completion effects.
+    engine.noteRenderedInstruction({
       instructionId: "post-reconcile-second-turn",
-    })).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+      expectedTurn: 2,
+      renderedAt: "2026-08-20T10:01:00.000Z",
+    });
 
     observations.activity = "working";
     engine.appendOutput(Buffer.from("second turn working"), replay);
@@ -1345,12 +1420,12 @@ describe("WorkerTurnEngine", () => {
     observations.activity = "awaiting-input";
     engine.appendOutput(Buffer.from("first turn prompt"), replay);
     await vi.advanceTimersByTimeAsync(200);
-    await expect(engine.submitInstruction({
-      message: "run the covered second turn",
-      encoded: Buffer.from("run the covered second turn\n"),
-      source: "orchestrator",
+    // Native capture may cover later human input even while the first receipt is unresolved.
+    engine.noteRenderedInstruction({
       instructionId: "covered-second-turn",
-    })).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+      expectedTurn: 2,
+      renderedAt: "2026-08-20T10:01:00.000Z",
+    });
     observations.activity = "working";
     engine.appendOutput(Buffer.from("second turn working"), replay);
     observations.activity = "awaiting-input";
@@ -1390,7 +1465,7 @@ describe("WorkerTurnEngine", () => {
       readObservedModel,
       replay,
     } = harness({ provider: "cursor" }, { preview });
-    captureProviderTurns.mockResolvedValue([
+    captureProviderTurns.mockResolvedValueOnce([
       { text: "old one", data: { transport: "provider-native" } },
       { text: "old two", data: { transport: "provider-native" } },
     ]);
@@ -1414,7 +1489,14 @@ describe("WorkerTurnEngine", () => {
       encoded: Buffer.from("new generation work\n"),
       source: "orchestrator",
       instructionId: "after-stale-commit",
-    })).resolves.toMatchObject({ state: "rendered", expectedTurn: 3 });
+    })).resolves.toMatchObject({ state: "queued", hold: "provider-busy" });
+    // Automatic admission cannot get past an uncommitted receipt. External input can still be
+    // observed in the new generation, and the old receipt must never complete that instruction.
+    engine.noteRenderedInstruction({
+      instructionId: "after-stale-commit",
+      expectedTurn: 3,
+      renderedAt: "2026-08-20T10:01:00.000Z",
+    });
     vi.mocked(effects.notifyInstructionState).mockClear();
     vi.mocked(effects.setAttention).mockClear();
     vi.mocked(preview.preview).mockClear();
@@ -2049,10 +2131,10 @@ describe("WorkerTurnEngine", () => {
       readTranscriptMessages,
       replay,
     } = harness({}, { preview });
-    captureProviderTurns.mockResolvedValue([{
+    captureProviderTurns.mockResolvedValueOnce([{
       text: "completed first turn",
       data: { transport: "provider-native" },
-    }]);
+    }]).mockResolvedValueOnce([]); // Queued redelivery preflight must see no unseen older receipt.
     readTranscriptMessages.mockReturnValueOnce(transcriptGate.promise);
     readObservedModel.mockReturnValueOnce(modelGate.promise);
 
@@ -2097,15 +2179,35 @@ describe("WorkerTurnEngine", () => {
     });
     await flushMicrotasks();
     await expect(redelivery).resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    expect(captureProviderTurns).toHaveBeenLastCalledWith(expect.objectContaining({
+      allowFallback: false, turnNumber: 2,
+    }));
 
     expect(effects.notifyDeliveryBoundary).toHaveBeenCalledOnce();
     expect(vi.mocked(effects.setAttention).mock.calls.map(([state]) => state))
-      .toEqual(["done", "working"]);
+      .toEqual(["done"]);
     expect(engine.waitResult(2).status).not.toBe("completed");
   });
 });
 
 describe("Codex launch attribution", () => {
+  it("refuses a markerless same-brief rollout on a live marker-injected launch", async () => {
+    const h = await codexLaunchFixture(); roots.push(h.root);
+    h.a.providerInstructions = "explicit developer rules";
+    h.a.codexActorMarker = true;
+    h.a.launchRecord = { mode: "launch", transport: "pty", resolvedAt: h.a.createdAt, executable: "codex",
+      args: ["-c", `developer_instructions=${JSON.stringify(`${h.a.providerInstructions}\n\n[cyberdeck-native-session:${h.a.id}]`)}`, "--", "A BRIEF"],
+      cwd: h.root, cyberdeckEnv: {}, inheritedEnvCount: 0, truncated: false };
+    vi.useFakeTimers();
+    const current = harness(h.a, { transcripts: h.store });
+    current.engine.noteRenderedInstruction({ instructionId: h.a.initialInstructionId!, expectedTurn: 1, renderedAt: h.a.createdAt });
+    await h.metadata("FOREIGN", h.a.createdAt);
+    await h.complete("FOREIGN", "A BRIEF");
+    await current.engine.reconcileCanonicalTurns();
+    expect(current.engine.canonicalTurns).toBe(0);
+    expect(await h.store.readCompletionLedger(h.a.id)).toMatchObject({ canonicalTurns: 0, turns: [] });
+  });
+
   it("leaves a metadata-only neighbour unclaimed and binds each live launch to its exact rollout", async () => {
     const h = await codexLaunchFixture(); roots.push(h.root);
     vi.useFakeTimers();
@@ -2118,7 +2220,7 @@ describe("Codex launch attribution", () => {
     await vi.advanceTimersByTimeAsync(1_500);
     expect(nativeRead).not.toHaveBeenCalled(); // Pending Codex launches do not use Claude's native poll.
     await first.engine.reconcileCanonicalTurns();
-    await expect(h.store.observeProviderTurns(h.input(h.a))).resolves.toMatchObject({ nativeAvailable: false, turns: [] });
+    await expect(h.store.observeProviderTurns(h.input(h.a))).resolves.toMatchObject({ nativeSourceAvailable: false, turns: [] });
     // A preview or budget read cannot poison the claim before B's identifying prompt arrives.
     expect(await h.store.readTranscriptMessages(h.input(h.a))).toEqual([]);
     expect(await h.store.readProviderBudgetTelemetry(h.input(h.a), "session")).toEqual({});

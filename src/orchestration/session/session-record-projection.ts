@@ -54,11 +54,9 @@ export function cloneLaunchRecord(record: ResolvedLaunchRecord | undefined): Res
  * Rebuild a durable record into a runtime one after a restart.
  *
  * The broker cannot inherit a runtime it did not spawn, so nothing that was live before the restart
- * is live now. What survives is the *outcome*: a thread whose last observed state was `done` had
- * already finished its task, and losing the process loses nothing of it — it rehydrates as a
- * finished thread. Only a thread that was mid-turn (working, needs-input, stopping) actually had
- * work cut off, and only that thread is `interrupted`. Previously every live record was recovered
- * as interrupted, which is why finished threads came back as anything but Done.
+ * is live now. A saved attention label is not a process-exit receipt. Completed turns remain in the
+ * durable transcript; the lost process generation is interrupted even when its last turn ended.
+ * Exit code -1 is the broker's unknown-exit sentinel, never an observed provider exit code.
  */
 export function recoverRecord(stored: SessionRecord): SessionRecord {
   const record = cloneRecord(stored);
@@ -68,11 +66,10 @@ export function recoverRecord(stored: SessionRecord): SessionRecord {
     || record.executionState === "starting"
     || record.executionState === "errored"
   ) {
-    const finished = record.executionState === "active" && record.attentionState === "done";
     const errored = record.executionState === "errored";
-    record.executionState = finished ? "exited" : errored ? "failed" : "cancelled";
-    record.exitCode = 0;
-    record.attentionState = finished ? "done" : errored ? "failed" : "interrupted";
+    record.executionState = errored ? "failed" : "cancelled";
+    record.exitCode ??= -1;
+    record.attentionState = errored ? "failed" : "interrupted";
     record.updatedAt = new Date().toISOString();
     return record;
   }
@@ -80,7 +77,7 @@ export function recoverRecord(stored: SessionRecord): SessionRecord {
     ? "failed"
     : record.executionState === "cancelled"
       ? "stopped"
-      : "done";
+      : undefined;
   if (record.executionState === "cancelled" && record.attentionState === "stopping") {
     record.attentionState = "stopped";
   }

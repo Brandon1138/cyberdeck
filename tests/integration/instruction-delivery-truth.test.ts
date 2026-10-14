@@ -135,7 +135,7 @@ describe("instruction delivery at a blocked worker", () => {
 
     // The operator answers the prompt and the worker resumes the command it was asking about. That
     // turn belongs to the task it was started with, so the instruction does not get to ride it.
-    pty.emitOutput("\u001b]0;⠹ modal-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    pty.emitOutput("\u001b]0;⠹ modal-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
     await vi.waitFor(() => expect(registry.workerTruth(worker.id).state).toBe("working"));
     // Still queued, and still nothing written: a turn in flight is not a boundary, so the queue is
     // not even woken for it. The hold reason on the record is the one from its last attempt.
@@ -143,17 +143,17 @@ describe("instruction delivery at a blocked worker", () => {
     expect(pty.writes).toEqual([]);
 
     // That turn lands in the ledger. Now the next ordinal is unclaimed and the queue flushes itself.
-    pty.emitOutput("\u001b[2Jchecks passed\r\n❯ \r\n? for shortcuts\r\n\u001b]0;modal-worker\u0007");
+    pty.emitOutput("\u001b[2J\u001b[Hchecks passed\r\n❯ \r\n? for shortcuts\r\n\u001b]0;modal-worker\u0007");
     await vi.waitFor(async () =>
       expect((await queue.list(worker.id))[0]).toMatchObject({ status: "rendered", expectedTurn: 2 }));
     expect(pty.writes.at(-1)?.toString()).toBe("When the tests finish, run the linter and report back.\n");
 
     // The provider consumes the composer and runs. Only now is anything about delivery provable.
-    pty.emitOutput("\u001b]0;⠹ modal-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    pty.emitOutput("\u001b]0;⠹ modal-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
     await vi.waitFor(async () =>
       expect((await queue.list(worker.id))[0]?.status).toBe("acknowledged"));
 
-    pty.emitOutput("\u001b[2Jlinter clean\r\n\u001b]0;modal-worker\u0007");
+    pty.emitOutput("\u001b[2J\u001b[Hlinter clean\r\n❯ \r\n? for shortcuts\r\n\u001b]0;modal-worker\u0007");
     const settled = await registry.waitForWorkerResults([
       { sessionId: worker.id, completionTarget: 2 },
     ], 5_000, 400);
@@ -175,7 +175,7 @@ describe("instruction delivery at a blocked worker", () => {
     const { registry, queue, pty, worker } = await harness();
 
     pty.emitOutput([
-      "\u001b]0;⠹ modal-worker\u0007\u001b[2JDo you want to proceed?",
+      "\u001b]0;⠹ modal-worker\u0007\u001b[2J\u001b[HDo you want to proceed?",
       "❯ 1. Yes",
     ].join("\r\n"));
     await vi.waitFor(() => expect(registry.get(worker.id).attentionState).toBe("needs-input"));
@@ -195,8 +195,8 @@ describe("instruction delivery at a blocked worker", () => {
     expect(pty.writes).toEqual([]);
 
     // The modal clears into the turn it was blocking, and then that turn finishes.
-    pty.emitOutput("\u001b]0;⠹ modal-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
-    pty.emitOutput("\u001b[2Jfirst task done\r\n❯ \r\n? for shortcuts\r\n\u001b]0;modal-worker\u0007");
+    pty.emitOutput("\u001b]0;⠹ modal-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
+    pty.emitOutput("\u001b[2J\u001b[Hfirst task done\r\n❯ \r\n? for shortcuts\r\n\u001b]0;modal-worker\u0007");
     await vi.waitFor(async () => {
       const records = await queue.list(worker.id);
       expect(records.map(({ status }) => status)).toEqual(["rendered", "queued"]);
@@ -207,14 +207,14 @@ describe("instruction delivery at a blocked worker", () => {
     expect((await queue.list(worker.id))[0]).toMatchObject({ expectedTurn: 2 });
 
     // The provider takes the first and runs it. The second is still behind a turn in flight.
-    pty.emitOutput("\u001b]0;⠹ modal-worker\u0007\u001b[2JWorking\r\nesc to interrupt");
+    pty.emitOutput("\u001b]0;⠹ modal-worker\u0007\u001b[2J\u001b[HWorking\r\nesc to interrupt");
     await vi.waitFor(async () =>
       expect((await queue.list(worker.id))[0]?.status).toBe("acknowledged"));
     expect((await queue.list(worker.id))[1]).toMatchObject({ status: "queued" });
     expect(pty.writes.map((write) => write.toString())).toEqual(["First follow-up\n"]);
 
     // That turn ends, and the second goes in behind it with its own ordinal, in order.
-    pty.emitOutput("\u001b[2Jfirst follow-up answered\r\n\u001b]0;modal-worker\u0007");
+    pty.emitOutput("\u001b[2J\u001b[Hfirst follow-up answered\r\n❯ \r\n? for shortcuts\r\n\u001b]0;modal-worker\u0007");
     await vi.waitFor(async () =>
       expect((await queue.list(worker.id))[1]).toMatchObject({ status: "rendered", expectedTurn: 3 }));
     expect(pty.writes.map((write) => write.toString())).toEqual([
@@ -227,7 +227,7 @@ describe("instruction delivery at a blocked worker", () => {
   it("settles a held instruction as undelivered when the worker dies before it lands", async () => {
     const { registry, queue, pty, worker } = await harness();
 
-    pty.emitOutput("\u001b]0;\u2839 modal-worker\u0007\u001b[2JDo you want to proceed?\r\n\u276f 1. Yes");
+    pty.emitOutput("\u001b]0;\u2839 modal-worker\u0007\u001b[2J\u001b[HDo you want to proceed?\r\n\u276f 1. Yes");
     await vi.waitFor(() => expect(registry.get(worker.id).attentionState).toBe("needs-input"));
 
     const accepted = await queue.enqueue({

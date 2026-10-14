@@ -70,12 +70,16 @@ export interface CaptureWorkerTurns {
   createdAt: string;
   turnNumber: number;
   fallbackText?: string;
+  /** Explicit caller authorization from a positively observed boundary in this session's own terminal. */
   allowFallback?: boolean;
   /** Launch receipts require exact native attribution before any first-turn capture. */
   initialInstructionId?: string | undefined;
+  /** Marker-injected Codex launches cannot adopt legacy markerless rollouts. */
+  codexMarkerRequired?: boolean;
 }
 
-export type WorkerTurnTransport = "provider-native" | "terminal-replay-fallback";
+export type WorkerTurnTransport = "provider-native" | "terminal-replay-fallback" | "broker-lifecycle";
+export type NativeSourceStatus = "available" | "missing" | "unbound" | "conflict" | "source-error";
 
 /** One provider result observed without mutating Cyberdeck's semantic transcript. */
 export interface ObservedWorkerTurn {
@@ -92,15 +96,32 @@ export interface WorkerTurnObservation {
   provider: string;
   turnNumber: number;
   turns: readonly ObservedWorkerTurn[];
-  nativeAvailable?: boolean;
   /** Bound native file plus complete-line offset; movement is independent of terminal bytes. */
   activityVersion?: string;
+  /** Existence of an exactly attributed native source, independently of completed turns. */
+  nativeSourceAvailable?: boolean;
+  /** Missing sources and refused/unreadable identities are different evidence. */
+  nativeSourceStatus?: NativeSourceStatus;
+  nativeSourceReason?: string;
+  /** True only for explicitly authorized own-terminal fallback when the native source is missing. */
+  nativeFallbackAllowed?: boolean;
+  nativeSessionId?: string;
+  /** Provider-authored activity only; idle is never a statement about task success. */
+  nativeActivity?: "working" | "idle" | "unknown";
+  nativeActivityEvidence?: { id: string; occurredAt?: string; kind: string; providerTurnId?: string;
+    generation?: number; executionId?: string; nativeSessionId?: string;
+    /** Exact source identity/interval to retain if the engine banks an authoritative negative closure. */
+    receiptData?: Record<string, unknown> };
 }
+
+export interface InstructionTurnTarget { instructionId: string; expectedTurn: number; renderedAt: string }
 
 export interface WorkerTurnLedger {
   completedTurns: number;
   canonicalTurns: number;
   providerOccurredThrough?: string;
+  instructionTargets?: readonly InstructionTurnTarget[];
+  lastNativeTurn?: WorkerTurnTranscript;
   turns: readonly WorkerTurnTranscript[];
 }
 

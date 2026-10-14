@@ -5,8 +5,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { ClaudeProviderAdapter } from "../../src/providers/claude.js";
 import { CodexProviderAdapter, type CodexCommandRunner } from "../../src/providers/codex.js";
+import { codexDeveloperInstructions, codexSessionMarker } from "../../src/providers/codex/native-session-identity.js";
 import { CursorProviderAdapter } from "../../src/providers/cursor/session-adapter.js";
 import { AntigravityProviderAdapter } from "../../src/providers/antigravity/session-adapter.js";
+
+vi.mock("../../src/providers/codex/effective-instructions.js", () => ({
+  readCodexDeveloperInstructions: vi.fn(async () => undefined),
+}));
 
 const CHILD_SOURCE: NodeJS.ProcessEnv = {
   PATH: "/source/provider-bin",
@@ -35,8 +40,11 @@ function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 describe("CodexProviderAdapter", () => {
-  it("builds an interactive command without choosing a model", () => {
-    const spec = new CodexProviderAdapter().buildLaunchSpec(session());
+  it("prepares an interactive command without choosing a model", async () => {
+    const record = session();
+    const adapter = new CodexProviderAdapter();
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
     expect(spec.executable).toBe("codex");
     expect(spec.args).toEqual([
       "--no-alt-screen",
@@ -46,6 +54,8 @@ describe("CodexProviderAdapter", () => {
       "read-only",
       "-a",
       "on-request",
+      "-c",
+      `developer_instructions=${JSON.stringify(codexDeveloperInstructions(record.id))}`,
     ]);
   });
 
@@ -60,11 +70,14 @@ describe("CodexProviderAdapter", () => {
     expect(spec.args).toContain("model_reasoning_effort=\"xhigh\"");
   });
 
-  it("maps explicit auto approval mode to Codex never while preserving the sandbox", () => {
-    const spec = new CodexProviderAdapter().buildLaunchSpec(session({
+  it("maps explicit auto approval mode to Codex never while preserving the sandbox", async () => {
+    const record = session({
       sandbox: "workspace-write",
       approvalMode: "auto",
-    }));
+    });
+    const adapter = new CodexProviderAdapter();
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
     expect(spec.args).toEqual([
       "--no-alt-screen",
       "-C",
@@ -73,6 +86,8 @@ describe("CodexProviderAdapter", () => {
       "workspace-write",
       "-a",
       "never",
+      "-c",
+      `developer_instructions=${JSON.stringify(codexDeveloperInstructions(record.id))}`,
     ]);
   });
 
@@ -105,7 +120,9 @@ describe("CodexProviderAdapter", () => {
     });
     const spec = new CodexProviderAdapter({ mcp }).buildLaunchSpec(orchestrator);
 
-    expect(spec.args).toContain("developer_instructions=\"Cyberdeck orchestrator guidance\"");
+    expect(spec.args).toContain(`developer_instructions=${JSON.stringify(
+      codexDeveloperInstructions(orchestrator.id, "Cyberdeck orchestrator guidance"),
+    )}`);
     expect(spec.args).toEqual(expect.arrayContaining([
       "--remote",
       "unix://",
@@ -232,7 +249,8 @@ describe("CodexProviderAdapter", () => {
       nativeSessionId: "native-conversation",
       runCommand: async () => JSON.stringify({ status: "connected" }),
     });
-    const orchestrator = session({ kind: "orchestrator", sandbox: "workspace-write", approvalMode: "auto" });
+    const orchestrator = session({ kind: "orchestrator", sandbox: "workspace-write", approvalMode: "auto",
+      providerInstructions: "bridge launch fixture guidance" });
     const spec = operation === "launch" ? adapter.buildLaunchSpec(orchestrator) : adapter.buildResumeSpec(orchestrator);
     const nativeArgs = [...spec.args];
     await adapter.prepareLaunch(orchestrator, spec);
@@ -295,6 +313,8 @@ describe("CodexProviderAdapter", () => {
   // A resume has no initial prompt left to attach to, and re-attaching a launch's image to every
   // later turn would put an image in front of the model that the operator never sent again.
   it("never re-attaches a launch image on resume", async () => {
+    const record = session({ createdAt: "2026-07-21T22:55:21.806Z",
+      imageAttachments: ["/state/pasted-images/paste-a.png"] });
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-codex-resume-"));
     const nativeId = "019f86e4-16e4-7c61-9ee7-76b8b83b1018";
     const day = join(root, "2026", "07", "22");
@@ -308,12 +328,10 @@ describe("CodexProviderAdapter", () => {
         cwd: "/tmp/repo",
         originator: "codex-tui",
       },
-    })}\n`);
+    })}\n${JSON.stringify({ type: "response_item", payload: { type: "message", role: "developer",
+      content: [{ type: "input_text", text: codexSessionMarker(record.id) }] } })}\n`);
 
-    const spec = new CodexProviderAdapter({ sessionsDirectory: root }).buildResumeSpec(session({
-      createdAt: "2026-07-21T22:55:21.806Z",
-      imageAttachments: ["/state/pasted-images/paste-a.png"],
-    }));
+    const spec = new CodexProviderAdapter({ sessionsDirectory: root }).buildResumeSpec(record);
 
     expect(spec.args).not.toContain("-i");
   });
@@ -335,6 +353,9 @@ describe("CodexProviderAdapter", () => {
   });
 
   it("resumes the exact Codex conversation resolved from native session metadata", async () => {
+    const record = session({ createdAt: "2026-07-21T22:55:21.806Z", executionState: "exited",
+      exitCode: 0, model: "gpt-test", kind: "orchestrator", sandbox: "workspace-write",
+      approvalMode: "auto", providerInstructions: "Cyberdeck orchestrator guidance" });
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-codex-sessions-"));
     const createdAt = "2026-07-21T22:55:21.806Z";
     const day = join(root, "2026", "07", "22");
@@ -349,22 +370,14 @@ describe("CodexProviderAdapter", () => {
         cwd: "/tmp/repo",
         originator: "codex-tui",
       },
-    })}\n`);
+    })}\n${JSON.stringify({ type: "response_item", payload: { type: "message", role: "developer",
+      content: [{ type: "input_text", text: codexSessionMarker(record.id) }] } })}\n`);
 
     const spec = new CodexProviderAdapter({
       sessionsDirectory: root,
       mcp: { nodePath: "/node", cliPath: "/cyberdeck.js" },
       sourceEnvironment: CHILD_SOURCE,
-    }).buildResumeSpec(session({
-      createdAt,
-      executionState: "exited",
-      exitCode: 0,
-      model: "gpt-test",
-      kind: "orchestrator",
-      sandbox: "workspace-write",
-      approvalMode: "auto",
-      providerInstructions: "Cyberdeck orchestrator guidance",
-    }));
+    }).buildResumeSpec(record);
 
     expect(spec.executable).toBe("codex");
     expect(spec.args).toEqual([
@@ -382,7 +395,7 @@ describe("CodexProviderAdapter", () => {
       "-m",
       "gpt-test",
       "-c",
-      "developer_instructions=\"Cyberdeck orchestrator guidance\"",
+      `developer_instructions=${JSON.stringify(codexDeveloperInstructions(record.id, "Cyberdeck orchestrator guidance"))}`,
       "-c",
       "mcp_servers.cyberdeck.command=\"/node\"",
       "-c",

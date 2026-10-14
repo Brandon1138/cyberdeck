@@ -228,9 +228,9 @@ describe("Scout session lifecycle", () => {
       expect(record.scout?.transport).toBe("headless-stream-json");
       // Preserve the stream supervisor's existing truth instead of waiting for a terminal
       // composer that this one-shot transport never renders, before or after native JSON output.
-      expect(registry.workerTruth(record.id)).toMatchObject({ state: "idle", terminal: false });
+      expect(registry.workerTruth(record.id)).toMatchObject({ state: "unknown", terminal: false });
       pty.emit(streamText("Partial native response, not a decision card."));
-      expect(registry.workerTruth(record.id)).toMatchObject({ state: "idle", terminal: false });
+      expect(registry.workerTruth(record.id)).toMatchObject({ state: "working", terminal: false });
       expect(registry.workerTruth(record.id).completedTurns).toBe(0);
       await expect(registry.submitInstruction(record.id, "Follow-up", "orchestrator"))
         .rejects.toMatchObject({ code: "SESSION_BUSY" });
@@ -252,7 +252,6 @@ describe("Scout session lifecycle", () => {
     pty.exit(0);
     expect(registry.get(record.id)).toMatchObject({
       executionState: "exited",
-      attentionState: "done",
       exitCode: 0,
       scout: { reportState: "missing" },
     });
@@ -261,7 +260,6 @@ describe("Scout session lifecycle", () => {
 
     expect(registry.get(record.id)).toMatchObject({
       executionState: "exited",
-      attentionState: "done",
       exitCode: 0,
       scout: { reportState: "missing" },
     });

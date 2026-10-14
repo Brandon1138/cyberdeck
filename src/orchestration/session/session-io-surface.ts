@@ -136,6 +136,7 @@ export class SessionIoSurface {
     if (data.length > 0 && runtime.controller?.clientId === clientId && clientId !== undefined) {
       this.lastOperatorInput.set(runtime, this.now());
     }
+    if (data.length > 0) runtime.turns.noteHumanInput();
     requireSessionRuntime(runtime).write(data);
     await this.catalog.appendEvent("session.input", sessionId, { bytes: data.length });
   }
@@ -156,7 +157,9 @@ export class SessionIoSurface {
     try {
       runtime.turns.resetStallObservation();
       await this.catalog.appendTranscript(sessionId, "prompt", "human", message, {});
-      await this.catalog.setAttention(runtime, "working", true);
+      delete runtime.record.attentionState;
+      runtime.record.meaningfulUpdatedAt = new Date().toISOString();
+      await this.catalog.persist(runtime);
       await this.write(sessionId, clientId, data);
     } finally {
       const remaining = (this.humanSubmissions.get(runtime) ?? 1) - 1;
@@ -199,20 +202,19 @@ export class SessionIoSurface {
       requireInteractiveInput(runtime);
       if (wake) {
         requireTerminalFinalizationComplete(runtime);
-        const hold = this.wakeHold(runtime);
-        if (hold !== undefined) {
-          this.heldWakes.set(sessionId, hold);
-          if (hold === "wake-operator-active") this.armQuietBoundary(sessionId, runtime);
-          throw new WakeHeldError(hold);
-        }
-        this.clearWakeHold(sessionId);
+        this.assertWakeBoundary(sessionId, runtime);
       }
     }
     const adapter = this.catalog.requireAdapter(runtime.record.provider);
     const submitKey = adapter.submitKey?.();
     return runtime.turns.submitInstruction({
       message,
-      encoded: () => adapter.submitInput?.(message, runtime.record) ?? Buffer.from(`${message}\n`),
+      encoded: () => {
+        // Native preflight awaits I/O; revalidate authority and operator quietness at the write.
+        if (runtime.controller !== undefined && !wake) throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
+        if (wake) this.assertWakeBoundary(sessionId, runtime);
+        return adapter.submitInput?.(message, runtime.record) ?? Buffer.from(`${message}\n`);
+      },
       ...(submitKey === undefined ? {} : { submitKey }),
       source,
       metadata,
@@ -226,6 +228,16 @@ export class SessionIoSurface {
    * no await before recording bytes and writing them, so input cannot interleave with the gate.
    * The engine revalidates its turn/capture/readiness reservations and arms the existing verifier.
    */
+  private assertWakeBoundary(sessionId: string, runtime: RuntimeSession): void {
+    const hold = this.wakeHold(runtime);
+    if (hold !== undefined) {
+      this.heldWakes.set(sessionId, hold);
+      if (hold === "wake-operator-active") this.armQuietBoundary(sessionId, runtime);
+      throw new WakeHeldError(hold);
+    }
+    this.clearWakeHold(sessionId);
+  }
+
   private wakeHold(runtime: RuntimeSession): WakeHoldReason | undefined {
     const truth = runtime.turns.projectTruth(); // Uses the provider composer reading from MIK-260.
     if (truth.state === "working" || truth.pendingInstructions > 0 || this.humanSubmissions.has(runtime)) {

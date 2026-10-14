@@ -56,6 +56,8 @@ export interface SessionStoreLike {
 export interface TranscriptLike {
   append(event: AppendWorkerTurnTranscriptEvent): Promise<unknown>;
   dropClaudeBinding?(sessionId: string): Promise<void>;
+  dropTurnLedger?(sessionId: string): Promise<void>;
+  dropCodexBinding?(sessionId: string): Promise<void>;
   observeProviderTurns?(input: CaptureWorkerTurns): Promise<WorkerTurnObservation>;
   commitProviderTurns?(observation: WorkerTurnObservation): Promise<WorkerTurnTranscript[]>;
   readCompletionLedger?(sessionId: string): Promise<WorkerTurnLedger>;
