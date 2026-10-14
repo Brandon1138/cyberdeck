@@ -165,7 +165,7 @@ describe("peer first-instruction lifecycle", () => {
     const restarted = await h.restart(created.sessionId, recoveredTranscripts);
     await expect(restarted.registry.resume(created.sessionId)).rejects.toMatchObject({ code: "SESSION_RESUME_UNAVAILABLE" });
     await restarted.queue.flush(created.sessionId);
-    expect((await restarted.queue.list(created.sessionId))[0]).toMatchObject({ status: "queued", holdReason: "native-recovery-unavailable" });
+    expect((await restarted.queue.list(created.sessionId))[0]).toMatchObject({ status: "rendered", holdReason: "native-recovery-unavailable" });
     expect(h.handles).toHaveLength(2);
     await restarted.registry.resume(created.sessionId);
     await vi.waitFor(async () => expect((await restarted.queue.list(created.sessionId))[0]?.status).toBe("completed"));
@@ -186,7 +186,7 @@ describe("peer first-instruction lifecycle", () => {
     expect(first.registry.get(h.actor.session.id).id).toBe(h.actor.session.id);
     expect(first.registry.initialInstructionRecoveryFailure(created.sessionId)).toContain("without resending the brief");
     await first.queue.flush(created.sessionId);
-    expect((await first.queue.list(created.sessionId))[0]).toMatchObject({ status: "queued", holdReason: "native-recovery-unavailable" });
+    expect((await first.queue.list(created.sessionId))[0]).toMatchObject({ status: "rendered", holdReason: "native-recovery-unavailable" });
     first.queue.stop();
     const retried = await h.restart(created.sessionId, recoveredTranscripts);
     expect(retried.registry.initialInstructionRecoveryFailure(created.sessionId)).toBeUndefined();
@@ -199,6 +199,7 @@ describe("peer first-instruction lifecycle", () => {
     const h = await harness("codex"); const created = await h.create(provider);
     if (created.outcome !== "CREATED") throw new Error(created.reason);
     h.transcripts.complete(created.sessionId, "FIRST_ACK");
+    h.handles[1]!.handle.emit(READY[provider]);
     await vi.waitFor(async () => expect((await h.queue.list(created.sessionId))[0]?.status).toBe("completed"), { timeout: 4_000 });
     const restarted = await h.restart(created.sessionId);
     await restarted.registry.resume(created.sessionId);
@@ -263,6 +264,7 @@ describe("peer first-instruction lifecycle", () => {
       await new Promise((resolve) => setTimeout(resolve, 250));
       expect(h.registry.workerTruth(created.sessionId).completedTurns).toBe(0);
       h.transcripts.complete(created.sessionId, "FIRST_ACK");
+      handle.emit(READY[provider]);
       await vi.waitFor(async () => expect((await h.queue.list(created.sessionId))[0]?.status).toBe("completed"), { timeout: 4_000 });
       await vi.waitFor(async () => expect((await h.queue.list(created.sessionId))[1]).toMatchObject({ status: "rendered", expectedTurn: 2 }), { timeout: 4_000 });
       expect(h.registry.workerTruth(created.sessionId).canonicalTurns).toBe(1);

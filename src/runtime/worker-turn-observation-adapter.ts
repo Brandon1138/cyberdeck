@@ -36,6 +36,8 @@ class RuntimeReplayObservation implements ReplayObservation {
     return this.digest.frameText();
   }
 
+  modalFrameText(): string { return this.digest.inputFrameText(); }
+
   strippedTail(maxChars: number): BoundedReplayTail {
     return this.digest.strippedTail(maxChars);
   }

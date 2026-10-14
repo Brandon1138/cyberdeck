@@ -17,12 +17,15 @@ export async function recoverInitialInstruction(record: SessionRecord, transcrip
   try {
     observation = await transcripts.observeProviderTurns({
       sessionId: record.id, provider: record.provider, cwd: record.cwd,
-      createdAt: record.createdAt, turnNumber: ledger.completedTurns + 1, allowFallback: false,
+      createdAt: record.createdAt, initialInstructionId: record.initialInstructionId, turnNumber: ledger.completedTurns + 1, allowFallback: false,
     });
   } catch {
     // A changing or unavailable provider log must not stop unrelated threads recovering. Do not
     // turn absence of readable evidence into an unconsumed receipt or echo private parser input.
     return { completed: false, unavailable: "Native first-turn evidence could not be read; resume or restart to retry without resending the brief" };
+  }
+  if (record.provider === "codex" && observation.nativeAvailable === false) {
+    return { completed: false, unavailable: "Exact native first-turn identity is unavailable; resume or restart to retry without resending the brief" };
   }
   const native = observation.turns.filter(({ transport }) => transport === "provider-native");
   if (native.length === 0) return { completed: false };

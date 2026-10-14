@@ -62,6 +62,7 @@ interface BudgetTranscripts {
     provider: string;
     cwd: string;
     createdAt: string;
+    initialInstructionId?: string | undefined;
     turnNumber: number;
   }, window: "weekly" | "session"): Promise<ParsedProviderBudgetTelemetry>;
 }
@@ -355,7 +356,7 @@ export class WorkerBudgetEnforcer implements WorkerBudgetGate {
         sessionId: record.id,
         provider: record.provider,
         cwd: record.cwd,
-        createdAt: record.createdAt,
+        createdAt: record.createdAt, initialInstructionId: record.initialInstructionId,
         turnNumber: runtime.canonicalTurns,
       }, budget.declaration.resource);
     } catch {

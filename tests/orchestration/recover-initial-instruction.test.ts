@@ -1,3 +1,6 @@
+import { rm } from "node:fs/promises";
+import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-store.js";
+import { codexLaunchFixture } from "../fixtures/codex-launch.js";
 import { describe, expect, it, vi } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { recoverInitialInstruction } from "../../src/orchestration/session/recover-initial-instruction.js";
@@ -30,3 +33,21 @@ describe("initial instruction recovery", () => {
     expect(source.commitProviderTurns).not.toHaveBeenCalled();
   });
 });
+
+  it("recovers two same-cwd Codex launches only from their own exact first prompt", async () => {
+    const h = await codexLaunchFixture();
+    try {
+      await h.metadata("B", h.a.createdAt); // B is the only, nearest heuristic candidate for A.
+      await h.complete("B", "B BRIEF");
+      const restarted = new ThreadTranscriptStore(h.root, h.options);
+      await expect(recoverInitialInstruction(h.a, restarted)).resolves.toMatchObject({ completed: false, unavailable: expect.any(String) });
+      expect((await restarted.readCompletionLedger(h.a.id)).canonicalTurns).toBe(0);
+      await expect(recoverInitialInstruction(h.b, restarted)).resolves.toEqual({ completed: true });
+      await h.metadata("A", h.a.createdAt);
+      await h.complete("A", "A BRIEF");
+      await expect(recoverInitialInstruction(h.a, restarted)).resolves.toEqual({ completed: true });
+      for (const [record, answer] of [[h.a, "A ANSWER"], [h.b, "B ANSWER"]] as const) {
+        expect(await restarted.readCompletionLedger(record.id)).toMatchObject({ canonicalTurns: 1, turns: [{ text: answer }] });
+      }
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+  });

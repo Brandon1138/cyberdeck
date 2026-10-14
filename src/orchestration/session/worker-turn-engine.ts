@@ -108,7 +108,7 @@ export class WorkerTurnEngine {
   private readonly reconciler = new WorkerTurnReconciler({
     interval: CANONICAL_RECONCILE_QUIET_MS,
     epoch: () => this.observationEpoch,
-    canPoll: () => (this.record.provider === "claude" || this.record.provider === "codex" && this.initialInstructionPending()) && this.record.executor !== "orbstack-container"
+    canPoll: () => this.record.provider === "claude" && this.record.executor !== "orbstack-container"
       && this.record.profile !== "scout" && this.hasNativeTurnPort(),
     canReconcile: () => this.hasNativeTurnPort() && this.canReconcileCanonicalTurns(),
     active: () => !this.terminalFinalizing
@@ -975,7 +975,7 @@ export class WorkerTurnEngine {
           sessionId: this.record.id,
           provider: this.record.provider,
           cwd: this.record.cwd,
-          createdAt: this.record.createdAt,
+          createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
           turnNumber: claim.completionTarget,
           fallbackText: fallback,
           allowFallback: attempt + 1 === transcriptAttempts,
@@ -1148,7 +1148,7 @@ export class WorkerTurnEngine {
           sessionId: this.record.id,
           provider: this.record.provider,
           cwd: this.record.cwd,
-          createdAt: this.record.createdAt,
+          createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
           turnNumber: completionTarget,
           ...(fallbackEvidence === undefined ? {} : { fallbackText: fallbackEvidence.text }),
           allowFallback,
@@ -1461,7 +1461,7 @@ export class WorkerTurnEngine {
           sessionId: this.record.id,
           provider: this.record.provider,
           cwd: this.record.cwd,
-          createdAt: this.record.createdAt,
+          createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
           turnNumber: before + 1,
           allowFallback: false,
         });
@@ -1585,7 +1585,7 @@ export class WorkerTurnEngine {
       sessionId: this.record.id,
       provider: this.record.provider,
       cwd: this.record.cwd,
-      createdAt: this.record.createdAt,
+      createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
       turnNumber: this.completedTurnCount,
     }).catch(() => undefined);
     if (!this.isCurrentObservation(epoch, revision, owner, activityRevision)) return;
@@ -1618,7 +1618,7 @@ export class WorkerTurnEngine {
       sessionId: this.record.id,
       provider: this.record.provider,
       cwd: this.record.cwd,
-      createdAt: this.record.createdAt,
+      createdAt: this.record.createdAt, initialInstructionId: this.record.initialInstructionId,
       turnNumber: this.completedTurnCount,
     });
   }

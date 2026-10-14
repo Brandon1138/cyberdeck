@@ -1,3 +1,4 @@
+import { codexLaunchFixture } from "../../fixtures/codex-launch.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -2101,5 +2102,36 @@ describe("WorkerTurnEngine", () => {
     expect(vi.mocked(effects.setAttention).mock.calls.map(([state]) => state))
       .toEqual(["done", "working"]);
     expect(engine.waitResult(2).status).not.toBe("completed");
+  });
+});
+
+describe("Codex launch attribution", () => {
+  it("leaves a metadata-only neighbour unclaimed and binds each live launch to its exact rollout", async () => {
+    const h = await codexLaunchFixture(); roots.push(h.root);
+    vi.useFakeTimers();
+    const nativeRead = vi.spyOn(h.store, "observeProviderTurns");
+    const first = harness(h.a, { transcripts: h.store });
+    const second = harness(h.b, { transcripts: h.store });
+    for (const current of [first, second]) current.engine.noteRenderedInstruction({ instructionId: current.record.initialInstructionId!, expectedTurn: 1, renderedAt: current.record.updatedAt });
+    await h.metadata("B", h.a.createdAt);
+    first.engine.finishInitialization(true);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(nativeRead).not.toHaveBeenCalled(); // Pending Codex launches do not use Claude's native poll.
+    await first.engine.reconcileCanonicalTurns();
+    await expect(h.store.observeProviderTurns(h.input(h.a))).resolves.toMatchObject({ nativeAvailable: false, turns: [] });
+    // A preview or budget read cannot poison the claim before B's identifying prompt arrives.
+    expect(await h.store.readTranscriptMessages(h.input(h.a))).toEqual([]);
+    expect(await h.store.readProviderBudgetTelemetry(h.input(h.a), "session")).toEqual({});
+    await h.complete("B", "B BRIEF");
+    await first.engine.reconcileCanonicalTurns();
+    expect(first.engine.canonicalTurns).toBe(0);
+    await h.metadata("A", h.a.createdAt);
+    await h.complete("A", `Launch instruction ${h.a.initialInstructionId}`, true);
+    await first.engine.reconcileCanonicalTurns();
+    await second.engine.reconcileCanonicalTurns();
+    for (const [current, answer] of [[first, "A ANSWER"], [second, "B ANSWER"]] as const) {
+      expect(current.engine.canonicalTurns).toBe(1);
+      expect(await h.store.readCompletionLedger(current.record.id)).toMatchObject({ canonicalTurns: 1, turns: [{ text: answer }] });
+    }
   });
 });

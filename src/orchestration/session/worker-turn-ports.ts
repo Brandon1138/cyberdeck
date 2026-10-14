@@ -25,6 +25,8 @@ export interface ReplayObservation {
   appendBytes(chunk: Buffer): void;
   reset(replay: string): void;
   frameText(): string;
+  /** Rendered rows with cursor positioning preserved; unknown screens return empty text. */
+  modalFrameText?(): string;
   strippedTail(maxChars: number): BoundedReplayTail;
   tokenCount(): number | undefined;
   readonly version: number;
@@ -69,6 +71,8 @@ export interface CaptureWorkerTurns {
   turnNumber: number;
   fallbackText?: string;
   allowFallback?: boolean;
+  /** Launch receipts require exact native attribution before any first-turn capture. */
+  initialInstructionId?: string | undefined;
 }
 
 export type WorkerTurnTransport = "provider-native" | "terminal-replay-fallback";
@@ -88,6 +92,7 @@ export interface WorkerTurnObservation {
   provider: string;
   turnNumber: number;
   turns: readonly ObservedWorkerTurn[];
+  nativeAvailable?: boolean;
   /** Bound native file plus complete-line offset; movement is independent of terminal bytes. */
   activityVersion?: string;
 }

@@ -26,9 +26,9 @@ export function projectWorkerTurnTruth(input: WorkerTruthInput & {
   });
 }
 
-/** Read the same bounded provider text that established the blocking verdict. */
+/** Answer from rendered rows: stripping cursor movement loses the boundaries that verify keys. */
 export function observeWorkerModal(provider: string, composer: ComposerObservation,
   activity: WorkerTruthInput["activity"], replay: ReplayObservation, hasRuntime?: boolean) {
   if (hasRuntime === false || !composer.modalOpen && activity !== "needs-input") return undefined;
-  return describeBlockedModal(provider, replay.strippedTail(BLOCKED_PROMPT_TAIL_CHARS).text);
+  return describeBlockedModal(provider, replay.modalFrameText?.() ?? replay.strippedTail(BLOCKED_PROMPT_TAIL_CHARS).text);
 }
