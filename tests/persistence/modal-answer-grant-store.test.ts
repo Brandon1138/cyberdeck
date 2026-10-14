@@ -13,10 +13,30 @@ async function store() {
 }
 
 describe("ModalAnswerGrantStore", () => {
-  it("round-trips grant, status, revoke on the canonical root", async () => {
+  it("is on by default for every root, with no record written", async () => {
     const grants = await store();
 
-    expect((await grants.status("/repo")).enabled).toBe(false);
+    expect(await grants.status("/repo")).toEqual({ root: "/canonical/repo", enabled: true });
+    expect(await grants.allowsRoot("/canonical/repo")).toBe(true);
+    expect(await grants.allowsRoot("/canonical/anything-else")).toBe(true);
+    expect(await grants.list()).toEqual([]);
+    expect(await grants.revoked()).toEqual([]);
+
+    // Turning a root on that was never switched off appends nothing and returns no grant record.
+    expect(await grants.set("/repo", true)).toBeUndefined();
+    await expect(readFile(grants.path, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("round-trips off, status, on again on the canonical root", async () => {
+    const grants = await store();
+
+    expect(await grants.set("/repo", false)).toBeUndefined();
+    expect(await grants.status("/repo")).toEqual({ root: "/canonical/repo", enabled: false });
+    expect(await grants.allowsRoot("/canonical/repo")).toBe(false);
+    expect(await grants.revoked()).toEqual(["/canonical/repo"]);
+    // An opt-out names exactly one root; parents and children stay on like any other root.
+    expect(await grants.allowsRoot("/canonical/repo/sub")).toBe(true);
+    expect(await grants.allowsRoot("/canonical")).toBe(true);
 
     const granted = await grants.set("/repo", true);
     expect(granted).toEqual({
@@ -27,15 +47,10 @@ describe("ModalAnswerGrantStore", () => {
     expect(await grants.status("/repo")).toMatchObject({
       root: "/canonical/repo",
       enabled: true,
+      grant: { root: "/canonical/repo", authority: "operator" },
     });
     expect(await grants.allowsRoot("/canonical/repo")).toBe(true);
-    // `allowsRoot` takes an already-canonical root; nothing widens to parents or children.
-    expect(await grants.allowsRoot("/canonical/repo/sub")).toBe(false);
-    expect(await grants.allowsRoot("/canonical")).toBe(false);
-
-    expect(await grants.set("/repo", false)).toBeUndefined();
-    expect((await grants.status("/repo")).enabled).toBe(false);
-    expect(await grants.allowsRoot("/canonical/repo")).toBe(false);
+    expect(await grants.revoked()).toEqual([]);
   });
 
   it("appends rather than rewrites, and replays the ledger to the same answer", async () => {
@@ -45,22 +60,25 @@ describe("ModalAnswerGrantStore", () => {
       now: () => "2026-09-07T10:00:00.000Z",
     };
     const grants = new ModalAnswerGrantStore(directory, options);
-    await grants.set("/repo", true);
-    await grants.set("/other", true);
     await grants.set("/repo", false);
+    await grants.set("/other", false);
     await grants.set("/repo", true);
+    await grants.set("/repo", false);
 
     const lines = (await readFile(grants.path, "utf8")).trim().split("\n");
     expect(lines).toHaveLength(4);
 
     const reopened = new ModalAnswerGrantStore(directory, options);
-    expect((await reopened.list()).map((grant) => grant.root)).toEqual(["/other", "/repo"]);
+    expect(await reopened.revoked()).toEqual(["/other", "/repo"]);
+    expect(await reopened.list()).toEqual([]);
+    expect(await reopened.allowsRoot("/repo")).toBe(false);
+    expect(await reopened.allowsRoot("/third")).toBe(true);
   });
 
-  it("is idempotent: re-granting an active root appends nothing", async () => {
+  it("is idempotent: switching an already-off root off again appends nothing", async () => {
     const grants = await store();
-    await grants.set("/repo", true);
-    await grants.set("/repo", true);
+    await grants.set("/repo", false);
+    await grants.set("/repo", false);
     const lines = (await readFile(grants.path, "utf8")).trim().split("\n");
     expect(lines).toHaveLength(1);
   });
