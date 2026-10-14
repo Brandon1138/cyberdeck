@@ -30,6 +30,29 @@ const binding: OrchestratorBinding = {
 };
 
 describe("InstructionQueue", () => {
+  it.each(["accepted", "queued", "rendered", "submitted", "acknowledged"] as const)("preserves %s progress when native launch recovery is unavailable", async (status) => {
+    const records = new Map<string, InstructionRecord>();
+    let lifecycle!: (update: InstructionStateUpdate) => void;
+    const target = { id: TARGET, cwd: "/repo", executionState: "active", pid: 4242 } as SessionRecord;
+    const sessions = { get: () => target, onControllerReleased: () => () => undefined,
+      onDeliveryBoundary: () => () => undefined,
+      onInstructionState: (listener: typeof lifecycle) => { lifecycle = listener; return () => undefined; },
+      submitInstruction: vi.fn() } satisfies SessionInstructionPort;
+    const queue = new InstructionQueue(sessions, { findBySessionId: async () => binding }, {
+      list: async () => [...records.values()], put: async (record) => { records.set(record.id, record); },
+    });
+    queue.start();
+    const receipt = await queue.prepareLaunch({ actorSessionId: ACTOR, target, message: "FIRST_ACK", instructionId: crypto.randomUUID() });
+    lifecycle({ sessionId: TARGET, instructionId: receipt.id, state: status, at: new Date().toISOString() });
+    await queue.flush(TARGET);
+    // Model the persisted pre-restart progress exactly, without a terminal runtime transition.
+    records.set(receipt.id, { ...records.get(receipt.id)!, status });
+    await queue.recoverLaunchInstructions(async () => ({ canonicalTurns: 0, pending: "native read failed" }));
+    expect(records.get(receipt.id)).toMatchObject({ status: status === "accepted" ? "queued" : status, holdReason: "native-recovery-unavailable" });
+    expect(sessions.submitInstruction).not.toHaveBeenCalled();
+    queue.stop();
+  });
+
   it("ignores stale lifecycle observations after a receipt advances or completes", async () => {
     const records = new Map<string, InstructionRecord>();
     let lifecycle!: (update: InstructionStateUpdate) => void;

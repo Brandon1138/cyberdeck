@@ -11,6 +11,13 @@ import type {
   SessionInstructionPort,
 } from "./session/session-ports.js";
 
+/** Every receipt writer shares the same monotonic lifecycle, including recovery-only holds. */
+function instructionProgress(current: InstructionLifecycleState, next: InstructionLifecycleState): InstructionLifecycleState {
+  const progress = ["accepted", "queued", "rendered", "submitted", "acknowledged", "completed"];
+  return ["completed", "undelivered", "cancelled"].includes(current)
+    || progress.indexOf(next) >= 0 && progress.indexOf(next) < progress.indexOf(current) ? current : next;
+}
+
 export const EnqueueInstructionParamsSchema = z.object({
   actorSessionId: z.uuid(),
   targetSessionId: z.uuid(),
@@ -293,8 +300,7 @@ export class InstructionQueue {
       // receipts never regress, including when that old runtime later stops or resumes.
       if (record === undefined || record.status === update.state
         || ["completed", "undelivered", "cancelled"].includes(record.status)) return;
-      const progress = ["accepted", "queued", "rendered", "submitted", "acknowledged", "completed"];
-      if (progress.indexOf(update.state) >= 0 && progress.indexOf(update.state) < progress.indexOf(record.status)) return;
+      if (instructionProgress(record.status, update.state) !== update.state) return;
       await this.store.put(InstructionRecordSchema.parse({
         ...record,
         status: update.state,
@@ -389,7 +395,7 @@ export class InstructionQueue {
     const updated = InstructionRecordSchema.parse({
       ...record,
       ...fields,
-      status,
+      status: instructionProgress(record.status, status),
       updatedAt: new Date().toISOString(),
     });
     await this.store.put(updated);
