@@ -248,6 +248,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     args.push("-c", `developer_instructions=${JSON.stringify(
       codexDeveloperInstructions(session.id, session.providerInstructions),
     )}`);
+    session.codexActorMarker = true;
   }
 
   private async prepareIdentity(session: SessionRecord, spec: ProviderLaunchSpec): Promise<void> {
@@ -267,6 +268,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       spec.args.splice(positional >= 0 ? positional : spec.args[0] === "resume" ? spec.args.length - 1 : spec.args.length,
         0, "-c", override);
     }
+    session.codexActorMarker = true;
   }
 
   private addCyberdeckMcp(args: string[], session: SessionRecord): void {

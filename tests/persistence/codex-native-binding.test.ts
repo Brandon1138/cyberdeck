@@ -7,7 +7,7 @@ import { CodexConversationBindingStore } from "../../src/persistence/codex-conve
 import { codexSessionMarker } from "../../src/providers/codex/native-session-identity.js";
 import { CodexProviderAdapter } from "../../src/providers/codex.js";
 import type { SessionRecord } from "../../src/domain/session.js";
-import { NativeTurnActivity } from "../../src/orchestration/session/worker-turn-native-state.js";
+import { NativeTurnActivity, nativeTurnIdentity } from "../../src/orchestration/session/worker-turn-native-state.js";
 import { codexLaunchFixture } from "../fixtures/codex-launch.js";
 
 const A = "11111111-1111-4111-8111-111111111111", B = "22222222-2222-4222-8222-222222222222";
@@ -71,7 +71,13 @@ describe("exact Codex native binding", () => {
     await f.rollout("legacy", undefined, T, [
       { type: "event_msg", payload: { type: "user_message", message: "FIRST BRIEF" } }, completed("first", "foreign"),
     ]);
-    expect(await f.store.observeProviderTurns({ ...f.input(), initialInstructionId: instructionId, codexMarkerRequired: true }))
+    const session = { id: A, provider: "codex", cwd, createdAt: T, initialInstructionId: instructionId,
+      providerInstructions: "explicit rules", sandbox: "read-only" } as SessionRecord;
+    const spec = new CodexProviderAdapter().buildLaunchSpec(session, "FIRST BRIEF");
+    session.launchRecord = { mode: "launch", transport: "pty", resolvedAt: T, executable: spec.executable,
+      args: spec.args, cwd, cyberdeckEnv: {}, inheritedEnvCount: 0, truncated: false };
+    expect(session.codexActorMarker).toBe(true);
+    expect(await f.store.observeProviderTurns({ ...nativeTurnIdentity(session), turnNumber: 1 }))
       .toMatchObject({ nativeSourceAvailable: false, nativeSourceStatus: "unbound", turns: [] });
     expect(await f.bindings.read(A)).toBeUndefined();
   });

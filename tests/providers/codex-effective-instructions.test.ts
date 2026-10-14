@@ -81,7 +81,9 @@ describe("effective Codex developer instructions", () => {
     const session = record();
     const spec = operation === "launch" ? adapter.buildLaunchSpec(session, "initial task") : adapter.buildResumeSpec(session);
     expect(spec.args.some(value => value.startsWith("developer_instructions="))).toBe(false);
+    expect(session.codexActorMarker).toBeUndefined();
     await adapter.prepareLaunch(session, spec);
+    expect(session.codexActorMarker).toBe(true);
     expect(resolveDeveloperInstructions).toHaveBeenCalledWith({ cwd: session.cwd, env: spec.env });
     expect(spec.args).toContain(`developer_instructions=${JSON.stringify(codexDeveloperInstructions(session.id, "inherited native guidance"))}`);
     if (operation === "launch") expect(spec.args.slice(-2)).toEqual(["--", "initial task"]);
@@ -104,11 +106,13 @@ describe("effective Codex developer instructions", () => {
     expect(spec.args).toContain(`developer_instructions=${JSON.stringify(codexDeveloperInstructions(session.id, "orchestrator inherited rules"))}`);
   });
 
-  it("keeps explicit instructions authoritative and never imports host config into a container", async () => {
+  it.each(["launch", "resume"] as const)("keeps explicit instructions authoritative and never imports host config into a container on %s", async operation => {
     const resolveDeveloperInstructions = vi.fn(async () => "must not be loaded");
-    const adapter = new CodexProviderAdapter({ resolveDeveloperInstructions });
+    const adapter = new CodexProviderAdapter({ resolveDeveloperInstructions, nativeSessionId: "native-thread" });
     for (const session of [record({ providerInstructions: "explicit guidance" }), record({ executor: "orbstack-container" })]) {
-      const spec = adapter.buildLaunchSpec(session); await adapter.prepareLaunch(session, spec);
+      const spec = operation === "launch" ? adapter.buildLaunchSpec(session) : adapter.buildResumeSpec(session);
+      await adapter.prepareLaunch(session, spec);
+      expect(session.codexActorMarker).toBe(session.providerInstructions ? true : undefined);
       if (session.providerInstructions) expect(spec.args).toContain(`developer_instructions=${JSON.stringify(codexDeveloperInstructions(session.id, "explicit guidance"))}`);
       else expect(spec.args.some(value => value.startsWith("developer_instructions="))).toBe(false);
     }
@@ -119,6 +123,7 @@ describe("effective Codex developer instructions", () => {
     const adapter = new CodexProviderAdapter({ resolveDeveloperInstructions: async () => { throw new Error("native config unavailable"); } });
     const session = record(), spec = adapter.buildLaunchSpec(session);
     await expect(adapter.prepareLaunch(session, spec)).rejects.toThrow("native config unavailable");
+    expect(session.codexActorMarker).toBeUndefined();
     expect(spec.args.some(value => value.startsWith("developer_instructions="))).toBe(false);
   });
 

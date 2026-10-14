@@ -19,6 +19,7 @@ import type {
 } from "./worker-coordination.js";
 import type { WorkerLeaseCredentialCustodian } from "./worker-lease-credential-custodian.js";
 import type { InstructionQueue } from "../orchestration/instruction-queue.js";
+import { nativeTurnIdentity } from "../orchestration/session/worker-turn-native-state.js";
 
 const DEFAULT_CHECK_INTERVAL_MS = 1_000;
 const MIN_CHECK_INTERVAL_MS = 100;
@@ -63,6 +64,7 @@ interface BudgetTranscripts {
     cwd: string;
     createdAt: string;
     initialInstructionId?: string | undefined;
+    codexMarkerRequired?: boolean | undefined;
     turnNumber: number;
   }, window: "weekly" | "session"): Promise<ParsedProviderBudgetTelemetry>;
 }
@@ -353,10 +355,7 @@ export class WorkerBudgetEnforcer implements WorkerBudgetGate {
     if (this.options.transcripts === undefined) return {};
     try {
       return await this.options.transcripts.readProviderBudgetTelemetry({
-        sessionId: record.id,
-        provider: record.provider,
-        cwd: record.cwd,
-        createdAt: record.createdAt, initialInstructionId: record.initialInstructionId,
+        ...nativeTurnIdentity(record),
         turnNumber: runtime.canonicalTurns,
       }, budget.declaration.resource);
     } catch {

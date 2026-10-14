@@ -2194,6 +2194,10 @@ describe("Codex launch attribution", () => {
   it("refuses a markerless same-brief rollout on a live marker-injected launch", async () => {
     const h = await codexLaunchFixture(); roots.push(h.root);
     h.a.providerInstructions = "explicit developer rules";
+    h.a.codexActorMarker = true;
+    h.a.launchRecord = { mode: "launch", transport: "pty", resolvedAt: h.a.createdAt, executable: "codex",
+      args: ["-c", `developer_instructions=${JSON.stringify(`${h.a.providerInstructions}\n\n[cyberdeck-native-session:${h.a.id}]`)}`, "--", "A BRIEF"],
+      cwd: h.root, cyberdeckEnv: {}, inheritedEnvCount: 0, truncated: false };
     vi.useFakeTimers();
     const current = harness(h.a, { transcripts: h.store });
     current.engine.noteRenderedInstruction({ instructionId: h.a.initialInstructionId!, expectedTurn: 1, renderedAt: h.a.createdAt });

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +13,11 @@ import {
 import { WorkerBudgetEnforcer } from "../../src/broker/worker-budget-enforcer.js";
 import { WorkerCoordinationStore } from "../../src/persistence/worker-coordination-store.js";
 import type { ParsedProviderBudgetTelemetry } from "../../src/runtime/provider-budget-telemetry.js";
+import { codexLaunchFixture } from "../fixtures/codex-launch.js";
+import { CodexProviderAdapter } from "../../src/providers/codex.js";
+import { CodexConversationBindingStore } from "../../src/persistence/codex-conversation-bindings.js";
+import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-store.js";
+import { nativeTurnIdentity } from "../../src/orchestration/session/worker-turn-native-state.js";
 
 const BASE_MS = Date.parse("2026-08-24T10:00:00.000Z");
 const WORKER_ID = "00000000-0000-4000-8000-000000000161";
@@ -189,6 +194,38 @@ async function registerBudget(
 }
 
 describe("WorkerBudgetEnforcer", () => {
+  it("cannot bind a foreign markerless rollout during a marker-injected worker's budget read", async () => {
+    const context = await harness();
+    const h = await codexLaunchFixture(); directories.push(h.root);
+    h.a.providerInstructions = "explicit rules";
+    new CodexProviderAdapter().buildLaunchSpec(h.a, "A BRIEF");
+    const registry = new FakeRegistry(h.a);
+    const telemetry = vi.spyOn(h.store, "readProviderBudgetTelemetry");
+    const subject = new WorkerBudgetEnforcer({ registry, coordination: context.coordination,
+      instructions: { enqueueBroker: vi.fn(async () => undefined) as never },
+      transcripts: h.store, now: context.now });
+    try {
+      await registerBudget(subject, h.a, declaration("tokens", 1_000));
+      await h.metadata("FOREIGN", h.a.createdAt);
+      await h.complete("FOREIGN", "A BRIEF");
+      await subject.refresh(h.a.id);
+      expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({ codexMarkerRequired: true }), "session");
+      const bindings = new CodexConversationBindingStore(h.root);
+      expect(await bindings.read(h.a.id)).toBeUndefined();
+      await h.metadata("OWN", new Date(Date.parse(h.a.createdAt) + 1_000).toISOString());
+      await appendFile(join(h.root, "sessions", "2026", "10", "13", "OWN.jsonl"), JSON.stringify({
+        type: "turn_context", payload: { developer_instructions: `[cyberdeck-native-session:${h.a.id}]` },
+      }) + "\n");
+      await h.complete("OWN", "A BRIEF");
+      const input = { ...nativeTurnIdentity(h.a), turnNumber: 1, allowFallback: false };
+      for (const store of [h.store, new ThreadTranscriptStore(h.root, h.options)]) {
+        expect(await store.observeProviderTurns(input)).toMatchObject({ nativeSourceAvailable: true,
+          nativeSessionId: "OWN", turns: [{ text: "OWN ANSWER" }] });
+      }
+      expect(await bindings.read(h.a.id)).toMatchObject({ nativeSessionId: "OWN" });
+    } finally { subject.close(); }
+  });
+
   it("coalesces periodic checks and observation callbacks into one check per interval", async () => {
     const context = await harness();
     const subject = enforcer(context);

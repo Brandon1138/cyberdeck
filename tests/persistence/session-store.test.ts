@@ -38,6 +38,14 @@ function record(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 describe("SessionStore", () => {
+  it.each([undefined, true, false])("round-trips the optional Codex actor-marker fact (%s)", async codexActorMarker => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-session-store-"));
+    directories.push(directory);
+    const snapshot = record(codexActorMarker === undefined ? {} : { codexActorMarker });
+    await new SessionStore(directory).put(snapshot);
+    expect(await new SessionStore(directory).load()).toEqual([snapshot]);
+  });
+
   it("replays the latest durable thread snapshot and deletion tombstones", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-session-store-"));
     directories.push(directory);

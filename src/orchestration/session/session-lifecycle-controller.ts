@@ -198,6 +198,7 @@ export class SessionLifecycleController {
     runtime.watchers.clear();
     runtime.record.pid = sessionRuntime.pid;
     runtime.record.generation = record.generation;
+    if (record.codexActorMarker !== undefined) runtime.record.codexActorMarker = record.codexActorMarker;
     if (record.execution !== undefined) runtime.record.execution = record.execution;
     runtime.record.executionState = "active";
     runtime.record.attachmentState = "detached";

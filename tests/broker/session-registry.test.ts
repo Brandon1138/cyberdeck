@@ -508,6 +508,27 @@ describe("SessionRegistry", () => {
     await expect(registry.resume(record.id)).resolves.toMatchObject({ generation: 2 });
   });
 
+  it("persists the actor-marker fact injected while preparing a legacy Codex resume", async () => {
+    const put = vi.fn(async (_record: SessionRecord) => undefined);
+    const registry = new SessionRegistry({
+      workerTurnObservation: new WorkerTurnObservationAdapter(),
+      adapters: { codex: { ...adapters.codex, prepareLaunch: async (session, spec) => {
+        if (spec.args[0] === "resume") session.codexActorMarker = true;
+      } } },
+      sessionRuntimeFactory: () => new FakePty(1000),
+      store: { put, delete: async () => undefined },
+      journal: { append: async () => undefined },
+      validateCwd: async () => undefined,
+      config: BrokerRuntimeConfigSchema.parse({}),
+    });
+    const record = await registry.start(request());
+    expect(record.codexActorMarker).toBeUndefined();
+    await registry.stop(record.id);
+    await expect(registry.resume(record.id)).resolves.toMatchObject({ codexActorMarker: true });
+    expect(registry.get(record.id).codexActorMarker).toBe(true);
+    expect(put).toHaveBeenLastCalledWith(expect.objectContaining({ codexActorMarker: true }));
+  });
+
   it("rehydrates a conversation lost mid-turn as interrupted and resumes exact provider state", async () => {
     const persisted = {
       id: "11111111-1111-4111-8111-111111111111",
