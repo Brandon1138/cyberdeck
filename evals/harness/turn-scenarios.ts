@@ -11,21 +11,27 @@ import { livePrompts } from "../scenarios/live-prompts.js";
 export async function phantomTurnScenario(root: string, mode: EvalMode = "offline-scripted", live?: LiveEvalConfig) {
   if (mode === "live-container") return livePhantomTurn(root, live!);
   const store = new ThreadTranscriptStore(join(root, "transcripts"));
-  let release!: () => void, entered = false;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let release!: () => void, entered = false, released = false, workerId: string | undefined, cwd: string | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; }).then(() => { released = true; });
   const observations: WorkerTurnObservation[] = [];
+  // Commands the scripted worker has actually consumed. A truthful transcript only ever carries a
+  // turn for an instruction the provider received; the engine polls every claude/codex session
+  // natively on its own schedule, so an unconditional answer would mint turns forever.
+  const received = async () => { try { return (await readFile(join(cwd!, "commands.jsonl"), "utf8")).trim().split("\n").filter((line) => line.length > 0 && !line.includes('"emit:')).length; } catch { return 0; } };
   const broker = await brokerFixture(root, { mode, transcripts: {
     append: store.append.bind(store),
-    observeProviderTurns: async (input) => ({ sessionId: input.sessionId, provider: "claude", turnNumber: input.turnNumber,
-      turns: [{ providerTurnId: `fixture-turn-${input.turnNumber}`, providerOccurredAt: new Date().toISOString(),
-        text: `answer-${input.turnNumber}`, transport: "provider-native" }] }),
-    commitProviderTurns: async (observation) => {
-      observations.push(observation);
-      const receipts = await store.commitProviderTurns(observation);
-      if (observation.turnNumber === 1 && !entered) { entered = true; await gate; }
-      return receipts;
+    observeProviderTurns: async (input) => {
+      const none = { sessionId: input.sessionId, provider: "claude" as const, turnNumber: input.turnNumber, turns: [] };
+      if (input.sessionId !== workerId || await received() < input.turnNumber) return none;
+      // The delayed final frame: the provider has finished turn 1, but its receipt is withheld until
+      // the scenario releases it. That is the scheduling proof.
+      if (input.turnNumber === 1 && !released) { entered = true; return none; }
+      return { ...none, turns: [{ providerTurnId: `fixture-turn-${input.turnNumber}`, providerOccurredAt: new Date().toISOString(),
+        text: `answer-${input.turnNumber}`, transport: "provider-native" as const }] };
     },
+    commitProviderTurns: async (observation) => { observations.push(observation); return store.commitProviderTurns(observation); },
   } });
+  workerId = broker.worker.id; cwd = broker.cwd;
   try {
     const first = await broker.instruct("first turn");
     await eventually(() => entered, "DELAYED_COMMIT_NOT_REACHED", broker.timeout);
