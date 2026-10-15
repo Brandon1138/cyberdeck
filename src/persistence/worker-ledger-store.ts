@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { open, unlink } from "node:fs/promises";
+import { open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { ThreadEventSchema } from "../domain/thread.js";
@@ -10,6 +10,24 @@ const Target = z.object({ instructionId: z.string().min(1), expectedTurn: z.numb
 const Ledger = z.object({ sessionId: z.uuid(), completedTurns: z.number().int().nonnegative(), canonicalTurns: z.number().int().nonnegative(),
   providerOccurredThrough: z.iso.datetime().optional(), turns: z.array(ThreadEventSchema).max(64),
   lastNativeTurn: ThreadEventSchema.optional(), instructionTargets: z.array(Target).max(64) });
+
+export const WORKER_LEDGER_REJECTIONS = ["WORKER_LEDGER_INVALID", "WORKER_LEDGER_CONFLICT"] as const;
+
+/**
+ * The one shape check, run on every read and every write so the two can never disagree about
+ * what a valid ledger is. `completedTurns` is the highest ordinal any turn was filed under and
+ * `canonicalTurns` counts distinct provider-native turns; a session whose ordinals were reused
+ * (an adopt or restart handing out turn 1 again while native turn ids kept advancing) legitimately
+ * has a count above its max ordinal, so the two are deliberately not compared.
+ */
+function assertLedger<T extends z.infer<typeof Ledger>>(sessionId: string, ledger: T): T {
+  const receipts = [...ledger.turns, ...(ledger.lastNativeTurn === undefined ? [] : [ledger.lastNativeTurn])];
+  if (ledger.sessionId !== sessionId || receipts.some(turn => turn.sessionId !== sessionId)) throw new Error("WORKER_LEDGER_CONFLICT");
+  if (receipts.some(turn => !Number.isSafeInteger(turn.data.turnNumber)
+    || Number(turn.data.turnNumber) <= 0 || Number(turn.data.turnNumber) > ledger.completedTurns
+    || typeof turn.data.semanticTurnId !== "string" || !["provider-native", "terminal-replay-fallback", "broker-lifecycle"].includes(String(turn.data.transport)))) throw new Error("WORKER_LEDGER_INVALID");
+  return ledger;
+}
 
 /** Receipt and admission truth is independent of the shared transcript's retention window. */
 export class WorkerLedgerStore {
@@ -26,12 +44,13 @@ export class WorkerLedgerStore {
     try {
       const metadata = await file.stat();
       if (!metadata.isFile() || metadata.size > 8 * 1024 * 1024) throw new Error("WORKER_LEDGER_INVALID");
-      const ledger = Ledger.parse(JSON.parse(await file.readFile("utf8")));
-      const receipts = [...ledger.turns, ...(ledger.lastNativeTurn === undefined ? [] : [ledger.lastNativeTurn])];
-      if (ledger.sessionId !== sessionId || receipts.some(turn => turn.sessionId !== sessionId)) throw new Error("WORKER_LEDGER_CONFLICT");
-      if (ledger.canonicalTurns > ledger.completedTurns || receipts.some(turn => !Number.isSafeInteger(turn.data.turnNumber)
-        || Number(turn.data.turnNumber) <= 0 || Number(turn.data.turnNumber) > ledger.completedTurns
-        || typeof turn.data.semanticTurnId !== "string" || !["provider-native", "terminal-replay-fallback", "broker-lifecycle"].includes(String(turn.data.transport)))) throw new Error("WORKER_LEDGER_INVALID");
+      const body = await file.readFile("utf8");
+      // The file read is I/O and may propagate; everything after it is a judgement about the bytes,
+      // and every way those bytes can be wrong is the same rejection so startup can quarantine it.
+      const ledger = (() => {
+        try { return assertLedger(sessionId, Ledger.parse(JSON.parse(body))); }
+        catch (error) { throw error instanceof Error && error.message === "WORKER_LEDGER_CONFLICT" ? error : new Error("WORKER_LEDGER_INVALID", { cause: error }); }
+      })();
       return { completedTurns: ledger.completedTurns, canonicalTurns: ledger.canonicalTurns, turns: ledger.turns,
         instructionTargets: ledger.instructionTargets,
         ...(ledger.providerOccurredThrough === undefined ? {} : { providerOccurredThrough: ledger.providerOccurredThrough }),
@@ -43,9 +62,15 @@ export class WorkerLedgerStore {
     const compact = (turn: WorkerTurnTranscript) => ({ ...turn,
       ...(turn.text !== undefined && turn.text.length > 6000 ? { text: `[receipt elision; original length ${turn.text.length}]\n${turn.text.slice(-6000)}`,
         data: { ...turn.data, receiptOriginalLength: turn.text.length } } : {}) });
-    const body = Ledger.parse({ ...ledger, sessionId, turns: ledger.turns.map(compact),
-      ...(ledger.lastNativeTurn === undefined ? {} : { lastNativeTurn: compact(ledger.lastNativeTurn) }), instructionTargets: ledger.instructionTargets ?? [] });
+    const body = assertLedger(sessionId, Ledger.parse({ ...ledger, sessionId, turns: ledger.turns.map(compact),
+      ...(ledger.lastNativeTurn === undefined ? {} : { lastNativeTurn: compact(ledger.lastNativeTurn) }), instructionTargets: ledger.instructionTargets ?? [] }));
     await writeAtomicPrivateFile(this.path(sessionId), JSON.stringify(body));
+  }
+  /** Move a ledger `read` refused out of the way so startup can rebuild it from the transcript. Returns the new path. */
+  quarantine(sessionId: string, reason: string): Promise<string> {
+    const source = this.path(sessionId);
+    const target = `${source}.${reason.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now()}`;
+    return this.serialize(sessionId, () => rename(source, target)).then(() => target);
   }
   remove(sessionId: string): Promise<void> { return this.serialize(sessionId, async () => {
     await unlink(this.path(sessionId)).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });

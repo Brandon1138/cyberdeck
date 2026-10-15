@@ -1,4 +1,4 @@
-import { providerTurnReceipt, WorkerLedgerStore, mergeWorkerLedgers } from "./worker-ledger-store.js";
+import { providerTurnReceipt, WorkerLedgerStore, WORKER_LEDGER_REJECTIONS, mergeWorkerLedgers } from "./worker-ledger-store.js";
 import { syncPrivateFile } from "./atomic-private-file.js";
 import { InstructionTargetIndex } from "./instruction-target-index.js";
 import { JsonlOffsetReader } from "./jsonl-offset-reader.js";
@@ -60,6 +60,8 @@ export interface ThreadTranscriptStoreOptions {
   codexSessionsDirectory?: string;
   claudeConversations?: ClaudeConversationBindingStore;
   codexConversations?: CodexConversationBindingStore;
+  /** Called when startup moves aside a ledger the reader refused; defaults to a console warning. */
+  onLedgerQuarantine?: (event: { sessionId: string; reason: string; path: string }) => void;
 }
 
 
@@ -543,11 +545,30 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     }
   }
 
+  /**
+   * A ledger the reader refuses is a cache that failed its own shape check, not the transcript it
+   * was derived from, and one such file must not take the broker down. Whoever touches the session
+   * first, startup's own sweep or a recovery read of a session whose transcript events have all
+   * rotated away, moves the file aside under a name that says why and continues from replay, which
+   * rewrites a fresh ledger. What that session loses is its retained receipts and admission fences,
+   * which only the quarantined file held. I/O errors still propagate.
+   */
+  private async readOrQuarantineWorkerLedger(sessionId: string): Promise<WorkerTurnLedger | undefined> {
+    try { return await this.workerLedgers.read(sessionId); } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (!(WORKER_LEDGER_REJECTIONS as readonly string[]).includes(reason)) throw error;
+      const path = await this.workerLedgers.quarantine(sessionId, reason);
+      (this.options.onLedgerQuarantine ?? (({ sessionId: id, reason: why, path: at }) =>
+        console.warn(`[transcripts] worker ledger for ${id} rejected (${why}); moved to ${at} and rebuilt from the transcript`)))({ sessionId, reason, path });
+      return undefined;
+    }
+  }
+
   private hydrateWorkerLedger(sessionId: string): Promise<void> {
     if (this.retiredSessions.has(sessionId)) return Promise.resolve();
     let pending = this.hydratedLedgers.get(sessionId);
     if (pending === undefined) {
-      pending = this.workerLedgers.read(sessionId).then(async stored => {
+      pending = this.readOrQuarantineWorkerLedger(sessionId).then(async stored => {
         if (this.retiredSessions.has(sessionId)) return;
         const targets = this.instructionTargets.read(sessionId);
         this.instructionTargets.restore(sessionId, stored?.instructionTargets ?? []);
