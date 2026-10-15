@@ -677,6 +677,22 @@ describe("ThreadTranscriptStore worker ledgers with reused ordinals", () => {
     }
   });
 
+  it("quarantines a ledger-only session's bad ledger on a recovery read, not just in the startup sweep", async () => {
+    // Every transcript event for a dormant session can rotate away while its ledger stays on disk.
+    // Startup's sweep never names such a session; recovery's readCompletionLedger is its first touch.
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const ledgers = join(root, "threads", "turn-ledgers");
+    await mkdir(ledgers, { recursive: true });
+    await writeFile(join(ledgers, `${SESSION_TWO}.json`), '{"sessionId":"');
+    const quarantined: Array<{ sessionId: string; reason: string; path: string }> = [];
+    const store = new ThreadTranscriptStore(root, { onLedgerQuarantine: event => quarantined.push(event) });
+    await expect(store.init()).resolves.toBeUndefined();
+    expect(quarantined).toEqual([]);
+    await expect(store.readCompletionLedger(SESSION_TWO)).resolves.toMatchObject({ completedTurns: 0, canonicalTurns: 0 });
+    expect(quarantined).toMatchObject([{ sessionId: SESSION_TWO, reason: "WORKER_LEDGER_INVALID" }]);
+    expect((await readdir(ledgers)).filter(file => file.startsWith(`${SESSION_TWO}.json.worker-ledger-invalid-`))).toHaveLength(1);
+  });
+
   it("refuses at write time what it would refuse at read time", async () => {
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
     const ledgers = new WorkerLedgerStore(root);

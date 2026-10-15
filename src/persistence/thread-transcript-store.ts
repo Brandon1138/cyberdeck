@@ -178,7 +178,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     if (this.initialized) return;
     if (this.initialization !== undefined) return this.initialization;
     this.initialization = this.loadMetadata().then(async () => {
-      for (const sessionId of new Set([...this.completionLedgers.keys(), ...this.instructionTargets.sessionIds()])) await this.hydrateOrQuarantine(sessionId);
+      for (const sessionId of new Set([...this.completionLedgers.keys(), ...this.instructionTargets.sessionIds()])) await this.hydrateWorkerLedger(sessionId);
     });
     await this.initialization;
     this.initialized = true;
@@ -546,20 +546,21 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   }
 
   /**
-   * Startup only. A ledger the reader refuses is a cache that failed its own shape check, not the
-   * transcript it was derived from; one such file out of hundreds must not keep the broker from
-   * starting. It is moved aside under a name that says why, and the session continues from
-   * replay, which rewrites a fresh ledger. What that session loses is its retained receipts and
-   * admission fences, which only the quarantined file held. I/O errors still propagate.
+   * A ledger the reader refuses is a cache that failed its own shape check, not the transcript it
+   * was derived from, and one such file must not take the broker down. Whoever touches the session
+   * first, startup's own sweep or a recovery read of a session whose transcript events have all
+   * rotated away, moves the file aside under a name that says why and continues from replay, which
+   * rewrites a fresh ledger. What that session loses is its retained receipts and admission fences,
+   * which only the quarantined file held. I/O errors still propagate.
    */
-  private async hydrateOrQuarantine(sessionId: string): Promise<void> {
-    try { await this.hydrateWorkerLedger(sessionId); } catch (error) {
+  private async readOrQuarantineWorkerLedger(sessionId: string): Promise<WorkerTurnLedger | undefined> {
+    try { return await this.workerLedgers.read(sessionId); } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       if (!(WORKER_LEDGER_REJECTIONS as readonly string[]).includes(reason)) throw error;
       const path = await this.workerLedgers.quarantine(sessionId, reason);
       (this.options.onLedgerQuarantine ?? (({ sessionId: id, reason: why, path: at }) =>
         console.warn(`[transcripts] worker ledger for ${id} rejected (${why}); moved to ${at} and rebuilt from the transcript`)))({ sessionId, reason, path });
-      await this.hydrateWorkerLedger(sessionId);
+      return undefined;
     }
   }
 
@@ -567,7 +568,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     if (this.retiredSessions.has(sessionId)) return Promise.resolve();
     let pending = this.hydratedLedgers.get(sessionId);
     if (pending === undefined) {
-      pending = this.workerLedgers.read(sessionId).then(async stored => {
+      pending = this.readOrQuarantineWorkerLedger(sessionId).then(async stored => {
         if (this.retiredSessions.has(sessionId)) return;
         const targets = this.instructionTargets.read(sessionId);
         this.instructionTargets.restore(sessionId, stored?.instructionTargets ?? []);
