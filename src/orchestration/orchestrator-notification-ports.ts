@@ -52,6 +52,8 @@ export interface NotificationInboxPort {
   pendingCount(controllerId: string): number;
   headCursor(controllerId: string): number;
   acknowledgeThrough(controllerId: string, cursor: number): Promise<number>;
+  /** Attention receipts acknowledge exactly the records their page returned. */
+  acknowledgeIds(controllerId: string, ids: readonly string[]): Promise<number>;
   /** The wait integration: a wait that delivered a target consumes the matching settled record. */
   acknowledgeByDedupeKey(
     controllerId: string,

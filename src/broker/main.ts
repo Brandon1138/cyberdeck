@@ -86,6 +86,7 @@ import { ObservedWorkerCoordinationService } from "./observed-worker-coordinatio
 import { composeOrchestratorNotificationFeed } from "./orchestrator-notification-feed.js";
 import { observeInstructionRepository } from "../orchestration/observed-instruction-repository.js";
 import { OrchestratorNotificationStore } from "../persistence/orchestrator-notification-store.js";
+import { createOrchestratorAttention } from "../persistence/orchestrator-attention-runtime.js";
 import { OrchestratorNoticeFiles } from "../persistence/orchestrator-notice-files.js";
 import {
   detachCockpit,
@@ -298,16 +299,18 @@ export async function runBroker(
   const orchestratorCapabilities = new WorkerCapabilityCatalog({
     probe: new CodexOrchestratorModelProbe(undefined, codexOrchestratorHome),
   });
+  const attention = await createOrchestratorAttention(stateDirectory, { registry, bindings: orchestratorStore, coordination: observedCoordination, transcripts });
   const orchestrators = new OrchestratorManager(
     registry,
     orchestratorStore,
     workerPreferences,
     providerPermissions,
     (provider) => orchestratorCapabilities.resolve(provider),
-    (binding, session) => orchestratorLiveness.bindingSession(binding, session),
-    (binding) => orchestratorLiveness.bindingRemoved(binding),
+    (binding, session) => attention.bindingChanged(binding).then(() => orchestratorLiveness.bindingSession(binding, session)),
+    (binding) => attention.bindingRemoved(binding).then(() => orchestratorLiveness.bindingRemoved(binding)),
   );
   const notificationFeed = composeOrchestratorNotificationFeed({
+    attention,
     inbox: notificationInbox,
     noticeFiles: new OrchestratorNoticeFiles(stateDirectory),
     bindings: orchestratorStore,
@@ -457,6 +460,7 @@ export async function runBroker(
     orchestrators,
     agentControl,
     notifications: notificationFeed.control,
+    attention,
     orchestratorPeers,
     instructions,
     workflows,

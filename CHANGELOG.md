@@ -6,6 +6,16 @@ and persisted schemas remain under active alpha development.
 
 ## [Unreleased]
 
+### Added
+
+- Explicit orchestrator attention waits: `cyberdeck_attention_arm` and
+  `cyberdeck_attention_cancel` persist an objective, worker completion targets,
+  a broker epoch, and cancellation. Optional attention receipts on
+  `cyberdeck_notifications_read` acknowledge only the reports, exact results,
+  and notifications the orchestrator received. Source reconciliation survives
+  registration races and notification crash gaps. This first slice records
+  durable state; attention scheduling and JEV evaluation remain later gates.
+
 ### Fixed
 
 - Broker startup streams the worker coordination journal, avoiding Node's string

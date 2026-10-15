@@ -1,4 +1,5 @@
 import { NOTICE_EXEMPT_TOOLS, NOTIFICATION_TOOLS } from "./notification-tools.js";
+import { ATTENTION_TOOLS } from "./attention-tools.js";
 import { workerBudgetInputSchema, workerWorkspaceInputSchema, scoutBriefInputSchema } from "./worker-input-schemas.js";
 import { createInterface } from "node:readline";
 import {
@@ -613,6 +614,7 @@ const TOOLS = [
     },
   },
   ...NOTIFICATION_TOOLS,
+  ...ATTENTION_TOOLS,
 ] as const;
 
 const UNBOUND_WORKER_TOOLS = new Set<(typeof TOOLS)[number]["name"]>([
@@ -983,7 +985,7 @@ async function callTool(
     return transport.request("agent.worker.startMany", { actorSessionId, ...args });
   }
   if (name === "cyberdeck_notifications_read") {
-    return transport.request("agent.notifications.read", { actorSessionId, ...args });
+    return transport.request("agent.notifications.read", { ...args, actorSessionId });
   }
   if (name === "cyberdeck_notifications_configure") {
     return transport.request("agent.notifications.configure", { actorSessionId, policy: args });
@@ -991,6 +993,8 @@ async function callTool(
   if (name === "cyberdeck_workers_wait") {
     return transport.request("agent.worker.wait", { actorSessionId, ...args });
   }
+  if (name === "cyberdeck_attention_arm") return transport.request("agent.attention.arm", { ...args, actorSessionId });
+  if (name === "cyberdeck_attention_cancel") return transport.request("agent.attention.cancel", { ...args, actorSessionId });
   if (name === "cyberdeck_thread_message") {
     return transport.request("agent.thread.enqueue", { actorSessionId, ...args });
   }

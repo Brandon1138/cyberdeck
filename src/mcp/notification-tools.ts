@@ -14,6 +14,8 @@ export const NOTIFICATION_TOOLS = [
         cursor: { type: "integer", minimum: 0, default: 0, description: "Read records with a cursor above this one. 0 reads from the oldest pending record." },
         limit: { type: "integer", minimum: 1, maximum: 50, default: 50 },
         acknowledgeThrough: { type: "integer", minimum: 0, description: "Acknowledge every pending record at or below this cursor before reading. Pass the previous page's nextCursor." },
+        attentionEpoch: { type: "string", format: "uuid", description: "Opt into this armed wait's non-consuming report/completion projection and exact page receipt. Reading alone does not consume attention." },
+        attentionReceiptId: { type: "string", format: "uuid", description: "Explicitly acknowledge the attention.receiptId you actually received. Requires attentionEpoch; use instead of acknowledgeThrough. Only that page's source coverage and notification IDs are consumed." },
         kinds: {
           type: "array",
           items: { type: "string", enum: ["settled", "intervention", "attention", "delivery", "risk", "progress", "budget", "handoff"] },

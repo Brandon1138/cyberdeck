@@ -1,4 +1,5 @@
 import type { InstructionRecord } from "../domain/instruction.js";
+import type { OrchestratorAttentionControlPlane } from "../orchestration/orchestrator-attention-control.js";
 import type { OrchestratorBindingDirectory } from "../orchestration/orchestrator-controller-directory.js";
 import { OrchestratorControllerDirectory } from "../orchestration/orchestrator-controller-directory.js";
 import type { NoticeFilePort } from "../orchestration/orchestrator-notice-file-port.js";
@@ -29,6 +30,7 @@ export interface OrchestratorNotificationFeedOptions {
   /** The queue's durable repository, read once at start for outstanding completion targets. */
   instructionRepository: Pick<InstructionRepository, "list">;
   now?: () => string;
+  attention?: OrchestratorAttentionControlPlane;
 }
 
 export interface OrchestratorNotificationFeed {
@@ -67,6 +69,7 @@ export function composeOrchestratorNotificationFeed(
     bindings: options.bindings,
     registry: options.registry,
     delivery: { notice: (controllerId) => delivery?.notice(controllerId) ?? Promise.resolve(undefined) },
+    ...(options.attention === undefined ? {} : { attention: options.attention }),
   });
   return {
     producer,
@@ -81,12 +84,14 @@ export function composeOrchestratorNotificationFeed(
         noticeFiles: options.noticeFiles,
       });
       await producer.start();
+      await options.attention?.start();
       await delivery.start();
       return delivery;
     },
     stop() {
       delivery?.stop();
       producer.stop();
+      options.attention?.stop();
     },
   };
 }
