@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readdir, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -9,6 +9,7 @@ import {
   pruneLegacyTranscript,
   ThreadTranscriptStore,
 } from "../../src/persistence/thread-transcript-store.js";
+import { WorkerLedgerStore } from "../../src/persistence/worker-ledger-store.js";
 
 // The store's incremental-scan behaviour is asserted by watching the `start` byte offset every
 // createReadStream call opens at. Node's own ESM namespace cannot be spied on directly, so the
@@ -616,5 +617,57 @@ describe("capability grants", () => {
     expect(grantAllows(workspaceGrant, "thread.read", { cwd: "/repo/one" })).toBe(true);
     expect(grantAllows(workspaceGrant, "thread.read", { cwd: "/repo/two" })).toBe(false);
     expect(grantAllows(workspaceGrant, "worker.start", { cwd: "/repo/one" })).toBe(false);
+  });
+});
+
+describe("ThreadTranscriptStore worker ledgers with reused ordinals", () => {
+  // An adopt or restart can hand out turn 1 again while the provider's native turn ids keep
+  // advancing. Replay then counts more canonical turns than the highest ordinal, which is the
+  // truth of that transcript and must survive a restart rather than abort it.
+  it("restarts over a ledger whose canonical count exceeds its highest ordinal", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const store = new ThreadTranscriptStore(root);
+    for (const [index, ordinal] of [1, 2, 1].entries()) {
+      const timestamp = new Date(Date.parse("2026-08-20T12:00:00.000Z") + index * 1_000).toISOString();
+      await store.commitProviderTurns({ sessionId: SESSION_ONE, provider: "claude", turnNumber: ordinal,
+        turns: [{ providerTurnId: `native-${index}`, providerOccurredAt: timestamp, text: `result ${index}`, transport: "provider-native" }] });
+    }
+    await expect(store.readCompletionLedger(SESSION_ONE)).resolves.toMatchObject({ completedTurns: 2, canonicalTurns: 3 });
+    const reopened = new ThreadTranscriptStore(root);
+    await expect(reopened.init()).resolves.toBeUndefined();
+    await expect(reopened.readCompletionLedger(SESSION_ONE)).resolves.toMatchObject({ completedTurns: 2, canonicalTurns: 3 });
+    expect(await readdir(join(root, "threads", "turn-ledgers"))).toEqual([`${SESSION_ONE}.json`]);
+  });
+
+  it("quarantines a ledger the reader refuses and still starts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const store = new ThreadTranscriptStore(root);
+    await store.commitProviderTurns({ sessionId: SESSION_ONE, provider: "claude", turnNumber: 1,
+      turns: [{ providerTurnId: "native-1", providerOccurredAt: "2026-08-20T12:00:01.000Z", text: "result", transport: "provider-native" }] });
+    const ledgers = join(root, "threads", "turn-ledgers");
+    const path = join(ledgers, `${SESSION_ONE}.json`);
+    const body = JSON.parse(await readFile(path, "utf8"));
+    body.turns[0].data.transport = "carrier-pigeon";
+    await writeFile(path, JSON.stringify(body));
+    const quarantined: Array<{ sessionId: string; reason: string; path: string }> = [];
+    const reopened = new ThreadTranscriptStore(root, { onLedgerQuarantine: event => quarantined.push(event) });
+    await expect(reopened.init()).resolves.toBeUndefined();
+    expect(quarantined).toMatchObject([{ sessionId: SESSION_ONE, reason: "WORKER_LEDGER_INVALID" }]);
+    expect(quarantined[0]!.path.startsWith(`${path}.worker-ledger-invalid-`)).toBe(true);
+    await expect(reopened.readCompletionLedger(SESSION_ONE)).resolves.toMatchObject({ completedTurns: 1, canonicalTurns: 1 });
+    const files = await readdir(ledgers);
+    expect(files).toHaveLength(2);
+    expect(files).toContain(`${SESSION_ONE}.json`);
+  });
+
+  it("refuses at write time what it would refuse at read time", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+    const ledgers = new WorkerLedgerStore(root);
+    await expect(ledgers.write(SESSION_ONE, { completedTurns: 2, canonicalTurns: 3, turns: [], instructionTargets: [] })).resolves.toBeUndefined();
+    await expect(ledgers.read(SESSION_ONE)).resolves.toMatchObject({ completedTurns: 2, canonicalTurns: 3 });
+    await expect(ledgers.write(SESSION_ONE, { completedTurns: 1, canonicalTurns: 1, instructionTargets: [], turns: [{
+      id: "33333333-3333-4333-8333-333333333333", cursor: 1, sessionId: SESSION_ONE, kind: "turn", source: "provider", occurredAt: "2026-08-20T12:00:01.000Z",
+      text: "late", data: { turnNumber: 2, semanticTurnId: "claude:x", transport: "provider-native" } } as never] }))
+      .rejects.toThrow("WORKER_LEDGER_INVALID");
   });
 });

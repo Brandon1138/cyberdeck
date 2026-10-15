@@ -1,4 +1,4 @@
-import { providerTurnReceipt, WorkerLedgerStore, mergeWorkerLedgers } from "./worker-ledger-store.js";
+import { providerTurnReceipt, WorkerLedgerStore, WORKER_LEDGER_REJECTIONS, mergeWorkerLedgers } from "./worker-ledger-store.js";
 import { syncPrivateFile } from "./atomic-private-file.js";
 import { InstructionTargetIndex } from "./instruction-target-index.js";
 import { JsonlOffsetReader } from "./jsonl-offset-reader.js";
@@ -60,6 +60,8 @@ export interface ThreadTranscriptStoreOptions {
   codexSessionsDirectory?: string;
   claudeConversations?: ClaudeConversationBindingStore;
   codexConversations?: CodexConversationBindingStore;
+  /** Called when startup moves aside a ledger the reader refused; defaults to a console warning. */
+  onLedgerQuarantine?: (event: { sessionId: string; reason: string; path: string }) => void;
 }
 
 
@@ -176,7 +178,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     if (this.initialized) return;
     if (this.initialization !== undefined) return this.initialization;
     this.initialization = this.loadMetadata().then(async () => {
-      for (const sessionId of new Set([...this.completionLedgers.keys(), ...this.instructionTargets.sessionIds()])) await this.hydrateWorkerLedger(sessionId);
+      for (const sessionId of new Set([...this.completionLedgers.keys(), ...this.instructionTargets.sessionIds()])) await this.hydrateOrQuarantine(sessionId);
     });
     await this.initialization;
     this.initialized = true;
@@ -540,6 +542,24 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
         if (oldest === undefined) break;
         this.semanticTurnIds.delete(oldest);
       }
+    }
+  }
+
+  /**
+   * Startup only. A ledger the reader refuses is a cache that failed its own shape check, not the
+   * transcript it was derived from; one such file out of hundreds must not keep the broker from
+   * starting. It is moved aside under a name that says why, and the session continues from
+   * replay, which rewrites a fresh ledger. What that session loses is its retained receipts and
+   * admission fences, which only the quarantined file held. I/O errors still propagate.
+   */
+  private async hydrateOrQuarantine(sessionId: string): Promise<void> {
+    try { await this.hydrateWorkerLedger(sessionId); } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (!(WORKER_LEDGER_REJECTIONS as readonly string[]).includes(reason)) throw error;
+      const path = await this.workerLedgers.quarantine(sessionId, reason);
+      (this.options.onLedgerQuarantine ?? (({ sessionId: id, reason: why, path: at }) =>
+        console.warn(`[transcripts] worker ledger for ${id} rejected (${why}); moved to ${at} and rebuilt from the transcript`)))({ sessionId, reason, path });
+      await this.hydrateWorkerLedger(sessionId);
     }
   }
 
