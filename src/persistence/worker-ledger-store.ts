@@ -44,7 +44,13 @@ export class WorkerLedgerStore {
     try {
       const metadata = await file.stat();
       if (!metadata.isFile() || metadata.size > 8 * 1024 * 1024) throw new Error("WORKER_LEDGER_INVALID");
-      const ledger = assertLedger(sessionId, Ledger.parse(JSON.parse(await file.readFile("utf8"))));
+      const body = await file.readFile("utf8");
+      // The file read is I/O and may propagate; everything after it is a judgement about the bytes,
+      // and every way those bytes can be wrong is the same rejection so startup can quarantine it.
+      const ledger = (() => {
+        try { return assertLedger(sessionId, Ledger.parse(JSON.parse(body))); }
+        catch (error) { throw error instanceof Error && error.message === "WORKER_LEDGER_CONFLICT" ? error : new Error("WORKER_LEDGER_INVALID", { cause: error }); }
+      })();
       return { completedTurns: ledger.completedTurns, canonicalTurns: ledger.canonicalTurns, turns: ledger.turns,
         instructionTargets: ledger.instructionTargets,
         ...(ledger.providerOccurredThrough === undefined ? {} : { providerOccurredThrough: ledger.providerOccurredThrough }),

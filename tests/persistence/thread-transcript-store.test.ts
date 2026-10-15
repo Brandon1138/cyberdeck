@@ -660,6 +660,23 @@ describe("ThreadTranscriptStore worker ledgers with reused ordinals", () => {
     expect(files).toContain(`${SESSION_ONE}.json`);
   });
 
+  it("quarantines truncated and schema-invalid ledgers rather than aborting startup", async () => {
+    for (const corrupt of ['{"sessionId":"', JSON.stringify({ sessionId: SESSION_ONE, completedTurns: "one", canonicalTurns: 1, turns: [], instructionTargets: [] })]) {
+      const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
+      const store = new ThreadTranscriptStore(root);
+      await store.commitProviderTurns({ sessionId: SESSION_ONE, provider: "claude", turnNumber: 1,
+        turns: [{ providerTurnId: "native-1", providerOccurredAt: "2026-08-20T12:00:01.000Z", text: "result", transport: "provider-native" }] });
+      const path = join(root, "threads", "turn-ledgers", `${SESSION_ONE}.json`);
+      await writeFile(path, corrupt);
+      const quarantined: Array<{ sessionId: string; reason: string; path: string }> = [];
+      const reopened = new ThreadTranscriptStore(root, { onLedgerQuarantine: event => quarantined.push(event) });
+      await expect(reopened.init()).resolves.toBeUndefined();
+      expect(quarantined).toMatchObject([{ sessionId: SESSION_ONE, reason: "WORKER_LEDGER_INVALID" }]);
+      await expect(reopened.readCompletionLedger(SESSION_ONE)).resolves.toMatchObject({ completedTurns: 1, canonicalTurns: 1 });
+      expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ completedTurns: 1, canonicalTurns: 1 });
+    }
+  });
+
   it("refuses at write time what it would refuse at read time", async () => {
     const root = await mkdtemp(join(tmpdir(), "cyberdeck-transcripts-"));
     const ledgers = new WorkerLedgerStore(root);
