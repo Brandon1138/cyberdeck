@@ -1,7 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { handleMcpRequest, type McpServerContext } from "../../src/mcp/server.js";
 import { ATTENTION_TOOL_CAPABILITIES } from "../../src/orchestration/orchestrator-attention-control.js";
-import { ACTOR, WORKER } from "../support/attention-harness.js";
+import { ACTOR, WORKER, OTHER, attentionHarness, cleanupAttentionHarnesses } from "../support/attention-harness.js";
+
+afterEach(cleanupAttentionHarnesses);
 
 describe("attention MCP surface", () => {
   it("exposes bounded explicit arm/cancel tools with the existing capability mapping", async () => {
@@ -29,5 +31,21 @@ describe("attention MCP surface", () => {
       ["agent.attention.cancel", { actorSessionId: ACTOR, epoch: WORKER }],
       ["agent.notifications.read", { actorSessionId: ACTOR, attentionEpoch: WORKER, attentionReceiptId: ACTOR }],
     ]);
+  });
+
+  it("carries authorized epoch discovery through the MCP error response without allowing actor spoofing", async () => {
+    const f = await attentionHarness(); const armed = await f.attention.arm(f.request());
+    const transport: McpServerContext["transport"] = { request: async (_method, params) =>
+      await f.attention.arm(params as ReturnType<typeof f.request>) as never };
+    const request = { jsonrpc: "2.0" as const, id: 1, method: "tools/call",
+      params: { name: "cyberdeck_attention_arm", arguments: f.request() } };
+    const response = await handleMcpRequest({ identity: { actorSessionId: ACTOR }, transport }, request);
+    const payload = (response!.result as { content: Array<{ text: string }> }).content[0]!.text;
+    expect(JSON.parse(payload)).toMatchObject({ failure: { code: "ATTENTION_ALREADY_ARMED",
+      message: expect.stringContaining(`epoch=${armed.epoch} status=armed`) } });
+    const denied = await handleMcpRequest({ identity: { actorSessionId: OTHER }, transport }, request);
+    const deniedPayload = (denied!.result as { content: Array<{ text: string }> }).content[0]!.text;
+    expect(JSON.parse(deniedPayload)).toMatchObject({ failure: { code: "ACTOR_NOT_AUTHORIZED" } });
+    expect(deniedPayload).not.toContain(armed.epoch);
   });
 });

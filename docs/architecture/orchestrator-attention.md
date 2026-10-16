@@ -23,12 +23,18 @@ wait statement.
 Retry the same arm request with the same mutation ID. A changed request using that
 ID is rejected. Replacing any prior wait, including a cancelled one, requires its
 `previousEpoch` and a fresh mutation ID. A stale cancel or receipt cannot change a new
-epoch. `cyberdeck_attention_cancel` takes the exact epoch and an optional reason;
+epoch. An authorized `ATTENTION_ALREADY_ARMED` conflict reports only the current
+epoch/status, so a newly bound primary can discover its predecessor's tombstone and
+explicitly retry the compare-and-swap. It does not silently take over the record.
+`cyberdeck_attention_cancel` takes the exact epoch and an optional reason;
 it does not stop workers, acknowledge reports, or change leases.
 
 Operator stop, binding reset/replacement, and a durable cancelled Orc turn after
 arming disarm attention. An older cancelled turn does not. Missing-process recovery
 is held explicitly; this service never starts or resumes a process.
+Loss of the current arm/read grant or target read scope cancels only that wait during
+reconciliation, including startup. Authority is checked before and after source capture;
+corrupt state and I/O errors still fail closed rather than becoming authority loss.
 
 ## One durable record
 
@@ -62,6 +68,9 @@ To read an armed wait, call `cyberdeck_notifications_read` with `attentionEpoch`
 The normal notification page is returned alongside `attention`, which includes the
 statement, bounded worker reports and results, captured/consumed coverage, gaps, and
 an opaque `receiptId`. Reading records a possible delivery, not consumption.
+After receipt persistence, the broker rechecks the original actor's binding/grant,
+target readability, and the persisted epoch/cancellation state before returning source
+data. A refused delivery may leave an unacknowledged receipt; it never consumes sources.
 
 After receiving and processing that page, call the same tool with its `attentionEpoch`
 and `attentionReceiptId`. Do not combine this with `acknowledgeThrough`. The broker

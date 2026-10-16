@@ -94,7 +94,9 @@ export class OrchestratorAttentionControlPlane {
         return current; // A cancelled request stays cancelled even after a lost arm response.
       }
       if (current !== undefined && current.epoch !== previousEpoch) {
-        throw new AttentionError("ATTENTION_ALREADY_ARMED", "Pass the current previousEpoch to replace the prior wait, including a cancelled wait");
+        // Only the current authorized controller reaches this discovery path. Keep replacement CAS explicit.
+        throw new AttentionError("ATTENTION_ALREADY_ARMED",
+          `Current attention epoch=${current.epoch} status=${current.status}. Pass this previousEpoch to replace the prior wait, including a cancelled wait`);
       }
       if (previousEpoch !== undefined && current?.epoch !== previousEpoch) this.stale();
       const authorities = statement.targets.map((target) => {
@@ -176,7 +178,7 @@ export class OrchestratorAttentionControlPlane {
     const controllerId = orchestratorController(binding).controllerId;
     await this.reconcile(controllerId, epoch);
     let page: AttentionReadPage | undefined;
-    const record = await this.options.store.update(controllerId, async (current) => {
+    await this.options.store.update(controllerId, async (current) => {
       this.requireEpoch(current, binding, epoch);
       if (current!.status !== "armed") throw new AttentionError("ATTENTION_CANCELLED", "This wait has been cancelled");
       await this.revalidate(binding, "thread.read");
@@ -194,7 +196,16 @@ export class OrchestratorAttentionControlPlane {
         receipts: [...current!.receipts, { id, epoch, sequence: current!.readSequence + 1,
           coverage: sources.received, notificationIds, createdAt: this.now() }].slice(-ATTENTION_LIMITS.receipts) };
     });
-    this.remember(record!);
+    // Persistence is an async authority boundary, not proof that the actor received the page.
+    // Read through the store's serialization so a queued cancel/re-arm cannot return stale source data.
+    await this.options.store.update(controllerId, async (current) => {
+      await this.revalidate(binding, "thread.read");
+      this.requireEpoch(current, binding, epoch);
+      if (current!.status !== "armed") throw new AttentionError("ATTENTION_CANCELLED", "This wait has been cancelled");
+      this.requireReadable(binding, current!);
+      this.remember(current!);
+      return current;
+    });
     return page!;
   }
 
@@ -241,15 +252,17 @@ export class OrchestratorAttentionControlPlane {
       if ((error as { code?: string }).code !== "SESSION_NOT_FOUND") throw error;
       recovery = "held-missing-process";
     }
-    this.requireReadable(binding, record);
+    if (!this.hasSourceAuthority(binding, record)) return this.cancelled(record, "Orchestrator source authority lost");
     const actorLedger = await this.options.transcripts.readCompletionLedger(record.actorSessionId);
     if (actorLedger.turns.some((turn) => typeof turn.data?.turnNumber === "number"
-      && turn.data.turnNumber > record.actorTurnFloor && turn.data.turnOutcome === "cancelled")) {
+      && turn.data.turnNumber > record.actorTurnFloor && turn.data.outcome === "cancelled")) {
       return this.cancelled(record, "Orchestrator turn cancelled after arming");
     }
     const sources = await captureAttentionSources(this.options, record);
     const currentBinding = await this.options.bindings.findBySessionId(record.actorSessionId);
-    if (currentBinding === undefined || currentBinding.key !== binding.key) return this.cancelled(record, "Orchestrator binding changed during capture");
+    if (currentBinding === undefined || currentBinding.key !== binding.key
+      || orchestratorController(currentBinding).controllerId !== record.controllerId) return this.cancelled(record, "Orchestrator binding changed during capture");
+    if (!this.hasSourceAuthority(currentBinding, record)) return this.cancelled(record, "Orchestrator source authority lost");
     if (record.snapshotId === sources.snapshotId && record.recovery === recovery) return record;
     return { ...record, recovery, snapshotId: sources.snapshotId, gaps: sources.gaps,
       coverage: { ...record.coverage, captured: sources.captured }, updatedAt: this.now() };
@@ -280,6 +293,17 @@ export class OrchestratorAttentionControlPlane {
       if (!grantAllows(binding.grant, "thread.read", { sessionId: authority.sessionId, cwd })) {
         throw new AttentionError("CAPABILITY_DENIED", "Wait sources are outside the current read grant");
       }
+    }
+  }
+
+  private hasSourceAuthority(binding: OrchestratorBinding, record: OrchestratorAttention): boolean {
+    const actor = { sessionId: binding.sessionId, cwd: binding.cwd };
+    if (!grantAllows(binding.grant, "thread.enqueue", actor) || !grantAllows(binding.grant, "thread.read", actor)) return false;
+    try { this.requireReadable(binding, record); return true; }
+    catch (error) {
+      // Only ordinary grant loss is a per-record cancellation. Corruption and I/O still fail closed.
+      if (error instanceof AttentionError && error.code === "CAPABILITY_DENIED") return false;
+      throw error;
     }
   }
 

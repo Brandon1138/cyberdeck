@@ -6,6 +6,7 @@ import { OrchestratorAttentionStore } from "../../src/persistence/orchestrator-a
 import { writeAtomicPrivateFile } from "../../src/persistence/atomic-private-file.js";
 import { WorkerCoordinationStore } from "../../src/persistence/worker-coordination-store.js";
 import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-store.js";
+import { parseCodexAbort } from "../../src/persistence/thread-transcript-lines.js";
 import { ObservedWorkerCoordinationService } from "../../src/broker/observed-worker-coordination.js";
 import { ACTOR, WORKER, OTHER, attentionHarness, cleanupAttentionHarnesses } from "../support/attention-harness.js";
 
@@ -114,8 +115,13 @@ describe("explicit attention waits", () => {
 
   it("an observed cancelled Orc turn after arming disarms attention; an older cancellation does not", async () => {
     const f = await attentionHarness();
-    const cancelledTurn = (turnNumber: number) => f.transcripts.append({ sessionId: ACTOR, kind: "turn", source: "broker",
-      text: "Cancelled", data: { turnNumber, semanticTurnId: `codex:cancelled-${turnNumber}`, transport: "provider-native", turnOutcome: "cancelled" } });
+    const cancelledTurn = (turnNumber: number) => {
+      const native = parseCodexAbort(JSON.stringify({ type: "event_msg", timestamp: "2026-10-16T10:00:00.000Z",
+        payload: { type: "turn_aborted", turn_id: `cancelled-${turnNumber}` } }), 0)!;
+      return f.transcripts.commitProviderTurns({ sessionId: ACTOR, provider: "codex", turnNumber,
+        turns: [{ providerTurnId: native.id, providerOccurredAt: native.occurredAt,
+          text: native.text, data: native.data!, transport: "provider-native" }] });
+    };
     await cancelledTurn(1);
     const armed = await f.attention.arm(f.request()); expect(armed.status).toBe("armed");
     await cancelledTurn(2); f.emit(ACTOR, { state: "idle", completedTurns: 2 }); await f.attention.flush();

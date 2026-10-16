@@ -2,9 +2,86 @@ import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ACTOR, WORKER, OTHER, attentionHarness, cleanupAttentionHarnesses } from "../support/attention-harness.js";
 
+import { OrchestratorAttentionControlPlane } from "../../src/orchestration/orchestrator-attention-control.js";
+import type { AttentionStorePort } from "../../src/orchestration/orchestrator-attention-ports.js";
+import { OrchestratorAttentionStore } from "../../src/persistence/orchestrator-attention-store.js";
+import { writeAtomicPrivateFile } from "../../src/persistence/atomic-private-file.js";
+
 afterEach(cleanupAttentionHarnesses);
 
 describe("attention consumption receipts", () => {
+  it("serializes cancellation behind a paused final binding lookup, then refuses later source reads", async () => {
+    const f = await attentionHarness(); await f.report("DO-NOT-RETURN-AFTER-CANCELLATION");
+    const armed = await f.attention.arm(f.request()); f.attention.stop();
+    let receiptWritten = false; let paused = false; let cancelling = false;
+    const barrier = () => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((release) => { resolve = release; });
+      return { promise, resolve };
+    };
+    const validationEntered = barrier();
+    const releaseValidation = barrier();
+    const cancelEnqueued = barrier();
+    const order: string[] = [];
+    const durable = new OrchestratorAttentionStore(f.directory, async (path, body) => {
+      await writeAtomicPrivateFile(path, body);
+      if (JSON.parse(body).receipts.length > 0) receiptWritten = true;
+    });
+    // Observe transaction admission before disk I/O, so lock ordering is deterministic.
+    // All reads/writes still use the real durable store; no sleeps or reentrant cancellation.
+    let tail: Promise<unknown> = Promise.resolve();
+    const serialized = <T>(operation: () => Promise<T>): Promise<T> => {
+      const result = tail.then(operation, operation);
+      tail = result.then(() => undefined, () => undefined);
+      return result;
+    };
+    const store: AttentionStorePort = {
+      get: (id) => serialized(() => durable.get(id)), list: () => durable.list(),
+      update: (id, change) => {
+        const cancellation = cancelling; cancelling = false;
+        const result = serialized(() => {
+          if (cancellation) order.push("cancel-admitted");
+          return durable.update(id, change);
+        });
+        if (cancellation) cancelEnqueued.resolve();
+        return result;
+      },
+    };
+    const attention = new OrchestratorAttentionControlPlane({ ...f.controlOptions, store });
+    f.controls.push(attention); await attention.start();
+    const lookup = f.controlOptions.bindings.findBySessionId.bind(f.controlOptions.bindings);
+    vi.spyOn(f.controlOptions.bindings, "findBySessionId").mockImplementation(async (id) => {
+      const binding = await lookup(id);
+      if (receiptWritten && !paused) {
+        paused = true; validationEntered.resolve(); await releaseValidation.promise;
+        order.push("validation-released");
+      }
+      return binding;
+    });
+    const reading = attention.readPage(ACTOR, armed.epoch, [], 1_200).then((page) => {
+      order.push("source-returned"); return page;
+    });
+    let cancellation: Promise<unknown> | undefined;
+    try {
+      await validationEntered.promise;
+      cancelling = true;
+      cancellation = attention.cancel({ actorSessionId: ACTOR, epoch: armed.epoch }).then((record) => {
+        order.push("cancel-committed"); return record;
+      });
+      await cancelEnqueued.promise;
+      expect(order).not.toContain("cancel-admitted");
+    } finally {
+      // Release from the test driver even on assertion failure; never await a mutation under its own lock.
+      releaseValidation.resolve(); await Promise.allSettled([reading, cancellation]);
+    }
+    const page = await reading;
+    expect(order.indexOf("validation-released")).toBeLessThan(order.indexOf("cancel-admitted"));
+    expect(order.indexOf("source-returned")).toBeLessThan(order.indexOf("cancel-committed"));
+    expect(page.workers[0]!.reports[0]!.summary).toBe("DO-NOT-RETURN-AFTER-CANCELLATION");
+    expect(await durable.get(armed.controllerId)).toMatchObject({ status: "cancelled", coverage: { consumed: [] } });
+    await expect(attention.readPage(ACTOR, armed.epoch, [], 1_200)).rejects.toMatchObject({ code: "ATTENTION_CANCELLED" });
+  });
+
   it("reading, notices and rendered input do not consume source coverage", async () => {
     const f = await attentionHarness(); await f.report("Read me"); await f.complete();
     const armed = await f.attention.arm(f.request()); await f.notify();

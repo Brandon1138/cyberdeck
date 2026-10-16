@@ -99,7 +99,7 @@ export async function captureAttentionSources(
 function boundedCompletion(turn: WorkerTurnTranscript, number: number, maxChars: number): NonNullable<AttentionWorkerView["completion"]> {
   // Expose only receipt identity/outcome fields; provider-authored arbitrary data stays in its journal.
   const data = turn.data === undefined ? undefined : Object.fromEntries(
-    ["semanticTurnId", "transport", "turnOutcome", "provider", "providerTurnId"]
+    ["semanticTurnId", "transport", "outcome", "provider", "providerTurnId"]
       .filter((key) => turn.data?.[key] !== undefined).map((key) => [key, turn.data![key]]),
   );
   return { turn: number, text: (turn.text ?? "").slice(0, maxChars), ...(data === undefined ? {} : { data }) };
