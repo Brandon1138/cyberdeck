@@ -49,6 +49,8 @@ export const OrchestratorAttentionSchema = z.object({
   coverage: z.object({
     captured: AttentionCoverageSchema, evaluated: AttentionCoverageSchema,
     noticed: AttentionCoverageSchema, submitted: AttentionCoverageSchema, consumed: AttentionCoverageSchema,
+    scheduled: AttentionCoverageSchema.optional(), rendered: AttentionCoverageSchema.optional(),
+    initiated: AttentionCoverageSchema.optional(),
   }).strict(),
   gaps: z.array(z.object({
     sessionId: z.uuid(), reason: z.enum(["supervision-lost", "worker-missing", "completion-unavailable"]),
@@ -57,10 +59,21 @@ export const OrchestratorAttentionSchema = z.object({
   decision: z.object({
     snapshotId: hash, outcome: z.enum(["WAKE", "DO_NOT_WAKE", "FALLBACK_WAKE"]),
     coverage: AttentionCoverageSchema, at: z.iso.datetime(),
+    inputId: hash.optional(), reason: z.string().min(1).max(128).optional(),
   }).strict().optional(),
   pendingIntent: z.object({
     epoch: z.uuid(), messageId: z.uuid(), coverage: AttentionCoverageSchema,
     createdAt: z.iso.datetime(), instructionId: z.uuid().optional(),
+    readSequenceFloor: ordinal.optional(),
+  }).strict().optional(),
+  reviewNotifiedAt: z.iso.datetime().optional(),
+  lastWake: z.object({
+    epoch: z.uuid(), messageId: z.uuid(), instructionId: z.uuid().optional(),
+    intendedAt: z.iso.datetime(), scheduledAt: z.iso.datetime().optional(),
+    renderedAt: z.iso.datetime().optional(), submittedAt: z.iso.datetime().optional(),
+    initiatedAt: z.iso.datetime().optional(), expectedTurn: ordinal.optional(),
+    consumedAt: z.iso.datetime().optional(), progressAt: z.iso.datetime().optional(),
+    dormantAt: z.iso.datetime().optional(), holdReason: z.string().max(256).optional(),
   }).strict().optional(),
   readSequence: ordinal,
   receipts: z.array(AttentionReadReceiptSchema).max(ATTENTION_LIMITS.receipts),
@@ -74,7 +87,7 @@ export const OrchestratorAttentionSchema = z.object({
     || record.authorities.length !== ids.size || record.authorities.some((authority) => !ids.has(authority.sessionId))) {
     ctx.addIssue({ code: "custom", message: "Wait authority must cover exactly its targets" });
   }
-  const coverage = [...Object.values(record.coverage), ...record.receipts.map((receipt) => receipt.coverage),
+  const coverage = [...Object.values(record.coverage).filter((value) => value !== undefined), ...record.receipts.map((receipt) => receipt.coverage),
     ...(record.decision === undefined ? [] : [record.decision.coverage]),
     ...(record.pendingIntent === undefined ? [] : [record.pendingIntent.coverage]),
     ...(record.consumption === undefined ? [] : [record.consumption.coverage])];
@@ -108,4 +121,10 @@ export type OrchestratorAttention = z.infer<typeof OrchestratorAttentionSchema>;
 
 export class AttentionError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "AttentionError"; }
+}
+
+/** An internal queue refusal. It never grants authority or starts a missing process. */
+export class AttentionWakeHeldError extends Error {
+  readonly code = "ATTENTION_WAKE_HELD";
+  constructor(readonly holdReason: string, readonly obsolete = false) { super(holdReason); }
 }

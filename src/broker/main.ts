@@ -320,7 +320,8 @@ export async function runBroker(
   });
   const instructions = new InstructionQueue(registry, orchestratorStore, observeInstructionRepository(activityInstructionStore(instructionStore, activity, (id) => {
     try { return registry.get(id); } catch { return undefined; }
-  }, (record, worker) => nativeCapture.captureInstruction(record, worker)), (record) => notificationFeed.observeInstruction(record)));
+  }, (record, worker) => nativeCapture.captureInstruction(record, worker)), (record) => notificationFeed.observeInstruction(record)),
+  (record) => (apply) => attention.admitWake(record, apply));
   instructions.start();
   await instructions.recoverLaunchInstructions(async (id) => {
     const ledger = await transcripts.readCompletionLedger(id);

@@ -33,6 +33,23 @@ export function composerHoldsMessage(content: string, entry: RenderedInstruction
   return content.startsWith(head) || head.startsWith(content);
 }
 
+/** Revalidate an attention wake after async authority lookup, immediately before a retry press. */
+export function admitSubmitRetry(entry: RenderedInstruction, host: {
+  epoch(): number; active(): boolean; pending(): boolean;
+  observe(): { activity: string; composer: ComposerObservation }; press(): void;
+}): void | Promise<boolean> {
+  if (entry.admission === undefined) { host.press(); return; }
+  const epoch = host.epoch();
+  return entry.admission(() => {
+    const { activity, composer } = host.observe();
+    if (epoch !== host.epoch() || !host.active() || !host.pending() || entry.state !== "rendered"
+      || activity === "working" || activity === "needs-input" || composer.modalOpen
+      || !composer.occupied || composer.content === undefined
+      || !composerHoldsMessage(normalizedHead(composer.content), entry)) return false;
+    entry.beforeResubmit?.(); host.press(); return true;
+  }).catch(() => false);
+}
+
 /** What the engine lends the verifier: its truth, its keyboard, and its transcript. */
 export interface SubmitVerificationHost {
   /** The lifecycle fence; a timer armed in an older epoch never fires. */
@@ -44,7 +61,7 @@ export interface SubmitVerificationHost {
   /** A fresh reading of the screen, including the composer. */
   observe(): { activity: string; composer: ComposerObservation };
   /** Press the provider's bare Enter for this entry and record that it was pressed. */
-  press(entry: RenderedInstruction, key: Buffer): void;
+  press(entry: RenderedInstruction, key: Buffer): void | Promise<boolean>;
   /** Report an entry still unsent after every allowed press. */
   exhausted(entry: RenderedInstruction, composer: ComposerObservation): void;
 }
@@ -65,6 +82,7 @@ export interface SubmitVerificationHost {
 export class SubmitVerifier {
   private timer?: ReturnType<typeof setTimeout>;
   private checks = 0;
+  private generation = 0;
 
   constructor(private readonly host: SubmitVerificationHost) {}
 
@@ -76,6 +94,7 @@ export class SubmitVerifier {
 
   /** Drop any armed check; the next process generation starts clean. */
   release(): void {
+    this.generation += 1;
     if (this.timer !== undefined) clearTimeout(this.timer);
     delete this.timer;
     this.checks = 0;
@@ -112,7 +131,12 @@ export class SubmitVerifier {
       this.host.exhausted(entry, composer);
       return;
     }
-    this.host.press(entry, entry.submitKey ?? Buffer.from("\r"));
-    this.schedule();
+    const epoch = this.host.epoch(), generation = this.generation;
+    const pressed = this.host.press(entry, entry.submitKey ?? Buffer.from("\r"));
+    if (pressed instanceof Promise) {
+      void pressed.then((allowed) => {
+        if (allowed && epoch === this.host.epoch() && generation === this.generation) this.schedule();
+      }).catch(() => undefined);
+    } else this.schedule();
   }
 }

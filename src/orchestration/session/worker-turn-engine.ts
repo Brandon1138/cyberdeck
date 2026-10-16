@@ -33,7 +33,7 @@ import { WorkerInputAdmission, heldInstructionDelivery, terminalInstructionDeliv
 import { WorkerCompletionLedger, WorkerTurnReconciler, WorkerStallTracker, completionReservationFloor } from "./worker-turn-state.js";
 import type { CompletionLedgerEntry, RenderedInstruction, WorkerStatusReading,
   TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
-import { normalizedHead, SubmitVerifier } from "./worker-submit-verification.js";
+import { admitSubmitRetry, normalizedHead, SubmitVerifier } from "./worker-submit-verification.js";
 import { WorkerInputReadiness } from "./worker-input-readiness.js";
 import { observeWorkerModal, projectWorkerTurnTruth } from "./worker-turn-truth.js";
 import { NativeTurnActivity, pendingExitTruth, supportsNativeTurnObservation, nativeReadFailure, nativeTurnIdentity } from "./worker-turn-native-state.js";
@@ -344,7 +344,13 @@ export class WorkerTurnEngine {
   }
 
   async submitInstruction(input: SubmitWorkerInstruction): Promise<InstructionDelivery> {
-    return this.admission.run(() => this.renderInstruction(input), (hold) => hold === "worker-terminal"
+    return this.admission.run(() => {
+      const epoch = this.observationEpoch, revision = this.activityRevision;
+      const render = () => epoch !== this.observationEpoch || revision !== this.activityRevision
+        ? this.holdInstruction("provider-busy", input.source, input.instructionId)
+        : this.renderInstruction(input);
+      return input.admission === undefined ? render() : input.admission(render);
+    }, (hold) => hold === "worker-terminal"
       ? this.terminalDelivery(input.source, input.instructionId)
       : this.holdInstruction(hold, input.source, input.instructionId));
   }
@@ -368,6 +374,8 @@ export class WorkerTurnEngine {
         messageLength: input.message.length,
         ...(input.submitKey === undefined ? {} : { submitKey: input.submitKey }),
         submitPresses: 0,
+        ...(input.admission === undefined ? {} : { admission: input.admission }),
+        ...(input.beforeResubmit === undefined ? {} : { beforeResubmit: input.beforeResubmit }),
       });
     }
     // Rendering bytes does not prove consumption or an in-flight provider turn.
@@ -714,7 +722,14 @@ export class WorkerTurnEngine {
   }
 
   /** The one place verification touches the keyboard: the bare Enter, recorded as broker input. */
-  private pressSubmitAgain(entry: RenderedInstruction, key: Buffer): void {
+  private pressSubmitAgain(entry: RenderedInstruction, key: Buffer): void | Promise<boolean> {
+    return admitSubmitRetry(entry, {
+      epoch: () => this.observationEpoch, active: () => this.record.executionState === "active" && !this.terminalFinalizing,
+      pending: () => this.rendered.includes(entry), observe: () => ({ activity: this.activity, composer: this.observeComposer() }),
+      press: () => this.writeSubmitAgain(entry, key),
+    });
+  }
+  private writeSubmitAgain(entry: RenderedInstruction, key: Buffer): void {
     entry.submitPresses = (entry.submitPresses ?? 0) + 1;
     this.activityRevision += 1;
     this.options.effects.write(key);

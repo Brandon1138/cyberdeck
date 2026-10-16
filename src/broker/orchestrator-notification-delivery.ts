@@ -8,6 +8,7 @@ import type { InstructionQueue } from "../orchestration/instruction-queue.js";
 import type { NoticeFilePort } from "../orchestration/orchestrator-notice-file-port.js";
 import type { NotificationInboxPort } from "../orchestration/orchestrator-notification-ports.js";
 import { OrchestratorNotificationWakeBudget } from "./orchestrator-notification-wake-budget.js";
+import type { OrchestratorAttentionScheduling } from "./orchestrator-attention-scheduling.js";
 
 export interface OrchestratorNotificationDeliveryOptions {
   inbox: NotificationInboxPort;
@@ -22,6 +23,7 @@ export interface OrchestratorNotificationDeliveryOptions {
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
+  attention?: Pick<OrchestratorAttentionScheduling, "manages">;
 }
 
 interface PendingWake {
@@ -229,6 +231,13 @@ export class OrchestratorNotificationDelivery {
   }
 
   private async reconcile(controllerId: string): Promise<void> {
+    if (await this.options.attention?.manages(controllerId)) {
+      this.cancelTimer(controllerId);
+      const legacy = this.pendingWakes.get(controllerId);
+      if (legacy !== undefined) await this.options.instructions.withdraw(legacy.sessionId, legacy.messageId);
+      this.pendingWakes.delete(controllerId);
+      return;
+    }
     const wake = this.pendingWakes.get(controllerId);
     const inbox = this.options.inbox;
     if (wake !== undefined) {
@@ -255,6 +264,7 @@ export class OrchestratorNotificationDelivery {
   }
 
   private async wake(controllerId: string): Promise<void> {
+    if (await this.options.attention?.manages(controllerId)) return;
     if (!this.hasEligible(controllerId) || this.pendingWakes.has(controllerId)) return;
     const controller = await this.options.controllers.forController(controllerId);
     if (controller === undefined || !this.started) return;

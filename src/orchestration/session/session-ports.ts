@@ -1,4 +1,4 @@
-import type { InstructionRecord } from "../../domain/instruction.js";
+import type { InstructionRecord, InstructionAdmission } from "../../domain/instruction.js";
 import type { ModalAnswerAttempt } from "../../domain/modal-descriptor.js";
 import type { OrchestratorBinding } from "../../domain/orchestrator.js";
 import type {
@@ -180,6 +180,7 @@ export interface SessionInstructionPort extends SessionLookupPort {
     source: "orchestrator" | "worker" | "broker",
     metadata?: Record<string, unknown>,
     instructionId?: string,
+    admission?: InstructionAdmission,
   ): Promise<InstructionDelivery>;
 }
 

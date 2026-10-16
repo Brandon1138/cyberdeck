@@ -3,8 +3,12 @@ import { InstructionLifecycleStateSchema } from "./worker-truth.js";
 
 export const WakeContextSchema = z.object({
   controllerId: z.string().min(1),
-  cursor: z.number().int().positive(),
+  cursor: z.number().int().nonnegative(),
   notificationIds: z.array(z.uuid()),
+  /** Internal attention identity; absence preserves legacy wake records. */
+  attentionEpoch: z.uuid().optional(),
+}).refine((wake) => wake.attentionEpoch !== undefined || wake.cursor > 0, {
+  message: "Legacy wakes require a positive inbox cursor",
 });
 
 export type WakeHoldReason = "wake-turn-in-flight" | "wake-composer-occupied" | "wake-operator-active";
@@ -77,3 +81,6 @@ export const InstructionRecordSchema = z.preprocess(
 
 export type InstructionRecord = z.infer<typeof InstructionRecordSchema>;
 export type InstructionStatus = z.infer<typeof InstructionStatusSchema>;
+
+/** Runtime-only authority transaction, applied after provider preflight and before writing. */
+export type InstructionAdmission = <T>(apply: () => T | Promise<T>) => Promise<T>;

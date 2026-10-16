@@ -173,6 +173,8 @@ export interface SubmitWorkerInstruction {
   source: "orchestrator" | "worker" | "broker";
   metadata?: Record<string, unknown>;
   instructionId?: string;
+  admission?: import("../../domain/instruction.js").InstructionAdmission;
+  beforeResubmit?: () => void;
 }
 
 /** Effects the engine may request without learning about registry attachments or infrastructure. */
