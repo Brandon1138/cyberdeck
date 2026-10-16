@@ -9,9 +9,9 @@ This document is the acceptance-item inventory: every known prompt surface per p
 triggers it, and its disposition. Three dispositions exist:
 
 - **avoid** — Cyberdeck prevents the prompt from ever appearing, by registering the exact worktree
-  in the provider's own trust store before the worker spawns. Gated on the operator's
-  `cyberdeck modal-answers on --root <repo>` grant; without the grant nothing is written and the
-  prompt surfaces exactly as before.
+  in the provider's own trust store before the worker spawns. On by default; if the operator
+  switched that repository off with `cyberdeck modal-answers off --root <repo>` nothing is written
+  and the prompt surfaces exactly as before.
 - **answer** — the prompt is recognized into a structured descriptor
   (`src/domain/modal-descriptor.ts`) carried on worker truth, and an orchestrator holding the lease
   may press one *enumerated* answer through `worker_ctl answer_modal`, policy- and
