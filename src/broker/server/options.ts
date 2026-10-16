@@ -5,6 +5,7 @@ import type { JobControlPlane } from "../../control-plane/job-control-plane.js";
 import type { ControlPlaneRuntime } from "../../control-plane/runtime.js";
 import type { LocalWorkerTelemetrySnapshot } from "../../domain/local-worker-control.js";
 import type { AgentControlService } from "../../orchestration/agent-control-service.js";
+import type { OrchestratorAttentionControlPlane } from "../../orchestration/orchestrator-attention-control.js";
 import type { OrchestratorNotificationControlPlane } from "../../orchestration/orchestrator-notification-control.js";
 import type { OrchestratorPeerService } from "../../orchestration/orchestrator-peer-service.js";
 import type { InstructionQueue } from "../../orchestration/instruction-queue.js";
@@ -59,6 +60,7 @@ export interface BrokerServerOptions {
   orchestratorPeers?: OrchestratorPeerService;
   /** The orchestrator notification feed's drain, policy and busy-path notice. */
   notifications?: OrchestratorNotificationControlPlane;
+  attention?: OrchestratorAttentionControlPlane;
   instructions?: InstructionQueue;
   workflows?: WorkflowService;
   controlPlane?: JobControlPlane;

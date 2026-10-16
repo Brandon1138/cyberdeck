@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AgentAttentionArmParamsSchema, AgentAttentionCancelParamsSchema } from "../../orchestration/orchestrator-attention-control.js";
 import {
   AgentActorParamsSchema,
   AgentInspectOrchestratorParamsSchema,
@@ -50,6 +51,14 @@ import {
 
 /** Everything an orchestrator or a worker asks for through its own bound actor. */
 export const agentMethods: Record<string, BrokerMethodHandler> = {
+  "agent.attention.arm": async (server, _context, frame) => {
+    if (server.options.attention === undefined) throw Object.assign(new Error("Attention is unavailable"), { code: "METHOD_NOT_FOUND" });
+    return server.options.attention.arm(AgentAttentionArmParamsSchema.parse(frame.params));
+  },
+  "agent.attention.cancel": async (server, _context, frame) => {
+    if (server.options.attention === undefined) throw Object.assign(new Error("Attention is unavailable"), { code: "METHOD_NOT_FOUND" });
+    return server.options.attention.cancel(AgentAttentionCancelParamsSchema.parse(frame.params));
+  },
   // Read-only self-description for a Cyberdeck MCP server that needs to say precisely why it
   // cannot act. It grants nothing and is deliberately answerable for an unbound actor.
   "agent.actor.describe": async (server, _context, frame) => {

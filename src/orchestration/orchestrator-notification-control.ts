@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { AttentionError } from "../domain/orchestrator-attention.js";
+import type { OrchestratorAttentionControlPlane, AttentionReadPage } from "./orchestrator-attention-control.js";
 import { grantAllows } from "../domain/capability.js";
 import {
   NOTIFICATION_LIMITS,
@@ -24,10 +26,14 @@ export const AgentNotificationsReadParamsSchema = z.object({
   cursor: z.number().int().nonnegative().default(0),
   limit: z.number().int().min(1).max(NOTIFICATION_LIMITS.drainPageMax).default(NOTIFICATION_LIMITS.drainPageMax),
   acknowledgeThrough: z.number().int().nonnegative().optional(),
+  attentionEpoch: z.uuid().optional(),
+  attentionReceiptId: z.uuid().optional(),
   kinds: z.array(NotificationKindSchema).optional(),
   severities: z.array(WorkerEventSeveritySchema).optional(),
   maxResultChars: z.number().int().min(200).max(4_000).default(1_200),
-});
+}).refine((request) => (request.attentionReceiptId === undefined || request.attentionEpoch !== undefined)
+  && (request.attentionEpoch === undefined || request.acknowledgeThrough === undefined),
+"Attention reads use an epoch and receipt ID for acknowledgement, never acknowledgeThrough");
 
 /**
  * A partial policy, spelled out rather than derived with `.partial()`: zod keeps a field's default
@@ -63,6 +69,7 @@ export interface NotificationsReadResult {
   pending: number;
   dropped: number;
   policy: NotificationPolicy;
+  attention?: AttentionReadPage;
 }
 
 /** The delivery service's busy-path entry point, as the control plane sees it. */
@@ -83,6 +90,7 @@ export interface OrchestratorNotificationControlOptions {
   registry: SessionLookupPort & Pick<WorkerTruthQueryPort, "waitForWorkerResults">;
   /** Absent in tests that only exercise the drain; `notice` then answers nothing. */
   delivery?: NotificationNoticePort;
+  attention?: Pick<OrchestratorAttentionControlPlane, "readPage" | "acknowledge">;
 }
 
 /**
@@ -101,7 +109,14 @@ export class OrchestratorNotificationControlPlane {
     const binding = await this.requireBinding(request.actorSessionId);
     const controllerId = orchestratorController(binding).controllerId;
     const { inbox } = this.options;
-    if (request.acknowledgeThrough !== undefined) {
+    if (request.attentionEpoch !== undefined && this.options.attention === undefined) {
+      throw new AttentionError("METHOD_NOT_FOUND", "Attention state is unavailable; no receipt was acknowledged");
+    }
+    if (request.attentionReceiptId !== undefined) {
+      const ids = await this.options.attention!.acknowledge(request.actorSessionId,
+        request.attentionEpoch!, request.attentionReceiptId);
+      await inbox.acknowledgeIds(controllerId, ids);
+    } else if (request.acknowledgeThrough !== undefined) {
       await inbox.acknowledgeThrough(controllerId, request.acknowledgeThrough);
     }
     const page = inbox.listPending(controllerId, request.cursor, request.limit, {
@@ -116,6 +131,9 @@ export class OrchestratorNotificationControlPlane {
         : undefined;
       notifications.push(result === undefined ? record : { ...record, result });
     }
+    const attention = request.attentionEpoch === undefined ? undefined
+      : await this.options.attention!.readPage(request.actorSessionId, request.attentionEpoch,
+        notifications.map((record) => record.id), request.maxResultChars);
     return {
       notifications,
       // The cursor advances over the whole page, filtered records included: a record a peer may
@@ -124,6 +142,7 @@ export class OrchestratorNotificationControlPlane {
       pending: inbox.pendingCount(controllerId),
       dropped: inbox.dropped(controllerId).sinceAcknowledged,
       policy: inbox.policy(controllerId),
+      ...(attention === undefined ? {} : { attention }),
     };
   }
 

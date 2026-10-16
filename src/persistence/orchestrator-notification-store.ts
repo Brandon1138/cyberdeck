@@ -289,6 +289,19 @@ export class OrchestratorNotificationStore {
     });
   }
 
+  acknowledgeIds(controllerId: string, ids: readonly string[]): Promise<number> {
+    const requested = new Set(z.array(z.uuid()).parse(ids));
+    return this.serialize(async () => {
+      this.requireLoaded();
+      const state = this.state.get(controllerId);
+      const records = state === undefined ? [] : pending(state).filter((record) => requested.has(record.id));
+      if (records.length > 0) await this.persist({ recordType: "orchestrator-notification.acknowledge",
+        controllerId, throughCursor: Math.max(...records.map((record) => record.cursor)),
+        ids: records.map((record) => record.id), at: this.now() });
+      return records.length;
+    });
+  }
+
   /**
    * Delivery is fsynced first, then selective acknowledgement; a crash between them leaves the
    * notification pending for retry. The acknowledgement envelope's optional ids avoids consuming
