@@ -5,6 +5,7 @@ import {
   projectRootFromModulePath,
 } from "../src/cli/runtime.js";
 import type { OrchestratorManagerResult } from "../src/orchestration/orchestrator-manager.js";
+import { preflightCockpit, type SpawnSyncLike } from "../src/tmux/cockpit.js";
 
 function quietCommand(name: string) {
   const command = createProgram().commands.find((candidate) => candidate.name() === name)!;
@@ -286,6 +287,29 @@ describe("Cyberdeck CLI", () => {
       cwd: "/repo/cockpit",
       orchestratorSessionId: result.session.id,
     }));
+  });
+
+  it.each(["create", "existing"] as const)("does not %s an Orc when the tmux socket is missing", async (type) => {
+    const result = orchestratorResult(false);
+    const spawnSync: SpawnSyncLike = (_command, args) => args[0] === "-V"
+      ? { status: 0, stdout: "tmux 3.6a\n" }
+      : { status: 1, stderr: "error connecting to /tmp/missing (No such file or directory)\n" };
+    const services = {
+      preflight: () => preflightCockpit({ spawnSync, insideTmux: true, hostPaneId: "%4" }),
+      create: vi.fn(async () => result),
+      resume: vi.fn(async () => result.session),
+      stop: vi.fn(async () => {}),
+      present: vi.fn(),
+    };
+    const target = type === "create"
+      ? { type, cockpitCwd: "/repo", request: { provider: "codex" as const, model: "gpt-5.6-sol", cwd: "/repo", scope: "fleet" as const } }
+      : { type, cockpitCwd: "/repo", session: result.session, requiresResume: true };
+
+    await expect(openFleetCockpit(target, services)).rejects.toThrow("No such file or directory");
+    expect(services.create).not.toHaveBeenCalled();
+    expect(services.resume).not.toHaveBeenCalled();
+    expect(services.stop).not.toHaveBeenCalled();
+    expect(services.present).not.toHaveBeenCalled();
   });
 
   it("rolls back only a newly created Fleet orchestrator when cockpit presentation fails", async () => {

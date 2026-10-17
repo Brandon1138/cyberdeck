@@ -6,7 +6,7 @@ export type SpawnSyncLike = (
   command: string,
   args: string[],
   options?: { stdio?: "ignore" | "inherit"; encoding?: "utf8" },
-) => { status: number | null; stdout?: string };
+) => { status: number | null; stdout?: string; stderr?: string };
 
 export interface CockpitOptions {
   cliPath: string;
@@ -217,6 +217,10 @@ export function preflightCockpit(options: CockpitPreflightOptions = {}): Cockpit
   const hostPaneId = insideTmux
     ? options.hostPaneId ?? discoverHostPane(spawnSync, options.insideTmux === undefined)
     : undefined;
+  // A running tmux binary and an inherited pane id do not prove the server is reachable:
+  // its socket may have been removed while existing clients and panes stayed alive.
+  // Fail before creating or resuming a provider, rather than during presentation.
+  if (hostPaneId !== undefined) hostWindowId(spawnSync, hostPaneId);
   return {
     tmuxVersion: (version.stdout ?? "").trim(),
     // Kept for the managed cockpit session, which is still how a client outside tmux — and a
@@ -259,7 +263,8 @@ export function hostWindowId(spawnSync: SpawnSyncLike, hostPaneId: string): stri
   );
   const windowId = (result.stdout ?? "").trim();
   if (result.status !== 0 || windowId === "") {
-    throw new Error("tmux failed to locate the window Fleet is running in");
+    const detail = (result.stderr ?? "").trim();
+    throw new Error(`tmux failed to locate the window Fleet is running in${detail ? `: ${detail}` : ""}`);
   }
   return windowId;
 }

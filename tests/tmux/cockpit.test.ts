@@ -500,18 +500,45 @@ describe("launchCockpit inside the window Fleet already occupies", () => {
 
 describe("preflightCockpit host pane discovery", () => {
   it("carries the caller's pane so presentation happens in place", () => {
-    const spawnSync = vi.fn<SpawnSyncLike>(() => ({ status: 0, stdout: "tmux 3.5a\n" }));
+    const spawnSync = vi.fn<SpawnSyncLike>((_command, args) =>
+      ({ status: 0, stdout: args[0] === "-V" ? "tmux 3.5a\n" : "@1\n" }));
     expect(preflightCockpit({ spawnSync, insideTmux: true, hostPaneId: "%4" })).toEqual({
       tmuxVersion: "tmux 3.5a",
       presentationCommand: "switch-client",
       hostPaneId: "%4",
     });
+    expect(spawnSync).toHaveBeenLastCalledWith(
+      "tmux", ["display-message", "-p", "-t", "%4", "#{window_id}"], { encoding: "utf8" },
+    );
   });
 
   it("asks tmux for the pane when the caller does not name one", () => {
     const spawnSync = vi.fn<SpawnSyncLike>((_command, args) =>
-      args[0] === "-V" ? { status: 0, stdout: "tmux 3.5a\n" } : { status: 0, stdout: "%5\n" });
+      ({ status: 0, stdout: args[0] === "-V" ? "tmux 3.5a\n" : args.includes("-t") ? "@1\n" : "%5\n" }));
     expect(preflightCockpit({ spawnSync, insideTmux: true }).hostPaneId).toBe("%5");
+  });
+
+  it("rejects an inherited pane when its server socket is missing and preserves tmux's diagnostic", () => {
+    vi.stubEnv("TMUX", "/tmp/tmux-501/missing,123,0");
+    vi.stubEnv("TMUX_PANE", "%4");
+    const detail = "error connecting to /tmp/tmux-501/missing (No such file or directory)";
+    const spawnSync = vi.fn<SpawnSyncLike>((_command, args) => args[0] === "-V"
+      ? { status: 0, stdout: "tmux 3.5a\n" }
+      : { status: 1, stderr: `${detail}\n` });
+    try {
+      expect(() => preflightCockpit({ spawnSync })).toThrow(
+        `tmux failed to locate the window Fleet is running in: ${detail}`,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("rejects an empty window response before presentation", () => {
+    const spawnSync = vi.fn<SpawnSyncLike>((_command, args) =>
+      ({ status: 0, stdout: args[0] === "-V" ? "tmux 3.5a\n" : "\n" }));
+    expect(() => preflightCockpit({ spawnSync, insideTmux: true, hostPaneId: "%4" }))
+      .toThrow("tmux failed to locate the window Fleet is running in");
   });
 
   it("ignores an answer that does not name a pane", () => {
