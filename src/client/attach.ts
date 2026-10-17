@@ -66,6 +66,8 @@ export interface AttachSessionOptions {
   detachIdentity?: string;
   /** Presentation callback invoked only after an explicit keyboard detach has released control. */
   onExplicitDetach?: (() => void | Promise<void>) | undefined;
+  /** The attachment was claimed and its initial replay was actually presented. */
+  onAttached?: (() => void) | undefined;
 }
 
 export async function attachSession(options: AttachSessionOptions): Promise<number> {
@@ -317,6 +319,7 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
         replayWritten = true;
         for (const chunk of liveBeforeReplay) output.write(chunk);
         liveBeforeReplay.length = 0;
+        options.onAttached?.();
 
         if (options.mode === "control") {
           input.setRawMode?.(true);

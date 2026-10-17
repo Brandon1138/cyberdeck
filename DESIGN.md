@@ -89,7 +89,7 @@ components:
 
 A developer returns to a dim terminal after several agents have worked across multiple repositories. The interface must reveal what changed, what needs intervention, and what can be reopened without making the user decode a dashboard. This physical scene requires a dark, quiet canvas, strong text hierarchy, dense rows, and restrained semantic color.
 
-Fleet is a provider-neutral register of durable conversations. It follows the proven Claude Code Fleet interaction pattern while changing the parts that would lie about ownership, lifecycle, or model choice. The broker owns runtimes, tmux owns presentation, and every row represents a conversation that remains visible after detachment or broker restart. A lost runtime becomes `Interrupted`; its thread does not vanish and reopening it resumes the exact provider-native conversation when possible.
+Fleet is a provider-neutral register of durable conversations. It follows the proven Claude Code Fleet interaction pattern while changing the parts that would lie about ownership, lifecycle, or model choice. The broker owns runtimes, tmux owns presentation, and every row represents a conversation that remains available after detachment or broker restart. A lost runtime becomes `Interrupted`; its thread does not vanish and reopening it resumes the exact provider-native conversation when possible.
 
 The interface is keyboard-first and structurally simple: one header, project groups, conversation rows, and one bottom composer. It has no speculative panels, ornamental terminal chrome, provider rankings, or hidden fallback. Mouse and hover behavior are outside the current implementation scope, and no action may depend on either.
 
@@ -181,21 +181,27 @@ The header occupies the upper-left of Fleet and establishes identity, current or
 ```text
  ▄████▄   Cyberdeck
 ▟█▄██▄█▙  Codex Sol · high · ~/code/personal/mikoshi
-▌▌▌▌▐▐▐▐  18 agents · 1 needs input · 2 working · 14 done · 1 failed
+▌▌▌▌▐▐▐▐  2 working · 1 needs input · 2 unread
 ```
 
 - Reserve an `8ch` by `3-row` logo bay with a `2ch` gap before text. The final 8-bit Cyberdeck logo must fit this box without moving the metadata column.
 - The mark is the 8-bit Cyberdeck octopus above, rendered in Octo Violet from half-block and quadrant glyphs: a domed mantle, two notch eyes, and eight one-pixel tentacles. It is the only 8-bit artwork in the interface.
 - Render `Cyberdeck` in strong bold text.
 - The second line shows the bound orchestrator's friendly model, effort, and scope. The normal global binding is labeled `fleet`; an explicitly isolated workspace binding shows its shortened path. If none exists, show `No orchestrator · ctrl+o to choose` without implying a model default.
-- The third line shows total threads plus nonzero attention counts. `Stopped`, `Interrupted`, and `Failed` are never folded into `done`.
+- The summary prioritizes accurate `working`, `needs input`, and `unread` counts and wraps those entries intact. Wider panes add process and nonzero status counts when they fit. Process liveness is separate from activity and verified outcome; inactive states are never folded into `done`.
 - Keep the full logo bay in regular and half-width cockpit panes. Below `64` columns, omit the logo pixels but retain the same header text order.
 
 ### Project Groups and Thread Rows
 
 Project headings are shortened canonical working-directory paths rendered plainly — a path is structure, not state, so it takes no accent. Groups are separated by one blank row, not rules or boxes. Pinned groups and rows come first; manual ordering is stable and persisted. Unpinned peers use most-recent meaningful activity as the tiebreaker.
 
-A project heading is a navigable row of its own. `Up`/`Down` step onto it, `Enter` toggles collapse, and `Left`/`Right` collapse and expand explicitly. A collapsed heading reports how many threads it is hiding and removes them from the navigation model, not merely from the paint. Collapse is view state, held per path for the life of the session.
+A project heading is a navigable row of its own. `Up`/`Down` step onto it, empty `Enter` toggles collapse, and `Left`/`Right` collapse and expand explicitly. A collapsed heading reports how many threads it is hiding and removes them from navigation as well as paint. Project and History folds persist in the existing Fleet preferences.
+
+Live is the default view. Within the Orcs roster and each project, all actionable rows appear ahead of a counted, initially folded History disclosure. Known idle sessions with no queued work, verified Done and confirmed stopped/exited sessions belong to History. Unknown, Failed, Interrupted, provider limits, stalls, blocked sessions, pending instructions and unconfirmed stops stay actionable. A contradictory live process is never hidden by a stopped/exited label. Explicit project folds remain the operator's choice; the default unregistered fold does not hide live work.
+
+History discloses inactive threads without discarding them. Its first five rows use the existing show-more control; live rows have no cap. Pins, ordering, ownership lenses, PR attribution and custody detail remain intact within these partitions. Focus follows durable IDs. If a selected row becomes hidden, focus rises to its disclosure or the view controls and thread actions become inert. An explicit stop/delete sequence reveals its same-ID target as it moves into History. Deleting or filtering a row never silently arms its neighbour.
+
+The functional Live / Unread / History controls form one navigable row. Home reaches it; Left/Right move its focus and Enter applies it. `/view live|unread|history` supplies the same path through the slash palette. Unread filters by genuine new assistant content; History filters to inactive rows and opens their disclosures. Folder, History, update-list and view-control focus display no unrelated selected-thread footer. Ctrl+W retains Fleet/Diagnostics switching.
 
 ```text
   ▾ ~/code/personal/cyberdeck
@@ -208,7 +214,7 @@ The row order is fixed at both full and multiplexed widths:
 - Every navigable row opens with a two-cell gutter: `▌ ` when focused, two spaces otherwise. Thread titles therefore sit two cells inside their project heading.
 - The left rule is the only selection signal that depends on rendering rather than content, and it is a plain glyph, so focus survives `--no-color`. The focused title also goes bold and brighter; unselected titles are Cool Ash.
 - `·` marks every thread except a live one, which takes the filled `•`. The marker takes Completion Green for `Done`, Attention Amber for `Needs input`, Failure Red for `Failed`, Live Ice for `Working`, and Cool Ash otherwise. Both glyphs are one cell wide, so the shape change never shifts a column. The status label follows the same color rule, without the glyph.
-- The title receives roughly 28 percent of width, model and effort receive at most `20ch`, status receives only its content width up to `11ch`, age receives `5ch`, and preview consumes all remaining space.
+- Wide rows allocate roughly 36 percent to the task name, up to `20ch` to model/effort, `14ch` to literal status and `5ch` to age. Preview uses remaining space. Literal state and owner sigils retain priority; custody conflicts are budgeted ahead of supplementary PR/worktree columns.
 - Provider, worker role, sandbox, and raw session ID are not permanent columns. Show provider only as part of an unambiguous friendly model label. Put deeper metadata in thread detail or diagnostics.
 - Age is right-aligned and based on the latest meaningful prompt, assistant completion, or lifecycle transition. Selection, attachment, and Fleet refresh do not reset it.
 - A renamed title overrides the normalized initial task title and persists across restarts.
@@ -216,10 +222,10 @@ The row order is fixed at both full and multiplexed widths:
 At `80` to `99` columns, the same single-line structure is retained with narrower title, identity, and preview columns.
 
 ```text
-▌ · Create iPhoneDoctor…  Opus · high  Done       Shader background is ready…  2m
+▌ · Create iPhoneDoctor…  Opus · high  Idle       Shader background is ready…  2m
 ```
 
-Below `80` columns the row still yields, but the model does not. Columns give up width in a fixed order: the worktree name first — the folder heading above it already said where the thread lives — then the pull-request number, then the lease badge, then title and preview down to their floors. Model, state, and the owner sigil are budgeted before any of them and survive the narrowest pane Fleet renders into. The row remains one line so multiplexing does not switch Fleet into a separate compact presentation.
+Below `80` columns, preview, PR and worktree columns yield to the task name. Model becomes a readable model name without effort and retains the `~` uncertainty marker. In `50`–`79` column panes, a concrete custody conflict takes that row's model slot, preserving model names on its healthy siblings; age yields below `60` if needed. Model can disappear in still narrower panes; below `45`, age also yields. Literal status and ownership remain legible. Full canonical model/effort and available metadata appear in selected detail; no new provider abbreviations are introduced. Every row stays single-line and is measured in terminal display cells, including non-ASCII paths and graphemes.
 
 Lease custody is not a permanent column either. `legacy`, `unowned`, and `adoptable` describe a lease an operator has no move to make about, and nearly every worker carries one, so no unowned state prints on a row; a group that shares one still states it once on its section heading, and the full five-field breakdown stays behind `ctrl+l`. The only tag left on a row is `conflict` or `anomaly`, which says the broker is contradicting itself.
 
@@ -231,9 +237,9 @@ Provenance is a shape, not a hue. Every orchestrator wears a deterministic one-c
   ▾ ~/code/personal/cyberdeck
 ▌ • Orc alpha                  Opus · high    Working      Dispatching wave two…              2m  ◆
   · Worker one                 Sol · high     Working      Rewriting the projection…          1m  ◆
-  · Worker two                 Sol · high     Done          Tests pass…                       4m  ▲
-  · Worker three               Sol · high     Done          Branch pushed…                    9m  ⊘
-  · Worker four                Opus · high    Done          Scratch run…                     22m
+  · Worker two                 Sol · high     Idle          Tests pass…                       4m  ▲
+  · Worker three               Sol · high     Idle          Branch pushed…                    9m  ⊘
+  · Worker four                Opus · high    Idle          Scratch run…                     22m
 ```
 
 Three states, not two:
@@ -253,14 +259,20 @@ Fleet status is a user-attention state derived from durable conversation state p
 | Label | Meaning | Treatment |
 | --- | --- | --- |
 | `Working` | The provider is generating, executing a tool, or starting a turn. | Live Ice plus the filled `•` marker |
+| `Starting` | The provider is launching or has not established input readiness. | Cool Ash |
 | `Needs input` | Progress is blocked on explicit approval, permission, authentication, trust, computer-use enablement, or a blocking question. | Attention Amber |
-| `Done` | No work is active and no intervention is required. The last turn completed successfully, or a new zero-turn session is ready. | Completion Green |
+| `Idle` | A recognized input surface is clear; no turn is in flight. Queued instructions still keep the row live. | Cool Ash |
+| `Unknown` | Available evidence cannot establish current provider activity. Detail quotes the available truth explanation. | Cool Ash plus literal label |
+| `Stalled` | A known turn or startup has exceeded its observation window. This does not prove deadlock. | Attention Amber |
+| `Provider limit` | The provider refused to continue on a recorded limit. | Attention Amber |
+| `Done` | The broker verified a structured Scout decision-card outcome. | Completion Green |
 | `Stopping` | A stop was requested and provider exit is not yet confirmed. | Cool Ash plus literal label |
 | `Stopped` | The user intentionally stopped the runtime; the conversation remains resumable. | Cool Ash |
 | `Interrupted` | Broker or runtime ownership was lost without a confirmed user stop. The row remains and may be resumed. | Cool Ash plus literal label |
 | `Failed` | The provider or turn ended unexpectedly. | Failure Red |
+| `Exited` | The process exited; this alone says nothing about task success. | Cool Ash |
 
-An active TUI waiting for its next ordinary prompt is `Done`, not `Needs input`. Terminal-title idleness alone is insufficient evidence of a blocking condition. Clean process exit after a successful turn may remain `Done`; a nonzero or protocol-invalid exit is `Failed`.
+A recognized TUI waiting for its next ordinary prompt is Idle. Neither idleness, a clean exit nor a completed turn proves task success. Provider activity, turn completion and verified outcome remain separate. Terminal-title idleness alone establishes no blocking condition or success.
 
 ### Durable Preview and Persistence
 
@@ -270,6 +282,16 @@ An active TUI waiting for its next ordinary prompt is `Done`, not `Needs input`.
 - Persist the normalized preview with the thread record so Fleet can render it before any provider runtime is resumed.
 - If no assistant message exists, render `No response yet` in Cool Ash. If persistence is unreadable, render `Preview unavailable` and surface the storage error without inventing content.
 - Persist the thread index, provider conversation identity, project path, model, effort, title, timestamps, pin and order metadata, last truthful state, and composer configuration. Broker restart must rehydrate the same groups and rows.
+
+Unread is content state, not process state. Each thread has a seen content/turn watermark and a latest observed preview in the existing preference journal. First sight baselines the current classified preview, including cold/legacy records, without calling it new. A changed preview with explicit `latestPreviewKind: assistant` provenance and advancing canonical turn evidence creates `*`; process generation fences stale observations after resume. The existing extractor records this optional presentation metadata only for structured assistant prose; prompt fallbacks are tagged prompt and terminal-only prose stays unattributed. This is necessary because canonical counters also include cancelled receipts. `meaningfulUpdatedAt` sorts proven updates but cannot create them, because it also changes for prompts and lifecycle events. Heartbeats, spinner bytes, model changes and generic `updatedAt` are never unread evidence.
+
+`/read` explicitly inspects the selected reply. A native attachment presented directly by Fleet also consumes that thread's latest reply; rejected attachments and exits before replay do not. Opening or selecting an orchestrator cockpit does not acknowledge replay inspection, so its replies remain unread until `/read`. Passive footer rendering and cursor traversal never mark content read. Up to three unread threads appear in Since your last visit; its navigable entries reveal the corresponding thread and its History disclosure. Repeated snapshots or temporarily missing truth cannot erase pending unread content. Replay-only/legacy evidence and identical stored preview heads cannot prove a distinct new reply and are conservatively omitted. Old preference journals need no migration; old brokers retain visit-local state.
+
+Structured Scout decision-card findings carry assistant provenance on completion and recovery. Supervisor-generated failure diagnostics carry no assistant provenance, including when they replace an earlier finding.
+
+### Selected Thread Detail
+
+A compact separator and selected-thread detail sit immediately above the composer. They show the stored task title, full model/effort with observed/launch uncertainty, cwd/worktree, current owner/controller, available truth explanation and latest meaningful assistant preview. Missing values get literal fallbacks such as Model unavailable, controller unavailable or No response yet. Paths and text fit terminal display cells. Height budgets shorten this detail first, preserving the composer and useful thread rows. Help, pickers, shell/project/rename modes, confirmation notices and multiline drafts take its space. Structural focus has no thread detail.
 
 ### Bottom Composer
 
@@ -323,6 +345,7 @@ esc back/clear     ctrl+r rename     ctrl+j newline        ctrl+s cwd  ctrl+t pi
 - `Ctrl+X` is contextual but stop-first. Help says `stop` until the selected thread has received an explicit stop step, including when it is already `Done`; only then may it say `delete` when the full tree is terminal. The visible confirmation must repeat the exact destructive action and descendant count.
 - `Esc` backs out of help, an edit, a reply, a picker, or a nonempty draft and never exits Fleet. Two consecutive `Ctrl+C` presses within five seconds exit without stopping agents; the first press shows the only red inline exit confirmation near the footer, and any other key cancels it.
 - At narrow widths, wrap the panel into two columns or one column. Never truncate key names or cover thread rows.
+- When all shortcuts do not fit, show a bounded help viewport with a position count; arrows, Page Up/Down and Home/End scroll it. Every shortcut remains reachable, and selected-thread detail yields its space.
 
 ### Destructive and Failure Feedback
 
@@ -336,7 +359,7 @@ Failure copy keeps the thread visible, preserves its last assistant preview, and
 
 - **Do** reserve the `8ch` by `3-row` upper-left bay for the 8-bit octopus mark and render it only in Octo Violet.
 - **Do** keep task, friendly model and effort, truthful state, assistant preview, and age visually adjacent.
-- **Do** show `Done` when an active provider has completed its turn and awaits an ordinary next prompt.
+- **Do** show Idle for a recognized clear input surface and reserve Done for a verified structured outcome.
 - **Do** reserve `Needs input` for a concrete blocking intervention and preserve its literal text in reduced-color terminals.
 - **Do** rehydrate project groups and threads from durable state after broker restart, marking unverifiable runtime ownership as `Interrupted`.
 - **Do** derive previews from the beginning of the latest assistant message.

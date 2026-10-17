@@ -1,10 +1,11 @@
 import type { SessionRecord } from "../../domain/session.js";
-import { FOLDER_THREAD_CAP, ORCS_SECTION_KEY } from "./constants.js";
+import { ORCS_SECTION_KEY } from "./constants.js";
 import { groupThreads, orchestratorThreads } from "./list-groups.js";
-import { isCollapsed, isExpanded, orderedThreads } from "./list-rows.js";
+import { fleetListRows, orderedThreads, threadFocusInert } from "./list-rows.js";
+import { reconcileReplyWatermarks } from "./visit-state.js";
 import { handoffMarks, isHandoffEligible } from "./picker-handoff.js";
 import { existingOrchestrators, orchestratorFocusAt, orchestratorFocusIndex } from "./picker-orchestrator.js";
-import { FleetAction, FleetSnapshot, FleetState, FleetThread, OrchestratorPickerState } from "./state.js";
+import { FleetAction, FleetSnapshot, FleetState, OrchestratorPickerState } from "./state.js";
 
 export function openAction(record: SessionRecord): FleetAction {
   return record.executionState === "active" || record.executionState === "starting"
@@ -13,9 +14,13 @@ export function openAction(record: SessionRecord): FleetAction {
 }
 
 export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number): FleetState {
+  state = reconcileReplyWatermarks(state, snapshot);
   const threads = orderedThreads(snapshot);
   const selectedExists = threads.some(({ record }) => record.id === state.selectedSessionId);
-  const selectedSessionId = selectedExists ? state.selectedSessionId : threads[0]?.record.id;
+  // Losing a selection never arms an action on the neighbour that happens to take its old slot.
+  const selectionLost = state.selectedSessionId !== undefined && !selectedExists;
+  const selectedSessionId = selectedExists ? state.selectedSessionId
+    : selectionLost ? undefined : threads[0]?.record.id;
   // An orc's row is never hidden by the folder it was launched in — it lives in the global
   // Orcs section — but that section folds and caps like a folder, so the orc answers to it
   // under the sentinel key instead.
@@ -33,33 +38,33 @@ export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: 
       ? ORCS_SECTION_KEY
       : folders.find(({ threads: workers }) =>
         workers.some(({ record }) => record.id === selectedRecord.id))?.cwd;
-  const folderExists = state.focusedFolderCwd !== undefined
-    && folders.some(({ cwd }) => cwd === state.focusedFolderCwd);
-  // A capped folder only offers a show-more row once it has more workers than it shows,
-  // and a collapsed folder offers none at all.
-  const showMoreExists = state.focusedShowMoreCwd !== undefined
-    && !isCollapsed(state, state.focusedShowMoreCwd)
-    && folders.some(({ cwd, threads: workers }) =>
-      cwd === state.focusedShowMoreCwd && workers.length > FOLDER_THREAD_CAP);
-  // A collapsed folder hides its threads, so focus rises to the header rather
-  // than resting on a row nobody can see; the cap does the same onto its show-more row.
-  const selectedCollapsed = selectedCwd !== undefined && isCollapsed(state, selectedCwd);
-  const selectedCapped = !selectedCollapsed
-    && selectedCwd !== undefined
-    && selectedSessionId !== undefined
-    && cappedOut(folders, state, selectedCwd, selectedSessionId);
-  const focusedFolderCwd = folderExists
-    ? state.focusedFolderCwd
-    : !showMoreExists && selectedCollapsed
-      ? selectedCwd
-      : undefined;
-  const focusedShowMoreCwd = focusedFolderCwd !== undefined
-    ? undefined
-    : showMoreExists
-      ? state.focusedShowMoreCwd
-      : selectedCapped
-        ? selectedCwd
-        : undefined;
+  // The explicit stop/delete ladder stays on the same durable id even when stopping folds it
+  // into history. Reveal that history locally rather than arming the thread in its former slot.
+  if (!threadFocusInert(state) && state.stopAcknowledgement?.sessionId === selectedSessionId && selectedCwd !== undefined) {
+    state = { ...state, expandedHistoryCwds: [...new Set([...(state.expandedHistoryCwds ?? []), selectedCwd])],
+      expandedCwds: [...new Set([...(state.expandedCwds ?? []), selectedCwd])] };
+  }
+  const rows = fleetListRows(snapshot, { ...state, selectedSessionId });
+  const has = (kind: "folder" | "show-more" | "history", cwd: string | undefined) =>
+    cwd !== undefined && rows.some((row) => row.kind === kind && row.cwd === cwd);
+  const visibleSelection = rows.some((row) => row.kind === "thread" && row.thread.record.id === selectedSessionId);
+  let focusedFolderCwd = has("folder", state.focusedFolderCwd) ? state.focusedFolderCwd : undefined;
+  let focusedShowMoreCwd = has("show-more", state.focusedShowMoreCwd) ? state.focusedShowMoreCwd : undefined;
+  let focusedHistoryCwd = has("history", state.focusedHistoryCwd) ? state.focusedHistoryCwd : undefined;
+  let focusedViewControl = state.focusedViewControl;
+  const focusedUpdateSessionId = rows.some((row) => row.kind === "update"
+    && row.thread.record.id === state.focusedUpdateSessionId) ? state.focusedUpdateSessionId : undefined;
+  const lostStructuralFocus = threadFocusInert(state) && focusedFolderCwd === undefined
+    && focusedShowMoreCwd === undefined && focusedHistoryCwd === undefined
+    && focusedViewControl === undefined && focusedUpdateSessionId === undefined;
+  if (selectionLost && !threadFocusInert(state) || lostStructuralFocus) focusedViewControl = state.listView ?? "live";
+  if (focusedViewControl === undefined && focusedFolderCwd === undefined && focusedShowMoreCwd === undefined
+    && focusedHistoryCwd === undefined && focusedUpdateSessionId === undefined && !visibleSelection) {
+    if (has("show-more", selectedCwd)) focusedShowMoreCwd = selectedCwd;
+    else if (has("history", selectedCwd)) focusedHistoryCwd = selectedCwd;
+    else if (has("folder", selectedCwd)) focusedFolderCwd = selectedCwd;
+    else focusedViewControl = state.listView ?? "live";
+  }
   const stopAcknowledgement = state.stopAcknowledgement?.sessionId === selectedSessionId
     ? state.stopAcknowledgement
     : undefined;
@@ -81,6 +86,9 @@ export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: 
     selectedSessionId,
     focusedFolderCwd,
     focusedShowMoreCwd,
+    focusedHistoryCwd,
+    focusedViewControl,
+    focusedUpdateSessionId,
     stopAcknowledgement,
     deleteConfirmation,
     quitConfirmation,
@@ -128,15 +136,4 @@ export function normalizeOrchestratorPicker(
 }
 
 /** True when the folder's cap would hide this worker, leaving its selection without a row. */
-export function cappedOut(
-  folders: ReadonlyArray<{ cwd: string; threads: readonly FleetThread[]; }>,
-  state: FleetState,
-  cwd: string,
-  sessionId: string,
-): boolean {
-  if (isExpanded(state, cwd)) return false;
-  const folder = folders.find((candidate) => candidate.cwd === cwd);
-  if (folder === undefined) return false;
-  return folder.threads.findIndex(({ record }) => record.id === sessionId) >= FOLDER_THREAD_CAP;
-}
 

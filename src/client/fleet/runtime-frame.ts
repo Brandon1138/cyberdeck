@@ -167,6 +167,8 @@ export function fleetFrameLayout(
       if (row.kind === "folder") return `folder:${row.cwd}`;
       if (row.kind === "thread") return `thread:${row.thread.record.id}`;
       if (row.kind === "show-more") return `show-more:${row.cwd}`;
+      if (row.kind === "history") return `history:${row.cwd}`;
+      if (row.kind === "update") return `update:${row.thread.record.id}`;
       if (row.kind === "ownership") return `ownership:${row.coordination.sessionId}`;
       return row.kind;
     })

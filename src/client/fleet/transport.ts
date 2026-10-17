@@ -2,6 +2,7 @@ import type { FleetOrchestratorOwnershipView, FleetWorkerCoordinationView, } fro
 import type { SessionRecord } from "../../domain/session.js";
 import { DEFAULT_PERMISSION_POLICIES, UNQUERIED_WORKER_MODELS } from "./constants.js";
 import { orderedThreads } from "./list-rows.js";
+import { reconcileReplyWatermarks } from "./visit-state.js";
 import { FleetSnapshot, FleetState, FleetThread, FleetTransport, StartFleetAction, ThreadStatus } from "./state.js";
 
 export async function collectFleetSnapshot(client: FleetTransport): Promise<FleetSnapshot> {
@@ -42,8 +43,9 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
 }
 
 export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.cwd()): FleetState {
-  return {
+  return reconcileReplyWatermarks({
     selectedSessionId: orderedThreads(snapshot)[0]?.record.id,
+    focusedViewControl: snapshot.threads.length === 0 ? "live" : undefined,
     threadListScrollOffset: 0,
     fallbackCwd,
     draft: "",
@@ -52,7 +54,8 @@ export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.
     permissionPolicies: { ...DEFAULT_PERMISSION_POLICIES },
     nvimLayoutEnabled: true,
     view: "fleet",
-  };
+    listView: "live",
+  }, snapshot);
 }
 
 export function threadStatus(thread: FleetThread): ThreadStatus {

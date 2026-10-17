@@ -2,9 +2,10 @@ import type { FleetWorkerCoordinationView } from "../../broker/worker-coordinati
 import { conversationPreview } from "../../domain/conversation-preview.js";
 import { leaseCustody, leaseCustodyBadge, type LeaseCustodyBadge } from "../lease-custody.js";
 import { pullRequestLabel, pullRequestTone, type PullRequestSummary } from "../pr-status.js";
-import { ANSI, HANDOFF_MARK, MIN_PREVIEW_CELL_WIDTH, MIN_TITLE_CELL_WIDTH, NARROW_IDENTITY_CELL_WIDTH, ROW_GUTTER, SELECTION_RULE, STATUS_CELL_WIDTH, WIDE_ROW_WIDTH } from "./constants.js";
+import { ANSI, HANDOFF_MARK, ROW_GUTTER, SELECTION_RULE, STATUS_CELL_WIDTH, WIDE_ROW_WIDTH } from "./constants.js";
 import { isCollapsed, threadFocusInert } from "./list-rows.js";
-import { threadIdentity } from "./model-labels.js";
+import { compactThreadIdentity, threadIdentity } from "./model-labels.js";
+import { isUnreadThread } from "./visit-state.js";
 import { isHandoffMarked } from "./picker-handoff.js";
 import { displayThreadName, fit, pad, padStart } from "./render-composer.js";
 import { ResolvedFleetRenderOptions } from "./runtime-options.js";
@@ -68,7 +69,7 @@ export function renderFolderRow(
 ): string {
   const focused = state.focusedFolderCwd === cwd;
   const collapsed = isCollapsed(state, cwd);
-  const summary = collapsed
+  const summary = collapsed || threadCount === 0
     ? ` · ${threadCount} thread${threadCount === 1 ? "" : "s"}`
     : "";
   const label = fit(
@@ -98,6 +99,29 @@ export function renderShowMoreRow(
     }`;
 }
 
+export function renderHistoryRow(cwd: string, count: number, expanded: boolean, state: FleetState, options: ResolvedFleetRenderOptions, scrollbar?: "track" | "thumb"): string {
+  const focused = state.focusedHistoryCwd === cwd;
+  const label = fit(`  ${expanded ? "▾" : "▸"} History · ${count}`, Math.max(1, options.width - 2));
+  return `${rowGutter(focused, options.color, scrollbar)}${paint(label, focused ? "bold" : "muted", options.color)}`;
+}
+
+export function renderViewControls(state: FleetState, options: ResolvedFleetRenderOptions): string {
+  const view = state.listView ?? "live";
+  const controls = (["live", "unread", "history"] as const).map((candidate) => {
+    const label = candidate[0]!.toUpperCase() + candidate.slice(1);
+    const text = candidate === view ? `[${label}]` : label;
+    return `${state.focusedViewControl === candidate ? SELECTION_RULE : ""}${paint(text, state.focusedViewControl === candidate || candidate === view ? "bold" : "muted", options.color)}`;
+  }).join("  ");
+  return `${rowGutter(state.focusedViewControl !== undefined, options.color)}${controls}`;
+}
+
+export function renderUpdateRow(thread: FleetThread, state: FleetState, options: ResolvedFleetRenderOptions, scrollbar?: "track" | "thumb"): string {
+  const focused = state.focusedUpdateSessionId === thread.record.id;
+  const suffix = ": new reply";
+  const title = fit(displayThreadName(thread.record.name ?? thread.record.role ?? "Untitled thread"), Math.max(1, options.width - 4 - suffix.length));
+  return `${rowGutter(focused, options.color, scrollbar)}${paint(`* ${title}${suffix}`, focused ? "bold" : "muted", options.color)}`;
+}
+
 export function renderThreadRow(
   thread: FleetThread,
   state: FleetState,
@@ -117,8 +141,8 @@ export function renderThreadRow(
   const baseTitle = displayThreadName(
     thread.record.name ?? thread.record.role ?? `Untitled ${thread.record.id.slice(0, 8)}`,
   );
-  const title = `${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
-  const identity = threadIdentity(thread.record);
+  const title = `${isUnreadThread(state, thread.record.id) ? "* " : ""}${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
+  const identity = options.width < 80 ? compactThreadIdentity(thread.record) : threadIdentity(thread.record);
   const status = threadStatus(thread);
   const age = relativeTime(thread.record.meaningfulUpdatedAt ?? thread.record.updatedAt, options.now);
   const layout = threadRowLayout(
@@ -142,15 +166,18 @@ export function renderThreadRow(
     ...(layout.worktree === 0
       ? []
       : [paint(pad(fit(worktree ?? "", layout.worktree), layout.worktree), "subtle", options.color)]),
-    paint(pad(identity, layout.identity), "subtle", options.color),
-    statusText(pad(status, STATUS_CELL_WIDTH), false, options.color),
-    paint(pad(preview, layout.preview), "muted", options.color),
+    ...(layout.identity === 0 ? [] : [options.width < WIDE_ROW_WIDTH && leaseBadge !== undefined && layout.leaseBadge === 0
+      ? leaseBadgeCell(leaseBadge, layout.identity, options.color)
+      : paint(pad(identity, layout.identity), "subtle", options.color)]),
+    selected ? paint(statusText(pad(status, layout.status), false, options.color), "bold", options.color)
+      : statusText(pad(status, layout.status), false, options.color),
+    ...(layout.preview === 0 ? [] : [paint(pad(preview, layout.preview), "muted", options.color)]),
     // The number sits between the preview and the time: right of everything that
     // says what the thread is doing, left of when it last did it.
     ...(layout.pullRequest === 0
       ? []
       : [pullRequestCell(options.pullRequests.get(thread.record.id), layout.pullRequest, options.color)]),
-    padStart(age, 5),
+    ...(layout.age === 0 ? [] : [padStart(fit(age, layout.age), layout.age)]),
     // Provenance closes the row, after when it last moved. Nothing to the right of it competes.
     ...(layout.ownerSigil === 0
       ? []
@@ -192,44 +219,49 @@ export function threadRowLayout(
   pullRequest: number;
   ownerSigil: number;
   preview: number;
+  status: number;
+  age: number;
 } {
   const wide = width >= WIDE_ROW_WIDTH;
-  const identity = wide
-    ? Math.min(20, Math.max(NARROW_IDENTITY_CELL_WIDTH, Math.floor(width * 0.15)))
-    : NARROW_IDENTITY_CELL_WIDTH;
-  // Gutter, marker, age, and the separator between every one of the six cells a row always has,
-  // plus the owner sigil and its separator when any row in the frame carries one.
-  const reserved = 13 + STATUS_CELL_WIDTH + identity
-    + (ownerSigilWidth === 0 ? 0 : ownerSigilWidth + 1);
-  let optional = width - reserved - MIN_TITLE_CELL_WIDTH - MIN_PREVIEW_CELL_WIDTH;
+  const status = STATUS_CELL_WIDTH;
+  const compactCustody = !wide && width >= 50 && leaseBadgeWidth > 0;
+  const age = width >= 45 && !(compactCustody && width < 60) ? 5 : 0;
+  const ownerSigil = ownerSigilWidth;
+  // Three-cell gutter/marker, literal status, title, then optional age and provenance.
+  const fixed = 3 + status + 2 + (age === 0 ? 0 : age + 1) + (ownerSigil === 0 ? 0 : ownerSigil + 1);
+  const titleFloor = wide ? 24 : compactCustody && width < 60 ? 18 : width >= 45 ? 22 : 6;
+  // In a compact row, a concrete conflict occupies the model slot on that row alone; one
+  // contested lease must not remove observed model labels from every healthy sibling.
+  const leaseBadge = !compactCustody && leaseBadgeWidth > 0 && width - fixed - titleFloor >= leaseBadgeWidth + 1 ? leaseBadgeWidth : 0;
+  const leaseCost = leaseBadge === 0 ? 0 : leaseBadge + 1;
+  const identityBudget = Math.max(0, width - fixed - leaseCost - titleFloor - 1);
+  const identity = width < 50 || identityBudget < 4 ? 0 : Math.min(wide ? 20 : 9, identityBudget);
+  const reserved = fixed + leaseCost + (identity === 0 ? 0 : identity + 1);
+  const previewFloor = wide ? 8 : 0;
+  let optional = width - reserved - titleFloor - previewFloor - (wide ? 1 : 0);
   const affordable = (cell: number): number => {
     if (cell === 0 || optional < cell + 1) return 0;
     optional -= cell + 1;
     return cell;
   };
-  const leaseBadge = affordable(leaseBadgeWidth);
-  const pullRequest = affordable(pullRequestWidth);
-  const worktree = affordable(worktreeWidth);
+  const pullRequest = wide ? affordable(pullRequestWidth) : 0;
+  const worktree = wide ? affordable(worktreeWidth) : 0;
   const spent = reserved
     + (pullRequest === 0 ? 0 : pullRequest + 1)
-    + (leaseBadge === 0 ? 0 : leaseBadge + 1)
     + (worktree === 0 ? 0 : worktree + 1);
   const remaining = width - spent;
-  const desiredTitle = wide
-    ? Math.min(38, Math.max(22, Math.floor(width * 0.28)))
-    : Math.min(28, Math.max(16, Math.floor(width * 0.38)));
-  const title = Math.min(
-    desiredTitle,
-    Math.max(MIN_TITLE_CELL_WIDTH, remaining - MIN_PREVIEW_CELL_WIDTH),
-  );
+  const title = wide ? Math.min(52, Math.max(24, Math.floor(width * 0.36)), Math.max(1, remaining - previewFloor - 1))
+    : Math.max(1, remaining);
   return {
     title,
     identity,
     leaseBadge,
     worktree,
     pullRequest,
-    ownerSigil: ownerSigilWidth,
-    preview: Math.max(1, remaining - title),
+    ownerSigil,
+    preview: wide ? Math.max(0, remaining - title - 1) : 0,
+    status,
+    age,
   };
 }
 
@@ -331,7 +363,7 @@ export function threadPreview(thread: FleetThread, width: number): string {
     return fit(thread.workerTruth.detail, width);
   }
   return conversationPreview({
-    storedPreview: thread.record.latestPreview,
+    storedPreview: thread.record.latestPreviewKind === "prompt" || thread.record.latestPreviewKind === "none" ? undefined : thread.record.latestPreview,
     maxLength: width,
   }).text;
 }

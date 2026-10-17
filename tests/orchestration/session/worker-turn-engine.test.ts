@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { ThreadTranscriptStore } from "../../../src/persistence/thread-transcript-store.js";
 import type { SessionRecord } from "../../../src/domain/session.js";
 import { DELIVERY_HOLD_DETAIL } from "../../../src/domain/worker-truth.js";
+import { conversationPreview } from "../../../src/domain/conversation-preview.js";
 import type {
   ReplayObservation,
   WorkerTurnEngineEffects,
@@ -1388,6 +1389,7 @@ describe("WorkerTurnEngine", () => {
     await engine.reconcileCanonicalTurns();
 
     expect(record.latestPreview).toBe("fresh preview");
+    expect(record.latestPreviewKind).toBe("assistant");
     expect(record.observedModel).toEqual(freshModel);
     expect(readObservedModel.mock.calls.map(([input]) => input.turnNumber)).toEqual([0, 1]);
 
@@ -1401,6 +1403,24 @@ describe("WorkerTurnEngine", () => {
 
     expect(record.latestPreview).toBe("fresh preview");
     expect(record.observedModel).toEqual(freshModel);
+  });
+
+  it("persists prompt provenance and leaves terminal-only prose unattributed for Fleet unread", async () => {
+    const prompt = harness({}, { preview: { preview: conversationPreview } });
+    prompt.readTranscriptMessages.mockResolvedValue([{ role: "user", text: "A user's prompt with no assistant reply" }]);
+    prompt.observations.activity = "needs-input";
+    prompt.engine.appendOutput(Buffer.from("Tip: Try the Desktop app."), prompt.replay);
+    await flushMicrotasks();
+    expect(prompt.record.latestPreview).toBe("A user's prompt with no assistant reply");
+    expect(prompt.record.latestPreviewKind).toBe("prompt");
+
+    const terminal = harness({}, { preview: { preview: conversationPreview } });
+    terminal.readTranscriptMessages.mockResolvedValue([]);
+    terminal.observations.activity = "needs-input";
+    terminal.engine.appendOutput(Buffer.from("I found a useful result in the terminal."), terminal.replay);
+    await flushMicrotasks();
+    expect(terminal.record.latestPreview).toBe("I found a useful result in the terminal.");
+    expect(terminal.record.latestPreviewKind).toBeUndefined();
   });
 
   it("does not recapture a deferred turn already covered by a multi-turn capture", async () => {

@@ -29,11 +29,17 @@ export function navigableListRowIndex(
 }
 
 export function isFocusableListRow(row: FleetListRow | undefined): row is FleetRow {
-  return row?.kind === "folder" || row?.kind === "thread" || row?.kind === "show-more";
+  return row?.kind === "folder" || row?.kind === "thread" || row?.kind === "show-more"
+    || row?.kind === "history" || row?.kind === "views" || row?.kind === "update";
 }
 
 export function focusRow(state: FleetState, row: FleetListRow | undefined): FleetState {
   if (!isFocusableListRow(row)) return state;
+  state = { ...state, focusedFolderCwd: undefined, focusedShowMoreCwd: undefined,
+    focusedHistoryCwd: undefined, focusedViewControl: undefined, focusedUpdateSessionId: undefined };
+  if (row.kind === "views") return { ...state, focusedViewControl: state.listView ?? "live" };
+  if (row.kind === "history") return { ...state, focusedHistoryCwd: row.cwd };
+  if (row.kind === "update") return { ...state, focusedUpdateSessionId: row.thread.record.id };
   if (row.kind === "folder") {
     return { ...state, focusedFolderCwd: row.cwd, focusedShowMoreCwd: undefined };
   }
@@ -99,6 +105,13 @@ export function setExpanded(state: FleetState, cwd: string, expanded: boolean): 
   };
 }
 
+export function setHistoryExpanded(state: FleetState, cwd: string, expanded: boolean): FleetState {
+  const current = state.expandedHistoryCwds ?? [];
+  if (current.includes(cwd) === expanded) return state;
+  return { ...state, expandedHistoryCwds: expanded ? [...new Set([...current, cwd])]
+    : current.filter((candidate) => candidate !== cwd) };
+}
+
 /**
  * A fold is a standing operator decision, not view state, so each toggle writes through to the
  * preference store. Arrow keys repeat against a folder that is already folded, and an append-only
@@ -112,7 +125,8 @@ export function foldTransition(state: FleetState, next: FleetState, cwd: string)
     action: {
       type: "folder-disposition",
       cwd,
-      disposition: { collapsed: isCollapsed(next, cwd), expanded: isExpanded(next, cwd) },
+      disposition: { collapsed: isCollapsed(next, cwd), expanded: isExpanded(next, cwd),
+        ...(next.expandedHistoryCwds === undefined ? {} : { historyExpanded: next.expandedHistoryCwds.includes(cwd) }) },
     },
   };
 }

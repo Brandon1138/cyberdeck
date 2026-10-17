@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FleetFolderDispositionSchema, FleetLaunchProfileSchema } from "../../domain/fleet-preferences.js";
+import { FleetFolderDispositionSchema, FleetLaunchProfileSchema, FleetVisitPreferencesSchema } from "../../domain/fleet-preferences.js";
 import {
   CavemanWorkersRequestSchema,
   CreateOrchestratorRequestSchema,
@@ -64,6 +64,11 @@ export const fleetMethods: Record<string, BrokerMethodHandler> = {
   },
   "fleet.folderDispositions": async (server, _context, _frame) => {
     return requireFleetPreferences(server.options).listFolderDispositions();
+  },
+  "fleet.visit": async (server) => requireFleetPreferences(server.options).visitPreferences(),
+  "fleet.visit.set": async (server, _context, frame) => {
+    await requireFleetPreferences(server.options).setVisitPreferences(FleetVisitPreferencesSchema.parse(frame.params));
+    return { saved: true };
   },
   "fleet.nvimLayout": async (server, _context, _frame) => {
     return requireFleetPreferences(server.options).nvimLayoutEnabled();

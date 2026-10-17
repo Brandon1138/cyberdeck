@@ -4,10 +4,12 @@ import { displayWidth } from "../display-width.js";
 import { pullRequestLabel } from "../pr-status.js";
 import { PULL_REQUEST_CELL_WIDTH, WORKTREE_TAG_WIDTH } from "./constants.js";
 import { scrollFocusedRowIntoView } from "./list-groups.js";
-import { fleetListRows, isTerminalSession, orderedThreads } from "./list-rows.js";
+import { fleetListRows, isTerminalSession, orderedThreads, threadFocusInert } from "./list-rows.js";
 import { composerCwd, friendlyEffort, friendlyModel } from "./model-labels.js";
 import { clampRowWidth, contextLine, fit, renderComposerLines } from "./render-composer.js";
-import { renderFolderRow, renderShowMoreRow, renderThreadRow, renderWorkerCoordinationRow, rowGutter, threadListScrollbar } from "./render-rows.js";
+import { renderFolderRow, renderHistoryRow, renderUpdateRow, renderViewControls, renderShowMoreRow, renderThreadRow, renderWorkerCoordinationRow, rowGutter, threadListScrollbar } from "./render-rows.js";
+import { renderSelectedDetail, wrapDetailText } from "./render-detail.js";
+import { isUnreadThread } from "./visit-state.js";
 import { ResolvedFleetRenderOptions } from "./runtime-options.js";
 import { paint, renderNotice, shortPath } from "./slash-commands.js";
 import { FleetSnapshot, FleetState, FleetThread, ShellModeState, ThreadStatus } from "./state.js";
@@ -39,7 +41,7 @@ export function renderFleetList(
     const transcript = renderShellTranscript(state.shellMode, threadListViewportHeight, options);
     const shellBody = [...header.slice(0, bodyHeight), ...transcript];
     while (shellBody.length < bodyHeight) shellBody.push("");
-    return [...shellBody, ...footer].join("\n");
+    return [...shellBody, ...footer].map((line) => clampRowWidth(line, options.width)).join("\n");
   }
   const rows = fleetListRows(snapshot, state);
   // Same bargain as the pull-request column: a fleet whose leases are all healthy — or whose
@@ -80,7 +82,7 @@ export function renderFleetList(
   // project. Its role heading is part of those contents, so it counts as spilled content too.
   const nextRowKind = rows[offset + visibleRows.length]?.kind;
   const hideOrphanedFolder = lastVisibleRow?.kind === "folder"
-    && (nextRowKind === "thread" || nextRowKind === "section")
+    && (nextRowKind === "thread" || nextRowKind === "section" || nextRowKind === "history")
     && viewportState.focusedFolderCwd !== lastVisibleRow.cwd;
   // Every composed row is clamped to the pane, because a row wider than the pane is soft-wrapped
   // by the terminal into an orphaned fragment line the viewport never counted.
@@ -110,6 +112,9 @@ export function renderFleetList(
           indicator,
         );
       }
+      if (row.kind === "views") return renderViewControls(viewportState, options);
+      if (row.kind === "history") return renderHistoryRow(row.cwd, row.threadCount, row.expanded, viewportState, options, indicator);
+      if (row.kind === "update") return renderUpdateRow(row.thread, viewportState, options, indicator);
       if (row.kind === "thread") {
         return renderThreadRow(
           row.thread,
@@ -141,7 +146,7 @@ export function renderFleetList(
     }).map((line) => clampRowWidth(line, options.width));
   const body = [...header.slice(0, bodyHeight), ...listLines];
   while (body.length < bodyHeight) body.push("");
-  return [...body, ...footer].join("\n");
+  return [...body, ...footer].map((line) => clampRowWidth(line, options.width)).join("\n");
 }
 
 /**
@@ -184,7 +189,7 @@ export function renderFleetFooter(
 ): string[] {
   return prepared([snapshot, state, options, "renderFleetFooter"], () => {
     const threads = orderedThreads(snapshot);
-    const selected = threads.find(({ record }) => record.id === state.selectedSessionId);
+    const selected = threadFocusInert(state) ? undefined : threads.find(({ record }) => record.id === state.selectedSessionId);
     const terminal = selected !== undefined && isTerminalSession(selected.record);
     const stopAcknowledged = selected !== undefined
       && state.stopAcknowledgement?.sessionId === selected.record.id;
@@ -220,22 +225,30 @@ export function renderFleetFooter(
           "ctrl+s change",
           options.width,
         );
-    const helpLines = state.helpOpen === true
-      ? shortcutHelp(options.width, terminal && stopAcknowledged ? "delete" : "stop")
-      : [];
+    const allHelp = state.helpOpen === true ? shortcutHelp(options.width, terminal && stopAcknowledged ? "delete" : "stop") : [];
+    const helpCapacity = Math.max(1, options.height - composerLines.length - 12);
+    const helpOffset = Math.min(Math.max(0, state.helpScrollOffset ?? 0), Math.max(0, allHelp.length - helpCapacity));
+    const helpLines = allHelp.length === 0 ? [] : [
+      `Shortcuts ${helpOffset + 1}–${Math.min(allHelp.length, helpOffset + helpCapacity)}/${allHelp.length} · ↑↓ scroll`,
+      ...allHelp.slice(helpOffset, helpOffset + helpCapacity),
+    ];
     const notice = state.notice === undefined
       ? undefined
       : renderNotice(state.notice, state.noticeTone, options.width, options.color);
     const footer = [
       ...(notice === undefined ? [] : [notice]),
       paint("─".repeat(options.width), "dim", options.color),
-      ...composerLines,
+      ...composerLines.map((line) => clampRowWidth(line, options.width)),
       paint("─".repeat(options.width), "dim", options.color),
       ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
       paint(fit(launchContext, options.width), "dim", options.color),
-      paint(fit(`↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
+      paint(fit(options.width < 80 ? "/view · /read · ? more · enter open/start · ↑↓"
+        : `↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
     ];
-    if (footer.length <= options.height) return footer;
+    if (footer.length <= options.height) {
+      const detail = renderSelectedDetail(snapshot, state, options, Math.max(0, Math.min(10, options.height - footer.length - 8)));
+      return [...detail, ...footer];
+    }
 
     // In a pane shorter than the fixed footer, interaction content outranks its chrome and hints.
     // The active composer always owns one row. A fresh notice owns the next row when one exists;
@@ -246,6 +259,19 @@ export function renderFleetFooter(
     );
     return [...noticeRows, ...visibleComposerRows].slice(-options.height);
   });
+}
+
+/** Resolve End's sentinel to a real offset before the next arrow key changes it. */
+export function normalizeHelpScroll(state: FleetState, snapshot: FleetSnapshot, options: ResolvedFleetRenderOptions): FleetState {
+  if (state.helpOpen !== true) return state;
+  const selected = threadFocusInert(state) ? undefined : snapshot.threads.find(({ record }) => record.id === state.selectedSessionId);
+  const destructive = selected !== undefined && isTerminalSession(selected.record)
+    && state.stopAcknowledgement?.sessionId === selected.record.id ? "delete" : "stop";
+  const all = shortcutHelp(options.width, destructive);
+  const composerRows = renderComposerLines(state.draft, "task", options).length;
+  const capacity = Math.max(1, options.height - composerRows - 12);
+  const offset = Math.max(0, Math.min(state.helpScrollOffset ?? 0, Math.max(0, all.length - capacity)));
+  return offset === state.helpScrollOffset ? state : { ...state, helpScrollOffset: offset };
 }
 
 /** What `!` mode runs the operator's lines through, named so the footer is never a guess. */
@@ -274,15 +300,17 @@ export function renderHeader(
     // Process liveness is a separate fact from current activity and verified task outcomes.
     const running = threads.filter(({ record }) =>
       record.executionState === "active" || record.executionState === "starting").length;
-    const counts = [
+    const primary = [
+      `${count("Working")} working`, `${count("Needs input")} needs input`,
+      `${threads.filter(({ record }) => isUnreadThread(state, record.id)).length} unread`,
+    ];
+    const supplementary = [
       `${running} agents`,
-      `${count("Needs input")} needs input`,
-      `${count("Working")} working`,
       ...(["Starting", "Idle", "Stalled", "Provider limit", "Unknown", "Stopping", "Stopped", "Exited", "Done"] as const)
         .flatMap((status) => count(status) === 0 ? [] : [`${count(status)} ${status.toLowerCase()}`]),
       ...(count("Interrupted") === 0 ? [] : [`${count("Interrupted")} interrupted`]),
       ...(count("Failed") === 0 ? [] : [`${count("Failed")} failed`]),
-    ].join(" · ");
+    ];
     const orchestrator = threads.find(({ record }) =>
       record.kind === "orchestrator" && record.orchestratorScope === "fleet")?.record
       ?? threads.find(({ record }) =>
@@ -291,20 +319,35 @@ export function renderHeader(
     const scope = orchestrator?.orchestratorScope === "fleet"
       ? "fleet"
       : shortPath(orchestrator?.cwd ?? state.fallbackCwd, options.home);
+    const observedOrc = threads.find((thread) => thread.record.id === orchestrator?.id)?.record;
     const context = orchestrator === undefined
       ? `No orchestrator · ctrl+o to choose · ${shortPath(state.fallbackCwd, options.home)}`
-      : `${friendlyModel(orchestrator.provider, orchestrator.model)} · ${friendlyEffort(orchestrator.effort ?? "provider-managed")} · ${scope}`;
+      : `${friendlyModel(orchestrator.provider, observedOrc?.observedModel?.model ?? orchestrator.model)} · ${friendlyEffort(observedOrc?.observedModel?.effort ?? orchestrator.effort ?? "provider-managed")} · ${scope}`;
     const mark = options.color ? options.mascot : undefined;
     const markWidth = mark?.columns ?? 0;
     const showsMark = mark !== undefined && options.width >= markWidth + 2 + 32;
     const textWidth = Math.max(1, options.width - (showsMark ? markWidth + 2 : 0));
+    const countLines: string[] = [];
+    for (const entry of primary) {
+      const last = countLines.at(-1);
+      if (last !== undefined && displayWidth(`${last} · ${entry}`) <= textWidth) countLines[countLines.length - 1] = `${last} · ${entry}`;
+      else countLines.push(entry);
+    }
+    // Process/activity breakdown is supplementary; the three operator counts never get cut off.
+    if (textWidth >= 100) {
+      for (const entry of supplementary) {
+        const last = countLines.at(-1)!;
+        if (displayWidth(`${last} · ${entry}`) <= textWidth) countLines[countLines.length - 1] = `${last} · ${entry}`;
+        else if (countLines.length < 2) countLines.push(entry);
+      }
+    }
     const textLines = [
       paint("Cyberdeck", "bold", options.color),
       paint(fit(context, textWidth), "dim", options.color),
-      paint(fit(counts, textWidth), "dim", options.color),
+      ...countLines.map((line) => paint(fit(line, textWidth), "muted", options.color)),
     ];
-    // Keep the header's four-row footprint stable whether graphics are available or not.
-    if (!showsMark) return [...textLines, ""];
+    while (textLines.length < 4) textLines.push("");
+    if (!showsMark) return textLines;
     return Array.from(
       { length: Math.max(mark.rows.length, textLines.length) },
       (_, index) => `${mark.rows[index] ?? " ".repeat(markWidth)}  ${textLines[index] ?? ""}`,
@@ -315,16 +358,17 @@ export function renderHeader(
 export function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
     "pgup/dn page", "alt+k/j half", "home/end", "shift+↑↓ reorder", "←→ fold project",
-    "a add project", "d remove project", "ctrl+w switch views",
+    "a add project", "d remove project", "ctrl+w diagnostics", "/view live|unread|history", "/read inspect · * unread", "←→/enter History or views",
     "@ mention", "alt+1–9 open", "esc back/clear",
     "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim (folder: main checkout)", "! shell", "ctrl+s shell popup", "ctrl+t pin to top", "ctrl+d mark for handoff", "/handoff give marked to an orc", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
   ];
   // Wrapping by a count rather than fixed slices is what keeps the last row from silently
   // swallowing every entry added since: a new shortcut costs a row, never another key's visibility.
-  const perRow = width >= 110 ? 6 : width >= 70 ? 4 : 1;
   const rows: string[] = [];
-  for (let index = 0; index < entries.length; index += perRow) {
-    rows.push(entries.slice(index, index + perRow).join("   "));
+  for (const entry of entries) {
+    const last = rows.at(-1);
+    if (last !== undefined && displayWidth(`${last}   ${entry}`) <= width) rows[rows.length - 1] = `${last}   ${entry}`;
+    else rows.push(...wrapDetailText(entry, width));
   }
   return rows;
 }

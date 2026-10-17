@@ -38,6 +38,12 @@ function record(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 describe("SessionStore", () => {
+  it.each([undefined, "assistant", "prompt", "none"] as const)("preserves preview provenance across restart, including legacy omission (%s)", async (latestPreviewKind) => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-session-store-")); directories.push(directory);
+    const snapshot = record(latestPreviewKind === undefined ? {} : { latestPreviewKind });
+    await new SessionStore(directory).put(snapshot);
+    expect(await new SessionStore(directory).load()).toEqual([snapshot]);
+  });
   it.each([undefined, true, false])("round-trips the optional Codex actor-marker fact (%s)", async codexActorMarker => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-session-store-"));
     directories.push(directory);

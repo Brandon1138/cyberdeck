@@ -6,6 +6,7 @@ import { fleetOwnerSigils, workerOwner, workerOwnerSigil, type OwnerSigils, } fr
 import { FOLDER_THREAD_CAP, ORCS_SECTION_KEY, ORCS_SECTION_LABEL, WORKERS_SECTION_LABEL } from "./constants.js";
 import { groupThreads, orchestratorThreads, worktreeTag } from "./list-groups.js";
 import { FleetSnapshot, FleetState, FleetThread } from "./state.js";
+import { isLiveThread, isUnreadThread, unreadThreads } from "./visit-state.js";
 
 export function isTerminalSession(record: SessionRecord): boolean {
   if (record.executionState === "active" || record.executionState === "starting") return false;
@@ -26,6 +27,9 @@ export function orderedThreads(snapshot: FleetSnapshot): FleetThread[] {
  * their own right: focus lands on them, and Enter there collapses or expands the folder.
  */
 export type FleetRow =
+  | { kind: "views"; }
+  | { kind: "history"; cwd: string; threadCount: number; expanded: boolean; }
+  | { kind: "update"; thread: FleetThread; }
   | {
     kind: "folder";
     cwd: string;
@@ -72,6 +76,10 @@ export function isExpanded(state: FleetState, cwd: string): boolean {
   return state.expandedCwds?.includes(cwd) === true;
 }
 
+export function historyExpanded(state: FleetState, cwd: string): boolean {
+  return state.expandedHistoryCwds?.includes(cwd) === true;
+}
+
 /**
  * The fleet reads top-down as one Orcs roster over the folders its workers live in.
  * Orchestrators are fleet-wide, so they are listed once, flat, ahead of every folder;
@@ -99,18 +107,25 @@ export function fleetListRows(snapshot: FleetSnapshot, state: FleetState): Fleet
         ? []
         : [{ kind: "spacer" }];
       if (isCollapsed(state, cwd)) return [...spacer, header];
-      const visible = isExpanded(state, cwd) ? threads : threads.slice(0, FOLDER_THREAD_CAP);
       return [
         ...spacer,
         header,
-        ...sectionRows(WORKERS_SECTION_LABEL, visible, threads, state, provenance, cwd),
-        // The row survives expansion so the folder can be rolled back up from the same place.
-        ...(threads.length > FOLDER_THREAD_CAP
-          ? [{ kind: "show-more" as const, cwd, hiddenCount: threads.length - visible.length }]
-          : []),
+        ...groupContentRows(threads, state, provenance, cwd, WORKERS_SECTION_LABEL),
       ];
   });
-  return [...orcRows, ...folderRows];
+  const updates = unreadThreads(snapshot, state).slice(0, 3);
+  return [
+    { kind: "views" },
+    ...(snapshot.threads.length === 0 ? [{ kind: "section" as const, label: "No durable agent threads yet." }]
+      : state.listView === "unread" && unreadThreads(snapshot, state).length === 0
+        ? [{ kind: "section" as const, label: "No unread assistant replies." }] : []),
+    ...orcRows, ...folderRows,
+    ...(updates.length === 0 || state.listView === "unread" ? [] : [
+      { kind: "spacer" as const },
+      { kind: "section" as const, label: "Since your last visit" },
+      ...updates.map((thread) => ({ kind: "update" as const, thread })),
+    ]),
+  ];
   });
 }
 
@@ -131,13 +146,36 @@ export function orcSectionRows(
     label: ORCS_SECTION_LABEL,
   };
   if (isCollapsed(state, ORCS_SECTION_KEY)) return [header];
-  const visible = isExpanded(state, ORCS_SECTION_KEY) ? orcs : orcs.slice(0, FOLDER_THREAD_CAP);
   return [
     header,
-    ...threadRows(visible, state, undefined, provenance),
-    ...(orcs.length > FOLDER_THREAD_CAP
-      ? [{ kind: "show-more" as const, cwd: ORCS_SECTION_KEY, hiddenCount: orcs.length - visible.length }]
-      : []),
+    ...groupContentRows(orcs, state, provenance, ORCS_SECTION_KEY),
+  ];
+}
+
+/** All actionable rows remain visible. Only durable history pays the old show-more cap. */
+function groupContentRows(
+  threads: readonly FleetThread[], state: FleetState, provenance: FleetProvenance,
+  cwd: string, label?: string,
+): FleetListRow[] {
+  const view = state.listView ?? "live";
+  const live = threads.filter(isLiveThread);
+  const history = threads.filter((thread) => !isLiveThread(thread));
+  const visibleLive = view === "unread"
+    ? threads.filter(({ record }) => isUnreadThread(state, record.id))
+    : view === "history" ? [] : live;
+  const rollup = uniformLeaseCustody(threads.map(threadLeaseCustody));
+  const visibleHistory = !historyExpanded(state, cwd) || view === "unread"
+    ? [] : isExpanded(state, cwd) ? history : history.slice(0, FOLDER_THREAD_CAP);
+  return [
+    ...(label === undefined || rollup === undefined || rollup.kind === "attached" || threads.length === 0
+      ? [] : [{ kind: "section" as const, label: sectionLabel(label, threads.length, rollup) }]),
+    ...threadRows(visibleLive, state, rollup, provenance, cwd),
+    ...(history.length === 0 || view === "unread" ? [] : [
+      { kind: "history" as const, cwd, threadCount: history.length, expanded: historyExpanded(state, cwd) },
+      ...threadRows(visibleHistory, state, rollup, provenance, cwd),
+      ...(historyExpanded(state, cwd) && history.length > FOLDER_THREAD_CAP
+        ? [{ kind: "show-more" as const, cwd, hiddenCount: history.length - visibleHistory.length }] : []),
+    ]),
   ];
 }
 
@@ -293,7 +331,13 @@ export function sectionLabel(
 }
 
 export function focusedListRowIndex(rows: readonly FleetListRow[], state: FleetState): number {
-  const index = state.focusedFolderCwd !== undefined
+  const index = state.focusedViewControl !== undefined
+    ? rows.findIndex((row) => row.kind === "views")
+    : state.focusedHistoryCwd !== undefined
+      ? rows.findIndex((row) => row.kind === "history" && row.cwd === state.focusedHistoryCwd)
+    : state.focusedUpdateSessionId !== undefined
+      ? rows.findIndex((row) => row.kind === "update" && row.thread.record.id === state.focusedUpdateSessionId)
+    : state.focusedFolderCwd !== undefined
     ? rows.findIndex((row) => row.kind === "folder" && row.cwd === state.focusedFolderCwd)
     : state.focusedShowMoreCwd !== undefined
       ? rows.findIndex((row) => row.kind === "show-more" && row.cwd === state.focusedShowMoreCwd)
@@ -303,6 +347,8 @@ export function focusedListRowIndex(rows: readonly FleetListRow[], state: FleetS
 
 /** True while a folder header or show-more row owns the row, leaving thread keys inert. */
 export function threadFocusInert(state: FleetState): boolean {
-  return state.focusedFolderCwd !== undefined || state.focusedShowMoreCwd !== undefined;
+  return state.focusedFolderCwd !== undefined || state.focusedShowMoreCwd !== undefined
+    || state.focusedHistoryCwd !== undefined || state.focusedViewControl !== undefined
+    || state.focusedUpdateSessionId !== undefined;
 }
 

@@ -1,4 +1,4 @@
-import type { FleetFolderDisposition, FleetLaunchProfile } from "../../domain/fleet-preferences.js";
+import type { FleetFolderDisposition, FleetLaunchProfile, FleetVisitPreferences } from "../../domain/fleet-preferences.js";
 import type { ModalAnswerGrant, ModalAnswerGrantStatus } from "../../domain/modal-answer.js";
 import type { OrchestratorBinding } from "../../domain/orchestrator.js";
 import type { ScoutEgressGrant, ScoutEgressStatus } from "../../domain/scout-egress.js";
@@ -26,6 +26,8 @@ export interface FleetPreferenceReadPort {
   set(cwd: string, profile: FleetLaunchProfile): Promise<void>;
   setFolderDisposition(key: string, disposition: FleetFolderDisposition): Promise<void>;
   setNvimLayout(enabled: boolean): Promise<void>;
+  visitPreferences(): Promise<FleetVisitPreferences>;
+  setVisitPreferences(preferences: FleetVisitPreferences): Promise<void>;
 }
 
 /**

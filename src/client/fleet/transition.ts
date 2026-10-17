@@ -11,6 +11,7 @@ import { openPermissionPicker, transitionCommandPalette, transitionPermissionPic
 import { openWorkerPicker, transitionProjectPrompt, transitionShellMode, transitionWorkerPicker } from "./picker-worker.js";
 import { startTransition, workerPolicyTransition } from "./slash-commands.js";
 import { FleetSnapshot, FleetState, FleetTransition } from "./state.js";
+import { transitionVisitControls } from "./transition-visit.js";
 import { transitionQuit, transitionRename } from "./transition-modes.js";
 export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, key: string, now = Date.now(), threadListViewportHeight = Number.MAX_SAFE_INTEGER): FleetTransition {
   const normalized = normalizeState(current, snapshot, now);
@@ -81,8 +82,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
     };
   }
   if (key === "ctrl+]") {
-    const cockpitTarget = selected
-      ?? threads.find(({ record }) => record.id === state.selectedSessionId);
+    const cockpitTarget = selected;
     if (cockpitTarget?.record.kind !== "orchestrator") {
       return {
         state: {
@@ -115,7 +115,12 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
     };
   }
   if (key === "?" && state.draft === "") {
-    return { state: { ...state, helpOpen: state.helpOpen !== true, notice: undefined } };
+    return { state: { ...state, helpOpen: state.helpOpen !== true, helpScrollOffset: 0, notice: undefined } };
+  }
+  if (state.helpOpen === true && state.draft === "" && ["up", "down", "pageup", "pagedown", "home", "end"].includes(key)) {
+    const delta = key === "up" ? -1 : key === "down" ? 1 : key === "pageup" ? -5 : 5;
+    return { state: { ...state, helpScrollOffset: key === "home" ? 0 : key === "end" ? Number.MAX_SAFE_INTEGER
+      : Math.max(0, Math.min(100, (state.helpScrollOffset ?? 0) + delta)) } };
   }
   if (key === "ctrl+l") {
     return {
@@ -237,7 +242,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
   }
   if (/^alt\+[1-9]$/u.test(key)) {
     const index = Number(key.slice(-1)) - 1;
-    const target = threads[index];
+    const target = fleetListRows(snapshot, state).filter((row) => row.kind === "thread")[index]?.thread;
     return target === undefined
       ? { state }
       : {
@@ -246,6 +251,9 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
           selectedSessionId: target.record.id,
           focusedFolderCwd: undefined,
           focusedShowMoreCwd: undefined,
+          focusedHistoryCwd: undefined,
+          focusedViewControl: undefined,
+          focusedUpdateSessionId: undefined,
           deleteConfirmation: undefined,
           notice: undefined,
         },
@@ -308,6 +316,8 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
   if (focusedFolderCwd !== undefined && (key === "left" || key === "right")) {
     return foldTransition(state, setCollapsed(state, focusedFolderCwd, key === "left"), focusedFolderCwd);
   }
+  const visitTransition = transitionVisitControls(state, snapshot, key);
+  if (visitTransition !== undefined) return visitTransition;
   if (key === "enter" && focusedFolderCwd !== undefined && state.draft.trim() === "") {
     return foldTransition(
       state,
@@ -356,7 +366,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
         action: openAction(selected.record),
       };
     }
-    return startTransition(state, selected.record, initialPrompt);
+    return startTransition(state, selected.record, initialPrompt, composerCwd(state, snapshot));
   }
   if (key === "enter" && selected === undefined && state.draft.trim() !== "") {
     const initialPrompt = state.draft.trim();
@@ -365,7 +375,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
     if (initialPrompt === "/model") return openWorkerPicker(state, snapshot, "");
     if (initialPrompt === "/permissions") return openPermissionPicker(state, snapshot);
     if (initialPrompt === "/handoff") return openHandoffPicker(state, snapshot);
-    return startTransition(state, undefined, initialPrompt);
+    return startTransition(state, undefined, initialPrompt, composerCwd(state, snapshot));
   }
   if (
     key === "up"

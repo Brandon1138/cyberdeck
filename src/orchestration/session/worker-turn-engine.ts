@@ -1544,9 +1544,14 @@ export class WorkerTurnEngine {
     const previews = this.options.preview;
     if (previews === undefined) return;
     let preview = previews.preview({ transcript: captured, maxLength: PREVIEW_STORAGE_LIMIT });
+    // Preserve structured role provenance; record/replay prose alone cannot prove a new reply.
+    let kind: SessionRecord["latestPreviewKind"] = preview.kind === "assistant"
+      ? captured.some((message) => message.role === "assistant") ? "assistant" : undefined
+      : preview.kind === "prompt" ? "prompt" : undefined;
     if (preview.kind === "none") {
       const transcript = await this.readTranscriptMessages().catch(() => []);
       if (!this.isCurrentObservation(epoch, revision, owner, activityRevision)) return;
+      const nativePreview = previews.preview({ transcript, maxLength: PREVIEW_STORAGE_LIMIT });
       preview = previews.preview({
         transcript,
         ...(this.record.latestPreview === undefined
@@ -1555,10 +1560,15 @@ export class WorkerTurnEngine {
         replay,
         maxLength: PREVIEW_STORAGE_LIMIT,
       });
+      kind = preview.kind === "prompt" ? "prompt"
+        : preview.kind === "assistant" && nativePreview.kind === "assistant" ? "assistant"
+          : preview.text === this.record.latestPreview ? this.record.latestPreviewKind : undefined;
     }
     if (!this.isCurrentObservation(epoch, revision, owner, activityRevision)) return;
-    if (preview.kind === "none" || preview.text === this.record.latestPreview) return;
+    if (preview.kind === "none" || preview.text === this.record.latestPreview && kind === this.record.latestPreviewKind) return;
     this.record.latestPreview = preview.text;
+    if (kind === undefined) delete this.record.latestPreviewKind;
+    else this.record.latestPreviewKind = kind;
     await this.options.effects.persist();
   }
 

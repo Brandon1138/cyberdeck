@@ -35,7 +35,7 @@ describe.each(["worker", "orchestrator"] as const)("Fleet %s truth parity", (kin
     thread.record = { ...record, kind };
     const snapshot = { threads: [thread] };
     expect(threadStatus(thread)).toBe(label);
-    const rendered = renderFleet(snapshot, createFleetState(snapshot), { color: false, width: 150, height: 30, now: Date.parse(NOW) });
+    const rendered = renderFleet(snapshot, { ...createFleetState(snapshot), expandedHistoryCwds: ["/repo", "/@orcs"] }, { color: false, width: 150, height: 30, now: Date.parse(NOW) });
     expect(rendered).toContain(label);
     expect(rendered).not.toContain("Done");
   });
@@ -59,7 +59,7 @@ it("reserves green Done for a broker-verified Scout decision-card outcome", () =
   thread.record = scout;
   expect(threadStatus(thread)).toBe("Done");
   const snapshot = { threads: [thread] };
-  const rendered = renderFleet(snapshot, createFleetState(snapshot), { color: true, width: 150, height: 30, now: Date.parse(NOW) });
+  const rendered = renderFleet(snapshot, { ...createFleetState(snapshot), expandedHistoryCwds: ["/repo"] }, { color: true, width: 150, height: 30, now: Date.parse(NOW) });
   expect(rendered).toContain("\u001b[38;2;120;198;121mDone          \u001b[0m");
   expect(rendered).toContain("1 done");
   for (const state of ["unknown", "working", "stopping", "stopped", "failed", "errored", "provider-limit"] as const) {
