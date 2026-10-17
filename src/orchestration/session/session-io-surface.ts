@@ -229,6 +229,10 @@ export class SessionIoSurface {
     });
   }
 
+  verifyInstructionSubmission(sessionId: string, instructionId: string): void {
+    this.catalog.requireRuntime(sessionId).turns.verifyInstructionSubmission(instructionId);
+  }
+
   /**
    * Same session-scoped synchronous exclusion as the engine's deliveryHold/check/write path:
    * no await from this reading through submitInstruction's PTY write. Controller write also has

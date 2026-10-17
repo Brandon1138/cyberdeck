@@ -14,6 +14,43 @@ function barrier<T = void>() {
 afterEach(cleanupSchedulingHarnesses);
 
 describe("attention wake application authority and crash boundaries", () => {
+  it("S2-F1 holds an already queued wake while off, including direct queue flush, and resumes once", async () => {
+    const h = await schedulingHarness(); const arm = await h.attention.arm(h.request()); await h.drain();
+    h.setHold("provider-modal"); await h.complete(); await h.drain();
+    const [instruction] = await h.queue.list(); expect(instruction!.status).toBe("queued");
+    await h.inbox.setPolicy(arm.controllerId, { ...h.inbox.policy(arm.controllerId), wake: "off" });
+    await h.drain(); h.setHold(undefined);
+    await h.queue.flush(ACTOR); await h.drain();
+    expect(h.writes).toHaveLength(0);
+    expect(await h.queue.list()).toMatchObject([{ id: instruction!.id, status: "queued", holdReason: "notification-wake-off" }]);
+    let state = (await h.store.get(arm.controllerId))!;
+    expect(state.lastWake!.holdReason).toBe("notification-wake-off");
+    expect(state.pendingIntent!.messageId).toBe(instruction!.messageId); expect(state.coverage.consumed).toEqual([]);
+    await h.inbox.setPolicy(arm.controllerId, { ...h.inbox.policy(arm.controllerId), wake: "steering-only" }); await h.drain();
+    expect(h.writes).toHaveLength(1);
+    expect(await h.queue.list()).toMatchObject([{ id: instruction!.id, status: "rendered" }]);
+    state = (await h.store.get(arm.controllerId))!;
+    expect(state.lastWake!.holdReason).toBeUndefined(); expect(state.coverage.consumed).toEqual([]);
+  });
+
+  it("S2-F1 refuses a rendered wake retry while off and allows the same entry after re-enable", async () => {
+    const h = await schedulingHarness(); const arm = await h.attention.arm(h.request()); await h.complete(); await h.drain();
+    const [instruction] = await h.queue.list();
+    const entry: RenderedInstruction = { instructionId: instruction!.id, expectedTurn: 1, renderedAt: NOW, state: "rendered",
+      messageHead: instruction!.message.slice(0, 48), admission: (apply) => h.attention.admitWake(instruction!, apply) };
+    const press = vi.fn();
+    const host = { epoch: () => 1, active: () => true, pending: () => true,
+      observe: () => ({ activity: "awaiting-input", composer: { modalOpen: false, occupied: true, content: instruction!.message } }), press };
+    await h.inbox.setPolicy(arm.controllerId, { ...h.inbox.policy(arm.controllerId), wake: "off" });
+    await admitSubmitRetry(entry, host); await h.drain();
+    expect(press).not.toHaveBeenCalled();
+    expect((await h.store.get(arm.controllerId))!.lastWake!.holdReason).toBe("notification-wake-off");
+    await h.inbox.setPolicy(arm.controllerId, { ...h.inbox.policy(arm.controllerId), wake: "steering-only" }); await h.drain();
+    expect(await admitSubmitRetry(entry, host)).toBe(true); expect(press).toHaveBeenCalledTimes(1);
+    expect(h.writes).toHaveLength(1); expect(await h.queue.list()).toHaveLength(1);
+    expect((await h.store.get(arm.controllerId))!.coverage.consumed).toEqual([]);
+  });
+
   it("does not apply an asynchronous decision after cancellation", async () => {
     const entered = barrier(), release = barrier();
     const h = await schedulingHarness(async () => { entered.resolve(); await release.promise; return { outcome: "WAKE", reason: "fixture" }; });

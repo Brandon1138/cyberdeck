@@ -230,9 +230,13 @@ export class InstructionQueue {
     return (await this.store.list(record.targetSessionId)).find(({ id }) => id === record.id) ?? record;
   }
 
-  flush(targetSessionId: string): Promise<InstructionRecord[]> {
+  flush(targetSessionId: string, verifyMessageId?: string): Promise<InstructionRecord[]> {
     return this.serialize(targetSessionId, async () => {
-      const pending = (await this.store.list(targetSessionId))
+      const records = await this.store.list(targetSessionId);
+      const rendered = records.find((record) => record.messageId === verifyMessageId && record.status === "rendered"
+        && record.brokerOwned === true && record.wake?.attentionEpoch !== undefined);
+      if (rendered !== undefined) this.registry.verifyInstructionSubmission?.(targetSessionId, rendered.id);
+      const pending = records
         .filter((record) => record.status === "accepted" || record.status === "queued");
       const results: InstructionRecord[] = [];
       for (const [index, record] of pending.entries()) {

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { ThreadTranscriptStore } from "../../../src/persistence/thread-transcript-store.js";
 import type { SessionRecord } from "../../../src/domain/session.js";
 import { DELIVERY_HOLD_DETAIL } from "../../../src/domain/worker-truth.js";
+import { WakeHeldError } from "../../../src/domain/instruction.js";
 import type {
   ReplayObservation,
   WorkerTurnEngineEffects,
@@ -538,6 +539,32 @@ describe("WorkerTurnEngine", () => {
       h.engine.appendOutput(Buffer.from("› Ask Codex to do anything"), h.replay);
       return h;
     }
+
+    it("resumes a rendered guarded instruction after the bounded hold window without rewriting or resetting presses", async () => {
+      const { engine, observations, writes } = idleHarness(); let held = true;
+      await engine.submitInstruction({ ...instruction(), admission: async (apply) => apply(),
+        beforeResubmit: () => { if (held) throw new WakeHeldError("wake-operator-active"); } });
+      observations.composer = { occupied: true, modalOpen: false, content: "Standby. Reply with one line" };
+      await vi.advanceTimersByTimeAsync(60_000); expect(writes).toHaveLength(1);
+      held = false; engine.verifyInstructionSubmission("different-instruction");
+      await vi.advanceTimersByTimeAsync(3_000); expect(writes).toHaveLength(1);
+      engine.verifyInstructionSubmission("i-standby"); await vi.advanceTimersByTimeAsync(1_500);
+      expect(writes).toHaveLength(2); expect(writes[1]).toEqual(ENTER);
+      engine.verifyInstructionSubmission("i-standby"); await vi.advanceTimersByTimeAsync(6_000);
+      expect(writes).toHaveLength(3); expect(writes[2]).toEqual(ENTER);
+      engine.verifyInstructionSubmission("i-standby"); await vi.advanceTimersByTimeAsync(60_000);
+      expect(writes).toHaveLength(3);
+    });
+
+    it("does not press or re-arm from a delayed admission after the engine releases its timers", async () => {
+      const { engine, observations, writes } = idleHarness();
+      let pause = false; const gate = deferred<void>();
+      await engine.submitInstruction({ ...instruction(), admission: async (apply) => { if (pause) await gate.promise; return apply(); } });
+      observations.composer = { occupied: true, modalOpen: false, content: "Standby. Reply with one line" };
+      pause = true; await vi.advanceTimersByTimeAsync(1_500); expect(writes).toHaveLength(1);
+      engine.releaseTimers(); gate.resolve(); await vi.advanceTimersByTimeAsync(60_000);
+      expect(writes).toHaveLength(1);
+    });
 
     it("presses Enter again when the composer still shows the instruction it wrote", async () => {
       const { engine, observations, writes, effects } = idleHarness();

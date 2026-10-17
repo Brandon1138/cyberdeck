@@ -1,5 +1,7 @@
 import type { ComposerObservation } from "../../domain/worker-truth.js";
 import type { RenderedInstruction } from "./worker-turn-state.js";
+import { WakeHeldError } from "../../domain/instruction.js";
+import { AttentionWakeHeldError } from "../../domain/orchestrator-attention.js";
 
 /**
  * How long after rendering an instruction the engine looks for it still sitting in the composer.
@@ -33,21 +35,25 @@ export function composerHoldsMessage(content: string, entry: RenderedInstruction
   return content.startsWith(head) || head.startsWith(content);
 }
 
+/** False stops this entry; a temporary hold may be checked again within the existing limit. */
+export type SubmitRetryResult = boolean | "held";
+
 /** Revalidate an attention wake after async authority lookup, immediately before a retry press. */
 export function admitSubmitRetry(entry: RenderedInstruction, host: {
   epoch(): number; active(): boolean; pending(): boolean;
   observe(): { activity: string; composer: ComposerObservation }; press(): void;
-}): void | Promise<boolean> {
+}): void | Promise<SubmitRetryResult> {
   if (entry.admission === undefined) { host.press(); return; }
   const epoch = host.epoch();
   return entry.admission(() => {
     const { activity, composer } = host.observe();
-    if (epoch !== host.epoch() || !host.active() || !host.pending() || entry.state !== "rendered"
-      || activity === "working" || activity === "needs-input" || composer.modalOpen
-      || !composer.occupied || composer.content === undefined
+    if (epoch !== host.epoch() || !host.active() || !host.pending() || entry.state !== "rendered") return false;
+    if (activity === "working" || activity === "needs-input" || composer.modalOpen) return "held";
+    if (!composer.occupied || composer.content === undefined
       || !composerHoldsMessage(normalizedHead(composer.content), entry)) return false;
     entry.beforeResubmit?.(); host.press(); return true;
-  }).catch(() => false);
+  }).catch((error: unknown) => error instanceof WakeHeldError
+    || (error instanceof AttentionWakeHeldError && !error.obsolete) ? "held" : false);
 }
 
 /** What the engine lends the verifier: its truth, its keyboard, and its transcript. */
@@ -61,7 +67,7 @@ export interface SubmitVerificationHost {
   /** A fresh reading of the screen, including the composer. */
   observe(): { activity: string; composer: ComposerObservation };
   /** Press the provider's bare Enter for this entry and record that it was pressed. */
-  press(entry: RenderedInstruction, key: Buffer): void | Promise<boolean>;
+  press(entry: RenderedInstruction, key: Buffer, current: () => boolean): void | Promise<SubmitRetryResult>;
   /** Report an entry still unsent after every allowed press. */
   exhausted(entry: RenderedInstruction, composer: ComposerObservation): void;
 }
@@ -90,6 +96,13 @@ export class SubmitVerifier {
   arm(): void {
     this.release();
     this.schedule();
+  }
+
+  /** Resume only the same guarded rendered entry; retain its lifetime press allowance. */
+  recheck(instructionId: string): void {
+    if (this.host.active() && this.host.pending().some((entry) => entry.instructionId === instructionId
+      && entry.state === "rendered" && entry.admission !== undefined
+      && (entry.submitPresses ?? 0) < SUBMIT_VERIFY_MAX_PRESSES)) this.arm();
   }
 
   /** Drop any armed check; the next process generation starts clean. */
@@ -132,11 +145,15 @@ export class SubmitVerifier {
       return;
     }
     const epoch = this.host.epoch(), generation = this.generation;
-    const pressed = this.host.press(entry, entry.submitKey ?? Buffer.from("\r"));
+    // Lend the async press this generation's fence as well as checking its eventual callback.
+    const current = () => epoch === this.host.epoch() && generation === this.generation
+      && this.host.active() && this.host.pending().includes(entry) && entry.state === "rendered";
+    const recheck = (result?: SubmitRetryResult) => {
+      if (result !== false && current() && this.checks < SUBMIT_VERIFY_MAX_CHECKS) this.schedule();
+    };
+    const pressed = this.host.press(entry, entry.submitKey ?? Buffer.from("\r"), current);
     if (pressed instanceof Promise) {
-      void pressed.then((allowed) => {
-        if (allowed && epoch === this.host.epoch() && generation === this.generation) this.schedule();
-      }).catch(() => undefined);
-    } else this.schedule();
+      void pressed.then(recheck).catch(() => undefined);
+    } else recheck();
   }
 }

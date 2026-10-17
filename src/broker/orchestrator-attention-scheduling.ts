@@ -152,12 +152,17 @@ export class OrchestratorAttentionScheduling {
         });
         if (record?.status !== "armed") return;
       } else {
+        if (this.options.inbox.policy(controllerId).wake === "off") { await this.hold(record, "notification-wake-off"); return; }
         if (record.recovery !== "ready") { await this.hold(record, "attention-missing-process"); return; }
         let instruction = instructions.find((entry) => entry.messageId === intent.messageId);
         if (instruction === undefined) instruction = await this.enqueue(record);
         else if (["accepted", "queued"].includes(instruction.status)) {
           await this.options.instructions.flush(record.actorSessionId);
           instruction = (await this.options.instructions.list(record.actorSessionId)).find((entry) => entry.messageId === intent.messageId);
+        } else if (instruction.status === "rendered" && record.lastWake?.holdReason === "notification-wake-off") {
+          // A policy hold can outlast bounded verification. Re-enable resumes the same rendered
+          // entry through its original admission transaction, with no text rewrite or new queue.
+          await this.options.instructions.flush(record.actorSessionId, intent.messageId);
         }
         if (instruction !== undefined) await this.observe(record, instruction);
         return;

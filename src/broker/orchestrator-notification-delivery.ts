@@ -221,6 +221,7 @@ export class OrchestratorNotificationDelivery {
     const lastNoticed = this.options.inbox.noticeState(controllerId).lastNoticedCursor;
     const record = (await this.options.instructions.list(controller.sessionId)).find((entry) =>
       entry.brokerOwned === true && entry.submissionKind === "wake" && entry.wake?.controllerId === controllerId
+      && entry.wake.attentionEpoch === undefined
       && (["accepted", "queued"].includes(entry.status)
         || (delivered(entry) && entry.wake.cursor > lastNoticed)));
     if (record?.wake === undefined) return;

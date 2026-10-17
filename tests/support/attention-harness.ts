@@ -82,7 +82,7 @@ export async function attentionHarness(options: { peer?: boolean; workspace?: bo
   await inbox.load();
   const controls: OrchestratorAttentionControlPlane[] = [];
   const errors: unknown[] = [];
-  const controlOptions = { store, registry, coordination, transcripts,
+  const controlOptions = { store, registry, coordination, transcripts, inbox,
     bindings: { list: async () => [...bindings.values()], findBySessionId: async (id: string) => bindings.get(id) },
     now: () => NOW, onError: (error: unknown) => { errors.push(error); } };
   const makeControl = (overrideStore = store, sourceOverrides: Partial<Pick<OrchestratorAttentionOptions, "coordination" | "transcripts">> = {}) => {

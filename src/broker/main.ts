@@ -299,7 +299,7 @@ export async function runBroker(
   const orchestratorCapabilities = new WorkerCapabilityCatalog({
     probe: new CodexOrchestratorModelProbe(undefined, codexOrchestratorHome),
   });
-  const attention = await createOrchestratorAttention(stateDirectory, { registry, bindings: orchestratorStore, coordination: observedCoordination, transcripts });
+  const attention = await createOrchestratorAttention(stateDirectory, { registry, bindings: orchestratorStore, coordination: observedCoordination, transcripts, inbox: notificationInbox });
   const orchestrators = new OrchestratorManager(
     registry,
     orchestratorStore,

@@ -33,7 +33,7 @@ import { WorkerInputAdmission, heldInstructionDelivery, terminalInstructionDeliv
 import { WorkerCompletionLedger, WorkerTurnReconciler, WorkerStallTracker, completionReservationFloor } from "./worker-turn-state.js";
 import type { CompletionLedgerEntry, RenderedInstruction, WorkerStatusReading,
   TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
-import { admitSubmitRetry, normalizedHead, SubmitVerifier } from "./worker-submit-verification.js";
+import { admitSubmitRetry, normalizedHead, SubmitVerifier, type SubmitRetryResult } from "./worker-submit-verification.js";
 import { WorkerInputReadiness } from "./worker-input-readiness.js";
 import { observeWorkerModal, projectWorkerTurnTruth } from "./worker-turn-truth.js";
 import { NativeTurnActivity, pendingExitTruth, supportsNativeTurnObservation, nativeReadFailure, nativeTurnIdentity } from "./worker-turn-native-state.js";
@@ -92,7 +92,11 @@ export class WorkerTurnEngine {
     active: () => this.record.executionState === "active" && !this.terminalFinalizing,
     pending: () => this.rendered,
     observe: () => ({ activity: this.activity, composer: this.observeComposer() }),
-    press: (entry, key) => this.pressSubmitAgain(entry, key),
+    press: (entry, key, current): void | Promise<SubmitRetryResult> => admitSubmitRetry(entry, {
+      epoch: () => this.observationEpoch, active: () => current() && this.record.executionState === "active" && !this.terminalFinalizing,
+      pending: () => this.rendered.includes(entry), observe: () => ({ activity: this.activity, composer: this.observeComposer() }),
+      press: () => this.writeSubmitAgain(entry, key),
+    }),
     exhausted: (entry, composer) => {
       void this.appendTranscript("lifecycle", "broker",
         `instruction still unsent after ${entry.submitPresses ?? 0} extra Enter presses; the composer holds its text`,
@@ -721,14 +725,8 @@ export class WorkerTurnEngine {
     delete this.deferredScreenCompletionTarget;
   }
 
-  /** The one place verification touches the keyboard: the bare Enter, recorded as broker input. */
-  private pressSubmitAgain(entry: RenderedInstruction, key: Buffer): void | Promise<boolean> {
-    return admitSubmitRetry(entry, {
-      epoch: () => this.observationEpoch, active: () => this.record.executionState === "active" && !this.terminalFinalizing,
-      pending: () => this.rendered.includes(entry), observe: () => ({ activity: this.activity, composer: this.observeComposer() }),
-      press: () => this.writeSubmitAgain(entry, key),
-    });
-  }
+  /** An explicit policy re-enable may resume a bounded hold, retaining the entry and press count. */
+  verifyInstructionSubmission(instructionId: string): void { this.submitVerifier.recheck(instructionId); }
   private writeSubmitAgain(entry: RenderedInstruction, key: Buffer): void {
     entry.submitPresses = (entry.submitPresses ?? 0) + 1;
     this.activityRevision += 1;

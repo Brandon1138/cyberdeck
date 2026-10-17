@@ -13,6 +13,7 @@ import {
 } from "./orchestrator-attention-source.js";
 import type { WorkerEventObserver, HandoffBatchObserver } from "../broker/observed-worker-coordination.js";
 import type { InstructionRecord } from "../domain/instruction.js";
+import type { NotificationInboxPort } from "./orchestrator-notification-ports.js";
 
 /** Reuse the existing grants; old persisted primary and peer bindings need no migration. */
 export const ATTENTION_TOOL_CAPABILITIES = {
@@ -31,6 +32,7 @@ export const AgentAttentionCancelParamsSchema = z.object({
 export interface OrchestratorAttentionOptions extends AttentionSourceOptions {
   store: AttentionStorePort;
   bindings: OrchestratorBindingDirectory;
+  inbox: Pick<NotificationInboxPort, "policy">;
   registry: AttentionSourceOptions["registry"] & {
     onSessionUpdate(listener: (sessionId: string) => void): () => void;
     isStopRequested(sessionId: string): boolean;
@@ -222,6 +224,7 @@ export class OrchestratorAttentionControlPlane {
     const wake = instruction.wake!;
     await this.reconcile(wake.controllerId, wake.attentionEpoch, false);
     let result: T | undefined;
+    let policyHeld = false;
     await this.options.store.update(wake.controllerId, async (record) => {
       if (wake.attentionEpoch === undefined) {
         if (record !== undefined) throw new AttentionWakeHeldError("attention-owns-wake-policy", true);
@@ -244,10 +247,19 @@ export class OrchestratorAttentionControlPlane {
             && (gap.reason === "supervision-lost" || gap.reason === "worker-missing"));
           if (held === recordedLoss) throw new AttentionWakeHeldError("attention-source-changed");
         }
+        // The policy may change during native preflight or binding I/O. No await from this
+        // reading through apply: every write/retry uses the current operator policy.
+        if (this.options.inbox.policy(wake.controllerId).wake === "off") {
+          policyHeld = true;
+          return { ...record, updatedAt: this.now(),
+            ...(record.lastWake === undefined ? {} : { lastWake: { ...record.lastWake, holdReason: "notification-wake-off" } }) };
+        }
       }
       result = await apply();
       return record;
     });
+    // Persist the visible hold without clearing the intent, then let the queue retain eligibility.
+    if (policyHeld) throw new AttentionWakeHeldError("notification-wake-off");
     return result as T;
   }
 

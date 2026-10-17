@@ -142,6 +142,14 @@ hold the persisted intent; policy changes and the budget-expiry boundary retry i
 Attention counts existing durable wake instructions for its rolling ceiling across
 restart. The unchanged legacy wake budget is still process-local.
 
+Wake-off is checked synchronously at the final authority boundary, including retries
+of already rendered text. It records a visible hold without cancelling the stable
+intent. Temporary submit refusals use the existing eight-check/two-press bounds;
+obsolete entries stop. Re-enabling a policy-held rendered wake re-arms that same
+entry's verification even after its check window expired, retaining its press count,
+generation fence and all admission gates. It never retypes the payload. Legacy wake
+recovery excludes attention-epoch instructions on both inbox changes and startup.
+
 An unrelated active Orc turn does not discharge the pending intent. Explicit receipt
 acknowledgement clears it only when the consumed source coverage contains that intent;
 partial pages retain it. An exact page read before banking can satisfy the same covered

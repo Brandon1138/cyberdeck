@@ -171,6 +171,8 @@ export interface InstructionStateUpdate {
 }
 
 export interface SessionInstructionPort extends SessionLookupPort {
+  /** Re-arm verification of existing rendered text; never render it again or reset its press count. */
+  verifyInstructionSubmission?(sessionId: string, instructionId: string): void;
   onControllerReleased(listener: (sessionId: string) => void): () => void;
   onDeliveryBoundary(listener: (sessionId: string) => void): () => void;
   onInstructionState(listener: (update: InstructionStateUpdate) => void): () => void;

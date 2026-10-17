@@ -254,6 +254,10 @@ export class SessionRegistry {
     return this.bus.onDeliveryBoundary(listener);
   }
 
+  verifyInstructionSubmission(sessionId: string, instructionId: string): void {
+    this.io.verifyInstructionSubmission(sessionId, instructionId);
+  }
+
   onInstructionState(listener: (update: InstructionStateUpdate) => void): () => void {
     return this.bus.onInstructionState(listener);
   }

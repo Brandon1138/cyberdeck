@@ -94,17 +94,17 @@ async function harness() {
     lifecycle: "working", resources: { sessionId: worker.id, worktreePath: directory, eventStreamId: `worker:${worker.id}` }, controller, reason: "Fixture worker" });
   const leaseToken = registered.outcomes[0]!.leaseToken!;
   const store = new OrchestratorAttentionStore(directory);
-  const attention = new OrchestratorAttentionControlPlane({ store, registry, bindings, coordination, transcripts, now: () => new Date(now()).toISOString() });
   const inbox = new OrchestratorNotificationStore(directory); await inbox.load();
+  const attention = new OrchestratorAttentionControlPlane({ store, registry, bindings, coordination, transcripts, inbox, now: () => new Date(now()).toISOString() });
   await inbox.setPolicy(controller.controllerId, { ...inbox.policy(controller.controllerId), coalesceMs: 60_000 });
   const instructionStore = new InstructionStore(directory);
   const feed = composeOrchestratorNotificationFeed({ attention, registry, bindings, coordination, inbox, instructionRepository: instructionStore,
     noticeFiles: new OrchestratorNoticeFiles(directory), now: () => new Date(now()).toISOString() });
   const queue = new InstructionQueue(registry, bindings, observeInstructionRepository(instructionStore, (record) => feed.observeInstruction(record)),
     (record) => (apply) => attention.admitWake(record, apply));
-  queue.start(); await feed.start(queue);
+  queue.start(); const delivery = await feed.start(queue);
   close.push(async () => { feed.stop(); await attention.flush(); await feed.scheduling!.flush(); queue.stop(); await registry.stopAll(); });
-  return { directory, actor, worker, registry, actorProvider, workerProvider, attention, store, feed, queue, transcripts,
+  return { directory, actor, worker, registry, actorProvider, workerProvider, attention, store, feed, delivery, queue, transcripts,
     coordination, inbox, controller, leaseToken, advance(milliseconds: number) { offset += milliseconds; },
     arm: (extra = {}) => attention.arm({ actorSessionId: actor.id, mutationId: randomUUID(), objective: "Read and verify the worker result",
       nextAction: "Process the exact result then acknowledge it", targets: [{ sessionId: worker.id, completionTarget: 1 }], ...extra }),
@@ -123,6 +123,72 @@ async function harness() {
 }
 
 describe("attention simulated-provider lifecycle", () => {
+  it("S2-F1 re-enables verification of the same rendered wake through the real queue and registry", async () => {
+    const h = await harness(); const arm = await h.arm(); await h.complete("RENDERED-POLICY-HOLD");
+    const [instruction] = await h.queue.list(h.actor.id);
+    const recheck = vi.spyOn(h.registry, "verifyInstructionSubmission");
+    await h.inbox.setPolicy(arm.controllerId, { ...h.inbox.policy(arm.controllerId), wake: "off" }); await h.drain();
+    expect((await h.store.get(arm.controllerId))!.lastWake!.holdReason).toBe("notification-wake-off");
+    expect(recheck).not.toHaveBeenCalled();
+    await h.inbox.setPolicy(arm.controllerId, { ...h.inbox.policy(arm.controllerId), wake: "steering-only" }); await h.drain();
+    expect(recheck).toHaveBeenCalledExactlyOnceWith(h.actor.id, instruction!.id);
+    expect(h.actorProvider.writes).toHaveLength(1); expect(await h.queue.list(h.actor.id)).toHaveLength(1);
+    await h.drain(); expect(recheck).toHaveBeenCalledTimes(1);
+    expect((await h.store.get(arm.controllerId))!.coverage.consumed).toEqual([]);
+  });
+
+  it("S2-F1 holds a wake disabled during final admission and resumes the same intent", async () => {
+    const h = await harness(); const arm = await h.arm(); await h.drain();
+    let entered!: () => void, release!: () => void;
+    const paused = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const admit = h.attention.admitWake.bind(h.attention);
+    vi.spyOn(h.attention, "admitWake").mockImplementationOnce(async (instruction, apply) => {
+      entered(); await gate; return admit(instruction, apply);
+    });
+    const completing = h.complete("POLICY-RACE-RESULT");
+    try {
+      await paused;
+      await h.inbox.setPolicy(arm.controllerId, { ...h.inbox.policy(arm.controllerId), wake: "off" });
+      release(); await completing;
+      expect(h.actorProvider.writes).toHaveLength(0);
+      const [instruction] = await h.queue.list(h.actor.id);
+      expect(instruction).toMatchObject({ status: "queued", holdReason: "notification-wake-off" });
+      const held = (await h.store.get(arm.controllerId))!;
+      expect(held.pendingIntent!.messageId).toBe(instruction!.messageId);
+      expect(held.lastWake!.holdReason).toBe("notification-wake-off");
+      expect(held.coverage.consumed).toEqual([]);
+      await h.inbox.setPolicy(arm.controllerId, { ...h.inbox.policy(arm.controllerId), wake: "steering-only" });
+      await h.drain(); await h.waitState("rendered");
+      expect(h.actorProvider.writes).toHaveLength(1);
+      expect(await h.queue.list(h.actor.id)).toMatchObject([{ id: instruction!.id, status: "rendered" }]);
+      expect((await h.store.get(arm.controllerId))!.pendingIntent!.messageId).toBe(instruction!.messageId);
+      expect((await h.store.get(arm.controllerId))!.coverage.consumed).toEqual([]);
+    } finally { release(); await completing; }
+  });
+
+  it.each(["inbox arrival", "delivery restart"])("S2-F3 preserves an attention wake through %s while a modal holds it", async (change) => {
+    const h = await harness(); const arm = await h.arm(); await h.drain();
+    h.actorProvider.emit("Claude needs your permission to use Bash\r\nDo you want to proceed?\r\n❯ 1. Yes\r\n  3. No");
+    await vi.waitFor(() => expect(h.registry.workerTruth(h.actor.id).state).toBe("blocked-modal"));
+    await h.complete("RESULT-HELD-BEHIND-MODAL");
+    const [original] = await h.queue.list(h.actor.id);
+    expect(original!.status).toBe("queued"); expect(h.actorProvider.writes).toHaveLength(0);
+    if (change === "delivery restart") { h.delivery.stop(); await h.delivery.start(); }
+    await h.inbox.append({ controllerId: arm.controllerId, sessionId: h.worker.id, kind: "progress", severity: "info",
+      summary: "Later non-waking notification", wakeEligible: false });
+    await h.delivery.notice(arm.controllerId);
+    expect(await h.queue.list(h.actor.id)).toMatchObject([{ id: original!.id, status: "queued" }]);
+    expect((await h.store.get(arm.controllerId))!.pendingIntent!.messageId).toBe(original!.messageId);
+    expect((await h.store.get(arm.controllerId))!.coverage.consumed).toEqual([]);
+    h.actorProvider.ready(); await h.queue.flush(h.actor.id); await h.drain(); await h.waitState("rendered");
+    expect(h.actorProvider.writes).toHaveLength(1);
+    expect(await h.queue.list(h.actor.id)).toMatchObject([{ id: original!.id, status: "rendered" }]);
+    const state = (await h.store.get(arm.controllerId))!;
+    expect(state.pendingIntent!.messageId).toBe(original!.messageId);
+    expect(state.coverage.consumed).toEqual([]); expect(state.lastWake!.submittedAt).toBeUndefined();
+  });
+
   it("runs source capture → decision → queue → render → attributed turn → exact read/action/ack → progress → re-arm", async () => {
     const h = await harness(); const arm = await h.arm(); await h.drain();
     expect(h.actorProvider.writes).toEqual([]);
