@@ -1,4 +1,5 @@
 import type { ModalAnswerAttempt } from "../domain/modal-descriptor.js";
+import type { InstructionAdmission } from "../domain/instruction.js";
 import type { ResolvedLaunchRecord, SessionRecord, StartSessionRequest } from "../domain/session.js";
 import type { ScoutDecisionCard } from "../domain/scout-output.js";
 import type { ScoutArtifactKind } from "../domain/worker-profile.js";
@@ -244,12 +245,17 @@ export class SessionRegistry {
     source: "orchestrator" | "worker" | "broker" = "orchestrator",
     metadata: Record<string, unknown> = {},
     instructionId?: string,
+    admission?: InstructionAdmission,
   ): Promise<InstructionDelivery> {
-    return this.io.submitInstruction(sessionId, message, source, metadata, instructionId);
+    return this.io.submitInstruction(sessionId, message, source, metadata, instructionId, admission);
   }
 
   onDeliveryBoundary(listener: (sessionId: string) => void): () => void {
     return this.bus.onDeliveryBoundary(listener);
+  }
+
+  verifyInstructionSubmission(sessionId: string, instructionId: string): void {
+    this.io.verifyInstructionSubmission(sessionId, instructionId);
   }
 
   onInstructionState(listener: (update: InstructionStateUpdate) => void): () => void {

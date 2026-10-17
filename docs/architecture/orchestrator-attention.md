@@ -1,8 +1,9 @@
 # Explicit orchestrator attention waits
 
-Slice 1 implements durable waiting and explicit consumption. Attention scheduling,
-the liveness floor, model evaluation, and live activation remain later review gates.
-Existing notification wakes continue to use their existing policy.
+Slices 1 and 2 implement durable waiting, explicit consumption, and deterministic
+attention scheduling through the existing instruction queue. Model evaluation and
+live activation remain later review gates. Controllers without an attention record
+retain their existing notification wake policy.
 
 ## Control and authority
 
@@ -45,9 +46,11 @@ renames it, and syncs its directory. Cancelled waits remain as tombstones.
 
 The record retains the statement, epoch and request identity, target authority,
 source coverage, source gaps, latest decision slot, one pending intent slot, and
-explicit consumption. Evaluated, noticed, submitted, and consumed coverage are separate
-from captured coverage. Decision and wake-intent fields are only a persistence contract
-in this slice; no model or wake producer writes them.
+explicit consumption. Evaluated, noticed, scheduled, rendered, submitted, initiated,
+and consumed coverage are separate from captured coverage. A decision and its one
+stable-message pending intent are banked in the same atomic replacement before enqueue.
+The latest wake retains instruction identity, holds, submission, attributed turn
+initiation, explicit consumption, subsequent turn completion and observed dormancy.
 
 Mutations serialize per controller and reread committed state before changing it.
 An ambiguous write cannot leave cached authority that a retry might reuse. Committed
@@ -92,19 +95,89 @@ read again to obtain a fresh receipt. A later acknowledgement of an older retain
 cannot regress source coverage or overwrite newer consumed truth. Source payloads remain
 in their existing journals; this is not a second notification queue.
 
+## Deterministic scheduling and recovery
+
+The existing notification feed composes attention scheduling. Source, authority,
+inbox-policy and instruction-lifecycle changes trigger serialized reconciliation;
+nearby changes use the existing notification policy's coalescing interval. Review
+deadlines use a broker timer and are reconstructed on startup. There is no polling
+Orc, second notification queue, model adapter, or remote inference in this slice.
+
+The group-wait reference policy defers ordinary progress, recovering errors and
+partial results while awaited work can progress. Broker policy overrides deferral
+for explicit intervention, source/supervision gaps, an unresolved oversized backlog,
+all awaited work stopping, and the review deadline. Unknown activity never proves
+work stopped or succeeded. Policy scans report metadata beyond the 50-summary read
+page; after 1,000 reports per worker it conservatively surfaces the backlog. Deferral
+never acknowledges or discards anything. Two failed/invalid local fixture decisions
+fall back to a durable wake; unchanged semantic inputs are not evaluated again.
+
+The attention record owns wake policy once the controller explicitly opts in. A
+cancelled tombstone keeps idle from reviving that wait through the legacy wake path.
+Legacy notices remain readable, and controllers that never used attention retain
+legacy wakes. Existing queued legacy wakes become obsolete for an opted-in controller.
+No ordinary instruction is withdrawn or granted different ownership.
+
+One pending intent per epoch carries a stable message ID and source coverage.
+Simultaneous arrivals coalesce into it; later developments remain outstanding and
+cannot enlarge what a prior rendering/submission proved. Existing queue deduplication
+is serialized per target, including concurrent enqueue retries. Startup recovers the
+intent-before-enqueue and enqueue-before-bookkeeping crash gaps from that same queue.
+Authoritative worker reports and completion receipts reconstruct inbox crash gaps and
+overflow. No inbox cursor or shown hook notice establishes attention consumption.
+
+Every attention wake delivery attempt, including a held queue flush, runs the same
+control-plane authority transaction after native provider preflight. It holds epoch
+serialization through the final binding lookup and provider write, rechecking grants,
+stop state, missing-process recovery and current relevant lease state. Supervision-loss
+wakes report the loss; they confer no authority over the transferred worker. A later
+submit-verification retry re-enters that transaction and rechecks its own composer,
+modal, process-generation and operator-quiet gates. Already rendered bytes cannot be
+withdrawn, and rendering alone never proves submission, turn initiation or consumption.
+
+Provider capacity, permissions, human input, composer/modal and ordinary-instruction
+ownership gates remain in the existing admission machinery. Missing processes remain
+durably held, with no start/resume call. Notification `wake: off` and hourly ceilings
+hold the persisted intent; policy changes and the budget-expiry boundary retry it.
+Attention counts existing durable wake instructions for its rolling ceiling across
+restart. The unchanged legacy wake budget is still process-local.
+
+Wake-off is checked synchronously at the final authority boundary, including retries
+of already rendered text. It records a visible hold without cancelling the stable
+intent. Temporary submit refusals use the existing eight-check/two-press bounds;
+obsolete entries stop. Re-enabling a policy-held rendered wake re-arms that same
+entry's verification even after its check window expired, retaining its press count,
+generation fence and all admission gates. It never retypes the payload. Legacy wake
+recovery excludes attention-epoch instructions on both inbox changes and startup.
+
+An unrelated active Orc turn does not discharge the pending intent. Explicit receipt
+acknowledgement clears it only when the consumed source coverage contains that intent;
+partial pages retain it. An exact page read before banking can satisfy the same covered
+obligation. New arrivals during reading/acknowledgement remain outstanding. Reading an
+attention page also exposes the latest decision, pending intent and wake evidence so
+delivery/recovery holds are visible without claiming receipt consumption.
+
 ## Compatibility and next gate
 
 Existing callers that omit attention fields keep their cursor acknowledgement and
 result-delivery semantics. Their acknowledgements do not imply attention consumption.
 The existing notification JSONL format already supports selective IDs; its schema,
-worker coordination journals, instruction records, and binding grants are unchanged.
+worker coordination journals and binding grants are unchanged. Instruction wakes add
+an optional `attentionEpoch`; attention-only wakes allow an inbox cursor of zero when
+authoritative sources exist without an inbox record. Legacy wakes still require a
+positive cursor. Ordinary instruction records retain their existing interpretation.
 Previously handled legacy reports may conservatively appear on the first attention
 read because they have no attention consumption receipt.
 
-Slice 2 must connect this state to the existing instruction queue, persist a decision
-and stable pending wake ID before enqueueing, apply epoch/binding/lease fencing at
-execution, and distinguish rendering, observed submission, turn initiation, explicit
-consumption, and later progress. It must enforce group settlement and review deadlines,
-reconcile every relevant authority/source change, preserve human/composer/modal gates,
-and prove recovery with simulated providers. It begins only after independent review
-of slice 1. No live JEV, broker activation, or autonomous provider proof is claimed here.
+Existing schema-v1 attention records load without migration; the scheduling fields
+are optional. Slice-1-only readers reject extended records conservatively, so rollback
+to those readers is not forward-compatible. The latest wake identity is retained when
+an Orc explicitly re-arms; each epoch has fresh decision and pending-intent slots.
+
+The simulated-provider lifecycle test uses the real session registry, feed, queue,
+private-file/journal persistence and receipt API. A scripted provider reads a unique
+worker value, writes a disposable artifact from it, explicitly acknowledges, completes
+its attributed turn and re-arms. Provider observations are fixtures, including the
+native-shaped transcript frames. This is source/fixture proof, not a live-model or
+shared-broker/JEV canary. Slice 2 stops at independent review; snapshots/adapters and
+active JEV/live proof belong to separately released slices 3 and 4.

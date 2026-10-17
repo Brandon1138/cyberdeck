@@ -29,6 +29,7 @@ export interface AttentionSourceSnapshot {
   workers: AttentionWorkerView[];
   gaps: OrchestratorAttention["gaps"];
   snapshotId: string;
+  signals: Array<{ sessionId: string; intervention: boolean; blocked: boolean; backlog: boolean }>;
 }
 
 export function attentionDigest(value: unknown): string {
@@ -43,6 +44,7 @@ export async function captureAttentionSources(
   const received: AttentionCoverage = [];
   const workers: AttentionWorkerView[] = [];
   const gaps: OrchestratorAttention["gaps"] = [];
+  const signals: AttentionSourceSnapshot["signals"] = [];
   let reportBudget: number = ATTENTION_LIMITS.reports;
   for (const target of record.statement.targets) {
     const consumed = record.coverage.consumed.find((point) => point.sessionId === target.sessionId);
@@ -74,6 +76,20 @@ export async function captureAttentionSources(
     reportBudget -= reports.length;
     const eventOrdinal = Math.max(prior?.eventOrdinal ?? consumed?.eventOrdinal ?? 0,
       supervision === "held" ? options.coordination.workerEventSummary(target.sessionId).lastOrdinal : 0);
+    // The bounded read page is not the policy's history. Scan metadata beyond it, conservatively
+    // surfacing an oversized unresolved backlog rather than hiding an intervention behind progress.
+    let cursor = consumed?.eventOrdinal ?? 0, intervention = false, blocked = false;
+    for (let pageNumber = 0; supervision === "held" && cursor < eventOrdinal && pageNumber < 20; pageNumber += 1) {
+      const page = options.coordination.projectEvents({ cursor, limit: 50,
+        filter: { workerIds: [target.sessionId], intervention: "any" } }).events;
+      if (page.length === 0) { cursor = eventOrdinal; break; }
+      for (const event of page) if (event.state === "active") {
+        intervention ||= event.interventionRequired || event.kind === "DECISION_REQUEST";
+        blocked ||= event.continuation !== "continuing";
+      }
+      cursor = page.at(-1)!.ordinal;
+    }
+    signals.push({ sessionId: target.sessionId, intervention, blocked, backlog: supervision === "held" && cursor < eventOrdinal });
     const truthKey = attentionDigest({ supervision, state: truth?.state, terminal: truth?.terminal,
       completedTurns: truth?.completedTurns, pendingInstructions: truth?.pendingInstructions,
       modal: truth?.modal?.fingerprint, providerLimit: truth?.providerLimit });
@@ -92,8 +108,8 @@ export async function captureAttentionSources(
     received.push({ sessionId: target.sessionId, eventOrdinal: receivedOrdinal,
       completionTurn: view.completion === undefined ? consumed?.completionTurn ?? 0 : completionTurn, truthKey });
   }
-  return { captured, received, workers, gaps,
-    snapshotId: attentionDigest({ epoch: record.epoch, captured, gaps }) };
+  return { captured, received, workers, gaps, signals,
+    snapshotId: attentionDigest({ epoch: record.epoch, captured, gaps, signals }) };
 }
 
 function boundedCompletion(turn: WorkerTurnTranscript, number: number, maxChars: number): NonNullable<AttentionWorkerView["completion"]> {

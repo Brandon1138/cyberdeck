@@ -28,6 +28,8 @@ export interface RenderedInstruction {
   submitKey?: Buffer;
   /** How many times verification has pressed Enter for this entry. */
   submitPresses?: number;
+  admission?: import("../../domain/instruction.js").InstructionAdmission;
+  beforeResubmit?: () => void;
 }
 
 export interface StallObservation {

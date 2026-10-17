@@ -33,9 +33,9 @@ import { WorkerInputAdmission, heldInstructionDelivery, terminalInstructionDeliv
 import { WorkerCompletionLedger, WorkerTurnReconciler, WorkerStallTracker, completionReservationFloor } from "./worker-turn-state.js";
 import type { CompletionLedgerEntry, RenderedInstruction, WorkerStatusReading,
   TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
-import { normalizedHead, SubmitVerifier } from "./worker-submit-verification.js";
+import { admitSubmitRetry, normalizedHead, SubmitVerifier, type SubmitRetryResult } from "./worker-submit-verification.js";
 import { WorkerInputReadiness } from "./worker-input-readiness.js";
-import { observeWorkerModal, projectWorkerTurnTruth } from "./worker-turn-truth.js";
+import { observeWorkerModal, projectWorkerTurnTruth, workerPreviewKind, updateWorkerPreview } from "./worker-turn-truth.js";
 import { NativeTurnActivity, pendingExitTruth, supportsNativeTurnObservation, nativeReadFailure, nativeTurnIdentity } from "./worker-turn-native-state.js";
 
 export interface WorkerTurnAppendResult {
@@ -92,7 +92,11 @@ export class WorkerTurnEngine {
     active: () => this.record.executionState === "active" && !this.terminalFinalizing,
     pending: () => this.rendered,
     observe: () => ({ activity: this.activity, composer: this.observeComposer() }),
-    press: (entry, key) => this.pressSubmitAgain(entry, key),
+    press: (entry, key, current): void | Promise<SubmitRetryResult> => admitSubmitRetry(entry, {
+      epoch: () => this.observationEpoch, active: () => current() && this.record.executionState === "active" && !this.terminalFinalizing,
+      pending: () => this.rendered.includes(entry), observe: () => ({ activity: this.activity, composer: this.observeComposer() }),
+      press: () => this.writeSubmitAgain(entry, key),
+    }),
     exhausted: (entry, composer) => {
       void this.appendTranscript("lifecycle", "broker",
         `instruction still unsent after ${entry.submitPresses ?? 0} extra Enter presses; the composer holds its text`,
@@ -344,7 +348,13 @@ export class WorkerTurnEngine {
   }
 
   async submitInstruction(input: SubmitWorkerInstruction): Promise<InstructionDelivery> {
-    return this.admission.run(() => this.renderInstruction(input), (hold) => hold === "worker-terminal"
+    return this.admission.run(() => {
+      const epoch = this.observationEpoch, revision = this.activityRevision;
+      const render = () => epoch !== this.observationEpoch || revision !== this.activityRevision
+        ? this.holdInstruction("provider-busy", input.source, input.instructionId)
+        : this.renderInstruction(input);
+      return input.admission === undefined ? render() : input.admission(render);
+    }, (hold) => hold === "worker-terminal"
       ? this.terminalDelivery(input.source, input.instructionId)
       : this.holdInstruction(hold, input.source, input.instructionId));
   }
@@ -368,6 +378,8 @@ export class WorkerTurnEngine {
         messageLength: input.message.length,
         ...(input.submitKey === undefined ? {} : { submitKey: input.submitKey }),
         submitPresses: 0,
+        ...(input.admission === undefined ? {} : { admission: input.admission }),
+        ...(input.beforeResubmit === undefined ? {} : { beforeResubmit: input.beforeResubmit }),
       });
     }
     // Rendering bytes does not prove consumption or an in-flight provider turn.
@@ -713,8 +725,9 @@ export class WorkerTurnEngine {
     delete this.deferredScreenCompletionTarget;
   }
 
-  /** The one place verification touches the keyboard: the bare Enter, recorded as broker input. */
-  private pressSubmitAgain(entry: RenderedInstruction, key: Buffer): void {
+  /** An explicit policy re-enable may resume a bounded hold, retaining the entry and press count. */
+  verifyInstructionSubmission(instructionId: string): void { this.submitVerifier.recheck(instructionId); }
+  private writeSubmitAgain(entry: RenderedInstruction, key: Buffer): void {
     entry.submitPresses = (entry.submitPresses ?? 0) + 1;
     this.activityRevision += 1;
     this.options.effects.write(key);
@@ -1544,10 +1557,7 @@ export class WorkerTurnEngine {
     const previews = this.options.preview;
     if (previews === undefined) return;
     let preview = previews.preview({ transcript: captured, maxLength: PREVIEW_STORAGE_LIMIT });
-    // Preserve structured role provenance; record/replay prose alone cannot prove a new reply.
-    let kind: SessionRecord["latestPreviewKind"] = preview.kind === "assistant"
-      ? captured.some((message) => message.role === "assistant") ? "assistant" : undefined
-      : preview.kind === "prompt" ? "prompt" : undefined;
+    let kind = workerPreviewKind(preview, captured.some((message) => message.role === "assistant"));
     if (preview.kind === "none") {
       const transcript = await this.readTranscriptMessages().catch(() => []);
       if (!this.isCurrentObservation(epoch, revision, owner, activityRevision)) return;
@@ -1560,15 +1570,10 @@ export class WorkerTurnEngine {
         replay,
         maxLength: PREVIEW_STORAGE_LIMIT,
       });
-      kind = preview.kind === "prompt" ? "prompt"
-        : preview.kind === "assistant" && nativePreview.kind === "assistant" ? "assistant"
-          : preview.text === this.record.latestPreview ? this.record.latestPreviewKind : undefined;
+      kind = workerPreviewKind(preview, nativePreview.kind === "assistant", this.record);
     }
     if (!this.isCurrentObservation(epoch, revision, owner, activityRevision)) return;
-    if (preview.kind === "none" || preview.text === this.record.latestPreview && kind === this.record.latestPreviewKind) return;
-    this.record.latestPreview = preview.text;
-    if (kind === undefined) delete this.record.latestPreviewKind;
-    else this.record.latestPreviewKind = kind;
+    if (!updateWorkerPreview(this.record, preview, kind)) return;
     await this.options.effects.persist();
   }
 

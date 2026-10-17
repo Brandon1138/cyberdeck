@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows, type CyberdeckCapability } from "../domain/capability.js";
 import {
-  ATTENTION_LIMITS, AttentionError, AttentionStatementSchema,
+  ATTENTION_LIMITS, AttentionError, AttentionWakeHeldError, AttentionStatementSchema,
   type AttentionCoverage, type AttentionStatement, type OrchestratorAttention,
 } from "../domain/orchestrator-attention.js";
 import { orchestratorController, type OrchestratorBinding } from "../domain/orchestrator.js";
@@ -12,6 +12,8 @@ import {
   attentionDigest, captureAttentionSources, type AttentionSourceOptions, type AttentionSourceSnapshot,
 } from "./orchestrator-attention-source.js";
 import type { WorkerEventObserver, HandoffBatchObserver } from "../broker/observed-worker-coordination.js";
+import type { InstructionRecord } from "../domain/instruction.js";
+import type { NotificationInboxPort } from "./orchestrator-notification-ports.js";
 
 /** Reuse the existing grants; old persisted primary and peer bindings need no migration. */
 export const ATTENTION_TOOL_CAPABILITIES = {
@@ -30,6 +32,7 @@ export const AgentAttentionCancelParamsSchema = z.object({
 export interface OrchestratorAttentionOptions extends AttentionSourceOptions {
   store: AttentionStorePort;
   bindings: OrchestratorBindingDirectory;
+  inbox: Pick<NotificationInboxPort, "policy">;
   registry: AttentionSourceOptions["registry"] & {
     onSessionUpdate(listener: (sessionId: string) => void): () => void;
     isStopRequested(sessionId: string): boolean;
@@ -37,6 +40,7 @@ export interface OrchestratorAttentionOptions extends AttentionSourceOptions {
   coordination: AttentionSourceOptions["coordination"] & {
     onEventSubmitted(listener: WorkerEventObserver): () => void;
     onHandoffCommitted(listener: HandoffBatchObserver): () => void;
+    onSubjectChanged?(listener: (sessionId: string) => void): () => void;
   };
   now?: () => string;
   onError?: (error: unknown) => void;
@@ -48,15 +52,19 @@ export interface AttentionReadPage {
   recovery: OrchestratorAttention["recovery"];
   captured: AttentionCoverage; consumed: AttentionCoverage;
   workers: AttentionSourceSnapshot["workers"]; gaps: OrchestratorAttention["gaps"];
+  decision?: OrchestratorAttention["decision"];
+  pendingIntent?: OrchestratorAttention["pendingIntent"];
+  lastWake?: OrchestratorAttention["lastWake"];
 }
 
-/** Explicit waiting and source capture only. This slice never evaluates a model or enqueues a wake. */
+/** Explicit waits, source capture and the authority transaction used by the existing wake queue. */
 export class OrchestratorAttentionControlPlane {
   private readonly active = new Map<string, OrchestratorAttention>();
   private readonly scheduled = new Map<string, Promise<void>>();
   private readonly dirty = new Set<string>();
   private readonly unsubscribes: Array<() => void> = [];
   private started = false;
+  private readonly listeners = new Set<(controllerId: string) => void>();
 
   constructor(private readonly options: OrchestratorAttentionOptions) {}
   private now(): string { return this.options.now?.() ?? new Date().toISOString(); }
@@ -70,6 +78,8 @@ export class OrchestratorAttentionControlPlane {
       this.options.coordination.onHandoffCommitted((_input, result) => {
         for (const member of result.handoff?.manifest ?? []) this.changed(member.workerId);
       }));
+    const unsubscribeSubjects = this.options.coordination.onSubjectChanged?.((id) => this.changed(id));
+    if (unsubscribeSubjects !== undefined) this.unsubscribes.push(unsubscribeSubjects);
     try {
       for (const record of await this.options.store.list()) this.remember(record);
       for (const controllerId of [...this.active.keys()]) await this.reconcile(controllerId);
@@ -120,6 +130,7 @@ export class OrchestratorAttentionControlPlane {
         coverage: { captured: inheritedCoverage(current, statement, "captured"), evaluated: [], noticed: [], submitted: [],
           consumed: inheritedCoverage(current, statement, "consumed") },
         gaps: [], readSequence: 0, receipts: [],
+        ...(current?.lastWake === undefined ? {} : { lastWake: current.lastWake }),
       };
       next = await this.refresh(next);
       await this.revalidate(binding, "thread.enqueue");
@@ -164,13 +175,92 @@ export class OrchestratorAttentionControlPlane {
     if (record !== undefined) this.remember(record);
   }
 
-  async reconcile(controllerId: string, epoch?: string): Promise<OrchestratorAttention | undefined> {
+  async reconcile(controllerId: string, epoch?: string, notify = true): Promise<OrchestratorAttention | undefined> {
     const record = await this.options.store.update(controllerId, async (current) => {
       if (current?.status !== "armed" || (epoch !== undefined && current.epoch !== epoch)) return current;
       return this.refresh(current);
     });
-    if (record !== undefined) this.remember(record);
+    if (record !== undefined) this.remember(record, notify);
     return record;
+  }
+
+  onChange(listener: (controllerId: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+  schedulingRecords(): Promise<OrchestratorAttention[]> { return this.options.store.list(); }
+  schedulingRecord(controllerId: string): Promise<OrchestratorAttention | undefined> { return this.options.store.get(controllerId); }
+
+  async schedulingSnapshot(controllerId: string): Promise<{ record: OrchestratorAttention; sources: AttentionSourceSnapshot } | undefined> {
+    let snapshot: { record: OrchestratorAttention; sources: AttentionSourceSnapshot } | undefined;
+    await this.options.store.update(controllerId, async (current) => {
+      if (current?.status !== "armed") return current;
+      const record = await this.refresh(current);
+      if (record.status !== "armed") return record;
+      const sources = await captureAttentionSources(this.options, record);
+      const next = { ...record, snapshotId: sources.snapshotId, gaps: sources.gaps,
+        coverage: { ...record.coverage, captured: sources.captured } };
+      snapshot = { record: next, sources };
+      return next;
+    });
+    return snapshot;
+  }
+
+  /** Every decision application rereads disk and rechecks sources and authority after async I/O. */
+  schedulingUpdate(controllerId: string, change: (record: OrchestratorAttention) => OrchestratorAttention): Promise<OrchestratorAttention | undefined> {
+    return this.options.store.update(controllerId, async (current) => {
+      if (current === undefined) return current;
+      const record = current.status === "armed" ? await this.refresh(current) : current;
+      if (record.status !== "armed") return record;
+      const binding = await this.options.bindings.findBySessionId(record.actorSessionId);
+      if (binding === undefined || binding.key !== record.bindingKey || orchestratorController(binding).controllerId !== record.controllerId
+        || !this.hasSourceAuthority(binding, record)) return this.cancelled(record, "Orchestrator scheduling authority lost");
+      return change(record);
+    });
+  }
+
+  /** Holds epoch serialization through final binding lookup and the synchronous provider write. */
+  async admitWake<T>(instruction: InstructionRecord, apply: () => T | Promise<T>): Promise<T> {
+    const wake = instruction.wake!;
+    await this.reconcile(wake.controllerId, wake.attentionEpoch, false);
+    let result: T | undefined;
+    let policyHeld = false;
+    await this.options.store.update(wake.controllerId, async (record) => {
+      if (wake.attentionEpoch === undefined) {
+        if (record !== undefined) throw new AttentionWakeHeldError("attention-owns-wake-policy", true);
+      } else {
+        if (record === undefined || record.status !== "armed" || record.epoch !== wake.attentionEpoch
+          || record.pendingIntent?.messageId !== instruction.messageId
+          || record.actorSessionId !== instruction.targetSessionId) throw new AttentionWakeHeldError("attention-obsolete", true);
+        const binding = await this.requireBinding(record.actorSessionId, "thread.enqueue");
+        this.requireEpoch(record, binding, wake.attentionEpoch);
+        if (!this.hasSourceAuthority(binding, record)) throw new AttentionWakeHeldError("attention-authority-lost", true);
+        const actor = this.options.registry.get(record.actorSessionId);
+        if (record.recovery !== "ready" || actor.exitCode !== null || actor.attentionState === "interrupted") {
+          throw new AttentionWakeHeldError("attention-missing-process");
+        }
+        if (this.options.registry.isStopRequested(record.actorSessionId)) throw new AttentionWakeHeldError("attention-stopped", true);
+        for (const authority of record.authorities) {
+          const lease = this.options.coordination.getSubject(authority.sessionId)?.lease;
+          const held = lease?.state === "active" && lease.controller?.controllerId === record.controllerId && lease.version === authority.leaseVersion;
+          const recordedLoss = record.gaps.some((gap) => gap.sessionId === authority.sessionId
+            && (gap.reason === "supervision-lost" || gap.reason === "worker-missing"));
+          if (held === recordedLoss) throw new AttentionWakeHeldError("attention-source-changed");
+        }
+        // The policy may change during native preflight or binding I/O. No await from this
+        // reading through apply: every write/retry uses the current operator policy.
+        if (this.options.inbox.policy(wake.controllerId).wake === "off") {
+          policyHeld = true;
+          return { ...record, updatedAt: this.now(),
+            ...(record.lastWake === undefined ? {} : { lastWake: { ...record.lastWake, holdReason: "notification-wake-off" } }) };
+        }
+      }
+      result = await apply();
+      return record;
+    });
+    // Persist the visible hold without clearing the intent, then let the queue retain eligibility.
+    if (policyHeld) throw new AttentionWakeHeldError("notification-wake-off");
+    return result as T;
   }
 
   async readPage(actorSessionId: string, epoch: string, notificationIds: string[], maxChars: number): Promise<AttentionReadPage> {
@@ -189,7 +279,10 @@ export class OrchestratorAttentionControlPlane {
       const id = randomUUID();
       page = { epoch, receiptId: id, snapshotId: sources.snapshotId, statement: current!.statement,
         recovery: current!.recovery, captured: sources.captured, consumed: current!.coverage.consumed,
-        workers: sources.workers, gaps: sources.gaps };
+        workers: sources.workers, gaps: sources.gaps,
+        ...(current!.decision === undefined ? {} : { decision: current!.decision }),
+        ...(current!.pendingIntent === undefined ? {} : { pendingIntent: current!.pendingIntent }),
+        ...(current!.lastWake === undefined ? {} : { lastWake: current!.lastWake }) };
       return { ...current!, snapshotId: sources.snapshotId, gaps: sources.gaps,
         coverage: { ...current!.coverage, captured: sources.captured }, updatedAt: this.now(),
         readSequence: current!.readSequence + 1,
@@ -316,11 +409,13 @@ export class OrchestratorAttentionControlPlane {
   private stale(): never { throw new AttentionError("STALE_ATTENTION_EPOCH", "Wait epoch has changed; this operation cannot affect it"); }
   private cancelled(record: OrchestratorAttention, reason: string): OrchestratorAttention {
     const { pendingIntent: _intent, ...rest } = record;
-    return { ...rest, status: "cancelled", cancelledAt: this.now(), cancelReason: reason, updatedAt: this.now() };
+    return { ...rest, status: "cancelled", cancelledAt: this.now(), cancelReason: reason, updatedAt: this.now(),
+      ...(record.lastWake === undefined ? {} : { lastWake: { ...record.lastWake, holdReason: "attention-cancelled" } }) };
   }
-  private remember(record: OrchestratorAttention): void {
+  private remember(record: OrchestratorAttention, notify = true): void {
     if (record.status === "armed") this.active.set(record.controllerId, record);
     else this.active.delete(record.controllerId);
+    if (notify) for (const listener of this.listeners) listener(record.controllerId);
   }
   private changed(sessionId: string): void {
     if (!this.started) return;

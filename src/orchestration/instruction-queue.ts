@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows } from "../domain/capability.js";
-import { InstructionRecordSchema, WakeContextSchema, WakeHeldError, type InstructionRecord } from "../domain/instruction.js";
+import { InstructionRecordSchema, WakeContextSchema, WakeHeldError, type InstructionRecord, type InstructionAdmission } from "../domain/instruction.js";
+import { AttentionError, AttentionWakeHeldError } from "../domain/orchestrator-attention.js";
 import { instructionReachedProvider, type InstructionLifecycleState } from "../domain/worker-truth.js";
 import type { SessionRecord } from "../domain/session.js";
 import type {
@@ -59,6 +60,7 @@ export class InstructionQueue {
     private readonly registry: SessionInstructionPort,
     private readonly orchestrators: OrchestratorBindingReader,
     private readonly store: InstructionRepository,
+    private readonly wakeAdmission?: (record: InstructionRecord) => InstructionAdmission,
   ) {}
 
   start(): void {
@@ -205,37 +207,36 @@ export class InstructionQueue {
   ): Promise<InstructionRecord> {
     const request = EnqueueBrokerInstructionParamsSchema.parse(input);
     this.registry.get(request.targetSessionId);
-    const existing = await this.store.list(request.targetSessionId);
-    const duplicate = existing.find((record) => record.messageId === request.messageId);
-    if (duplicate !== undefined) {
-      if (duplicate.submissionKind === "wake" && ["accepted", "queued"].includes(duplicate.status)) {
-        await this.flush(request.targetSessionId);
-        return (await this.store.list(request.targetSessionId)).find(({ id }) => id === duplicate.id) ?? duplicate;
-      }
-      return duplicate;
-    }
-    const now = new Date().toISOString();
-    const record = InstructionRecordSchema.parse({
-      id: randomUUID(),
-      actorSessionId: request.actorSessionId,
-      targetSessionId: request.targetSessionId,
-      message: request.message,
-      status: "accepted",
-      createdAt: now,
-      updatedAt: now,
-      messageId: request.messageId,
-      hop: 0,
-      brokerOwned: true,
-      ...(request.submissionKind === undefined ? {} : { submissionKind: request.submissionKind, wake: request.wake }),
+    let wasCreated = false;
+    const record = await this.serialize(request.targetSessionId, async () => {
+      const existing = await this.store.list(request.targetSessionId);
+      const duplicate = existing.find((entry) => entry.messageId === request.messageId);
+      if (duplicate !== undefined) return duplicate;
+      const now = new Date().toISOString();
+      const created = InstructionRecordSchema.parse({
+        id: randomUUID(), actorSessionId: request.actorSessionId, targetSessionId: request.targetSessionId,
+        message: request.message, status: "accepted", createdAt: now, updatedAt: now,
+        messageId: request.messageId, hop: 0, brokerOwned: true,
+        ...(request.submissionKind === undefined ? {} : { submissionKind: request.submissionKind, wake: request.wake }),
+      });
+      await this.store.put(created);
+      wasCreated = true;
+      return created;
     });
-    await this.store.put(record);
+    // Preserve ordinary broker-policy retries; only wake duplicates actively retry a hold.
+    if (!wasCreated && record.submissionKind !== "wake") return record;
+    if (!["accepted", "queued"].includes(record.status)) return record;
     await this.flush(record.targetSessionId);
     return (await this.store.list(record.targetSessionId)).find(({ id }) => id === record.id) ?? record;
   }
 
-  flush(targetSessionId: string): Promise<InstructionRecord[]> {
+  flush(targetSessionId: string, verifyMessageId?: string): Promise<InstructionRecord[]> {
     return this.serialize(targetSessionId, async () => {
-      const pending = (await this.store.list(targetSessionId))
+      const records = await this.store.list(targetSessionId);
+      const rendered = records.find((record) => record.messageId === verifyMessageId && record.status === "rendered"
+        && record.brokerOwned === true && record.wake?.attentionEpoch !== undefined);
+      if (rendered !== undefined) this.registry.verifyInstructionSubmission?.(targetSessionId, rendered.id);
+      const pending = records
         .filter((record) => record.status === "accepted" || record.status === "queued");
       const results: InstructionRecord[] = [];
       for (const [index, record] of pending.entries()) {
@@ -247,7 +248,7 @@ export class InstructionQueue {
         if (instructionReachedProvider(attempted.status)) continue;
         // A terminal worker holds nothing back: the next record hits the same dead session and
         // resolves itself the same way, each with its own honest terminal state.
-        if (attempted.status === "undelivered") continue;
+        if (attempted.status === "undelivered" || attempted.status === "cancelled") continue;
         const holdReason = attempted.status === "rendered"
           ? "composer-occupied"
           : attempted.holdReason ?? "composer-occupied";
@@ -353,6 +354,10 @@ export class InstructionQueue {
         : "orchestrator";
     let delivery;
     try {
+      if (record.wake?.attentionEpoch !== undefined && this.wakeAdmission === undefined) {
+        throw new AttentionWakeHeldError("attention-admission-unavailable");
+      }
+      const admission = record.submissionKind === "wake" ? this.wakeAdmission?.(record) : undefined;
       delivery = await this.registry.submitInstruction(record.targetSessionId, record.message, source, {
         actorSessionId: record.actorSessionId,
         senderSessionId: record.senderSessionId ?? record.actorSessionId,
@@ -360,8 +365,14 @@ export class InstructionQueue {
         workflowRunId: record.workflowRunId ?? null,
         brokerOwned: record.brokerOwned === true,
         ...(record.submissionKind === undefined ? {} : { submissionKind: record.submissionKind }),
-      }, record.id);
+      }, record.id, ...(admission === undefined ? [] as const : [admission] as const));
     } catch (error) {
+      if (error instanceof AttentionWakeHeldError) {
+        return this.persistState(record, error.obsolete ? "cancelled" : "queued", { holdReason: error.holdReason });
+      }
+      if (record.wake?.attentionEpoch !== undefined && error instanceof AttentionError) {
+        return this.persistState(record, "cancelled", { holdReason: error.code });
+      }
       if (error instanceof WakeHeldError) {
         return this.persistState(record, "queued", { holdReason: error.holdReason });
       }

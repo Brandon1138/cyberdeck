@@ -1,4 +1,4 @@
-import { WakeHeldError, type WakeHoldReason } from "../../domain/instruction.js";
+import { WakeHeldError, type WakeHoldReason, type InstructionAdmission } from "../../domain/instruction.js";
 import type { ModalAnswerAttempt } from "../../domain/modal-descriptor.js";
 import { SessionCatalog } from "./session-catalog.js";
 import type { InstructionDelivery } from "./session-ports.js";
@@ -189,6 +189,7 @@ export class SessionIoSurface {
     source: "orchestrator" | "worker" | "broker" = "orchestrator",
     metadata: Record<string, unknown> = {},
     instructionId?: string,
+    admission?: InstructionAdmission,
   ): Promise<InstructionDelivery> {
     this.catalog.assertMayConsume(sessionId);
     const runtime = this.catalog.requireRuntime(sessionId);
@@ -218,8 +219,18 @@ export class SessionIoSurface {
       ...(submitKey === undefined ? {} : { submitKey }),
       source,
       metadata,
+      ...(admission === undefined ? {} : { admission, beforeResubmit: () => {
+        this.catalog.assertMayConsume(sessionId);
+        if (wake && this.now() - (this.lastOperatorInput.get(runtime) ?? this.startedAt) < WAKE_OPERATOR_QUIET_MS) {
+          throw new WakeHeldError("wake-operator-active");
+        }
+      } }),
       ...(instructionId === undefined ? {} : { instructionId }),
     });
+  }
+
+  verifyInstructionSubmission(sessionId: string, instructionId: string): void {
+    this.catalog.requireRuntime(sessionId).turns.verifyInstructionSubmission(instructionId);
   }
 
   /**

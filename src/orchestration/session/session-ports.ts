@@ -1,4 +1,4 @@
-import type { InstructionRecord } from "../../domain/instruction.js";
+import type { InstructionRecord, InstructionAdmission } from "../../domain/instruction.js";
 import type { ModalAnswerAttempt } from "../../domain/modal-descriptor.js";
 import type { OrchestratorBinding } from "../../domain/orchestrator.js";
 import type {
@@ -171,6 +171,8 @@ export interface InstructionStateUpdate {
 }
 
 export interface SessionInstructionPort extends SessionLookupPort {
+  /** Re-arm verification of existing rendered text; never render it again or reset its press count. */
+  verifyInstructionSubmission?(sessionId: string, instructionId: string): void;
   onControllerReleased(listener: (sessionId: string) => void): () => void;
   onDeliveryBoundary(listener: (sessionId: string) => void): () => void;
   onInstructionState(listener: (update: InstructionStateUpdate) => void): () => void;
@@ -180,6 +182,7 @@ export interface SessionInstructionPort extends SessionLookupPort {
     source: "orchestrator" | "worker" | "broker",
     metadata?: Record<string, unknown>,
     instructionId?: string,
+    admission?: InstructionAdmission,
   ): Promise<InstructionDelivery>;
 }
 

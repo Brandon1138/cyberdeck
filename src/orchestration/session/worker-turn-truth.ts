@@ -1,8 +1,26 @@
 import { describeBlockedModal } from "../../domain/modal-descriptor.js";
 import { BLOCKED_PROMPT_TAIL_CHARS } from "../../domain/terminal-replay.js";
 import { projectWorkerTruth, type ComposerObservation, type WorkerTruthInput } from "../../domain/worker-truth.js";
+import type { SessionRecord } from "../../domain/session.js";
 import type { WorkerInputReadiness } from "./worker-input-readiness.js";
-import type { ReplayObservation } from "./worker-turn-ports.js";
+import type { ReplayObservation, WorkerTurnPreview } from "./worker-turn-ports.js";
+
+/** Preserve structured role provenance; record/replay prose alone cannot prove a new reply. */
+export function workerPreviewKind(preview: WorkerTurnPreview, nativeAssistant: boolean,
+  record?: SessionRecord): SessionRecord["latestPreviewKind"] {
+  return preview.kind === "prompt" ? "prompt"
+    : preview.kind === "assistant" && nativeAssistant ? "assistant"
+      : record !== undefined && preview.text === record.latestPreview ? record.latestPreviewKind : undefined;
+}
+
+export function updateWorkerPreview(record: SessionRecord, preview: WorkerTurnPreview,
+  kind: SessionRecord["latestPreviewKind"]): boolean {
+  if (preview.kind === "none" || preview.text === record.latestPreview && kind === record.latestPreviewKind) return false;
+  record.latestPreview = preview.text;
+  if (kind === undefined) delete record.latestPreviewKind;
+  else record.latestPreviewKind = kind;
+  return true;
+}
 
 export function projectWorkerTurnTruth(input: WorkerTruthInput & {
   terminalFinalizing: boolean;

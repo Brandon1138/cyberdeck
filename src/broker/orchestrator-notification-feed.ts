@@ -1,4 +1,5 @@
 import type { InstructionRecord } from "../domain/instruction.js";
+import { OrchestratorAttentionScheduling } from "./orchestrator-attention-scheduling.js";
 import type { OrchestratorAttentionControlPlane } from "../orchestration/orchestrator-attention-control.js";
 import type { OrchestratorBindingDirectory } from "../orchestration/orchestrator-controller-directory.js";
 import { OrchestratorControllerDirectory } from "../orchestration/orchestrator-controller-directory.js";
@@ -36,6 +37,7 @@ export interface OrchestratorNotificationFeedOptions {
 export interface OrchestratorNotificationFeed {
   producer: OrchestratorNotificationProducer;
   control: OrchestratorNotificationControlPlane;
+  readonly scheduling: OrchestratorAttentionScheduling | undefined;
   /** Hand the queue's repository through this so the producer sees every persisted instruction. */
   observeInstruction(record: InstructionRecord): void;
   /** Builds delivery once the instruction queue exists, then starts producer and delivery in order. */
@@ -64,6 +66,7 @@ export function composeOrchestratorNotificationFeed(
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   let delivery: OrchestratorNotificationDelivery | undefined;
+  let scheduling: OrchestratorAttentionScheduling | undefined;
   const control = new OrchestratorNotificationControlPlane({
     inbox: options.inbox,
     bindings: options.bindings,
@@ -74,22 +77,30 @@ export function composeOrchestratorNotificationFeed(
   return {
     producer,
     control,
-    observeInstruction: (record) => producer.observeInstruction(record),
+    get scheduling() { return scheduling; },
+    observeInstruction(record) { producer.observeInstruction(record); scheduling?.observeInstruction(record); },
     async start(instructions) {
+      if (options.attention !== undefined) scheduling = new OrchestratorAttentionScheduling({
+        attention: options.attention, inbox: options.inbox, registry: options.registry, instructions,
+        ...(options.now === undefined ? {} : { now: () => Date.parse(options.now!()) }),
+      });
       delivery = new OrchestratorNotificationDelivery({
         inbox: options.inbox,
         controllers,
         registry: options.registry,
         instructions,
         noticeFiles: options.noticeFiles,
+        ...(scheduling === undefined ? {} : { attention: scheduling }),
       });
       await producer.start();
       await options.attention?.start();
+      await scheduling?.start();
       await delivery.start();
       return delivery;
     },
     stop() {
       delivery?.stop();
+      scheduling?.stop();
       producer.stop();
       options.attention?.stop();
     },
