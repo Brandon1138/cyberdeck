@@ -246,7 +246,10 @@ function discoverHostPane(
   const fromEnvironment = consultEnvironment ? process.env.TMUX_PANE : undefined;
   if (isPaneId(fromEnvironment)) return fromEnvironment.trim();
   const queried = spawnSync("tmux", ["display-message", "-p", "#{pane_id}"], { encoding: "utf8" });
-  if (queried.status !== 0) return undefined;
+  if (queried.status !== 0) {
+    const detail = (queried.stderr ?? "").trim();
+    throw new Error(`tmux failed to locate the pane Fleet is running in${detail ? `: ${detail}` : ""}`);
+  }
   const paneId = (queried.stdout ?? "").trim();
   return isPaneId(paneId) ? paneId : undefined;
 }

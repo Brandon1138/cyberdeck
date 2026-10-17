@@ -289,13 +289,21 @@ describe("Cyberdeck CLI", () => {
     }));
   });
 
-  it.each(["create", "existing"] as const)("does not %s an Orc when the tmux socket is missing", async (type) => {
+  it.each([
+    { type: "create", hostPaneId: "%4" },
+    { type: "existing", hostPaneId: "%4" },
+    { type: "create", hostPaneId: undefined },
+    { type: "existing", hostPaneId: undefined },
+  ] as const)("does not open a $type Orc when the tmux socket is missing (pane $hostPaneId)", async ({ type, hostPaneId }) => {
     const result = orchestratorResult(false);
     const spawnSync: SpawnSyncLike = (_command, args) => args[0] === "-V"
       ? { status: 0, stdout: "tmux 3.6a\n" }
       : { status: 1, stderr: "error connecting to /tmp/missing (No such file or directory)\n" };
     const services = {
-      preflight: () => preflightCockpit({ spawnSync, insideTmux: true, hostPaneId: "%4" }),
+      preflight: () => preflightCockpit({
+        spawnSync, insideTmux: true,
+        ...(hostPaneId === undefined ? {} : { hostPaneId }),
+      }),
       create: vi.fn(async () => result),
       resume: vi.fn(async () => result.session),
       stop: vi.fn(async () => {}),

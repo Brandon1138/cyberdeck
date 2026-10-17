@@ -541,6 +541,25 @@ describe("preflightCockpit host pane discovery", () => {
       .toThrow("tmux failed to locate the window Fleet is running in");
   });
 
+  it("rejects failed pane discovery when the inherited pane is absent", () => {
+    vi.stubEnv("TMUX", "/tmp/tmux-501/missing,123,0");
+    vi.stubEnv("TMUX_PANE", undefined);
+    const detail = "error connecting to /tmp/tmux-501/missing (No such file or directory)";
+    const spawnSync = vi.fn<SpawnSyncLike>((_command, args) => args[0] === "-V"
+      ? { status: 0, stdout: "tmux 3.5a\n" }
+      : { status: 1, stderr: `${detail}\n` });
+    try {
+      expect(() => preflightCockpit({ spawnSync })).toThrow(
+        `tmux failed to locate the pane Fleet is running in: ${detail}`,
+      );
+      expect(spawnSync).toHaveBeenLastCalledWith(
+        "tmux", ["display-message", "-p", "#{pane_id}"], { encoding: "utf8" },
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("ignores an answer that does not name a pane", () => {
     const spawnSync = vi.fn<SpawnSyncLike>((_command, args) =>
       args[0] === "-V" ? { status: 0, stdout: "tmux 3.5a\n" } : { status: 0, stdout: "no such pane\n" });
