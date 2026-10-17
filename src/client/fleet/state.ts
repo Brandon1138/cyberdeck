@@ -2,6 +2,7 @@ import type { FleetWorkerCoordinationView } from "../../broker/worker-coordinati
 import type { CavemanWorkersRequest, CreateOrchestratorRequest, FableWorkersRequest } from "../../domain/orchestrator.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../../domain/session.js";
 import type { WorkerTruth } from "../../domain/worker-truth.js";
+import type { FleetListView, FleetReplyWatermark } from "../../domain/fleet-preferences.js";
 import { type AttachTransport } from "../attach.js";
 import { type ConfigurablePermissionProvider, type ProviderPermissionPolicy, type ProviderPermissionResolution } from "../permission-policy.js";
 import { type PullRequestSummary } from "../pr-status.js";
@@ -141,6 +142,7 @@ export type WorkerIsolation = "shared" | "worktree";
 export interface FolderDisposition {
   collapsed: boolean;
   expanded: boolean;
+  historyExpanded?: boolean;
 }
 
 export interface WorkerPickerState {
@@ -215,9 +217,15 @@ export interface FleetState {
    * focused folder header is, and cleared the moment the row itself stops existing.
    */
   focusedShowMoreCwd?: string | undefined;
+  focusedHistoryCwd?: string | undefined;
+  focusedViewControl?: FleetListView | undefined;
+  focusedUpdateSessionId?: string | undefined;
+  listView?: FleetListView | undefined;
+  expandedHistoryCwds?: readonly string[] | undefined;
+  replyWatermarks?: Readonly<Record<string, FleetReplyWatermark>> | undefined;
   /** Folders whose threads are hidden. Membership survives snapshot churn. */
   collapsedCwds?: readonly string[] | undefined;
-  /** Folders showing every worker rather than the first {@link FOLDER_THREAD_CAP}. */
+  /** History disclosures showing every inactive thread rather than the first {@link FOLDER_THREAD_CAP}. */
   expandedCwds?: readonly string[] | undefined;
   fallbackCwd: string;
   workingDirectory?: string | undefined;
@@ -243,6 +251,7 @@ export interface FleetState {
   nvimLayoutEnabled: boolean;
   view: "fleet" | "diagnostics";
   helpOpen?: boolean | undefined;
+  helpScrollOffset?: number | undefined;
   /**
    * Set while the operator is debugging lease custody. Worker rows then carry the full
    * broker projection on a second line; at rest a single badge says the same thing.

@@ -9,7 +9,7 @@ import { fit, renderComposerLines } from "./render-composer.js";
 import { renderHeader } from "./render-list.js";
 import { boundedIndex } from "./render-rows.js";
 import { ResolvedFleetRenderOptions, SlashCommandDefinition, SlashCommandValue } from "./runtime-options.js";
-import { paint, renderNotice, workerPolicyTransition } from "./slash-commands.js";
+import { paint, renderNotice, workerPolicyTransition, visitCommandTransition } from "./slash-commands.js";
 import { FleetSnapshot, FleetState, FleetTransition } from "./state.js";
 
 export function transitionCommandPalette(
@@ -110,6 +110,7 @@ export function transitionCommandPalette(
       };
       if (command.name === "/model") return openWorkerPicker(closed, snapshot, "");
       if (command.name === "/handoff") return openHandoffPicker(closed, snapshot);
+      if (command.name === "/read") return visitCommandTransition(closed, snapshot, "/read")!;
       return openPermissionPicker(closed, snapshot);
     }
     const command = palette.command!;

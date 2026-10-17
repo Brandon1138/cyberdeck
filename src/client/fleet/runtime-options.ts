@@ -62,6 +62,8 @@ export interface OrchestratorModelChoice {
 }
 
 export type SlashCommandName =
+  | "/view"
+  | "/read"
   | "/model"
   | "/permissions"
   | "/fable-workers"

@@ -74,8 +74,36 @@ rollback failure is reported after the original presentation error. Ordinary det
 operations still never stop a provider.
 
 `cyberdeck dashboard` groups durable agent threads by project. Every row shows the thread name,
-friendly model and effort, truthful attention status, normalized assistant preview, and relative
-meaningful activity time. It never ranks providers or chooses a model.
+truthful attention status and ownership. Wider rows also show model/effort, assistant preview,
+worktree and pull request information; compact rows give that space back to task names. The selected
+thread's footer shows its full stored title, model/effort, cwd, owner and latest meaningful reply.
+Observed model values take precedence, and `~` retains the existing launch-value uncertainty marker.
+
+Fleet opens in **Live**: actionable sessions appear first within Orcs and each project, with known
+inactive threads under a counted **History** disclosure. Idle sessions with queued instructions,
+Unknown, Failed, Interrupted, stalled and blocked sessions stay actionable. History remains durable
+and reopenable. Only expanded history uses the five-thread cap and `show more`; live rows are never
+capped. Pins and the existing activity/order rules apply within each partition.
+
+Use `/view live`, `/view unread`, or `/view history`, or press `Home` to focus the view controls,
+`Left`/`Right` to choose, and `Enter` to apply. Unread shows threads with new meaningful assistant
+content; History shows known inactive threads. `Up`/`Down` navigate project headings, history
+disclosures and threads. Empty `Enter` toggles a disclosure; `Left`/`Right` close/open it. Thread
+actions and the detail footer are inactive while a structural row holds focus. Snapshot churn keeps
+selection bound to the same thread ID and never arms a destructive action on its replacement.
+
+`*` marks a new reply. `/read` explicitly inspects the selected reply and marks it read; presenting
+an actual native attachment also marks it read. Cursor traversal and the passive footer do not.
+The **Since your last visit** list shows up to three such updates; `Enter` on an entry reveals its
+thread without consuming it. Read/view preferences use the existing Fleet preference journal.
+First sight establishes a content baseline, so historical replies are never announced as new.
+If a cold index already has prose but no canonical count, its first trusted native capture also
+establishes a baseline rather than announcing historical backfill.
+Unread requires changed classified assistant preview text, explicit assistant preview provenance,
+and advancing canonical turn evidence; general
+activity timestamps, prompts, model changes and terminal chrome cannot create replies. Replay-only
+or legacy brokers cannot prove new assistant replies; identical stored preview heads are not counted
+again. Older brokers keep read/view state for the current Fleet visit only.
 
 Fleet controls:
 
@@ -90,7 +118,7 @@ Fleet controls:
   the broker's five-minute cache, so newly advertised models need no Cyberdeck update. If discovery
   fails, the switcher labels its stored Codex choices and shows the reason. Refresh preserves the
   selected model and effort; a removed selection requires choosing again.
-- `Up` / `Down`: select a thread.
+- `Up` / `Down`: navigate the visible register, including headings, disclosures and view controls.
 - `Right`, or `Enter` while the bottom composer is empty: open the selected provider TUI. A live
   thread attaches to its existing PTY; a terminal thread resumes that exact provider-native
   conversation first.
@@ -129,11 +157,13 @@ Fleet controls:
 - Type a task in the persistent bottom composer and press `Enter`: start a new thread using the
   visible model, effort, sandbox, and project context, then attach to its native TUI.
 - `?`: toggle the shortcut panel. It documents reorder, view switch, rename, multiline, pin, numbered
-  opening, and contextual stop/delete controls.
+  opening, and contextual stop/delete controls. Narrow help scrolls with arrows or Page Up/Down;
+  Home/End reach its beginning/end. Selected detail yields to help, pickers, confirmations and
+  multiline drafts.
 - `Esc`: close an active picker/edit mode or clear a draft. It never exits Fleet.
 - The first `Ctrl+X` on any selected thread is always the stop step, including a thread already
   displayed as `Done`. On an orchestrator, it stops the orchestrator and every owned worker while
-  keeping all thread history visible.
+  keeping all thread history available.
 - After that stop step, `Ctrl+X` on a terminal thread or fully stopped orchestrator tree shows the
   exact red deletion confirmation. Press `Ctrl+X` once more to delete the thread or tree leaf-first.
 - `Ctrl+C` twice consecutively: leave Fleet. The first press shows a red inline confirmation near the
@@ -368,9 +398,10 @@ accumulates history without anyone stopping and deleting threads to reclaim capa
 
 Broker shutdown still ends active PTYs, but the durable session catalog, project grouping, model
 metadata, normalized preview, and native conversation identity survive broker death or restart.
-A thread that had finished its task is rehydrated as `Done` — the process is gone, the outcome is
-not. Only a thread that was genuinely mid-turn is rehydrated as `Interrupted`; opening either one
-uses the provider's exact resume path rather than inventing a replacement conversation.
+Current activity, completed turns and verified task outcome are separate facts. `Idle` means a
+recognized clear input surface, `Exited` means observed process exit, and `Done` requires a verified
+structured Scout outcome. Unverifiable activity remains `Unknown`; lost process ownership can be
+`Interrupted`. Reopening a durable thread uses the provider's exact resume path when supported.
 
 Finished threads are retired automatically after 7 days, or once 200 of them have accumulated,
 whichever comes first. Pinned threads are never retired. Both bounds are configurable, and `null`

@@ -73,7 +73,7 @@ export function composerCursor(
   return {
     row: Math.max(1, rowIndex + 1),
     column: focus.value === ""
-      ? emptyColumn
+      ? Math.min(width, emptyColumn)
       : Math.min(width, displayWidth(visibleLine) + 1),
   };
 }

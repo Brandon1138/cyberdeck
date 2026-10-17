@@ -2,23 +2,28 @@ import { homedir } from "node:os";
 import { imageInputRefusal, providerAcceptsImages, providerAttachesImagesAtLaunch } from "../../domain/image-input.js";
 import type { CavemanWorkersResult, OrchestratorGrantToggleResult } from "../../domain/orchestrator.js";
 import type { SessionRecord } from "../../domain/session.js";
+import type { FleetListView } from "../../domain/fleet-preferences.js";
 import { composerImageAttachments } from "../clipboard-image.js";
 import { resolveProviderPermission } from "../permission-policy.js";
 import { ANSI } from "./constants.js";
 import { composerCwd, composerWorkspace, taskName } from "./model-labels.js";
 import { openWorkerPickerForCwd } from "./picker-worker.js";
 import { fit } from "./render-composer.js";
+import { groupThreads } from "./list-groups.js";
+import { threadFocusInert } from "./list-rows.js";
+import { assistantPreview, isUnreadThread, markThreadRead } from "./visit-state.js";
 import { FleetNoticeTone, FleetSnapshot, FleetState, FleetTransition, LaunchProfile, WorkerIsolation } from "./state.js";
 
 export function startTransition(
   state: FleetState,
   selected: SessionRecord | undefined,
   draft: string,
+  displayedCwd?: string,
 ): FleetTransition {
   if (draft.startsWith("/")) {
     return { state: { ...state, notice: "Use /model to configure a new worker", noticeTone: "error" } };
   }
-  const cwd = state.workingDirectory ?? selected?.cwd ?? state.fallbackCwd;
+  const cwd = displayedCwd ?? state.workingDirectory ?? selected?.cwd ?? state.fallbackCwd;
   const profile = state.launchProfiles[cwd];
   if (profile === undefined) {
     return openWorkerPickerForCwd(state, cwd, draft);
@@ -265,13 +270,38 @@ export function workerPolicyTransition(
   snapshot: FleetSnapshot,
   command: string,
 ): FleetTransition | undefined {
-  return grantToggleTransition(state, snapshot, command, {
+  return visitCommandTransition(state, snapshot, command)
+    ?? grantToggleTransition(state, snapshot, command, {
     name: "/fable-workers",
     action: "fable-workers",
   })
     ?? cavemanWorkersTransition(state, snapshot, command)
     ?? nvimLayoutTransition(state, command)
     ?? worktreeModeTransition(state, snapshot, command);
+}
+
+export function selectListView(state: FleetState, snapshot: FleetSnapshot, view: FleetListView): FleetState {
+  return {
+    ...state, listView: view, focusedViewControl: view, focusedFolderCwd: undefined,
+    focusedShowMoreCwd: undefined, focusedHistoryCwd: undefined, focusedUpdateSessionId: undefined,
+    threadListScrollOffset: 0, draft: "", helpOpen: false, deleteConfirmation: undefined, notice: undefined,
+    ...(view === "history" ? { expandedHistoryCwds: ["/@orcs", ...groupThreads(snapshot).map(({ cwd }) => cwd)] } : {}),
+  };
+}
+
+export function visitCommandTransition(state: FleetState, snapshot: FleetSnapshot, command: string): FleetTransition | undefined {
+  if (/^\/view(?:\s|$)/u.test(command)) {
+    const view = /^\/view\s+(live|unread|history)$/u.exec(command)?.[1] as FleetListView | undefined;
+    return view === undefined
+      ? { state: { ...state, draft: "", notice: "Usage: /view live|unread|history", noticeTone: "error" } }
+      : { state: selectListView(state, snapshot, view) };
+  }
+  if (command !== "/read") return undefined;
+  const thread = threadFocusInert(state) ? undefined
+    : snapshot.threads.find(({ record }) => record.id === state.selectedSessionId);
+  if (thread === undefined) return { state: { ...state, draft: "", notice: "Select a thread to inspect its reply", noticeTone: "warning" } };
+  const read = markThreadRead(state, thread.record.id);
+  return { state: { ...read, draft: "", notice: `Latest reply: ${assistantPreview(thread) ?? (isUnreadThread(state, thread.record.id) ? state.replyWatermarks?.[thread.record.id]?.latest : null) ?? "No response yet"}`, noticeTone: "neutral" } };
 }
 
 export function policyOrchestrator(snapshot: FleetSnapshot, state: FleetState): SessionRecord | undefined {

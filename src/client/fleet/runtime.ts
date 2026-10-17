@@ -23,6 +23,9 @@ import { FleetInput, FleetOutput, FleetSignals, FolderDisposition, InteractiveFl
 import { transitionFleet } from "./transition.js";
 import { createFleetState } from "./transport.js";
 import { FleetSnapshotFeed } from "./snapshot-feed.js";
+import { groupThreads } from "./list-groups.js";
+import { FleetVisitPreferencesSchema, type FleetVisitPreferences, type FleetReplyWatermark } from "../../domain/fleet-preferences.js";
+import { isLiveThread, markThreadRead, restoreVisitPreferences } from "./visit-state.js";
 export async function runFleet(
   client: InteractiveFleetTransport,
   input: FleetInput = process.stdin,
@@ -35,6 +38,7 @@ export async function runFleet(
   catch (error) { snapshotFeed.dispose(); throw error; }
   let snapshot = snapshotFeed.snapshot;
   let state = createFleetState(snapshot);
+  let savedFolders: Record<string, FolderDisposition> = {};
   const permissionPreferences = runtime.permissionPreferences;
   try {
     state = {
@@ -49,16 +53,41 @@ export async function runFleet(
       {},
     );
     const keys = Object.entries(dispositions);
+    savedFolders = dispositions;
     const collapsed = keys.filter(([, disposition]) => disposition.collapsed).map(([key]) => key);
+    const unregisteredHasLiveRows = groupThreads(snapshot).find(({ cwd }) => cwd === UNREGISTERED_SECTION_KEY)?.threads.some(isLiveThread) === true;
     state = {
       ...state,
       collapsedCwds: dispositions[UNREGISTERED_SECTION_KEY] === undefined
-        ? [...collapsed, UNREGISTERED_SECTION_KEY]
+        ? [...collapsed, ...(unregisteredHasLiveRows ? [] : [UNREGISTERED_SECTION_KEY])]
         : collapsed,
       expandedCwds: keys.filter(([, disposition]) => disposition.expanded).map(([key]) => key),
+      expandedHistoryCwds: keys.filter(([, disposition]) => disposition.historyExpanded === true).map(([key]) => key),
     };
   } catch {
   }
+  let savedVisit: FleetVisitPreferences | undefined;
+  try {
+    savedVisit = FleetVisitPreferencesSchema.parse(await client.request("fleet.visit", {}));
+    state = restoreVisitPreferences(state, snapshot, savedVisit, savedFolders);
+  } catch { /* Older brokers keep a visit-local baseline; no inferred historical unread. */ }
+  const saveVisit = async () => {
+    if (savedVisit === undefined) return;
+    const replies: Record<string, FleetReplyWatermark> = {};
+    for (const [id, watermark] of Object.entries(state.replyWatermarks ?? {})) {
+      if (JSON.stringify(savedVisit.replies[id]) !== JSON.stringify(watermark)) replies[id] = watermark;
+    }
+    const view = state.listView ?? "live";
+    if (Object.keys(replies).length === 0 && savedVisit.view === view) return;
+    try {
+      await client.request("fleet.visit.set", { view, replies });
+      savedVisit = { view, replies: { ...savedVisit.replies, ...replies } };
+    } catch (error) {
+      state = { ...state, notice: `Could not save Fleet read/view state: ${error instanceof Error ? error.message : String(error)}`, noticeTone: "error" };
+      // Keep in-memory state stable, and avoid writing the same failed append each repaint.
+      savedVisit = undefined;
+    }
+  };
   try {
     state = {
       ...state,
@@ -223,6 +252,7 @@ export async function runFleet(
     input.pause?.();
     input.setRawMode?.(false);
     output.write(`${LEAVE_FLEET_SCREEN}\u001b[2J\u001b[H`);
+    let inspected = false;
     try {
       const status = await attachSession({
         sessionId,
@@ -232,8 +262,10 @@ export async function runFleet(
         output,
         signals,
         closeTransport: false,
+        onAttached: () => { inspected = true; },
         ...(runtime.detachIdentity === undefined ? {} : { detachIdentity: runtime.detachIdentity }),
       });
+      if (inspected) state = markThreadRead(normalizeState(state, snapshotFeed.snapshot, Date.now()), sessionId);
       if (status !== 0) state = { ...state, notice: "Provider attachment closed unexpectedly", noticeTone: "error" };
     } catch (error) {
       state = { ...state, notice: error instanceof Error ? error.message : String(error), noticeTone: "error" };
@@ -263,7 +295,10 @@ export async function runFleet(
     output.write(`${LEAVE_FLEET_SCREEN}\u001b[2J\u001b[H`);
     try {
       const session = await runtime.openOrchestrator(target);
-      state = { ...state, selectedSessionId: session.id, notice: undefined };
+      state = markThreadRead(normalizeState({ ...state, selectedSessionId: session.id,
+        ...(target.type === "create" ? { listView: "live" } : {}),
+        focusedFolderCwd: undefined, focusedHistoryCwd: undefined, focusedShowMoreCwd: undefined,
+        focusedViewControl: undefined, focusedUpdateSessionId: undefined, notice: undefined }, snapshotFeed.snapshot, Date.now()), session.id);
       if (nvimLayoutHookInstalled) {
         await runtime.nvimLayoutHooks?.rebalance(
           layoutOrchestratorSessionIds(snapshot, session.id),
@@ -337,6 +372,7 @@ export async function runFleet(
     snapshot = executed.snapshot;
     if (action !== undefined) snapshotFeed.resync(snapshot);
     nvimLayoutHookInstalled = executed.nvimLayoutHookInstalled;
+    await saveVisit();
     notify();
   };
   const queueKeys = (keys: readonly string[]) => {
@@ -387,6 +423,7 @@ export async function runFleet(
       }
       refreshNotice = snapshotFeed.error;
       state = normalizeState(state, snapshot, Date.now());
+      await saveVisit();
       if (mascotFrameTimer !== undefined) clearTimeout(mascotFrameTimer);
       mascotFrameTimer = undefined;
       const pulse = mascotPulse?.update(snapshot.threads, Date.now());

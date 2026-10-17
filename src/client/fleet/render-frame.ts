@@ -6,7 +6,7 @@ import { renderHandoffPicker } from "./picker-handoff.js";
 import { renderOrchestratorPicker } from "./picker-orchestrator.js";
 import { renderCommandPalette, renderPermissionPicker } from "./picker-palette.js";
 import { renderWorkerPicker } from "./picker-worker.js";
-import { renderFleetFooter, renderFleetList, renderHeader } from "./render-list.js";
+import { normalizeHelpScroll, renderFleetFooter, renderFleetList, renderHeader } from "./render-list.js";
 import { ResolvedFleetRenderOptions } from "./runtime-options.js";
 import { FleetRenderOptions, FleetSnapshot, FleetState } from "./state.js";
 
@@ -67,6 +67,7 @@ export function normalizeThreadListViewport(
   state: FleetState,
   options: ResolvedFleetRenderOptions,
 ): FleetState {
+  state = normalizeHelpScroll(state, snapshot, options);
   return scrollFocusedRowIntoView(
     state,
     fleetListRows(snapshot, state),

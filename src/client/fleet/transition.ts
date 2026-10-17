@@ -1,15 +1,15 @@
 import { imageInputRefusal, providerAcceptsImages } from "../../domain/image-input.js";
 import { HANDOFF_LIMITS } from "../../domain/worker-handoff.js";
 import { DELETE_CONFIRMATION_MS, PROJECTS_UNAVAILABLE_NOTICE, QUIT_CONFIRMATION_NOTICE } from "./constants.js";
-import { focusRow, foldTransition, navigableListRowIndex, scrollFocusedRowIntoView, setCollapsed, setExpanded, threadSubject } from "./list-groups.js";
-import { fleetListRows, focusedListRowIndex, isCollapsed, isExpanded, isTerminalSession, orderedThreads, threadFocusInert } from "./list-rows.js";
+import { focusRow, foldTransition, groupThreads, navigableListRowIndex, scrollFocusedRowIntoView, setCollapsed, setExpanded, setHistoryExpanded, threadSubject } from "./list-groups.js";
+import { fleetListRows, focusedListRowIndex, isCollapsed, isExpanded, historyExpanded, isTerminalSession, orderedThreads, threadFocusInert } from "./list-rows.js";
 import { composerCwd } from "./model-labels.js";
 import { normalizeState, openAction } from "./normalize.js";
 import { TERMINAL_HANDOFF_REFUSAL, handoffMarks, openHandoffPicker, transitionHandoffPicker } from "./picker-handoff.js";
 import { initialOrchestratorPicker, transitionOrchestratorPicker } from "./picker-orchestrator.js";
 import { openPermissionPicker, transitionCommandPalette, transitionPermissionPicker } from "./picker-palette.js";
 import { openWorkerPicker, transitionProjectPrompt, transitionShellMode, transitionWorkerPicker } from "./picker-worker.js";
-import { startTransition, workerPolicyTransition } from "./slash-commands.js";
+import { selectListView, startTransition, workerPolicyTransition } from "./slash-commands.js";
 import { FleetSnapshot, FleetState, FleetTransition } from "./state.js";
 import { transitionQuit, transitionRename } from "./transition-modes.js";
 export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, key: string, now = Date.now(), threadListViewportHeight = Number.MAX_SAFE_INTEGER): FleetTransition {
@@ -81,8 +81,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
     };
   }
   if (key === "ctrl+]") {
-    const cockpitTarget = selected
-      ?? threads.find(({ record }) => record.id === state.selectedSessionId);
+    const cockpitTarget = selected;
     if (cockpitTarget?.record.kind !== "orchestrator") {
       return {
         state: {
@@ -115,7 +114,12 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
     };
   }
   if (key === "?" && state.draft === "") {
-    return { state: { ...state, helpOpen: state.helpOpen !== true, notice: undefined } };
+    return { state: { ...state, helpOpen: state.helpOpen !== true, helpScrollOffset: 0, notice: undefined } };
+  }
+  if (state.helpOpen === true && state.draft === "" && ["up", "down", "pageup", "pagedown", "home", "end"].includes(key)) {
+    const delta = key === "up" ? -1 : key === "down" ? 1 : key === "pageup" ? -5 : 5;
+    return { state: { ...state, helpScrollOffset: key === "home" ? 0 : key === "end" ? Number.MAX_SAFE_INTEGER
+      : Math.max(0, Math.min(100, (state.helpScrollOffset ?? 0) + delta)) } };
   }
   if (key === "ctrl+l") {
     return {
@@ -237,7 +241,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
   }
   if (/^alt\+[1-9]$/u.test(key)) {
     const index = Number(key.slice(-1)) - 1;
-    const target = threads[index];
+    const target = fleetListRows(snapshot, state).filter((row) => row.kind === "thread")[index]?.thread;
     return target === undefined
       ? { state }
       : {
@@ -246,6 +250,9 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
           selectedSessionId: target.record.id,
           focusedFolderCwd: undefined,
           focusedShowMoreCwd: undefined,
+          focusedHistoryCwd: undefined,
+          focusedViewControl: undefined,
+          focusedUpdateSessionId: undefined,
           deleteConfirmation: undefined,
           notice: undefined,
         },
@@ -308,6 +315,30 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
   if (focusedFolderCwd !== undefined && (key === "left" || key === "right")) {
     return foldTransition(state, setCollapsed(state, focusedFolderCwd, key === "left"), focusedFolderCwd);
   }
+  if (state.focusedViewControl !== undefined && state.draft === "") {
+    const views = ["live", "unread", "history"] as const;
+    if (key === "left" || key === "right") {
+      const index = views.indexOf(state.focusedViewControl);
+      return { state: { ...state, focusedViewControl: views[Math.max(0, Math.min(2, index + (key === "left" ? -1 : 1)))] } };
+    }
+    if (key === "enter") return { state: selectListView(state, snapshot, state.focusedViewControl) };
+  }
+  if (state.focusedHistoryCwd !== undefined && state.draft === "" && (key === "left" || key === "right" || key === "enter")) {
+    const cwd = state.focusedHistoryCwd;
+    return foldTransition(state, setHistoryExpanded(state, cwd,
+      key === "enter" ? !historyExpanded(state, cwd) : key === "right"), cwd);
+  }
+  if (state.focusedUpdateSessionId !== undefined && state.draft === "" && (key === "enter" || key === "right")) {
+    const target = snapshot.threads.find(({ record }) => record.id === state.focusedUpdateSessionId);
+    if (target === undefined) return { state };
+    const cwd = target.record.kind === "orchestrator" ? "/@orcs"
+      : groupThreads(snapshot).find(({ threads }) => threads.includes(target))?.cwd;
+    let next: FleetState = { ...state, listView: "live", selectedSessionId: target.record.id,
+      focusedUpdateSessionId: undefined, focusedFolderCwd: undefined, focusedHistoryCwd: undefined,
+      focusedShowMoreCwd: undefined, focusedViewControl: undefined, notice: undefined };
+    if (cwd !== undefined) next = setExpanded(setHistoryExpanded(setCollapsed(next, cwd, false), cwd, true), cwd, true);
+    return { state: next };
+  }
   if (key === "enter" && focusedFolderCwd !== undefined && state.draft.trim() === "") {
     return foldTransition(
       state,
@@ -356,7 +387,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
         action: openAction(selected.record),
       };
     }
-    return startTransition(state, selected.record, initialPrompt);
+    return startTransition(state, selected.record, initialPrompt, composerCwd(state, snapshot));
   }
   if (key === "enter" && selected === undefined && state.draft.trim() !== "") {
     const initialPrompt = state.draft.trim();
@@ -365,7 +396,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
     if (initialPrompt === "/model") return openWorkerPicker(state, snapshot, "");
     if (initialPrompt === "/permissions") return openPermissionPicker(state, snapshot);
     if (initialPrompt === "/handoff") return openHandoffPicker(state, snapshot);
-    return startTransition(state, undefined, initialPrompt);
+    return startTransition(state, undefined, initialPrompt, composerCwd(state, snapshot));
   }
   if (
     key === "up"

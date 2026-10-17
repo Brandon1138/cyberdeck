@@ -6,6 +6,9 @@ import {
   FleetLaunchProfileSchema,
   type FleetFolderDisposition,
   type FleetLaunchProfile,
+  FleetVisitPreferencesSchema,
+  type FleetVisitPreferences,
+  type FleetReplyWatermark,
 } from "../domain/fleet-preferences.js";
 import { ValidatedJournal } from "./validated-journal.js";
 
@@ -89,6 +92,10 @@ const FleetPreferenceRecordSchema = z.discriminatedUnion("recordType", [
   FleetNvimLayoutRecordSchema,
   FleetProjectRecordSchema,
   FleetProjectMigrationRecordSchema,
+  z.object({
+    recordType: z.literal("fleet.visit"), eventId: z.uuid(), persistedAt: z.iso.datetime(),
+    preferences: FleetVisitPreferencesSchema,
+  }),
 ]);
 
 type FleetPreferenceRecord = z.infer<typeof FleetPreferenceRecordSchema>;
@@ -169,6 +176,13 @@ export class FleetPreferenceStore {
   async list(): Promise<Record<string, FleetLaunchProfile>> { return structuredClone((await this.journal.read()).profiles); }
   async listFolderDispositions(): Promise<Record<string, FleetFolderDisposition>> { return structuredClone((await this.journal.read()).folders); }
   async nvimLayoutEnabled(): Promise<boolean> { return (await this.journal.read()).enabled; }
+  async visitPreferences(): Promise<FleetVisitPreferences> { return structuredClone((await this.journal.read()).visit); }
+  /** Merge a bounded change rather than replacing another Fleet client's unrelated watermarks. */
+  async setVisitPreferences(preferences: FleetVisitPreferences): Promise<void> {
+    await this.append(FleetPreferenceRecordSchema.parse({
+      recordType: "fleet.visit", eventId: randomUUID(), persistedAt: new Date().toISOString(), preferences,
+    }));
+  }
   private append(record: FleetPreferenceRecord): Promise<void> { return this.journal.append(record); }
 }
 
@@ -178,10 +192,11 @@ interface PreferenceProjection {
   folders: Record<string, FleetFolderDisposition>;
   enabled: boolean;
   migrated: boolean;
+  visit: FleetVisitPreferences;
 }
 
 function projectPreferences(content: string): PreferenceProjection {
-  const result: PreferenceProjection = { projects: new Map(), profiles: {}, folders: {}, enabled: true, migrated: false };
+  const result: PreferenceProjection = { projects: new Map(), profiles: {}, folders: {}, enabled: true, migrated: false, visit: { replies: {} } };
   const lines = content.split("\n");
   if (!content.endsWith("\n")) lines.pop();
   for (const [index, line] of lines.entries()) {
@@ -194,8 +209,37 @@ function projectPreferences(content: string): PreferenceProjection {
         case "fleet.folder-collapse": result.folders[record.key] = record.disposition; break;
         case "fleet.nvim-layout": result.enabled = record.enabled; break;
         case "fleet.project-migration": result.migrated = true; break;
+        case "fleet.visit": {
+          if (record.preferences.view !== undefined) result.visit.view = record.preferences.view;
+          for (const [id, next] of Object.entries(record.preferences.replies)) {
+            const previous = result.visit.replies[id];
+            // An inspection from an older snapshot reads that content, not a later unseen reply.
+            const previousIsNewer = previous !== undefined && ((previous.generation ?? 0) > (next.generation ?? 0)
+              || (previous.generation ?? 0) === (next.generation ?? 0) && previous.canonicalTurns > next.canonicalTurns);
+            const latest = previousIsNewer ? previous! : next;
+            const read = previous !== undefined && compareSeen(previous, next) > 0 ? previous : next;
+            result.visit.replies[id] = {
+              ...latest, seen: read.seen,
+              ...(previous === undefined && read.seenCanonicalTurns === undefined ? {}
+                : { seenCanonicalTurns: read.seenCanonicalTurns ?? (read.seen === read.latest ? read.canonicalTurns : 0) }),
+              ...((read.seenGeneration ?? (read.seen === read.latest ? read.generation : undefined)) === undefined ? {}
+                : { seenGeneration: read.seenGeneration ?? read.generation }),
+            };
+          }
+          break;
+        }
       }
     } catch (error) { throw new Error(`Invalid Fleet preference at line ${index + 1}`, { cause: error }); }
   }
   return result;
+}
+
+/** The most recent actual inspection wins independently of the newest observed reply. */
+function compareSeen(left: FleetReplyWatermark, right: FleetReplyWatermark): number {
+  const pair = (value: FleetReplyWatermark) => [
+    value.seenGeneration ?? (value.seen === value.latest ? value.generation : 0) ?? 0,
+    value.seenCanonicalTurns ?? (value.seen === value.latest ? value.canonicalTurns : 0),
+  ];
+  const a = pair(left), b = pair(right);
+  return a[0]! - b[0]! || a[1]! - b[1]!;
 }
