@@ -35,7 +35,7 @@ import type { CompletionLedgerEntry, RenderedInstruction, WorkerStatusReading,
   TurnCaptureClaim, BankedTurnReceipt, PendingTurnCommit, ScreenCompletionEvidence, TurnCommitOutcome } from "./worker-turn-state.js";
 import { admitSubmitRetry, normalizedHead, SubmitVerifier, type SubmitRetryResult } from "./worker-submit-verification.js";
 import { WorkerInputReadiness } from "./worker-input-readiness.js";
-import { observeWorkerModal, projectWorkerTurnTruth } from "./worker-turn-truth.js";
+import { observeWorkerModal, projectWorkerTurnTruth, workerPreviewKind, updateWorkerPreview } from "./worker-turn-truth.js";
 import { NativeTurnActivity, pendingExitTruth, supportsNativeTurnObservation, nativeReadFailure, nativeTurnIdentity } from "./worker-turn-native-state.js";
 
 export interface WorkerTurnAppendResult {
@@ -1557,9 +1557,11 @@ export class WorkerTurnEngine {
     const previews = this.options.preview;
     if (previews === undefined) return;
     let preview = previews.preview({ transcript: captured, maxLength: PREVIEW_STORAGE_LIMIT });
+    let kind = workerPreviewKind(preview, captured.some((message) => message.role === "assistant"));
     if (preview.kind === "none") {
       const transcript = await this.readTranscriptMessages().catch(() => []);
       if (!this.isCurrentObservation(epoch, revision, owner, activityRevision)) return;
+      const nativePreview = previews.preview({ transcript, maxLength: PREVIEW_STORAGE_LIMIT });
       preview = previews.preview({
         transcript,
         ...(this.record.latestPreview === undefined
@@ -1568,10 +1570,10 @@ export class WorkerTurnEngine {
         replay,
         maxLength: PREVIEW_STORAGE_LIMIT,
       });
+      kind = workerPreviewKind(preview, nativePreview.kind === "assistant", this.record);
     }
     if (!this.isCurrentObservation(epoch, revision, owner, activityRevision)) return;
-    if (preview.kind === "none" || preview.text === this.record.latestPreview) return;
-    this.record.latestPreview = preview.text;
+    if (!updateWorkerPreview(this.record, preview, kind)) return;
     await this.options.effects.persist();
   }
 

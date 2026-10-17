@@ -48,7 +48,7 @@ export const MIN_PREVIEW_CELL_WIDTH = 6;
  * column is normally four or five cells wide, and only as wide as it must be.
  */
 export const PULL_REQUEST_CELL_WIDTH = 7;
-/** Workers shown per folder before the rest go behind a show-more row. */
+/** Historical threads shown per disclosure before the rest go behind a show-more row. */
 export const FOLDER_THREAD_CAP = 5;
 export const DEFAULT_PERMISSION_POLICIES: Readonly<Record<ConfigurablePermissionProvider, ProviderPermissionPolicy>> = {
   codex: "permissioned",
@@ -109,6 +109,16 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
       { value: "off", description: "Workers run in this folder as-is" },
     ],
   },
+  {
+    name: "/view",
+    description: "Choose Live, Unread, or History",
+    values: [
+      { value: "live", description: "Actionable sessions and inactive disclosures" },
+      { value: "unread", description: "Meaningful assistant replies awaiting inspection" },
+      { value: "history", description: "Known inactive sessions, ready to reopen" },
+    ],
+  },
+  { name: "/read", description: "Inspect the selected reply and mark it read" },
 ];
 /**
  * The composer's offer, built from what the providers answered.

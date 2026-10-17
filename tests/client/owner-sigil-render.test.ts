@@ -209,16 +209,17 @@ describe("owner sigil rendering", () => {
   });
 
   it("keeps the sigil when the pane is too narrow for the title it truncates", () => {
+    const title = "Worker with a very long name indeed that cannot fit a narrow Fleet pane";
     const threads = [
       orc(ORC_A_ID, "Orc alpha", ORC_A),
-      worker(WORKER_A, "Worker with a very long name indeed", { controllerId: ORC_A }),
+      worker(WORKER_A, title, { controllerId: ORC_A }),
     ];
     const wide = render(threads);
     const narrow = render(threads, {}, { width: 74 });
     const sigil = sigilOf(rowFor(wide, "Orc alpha"));
     const row = narrow.find((line) => line.includes("Worker with"))!;
 
-    expect(row).not.toContain("Worker with a very long name indeed");
+    expect(row).not.toContain(title);
     expect(sigilOf(row)).toBe(sigil);
   });
 });

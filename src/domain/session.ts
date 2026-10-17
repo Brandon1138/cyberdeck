@@ -154,6 +154,8 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
   childIds: z.array(z.uuid()),
   attentionState: ThreadAttentionStateSchema.optional(),
   latestPreview: z.string().optional(),
+  /** Preview provenance for presentation; omitted by legacy records, never a task-outcome claim. */
+  latestPreviewKind: z.enum(["assistant", "prompt", "none"]).optional(),
   meaningfulUpdatedAt: z.iso.datetime().optional(),
   pinned: z.boolean().optional(),
   displayOrder: z.number().int().nonnegative().optional(),

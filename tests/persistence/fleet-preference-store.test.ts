@@ -164,4 +164,60 @@ describe("FleetPreferenceStore", () => {
 
     await expect(store.listFolderDispositions()).rejects.toThrow("Invalid Fleet preference at line 2");
   });
+
+  it("starts legacy journals with no invented seen or unread state and keeps history disclosures optional", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-")); directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+    await store.setFolderDisposition("/repo", { collapsed: false, expanded: false });
+    await expect(store.visitPreferences()).resolves.toEqual({ replies: {} });
+    await store.setFolderDisposition("/repo", { collapsed: false, expanded: true, historyExpanded: true });
+    await expect(new FleetPreferenceStore(directory).listFolderDispositions()).resolves.toEqual({
+      "/repo": { collapsed: false, expanded: true, historyExpanded: true },
+    });
+  });
+
+  it("persists per-thread content watermarks and view state without replacing other threads", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-")); directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+    await store.setVisitPreferences({ view: "unread", replies: { one: { seen: null, latest: "A real assistant reply", canonicalTurns: 1 } } });
+    await store.setVisitPreferences({ replies: { two: { seen: "Old", latest: "New", canonicalTurns: 2, updatedAt: "2026-10-14T12:00:00.000Z" } } });
+    const replayed = await new FleetPreferenceStore(directory).visitPreferences();
+    expect(replayed.view).toBe("unread");
+    expect(replayed.replies.one).toEqual({ seen: null, latest: "A real assistant reply", canonicalTurns: 1 });
+    expect(replayed.replies.two?.seen).toBe("Old");
+    await store.setVisitPreferences({ view: "history", replies: { one: { seen: "A real assistant reply", latest: "A real assistant reply", canonicalTurns: 1 } } });
+    const inspected = await store.visitPreferences();
+    expect(inspected.view).toBe("history"); expect(inspected.replies.one?.seen).toBe(inspected.replies.one?.latest);
+    expect(inspected.replies.two).toEqual(replayed.replies.two);
+  });
+
+  it("does not consume a newer reply when another client inspects an older snapshot", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-")); directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+    await store.setVisitPreferences({ replies: { one: { seen: "First", latest: "Third", canonicalTurns: 3 } } });
+    await store.setVisitPreferences({ replies: { one: { seen: "Second", latest: "Second", canonicalTurns: 2 } } });
+    expect((await store.visitPreferences()).replies.one).toEqual({ seen: "Second", latest: "Third", canonicalTurns: 3, seenCanonicalTurns: 2 });
+  });
+  it("does not roll back an inspection when a stale client observes a newer reply", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-")); directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+    await store.setVisitPreferences({ replies: { one: { seen: "Second", latest: "Second", canonicalTurns: 2, seenCanonicalTurns: 2 } } });
+    await store.setVisitPreferences({ replies: { one: { seen: "First", latest: "Third", canonicalTurns: 3, seenCanonicalTurns: 1 } } });
+    expect((await store.visitPreferences()).replies.one).toEqual({ seen: "Second", latest: "Third", canonicalTurns: 3, seenCanonicalTurns: 2 });
+    await store.setVisitPreferences({ replies: { one: { seen: "First", latest: "First", canonicalTurns: 1, seenCanonicalTurns: 1 } } });
+    expect((await store.visitPreferences()).replies.one?.seen).toBe("Second");
+    await store.setVisitPreferences({ replies: { one: { seen: "Third", latest: "Third", canonicalTurns: 3, seenCanonicalTurns: 3 } } });
+    await store.setVisitPreferences({ replies: { one: { seen: "Second", latest: "Third", canonicalTurns: 3, seenCanonicalTurns: 2 } } });
+    expect((await store.visitPreferences()).replies.one?.seenCanonicalTurns).toBe(3);
+  });
+
+  it("rejects invalid visit data and keeps the existing preferences readable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-")); directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+    await store.set("/repo", { provider: "codex", model: "gpt-6.1-sol" });
+    await expect(store.setVisitPreferences({ view: "invented", replies: {} } as never)).rejects.toThrow();
+    await expect(store.setVisitPreferences({ replies: { one: { seen: null, latest: "Spinner", canonicalTurns: -1 } } })).rejects.toThrow();
+    expect((await store.list())["/repo"]?.model).toBe("gpt-6.1-sol");
+    await expect(store.visitPreferences()).resolves.toEqual({ replies: {} });
+  });
 });

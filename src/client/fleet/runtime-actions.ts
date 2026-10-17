@@ -120,7 +120,8 @@ export async function executeFleetAction(
       ({ state, snapshot } = await context.openNativeThread(action.sessionId, state));
     } else if (action?.type === "start") {
       const record = await startFleetSession(client, action);
-      state = { ...state, selectedSessionId: record.id };
+      state = { ...state, selectedSessionId: record.id, listView: "live", focusedViewControl: undefined,
+        focusedFolderCwd: undefined, focusedHistoryCwd: undefined, focusedShowMoreCwd: undefined, focusedUpdateSessionId: undefined };
       snapshot = await collectFleetSnapshot(client);
       ({ state, snapshot } = await context.openNativeThread(record.id, state));
     } else if (action?.type === "open-orchestrator") {

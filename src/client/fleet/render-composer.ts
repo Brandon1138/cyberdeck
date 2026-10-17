@@ -35,7 +35,7 @@ export function renderComposerLines(
     ? prompt.prefix
     : paint(prompt.prefix, prompt.tone, options.color);
   if (value === "") {
-    return [`${paintedPrefix} ${paint(prompt.placeholder, "dim", options.color)}`];
+    return [clampRowWidth(`${paintedPrefix} ${paint(prompt.placeholder, "dim", options.color)}`, options.width)];
   }
 
   const rows: string[] = [];
@@ -66,10 +66,10 @@ export function renderComposerLines(
   }
 
   const maximumRows = Math.max(1, Math.min(12, Math.floor(options.height / 3)));
-  if (rows.length <= maximumRows) return rows;
+  if (rows.length <= maximumRows) return rows.map((row) => clampRowWidth(row, options.width));
   const visibleRows = rows.slice(-maximumRows);
   visibleRows[0] = `… ${(visibleRows[0] ?? "").slice(2)}`;
-  return visibleRows;
+  return visibleRows.map((row) => clampRowWidth(row, options.width));
 }
 
 /** Splits a painted line into plain text and the escape sequences between it. */

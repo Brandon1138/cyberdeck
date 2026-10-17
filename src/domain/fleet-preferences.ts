@@ -16,7 +16,27 @@ export const FleetLaunchProfileSchema = z.object({
 export const FleetFolderDispositionSchema = z.object({
   collapsed: z.boolean(),
   expanded: z.boolean(),
+  historyExpanded: z.boolean().optional(),
 });
+
+export const FleetListViewSchema = z.enum(["live", "unread", "history"]);
+/** Content watermarks, never timestamps of process activity. Null is an honest empty baseline. */
+export const FleetReplyWatermarkSchema = z.object({
+  seen: z.string().max(600).nullable(),
+  latest: z.string().max(600).nullable(),
+  canonicalTurns: z.number().int().nonnegative(),
+  generation: z.number().int().positive().optional(),
+  seenCanonicalTurns: z.number().int().nonnegative().optional(),
+  seenGeneration: z.number().int().positive().optional(),
+  updatedAt: z.iso.datetime().optional(),
+});
+export const FleetVisitPreferencesSchema = z.object({
+  view: FleetListViewSchema.optional(),
+  replies: z.record(z.string(), FleetReplyWatermarkSchema).default({}),
+});
+export type FleetListView = z.infer<typeof FleetListViewSchema>;
+export type FleetReplyWatermark = z.infer<typeof FleetReplyWatermarkSchema>;
+export type FleetVisitPreferences = z.infer<typeof FleetVisitPreferencesSchema>;
 
 /**
  * Who detached, as the wire and the durable log both spell it.

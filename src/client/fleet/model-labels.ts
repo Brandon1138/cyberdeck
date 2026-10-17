@@ -77,6 +77,14 @@ export function threadIdentity(record: SessionRecord): string {
     } · ${friendlyEffort(effort ?? "provider-managed")}`;
 }
 
+/** Names, never new provider abbreviations; effort moves to the selected detail at small widths. */
+export function compactThreadIdentity(record: SessionRecord): string {
+  const observed = record.observedModel;
+  const model = friendlyModel(record.provider, observed?.model ?? record.model);
+  const label = model.replace(/^(?:Codex|Claude|Cursor|Antigravity) /u, "");
+  return `${observed === undefined || observed.effort === undefined ? "~" : ""}${label}`;
+}
+
 export function friendlyModel(provider: string, model: string | undefined): string {
   if (model === undefined) return `${titleCase(provider)} Native`;
   if (provider === "cursor") {
@@ -84,6 +92,9 @@ export function friendlyModel(provider: string, model: string | undefined): stri
     if (label !== undefined) return label;
   }
   const known: Record<string, string> = {
+    "gpt-6.1-sol": "Codex Sol 6.1",
+    "gpt-6-sol": "Codex Sol 6",
+    "gpt-6-astra": "Codex Astra 6",
     "gpt-5.6-luna": "Codex Luna",
     "gpt-5.6-terra": "Codex Terra",
     "gpt-5.6-sol": "Codex Sol",

@@ -1,4 +1,5 @@
 import type { SessionRecord } from "../../domain/session.js";
+import { setScoutPreview } from "./scout-preview.js";
 import type { ScoutDecisionCard } from "../../domain/scout-output.js";
 import type {
   ScoutArtifactKind,
@@ -37,8 +38,6 @@ export interface ScoutSessionSupervisorOptions {
   reports?: ScoutReportPort | undefined;
   workspace: ScoutWorkspaceVerificationPort;
 }
-
-const PREVIEW_STORAGE_LIMIT = 600;
 
 /** Creates one supervisor per Scout session, and nothing at all for every other session. */
 export class ScoutSessionSupervisorFactory {
@@ -275,7 +274,7 @@ export class ScoutSessionSupervisor {
     scout.terminalState = "complete";
     this.card = captured.card;
     this.effects.setLatestResult(captured.text);
-    this.record.latestPreview = captured.card.finding.slice(0, PREVIEW_STORAGE_LIMIT);
+    setScoutPreview(this.record, captured.card.finding, "assistant");
     this.effects.recordCompletion(1, captured.text);
     this.record.attentionState = "done";
     this.record.updatedAt = new Date().toISOString();
@@ -311,7 +310,7 @@ export class ScoutSessionSupervisor {
     scout.launchFailure = { phase, failedAt, message };
     const latestResult = `Scout failed during ${phase}: ${message}`;
     this.effects.setLatestResult(latestResult);
-    this.record.latestPreview = latestResult.slice(0, PREVIEW_STORAGE_LIMIT);
+    setScoutPreview(this.record, latestResult, "none");
     this.record.executionState = "failed";
     this.record.attentionState = "failed";
     this.record.updatedAt = failedAt;
@@ -354,11 +353,8 @@ export class ScoutSessionSupervisor {
     this.record.exitCode = 1;
     this.record.updatedAt = failedAt;
     this.record.meaningfulUpdatedAt = failedAt;
-    this.record.latestPreview = `Scout launch failed during ${phase}: ${message}`.slice(
-      0,
-      PREVIEW_STORAGE_LIMIT,
-    );
-    this.effects.setLatestResult(this.record.latestPreview);
+    setScoutPreview(this.record, `Scout launch failed during ${phase}: ${message}`, "none");
+    this.effects.setLatestResult(this.record.latestPreview!);
     await register();
     await this.effects.appendEvent("scout.launch.failed", {
       phase,
@@ -395,6 +391,7 @@ export class ScoutSessionSupervisor {
         && scout.terminalState !== "budget_exhausted"
         && scout.terminalState !== "failed";
       if (verifiedHeadlessResult || recoverableLegacyResult) {
+        if ("card" in captured) changed = setScoutPreview(this.record, captured.card.finding, "assistant") || changed;
         changed ||= scout.terminalState !== "complete"
           || this.record.executionState !== "exited"
           || this.record.attentionState !== "done";
@@ -563,7 +560,7 @@ export class ScoutSessionSupervisor {
     }
     const latestResult = `Scout failed during ${phase}: ${message}`;
     this.effects.setLatestResult(latestResult);
-    this.record.latestPreview = latestResult.slice(0, PREVIEW_STORAGE_LIMIT);
+    setScoutPreview(this.record, latestResult, "none");
     this.record.executionState = "failed";
     this.record.attentionState = "failed";
     this.record.updatedAt = failedAt;
