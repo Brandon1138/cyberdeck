@@ -168,7 +168,8 @@ export function commandPaletteCandidates(
     if (query === "") return SLASH_COMMANDS;
     return SLASH_COMMANDS.filter((command) =>
       command.name.slice(1).includes(query)
-      || command.description.toLowerCase().includes(query));
+      || command.description.toLowerCase().includes(query))
+      .sort((left, right) => Number(right.name.slice(1) === query) - Number(left.name.slice(1) === query));
   }
   const command = SLASH_COMMANDS.find((candidate) => candidate.name === palette.command);
   if (command?.values === undefined) return [];

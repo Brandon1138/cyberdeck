@@ -8,7 +8,7 @@ import { collectDashboardSnapshot, renderDashboard } from "../dashboard.js";
 import { NO_PULL_REQUEST_STATUS, PullRequestStatusCache } from "../pr-status.js";
 import { queryTerminalBackground } from "../terminal-background.js";
 import { createTerminalMascot } from "../terminal-mascot.js";
-import { ENTER_FLEET_SCREEN, LEAVE_FLEET_SCREEN, UNREGISTERED_SECTION_KEY } from "./constants.js";
+import { ENTER_FLEET_SCREEN, LEAVE_FLEET_SCREEN } from "./constants.js";
 import { FleetKeyDecoder, composerCursor, waitForRefresh } from "./key-decoder.js";
 import { MascotActivityPulse } from "./mascot-pulse.js";
 import { normalizeState } from "./normalize.js";
@@ -23,9 +23,8 @@ import { FleetInput, FleetOutput, FleetSignals, FolderDisposition, InteractiveFl
 import { transitionFleet } from "./transition.js";
 import { createFleetState } from "./transport.js";
 import { FleetSnapshotFeed } from "./snapshot-feed.js";
-import { groupThreads } from "./list-groups.js";
-import { FleetVisitPreferencesSchema, type FleetVisitPreferences, type FleetReplyWatermark } from "../../domain/fleet-preferences.js";
-import { isLiveThread, markThreadRead, restoreVisitPreferences } from "./visit-state.js";
+import { createVisitPreferenceSaver, loadVisitPreferences } from "./visit-preferences.js";
+import { markThreadRead, restoreFolderDispositions, restoreVisitPreferences } from "./visit-state.js";
 export async function runFleet(
   client: InteractiveFleetTransport,
   input: FleetInput = process.stdin,
@@ -52,42 +51,15 @@ export async function runFleet(
       "fleet.folderDispositions",
       {},
     );
-    const keys = Object.entries(dispositions);
     savedFolders = dispositions;
-    const collapsed = keys.filter(([, disposition]) => disposition.collapsed).map(([key]) => key);
-    const unregisteredHasLiveRows = groupThreads(snapshot).find(({ cwd }) => cwd === UNREGISTERED_SECTION_KEY)?.threads.some(isLiveThread) === true;
-    state = {
-      ...state,
-      collapsedCwds: dispositions[UNREGISTERED_SECTION_KEY] === undefined
-        ? [...collapsed, ...(unregisteredHasLiveRows ? [] : [UNREGISTERED_SECTION_KEY])]
-        : collapsed,
-      expandedCwds: keys.filter(([, disposition]) => disposition.expanded).map(([key]) => key),
-      expandedHistoryCwds: keys.filter(([, disposition]) => disposition.historyExpanded === true).map(([key]) => key),
-    };
+    state = restoreFolderDispositions(state, snapshot, dispositions);
   } catch {
   }
-  let savedVisit: FleetVisitPreferences | undefined;
-  try {
-    savedVisit = FleetVisitPreferencesSchema.parse(await client.request("fleet.visit", {}));
-    state = restoreVisitPreferences(state, snapshot, savedVisit, savedFolders);
-  } catch { /* Older brokers keep a visit-local baseline; no inferred historical unread. */ }
-  const saveVisit = async () => {
-    if (savedVisit === undefined) return;
-    const replies: Record<string, FleetReplyWatermark> = {};
-    for (const [id, watermark] of Object.entries(state.replyWatermarks ?? {})) {
-      if (JSON.stringify(savedVisit.replies[id]) !== JSON.stringify(watermark)) replies[id] = watermark;
-    }
-    const view = state.listView ?? "live";
-    if (Object.keys(replies).length === 0 && savedVisit.view === view) return;
-    try {
-      await client.request("fleet.visit.set", { view, replies });
-      savedVisit = { view, replies: { ...savedVisit.replies, ...replies } };
-    } catch (error) {
-      state = { ...state, notice: `Could not save Fleet read/view state: ${error instanceof Error ? error.message : String(error)}`, noticeTone: "error" };
-      // Keep in-memory state stable, and avoid writing the same failed append each repaint.
-      savedVisit = undefined;
-    }
-  };
+  const savedVisit = await loadVisitPreferences(client);
+  if (savedVisit !== undefined) state = restoreVisitPreferences(state, snapshot, savedVisit, savedFolders);
+  const saveVisit = createVisitPreferenceSaver(client, savedVisit, (message) => {
+    state = { ...state, notice: message, noticeTone: "error" };
+  });
   try {
     state = {
       ...state,
@@ -295,10 +267,11 @@ export async function runFleet(
     output.write(`${LEAVE_FLEET_SCREEN}\u001b[2J\u001b[H`);
     try {
       const session = await runtime.openOrchestrator(target);
-      state = markThreadRead(normalizeState({ ...state, selectedSessionId: session.id,
+      // tmux presentation does not acknowledge that the attachment actually displayed its replay.
+      state = normalizeState({ ...state, selectedSessionId: session.id,
         ...(target.type === "create" ? { listView: "live" } : {}),
         focusedFolderCwd: undefined, focusedHistoryCwd: undefined, focusedShowMoreCwd: undefined,
-        focusedViewControl: undefined, focusedUpdateSessionId: undefined, notice: undefined }, snapshotFeed.snapshot, Date.now()), session.id);
+        focusedViewControl: undefined, focusedUpdateSessionId: undefined, notice: undefined }, snapshotFeed.snapshot, Date.now());
       if (nvimLayoutHookInstalled) {
         await runtime.nvimLayoutHooks?.rebalance(
           layoutOrchestratorSessionIds(snapshot, session.id),
@@ -372,7 +345,7 @@ export async function runFleet(
     snapshot = executed.snapshot;
     if (action !== undefined) snapshotFeed.resync(snapshot);
     nvimLayoutHookInstalled = executed.nvimLayoutHookInstalled;
-    await saveVisit();
+    await saveVisit(state);
     notify();
   };
   const queueKeys = (keys: readonly string[]) => {
@@ -423,7 +396,7 @@ export async function runFleet(
       }
       refreshNotice = snapshotFeed.error;
       state = normalizeState(state, snapshot, Date.now());
-      await saveVisit();
+      await saveVisit(state);
       if (mascotFrameTimer !== undefined) clearTimeout(mascotFrameTimer);
       mascotFrameTimer = undefined;
       const pulse = mascotPulse?.update(snapshot.threads, Date.now());

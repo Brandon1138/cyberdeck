@@ -12,6 +12,10 @@ import type {
   ScoutSupervisionEffects,
 } from "../../../src/orchestration/session/scout-supervision-ports.js";
 import type { ScoutWorkspaceVerdict } from "../../../src/orchestration/session/session-workspace-ports.js";
+import { createFleetState } from "../../../src/client/fleet/transport.js";
+import { normalizeState } from "../../../src/client/fleet/normalize.js";
+import { isUnreadThread } from "../../../src/client/fleet/visit-state.js";
+import type { FleetSnapshot } from "../../../src/client/fleet/state.js";
 
 const card: ScoutDecisionCard = {
   question: "Where does provisioning happen?",
@@ -316,6 +320,7 @@ describe("ScoutSessionSupervisor", () => {
     expect(record.executionState).toBe("exited");
     expect(record.attentionState).toBe("done");
     expect(record.exitCode).toBe(0);
+    expect(record.latestPreviewKind).toBe("assistant");
     expect(supervisor.decisionCard()?.verdict).toBe("SUPPORTED");
     expect(harness.completions).toEqual([{ turns: 1, text: "CARD TEXT" }]);
     expect(harness.order).toContain("persist");
@@ -357,6 +362,22 @@ describe("ScoutSessionSupervisor", () => {
     ]);
   });
 
+  it("makes a newly completed structured Scout result unread in Fleet", async () => {
+    const record = scoutRecord();
+    let turns = 0;
+    const snapshot = (): FleetSnapshot => ({ threads: [{ record: { ...record }, workerTruth: {
+      state: turns === 0 ? "working" : "exited", terminal: turns > 0,
+      canonicalTurns: turns, completedTurns: turns, pendingInstructions: 0,
+      composerOccupied: false, modalOpen: false, detail: "Structured Scout completion",
+    } }] });
+    const state = createFleetState(snapshot());
+    const { reports } = fakeReports({ collect: async () => completeCapture });
+    const harness = fakeEffects({ recordCompletion: (count) => { turns = count; } });
+    await supervisorFor(record, reports, harness.effects).finalizeExit(0, () => "replay");
+    expect(record.latestPreview).toBe(card.finding);
+    expect(isUnreadThread(normalizeState(state, snapshot(), Date.now()), record.id)).toBe(true);
+  });
+
   it("preserves a launch failure as a durable record before it is registered", async () => {
     const record = scoutRecord({ executionState: "starting", pid: 0 });
     const { reports } = fakeReports();
@@ -371,6 +392,7 @@ describe("ScoutSessionSupervisor", () => {
     expect(seenAtRegistration).toEqual(["failed", "failed"]);
     expect(record.exitCode).toBe(1);
     expect(record.attentionState).toBe("failed");
+    expect(record.latestPreviewKind).toBe("none");
     expect(harness.transcript[0]?.text).toBe("Scout launch failed");
   });
 
@@ -385,6 +407,7 @@ describe("ScoutSessionSupervisor", () => {
     expect(record.scout?.terminalState).toBe("failed");
     expect(record.executionState).toBe("failed");
     expect(harness.kills).toEqual(["SIGTERM"]);
+    expect(record.latestPreviewKind).toBe("none");
     expect(harness.results.at(-1)).toBe("Scout failed during initialize: composer never answered");
   });
 });

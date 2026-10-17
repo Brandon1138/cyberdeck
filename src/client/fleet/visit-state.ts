@@ -1,3 +1,4 @@
+import { UNREGISTERED_SECTION_KEY } from "./constants.js";
 import { conversationPreview } from "../../domain/conversation-preview.js";
 import type { FleetReplyWatermark, FleetVisitPreferences } from "../../domain/fleet-preferences.js";
 import type { FleetSnapshot, FleetState, FleetThread, FolderDisposition } from "./state.js";
@@ -107,4 +108,19 @@ export function unreadThreads(snapshot: FleetSnapshot, state: FleetState): Fleet
     const rightAt = state.replyWatermarks?.[right.record.id]?.updatedAt ?? "";
     return rightAt.localeCompare(leftAt) || left.record.id.localeCompare(right.record.id);
   });
+}
+
+/** Restore explicit project folds while keeping unregistered live work visible by default. */
+export function restoreFolderDispositions(state: FleetState, snapshot: FleetSnapshot, dispositions: Readonly<Record<string, FolderDisposition>>): FleetState {
+  const keys = Object.entries(dispositions);
+  const collapsed = keys.filter(([, disposition]) => disposition.collapsed).map(([key]) => key);
+  const unregisteredHasLiveRows = groupThreads(snapshot).find(({ cwd }) => cwd === UNREGISTERED_SECTION_KEY)?.threads.some(isLiveThread) === true;
+  return {
+    ...state,
+    collapsedCwds: dispositions[UNREGISTERED_SECTION_KEY] === undefined
+      ? [...collapsed, ...(unregisteredHasLiveRows ? [] : [UNREGISTERED_SECTION_KEY])]
+      : collapsed,
+    expandedCwds: keys.filter(([, disposition]) => disposition.expanded).map(([key]) => key),
+    expandedHistoryCwds: keys.filter(([, disposition]) => disposition.historyExpanded === true).map(([key]) => key),
+  };
 }

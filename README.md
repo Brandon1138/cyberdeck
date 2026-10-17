@@ -92,8 +92,10 @@ disclosures and threads. Empty `Enter` toggles a disclosure; `Left`/`Right` clos
 actions and the detail footer are inactive while a structural row holds focus. Snapshot churn keeps
 selection bound to the same thread ID and never arms a destructive action on its replacement.
 
-`*` marks a new reply. `/read` explicitly inspects the selected reply and marks it read; presenting
-an actual native attachment also marks it read. Cursor traversal and the passive footer do not.
+`*` marks a new reply. `/read` explicitly inspects the selected reply and marks it read. Native
+attachments presented directly by Fleet also mark it read. Opening or selecting an orchestrator
+cockpit leaves it unread until `/read`: tmux pane presentation cannot confirm replay inspection.
+Cursor traversal and the passive footer do not mark replies read.
 The **Since your last visit** list shows up to three such updates; `Enter` on an entry reveals its
 thread without consuming it. Read/view preferences use the existing Fleet preference journal.
 First sight establishes a content baseline, so historical replies are never announced as new.

@@ -1,16 +1,17 @@
 import { imageInputRefusal, providerAcceptsImages } from "../../domain/image-input.js";
 import { HANDOFF_LIMITS } from "../../domain/worker-handoff.js";
 import { DELETE_CONFIRMATION_MS, PROJECTS_UNAVAILABLE_NOTICE, QUIT_CONFIRMATION_NOTICE } from "./constants.js";
-import { focusRow, foldTransition, groupThreads, navigableListRowIndex, scrollFocusedRowIntoView, setCollapsed, setExpanded, setHistoryExpanded, threadSubject } from "./list-groups.js";
-import { fleetListRows, focusedListRowIndex, isCollapsed, isExpanded, historyExpanded, isTerminalSession, orderedThreads, threadFocusInert } from "./list-rows.js";
+import { focusRow, foldTransition, navigableListRowIndex, scrollFocusedRowIntoView, setCollapsed, setExpanded, threadSubject } from "./list-groups.js";
+import { fleetListRows, focusedListRowIndex, isCollapsed, isExpanded, isTerminalSession, orderedThreads, threadFocusInert } from "./list-rows.js";
 import { composerCwd } from "./model-labels.js";
 import { normalizeState, openAction } from "./normalize.js";
 import { TERMINAL_HANDOFF_REFUSAL, handoffMarks, openHandoffPicker, transitionHandoffPicker } from "./picker-handoff.js";
 import { initialOrchestratorPicker, transitionOrchestratorPicker } from "./picker-orchestrator.js";
 import { openPermissionPicker, transitionCommandPalette, transitionPermissionPicker } from "./picker-palette.js";
 import { openWorkerPicker, transitionProjectPrompt, transitionShellMode, transitionWorkerPicker } from "./picker-worker.js";
-import { selectListView, startTransition, workerPolicyTransition } from "./slash-commands.js";
+import { startTransition, workerPolicyTransition } from "./slash-commands.js";
 import { FleetSnapshot, FleetState, FleetTransition } from "./state.js";
+import { transitionVisitControls } from "./transition-visit.js";
 import { transitionQuit, transitionRename } from "./transition-modes.js";
 export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, key: string, now = Date.now(), threadListViewportHeight = Number.MAX_SAFE_INTEGER): FleetTransition {
   const normalized = normalizeState(current, snapshot, now);
@@ -315,30 +316,8 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
   if (focusedFolderCwd !== undefined && (key === "left" || key === "right")) {
     return foldTransition(state, setCollapsed(state, focusedFolderCwd, key === "left"), focusedFolderCwd);
   }
-  if (state.focusedViewControl !== undefined && state.draft === "") {
-    const views = ["live", "unread", "history"] as const;
-    if (key === "left" || key === "right") {
-      const index = views.indexOf(state.focusedViewControl);
-      return { state: { ...state, focusedViewControl: views[Math.max(0, Math.min(2, index + (key === "left" ? -1 : 1)))] } };
-    }
-    if (key === "enter") return { state: selectListView(state, snapshot, state.focusedViewControl) };
-  }
-  if (state.focusedHistoryCwd !== undefined && state.draft === "" && (key === "left" || key === "right" || key === "enter")) {
-    const cwd = state.focusedHistoryCwd;
-    return foldTransition(state, setHistoryExpanded(state, cwd,
-      key === "enter" ? !historyExpanded(state, cwd) : key === "right"), cwd);
-  }
-  if (state.focusedUpdateSessionId !== undefined && state.draft === "" && (key === "enter" || key === "right")) {
-    const target = snapshot.threads.find(({ record }) => record.id === state.focusedUpdateSessionId);
-    if (target === undefined) return { state };
-    const cwd = target.record.kind === "orchestrator" ? "/@orcs"
-      : groupThreads(snapshot).find(({ threads }) => threads.includes(target))?.cwd;
-    let next: FleetState = { ...state, listView: "live", selectedSessionId: target.record.id,
-      focusedUpdateSessionId: undefined, focusedFolderCwd: undefined, focusedHistoryCwd: undefined,
-      focusedShowMoreCwd: undefined, focusedViewControl: undefined, notice: undefined };
-    if (cwd !== undefined) next = setExpanded(setHistoryExpanded(setCollapsed(next, cwd, false), cwd, true), cwd, true);
-    return { state: next };
-  }
+  const visitTransition = transitionVisitControls(state, snapshot, key);
+  if (visitTransition !== undefined) return visitTransition;
   if (key === "enter" && focusedFolderCwd !== undefined && state.draft.trim() === "") {
     return foldTransition(
       state,

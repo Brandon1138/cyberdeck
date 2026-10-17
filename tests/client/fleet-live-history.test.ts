@@ -377,13 +377,14 @@ describe("Fleet compact rows, detail and interaction height", () => {
 });
 
 describe("Fleet runtime read/view preferences", () => {
-  it.each(["attached", "rejected", "ended-before-replay"] as const)("marks content read only after actual attachment presentation (%s)", async (outcome) => {
+  it.each(["attached", "rejected", "ended-before-replay", "cockpit-returned"] as const)("marks content read only after actual attachment presentation (%s)", async (outcome) => {
     class Input extends EventEmitter {
       isTTY = true; isRaw = false;
       setRawMode(raw: boolean) { this.isRaw = raw; }
       pause() {} resume() {}
     }
     const snapshot = { threads: [worker("one", "working", 2, "The new assistant reply.")] };
+    if (outcome === "cockpit-returned") snapshot.threads[0]!.record.kind = "orchestrator";
     let preferences: FleetVisitPreferences = { view: "live", replies: { one: { seen: "An earlier reply.", latest: "The new assistant reply.", canonicalTurns: 2 } } };
     const listeners = new Set<(frame: ServerFrame) => void>();
     const input = new Input();
@@ -409,13 +410,20 @@ describe("Fleet runtime read/view preferences", () => {
       onFrame(listener: (frame: ServerFrame) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
       onClose: () => () => {}, sendFrame: vi.fn(), close: vi.fn(),
     };
-    const running = runFleet(transport as never, input, output, new EventEmitter());
+    const openOrchestrator = vi.fn(async () => snapshot.threads[0]!.record);
+    const running = runFleet(transport as never, input, output, new EventEmitter(), { openOrchestrator });
     try {
       await vi.waitFor(() => expect(screen).toContain("1 unread"));
       expect(preferences.replies.one?.seen).toBe("An earlier reply.");
-      input.emit("data", Buffer.from("\r"));
-      await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.attach", expect.objectContaining({ sessionId: "one" })));
-      if (outcome === "attached") {
+      input.emit("data", outcome === "cockpit-returned" ? Buffer.from([0x1d]) : Buffer.from("\r"));
+      if (outcome !== "cockpit-returned") await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.attach", expect.objectContaining({ sessionId: "one" })));
+      if (outcome === "cockpit-returned") {
+        await vi.waitFor(() => expect(openOrchestrator).toHaveBeenCalledTimes(1));
+        await vi.waitFor(() => expect(input.isRaw).toBe(true));
+        expect(preferences.replies.one?.seen).toBe("An earlier reply.");
+        input.emit("data", Buffer.from("/read\r"));
+        await vi.waitFor(() => expect(preferences.replies.one?.seen).toBe("The new assistant reply."));
+      } else if (outcome === "attached") {
         await vi.waitFor(() => expect(input.isRaw).toBe(true));
         input.emit("data", Buffer.from([0x1d]));
         await vi.waitFor(() => expect(preferences.replies.one?.seen).toBe("The new assistant reply."));

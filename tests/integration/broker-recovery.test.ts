@@ -162,7 +162,7 @@ describe("broker durable startup", () => {
         now: Date.parse("2026-07-26T12:00:00.000Z"),
         home: "/Users/brandon",
       });
-      expect(rendered).toContain("0 agents · 0 needs input · 0 working · 2 interrupted");
+      expect(rendered).toContain("0 working · 0 needs input · 0 unread · 0 agents · 2 interrupted");
       expect(rendered).toContain("Finished the task");
     } finally {
       client.close();
