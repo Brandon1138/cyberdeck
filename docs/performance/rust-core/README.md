@@ -8,6 +8,30 @@ history-heavy mailboxes. It does **not** justify making this IPC boundary the de
 for every workload. A Rust core remains the direction; boundary placement is an empirical
 decision, and TypeScript remains a supported application and rollback path.
 
+## Zod 4.6.6 security-patch refresh
+
+The production audit required upgrading Zod from 4.6.5 to 4.6.6. The refreshed
+[`2026-11-05-macos-arm64-zod-4.6.6.json`](2026-11-05-macos-arm64-zod-4.6.6.json)
+records five runs using the same fixtures, machine, Node/Rust versions and methodology.
+All four implementations still produce identical projections. The production dependency
+audit reports no known vulnerabilities; the complete local suite passes with four workers
+(3,641 passed, 26 skipped). The initial unrestricted run hit a shell-output timing assertion
+and an npm-pack timeout; neither reproduced in the complete lower-concurrency run.
+
+| Cold replay | Existing uncached TS | Cached TS | Streaming cached TS | Integrated Rust + TS |
+| --- | ---: | ---: | ---: | ---: |
+| Small | 5.57 ms | 6.68 ms | 6.31 ms | 12.26 ms |
+| History | 250.97 ms | 280.63 ms | 291.92 ms | 164.71 ms |
+| Wide | 76.98 ms | 88.69 ms | 86.82 ms | 127.53 ms |
+
+History Node cold-read peak RSS is 346.75 MiB for cached TypeScript and 102.36 MiB
+for Rust mode; the separately measured helper peak is 3.72 MiB. These are separate
+process peaks, not aggregate hybrid RSS. History warm reads are 1.11 ms and 1.41 ms
+respectively. The recommendation remains selective native adoption: history-heavy replay
+benefits, while small and wide workloads favor TypeScript. The baseline below is preserved;
+this refresh is not a controlled attribution of timing changes to the Zod patch, since host
+load and sampling noise can differ between runs. No tests or builds overlapped this benchmark.
+
 ## 2026-11-05 baseline
 
 Apple M4 Pro, macOS arm64, Node 24.18.0, Rust 1.97.1 release profile. Five fresh processes
