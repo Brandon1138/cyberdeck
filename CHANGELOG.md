@@ -25,6 +25,7 @@ and persisted schemas remain under active alpha development.
 
 - Upgrade Zod to 4.6.6 to address the high-severity collection-validation memory
   exhaustion advisory GHSA-mrhx-c7xc-m3w5 and restore the production dependency audit.
+- Move macOS CI and publishing from the retired `macos-14` runner to `macos-15`.
 
 - Instruction reads reuse a validated projection while file identity is unchanged,
   including in TypeScript mode; external mutations trigger complete revalidation.
