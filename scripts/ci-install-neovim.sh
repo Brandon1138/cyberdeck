@@ -21,11 +21,11 @@ mkdir "$destination"
 archive="$destination/$asset.tar.gz"
 curl --fail --location --retry 3 --output "$archive" \
   "https://github.com/neovim/neovim/releases/download/v0.11.5/$asset.tar.gz"
-if command -v sha256sum >/dev/null; then
-  # macOS and GNU implementations both accept -c; the generated line is well formed.
-  printf '%s  %s\n' "$checksum" "$archive" | sha256sum -c
-else
+if [[ "$(uname -s)" == Darwin ]]; then
+  # macOS's sha256sum is not GNU-compatible; use its established Perl verifier.
   printf '%s  %s\n' "$checksum" "$archive" | shasum --algorithm 256 --check
+else
+  printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --strict
 fi
 tar -xzf "$archive" -C "$destination" --strip-components=1
 "$destination/bin/nvim" --version
