@@ -23,6 +23,9 @@ and persisted schemas remain under active alpha development.
 
 ### Fixed
 
+- Upgrade Zod to 4.6.6 to address the high-severity collection-validation memory
+  exhaustion advisory GHSA-mrhx-c7xc-m3w5 and restore the production dependency audit.
+
 - Instruction reads reuse a validated projection while file identity is unchanged,
   including in TypeScript mode; external mutations trigger complete revalidation.
 
