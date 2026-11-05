@@ -1,0 +1,57 @@
+name: Rust core
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.0
+      - name: Enable locked pnpm
+        run: |
+          corepack enable
+          corepack install --global pnpm@11.5.0
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - run: pnpm install --frozen-lockfile
+      - name: Rust format, lint, and compiler contracts
+        run: |
+          cargo fmt --manifest-path native/core/Cargo.toml --check
+          cargo clippy --locked --manifest-path native/core/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path native/core/Cargo.toml
+      - name: Build host and native worker
+        run: |
+          pnpm check
+          pnpm build
+          pnpm build:native
+      - name: Required cross-language and failure tests
+        run: pnpm exec vitest run tests/persistence/native-instruction-replay.test.ts tests/persistence/validated-journal.test.ts
+        env:
+          CYBERDECK_REQUIRE_NATIVE_TESTS: '1'
+      - name: Compare projections and record performance
+        run: pnpm bench:core "$RUNNER_TEMP/rust-core-benchmark.json"
+        env:
+          CYBERDECK_BENCH_ROUNDS: '3'
+      - name: Packed native worker smoke test
+        run: node scripts/check-native-package.mjs
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-core-${{ matrix.runner }}
+          path: ${{ runner.temp }}/rust-core-benchmark.json
+          if-no-files-found: warn

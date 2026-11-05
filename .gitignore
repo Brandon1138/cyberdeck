@@ -10,3 +10,5 @@ worktrees
 *.tgz
 package-output.json
 nvim.log
+native/core/target/
+native/bin/

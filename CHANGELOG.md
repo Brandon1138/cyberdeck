@@ -8,6 +8,11 @@ and persisted schemas remain under active alpha development.
 
 ### Added
 
+- Opt-in Rust instruction-journal replay, a reversible first step toward a Rust
+  core with a TypeScript application. ADR 0001 records the boundary, rollout and
+  future decision gates; cross-language tests and recurring comparative benchmarks
+  cover supported hosts. Default replay remains TypeScript.
+
 - Explicit orchestrator attention waits: `cyberdeck_attention_arm` and
   `cyberdeck_attention_cancel` persist an objective, worker completion targets,
   a broker epoch, and cancellation. Optional attention receipts on
@@ -17,6 +22,9 @@ and persisted schemas remain under active alpha development.
   durable state; attention scheduling and JEV evaluation remain later gates.
 
 ### Fixed
+
+- Instruction reads reuse a validated projection while file identity is unchanged,
+  including in TypeScript mode; external mutations trigger complete revalidation.
 
 - Broker startup streams the worker coordination journal, avoiding Node's string
   limit after long-running budget observation history. Automatic lossless
