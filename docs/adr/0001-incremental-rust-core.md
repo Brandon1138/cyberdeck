@@ -69,6 +69,10 @@ safe integers, optional-field null rejection, timestamps and wake context are di
 Unknown fields are ignored, as in the current Zod schema. Domain schema changes must update the
 native contract and the differential corpus in the same PR; incompatible changes require a
 new command/schema version. There is no claim that the Rust compiler verifies Zod compatibility.
+The TypeScript parity fixture requires every declared instruction/wake field and lifecycle status,
+so adding even an optional schema field fails typecheck until the fixture is extended. This slice
+targets the committed schema at base `6943bbafb34c0e474a6b123677e0dcb8ab460be7`; do not transplant
+its native binary into a checkout with additional domain fields without reconciling that contract.
 
 Native v1 deliberately fails closed on invalid UTF-8, lone JSON surrogates, non-finite JSON
 numbers (including in ignored fields), excessively nested

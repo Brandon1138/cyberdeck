@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { InstructionStore } from "../../src/persistence/instruction-store.js";
-import { InstructionRecordSchema } from "../../src/domain/instruction.js";
+import { InstructionRecordSchema, type InstructionRecord } from "../../src/domain/instruction.js";
 import { nativeInstructionBinary, replayInstructionsNative } from "../../src/persistence/native-instruction-replay.js";
 import { ValidatedJournal } from "../../src/persistence/validated-journal.js";
 
@@ -16,6 +16,20 @@ async function directory() { const path = await mkdtemp(join(tmpdir(), "cyberdec
 const id = "11111111-1111-4111-8111-111111111111";
 const other = "22222222-2222-4222-8222-222222222222";
 const base = { id, actorSessionId: id, targetSessionId: id, messageId: id, message: "fixture", status: "queued", createdAt: "2026-11-05T00:00:00.000Z", updatedAt: "2026-11-05T00:00:00.000Z" };
+// Optional schema additions must update the parity corpus, not silently disappear
+// across the native boundary. Required makes this a compile-time coverage gate.
+const everyWakeField: Required<NonNullable<InstructionRecord["wake"]>> = {
+  controllerId: "fixture", cursor: 0, attentionEpoch: id, notificationIds: [other],
+};
+const everyField: Required<InstructionRecord> = {
+  ...base, status: "completed", hop: 0, senderSessionId: other, renderedAt: base.createdAt,
+  submittedAt: base.createdAt, completedAt: base.createdAt, expectedTurn: 1, holdReason: "fixture",
+  workflowRunId: id, causationId: other, brokerOwned: false, launch: true, submissionKind: "wake", wake: everyWakeField,
+};
+const everyStatus: Record<InstructionRecord["status"], true> = {
+  accepted: true, queued: true, rendered: true, submitted: true, acknowledged: true,
+  completed: true, undelivered: true, cancelled: true,
+};
 async function stores(content: string | Buffer) {
   const dir = await directory();
   const ts = new InstructionStore(dir, { replay: "typescript" });
@@ -28,6 +42,7 @@ const line = (value: unknown) => JSON.stringify(value) + "\n";
 
 describe.skipIf(!available)("Rust instruction replay parity", () => {
   const cases: Record<string, unknown>[] = [
+    everyField,
     {}, { status: "delivered" }, { message: "\ufeff  fixture \ufeff" }, { message: "\u0085" },
     { message: "emoji 🦀 / Ελληνικά / 日本語" }, { hop: 9007199254740991 }, { hop: -0 },
     { id: "00000000-0000-0000-0000-000000000000" }, { id: "ffffffff-ffff-ffff-ffff-ffffffffffff" },
@@ -37,7 +52,7 @@ describe.skipIf(!available)("Rust instruction replay parity", () => {
       holdReason: "", workflowRunId: id, causationId: other, brokerOwned: false, launch: true, submissionKind: "wake",
       wake: { controllerId: "fixture", cursor: 0, attentionEpoch: id, notificationIds: [other] } },
     { wake: { controllerId: "fixture", cursor: 1, notificationIds: [] } }, { unknown: { future: true } },
-    ...["accepted", "queued", "rendered", "submitted", "acknowledged", "completed", "undelivered", "cancelled"].map((status) => ({ status })),
+    ...Object.keys(everyStatus).map((status) => ({ status })),
     { hop: -1 }, { hop: 0.5 }, { hop: 9007199254740992 }, { hop: null }, { hop: "0" },
     { expectedTurn: 0 }, { expectedTurn: -1 }, { expectedTurn: null }, { expectedTurn: 1.1 },
     { message: "\ufeff \t\n" }, { message: null }, { status: "submitted-ish" }, { status: "toString" },
