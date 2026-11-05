@@ -1,4 +1,4 @@
-import { open, stat } from "node:fs/promises";
+import { open, stat, type FileHandle } from "node:fs/promises";
 import type { BigIntStats } from "node:fs";
 import { openPrivateAppendFile } from "./private-files.js";
 
@@ -15,7 +15,11 @@ const version = (info: BigIntStats): string =>
 export class ValidatedJournal<T> {
   private tail = Promise.resolve();
   private cached: { version: string; projection: T } | undefined;
-  constructor(private readonly path: string, private readonly project: (content: string) => T) {}
+  constructor(
+    private readonly path: string,
+    private readonly project: (content: string) => T,
+    private readonly projectFile?: (file: FileHandle) => Promise<T>,
+  ) {}
 
   read(): Promise<T> {
     return this.enqueue(async () => {
@@ -32,7 +36,9 @@ export class ValidatedJournal<T> {
           const before = version(await file.stat({ bigint: true }));
           const projection = this.cached?.version === before
             ? this.cached.projection
-            : this.project(await file.readFile("utf8"));
+            : this.projectFile !== undefined
+              ? await this.projectFile(file)
+              : this.project(await file.readFile("utf8"));
           const after = version(await file.stat({ bigint: true }));
           const current = await stat(this.path, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
             if (error.code === "ENOENT") return undefined;

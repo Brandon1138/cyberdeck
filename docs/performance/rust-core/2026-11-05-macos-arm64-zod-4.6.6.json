@@ -1,0 +1,1238 @@
+{
+  "protocol": 1,
+  "createdAt": "2026-11-05T20:42:45.928Z",
+  "head": "ea736b0e13a24991c49ead0bfda7644e20f4369e",
+  "dirty": false,
+  "node": "v24.18.0",
+  "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "platform": "darwin",
+  "arch": "arm64",
+  "os": "27.2.0",
+  "cpu": "Apple M4 Pro",
+  "rounds": 5,
+  "binarySha256": "467f25e00a6fd23ccec3dba1e7aeeb5794c560996dfc26b68d0b55cd1cb2f5c2",
+  "fileSha256": {
+    "package.json": "2b34262e2489af369fb9568e8557e57e926838075d172d722f5713aa213b549a",
+    "pnpm-lock.yaml": "71d0b34f014dc753191e15ace7d1502a66ee03a8034d6121b6185aa813f4bc8a",
+    "rust-toolchain.toml": "8e390d6a0838315f972690f46ef8bae8b7ecc9ee6c1ed70140ef852869c2482e",
+    "native/core/Cargo.toml": "938c828a4418d2d51d8821a879000471fe5d7fd9909c69fca6dd8e46932db2b8",
+    "native/core/Cargo.lock": "b4cfeb2ad93d7b8b75c280d9991852540edd299e7bde5e0fdd7d0c39f65bd12e",
+    "native/core/src/lib.rs": "6368718d529c09b9bb907e3937e0408442dc0a1edc843763f137e1405eb6bed2",
+    "native/core/src/main.rs": "7842a72c005cf7c5856de851b877bb78e8cd0daccbdabb6bbfd407b7d750aec7",
+    "native/core/src/instruction.rs": "4caf4ac157e05917a83a57d24d5e1a5868616b2a499013633a6ff83a747f2e1e",
+    "native/core/src/validation.rs": "2451283b3311e0907847cbb4c57355c5d1f661bca6f572460b6b41b2e715f75a",
+    "src/persistence/instruction-store.ts": "03202d25dcff9b77a9a4534acb576478bcab0769010514873ec507b1a63969e8",
+    "dist/src/persistence/instruction-store.js": "566ad6e8f2146049c62f7a310ee7148d538031d6e52b55ae67b1fd81d1501d77",
+    "src/persistence/validated-journal.ts": "efbdb8604493ec85f7945c592490ca3d7ac898a256afbcae0947f0aa76fe0a05",
+    "dist/src/persistence/validated-journal.js": "3dcedb52a93610375b5260d4f9c50eaddd9929429d97cb2ffdb5f29aab6385ad",
+    "src/persistence/native-instruction-replay.ts": "6ab2cd1cb801287a3bf17a351ce6c31a97d628ab1b914c441670099cd85540c0",
+    "dist/src/persistence/native-instruction-replay.js": "e97594e46fbf2c4add7e982c946a5d50854a4c498d6b3ddae2ad9353faa04201",
+    "src/domain/instruction.ts": "da80b81afa58908412610fd5a2d22e3f8c92d46068d0dcdb2d749ee1ca0cdbf8",
+    "dist/src/domain/instruction.js": "02ce86b2da2747cd95380c65c9a2ab6caba2569d1ac07b80a63659ec8ce51e72",
+    "src/domain/worker-truth.ts": "f035d78b56fc5117375cb261744cac188eb76ddc5ed6fb609c23a2b7edd4bb12",
+    "dist/src/domain/worker-truth.js": "34d48b778600a5dc4616446bb93d0c9db1d3cb83798bf6e80602021205124cfc",
+    "scripts/bench-native-core.mjs": "f91afadee3ecff87df7bb0ed346ee15bf69fd9f579412de5fd345b08b9abc679",
+    "scripts/bench-native-core-worker.mjs": "85548d27a7960b2ec4d9e29af06938173b07def7900c1676195afd16903fdef3",
+    "scripts/bench-native-core-rss.py": "e0517d0edf4edee9f25633d2c15d7f51c4143939dab4a64f72540eb237c8762e"
+  },
+  "methodology": "Fresh process per cold sample, warm OS cache, alternating modes, five same-process warm reads; cold operation includes helper spawn/IPC/host validation. Node RSS and standalone helper RSS are separate peaks, not aggregate peak. No real provider or broker.",
+  "workloads": [
+    {
+      "name": "small",
+      "rows": 64,
+      "retained": 32,
+      "payload": 256,
+      "bytes": 37556,
+      "sha256": "fa1ff49879a7eb0dac6748868a9ee7296f91e082e953328b46b68a93517b1a09",
+      "samples": [
+        {
+          "round": 0,
+          "mode": "legacy-typescript",
+          "startupMs": 69.168834,
+          "coldMs": 4.669415999999998,
+          "warmMs": [
+            0.7741670000000056,
+            0.9634999999999962,
+            0.5660839999999894,
+            0.6109170000000006,
+            0.6852500000000106
+          ],
+          "hostColdPeakRssMiB": 64.484375,
+          "hostProcessPeakRssMiB": 66.796875,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 102.22095799999997
+        },
+        {
+          "round": 0,
+          "mode": "typescript",
+          "startupMs": 70.733959,
+          "coldMs": 5.550750000000008,
+          "warmMs": [
+            0.31725000000000136,
+            0.26770799999999895,
+            0.2567499999999967,
+            0.6198749999999933,
+            0.26670900000000586
+          ],
+          "hostColdPeakRssMiB": 64.21875,
+          "hostProcessPeakRssMiB": 65.25,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 102.30450000000002
+        },
+        {
+          "round": 0,
+          "mode": "streaming-typescript",
+          "startupMs": 70.721,
+          "coldMs": 5.504958000000002,
+          "warmMs": [
+            0.3060000000000116,
+            0.6776250000000061,
+            0.23991699999999128,
+            0.22350000000000136,
+            0.2015829999999994
+          ],
+          "hostColdPeakRssMiB": 64.0625,
+          "hostProcessPeakRssMiB": 65.0625,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 102.34699999999992
+        },
+        {
+          "round": 0,
+          "mode": "rust",
+          "startupMs": 71.539458,
+          "coldMs": 10.719875000000002,
+          "warmMs": [
+            0.3408330000000035,
+            0.28829100000000096,
+            0.2618749999999892,
+            0.6764589999999941,
+            0.22299999999999898
+          ],
+          "hostColdPeakRssMiB": 64.734375,
+          "hostProcessPeakRssMiB": 65.6875,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 107.059125
+        },
+        {
+          "round": 1,
+          "mode": "typescript",
+          "startupMs": 73.581334,
+          "coldMs": 5.970250000000007,
+          "warmMs": [
+            0.3259999999999934,
+            0.35529099999999403,
+            0.28566700000000367,
+            0.26183299999999576,
+            0.2448750000000075
+          ],
+          "hostColdPeakRssMiB": 65.640625,
+          "hostProcessPeakRssMiB": 66.03125,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 105.76958300000001
+        },
+        {
+          "round": 1,
+          "mode": "streaming-typescript",
+          "startupMs": 81.2795,
+          "coldMs": 6.431791000000004,
+          "warmMs": [
+            0.38725000000000875,
+            0.2988330000000019,
+            0.8813750000000056,
+            0.27683299999999633,
+            0.2510000000000048
+          ],
+          "hostColdPeakRssMiB": 64.3125,
+          "hostProcessPeakRssMiB": 65.234375,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 117.49116700000002
+        },
+        {
+          "round": 1,
+          "mode": "rust",
+          "startupMs": 79.826833,
+          "coldMs": 12.260125000000002,
+          "warmMs": [
+            0.3315419999999989,
+            0.30187500000000966,
+            0.29349999999999454,
+            0.2960830000000101,
+            0.7326249999999987
+          ],
+          "hostColdPeakRssMiB": 64.9375,
+          "hostProcessPeakRssMiB": 65.953125,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 120.88904200000002
+        },
+        {
+          "round": 1,
+          "mode": "legacy-typescript",
+          "startupMs": 81.340833,
+          "coldMs": 5.441709000000003,
+          "warmMs": [
+            1.3887919999999951,
+            0.7337500000000006,
+            0.7227500000000049,
+            0.6851669999999928,
+            0.6337919999999997
+          ],
+          "hostColdPeakRssMiB": 64.421875,
+          "hostProcessPeakRssMiB": 66.71875,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 119.28250000000003
+        },
+        {
+          "round": 2,
+          "mode": "streaming-typescript",
+          "startupMs": 84.532083,
+          "coldMs": 6.089167000000003,
+          "warmMs": [
+            0.35062500000000796,
+            0.2734169999999949,
+            0.25004199999999344,
+            0.2557910000000021,
+            0.6852080000000029
+          ],
+          "hostColdPeakRssMiB": 64.421875,
+          "hostProcessPeakRssMiB": 65.5625,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 119.48879199999988
+        },
+        {
+          "round": 2,
+          "mode": "rust",
+          "startupMs": 84.9335,
+          "coldMs": 13.106082999999998,
+          "warmMs": [
+            0.35891700000000526,
+            0.32020800000000804,
+            0.30991699999999867,
+            0.2851670000000013,
+            0.27899999999999636
+          ],
+          "hostColdPeakRssMiB": 65.6875,
+          "hostProcessPeakRssMiB": 66,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 126.10174999999981
+        },
+        {
+          "round": 2,
+          "mode": "legacy-typescript",
+          "startupMs": 80.678042,
+          "coldMs": 5.5732909999999976,
+          "warmMs": [
+            0.8917909999999978,
+            1.1094580000000036,
+            0.6490830000000045,
+            0.7934170000000051,
+            0.8241250000000093
+          ],
+          "hostColdPeakRssMiB": 64.609375,
+          "hostProcessPeakRssMiB": 66.984375,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 119.29312499999992
+        },
+        {
+          "round": 2,
+          "mode": "typescript",
+          "startupMs": 78.124084,
+          "coldMs": 6.682708000000005,
+          "warmMs": [
+            0.3519579999999962,
+            0.2908749999999998,
+            0.2739580000000075,
+            0.32745800000000713,
+            0.259791000000007
+          ],
+          "hostColdPeakRssMiB": 65.40625,
+          "hostProcessPeakRssMiB": 65.78125,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 114.64883299999997
+        },
+        {
+          "round": 3,
+          "mode": "rust",
+          "startupMs": 83.516,
+          "coldMs": 12.178291999999999,
+          "warmMs": [
+            0.3307919999999882,
+            0.28950000000000387,
+            0.29949999999999477,
+            0.2724580000000003,
+            0.2476660000000095
+          ],
+          "hostColdPeakRssMiB": 64.8125,
+          "hostProcessPeakRssMiB": 65.109375,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 124.26004200000011
+        },
+        {
+          "round": 3,
+          "mode": "legacy-typescript",
+          "startupMs": 79.589917,
+          "coldMs": 5.992625000000004,
+          "warmMs": [
+            0.9419170000000037,
+            0.7818749999999994,
+            1.2658339999999981,
+            0.6017909999999915,
+            0.5872909999999933
+          ],
+          "hostColdPeakRssMiB": 66,
+          "hostProcessPeakRssMiB": 68.671875,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 119.3656669999998
+        },
+        {
+          "round": 3,
+          "mode": "typescript",
+          "startupMs": 81.574458,
+          "coldMs": 6.7332079999999905,
+          "warmMs": [
+            0.3149580000000043,
+            0.3399999999999892,
+            0.3175410000000056,
+            0.2805839999999904,
+            0.24866699999999753
+          ],
+          "hostColdPeakRssMiB": 65.609375,
+          "hostProcessPeakRssMiB": 65.953125,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 117.74279200000001
+        },
+        {
+          "round": 3,
+          "mode": "streaming-typescript",
+          "startupMs": 80.586625,
+          "coldMs": 6.309666000000007,
+          "warmMs": [
+            0.36470799999999315,
+            0.3412920000000099,
+            0.3235419999999891,
+            0.3291250000000048,
+            0.7874580000000009
+          ],
+          "hostColdPeakRssMiB": 64.46875,
+          "hostProcessPeakRssMiB": 65.59375,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 117.10550000000012
+        },
+        {
+          "round": 4,
+          "mode": "legacy-typescript",
+          "startupMs": 83.195917,
+          "coldMs": 6.254875000000013,
+          "warmMs": [
+            1.111333000000002,
+            0.874875000000003,
+            1.4337089999999932,
+            0.6797080000000051,
+            0.6105000000000018
+          ],
+          "hostColdPeakRssMiB": 65.125,
+          "hostProcessPeakRssMiB": 67.9375,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 122.95383300000003
+        },
+        {
+          "round": 4,
+          "mode": "typescript",
+          "startupMs": 84.626125,
+          "coldMs": 6.693208999999996,
+          "warmMs": [
+            0.4195830000000029,
+            0.3642499999999984,
+            0.31937500000000796,
+            0.30854200000000276,
+            0.28674999999999784
+          ],
+          "hostColdPeakRssMiB": 65.859375,
+          "hostProcessPeakRssMiB": 66.234375,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 122.48916599999984
+        },
+        {
+          "round": 4,
+          "mode": "streaming-typescript",
+          "startupMs": 84.082375,
+          "coldMs": 7.067707999999996,
+          "warmMs": [
+            0.47733300000000156,
+            0.5258330000000058,
+            0.457334000000003,
+            0.4852080000000001,
+            0.433125000000004
+          ],
+          "hostColdPeakRssMiB": 65.703125,
+          "hostProcessPeakRssMiB": 66.109375,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 123.67716700000028
+        },
+        {
+          "round": 4,
+          "mode": "rust",
+          "startupMs": 129.845375,
+          "coldMs": 79.166041,
+          "warmMs": [
+            0.7902500000000146,
+            0.6624999999999943,
+            0.7900419999999997,
+            0.5643330000000049,
+            0.6176670000000115
+          ],
+          "hostColdPeakRssMiB": 66.71875,
+          "hostProcessPeakRssMiB": 67.046875,
+          "records": 32,
+          "digest": "10dcc30a819185338c44d6adc285ca5dba8f8e06fa2fe06025b0f58528e2aff0",
+          "processWallMs": 249.0218749999999
+        }
+      ],
+      "helperRss": [
+        2.25,
+        2.25,
+        2.25,
+        2.25,
+        2.25
+      ],
+      "summary": {
+        "legacy-typescript": {
+          "coldMs": 5.5732909999999976,
+          "warmMs": 0.7741670000000056,
+          "hostColdPeakRssMiB": 64.609375
+        },
+        "typescript": {
+          "coldMs": 6.682708000000005,
+          "warmMs": 0.30854200000000276,
+          "hostColdPeakRssMiB": 65.609375
+        },
+        "streaming-typescript": {
+          "coldMs": 6.309666000000007,
+          "warmMs": 0.3412920000000099,
+          "hostColdPeakRssMiB": 64.421875
+        },
+        "rust": {
+          "coldMs": 12.260125000000002,
+          "warmMs": 0.30991699999999867,
+          "hostColdPeakRssMiB": 64.9375
+        }
+      }
+    },
+    {
+      "name": "history",
+      "rows": 50000,
+      "retained": 576,
+      "payload": 768,
+      "bytes": 55088889,
+      "sha256": "1a4f317dfbd3dd74a4f65a61d91355d1aa0745f0d1cabe1769697bffcde24878",
+      "samples": [
+        {
+          "round": 0,
+          "mode": "legacy-typescript",
+          "startupMs": 108.32225,
+          "coldMs": 404.57312499999995,
+          "warmMs": [
+            334.20775000000003,
+            311.0830830000001,
+            378.284042,
+            201.0820409999999,
+            205.21383300000002
+          ],
+          "hostColdPeakRssMiB": 331.296875,
+          "hostProcessPeakRssMiB": 570.625,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 2001.91125
+        },
+        {
+          "round": 0,
+          "mode": "typescript",
+          "startupMs": 90.8795,
+          "coldMs": 280.626041,
+          "warmMs": [
+            1.3877919999999904,
+            1.2644169999999804,
+            1.0962499999999977,
+            1.0191670000000386,
+            1.408125000000041
+          ],
+          "hostColdPeakRssMiB": 347.546875,
+          "hostProcessPeakRssMiB": 347.984375,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 428.2190420000006
+        },
+        {
+          "round": 0,
+          "mode": "streaming-typescript",
+          "startupMs": 96.407208,
+          "coldMs": 330.42975,
+          "warmMs": [
+            1.2776250000000005,
+            1.4622080000000324,
+            1.3088329999999928,
+            1.6990829999999733,
+            1.023458000000005
+          ],
+          "hostColdPeakRssMiB": 142.65625,
+          "hostProcessPeakRssMiB": 143.03125,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 472.29683300000033
+        },
+        {
+          "round": 0,
+          "mode": "rust",
+          "startupMs": 90.392417,
+          "coldMs": 160.601042,
+          "warmMs": [
+            1.2909170000000074,
+            1.0345839999999953,
+            1.0510419999999954,
+            1.5995829999999671,
+            1.0339999999999918
+          ],
+          "hostColdPeakRssMiB": 102.359375,
+          "hostProcessPeakRssMiB": 102.90625,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 287.55004200000076
+        },
+        {
+          "round": 1,
+          "mode": "typescript",
+          "startupMs": 81.860958,
+          "coldMs": 252.28450000000004,
+          "warmMs": [
+            1.2608750000000555,
+            1.1393339999999625,
+            1.1576670000000036,
+            1.0151250000000118,
+            1.0951250000000528
+          ],
+          "hostColdPeakRssMiB": 346.75,
+          "hostProcessPeakRssMiB": 347.078125,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 378.79333300000053
+        },
+        {
+          "round": 1,
+          "mode": "streaming-typescript",
+          "startupMs": 81.73625,
+          "coldMs": 240.47166700000002,
+          "warmMs": [
+            1.2685410000000275,
+            1.096291000000008,
+            0.9920000000000186,
+            1.1041660000000206,
+            1.0464589999999703
+          ],
+          "hostColdPeakRssMiB": 142.890625,
+          "hostProcessPeakRssMiB": 143.703125,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 360.4264579999999
+        },
+        {
+          "round": 1,
+          "mode": "rust",
+          "startupMs": 82.34075,
+          "coldMs": 150.05874999999997,
+          "warmMs": [
+            1.3773330000000215,
+            1.386084000000011,
+            1.481833999999992,
+            1.605084000000005,
+            1.1881249999999852
+          ],
+          "hostColdPeakRssMiB": 106.828125,
+          "hostProcessPeakRssMiB": 107.875,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 268.6432500000001
+        },
+        {
+          "round": 1,
+          "mode": "legacy-typescript",
+          "startupMs": 96.157208,
+          "coldMs": 240.74608400000002,
+          "warmMs": [
+            218.78154100000006,
+            225.65316699999994,
+            245.35020800000007,
+            229.34454099999994,
+            217.73512499999993
+          ],
+          "hostColdPeakRssMiB": 332.71875,
+          "hostProcessPeakRssMiB": 470.5625,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 1514.1443330000002
+        },
+        {
+          "round": 2,
+          "mode": "streaming-typescript",
+          "startupMs": 91.180334,
+          "coldMs": 332.22858299999996,
+          "warmMs": [
+            1.6661250000000223,
+            1.6095419999999763,
+            1.4459579999999619,
+            1.317124999999976,
+            1.183084000000008
+          ],
+          "hostColdPeakRssMiB": 147.25,
+          "hostProcessPeakRssMiB": 147.34375,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 470.2153339999986
+        },
+        {
+          "round": 2,
+          "mode": "rust",
+          "startupMs": 91.341875,
+          "coldMs": 186.651292,
+          "warmMs": [
+            1.4692079999999805,
+            1.0930000000000177,
+            1.080916000000002,
+            1.6278750000000173,
+            1.161042000000009
+          ],
+          "hostColdPeakRssMiB": 98.171875,
+          "hostProcessPeakRssMiB": 98.65625,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 316.705833
+        },
+        {
+          "round": 2,
+          "mode": "legacy-typescript",
+          "startupMs": 116.942291,
+          "coldMs": 298.973167,
+          "warmMs": [
+            265.909459,
+            231.99362499999995,
+            236.37966699999993,
+            232.22037499999988,
+            222.21416699999986
+          ],
+          "hostColdPeakRssMiB": 332.671875,
+          "hostProcessPeakRssMiB": 470.765625,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 1649.2998329999991
+        },
+        {
+          "round": 2,
+          "mode": "typescript",
+          "startupMs": 92.027084,
+          "coldMs": 306.466875,
+          "warmMs": [
+            1.3195420000000126,
+            1.06170800000001,
+            0.9705829999999764,
+            1.221666999999968,
+            1.1149159999999938
+          ],
+          "hostColdPeakRssMiB": 347.390625,
+          "hostProcessPeakRssMiB": 347.46875,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 447.7243749999998
+        },
+        {
+          "round": 3,
+          "mode": "rust",
+          "startupMs": 85.320875,
+          "coldMs": 164.705125,
+          "warmMs": [
+            1.5565839999999866,
+            1.4459169999999801,
+            1.3501249999999914,
+            1.3111670000000117,
+            1.4106670000000179
+          ],
+          "hostColdPeakRssMiB": 110.8125,
+          "hostProcessPeakRssMiB": 112.078125,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 289.04770800000006
+        },
+        {
+          "round": 3,
+          "mode": "legacy-typescript",
+          "startupMs": 93.11225,
+          "coldMs": 250.965958,
+          "warmMs": [
+            215.8,
+            201.59479199999998,
+            200.00970900000004,
+            190.90495799999997,
+            195.48958399999992
+          ],
+          "hostColdPeakRssMiB": 332.328125,
+          "hostProcessPeakRssMiB": 569.859375,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 1396.1202079999985
+        },
+        {
+          "round": 3,
+          "mode": "typescript",
+          "startupMs": 85.374208,
+          "coldMs": 244.45445899999999,
+          "warmMs": [
+            1.226583000000005,
+            1.0793750000000273,
+            1.0710829999999874,
+            0.98599999999999,
+            0.973542000000009
+          ],
+          "hostColdPeakRssMiB": 346.5625,
+          "hostProcessPeakRssMiB": 346.6875,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 374.2947920000006
+        },
+        {
+          "round": 3,
+          "mode": "streaming-typescript",
+          "startupMs": 82.743458,
+          "coldMs": 246.46733299999997,
+          "warmMs": [
+            1.2085839999999735,
+            1.2246670000000108,
+            1.0320409999999924,
+            1.0589579999999614,
+            1.0429170000000454
+          ],
+          "hostColdPeakRssMiB": 142.734375,
+          "hostProcessPeakRssMiB": 142.828125,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 368.127708
+        },
+        {
+          "round": 4,
+          "mode": "legacy-typescript",
+          "startupMs": 77.726708,
+          "coldMs": 244.65683399999998,
+          "warmMs": [
+            222.89991700000002,
+            216.62308299999995,
+            307.21629200000007,
+            274.9632919999999,
+            364.0946250000002
+          ],
+          "hostColdPeakRssMiB": 332.328125,
+          "hostProcessPeakRssMiB": 469.859375,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 1815.784832999998
+        },
+        {
+          "round": 4,
+          "mode": "typescript",
+          "startupMs": 319.35475,
+          "coldMs": 342.726833,
+          "warmMs": [
+            1.5001250000000255,
+            1.2304589999999962,
+            1.1274579999999332,
+            1.0189169999999876,
+            1.0811669999999367
+          ],
+          "hostColdPeakRssMiB": 346.703125,
+          "hostProcessPeakRssMiB": 347.046875,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 726.9831249999988
+        },
+        {
+          "round": 4,
+          "mode": "streaming-typescript",
+          "startupMs": 91.732583,
+          "coldMs": 291.91999999999996,
+          "warmMs": [
+            1.8979999999999677,
+            1.5572500000000105,
+            1.3855409999999893,
+            1.3258749999999964,
+            1.131750000000011
+          ],
+          "hostColdPeakRssMiB": 143.484375,
+          "hostProcessPeakRssMiB": 143.609375,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 429.92987500000163
+        },
+        {
+          "round": 4,
+          "mode": "rust",
+          "startupMs": 98.186792,
+          "coldMs": 245.24604100000002,
+          "warmMs": [
+            2.1927499999999895,
+            1.7898329999999874,
+            1.9928330000000187,
+            1.8785839999999894,
+            1.924709000000007
+          ],
+          "hostColdPeakRssMiB": 101.40625,
+          "hostProcessPeakRssMiB": 102.59375,
+          "records": 576,
+          "digest": "6eec5d86daadc9b4dea9f5f6d6b0d9545f937f23af2f2025695b72657301fc42",
+          "processWallMs": 387.77229200000147
+        }
+      ],
+      "helperRss": [
+        3.671875,
+        3.71875,
+        3.75,
+        3.703125,
+        3.765625
+      ],
+      "summary": {
+        "legacy-typescript": {
+          "coldMs": 250.965958,
+          "warmMs": 225.65316699999994,
+          "hostColdPeakRssMiB": 332.328125
+        },
+        "typescript": {
+          "coldMs": 280.626041,
+          "warmMs": 1.1149159999999938,
+          "hostColdPeakRssMiB": 346.75
+        },
+        "streaming-typescript": {
+          "coldMs": 291.91999999999996,
+          "warmMs": 1.2685410000000275,
+          "hostColdPeakRssMiB": 142.890625
+        },
+        "rust": {
+          "coldMs": 164.705125,
+          "warmMs": 1.4106670000000179,
+          "hostColdPeakRssMiB": 102.359375
+        }
+      }
+    },
+    {
+      "name": "wide",
+      "rows": 10000,
+      "retained": 10000,
+      "payload": 256,
+      "bytes": 5888888,
+      "sha256": "56cacb332b9cd361f73633b32df194dfa82571d507216de093fe130630b91482",
+      "samples": [
+        {
+          "round": 0,
+          "mode": "legacy-typescript",
+          "startupMs": 101.595042,
+          "coldMs": 76.976291,
+          "warmMs": [
+            53.059541000000024,
+            52.046332999999976,
+            42.14195900000004,
+            44.768125,
+            45.616333999999995
+          ],
+          "hostColdPeakRssMiB": 111.609375,
+          "hostProcessPeakRssMiB": 203.203125,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 476.0239159999983
+        },
+        {
+          "round": 0,
+          "mode": "typescript",
+          "startupMs": 86.967292,
+          "coldMs": 92.819958,
+          "warmMs": [
+            15.107665999999995,
+            16.274249999999995,
+            25.364833000000004,
+            13.926749999999998,
+            14.49491599999999
+          ],
+          "hostColdPeakRssMiB": 122.640625,
+          "hostProcessPeakRssMiB": 156.8125,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 313.3614170000001
+        },
+        {
+          "round": 0,
+          "mode": "streaming-typescript",
+          "startupMs": 88.5755,
+          "coldMs": 86.81745799999999,
+          "warmMs": [
+            27.58945799999998,
+            15.57808399999999,
+            14.50200000000001,
+            19.822125,
+            14.755874999999975
+          ],
+          "hostColdPeakRssMiB": 106.796875,
+          "hostProcessPeakRssMiB": 174.015625,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 320.2993749999987
+        },
+        {
+          "round": 0,
+          "mode": "rust",
+          "startupMs": 100.141167,
+          "coldMs": 127.53258300000002,
+          "warmMs": [
+            22.172541999999993,
+            28.390541999999982,
+            20.41145800000004,
+            17.82079200000004,
+            24.837541999999985
+          ],
+          "hostColdPeakRssMiB": 114.046875,
+          "hostProcessPeakRssMiB": 172.09375,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 388.33558399999674
+        },
+        {
+          "round": 1,
+          "mode": "typescript",
+          "startupMs": 83.102083,
+          "coldMs": 88.69495900000001,
+          "warmMs": [
+            15.753375000000005,
+            17.702665999999994,
+            14.826999999999998,
+            14.727041999999983,
+            16.18083299999998
+          ],
+          "hostColdPeakRssMiB": 128.25,
+          "hostProcessPeakRssMiB": 182.609375,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 297.9679580000011
+        },
+        {
+          "round": 1,
+          "mode": "streaming-typescript",
+          "startupMs": 84.853375,
+          "coldMs": 74.37395799999999,
+          "warmMs": [
+            19.616457999999994,
+            17.797540999999995,
+            13.917833000000002,
+            14.517041000000006,
+            18.832458000000003
+          ],
+          "hostColdPeakRssMiB": 105.859375,
+          "hostProcessPeakRssMiB": 173.234375,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 290.60420800000065
+        },
+        {
+          "round": 1,
+          "mode": "rust",
+          "startupMs": 83.934417,
+          "coldMs": 115.97804200000002,
+          "warmMs": [
+            16.326041000000004,
+            20.965374999999995,
+            16.64262500000001,
+            14.342083999999971,
+            15.031542000000002
+          ],
+          "hostColdPeakRssMiB": 109.796875,
+          "hostProcessPeakRssMiB": 161.953125,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 328.40329199999906
+        },
+        {
+          "round": 1,
+          "mode": "legacy-typescript",
+          "startupMs": 81.760666,
+          "coldMs": 73.764875,
+          "warmMs": [
+            38.88454100000001,
+            37.33695799999998,
+            36.06133399999999,
+            37.13775000000004,
+            36.50762500000002
+          ],
+          "hostColdPeakRssMiB": 121.453125,
+          "hostProcessPeakRssMiB": 238.5,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 405.81695799999943
+        },
+        {
+          "round": 2,
+          "mode": "streaming-typescript",
+          "startupMs": 85.867667,
+          "coldMs": 77.588917,
+          "warmMs": [
+            17.88066599999999,
+            19.129667000000012,
+            15.892083999999983,
+            13.751334000000014,
+            14.73275000000001
+          ],
+          "hostColdPeakRssMiB": 109.40625,
+          "hostProcessPeakRssMiB": 160.984375,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 291.3681660000002
+        },
+        {
+          "round": 2,
+          "mode": "rust",
+          "startupMs": 87.077584,
+          "coldMs": 113.37241599999999,
+          "warmMs": [
+            16.845916999999986,
+            20.801874999999995,
+            16.252875000000017,
+            13.81133299999999,
+            14.371458000000018
+          ],
+          "hostColdPeakRssMiB": 111.328125,
+          "hostProcessPeakRssMiB": 166.625,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 326.97899999999936
+        },
+        {
+          "round": 2,
+          "mode": "legacy-typescript",
+          "startupMs": 80.807084,
+          "coldMs": 75.40754100000001,
+          "warmMs": [
+            39.815,
+            37.747625,
+            35.122333,
+            39.742459,
+            37.01650000000001
+          ],
+          "hostColdPeakRssMiB": 121.234375,
+          "hostProcessPeakRssMiB": 238.3125,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 406.6555840000001
+        },
+        {
+          "round": 2,
+          "mode": "typescript",
+          "startupMs": 84.830167,
+          "coldMs": 103.52787500000001,
+          "warmMs": [
+            25.998874999999998,
+            14.669750000000022,
+            15.952832999999998,
+            17.739041000000014,
+            14.609417000000008
+          ],
+          "hostColdPeakRssMiB": 126.15625,
+          "hostProcessPeakRssMiB": 191.640625,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 326.4792500000003
+        },
+        {
+          "round": 3,
+          "mode": "rust",
+          "startupMs": 92.895042,
+          "coldMs": 193.659833,
+          "warmMs": [
+            21.718208000000004,
+            22.59729100000004,
+            15.063375000000008,
+            16.30525,
+            19.17891599999996
+          ],
+          "hostColdPeakRssMiB": 115.640625,
+          "hostProcessPeakRssMiB": 170.65625,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 431.94266699999935
+        },
+        {
+          "round": 3,
+          "mode": "legacy-typescript",
+          "startupMs": 91.359958,
+          "coldMs": 81.87966699999998,
+          "warmMs": [
+            44.06129200000001,
+            37.84125,
+            36.62983299999999,
+            39.99725000000001,
+            37.030708000000004
+          ],
+          "hostColdPeakRssMiB": 121.9375,
+          "hostProcessPeakRssMiB": 238.859375,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 437.27900000000227
+        },
+        {
+          "round": 3,
+          "mode": "typescript",
+          "startupMs": 88.688125,
+          "coldMs": 86.30758300000001,
+          "warmMs": [
+            16.793042000000014,
+            16.159458,
+            26.709958,
+            15.055791,
+            15.544542000000007
+          ],
+          "hostColdPeakRssMiB": 123.796875,
+          "hostProcessPeakRssMiB": 158.21875,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 318.24341600000116
+        },
+        {
+          "round": 3,
+          "mode": "streaming-typescript",
+          "startupMs": 89.950167,
+          "coldMs": 93.900667,
+          "warmMs": [
+            20.380875000000003,
+            23.95420899999999,
+            14.200333,
+            15.028292000000022,
+            17.421790999999985
+          ],
+          "hostColdPeakRssMiB": 109.984375,
+          "hostProcessPeakRssMiB": 165.71875,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 324.2167909999989
+        },
+        {
+          "round": 4,
+          "mode": "legacy-typescript",
+          "startupMs": 91.644,
+          "coldMs": 82.351542,
+          "warmMs": [
+            51.70362500000002,
+            50.096374999999995,
+            44.94341600000001,
+            39.609666000000004,
+            45.587041
+          ],
+          "hostColdPeakRssMiB": 110.59375,
+          "hostProcessPeakRssMiB": 202.046875,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 458.7544170000001
+        },
+        {
+          "round": 4,
+          "mode": "typescript",
+          "startupMs": 89.020125,
+          "coldMs": 84.87275000000001,
+          "warmMs": [
+            15.324709000000013,
+            16.932874999999996,
+            26.74933299999998,
+            15.526624999999996,
+            14.583208000000013
+          ],
+          "hostColdPeakRssMiB": 123.140625,
+          "hostProcessPeakRssMiB": 156.640625,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 314.97595900000306
+        },
+        {
+          "round": 4,
+          "mode": "streaming-typescript",
+          "startupMs": 97.080791,
+          "coldMs": 90.557792,
+          "warmMs": [
+            20.521000000000015,
+            18.864125,
+            16.68704199999999,
+            14.258041999999989,
+            14.708874999999978
+          ],
+          "hostColdPeakRssMiB": 110.21875,
+          "hostProcessPeakRssMiB": 161.515625,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 330.1262499999975
+        },
+        {
+          "round": 4,
+          "mode": "rust",
+          "startupMs": 89.088666,
+          "coldMs": 134.63879200000002,
+          "warmMs": [
+            21.815416999999997,
+            26.598749999999995,
+            14.938874999999996,
+            15.309459000000004,
+            19.057875000000024
+          ],
+          "hostColdPeakRssMiB": 118.265625,
+          "hostProcessPeakRssMiB": 172.90625,
+          "records": 10000,
+          "digest": "f89fdc0114963e3eb2d72449992505cff1706a317776a73deebf520ea952c62a",
+          "processWallMs": 373.52362500000163
+        }
+      ],
+      "helperRss": [
+        15.953125,
+        15.828125,
+        15.390625,
+        15.90625,
+        15.84375
+      ],
+      "summary": {
+        "legacy-typescript": {
+          "coldMs": 76.976291,
+          "warmMs": 39.742459,
+          "hostColdPeakRssMiB": 121.234375
+        },
+        "typescript": {
+          "coldMs": 88.69495900000001,
+          "warmMs": 15.753375000000005,
+          "hostColdPeakRssMiB": 123.796875
+        },
+        "streaming-typescript": {
+          "coldMs": 86.81745799999999,
+          "warmMs": 16.68704199999999,
+          "hostColdPeakRssMiB": 109.40625
+        },
+        "rust": {
+          "coldMs": 127.53258300000002,
+          "warmMs": 17.82079200000004,
+          "hostColdPeakRssMiB": 114.046875
+        }
+      }
+    }
+  ]
+}

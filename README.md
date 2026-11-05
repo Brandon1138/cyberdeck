@@ -35,6 +35,13 @@ mise exec -- pnpm build
 mise exec -- pnpm dev
 ```
 
+An optional Rust worker accelerates cold instruction-journal replay for history-heavy
+mailboxes. Build it with `pnpm build:native` and select it for a newly started broker
+with `CYBERDECK_INSTRUCTION_REPLAY=rust`. TypeScript remains the default and rollback
+path. See [ADR 0001](docs/adr/0001-incremental-rust-core.md) for supported builds,
+input limits and rollout requirements, and the [comparative benchmarks](docs/performance/rust-core/README.md)
+for workloads where the native boundary helps or hurts.
+
 Run `cyberdeck` with no arguments to start the broker when needed and open the interactive fleet.
 
 Cyberdeck is an independent open-source project. It is not affiliated with,

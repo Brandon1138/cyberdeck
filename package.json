@@ -38,7 +38,8 @@
     "LICENSE",
     "NOTICE",
     "SECURITY.md",
-    "TRADEMARKS.md"
+    "TRADEMARKS.md",
+    "dist/native/bin"
   ],
   "publishConfig": {
     "access": "public",
@@ -60,7 +61,10 @@
     "probe": "tsx scripts/probe-runtimes.ts",
     "gate:live-codex": "tsx scripts/run-live-codex-gate.ts",
     "dev": "tsx src/cli.ts",
-    "postinstall": "node -e \"const fs=require('node:fs'),path=require('node:path');if(process.platform==='darwin'){const helper=path.join(path.dirname(require.resolve('node-pty/package.json')),'prebuilds',process.platform+'-'+process.arch,'spawn-helper');if(fs.existsSync(helper))fs.chmodSync(helper,0o755)}\""
+    "postinstall": "node -e \"const fs=require('node:fs'),path=require('node:path');if(process.platform==='darwin'){const helper=path.join(path.dirname(require.resolve('node-pty/package.json')),'prebuilds',process.platform+'-'+process.arch,'spawn-helper');if(fs.existsSync(helper))fs.chmodSync(helper,0o755)}\"",
+    "build:native": "node scripts/build-native-core.mjs",
+    "test:native": "cargo test --locked --manifest-path native/core/Cargo.toml && pnpm build:native && CYBERDECK_REQUIRE_NATIVE_TESTS=1 vitest run tests/persistence/native-instruction-replay.test.ts",
+    "bench:core": "node scripts/bench-native-core.mjs"
   },
   "dependencies": {
     "@opentelemetry/api": "1.9.1",
@@ -74,7 +78,7 @@
     "qrcode": "1.5.4",
     "smol-toml": "1.9.0",
     "ws": "8.22.0",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
