@@ -143,7 +143,7 @@ export function normalizeOrchestratorPicker(
 ): OrchestratorPickerState {
   if (picker.step !== "target") return picker;
   const existing = existingOrchestrators(snapshot);
-  const focus = orchestratorFocusIndex(picker.focus, existing) < 0
+  const focus = picker.focus.kind === "existing" && orchestratorFocusIndex(picker.focus, existing) < 0
     ? orchestratorFocusAt(0, existing)
     : picker.focus;
   const focusedId = focus.kind === "existing" ? focus.sessionId : undefined;

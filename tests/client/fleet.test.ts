@@ -82,6 +82,15 @@ function fleet(...records: FleetThread[]): FleetSnapshot {
   };
 }
 
+/** Explicitly unfold the existing roster and focus its first Orc. */
+function openExistingOrchestratorPicker(state: FleetState, snapshot: FleetSnapshot) {
+  let result = transitionFleet(state, snapshot, "ctrl+o", NOW_MS);
+  for (const key of ["up", "enter", "down"]) {
+    result = transitionFleet(result.state, snapshot, key, NOW_MS);
+  }
+  return result;
+}
+
 function coordination(
   sessionId: string,
   leaseHealth: FleetWorkerCoordinationView["leaseHealth"],
@@ -1619,6 +1628,53 @@ describe("fleet presentation", () => {
 });
 
 describe("fleet controls", () => {
+  it("opens Ctrl+O with existing Orcs collapsed and new models immediately selectable", () => {
+    const snapshot = fleet(...Array.from({ length: 40 }, (_, index) => ({ record: session({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      kind: "orchestrator", role: "orchestrator", name: `Existing peer ${index}`,
+    }) })));
+    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+    expect(opened.state.orchestratorPicker).toMatchObject({
+      step: "target", focus: { kind: "profile", modelIndex: 0 },
+    });
+    const rendered = renderFleet(snapshot, opened.state, { color: false, width: 110, height: 20 });
+    expect(rendered).toContain("▸ Existing orchestrators (40)");
+    expect(rendered).toContain("New orchestrator");
+    expect(rendered).not.toContain("Existing peer");
+    expect(transitionFleet(opened.state, snapshot, "ctrl+x", NOW_MS).action).toBeUndefined();
+    const next = transitionFleet(opened.state, snapshot, "down", NOW_MS);
+    expect(next.state.orchestratorPicker).toMatchObject({ focus: { kind: "profile", modelIndex: 1 } });
+    expect(transitionFleet(opened.state, snapshot, "enter", NOW_MS).state.orchestratorPicker)
+      .toMatchObject({ step: "effort", modelIndex: 0 });
+  });
+
+  it("unfolds existing Orcs on demand and folds them out of navigation again", () => {
+    const peer = session({ kind: "orchestrator", role: "orchestrator", name: "Hidden peer" });
+    const snapshot = fleet({ record: peer });
+    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+    const header = transitionFleet(opened.state, snapshot, "up", NOW_MS);
+    expect(header.state.orchestratorPicker).toMatchObject({ focus: { kind: "existing-group" } });
+    expect(transitionFleet(header.state, snapshot, "ctrl+x", NOW_MS).action).toBeUndefined();
+    const expanded = transitionFleet(header.state, snapshot, "enter", NOW_MS);
+    expect(renderFleet(snapshot, expanded.state, { color: false, width: 110, height: 30 }))
+      .toContain("Hidden peer");
+    const selected = transitionFleet(expanded.state, snapshot, "down", NOW_MS);
+    expect(selected.state.orchestratorPicker).toMatchObject({ focus: { kind: "existing", sessionId: peer.id } });
+    const collapsed = transitionFleet(selected.state, snapshot, "left", NOW_MS);
+    expect(renderFleet(snapshot, collapsed.state, { color: false, width: 110, height: 30 }))
+      .not.toContain("Hidden peer");
+    expect(transitionFleet(collapsed.state, snapshot, "down", NOW_MS).state.orchestratorPicker)
+      .toMatchObject({ focus: { kind: "profile", modelIndex: 0 } });
+    expect(transitionFleet(collapsed.state, snapshot, "right", NOW_MS).state.orchestratorPicker)
+      .toMatchObject({ existingExpanded: true });
+    const folded = transitionFleet(expanded.state, snapshot, "enter", NOW_MS);
+    expect(folded.state.orchestratorPicker).toMatchObject({ existingExpanded: false });
+    const closed = transitionFleet(expanded.state, snapshot, "escape", NOW_MS);
+    const reopened = transitionFleet(closed.state, snapshot, "ctrl+o", NOW_MS);
+    expect(renderFleet(snapshot, reopened.state, { color: false, width: 110, height: 30 }))
+      .not.toContain("Hidden peer");
+  });
+
   it("walks a new model and effort then creates a distinct orchestrator", () => {
     const snapshot = fleet();
     const initial = createFleetState(snapshot, "/repo/one");
@@ -1683,7 +1739,7 @@ describe("fleet controls", () => {
       displayOrder: 1,
     });
     const snapshot = fleet({ record: current }, { record: peer });
-    const opened = transitionFleet(createFleetState(snapshot, "/repo/one"), snapshot, "ctrl+o", NOW_MS);
+    const opened = openExistingOrchestratorPicker(createFleetState(snapshot, "/repo/one"), snapshot);
     const selectedPeer = transitionFleet(opened.state, snapshot, "down", NOW_MS);
     const switched = transitionFleet(selectedPeer.state, snapshot, "enter", NOW_MS);
 
@@ -1695,7 +1751,7 @@ describe("fleet controls", () => {
     });
     expect(switched.state.selectedSessionId).toBe(peer.id);
 
-    const reopened = transitionFleet(switched.state, snapshot, "ctrl+o", NOW_MS);
+    const reopened = openExistingOrchestratorPicker(switched.state, snapshot);
     const switchedBack = transitionFleet(reopened.state, snapshot, "enter", NOW_MS);
     expect(switchedBack.action).toEqual({
       type: "open-orchestrator",
@@ -1726,7 +1782,7 @@ describe("fleet controls", () => {
       exitCode: 0,
     });
     const snapshot = fleet({ record: available }, { record: worker }, { record: ended });
-    const picker = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+    const picker = openExistingOrchestratorPicker(createFleetState(snapshot), snapshot);
     const rendered = renderFleet(snapshot, picker.state, { color: false, width: 110, height: 30 });
 
     expect(rendered).toContain("Existing orchestrators");
@@ -1749,7 +1805,7 @@ describe("fleet controls", () => {
       name: "Busy peer",
     });
     const snapshot = fleet({ record: controlled });
-    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+    const opened = openExistingOrchestratorPicker(createFleetState(snapshot), snapshot);
     const rendered = renderFleet(snapshot, opened.state, { color: false, width: 110, height: 30 });
     const refused = transitionFleet(opened.state, snapshot, "enter", NOW_MS);
 
@@ -1763,7 +1819,7 @@ describe("fleet controls", () => {
   it("stops a selected existing orchestrator from the picker via Ctrl+X, then walks the same delete ladder", () => {
     const peer = session({ kind: "orchestrator", role: "orchestrator", name: "Peer orc" });
     const snapshot = fleet({ record: peer });
-    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+    const opened = openExistingOrchestratorPicker(createFleetState(snapshot), snapshot);
 
     const stop = transitionFleet(opened.state, snapshot, "ctrl+x", NOW_MS);
     expect(stop.action).toEqual({ type: "stop", sessionId: peer.id });
@@ -1814,7 +1870,7 @@ describe("fleet controls", () => {
       updatedAt: "2026-07-22T09:00:00.000Z",
     });
     const before = fleet({ record: target }, { record: neighbour });
-    const opened = transitionFleet(createFleetState(before), before, "ctrl+o", NOW_MS);
+    const opened = openExistingOrchestratorPicker(createFleetState(before), before);
 
     const stop = transitionFleet(opened.state, before, "ctrl+x", NOW_MS);
     expect(stop.action).toEqual({ type: "stop", sessionId: target.id });
@@ -1848,7 +1904,7 @@ describe("fleet controls", () => {
       exitCode: 0,
     });
     const before = fleet({ record: ended });
-    const opened = transitionFleet(createFleetState(before), before, "ctrl+o", NOW_MS);
+    const opened = openExistingOrchestratorPicker(createFleetState(before), before);
 
     const stop = transitionFleet(opened.state, before, "ctrl+x", NOW_MS);
     expect(stop.action).toEqual({ type: "stop", sessionId: ended.id });
@@ -1879,7 +1935,7 @@ describe("fleet controls", () => {
       exitCode: 0,
     });
     const snapshot = fleet({ record: stopped });
-    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+    const opened = openExistingOrchestratorPicker(createFleetState(snapshot), snapshot);
 
     const stop = transitionFleet(opened.state, snapshot, "ctrl+x", NOW_MS);
     expect(stop.action).toEqual({ type: "stop", sessionId: stopped.id });
@@ -1901,7 +1957,7 @@ describe("fleet controls", () => {
   it("does nothing on Ctrl+X when a New orchestrator profile is focused", () => {
     const peer = session({ kind: "orchestrator", role: "orchestrator", name: "Peer orc" });
     const snapshot = fleet({ record: peer });
-    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+    const opened = openExistingOrchestratorPicker(createFleetState(snapshot), snapshot);
     const onNewProfile = transitionFleet(opened.state, snapshot, "down", NOW_MS);
     expect(onNewProfile.state.orchestratorPicker).toMatchObject({
       focus: { kind: "profile", modelIndex: 0 },
@@ -1915,7 +1971,7 @@ describe("fleet controls", () => {
   it("shows the Ctrl+X hint only while an existing orchestrator row is focused", () => {
     const peer = session({ kind: "orchestrator", role: "orchestrator", name: "Peer orc" });
     const snapshot = fleet({ record: peer });
-    const opened = transitionFleet(createFleetState(snapshot), snapshot, "ctrl+o", NOW_MS);
+    const opened = openExistingOrchestratorPicker(createFleetState(snapshot), snapshot);
 
     const onExisting = renderFleet(snapshot, opened.state, { color: false, width: 140, height: 30 });
     expect(onExisting).toContain("ctrl+x stop");
@@ -2016,7 +2072,7 @@ describe("fleet controls", () => {
       cwd: "/repo/one",
     });
     const snapshot = fleet({ record: starting });
-    const opened = transitionFleet(createFleetState(snapshot, "/repo/one"), snapshot, "ctrl+o", NOW_MS);
+    const opened = openExistingOrchestratorPicker(createFleetState(snapshot, "/repo/one"), snapshot);
     const rendered = renderFleet(snapshot, opened.state, { color: false, width: 110, height: 30 });
 
     expect(rendered).toContain("Booting peer");
@@ -3513,7 +3569,7 @@ describe("runFleet", () => {
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
 
     input.emit("data", Buffer.from([0x0f]));
-    input.emit("data", Buffer.from("\u001b[B\r"));
+    input.emit("data", Buffer.from("\r")); // the first new model is already focused
     input.emit("data", Buffer.from("\u001b[B\u001b[B\u001b[B\r"));
     await vi.waitFor(() => expect(openOrchestrator).toHaveBeenCalledWith({
       type: "create",
@@ -3951,7 +4007,8 @@ describe("runFleet", () => {
     const running = runFleet(transport as never, input, output, new EventEmitter());
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
 
-    input.emit("data", Buffer.from([0x0f])); // ctrl+o opens the picker on the only existing orchestrator
+    input.emit("data", Buffer.from([0x0f])); // ctrl+o opens the picker with the roster folded
+    input.emit("data", Buffer.from("\u001b[A\r\u001b[B")); // unfold the roster and select its first Orc
     input.emit("data", Buffer.from([0x18])); // ctrl+x, denied by the broker
     await vi.waitFor(() => {
       const latestScreen = Buffer.concat(output.chunks).toString().split("[?25l[H").at(-1) ?? "";
@@ -4021,7 +4078,8 @@ describe("runFleet", () => {
     const running = runFleet(transport as never, input, output, new EventEmitter());
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
 
-    input.emit("data", Buffer.from([0x0f])); // ctrl+o, focus on Orc 1
+    input.emit("data", Buffer.from([0x0f])); // ctrl+o opens the picker with the roster folded
+    input.emit("data", Buffer.from("\u001b[A\r\u001b[B")); // unfold the roster and select its first Orc
     input.emit("data", Buffer.from("[B")); // down, choiceIndex 1 = Orc 2 (the last existing row)
     // Orc 2 is already terminal: stop no-ops, second arms the confirmation, third deletes it.
     input.emit("data", Buffer.from([0x18, 0x18, 0x18]));
@@ -4117,6 +4175,7 @@ describe("runFleet", () => {
 
     input.emit("data", Buffer.from([0x0f])); // ctrl+o
     await vi.waitFor(() => expect(screen()).toContain("Existing orchestrators"));
+    input.emit("data", Buffer.from("\u001b[A\r\u001b[B")); // unfold the roster and select its first Orc
 
     // First press: the graceful stop. The record really moves to cancelled/stopping and then to
     // stopped, and the row has to still be there — and say so — for the rest of the ladder.

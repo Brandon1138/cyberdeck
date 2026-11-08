@@ -90,6 +90,7 @@ export interface StopAcknowledgement {
  * whatever slid into the slot; a session id cannot.
  */
 export type OrchestratorPickerFocus =
+  | { kind: "existing-group"; }
   | { kind: "existing"; sessionId: string; }
   | { kind: "profile"; modelIndex: number; };
 
@@ -97,6 +98,7 @@ export type OrchestratorPickerState =
   | {
     step: "target";
     focus: OrchestratorPickerFocus;
+    existingExpanded?: boolean;
     /** Mirrors the fleet list's ctrl+x ladder, scoped to the picker's own selection. */
     stopAcknowledgement?: StopAcknowledgement | undefined;
     deleteConfirmation?: DeleteConfirmation | undefined;

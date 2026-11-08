@@ -35,17 +35,15 @@ export function transitionOrchestratorPicker(
   if (key === "up" || key === "down") {
     const delta = key === "up" ? -1 : 1;
     if (picker.step === "target") {
-      const existing = existingOrchestrators(snapshot);
-      const current = orchestratorFocusIndex(picker.focus, existing);
-      // An unresolved focus — its orchestrator was deleted from under the picker — is rescued onto
-      // the first row rather than moved relative to a position it no longer has.
-      const index = current < 0
-        ? 0
-        : boundedIndex(current + delta, existing.length + choices.length);
+      const existing = picker.existingExpanded ? existingOrchestrators(snapshot) : [];
+      const current = picker.focus.kind === "existing-group"
+        ? 0 : orchestratorFocusIndex(picker.focus, existing) + 1;
+      const index = boundedIndex(current + delta, 1 + existing.length + choices.length);
       return {
         state: {
           ...state,
-          orchestratorPicker: { ...picker, focus: orchestratorFocusAt(index, existing) },
+          orchestratorPicker: { ...picker, focus: index === 0
+            ? { kind: "existing-group" } : orchestratorFocusAt(index - 1, existing) },
         },
       };
     }
@@ -57,6 +55,25 @@ export function transitionOrchestratorPicker(
           ...picker,
           effortIndex: boundedIndex(picker.effortIndex + delta, choice.provider.efforts.length),
         },
+      },
+    };
+  }
+
+  if (picker.step === "target" && (
+    picker.focus.kind === "existing-group" && ["enter", "left", "right"].includes(key)
+    || picker.focus.kind === "existing" && key === "left"
+  )) {
+    return {
+      state: {
+        ...state,
+        orchestratorPicker: {
+          ...picker,
+          focus: { kind: "existing-group" },
+          existingExpanded: key === "enter" ? !picker.existingExpanded : key === "right",
+          stopAcknowledgement: undefined,
+          deleteConfirmation: undefined,
+        },
+        notice: undefined,
       },
     };
   }
@@ -115,6 +132,7 @@ export function transitionOrchestratorPicker(
   if (key !== "enter") return { state };
   if (picker.step === "target") {
     const focus = picker.focus;
+    if (focus.kind === "existing-group") return { state };
     const existing = existingOrchestrators(snapshot);
     if (focus.kind === "existing") {
       const selectedExisting = existing.find((record) => record.id === focus.sessionId);
@@ -207,10 +225,13 @@ export function renderOrchestratorPicker(
   if (picker.step === "target") {
     const existing = existingOrchestrators(snapshot);
     const focusIndex = orchestratorFocusIndex(picker.focus, existing);
-    lines.push("Existing orchestrators", "");
+    lines.push(pickerRow(
+      `${picker.existingExpanded ? "▾" : "▸"} Existing orchestrators (${existing.length})`,
+      picker.focus.kind === "existing-group", options.color,
+    ), "");
     if (existing.length === 0) {
       lines.push(paint("  No interactive orchestrators", "dim", options.color));
-    } else {
+    } else if (picker.existingExpanded) {
       lines.push(...existing.map((record, index) =>
         pickerRow(existingOrchestratorLabel(record, options.color), index === focusIndex, options.color)));
     }
@@ -238,7 +259,9 @@ export function renderOrchestratorPicker(
       pickerRow(effort === "native-default" ? "Provider managed" : effort, index === picker.effortIndex, options.color)));
   }
 
-  const targetHint = destructiveHint === undefined
+  const targetHint = picker.step === "target" && picker.focus.kind === "existing-group"
+    ? "↑↓ select · enter expand/collapse · ←→ fold/unfold · esc back"
+    : destructiveHint === undefined
     ? "↑↓ select · enter focus/next · esc back"
     : `↑↓ select · enter focus/next · ${destructiveHint} · esc back`;
   const footer = [
@@ -277,18 +300,19 @@ export function orchestratorSelection(
   };
 }
 
-export function initialOrchestratorPicker(snapshot: FleetSnapshot, _cwd: string): OrchestratorPickerState {
-  return { step: "target", focus: orchestratorFocusAt(0, existingOrchestrators(snapshot)) };
+export function initialOrchestratorPicker(_snapshot: FleetSnapshot, _cwd: string): OrchestratorPickerState {
+  return { step: "target", focus: { kind: "profile", modelIndex: 0 } };
 }
 
-/** Where a focus sits in the picker's combined row order, or -1 when its orchestrator is gone. */
+/** Index among target rows, excluding the disclosure; -1 for that header or a deleted Orc. */
 export function orchestratorFocusIndex(
   focus: OrchestratorPickerFocus,
   existing: readonly SessionRecord[],
 ): number {
   return focus.kind === "profile"
     ? existing.length + focus.modelIndex
-    : existing.findIndex((record) => record.id === focus.sessionId);
+    : focus.kind === "existing-group" ? -1
+      : existing.findIndex((record) => record.id === focus.sessionId);
 }
 
 /** The inverse: the durable focus a row position names, so navigation never stores a position. */
