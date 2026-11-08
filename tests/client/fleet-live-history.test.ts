@@ -48,20 +48,21 @@ function reply(snapshot: FleetSnapshot, text = "A new meaningful assistant reply
 }
 
 describe("Fleet live/history membership and navigation", () => {
-  it.each(["working", "starting", "unknown", "blocked-modal", "blocked-composer", "stalled", "provider-limit", "failed", "errored", "interrupted", "stopping"] as const)("keeps %s actionable ahead of history", (status) => {
+  it.each(["working", "starting", "idle", "unknown", "blocked-modal", "blocked-composer", "stalled", "provider-limit", "errored", "interrupted", "stopping"] as const)("keeps present runtimes in Live with %s activity", (status) => {
     const thread = worker(status, status);
     expect(isLiveThread(thread)).toBe(true);
     expect(visible({ threads: [thread] }, createFleetState({ threads: [thread] }))).toEqual([status]);
   });
-  it.each(["idle", "exited", "stopped"] as const)("folds known inactive %s without deleting it", (status) => {
+  it.each(["failed", "exited", "stopped"] as const)("folds absent %s runtimes without deleting the conversation", (status) => {
     const thread = worker(status, status), snapshot = { threads: [thread] };
     expect(isLiveThread(thread)).toBe(false);
     expect(visible(snapshot, createFleetState(snapshot))).toEqual([]);
-    expect(fleetListRows(snapshot, createFleetState(snapshot))).toContainEqual({ kind: "history", cwd: "/repo", threadCount: 1, expanded: false });
+    expect(fleetListRows(snapshot, createFleetState(snapshot))).toContainEqual(expect.objectContaining({ kind: "folder", cwd: "/repo", historyCount: 1, collapsed: true }));
   });
   it("keeps queued idle, inconsistent stopped, and legacy live Unknown sessions visible", () => {
     const queued = worker("queued", "idle"); queued.workerTruth!.pendingInstructions = 1;
     const contradictory = worker("contradictory", "stopped"); contradictory.record.exitCode = null;
+    contradictory.record.pid = 42;
     const legacy = worker("legacy", "unknown"); delete legacy.workerTruth;
     expect([queued, contradictory, legacy].map(isLiveThread)).toEqual([true, true, true]);
   });
@@ -79,15 +80,15 @@ describe("Fleet live/history membership and navigation", () => {
     const snapshot = { threads: [worker("old", "exited")], projects: ["/repo", "/empty"] };
     const state = createFleetState(snapshot);
     const rendered = renderFleet(snapshot, state, options());
-    expect(rendered).toContain("History · 1");
-    expect(rendered).toContain("/empty · 0 threads");
+    expect(rendered).toContain("/repo · 0 live · 1 history");
+    expect(rendered).toContain("/empty · 0 live");
     expect(rendered).not.toContain("Task old");
   });
   it("toggles history in rendering and navigation together, with a durable fold action", () => {
     const snapshot = { threads: [worker("live", "working"), worker("old", "exited")] };
     const state = { ...createFleetState(snapshot), focusedHistoryCwd: "/repo" };
     const opened = transitionFleet(state, snapshot, "enter", now);
-    expect(opened.action).toEqual({ type: "folder-disposition", cwd: "/repo", disposition: { collapsed: false, expanded: false, historyExpanded: true } });
+    expect(opened.action).toEqual({ type: "folder-disposition", cwd: "/repo", disposition: { collapsed: false, expanded: false, liveHistoryExpanded: true } });
     expect(visible(snapshot, opened.state)).toEqual(["live", "old"]);
     const old = transitionFleet(opened.state, snapshot, "down", now).state;
     expect(old.selectedSessionId).toBe("old");
@@ -108,7 +109,7 @@ describe("Fleet live/history membership and navigation", () => {
   it("keeps a hidden selection inert when it moves to History or disappears", () => {
     const snapshot = { threads: [worker("chosen", "working"), worker("other", "working")] };
     const state = { ...createFleetState(snapshot), selectedSessionId: "chosen" };
-    const changed = { threads: [worker("chosen", "idle"), snapshot.threads[1]!] };
+    const changed = { threads: [worker("chosen", "exited"), snapshot.threads[1]!] };
     const normalized = transitionFleet(state, changed, "ctrl+x", now);
     expect(normalized.state.selectedSessionId).toBe("chosen");
     expect(normalized.state.focusedHistoryCwd).toBe("/repo");
@@ -153,7 +154,7 @@ describe("Fleet live/history membership and navigation", () => {
     expect(visible(snapshot, state)).toEqual(["old"]);
     state = transitionFleet({ ...state, draft: "/view live" }, snapshot, "enter", now).state;
     expect(state.listView).toBe("live");
-    expect(visible(snapshot, state)).toEqual(["live", "old"]);
+    expect(visible(snapshot, state)).toEqual(["live"]);
     const decoder = new FleetKeyDecoder();
     expect(decoder.push(Buffer.from([0x1b]))).toEqual([]);
     expect(decoder.flush()).toEqual(["escape"]);
@@ -341,6 +342,7 @@ describe("Fleet compact rows, detail and interaction height", () => {
   });
   it("keeps observed model names on healthy compact rows when a sibling has a custody conflict", () => {
     const healthy = worker("healthy", "working"), conflicted = worker("conflict", "failed");
+    conflicted.record.exitCode = null; conflicted.record.pid = 42;
     conflicted.record.name = "Investigate launch";
     conflicted.coordination = { sessionId: "conflict", subjectId: "conflict", origin: { creatorControllerId: "orc", taskId: "task", threadId: "conflict", createdAt: NOW },
       currentController: { controllerId: "orc", familyId: "family", scope: "fleet" }, leaseHealth: "contested", orphaned: false, adoptable: false };

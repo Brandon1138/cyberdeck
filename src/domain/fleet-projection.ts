@@ -1,6 +1,7 @@
 import type { SessionRecord } from "./session.js";
 import type { LeaseState } from "./worker-coordination.js";
 import type { WorkerTruth } from "./worker-truth.js";
+import type { SessionRuntimePresence } from "./session-runtime-presence.js";
 
 export interface FleetWorkerCoordinationView {
   sessionId: string;
@@ -45,6 +46,7 @@ export interface FleetProjectionSnapshot {
     record: SessionRecord;
     /** Current broker observation, separate from persisted lifecycle and task outcome. */
     workerTruth?: WorkerTruth;
+    runtimePresence?: SessionRuntimePresence;
     coordination?: FleetWorkerCoordinationView;
     controllerId?: string;
     createdBy?: { sessionId: string };

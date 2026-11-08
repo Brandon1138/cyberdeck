@@ -3,6 +3,26 @@ import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-obse
 import { PROVIDER_SCREENS, redraw } from "./provider-screen-fixtures.js";
 
 describe("WorkerTurnObservationAdapter", () => {
+  it("reads a Codex idle/draft/idle cycle after scrollback clearing and wide output scrolls away", () => {
+    for (const size of [1, 7, 4096]) {
+      const adapter = new WorkerTurnObservationAdapter();
+      const replay = adapter.createReplay(128 * 1024);
+      const append = (text: string) => {
+        const bytes = Buffer.from(text);
+        for (let at = 0; at < bytes.length; at += size) replay.appendBytes(bytes.subarray(at, at + size));
+      };
+      append("\u001b[H\u001b[2J\u001b[3J\u001b[1;3r\u001b[1;1HMaximum classical terseness. Fully 文言文");
+      expect(adapter.composer("codex", replay).inputReady).toBe(false);
+      append("\u001b[3;1H\r\n\u001b[r\u001b[4;1H› Ask Codex to do anything\u001b[K\u001b[6;1HGPT-6-Luna low · /tmp/worker · ⚠ 5 warnings · f2 to view");
+      expect(adapter.activity("codex", replay)).toBe("awaiting-input");
+      expect(adapter.composer("codex", replay)).toMatchObject({ occupied: false, inputReady: true });
+      append("\u001b[4;1H\u001b[K› operator draft");
+      expect(adapter.composer("codex", replay)).toMatchObject({ occupied: true, inputReady: false });
+      append("\u001b[4;1H\u001b[K› Ask Codex to do anything");
+      expect(adapter.composer("codex", replay)).toMatchObject({ occupied: false, inputReady: true });
+    }
+  });
+
   it("keeps Claude's composer readable after Kitty keyboard mode changes", () => {
     const adapter = new WorkerTurnObservationAdapter();
     const replay = adapter.createReplay(128 * 1024);

@@ -162,8 +162,13 @@ describe("broker durable startup", () => {
         now: Date.parse("2026-07-26T12:00:00.000Z"),
         home: "/Users/brandon",
       });
-      expect(rendered).toContain("0 working · 0 needs input · 0 unread · 0 agents · 2 interrupted");
-      expect(rendered).toContain("Finished the task");
+      expect(rendered).toContain("0 live · 0 working · 0 needs input · 0 unread · 2 history");
+      expect(rendered).not.toContain("Finished the task");
+      const historical = renderFleet(snapshot, { ...createFleetState(snapshot), listView: "history" }, {
+        color: false, width: 150, height: 40, now: Date.parse("2026-07-26T12:00:00.000Z"), home: "/Users/brandon",
+      });
+      expect(historical).toContain("Finished the task");
+      expect(historical).toContain("Interrupted");
     } finally {
       client.close();
       await server.close();

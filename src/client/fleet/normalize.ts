@@ -3,6 +3,8 @@ import { ORCS_SECTION_KEY } from "./constants.js";
 import { groupThreads, orchestratorThreads } from "./list-groups.js";
 import { fleetListRows, orderedThreads, threadFocusInert } from "./list-rows.js";
 import { reconcileReplyWatermarks } from "./visit-state.js";
+import { reconcileLifecycleWatermarks, pendingLifecycleThreads } from "./lifecycle-state.js";
+import { isLiveThread, threadRuntimePresence } from "./runtime-presence.js";
 import { handoffMarks, isHandoffEligible } from "./picker-handoff.js";
 import { existingOrchestrators, orchestratorFocusAt, orchestratorFocusIndex } from "./picker-orchestrator.js";
 import { FleetAction, FleetSnapshot, FleetState, OrchestratorPickerState } from "./state.js";
@@ -14,13 +16,15 @@ export function openAction(record: SessionRecord): FleetAction {
 }
 
 export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number): FleetState {
-  state = reconcileReplyWatermarks(state, snapshot);
+  const selectedWasLive = state.selectedSessionId !== undefined
+    && state.lifecycleWatermarks?.[state.selectedSessionId]?.presence === "present";
+  state = reconcileLifecycleWatermarks(reconcileReplyWatermarks(state, snapshot), snapshot);
   const threads = orderedThreads(snapshot);
   const selectedExists = threads.some(({ record }) => record.id === state.selectedSessionId);
   // Losing a selection never arms an action on the neighbour that happens to take its old slot.
   const selectionLost = state.selectedSessionId !== undefined && !selectedExists;
   const selectedSessionId = selectedExists ? state.selectedSessionId
-    : selectionLost ? undefined : threads[0]?.record.id;
+    : selectionLost ? undefined : threads.find(isLiveThread)?.record.id;
   // An orc's row is never hidden by the folder it was launched in — it lives in the global
   // Orcs section — but that section folds and caps like a folder, so the orc answers to it
   // under the sentinel key instead.
@@ -41,8 +45,16 @@ export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: 
   // The explicit stop/delete ladder stays on the same durable id even when stopping folds it
   // into history. Reveal that history locally rather than arming the thread in its former slot.
   if (!threadFocusInert(state) && state.stopAcknowledgement?.sessionId === selectedSessionId && selectedCwd !== undefined) {
-    state = { ...state, expandedHistoryCwds: [...new Set([...(state.expandedHistoryCwds ?? []), selectedCwd])],
-      expandedCwds: [...new Set([...(state.expandedCwds ?? []), selectedCwd])] };
+    state = { ...state, revealedHistorySessionId: selectedSessionId,
+      openFolderCwds: [...new Set([...(state.openFolderCwds ?? []), selectedCwd])] };
+  } else if (!threadFocusInert(state) && selectedWasLive && selectedRecord !== undefined
+    && (state.listView ?? "live") === "live" && selectedCwd !== undefined
+    && threadRuntimePresence(threads.find(({ record }) => record.id === selectedSessionId)!) === "absent") {
+    const notices = pendingLifecycleThreads(folders.find(({ cwd }) => cwd === selectedCwd)?.threads ?? [], state);
+    state = { ...state, focusedLifecycleCwd: notices.some(({ record }) => record.id === selectedSessionId) ? selectedCwd : undefined,
+      focusedLifecycleOccurrences: Object.fromEntries(notices.map(({ record }) => [record.id, state.lifecycleWatermarks![record.id]!.notice!.generation])),
+      focusedHistoryCwd: notices.some(({ record }) => record.id === selectedSessionId) ? undefined : selectedCwd,
+      openFolderCwds: [...new Set([...(state.openFolderCwds ?? []), selectedCwd])] };
   }
   const rows = fleetListRows(snapshot, { ...state, selectedSessionId });
   const has = (kind: "folder" | "show-more" | "history", cwd: string | undefined) =>
@@ -54,12 +66,20 @@ export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: 
   let focusedViewControl = state.focusedViewControl;
   const focusedUpdateSessionId = rows.some((row) => row.kind === "update"
     && row.thread.record.id === state.focusedUpdateSessionId) ? state.focusedUpdateSessionId : undefined;
+  const focusedLifecycleCwd = rows.some((row) => row.kind === "lifecycle" && row.cwd === state.focusedLifecycleCwd)
+    ? state.focusedLifecycleCwd : undefined;
+  const focusedLifecycleSessionId = rows.some((row) => row.kind === "lifecycle-item" && row.thread.record.id === state.focusedLifecycleSessionId)
+    ? state.focusedLifecycleSessionId : undefined;
+  const focusedUnconfirmedCwd = rows.some((row) => row.kind === "unconfirmed" && row.cwd === state.focusedUnconfirmedCwd)
+    ? state.focusedUnconfirmedCwd : undefined;
   const lostStructuralFocus = threadFocusInert(state) && focusedFolderCwd === undefined
     && focusedShowMoreCwd === undefined && focusedHistoryCwd === undefined
-    && focusedViewControl === undefined && focusedUpdateSessionId === undefined;
+    && focusedViewControl === undefined && focusedUpdateSessionId === undefined && focusedLifecycleCwd === undefined
+    && focusedLifecycleSessionId === undefined && focusedUnconfirmedCwd === undefined;
   if (selectionLost && !threadFocusInert(state) || lostStructuralFocus) focusedViewControl = state.listView ?? "live";
   if (focusedViewControl === undefined && focusedFolderCwd === undefined && focusedShowMoreCwd === undefined
-    && focusedHistoryCwd === undefined && focusedUpdateSessionId === undefined && !visibleSelection) {
+    && focusedHistoryCwd === undefined && focusedUpdateSessionId === undefined && focusedLifecycleCwd === undefined
+    && focusedLifecycleSessionId === undefined && focusedUnconfirmedCwd === undefined && !visibleSelection) {
     if (has("show-more", selectedCwd)) focusedShowMoreCwd = selectedCwd;
     else if (has("history", selectedCwd)) focusedHistoryCwd = selectedCwd;
     else if (has("folder", selectedCwd)) focusedFolderCwd = selectedCwd;
@@ -89,6 +109,12 @@ export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: 
     focusedHistoryCwd,
     focusedViewControl,
     focusedUpdateSessionId,
+    focusedLifecycleCwd,
+    focusedLifecycleSessionId,
+    focusedUnconfirmedCwd,
+    focusedLifecycleOccurrences: focusedLifecycleCwd !== undefined || focusedLifecycleSessionId !== undefined
+      || visibleSelection && selectedSessionId !== undefined && state.focusedLifecycleOccurrences?.[selectedSessionId] !== undefined
+      ? state.focusedLifecycleOccurrences : undefined,
     stopAcknowledgement,
     deleteConfirmation,
     quitConfirmation,

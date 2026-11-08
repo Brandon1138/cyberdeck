@@ -12,6 +12,7 @@ import { fit } from "./render-composer.js";
 import { groupThreads } from "./list-groups.js";
 import { threadFocusInert } from "./list-rows.js";
 import { assistantPreview, isUnreadThread, markThreadRead } from "./visit-state.js";
+import { acknowledgeLifecycleNotices } from "./lifecycle-state.js";
 import { FleetNoticeTone, FleetSnapshot, FleetState, FleetTransition, LaunchProfile, WorkerIsolation } from "./state.js";
 
 export function startTransition(
@@ -284,12 +285,20 @@ export function selectListView(state: FleetState, snapshot: FleetSnapshot, view:
   return {
     ...state, listView: view, focusedViewControl: view, focusedFolderCwd: undefined,
     focusedShowMoreCwd: undefined, focusedHistoryCwd: undefined, focusedUpdateSessionId: undefined,
+    focusedLifecycleCwd: undefined, focusedLifecycleSessionId: undefined, focusedLifecycleOccurrences: undefined,
+    focusedUnconfirmedCwd: undefined, revealedHistorySessionId: undefined,
     threadListScrollOffset: 0, draft: "", helpOpen: false, deleteConfirmation: undefined, notice: undefined,
-    ...(view === "history" ? { expandedHistoryCwds: ["/@orcs", ...groupThreads(snapshot).map(({ cwd }) => cwd)] } : {}),
   };
 }
 
 export function visitCommandTransition(state: FleetState, snapshot: FleetSnapshot, command: string): FleetTransition | undefined {
+  if (command === "/ack") {
+    const occurrences = state.focusedLifecycleOccurrences ?? {};
+    if (Object.keys(occurrences).length === 0) return { state: { ...state, draft: "",
+      notice: "Select a session notice or notice group to acknowledge", noticeTone: "warning" } };
+    return { state: { ...acknowledgeLifecycleNotices(state, occurrences), draft: "",
+      focusedLifecycleOccurrences: undefined, notice: "Session notices acknowledged", noticeTone: "neutral" } };
+  }
   if (/^\/view(?:\s|$)/u.test(command)) {
     const view = /^\/view\s+(live|unread|history)$/u.exec(command)?.[1] as FleetListView | undefined;
     return view === undefined

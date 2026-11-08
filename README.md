@@ -79,11 +79,22 @@ worktree and pull request information; compact rows give that space back to task
 thread's footer shows its full stored title, model/effort, cwd, owner and latest meaningful reply.
 Observed model values take precedence, and `~` retains the existing launch-value uncertainty marker.
 
-Fleet opens in **Live**: actionable sessions appear first within Orcs and each project, with known
-inactive threads under a counted **History** disclosure. Idle sessions with queued instructions,
-Unknown, Failed, Interrupted, stalled and blocked sessions stay actionable. History remains durable
-and reopenable. Only expanded history uses the five-thread cap and `show more`; live rows are never
-capped. Pins and the existing activity/order rules apply within each partition.
+Fleet opens in **Live**, which shows sessions with a current broker-owned runtime. Idle, blocked,
+limited, failed and stopping sessions remain live until their runtime exits. A completed turn, a
+terminal provider fault, pending instructions or a pin cannot change runtime membership. Conversations
+without a runtime belong to **History**, preserving their truthful status and resume behavior.
+Projects containing only history default to one compact heading. History disclosures start closed,
+and opening the History tab does not expand them in Live. Only expanded history uses the five-thread
+cap and `show more`; live rows are never capped. Unconfirmed runtime ownership has its own counted
+disclosure. On connection failure, Fleet labels the frozen display as its last confirmed view.
+
+New interruptions and failed/limited exits appear in one counted notice group per project. Enter
+expands the group; inspecting an entry reveals its conversation without resuming it or expanding
+its historical siblings. `/ack` acknowledges the focused notice or group. Acknowledgement is
+separate from assistant unread state and never changes session status or task outcome. Notices and
+acknowledgements survive restart and distinguish runtime generations. First use baselines existing
+history without announcing the old interruption backlog as new. Older brokers retain notices only
+for the current visit.
 
 Use `/view live`, `/view unread`, or `/view history`, or press `Home` to focus the view controls,
 `Left`/`Right` to choose, and `Enter` to apply. Unread shows threads with new meaningful assistant

@@ -57,7 +57,7 @@ export async function runFleet(
   }
   const savedVisit = await loadVisitPreferences(client);
   if (savedVisit !== undefined) state = restoreVisitPreferences(state, snapshot, savedVisit, savedFolders);
-  const saveVisit = createVisitPreferenceSaver(client, savedVisit, (message) => {
+  const saveVisit = createVisitPreferenceSaver(() => client, savedVisit, (message) => {
     state = { ...state, notice: message, noticeTone: "error" };
   });
   try {
@@ -271,6 +271,8 @@ export async function runFleet(
       state = normalizeState({ ...state, selectedSessionId: session.id,
         ...(target.type === "create" ? { listView: "live" } : {}),
         focusedFolderCwd: undefined, focusedHistoryCwd: undefined, focusedShowMoreCwd: undefined,
+        focusedLifecycleCwd: undefined, focusedLifecycleSessionId: undefined, focusedLifecycleOccurrences: undefined,
+        focusedUnconfirmedCwd: undefined, revealedHistorySessionId: undefined,
         focusedViewControl: undefined, focusedUpdateSessionId: undefined, notice: undefined }, snapshotFeed.snapshot, Date.now());
       if (nvimLayoutHookInstalled) {
         await runtime.nvimLayoutHooks?.rebalance(
@@ -388,6 +390,7 @@ export async function runFleet(
         continue;
       }
       snapshot = snapshotFeed.snapshot;
+      state = { ...state, connectionStale: snapshotFeed.error !== undefined };
       if (snapshotFeed.error !== undefined && (state.notice === undefined || state.notice === refreshNotice)) {
         state = { ...state, notice: snapshotFeed.error, noticeTone: "error" };
       } else if (snapshotFeed.error === undefined && refreshNotice !== undefined && state.notice === refreshNotice) {

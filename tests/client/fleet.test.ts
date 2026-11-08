@@ -116,7 +116,8 @@ function coordination(
 
 /** A fleet state with one folder already opened past the show-more cap. */
 function expandedState(snapshot: FleetSnapshot, cwd: string): FleetState {
-  return { ...createFleetState(snapshot), expandedCwds: [cwd], expandedHistoryCwds: [cwd] };
+  return { ...createFleetState(snapshot), selectedSessionId: snapshot.threads[0]?.record.id,
+    expandedCwds: [cwd], expandedHistoryCwds: [cwd] };
 }
 
 /** Known inactive fixtures exercise disclosure/cap controls rather than hiding live unknowns. */
@@ -126,7 +127,8 @@ function historical(snapshot: FleetSnapshot): FleetSnapshot {
   })) };
 }
 function historyState(snapshot: FleetSnapshot): FleetState {
-  return { ...createFleetState(snapshot), expandedHistoryCwds: ["/@orcs", ...snapshot.threads.map(({ record }) => record.cwd), ...(snapshot.projects ?? [])] };
+  return { ...createFleetState(snapshot), selectedSessionId: snapshot.threads[0]?.record.id,
+    expandedHistoryCwds: ["/@orcs", ...snapshot.threads.map(({ record }) => record.cwd), ...(snapshot.projects ?? [])] };
 }
 
 /** A fleet of orchestrators alone, newest first, each launched in its own folder. */
@@ -487,7 +489,7 @@ describe("fleet presentation", () => {
     const folded = transitionFleet(onHeader, snapshot, "left", NOW_MS).state;
     expect(folded.collapsedCwds).toEqual(["/@orcs"]);
     const foldedRender = renderFleet(snapshot, folded, view);
-    expect(foldedRender).toContain("▸ Orcs · 2 threads");
+    expect(foldedRender).toContain("▸ Orcs · 2 live");
     expect(foldedRender).not.toContain("Orc 1");
     // Folding the roster is not folding a project: the folders keep their own rows.
     expect(foldedRender).toContain("▾ /repo/zulu");
@@ -874,7 +876,7 @@ describe("fleet presentation", () => {
     const doneLine = lines.find((line) => line.includes("Completed task"))!;
     const needsInputLine = lines.find((line) => line.includes("Approval task"))!;
 
-    expect(lines).toContain("  ▾ ~/code/personal/cyberdeck");
+    expect(lines).toContain("  ▾ ~/code/personal/cyberdeck · 2 live");
     expect(doneLine).toMatch(/^▌ ·/u);
     expect(needsInputLine).toMatch(/^  ·/u);
     // The preview yields to the model column at this width, rather than the other way round:
@@ -1122,7 +1124,7 @@ describe("fleet presentation", () => {
       home: "/Users/brandon",
     });
 
-    expect(rendered).toContain("1 working · 0 needs input · 0 unread · 1 agents · 2 exited · 1 failed");
+    expect(rendered).toContain("2 live · 1 working · 0 needs input · 0 unread · 2 history · 1 failed");
     expect(rendered).toContain("Finished earlier");
     expect(rendered).toContain("Finished before that");
   });
@@ -1347,7 +1349,7 @@ describe("fleet presentation", () => {
       view,
     );
     expect(collapsed).not.toBe(expanded);
-    expect(collapsed).toContain("▸ /repo/two · 3 threads");
+    expect(collapsed).toContain("▸ /repo/two · 3 live");
     expect(collapsed).not.toContain("▾ /repo/two");
   });
 
@@ -2300,7 +2302,7 @@ describe("fleet controls", () => {
     const collapsed = transitionFleet(onFolder, snapshot, "enter", NOW_MS).state;
     expect(collapsed.collapsedCwds).toEqual(["/repo/two"]);
     expect(renderFleet(snapshot, collapsed, { color: false, width: 100, height: 28, now: NOW_MS }))
-      .toContain("▌ ▸ /repo/two · 1 thread");
+      .toContain("▌ ▸ /repo/two · 1 live");
 
     // The hidden threads are gone from the navigation model, not merely unpainted.
     expect(transitionFleet(collapsed, snapshot, "down", NOW_MS).state.focusedFolderCwd).toBe("/repo/two");
@@ -2498,7 +2500,8 @@ describe("fleet controls", () => {
     // The worker lives under its folder now, one header below the Orcs section.
     const onFolder = transitionFleet(retry.state, snapshot, "down", NOW_MS).state;
     expect(onFolder.focusedFolderCwd).toBe(child.cwd);
-    const onHistory = transitionFleet(onFolder, snapshot, "down", NOW_MS).state;
+    const openedFolder = transitionFleet(onFolder, snapshot, "right", NOW_MS).state;
+    const onHistory = transitionFleet(openedFolder, snapshot, "down", NOW_MS).state;
     const expanded = transitionFleet(onHistory, snapshot, "enter", NOW_MS).state;
     expect(transitionFleet(expanded, snapshot, "down", NOW_MS).state.selectedSessionId).toBe(child.id);
   });
@@ -2677,7 +2680,7 @@ describe("fleet controls", () => {
       width: 100,
       height: 24,
     });
-    expect(rendered).toContain("2-4 of 9");
+    expect(rendered).toContain("2-4 of 10");
     expect(rendered).not.toContain("/model  ");
 
     expect(transitionFleet(fourth.state, snapshot, "escape", NOW_MS).state)
@@ -3791,7 +3794,7 @@ describe("runFleet", () => {
     input.emit("data", Buffer.from("\u001b[C"));
     await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("fleet.folderDisposition.set", {
       key: "/repo/two",
-      disposition: { collapsed: false, expanded: false, historyExpanded: false },
+      disposition: { collapsed: false, expanded: false, liveHistoryExpanded: false },
     }));
 
     input.emit("data", Buffer.from([0x03, 0x03]));
@@ -4185,7 +4188,7 @@ describe("runFleet", () => {
     const transport = {
       request: vi.fn(async (method: string, params: { sessionId?: string }) => {
         if (method === "session.list") return records;
-        if (method === "fleet.folderDispositions") return { [first.cwd]: { collapsed: false, expanded: false, historyExpanded: true } };
+        if (method === "fleet.folderDispositions") return { [first.cwd]: { collapsed: false, expanded: false, liveHistoryExpanded: true } };
         if (method === "session.snapshot") return { data: "" };
         if (method === "session.stopOne") return { stopped: true };
         if (method === "session.delete") {
@@ -4204,7 +4207,8 @@ describe("runFleet", () => {
     const running = runFleet(transport as never, input, output, new EventEmitter());
     await vi.waitFor(() => expect(input.isRaw).toBe(true));
 
-    input.emit("data", Buffer.from("\u001b[B"));
+    // Start from the view control, then traverse project, History, first and second thread.
+    input.emit("data", Buffer.from("\u001b[B".repeat(4)));
     input.emit("data", Buffer.from([0x18, 0x18, 0x18]));
     await vi.waitFor(() => expect(transport.request).toHaveBeenCalledWith("session.delete", {
       sessionId: second.id,

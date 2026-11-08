@@ -60,6 +60,25 @@ it("includes truth for workers and orchestrators and sends bounded truth-only de
   expect((await projection.read(second.retained.version, second.retained)).reply.kind).toBe("delta");
 });
 
+it("projects confirmed runtime ownership independently of terminal provider truth and fences metadata awaits", async () => {
+  let presence = "present";
+  let record = { id: "one", generation: 1, executionState: "errored", pid: 42, exitCode: null } as SessionRecord;
+  let release: (() => void) | undefined;
+  const projection = new FleetProjection({ registry: {
+    list: () => [record], workerTruth: () => ({ ...truth("errored"), terminal: true }), runtimePresence: () => presence,
+  }, fleetProjects: { list: () => new Promise<string[]>((resolve) => { release = () => resolve(["/repo"]); }) } } as unknown as BrokerServerOptions);
+  const pending = projection.read();
+  // A resume while project metadata is loading must not pair an old generation with new ownership.
+  record = { ...record, generation: 2 };
+  release!();
+  const first = await pending;
+  expect(first.retained.snapshot.threads[0]).toMatchObject({ record: { generation: 2 }, runtimePresence: "present", workerTruth: { terminal: true } });
+  presence = "absent";
+  const stopped = projection.read(first.retained.version, first.retained);
+  release!();
+  expect((await stopped).retained.snapshot.threads[0]?.runtimePresence).toBe("absent");
+});
+
 it("coalesces updates for every session kind on the wire, retains full details and resyncs new connections", async () => {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-wire-"));
   const id = "11111111-1111-4111-8111-111111111111";

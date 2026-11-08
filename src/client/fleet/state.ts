@@ -2,7 +2,8 @@ import type { FleetWorkerCoordinationView } from "../../broker/worker-coordinati
 import type { CavemanWorkersRequest, CreateOrchestratorRequest, FableWorkersRequest } from "../../domain/orchestrator.js";
 import type { ProviderId, ReasoningEffort, SessionRecord, StartSessionRequest } from "../../domain/session.js";
 import type { WorkerTruth } from "../../domain/worker-truth.js";
-import type { FleetListView, FleetReplyWatermark } from "../../domain/fleet-preferences.js";
+import type { FleetListView, FleetReplyWatermark, FleetLifecycleWatermark } from "../../domain/fleet-preferences.js";
+import type { SessionRuntimePresence } from "../../domain/session-runtime-presence.js";
 import { type AttachTransport } from "../attach.js";
 import { type ConfigurablePermissionProvider, type ProviderPermissionPolicy, type ProviderPermissionResolution } from "../permission-policy.js";
 import { type PullRequestSummary } from "../pr-status.js";
@@ -44,6 +45,7 @@ export interface FleetThread {
   record: SessionRecord;
   /** Current shared broker truth; absent when connected to a legacy broker. */
   workerTruth?: WorkerTruth;
+  runtimePresence?: SessionRuntimePresence;
   coordination?: FleetWorkerCoordinationView;
   /**
    * The durable controller family this orchestrator row speaks for, from its binding. Absent on
@@ -143,6 +145,7 @@ export interface FolderDisposition {
   collapsed: boolean;
   expanded: boolean;
   historyExpanded?: boolean;
+  liveHistoryExpanded?: boolean;
 }
 
 export interface WorkerPickerState {
@@ -220,8 +223,22 @@ export interface FleetState {
   focusedHistoryCwd?: string | undefined;
   focusedViewControl?: FleetListView | undefined;
   focusedUpdateSessionId?: string | undefined;
+  focusedLifecycleCwd?: string | undefined;
+  focusedLifecycleSessionId?: string | undefined;
+  focusedLifecycleOccurrences?: Readonly<Record<string, number>> | undefined;
+  focusedUnconfirmedCwd?: string | undefined;
   listView?: FleetListView | undefined;
   expandedHistoryCwds?: readonly string[] | undefined;
+  historyViewCollapsedCwds?: readonly string[] | undefined;
+  expandedLifecycleCwds?: readonly string[] | undefined;
+  expandedUnconfirmedCwds?: readonly string[] | undefined;
+  /** Explicit open folders override the automatic folding of history-only projects. */
+  openFolderCwds?: readonly string[] | undefined;
+  /** Reveal one inspected/stopped historical target without expanding its entire cohort. */
+  revealedHistorySessionId?: string | undefined;
+  lifecycleWatermarks?: Readonly<Record<string, FleetLifecycleWatermark>> | undefined;
+  lifecycleInitialized?: boolean | undefined;
+  connectionStale?: boolean | undefined;
   replyWatermarks?: Readonly<Record<string, FleetReplyWatermark>> | undefined;
   /** Folders whose threads are hidden. Membership survives snapshot churn. */
   collapsedCwds?: readonly string[] | undefined;

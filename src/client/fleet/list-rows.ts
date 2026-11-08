@@ -7,6 +7,8 @@ import { FOLDER_THREAD_CAP, ORCS_SECTION_KEY, ORCS_SECTION_LABEL, WORKERS_SECTIO
 import { groupThreads, orchestratorThreads, worktreeTag } from "./list-groups.js";
 import { FleetSnapshot, FleetState, FleetThread } from "./state.js";
 import { isLiveThread, isUnreadThread, unreadThreads } from "./visit-state.js";
+import { isHistoricalThread, threadRuntimePresence } from "./runtime-presence.js";
+import { pendingLifecycleThreads } from "./lifecycle-state.js";
 
 export function isTerminalSession(record: SessionRecord): boolean {
   if (record.executionState === "active" || record.executionState === "starting") return false;
@@ -30,10 +32,18 @@ export type FleetRow =
   | { kind: "views"; }
   | { kind: "history"; cwd: string; threadCount: number; expanded: boolean; }
   | { kind: "update"; thread: FleetThread; }
+  | { kind: "lifecycle"; cwd: string; threads: FleetThread[]; expanded: boolean; }
+  | { kind: "lifecycle-item"; cwd: string; thread: FleetThread; }
+  | { kind: "unconfirmed"; cwd: string; threads: FleetThread[]; expanded: boolean; }
   | {
     kind: "folder";
     cwd: string;
     threadCount: number;
+    collapsed?: boolean;
+    liveCount?: number;
+    historyCount?: number;
+    unconfirmedCount?: number;
+    noticeCount?: number;
     /** Set on the Orcs header, which names a section rather than a path on disk. */
     label?: string;
   }
@@ -72,12 +82,29 @@ export function isCollapsed(state: FleetState, cwd: string): boolean {
   return state.collapsedCwds?.includes(cwd) === true;
 }
 
+export function groupIsCollapsed(state: FleetState, cwd: string, threads: readonly FleetThread[]): boolean {
+  if (isCollapsed(state, cwd)) return true;
+  if (state.openFolderCwds?.includes(cwd) || state.expandedHistoryCwds?.includes(cwd)) return false;
+  if (state.focusedHistoryCwd === cwd || state.focusedLifecycleCwd === cwd
+    || state.focusedUnconfirmedCwd === cwd || threads.some(({ record }) => record.id === state.revealedHistorySessionId)) return false;
+  return (state.listView ?? "live") === "live" && threads.length > 0
+    && threads.every(isHistoricalThread) && pendingLifecycleThreads(threads, state).length === 0;
+}
+
+function folderRow(cwd: string, threads: FleetThread[], state: FleetState, label?: string): Extract<FleetRow, { kind: "folder" }> {
+  return { kind: "folder", cwd, threadCount: threads.length, collapsed: groupIsCollapsed(state, cwd, threads),
+    liveCount: threads.filter(isLiveThread).length, historyCount: threads.filter(isHistoricalThread).length,
+    unconfirmedCount: threads.filter((thread) => threadRuntimePresence(thread) === "unknown").length,
+    noticeCount: pendingLifecycleThreads(threads, state).length, ...(label === undefined ? {} : { label }) };
+}
+
 export function isExpanded(state: FleetState, cwd: string): boolean {
   return state.expandedCwds?.includes(cwd) === true;
 }
 
 export function historyExpanded(state: FleetState, cwd: string): boolean {
-  return state.expandedHistoryCwds?.includes(cwd) === true;
+  return state.listView === "history" ? !state.historyViewCollapsedCwds?.includes(cwd)
+    : state.expandedHistoryCwds?.includes(cwd) === true;
 }
 
 /**
@@ -97,16 +124,11 @@ export function fleetListRows(snapshot: FleetSnapshot, state: FleetState): Fleet
       ? []
       : orcSectionRows(orcs, state, provenance);
     const folderRows = groupThreads(snapshot).flatMap(({ cwd, label, threads }, groupIndex): FleetListRow[] => {
-      const header: FleetRow = {
-        kind: "folder",
-        cwd,
-        threadCount: threads.length,
-        ...(label === undefined ? {} : { label }),
-      };
+      const header = folderRow(cwd, threads, state, label);
       const spacer: FleetListRow[] = groupIndex === 0 && orcRows.length === 0
         ? []
         : [{ kind: "spacer" }];
-      if (isCollapsed(state, cwd)) return [...spacer, header];
+      if (header.collapsed) return [...spacer, header];
       return [
         ...spacer,
         header,
@@ -139,13 +161,8 @@ export function orcSectionRows(
   state: FleetState,
   provenance: FleetProvenance,
 ): FleetListRow[] {
-  const header: FleetRow = {
-    kind: "folder",
-    cwd: ORCS_SECTION_KEY,
-    threadCount: orcs.length,
-    label: ORCS_SECTION_LABEL,
-  };
-  if (isCollapsed(state, ORCS_SECTION_KEY)) return [header];
+  const header = folderRow(ORCS_SECTION_KEY, [...orcs], state, ORCS_SECTION_LABEL);
+  if (header.collapsed) return [header];
   return [
     header,
     ...groupContentRows(orcs, state, provenance, ORCS_SECTION_KEY),
@@ -159,19 +176,31 @@ function groupContentRows(
 ): FleetListRow[] {
   const view = state.listView ?? "live";
   const live = threads.filter(isLiveThread);
-  const history = threads.filter((thread) => !isLiveThread(thread));
+  const history = threads.filter(isHistoricalThread);
+  const unconfirmed = threads.filter((thread) => threadRuntimePresence(thread) === "unknown");
+  const notices = pendingLifecycleThreads(threads, state);
   const visibleLive = view === "unread"
     ? threads.filter(({ record }) => isUnreadThread(state, record.id))
     : view === "history" ? [] : live;
   const rollup = uniformLeaseCustody(threads.map(threadLeaseCustody));
+  const revealed = history.find(({ record }) => record.id === state.revealedHistorySessionId);
   const visibleHistory = !historyExpanded(state, cwd) || view === "unread"
     ? [] : isExpanded(state, cwd) ? history : history.slice(0, FOLDER_THREAD_CAP);
+  if (revealed !== undefined && view !== "unread" && !visibleHistory.includes(revealed)) visibleHistory.push(revealed);
   return [
     ...(label === undefined || rollup === undefined || rollup.kind === "attached" || threads.length === 0
       ? [] : [{ kind: "section" as const, label: sectionLabel(label, threads.length, rollup) }]),
     ...threadRows(visibleLive, state, rollup, provenance, cwd),
+    ...(view === "unread" || unconfirmed.length === 0 ? [] : [
+      { kind: "unconfirmed" as const, cwd, threads: unconfirmed, expanded: state.expandedUnconfirmedCwds?.includes(cwd) === true },
+      ...(state.expandedUnconfirmedCwds?.includes(cwd) ? threadRows(unconfirmed, state, rollup, provenance, cwd) : []),
+    ]),
+    ...(view === "unread" || notices.length === 0 ? [] : [
+      { kind: "lifecycle" as const, cwd, threads: notices, expanded: state.expandedLifecycleCwds?.includes(cwd) === true },
+      ...(state.expandedLifecycleCwds?.includes(cwd) ? notices.map((thread) => ({ kind: "lifecycle-item" as const, cwd, thread })) : []),
+    ]),
     ...(history.length === 0 || view === "unread" ? [] : [
-      { kind: "history" as const, cwd, threadCount: history.length, expanded: historyExpanded(state, cwd) },
+      { kind: "history" as const, cwd, threadCount: history.length, expanded: historyExpanded(state, cwd) || revealed !== undefined },
       ...threadRows(visibleHistory, state, rollup, provenance, cwd),
       ...(historyExpanded(state, cwd) && history.length > FOLDER_THREAD_CAP
         ? [{ kind: "show-more" as const, cwd, hiddenCount: history.length - visibleHistory.length }] : []),
@@ -333,6 +362,12 @@ export function sectionLabel(
 export function focusedListRowIndex(rows: readonly FleetListRow[], state: FleetState): number {
   const index = state.focusedViewControl !== undefined
     ? rows.findIndex((row) => row.kind === "views")
+    : state.focusedLifecycleCwd !== undefined
+      ? rows.findIndex((row) => row.kind === "lifecycle" && row.cwd === state.focusedLifecycleCwd)
+    : state.focusedLifecycleSessionId !== undefined
+      ? rows.findIndex((row) => row.kind === "lifecycle-item" && row.thread.record.id === state.focusedLifecycleSessionId)
+    : state.focusedUnconfirmedCwd !== undefined
+      ? rows.findIndex((row) => row.kind === "unconfirmed" && row.cwd === state.focusedUnconfirmedCwd)
     : state.focusedHistoryCwd !== undefined
       ? rows.findIndex((row) => row.kind === "history" && row.cwd === state.focusedHistoryCwd)
     : state.focusedUpdateSessionId !== undefined
@@ -349,6 +384,7 @@ export function focusedListRowIndex(rows: readonly FleetListRow[], state: FleetS
 export function threadFocusInert(state: FleetState): boolean {
   return state.focusedFolderCwd !== undefined || state.focusedShowMoreCwd !== undefined
     || state.focusedHistoryCwd !== undefined || state.focusedViewControl !== undefined
-    || state.focusedUpdateSessionId !== undefined;
+    || state.focusedUpdateSessionId !== undefined || state.focusedLifecycleCwd !== undefined
+    || state.focusedLifecycleSessionId !== undefined || state.focusedUnconfirmedCwd !== undefined;
 }
 

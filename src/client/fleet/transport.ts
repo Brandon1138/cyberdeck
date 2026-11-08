@@ -3,6 +3,8 @@ import type { SessionRecord } from "../../domain/session.js";
 import { DEFAULT_PERMISSION_POLICIES, UNQUERIED_WORKER_MODELS } from "./constants.js";
 import { orderedThreads } from "./list-rows.js";
 import { reconcileReplyWatermarks } from "./visit-state.js";
+import { reconcileLifecycleWatermarks } from "./lifecycle-state.js";
+import { isLiveThread } from "./runtime-presence.js";
 import { FleetSnapshot, FleetState, FleetThread, FleetTransport, StartFleetAction, ThreadStatus } from "./state.js";
 
 export async function collectFleetSnapshot(client: FleetTransport): Promise<FleetSnapshot> {
@@ -43,8 +45,8 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
 }
 
 export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.cwd()): FleetState {
-  return reconcileReplyWatermarks({
-    selectedSessionId: orderedThreads(snapshot)[0]?.record.id,
+  return reconcileLifecycleWatermarks(reconcileReplyWatermarks({
+    selectedSessionId: orderedThreads(snapshot).find(isLiveThread)?.record.id,
     focusedViewControl: snapshot.threads.length === 0 ? "live" : undefined,
     threadListScrollOffset: 0,
     fallbackCwd,
@@ -55,7 +57,7 @@ export function createFleetState(snapshot: FleetSnapshot, fallbackCwd = process.
     nvimLayoutEnabled: true,
     view: "fleet",
     listView: "live",
-  }, snapshot);
+  }, snapshot), snapshot);
 }
 
 export function threadStatus(thread: FleetThread): ThreadStatus {

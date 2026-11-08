@@ -30,13 +30,26 @@ export function navigableListRowIndex(
 
 export function isFocusableListRow(row: FleetListRow | undefined): row is FleetRow {
   return row?.kind === "folder" || row?.kind === "thread" || row?.kind === "show-more"
-    || row?.kind === "history" || row?.kind === "views" || row?.kind === "update";
+    || row?.kind === "history" || row?.kind === "views" || row?.kind === "update"
+    || row?.kind === "lifecycle" || row?.kind === "lifecycle-item" || row?.kind === "unconfirmed";
 }
 
 export function focusRow(state: FleetState, row: FleetListRow | undefined): FleetState {
   if (!isFocusableListRow(row)) return state;
   state = { ...state, focusedFolderCwd: undefined, focusedShowMoreCwd: undefined,
-    focusedHistoryCwd: undefined, focusedViewControl: undefined, focusedUpdateSessionId: undefined };
+    focusedHistoryCwd: undefined, focusedViewControl: undefined, focusedUpdateSessionId: undefined,
+    focusedLifecycleCwd: undefined, focusedLifecycleSessionId: undefined, focusedLifecycleOccurrences: undefined,
+    focusedUnconfirmedCwd: undefined };
+  if (row.kind === "lifecycle" || row.kind === "lifecycle-item") {
+    const threads = row.kind === "lifecycle" ? row.threads : [row.thread];
+    const occurrences = Object.fromEntries(threads.flatMap(({ record }) => {
+      const notice = state.lifecycleWatermarks?.[record.id]?.notice;
+      return notice === undefined ? [] : [[record.id, notice.generation]];
+    }));
+    return { ...state, ...(row.kind === "lifecycle" ? { focusedLifecycleCwd: row.cwd }
+      : { focusedLifecycleSessionId: row.thread.record.id }), focusedLifecycleOccurrences: occurrences };
+  }
+  if (row.kind === "unconfirmed") return { ...state, focusedUnconfirmedCwd: row.cwd };
   if (row.kind === "views") return { ...state, focusedViewControl: state.listView ?? "live" };
   if (row.kind === "history") return { ...state, focusedHistoryCwd: row.cwd };
   if (row.kind === "update") return { ...state, focusedUpdateSessionId: row.thread.record.id };
@@ -51,6 +64,8 @@ export function focusRow(state: FleetState, row: FleetListRow | undefined): Flee
     focusedFolderCwd: undefined,
     focusedShowMoreCwd: undefined,
     selectedSessionId: row.thread.record.id,
+    focusedLifecycleOccurrences: state.lifecycleWatermarks?.[row.thread.record.id]?.notice === undefined ? undefined
+      : { [row.thread.record.id]: state.lifecycleWatermarks[row.thread.record.id]!.notice!.generation },
   };
 }
 
@@ -85,12 +100,14 @@ export function scrollFocusedRowIntoView(
 
 export function setCollapsed(state: FleetState, cwd: string, collapsed: boolean): FleetState {
   const current = state.collapsedCwds ?? [];
-  if (current.includes(cwd) === collapsed) return state;
+  if (current.includes(cwd) === collapsed && (collapsed || state.openFolderCwds?.includes(cwd))) return state;
   return {
     ...state,
     collapsedCwds: collapsed
       ? [...current, cwd]
       : current.filter((candidate) => candidate !== cwd),
+    openFolderCwds: collapsed ? state.openFolderCwds?.filter((candidate) => candidate !== cwd)
+      : [...new Set([...(state.openFolderCwds ?? []), cwd])],
   };
 }
 
@@ -106,9 +123,15 @@ export function setExpanded(state: FleetState, cwd: string, expanded: boolean): 
 }
 
 export function setHistoryExpanded(state: FleetState, cwd: string, expanded: boolean): FleetState {
+  if (state.listView === "history") {
+    const current = state.historyViewCollapsedCwds ?? [];
+    if (current.includes(cwd) === !expanded) return state;
+    return { ...state, revealedHistorySessionId: undefined,
+      historyViewCollapsedCwds: expanded ? current.filter((candidate) => candidate !== cwd) : [...current, cwd] };
+  }
   const current = state.expandedHistoryCwds ?? [];
-  if (current.includes(cwd) === expanded) return state;
-  return { ...state, expandedHistoryCwds: expanded ? [...new Set([...current, cwd])]
+  if (current.includes(cwd) === expanded && state.revealedHistorySessionId === undefined) return state;
+  return { ...state, revealedHistorySessionId: undefined, expandedHistoryCwds: expanded ? [...new Set([...current, cwd])]
     : current.filter((candidate) => candidate !== cwd) };
 }
 
@@ -126,7 +149,8 @@ export function foldTransition(state: FleetState, next: FleetState, cwd: string)
       type: "folder-disposition",
       cwd,
       disposition: { collapsed: isCollapsed(next, cwd), expanded: isExpanded(next, cwd),
-        ...(next.expandedHistoryCwds === undefined ? {} : { historyExpanded: next.expandedHistoryCwds.includes(cwd) }) },
+        ...(next.listView === "history" ? { historyExpanded: !next.historyViewCollapsedCwds?.includes(cwd) } : {}),
+        ...(next.expandedHistoryCwds === undefined ? {} : { liveHistoryExpanded: next.expandedHistoryCwds.includes(cwd) }) },
     },
   };
 }

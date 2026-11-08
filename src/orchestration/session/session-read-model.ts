@@ -2,6 +2,7 @@ import type { ResolvedLaunchRecord, SessionRecord } from "../../domain/session.j
 import type { ScoutDecisionCard } from "../../domain/scout-output.js";
 import type { ScoutArtifactKind } from "../../domain/worker-profile.js";
 import type { WorkerTruth } from "../../domain/worker-truth.js";
+import type { SessionRuntimePresence } from "../../domain/session-runtime-presence.js";
 import { SessionCatalog } from "./session-catalog.js";
 import { cloneLaunchRecord, cloneRecord, registryError } from "./session-record-projection.js";
 import type { ScoutArtifactRead } from "./session-ports.js";
@@ -23,6 +24,12 @@ export class SessionReadModel {
 
   list(): SessionRecord[] {
     return this.catalog.list();
+  }
+
+  runtimePresence(sessionId: string): SessionRuntimePresence {
+    const runtime = this.catalog.requireRuntime(sessionId);
+    if (runtime.record.exitCode !== null) return "absent";
+    return runtime.sessionRuntime === undefined ? "unknown" : "present";
   }
 
   workerCapacity(): { activeWorkers: number; maxConcurrentWorkers: number | null } {

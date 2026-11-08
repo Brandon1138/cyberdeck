@@ -169,7 +169,7 @@ describe("FleetPreferenceStore", () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-")); directories.push(directory);
     const store = new FleetPreferenceStore(directory);
     await store.setFolderDisposition("/repo", { collapsed: false, expanded: false });
-    await expect(store.visitPreferences()).resolves.toEqual({ replies: {} });
+    await expect(store.visitPreferences()).resolves.toEqual({ replies: {}, lifecycle: {} });
     await store.setFolderDisposition("/repo", { collapsed: false, expanded: true, historyExpanded: true });
     await expect(new FleetPreferenceStore(directory).listFolderDispositions()).resolves.toEqual({
       "/repo": { collapsed: false, expanded: true, historyExpanded: true },
@@ -218,6 +218,31 @@ describe("FleetPreferenceStore", () => {
     await expect(store.setVisitPreferences({ view: "invented", replies: {} } as never)).rejects.toThrow();
     await expect(store.setVisitPreferences({ replies: { one: { seen: null, latest: "Spinner", canonicalTurns: -1 } } })).rejects.toThrow();
     expect((await store.list())["/repo"]?.model).toBe("gpt-6.1-sol");
-    await expect(store.visitPreferences()).resolves.toEqual({ replies: {} });
+    await expect(store.visitPreferences()).resolves.toEqual({ replies: {}, lifecycle: {} });
+  });
+
+  it("persists loss notices and merges older acknowledgements without consuming a newer generation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-")); directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+    const occurrence = { generation: 1, kind: "interrupted" as const, occurredAt: "2026-10-17T18:00:00.000Z" };
+    await store.setVisitPreferences({ replies: {}, lifecycleInitialized: true,
+      lifecycle: { one: { generation: 1, acknowledgedGeneration: 0, presence: "absent", notice: occurrence } } });
+    expect((await new FleetPreferenceStore(directory).visitPreferences()).lifecycle?.one?.notice).toEqual(occurrence);
+    await store.setVisitPreferences({ replies: {}, lifecycle: {
+      one: { generation: 2, acknowledgedGeneration: 0, presence: "absent", notice: { ...occurrence, generation: 2 } },
+    } });
+    await store.setVisitPreferences({ replies: {}, lifecycle: { one: { generation: 1, acknowledgedGeneration: 1 } } });
+    const newer = (await new FleetPreferenceStore(directory).visitPreferences()).lifecycle?.one;
+    expect(newer?.generation).toBe(2); expect(newer?.acknowledgedGeneration).toBe(1);
+    expect(newer?.notice?.generation).toBe(2);
+    await store.setVisitPreferences({ replies: {}, lifecycle: { one: { generation: 2, acknowledgedGeneration: 2 } } });
+    // A delayed observer cannot resurrect an acknowledged occurrence.
+    await store.setVisitPreferences({ replies: {}, lifecycle: {
+      one: { generation: 2, acknowledgedGeneration: 0, notice: { ...occurrence, generation: 2 } },
+    } });
+    const restored = await new FleetPreferenceStore(directory).visitPreferences();
+    expect(restored.lifecycleInitialized).toBe(true);
+    expect(restored.lifecycle?.one?.notice).toBeUndefined();
+    expect(restored.replies).toEqual({});
   });
 });

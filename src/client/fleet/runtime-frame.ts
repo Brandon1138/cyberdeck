@@ -169,6 +169,8 @@ export function fleetFrameLayout(
       if (row.kind === "show-more") return `show-more:${row.cwd}`;
       if (row.kind === "history") return `history:${row.cwd}`;
       if (row.kind === "update") return `update:${row.thread.record.id}`;
+      if (row.kind === "lifecycle" || row.kind === "unconfirmed") return `${row.kind}:${row.cwd}`;
+      if (row.kind === "lifecycle-item") return `lifecycle-item:${row.thread.record.id}`;
       if (row.kind === "ownership") return `ownership:${row.coordination.sessionId}`;
       return row.kind;
     })

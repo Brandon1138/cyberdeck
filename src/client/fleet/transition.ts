@@ -254,6 +254,8 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
           focusedHistoryCwd: undefined,
           focusedViewControl: undefined,
           focusedUpdateSessionId: undefined,
+          focusedLifecycleCwd: undefined, focusedLifecycleSessionId: undefined, focusedLifecycleOccurrences: undefined,
+          focusedUnconfirmedCwd: undefined,
           deleteConfirmation: undefined,
           notice: undefined,
         },
@@ -321,7 +323,8 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
   if (key === "enter" && focusedFolderCwd !== undefined && state.draft.trim() === "") {
     return foldTransition(
       state,
-      setCollapsed(state, focusedFolderCwd, !isCollapsed(state, focusedFolderCwd)),
+      setCollapsed(state, focusedFolderCwd, !(fleetListRows(snapshot, state).find((row) => row.kind === "folder"
+        && row.cwd === focusedFolderCwd) as { collapsed?: boolean } | undefined)?.collapsed),
       focusedFolderCwd,
     );
   }

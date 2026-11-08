@@ -76,6 +76,13 @@ export const InstructionRecordSchema = z.preprocess(
     /** Only the internal broker enqueue can mint a wake submission. Legacy records are ordinary. */
     submissionKind: z.literal("wake").optional(),
     wake: WakeContextSchema.optional(),
+    /** Operator withdrawal is a terminal receipt, with the mandate retained for audit. */
+    withdrawal: z.object({
+      kind: z.literal("operator"),
+      reason: z.string().trim().min(1),
+      authority: z.object({ path: z.string().startsWith("/"), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+      at: z.iso.datetime(),
+    }).strict().optional(),
   }),
 );
 

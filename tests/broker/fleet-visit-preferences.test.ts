@@ -13,8 +13,8 @@ describe("Fleet visit preference RPC handlers", () => {
       const store = new FleetPreferenceStore(directory);
       const server = { options: { fleetPreferences: store } } as unknown as Parameters<BrokerMethodHandler>[0];
       const invoke = (name: string, params: unknown) => fleetMethods[name]!(server, {} as Parameters<BrokerMethodHandler>[1], { params } as Parameters<BrokerMethodHandler>[2]);
-      expect(await invoke("fleet.visit", {})).toEqual({ replies: {} });
-      const preferences = { view: "unread", replies: { thread: { seen: "Earlier reply", latest: "New reply", canonicalTurns: 2 } } };
+      expect(await invoke("fleet.visit", {})).toEqual({ replies: {}, lifecycle: {} });
+      const preferences = { view: "unread", replies: { thread: { seen: "Earlier reply", latest: "New reply", canonicalTurns: 2 } }, lifecycle: {} };
       expect(await invoke("fleet.visit.set", preferences)).toEqual({ saved: true });
       expect(await invoke("fleet.visit", {})).toEqual(preferences);
       await expect(invoke("fleet.visit.set", { view: "invented" })).rejects.toThrow();

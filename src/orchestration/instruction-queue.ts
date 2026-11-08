@@ -30,6 +30,15 @@ export const EnqueueInstructionParamsSchema = z.object({
   hop: z.number().int().nonnegative().default(0),
 });
 
+/** Operator surface only. Exact identities prevent withdrawal of a replacement instruction. */
+export const WithdrawInstructionParamsSchema = z.object({
+  targetSessionId: z.uuid(),
+  instructionId: z.uuid(),
+  messageId: z.uuid(),
+  reason: z.string().trim().min(1).max(2000),
+  authority: z.object({ path: z.string().startsWith("/"), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+}).strict();
+
 /** Internal-only policy instruction. No broker RPC routes to this schema. */
 export const EnqueueBrokerInstructionParamsSchema = z.object({
   actorSessionId: z.uuid(),
@@ -296,6 +305,30 @@ export class InstructionQueue {
       if (record === undefined) return undefined;
       if (record.status !== "accepted" && record.status !== "queued") return record;
       return this.persistState(record, "cancelled", {});
+    });
+  }
+
+  /** Shares the delivery serializer: rendered/consumed bytes can never become cancelled. */
+  withdrawForOperator(input: z.infer<typeof WithdrawInstructionParamsSchema>): Promise<{
+    outcome: "CANCELLED" | "NOT_FOUND" | "IDENTITY_MISMATCH" | "TOO_LATE";
+    instruction?: InstructionRecord;
+  }> {
+    const request = WithdrawInstructionParamsSchema.parse(input);
+    return this.serialize(request.targetSessionId, async () => {
+      const record = (await this.store.list(request.targetSessionId)).find(({ id }) => id === request.instructionId);
+      if (record === undefined) return { outcome: "NOT_FOUND" as const };
+      if (record.targetSessionId !== request.targetSessionId || record.messageId !== request.messageId) {
+        return { outcome: "IDENTITY_MISMATCH" as const };
+      }
+      if (record.status === "cancelled") return { outcome: "CANCELLED" as const, instruction: record };
+      if (record.status !== "accepted" && record.status !== "queued") {
+        return { outcome: "TOO_LATE" as const, instruction: record };
+      }
+      const instruction = await this.persistState(record, "cancelled", {
+        holdReason: undefined,
+        withdrawal: { kind: "operator", reason: request.reason, authority: request.authority, at: new Date().toISOString() },
+      });
+      return { outcome: "CANCELLED" as const, instruction };
     });
   }
 

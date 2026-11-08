@@ -7,9 +7,10 @@ import { scrollFocusedRowIntoView } from "./list-groups.js";
 import { fleetListRows, isTerminalSession, orderedThreads, threadFocusInert } from "./list-rows.js";
 import { composerCwd, friendlyEffort, friendlyModel } from "./model-labels.js";
 import { clampRowWidth, contextLine, fit, renderComposerLines } from "./render-composer.js";
-import { renderFolderRow, renderHistoryRow, renderUpdateRow, renderViewControls, renderShowMoreRow, renderThreadRow, renderWorkerCoordinationRow, rowGutter, threadListScrollbar } from "./render-rows.js";
+import { renderFolderRow, renderHistoryRow, renderLifecycleRow, renderLifecycleItem, renderUnconfirmedRow, renderUpdateRow, renderViewControls, renderShowMoreRow, renderThreadRow, renderWorkerCoordinationRow, rowGutter, threadListScrollbar } from "./render-rows.js";
 import { renderSelectedDetail, wrapDetailText } from "./render-detail.js";
 import { isUnreadThread } from "./visit-state.js";
+import { isLiveThread, isHistoricalThread, threadRuntimePresence } from "./runtime-presence.js";
 import { ResolvedFleetRenderOptions } from "./runtime-options.js";
 import { paint, renderNotice, shortPath } from "./slash-commands.js";
 import { FleetSnapshot, FleetState, FleetThread, ShellModeState, ThreadStatus } from "./state.js";
@@ -110,10 +111,14 @@ export function renderFleetList(
           viewportState,
           options,
           indicator,
+          row,
         );
       }
       if (row.kind === "views") return renderViewControls(viewportState, options);
       if (row.kind === "history") return renderHistoryRow(row.cwd, row.threadCount, row.expanded, viewportState, options, indicator);
+      if (row.kind === "lifecycle") return renderLifecycleRow(row.cwd, row.threads, row.expanded, viewportState, options, indicator);
+      if (row.kind === "lifecycle-item") return renderLifecycleItem(row.thread, viewportState, options, indicator);
+      if (row.kind === "unconfirmed") return renderUnconfirmedRow(row.cwd, row.threads.length, row.expanded, viewportState, options, indicator);
       if (row.kind === "update") return renderUpdateRow(row.thread, viewportState, options, indicator);
       if (row.kind === "thread") {
         return renderThreadRow(
@@ -232,10 +237,15 @@ export function renderFleetFooter(
       `Shortcuts ${helpOffset + 1}–${Math.min(allHelp.length, helpOffset + helpCapacity)}/${allHelp.length} · ↑↓ scroll`,
       ...allHelp.slice(helpOffset, helpOffset + helpCapacity),
     ];
+    const noticeHint = state.focusedLifecycleCwd !== undefined ? "enter expand notices · /ack acknowledge focused group"
+      : state.focusedLifecycleSessionId !== undefined ? "enter inspect history · /ack acknowledge notice"
+        : state.focusedUnconfirmedCwd !== undefined ? "enter inspect unconfirmed runtimes"
+          : state.focusedLifecycleOccurrences !== undefined ? "/ack acknowledge session notice" : undefined;
     const notice = state.notice === undefined
       ? undefined
       : renderNotice(state.notice, state.noticeTone, options.width, options.color);
     const footer = [
+      ...(noticeHint === undefined ? [] : [paint(fit(noticeHint, options.width), "muted", options.color)]),
       ...(notice === undefined ? [] : [notice]),
       paint("─".repeat(options.width), "dim", options.color),
       ...composerLines.map((line) => clampRowWidth(line, options.width)),
@@ -295,17 +305,19 @@ export function renderHeader(
   options: ResolvedFleetRenderOptions,
 ): string[] {
   return prepared([threads, state, options, "renderHeader"], () => {
-    const statuses = threads.map(threadStatus);
+    const live = threads.filter(isLiveThread);
+    const statuses = live.map(threadStatus);
     const count = (status: ThreadStatus) => statuses.filter((candidate) => candidate === status).length;
     // Process liveness is a separate fact from current activity and verified task outcomes.
-    const running = threads.filter(({ record }) =>
-      record.executionState === "active" || record.executionState === "starting").length;
     const primary = [
+      `${live.length} live`,
       `${count("Working")} working`, `${count("Needs input")} needs input`,
       `${threads.filter(({ record }) => isUnreadThread(state, record.id)).length} unread`,
     ];
     const supplementary = [
-      `${running} agents`,
+      `${threads.filter(isHistoricalThread).length} history`,
+      ...threads.some((thread) => threadRuntimePresence(thread) === "unknown")
+        ? [`${threads.filter((thread) => threadRuntimePresence(thread) === "unknown").length} runtime unconfirmed`] : [],
       ...(["Starting", "Idle", "Stalled", "Provider limit", "Unknown", "Stopping", "Stopped", "Exited", "Done"] as const)
         .flatMap((status) => count(status) === 0 ? [] : [`${count(status)} ${status.toLowerCase()}`]),
       ...(count("Interrupted") === 0 ? [] : [`${count("Interrupted")} interrupted`]),
@@ -327,24 +339,26 @@ export function renderHeader(
     const markWidth = mark?.columns ?? 0;
     const showsMark = mark !== undefined && options.width >= markWidth + 2 + 32;
     const textWidth = Math.max(1, options.width - (showsMark ? markWidth + 2 : 0));
+    const countPrefix = state.connectionStale ? "Last confirmed: " : "";
+    const countWidth = Math.max(1, textWidth - displayWidth(countPrefix));
     const countLines: string[] = [];
     for (const entry of primary) {
       const last = countLines.at(-1);
-      if (last !== undefined && displayWidth(`${last} · ${entry}`) <= textWidth) countLines[countLines.length - 1] = `${last} · ${entry}`;
+      if (last !== undefined && displayWidth(`${last} · ${entry}`) <= countWidth) countLines[countLines.length - 1] = `${last} · ${entry}`;
       else countLines.push(entry);
     }
     // Process/activity breakdown is supplementary; the three operator counts never get cut off.
     if (textWidth >= 100) {
       for (const entry of supplementary) {
         const last = countLines.at(-1)!;
-        if (displayWidth(`${last} · ${entry}`) <= textWidth) countLines[countLines.length - 1] = `${last} · ${entry}`;
+        if (displayWidth(`${last} · ${entry}`) <= countWidth) countLines[countLines.length - 1] = `${last} · ${entry}`;
         else if (countLines.length < 2) countLines.push(entry);
       }
     }
     const textLines = [
-      paint("Cyberdeck", "bold", options.color),
+      paint(state.connectionStale ? "Cyberdeck · cached view" : "Cyberdeck", "bold", options.color),
       paint(fit(context, textWidth), "dim", options.color),
-      ...countLines.map((line) => paint(fit(line, textWidth), "muted", options.color)),
+      ...countLines.map((line) => paint(fit(`${countPrefix}${line}`, textWidth), "muted", options.color)),
     ];
     while (textLines.length < 4) textLines.push("");
     if (!showsMark) return textLines;
@@ -358,7 +372,7 @@ export function renderHeader(
 export function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
     "pgup/dn page", "alt+k/j half", "home/end", "shift+↑↓ reorder", "←→ fold project",
-    "a add project", "d remove project", "ctrl+w diagnostics", "/view live|unread|history", "/read inspect · * unread", "←→/enter History or views",
+    "a add project", "d remove project", "ctrl+w diagnostics", "/view live|unread|history", "/read inspect · * unread", "/ack session notices", "←→/enter History or views",
     "@ mention", "alt+1–9 open", "esc back/clear",
     "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim (folder: main checkout)", "! shell", "ctrl+s shell popup", "ctrl+t pin to top", "ctrl+d mark for handoff", "/handoff give marked to an orc", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
   ];

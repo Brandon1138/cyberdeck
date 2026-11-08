@@ -429,7 +429,7 @@ export class WorkerTurnEngine {
       exitCode: this.record.exitCode,
       ...(this.record.attentionState === undefined ? {} : { attentionState: this.record.attentionState }),
       activity: this.nativeActivity.activity(this.activity, this.activityRevision),
-      composer: this.nativeActivity.refused ? { ...this.composer, inputReady: false } : this.composer,
+      composer: this.composer, // Screen readiness is independent of native receipts; delivery and completion stay fenced.
       completedTurns: this.completedTurnCount,
       canonicalTurns: this.canonicalTurnCount,
       pendingInstructions: this.rendered.length,

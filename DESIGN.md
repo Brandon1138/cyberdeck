@@ -181,14 +181,14 @@ The header occupies the upper-left of Fleet and establishes identity, current or
 ```text
  ▄████▄   Cyberdeck
 ▟█▄██▄█▙  Codex Sol · high · ~/code/personal/mikoshi
-▌▌▌▌▐▐▐▐  2 working · 1 needs input · 2 unread
+▌▌▌▌▐▐▐▐  4 live · 2 working · 1 needs input · 2 unread
 ```
 
 - Reserve an `8ch` by `3-row` logo bay with a `2ch` gap before text. The final 8-bit Cyberdeck logo must fit this box without moving the metadata column.
 - The mark is the 8-bit Cyberdeck octopus above, rendered in Octo Violet from half-block and quadrant glyphs: a domed mantle, two notch eyes, and eight one-pixel tentacles. It is the only 8-bit artwork in the interface.
 - Render `Cyberdeck` in strong bold text.
 - The second line shows the bound orchestrator's friendly model, effort, and scope. The normal global binding is labeled `fleet`; an explicitly isolated workspace binding shows its shortened path. If none exists, show `No orchestrator · ctrl+o to choose` without implying a model default.
-- The summary prioritizes accurate `working`, `needs input`, and `unread` counts and wraps those entries intact. Wider panes add process and nonzero status counts when they fit. Process liveness is separate from activity and verified outcome; inactive states are never folded into `done`.
+- The summary prioritizes accurate `live`, `working`, `needs input`, and `unread` counts and wraps those entries intact. Activity counts describe live runtimes; unread spans live and historical conversations. Wider panes add history, unconfirmed ownership and nonzero live status counts when they fit. Runtime presence is separate from activity and verified outcome; inactive states are never folded into `done`. Cached displays explicitly label these counts as last confirmed.
 - Keep the full logo bay in regular and half-width cockpit panes. Below `64` columns, omit the logo pixels but retain the same header text order.
 
 ### Project Groups and Thread Rows
@@ -197,9 +197,13 @@ Project headings are shortened canonical working-directory paths rendered plainl
 
 A project heading is a navigable row of its own. `Up`/`Down` step onto it, empty `Enter` toggles collapse, and `Left`/`Right` collapse and expand explicitly. A collapsed heading reports how many threads it is hiding and removes them from navigation as well as paint. Project and History folds persist in the existing Fleet preferences.
 
-Live is the default view. Within the Orcs roster and each project, all actionable rows appear ahead of a counted, initially folded History disclosure. Known idle sessions with no queued work, verified Done and confirmed stopped/exited sessions belong to History. Unknown, Failed, Interrupted, provider limits, stalls, blocked sessions, pending instructions and unconfirmed stops stay actionable. A contradictory live process is never hidden by a stopped/exited label. Explicit project folds remain the operator's choice; the default unregistered fold does not hide live work.
+Live is the default view and means a current broker-owned runtime is present. Idle, blocked, stalled, limited, failed and stopping sessions remain visible until exit is confirmed. Runtime membership never derives from activity, task outcome, a pending instruction, a pin or age. Absent runtimes belong to History with their actual status and resumability intact. Unconfirmed runtime ownership has a separate counted disclosure; it is never counted as live or silently filed as history. Explicit project folds remain the operator's choice. Projects containing only history default to one compact heading; cursor traversal never expands one.
 
-History discloses inactive threads without discarding them. Its first five rows use the existing show-more control; live rows have no cap. Pins, ordering, ownership lenses, PR attribution and custody detail remain intact within these partitions. Focus follows durable IDs. If a selected row becomes hidden, focus rises to its disclosure or the view controls and thread actions become inert. An explicit stop/delete sequence reveals its same-ID target as it moves into History. Deleting or filtering a row never silently arms its neighbour.
+History discloses absent runtimes without discarding their conversations or claiming task success. Its first five rows use the existing show-more control; live rows have no cap. Live's explicit History folds are independent of the History tab. Legacy folds establish no automatic expansion in Live. Pins, ordering, ownership lenses, PR attribution and custody detail remain intact within these partitions. Focus follows durable IDs. Runtime loss moves thread focus onto its notice or History disclosure, making thread actions inert. An explicit inspection or stop/delete sequence reveals only its same-ID historical target without expanding the cohort. Deleting or filtering a row never silently arms its neighbour.
+
+New interruptions and failed/limited exits produce one counted notice disclosure per project or the Orcs roster. The disclosure expands to inspectable entries; Enter on an entry reveals its conversation without attachment, resume or implicit acknowledgement. `/ack` explicitly acknowledges the focused entry or captured group of occurrences. The contextual footer states its scope. Reading a reply, cursor traversal and selection never acknowledge lifecycle attention. Acknowledgement changes no runtime status, task outcome or assistant unread state. Group acknowledgement cannot consume members or newer generations that arrived after focus was acquired.
+
+Lifecycle notices use durable runtime generations and the existing Fleet preference journal. First use baselines existing inactive history without announcing an interruption backlog; subsequent observations and broker-recovery losses create notices. Repeated snapshots and restarts cannot recreate acknowledged occurrences. Missing threads and a failed Fleet connection never manufacture exits. A disconnected display retains its last confirmed membership with an explicit cached-view label.
 
 The functional Live / Unread / History controls form one navigable row. Home reaches it; Left/Right move its focus and Enter applies it. `/view live|unread|history` supplies the same path through the slash palette. Unread filters by genuine new assistant content; History filters to inactive rows and opens their disclosures. Folder, History, update-list and view-control focus display no unrelated selected-thread footer. Ctrl+W retains Fleet/Diagnostics switching.
 

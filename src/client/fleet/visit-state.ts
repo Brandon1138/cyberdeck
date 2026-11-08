@@ -3,30 +3,17 @@ import { conversationPreview } from "../../domain/conversation-preview.js";
 import type { FleetReplyWatermark, FleetVisitPreferences } from "../../domain/fleet-preferences.js";
 import type { FleetSnapshot, FleetState, FleetThread, FolderDisposition } from "./state.js";
 import { groupThreads } from "./list-groups.js";
-import { threadStatus } from "./transport.js";
+import { reconcileLifecycleWatermarks } from "./lifecycle-state.js";
+export { isLiveThread } from "./runtime-presence.js";
+import { isLiveThread } from "./runtime-presence.js";
 
 export function restoreVisitPreferences(state: FleetState, snapshot: FleetSnapshot, preferences: FleetVisitPreferences, folders: Readonly<Record<string, FolderDisposition>>): FleetState {
   const view = preferences.view ?? "live";
-  return { ...state, listView: view, replyWatermarks: preferences.replies,
+  return reconcileLifecycleWatermarks({ ...state, listView: view, replyWatermarks: preferences.replies,
+    ...(preferences.lifecycleInitialized === true ? { lifecycleInitialized: true, lifecycleWatermarks: preferences.lifecycle ?? {} } : {}),
+    historyViewCollapsedCwds: Object.entries(folders).filter(([, disposition]) => disposition.historyExpanded === false).map(([cwd]) => cwd),
     focusedViewControl: state.focusedViewControl === undefined ? undefined : view,
-    ...(view === "history" ? { expandedHistoryCwds: ["/@orcs", ...groupThreads(snapshot).map(({ cwd }) => cwd)]
-      .filter((cwd) => folders[cwd]?.historyExpanded !== false) } : {}),
-  };
-}
-
-/** Presentation membership only. Activity and verified task outcome remain broker-owned. */
-export function isLiveThread(thread: FleetThread): boolean {
-  const status = threadStatus(thread);
-  if ((thread.workerTruth?.pendingInstructions ?? 0) > 0) return true;
-  if (status === "Idle") return false;
-  if (status === "Done") return false;
-  if (status === "Stopped" || status === "Exited") {
-    // A contradictory live process must remain inspectable ahead of history.
-    return typeof thread.record.exitCode !== "number"
-      || thread.record.executionState === "active" || thread.record.executionState === "starting";
-  }
-  // Failed, interrupted, uncertain, limited and blocked sessions all need an operator's attention.
-  return true;
+  }, snapshot);
 }
 
 export function assistantPreview(thread: FleetThread): string | null {
@@ -120,7 +107,8 @@ export function restoreFolderDispositions(state: FleetState, snapshot: FleetSnap
     collapsedCwds: dispositions[UNREGISTERED_SECTION_KEY] === undefined
       ? [...collapsed, ...(unregisteredHasLiveRows ? [] : [UNREGISTERED_SECTION_KEY])]
       : collapsed,
+    openFolderCwds: keys.filter(([, disposition]) => !disposition.collapsed).map(([key]) => key),
     expandedCwds: keys.filter(([, disposition]) => disposition.expanded).map(([key]) => key),
-    expandedHistoryCwds: keys.filter(([, disposition]) => disposition.historyExpanded === true).map(([key]) => key),
+    expandedHistoryCwds: keys.filter(([, disposition]) => disposition.liveHistoryExpanded === true).map(([key]) => key),
   };
 }

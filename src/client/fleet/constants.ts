@@ -119,6 +119,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
     ],
   },
   { name: "/read", description: "Inspect the selected reply and mark it read" },
+  { name: "/ack", description: "Acknowledge the focused session notice or notice group" },
 ];
 /**
  * The composer's offer, built from what the providers answered.

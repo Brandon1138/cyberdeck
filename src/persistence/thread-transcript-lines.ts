@@ -96,6 +96,17 @@ export async function codexLaunchMatches(path: string, identity: CodexLaunchIden
       matched = matches(frame.payload.message);
       return false;
     }
+    // Codex 0.163 remote rollouts omit user_message. Startup AGENTS/environment messages precede
+    // turn_context; the first user response item after that context is the actual launch brief.
+    if (sawContext && frame.type === "response_item" && frame.payload?.type === "message"
+      && frame.payload.role === "user") {
+      const blocks = frame.payload.content;
+      matched = Array.isArray(blocks) && matches(blocks.flatMap((block: { type?: string; text?: unknown } | null) =>
+        block?.type === "input_text" && typeof block.text === "string" ? [block.text] : []).join("\n"));
+      return false;
+    }
+    if (frame.type === "response_item" && (frame.payload?.role === "assistant"
+      || frame.payload?.type === "function_call" || frame.payload?.type === "custom_tool_call")) return false;
     // A completion without an identifying launch prompt is unavailable, not canonical evidence.
     return !(frame.type === "event_msg" && frame.payload?.type === "task_complete");
   });

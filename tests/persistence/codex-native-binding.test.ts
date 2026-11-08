@@ -40,6 +40,39 @@ async function fixture() {
 }
 
 describe("exact Codex native binding", () => {
+  it("binds the first Codex 0.163 user response item after context without a legacy user_message", async () => {
+    const f = await fixture();
+    const instructionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await f.store.append({ sessionId: A, kind: "prompt", source: "orchestrator", text: "FIRST BRIEF",
+      data: { initial: true, instructionId, expectedTurn: 1 } });
+    const user = (text: string) => ({ type: "response_item", payload: {
+      type: "message", role: "user", content: [{ type: "input_text", text }],
+    } });
+    await f.rollout("remote", A, T, [started("first"), user("# AGENTS.md instructions for /tmp/repo"),
+      { type: "turn_context", payload: {} }, user("FIRST BRIEF"), completed("first", "answer")]);
+    const observation = await f.store.observeProviderTurns({ ...f.input(), initialInstructionId: instructionId, codexMarkerRequired: true });
+    expect(observation).toMatchObject({ nativeSourceAvailable: true, nativeSourceStatus: "available", turns: [{ text: "answer" }] });
+    await f.store.commitProviderTurns(observation);
+    expect(await f.store.readCompletionLedger(A)).toMatchObject({ completedTurns: 1, canonicalTurns: 1 });
+  });
+
+  it.each(["another prompt", "assistant", "completion"])("does not find a launch brief in a later response item after %s", async boundary => {
+    const f = await fixture();
+    const instructionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await f.store.append({ sessionId: A, kind: "prompt", source: "orchestrator", text: "FIRST BRIEF",
+      data: { initial: true, instructionId, expectedTurn: 1 } });
+    const message = (role: string, text: string) => ({ type: "response_item", payload: {
+      type: "message", role, content: [{ type: role === "user" ? "input_text" : "output_text", text }],
+    } });
+    await f.rollout("remote", A, T, [{ type: "turn_context", payload: {} },
+      boundary === "another prompt" ? message("user", "OTHER BRIEF")
+        : boundary === "assistant" ? message("assistant", "FIRST BRIEF") : completed("old", "old answer"),
+      message("user", "FIRST BRIEF"), completed("later", "later answer")]);
+    expect(await f.store.observeProviderTurns({ ...f.input(), initialInstructionId: instructionId, codexMarkerRequired: true }))
+      .toMatchObject({ nativeSourceAvailable: false, turns: [] });
+    expect(await f.bindings.read(A)).toBeUndefined();
+  });
+
   it("does not bind or commit a two-hour-old markerless same-brief rollout on a live read", async () => {
     const h = await codexLaunchFixture(); roots.push(h.root);
     await h.metadata("LEGACY X", "2026-10-13T08:00:00.000Z");

@@ -438,11 +438,13 @@ describe("SessionRegistry", () => {
     const record = await registry.start(request({ kind }));
     ptys[0]!.emitOutput("API Error: 401 authentication_error\n");
     expect(registry.workerTruth(record.id)).toMatchObject({ state: "errored", terminal: true });
+    expect(registry.runtimePresence(record.id)).toBe("present");
     expect((await registry.waitForWorkerResults([{ sessionId: record.id, completionTarget: 1 }], 0, 100)).results[0])
       .toMatchObject({ status: "failed", truth: { state: "errored" } });
     ptys[0]!.emitExit(0);
     expect(registry.get(record.id)).toMatchObject({ executionState: "failed", attentionState: "failed", exitCode: 0 });
     expect(registry.workerTruth(record.id).state).toBe("errored");
+    expect(registry.runtimePresence(record.id)).toBe("absent");
   });
 
   it("keeps a requested stop nonterminal until the process exit is observed", async () => {

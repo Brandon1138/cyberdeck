@@ -66,16 +66,16 @@ export function renderFolderRow(
   state: FleetState,
   options: ResolvedFleetRenderOptions,
   scrollbar?: "track" | "thumb" | undefined,
+  counts?: { collapsed?: boolean; liveCount?: number; historyCount?: number; unconfirmedCount?: number; noticeCount?: number },
 ): string {
   const focused = state.focusedFolderCwd === cwd;
-  const collapsed = isCollapsed(state, cwd);
-  const summary = collapsed || threadCount === 0
+  const collapsed = counts?.collapsed ?? isCollapsed(state, cwd);
+  const summary = counts === undefined ? collapsed || threadCount === 0
     ? ` · ${threadCount} thread${threadCount === 1 ? "" : "s"}`
-    : "";
-  const label = fit(
-    `${collapsed ? "▸" : "▾"} ${heading ?? shortPath(cwd, options.home)}${summary}`,
-    Math.max(1, options.width - ROW_GUTTER.length),
-  );
+    : "" : ` · ${counts.liveCount ?? 0} live${collapsed && (counts.historyCount ?? 0) > 0 ? ` · ${counts.historyCount} history` : ""}${(counts.unconfirmedCount ?? 0) > 0 ? ` · ${counts.unconfirmedCount} unconfirmed` : ""}${collapsed && (counts.noticeCount ?? 0) > 0 ? ` · ${counts.noticeCount} notices` : ""}`;
+  const available = Math.max(1, options.width - ROW_GUTTER.length);
+  const label = fit(`${fit(`${collapsed ? "▸" : "▾"} ${heading ?? shortPath(cwd, options.home)}`,
+    Math.max(1, available - summary.length))}${summary}`, available);
   return `${rowGutter(focused, options.color, scrollbar)}${focused ? paint(label, "bold", options.color) : label}`;
 }
 
@@ -120,6 +120,34 @@ export function renderUpdateRow(thread: FleetThread, state: FleetState, options:
   const suffix = ": new reply";
   const title = fit(displayThreadName(thread.record.name ?? thread.record.role ?? "Untitled thread"), Math.max(1, options.width - 4 - suffix.length));
   return `${rowGutter(focused, options.color, scrollbar)}${paint(`* ${title}${suffix}`, focused ? "bold" : "muted", options.color)}`;
+}
+
+export function renderLifecycleRow(cwd: string, threads: readonly FleetThread[], expanded: boolean,
+  state: FleetState, options: ResolvedFleetRenderOptions, scrollbar?: "track" | "thumb"): string {
+  const focused = state.focusedLifecycleCwd === cwd;
+  const kinds = new Set(threads.map(({ record }) => state.lifecycleWatermarks?.[record.id]?.notice?.kind));
+  const description = kinds.size === 1 && kinds.has("interrupted")
+    ? `${threads.length} session${threads.length === 1 ? "" : "s"} interrupted`
+    : `${threads.length} session notice${threads.length === 1 ? "" : "s"}`;
+  const label = fit(`  ${expanded ? "▾" : "▸"} ${description}`, Math.max(1, options.width - 2));
+  return `${rowGutter(focused, options.color, scrollbar)}${paint(label, focused ? "bold" : kinds.has("failed") ? "alert" : "attention", options.color)}`;
+}
+
+export function renderLifecycleItem(thread: FleetThread, state: FleetState, options: ResolvedFleetRenderOptions,
+  scrollbar?: "track" | "thumb"): string {
+  const focused = state.focusedLifecycleSessionId === thread.record.id;
+  const notice = state.lifecycleWatermarks?.[thread.record.id]?.notice;
+  const status = notice?.kind === "interrupted" ? "Interrupted" : notice?.kind === "provider-limit" ? "Provider limit" : "Failed";
+  const label = fit(`    ${displayThreadName(thread.record.name ?? thread.record.id.slice(0, 8))} · ${status}`,
+    Math.max(1, options.width - 2));
+  return `${rowGutter(focused, options.color, scrollbar)}${paint(label, focused ? "bold" : "muted", options.color)}`;
+}
+
+export function renderUnconfirmedRow(cwd: string, count: number, expanded: boolean, state: FleetState,
+  options: ResolvedFleetRenderOptions, scrollbar?: "track" | "thumb"): string {
+  const label = fit(`  ${expanded ? "▾" : "▸"} Runtime unconfirmed · ${count}`, Math.max(1, options.width - 2));
+  const focused = state.focusedUnconfirmedCwd === cwd;
+  return `${rowGutter(focused, options.color, scrollbar)}${paint(label, focused ? "bold" : "muted", options.color)}`;
 }
 
 export function renderThreadRow(

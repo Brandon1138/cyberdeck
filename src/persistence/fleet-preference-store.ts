@@ -11,6 +11,7 @@ import {
   type FleetReplyWatermark,
 } from "../domain/fleet-preferences.js";
 import { ValidatedJournal } from "./validated-journal.js";
+import { mergeLifecycleWatermark } from "../domain/fleet-lifecycle-watermark.js";
 
 export {
   FleetFolderDispositionSchema,
@@ -196,7 +197,7 @@ interface PreferenceProjection {
 }
 
 function projectPreferences(content: string): PreferenceProjection {
-  const result: PreferenceProjection = { projects: new Map(), profiles: {}, folders: {}, enabled: true, migrated: false, visit: { replies: {} } };
+  const result: PreferenceProjection = { projects: new Map(), profiles: {}, folders: {}, enabled: true, migrated: false, visit: { replies: {}, lifecycle: {} } };
   const lines = content.split("\n");
   if (!content.endsWith("\n")) lines.pop();
   for (const [index, line] of lines.entries()) {
@@ -211,6 +212,10 @@ function projectPreferences(content: string): PreferenceProjection {
         case "fleet.project-migration": result.migrated = true; break;
         case "fleet.visit": {
           if (record.preferences.view !== undefined) result.visit.view = record.preferences.view;
+          if (record.preferences.lifecycleInitialized === true) result.visit.lifecycleInitialized = true;
+          for (const [id, watermark] of Object.entries(record.preferences.lifecycle ?? {})) {
+            result.visit.lifecycle![id] = mergeLifecycleWatermark(result.visit.lifecycle![id], watermark);
+          }
           for (const [id, next] of Object.entries(record.preferences.replies)) {
             const previous = result.visit.replies[id];
             // An inspection from an older snapshot reads that content, not a later unseen reply.

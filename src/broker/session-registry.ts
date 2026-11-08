@@ -4,6 +4,7 @@ import type { ResolvedLaunchRecord, SessionRecord, StartSessionRequest } from ".
 import type { ScoutDecisionCard } from "../domain/scout-output.js";
 import type { ScoutArtifactKind } from "../domain/worker-profile.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
+import type { SessionRuntimePresence } from "../domain/session-runtime-presence.js";
 import { checkSessionCwdAccessible } from "../orchestration/session/session-cwd-check.js";
 import { SessionCatalog } from "../orchestration/session/session-catalog.js";
 import { SessionIoSurface } from "../orchestration/session/session-io-surface.js";
@@ -169,6 +170,10 @@ export class SessionRegistry {
 
   list(): SessionRecord[] {
     return this.reads.list();
+  }
+
+  runtimePresence(sessionId: string): SessionRuntimePresence {
+    return this.reads.runtimePresence(sessionId);
   }
 
   workerCapacity(): { activeWorkers: number; maxConcurrentWorkers: number | null } {

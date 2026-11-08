@@ -9,6 +9,7 @@ import {
   ResetOrchestratorRequestSchema,
 } from "../../domain/orchestrator.js";
 import { WorkerHandoffParamsSchema } from "../../orchestration/worker-handoff-service.js";
+import { WithdrawInstructionParamsSchema } from "../../orchestration/instruction-queue.js";
 import { fleetOrchestratorOwnership, fleetWorkerCoordinationView } from "../worker-coordination-view.js";
 import {
   type BrokerMethodHandler,
@@ -18,6 +19,7 @@ import {
   requireOrchestrators,
   requireWorkerCapabilities,
   requireWorkerHandoff,
+  requireInstructions,
 } from "./method-context.js";
 import {
   FleetReattachParamsSchema,
@@ -26,6 +28,10 @@ import {
 
 /** Fleet's own surface: operator preferences, the project registry, and orchestrator rosters. */
 export const fleetMethods: Record<string, BrokerMethodHandler> = {
+  // Operator administration, like directed handoff. Deliberately absent from agent/MCP tools.
+  "fleet.instruction.withdraw": async (server, _context, frame) => {
+    return requireInstructions(server.options).withdrawForOperator(WithdrawInstructionParamsSchema.parse(frame.params));
+  },
   "fleet.snapshot": async (server, context, frame) => {
     const { version } = z.object({ version: z.string().optional() }).parse(frame.params);
     const result = await server.fleetProjection.read(version, context.fleetProjection);

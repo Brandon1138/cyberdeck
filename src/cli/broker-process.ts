@@ -66,7 +66,7 @@ export async function waitForBroker(
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
-  throw new Error(`Broker did not become ready: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  throw new Error(`Broker readiness timed out after ${timeoutMs}ms. The broker may still be starting; run \`cyberdeck broker status\` before retrying. Last connection error: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
 export async function waitForBrokerStop(timeoutMs = 5_000): Promise<void> {

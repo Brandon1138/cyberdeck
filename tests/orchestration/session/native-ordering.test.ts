@@ -278,10 +278,26 @@ describe("independent new-instruction ordinal attribution", () => {
 });
 
 describe("independent refused native source fallback", () => {
+  it.each(["unbound", "conflict", "source-error"] as const)("reports a recognized idle composer with %s capture without admitting more work", async status => {
+    const f = harness();
+    f.engine.finishInitialization();
+    f.observations.activity = "awaiting-input";
+    f.engine.appendOutput(Buffer.from("recognized idle composer"));
+    f.observeProviderTurns.mockResolvedValue({ sessionId: f.record.id, provider: "codex", turnNumber: 1,
+      turns: [], nativeSourceAvailable: false, nativeSourceStatus: status, nativeFallbackAllowed: false, nativeActivity: "unknown" });
+    await f.engine.reconcileCanonicalTurns();
+    expect(f.engine.projectTruth()).toMatchObject({ state: "idle", taskOutcome: "unknown", completedTurns: 0, canonicalTurns: 0 });
+    expect(await f.engine.submitInstruction({ source: "orchestrator", message: "next task", encoded: Buffer.from("next task"), instructionId: "next" }))
+      .toMatchObject({ state: "queued", hold: "provider-busy" });
+    expect(f.writes).toHaveLength(0);
+    expect(f.engine.completedTurns).toBe(0);
+  });
+
   it.each(["unbound","conflict","source-error"] as const)("does not bank an in-memory fallback when native source is %s", async(status)=>{
     vi.useFakeTimers();
     const f=harness();
     f.engine.finishInitialization();
+    f.observations.composer={modalOpen:false,occupied:false,inputReady:false};
     f.observeProviderTurns.mockResolvedValue({sessionId:f.record.id,provider:"codex",turnNumber:1,turns:[],nativeSourceAvailable:false,nativeSourceStatus:status,nativeFallbackAllowed:false,nativeActivity:"unknown"});
     f.observations.activity="working"; f.engine.appendOutput(Buffer.from("Working"));
     f.observations.activity="awaiting-input"; f.engine.appendOutput(Buffer.from("screen answer"));

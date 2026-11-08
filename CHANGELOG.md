@@ -18,6 +18,11 @@ and persisted schemas remain under active alpha development.
 
 ### Fixed
 
+- Broker notification recovery reuses a file-validated instruction projection instead of
+  reparsing the entire mailbox journal for each controller. External writes and replacements
+  invalidate the projection. Readiness timeouts now explain that startup may still be running
+  and direct the operator to check broker status before retrying.
+
 - Broker startup streams the worker coordination journal, avoiding Node's string
   limit after long-running budget observation history. Automatic lossless
   checkpoints archive the original journal and remove intermediate snapshots

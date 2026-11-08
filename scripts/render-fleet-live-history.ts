@@ -13,12 +13,13 @@ const home = "/Users/brandon";
 const now = Date.parse("2026-10-14T19:00:00.000Z");
 const at = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
 function thread(id: string, name: string, state: WorkerTruthState, cwd: string, minutes = 2, kind: "worker" | "orchestrator" = "worker"): FleetThread {
-  const terminal = ["stopped", "exited", "failed"].includes(state);
+  const terminal = ["stopped", "exited", "failed", "interrupted"].includes(state);
   return {
+    runtimePresence: terminal ? "absent" : "present",
     record: { id, name, kind, provider: "codex", model: "gpt-6.1-sol", effort: "max", cwd,
       sandbox: "workspace-write", detached: true, attachmentState: "detached", createdAt: at(5000),
-      updatedAt: at(minutes), meaningfulUpdatedAt: at(minutes), executionState: terminal ? state === "stopped" ? "cancelled" : state : "active",
-      childIds: [], exitCode: terminal ? state === "failed" ? 1 : 0 : null, pid: terminal ? null : 1234,
+      updatedAt: at(minutes), meaningfulUpdatedAt: at(minutes), executionState: terminal ? state === "stopped" || state === "interrupted" ? "cancelled" : state : "active",
+      generation: 1, childIds: [], exitCode: terminal ? state === "failed" ? 1 : state === "interrupted" ? -1 : 0 : null, pid: terminal ? 0 : 1234,
       latestPreview: "I traced the issue and retained the existing input values.",
       latestPreviewKind: "assistant",
       observedModel: { model: "gpt-6.1-sol", effort: "max", source: "codex-rollout", observedAt: at(minutes) },
@@ -43,6 +44,8 @@ export function representativeFleet(): { snapshot: FleetSnapshot; state: FleetSt
   canary.record.workspace = { worktreePath: canary.record.cwd, repositoryPath: parking, branch: "cyberdeck/checkout-canary", baseRef: "HEAD", provisioning: "cyberdeck-provisioned", writableRoots: [] };
   const blocked = thread("blocked", "Preserve invalid booking fields and report every error", "blocked-modal", parking, 4);
   const failed = thread("failed", "Investigate provider startup failure", "failed", cyberdeck, 7);
+  // Provider failure can precede process exit: keep the unhealthy runtime in Live.
+  failed.runtimePresence = "present"; failed.record.exitCode = null; failed.record.pid = 1234; failed.record.executionState = "errored";
   const unknown = thread("unknown", "Trace the native conversation binding after /clear", "unknown", cyberdeck, 3);
   delete unknown.record.observedModel;
   const limited = thread("limited", "Recover the provider session at its usage limit", "provider-limit", cyberdeck, 8);
@@ -59,7 +62,9 @@ export function representativeFleet(): { snapshot: FleetSnapshot; state: FleetSt
   ][index]!, index % 2 === 0 ? "stopped" : "exited", index < 3 ? parking : cyberdeck, 30 + index * 120));
   const oldOrcs = Array.from({ length: 3 }, (_, index) => thread(`old-orc-${index}`, `cd-orc / earlier investigation ${index + 1}`, "stopped", cyberdeck, 500 + index, "orchestrator"));
   const stray = thread("stray", "Scratch investigation outside registered projects", "exited", "/private/tmp/notes-é/工程", 400);
-  const snapshot: FleetSnapshot = { threads: [primary, peer, canary, blocked, failed, unknown, limited, idle, ...history, ...oldOrcs, stray],
+  const interruptions = Array.from({ length: 40 }, (_, index) => thread(`interrupted-${index}`,
+    `Earlier Start Parking review ${index + 1}`, "interrupted", parking, 2880 + index));
+  const snapshot: FleetSnapshot = { threads: [primary, peer, canary, blocked, failed, unknown, limited, idle, ...history, ...oldOrcs, stray, ...interruptions],
     projects: [parking, cyberdeck, `${home}/code/personal/ammo`, `${home}/code/personal/mikoshi`] };
   let state = createFleetState(snapshot, cyberdeck);
   state = { ...state, selectedSessionId: canary.record.id, collapsedCwds: ["/@unregistered"],
@@ -86,6 +91,8 @@ async function writeArtifacts(): Promise<void> {
     ["live", state],
     ["history", transitionFleet({ ...state, draft: "/view history" }, snapshot, "enter", now).state],
     ["unread", transitionFleet({ ...state, draft: "/view unread" }, snapshot, "enter", now).state],
+    ["recovered-loss", normalizeState({ ...state, lifecycleWatermarks: { ...state.lifecycleWatermarks,
+      "interrupted-0": { generation: 1, acknowledgedGeneration: 0, baselineGeneration: 0, presence: "present" } } }, snapshot, now)],
     ["expanded", { ...state, expandedHistoryCwds: ["/@orcs", `${home}/code/work/start-parking`, `${home}/code/personal/cyberdeck`], expandedCwds: [`${home}/code/personal/cyberdeck`] }],
     ["unknown", { ...state, selectedSessionId: "unknown" }],
     ["help", { ...state, helpOpen: true }],
