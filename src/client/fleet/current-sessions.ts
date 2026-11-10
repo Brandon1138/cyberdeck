@@ -5,8 +5,8 @@ import { isLiveThread, threadRuntimePresence } from "./runtime-presence.js";
 /** Current work is directly discoverable, including observed workers without broker processes. */
 export function currentSessionRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow[] {
   const root = state.projectFilter?.replace(/\/$/u, "");
-  const threads = snapshot.threads.filter(thread => threadRuntimePresence(thread) !== "absent")
-    .filter(thread => !root || thread.record.cwd === root || thread.record.cwd.startsWith(`${root}/`))
+  const threads = snapshot.threads.filter(thread => thread.record.id === state.revealedHistorySessionId
+      || threadRuntimePresence(thread) !== "absent" && (!root || thread.record.cwd === root || thread.record.cwd.startsWith(`${root}/`)))
     .sort((a, b) => Number(isLiveThread(b)) - Number(isLiveThread(a))
       || a.record.createdAt.localeCompare(b.record.createdAt) || a.record.id.localeCompare(b.record.id));
   return [

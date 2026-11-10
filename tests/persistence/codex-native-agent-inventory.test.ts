@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { CodexNativeAgentInventory } from "../../src/persistence/codex-native-agent-inventory.js";
 import { CodexConversationBindingStore } from "../../src/persistence/codex-conversation-bindings.js";
 import type { SessionRecord } from "../../src/domain/session.js";
+import { CodexNativeAgentSources } from "../../src/persistence/codex-native-agent-sources.js";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -82,4 +83,26 @@ it("retains known workers when the exact binding temporarily disappears", async 
   expect(rows).toHaveLength(1);
   expect(rows[0]?.workerTruth?.state).toBe("unknown");
   expect(inventory.notice).toContain("unavailable");
+});
+it("discovers ordinary worker children from their own Codex home alongside orchestrator children", async () => {
+  const orchestrator = await fixture(), ordinary = await fixture();
+  const workerId = "66666666-6666-4666-8666-666666666666", workerNative = "77777777-7777-4777-8777-777777777777";
+  const workerChild = "88888888-8888-4888-8888-888888888888";
+  await orchestrator.bindings.record({ sessionId: workerId, nativeSessionId: workerNative, transcriptPath: join(ordinary.home, "worker.jsonl"), cwd: "/repo" });
+  const db = new DatabaseSync(join(ordinary.home, "state_5.sqlite"));
+  db.prepare("UPDATE thread_spawn_edges SET parent_thread_id=?,child_thread_id=?").run(workerNative, workerChild);
+  db.prepare("UPDATE threads SET id=?,source=?,agent_path=?").run(workerChild,
+    JSON.stringify({ subagent: { thread_spawn: { parent_thread_id: workerNative, agent_path: "/root/services" } } }), "/root/services"); db.close();
+  await writeFile(ordinary.rollout, JSON.stringify({ type: "session_meta", payload: { id: workerChild } }) + "\n"
+    + JSON.stringify({ timestamp: "2026-11-10T12:02:00.000Z", type: "event_msg", payload: { type: "task_started" } }) + "\n");
+  const sources = new CodexNativeAgentSources({ orchestratorHome: orchestrator.home, workerHome: ordinary.home, bindings: orchestrator.bindings });
+  const worker = { ...parent, id: workerId, kind: "worker", name: "Ordinary worker" } as SessionRecord;
+  const rows = await sources.list([parent, worker]);
+  expect(rows.map(row => row.record.name).sort()).toEqual(["publication", "services"]);
+  expect(rows.find(row => row.record.id === workerChild)).toMatchObject({ record: { parentSessionId: workerId }, workerTruth: { state: "working" } });
+  await rm(join(ordinary.home, "state_5.sqlite"));
+  const partial = await sources.list([parent, worker]);
+  expect(partial.find(row => row.record.id === childId)?.workerTruth?.state).toBe("working");
+  expect(partial.find(row => row.record.id === workerChild)?.workerTruth?.state).toBe("unknown");
+  expect(sources.notice).toContain("unavailable");
 });

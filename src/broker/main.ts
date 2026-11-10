@@ -48,7 +48,7 @@ import {
 } from "../persistence/thread-transcript-store.js";
 import { ClaudeConversationBindingStore } from "../persistence/claude-conversation-bindings.js";
 import { CodexConversationBindingStore } from "../persistence/codex-conversation-bindings.js";
-import { CodexNativeAgentInventory } from "../persistence/codex-native-agent-inventory.js";
+import { CodexNativeAgentSources } from "../persistence/codex-native-agent-sources.js";
 import { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import { SessionStore } from "../persistence/session-store.js";
 import { FleetPreferenceStore } from "../persistence/fleet-preference-store.js";
@@ -469,7 +469,7 @@ export async function runBroker(
     fleetDetaches,
     fleetPreferences,
     fleetProjects,
-    nativeAgents: new CodexNativeAgentInventory(codexOrchestratorHome.directory, codexConversations),
+    nativeAgents: new CodexNativeAgentSources({ orchestratorHome: codexOrchestratorHome.directory, workerHome: codexOrchestratorHome.sourceDirectory, bindings: codexConversations }),
     workerPreferences,
     workerCapabilities,
     scoutEgress,
