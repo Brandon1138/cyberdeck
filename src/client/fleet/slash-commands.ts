@@ -357,7 +357,7 @@ export function statusText(status: string, pendingDelete: boolean, color: boolea
   // Verified completion stays green; input, stalls and provider limits call for attention.
   // Uncertain and inert states stay greyscale; only observed work takes the live hue.
   if (label === "Done") return paint(status, "done", color);
-  if (label === "Needs input" || label === "Stalled" || label === "Provider limit") return paint(status, "attention", color);
+  if (label === "Needs you" || label === "Stalled" || label === "Provider limit") return paint(status, "attention", color);
   if (label === "Working") return paint(status, "working", color);
   return paint(status, "muted", color);
 }

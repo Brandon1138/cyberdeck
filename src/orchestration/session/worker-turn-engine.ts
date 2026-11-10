@@ -1,3 +1,4 @@
+import { WorkerTruthObservation } from "../../domain/worker-truth-observation.js";
 import {
   modalAnswerKeySequence,
   type ModalAnswerAttempt,
@@ -37,12 +38,10 @@ import { admitSubmitRetry, normalizedHead, SubmitVerifier, type SubmitRetryResul
 import { WorkerInputReadiness } from "./worker-input-readiness.js";
 import { observeWorkerModal, projectWorkerTurnTruth, workerPreviewKind, updateWorkerPreview } from "./worker-turn-truth.js";
 import { NativeTurnActivity, pendingExitTruth, supportsNativeTurnObservation, nativeReadFailure, nativeTurnIdentity } from "./worker-turn-native-state.js";
-
 export interface WorkerTurnAppendResult {
   fatal: boolean;
   termination?: SessionTermination;
 }
-
 export interface WorkerTurnEngineFactoryOptions {
   observations: WorkerTurnObservationPort;
   preview?: WorkerTurnPreviewPort;
@@ -74,6 +73,7 @@ export class WorkerTurnEngineFactory {
  * the registry boundary. Everything learned from terminal or transcript observations is folded here.
  */
 export class WorkerTurnEngine {
+  private readonly truthObservation = new WorkerTruthObservation();
   private readonly replay: ReplayObservation;
   private activity: ReturnType<WorkerTurnObservationPort["activity"]> = "unknown";
   private observedWorking = false;
@@ -419,7 +419,7 @@ export class WorkerTurnEngine {
       return pendingExitTruth(this.completedTurnCount, this.canonicalTurnCount, this.rendered.length);
     }
     this.observeComposer();
-    return projectWorkerTurnTruth({
+    return this.truthObservation.observe(projectWorkerTurnTruth({
       terminalFinalizing: false,
       readiness: this.inputReadiness, deliveryHeld: this.deliveryHeld,
       nativeTurnSettled: this.nativeTurnSettled,
@@ -442,7 +442,7 @@ export class WorkerTurnEngine {
       stopRequested: this.options.effects.stopRequested?.(),
       modal: this.currentModalDescriptor(),
       ...(this.record.termination === undefined ? {} : { terminationReason: this.record.termination.reason }),
-    });
+    }), this.record.generation, this.now());
   }
 
   private currentModalDescriptor() {

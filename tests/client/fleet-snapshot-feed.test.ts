@@ -45,7 +45,7 @@ it("applies truth-only deltas without stale attention or per-session truth reque
       upsert: [{ record, workerTruth: { ...truth, state: "blocked-composer", composerOccupied: true,
         detail: "Rendered but not submitted" } }], remove: [] }));
     await feed.refresh();
-    expect(threadStatus(feed.snapshot.threads[0]!)).toBe("Needs input");
+    expect(threadStatus(feed.snapshot.threads[0]!)).toBe("Idle");
     expect(feed.snapshot.threads[0]?.workerTruth?.detail).toBe("Rendered but not submitted");
     expect(client.request.mock.calls.map(([method]) => method)).toEqual(["fleet.snapshot", "fleet.snapshot"]);
   } finally { feed.dispose(); }

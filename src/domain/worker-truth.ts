@@ -175,6 +175,7 @@ export interface WorkerTruthInput {
 }
 
 export interface WorkerTruth {
+  lastConfirmed?: { state: WorkerTruthState; at: string };
   state: WorkerTruthState;
   terminal: boolean;
   completedTurns: number;

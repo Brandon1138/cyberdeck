@@ -22,10 +22,10 @@ function observed(overrides: Partial<WorkerTruthInput> = {}): FleetThread {
 describe.each(["worker", "orchestrator"] as const)("Fleet %s truth parity", (kind) => {
   it.each([
     ["prompt-free startup", { awaitingInputReady: true }, "Starting"],
-    ["startup modal", { awaitingInputReady: true, composer: { occupied: false, modalOpen: true } }, "Needs input"],
+    ["startup modal", { awaitingInputReady: true, composer: { occupied: false, modalOpen: true } }, "Needs you"],
     ["dismissed modal", { composer: { occupied: false, modalOpen: false, inputReady: true }, activity: "awaiting-input" }, "Idle"],
-    ["rendered but unsent composer", { pendingInstructions: 1, composer: { occupied: true, modalOpen: false } }, "Needs input"],
-    ["unrecognized screen despite old completed turns", { completedTurns: 2, canonicalTurns: 2 }, "Unknown"],
+    ["rendered but unsent composer", { pendingInstructions: 1, composer: { occupied: true, modalOpen: false } }, "Idle"],
+    ["unrecognized screen despite old completed turns", { completedTurns: 2, canonicalTurns: 2 }, "Unavailable"],
     ["clean exit", { executionState: "exited", exitCode: 0, completedTurns: 1 }, "Exited"],
     ["recovered interrupted", { executionState: "cancelled", attentionState: "interrupted" }, "Interrupted"],
     ["observed work", { activity: "working" }, "Working"],
@@ -44,8 +44,8 @@ describe.each(["worker", "orchestrator"] as const)("Fleet %s truth parity", (kin
 it("preserves the distinct broker modal and composer explanations", () => {
   const modal = observed({ composer: { occupied: false, modalOpen: true } });
   const composer = observed({ composer: { occupied: true, modalOpen: false } });
-  expect(threadStatus(modal)).toBe("Needs input");
-  expect(threadStatus(composer)).toBe("Needs input");
+  expect(threadStatus(modal)).toBe("Needs you");
+  expect(threadStatus(composer)).toBe("Idle");
   expect(modal.workerTruth?.detail).not.toEqual(composer.workerTruth?.detail);
   expect(threadPreview(modal, 200)).toBe(modal.workerTruth?.detail);
   expect(threadPreview(composer, 200)).toBe(composer.workerTruth?.detail);
@@ -77,7 +77,7 @@ it("counts new statuses separately from process liveness and completion", () => 
     workerTruth: { ...observed().workerTruth!, state } }));
   const snapshot = { threads };
   const rendered = renderFleet(snapshot, createFleetState(snapshot), { color: false, width: 300, height: 40, now: Date.parse(NOW) });
-  for (const label of ["1 starting", "1 working", "2 needs input", "1 idle", "1 stalled", "1 provider limit", "1 unknown", "1 stopping", "1 stopped", "1 interrupted", "1 exited", "1 failed"]) {
+  for (const label of ["1 starting", "1 working", "1 needs you", "2 idle", "1 stalled", "1 provider limit", "1 unavailable", "1 stopping", "1 stopped", "1 interrupted", "1 exited", "1 failed"]) {
     expect(rendered).toContain(label);
   }
   expect(rendered).not.toContain("done");
@@ -90,7 +90,7 @@ it("keeps legacy polling bounded and reports absent activity evidence as Unknown
     return [];
   });
   const snapshot = await collectFleetSnapshot({ request } as never);
-  expect(snapshot.threads.map(threadStatus)).toEqual(["Unknown", "Unknown"]);
+  expect(snapshot.threads.map(threadStatus)).toEqual(["Unavailable", "Unavailable"]);
   expect(request.mock.calls.map(([method]) => method)).toEqual([
     "session.list", "fleet.workerCoordination", "fleet.orchestratorOwnership", "fleet.projects",
   ]);
@@ -102,12 +102,12 @@ it("keeps legacy polling bounded and reports absent activity evidence as Unknown
   } } })).toBe("Failed");
 });
 
-it.each(["Starting", "Idle", "Unknown", "Stopping", "Stopped", "Interrupted", "Exited"] as const)("keeps %s neutral", (status) => {
+it.each(["Starting", "Idle", "Unavailable", "Stopping", "Stopped", "Interrupted", "Exited"] as const)("keeps %s neutral", (status) => {
   expect(statusMarker(status, false, true)).toContain("\u001b[38;2;154;163;175m");
   expect(statusText(status, false, true)).toContain("\u001b[38;2;154;163;175m");
 });
 
-it.each(["Needs input", "Stalled", "Provider limit"] as const)("keeps %s in attention amber", (status) => {
+it.each(["Needs you", "Stalled", "Provider limit"] as const)("keeps %s in attention amber", (status) => {
   expect(statusMarker(status, false, true)).toContain("\u001b[38;2;212;168;91m");
   expect(statusText(status, false, true)).toContain("\u001b[38;2;212;168;91m");
 });

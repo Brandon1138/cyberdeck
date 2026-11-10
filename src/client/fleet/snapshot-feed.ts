@@ -116,7 +116,9 @@ export class FleetSnapshotFeed {
       if (reply.order !== undefined && (reply.order.length !== threads.size || new Set(reply.order).size !== threads.size || reply.order.some((id) => !threads.has(id)))) {
         this.version = undefined; this.pending = true; return;
       }
-      this.snapshot = { threads: reply.order === undefined ? [...threads.values()] : reply.order.map((id) => threads.get(id)!),
+      this.snapshot = { ...this.snapshot, threads: reply.order === undefined ? [...threads.values()] : reply.order.map((id) => threads.get(id)!),
+        ...(reply.currentLayout === undefined ? {} : { currentLayout: reply.currentLayout }),
+        ...(reply.nativeAgentNotice === undefined ? {} : { nativeAgentNotice: reply.nativeAgentNotice ?? undefined }),
         ...(reply.projects === undefined ? {} : { projects: reply.projects }) };
     } else if (reply.version !== this.version) { this.version = undefined; this.pending = true; return; }
     this.version = reply.version;

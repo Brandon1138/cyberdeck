@@ -167,7 +167,8 @@ export function renderThreadRow(
   const selected = !threadFocusInert(state)
     && thread.record.id === state.selectedSessionId;
   const baseTitle = displayThreadName(
-    thread.record.name ?? thread.record.role ?? `Untitled ${thread.record.id.slice(0, 8)}`,
+    thread.nativeAgent === undefined ? thread.record.name ?? thread.record.role ?? `Untitled ${thread.record.id.slice(0, 8)}`
+      : `${thread.record.name} · native for ${thread.nativeAgent.parentName}`,
   );
   const title = `${isUnreadThread(state, thread.record.id) ? "* " : ""}${thread.record.pinned === true ? "⌃ " : ""}${baseTitle}`;
   const identity = options.width < 80 ? compactThreadIdentity(thread.record) : threadIdentity(thread.record);
@@ -387,7 +388,7 @@ export function pullRequestCell(
  */
 export function threadPreview(thread: FleetThread, width: number): string {
   // A blocked row explains the current obstacle, rather than showing a previous turn's reply.
-  if (thread.workerTruth?.state === "blocked-modal" || thread.workerTruth?.state === "blocked-composer") {
+  if (thread.workerTruth?.state === "unknown" || thread.workerTruth?.state === "blocked-modal" || thread.workerTruth?.state === "blocked-composer") {
     return fit(thread.workerTruth.detail, width);
   }
   return conversationPreview({
@@ -409,7 +410,7 @@ export function statusMarker(
 ): string {
   const tone = status === "Done"
     ? "done"
-    : status === "Needs input" || status === "Stalled" || status === "Provider limit"
+    : status === "Needs you" || status === "Stalled" || status === "Provider limit"
       ? "attention"
       : status === "Failed"
         ? "alert"

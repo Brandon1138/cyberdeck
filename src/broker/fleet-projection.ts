@@ -18,6 +18,7 @@ export class FleetProjection {
       this.options.fleetProjects?.list(),
     ]);
     // Read lifecycle, generation and runtime ownership together, after asynchronous metadata.
+    const native = await this.options.nativeAgents?.list(this.options.registry.list()) ?? [];
     const sessions = this.options.registry.list();
     const ids = new Set(sessions.map(({ id }) => id));
     const coordination = new Map(fleetWorkerCoordinationView(
@@ -27,6 +28,8 @@ export class FleetProjection {
     const owners = new Map(fleetOrchestratorOwnership(bindings.filter((binding) => ids.has(binding.sessionId)))
       .map((entry) => [entry.sessionId, entry]));
     const snapshot: FleetProjectionSnapshot = {
+      ...(this.options.nativeAgents === undefined ? {} : { currentLayout: "sessions" as const }),
+      ...(this.options.nativeAgents?.notice === undefined ? {} : { nativeAgentNotice: this.options.nativeAgents.notice }),
       threads: sessions.map(({ launchRecord: _launch, providerInstructions: _instructions, imageAttachments: _images, ...record }) => ({
         record: structuredClone(record),
         workerTruth: structuredClone(this.options.registry.workerTruth(record.id)),
@@ -37,6 +40,11 @@ export class FleetProjection {
       })),
       ...(projects === undefined ? {} : { projects }),
     };
+    for (const thread of native) {
+      const root = sessions.find(record => record.id === thread.nativeAgent?.rootSessionId);
+      if (root === undefined || root.generation !== thread.nativeAgent?.rootGeneration || ids.has(thread.record.id)) continue;
+      snapshot.threads.push(structuredClone(thread)); ids.add(thread.record.id);
+    }
     const version = `${this.epoch}:${createHash("sha256").update(JSON.stringify(snapshot)).digest("hex")}`;
     const retained = { version, snapshot };
     if (previous === undefined || baseVersion !== previous.version) {
@@ -48,8 +56,10 @@ export class FleetProjection {
       kind: "delta", version, baseVersion,
       upsert: snapshot.threads.filter((thread) => old.get(thread.record.id) !== JSON.stringify(thread)),
       remove: previous.snapshot.threads.filter((thread) => !ids.has(thread.record.id)).map((thread) => thread.record.id),
-      ...(JSON.stringify(previous.snapshot.threads.map((thread) => thread.record.id)) === JSON.stringify(sessions.map((record) => record.id))
-        ? {} : { order: sessions.map((record) => record.id) }),
+      ...(JSON.stringify(previous.snapshot.threads.map((thread) => thread.record.id)) === JSON.stringify(snapshot.threads.map(({ record }) => record.id))
+        ? {} : { order: snapshot.threads.map(({ record }) => record.id) }),
+      ...(snapshot.currentLayout === undefined ? {} : { currentLayout: snapshot.currentLayout }),
+      nativeAgentNotice: snapshot.nativeAgentNotice ?? null,
       ...(projects === undefined ? {} : { projects }),
     };
     // A burst affecting most rows is cheaper as a full resync. Retain only one previous generation.

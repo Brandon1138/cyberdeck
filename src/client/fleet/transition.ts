@@ -30,6 +30,12 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
   const selected = threadFocusInert(state)
     ? undefined
     : threads.find(({ record }) => record.id === state.selectedSessionId);
+  if (key === "enter" && /^\/filter(?:\s|$)/u.test(state.draft.trim())) {
+    const projectFilter = state.draft.trim().slice(7).trim();
+    return { state: { ...state, draft: "", projectFilter: projectFilter === "all" || projectFilter === "" ? undefined : projectFilter,
+      selectedSessionId: undefined, focusedFolderCwd: undefined, focusedUnconfirmedCwd: undefined, commandPalette: undefined, threadListScrollOffset: 0,
+      focusedViewControl: "live", notice: undefined } };
+  }
   if (key === "ctrl+w") {
     return {
       state: {
@@ -74,6 +80,11 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
   }
   if (state.orchestratorPicker !== undefined) {
     return transitionOrchestratorPicker(state, snapshot, key, now);
+  }
+  if (selected?.nativeAgent !== undefined && ["enter", "right", " ", "ctrl+x", "ctrl+d", "ctrl+r", "ctrl+t", "ctrl+n", "shift+up", "shift+down"].includes(key)
+      && (key !== " " || state.draft === "")
+      && !(key === "enter" && /^\/(?:view|read)(?:\s|$)/u.test(state.draft.trim()))) {
+    return { state: { ...state, notice: `Native worker ${selected.record.name} for ${selected.nativeAgent.parentName} · ${selected.workerTruth?.detail ?? "Observation unavailable"} · controls belong to its parent`, noticeTone: "neutral" } };
   }
   if (key === "ctrl+s") {
     return {
@@ -243,6 +254,9 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
   if (/^alt\+[1-9]$/u.test(key)) {
     const index = Number(key.slice(-1)) - 1;
     const target = fleetListRows(snapshot, state).filter((row) => row.kind === "thread")[index]?.thread;
+    if (target?.nativeAgent !== undefined) return { state: { ...state, selectedSessionId: target.record.id, focusedViewControl: undefined, focusedFolderCwd: undefined, focusedHistoryCwd: undefined,
+      focusedUnconfirmedCwd: undefined, focusedLifecycleCwd: undefined, focusedLifecycleSessionId: undefined, focusedShowMoreCwd: undefined, focusedUpdateSessionId: undefined,
+      notice: `Native worker ${target.record.name} for ${target.nativeAgent.parentName} · controls belong to its parent`, noticeTone: "neutral" } };
     return target === undefined
       ? { state }
       : {

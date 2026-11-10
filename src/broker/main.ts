@@ -48,6 +48,7 @@ import {
 } from "../persistence/thread-transcript-store.js";
 import { ClaudeConversationBindingStore } from "../persistence/claude-conversation-bindings.js";
 import { CodexConversationBindingStore } from "../persistence/codex-conversation-bindings.js";
+import { CodexNativeAgentInventory } from "../persistence/codex-native-agent-inventory.js";
 import { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import { SessionStore } from "../persistence/session-store.js";
 import { FleetPreferenceStore } from "../persistence/fleet-preference-store.js";
@@ -108,7 +109,6 @@ import { runShellCommand } from "../runtime/shell-command.js";
 import { runClaudeTranscriptRebind } from "../providers/claude/transcript-hook.js";
 import type { CliToolkit } from "../cli/toolkit.js";
 import type { FleetRuntimeDeps } from "../client/fleet/deps.js";
-
 function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<string, unknown>): BrokerEvent {
   return {
     id: randomUUID(),
@@ -117,7 +117,6 @@ function brokerEvent(type: "broker.started" | "broker.shutdown", data: Record<st
     data,
   };
 }
-
 export function createFleetRuntimeDeps(
   stateDirectory = appStateDirectory,
 ): FleetRuntimeDeps {
@@ -470,6 +469,7 @@ export async function runBroker(
     fleetDetaches,
     fleetPreferences,
     fleetProjects,
+    nativeAgents: new CodexNativeAgentInventory(codexOrchestratorHome.directory, codexConversations),
     workerPreferences,
     workerCapabilities,
     scoutEgress,

@@ -164,7 +164,7 @@ function currentComposerPosition(provider: ProviderId, screen: RenderedTerminalS
     }
     if (/^[─━═╭╮╰╯┌┐└┘]+$/u.test(line)) continue;
     if (/^\? for shortcuts\b/iu.test(line)
-        || (provider === "codex" && /^(?:\d+% context left|tab to queue|← for agents|(?:gpt-[\w.-]+|o[134](?:-[\w.-]+)?)\s+(?:minimal|low|medium|high|xhigh|default)\s+·)/iu.test(line))
+        || (provider === "codex" && /^(?:\d+% context left|tab to queue|← for agents|(?:gpt-[\w.-]+|o[134](?:-[\w.-]+)?)\s+(?:minimal|low|medium|high|xhigh|max|ultra|default)\s+·)/iu.test(line))
         || (provider === "claude" && /^(?:[⏵⏸]+\s*)?(?:bypass permissions on|accept edits on|plan mode on|auto mode on)\b.*shift\+tab|^tab to queue message$/iu.test(line))) { footer = true; continue; }
     return -1;
   }
