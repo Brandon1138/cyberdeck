@@ -21,7 +21,8 @@ mkdir "$destination"
 archive="$destination/$asset.tar.gz"
 curl --fail --location --retry 3 --output "$archive" \
   "https://github.com/neovim/neovim/releases/download/v0.11.5/$asset.tar.gz"
-if command -v sha256sum >/dev/null; then
+# macOS's BSD sha256sum does not accept GNU --strict; its native shasum verifies the same digest.
+if [ "$(uname -s)" != Darwin ] && command -v sha256sum >/dev/null; then
   printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --strict
 else
   printf '%s  %s\n' "$checksum" "$archive" | shasum --algorithm 256 --check
