@@ -42,6 +42,7 @@ export interface FleetSignals {
 }
 
 export interface FleetThread {
+  nativeAgent?: import("../../domain/fleet-projection.js").FleetProjectionSnapshot["threads"][number]["nativeAgent"];
   record: SessionRecord;
   /** Current shared broker truth; absent when connected to a legacy broker. */
   workerTruth?: WorkerTruth;
@@ -58,6 +59,8 @@ export interface FleetThread {
 }
 
 export interface FleetSnapshot {
+  currentLayout?: "sessions";
+  nativeAgentNotice?: string | undefined;
   threads: FleetThread[];
   /**
    * The operator's registered project roots, or `undefined` when this Fleet has no registry to
@@ -208,6 +211,7 @@ export interface ShellModeState {
 export type FleetNoticeTone = "neutral" | "warning" | "error" | "confirmation";
 
 export interface FleetState {
+  projectFilter?: string | undefined;
   selectedSessionId?: string | undefined;
   /** First rendered row in the independently scrolling thread-list body. */
   threadListScrollOffset: number;
@@ -345,7 +349,7 @@ export interface FleetTransition {
 
 export type StartFleetAction = Extract<FleetAction, { type: "start"; }>;
 
-export type ThreadStatus = "Starting" | "Working" | "Needs input" | "Idle" | "Stalled" | "Provider limit" | "Done" | "Stopping" | "Stopped" | "Interrupted" | "Exited" | "Failed" | "Unknown";
+export type ThreadStatus = "Starting" | "Working" | "Needs you" | "Idle" | "Stalled" | "Provider limit" | "Done" | "Stopping" | "Stopped" | "Interrupted" | "Exited" | "Failed" | "Unavailable";
 
 export interface FleetRenderOptions {
   /** A full-resolution image placement, available only when the terminal supports native graphics. */

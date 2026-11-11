@@ -306,19 +306,21 @@ export function renderHeader(
 ): string[] {
   return prepared([threads, state, options, "renderHeader"], () => {
     const live = threads.filter(isLiveThread);
-    const statuses = live.map(threadStatus);
+    const native = threads.filter(thread => thread.nativeAgent !== undefined && threadRuntimePresence(thread) !== "absent");
+    const statuses = [...live, ...native].map(threadStatus);
     const count = (status: ThreadStatus) => statuses.filter((candidate) => candidate === status).length;
     // Process liveness is a separate fact from current activity and verified task outcomes.
     const primary = [
       `${live.length} live`,
-      `${count("Working")} working`, `${count("Needs input")} needs input`,
+      ...(native.length === 0 ? [] : [`${native.length} native workers`]),
+      `${count("Working")} working`, `${count("Needs you")} needs you`,
       `${threads.filter(({ record }) => isUnreadThread(state, record.id)).length} unread`,
     ];
     const supplementary = [
       `${threads.filter(isHistoricalThread).length} history`,
       ...threads.some((thread) => threadRuntimePresence(thread) === "unknown")
         ? [`${threads.filter((thread) => threadRuntimePresence(thread) === "unknown").length} runtime unconfirmed`] : [],
-      ...(["Starting", "Idle", "Stalled", "Provider limit", "Unknown", "Stopping", "Stopped", "Exited", "Done"] as const)
+      ...(["Starting", "Idle", "Stalled", "Provider limit", "Unavailable", "Stopping", "Stopped", "Exited", "Done"] as const)
         .flatMap((status) => count(status) === 0 ? [] : [`${count(status)} ${status.toLowerCase()}`]),
       ...(count("Interrupted") === 0 ? [] : [`${count("Interrupted")} interrupted`]),
       ...(count("Failed") === 0 ? [] : [`${count("Failed")} failed`]),

@@ -48,6 +48,10 @@ export interface ConnectionContext {
   fleetSubscription?: { unsubscribe: () => void; timer?: ReturnType<typeof setTimeout> };
 }
 export interface BrokerServerOptions {
+  nativeAgents?: {
+    readonly notice?: string | undefined;
+    list(sessions: readonly import("../../domain/session.js").SessionRecord[]): Promise<import("../../domain/fleet-projection.js").FleetProjectionSnapshot["threads"]>;
+  };
   activity?: AgentActivityPort;
   telemetry?: ActivitySinkPort;
   executionHealth?: () => unknown;

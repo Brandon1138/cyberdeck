@@ -100,7 +100,7 @@ describe("literal Fleet runtime membership", () => {
     const state = normalizeState({ ...createFleetState(snapshot), connectionStale: true }, snapshot, now);
     const body = renderFleet(snapshot, state, { width, height: 30, now, color: false });
     expect(body).toContain("cached view");
-    for (const count of ["1 live", "1 working", "0 needs input", "0 unread"]) expect(body).toContain(count);
+    for (const count of ["1 live", "1 working", "0 needs you", "0 unread"]) expect(body).toContain(count);
     expect(body).toContain("Last confirmed:");
     expect(ids(snapshot, state)).toEqual(["current"]);
     expect(state.lifecycleWatermarks?.current?.notice).toBeUndefined();

@@ -1035,7 +1035,7 @@ describe("fleet presentation", () => {
 
       expect(row).not.toContain("#42");
       expect(row).toContain("Ship indicator");
-      expect(row).toContain("Unknown");
+      expect(row).toContain("Unavailable");
       expect(row).toHaveLength(63);
       expect(rowFor(rendered, "No branch")).toHaveLength(63);
     });
@@ -1133,12 +1133,12 @@ describe("fleet presentation", () => {
       home: "/Users/brandon",
     });
 
-    expect(rendered).toContain("2 live · 1 working · 0 needs input · 0 unread · 2 history · 1 failed");
+    expect(rendered).toContain("2 live · 1 working · 0 needs you · 0 unread · 2 history · 1 failed");
     expect(rendered).toContain("Finished earlier");
     expect(rendered).toContain("Finished before that");
   });
 
-  it("reads a session that died inside a live process as failed, never as needs input", () => {
+  it("reads a session that died inside a live process as failed, never as needs you", () => {
     const errored = session({ executionState: "errored", attentionState: "failed" });
     expect(threadStatus({ record: errored })).toBe("Failed");
     // Even with no persisted attention state, the execution state alone settles it.
@@ -1160,19 +1160,19 @@ describe("fleet presentation", () => {
       now: NOW_MS,
     });
 
-    // Idle is Cool Ash and Needs input is Attention Amber. The focused
+    // Idle is Cool Ash and Needs you is Attention Amber. The focused
     // row adds weight to the dot plus a selection rule in the gutter, never a colour.
     expect(rendered).toContain("\u001b[1m\u001b[38;2;154;163;175m·\u001b[0m\u001b[0m");
     expect(rendered).toContain("\u001b[38;2;212;168;91m·\u001b[0m");
     expect(rendered).toContain("\u001b[38;2;154;163;175mIdle          \u001b[0m");
-    expect(rendered).toContain("\u001b[38;2;212;168;91mNeeds input   \u001b[0m");
+    expect(rendered).toContain("\u001b[38;2;212;168;91mNeeds you     \u001b[0m");
     expect(rendered).toContain("\u001b[38;2;154;163;175m▌\u001b[0m");
 
     // The regression this pins: "finished, go read it" and "blocked, go unblock it"
     // are different errands, so their rows must never resolve to the same hue.
     const rows = rendered.split("\n");
     const doneRow = rows.find((row) => row.includes("Idle          ")) ?? "";
-    const blockedRow = rows.find((row) => row.includes("Needs input")) ?? "";
+    const blockedRow = rows.find((row) => row.includes("Needs you")) ?? "";
     expect(doneRow).toContain("\u001b[38;2;154;163;175m");
     expect(doneRow).not.toContain("\u001b[38;2;212;168;91m");
     expect(blockedRow).toContain("\u001b[38;2;212;168;91m");
@@ -1523,21 +1523,21 @@ describe("fleet presentation", () => {
   it("renders status from shared broker truth and keeps legacy active uncertainty honest", () => {
     expect(threadStatus({ record: session({ attentionState: "done" }), workerTruth: truth("working") })).toBe("Working");
     expect(threadStatus({ record: session({ attentionState: "working" }), workerTruth: truth("idle") })).toBe("Idle");
-    expect(threadStatus({ record: session({ attentionState: "done" }) })).toBe("Unknown");
+    expect(threadStatus({ record: session({ attentionState: "done" }) })).toBe("Unavailable");
     const approval = fleet({
       record: session({ provider: "claude", model: "opus", attentionState: "needs-input" }),
       workerTruth: truth("blocked-modal"),
     });
-    expect(threadStatus(approval.threads[0]!)).toBe("Needs input");
+    expect(threadStatus(approval.threads[0]!)).toBe("Needs you");
     const rendered = renderFleet(approval, createFleetState(approval), {
       color: false,
       width: 120,
       height: 28,
       now: NOW_MS,
     });
-    expect(rendered).toContain("1 needs input");
-    expect(rendered).toContain("Needs input");
-    expect(threadStatus({ record: session() })).toBe("Unknown");
+    expect(rendered).toContain("1 needs you");
+    expect(rendered).toContain("Needs you");
+    expect(threadStatus({ record: session() })).toBe("Unavailable");
     expect(threadStatus({ record: session({ executionState: "failed" }) })).toBe("Failed");
     expect(threadStatus({
       record: session({ executionState: "cancelled", exitCode: 0 }),

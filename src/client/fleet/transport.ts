@@ -66,7 +66,7 @@ export function threadStatus(thread: FleetThread): ThreadStatus {
     // or process exit. Current fault/stop/uncertainty still wins over an old successful report.
     if ((thread.workerTruth.state === "idle" || thread.workerTruth.state === "exited")
       && thread.workerTruth.taskOutcome === "succeeded") return "Done";
-    return TRUTH_STATUS[thread.workerTruth.state] ?? "Unknown";
+    return TRUTH_STATUS[thread.workerTruth.state] ?? "Unavailable";
   }
   // Legacy records describe process lifecycle, not current provider activity. Persisted turn
   // attention can survive a restart and cannot prove current work, readiness, or task success.
@@ -89,7 +89,7 @@ export function threadStatus(thread: FleetThread): ThreadStatus {
       if (attention === "stopped") return "Stopped";
       if (attention === "interrupted") return "Interrupted";
       if (attention === "failed") return "Failed";
-      return "Unknown";
+      return "Unavailable";
     }
   }
 }
@@ -105,8 +105,8 @@ function verifiedScoutOutcome(record: SessionRecord): boolean {
 const TRUTH_STATUS: Readonly<Record<string, ThreadStatus>> = {
   starting: "Starting",
   working: "Working",
-  "blocked-modal": "Needs input",
-  "blocked-composer": "Needs input",
+  "blocked-modal": "Needs you",
+  "blocked-composer": "Idle",
   idle: "Idle",
   stalled: "Stalled",
   "provider-limit": "Provider limit",
@@ -116,7 +116,7 @@ const TRUTH_STATUS: Readonly<Record<string, ThreadStatus>> = {
   stopped: "Stopped",
   interrupted: "Interrupted",
   exited: "Exited",
-  unknown: "Unknown",
+  unknown: "Unavailable",
 };
 
 export async function startFleetSession(

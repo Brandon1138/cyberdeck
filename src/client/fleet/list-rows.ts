@@ -9,6 +9,7 @@ import { FleetSnapshot, FleetState, FleetThread } from "./state.js";
 import { isLiveThread, isUnreadThread, unreadThreads } from "./visit-state.js";
 import { isHistoricalThread, threadRuntimePresence } from "./runtime-presence.js";
 import { pendingLifecycleThreads } from "./lifecycle-state.js";
+import { currentSessionRows } from "./current-sessions.js";
 
 export function isTerminalSession(record: SessionRecord): boolean {
   if (record.executionState === "active" || record.executionState === "starting") return false;
@@ -113,6 +114,7 @@ export function historyExpanded(state: FleetState, cwd: string): boolean {
  * folders below hold workers only.
  */
 export function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow[] {
+  if (snapshot.currentLayout === "sessions" && (state.listView ?? "live") === "live") return currentSessionRows(snapshot, state);
   return prepared([snapshot, state, "fleetListRows"], () => {
     const orcs = orchestratorThreads(snapshot.threads);
     // One assignment for the whole frame, so an Orc's row and its workers' rows cannot disagree.

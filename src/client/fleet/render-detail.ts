@@ -35,7 +35,7 @@ export function renderSelectedDetail(snapshot: FleetSnapshot, state: FleetState,
   const model = record.observedModel?.model ?? record.model ?? "Model unavailable";
   const effort = record.observedModel?.effort ?? record.effort ?? "Provider managed";
   const launchOnly = record.observedModel === undefined || record.observedModel.effort === undefined;
-  const owner = record.kind === "orchestrator" ? `controller ${thread.controllerId ?? "unavailable"}`
+  const owner = thread.nativeAgent !== undefined ? `native worker for ${thread.nativeAgent.parentName} · observed only` : record.kind === "orchestrator" ? `controller ${thread.controllerId ?? "unavailable"}`
     : thread.coordination === undefined ? "owner operator"
       : (() => {
         const current = workerOwner(thread.coordination);
@@ -49,7 +49,7 @@ export function renderSelectedDetail(snapshot: FleetSnapshot, state: FleetState,
   const path = `cwd ${elideLeading(shortPath(record.cwd, options.home), Math.max(1, options.width - 4))}`;
   const preview = assistantPreview(thread) ?? (isUnreadThread(state, record.id) ? state.replyWatermarks?.[record.id]?.latest : null) ?? "No response yet";
   const status = threadStatus(thread);
-  const truth = thread.workerTruth?.detail ?? (status === "Unknown"
+  const truth = thread.workerTruth?.detail ?? (status === "Unavailable"
     ? "Current provider activity is unavailable on this broker" : record.termination?.reason);
   const metadata = [
     paint(path, "muted", options.color),
@@ -70,8 +70,8 @@ export function renderSelectedDetail(snapshot: FleetSnapshot, state: FleetState,
     ...metadata,
   ];
   const visible = detail.slice(0, budget - 2);
-  if (status === "Unknown" && truth !== undefined && detail.length > budget - 2 && visible.length > 0) {
-    visible[visible.length - 1] = paint(fit(`Unknown: ${truth}`, options.width), "muted", options.color);
+  if (status === "Unavailable" && truth !== undefined && detail.length > budget - 2 && visible.length > 0) {
+    visible[visible.length - 1] = paint(fit(`Unavailable: ${truth}`, options.width), "muted", options.color);
   }
   return [paint("─".repeat(options.width), "dim", options.color), ...visible, paint(fit(preview, options.width), "muted", options.color)];
 }

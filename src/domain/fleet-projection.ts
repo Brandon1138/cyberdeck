@@ -42,6 +42,8 @@ export interface FleetOrchestratorOwnershipView {
 
 /** Display data only. Full launch details remain available through session.get. */
 export interface FleetProjectionSnapshot {
+  currentLayout?: "sessions";
+  nativeAgentNotice?: string;
   threads: Array<{
     record: SessionRecord;
     /** Current broker observation, separate from persisted lifecycle and task outcome. */
@@ -50,10 +52,11 @@ export interface FleetProjectionSnapshot {
     coordination?: FleetWorkerCoordinationView;
     controllerId?: string;
     createdBy?: { sessionId: string };
+    nativeAgent?: { threadId: string; parentThreadId: string; parentName: string; rootSessionId: string; rootGeneration?: number };
   }>;
   projects?: readonly string[];
 }
 export type FleetProjectionReply =
   | { kind: "full"; version: string; snapshot: FleetProjectionSnapshot }
-  | { kind: "delta"; version: string; baseVersion: string; upsert: FleetProjectionSnapshot["threads"]; remove: string[]; order?: string[]; projects?: readonly string[] }
+  | { kind: "delta"; version: string; baseVersion: string; upsert: FleetProjectionSnapshot["threads"]; remove: string[]; order?: string[]; projects?: readonly string[]; currentLayout?: "sessions"; nativeAgentNotice?: string | null }
   | { kind: "unchanged"; version: string };
