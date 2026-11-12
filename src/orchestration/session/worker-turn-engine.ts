@@ -113,8 +113,7 @@ export class WorkerTurnEngine {
   private readonly reconciler = new WorkerTurnReconciler({
     interval: CANONICAL_RECONCILE_QUIET_MS,
     epoch: () => this.observationEpoch,
-    canPoll: () => (this.record.provider === "claude" || this.record.provider === "codex"
-      && (this.record.initialInstructionId === undefined || this.canonicalTurnCount > 0))
+    canPoll: () => (this.record.provider === "claude" || this.record.provider === "codex")
       && this.record.profile !== "scout" && this.hasNativeTurnPort(),
     canReconcile: () => this.hasNativeTurnPort() && supportsNativeTurnObservation(this.record, this.suppressSemanticTurns === true),
     active: () => !this.terminalFinalizing
@@ -875,7 +874,7 @@ export class WorkerTurnEngine {
   }
 
   private updateStallObservation(): void {
-    this.stallTracker.update(this.transcriptActivityVersion === undefined ? this.replay.version : 0,
+    this.stallTracker.update(this.transcriptActivityVersion === undefined ? this.replay.version : this.replay.progressVersion?.(this.record.provider) ?? 0,
       this.replay.tokenCount(), this.transcriptActivityVersion, this.now());
   }
 

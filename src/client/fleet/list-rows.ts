@@ -29,6 +29,15 @@ export function orderedThreads(snapshot: FleetSnapshot): FleetThread[] {
  * One navigable line of the fleet list. Folder headers and show-more rows are rows in
  * their own right: focus lands on them, and Enter there collapses or expands the folder.
  */
+export interface FleetTreeRow {
+  depth: number;
+  parentKey?: string;
+  ancestors: string[];
+  key?: string;
+  collapsed?: boolean;
+  summary?: string;
+}
+
 export type FleetRow =
   | { kind: "views"; }
   | { kind: "history"; cwd: string; threadCount: number; expanded: boolean; }
@@ -40,6 +49,7 @@ export type FleetRow =
     kind: "folder";
     cwd: string;
     threadCount: number;
+    tree?: FleetTreeRow;
     collapsed?: boolean;
     liveCount?: number;
     historyCount?: number;
@@ -52,6 +62,7 @@ export type FleetRow =
     kind: "thread";
     cwd: string;
     thread: FleetThread;
+    tree?: FleetTreeRow;
     /** Absent when custody is healthy, unknown, or already stated by the group rollup. */
     leaseBadge?: LeaseCustodyBadge;
     /** Where under its project the worker lives, when that is not the project root itself. */
@@ -114,7 +125,7 @@ export function historyExpanded(state: FleetState, cwd: string): boolean {
  * folders below hold workers only.
  */
 export function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow[] {
-  if (snapshot.currentLayout === "sessions" && (state.listView ?? "live") === "live") return currentSessionRows(snapshot, state);
+  if (snapshot.currentLayout === "sessions" || state.listView === "workers") return currentSessionRows(snapshot, state);
   return prepared([snapshot, state, "fleetListRows"], () => {
     const orcs = orchestratorThreads(snapshot.threads);
     // One assignment for the whole frame, so an Orc's row and its workers' rows cannot disagree.

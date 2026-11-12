@@ -1,3 +1,4 @@
+import { transitionTreeControls } from "./transition-tree.js";
 import { imageInputRefusal, providerAcceptsImages } from "../../domain/image-input.js";
 import { HANDOFF_LIMITS } from "../../domain/worker-handoff.js";
 import { DELETE_CONFIRMATION_MS, PROJECTS_UNAVAILABLE_NOTICE, QUIT_CONFIRMATION_NOTICE } from "./constants.js";
@@ -25,8 +26,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
       quitConfirmation: undefined,
       ...(normalized.notice === QUIT_CONFIRMATION_NOTICE ? { notice: undefined } : {}),
     };
-  const focusedFolderCwd = state.focusedFolderCwd;
-  const focusedShowMoreCwd = state.focusedShowMoreCwd;
+  const { focusedFolderCwd, focusedShowMoreCwd } = state;
   const selected = threadFocusInert(state)
     ? undefined
     : threads.find(({ record }) => record.id === state.selectedSessionId);
@@ -34,7 +34,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
     const projectFilter = state.draft.trim().slice(7).trim();
     return { state: { ...state, draft: "", projectFilter: projectFilter === "all" || projectFilter === "" ? undefined : projectFilter,
       selectedSessionId: undefined, focusedFolderCwd: undefined, focusedUnconfirmedCwd: undefined, commandPalette: undefined, threadListScrollOffset: 0,
-      focusedViewControl: "live", notice: undefined } };
+      focusedViewControl: state.listView ?? "live", notice: undefined } };
   }
   if (key === "ctrl+w") {
     return {
@@ -81,6 +81,7 @@ export function transitionFleet(current: FleetState, snapshot: FleetSnapshot, ke
   if (state.orchestratorPicker !== undefined) {
     return transitionOrchestratorPicker(state, snapshot, key, now);
   }
+  const treeTransition = transitionTreeControls(state, snapshot, key); if (treeTransition) return treeTransition;
   if (selected?.nativeAgent !== undefined && ["enter", "right", " ", "ctrl+x", "ctrl+d", "ctrl+r", "ctrl+t", "ctrl+n", "shift+up", "shift+down"].includes(key)
       && (key !== " " || state.draft === "")
       && !(key === "enter" && /^\/(?:view|read)(?:\s|$)/u.test(state.draft.trim()))) {

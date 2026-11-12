@@ -111,9 +111,10 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   },
   {
     name: "/view",
-    description: "Choose Live, Unread, or History",
+    description: "Choose Live, Workers, Unread, or History",
     values: [
-      { value: "live", description: "Actionable sessions and inactive disclosures" },
+      { value: "live", description: "Orchestrators, projects, and collapsible worker trees" },
+      { value: "workers", description: "Find workers directly, independently of Orc folds" },
       { value: "unread", description: "Meaningful assistant replies awaiting inspection" },
       { value: "history", description: "Known inactive sessions, ready to reopen" },
     ],

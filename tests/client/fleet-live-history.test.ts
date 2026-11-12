@@ -148,6 +148,8 @@ describe("Fleet live/history membership and navigation", () => {
     let state = transitionFleet(createFleetState(snapshot), snapshot, "home", now).state;
     expect(state.focusedViewControl).toBe("live");
     state = transitionFleet(state, snapshot, "right", now).state;
+    expect(state.focusedViewControl).toBe("workers");
+    state = transitionFleet(state, snapshot, "right", now).state;
     state = transitionFleet(state, snapshot, "right", now).state;
     state = transitionFleet(state, snapshot, "enter", now).state;
     expect(state.listView).toBe("history");

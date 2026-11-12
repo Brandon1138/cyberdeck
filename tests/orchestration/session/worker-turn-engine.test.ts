@@ -42,7 +42,7 @@ function sessionRecord(): SessionRecord {
 
 function harness(
   recordOverrides: Partial<SessionRecord> = {},
-  options: { preview?: WorkerTurnPreviewPort; transcripts?: WorkerTurnTranscriptPort; tokenCount?: number } = {},
+  options: { preview?: WorkerTurnPreviewPort; transcripts?: WorkerTurnTranscriptPort; tokenCount?: number; progressVersion?: () => number } = {},
 ) {
   let frame = "";
   let activity: ReturnType<WorkerTurnObservationPort["activity"]> = "unknown";
@@ -63,6 +63,7 @@ function harness(
     }),
     tokenCount: () => options.tokenCount,
     get version() { return frame.length; },
+    ...(options.progressVersion === undefined ? {} : { progressVersion: options.progressVersion }),
   };
   const fatalTermination = vi.fn<WorkerTurnObservationPort["fatalTermination"]>()
     .mockReturnValue(undefined);
@@ -410,6 +411,50 @@ describe("WorkerTurnEngine", () => {
     vi.setSystemTime(300_000);
     expect(f.engine.projectTruth().state).toBe("idle");
     expect(f.engine.waitResult(1).status).toBe("waiting");
+  });
+
+  it("counts real screen progress alongside a quiet native transcript, but not raw repaints", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T09:00:00.000Z"));
+    let screenProgress = 1;
+    const f = harness({}, { progressVersion: () => screenProgress });
+    f.observations.activity = "awaiting-input";
+    f.engine.finishInitialization(false);
+    f.observeProviderTurns.mockImplementation(async input => ({ ...input, turns: [],
+      nativeSourceAvailable: true, nativeActivity: "working", activityVersion: "unchanged-source",
+      nativeActivityEvidence: { id: "start", kind: "task_started", occurredAt: "2026-08-20T09:00:00.000Z" } }));
+    f.observations.activity = "working";
+    f.engine.appendOutput(Buffer.from("Working (0s • esc to interrupt)"));
+    await f.engine.reconcileCanonicalTurns();
+    vi.setSystemTime(Date.now() + 125_000);
+    expect(f.engine.projectTruth().state).toBe("stalled");
+    screenProgress++;
+    f.engine.appendOutput(Buffer.from("Edited src/app.ts"));
+    expect(f.engine.projectTruth().state).toBe("working");
+    expect(f.engine.waitResult(1).status).toBe("working");
+    vi.setSystemTime(Date.now() + 125_000);
+    f.engine.appendOutput(Buffer.from("Working (4m 10s • esc to interrupt)"));
+    expect(f.engine.projectTruth().state).toBe("stalled");
+    expect(f.engine.completedTurns).toBe(0);
+  });
+
+  it("polls Codex during its first instructed turn despite continuous terminal redraws", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T09:00:00.000Z"));
+    const f = harness({ initialInstructionId: "first-instruction" });
+    f.observations.activity = "awaiting-input";
+    f.engine.finishInitialization(false);
+    f.observeProviderTurns.mockImplementation(async input => ({ ...input, turns: [],
+      nativeSourceAvailable: true, nativeActivity: "working", activityVersion: `source:${Date.now()}`,
+      nativeActivityEvidence: { id: "start", kind: "task_started", occurredAt: "2026-08-20T09:00:00.000Z" } }));
+    f.observations.activity = "working";
+    for (let i = 0; i < 10; i++) {
+      f.engine.appendOutput(Buffer.from("spinner"));
+      await vi.advanceTimersByTimeAsync(500);
+    }
+    expect(f.observeProviderTurns).toHaveBeenCalled();
+    expect(f.engine.projectTruth().state).toBe("working");
+    expect(f.engine.canonicalTurns).toBe(0);
   });
 
   it("reports no observed progress for a known busy turn, including without a token counter", () => {
@@ -2265,7 +2310,9 @@ describe("Codex launch attribution", () => {
     await h.metadata("B", h.a.createdAt);
     first.engine.finishInitialization(true);
     await vi.advanceTimersByTimeAsync(1_500);
-    expect(nativeRead).not.toHaveBeenCalled(); // Pending Codex launches do not use Claude's native poll.
+    expect(nativeRead).toHaveBeenCalled(); // First-turn progress is polled; exact launch attribution still gates binding.
+    expect(first.engine.canonicalTurns).toBe(0);
+    expect(second.engine.canonicalTurns).toBe(0);
     await first.engine.reconcileCanonicalTurns();
     await expect(h.store.observeProviderTurns(h.input(h.a))).resolves.toMatchObject({ nativeSourceAvailable: false, turns: [] });
     // A preview or budget read cannot poison the claim before B's identifying prompt arrives.

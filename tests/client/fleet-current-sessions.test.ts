@@ -15,12 +15,13 @@ function thread(id: string, native = false): FleetThread {
     ...(native ? { nativeAgent: { threadId: id, parentThreadId: "native-parent", parentName: "Astra", rootSessionId: "parent" } } : {}) };
 }
 const snapshot: FleetSnapshot = { currentLayout: "sessions", threads: [thread("parent"), thread("publication", true)], projects: ["/repo", "/empty"] };
-it("shows native workers and unconfirmed sessions directly without topology disclosures", () => {
+it("shows active native workers nested under their orchestrator", () => {
   const rows = fleetListRows(snapshot, createFleetState(snapshot));
   expect(rows.filter(row => row.kind === "thread").map(row => row.thread.record.id)).toEqual(["parent", "publication"]);
-  expect(rows.some(row => ["folder", "history", "unconfirmed", "ownership"].includes(row.kind))).toBe(false);
+  expect(rows.some(row => row.kind === "folder" && row.cwd === "/repo")).toBe(true);
+  expect(rows.find(row => row.kind === "thread" && row.thread.record.id === "publication")).toMatchObject({ tree: { depth: 2, parentKey: "/@session/parent" } });
   const body = renderFleet(snapshot, createFleetState(snapshot), { width: 140, height: 30, color: false });
-  expect(body).toContain("publication"); expect(body).toContain("Astra"); expect(body).not.toContain("/empty");
+  expect(body).toContain("publication"); expect(body).toContain("native"); expect(body).toContain("/empty");
 });
 it.each(["enter", "right", " ", "ctrl+x", "ctrl+d", "ctrl+r", "ctrl+t", "ctrl+n", "shift+up", "alt+2"])("keeps native observation read-only for %s", key => {
   const result = transitionFleet({ ...createFleetState(snapshot), selectedSessionId: "publication" }, snapshot, key);

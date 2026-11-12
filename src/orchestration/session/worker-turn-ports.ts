@@ -30,6 +30,8 @@ export interface ReplayObservation {
   strippedTail(maxChars: number): BoundedReplayTail;
   tokenCount(): number | undefined;
   readonly version: number;
+  /** Meaningful rendered progress, excluding provider spinner/clock/composer redraws. */
+  progressVersion?(provider: string): number;
 }
 
 /** Infrastructure-neutral terminal interpretation used by the worker turn state machine. */

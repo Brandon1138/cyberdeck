@@ -9,6 +9,7 @@ import type {
 import { frameComposerState, frameInputReady } from "./composer-state.js";
 import { conversationPreview } from "./conversation-preview.js";
 import { ReplayDigest } from "./replay-digest.js";
+import { CodexScreenProgress } from "./codex-progress.js";
 import {
   detectProviderLimitTerminationInTail,
   detectSessionFatalErrorInTail,
@@ -22,6 +23,7 @@ import {
 } from "./terminal-replay.js";
 
 class RuntimeReplayObservation implements ReplayObservation {
+  private readonly codexProgress = new CodexScreenProgress();
   constructor(readonly digest: ReplayDigest) {}
 
   appendBytes(chunk: Buffer): void {
@@ -30,6 +32,7 @@ class RuntimeReplayObservation implements ReplayObservation {
 
   reset(replay: string): void {
     this.digest.reset(replay);
+    this.codexProgress.reset();
   }
 
   frameText(): string {
@@ -48,6 +51,10 @@ class RuntimeReplayObservation implements ReplayObservation {
 
   get version(): number {
     return this.digest.version;
+  }
+
+  progressVersion(provider: string): number {
+    return provider === "codex" ? this.codexProgress.observe(this.digest.inputFrameText()) : 0;
   }
 }
 
