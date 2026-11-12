@@ -163,3 +163,24 @@ it("counts native and managed unconfirmed records once without calling them live
   expect(frame).toContain("0 live Orcs · 0 live managed workers · 1 native discovered");
   expect(frame.match(/2 runtime unconfirmed/g)).toHaveLength(1);
 });
+
+
+it.each(["live", "workers"] as const)("filters cross-project descendants and rollups in %s", listView => {
+  const fleet = treeThread("Fleet", "idle", { kind: "orchestrator", cwd: "/home/operator", controller: "fleet-controller" });
+  fleet.record.orchestratorScope = "fleet";
+  const parking = treeThread("parking-worker", "working", { nativeParent: "Fleet", cwd: "/projects/parking" });
+  const other = treeThread("other-worker", "working", { nativeParent: "Fleet", cwd: "/projects/other" });
+  const parent = treeThread("cross-project-parent", "idle", { nativeParent: "Fleet", cwd: "/projects/other" });
+  const nested = treeThread("parking-grandchild", "working", { nativeParent: parent.record.id, root: "Fleet", cwd: "/projects/parking" });
+  const snapshot: FleetSnapshot = { currentLayout: "sessions", projects: ["/projects/parking", "/projects/other"],
+    threads: [fleet, parking, other, parent, nested] };
+  const state: FleetState = { ...createFleetState(snapshot), listView, projectFilter: "/projects/parking" };
+  const ids = visible(snapshot, state);
+  expect(ids).toContain("parking-worker");
+  expect(ids).toContain("parking-grandchild");
+  expect(ids).not.toContain("other-worker");
+  if (listView === "live") expect(ids).toContain("cross-project-parent");
+  else expect(ids).not.toContain("cross-project-parent");
+  const rows = fleetListRows(snapshot, state);
+  expect(rows.filter(row => row.kind === "section").map(row => row.label).join(" ")).not.toContain("3 working");
+});
