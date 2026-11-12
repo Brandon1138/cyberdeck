@@ -21,7 +21,7 @@ export const FleetFolderDispositionSchema = z.object({
   liveHistoryExpanded: z.boolean().optional(),
 });
 
-export const FleetListViewSchema = z.enum(["live", "unread", "history"]);
+export const FleetListViewSchema = z.enum(["live", "workers", "unread", "history"]);
 /** Content watermarks, never timestamps of process activity. Null is an honest empty baseline. */
 export const FleetReplyWatermarkSchema = z.object({
   seen: z.string().max(600).nullable(),

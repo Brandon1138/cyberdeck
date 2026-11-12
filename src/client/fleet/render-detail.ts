@@ -35,7 +35,9 @@ export function renderSelectedDetail(snapshot: FleetSnapshot, state: FleetState,
   const model = record.observedModel?.model ?? record.model ?? "Model unavailable";
   const effort = record.observedModel?.effort ?? record.effort ?? "Provider managed";
   const launchOnly = record.observedModel === undefined || record.observedModel.effort === undefined;
-  const owner = thread.nativeAgent !== undefined ? `native worker for ${thread.nativeAgent.parentName} · observed only` : record.kind === "orchestrator" ? `controller ${thread.controllerId ?? "unavailable"}`
+  const nativeParent = thread.nativeAgent === undefined ? undefined : snapshot.threads.find(t => t.record.id === thread.nativeAgent!.parentThreadId)
+    ?? snapshot.threads.find(t => t.record.id === thread.nativeAgent!.rootSessionId);
+  const owner = thread.nativeAgent !== undefined ? `native worker for ${nativeParent?.record.name ?? thread.nativeAgent.parentName} · observed only` : record.kind === "orchestrator" ? `controller ${thread.controllerId ?? "unavailable"}`
     : thread.coordination === undefined ? "owner operator"
       : (() => {
         const current = workerOwner(thread.coordination);
@@ -53,6 +55,8 @@ export function renderSelectedDetail(snapshot: FleetSnapshot, state: FleetState,
     ? "Current provider activity is unavailable on this broker" : record.termination?.reason);
   const metadata = [
     paint(path, "muted", options.color),
+    ...(thread.workerTruth?.lastConfirmed === undefined ? [] : [paint(fit(
+      `Observed ${thread.workerTruth.lastConfirmed.state} at ${thread.workerTruth.lastConfirmed.at}`, options.width), "muted", options.color)]),
     ...(record.workspace?.worktreePath === undefined || record.workspace.worktreePath === record.cwd ? []
       : [paint(fit(`worktree ${shortPath(record.workspace.worktreePath, options.home)}`, options.width), "muted", options.color)]),
     paint(fit(owner, options.width), "subtle", options.color),

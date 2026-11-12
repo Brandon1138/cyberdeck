@@ -300,9 +300,9 @@ export function visitCommandTransition(state: FleetState, snapshot: FleetSnapsho
       focusedLifecycleOccurrences: undefined, notice: "Session notices acknowledged", noticeTone: "neutral" } };
   }
   if (/^\/view(?:\s|$)/u.test(command)) {
-    const view = /^\/view\s+(live|unread|history)$/u.exec(command)?.[1] as FleetListView | undefined;
+    const view = /^\/view\s+(live|workers|unread|history)$/u.exec(command)?.[1] as FleetListView | undefined;
     return view === undefined
-      ? { state: { ...state, draft: "", notice: "Usage: /view live|unread|history", noticeTone: "error" } }
+      ? { state: { ...state, draft: "", notice: "Usage: /view live|workers|unread|history", noticeTone: "error" } }
       : { state: selectListView(state, snapshot, view) };
   }
   if (command !== "/read") return undefined;

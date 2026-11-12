@@ -236,8 +236,8 @@ describe("fleet presentation", () => {
     // One Orcs section for the whole fleet, most recent first. Orc rows carry no folder: an orc
     // works across repos, so the path it spawned in says nothing, and a column only orcs filled
     // knocked every column right of it out of line with the worker rows below.
-    expect(rendered.match(/Orcs/g)).toHaveLength(1);
-    expect(lineOf("Orcs")).toBeLessThan(lineOf("Newer orc"));
+    expect(rendered.match(/▾ Orcs/g)).toHaveLength(1);
+    expect(lineOf("▾ Orcs")).toBeLessThan(lineOf("Newer orc"));
     expect(lineOf("Newer orc")).toBeLessThan(lineOf("Older orc"));
     expect(lines[lineOf("Newer orc")]).not.toContain("/repo/alpha");
     expect(lines[lineOf("Older orc")]).not.toContain("/repo/zulu");
@@ -1133,7 +1133,7 @@ describe("fleet presentation", () => {
       home: "/Users/brandon",
     });
 
-    expect(rendered).toContain("2 live · 1 working · 0 needs you · 0 unread · 2 history · 1 failed");
+    expect(rendered).toContain("0 live Orcs · 2 live managed workers · 1 working · 0 needs you · 0 unread · 2 history · 1 failed");
     expect(rendered).toContain("Finished earlier");
     expect(rendered).toContain("Finished before that");
   });
@@ -1423,8 +1423,8 @@ describe("fleet presentation", () => {
     for (const [index, row] of mark.rows.entries()) expect(lines[index]).toContain(row);
     expect(lines[0]).toContain("Cyberdeck");
 
-    // The native image is four rows beside three lines of text.
-    expect(lines[mark.rows.length - 1]?.trim()).toBe(mark.rows.at(-1)?.trim());
+    // The native image remains intact beside the wrapping role/activity counts.
+    expect(lines[mark.rows.length - 1]?.startsWith(mark.rows.at(-1)!)).toBe(true);
 
     const narrow = renderFleet(snapshot, state, {
       color: true, width: 43, height: 30, now: NOW_MS, mascot: mark,
@@ -1621,7 +1621,7 @@ describe("fleet presentation", () => {
 
     expect(rendered).toContain("ctrl+o to choose");
     expect(rendered.split("\n").at(-1)).toBe(
-      "↑↓ · pgup/dn · alt+k/j half · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ctrl+x stop agent",
+      "↑↓ · ←→ fold · pgup/dn · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ctrl+x stop agent",
     );
   });
 

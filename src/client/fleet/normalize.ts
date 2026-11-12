@@ -1,3 +1,4 @@
+import { revealCurrentSession, currentSessionRows } from "./current-sessions.js";
 import type { SessionRecord } from "../../domain/session.js";
 import { ORCS_SECTION_KEY } from "./constants.js";
 import { groupThreads, orchestratorThreads } from "./list-groups.js";
@@ -36,18 +37,28 @@ export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: 
   ];
   // A worker answers to the section it renders in, which under a registry is its project rather
   // than its own working directory.
-  const selectedCwd = selectedRecord === undefined
+  let selectedCwd = selectedRecord === undefined
     ? undefined
     : selectedRecord.kind === "orchestrator"
       ? ORCS_SECTION_KEY
       : folders.find(({ threads: workers }) =>
         workers.some(({ record }) => record.id === selectedRecord.id))?.cwd;
+  const treeLayout = snapshot.currentLayout === "sessions" || state.listView === "workers";
+  if (treeLayout && selectedSessionId !== undefined) {
+    const revealed = revealCurrentSession({ ...state, listView: "live" }, snapshot, selectedSessionId);
+    const selectedRow = currentSessionRows(snapshot, revealed).find(row => row.kind === "thread" && row.thread.record.id === selectedSessionId);
+    if (selectedRow?.kind === "thread") selectedCwd = selectedRow.tree?.ancestors[0];
+    if (!threadFocusInert(state) && (state.stopAcknowledgement?.sessionId === selectedSessionId
+      || selectedWasLive && threadRuntimePresence(threads.find(t => t.record.id === selectedSessionId)!) === "absent")) {
+      state = { ...revealed, listView: state.listView };
+    }
+  }
   // The explicit stop/delete ladder stays on the same durable id even when stopping folds it
   // into history. Reveal that history locally rather than arming the thread in its former slot.
   if (!threadFocusInert(state) && state.stopAcknowledgement?.sessionId === selectedSessionId && selectedCwd !== undefined) {
     state = { ...state, revealedHistorySessionId: selectedSessionId,
       openFolderCwds: [...new Set([...(state.openFolderCwds ?? []), selectedCwd])] };
-  } else if (!threadFocusInert(state) && selectedWasLive && selectedRecord !== undefined
+  } else if (!treeLayout && !threadFocusInert(state) && selectedWasLive && selectedRecord !== undefined
     && (state.listView ?? "live") === "live" && selectedCwd !== undefined
     && threadRuntimePresence(threads.find(({ record }) => record.id === selectedSessionId)!) === "absent") {
     const notices = pendingLifecycleThreads(folders.find(({ cwd }) => cwd === selectedCwd)?.threads ?? [], state);
@@ -80,7 +91,12 @@ export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: 
   if (focusedViewControl === undefined && focusedFolderCwd === undefined && focusedShowMoreCwd === undefined
     && focusedHistoryCwd === undefined && focusedUpdateSessionId === undefined && focusedLifecycleCwd === undefined
     && focusedLifecycleSessionId === undefined && focusedUnconfirmedCwd === undefined && !visibleSelection) {
-    if (has("show-more", selectedCwd)) focusedShowMoreCwd = selectedCwd;
+    const treeParent = treeLayout && selectedSessionId !== undefined ? currentSessionRows(snapshot,
+      revealCurrentSession({ ...state, listView: "live" }, snapshot, selectedSessionId))
+      .find(row => row.kind === "thread" && row.thread.record.id === selectedSessionId) : undefined;
+    const ancestor = treeParent?.kind === "thread" ? [...(treeParent.tree?.ancestors ?? [])].reverse().find(key => has("folder", key)) : undefined;
+    if (ancestor) focusedFolderCwd = ancestor;
+    else if (has("show-more", selectedCwd)) focusedShowMoreCwd = selectedCwd;
     else if (has("history", selectedCwd)) focusedHistoryCwd = selectedCwd;
     else if (has("folder", selectedCwd)) focusedFolderCwd = selectedCwd;
     else focusedViewControl = state.listView ?? "live";

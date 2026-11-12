@@ -2,6 +2,7 @@ import { foldTransition, groupThreads, setCollapsed, setExpanded, setHistoryExpa
 import { historyExpanded } from "./list-rows.js";
 import { selectListView } from "./slash-commands.js";
 import type { FleetSnapshot, FleetState, FleetTransition } from "./state.js";
+import { revealCurrentSession } from "./current-sessions.js";
 import { threadRuntimePresence } from "./runtime-presence.js";
 
 /** Inspect a durable conversation without attaching, resuming, reading or revealing its siblings. */
@@ -22,7 +23,7 @@ export function revealFleetThread(state: FleetState, snapshot: FleetSnapshot, se
     if (threadRuntimePresence(target) === "unknown") next = { ...next,
       expandedUnconfirmedCwds: [...new Set([...(next.expandedUnconfirmedCwds ?? []), cwd])] };
   }
-  return next;
+  return snapshot.currentLayout === "sessions" ? revealCurrentSession(next, snapshot, sessionId) : next;
 }
 
 /** Handle structural visit controls without arming an action on a previously selected thread. */
@@ -40,10 +41,10 @@ export function transitionVisitControls(state: FleetState, snapshot: FleetSnapsh
     }
   }
   if (state.focusedViewControl !== undefined && state.draft === "") {
-    const views = ["live", "unread", "history"] as const;
+    const views = ["live", "workers", "unread", "history"] as const;
     if (key === "left" || key === "right") {
       const index = views.indexOf(state.focusedViewControl);
-      return { state: { ...state, focusedViewControl: views[Math.max(0, Math.min(2, index + (key === "left" ? -1 : 1)))] } };
+      return { state: { ...state, focusedViewControl: views[Math.max(0, Math.min(views.length - 1, index + (key === "left" ? -1 : 1)))] } };
     }
     if (key === "enter") return { state: selectListView(state, snapshot, state.focusedViewControl) };
   }

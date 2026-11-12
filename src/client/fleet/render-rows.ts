@@ -1,3 +1,5 @@
+import { renderTreeFolder, renderTreeThread } from "./render-tree.js";
+import type { FleetTreeRow } from "./list-rows.js";
 import type { FleetWorkerCoordinationView } from "../../broker/worker-coordination-view.js";
 import { conversationPreview } from "../../domain/conversation-preview.js";
 import { leaseCustody, leaseCustodyBadge, type LeaseCustodyBadge } from "../lease-custody.js";
@@ -66,8 +68,9 @@ export function renderFolderRow(
   state: FleetState,
   options: ResolvedFleetRenderOptions,
   scrollbar?: "track" | "thumb" | undefined,
-  counts?: { collapsed?: boolean; liveCount?: number; historyCount?: number; unconfirmedCount?: number; noticeCount?: number },
+  counts?: { tree?: FleetTreeRow; collapsed?: boolean; liveCount?: number; historyCount?: number; unconfirmedCount?: number; noticeCount?: number },
 ): string {
+  if (counts?.tree) return renderTreeFolder(cwd, heading, counts.collapsed === true, counts.tree, state, options, scrollbar);
   const focused = state.focusedFolderCwd === cwd;
   const collapsed = counts?.collapsed ?? isCollapsed(state, cwd);
   const summary = counts === undefined ? collapsed || threadCount === 0
@@ -107,7 +110,7 @@ export function renderHistoryRow(cwd: string, count: number, expanded: boolean, 
 
 export function renderViewControls(state: FleetState, options: ResolvedFleetRenderOptions): string {
   const view = state.listView ?? "live";
-  const controls = (["live", "unread", "history"] as const).map((candidate) => {
+  const controls = (["live", "workers", "unread", "history"] as const).map((candidate) => {
     const label = candidate[0]!.toUpperCase() + candidate.slice(1);
     const text = candidate === view ? `[${label}]` : label;
     return `${state.focusedViewControl === candidate ? SELECTION_RULE : ""}${paint(text, state.focusedViewControl === candidate || candidate === view ? "bold" : "muted", options.color)}`;
@@ -163,7 +166,9 @@ export function renderThreadRow(
   ownerSigilWidth = 0,
   ownerSigil?: string | undefined,
   outsideLens = false,
+  tree?: FleetTreeRow,
 ): string {
+  if (tree) return renderTreeThread(thread, tree, state, options, scrollbar, leaseBadge);
   const selected = !threadFocusInert(state)
     && thread.record.id === state.selectedSessionId;
   const baseTitle = displayThreadName(
