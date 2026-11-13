@@ -69,6 +69,11 @@ implements WorkerTurnObservationPort, WorkerTurnPreviewPort {
     return markerTerminalActivity(provider as ProviderId, this.digest(replay));
   }
 
+  starting(provider: string, replay: ReplayObservation): boolean {
+    return provider === "codex"
+      && /^\s*•\s+Starting MCP servers \(\d+\/\d+\):/mu.test(this.digest(replay).inputFrameText());
+  }
+
   composer(provider: string, replay: ReplayObservation) {
     const digest = this.digest(replay);
     // An unreliable screen can retain a draft hold, but it can never authorize input. Once the

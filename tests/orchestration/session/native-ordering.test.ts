@@ -49,6 +49,7 @@ function harness(
 ) {
   let frame = "";
   let activity: ReturnType<WorkerTurnObservationPort["activity"]> = "unknown";
+  let starting = false;
   let composer: ReturnType<WorkerTurnObservationPort["composer"]> = {
     modalOpen: false,
     occupied: false,
@@ -72,6 +73,7 @@ function harness(
   const observations: WorkerTurnObservationPort = {
     createReplay: () => replay,
     activity: () => activity,
+    starting: () => starting,
     composer: () => composer,
     fatalTermination,
     compactFrame: (text) => text,
@@ -142,6 +144,7 @@ function harness(
     engine,
     observations: {
       set activity(next: typeof activity) { activity = next; },
+      set starting(next: boolean) { starting = next; },
       set composer(next: typeof composer) { composer = next; },
     },
     // Existing scenarios control the side-effect-free observation payload through this mock.
@@ -189,6 +192,86 @@ function nativeObservation(activity: "idle" | "working", turns: boolean = false)
     nativeActivityEvidence: {id: activity === "idle" ? "old" : "new", kind: activity === "idle" ? "task_complete" as const : "task_started" as const, occurredAt: "2026-08-20T09:00:01.000Z"},
     turns: turns ? [{providerTurnId: "old", providerOccurredAt:"2026-08-20T09:00:01.000Z", text:"old completion", transport:"provider-native" as const}] : []};
 }
+describe("idle readiness survives presentation changes", () => {
+  async function idleOrchestrator(workingAt = "2026-08-20T09:00:00.500Z", starting = false) {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(workingAt));
+    const f = harness({ kind: "orchestrator", initialInstructionId: "initial" });
+    f.engine.noteRenderedInstruction({ instructionId: "initial", expectedTurn: 1,
+      renderedAt: f.record.createdAt });
+    f.engine.finishInitialization(true);
+    f.observations.activity = "working";
+    f.observations.starting = starting;
+    f.engine.appendOutput(Buffer.from("Starting MCP servers (esc to interrupt)"));
+    f.observeProviderTurns.mockImplementation(async input => ({
+      ...nativeObservation("idle"), turnNumber: input.turnNumber,
+      turns: input.turnNumber === 1 ? [{ providerTurnId: "first", providerOccurredAt: "2026-08-20T09:00:01.000Z",
+        text: "Standing by.", transport: "provider-native" }] : [],
+    }));
+    await f.engine.reconcileCanonicalTurns();
+    expect(f.engine.completedTurns).toBe(1);
+    return f;
+  }
+
+  it("admits the next instruction after an idle redraw", async () => {
+    const f = await idleOrchestrator();
+    vi.setSystemTime(new Date("2026-08-20T09:00:03.000Z"));
+    f.observations.activity = "awaiting-input";
+    f.engine.appendOutput(Buffer.from("ready prompt repaint"));
+    expect(f.engine.projectTruth().state).toBe("idle");
+    expect(await f.engine.submitInstruction({ source: "orchestrator", instructionId: "second",
+      message: "next", encoded: Buffer.from("next") })).toMatchObject({ state: "rendered", expectedTurn: 2 });
+    expect(f.writes.map(bytes => bytes.toString())).toEqual(["next"]);
+  });
+
+  it("keeps native idle after attaching and detaching across an unreadable resize repaint", async () => {
+    const f = await idleOrchestrator();
+    const h = ioHarness(f);
+    await h.io.attach(f.record.id, "operator", "control", () => {});
+    f.observations.activity = "unknown";
+    f.observations.composer = { modalOpen: false, occupied: false, inputReady: false };
+    f.engine.appendOutput(Buffer.from("unclassified terminal resize repaint"));
+    await h.io.detach(f.record.id, "operator");
+    await f.engine.reconcileCanonicalTurns();
+    expect(f.engine.projectTruth()).toMatchObject({ state: "idle", completedTurns: 1, canonicalTurns: 1 });
+    expect(f.effects.setAttention).not.toHaveBeenCalledWith("working", false);
+    expect(await f.engine.submitInstruction({ source: "orchestrator", instructionId: "second",
+      message: "next", encoded: Buffer.from("next") })).toMatchObject({ state: "rendered", expectedTurn: 2 });
+  });
+
+  it("forwards attachment focus reports without discarding idle readiness", async () => {
+    const f = await idleOrchestrator();
+    const h = ioHarness(f);
+    await h.io.attach(f.record.id, "operator", "control", () => {});
+    for (const focus of ["\u001b[I", "\u001b[O"]) {
+      await h.io.write(f.record.id, "operator", Buffer.from(focus));
+      expect(f.engine.projectTruth().state).toBe("idle");
+      expect(h.runtime.sessionRuntime.write).toHaveBeenCalledWith(Buffer.from(focus));
+    }
+    await h.io.detach(f.record.id, "operator");
+    expect(await f.engine.submitInstruction({ source: "orchestrator", instructionId: "second",
+      message: "next", encoded: Buffer.from("next") })).toMatchObject({ state: "rendered", expectedTurn: 2 });
+  });
+
+  it("recovers delivery when startup catches up with an already banked native completion", async () => {
+    const f = await idleOrchestrator("2026-08-20T09:00:02.000Z", true);
+    expect(await f.engine.submitInstruction({ source: "orchestrator", instructionId: "second",
+      message: "next", encoded: Buffer.from("next") })).toMatchObject({ state: "queued", hold: "provider-busy" });
+    vi.mocked(f.effects.notifyDeliveryBoundary).mockClear();
+    vi.setSystemTime(new Date("2026-08-20T09:00:03.000Z"));
+    f.observations.activity = "awaiting-input";
+    f.engine.appendOutput(Buffer.from("ready after MCP startup"));
+    await vi.advanceTimersByTimeAsync(600);
+    await f.engine.reconcileCanonicalTurns();
+    expect(f.engine.projectTruth().state).toBe("idle");
+    expect(f.effects.notifyDeliveryBoundary).toHaveBeenCalled();
+    expect(await f.engine.submitInstruction({ source: "orchestrator", instructionId: "second",
+      message: "next", encoded: Buffer.from("next") })).toMatchObject({ state: "rendered", expectedTurn: 2 });
+    expect(f.engine.completedTurns).toBe(1);
+    expect(f.writes).toHaveLength(1);
+  });
+});
+
 describe("independent native integration regressions", () => {
   it("does not replace current working controls with an unchanged old native idle record", async () => {
     const f=harness();

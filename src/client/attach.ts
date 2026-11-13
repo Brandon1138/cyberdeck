@@ -1,4 +1,5 @@
 import type { ClientFrame, ServerFrame } from "../protocol/frames.js";
+import { attachmentReplay } from "./attachment-replay.js";
 
 export interface AttachTransport {
   request<T>(method: string, params: unknown): Promise<T>;
@@ -315,7 +316,7 @@ export async function attachSession(options: AttachSessionOptions): Promise<numb
         if (finished) return;
         attachmentClaimed = true;
         detachOnLeftArrow = options.detachOnLeftArrow ?? (session?.kind !== "orchestrator");
-        output.write(Buffer.from(data, "base64"));
+        output.write(attachmentReplay(Buffer.from(data, "base64")));
         replayWritten = true;
         for (const chunk of liveBeforeReplay) output.write(chunk);
         liveBeforeReplay.length = 0;

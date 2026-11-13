@@ -281,7 +281,7 @@ export class WorkerTurnEngine {
     if (this.terminalScreenReservationsDiscarded) return { fatal: false };
 
     const activity = this.options.observations.activity(this.record.provider, this.replay);
-    this.nativeActivity.observeScreen(this.activityRevision, activity, this.now());
+    this.nativeActivity.observeScreen(this.activityRevision, activity, this.now(), this.options.observations.starting?.(this.record.provider, this.replay) === true);
     if (this.inputReadiness.starting) {
       // Loading history and MCP startup can spin then become idle without any model turn.
       // Keep queued input off that startup surface and never bank it as a completion.
@@ -1436,7 +1436,7 @@ export class WorkerTurnEngine {
     const changed = this.nativeActivity.observe(observation, claim.activityRevision, this.activityRevision);
     if (this.nativeActivity.activity(this.activity, this.activityRevision) === "working") {
       this.observedWorking = true; this.nativeTurnSettled = false;
-    }
+    } else if (this.nativeActivity.ownsCurrentEnd(this.activityRevision)) this.observedWorking = false;
     if (changed) this.options.effects.notifySessionUpdate();
     return { ...observation, turns: this.nativeActivity.turns(observation, this.activityRevision, this.inputTargets.snapshot()) };
   }
@@ -1541,6 +1541,7 @@ export class WorkerTurnEngine {
       return readable;
     } finally {
       this.finishTurnCapture(claim);
+      this.notifyDeliveryBoundary();
     }
   }
 

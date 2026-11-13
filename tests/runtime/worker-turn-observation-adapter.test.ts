@@ -3,6 +3,18 @@ import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-obse
 import { PROVIDER_SCREENS, redraw } from "./provider-screen-fixtures.js";
 
 describe("WorkerTurnObservationAdapter", () => {
+  it("distinguishes Codex MCP startup from model work and ready prompts", () => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    replay.appendBytes(Buffer.from(redraw(["• Starting MCP servers (5/10): blender, headroom", "(0s • esc to interrupt)", "› Ask Codex to do anything"])));
+    expect(adapter.starting("codex", replay)).toBe(true);
+    expect(adapter.starting("claude", replay)).toBe(false);
+    replay.appendBytes(Buffer.from(redraw(["• Working (esc to interrupt)", "› Ask Codex to do anything"])));
+    expect(adapter.starting("codex", replay)).toBe(false);
+    replay.appendBytes(Buffer.from(redraw(["› Ask Codex to do anything", "GPT-6.1-Sol high · /tmp/repo"])));
+    expect(adapter.starting("codex", replay)).toBe(false);
+  });
+
   it("reads a Codex idle/draft/idle cycle after scrollback clearing and wide output scrolls away", () => {
     for (const size of [1, 7, 4096]) {
       const adapter = new WorkerTurnObservationAdapter();

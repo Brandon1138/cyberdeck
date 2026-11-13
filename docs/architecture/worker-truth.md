@@ -182,8 +182,16 @@ use their owned private source and never import the host's configuration for att
 
 Both host and container native sources are polled without requiring terminal output. Native activity
 and receipt accounting are independent: an older completion may settle its target while a newer
-`task_started` keeps the current row Working. Repeated old idle evidence cannot overwrite newer
-input or screen activity. Resume and actual operator input fence old completion-side effects.
+`task_started` keeps the current row Working. Proven native idle survives passive terminal redraws
+and admission-only revisions. Delayed startup painting may finish at a recognized ready surface
+without another native turn. Repeated old idle evidence cannot overwrite newer input, positive
+Working controls or a modal; resume and actual operator input fence old completion-side effects.
+Readiness recovery retries queued delivery even when no new completion receipt is banked.
+
+Attachment history omits terminal capability/status/color queries, which otherwise make the new
+terminal send fresh replies that look like operator input. Drawing and terminal modes are retained;
+live provider queries and all controller input remain byte-for-byte traffic. Terminal focus reports
+are forwarded without counting them as operator commands or invalidating native idle readiness.
 
 Before assigning an automated instruction its ordinal, admission serializes input, restores durable
 receipts, and reconciles unseen native history. Failed preflight holds delivery. Authority, operator
