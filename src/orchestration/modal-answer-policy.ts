@@ -35,10 +35,11 @@ export interface ModalAnswerPolicyOptions {
  * scopes must be answered inside that scope, so a hook review is only ever continued without its
  * hooks — a grant never trusts them, and a request that names no answer is refused rather than
  * assumed to be the safe one; and the worker's cwd must resolve to a repository whose primary
- * checkout root the operator granted. A linked worktree resolves to the repository it belongs to —
- * `git rev-parse --git-common-dir` from any worktree names the primary `.git` — which is precisely
- * how a grant on a repository covers the worktrees Cyberdeck provisions into it. Prompts failing
- * any condition surface to the operator exactly as before; nothing here widens silently.
+ * checkout root the operator has not switched off. Answering is on by default — Cyberdeck is
+ * semi-autonomous, and the ledger records opt-outs, not opt-ins. A linked worktree resolves to the
+ * repository it belongs to — `git rev-parse --git-common-dir` from any worktree names the primary
+ * `.git` — which is precisely how one repository decision covers the worktrees Cyberdeck provisions
+ * into it. Prompts failing any condition surface to the operator exactly as before.
  */
 export class ModalAnswerPolicy {
   constructor(private readonly options: ModalAnswerPolicyOptions) {}
@@ -77,11 +78,11 @@ export class ModalAnswerPolicy {
     if (!(await this.options.grants.allowsRoot(root))) {
       return {
         allowed: false,
-        reason: `No operator modal-answer grant covers ${root}; grant one with \`cyberdeck modal-answers on --root ${root}\``,
+        reason: `The operator switched automated modal answers off for ${root}; re-enable with \`cyberdeck modal-answers on --root ${root}\``,
         root,
       };
     }
-    return { allowed: true, reason: `Operator grant covers ${root}`, root };
+    return { allowed: true, reason: `Automated modal answers are on for ${root}`, root };
   }
 
   /** Whether provision-time workspace trust may be written for this cwd. */

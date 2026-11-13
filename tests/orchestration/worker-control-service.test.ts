@@ -1187,7 +1187,7 @@ describe("WorkerControlService answer_modal", () => {
 
   it("returns the policy refusal verbatim and journals nothing", async () => {
     const { bench, workerId, modal } = await blockedWorker();
-    bench.setPolicy({ allowed: false, reason: "No operator modal-answer grant covers /repo" });
+    bench.setPolicy({ allowed: false, reason: "The operator switched automated modal answers off for /repo" });
 
     const result = await bench.control.control({
       actorSessionId: ORC,
@@ -1200,7 +1200,7 @@ describe("WorkerControlService answer_modal", () => {
 
     expect(result).toMatchObject({
       code: "MODAL_POLICY_DENIED",
-      detail: "No operator modal-answer grant covers /repo",
+      detail: "The operator switched automated modal answers off for /repo",
     });
     expect(bench.modalPresses).toEqual([]);
     expect(
