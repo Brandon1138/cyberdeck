@@ -11,6 +11,63 @@ function observation(activity: "working" | "idle", occurredAt = "2026-10-13T12:0
 }
 
 describe("exact native activity observations", () => {
+  it("keeps proven native idle through unclassified attachment redraws", () => {
+    const native = new NativeTurnActivity(createdAt);
+    native.noteInput(createdAt);
+    native.observe(observation("idle"), 1, 1);
+    native.observeScreen(2, "unknown");
+    expect(native.activity("unknown", 2)).toBe("awaiting-input");
+  });
+
+  it("preserves idle through redraw and admission without reusing it after real input", () => {
+    const native = new NativeTurnActivity(createdAt);
+    native.noteInput(createdAt);
+    native.observe(observation("idle"), 1, 1);
+    native.observeScreen(2, "awaiting-input");
+    expect(native.activity("awaiting-input", 2)).toBe("awaiting-input");
+    native.admit(3);
+    expect(native.activity("awaiting-input", 3)).toBe("awaiting-input");
+    native.noteInput("2026-10-13T12:00:02.000Z");
+    native.observe(observation("idle"), 4, 4);
+    expect(native.activity("unknown", 4)).toBe("unknown");
+  });
+
+  it("recognizes the ready surface after a delayed startup repaint without a new native receipt", () => {
+    const native = new NativeTurnActivity(createdAt);
+    native.noteInput(createdAt);
+    native.observeScreen(1, "working", Date.parse("2026-10-13T12:00:02.000Z"), true);
+    native.observe(observation("idle"), 1, 1);
+    expect(native.activity("working", 1)).toBe("working");
+    native.observeScreen(2, "unknown");
+    expect(native.activity("unknown", 2)).toBe("working");
+    native.observeScreen(3, "awaiting-input");
+    expect(native.activity("awaiting-input", 3)).toBe("awaiting-input");
+    native.observeScreen(4, "unknown");
+    expect(native.activity("unknown", 4)).toBe("awaiting-input");
+  });
+
+  it("does not retain idle over newer positive work or a modal", () => {
+    const native = new NativeTurnActivity(createdAt);
+    native.observe(observation("idle"), 1, 1);
+    native.observeScreen(2, "working");
+    native.observeScreen(3, "unknown");
+    expect(native.activity("unknown", 3)).not.toBe("awaiting-input");
+    native.observeScreen(4, "awaiting-input");
+    expect(native.activity("awaiting-input", 4)).not.toBe("awaiting-input");
+    native.observeScreen(5, "needs-input");
+    expect(native.activity("needs-input", 5)).toBe("needs-input");
+  });
+
+  it("does not turn an older completion into readiness when real newer work repaints idle", () => {
+    const native = new NativeTurnActivity(createdAt);
+    native.noteInput(createdAt);
+    native.observeScreen(1, "working", Date.parse("2026-10-13T12:00:02.000Z"));
+    native.observe(observation("idle"), 1, 1);
+    native.observeScreen(2, "awaiting-input");
+    expect(native.activity("awaiting-input", 2)).toBe("unknown");
+    expect(native.ownsCurrentEnd(2)).toBe(false);
+  });
+
   it("uses native lifecycle evidence and keeps currently observed modals visible", () => {
     const native = new NativeTurnActivity(createdAt);
     native.observe(observation("working"), 1, 1);

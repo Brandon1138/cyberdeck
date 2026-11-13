@@ -38,7 +38,7 @@ class FakeTransport implements AttachTransport {
   private readonly frameListeners = new Set<(frame: ServerFrame) => void>();
   private readonly closeListeners = new Set<() => void>();
 
-  constructor(private readonly sessionKind?: "worker" | "orchestrator") {}
+  constructor(private readonly sessionKind?: "worker" | "orchestrator", private readonly replay = "REPLAY") {}
 
   async request<T>(method: string, params: unknown): Promise<T> {
     // The real client ends its socket on close, so anything sent afterwards never reaches the broker.
@@ -56,7 +56,7 @@ class FakeTransport implements AttachTransport {
       data: Buffer.from("LIVE").toString("base64"),
     });
     return {
-      data: Buffer.from("REPLAY").toString("base64"),
+      data: Buffer.from(this.replay).toString("base64"),
       ...(this.sessionKind === undefined ? {} : { session: { kind: this.sessionKind } }),
     } as T;
   }
@@ -93,6 +93,24 @@ const inputFrames = (transport: FakeTransport) => transport.sent
   .map((frame) => Buffer.from((frame as { data: string }).data, "base64"));
 
 describe("attachSession", () => {
+  it("filters historical terminal probes while preserving live queries and control input", async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const probes = "\u001b[6n\u001b]10;?\u001b\\\u001b]11;?\u001b\\\u001b[?u\u001b[c";
+    const prompt = "\u001b[H› Ask Codex to do anything";
+    const transport = new FakeTransport("orchestrator", probes + prompt);
+    const attached = attachSession({ sessionId: TEST_SESSION_ID, mode: "control", transport,
+      input, output, signals: new EventEmitter(), closeTransport: false });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(Buffer.concat(output.chunks)).toEqual(Buffer.from(prompt + "LIVE"));
+    transport.emitFrame({ type: "output", sessionId: TEST_SESSION_ID, data: Buffer.from(probes).toString("base64") });
+    expect(Buffer.concat(output.chunks)).toEqual(Buffer.from(prompt + "LIVE" + probes));
+    input.emit("data", Buffer.from("\u001b[2;3R"));
+    input.emit("data", Buffer.from([0x1d]));
+    await expect(attached).resolves.toBe(0);
+    expect(inputFrames(transport)).toEqual([Buffer.from("\u001b[2;3R")]);
+  });
+
   it("bridges control input, replay, resize, and Ctrl-] with raw-mode cleanup", async () => {
     const input = new FakeInput();
     const output = new FakeOutput();

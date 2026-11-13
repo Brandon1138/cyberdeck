@@ -38,6 +38,8 @@ export interface ReplayObservation {
 export interface WorkerTurnObservationPort {
   createReplay(replayChars: number): ReplayObservation;
   activity(provider: string, replay: ReplayObservation): ProviderTerminalActivity;
+  /** A provider's setup spinner is not evidence of a newer model turn. */
+  starting?(provider: string, replay: ReplayObservation): boolean;
   composer(provider: string, replay: ReplayObservation): ComposerObservation;
   fatalTermination(tail: BoundedReplayTail, at: string): SessionTermination | undefined;
   compactFrame(frame: string, maxChars?: number): string;

@@ -132,11 +132,15 @@ export class SessionIoSurface {
     if (runtime.controller !== undefined && runtime.controller.clientId !== clientId) {
       throw new RegistryError("NOT_SESSION_CONTROLLER", "Another client controls this session");
     }
+    // Focus reports are terminal notifications, not an operator command. Still forward their
+    // exact bytes, without invalidating native readiness or extending the operator quiet window.
+    const focusReport = data.length === 3 && data[0] === 0x1b && data[1] === 0x5b
+      && (data[2] === 0x49 || data[2] === 0x4f);
     // Record admitted controller bytes synchronously, before the PTY can echo them.
-    if (data.length > 0 && runtime.controller?.clientId === clientId && clientId !== undefined) {
+    if (data.length > 0 && !focusReport && runtime.controller?.clientId === clientId && clientId !== undefined) {
       this.lastOperatorInput.set(runtime, this.now());
     }
-    if (data.length > 0) runtime.turns.noteHumanInput();
+    if (data.length > 0 && !focusReport) runtime.turns.noteHumanInput();
     requireSessionRuntime(runtime).write(data);
     await this.catalog.appendEvent("session.input", sessionId, { bytes: data.length });
   }
