@@ -3,7 +3,7 @@
   "baseSha": "76815169071b2e2852b31958a0475955210913df",
   "sourceFixtureStatus": "APPROVED WITH LIMITS at 64b1dfb: independent whole-branch source review; two nonblocking P3 retry findings remain. Native/human acceptance separate.",
   "fullIntegratedStatus": "PASS at source64b1dfb: pnpm check, test --maxWorkers=2, build exit0; 311 files/4216 tests passed, 1 file/27 skipped, 611.40s. All858 source/test/script/config hashes unchanged across run.",
-  "liveStatus": "ATTEMPTED: lifecycle failed before native launch (ORCHESTRATOR_SELECTION_UNSUPPORTED); nine later cases NOT RUN",
+  "liveStatus": "ATTEMPTED with pinned Codex0.169.0: resident launch observed, then native workspace-trust hold before prompts or idle gate; two owned resident exits and isolated daemon cleanup confirmed. Native trust approval pending.",
   "sourceScope": "Actual production services, persisted reopen and separately owned controller child SIGKILL/restart with synthetic OS transport. No full broker network server, native provider or power-loss qualification. Integrated completion also validates optional Fleet resident inspection at the RPC display boundary; palette/catalog/resident-marker expectations updated without authority, key handling or Unknown-semantics changes.",
   "files": [
     {
@@ -371,7 +371,7 @@
     "All seven matched human semantic grades: NOT RUN"
   ],
   "liveInvocationTemplate": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode lifecycle --state-directory /tmp/sg-operator-01 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only",
-  "authorization": "Operator approved selected isolated campaign with ten-minute total limit. Campaign stopped on first failure before provider launch. No model substitution, resident enablement, broker restart, or merge.",
+  "authorization": "Operator approved fixed version and full lifecycle, superseding previous ten-minute cap. Native prompt expands folder trust to repository root; isolated-home trust approval requested and pending. No trust answer/configuration change yet.",
   "evidencePrivacy": "Only synthetic measurements, commands, hashes and verdicts included. Private live originals remain in operator-selected isolated state outside Git. Local logs/report are ignored handoff artifacts.",
   "preservedAgentsSha256": "ce01da8962cac8487b4d7c26b08b561c3c718e07ff25aa49e191db02cbd0cd3e",
   "completion": {
@@ -637,5 +637,73 @@
     "gateResultSha256": "6507357bd4a593642969b60d358a5c785cdc9c8eaeea6c2df02f75880421296c",
     "requestCounting": "UNQUALIFIED; no zero-inference proof inferred",
     "timeLimit": "10 minutes; first failure ended campaign early"
+  },
+  "fullLifecycleStartupHold": {
+    "authorization": "Okay approved fix version and go full lifecycle qualification.",
+    "earlierTimeCap": "superseded by full-lifecycle approval",
+    "attempts": [
+      {
+        "stateDirectory": "/tmp/sg14r00",
+        "source": "915171300a45b49e06597a489428196f3c0489a4",
+        "provider": "codex-cli 0.169.0",
+        "startedAt": "2026-11-14T13:32:24.293Z",
+        "endedAt": "2026-11-14T13:32:34.370Z",
+        "status": "FAILED_OR_UNAVAILABLE",
+        "error": "Resident hold: provider-permission-modal",
+        "processes": [
+          {
+            "pid": 20175,
+            "executable": "codex",
+            "exited": true,
+            "sessionId": "9294a697-856b-47f5-8048-0f28c14a2c8a",
+            "resident": true
+          }
+        ],
+        "submissions": [],
+        "cleanupSessions": "stopAll completed",
+        "cleanupDaemon": "isolated stop completed",
+        "gateResultSha256": "1378b03c3b0895dd6815f917fa2c7a4d23282a4b8fbc1c0520e5c1ca553abf05"
+      },
+      {
+        "stateDirectory": "/tmp/sg14r01",
+        "source": "915171300a45b49e06597a489428196f3c0489a4",
+        "provider": "codex-cli 0.169.0",
+        "startedAt": "2026-11-14T13:34:19.118Z",
+        "endedAt": "2026-11-14T13:34:31.881Z",
+        "status": "FAILED_OR_UNAVAILABLE",
+        "error": "Resident hold: provider-permission-modal",
+        "processes": [
+          {
+            "pid": 21310,
+            "executable": "codex",
+            "exited": true,
+            "sessionId": "f0f2e1ac-4ef1-48e1-ae30-34d53e5866b3",
+            "resident": true
+          }
+        ],
+        "submissions": [],
+        "cleanupSessions": "stopAll completed",
+        "cleanupDaemon": "isolated stop completed",
+        "gateResultSha256": "4d7ed56e1384470a7969d02cfc6166ada66bceb6c2ad70ff2c14d26ba1d8c913"
+      }
+    ],
+    "modal": {
+      "provider": "codex",
+      "kind": "workspace-trust",
+      "fingerprint": "ce5a2f302a4bfa0f",
+      "evidence": "Folder access\n/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114\nNote: You\u2019re in a subdirectory of a Git project. Trusting will apply to the\nrepository root:\n/Users/brandon/code/personal/cyberdeck\nTrust this folder? Codex can read, edit, and run files here, subject to your\npermission settings. Folder settings can run code automatically, even\nwithout a model request. Continue only if you trust these files. Your trust\ndecision will be saved.\n\u203a 1. Trust and continue\n2. Back to Agent Command Center\nenter continue \u00b7 esc back",
+      "answers": [
+        {
+          "id": "trust",
+          "label": "Trust and continue"
+        },
+        {
+          "id": "decline",
+          "label": "Back to Agent Command Center"
+        }
+      ]
+    },
+    "pendingApproval": "Trust repository root only inside fresh isolated acceptance home; no native trust answer or config change yet",
+    "remainingCases": "NOT RUN"
   }
 }

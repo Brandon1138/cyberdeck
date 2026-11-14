@@ -29,3 +29,26 @@ total campaign. Human semantic grading, complete request counting, native orphan
 cleanup and capacity qualification remain outstanding.
 
 Evidence SHA-256 (`gate-result.json`): `6507357bd4a593642969b60d358a5c785cdc9c8eaeea6c2df02f75880421296c`.
+
+## Full-lifecycle retry with corrected CLI
+
+The operator subsequently approved pinning the version and running full lifecycle
+qualification, superseding the earlier ten-minute total cap. Source remained
+`915171300a45b49e06597a489428196f3c0489a4`.
+
+Codex 0.169.0 launched one resident in `/tmp/sg14r00`, then held at a native
+permission modal before any prompt submission. An observation-only repetition in
+`/tmp/sg14r01` captured the exact structured `workspace-trust` dialog. It says
+trusting the selected worktree applies to repository root
+`/Users/brandon/code/personal/cyberdeck`, and folder settings may execute code
+automatically. Available answers are “Trust and continue” and “Back to Agent
+Command Center”. No answer or trust-setting change was made.
+
+Both runs retained zero prompt submissions, observed their one resident exit,
+and completed isolated daemon shutdown. Both stopped before the idle gate.
+Private evidence directories remain preserved. Explicit approval was requested
+to save repository trust only inside the next fresh isolated acceptance home;
+that decision is pending. No primary-home configuration or broker was changed.
+
+The version mismatch is resolved. Native workspace trust is the current blocker;
+lifecycle/renewal/recovery and semantic acceptance are still unqualified.

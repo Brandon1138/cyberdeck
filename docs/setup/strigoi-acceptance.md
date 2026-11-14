@@ -11,11 +11,14 @@ commit advanced HEAD during testing without changing those bytes. No native prov
 acceptance or human semantic grading has run.
 
 The selected isolated configuration is Codex `gpt-6.1-sol`, effort `high`, with cwd
-`/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114`. The operator approved
-a ten-minute campaign. Its first lifecycle invocation failed before provider launch because
-the specified PATH selected Codex 0.153.2, whose catalog omitted the selected model.
-The interactive 0.169.0 CLI lists that model/effort. The campaign stopped on first failure;
-all nine later cases remain NOT RUN. See [attempt evidence and corrected retry requirements](strigoi-live-attempt.md).
+`/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114`. After the first
+campaign exposed an older CLI on PATH, the operator approved pinning Codex 0.169.0
+and running full lifecycle qualification. Native launch now succeeds, but a
+workspace-trust modal blocks before prompts or idle observation. Codex applies
+that trust to the repository root and warns that folder settings may run automatically.
+Approval to save trust only in a fresh isolated test home is pending. Both attempted
+resident processes exited and both isolated daemons stopped. See
+[attempt evidence](strigoi-live-attempt.md). Other live cases remain NOT RUN.
 
 The original measurement table below describes the pre-remediation source. Current packets use
 authenticated v2 page traversal and the archive appends incremental records. At 1,024 synthetic
