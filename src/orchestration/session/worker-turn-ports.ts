@@ -20,6 +20,9 @@ export interface BoundedReplayTail {
   truncated: boolean;
 }
 
+/** A provider-announced work interval; redraws within it do not start new work. */
+export interface ProviderWorkCycle { id: number; active: boolean }
+
 /** The bounded, incrementally maintained reading of one runtime replay. */
 export interface ReplayObservation {
   appendBytes(chunk: Buffer): void;
@@ -32,6 +35,7 @@ export interface ReplayObservation {
   readonly version: number;
   /** Meaningful rendered progress, excluding provider spinner/clock/composer redraws. */
   progressVersion?(provider: string): number;
+  workCycle?(provider: string): ProviderWorkCycle | undefined;
 }
 
 /** Infrastructure-neutral terminal interpretation used by the worker turn state machine. */

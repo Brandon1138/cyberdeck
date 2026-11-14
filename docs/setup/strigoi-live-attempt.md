@@ -1,3 +1,22 @@
+## Work-cycle remediation and fresh qualification
+
+The delayed-redraw defect below now has a failing-before/passing-after regression.
+Codex explicit work-cycle notifications fence one working interval; repeated redraws
+do not create newer work. A cycle must close and an exactly bound native completion
+must remain current before admission. New remote cycles, local input, generation
+changes, modals and unannounced positive work still fence older completions.
+
+The matched native streaming diagnostic at `/tmp/sg14r04/admission-probe-06`
+completed both turns with native provenance and admitted the second instruction
+once. Its owned process exited and isolated daemon stopped. Typecheck and 108
+focused tests passed. This fixes the reproduced admission scenario; full lifecycle
+qualification is still pending in the separately approved fresh `/tmp/sg14r05`.
+
+CI at `317a537` passed Linux x64/arm64, all five distro jobs and WSL. macOS failed
+one test during fixture deletion with `ENOTEMPTY` after late Scout trace output.
+The fixture now waits for outstanding trace writes before deleting its directory;
+the affected Scout tests pass. Results at earlier heads remain historical evidence.
+
 # Readiness continuation: 2026-11-14
 
 At source `833a7a44aee27b524ef3a69413a3787783e9ed40`, all CI checks and the
