@@ -113,6 +113,25 @@ describe("serialized succession", () => {
     await expect(f.runtime.admission.run(t.predecessor!.sessionId, "mutate", async () => "finish existing work")).resolves.toBe("finish existing work");
     expect(f.delivery.hold).toHaveBeenCalled(); expect(f.trace).not.toContain("stop");
   });
+  it.each(["aborted", "complete"])("checks and clears provider modal fencing for a %s transition", async (phase) => {
+    const f = await fixture(), t = await f.runtime.succession!.renew(1, "modal", "r");
+    let modal = phase === "aborted";
+    const truth = f.registry.workerTruth.bind(f.registry);
+    vi.spyOn(f.registry, "workerTruth").mockImplementation((id) => ({ ...truth(id), modalOpen: modal }));
+    if (phase === "aborted") await f.runtime.succession!.abort(t.id, "abort-modal");
+    else { await f.drive(t.id); modal = true; await f.runtime.lifecycle.reconcile(); }
+    const actor = (await f.bindings.strigoi.read()).activeBinding!.sessionId, effect = vi.fn(async () => "open");
+    await expect(f.runtime.admission.run(actor, "mutate", effect)).rejects.toThrow("FROZEN");
+    expect((await f.bindings.strigoi.read()).hold?.code).toBe("provider-permission-modal");
+    await f.runtime.lifecycle.reconcile(); await f.runtime.succession!.advance(t.id);
+    await expect(f.runtime.admission.run(actor, "mutate", effect)).rejects.toThrow("FROZEN");
+    expect(effect).not.toHaveBeenCalled();
+    modal = false; await f.runtime.lifecycle.reconcile();
+    expect((await f.bindings.strigoi.read()).hold).toBeUndefined();
+    expect((await f.bindings.strigoi.read()).transition?.phase).toBe(phase);
+    await expect(f.runtime.admission.run(actor, "mutate", effect)).resolves.toBe("open");
+    expect(effect).toHaveBeenCalledOnce(); expect(f.spawn).toHaveBeenCalledTimes(phase === "aborted" ? 1 : 2);
+  });
   it.each(["before", "after"])("replays a lost %s-release result without redoing adoption", async (side) => {
     const f = await fixture(), reopen = vi.mocked(f.runtime.admission.reopen).getMockImplementation()!;
     vi.spyOn(f.runtime.admission, "reopen").mockImplementationOnce(async (...args) => {

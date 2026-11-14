@@ -147,6 +147,25 @@ export class StrigoiLifecycle {
     if ((await this.options.repository.retentionPins()).has(sessionId)) throw failure("STRIGOI_RESUME_REQUIRES_LIFECYCLE");
   }
 
+  /** Shared runtime fencing after ordinary reconciliation or a drained terminal transition. */
+  async reconcileActive(epoch: number): Promise<void> {
+    let state = await this.options.repository.read();
+    if (!state.activeBinding || state.desired !== "enabled" || !this.permitsSuccession(epoch)
+      || state.transition && !["complete", "aborted"].includes(state.transition.phase)) return;
+    if (!this.owned(state.activeBinding.sessionId)) { await this.freeze(state); await this.hold("launch-ownership-unresolved", "Recorded identity has no owned runtime; the succession recovery collaborator is not wired."); return; }
+    const record = this.options.registry.get(state.activeBinding.sessionId);
+    if (record.generation !== state.activeGeneration) { await this.freeze(state); await this.hold("launch-ownership-unresolved", "Runtime generation differs from the active binding."); return; }
+    if (record.executionState !== "active" || record.exitCode !== null) { await this.freeze(state); await this.hold("provider-unavailable", "The owned runtime is not active; inspect provider evidence before recovery."); return; }
+    if (this.options.registry.workerTruth(record.id).modalOpen) { await this.freeze(state); await this.hold("provider-permission-modal", "Provider requires operator input; no automatic answer or model turn."); return; }
+    if (state.hold?.code === "provider-permission-modal") {
+      state = await this.authority(async () => {
+        const current = await this.options.repository.read();
+        return current.hold?.code === "provider-permission-modal" ? this.write(current, { hold: undefined }) : current;
+      });
+    }
+    if (!state.hold && state.desired === "enabled" && this.permitsSuccession(epoch)) await this.options.admission.reopen(identity(state)!);
+  }
+
   private async reconcileOnce(): Promise<void> {
     const epoch = this.epoch;
     let state = await this.options.repository.read();
@@ -162,19 +181,7 @@ export class StrigoiLifecycle {
     }
     if (state.desired !== "enabled") return;
     if (state.activeBinding) {
-      if (!this.owned(state.activeBinding.sessionId)) { await this.freeze(state); await this.hold("launch-ownership-unresolved", "Recorded identity has no owned runtime; the succession recovery collaborator is not wired."); return; }
-      const record = this.options.registry.get(state.activeBinding.sessionId);
-      if (record.generation !== state.activeGeneration) { await this.freeze(state); await this.hold("launch-ownership-unresolved", "Runtime generation differs from the active binding."); return; }
-      if (record.executionState !== "active" || record.exitCode !== null) { await this.freeze(state); await this.hold("provider-unavailable", "The owned runtime is not active; inspect provider evidence before recovery."); return; }
-      if (this.options.registry.workerTruth(record.id).modalOpen) { await this.freeze(state); await this.hold("provider-permission-modal", "Provider requires operator input; no automatic answer or model turn."); return; }
-      if (state.hold?.code === "provider-permission-modal") {
-        state = await this.authority(async () => {
-          const current = await this.options.repository.read();
-          return current.hold?.code === "provider-permission-modal" ? this.write(current, { hold: undefined }) : current;
-        });
-      }
-      if (!state.hold && state.desired === "enabled" && !this.disposed && epoch === this.epoch) await this.options.admission.reopen(identity(state)!);
-      return;
+      await this.reconcileActive(epoch); return;
     }
     if (state.hold) return;
     if (state.transition?.nextAttemptAt && Date.parse(state.transition.nextAttemptAt) > Date.now()) {

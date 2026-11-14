@@ -78,7 +78,7 @@ export class StrigoiSuccession {
       const id = state.activeBinding?.sessionId;
       if (!id) return;
       if (this.o.registry.ownsProcess(id) && this.o.registry.get(id).exitCode === null) {
-        if (state.transition && ["complete", "aborted"].includes(state.transition.phase) && !state.hold) {
+        if (state.transition && ["complete", "aborted"].includes(state.transition.phase)) {
           await this.advance(state.transition.id);
         }
         return;
@@ -114,8 +114,8 @@ export class StrigoiSuccession {
           }
           if (!state.hold && this.o.lifecycle.permitsSuccession(epoch)) {
             await this.o.manager.observeResident(state.activeBinding!, this.o.registry.get(actor.sessionId));
-            if (this.o.lifecycle.permitsSuccession(epoch)) await this.o.admission.reopen(actor);
           }
+          await this.o.lifecycle.reconcileActive(epoch);
           break;
         }
         if (!await this.step(state, epoch)) {
@@ -127,6 +127,7 @@ export class StrigoiSuccession {
   }
   abort(transitionId: string, mutationId: string): Promise<void> {
     return this.serial(async () => {
+      const epoch = this.o.lifecycle.successionEpoch();
       await this.authority(async () => {
         const s = await this.o.repository.read(), t = s.transition;
         if (!t || t.id !== transitionId) throw fault("STRIGOI_STALE_TRANSITION");
@@ -142,7 +143,7 @@ export class StrigoiSuccession {
       // Keep the barrier closed until it drains, then let lifecycle recheck fresh state.
       const drain = this.startDrain(s.transition!);
       await Promise.resolve();
-      if (s.desired === "enabled" && drain.done) await this.o.admission.reopen(s.transition!.predecessor!);
+      if (drain.done) await this.o.lifecycle.reconcileActive(epoch);
       else { void drain.wait.catch(() => {}); this.o.lifecycle.wakeSuccession(this.now() + 1000); }
     });
   }

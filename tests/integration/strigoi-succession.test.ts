@@ -226,6 +226,49 @@ describe("succession durable boundary faults through the real registry/evidence 
       }
     } finally { finish(); await admitted; vi.useRealTimers(); }
   });
+  it.each(["after-drain", "during-drain"])("fences aborted mutation admission when a modal opens %s and releases only after close", async (timing) => {
+    const f = await fixture(), t = await f.runtime.succession!.renew(1, "abort modal", "r");
+    const actor = t.predecessor!.sessionId, effect = vi.fn(async () => "admitted");
+    const reopen = vi.mocked(f.runtime.admission.reopen); reopen.mockClear();
+    let modal = false, entered!: () => void, finish!: () => void;
+    const truth = f.registry.workerTruth.bind(f.registry);
+    vi.spyOn(f.registry, "workerTruth").mockImplementation((id) => ({ ...truth(id), modalOpen: modal }));
+    const started = new Promise<void>((r) => { entered = r; }), pending = new Promise<void>((r) => { finish = r; });
+    const admitted = f.runtime.admission.run(actor, "mutate", async () => { entered(); await pending; });
+    await started;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await f.runtime.succession!.abort(t.id, "abort-modal");
+      await expect(f.runtime.admission.run(actor, "mutate", effect)).rejects.toThrow("FROZEN");
+      if (timing === "during-drain") modal = true;
+      // Reconciliation can time out but must leave the original permit and barrier intact.
+      const waiting = f.runtime.lifecycle.reconcile();
+      await vi.advanceTimersByTimeAsync(120_001); await waiting;
+      await expect(f.runtime.admission.run(actor, "mutate", effect)).rejects.toThrow("FROZEN");
+      finish(); await admitted;
+      await f.runtime.lifecycle.reconcile();
+      if (timing === "after-drain") {
+        await expect(f.runtime.admission.run(actor, "mutate", effect)).resolves.toBe("admitted");
+        effect.mockClear(); reopen.mockClear(); modal = true;
+      } else {
+        await expect(f.runtime.admission.run(actor, "mutate", effect)).rejects.toThrow("FROZEN");
+      }
+      await f.runtime.lifecycle.reconcile();
+      await expect(f.runtime.admission.run(actor, "mutate", effect)).rejects.toThrow("FROZEN");
+      expect((await f.bindings.strigoi.read()).hold?.code).toBe("provider-permission-modal");
+      expect((await f.runtime.lifecycle.inspect()).readiness).toBe("held");
+      await f.runtime.succession!.advance(t.id);
+      await expect(f.runtime.admission.run(actor, "mutate", effect)).rejects.toThrow("FROZEN");
+      expect(effect).not.toHaveBeenCalled(); expect(reopen).not.toHaveBeenCalled();
+      modal = false; await f.runtime.lifecycle.reconcile();
+      const state = await f.bindings.strigoi.read();
+      expect(state.hold).toBeUndefined(); expect(state.transition?.phase).toBe("aborted");
+      expect(state.activeBinding).toEqual(f.original.activeBinding); expect(state.incarnation).toBe(1);
+      await expect(f.runtime.admission.run(actor, "mutate", effect)).resolves.toBe("admitted");
+      expect(effect).toHaveBeenCalledOnce(); expect(f.spawn).toHaveBeenCalledOnce();
+      expect(f.trace).not.toContain("stop"); expect(f.trace).not.toContain("sealed"); expect(f.submitted).toHaveLength(0);
+    } finally { finish(); await admitted; vi.useRealTimers(); }
+  });
   it.each(["suspend", "dispose"])("rechecks the lifecycle epoch after drain when %s arrives during the wait", async (action) => {
     const f = await fixture(), t = await f.runtime.succession!.renew(1, "fenced drain", "r");
     await f.drive(t.id, 1);

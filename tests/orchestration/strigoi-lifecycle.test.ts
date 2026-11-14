@@ -150,6 +150,24 @@ describe("passive Strigoi lifecycle", () => {
     await f.resident.reconcile(); expect(f.start).toHaveBeenCalledOnce();
     expect((await f.resident.inspect()).state.hold?.code).toBe("provider-permission-modal");
     expect(f.registry.submit).not.toHaveBeenCalled();
+    expect(f.admission.reopen).not.toHaveBeenCalled();
+    f.setModal(false); await f.resident.reconcile();
+    expect((await f.resident.inspect()).state.hold).toBeUndefined();
+    expect(f.admission.reopen).toHaveBeenCalledOnce(); expect(f.start).toHaveBeenCalledOnce();
+  });
+  it.each(["generation", "inactive", "ownership", "epoch", "hold"])("terminal runtime fencing does not reopen on %s mismatch", async (condition) => {
+    const f = await fixture(); await f.resident.configure(selection, "configure"); await f.resident.reconcile();
+    f.admission.reopen.mockClear();
+    const epoch = f.resident.successionEpoch(), state = await f.bindings.strigoi.read();
+    const record = f.records.get(state.activeBinding!.sessionId)!;
+    if (condition === "generation") record.generation! += 1;
+    if (condition === "inactive") record.executionState = "starting";
+    if (condition === "ownership") f.registry.ownsProcess = () => false;
+    if (condition === "epoch") f.resident.dispose();
+    if (condition === "hold") await f.bindings.strigoi.compareAndSwap(state.revision, "hold", { ...state, revision: state.revision + 1,
+      hold: { code: "continuity-evidence-unavailable", detail: "Missing evidence", sourceIds: [] } });
+    await f.resident.reconcileActive(epoch);
+    expect(f.admission.reopen).not.toHaveBeenCalled();
   });
 });
 
