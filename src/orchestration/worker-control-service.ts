@@ -1,3 +1,5 @@
+import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
+import { compactEvent } from "./worker-event-projection.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows, type CapabilityGrant, type CyberdeckCapability } from "../domain/capability.js";
@@ -139,11 +141,6 @@ export const AgentWorkerEventsParamsSchema = z.object({
 });
 
 /** Trim caps. These exist so an Orc's context cost per read stays predictable, not to hide data. */
-const SUMMARY_CHARS = 320;
-const RECOMMENDATION_CHARS = 240;
-const FIELD_CHARS = 160;
-const MAX_FACTS = 8;
-const MAX_LIST_FIELDS = 3;
 const MAX_STATE_ENTRIES = 25;
 
 export type LeaseResultCode = OwnershipOutcome["code"];
@@ -326,6 +323,7 @@ export interface ModalAnswerPolicyPort {
 }
 
 export interface WorkerControlOptions {
+  strigoi?: StrigoiAdmission;
   coordination: WorkerCoordinationService;
   credentials?: WorkerLeaseCredentialCustodian;
   registry: SessionLookupPort
@@ -365,123 +363,129 @@ export class WorkerControlService {
 
   async lease(input: z.input<typeof AgentLeaseParamsSchema>): Promise<LeaseControlResult> {
     const request = AgentLeaseParamsSchema.parse(input);
-    const { binding, controller } = await this.requireController(request.actorSessionId);
-    const mutationId = request.mutationId ?? `lease:${randomUUID()}`;
-    return this.exclusive(async () => {
-      if (request.action === "acquire" || request.action === "adopt") {
-        return this.take(request, binding, controller, mutationId);
-      }
-      return this.authenticatedLease(request, binding, controller, mutationId);
+    return admitted(this.options.strigoi, request.actorSessionId, async () => {
+      const mutationId = request.mutationId ?? `lease:${randomUUID()}`;
+      return this.exclusive(async () => {
+        const { binding, controller } = await this.requireController(request.actorSessionId);
+        if (request.action === "acquire" || request.action === "adopt") {
+          return this.take(request, binding, controller, mutationId);
+        }
+        return this.authenticatedLease(request, binding, controller, mutationId);
+      });
     });
   }
 
   async control(input: z.input<typeof AgentWorkerControlParamsSchema>): Promise<WorkerControlResult> {
     const request = AgentWorkerControlParamsSchema.parse(input);
-    const { binding, controller } = await this.requireController(request.actorSessionId);
-    return this.exclusive(async () => {
-      const subject = await this.reconcileSessionLifecycle(request.workerId);
-      if (subject === undefined) {
-        return {
-          action: request.action,
-          workerId: request.workerId,
-          code: "SUBJECT_NOT_FOUND" as const,
-          detail: "No lease subject is registered for this worker; acquire a lease first",
-        };
-      }
-      const capability: CyberdeckCapability = request.action === "stop" ? "worker.start" : "thread.enqueue";
-      if (!this.inGrant(subject, binding.grant, capability)) {
-        return {
-          action: request.action,
-          workerId: request.workerId,
-          code: "DENIED" as const,
-          detail: `${capability} over this worker is outside this orchestrator's grant`,
-        };
-      }
-      const authority = await this.authorize(subject, controller, request.reason, request.action);
-      if (authority.rejection !== undefined) {
-        return { action: request.action, workerId: request.workerId, ...authority.rejection };
-      }
-      if (request.action === "stop") return this.stopWorker(request, subject, controller);
-      if (TERMINAL_WORKER_LIFECYCLES.has(subject.lifecycle)) {
-        return {
-          action: request.action,
-          workerId: request.workerId,
-          code: "WORKER_TERMINAL" as const,
-          lifecycle: subject.lifecycle,
-          detail: "Worker reached a terminal lifecycle; it accepts no further instruction",
-        };
-      }
-      return request.action === "redirect"
-        ? this.redirectWorker(request, subject)
-        : request.action === "answer_modal"
-          ? this.answerModal(request, subject, controller)
-          : this.requestCheckpoint(request, subject, controller);
+    return admitted(this.options.strigoi, request.actorSessionId, async () => {
+      return this.exclusive(async () => {
+        const { binding, controller } = await this.requireController(request.actorSessionId);
+        const subject = await this.reconcileSessionLifecycle(request.workerId);
+        if (subject === undefined) {
+          return {
+            action: request.action,
+            workerId: request.workerId,
+            code: "SUBJECT_NOT_FOUND" as const,
+            detail: "No lease subject is registered for this worker; acquire a lease first",
+          };
+        }
+        const capability: CyberdeckCapability = request.action === "stop" ? "worker.start" : "thread.enqueue";
+        if (!this.inGrant(subject, binding.grant, capability)) {
+          return {
+            action: request.action,
+            workerId: request.workerId,
+            code: "DENIED" as const,
+            detail: `${capability} over this worker is outside this orchestrator's grant`,
+          };
+        }
+        const authority = await this.authorize(subject, controller, request.reason, request.action);
+        if (authority.rejection !== undefined) {
+          return { action: request.action, workerId: request.workerId, ...authority.rejection };
+        }
+        if (request.action === "stop") return this.stopWorker(request, subject, controller);
+        if (TERMINAL_WORKER_LIFECYCLES.has(subject.lifecycle)) {
+          return {
+            action: request.action,
+            workerId: request.workerId,
+            code: "WORKER_TERMINAL" as const,
+            lifecycle: subject.lifecycle,
+            detail: "Worker reached a terminal lifecycle; it accepts no further instruction",
+          };
+        }
+        return request.action === "redirect"
+          ? this.redirectWorker(request, subject)
+          : request.action === "answer_modal"
+            ? this.answerModal(request, subject, controller)
+            : this.requestCheckpoint(request, subject, controller);
+      });
     });
   }
 
   async events(input: z.input<typeof AgentWorkerEventsParamsSchema>): Promise<WorkerEventsResult> {
     const request = AgentWorkerEventsParamsSchema.parse(input);
-    const { binding, controller } = await this.requireController(request.actorSessionId);
-    const acknowledged = request.acknowledgeHandoffIds === undefined
-      ? []
-      : await this.options.coordination.acknowledgeHandoffs({
-          controllerId: controller.controllerId,
-          handoffIds: request.acknowledgeHandoffIds,
-        });
-    const scoped = this.options.coordination.listSubjects().filter(
-      (subject) => subject.subjectKind === "worker" && this.inGrant(subject, binding.grant, "thread.read"),
-    );
-    const selected = scoped.filter(
-      (subject) =>
-        (request.workerId === undefined || subject.subjectId === request.workerId)
-        && (request.waveId === undefined || subject.origin.waveId === request.waveId),
-    );
-    const projection = this.options.coordination.projectEvents({
-      cursor: request.cursor,
-      limit: request.limit,
-      filter: {
-        workerIds: selected.map((subject) => subject.subjectId),
-        ...(request.waveId === undefined ? {} : { waveId: request.waveId }),
-        ...(request.kinds === undefined ? {} : { kinds: request.kinds }),
-        ...(request.severities === undefined ? {} : { severities: request.severities }),
-        ...(request.view === "active" ? {} : { intervention: interventionFilter(request.view) }),
-      },
-    });
-    const state = selected
-      .slice(0, MAX_STATE_ENTRIES)
-      .map((subject) => this.stateSummary(subject));
-    // Delivery is at-least-once. Reading never changes state; a later poll explicitly acknowledges
-    // the previous page. If this response is lost, the same oldest handoff is therefore replayed.
-    const pendingHandoffs = this.options.coordination.pendingHandoffs({
-      controllerId: controller.controllerId,
-      limit: MAX_HANDOFF_PAGE + 1,
-    });
-    const handoffs = pendingHandoffs.slice(0, MAX_HANDOFF_PAGE);
-    return {
-      cursor: request.cursor,
-      nextCursor: projection.nextCursor,
-      hasMore: projection.hasMore,
-      returned: projection.events.length,
-      view: request.view,
-      state,
-      ...(selected.length > state.length ? { stateTruncated: true } : {}),
-      ...(acknowledged.length === 0
-        ? {}
-        : { acknowledgedHandoffIds: acknowledged.map((handoff) => handoff.handoffId) }),
-      ...(pendingHandoffs.length > MAX_HANDOFF_PAGE ? { handoffsHaveMore: true } : {}),
-      ...(handoffs.length === 0
-        ? {}
-        : {
-            handoffs: handoffs.map((handoff) => ({
-              handoffId: handoff.handoffId,
-              directive: handoff.directive,
-              issuedAt: handoff.issuedAt,
-              manifest: handoff.manifest,
-              briefing: handoffBriefing(handoff),
-            })),
-          }),
-      events: projection.events.map(compactEvent),
-    };
+    return admitted(this.options.strigoi, request.actorSessionId, async () => {
+      const { binding, controller } = await this.requireController(request.actorSessionId);
+      const acknowledged = request.acknowledgeHandoffIds === undefined
+        ? []
+        : await this.options.coordination.acknowledgeHandoffs({
+            controllerId: controller.controllerId,
+            handoffIds: request.acknowledgeHandoffIds,
+          });
+      const scoped = this.options.coordination.listSubjects().filter(
+        (subject) => subject.subjectKind === "worker" && this.inGrant(subject, binding.grant, "thread.read"),
+      );
+      const selected = scoped.filter(
+        (subject) =>
+          (request.workerId === undefined || subject.subjectId === request.workerId)
+          && (request.waveId === undefined || subject.origin.waveId === request.waveId),
+      );
+      const projection = this.options.coordination.projectEvents({
+        cursor: request.cursor,
+        limit: request.limit,
+        filter: {
+          workerIds: selected.map((subject) => subject.subjectId),
+          ...(request.waveId === undefined ? {} : { waveId: request.waveId }),
+          ...(request.kinds === undefined ? {} : { kinds: request.kinds }),
+          ...(request.severities === undefined ? {} : { severities: request.severities }),
+          ...(request.view === "active" ? {} : { intervention: interventionFilter(request.view) }),
+        },
+      });
+      const state = selected
+        .slice(0, MAX_STATE_ENTRIES)
+        .map((subject) => this.stateSummary(subject));
+      // Delivery is at-least-once. Reading never changes state; a later poll explicitly acknowledges
+      // the previous page. If this response is lost, the same oldest handoff is therefore replayed.
+      const pendingHandoffs = this.options.coordination.pendingHandoffs({
+        controllerId: controller.controllerId,
+        limit: MAX_HANDOFF_PAGE + 1,
+      });
+      const handoffs = pendingHandoffs.slice(0, MAX_HANDOFF_PAGE);
+      return {
+        cursor: request.cursor,
+        nextCursor: projection.nextCursor,
+        hasMore: projection.hasMore,
+        returned: projection.events.length,
+        view: request.view,
+        state,
+        ...(selected.length > state.length ? { stateTruncated: true } : {}),
+        ...(acknowledged.length === 0
+          ? {}
+          : { acknowledgedHandoffIds: acknowledged.map((handoff) => handoff.handoffId) }),
+        ...(pendingHandoffs.length > MAX_HANDOFF_PAGE ? { handoffsHaveMore: true } : {}),
+        ...(handoffs.length === 0
+          ? {}
+          : {
+              handoffs: handoffs.map((handoff) => ({
+                handoffId: handoff.handoffId,
+                directive: handoff.directive,
+                issuedAt: handoff.issuedAt,
+                manifest: handoff.manifest,
+                briefing: handoffBriefing(handoff),
+              })),
+            }),
+        events: projection.events.map(compactEvent),
+      };
+    }, request.acknowledgeHandoffIds === undefined ? "read" : "mutate");
   }
 
   /**
@@ -489,12 +493,13 @@ export class WorkerControlService {
    * reason spelled out. Ambiguity is never resolved silently in favour of taking control.
    */
   async surveyRecovery(actorSessionId: string, waveId?: string): Promise<RecoveryPlan> {
-    const { binding, controller } = await this.requireController(actorSessionId);
-    return this.planFor(
-      { scope: waveId === undefined ? "all-eligible" : "wave", action: "adopt", ...(waveId === undefined ? {} : { waveId }) },
-      binding.grant,
-      controller,
-    );
+    return admitted(this.options.strigoi, actorSessionId, async () => {
+      const { binding, controller } = await this.requireController(actorSessionId);
+      return this.planFor(
+        { scope: waveId === undefined ? "all-eligible" : "wave", action: "adopt", ...(waveId === undefined ? {} : { waveId }) },
+        binding.grant, controller, false,
+      );
+    }, "recovery");
   }
 
   private async take(
@@ -730,12 +735,16 @@ export class WorkerControlService {
     },
     grant: CapabilityGrant,
     controller: ControllerIdentity,
+    reconcile = true,
   ): Promise<RecoveryPlan> {
     const nowMs = this.now();
     const eligible: RecoveryCandidate[] = [];
     const blocked: RecoveryBlocker[] = [];
     for (const storedSubject of this.options.coordination.listSubjects()) {
-      const subject = await this.reconcileSessionLifecycle(storedSubject.subjectId) ?? storedSubject;
+      // A recovery survey projects current process truth without writing lifecycle/lease state.
+      const liveRecord = this.sessionRecord(storedSubject.subjectId);
+      const subject = reconcile ? await this.reconcileSessionLifecycle(storedSubject.subjectId) ?? storedSubject
+        : liveRecord === undefined ? storedSubject : { ...storedSubject, lifecycle: lifecycleOf(liveRecord) };
       if (subject.subjectKind !== "worker") continue;
       if (request.scope === "wave" && subject.origin.waveId !== request.waveId) continue;
       if (request.scope === "worker" && subject.subjectId !== request.workerId) continue;
@@ -1482,45 +1491,4 @@ function lifecycleOf(record: SessionRecord): OwnershipSubject["lifecycle"] {
   // Cancelled, errored, and failed bookkeeping can still own a live process. Keep coordination
   // recoverable until registry exit observation supplies a non-null exitCode.
   return "working";
-}
-
-/** Material state and deltas only. Transcript-shaped output is never produced by this projection. */
-function compactEvent(event: StoredWorkerEvent): Record<string, unknown> {
-  const facts = event.structuredFacts === undefined
-    ? undefined
-    : Object.fromEntries(
-      Object.entries(event.structuredFacts)
-        .slice(0, MAX_FACTS)
-        .map(([key, value]) => [key, typeof value === "string" ? truncate(value, FIELD_CHARS) : value]),
-    );
-  return {
-    ordinal: event.ordinal,
-    eventId: event.eventId,
-    workerId: event.workerId,
-    ...(event.waveId === undefined ? {} : { waveId: event.waveId }),
-    kind: event.kind,
-    severity: event.severity,
-    interventionRequired: event.interventionRequired,
-    continuation: event.continuation,
-    state: event.state,
-    summary: truncate(event.summary, SUMMARY_CHARS),
-    ...(facts === undefined || Object.keys(facts).length === 0 ? {} : { facts }),
-    ...(event.changedAssumptions.length === 0
-      ? {}
-      : { changedAssumptions: event.changedAssumptions.slice(0, MAX_LIST_FIELDS).map((entry) => truncate(entry, FIELD_CHARS)) }),
-    ...(event.evidenceRefs.length === 0
-      ? {}
-      : { evidenceRefs: event.evidenceRefs.slice(0, MAX_LIST_FIELDS).map((entry) => truncate(entry, FIELD_CHARS)) }),
-    ...(event.recommendedAction === undefined
-      ? {}
-      : { recommendedAction: truncate(event.recommendedAction, RECOMMENDATION_CHARS) }),
-    ...(event.checkpointCorrelationId === undefined
-      ? {}
-      : { checkpointCorrelationId: event.checkpointCorrelationId }),
-    at: event.timestamp,
-  };
-}
-
-function truncate(value: string, max: number): string {
-  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 }

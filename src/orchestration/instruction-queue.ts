@@ -1,3 +1,4 @@
+import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows } from "../domain/capability.js";
@@ -70,6 +71,7 @@ export class InstructionQueue {
     private readonly orchestrators: OrchestratorBindingReader,
     private readonly store: InstructionRepository,
     private readonly wakeAdmission?: (record: InstructionRecord) => InstructionAdmission,
+    private readonly strigoi?: StrigoiAdmission,
   ) {}
 
   start(): void {
@@ -106,23 +108,25 @@ export class InstructionQueue {
       actorSessionId: input.actorSessionId, targetSessionId: input.target.id,
       message: input.message, messageId: input.instructionId,
     });
-    const binding = await this.orchestrators.findBySessionId(request.actorSessionId);
-    if (binding === undefined) throw Object.assign(new Error("Actor is not a bound orchestrator"), { code: "ACTOR_NOT_AUTHORIZED" });
-    if (!grantAllows(binding.grant, "thread.enqueue", input.target)) {
-      throw Object.assign(new Error("Target thread is outside this orchestrator's enqueue grant"), { code: "CAPABILITY_DENIED" });
-    }
-    return this.serialize(input.target.id, async () => {
-      const existing = (await this.store.list(input.target.id)).find((record) => record.messageId === request.messageId);
-      if (existing !== undefined) return existing;
-      const at = new Date().toISOString();
-      const record = InstructionRecordSchema.parse({
-        id: input.instructionId, actorSessionId: request.actorSessionId,
-        targetSessionId: input.target.id, message: request.message, messageId: request.messageId,
-        status: "accepted", createdAt: at, updatedAt: at,
-        ...(input.native === false ? { launch: false } : { expectedTurn: 1, launch: true }),
+    return admitted(this.strigoi, request.actorSessionId, async () => {
+      const binding = await this.orchestrators.findBySessionId(request.actorSessionId);
+      if (binding === undefined) throw Object.assign(new Error("Actor is not a bound orchestrator"), { code: "ACTOR_NOT_AUTHORIZED" });
+      if (!grantAllows(binding.grant, "thread.enqueue", input.target)) {
+        throw Object.assign(new Error("Target thread is outside this orchestrator's enqueue grant"), { code: "CAPABILITY_DENIED" });
+      }
+      return this.serialize(input.target.id, async () => {
+        const existing = (await this.store.list(input.target.id)).find((record) => record.messageId === request.messageId);
+        if (existing !== undefined) return existing;
+        const at = new Date().toISOString();
+        const record = InstructionRecordSchema.parse({
+          id: input.instructionId, actorSessionId: request.actorSessionId,
+          targetSessionId: input.target.id, message: request.message, messageId: request.messageId,
+          status: "accepted", createdAt: at, updatedAt: at,
+          ...(input.native === false ? { launch: false } : { expectedTurn: 1, launch: true }),
+        });
+        await this.store.put(record);
+        return record;
       });
-      await this.store.put(record);
-      return record;
     });
   }
 
@@ -169,6 +173,17 @@ export class InstructionQueue {
 
   async enqueue(input: z.input<typeof EnqueueInstructionParamsSchema>): Promise<InstructionRecord> {
     const request = EnqueueInstructionParamsSchema.parse(input);
+    const record = await admitted(this.strigoi, request.actorSessionId, () =>
+      admitted(this.strigoi, request.senderSessionId, () => this.accept(request)));
+    // Nested workflow/worker calls finish their mutation before any provider preflight.
+    const deliver = () => this.flush(record.targetSessionId);
+    if (this.strigoi?.deferDelivery(deliver)) return record;
+    await deliver();
+    return (await this.store.list(record.targetSessionId)).find(({ id }) => id === record.id) ?? record;
+  }
+
+  private async accept(input: z.input<typeof EnqueueInstructionParamsSchema>): Promise<InstructionRecord> {
+    const request = EnqueueInstructionParamsSchema.parse(input);
     const binding = await this.orchestrators.findBySessionId(request.actorSessionId);
     if (binding === undefined) throw Object.assign(new Error("Actor is not a bound orchestrator"), { code: "ACTOR_NOT_AUTHORIZED" });
     const target = this.registry.get(request.targetSessionId);
@@ -197,11 +212,7 @@ export class InstructionQueue {
       hop: request.hop,
     });
     await this.store.put(record);
-    // Delivered through the same serialized flush as everything else: an instruction written while
-    // an older one is still held would arrive out of order, and two composers' worth of text in one
-    // input surface is one corrupted payload.
-    await this.flush(record.targetSessionId);
-    return (await this.store.list(record.targetSessionId)).find(({ id }) => id === record.id) ?? record;
+    return record;
   }
 
   /**
@@ -240,6 +251,7 @@ export class InstructionQueue {
   }
 
   flush(targetSessionId: string, verifyMessageId?: string): Promise<InstructionRecord[]> {
+    if (this.strigoi?.deferDelivery(() => this.flush(targetSessionId, verifyMessageId))) return Promise.resolve([]);
     return this.serialize(targetSessionId, async () => {
       const records = await this.store.list(targetSessionId);
       const rendered = records.find((record) => record.messageId === verifyMessageId && record.status === "rendered"
@@ -390,7 +402,10 @@ export class InstructionQueue {
       if (record.wake?.attentionEpoch !== undefined && this.wakeAdmission === undefined) {
         throw new AttentionWakeHeldError("attention-admission-unavailable");
       }
-      const admission = record.submissionKind === "wake" ? this.wakeAdmission?.(record) : undefined;
+      const wake = record.submissionKind === "wake" ? this.wakeAdmission?.(record) : undefined;
+      const resident = this.strigoi?.instruction(record);
+      const admission: InstructionAdmission | undefined = resident === undefined ? wake
+        : (apply) => resident(() => wake === undefined ? apply() : wake(apply));
       delivery = await this.registry.submitInstruction(record.targetSessionId, record.message, source, {
         actorSessionId: record.actorSessionId,
         senderSessionId: record.senderSessionId ?? record.actorSessionId,
@@ -412,6 +427,9 @@ export class InstructionQueue {
       const code = typeof error === "object" && error !== null && "code" in error
         ? error.code
         : undefined;
+      if (typeof code === "string" && (code.startsWith("STRIGOI_") || code === "CAPABILITY_DENIED" || code === "ACTOR_NOT_AUTHORIZED")) {
+        return this.persistState(record, "queued", { holdReason: code });
+      }
       if (code === "SESSION_BUSY") {
         return this.persistState(record, "queued", { holdReason: "human-controller" });
       }

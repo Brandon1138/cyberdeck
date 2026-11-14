@@ -1,3 +1,6 @@
+import { WorkflowStore } from "../persistence/workflow-store.js";
+import { composeOrchestratorMutationServices } from "./orchestrator-mutation-services.js";
+import { StrigoiAdmission } from "../orchestration/strigoi-admission.js";
 import { ContainerNativeSource } from "../runtime/activity/container-native-source.js";
 import { TurnNativeCapture } from "../runtime/activity/turn-native-capture.js";
 import { ExecutionTranscriptStore } from "../persistence/execution-transcript-store.js";
@@ -60,7 +63,6 @@ import { OrchestratorManager } from "../orchestration/orchestrator-manager.js";
 import { OrchestratorControllerDirectory } from "../orchestration/orchestrator-controller-directory.js";
 import { OrchestratorSessionLiveness } from "../orchestration/orchestrator-session-liveness.js";
 import { AgentControlService } from "../orchestration/agent-control-service.js";
-import { OrchestratorPeerService } from "../orchestration/orchestrator-peer-service.js";
 import { GitWorkspaceProbe } from "../orchestration/git-workspace-probe.js";
 import { GitWorktreeProvisioner } from "../orchestration/git-worktree-provisioner.js";
 import { WorkerCapabilityCatalog } from "../orchestration/worker-capability-catalog.js";
@@ -68,12 +70,9 @@ import { CodexOrchestratorModelProbe } from "../providers/codex-orchestrator-mod
 import { InstructionQueue } from "../orchestration/instruction-queue.js";
 import { LocalWorkerControlService } from "../orchestration/local-worker-control-service.js";
 import { WorkerBudgetEnforcer } from "./worker-budget-enforcer.js";
-import { WorkerControlService } from "../orchestration/worker-control-service.js";
 import { WorkerHandoffService } from "../orchestration/worker-handoff-service.js";
 import { activityCoordinationStore } from "../orchestration/activity-coordination-store.js";
 import { InstructionStore } from "../persistence/instruction-store.js";
-import { WorkflowStore } from "../persistence/workflow-store.js";
-import { WorkflowService } from "../orchestration/workflow-service.js";
 import { loadBrokerRuntimeConfig } from "../runtime-config.js";
 import { retainStartupThreads } from "../orchestration/startup-thread-retention.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
@@ -298,7 +297,8 @@ export async function runBroker(
   const orchestratorCapabilities = new WorkerCapabilityCatalog({
     probe: new CodexOrchestratorModelProbe(undefined, codexOrchestratorHome),
   });
-  const attention = await createOrchestratorAttention(stateDirectory, { registry, bindings: orchestratorStore, coordination: observedCoordination, transcripts, inbox: notificationInbox });
+  const strigoiAdmission = new StrigoiAdmission(orchestratorStore.strigoi, orchestratorStore, registry);
+  const attention = await createOrchestratorAttention(stateDirectory, { registry, bindings: orchestratorStore, coordination: observedCoordination, transcripts, inbox: notificationInbox, strigoi: strigoiAdmission });
   const orchestrators = new OrchestratorManager(
     registry,
     orchestratorStore,
@@ -309,6 +309,7 @@ export async function runBroker(
     (binding) => attention.bindingRemoved(binding).then(() => orchestratorLiveness.bindingRemoved(binding)),
   );
   const notificationFeed = composeOrchestratorNotificationFeed({
+    strigoi: strigoiAdmission,
     attention,
     inbox: notificationInbox,
     noticeFiles: new OrchestratorNoticeFiles(stateDirectory),
@@ -320,7 +321,7 @@ export async function runBroker(
   const instructions = new InstructionQueue(registry, orchestratorStore, observeInstructionRepository(activityInstructionStore(instructionStore, activity, (id) => {
     try { return registry.get(id); } catch { return undefined; }
   }, (record, worker) => nativeCapture.captureInstruction(record, worker)), (record) => notificationFeed.observeInstruction(record)),
-  (record) => (apply) => attention.admitWake(record, apply));
+  (record) => (apply) => attention.admitWake(record, apply), strigoiAdmission);
   instructions.start();
   await instructions.recoverLaunchInstructions(async (id) => {
     const ledger = await transcripts.readCompletionLedger(id);
@@ -344,6 +345,7 @@ export async function runBroker(
     transcripts,
     workerPreferences,
     {
+      strigoi: strigoiAdmission,
       audit: journal,
       notifications: notificationInbox,
       providerPermissions,
@@ -355,21 +357,9 @@ export async function runBroker(
       modalPolicy: modalAnswerPolicy,
     },
   );
-  // Policy for orchestrator-created peers lives beside agent control; the manager only launches.
-  const orchestratorPeers = new OrchestratorPeerService({
-    registry,
-    bindings: orchestratorStore,
-    manager: orchestrators,
-    instructions,
-    audit: journal,
-  });
-  const workerControl = new WorkerControlService({
-    coordination: workerCoordination.service,
-    credentials: workerLeaseCredentials,
-    registry,
-    orchestrators: orchestratorStore,
-    instructions,
-    modalPolicy: modalAnswerPolicy,
+  const { orchestratorPeers, workerControl, workflows } = composeOrchestratorMutationServices({
+    workflowStore: new WorkflowStore(stateDirectory), registry, orchestratorStore, orchestrators, instructions, journal,
+    coordination: workerCoordination.service, workerLeaseCredentials, modalAnswerPolicy, strigoiAdmission,
   });
   // The same custodian the control service uses, so a handed-off lease is immediately usable by
   // the orchestrator that received it rather than reporting OWNERSHIP_LOST on its next call.
@@ -387,12 +377,6 @@ export async function runBroker(
     instructions,
     undefined,
     workerLeaseCredentials,
-  );
-  const workflows = new WorkflowService(
-    registry,
-    orchestratorStore,
-    new WorkflowStore(stateDirectory),
-    instructions,
   );
   // Nothing durable is composed here on purpose: an nvim address only means anything while the
   // nvim that owns the pane it was derived from is still running, which a restarted broker cannot

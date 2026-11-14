@@ -1,3 +1,4 @@
+import type { StrigoiAdmission } from "../orchestration/strigoi-admission.js";
 import type { InstructionRecord } from "../domain/instruction.js";
 import { OrchestratorAttentionScheduling } from "./orchestrator-attention-scheduling.js";
 import type { OrchestratorAttentionControlPlane } from "../orchestration/orchestrator-attention-control.js";
@@ -20,6 +21,7 @@ import {
 } from "./orchestrator-notification-producer.js";
 
 export interface OrchestratorNotificationFeedOptions {
+  strigoi?: StrigoiAdmission;
   /** Loaded before this is called; the feed never loads it. */
   inbox: NotificationInboxPort;
   noticeFiles: NoticeFilePort;
@@ -68,6 +70,7 @@ export function composeOrchestratorNotificationFeed(
   let delivery: OrchestratorNotificationDelivery | undefined;
   let scheduling: OrchestratorAttentionScheduling | undefined;
   const control = new OrchestratorNotificationControlPlane({
+    ...(options.strigoi === undefined ? {} : { strigoi: options.strigoi }),
     inbox: options.inbox,
     bindings: options.bindings,
     registry: options.registry,

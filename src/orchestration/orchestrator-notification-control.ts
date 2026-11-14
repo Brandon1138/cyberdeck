@@ -1,3 +1,4 @@
+import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
 import { z } from "zod";
 import { AttentionError } from "../domain/orchestrator-attention.js";
 import type { OrchestratorAttentionControlPlane, AttentionReadPage } from "./orchestrator-attention-control.js";
@@ -85,6 +86,7 @@ export class OrchestratorNotificationControlError extends Error {
 }
 
 export interface OrchestratorNotificationControlOptions {
+  strigoi?: StrigoiAdmission;
   inbox: NotificationInboxPort;
   bindings: OrchestratorBindingReader;
   registry: SessionLookupPort & Pick<WorkerTruthQueryPort, "waitForWorkerResults">;
@@ -106,59 +108,63 @@ export class OrchestratorNotificationControlPlane {
 
   async read(input: z.input<typeof AgentNotificationsReadParamsSchema>): Promise<NotificationsReadResult> {
     const request = AgentNotificationsReadParamsSchema.parse(input);
-    const binding = await this.requireBinding(request.actorSessionId);
-    const controllerId = orchestratorController(binding).controllerId;
-    const { inbox } = this.options;
-    if (request.attentionEpoch !== undefined && this.options.attention === undefined) {
-      throw new AttentionError("METHOD_NOT_FOUND", "Attention state is unavailable; no receipt was acknowledged");
-    }
-    if (request.attentionReceiptId !== undefined) {
-      const ids = await this.options.attention!.acknowledge(request.actorSessionId,
-        request.attentionEpoch!, request.attentionReceiptId);
-      await inbox.acknowledgeIds(controllerId, ids);
-    } else if (request.acknowledgeThrough !== undefined) {
-      await inbox.acknowledgeThrough(controllerId, request.acknowledgeThrough);
-    }
-    const page = inbox.listPending(controllerId, request.cursor, request.limit, {
-      ...(request.kinds === undefined ? {} : { kinds: request.kinds }),
-      ...(request.severities === undefined ? {} : { severities: request.severities }),
+    return admitted(this.options.strigoi, request.actorSessionId, async () => {
+      const binding = await this.requireBinding(request.actorSessionId);
+      const controllerId = orchestratorController(binding).controllerId;
+      const { inbox } = this.options;
+      if (request.attentionEpoch !== undefined && this.options.attention === undefined) {
+        throw new AttentionError("METHOD_NOT_FOUND", "Attention state is unavailable; no receipt was acknowledged");
+      }
+      if (request.attentionReceiptId !== undefined) {
+        const ids = await this.options.attention!.acknowledge(request.actorSessionId,
+          request.attentionEpoch!, request.attentionReceiptId);
+        await inbox.acknowledgeIds(controllerId, ids);
+      } else if (request.acknowledgeThrough !== undefined) {
+        await inbox.acknowledgeThrough(controllerId, request.acknowledgeThrough);
+      }
+      const page = inbox.listPending(controllerId, request.cursor, request.limit, {
+        ...(request.kinds === undefined ? {} : { kinds: request.kinds }),
+        ...(request.severities === undefined ? {} : { severities: request.severities }),
+      });
+      const notifications: DrainedNotification[] = [];
+      for (const record of page) {
+        if (!this.readable(binding, record.sessionId)) continue;
+        const result = record.kind === "settled" && record.completionTarget !== undefined
+          ? await this.embedResult(record.sessionId, record.completionTarget, request.maxResultChars)
+          : undefined;
+        notifications.push(result === undefined ? record : { ...record, result });
+      }
+      const attention = request.attentionEpoch === undefined ? undefined
+        : await this.options.attention!.readPage(request.actorSessionId, request.attentionEpoch,
+          notifications.map((record) => record.id), request.maxResultChars);
+      return {
+        notifications,
+        // The cursor advances over the whole page, filtered records included: a record a peer may
+        // not read is still acknowledged by its position, or the page would never move past it.
+        nextCursor: page.at(-1)?.cursor ?? request.cursor,
+        pending: inbox.pendingCount(controllerId),
+        dropped: inbox.dropped(controllerId).sinceAcknowledged,
+        policy: inbox.policy(controllerId),
+        ...(attention === undefined ? {} : { attention }),
+      };
     });
-    const notifications: DrainedNotification[] = [];
-    for (const record of page) {
-      if (!this.readable(binding, record.sessionId)) continue;
-      const result = record.kind === "settled" && record.completionTarget !== undefined
-        ? await this.embedResult(record.sessionId, record.completionTarget, request.maxResultChars)
-        : undefined;
-      notifications.push(result === undefined ? record : { ...record, result });
-    }
-    const attention = request.attentionEpoch === undefined ? undefined
-      : await this.options.attention!.readPage(request.actorSessionId, request.attentionEpoch,
-        notifications.map((record) => record.id), request.maxResultChars);
-    return {
-      notifications,
-      // The cursor advances over the whole page, filtered records included: a record a peer may
-      // not read is still acknowledged by its position, or the page would never move past it.
-      nextCursor: page.at(-1)?.cursor ?? request.cursor,
-      pending: inbox.pendingCount(controllerId),
-      dropped: inbox.dropped(controllerId).sinceAcknowledged,
-      policy: inbox.policy(controllerId),
-      ...(attention === undefined ? {} : { attention }),
-    };
   }
 
   async configure(
     input: z.input<typeof AgentNotificationsConfigureParamsSchema>,
   ): Promise<{ policy: NotificationPolicy }> {
     const request = AgentNotificationsConfigureParamsSchema.parse(input);
-    const binding = await this.requireBinding(request.actorSessionId);
-    const controllerId = orchestratorController(binding).controllerId;
-    const current = this.options.inbox.policy(controllerId);
-    const patch = Object.fromEntries(
-      Object.entries(request.policy).filter(([, value]) => value !== undefined),
-    );
-    if (Object.keys(patch).length === 0) return { policy: current };
-    const merged = NotificationPolicySchema.parse({ ...current, ...patch });
-    return { policy: await this.options.inbox.setPolicy(controllerId, merged) };
+    return admitted(this.options.strigoi, request.actorSessionId, async () => {
+      const binding = await this.requireBinding(request.actorSessionId);
+      const controllerId = orchestratorController(binding).controllerId;
+      const current = this.options.inbox.policy(controllerId);
+      const patch = Object.fromEntries(
+        Object.entries(request.policy).filter(([, value]) => value !== undefined),
+      );
+      if (Object.keys(patch).length === 0) return { policy: current };
+      const merged = NotificationPolicySchema.parse({ ...current, ...patch });
+      return { policy: await this.options.inbox.setPolicy(controllerId, merged) };
+    });
   }
 
   /**
@@ -169,10 +175,12 @@ export class OrchestratorNotificationControlPlane {
     input: z.input<typeof AgentNotificationsNoticeParamsSchema>,
   ): Promise<{ notice?: Notice & { text: string } }> {
     const request = AgentNotificationsNoticeParamsSchema.parse(input);
-    const binding = await this.options.bindings.findBySessionId(request.actorSessionId);
-    if (binding === undefined || this.options.delivery === undefined) return {};
-    const delivered = await this.options.delivery.notice(orchestratorController(binding).controllerId);
-    return delivered === undefined ? {} : { notice: { ...delivered.notice, text: delivered.text } };
+    return admitted(this.options.strigoi, request.actorSessionId, async () => {
+      const binding = await this.options.bindings.findBySessionId(request.actorSessionId);
+      if (binding === undefined || this.options.delivery === undefined) return {};
+      const delivered = await this.options.delivery.notice(orchestratorController(binding).controllerId);
+      return delivered === undefined ? {} : { notice: { ...delivered.notice, text: delivered.text } };
+    });
   }
 
   /** The key a wait acknowledges when it delivers a completed target. */

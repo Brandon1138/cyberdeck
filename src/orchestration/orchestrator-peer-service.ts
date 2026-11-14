@@ -1,3 +1,4 @@
+import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows, type CyberdeckCapability } from "../domain/capability.js";
@@ -95,6 +96,7 @@ export type OrchestratorCreateResult =
   };
 
 export interface OrchestratorPeerServiceDeps {
+  strigoi?: StrigoiAdmission;
   registry: SessionLookupPort;
   bindings: OrchestratorBindingReader & { list(): Promise<OrchestratorBinding[]> };
   manager: {
@@ -135,11 +137,11 @@ export class OrchestratorPeerService {
   async create(input: AgentCreateOrchestratorParams): Promise<OrchestratorCreateResult> {
     const request = AgentCreateOrchestratorParamsSchema.parse(input);
     const previous = this.inFlight.get(request.actorSessionId) ?? Promise.resolve();
-    const run = previous.catch(() => undefined).then(async () => {
+    const run = previous.catch(() => undefined).then(() => admitted(this.deps.strigoi, request.actorSessionId, async () => {
       const replayed = await this.replay(request);
       if (replayed !== undefined) return replayed;
       return this.decide(request);
-    });
+    }));
     this.inFlight.set(request.actorSessionId, run);
     try {
       return await run;
@@ -214,8 +216,8 @@ export class OrchestratorPeerService {
       return refusal;
     }
 
-    const binding = (await this.deps.bindings.findBySessionId(actor))!;
-    const capabilities = peerGrantCapabilities(binding.grant.capabilities);
+    let binding = (await this.deps.bindings.findBySessionId(actor))!;
+    let capabilities = peerGrantCapabilities(binding.grant.capabilities);
     const depth = (binding.createdBy?.depth ?? 0) + 1;
     const approval = request.approval!;
     if (request.brief !== undefined && this.deps.instructions === undefined) {
@@ -239,6 +241,11 @@ export class OrchestratorPeerService {
       depth,
       briefRequested: request.brief !== undefined,
     });
+
+    const currentRefusal = await this.admission(request);
+    if (currentRefusal !== undefined) return currentRefusal;
+    binding = (await this.deps.bindings.findBySessionId(actor))!;
+    capabilities = peerGrantCapabilities(binding.grant.capabilities);
 
     let created: OrchestratorManagerResult;
     let preparedBrief: InstructionRecord | undefined;
@@ -304,9 +311,12 @@ export class OrchestratorPeerService {
       warnings,
     };
     this.record(request, result, instructionId);
-    if (startup?.native === false) await this.deps.instructions!.flush(created.session.id).catch((error) => {
-      warnings.push(`Initial queue flush failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    if (startup?.native === false) {
+      const flush = () => this.deps.instructions!.flush(created.session.id).catch((error) => {
+        warnings.push(`Initial queue flush failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      if (!this.deps.strigoi?.deferDelivery(flush)) await flush();
+    }
     result.brief = instructionId === undefined ? { delivery: "not-requested" }
       : await this.briefState(created.session.id, instructionId);
     try {

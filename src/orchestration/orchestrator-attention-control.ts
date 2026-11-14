@@ -1,3 +1,4 @@
+import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows, type CyberdeckCapability } from "../domain/capability.js";
@@ -30,6 +31,7 @@ export const AgentAttentionCancelParamsSchema = z.object({
 }).strict();
 
 export interface OrchestratorAttentionOptions extends AttentionSourceOptions {
+  strigoi?: StrigoiAdmission;
   store: AttentionStorePort;
   bindings: OrchestratorBindingDirectory;
   inbox: Pick<NotificationInboxPort, "policy">;
@@ -93,71 +95,75 @@ export class OrchestratorAttentionControlPlane {
 
   async arm(input: z.input<typeof AgentAttentionArmParamsSchema>): Promise<OrchestratorAttention> {
     const request = AgentAttentionArmParamsSchema.parse(input);
-    const binding = await this.requireBinding(request.actorSessionId, ATTENTION_TOOL_CAPABILITIES.cyberdeck_attention_arm);
-    const controllerId = orchestratorController(binding).controllerId;
-    const { actorSessionId, mutationId, previousEpoch, ...statement } = request;
-    const requestHash = attentionDigest(request);
-    const record = await this.options.store.update(controllerId, async (current) => {
-      await this.revalidate(binding, "thread.enqueue");
-      if (current?.armMutationId === mutationId) {
-        if (current.armRequestHash !== requestHash) throw new AttentionError("MUTATION_ID_CONFLICT", "Arm mutation ID reused with another request");
-        return current; // A cancelled request stays cancelled even after a lost arm response.
-      }
-      if (current !== undefined && current.epoch !== previousEpoch) {
-        // Only the current authorized controller reaches this discovery path. Keep replacement CAS explicit.
-        throw new AttentionError("ATTENTION_ALREADY_ARMED",
-          `Current attention epoch=${current.epoch} status=${current.status}. Pass this previousEpoch to replace the prior wait, including a cancelled wait`);
-      }
-      if (previousEpoch !== undefined && current?.epoch !== previousEpoch) this.stale();
-      const authorities = statement.targets.map((target) => {
-        const worker = this.options.registry.get(target.sessionId);
-        if (worker.kind === "orchestrator" || !grantAllows(binding.grant, "thread.read", worker)
-          || !grantAllows(binding.grant, "thread.enqueue", worker)) {
-          throw new AttentionError("CAPABILITY_DENIED", "Wait target is outside the worker grant");
+    return admitted(this.options.strigoi, request.actorSessionId, async () => {
+      const binding = await this.requireBinding(request.actorSessionId, ATTENTION_TOOL_CAPABILITIES.cyberdeck_attention_arm);
+      const controllerId = orchestratorController(binding).controllerId;
+      const { actorSessionId, mutationId, previousEpoch, ...statement } = request;
+      const requestHash = attentionDigest(request);
+      const record = await this.options.store.update(controllerId, async (current) => {
+        await this.revalidate(binding, "thread.enqueue");
+        if (current?.armMutationId === mutationId) {
+          if (current.armRequestHash !== requestHash) throw new AttentionError("MUTATION_ID_CONFLICT", "Arm mutation ID reused with another request");
+          return current; // A cancelled request stays cancelled even after a lost arm response.
         }
-        const subject = this.options.coordination.getSubject(target.sessionId);
-        if (subject?.lease.state !== "active" || subject.lease.controller?.controllerId !== controllerId) {
-          throw new AttentionError("OWNERSHIP_LOST", "Wait target is not currently controlled by this orchestrator");
+        if (current !== undefined && current.epoch !== previousEpoch) {
+          // Only the current authorized controller reaches this discovery path. Keep replacement CAS explicit.
+          throw new AttentionError("ATTENTION_ALREADY_ARMED",
+            `Current attention epoch=${current.epoch} status=${current.status}. Pass this previousEpoch to replace the prior wait, including a cancelled wait`);
         }
-        return { sessionId: target.sessionId, leaseVersion: subject.lease.version, cwd: worker.cwd };
+        if (previousEpoch !== undefined && current?.epoch !== previousEpoch) this.stale();
+        const authorities = statement.targets.map((target) => {
+          const worker = this.options.registry.get(target.sessionId);
+          if (worker.kind === "orchestrator" || !grantAllows(binding.grant, "thread.read", worker)
+            || !grantAllows(binding.grant, "thread.enqueue", worker)) {
+            throw new AttentionError("CAPABILITY_DENIED", "Wait target is outside the worker grant");
+          }
+          const subject = this.options.coordination.getSubject(target.sessionId);
+          if (subject?.lease.state !== "active" || subject.lease.controller?.controllerId !== controllerId) {
+            throw new AttentionError("OWNERSHIP_LOST", "Wait target is not currently controlled by this orchestrator");
+          }
+          return { sessionId: target.sessionId, leaseVersion: subject.lease.version, cwd: worker.cwd };
+        });
+        const at = this.now();
+        const actorLedger = await this.options.transcripts.readCompletionLedger(actorSessionId);
+        let next: OrchestratorAttention = {
+          schemaVersion: 1, controllerId, actorSessionId, bindingKey: binding.key,
+          epoch: randomUUID(), armMutationId: mutationId, armRequestHash: requestHash, statement, authorities,
+          status: "armed", recovery: "ready", armedAt: at, updatedAt: at, actorTurnFloor: actorLedger.completedTurns, snapshotId: attentionDigest({}),
+          coverage: { captured: inheritedCoverage(current, statement, "captured"), evaluated: [], noticed: [], submitted: [],
+            consumed: inheritedCoverage(current, statement, "consumed") },
+          gaps: [], readSequence: 0, receipts: [],
+          ...(current?.lastWake === undefined ? {} : { lastWake: current.lastWake }),
+        };
+        next = await this.refresh(next);
+        await this.revalidate(binding, "thread.enqueue");
+        for (const authority of authorities) {
+          const subject = this.options.coordination.getSubject(authority.sessionId);
+          if (subject?.lease.state !== "active" || subject.lease.controller?.controllerId !== controllerId
+            || subject.lease.version !== authority.leaseVersion) throw new AttentionError("OWNERSHIP_LOST", "Wait target changed authority during arm");
+        }
+        return next;
       });
-      const at = this.now();
-      const actorLedger = await this.options.transcripts.readCompletionLedger(actorSessionId);
-      let next: OrchestratorAttention = {
-        schemaVersion: 1, controllerId, actorSessionId, bindingKey: binding.key,
-        epoch: randomUUID(), armMutationId: mutationId, armRequestHash: requestHash, statement, authorities,
-        status: "armed", recovery: "ready", armedAt: at, updatedAt: at, actorTurnFloor: actorLedger.completedTurns, snapshotId: attentionDigest({}),
-        coverage: { captured: inheritedCoverage(current, statement, "captured"), evaluated: [], noticed: [], submitted: [],
-          consumed: inheritedCoverage(current, statement, "consumed") },
-        gaps: [], readSequence: 0, receipts: [],
-        ...(current?.lastWake === undefined ? {} : { lastWake: current.lastWake }),
-      };
-      next = await this.refresh(next);
-      await this.revalidate(binding, "thread.enqueue");
-      for (const authority of authorities) {
-        const subject = this.options.coordination.getSubject(authority.sessionId);
-        if (subject?.lease.state !== "active" || subject.lease.controller?.controllerId !== controllerId
-          || subject.lease.version !== authority.leaseVersion) throw new AttentionError("OWNERSHIP_LOST", "Wait target changed authority during arm");
-      }
-      return next;
+      this.remember(record!);
+      // Register, then take a second source cut. A report committed during the first write is retained.
+      const reconciled = (await this.reconcile(controllerId, record!.epoch))!;
+      if (reconciled.epoch !== record!.epoch) this.stale();
+      return reconciled;
     });
-    this.remember(record!);
-    // Register, then take a second source cut. A report committed during the first write is retained.
-    const reconciled = (await this.reconcile(controllerId, record!.epoch))!;
-    if (reconciled.epoch !== record!.epoch) this.stale();
-    return reconciled;
   }
 
   async cancel(input: z.input<typeof AgentAttentionCancelParamsSchema>): Promise<OrchestratorAttention> {
     const request = AgentAttentionCancelParamsSchema.parse(input);
-    const binding = await this.requireBinding(request.actorSessionId, ATTENTION_TOOL_CAPABILITIES.cyberdeck_attention_cancel);
-    const record = await this.options.store.update(orchestratorController(binding).controllerId, async (current) => {
-      await this.revalidate(binding, "thread.enqueue");
-      this.requireEpoch(current, binding, request.epoch);
-      return current!.status === "cancelled" ? current : this.cancelled(current!, request.reason);
+    return admitted(this.options.strigoi, request.actorSessionId, async () => {
+      const binding = await this.requireBinding(request.actorSessionId, ATTENTION_TOOL_CAPABILITIES.cyberdeck_attention_cancel);
+      const record = await this.options.store.update(orchestratorController(binding).controllerId, async (current) => {
+        await this.revalidate(binding, "thread.enqueue");
+        this.requireEpoch(current, binding, request.epoch);
+        return current!.status === "cancelled" ? current : this.cancelled(current!, request.reason);
+      });
+      this.remember(record!);
+      return record!;
     });
-    this.remember(record!);
-    return record!;
   }
 
   /** Called by the existing manager's binding lifecycle; no second authority derivation. */
@@ -264,67 +270,71 @@ export class OrchestratorAttentionControlPlane {
   }
 
   async readPage(actorSessionId: string, epoch: string, notificationIds: string[], maxChars: number): Promise<AttentionReadPage> {
-    const binding = await this.requireBinding(actorSessionId, ATTENTION_TOOL_CAPABILITIES.cyberdeck_notifications_read);
-    const controllerId = orchestratorController(binding).controllerId;
-    await this.reconcile(controllerId, epoch);
-    let page: AttentionReadPage | undefined;
-    await this.options.store.update(controllerId, async (current) => {
-      this.requireEpoch(current, binding, epoch);
-      if (current!.status !== "armed") throw new AttentionError("ATTENTION_CANCELLED", "This wait has been cancelled");
-      await this.revalidate(binding, "thread.read");
-      this.requireReadable(binding, current!);
-      const sources = await captureAttentionSources(this.options, current!, maxChars);
-      await this.revalidate(binding, "thread.read");
-      this.requireReadable(binding, current!);
-      const id = randomUUID();
-      page = { epoch, receiptId: id, snapshotId: sources.snapshotId, statement: current!.statement,
-        recovery: current!.recovery, captured: sources.captured, consumed: current!.coverage.consumed,
-        workers: sources.workers, gaps: sources.gaps,
-        ...(current!.decision === undefined ? {} : { decision: current!.decision }),
-        ...(current!.pendingIntent === undefined ? {} : { pendingIntent: current!.pendingIntent }),
-        ...(current!.lastWake === undefined ? {} : { lastWake: current!.lastWake }) };
-      return { ...current!, snapshotId: sources.snapshotId, gaps: sources.gaps,
-        coverage: { ...current!.coverage, captured: sources.captured }, updatedAt: this.now(),
-        readSequence: current!.readSequence + 1,
-        receipts: [...current!.receipts, { id, epoch, sequence: current!.readSequence + 1,
-          coverage: sources.received, notificationIds, createdAt: this.now() }].slice(-ATTENTION_LIMITS.receipts) };
+    return admitted(this.options.strigoi, actorSessionId, async () => {
+      const binding = await this.requireBinding(actorSessionId, ATTENTION_TOOL_CAPABILITIES.cyberdeck_notifications_read);
+      const controllerId = orchestratorController(binding).controllerId;
+      await this.reconcile(controllerId, epoch);
+      let page: AttentionReadPage | undefined;
+      await this.options.store.update(controllerId, async (current) => {
+        this.requireEpoch(current, binding, epoch);
+        if (current!.status !== "armed") throw new AttentionError("ATTENTION_CANCELLED", "This wait has been cancelled");
+        await this.revalidate(binding, "thread.read");
+        this.requireReadable(binding, current!);
+        const sources = await captureAttentionSources(this.options, current!, maxChars);
+        await this.revalidate(binding, "thread.read");
+        this.requireReadable(binding, current!);
+        const id = randomUUID();
+        page = { epoch, receiptId: id, snapshotId: sources.snapshotId, statement: current!.statement,
+          recovery: current!.recovery, captured: sources.captured, consumed: current!.coverage.consumed,
+          workers: sources.workers, gaps: sources.gaps,
+          ...(current!.decision === undefined ? {} : { decision: current!.decision }),
+          ...(current!.pendingIntent === undefined ? {} : { pendingIntent: current!.pendingIntent }),
+          ...(current!.lastWake === undefined ? {} : { lastWake: current!.lastWake }) };
+        return { ...current!, snapshotId: sources.snapshotId, gaps: sources.gaps,
+          coverage: { ...current!.coverage, captured: sources.captured }, updatedAt: this.now(),
+          readSequence: current!.readSequence + 1,
+          receipts: [...current!.receipts, { id, epoch, sequence: current!.readSequence + 1,
+            coverage: sources.received, notificationIds, createdAt: this.now() }].slice(-ATTENTION_LIMITS.receipts) };
+      });
+      // Persistence is an async authority boundary, not proof that the actor received the page.
+      // Read through the store's serialization so a queued cancel/re-arm cannot return stale source data.
+      await this.options.store.update(controllerId, async (current) => {
+        await this.revalidate(binding, "thread.read");
+        this.requireEpoch(current, binding, epoch);
+        if (current!.status !== "armed") throw new AttentionError("ATTENTION_CANCELLED", "This wait has been cancelled");
+        this.requireReadable(binding, current!);
+        this.remember(current!);
+        return current;
+      });
+      return page!;
     });
-    // Persistence is an async authority boundary, not proof that the actor received the page.
-    // Read through the store's serialization so a queued cancel/re-arm cannot return stale source data.
-    await this.options.store.update(controllerId, async (current) => {
-      await this.revalidate(binding, "thread.read");
-      this.requireEpoch(current, binding, epoch);
-      if (current!.status !== "armed") throw new AttentionError("ATTENTION_CANCELLED", "This wait has been cancelled");
-      this.requireReadable(binding, current!);
-      this.remember(current!);
-      return current;
-    });
-    return page!;
   }
 
   /** Bank consumption first. A retry after a crash replays the same selective inbox acknowledgement. */
   async acknowledge(actorSessionId: string, epoch: string, receiptId: string): Promise<string[]> {
-    const binding = await this.requireBinding(actorSessionId, ATTENTION_TOOL_CAPABILITIES.cyberdeck_notifications_read);
-    let notificationIds: string[] = [];
-    const record = await this.options.store.update(orchestratorController(binding).controllerId, async (current) => {
-      this.requireEpoch(current, binding, epoch);
-      if (current!.status !== "armed") throw new AttentionError("ATTENTION_CANCELLED", "This wait has been cancelled");
-      await this.revalidate(binding, "thread.read");
-      this.requireReadable(binding, current!);
-      const receipt = current!.receipts.find((entry) => entry.id === receiptId);
-      if (receipt === undefined) throw new AttentionError("STALE_ATTENTION_RECEIPT", "Read receipt is unknown or no longer retained; read again");
-      notificationIds = receipt.notificationIds;
-      if (receipt.acknowledgedAt !== undefined) return current;
-      const at = this.now();
-      const newer = receipt.sequence > (current!.consumption?.sequence ?? 0);
-      return { ...current!, updatedAt: at,
-        coverage: { ...current!.coverage, consumed: mergeConsumed(current!.coverage.consumed, receipt.coverage, newer) },
-        receipts: current!.receipts.map((entry) => entry.id === receiptId ? { ...entry, acknowledgedAt: at } : entry),
-        ...(newer ? { consumption: { receiptId, sequence: receipt.sequence, coverage: receipt.coverage, at } } : {}),
-      };
+    return admitted(this.options.strigoi, actorSessionId, async () => {
+      const binding = await this.requireBinding(actorSessionId, ATTENTION_TOOL_CAPABILITIES.cyberdeck_notifications_read);
+      let notificationIds: string[] = [];
+      const record = await this.options.store.update(orchestratorController(binding).controllerId, async (current) => {
+        this.requireEpoch(current, binding, epoch);
+        if (current!.status !== "armed") throw new AttentionError("ATTENTION_CANCELLED", "This wait has been cancelled");
+        await this.revalidate(binding, "thread.read");
+        this.requireReadable(binding, current!);
+        const receipt = current!.receipts.find((entry) => entry.id === receiptId);
+        if (receipt === undefined) throw new AttentionError("STALE_ATTENTION_RECEIPT", "Read receipt is unknown or no longer retained; read again");
+        notificationIds = receipt.notificationIds;
+        if (receipt.acknowledgedAt !== undefined) return current;
+        const at = this.now();
+        const newer = receipt.sequence > (current!.consumption?.sequence ?? 0);
+        return { ...current!, updatedAt: at,
+          coverage: { ...current!.coverage, consumed: mergeConsumed(current!.coverage.consumed, receipt.coverage, newer) },
+          receipts: current!.receipts.map((entry) => entry.id === receiptId ? { ...entry, acknowledgedAt: at } : entry),
+          ...(newer ? { consumption: { receiptId, sequence: receipt.sequence, coverage: receipt.coverage, at } } : {}),
+        };
+      });
+      this.remember(record!);
+      return notificationIds;
     });
-    this.remember(record!);
-    return notificationIds;
   }
 
   async flush(): Promise<void> { await Promise.all(this.scheduled.values()); }
