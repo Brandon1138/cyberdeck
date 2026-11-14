@@ -137,6 +137,95 @@ describe("Strigoi production worker recovery", () => {
     expect(await f.store.get(armed.controllerId)).toMatchObject({ status: "cancelled", actorSessionId: ACTOR, epoch: armed.epoch });
   });
 
+  it.each([
+    { pause: "ledger", providerCancel: false }, { pause: "source", providerCancel: false }, { pause: "commit-stop", providerCancel: false },
+    { pause: "source", providerCancel: true }, { pause: "commit-stop", providerCancel: true },
+  ])("revalidates pre-seal refresh at $pause across cutover (provider cancellation: $providerCancel)", async ({ pause, providerCancel }) => {
+    const f = await fixture(); const armed = await f.attention.arm(f.request());
+    f.attention.stop(); await f.attention.flush();
+    await f.mutate({ transition: { id: f.transitionId, expectedIncarnation: 1,
+      predecessor: { sessionId: ACTOR, incarnation: 1, generation: 1 }, phase: "checkpointing", reason: "renew", attempts: 0 } });
+    const entered = deferred(), release = deferred();
+    if (pause === "commit-stop") {
+      f.stopped.add(ACTOR);
+      const update = f.store.update.bind(f.store);
+      vi.spyOn(f.store, "update").mockImplementationOnce((id, change, admit) => update(id, async (current) => {
+        const next = await change(current); entered.resolve(); await release.promise; return next;
+      }, admit));
+    } else {
+      const read = f.transcripts.readCompletionLedger.bind(f.transcripts);
+      let paused = false;
+      vi.spyOn(f.transcripts, "readCompletionLedger").mockImplementation(async (id) => {
+        if (!paused && id === (pause === "ledger" ? ACTOR : WORKER)) {
+          paused = true; entered.resolve(); await release.promise;
+        }
+        return read(id);
+      });
+    }
+    const refresh = f.attention.reconcile(armed.controllerId);
+    await entered.promise;
+    // seal() reads the attention store, whose refresh is deliberately still in flight.
+    // Use an already copied immutable packet and commit through the actual repository.
+    const packet = await f.packets.write({ sessionId: ACTOR, incarnation: 1, generation: 1 }, "race", [], f.now());
+    const state = await f.repository.read();
+    await f.mutate({ transition: { ...state.transition!, successor: nextIdentity, phase: "sealed", packet } });
+    await f.mutate({ activeBinding: f.successor, incarnation: 2, activeGeneration: 1, latestPacket: packet,
+      transition: { ...state.transition!, successor: nextIdentity, phase: "committed", packet } });
+    await f.mutate({ transition: { ...(await f.repository.read()).transition!, phase: "reconciling" } });
+    if (providerCancel) await f.transcripts.commitProviderTurns({ sessionId: ACTOR, provider: "codex", turnNumber: 1,
+      turns: [{ providerTurnId: "cancel-during-cutover", providerOccurredAt: f.now(), text: "Cancelled",
+        transport: "provider-native", data: { outcome: "cancelled" } }] });
+    release.resolve();
+    expect(await refresh).toMatchObject({ status: providerCancel ? "cancelled" : "armed", epoch: armed.epoch });
+    await f.attention.resumeForSuccessor(ACTOR, nextIdentity, f.transitionId);
+    expect(await f.store.get(armed.controllerId)).toMatchObject(providerCancel
+      ? { status: "cancelled", actorSessionId: ACTOR, epoch: armed.epoch }
+      : { status: "armed", actorSessionId: NEXT });
+    expect(f.errors).toEqual([]);
+  });
+
+  it.each(["explicit", "provider"])("preserves genuine %s cancellation racing a pre-seal refresh", async (mode) => {
+    const f = await fixture(); const armed = await f.attention.arm(f.request());
+    f.attention.stop(); await f.attention.flush();
+    const read = f.transcripts.readCompletionLedger.bind(f.transcripts), entered = deferred(), release = deferred();
+    vi.spyOn(f.transcripts, "readCompletionLedger").mockImplementationOnce(async (id) => {
+      entered.resolve(); await release.promise; return read(id);
+    });
+    const refresh = f.attention.reconcile(armed.controllerId); await entered.promise;
+    const queued = deferred(), update = f.store.update.bind(f.store);
+    if (mode === "explicit") vi.spyOn(f.store, "update").mockImplementationOnce((...args) => {
+      queued.resolve(); return update(...args);
+    });
+    const cancelled = mode === "explicit"
+      ? f.attention.cancel({ actorSessionId: ACTOR, epoch: armed.epoch, reason: "Operator cancelled during refresh" })
+      : f.transcripts.commitProviderTurns({ sessionId: ACTOR, provider: "codex", turnNumber: 1,
+        turns: [{ providerTurnId: "racing-cancel", providerOccurredAt: f.now(), text: "Cancelled", transport: "provider-native", data: { outcome: "cancelled" } }] });
+    if (mode === "provider") await cancelled; else await queued.promise;
+    release.resolve(); await refresh; await cancelled;
+    const packet = await f.seal(); await f.cutover();
+    await expect(f.recovery.reconcile(nextIdentity, packet)).resolves.toEqual([]);
+    expect(await f.store.get(armed.controllerId)).toMatchObject({ status: "cancelled", epoch: armed.epoch, actorSessionId: ACTOR });
+  });
+
+  it("still holds a lease released after sealing outstanding work", async () => {
+    const f = await fixture(); const packet = await f.seal();
+    await f.coordination.release({ mutationId: randomUUID(), actor: f.controller, controller: f.controller,
+      selector: { scope: "single", subjectId: WORKER }, leaseToken: f.tokens.get(WORKER)!, reason: "Operator released outstanding work" });
+    await f.cutover();
+    expect((await f.recovery.reconcile(nextIdentity, packet)).map((h) => h.code)).toContain("worker-ownership-changed");
+  });
+
+  it.each(["working", "failed", "stopped"] as const)("still holds unfinished interruption captured before seal (%s)", async (lifecycle) => {
+    const f = await fixture();
+    await f.coordination.updateLifecycle({ mutationId: randomUUID(), actor: f.controller, controller: f.controller,
+      selector: { scope: "single", subjectId: WORKER }, subjectId: WORKER, leaseToken: f.tokens.get(WORKER)!, lifecycle,
+      reason: "Observed unfinished worker" });
+    f.records.set(WORKER, { ...f.records.get(WORKER)!, exitCode: 1, attentionState: "interrupted" });
+    const packet = await f.seal(); await f.cutover();
+    expect((await f.recovery.reconcile(nextIdentity, packet)).map((h) => h.code)).toContain("worker-interrupted");
+    expect(f.registry.resume).not.toHaveBeenCalled(); expect(f.instructions.enqueue).not.toHaveBeenCalled();
+  });
+
   it("retains interrupted worker results and never re-dispatches or starts its process", async () => {
     const f = await fixture(); const packet = await f.seal(); await f.complete("result before broker death");
     f.records.set(WORKER, { ...f.records.get(WORKER)!, exitCode: 1, attentionState: "interrupted" });

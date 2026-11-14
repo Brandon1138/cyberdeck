@@ -7,12 +7,49 @@ import type { OrchestratorAttentionOptions } from "./orchestrator-attention-cont
 import { admitted } from "./strigoi-admission.js";
 import { captureAttentionSources } from "./orchestrator-attention-source.js";
 
+// Refresh-derived stop/replacement is provisional until the cancellation commit. Explicit
+// cancel() tombstones and provider-turn cancellations never enter this retry path.
+const successionCancellations = new Set([
+  "Orchestrator binding unavailable or replaced", "Orchestrator binding changed during capture",
+  "Orchestrator stopped or cancelled", "Orchestrator scheduling authority lost",
+]);
+export async function updateAttentionRefresh(options: OrchestratorAttentionOptions, controllerId: string,
+  change: Parameters<OrchestratorAttentionOptions["store"]["update"]>[1]): Promise<OrchestratorAttention | undefined> {
+  const retry = Symbol("succession changed before cancellation commit");
+  for (;;) {
+    let cancellation: OrchestratorAttention | undefined;
+    try {
+      return await options.store.update(controllerId, async (current) => {
+        const next = await change(current);
+        if (current?.status === "armed" && next?.status === "cancelled" && next.bindingKey === STRIGOI_KEY
+          && successionCancellations.has(next.cancelReason ?? "")) cancellation = next;
+        return next;
+      }, async (commit) => {
+        if (!cancellation || !options.resident) return commit();
+        if (!options.bindings.withAuthority) throw new Error("STRIGOI_ATTENTION_AUTHORITY_REQUIRED");
+        await options.bindings.withAuthority(async () => {
+          if (await preservesPredecessor(options, cancellation!)) throw retry;
+          await commit();
+        });
+      });
+    } catch (error) {
+      if (error !== retry) throw error;
+      // Release store/canonical serialization before rereading provider cancellation
+      // evidence. A queued explicit cancellation is observed on the next store update.
+    }
+  }
+}
+
+async function preservesPredecessor(options: OrchestratorAttentionOptions, record: OrchestratorAttention): Promise<boolean> {
+  if (record.bindingKey !== STRIGOI_KEY) return false;
+  const transition = (await options.resident?.read())?.transition;
+  return transition?.predecessor?.sessionId === record.actorSessionId
+    && ["sealed", "retiring", "launching", "committed", "adopting", "reconciling"].includes(transition.phase);
+}
+
 /** The live durable record is the snapshot. Packet history can never override a cancel tombstone. */
 export async function successionWait(options: OrchestratorAttentionOptions, record: OrchestratorAttention): Promise<OrchestratorAttention | undefined> {
-  if (record.bindingKey !== STRIGOI_KEY) return undefined;
-  const state = await options.resident?.read(), transition = state?.transition;
-  if (!transition || transition.predecessor?.sessionId !== record.actorSessionId
-    || !["sealed", "retiring", "launching", "committed", "adopting", "reconciling"].includes(transition.phase)) return undefined;
+  if (!await preservesPredecessor(options, record)) return undefined;
   const ledger = await options.transcripts.readCompletionLedger(record.actorSessionId);
   if (ledger.turns.some((turn) => typeof turn.data?.turnNumber === "number"
     && turn.data.turnNumber > record.actorTurnFloor && turn.data.outcome === "cancelled")) {

@@ -82,6 +82,10 @@ export class StrigoiWorkerRecovery implements StrigoiReconciliationParticipant {
         subjects.set(subject.subjectId, subject);
       }
     }
-    return { workers: [...subjects.values()].filter((subject) => subject.subjectKind === "worker"), waits };
+    // Keep every original source in the packet/archive. Only the latest sealed ownership
+    // determines executable obligations: settled history needs no process or lease repair.
+    // Current release/transfer/interruption of an outstanding captured worker still holds.
+    return { workers: [...subjects.values()].filter((subject) => subject.subjectKind === "worker"
+      && subject.lease.state !== "released" && subject.lifecycle !== "done"), waits };
   }
 }

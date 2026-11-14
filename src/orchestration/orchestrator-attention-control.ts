@@ -1,5 +1,5 @@
 import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
-import { resumeAttentionForSuccessor, successionWait } from "./orchestrator-attention-succession.js";
+import { resumeAttentionForSuccessor, successionWait, updateAttentionRefresh } from "./orchestrator-attention-succession.js";
 import type { StrigoiIdentity } from "../domain/strigoi.js";
 import type { StrigoiRepository } from "./strigoi-ports.js";
 import { randomUUID } from "node:crypto";
@@ -192,7 +192,7 @@ export class OrchestratorAttentionControlPlane {
   }
 
   async reconcile(controllerId: string, epoch?: string, notify = true): Promise<OrchestratorAttention | undefined> {
-    const record = await this.options.store.update(controllerId, async (current) => {
+    const record = await updateAttentionRefresh(this.options, controllerId, async (current) => {
       if (current?.status !== "armed" || (epoch !== undefined && current.epoch !== epoch)) return current;
       return this.refresh(current);
     });
@@ -209,7 +209,7 @@ export class OrchestratorAttentionControlPlane {
 
   async schedulingSnapshot(controllerId: string): Promise<{ record: OrchestratorAttention; sources: AttentionSourceSnapshot } | undefined> {
     let snapshot: { record: OrchestratorAttention; sources: AttentionSourceSnapshot } | undefined;
-    await this.options.store.update(controllerId, async (current) => {
+    await updateAttentionRefresh(this.options, controllerId, async (current) => {
       if (current?.status !== "armed") return current;
       const record = await this.refresh(current);
       if (record.status !== "armed" || await successionWait(this.options, record)) return record;
@@ -224,7 +224,7 @@ export class OrchestratorAttentionControlPlane {
 
   /** Every decision application rereads disk and rechecks sources and authority after async I/O. */
   schedulingUpdate(controllerId: string, change: (record: OrchestratorAttention) => OrchestratorAttention): Promise<OrchestratorAttention | undefined> {
-    return this.options.store.update(controllerId, async (current) => {
+    return updateAttentionRefresh(this.options, controllerId, async (current) => {
       if (current === undefined) return current;
       const record = current.status === "armed" ? await this.refresh(current) : current;
       if (record.status !== "armed" || await successionWait(this.options, record)) return record;
