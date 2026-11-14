@@ -1,3 +1,4 @@
+import type { EvidenceReferenceGuard } from "./strigoi-evidence-deletion.js";
 import { join } from "node:path";
 import { InstructionRecordSchema, type InstructionRecord } from "../domain/instruction.js";
 import { ValidatedJournal } from "./validated-journal.js";
@@ -7,7 +8,7 @@ export class InstructionStore {
   readonly path: string;
   private readonly journal: ValidatedJournal<Map<string, InstructionRecord>>;
 
-  constructor(stateDirectory: string, private readonly capture?: (record: InstructionRecord) => Promise<void>) {
+  constructor(stateDirectory: string, private readonly capture?: (record: InstructionRecord) => Promise<void>, private readonly withReferences?: EvidenceReferenceGuard) {
     this.path = join(stateDirectory, "orchestration", "instructions.jsonl");
     // Notification recovery reads this mailbox once per controller. Replaying the entire journal
     // for every read made broker startup exceed its readiness deadline on ordinary history.
@@ -17,8 +18,9 @@ export class InstructionStore {
 
   async put(record: InstructionRecord): Promise<void> {
     const parsed = InstructionRecordSchema.parse(record);
-    await this.journal.append(parsed);
-    await this.capture?.(parsed);
+    const commit = async () => { await this.journal.append(parsed); await this.capture?.(parsed); };
+    if (this.withReferences) await this.withReferences([parsed.actorSessionId, parsed.targetSessionId, ...parsed.senderSessionId ? [parsed.senderSessionId] : []], commit);
+    else await commit();
   }
 
   async list(targetSessionId?: string): Promise<InstructionRecord[]> {

@@ -186,7 +186,8 @@ export class SessionRuntimeAssembly {
   }
 
   /**
-   * Cleanup is deliberately non-throwing: it runs on exit, delete, and failed-launch paths, and a
+   * Cleanup records ordinary failures; continuity refusals on deletion must propagate.
+   * Otherwise it is non-throwing: it runs on exit, delete, and failed-launch paths, and a
    * failure to remove one artifact must be recorded rather than raised so it can never mask the
    * primary outcome that triggered it.
    */
@@ -216,16 +217,23 @@ export class SessionRuntimeAssembly {
       try {
         await transcripts.dropClaudeBinding.call(transcripts, record.id);
       } catch (error) {
+        if (error instanceof Error && error.message.startsWith("STRIGOI_EVIDENCE_")) throw error;
         cleanupFailures.push(error instanceof Error ? error.message : String(error));
       }
     }
     if (reason === "session-deleted" && transcripts?.dropCodexBinding !== undefined) {
       try { await transcripts.dropCodexBinding(record.id); }
-      catch (error) { cleanupFailures.push(error instanceof Error ? error.message : String(error)); }
+      catch (error) {
+        if (error instanceof Error && error.message.startsWith("STRIGOI_EVIDENCE_")) throw error;
+        cleanupFailures.push(error instanceof Error ? error.message : String(error));
+      }
     }
     if (reason === "session-deleted" && transcripts?.dropTurnLedger !== undefined) {
       try { await transcripts.dropTurnLedger(record.id); }
-      catch (error) { cleanupFailures.push(error instanceof Error ? error.message : String(error)); }
+      catch (error) {
+        if (error instanceof Error && error.message.startsWith("STRIGOI_EVIDENCE_")) throw error;
+        cleanupFailures.push(error instanceof Error ? error.message : String(error));
+      }
     }
     for (const message of cleanupFailures) {
       await this.catalog.appendTranscript(

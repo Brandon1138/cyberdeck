@@ -1,3 +1,4 @@
+import type { EvidenceReferenceGuard } from "./strigoi-evidence-deletion.js";
 import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -11,7 +12,7 @@ export class OrchestratorAttentionStore implements AttentionStorePort {
   private readonly tails = new Map<string, Promise<unknown>>();
 
   constructor(stateDirectory: string, private readonly write = writeAtomicPrivateFile,
-    private readonly capture?: (record: OrchestratorAttention) => Promise<void>) {
+    private readonly capture?: (record: OrchestratorAttention) => Promise<void>, private readonly withReferences?: EvidenceReferenceGuard) {
     this.directory = join(stateDirectory, "orchestration", "attention-v1");
   }
 
@@ -45,9 +46,13 @@ export class OrchestratorAttentionStore implements AttentionStorePort {
       const parsed = OrchestratorAttentionSchema.parse(next);
       if (parsed.controllerId !== controllerId) throw new AttentionError("ATTENTION_CORRUPT", "Controller identity mismatch");
       if (JSON.stringify(current) !== JSON.stringify(parsed)) {
-        if (current) await this.capture?.(current);
-        await this.write(this.path(controllerId), `${JSON.stringify(parsed)}\n`);
-        await this.capture?.(parsed);
+        const commit = async () => {
+          if (current) await this.capture?.(current);
+          await this.write(this.path(controllerId), `${JSON.stringify(parsed)}\n`);
+          await this.capture?.(parsed);
+        };
+        if (this.withReferences) await this.withReferences([parsed.actorSessionId, ...parsed.statement.targets.map((t) => t.sessionId)], commit);
+        else await commit();
       }
       return parsed;
     });

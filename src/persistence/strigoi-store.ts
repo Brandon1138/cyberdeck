@@ -1,3 +1,4 @@
+import { assertEvidenceRetainable } from "./strigoi-evidence-deletion.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -49,6 +50,12 @@ export class StrigoiStore implements StrigoiRepository {
       return (await this.load()).pins;
     });
   }
+  confirmMutation(mutationId: string): Promise<void> {
+    return this.enqueue(async () => {
+      if (!(await this.load()).mutations.has(mutationId)) throw new StrigoiStoreError("STRIGOI_MUTATION_CONFLICT", "Unknown resident mutation");
+      try { await syncPrivateFile(this.path); } catch { throw new StrigoiStoreError("STRIGOI_IO_ERROR", "Resident journal sync failed"); }
+    });
+  }
   compareAndSwap(expectedRevision: number, mutationId: string, next: StrigoiState): Promise<StrigoiState> {
     return this.enqueue(async () => {
       const parsed = StrigoiStateSchema.parse(next);
@@ -62,6 +69,9 @@ export class StrigoiStore implements StrigoiRepository {
         return structuredClone(previous.state);
       }
       if (loaded.state.revision !== expectedRevision) throw new StrigoiStoreError("STRIGOI_REVISION_CONFLICT", "Resident revision changed");
+      await assertEvidenceRetainable(this.stateDirectory, [...parsed.retainedSessionIds,
+        parsed.activeBinding?.sessionId, parsed.transition?.predecessor?.sessionId, parsed.transition?.successor?.sessionId]
+        .filter((id): id is string => id !== undefined && !loaded.pins.has(id)));
       validateAdvance(loaded.state, parsed);
       this.checkCollision(parsed, loaded.ordinary);
       try {

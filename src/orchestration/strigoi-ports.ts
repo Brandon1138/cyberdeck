@@ -20,6 +20,8 @@ export interface StrigoiInspection {
 export interface StrigoiRepository {
   read(): Promise<StrigoiState>;
   compareAndSwap(expectedRevision: number, mutationId: string, next: StrigoiState): Promise<StrigoiState>;
+  /** Confirm a visible mutation is durable before replay reports success. */
+  confirmMutation(mutationId: string): Promise<void>;
   retentionPins(): Promise<ReadonlySet<string>>;
 }
 

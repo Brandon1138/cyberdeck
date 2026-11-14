@@ -1,3 +1,4 @@
+import { parseNativeContinuityMessage, type NativeContinuityMessage } from "../../domain/native-continuity-message.js";
 import { readFile, readdir, rm } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { z } from "zod";
@@ -22,7 +23,7 @@ export interface PendingNativeInterval {
 }
 export class ContainerNativeSource {
   constructor(private readonly root: string,
-    private readonly capture?: (sessionId: string, id: string, message: TranscriptMessage) => Promise<void>) {}
+    private readonly capture?: (sessionId: string, id: string, message: NativeContinuityMessage) => Promise<void>) {}
   stateRoot(id: string): string { return join(this.root, "provider-state", z.uuid().parse(id)); }
   bindingPath(id: string): string { return join(this.root, "native-bindings", `${z.uuid().parse(id)}.json`); }
   async dropBinding(id: string): Promise<void> { await rm(this.bindingPath(id), { force: true }); }
@@ -139,7 +140,7 @@ export class ContainerNativeSource {
       end = line.end;
       if (line.text.trim() === "") continue;
       const frame = object(JSON.parse(line.text)), payload = object(frame?.payload);
-      if (frame?.isSidechain === true || frame?.isMeta === true) continue;
+      if (frame?.isSidechain === true) continue;
       if (snapshot.provider === "codex" && frame?.type === "session_meta"
         && (payload?.id !== source.nativeSessionId || payload.cwd !== "/workspace" || payload.originator !== "codex-tui")) {
         throw new NativeSourceError("conflict", "NATIVE_BINDING_CONFLICT");
@@ -147,10 +148,13 @@ export class ContainerNativeSource {
       if (snapshot.provider === "claude" && typeof frame?.sessionId === "string" && frame.sessionId !== source.nativeSessionId) {
         throw new NativeSourceError("conflict", "NATIVE_BINDING_CONFLICT");
       }
+      const evidence = parseNativeContinuityMessage(snapshot.provider, line.text);
+      if (evidence) await this.capture?.(snapshot.id, `${source.path}:${line.offset}`, evidence);
+      if (frame?.isMeta === true) continue;
       model = observedModelParser(snapshot.provider)?.(line.text) ?? model;
       if (snapshot.provider === "codex") budget = { ...budget, ...parseCodexBudgetTelemetryLine(line.text, window) };
       const preview = parseMessage(line.text);
-      if (preview) { await this.capture?.(snapshot.id, `${source.path}:${line.offset}`, preview); messages.push(preview); if (messages.length > 20) messages.shift(); }
+      if (preview) { messages.push(preview); if (messages.length > 20) messages.shift(); }
       // Only Claude's own record of the command, never a tool result that quotes the literal.
       if (snapshot.provider === "claude" && isClaudeClearFrame(frame)) throw new Error("NATIVE_CONVERSATION_CLEARED");
       if (frame?.type === "turn_context" && startedAt === undefined) {

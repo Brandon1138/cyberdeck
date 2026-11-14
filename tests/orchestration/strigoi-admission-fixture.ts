@@ -17,7 +17,7 @@ export function fixture() {
       resident: { name: "strigoi", incarnation: 1 }, provider: "codex", cwd: "/repo", sandbox: "read-only",
       scope: { kind: "fleet" }, grant: { subjectSessionId: actor, capabilities: ["thread.enqueue", "thread.read", "worker.start", "workflow.run", "orchestrator.create"], scope: { kind: "fleet" } },
       createdAt: at, updatedAt: at } };
-  const repository = { read: async () => structuredClone(state), retentionPins: async () => new Set([actor, successor]) };
+  const repository = { confirmMutation: async (_id: string) => {}, read: async () => structuredClone(state), retentionPins: async () => new Set([actor, successor]) };
   const bindings = { findBySessionId: async (id: string) => state.activeBinding?.sessionId === id ? structuredClone(state.activeBinding) : undefined };
   const registry = { get: (id: string) => ({ id, generation: 1, cwd: "/repo", provider: "codex", detached: true, sandbox: "read-only", attachmentState: "detached", pid: 1, kind: id === actor ? "orchestrator" : "worker", executionState: "active", exitCode: null, childIds: [], createdAt: at, updatedAt: at } as SessionRecord) };
   const admission = new StrigoiAdmission(repository, bindings, registry);

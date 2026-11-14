@@ -1,3 +1,4 @@
+import type { EvidenceReferenceGuard } from "./strigoi-evidence-deletion.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -12,14 +13,15 @@ export class WorkflowStore {
   private readonly runsPath: string;
   private readonly messagesPath: string;
 
-  constructor(stateDirectory: string, private readonly capture?: (record: WorkflowRun | WorkflowMessage) => Promise<void>) {
+  constructor(stateDirectory: string, private readonly capture?: (record: WorkflowRun | WorkflowMessage) => Promise<void>, private readonly withReferences?: EvidenceReferenceGuard) {
     this.runsPath = join(stateDirectory, "orchestration", "workflow-runs.jsonl");
     this.messagesPath = join(stateDirectory, "orchestration", "workflow-messages.jsonl");
   }
 
   async putRun(run: WorkflowRun): Promise<void> {
     const parsed = WorkflowRunSchema.parse(run);
-    await append(this.runsPath, parsed); await this.capture?.(parsed);
+    const commit = async () => { await append(this.runsPath, parsed); await this.capture?.(parsed); };
+    if (this.withReferences) await this.withReferences([parsed.ownerSessionId, ...parsed.participantSessionIds], commit); else await commit();
   }
 
   async listRuns(): Promise<WorkflowRun[]> {
@@ -35,7 +37,8 @@ export class WorkflowStore {
 
   async putMessage(message: WorkflowMessage): Promise<void> {
     const parsed = WorkflowMessageSchema.parse(message);
-    await append(this.messagesPath, parsed); await this.capture?.(parsed);
+    const commit = async () => { await append(this.messagesPath, parsed); await this.capture?.(parsed); };
+    if (this.withReferences) await this.withReferences([parsed.fromSessionId, parsed.toSessionId], commit); else await commit();
   }
 
   async listMessages(runId: string): Promise<WorkflowMessage[]> {

@@ -1,3 +1,4 @@
+import { withEvidenceDeletion, withEvidenceReferences, type EvidenceReferenceGuard } from "./strigoi-evidence-deletion.js";
 import { randomUUID } from "node:crypto";
 import { ArtifactStore } from "./artifact-store.js";
 import { OrchestratorStore } from "./orchestrator-store.js";
@@ -17,25 +18,28 @@ export function composeStrigoiEvidence(stateDirectory: string) {
   const packets = new StrigoiPackets(artifactStore), archive = new StrigoiSourceArchive(stateDirectory, packets);
   let sources: StrigoiSources;
   let held = false;
+  const withReferences: EvidenceReferenceGuard = (ids, commit) => withEvidenceReferences(stateDirectory, ids, commit);
   const instructionStore = new InstructionStore(stateDirectory, (record) => held ? Promise.resolve() : sources.record("instruction", record.id, record,
-    [record.actorSessionId, record.targetSessionId, ...record.senderSessionId ? [record.senderSessionId] : []]));
+    [record.actorSessionId, record.targetSessionId, ...record.senderSessionId ? [record.senderSessionId] : []]), withReferences);
   const workflowStore = new WorkflowStore(stateDirectory, (record) => held ? Promise.resolve() : sources.record("workflow", record.id, record,
-    "ownerSessionId" in record ? [record.ownerSessionId, ...record.participantSessionIds] : [record.fromSessionId, record.toSessionId]));
+    "ownerSessionId" in record ? [record.ownerSessionId, ...record.participantSessionIds] : [record.fromSessionId, record.toSessionId]), withReferences);
   const attentionStore = new OrchestratorAttentionStore(stateDirectory, undefined, (record) => held ? Promise.resolve() : sources.record("attention", record.epoch, record,
-    [record.actorSessionId, ...record.statement.targets.map((t) => t.sessionId)]));
+    [record.actorSessionId, ...record.statement.targets.map((t) => t.sessionId)]), withReferences);
   sources = new StrigoiSources({ repository: orchestratorStore.strigoi, archive, instructions: instructionStore,
     workflows: workflowStore, attention: attentionStore, coordination: new WorkerCoordinationStore(stateDirectory) });
   const beforeDelete = async (id: string) => {
     if (held || await sources.relevant([id]) || (await archive.pins()).has(id)) throw new Error("STRIGOI_EVIDENCE_REFERENCED");
   };
+  const withDeletion = <T>(id: string, commit: () => Promise<T>) => withEvidenceDeletion(stateDirectory, id, () => beforeDelete(id), commit);
   const transcriptContinuity: NonNullable<ThreadTranscriptStoreOptions["continuity"]> = {
     event: (event) => held ? Promise.resolve() : sources.event(event), beforeDelete,
-    native: (id, sourceId, message) => held ? Promise.resolve() : sources.record("turn", `native:${id}:${sourceId}`, message, [id]),
+    native: (id, sourceId, message) => sources.record("turn", `native:${id}:${sourceId}`, message, [id]),
   };
   async function verify() {
     await orchestratorStore.strigoi.retentionPins();
-    await packets.verify(await archive.list());
     const state = await orchestratorStore.strigoi.read();
+    await packets.verify(await sources.capture(state));
+    await packets.verify(await archive.list());
     const protectedSessionIds = new Set([...await orchestratorStore.strigoi.retentionPins(), ...await archive.pins()]);
     for (const packet of [state.latestPacket, state.transition?.packet, ...state.continuityReceipts?.map((r) => r.packet) ?? []]) {
       if (!packet) continue;
@@ -55,8 +59,6 @@ export function composeStrigoiEvidence(stateDirectory: string) {
       const pins = await orchestratorStore.strigoi.retentionPins();
       // Validate the index even with no current active resident; historical evidence remains pinned.
       await archive.pins();
-      const state = await orchestratorStore.strigoi.read();
-      await packets.verify(await sources.capture(state));
       return { protectedSessionIds: new Set([...pins, ...await verify()]), skipDestructiveRetention: false };
     } catch (error) {
       held = true;
@@ -71,5 +73,5 @@ export function composeStrigoiEvidence(stateDirectory: string) {
       return { protectedSessionIds: new Set<string>(), skipDestructiveRetention: true };
     }
   }
-  return { orchestratorStore, artifactStore, instructionStore, workflowStore, attentionStore, packets, sources, archive, transcriptContinuity, beforeDelete, startup, verify: async () => { await verify(); } };
+  return { orchestratorStore, artifactStore, instructionStore, workflowStore, attentionStore, packets, sources, archive, transcriptContinuity, beforeDelete, withDeletion, startup, verify: async () => { await verify(); } };
 }

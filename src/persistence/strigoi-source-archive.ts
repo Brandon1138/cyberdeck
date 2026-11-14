@@ -1,3 +1,5 @@
+import { withBindingAuthority } from "./binding-authority.js";
+import { assertEvidenceRetainable } from "./strigoi-evidence-deletion.js";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -10,16 +12,15 @@ const IndexSchema = z.object({ schemaVersion: z.literal(1), sources: z.array(Str
 /** Evidence index only: it confers no delivery, consumption, lease or controller authority. */
 export class StrigoiSourceArchive {
   readonly path: string;
-  private tail: Promise<unknown> = Promise.resolve();
-  constructor(directory: string, private readonly packets: StrigoiPacketPort) { this.path = join(directory, "orchestration", "strigoi", "sources.json"); }
+  constructor(private readonly directory: string, private readonly packets: StrigoiPacketPort) { this.path = join(directory, "orchestration", "strigoi", "sources.json"); }
   async list(): Promise<StrigoiSourceRef[]> {
-    await this.tail;
-    return this.load();
+    return withBindingAuthority(this.directory, () => this.load());
   }
   async pins(): Promise<ReadonlySet<string>> { return new Set((await this.list()).flatMap((s) => s.sessionIds ?? [])); }
   capture(kind: StrigoiSourceRef["kind"], id: string, value: unknown, sessionIds: string[]): Promise<void> {
     const text = typeof value === "string" ? value : JSON.stringify(value), revision = digest(text);
-    const work = this.tail.then(async () => {
+    return withBindingAuthority(this.directory, async () => {
+      await assertEvidenceRetainable(this.directory, sessionIds);
       const sources = await this.load();
       if (sources.some((s) => s.kind === kind && s.id === id && s.revision === revision)) return;
       if (sources.length === 0) {
@@ -29,7 +30,6 @@ export class StrigoiSourceArchive {
       sources.push(...await this.packets.copy({ kind, id, revision }, text, sessionIds));
       await writeAtomicPrivateFile(this.path, JSON.stringify({ schemaVersion: 1, sources, sha256: digest(JSON.stringify(sources)) }) + "\n");
     });
-    this.tail = work.catch(() => undefined); return work;
   }
   private async load(): Promise<StrigoiSourceRef[]> {
     const body = await readFile(this.path, "utf8").catch((e: NodeJS.ErrnoException) => { if (e.code === "ENOENT") return undefined; throw e; });

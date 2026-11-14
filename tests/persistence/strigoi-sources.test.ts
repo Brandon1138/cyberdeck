@@ -1,3 +1,7 @@
+import { ClaudeConversationBindingStore } from "../../src/persistence/claude-conversation-bindings.js";
+import * as privateFiles from "../../src/persistence/private-files.js";
+import * as atomic from "../../src/persistence/atomic-private-file.js";
+import { StrigoiLifecycle } from "../../src/orchestration/strigoi-lifecycle.js";
 import { mkdtemp, mkdir, rm, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +20,7 @@ import { WorkerTurnObservationAdapter } from "../../src/runtime/worker-turn-obse
 import { BrokerRuntimeConfigSchema } from "../../src/config.js";
 import { SessionRecordSchema } from "../../src/domain/session.js";
 import { attentionHarness, cleanupAttentionHarnesses } from "../support/attention-harness.js";
-import { fixture, identity, actor, target, at } from "../orchestration/strigoi-admission-fixture.js";
+import { fixture, identity, actor, target, at, deferred } from "../orchestration/strigoi-admission-fixture.js";
 const roots: string[] = [];
 afterEach(async () => { await cleanupAttentionHarnesses(); vi.restoreAllMocks(); await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 async function setup() {
@@ -59,9 +63,10 @@ it("captures native operator messages beyond the preview window and survives los
   await f.bindings.record({ sessionId: actor, nativeSessionId: nativeId, transcriptPath: path, cwd: "/repo" });
   await writeFile(path, [JSON.stringify({ type: "session_meta", payload: { id: nativeId, timestamp: at, cwd: "/repo", originator: "codex-tui" } }),
     ...Array.from({ length: 35 }, (_, i) => JSON.stringify({ type: "response_item", timestamp: at,
-      payload: { type: "message", role: "user", content: [{ type: "input_text", text: `Original constraint ${i}` }] } }))].join("\n") + "\n");
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text: i === 0 ? "<user_instructions>Never publish</user_instructions>" : `Original constraint ${i}` }] } }))].join("\n") + "\n");
   const pins = await f.evidence.startup(f.transcripts, f.sessions); expect(pins.skipDestructiveRetention).toBe(false);
   const nativeCopies = (await f.evidence.archive.list()).filter((s) => s.id.startsWith("native:")); expect(nativeCopies).toHaveLength(35);
+  expect((await f.evidence.packets.read(await f.continuity.checkpoint(identity, "", [], "native-cp"))).sources.some((s) => s.text?.includes("<user_instructions>Never publish</user_instructions>"))).toBe(true);
   await rm(path);
   const reopened = composeStrigoiEvidence(f.root);
   const retention = await reopened.startup(new ThreadTranscriptStore(f.root, { ...f.options, continuity: reopened.transcriptContinuity }), f.sessions);
@@ -180,10 +185,156 @@ it("captures every container operator message at startup before the live registr
   const path = join(directory, "rollout.jsonl");
   await writeFile(path, [JSON.stringify({ type: "session_meta", payload: { id: target, cwd: "/workspace", originator: "codex-tui" } }),
     ...Array.from({ length: 26 }, (_, i) => JSON.stringify({ type: "response_item", payload: { type: "message", role: "user",
-      content: [{ type: "input_text", text: `Container constraint ${i}` }] } }))].join("\n") + "\n");
+      content: [{ type: "input_text", text: i === 0 ? "<user_instructions>Never publish</user_instructions>" : `Container constraint ${i}` }] } }))].join("\n") + "\n");
   const transcripts = new ExecutionTranscriptStore(f.root, { ...f.options, continuity: f.evidence.transcriptContinuity }, source, () => undefined);
   expect((await f.evidence.startup(transcripts, f.sessions)).skipDestructiveRetention).toBe(false);
-  expect((await f.evidence.archive.list()).filter((s) => s.id.startsWith("native:"))).toHaveLength(26);
+  const refs = (await f.evidence.archive.list()).filter((s) => s.id.startsWith("native:"));
+  expect(refs).toHaveLength(26);
+  const packet = await f.evidence.packets.write(identity, "", refs, at);
+  expect((await f.evidence.packets.read(packet)).sources.some((s) => s.text?.includes("<user_instructions>Never publish</user_instructions>"))).toBe(true);
   await rm(path);
   expect((await f.evidence.startup(transcripts, f.sessions)).skipDestructiveRetention).toBe(false);
+});
+
+
+it("captures historical native context when an already observed worker becomes referenced", async () => {
+  const f = await setup(), path = join(f.native, "worker.jsonl");
+  const record = SessionRecordSchema.parse({ ...f.record, id: target, kind: "worker" });
+  await f.sessions.put(record);
+  await f.bindings.record({ sessionId: target, nativeSessionId: target, transcriptPath: path, cwd: "/repo" });
+  await writeFile(path, [JSON.stringify({ type: "session_meta", payload: { id: target, timestamp: at, cwd: "/repo", originator: "codex-tui" } }),
+    JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Historical constraint" }] } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "old-turn", last_agent_message: "Historical result" }, timestamp: at })].join("\n") + "\n");
+  const input = { sessionId: target, provider: "codex" as const, cwd: "/repo", createdAt: record.createdAt, turnNumber: 0 };
+  await f.transcripts.observeProviderTurns(input); await f.transcripts.readTranscriptMessages(input);
+  expect((await f.evidence.archive.list()).some((s) => s.id.startsWith(`native:${target}:`))).toBe(false);
+  await f.evidence.instructionStore.put(f.f.record);
+  const packet = await f.continuity.checkpoint(identity, "", [], "historical");
+  const sources = (await f.continuity.read(identity, packet)).sources;
+  expect(sources.some((s) => s.id.startsWith(`native:${target}:`) && s.text?.includes("Historical constraint"))).toBe(true);
+  expect(sources.some((s) => s.id.startsWith(`native:${target}:`) && s.text?.includes("Historical result"))).toBe(true);
+  const count = (await f.evidence.archive.list()).length;
+  await f.evidence.sources.capture(await f.evidence.orchestratorStore.strigoi.read());
+  expect((await f.evidence.archive.list()).length).toBe(count);
+});
+
+it("keeps resume held until required missing evidence is restored and captured", async () => {
+  const f = await setup(), path = join(f.native, "restore.jsonl");
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await f.bindings.record({ sessionId: actor, nativeSessionId: actor, transcriptPath: path, cwd: "/repo" });
+  expect((await f.evidence.startup(f.transcripts, f.sessions)).skipDestructiveRetention).toBe(true);
+  const freeze = vi.fn(async () => {}), reopen = vi.fn(async () => {}), start = vi.fn();
+  const lifecycle = new StrigoiLifecycle({ repository: f.evidence.orchestratorStore.strigoi, bindings: f.evidence.orchestratorStore,
+    admission: { ...f.f.admission, freeze, reopen, run: vi.fn(), instruction: vi.fn() }, verifyContinuity: f.evidence.verify,
+    manager: { prepareResident: vi.fn(), observeResident: vi.fn() },
+    registry: { ...f.f.registry, start, launchOutcome: vi.fn(), ownsProcess: () => false,
+      stopResidentProcess: vi.fn(), workerTruth: () => ({ modalOpen: false }) } });
+  try {
+    await expect(lifecycle.setDesired("enabled", "resume-missing")).rejects.toThrow("STRIGOI_NATIVE_SOURCE_UNAVAILABLE");
+    expect((await f.evidence.orchestratorStore.strigoi.read()).hold?.code).toBe("continuity-evidence-unavailable");
+    expect(reopen).not.toHaveBeenCalled(); expect(start).not.toHaveBeenCalled();
+    await writeFile(path, [JSON.stringify({ type: "session_meta", payload: { id: actor, timestamp: at, cwd: "/repo", originator: "codex-tui" } }),
+      JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<user_instructions>Restored constraint</user_instructions>" }] } })].join("\n") + "\n");
+    await lifecycle.setDesired("enabled", "resume-restored");
+    expect((await f.evidence.orchestratorStore.strigoi.read()).hold).toBeUndefined();
+    expect((await f.evidence.archive.list()).some((s) => s.id.startsWith(`native:${actor}:`))).toBe(true);
+    await rm(path); await f.evidence.verify(); // verified private coverage now permits loss of original
+  } finally { lifecycle.dispose(); }
+});
+
+it.each(["checkpoint", "adoption"])("resyncs an append-visible/fsync-failed %s on every retry before returning success", async (kind) => {
+  const f = await setup();
+  await f.transcripts.append({ sessionId: actor, kind: "prompt", source: "human", text: "Original" });
+  const packet = await f.continuity.checkpoint(identity, "base", [], "base");
+  const adoption = { identity, packetHash: packet.sha256, coverageId: packet.coverageId,
+    handledSourceIds: (await f.continuity.read(identity, packet)).sources.map((s) => s.coverageSourceId!), account: "Read exact evidence" };
+  const invoke = (service: StrigoiContinuity) => kind === "checkpoint" ? service.checkpoint(identity, "retry", [], "retry") : service.acknowledge(adoption, "retry");
+  const open = privateFiles.openPrivateAppendFile;
+  const append = vi.spyOn(privateFiles, "openPrivateAppendFile").mockImplementation(async (path) => {
+    const file = await open(path);
+    if (path === f.evidence.orchestratorStore.strigoi.path) vi.spyOn(file, "sync").mockRejectedValueOnce(new Error("injected append fsync failure"));
+    return file;
+  });
+  await expect(invoke(f.continuity)).rejects.toThrow("Resident journal write or sync failed"); append.mockRestore();
+  const revision = (await f.evidence.orchestratorStore.strigoi.read()).revision;
+  expect((await f.evidence.orchestratorStore.strigoi.read()).continuityReceipts?.some((r) => r.mutationId === "retry")).toBe(true);
+  const reopened = composeStrigoiEvidence(f.root);
+  const capture = vi.fn(async () => { throw new Error("replay must not recapture"); });
+  const write = vi.spyOn(reopened.packets, "write");
+  const service = new StrigoiContinuity({ repository: reopened.orchestratorStore.strigoi, bindings: reopened.orchestratorStore,
+    admission: f.f.admission, packets: reopened.packets, sources: { capture } });
+  const sync = vi.spyOn(atomic, "syncPrivateFile").mockRejectedValueOnce(new Error("retry sync still failed"));
+  await expect(invoke(service)).rejects.toThrow("Resident journal sync failed");
+  expect(sync).toHaveBeenCalledWith(reopened.orchestratorStore.strigoi.path);
+  sync.mockRestore(); const successfulSync = vi.spyOn(atomic, "syncPrivateFile");
+  await invoke(service);
+  expect(successfulSync).toHaveBeenCalledWith(reopened.orchestratorStore.strigoi.path);
+  expect(capture).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled();
+  expect((await reopened.orchestratorStore.strigoi.read()).revision).toBe(revision);
+});
+
+async function deletionRegistry(f: Awaited<ReturnType<typeof setup>>, retire = async (_id: string) => {}) {
+  const record = SessionRecordSchema.parse({ ...f.record, id: target, kind: "worker" }); await f.sessions.put(record);
+  const registry = new SessionRegistry({ adapters: {}, sessionRuntimeFactory: () => { throw new Error("No launch"); }, journal: { append: async () => {} },
+    workerTurnObservation: new WorkerTurnObservationAdapter(), recoveredSessions: [record], config: BrokerRuntimeConfigSchema.parse({}),
+    transcripts: f.transcripts, store: f.sessions, executions: { start: vi.fn(), retire } });
+  await registry.ready();
+  registry.setResidentLifecycle({ validateReservation: async () => {}, beforeStop: async () => {}, beforeResume: async () => {},
+    beforeDelete: f.evidence.beforeDelete, withDeletion: f.evidence.withDeletion });
+  return registry;
+}
+it("rechecks references acquired during retirement before any destructive deletion", async () => {
+  const f = await setup(), entered = deferred(), release = deferred();
+  const registry = await deletionRegistry(f, async () => { entered.resolve(); await release.promise; });
+  const drop = vi.spyOn(f.transcripts, "dropClaudeBinding"), erase = vi.spyOn(f.sessions, "delete");
+  const deletion = registry.delete(target); const result = expect(deletion).rejects.toThrow("STRIGOI_EVIDENCE_REFERENCED");
+  await entered.promise;
+  await f.evidence.instructionStore.put(f.f.record);
+  expect((await f.evidence.archive.pins()).has(target)).toBe(true);
+  release.resolve(); await result;
+  expect(drop).not.toHaveBeenCalled(); expect(erase).not.toHaveBeenCalled(); expect(registry.get(target).id).toBe(target);
+  await registry.stopAll();
+});
+it("fences source and resident reference acquisition through the final session-store deletion", async () => {
+  const f = await setup(), registry = await deletionRegistry(f), entered = deferred(), release = deferred();
+  const erase = f.sessions.delete.bind(f.sessions);
+  vi.spyOn(f.sessions, "delete").mockImplementationOnce(async (id) => { entered.resolve(); await release.promise; await erase(id); });
+  const deletion = registry.delete(target); await entered.promise;
+  try {
+    await expect(f.evidence.archive.capture("instruction", "too-late", "keep", [actor, target])).rejects.toThrow("STRIGOI_EVIDENCE_DELETING");
+    await expect(f.evidence.instructionStore.put(f.f.record)).rejects.toThrow("STRIGOI_EVIDENCE_DELETING");
+    expect(await f.evidence.instructionStore.list()).toEqual([]);
+    const state = await f.evidence.orchestratorStore.strigoi.read();
+    await expect(f.evidence.orchestratorStore.strigoi.compareAndSwap(state.revision, "late-pin", { ...state,
+      revision: state.revision + 1, retainedSessionIds: [...state.retainedSessionIds, target] })).rejects.toThrow("STRIGOI_EVIDENCE_DELETING");
+  } finally { release.resolve(); }
+  await deletion;
+  expect((await f.sessions.load()).some((r) => r.id === target)).toBe(false);
+  await expect(f.evidence.archive.capture("instruction", "after-delete", "keep", [target])).rejects.toThrow("STRIGOI_EVIDENCE_DELETING");
+  await registry.stopAll();
+});
+it("propagates continuity cleanup refusals instead of deleting the session record", async () => {
+  const f = await setup(), registry = await deletionRegistry(f);
+  vi.spyOn(f.transcripts, "dropClaudeBinding").mockRejectedValueOnce(new Error("STRIGOI_EVIDENCE_REFERENCED"));
+  await expect(registry.delete(target)).rejects.toThrow("STRIGOI_EVIDENCE_REFERENCED");
+  expect(registry.get(target).id).toBe(target); expect((await f.sessions.load()).some((r) => r.id === target)).toBe(true);
+  // A failed deletion releases its reservation so preserving the record can still acquire evidence.
+  await f.evidence.archive.capture("instruction", "after-refusal", "keep", [target]);
+  await registry.stopAll();
+});
+
+it("revalidates a bound Claude original during resume and captures restored instruction envelopes", async () => {
+  const f = await setup(), path = join(f.native, "claude.jsonl");
+  const bindings = new ClaudeConversationBindingStore(f.root);
+  await f.sessions.put(SessionRecordSchema.parse({ ...f.record, provider: "claude" }));
+  await bindings.record({ sessionId: actor, payload: { session_id: actor, transcript_path: path, cwd: "/repo" } });
+  const transcripts = new ThreadTranscriptStore(f.root, { ...f.options, claudeConversations: bindings });
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  expect((await f.evidence.startup(transcripts, f.sessions)).skipDestructiveRetention).toBe(true);
+  await expect(f.evidence.verify()).rejects.toThrow("STRIGOI_NATIVE_SOURCE_UNAVAILABLE");
+  await writeFile(path, JSON.stringify({ type: "user", message: { role: "user", content: "<user_instructions>Never publish</user_instructions>" } }) + "\n");
+  await f.evidence.verify();
+  const refs = (await f.evidence.archive.list()).filter((s) => s.id.startsWith(`native:${actor}:`));
+  expect(refs).toHaveLength(1);
+  await rm(path); await f.evidence.verify();
 });

@@ -242,8 +242,16 @@ export class SessionLifecycleController {
     // Keep the thread visible when its isolated evidence cannot be collected. Retirement
     // uses the same execution identity as resume and never deletes the private clone.
     await this.catalog.options.executions?.retire?.(sessionId);
-    await beforeDelete?.();
+    await runtime.launchTail;
+    const commit = () => this.deleteRetired(runtime, beforeDelete);
+    const guard = this.catalog.options.residentLifecycle?.withDeletion;
+    if (guard) await guard(sessionId, commit); else await commit();
+  }
 
+  private async deleteRetired(runtime: RuntimeSession, beforeDelete?: () => Promise<void>): Promise<void> {
+    const sessionId = runtime.record.id;
+    await this.catalog.options.residentLifecycle?.beforeDelete?.(sessionId);
+    await beforeDelete?.();
     // Workers outlive an orchestrator. Detach their live parent reference before
     // removing the parent record, leaving each worker's own durable state intact.
     const children = runtime.record.childIds
@@ -268,7 +276,6 @@ export class SessionLifecycleController {
         await this.catalog.persist(parent);
       }
     }
-    await runtime.launchTail;
     runtime.turns.retire();
     await this.assembly.cleanupLaunchArtifacts(runtime.record, "session-deleted");
     await this.catalog.options.store?.delete(sessionId);

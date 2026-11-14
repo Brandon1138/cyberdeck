@@ -312,7 +312,7 @@ export async function runBroker(
   const strigoi = await composeStrigoiRuntime({ repository: orchestratorStore.strigoi, bindings: orchestratorStore, registry, manager: orchestrators, admission: strigoiAdmission,
     continuity: new StrigoiContinuity({ repository: orchestratorStore.strigoi, bindings: orchestratorStore,
       admission: strigoiAdmission, packets: evidence.packets, sources: evidence.sources }),
-    verifyContinuity: evidence.verify, beforeDelete: evidence.beforeDelete, onError: (error) => console.error("Strigoi lifecycle held", error) });
+    verifyContinuity: evidence.verify, beforeDelete: evidence.beforeDelete, withDeletion: evidence.withDeletion, onError: (error) => console.error("Strigoi lifecycle held", error) });
   const notificationFeed = composeOrchestratorNotificationFeed({
     strigoi: strigoiAdmission,
     attention,

@@ -17,12 +17,15 @@ export class StrigoiContinuity {
       const initial = await this.options.repository.read(); this.validateIdentity(initial, identity);
       const requestHash = hash({ identity, prose, refs });
       const prior = this.replay(initial, mutationId, requestHash);
-      if (prior) return prior.packet;
+      if (prior) return this.run(identity, "mutate", async (state) => {
+        const receipt = this.replay(state, mutationId, requestHash)!;
+        await this.options.repository.confirmMutation(mutationId); return receipt.packet;
+      });
       // Native/transcript queues can acquire authority. Never wait for them while holding it.
       const sources = await this.options.sources.capture(initial);
       return this.run(identity, "mutate", async (state) => {
         const previous = this.replay(state, mutationId, requestHash);
-        if (previous) return previous.packet;
+        if (previous) { await this.options.repository.confirmMutation(mutationId); return previous.packet; }
         for (const ref of refs) {
           if (!sources.some((s) => s.kind === ref.kind && s.id === ref.id && s.revision === ref.revision
             && (ref.sha256 === undefined || s.sha256 === ref.sha256))) throw new Error("STRIGOI_UNKNOWN_SOURCE");
@@ -44,7 +47,7 @@ export class StrigoiContinuity {
     const adoption = StrigoiAdoptionSchema.parse(input);
     return this.run(adoption.identity, "recovery", async (state) => {
       const requestHash = hash(adoption);
-      if (this.replay(state, mutationId, requestHash)) return;
+      if (this.replay(state, mutationId, requestHash)) { await this.options.repository.confirmMutation(mutationId); return; }
       const packet = [state.latestPacket, state.transition?.packet, ...state.continuityReceipts?.map((r) => r.packet) ?? []]
         .find((p) => p?.sha256 === adoption.packetHash && p.coverageId === adoption.coverageId);
       if (!packet) throw new Error("STRIGOI_UNKNOWN_COVERAGE");
