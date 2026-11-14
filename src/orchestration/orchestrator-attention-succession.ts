@@ -20,6 +20,7 @@ export async function updateAttentionRefresh(options: OrchestratorAttentionOptio
     let cancellation: OrchestratorAttention | undefined;
     try {
       return await options.store.update(controllerId, async (current) => {
+        cancellation = undefined;
         const next = await change(current);
         if (current?.status === "armed" && next?.status === "cancelled" && next.bindingKey === STRIGOI_KEY
           && successionCancellations.has(next.cancelReason ?? "")) cancellation = next;
@@ -78,6 +79,7 @@ export async function resumeAttentionForSuccessor(options: OrchestratorAttention
     let finalCheck: (() => Promise<void>) | undefined;
     // Prepare source evidence outside canonical authority; the store compares disk before commit.
     return options.store.update(controllerId, async (current) => {
+      finalCheck = undefined;
       await validate();
       if (!current || current.status === "cancelled" || current.actorSessionId === successor.sessionId) return current;
       if (current.actorSessionId !== previousActor || current.bindingKey !== binding.key) throw new Error("STRIGOI_WAIT_CHANGED");

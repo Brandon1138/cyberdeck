@@ -210,6 +210,7 @@ export class OrchestratorAttentionControlPlane {
   async schedulingSnapshot(controllerId: string): Promise<{ record: OrchestratorAttention; sources: AttentionSourceSnapshot } | undefined> {
     let snapshot: { record: OrchestratorAttention; sources: AttentionSourceSnapshot } | undefined;
     await updateAttentionRefresh(this.options, controllerId, async (current) => {
+      snapshot = undefined;
       if (current?.status !== "armed") return current;
       const record = await this.refresh(current);
       if (record.status !== "armed" || await successionWait(this.options, record)) return record;
