@@ -25,10 +25,23 @@ export const StrigoiSourceRefSchema = z.object({ kind: z.enum(["turn", "instruct
 });
 export const StrigoiPacketRefSchema = z.object({ artifactId: z.string().min(1), sha256: z.string().regex(/^[a-f0-9]{64}$/), coverageId: z.string().min(1) });
 export const StrigoiHoldSchema = z.object({ code: z.string().min(1), detail: z.string().min(1), sourceIds: z.array(z.string()) });
+const SuccessionTurnSchema = z.object({
+  id: z.uuid(), attempt: z.number().int().min(1).max(2), startedAt: z.iso.datetime(),
+  outcome: z.enum(["unknown", "completed", "terminated"]),
+  endedAt: z.iso.datetime().optional(),
+  usage: z.object({ inputTokens: z.number().int().nonnegative().optional(), outputTokens: z.number().int().nonnegative().optional() }).optional(),
+}).strict();
 export const StrigoiTransitionSchema = z.object({
   id: z.string().min(1), expectedIncarnation: z.number().int().nonnegative(), reason: z.string().min(1), phase: StrigoiPhaseSchema,
   predecessor: StrigoiIdentitySchema.optional(), successor: StrigoiIdentitySchema.optional(), packet: StrigoiPacketRefSchema.optional(),
   attempts: z.number().int().nonnegative(), nextAttemptAt: z.iso.datetime().optional(),
+  requestedAt: z.iso.datetime().optional(), phaseTimes: z.record(z.string(), z.iso.datetime()).optional(),
+  retirementConfirmedAt: z.iso.datetime().optional(), stopRequestedAt: z.iso.datetime().optional(),
+  launchStartedAt: z.iso.datetime().optional(), checkpointTurn: SuccessionTurnSchema.optional(), adoptionTurn: SuccessionTurnSchema.optional(),
+  packetBytes: z.number().int().nonnegative().optional(), recovery: z.boolean().optional(),
+  lastMutationId: z.string().optional(),
+  adoptionDeferred: z.boolean().optional(),
+  turnHistory: z.array(SuccessionTurnSchema.extend({ kind: z.enum(["checkpoint", "adoption"]) })).optional(),
 }).refine((transition) => transition.predecessor === undefined || transition.predecessor.incarnation === transition.expectedIncarnation,
   "Predecessor must match expected incarnation")
   .refine((transition) => transition.successor === undefined || transition.successor.incarnation > transition.expectedIncarnation,
@@ -56,6 +69,8 @@ export const StrigoiStateSchema = z.object({
   schemaVersion: z.literal(1), revision: z.number().int().nonnegative(), desired: StrigoiDesiredSchema,
   selection: StrigoiSelectionSchema.optional(), activeGeneration: z.number().int().positive().optional(), activeBinding: OrchestratorBindingSchema.optional(), incarnation: z.number().int().nonnegative(),
   transition: StrigoiTransitionSchema.optional(), latestPacket: StrigoiPacketRefSchema.optional(), retainedSessionIds: z.array(z.uuid()),
+  successionRequests: z.array(z.object({ mutationId: z.string(), expectedIncarnation: z.number().int(), reason: z.string(), transitionId: z.string() })).optional(),
+  successionHistory: z.array(StrigoiTransitionSchema).optional(),
   continuityReceipts: z.array(StrigoiContinuityReceiptSchema).optional(),
   hold: StrigoiHoldSchema.optional(), updatedAt: z.iso.datetime(),
 }).refine((state) => state.desired !== "enabled" || state.selection !== undefined, "Enabled resident requires a selection")

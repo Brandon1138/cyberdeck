@@ -324,6 +324,10 @@ export class SessionRegistry {
     return this.lifecycle.stop(sessionId, "resident");
   }
 
+  residentRetirement(sessionId: string, generation: number): Promise<"confirmed" | "unknown"> {
+    return this.lifecycle.residentRetirement(sessionId, generation);
+  }
+
   forceStop(sessionId: string): void {
     return this.lifecycle.forceStop(sessionId);
   }

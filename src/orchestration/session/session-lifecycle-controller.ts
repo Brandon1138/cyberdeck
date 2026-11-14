@@ -43,6 +43,17 @@ export class SessionLifecycleController {
     this.observer = options.observer;
   }
 
+  /** Unknown-exit sentinel (-1), stop requests, and completed turns are NOT retirement. */
+  async residentRetirement(sessionId: string, generation: number): Promise<"confirmed" | "unknown"> {
+    const runtime = this.catalog.sessions.get(sessionId);
+    if (!runtime || runtime.record.generation !== generation || runtime.terminalFinalizing
+      || runtime.record.exitCode === null || runtime.record.exitCode < 0
+      || ["active", "starting", "errored"].includes(runtime.record.executionState)) return "unknown";
+    // Persist the observed exit before handing its evidence to the succession journal.
+    await this.catalog.persist(runtime);
+    return "confirmed";
+  }
+
   async stop(sessionId: string, origin: "operator" | "resident" = "operator"): Promise<void> {
     if (!this.shuttingDown && origin === "operator") await this.catalog.options.residentLifecycle?.beforeStop(sessionId);
     if (this.catalog.options.executions?.cancelStart?.(sessionId)) return;

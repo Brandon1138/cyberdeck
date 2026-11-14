@@ -12,8 +12,8 @@ export interface StrigoiInspection {
   state: StrigoiState;
   runtime?: SessionRecord;
   ownership: "owned" | "unknown" | "none";
-  readiness: "passive" | "held" | "unconfigured";
-  adoption: "not-required" | "pending";
+  readiness: "passive" | "held" | "unconfigured" | "ready";
+  adoption: "not-required" | "pending" | "acknowledged";
   usage: "unknown";
 }
 
@@ -45,4 +45,26 @@ export interface StrigoiPacketPort {
 }
 export interface StrigoiSourcePort {
   capture(state: StrigoiState): Promise<import("../domain/strigoi.js").StrigoiSourceRef[]>;
+}
+
+/** Task 7/8 production seams. Neither participant may infer authority from packet prose. */
+export interface StrigoiReconciliationParticipant {
+  /** Restart-safe: reconcile durable receipts before effects; never reissue ambiguous execution.
+   * Participants use shared admission before authority and recheck current desired/identity at
+   * their own final effects. Suspension cannot cancel an already-issued external operation. */
+  reconcile(identity: StrigoiIdentity, packet: import("../domain/strigoi.js").StrigoiPacketRef): Promise<import("../domain/strigoi.js").StrigoiHold[]>;
+}
+
+/** Durable instruction transport. An unknown/rendered attempt MUST only be observed, never retyped. */
+export interface StrigoiSuccessionTurns {
+  boundary(identity: StrigoiIdentity): Promise<"safe" | "busy" | "modal" | "unknown">;
+  observe(id: string, identity: StrigoiIdentity): Promise<{
+    outcome: "unknown" | "completed" | "terminated";
+    checkpoint?: string;
+    adoption?: import("../domain/strigoi.js").StrigoiAdoption;
+    usage?: { inputTokens?: number; outputTokens?: number };
+  }>;
+  /** Persist logical instruction before rendering; final native submission MUST call admit. */
+  submit(id: string, identity: StrigoiIdentity, kind: "checkpoint" | "adoption", packet: import("../domain/strigoi.js").StrigoiPacketRef | undefined,
+    admit: import("./session/session-ports.js").LaunchAdmission): Promise<void>;
 }

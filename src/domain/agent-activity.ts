@@ -31,6 +31,16 @@ export const AgentActivitySchema = z.object({
   origin: z.enum(["instruction", "initial-prompt", "direct-input", "unattributed"]).optional(),
   gap: z.enum(["unsupported-source", "unknown-frame", "truncated-source", "attribution-conflict", "missing-result", "retention", "disk-failure"]).optional(),
   usage: z.object({ inputTokens: z.number().int().nonnegative().optional(), outputTokens: z.number().int().nonnegative().optional(), provenance: z.literal("provider-native") }).strict().optional(),
+  succession: z.object({ transitionId: z.uuid(), phase: z.string(), reason: z.string(), launchAttempts: z.number().int().nonnegative(),
+    checkpointAttempts: z.number().int().nonnegative(), adoptionAttempts: z.number().int().nonnegative(),
+    phaseTimes: z.record(z.string(), z.iso.datetime()), packetManifestBytes: z.number().int().nonnegative().optional(),
+    checkpointOutcome: z.enum(["unknown", "completed", "terminated"]).optional(), adoptionOutcome: z.enum(["unknown", "completed", "terminated"]).optional(),
+    hold: z.string().optional(), usage: z.null(),
+    turns: z.array(z.object({ id: z.uuid(), kind: z.enum(["checkpoint", "adoption"]), attempt: z.number().int().positive(), startedAt: z.iso.datetime(),
+      endedAt: z.iso.datetime().optional(), outcome: z.enum(["unknown", "completed", "terminated"]),
+      usage: z.object({ inputTokens: z.number().int().nonnegative().optional(), outputTokens: z.number().int().nonnegative().optional() }).nullable(),
+    }).strict()),
+  }).strict().optional(),
 }).strict();
 export type AgentActivity = z.infer<typeof AgentActivitySchema>;
 export type ActivityInput = Omit<AgentActivity, "sequence">;

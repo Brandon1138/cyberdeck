@@ -23,6 +23,7 @@ function launchFailureCode(error: unknown, depth = 0): string {
   }
   return code;
 }
+export const strigoiLaunchFailureIsPermanent = (error: unknown): boolean => permanent(launchFailureCode(error));
 const identity = (state: StrigoiState): StrigoiIdentity | undefined => state.activeBinding === undefined ? undefined
   : { sessionId: state.activeBinding.sessionId, incarnation: state.incarnation, generation: state.activeGeneration! };
 const failure = (code: string): Error => Object.assign(new Error(code), { code });
@@ -41,13 +42,18 @@ export interface StrigoiLifecycleOptions {
   verifyContinuity?: () => Promise<void>;
 }
 
-/** Passive initial residence only. Succession/adoption is deliberately a later collaborator. */
+/** Passive initial residence and desired-state fencing, with an injected succession driver. */
 export class StrigoiLifecycle {
   private disposed = false;
   private epoch = 0;
   private pending: Promise<void> | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private succession?: { recover(state: StrigoiState): Promise<void> };
   constructor(private readonly options: StrigoiLifecycleOptions) {}
+  attachSuccession(succession: { recover(state: StrigoiState): Promise<void> }): void { this.succession = succession; }
+  successionEpoch(): number { return this.epoch; }
+  permitsSuccession(epoch: number): boolean { return !this.disposed && epoch === this.epoch; }
+  wakeSuccession(due: number): void { if (!this.disposed) this.schedule(due); }
 
   /** Core boot calls this before exposing the socket; no provider work is performed here. */
   async quiesce(): Promise<void> { await this.freeze(await this.options.repository.read()); }
@@ -77,7 +83,9 @@ export class StrigoiLifecycle {
       if (desired === "enabled" && !current.selection) throw failure("STRIGOI_NOT_CONFIGURED");
       if (current.desired === desired && (desired !== "enabled" || !current.hold)) return current;
       // An unresolved assigned identity must survive resume; clearing it would authorize duplicates.
-      const transition = current.transition?.successor ? current.transition : undefined;
+      let transition = current.transition?.predecessor || current.transition?.successor ? current.transition : undefined;
+      if (desired === "enabled" && transition?.predecessor && transition.phase === "launching" && !transition.successor)
+        transition = { ...transition, attempts: 0, nextAttemptAt: undefined, launchStartedAt: undefined };
       return this.write(current, { desired, ...(desired === "enabled" ? { hold: undefined, transition } : {}) }, mutationId);
     });
     if (desired !== "enabled") await this.stopOwned(state);
@@ -98,9 +106,12 @@ export class StrigoiLifecycle {
     if (id) { try { runtime = this.options.registry.get(id); } catch { /* Missing is not proof of death. */ } }
     const ready = runtime?.executionState === "active" && runtime.exitCode === null && runtime.generation === state.activeGeneration
       && id !== undefined && this.owned(id) && !this.options.registry.workerTruth(id).modalOpen;
+    const adopted = state.continuityReceipts?.some((r) => r.adoption !== undefined && r.adoption.identity.sessionId === id
+      && r.adoption.identity.generation === state.activeGeneration && r.packet.sha256 === state.transition?.packet?.sha256) === true;
+    const transitioning = state.transition && !state.transition.adoptionDeferred && !["complete", "aborted"].includes(state.transition.phase);
     return { state, ...(runtime ? { runtime } : {}), ownership: id ? this.owned(id) ? "owned" : "unknown" : "none",
-      readiness: state.hold || state.desired !== "enabled" || !state.activeBinding || !ready ? state.selection ? "held" : "unconfigured" : "passive",
-      adoption: state.latestPacket || state.incarnation > 1 ? "pending" : "not-required", usage: "unknown" };
+      readiness: state.hold || transitioning || state.desired !== "enabled" || !state.activeBinding || !ready ? state.selection ? "held" : "unconfigured" : adopted ? "ready" : "passive",
+      adoption: adopted ? "acknowledged" : state.latestPacket || state.incarnation > 1 ? "pending" : "not-required", usage: "unknown" };
   }
 
   dispose(): void {
@@ -113,7 +124,8 @@ export class StrigoiLifecycle {
     const state = await this.options.repository.read();
     if (this.disposed || state.desired !== "enabled" || state.transition?.id !== reservation.transitionId
       || state.transition.phase !== "launching" || state.transition.successor?.sessionId !== reservation.sessionId
-      || state.activeBinding !== undefined || state.hold) throw failure("STRIGOI_RESERVATION_UNAUTHORIZED");
+      || (state.activeBinding !== undefined && (!state.transition.retirementConfirmedAt
+        || state.transition.predecessor?.sessionId !== state.activeBinding.sessionId)) || state.hold) throw failure("STRIGOI_RESERVATION_UNAUTHORIZED");
   }
 
   async beforeStop(sessionId: string): Promise<void> {
@@ -140,12 +152,17 @@ export class StrigoiLifecycle {
     let state = await this.options.repository.read();
     if (this.disposed) return;
     if (state.hold?.code === "continuity-evidence-unavailable") { await this.freeze(state); return; }
+    if (this.succession && (state.transition?.predecessor && state.transition.phase !== "aborted"
+      || state.activeBinding && (!this.owned(state.activeBinding.sessionId)
+        || this.options.registry.get(state.activeBinding.sessionId).exitCode !== null))) {
+      await this.succession.recover(state); return;
+    }
     if (!state.activeBinding && state.transition?.successor) {
       await this.resolveAssigned(state, epoch); return;
     }
     if (state.desired !== "enabled") return;
     if (state.activeBinding) {
-      if (!this.owned(state.activeBinding.sessionId)) { await this.freeze(state); await this.hold("launch-ownership-unresolved", "Recorded identity has no owned runtime; succession is not implemented in Task 4."); return; }
+      if (!this.owned(state.activeBinding.sessionId)) { await this.freeze(state); await this.hold("launch-ownership-unresolved", "Recorded identity has no owned runtime; the succession recovery collaborator is not wired."); return; }
       const record = this.options.registry.get(state.activeBinding.sessionId);
       if (record.generation !== state.activeGeneration) { await this.freeze(state); await this.hold("launch-ownership-unresolved", "Runtime generation differs from the active binding."); return; }
       if (record.executionState !== "active" || record.exitCode !== null) { await this.freeze(state); await this.hold("provider-unavailable", "The owned runtime is not active; inspect provider evidence before recovery."); return; }
