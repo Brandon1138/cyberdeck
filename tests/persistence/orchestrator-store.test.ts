@@ -2,7 +2,8 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { OrchestratorBinding } from "../../src/domain/orchestrator.js";
+import { orchestratorController, type OrchestratorBinding } from "../../src/domain/orchestrator.js";
+import { OrchestratorControllerDirectory } from "../../src/orchestration/orchestrator-controller-directory.js";
 import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 
 const directories: string[] = [];
@@ -112,13 +113,32 @@ describe("OrchestratorStore", () => {
     const resident: OrchestratorBinding = { ...binding(id, "model"), key: "resident:strigoi", kind: "resident", scope, resident: { name: "strigoi", incarnation: 1 }, grant: { subjectSessionId: id, capabilities: ["thread.list"], scope } };
     const initial = await store.strigoi.read();
     await store.strigoi.compareAndSwap(0, "activate", { ...initial, revision: 1, desired: "enabled", selection: { provider: "codex", model: "model", cwd: "/repo" }, activeBinding: resident, incarnation: 1, activeGeneration: 1 });
-    const collision = { ...binding(id, "model"), key: "fleet", scope, grant: { subjectSessionId: id, capabilities: ["thread.list"], scope } };
+    const collision: OrchestratorBinding = { ...binding(id, "model"), key: "fleet", scope, grant: { subjectSessionId: id, capabilities: ["thread.list"], scope } };
     await appendFile(store.path, `${JSON.stringify(collision)}\n`);
     await expect(store.findBySessionId(id)).rejects.toMatchObject({ code: "STRIGOI_SESSION_CONFLICT" });
     await expect(store.get("fleet")).rejects.toMatchObject({ code: "STRIGOI_SESSION_CONFLICT" });
-    await expect(store.list()).rejects.toMatchObject({ code: "STRIGOI_SESSION_CONFLICT" });
+    await expect(store.get(resident.key)).rejects.toMatchObject({ code: "STRIGOI_SESSION_CONFLICT" });
+    expect(await store.list()).toEqual([ordinary]);
+    const directoryView = new OrchestratorControllerDirectory(store);
+    const controller = orchestratorController(ordinary);
+    expect(await directoryView.forController(controller.controllerId)).toEqual({ controllerId: controller.controllerId, familyId: controller.familyId, sessionId: ordinary.sessionId });
+    await expect(store.put({ ...collision, model: "updated" })).rejects.toMatchObject({ code: "STRIGOI_SESSION_CONFLICT" });
+    await store.put({ ...ordinary, model: "updated" });
+    expect(await store.get(ordinary.key)).toEqual({ ...ordinary, model: "updated" });
+    expect(await store.findBySessionId(ordinary.sessionId)).toEqual({ ...ordinary, model: "updated" });
+  });
+  it("permits established grant revocation during resident corruption but rejects new identities", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-resident-revoke-")); directories.push(directory);
+    const store = new OrchestratorStore(directory);
+    const ordinary = binding("11111111-1111-4111-8111-111111111111", "model");
+    const granted: OrchestratorBinding = { ...ordinary, grant: { ...ordinary.grant, capabilities: ["thread.list", "orchestrator.create"] } };
+    await store.put(granted);
+    await mkdir(dirname(store.strigoi.path), { recursive: true });
+    await writeFile(store.strigoi.path, "corrupt\n");
+    await store.put(ordinary);
     expect(await store.get(ordinary.key)).toEqual(ordinary);
-    expect(await store.findBySessionId(ordinary.sessionId)).toEqual(ordinary);
+    await expect(store.put(binding("22222222-2222-4222-8222-222222222222", "model"))).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
+    await expect(store.put({ ...ordinary, key: "workspace:/repo/two" })).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
   });
   it("isolates filesystem faults but fails closed for unknown session authority", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-resident-fs-")); directories.push(directory);

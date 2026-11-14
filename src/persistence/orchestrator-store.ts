@@ -35,8 +35,13 @@ export class OrchestratorStore {
   async list(): Promise<OrchestratorBinding[]> {
     return withBindingAuthority(this.stateDirectory, async () => {
       const bindings = [...(await this.load()).values()];
-      const resident = await this.residentIfValid();
-      if (resident) bindings.push(resident);
+      try {
+        const resident = await this.residentIfValid();
+        if (resident) bindings.push(resident);
+      } catch (error) {
+        if (!(error instanceof StrigoiStoreError) || error.code !== "STRIGOI_SESSION_CONFLICT" || !error.sessionId) throw error;
+        return structuredClone(bindings.filter((binding) => binding.sessionId !== error.sessionId));
+      }
       return structuredClone(bindings);
     });
   }
@@ -54,8 +59,14 @@ export class OrchestratorStore {
     const parsed = OrchestratorBindingSchema.parse(binding);
     if (parsed.kind === "resident" || parsed.key === STRIGOI_KEY) throw new Error("Resident binding requires Strigoi CAS");
     await withBindingAuthority(this.stateDirectory, async () => {
-      const resident = (await this.strigoi.readWithinAuthority()).activeBinding;
-      if (resident?.sessionId === parsed.sessionId) throw new StrigoiStoreError("STRIGOI_SESSION_CONFLICT", "Resident session conflicts with ordinary binding");
+      const bindings = await this.load();
+      const existing = bindings.get(parsed.key);
+      const established = existing?.sessionId === parsed.sessionId
+        && [...bindings.values()].filter((binding) => binding.sessionId === parsed.sessionId).length === 1;
+      const resident = established
+        ? await this.residentIfValid(parsed.sessionId)
+        : (await this.strigoi.readWithinAuthority()).activeBinding;
+      if (resident?.sessionId === parsed.sessionId) throw new StrigoiStoreError("STRIGOI_SESSION_CONFLICT", "Resident session conflicts with ordinary binding", parsed.sessionId);
       await this.journal.append(parsed);
     });
   }
