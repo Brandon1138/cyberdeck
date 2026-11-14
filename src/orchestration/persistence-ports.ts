@@ -1,3 +1,4 @@
+export type { StrigoiRepository } from "./strigoi-ports.js";
 import type { OrchestratorBinding } from "../domain/orchestrator.js";
 import type { ProviderId } from "../domain/session.js";
 import type { ThreadReadResult } from "../domain/thread.js";

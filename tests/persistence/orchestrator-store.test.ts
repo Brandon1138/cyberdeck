@@ -55,6 +55,41 @@ describe("OrchestratorStore", () => {
     });
   });
 
+  it("exposes the atomic resident and isolates a corrupt resident shard", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-resident-")); directories.push(directory);
+    const store = new OrchestratorStore(directory);
+    const ordinary = binding("11111111-1111-4111-8111-111111111111", "model");
+    await store.put(ordinary);
+    const sessionId = "22222222-2222-4222-8222-222222222222";
+    const scope = { kind: "fleet" as const };
+    const resident: OrchestratorBinding = { ...binding(sessionId, "model"), key: "resident:strigoi", kind: "resident", scope, resident: { name: "strigoi", incarnation: 1 }, grant: { subjectSessionId: sessionId, capabilities: ["thread.list"], scope } };
+    const initial = await store.strigoi.read();
+    await expect(store.put(resident)).rejects.toThrow("CAS");
+    await expect(store.reset(resident.key)).rejects.toThrow("CAS");
+    await store.strigoi.compareAndSwap(0, "activate", { ...initial, revision: 1, desired: "enabled", selection: { provider: "codex", model: "model", cwd: "/repo" }, activeBinding: resident, incarnation: 1 });
+    expect(await store.get(resident.key)).toEqual(resident);
+    expect(await store.findBySessionId(sessionId)).toEqual(resident);
+    expect(await store.list()).toContainEqual(resident);
+    await writeFile(store.strigoi.path, "corrupt\n");
+    await expect(store.get(resident.key)).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
+    expect(await store.get(ordinary.key)).toEqual(ordinary);
+    expect(await store.list()).toEqual([ordinary]);
+    expect(await store.findBySessionId(ordinary.sessionId)).toEqual(ordinary);
+  });
+
+  it("rejects legacy resident records while leaving ordinary bindings readable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-resident-legacy-")); directories.push(directory);
+    const store = new OrchestratorStore(directory);
+    const ordinary = binding("11111111-1111-4111-8111-111111111111", "model");
+    await store.put(ordinary);
+    const sessionId = "22222222-2222-4222-8222-222222222222", scope = { kind: "fleet" as const };
+    const resident = { ...binding(sessionId, "model"), key: "resident:strigoi", kind: "resident", scope, resident: { name: "strigoi", incarnation: 1 }, grant: { subjectSessionId: sessionId, capabilities: ["thread.list"], scope } };
+    const { appendFile } = await import("node:fs/promises");
+    await appendFile(store.path, `${JSON.stringify(resident)}\n${JSON.stringify(resident)}\n`);
+    await expect(store.strigoi.read()).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
+    expect(await store.list()).toEqual([ordinary]);
+  });
+
   /**
    * The log is append-only and predates MIK-98's `kind` field, so lines written by an older build
    * are still the ones this build reads. A primary and a peer written before the field existed both
