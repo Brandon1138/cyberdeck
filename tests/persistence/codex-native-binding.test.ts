@@ -40,6 +40,30 @@ async function fixture() {
 }
 
 describe("exact Codex native binding", () => {
+  it("does not let exactly foreign rollouts block a passive actor's first input", async () => {
+    const f = await fixture();
+    await f.rollout("other", B, T, [completed("other-turn", "not this actor's answer")]);
+    const input = { ...f.input(), codexMarkerRequired: true, allowFallback: false };
+    expect(await f.store.observeProviderTurns(input)).toMatchObject({
+      nativeSourceAvailable: false, nativeSourceStatus: "missing", turns: [],
+    });
+    expect(await f.bindings.read(A)).toBeUndefined();
+    // A real own turn subsequently establishes the exact binding; no foreign result is reused.
+    await f.rollout("own", A, T, [started("own-turn"), completed("own-turn", "own answer")]);
+    expect(await f.store.observeProviderTurns(input)).toMatchObject({
+      nativeSourceAvailable: true, nativeSessionId: "own", turns: [{ text: "own answer" }],
+    });
+  });
+
+  it("keeps unknown rollouts unbound even alongside exactly foreign rollouts", async () => {
+    const f = await fixture();
+    await f.rollout("other", B, T, [completed("other-turn", "foreign")]);
+    await f.rollout("unknown", undefined, T, [completed("unknown-turn", "unattributed")]);
+    expect(await f.store.observeProviderTurns({ ...f.input(), codexMarkerRequired: true, allowFallback: true }))
+      .toMatchObject({ nativeSourceStatus: "unbound", nativeFallbackAllowed: false, turns: [] });
+    expect(await f.bindings.read(A)).toBeUndefined();
+  });
+
   it("binds the first Codex 0.163 user response item after context without a legacy user_message", async () => {
     const f = await fixture();
     const instructionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -225,7 +249,7 @@ describe("exact Codex native binding", () => {
       await f.rollout("one", duplicate ? undefined : B, T, frames);
       if (duplicate) await f.rollout("two", undefined, T, frames);
       expect(await f.store.observeProviderTurns({ ...f.input(), initialInstructionId: instructionId, allowFallback: false }))
-        .toMatchObject({ nativeSourceAvailable: false, nativeSourceStatus: duplicate ? "conflict" : "unbound", turns: [] });
+        .toMatchObject({ nativeSourceAvailable: false, nativeSourceStatus: duplicate ? "conflict" : "missing", turns: [] });
       expect(await f.bindings.read(A)).toBeUndefined();
     }
   });

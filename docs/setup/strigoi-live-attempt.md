@@ -1,3 +1,36 @@
+# Readiness continuation: 2026-11-14
+
+At source `833a7a44aee27b524ef3a69413a3787783e9ed40`, all CI checks and the
+full local check/test/build passed (4,219 tests, 27 skips). The approved isolated
+`/tmp/sg14r04` run completed the full ten-minute idle interval and recovered through
+an exact-marker native adoption. This resolves the earlier missing-marker failure
+described below. Normal input subsequently remained queued as `provider-busy`;
+the lifecycle run failed before worker, renewal, and matched-baseline stages.
+
+A bounded streaming diagnostic in the same approved native home reproduced the
+admission failure independently of Strigoi. In `admission-probe-05`, Codex recorded
+`task_complete` at `2026-11-14T17:00:13.117Z`, while its terminal continued to report
+working redraws until `17:00:14.534Z`. The engine banked one canonical completion,
+but its native activity view became historical/unknown because `lastWorkingAt`
+was later than the native completion timestamp. The second instruction stayed
+queued, even after the terminal showed ready. No submitted prompt was retyped.
+The owned provider exited and the isolated daemon stopped.
+
+This is an unresolved readiness blocker. A fix must distinguish delayed redraws
+from actual newer provider work while preserving input, generation, and stale
+completion fences. No full lifecycle or semantic qualification is claimed.
+
+A separate discovery fix excludes inspected rollouts carrying exact foreign actor
+markers when deciding whether this actor's source is missing. It never binds a
+foreign result. Unknown or unmarked rollouts still hold admission. Typecheck and
+50 binding/source-policy tests pass. A reused-home passive probe remained held by
+an unmarked rollout from an earlier aborted launch; that is not a live pass for
+the discovery change.
+
+Private diagnostic artifacts remain under `/tmp/sg14r04/admission-probe-01`
+through `admission-probe-05` and the worktree's
+`handoffs/strigoi-continuation-20261114/`. Historical evidence below is preserved.
+
 # Bounded live acceptance attempt — 2026-11-14
 
 The operator approved the selected isolated campaign with a ten-minute total limit.
