@@ -1,4 +1,5 @@
-import { WorkflowStore } from "../persistence/workflow-store.js";
+import { composeStrigoiEvidence } from "../persistence/strigoi-evidence-runtime.js";
+import { StrigoiContinuity } from "../orchestration/strigoi-continuity.js";
 import { composeOrchestratorMutationServices } from "./orchestrator-mutation-services.js";
 import { StrigoiAdmission } from "../orchestration/strigoi-admission.js";
 import { composeStrigoiRuntime } from "./strigoi-runtime.js";
@@ -53,7 +54,6 @@ import {
 import { ClaudeConversationBindingStore } from "../persistence/claude-conversation-bindings.js";
 import { CodexConversationBindingStore } from "../persistence/codex-conversation-bindings.js";
 import { CodexNativeAgentSources } from "../persistence/codex-native-agent-sources.js";
-import { OrchestratorStore } from "../persistence/orchestrator-store.js";
 import { SessionStore } from "../persistence/session-store.js";
 import { FleetPreferenceStore } from "../persistence/fleet-preference-store.js";
 import { FleetDetachStore } from "../persistence/fleet-detach-store.js";
@@ -73,7 +73,6 @@ import { LocalWorkerControlService } from "../orchestration/local-worker-control
 import { WorkerBudgetEnforcer } from "./worker-budget-enforcer.js";
 import { WorkerHandoffService } from "../orchestration/worker-handoff-service.js";
 import { activityCoordinationStore } from "../orchestration/activity-coordination-store.js";
-import { InstructionStore } from "../persistence/instruction-store.js";
 import { loadBrokerRuntimeConfig } from "../runtime-config.js";
 import { retainStartupThreads } from "../orchestration/startup-thread-retention.js";
 import { ScoutReportStore } from "../persistence/scout-report-store.js";
@@ -178,13 +177,15 @@ export async function runBroker(
   stateDirectory = appStateDirectory,
 ): Promise<BrokerServer> {
   await ensurePrivateDirectory(stateDirectory);
+  const evidence = composeStrigoiEvidence(stateDirectory);
+  const { orchestratorStore, artifactStore, instructionStore, workflowStore } = evidence;
   const journal = new Journal(stateDirectory);
   const localActivity = await openActivityRecorder(resolve(stateDirectory, "activity"));
   const claudeConversations = new ClaudeConversationBindingStore(stateDirectory);
   const codexConversations = new CodexConversationBindingStore(stateDirectory);
   let registry: SessionRegistry;
-  const containerNativeSource = new ContainerNativeSource(resolve(stateDirectory, "containers"));
-  const transcripts = new ExecutionTranscriptStore(stateDirectory, { claudeConversations, codexConversations }, containerNativeSource, (id) => {
+  const containerNativeSource = new ContainerNativeSource(resolve(stateDirectory, "containers"), evidence.transcriptContinuity.native);
+  const transcripts = new ExecutionTranscriptStore(stateDirectory, { claudeConversations, codexConversations, continuity: evidence.transcriptContinuity }, containerNativeSource, (id) => {
     try { return registry?.get(id); } catch { return undefined; }
   });
   await transcripts.init();
@@ -203,7 +204,6 @@ export async function runBroker(
     }
   }
   const activity = withActivitySink(localActivity, telemetry);
-  const instructionStore = new InstructionStore(stateDirectory);
   const nativeCapture = new TurnNativeCapture(resolve(stateDirectory, "activity", "native-cursors"), activity, transcripts, instructionStore);
   transcripts.attachNativeCapture(nativeCapture);
   const sessionStore = new SessionStore(stateDirectory);
@@ -234,6 +234,7 @@ export async function runBroker(
     };
   const recoveredSessions = await retainStartupThreads(
     {
+      ...await evidence.startup(transcripts, sessionStore),
       catalog: sessionStore,
       scoutReports,
       claudeBindings: transcripts,
@@ -273,7 +274,6 @@ export async function runBroker(
     // A machine without git, or with none of these directories left on disk, starts empty. The
     // operator registers projects by hand from there; refusing to boot over it would be worse.
   });
-  const orchestratorStore = new OrchestratorStore(stateDirectory);
   let observedCoordination!: ObservedWorkerCoordinationService;
   const workerCoordination = new WorkerCoordinationRuntime({
     stateDirectory,
@@ -299,7 +299,7 @@ export async function runBroker(
     probe: new CodexOrchestratorModelProbe(undefined, codexOrchestratorHome),
   });
   const strigoiAdmission = new StrigoiAdmission(orchestratorStore.strigoi, orchestratorStore, registry);
-  const attention = await createOrchestratorAttention(stateDirectory, { registry, bindings: orchestratorStore, coordination: observedCoordination, transcripts, inbox: notificationInbox, strigoi: strigoiAdmission });
+  const attention = await createOrchestratorAttention(stateDirectory, { registry, bindings: orchestratorStore, coordination: observedCoordination, transcripts, inbox: notificationInbox, strigoi: strigoiAdmission }, evidence.attentionStore);
   const orchestrators = new OrchestratorManager(
     registry,
     orchestratorStore,
@@ -310,7 +310,9 @@ export async function runBroker(
     (binding) => attention.bindingRemoved(binding).then(() => orchestratorLiveness.bindingRemoved(binding)),
   );
   const strigoi = await composeStrigoiRuntime({ repository: orchestratorStore.strigoi, bindings: orchestratorStore, registry, manager: orchestrators, admission: strigoiAdmission,
-    onError: (error) => console.error("Strigoi lifecycle held", error) });
+    continuity: new StrigoiContinuity({ repository: orchestratorStore.strigoi, bindings: orchestratorStore,
+      admission: strigoiAdmission, packets: evidence.packets, sources: evidence.sources }),
+    verifyContinuity: evidence.verify, beforeDelete: evidence.beforeDelete, onError: (error) => console.error("Strigoi lifecycle held", error) });
   const notificationFeed = composeOrchestratorNotificationFeed({
     strigoi: strigoiAdmission,
     attention,
@@ -361,7 +363,7 @@ export async function runBroker(
     },
   );
   const { orchestratorPeers, workerControl, workflows } = composeOrchestratorMutationServices({
-    workflowStore: new WorkflowStore(stateDirectory), registry, orchestratorStore, orchestrators, instructions, journal,
+    workflowStore, registry, orchestratorStore, orchestrators, instructions, journal,
     coordination: workerCoordination.service, workerLeaseCredentials, modalAnswerPolicy, strigoiAdmission,
   });
   // The same custodian the control service uses, so a handed-off lease is immediately usable by
@@ -399,7 +401,6 @@ export async function runBroker(
   // The control plane owns durable job state, admission, budgets, leases, and reconciliation. Its
   // runtime enforces the ordering: persistence, then recovery, then reconciliation, and only then is
   // admission opened. The B-owned dispatch adapters are composed in without being modified.
-  const artifactStore = new ArtifactStore(stateDirectory);
   const runtime = new ControlPlaneRuntime({
     stateDirectory,
     config,

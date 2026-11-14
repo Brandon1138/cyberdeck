@@ -7,7 +7,7 @@ export class InstructionStore {
   readonly path: string;
   private readonly journal: ValidatedJournal<Map<string, InstructionRecord>>;
 
-  constructor(stateDirectory: string) {
+  constructor(stateDirectory: string, private readonly capture?: (record: InstructionRecord) => Promise<void>) {
     this.path = join(stateDirectory, "orchestration", "instructions.jsonl");
     // Notification recovery reads this mailbox once per controller. Replaying the entire journal
     // for every read made broker startup exceed its readiness deadline on ordinary history.
@@ -18,6 +18,7 @@ export class InstructionStore {
   async put(record: InstructionRecord): Promise<void> {
     const parsed = InstructionRecordSchema.parse(record);
     await this.journal.append(parsed);
+    await this.capture?.(parsed);
   }
 
   async list(targetSessionId?: string): Promise<InstructionRecord[]> {

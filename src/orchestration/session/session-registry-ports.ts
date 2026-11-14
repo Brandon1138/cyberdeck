@@ -134,6 +134,7 @@ export interface SessionRegistryOptions {
   residentLifecycle?: {
     validateReservation(reservation: import("./session-ports.js").LaunchReservation): Promise<void>;
     beforeStop(sessionId: string): Promise<void>;
+    beforeDelete?(sessionId: string): Promise<void>;
     beforeResume(sessionId: string): Promise<void>;
   };
   adapters: Record<string, ProviderAdapter>;

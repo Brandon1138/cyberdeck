@@ -230,6 +230,7 @@ export class SessionLifecycleController {
   }
 
   async delete(sessionId: string, beforeDelete?: () => Promise<void>): Promise<void> {
+    await this.catalog.options.residentLifecycle?.beforeDelete?.(sessionId);
     const runtime = this.catalog.requireRuntime(sessionId);
     if (
       runtime.record.executionState === "active"

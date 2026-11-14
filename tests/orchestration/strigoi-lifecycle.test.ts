@@ -11,7 +11,7 @@ import type { SessionStartPort, SessionLaunchOutcomePort } from "../../src/orche
 const selection = { provider: "codex" as const, model: "gpt-5.6-sol", cwd: "/repo" };
 const roots: string[] = [], residents: StrigoiLifecycle[] = [];
 afterEach(async () => { residents.splice(0).forEach((r) => r.dispose()); vi.useRealTimers(); for (const p of roots.splice(0)) await rm(p, { recursive: true, force: true }); });
-async function fixture() {
+async function fixture(verifyContinuity?: () => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), "strigoi-lifecycle-")); roots.push(root);
   const bindings = new OrchestratorStore(root), records = new Map<string, SessionRecord>();
   let modal = false;
@@ -34,7 +34,7 @@ async function fixture() {
     workerTruth: () => ({ modalOpen: modal }), submit: vi.fn() };
   const manager = new OrchestratorManager(registry, bindings, undefined, undefined, async () => []);
   const admission = { freeze: vi.fn(async () => {}), reopen: vi.fn(async () => {}), run: vi.fn(), instruction: vi.fn() };
-  const options = { repository: bindings.strigoi, bindings, registry, manager, admission };
+  const options = { repository: bindings.strigoi, bindings, registry, manager, admission, ...(verifyContinuity ? { verifyContinuity } : {}) };
   const make = () => { const r = new StrigoiLifecycle(options); residents.push(r); return r; };
   const resident = make();
   return { resident, make, start, reject, registry, admission, bindings, records, setModal: (v: boolean) => { modal = v; } };
@@ -151,4 +151,19 @@ describe("passive Strigoi lifecycle", () => {
     expect((await f.resident.inspect()).state.hold?.code).toBe("provider-permission-modal");
     expect(f.registry.submit).not.toHaveBeenCalled();
   });
+});
+
+it("preserves the continuity evidence hold until explicit resume verifies repaired evidence", async () => {
+  const verify = vi.fn(async () => {}), f = await fixture(verify);
+  await f.resident.configure(selection, "config");
+  const state = await f.bindings.strigoi.read();
+  await f.bindings.strigoi.compareAndSwap(state.revision, "evidence-hold", { ...state, revision: state.revision + 1,
+    hold: { code: "continuity-evidence-unavailable", detail: "Corrupt source index", sourceIds: [] } });
+  await f.resident.reconcile(); expect(f.start).not.toHaveBeenCalled();
+  expect((await f.resident.inspect()).state.hold?.code).toBe("continuity-evidence-unavailable");
+  verify.mockRejectedValueOnce(new Error("Still corrupt"));
+  await expect(f.resident.setDesired("enabled", "resume-bad")).rejects.toThrow("Still corrupt");
+  expect((await f.resident.inspect()).state.hold?.code).toBe("continuity-evidence-unavailable");
+  await f.resident.setDesired("enabled", "resume-good"); await f.resident.reconcile();
+  expect(f.start).toHaveBeenCalledTimes(1); expect(f.registry.submit).not.toHaveBeenCalled();
 });

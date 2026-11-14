@@ -10,7 +10,8 @@ export class OrchestratorAttentionStore implements AttentionStorePort {
   readonly directory: string;
   private readonly tails = new Map<string, Promise<unknown>>();
 
-  constructor(stateDirectory: string, private readonly write = writeAtomicPrivateFile) {
+  constructor(stateDirectory: string, private readonly write = writeAtomicPrivateFile,
+    private readonly capture?: (record: OrchestratorAttention) => Promise<void>) {
     this.directory = join(stateDirectory, "orchestration", "attention-v1");
   }
 
@@ -44,7 +45,9 @@ export class OrchestratorAttentionStore implements AttentionStorePort {
       const parsed = OrchestratorAttentionSchema.parse(next);
       if (parsed.controllerId !== controllerId) throw new AttentionError("ATTENTION_CORRUPT", "Controller identity mismatch");
       if (JSON.stringify(current) !== JSON.stringify(parsed)) {
+        if (current) await this.capture?.(current);
         await this.write(this.path(controllerId), `${JSON.stringify(parsed)}\n`);
+        await this.capture?.(parsed);
       }
       return parsed;
     });

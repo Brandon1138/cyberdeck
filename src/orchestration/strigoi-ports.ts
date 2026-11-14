@@ -31,3 +31,16 @@ export interface StrigoiAdmissionPort {
   reopen(identity: StrigoiIdentity): Promise<void>;
   instruction(record: InstructionRecord): InstructionAdmission;
 }
+
+/** Immutable copies and paged inventories; the implementation owns artifact integrity checks. */
+export interface StrigoiPacketPort {
+  verify(sources: import("../domain/strigoi.js").StrigoiSourceRef[]): Promise<void>;
+  copy(ref: import("../domain/strigoi.js").StrigoiSourceRef, text: string, sessionIds: string[]): Promise<import("../domain/strigoi.js").StrigoiSourceRef[]>;
+  write(identity: StrigoiIdentity, prose: string, sources: import("../domain/strigoi.js").StrigoiSourceRef[], at: string): Promise<import("../domain/strigoi.js").StrigoiPacketRef>;
+  read(ref: import("../domain/strigoi.js").StrigoiPacketRef, cursor?: string): Promise<{
+    packet: import("../domain/strigoi.js").StrigoiPacket; sources: import("../domain/strigoi.js").StrigoiSourceRef[]; nextCursor?: string;
+  }>;
+}
+export interface StrigoiSourcePort {
+  capture(state: StrigoiState): Promise<import("../domain/strigoi.js").StrigoiSourceRef[]>;
+}

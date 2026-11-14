@@ -31,7 +31,7 @@ import type {
 import { ClaudeConversationBindingStore } from "./claude-conversation-bindings.js";
 import { CodexConversationBindingStore } from "./codex-conversation-bindings.js";
 import { CodexConversationDiscovery } from "./codex-conversation-discovery.js";
-import { nativeSourceFailure, validateNativeFrame } from "./native-source-observation.js";
+import { NativeSourceError, nativeSourceFailure, validateNativeFrame } from "./native-source-observation.js";
 import { observedModelParser, type ObservedModel } from "../runtime/observed-model.js";
 import { isClaudeClearFrame } from "../runtime/claude-clear-frame.js";
 export { isClaudeClearFrame };
@@ -52,6 +52,11 @@ export type {
 } from "../orchestration/session/worker-turn-ports.js";
 
 export interface ThreadTranscriptStoreOptions {
+  continuity?: {
+    event(event: ThreadEvent): Promise<void>;
+    native(sessionId: string, id: string, message: TranscriptMessage): Promise<void>;
+    beforeDelete(sessionId: string): Promise<void>;
+  };
   now?: () => string;
   idFactory?: () => string;
   maxBytes?: number;
@@ -190,7 +195,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
       if (this.retiredSessions.has(input.sessionId) && (input.kind === "turn" || input.kind === "instruction")) throw new Error("THREAD_RETIRED");
       await this.hydrateWorkerLedger(input.sessionId);
       const event = this.createEvent(input);
-      await this.persist(event);
+      await this.persist(event, input.text);
       this.rememberSemanticTurn(event);
       if (event.kind === "turn" || (event.kind === "instruction" && event.data.instructionState === "rendered")) await this.persistWorkerLedger(event.sessionId);
       return event;
@@ -313,7 +318,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
           text: receipt.text,
           data: receipt.data,
         });
-        await this.persist(event);
+        await this.persist(event, turn.text);
         this.rememberSemanticTurn(event);
         await this.persistWorkerLedger(event.sessionId);
         receipts.push(event);
@@ -339,6 +344,17 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   async captureProviderTurns(input: CaptureProviderTurns): Promise<WorkerTurnTranscript[]> {
     const observation = await this.observeProviderTurns(input);
     return this.commitProviderTurns(observation);
+  }
+
+  /** Capture every original native message, independently of the preview window. */
+  async captureOriginalContext(input: CaptureProviderTurns, _session?: import("../domain/session.js").SessionRecord): Promise<void> {
+    if (!this.options.continuity || !["codex", "claude"].includes(input.provider)) return;
+    const path = input.provider === "claude" ? await this.resolveClaudeTranscript(input) : await this.findCodexTranscript(input);
+    if (path !== undefined && await stat(path).catch(ignoreMissing)) await this.nativeProjection(input, path, "turns");
+    else if (input.provider === "codex" && await this.codexConversations.exists(input.sessionId)) {
+      const status = this.codexStatuses.get(input.sessionId)?.status;
+      throw new NativeSourceError(status === "missing" ? "missing" : "source-error", "STRIGOI_NATIVE_SOURCE_UNAVAILABLE");
+    }
   }
 
   /**
@@ -598,6 +614,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
 
   dropTurnLedger(sessionId: string): Promise<void> {
     return this.enqueueWrite(async () => {
+      await this.options.continuity?.beforeDelete(sessionId);
       await this.init();
       const event = this.createEvent({ sessionId, kind: "lifecycle", source: "broker",
         text: "turn ledger retired", data: { turnLedgerRetired: true } });
@@ -636,7 +653,8 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     return result;
   }
 
-  private async persist(event: ThreadEvent): Promise<void> {
+  private async persist(event: ThreadEvent, originalText = event.text): Promise<void> {
+    await this.options.continuity?.event({ ...event, ...(originalText === undefined ? {} : { text: originalText }) });
     const serialized = `${JSON.stringify(event)}\n`;
     await this.rotateIfNeeded(Buffer.byteLength(serialized));
     const handle = await openPrivateAppendFile(this.path);
@@ -752,6 +770,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
    * session that legitimately holds the same path.
    */
   async dropClaudeBinding(sessionId: string): Promise<void> {
+    await this.options.continuity?.beforeDelete(sessionId);
     await this.claudeConversations.remove(sessionId);
     this.claudeStatuses.delete(sessionId);
     for (const [path, owner] of this.claimedClaudePaths) {
@@ -761,6 +780,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
 
   /** A retired session must not remain a durable claimant of a native Codex conversation. */
   async dropCodexBinding(sessionId: string): Promise<void> {
+    await this.options.continuity?.beforeDelete(sessionId);
     await this.codexConversations.remove(sessionId);
     this.codexStatuses.delete(sessionId);
     this.nativeProjections.delete(`turns:${sessionId}`);
@@ -806,9 +826,13 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     for (const id of value.turns.keys()) {
       if (this.semanticTurnIds.has(this.semanticKey(input.sessionId, `${input.provider}:${id}`))) value.turns.delete(id);
     }
-    await value.reader.scan(path, (line, offset, bytes) => {
+    await value.reader.scan(path, async (line, offset, bytes) => {
       if (line.trim() === "") return;
       validateNativeFrame(input.provider, line, codexIdentity, input.cwd);
+      if (this.options.continuity) {
+        const message = input.provider === "claude" ? parseClaudeTranscriptLine(line) : parseCodexRolloutLine(line);
+        if (message) await this.options.continuity.native(input.sessionId, `${path}:${offset}`, message);
+      }
       if (input.provider === "claude" && isClaudeClearFrame(line)) { value.cleared = true; return; }
       if (purpose === "preview") {
         const message = input.provider === "claude" ? parseClaudeTranscriptLine(line) : parseCodexRolloutLine(line);

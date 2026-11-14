@@ -38,6 +38,7 @@ export interface StrigoiLifecycleOptions {
     workerTruth(sessionId: string): { modalOpen: boolean };
   };
   onError?: (error: unknown) => void;
+  verifyContinuity?: () => Promise<void>;
 }
 
 /** Passive initial residence only. Succession/adoption is deliberately a later collaborator. */
@@ -53,6 +54,7 @@ export class StrigoiLifecycle {
 
   async configure(selection: StrigoiSelection, mutationId: string): Promise<StrigoiInspection> {
     const parsed = StrigoiSelectionSchema.parse(selection);
+    await this.options.verifyContinuity?.();
     if (!isAbsolute(parsed.cwd)) throw failure("INVALID_SESSION_CWD");
     await this.authority(async () => {
       const state = await this.options.repository.read();
@@ -69,6 +71,7 @@ export class StrigoiLifecycle {
     this.epoch += 1;
     this.clearTimer();
     await this.freeze(await this.options.repository.read());
+    if (desired === "enabled") await this.options.verifyContinuity?.();
     const state = await this.authority(async () => {
       const current = await this.options.repository.read();
       if (desired === "enabled" && !current.selection) throw failure("STRIGOI_NOT_CONFIGURED");
@@ -136,6 +139,7 @@ export class StrigoiLifecycle {
     const epoch = this.epoch;
     let state = await this.options.repository.read();
     if (this.disposed) return;
+    if (state.hold?.code === "continuity-evidence-unavailable") { await this.freeze(state); return; }
     if (!state.activeBinding && state.transition?.successor) {
       await this.resolveAssigned(state, epoch); return;
     }

@@ -21,7 +21,8 @@ export interface PendingNativeInterval {
   executionId?: string; startedAt?: string; providerTurnId?: string;
 }
 export class ContainerNativeSource {
-  constructor(private readonly root: string) {}
+  constructor(private readonly root: string,
+    private readonly capture?: (sessionId: string, id: string, message: TranscriptMessage) => Promise<void>) {}
   stateRoot(id: string): string { return join(this.root, "provider-state", z.uuid().parse(id)); }
   bindingPath(id: string): string { return join(this.root, "native-bindings", `${z.uuid().parse(id)}.json`); }
   async dropBinding(id: string): Promise<void> { await rm(this.bindingPath(id), { force: true }); }
@@ -149,7 +150,7 @@ export class ContainerNativeSource {
       model = observedModelParser(snapshot.provider)?.(line.text) ?? model;
       if (snapshot.provider === "codex") budget = { ...budget, ...parseCodexBudgetTelemetryLine(line.text, window) };
       const preview = parseMessage(line.text);
-      if (preview) { messages.push(preview); if (messages.length > 20) messages.shift(); }
+      if (preview) { await this.capture?.(snapshot.id, `${source.path}:${line.offset}`, preview); messages.push(preview); if (messages.length > 20) messages.shift(); }
       // Only Claude's own record of the command, never a tool result that quotes the literal.
       if (snapshot.provider === "claude" && isClaudeClearFrame(frame)) throw new Error("NATIVE_CONVERSATION_CLEARED");
       if (frame?.type === "turn_context" && startedAt === undefined) {

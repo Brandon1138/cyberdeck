@@ -18,7 +18,11 @@ export const StrigoiIdentitySchema = z.object({ sessionId: z.uuid(), incarnation
 export const StrigoiSelectionSchema = z.object({ provider: z.literal("codex"), model: z.string().min(1), effort: ReasoningEffortSchema.optional(), cwd: z.string().min(1) });
 export const StrigoiDesiredSchema = z.enum(["enabled", "suspended", "disabled"]);
 export const StrigoiPhaseSchema = z.enum(["requested", "checkpointing", "sealed", "retiring", "launching", "committed", "adopting", "reconciling", "complete", "aborted"]);
-export const StrigoiSourceRefSchema = z.object({ kind: z.enum(["turn", "instruction", "worker-event", "attention", "workflow", "artifact"]), id: z.string().min(1), revision: z.string().min(1), sha256: z.string().regex(/^[a-f0-9]{64}$/).optional() });
+export const StrigoiSourceRefSchema = z.object({ kind: z.enum(["turn", "instruction", "worker-event", "attention", "workflow", "artifact"]), id: z.string().min(1), revision: z.string().min(1), sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  coverageSourceId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  copy: z.object({ artifactId: z.uuid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+  sessionIds: z.array(z.uuid()).optional(), part: z.number().int().nonnegative().optional(), text: z.string().optional(),
+});
 export const StrigoiPacketRefSchema = z.object({ artifactId: z.string().min(1), sha256: z.string().regex(/^[a-f0-9]{64}$/), coverageId: z.string().min(1) });
 export const StrigoiHoldSchema = z.object({ code: z.string().min(1), detail: z.string().min(1), sourceIds: z.array(z.string()) });
 export const StrigoiTransitionSchema = z.object({
@@ -29,10 +33,30 @@ export const StrigoiTransitionSchema = z.object({
   "Predecessor must match expected incarnation")
   .refine((transition) => transition.successor === undefined || transition.successor.incarnation > transition.expectedIncarnation,
     "Successor incarnation must increase");
+const digest = z.string().regex(/^[a-f0-9]{64}$/);
+export const StrigoiArtifactRefSchema = z.object({ artifactId: z.uuid(), sha256: digest }).strict();
+const prose = z.string().refine((value) => Buffer.byteLength(value, "utf8") <= STRIGOI_LIMITS.checkpointProseBytes, "Prose exceeds UTF-8 byte limit");
+export const StrigoiPacketSchema = z.object({
+  schemaVersion: z.literal(1), author: StrigoiIdentitySchema, createdAt: z.iso.datetime(), prose,
+  coverageId: z.uuid(), sourceCount: z.number().int().nonnegative(), inventory: StrigoiArtifactRefSchema.optional(),
+}).strict().refine((p) => (p.sourceCount === 0) === (p.inventory === undefined), "Inventory/count mismatch");
+export const StrigoiAdoptionSchema = z.object({
+  identity: StrigoiIdentitySchema, packetHash: digest, coverageId: z.uuid(),
+  handledSourceIds: z.array(digest).refine((ids) => new Set(ids).size === ids.length, "Duplicate handled IDs"),
+  account: prose.refine((value) => value.trim().length > 0, "Adoption account required"),
+}).strict();
+export const StrigoiContinuityReceiptSchema = z.object({
+  mutationId: z.string().min(1), requestHash: digest, packet: StrigoiPacketRefSchema,
+  adoption: StrigoiAdoptionSchema.optional(),
+}).strict();
+export type StrigoiArtifactRef = z.infer<typeof StrigoiArtifactRefSchema>;
+export type StrigoiPacket = z.infer<typeof StrigoiPacketSchema>;
+export type StrigoiAdoption = z.infer<typeof StrigoiAdoptionSchema>;
 export const StrigoiStateSchema = z.object({
   schemaVersion: z.literal(1), revision: z.number().int().nonnegative(), desired: StrigoiDesiredSchema,
   selection: StrigoiSelectionSchema.optional(), activeGeneration: z.number().int().positive().optional(), activeBinding: OrchestratorBindingSchema.optional(), incarnation: z.number().int().nonnegative(),
   transition: StrigoiTransitionSchema.optional(), latestPacket: StrigoiPacketRefSchema.optional(), retainedSessionIds: z.array(z.uuid()),
+  continuityReceipts: z.array(StrigoiContinuityReceiptSchema).optional(),
   hold: StrigoiHoldSchema.optional(), updatedAt: z.iso.datetime(),
 }).refine((state) => state.desired !== "enabled" || state.selection !== undefined, "Enabled resident requires a selection")
   .refine((state) => state.activeBinding === undefined || (isStrigoiBinding(state.activeBinding)

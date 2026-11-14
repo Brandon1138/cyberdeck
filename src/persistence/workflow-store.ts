@@ -12,13 +12,14 @@ export class WorkflowStore {
   private readonly runsPath: string;
   private readonly messagesPath: string;
 
-  constructor(stateDirectory: string) {
+  constructor(stateDirectory: string, private readonly capture?: (record: WorkflowRun | WorkflowMessage) => Promise<void>) {
     this.runsPath = join(stateDirectory, "orchestration", "workflow-runs.jsonl");
     this.messagesPath = join(stateDirectory, "orchestration", "workflow-messages.jsonl");
   }
 
   async putRun(run: WorkflowRun): Promise<void> {
-    await append(this.runsPath, WorkflowRunSchema.parse(run));
+    const parsed = WorkflowRunSchema.parse(run);
+    await append(this.runsPath, parsed); await this.capture?.(parsed);
   }
 
   async listRuns(): Promise<WorkflowRun[]> {
@@ -33,7 +34,8 @@ export class WorkflowStore {
   }
 
   async putMessage(message: WorkflowMessage): Promise<void> {
-    await append(this.messagesPath, WorkflowMessageSchema.parse(message));
+    const parsed = WorkflowMessageSchema.parse(message);
+    await append(this.messagesPath, parsed); await this.capture?.(parsed);
   }
 
   async listMessages(runId: string): Promise<WorkflowMessage[]> {
