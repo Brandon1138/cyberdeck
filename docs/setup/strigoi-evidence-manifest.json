@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "baseSha": "76815169071b2e2852b31958a0475955210913df",
-  "sourceFixtureStatus": "Remediation implemented; focused checks passed. Final independent whole-branch re-review in progress; no final source approval yet.",
-  "fullIntegratedStatus": "IN PROGRESS on final remediation source; check passed. Historical Task10 full-suite PASS at 205912f is retained in checks.",
+  "sourceFixtureStatus": "APPROVED WITH LIMITS at 64b1dfb: independent whole-branch source review; two nonblocking P3 retry findings remain. Native/human acceptance separate.",
+  "fullIntegratedStatus": "PASS at source64b1dfb: pnpm check, test --maxWorkers=2, build exit0; 311 files/4216 tests passed, 1 file/27 skipped, 611.40s. All858 source/test/script/config hashes unchanged across run.",
   "liveStatus": "NOT RUN",
   "sourceScope": "Actual production services, persisted reopen and separately owned controller child SIGKILL/restart with synthetic OS transport. No full broker network server, native provider or power-loss qualification. Integrated completion also validates optional Fleet resident inspection at the RPC display boundary; palette/catalog/resident-marker expectations updated without authority, key handling or Unknown-semantics changes.",
   "files": [
@@ -362,8 +362,8 @@
   },
   "scalingAssessment": "Observed binding-authority pause grows to 446 ms at 1024 synthetic records; unbounded retention growth risk remains for final reviewer. No supplied latency SLO or capacity threshold is established. No optimization/retention-policy change.",
   "remainingGates": [
-    "Final independent whole-branch remediation review and practical scaling-risk ruling",
-    "Fresh full integrated test/build completion on final source",
+    "Two nonblocking P3 retry findings documented in docs/setup/strigoi-review.md",
+    "Production capacity and capture-time authority contention qualification before broad rollout",
     "Operator approves concrete isolated live invocations",
     "Native passive request-level zero-inference proof: UNQUALIFIED without complete upstream counter",
     "Native lifecycle, renewal, process recovery and cleanup support: NOT RUN",
@@ -413,7 +413,7 @@
     "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode crash --case reserved-launch --state-directory /tmp/sg-crash-02 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only"
   ],
   "semanticInvocationTemplate": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode semantic --case alfred --state-directory /tmp/sg-sem-01 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only",
-  "fullBuildStatus": "PENDING final controller run",
+  "fullBuildStatus": "PASS - final build exit0",
   "integratedCompletion": {
     "status": "DONE_WITH_CONCERNS",
     "phase": "Task10 pre-review integrated completion, not independent review fix1",
@@ -431,7 +431,7 @@
     "fullSuite": "Controller rerun required, build afterward",
     "live": "NOT RUN"
   },
-  "controllerVerificationNote": "Task10 historical evidence preserved. Current remediation is a draft PR candidate; final review/test/build pending. No native acceptance performed.",
+  "controllerVerificationNote": "Final reviewed/tested source64b1dfb; source bytes unchanged through check/test/build. Documentation-only evidence update follows. Historical logs and original harness aggregate false (HEAD changed by commit) retained with separate file-hash reconciliation.",
   "historicalEvidence": "Existing files/checks/scaling entries below describe Task10 at 205912f; they are retained historical evidence, not hashes or final-gate claims for remediation.",
   "remediation": {
     "baseSha": "205912fd9feae159e1b25567bb21d7db7ccca17c",
@@ -470,7 +470,7 @@
       "tests/persistence/validated-journal.test.ts": "6cb962d77725442e16b558b3d1d83bd0a240606f37fa4053f50d16be54ae57cf"
     },
     "focusedChecks": "199 distinct tests across 18 files, composed from 17 passing affected files and the corrected 15-test archive rerun; Node24 typecheck passed. Earlier failure log retained.",
-    "review": "IN PROGRESS",
+    "review": "APPROVED WITH LIMITS: no blocking source defect in reviewed paths; two P3 retry findings remain; see docs/setup/strigoi-review.md",
     "live": "NOT RUN",
     "scaling": {
       "node": "v24.18.0",
@@ -539,6 +539,69 @@
         }
       ]
     },
-    "limits": "Incremental writes and linear packet reads; full post-append archive validation inside capture authority retains quadratic cumulative reads. No production capacity claim."
+    "limits": "Incremental writes and linear packet reads; full post-append archive validation inside capture authority retains quadratic cumulative reads. No production capacity claim.",
+    "controllerGates": [
+      {
+        "name": "check",
+        "command": [
+          "rtk",
+          "proxy",
+          "pnpm",
+          "--config.verify-deps-before-run=false",
+          "check"
+        ],
+        "startedAt": "2026-11-14T13:08:59.564668+00:00",
+        "durationSeconds": 3.924,
+        "exitCode": 0,
+        "logSha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630"
+      },
+      {
+        "name": "test",
+        "command": [
+          "rtk",
+          "proxy",
+          "pnpm",
+          "--config.verify-deps-before-run=false",
+          "test",
+          "--maxWorkers=2"
+        ],
+        "startedAt": "2026-11-14T13:09:03.489864+00:00",
+        "durationSeconds": 612.912,
+        "exitCode": 0,
+        "logSha256": "07ce8728940818d6067f96de40155d0e33386c3f0cfc62a1825682ce0a9f794c"
+      },
+      {
+        "name": "build",
+        "command": [
+          "rtk",
+          "proxy",
+          "pnpm",
+          "--config.verify-deps-before-run=false",
+          "build"
+        ],
+        "startedAt": "2026-11-14T13:19:16.400300+00:00",
+        "durationSeconds": 5.363,
+        "exitCode": 0,
+        "logSha256": "ff898b56837ccb11282b2dbeb46b386249613d3b77d37ad16025a9c5ab19ca06"
+      }
+    ],
+    "controllerSourceReconciliation": {
+      "checkedAt": "2026-11-14T13:19:41.496155+00:00",
+      "sourceFilesUnchanged": true,
+      "fileCount": 858,
+      "changedFiles": [],
+      "branchUnchanged": true,
+      "headBefore": "205912fd9feae159e1b25567bb21d7db7ccca17c",
+      "headAfter": "64b1dfbd3ed2626d1a57d102ba9fc9e53afd395e",
+      "explanation": "The controller committed the unchanged source during the full test run to meet the explicit PR deadline. The original harness compares HEAD too and therefore reports aggregate false. Every source/test/script/config hash is unchanged; each gate exited0. Original results are preserved.",
+      "gateExitCodes": {
+        "check": 0,
+        "test": 0,
+        "build": 0
+      },
+      "verifiedSourceGatesPass": true
+    },
+    "independentReviewPatchSha256": "c24829864d0387d3b4c2a642bc38fe8a13aefb4213f398393de4925495b0eaf4",
+    "invocationPreflight": "All ten selected invocations validate at64b1dfb; all proposed state directories remain absent. No inference launched."
   }
 }

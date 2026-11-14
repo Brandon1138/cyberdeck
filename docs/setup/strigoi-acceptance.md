@@ -3,8 +3,12 @@
 Source/fixture acceptance is separate from live qualification. The initial Task 10 source at
 `205912f` passed its independent scoped review and integrated checks. The subsequent whole-branch
 review found five issues; remediation and a journal-integrity follow-up are now implemented.
-Final whole-branch re-review and a fresh controller check/test/build are in progress for the draft PR.
-Focused remediation coverage passed; no native provider acceptance or human semantic grading has run.
+Final whole-branch re-review is **source APPROVED with limits** at `64b1dfb`, with two
+nonblocking P3 retry findings recorded in [the review](strigoi-review.md). Fresh controller
+check/test/build passed: **311 files / 4,216 tests passed; 1 file / 27 tests skipped**.
+All 858 source/test/script/configuration hashes were unchanged across the run; the local
+commit advanced HEAD during testing without changing those bytes. No native provider
+acceptance or human semantic grading has run.
 
 The selected isolated configuration is Codex `gpt-6.1-sol`, effort `high`, with cwd
 `/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114`. Selection does not authorize
