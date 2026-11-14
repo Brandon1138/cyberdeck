@@ -1,0 +1,11 @@
+
+ RUN  v5.0.3 /Users/brandon/.codex/worktrees/worker-followup-delivery/cyberdeck
+
+
+ Test Files  281 passed (281)
+      Tests  3717 passed | 26 skipped (3743)
+   Start at  16:42:42
+   Duration  118.26s (tests 81%, import 14%, transform 5%, worker 1%)
+
+    Isolate  281 workers spawned · ~133ms startup each (spawn + environment, per file)
+             at least ~18.59s faster with isolate: false — reuses workers across files instead of one per file

@@ -256,7 +256,7 @@ describe("peer first-instruction lifecycle", () => {
       expect(receipt).toMatchObject({ launch: true, expectedTurn: 1, status: "rendered" });
       handle.emit(READY[provider]);
       const early = await h.queue.enqueue({ actorSessionId: h.actor.session.id, targetSessionId: created.sessionId, message: "Then reply SECOND_ACK." });
-      expect(early).toMatchObject({ status: "queued", holdReason: "provider-busy" });
+      expect(early).toMatchObject({ status: "queued", holdReason: "launch-pending" });
       expect(handle.writes).toEqual([]);
       // Startup repaints, including a superficially ready composer, cannot complete the brief.
       handle.emit("\u001b]0;⠹ Startup\u0007\u001b[2JWorking\nesc to interrupt\n");

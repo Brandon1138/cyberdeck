@@ -125,8 +125,10 @@ export class NativeTurnActivity {
     this.refused = observation.nativeSourceStatus === "unbound" || observation.nativeSourceStatus === "conflict"
       || observation.nativeSourceStatus === "source-error" || observation.nativeSourceReason === "NATIVE_COMPLETION_BOUNDARY_MISSING";
     this.available = observation.nativeSourceAvailable;
-    if (!this.available) delete this.view;
-    else {
+    // A read outage masks the last bound observation; it does not consume its identity.
+    // Keep the view so the same receipt can recover after the read succeeds. Real input,
+    // generation reset and newer busy screen revisions still fence it independently.
+    if (this.available) {
       const evidence = observation.nativeActivityEvidence;
       const occurredAt = evidence?.occurredAt;
       const newEvidence = evidence !== undefined && this.seenEvidence !== evidence.id;

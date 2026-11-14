@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { recoverPendingInstructions } from "./instruction-recovery.js";
+import type { WorkerTurnLedger } from "./session/worker-turn-ports.js";
 import { z } from "zod";
 import { grantAllows } from "../domain/capability.js";
 import { InstructionRecordSchema, WakeContextSchema, WakeHeldError, type InstructionRecord, type InstructionAdmission } from "../domain/instruction.js";
@@ -167,6 +169,12 @@ export class InstructionQueue {
     }
   }
 
+  /** Run after worker budget/authority recovery and after event subscriptions are installed. */
+  async recoverPendingInstructions(readLedger: (sessionId: string) => Promise<WorkerTurnLedger>): Promise<void> {
+    await recoverPendingInstructions(await this.store.list(), readLedger,
+      update => this.applyState(update), id => this.flush(id));
+  }
+
   async enqueue(input: z.input<typeof EnqueueInstructionParamsSchema>): Promise<InstructionRecord> {
     const request = EnqueueInstructionParamsSchema.parse(input);
     const binding = await this.orchestrators.findBySessionId(request.actorSessionId);
@@ -267,6 +275,7 @@ export class InstructionQueue {
           } else {
             results.push(await this.persistState(behind, "queued", {
               holdReason: behind.submissionKind === "wake" && !holdReason.startsWith("wake-") ? `wake-${holdReason}` : holdReason,
+              holdDetail: attempted.holdDetail,
             }));
           }
         }
@@ -303,7 +312,7 @@ export class InstructionQueue {
       const record = (await this.store.list(targetSessionId))
         .find((candidate) => candidate.messageId === messageId);
       if (record === undefined) return undefined;
-      if (record.status !== "accepted" && record.status !== "queued") return record;
+      if (record.deliveryAttemptAt !== undefined || (record.status !== "accepted" && record.status !== "queued")) return record;
       return this.persistState(record, "cancelled", {});
     });
   }
@@ -321,7 +330,7 @@ export class InstructionQueue {
         return { outcome: "IDENTITY_MISMATCH" as const };
       }
       if (record.status === "cancelled") return { outcome: "CANCELLED" as const, instruction: record };
-      if (record.status !== "accepted" && record.status !== "queued") {
+      if (record.deliveryAttemptAt !== undefined || (record.status !== "accepted" && record.status !== "queued")) {
         return { outcome: "TOO_LATE" as const, instruction: record };
       }
       const instruction = await this.persistState(record, "cancelled", {
@@ -346,6 +355,7 @@ export class InstructionQueue {
       // receipts never regress, including when that old runtime later stops or resumes.
       if (record === undefined || record.status === update.state
         || ["completed", "undelivered", "cancelled"].includes(record.status)) return;
+      if (update.turn !== undefined && record.expectedTurn !== undefined && update.turn !== record.expectedTurn) return;
       if (instructionProgress(record.status, update.state) !== update.state) return;
       await this.store.put(InstructionRecordSchema.parse({
         ...record,
@@ -354,7 +364,9 @@ export class InstructionQueue {
         // A provider can be seen to have taken the payload only once, and the broker may report that
         // as `acknowledged` or straight through to `completed` if the turn was faster than a poll.
         // The stamp is about the fact, not about which frame carried the news.
-        ...(update.state === "rendered" ? { renderedAt: record.renderedAt ?? update.at, holdReason: undefined } : {}),
+        ...(update.state === "rendered" ? { renderedAt: record.renderedAt ?? update.at, holdReason: undefined, holdDetail: undefined } : {}),
+        ...(instructionReachedProvider(update.state) ? { holdReason: undefined, holdDetail: undefined,
+          deliveryAttemptAt: undefined, ...(update.turn === undefined ? {} : { expectedTurn: update.turn }) } : {}),
         ...(record.submittedAt === undefined && instructionReachedProvider(update.state)
           ? { submittedAt: update.at }
           : {}),
@@ -380,12 +392,28 @@ export class InstructionQueue {
       }
       return this.persistState(record, "queued", { holdReason: "provider-starting" });
     }
+    if (record.deliveryAttemptAt !== undefined) return this.persistState(record, "queued", {
+      holdReason: "delivery-outcome-unknown",
+      holdDetail: "Delivery attempt has no durable outcome. Inspect this instruction ID in the worker transcript and reconcile the receipt before retrying; text will not be resent automatically",
+    });
+    // A broker restart loses its process, not the operator's accepted follow-up. Wait for an
+    // explicitly authorized resume of this same session; never create a replacement worker.
+    let target: SessionRecord | undefined;
+    try { target = this.registry.get(record.targetSessionId); } catch { /* Normal missing-session refusal below. */ }
+    if (target?.executionState === "cancelled" && target.attentionState === "interrupted") {
+      return this.persistState(record, "queued", { holdReason: "worker-interrupted",
+        holdDetail: "Broker recovery lost the process generation. Resume this same session to retry the retained instruction; no replacement or automatic restart is performed" });
+    }
     const source = record.brokerOwned === true
       ? "broker"
       : record.senderSessionId !== undefined && record.senderSessionId !== record.actorSessionId
         ? "worker"
         : "orchestrator";
     let delivery;
+    const attemptAt = new Date().toISOString();
+    await this.persistState(record, record.status, { deliveryAttemptAt: attemptAt });
+    // Only a known refusal or returned outcome releases the persisted attempt fence.
+    record = { ...record, deliveryAttemptAt: undefined };
     try {
       if (record.wake?.attentionEpoch !== undefined && this.wakeAdmission === undefined) {
         throw new AttentionWakeHeldError("attention-admission-unavailable");
@@ -425,19 +453,23 @@ export class InstructionQueue {
           holdReason: "worker-budget-exhausted",
         });
       }
-      throw error;
+      return this.persistState(record, "queued", { deliveryAttemptAt: attemptAt,
+        holdReason: "delivery-outcome-unknown",
+        holdDetail: "Delivery attempt failed with uncertain write outcome. Inspect the retained instruction ID and provider transcript before retrying; text will not be resent automatically" });
     }
     // `rendered` is the strongest thing an enqueue can honestly claim: the bytes are in the
     // provider's input surface. Whether the provider took them is observed later, or never.
     if (delivery.state === "undelivered") {
       return this.persistState(record, "undelivered", {
+        holdDetail: delivery.detail,
         ...(delivery.hold === undefined ? {} : { holdReason: record.submissionKind === "wake" ? `wake-${delivery.hold}` : delivery.hold }),
       });
     }
     return delivery.state === "queued"
-      ? this.persistState(record, "queued", { ...(delivery.hold === undefined ? {} : { holdReason: record.submissionKind === "wake" ? `wake-${delivery.hold}` : delivery.hold }) })
+      ? this.persistState(record, "queued", { holdDetail: delivery.detail, ...(delivery.hold === undefined ? {} : { holdReason: record.submissionKind === "wake" ? `wake-${delivery.hold}` : delivery.hold }) })
       : this.persistState(record, "rendered", {
           holdReason: undefined,
+          holdDetail: undefined,
           renderedAt: delivery.at,
           ...(delivery.expectedTurn === undefined ? {} : { expectedTurn: delivery.expectedTurn }),
         });

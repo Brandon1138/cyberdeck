@@ -337,7 +337,7 @@ export async function runBroker(
     credentials: workerLeaseCredentials,
   });
   registry.setWorkerBudgetGate(workerBudgets);
-  await workerBudgets.start();
+  await workerBudgets.start().then(() => instructions.recoverPendingInstructions(id => transcripts.readCompletionLedger(id)));
   const agentControl = new AgentControlService(
     registry,
     orchestratorStore,
