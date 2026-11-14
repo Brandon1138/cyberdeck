@@ -38,7 +38,7 @@ export class OrchestratorAttentionStore implements AttentionStorePort {
   }
 
   update(controllerId: string, change: (current: OrchestratorAttention | undefined) =>
-    Promise<OrchestratorAttention | undefined>): Promise<OrchestratorAttention | undefined> {
+    Promise<OrchestratorAttention | undefined>, admitCommit?: (commit: () => Promise<void>) => Promise<void>): Promise<OrchestratorAttention | undefined> {
     return this.exclusive(controllerId, async () => {
       const current = await this.read(this.path(controllerId), controllerId);
       const next = await change(current);
@@ -58,8 +58,9 @@ export class OrchestratorAttentionStore implements AttentionStorePort {
             cancelledAt: current.cancelledAt, cancelReason: current.cancelReason, pendingIntent: current.pendingIntent,
             lastWake: parsed.lastWake && current.lastWake && parsed.lastWake.holdReason === "attention-cancelled"
               ? { ...parsed.lastWake, holdReason: current.lastWake.holdReason } : parsed.lastWake })) === JSON.stringify(current);
-        if (this.withReferences) await this.withReferences(cancellation ? [] : [parsed.actorSessionId, ...parsed.statement.targets.map((t) => t.sessionId)], commit);
-        else await commit();
+        const admitted = () => admitCommit ? admitCommit(commit) : commit();
+        if (this.withReferences) await this.withReferences(cancellation ? [] : [parsed.actorSessionId, ...parsed.statement.targets.map((t) => t.sessionId)], admitted);
+        else await admitted();
       }
       return parsed;
     });

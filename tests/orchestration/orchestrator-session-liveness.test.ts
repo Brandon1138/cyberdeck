@@ -360,4 +360,21 @@ describe("orchestrator session lease liveness", () => {
     expect(bench.coordination.hasCurrentLease(input)).toBe(false);
     expect(bench.coordination.getSubject(worker.id)?.lease.state).toBe("active");
   });
+  it("ignores stale replacement/removal callbacks without losing the current session subscription", async () => {
+    const bench = await harness(); const worker = await bench.dispatch();
+    const successorId = randomUUID(), replacement = binding(successorId);
+    bench.bindings.delete(ORC); bench.bindings.set(successorId, replacement);
+    bench.records.set(successorId, session(successorId));
+    await bench.monitor.bindingSession(replacement, session(successorId));
+    await bench.monitor.bindingRemoved(binding());
+    await bench.monitor.bindingSession(binding());
+    bench.records.set(ORC, { ...session(ORC), exitCode: 0 }); bench.notify(ORC);
+    await bench.monitor.flush(); bench.advance(300_000);
+    expect(bench.coordination.getSubject(worker.id)?.lease.state).toBe("active");
+    bench.records.set(successorId, { ...session(successorId), exitCode: 0 }); bench.notify(successorId);
+    await bench.monitor.flush(); bench.advance(5_000);
+    expect(bench.coordination.getSubject(worker.id)?.lease.state).toBe("orphaned");
+    expect(bench.errors).not.toHaveBeenCalled();
+  });
+
 });

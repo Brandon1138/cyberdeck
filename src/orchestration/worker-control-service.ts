@@ -1,4 +1,5 @@
 import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
+import { recoverResidentWorkers } from "./worker-resident-recovery.js";
 import { compactEvent } from "./worker-event-projection.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -324,6 +325,7 @@ export interface ModalAnswerPolicyPort {
 
 export interface WorkerControlOptions {
   strigoi?: StrigoiAdmission;
+  residentLiveness?: Pick<import("./orchestrator-session-liveness.js").OrchestratorSessionLiveness, "bindingSession">;
   coordination: WorkerCoordinationService;
   credentials?: WorkerLeaseCredentialCustodian;
   registry: SessionLookupPort
@@ -500,6 +502,11 @@ export class WorkerControlService {
         binding.grant, controller, false,
       );
     }, "recovery");
+  }
+
+  /** Internal succession participant; uses this service's serializer, custody and substrate. */
+  recoverResident(identity: import("../domain/strigoi.js").StrigoiIdentity, inventory: OwnershipSubject[], validate: () => Promise<void>) {
+    return recoverResidentWorkers(this.options, this.credentials, (work) => this.exclusive(work), identity, inventory, validate);
   }
 
   private async take(

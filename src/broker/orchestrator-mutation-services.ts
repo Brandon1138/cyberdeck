@@ -17,12 +17,14 @@ export function composeOrchestratorMutationServices(options: {
   workerLeaseCredentials: NonNullable<WorkerControlOptions["credentials"]>;
   modalAnswerPolicy: NonNullable<WorkerControlOptions["modalPolicy"]>;
   strigoiAdmission: StrigoiAdmission;
+  residentLiveness?: NonNullable<WorkerControlOptions["residentLiveness"]>;
 }) {
   const { registry, orchestratorStore, instructions, strigoiAdmission: strigoi } = options;
   return {
     orchestratorPeers: new OrchestratorPeerService({ registry, bindings: orchestratorStore,
       manager: options.orchestrators, instructions, audit: options.journal, strigoi }),
     workerControl: new WorkerControlService({ registry, orchestrators: orchestratorStore, instructions,
+      ...(options.residentLiveness ? { residentLiveness: options.residentLiveness } : {}),
       coordination: options.coordination, credentials: options.workerLeaseCredentials,
       modalPolicy: options.modalAnswerPolicy, strigoi }),
     workflows: new WorkflowService(registry, orchestratorStore,

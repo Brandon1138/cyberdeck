@@ -1,4 +1,7 @@
 import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
+import { resumeAttentionForSuccessor, successionWait } from "./orchestrator-attention-succession.js";
+import type { StrigoiIdentity } from "../domain/strigoi.js";
+import type { StrigoiRepository } from "./strigoi-ports.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows, type CyberdeckCapability } from "../domain/capability.js";
@@ -33,7 +36,8 @@ export const AgentAttentionCancelParamsSchema = z.object({
 export interface OrchestratorAttentionOptions extends AttentionSourceOptions {
   strigoi?: StrigoiAdmission;
   store: AttentionStorePort;
-  bindings: OrchestratorBindingDirectory;
+  bindings: OrchestratorBindingDirectory & Pick<import("./persistence-ports.js").OrchestratorBindingLookup, "withAuthority">;
+  resident?: Pick<StrigoiRepository, "read">;
   inbox: Pick<NotificationInboxPort, "policy">;
   registry: AttentionSourceOptions["registry"] & {
     onSessionUpdate(listener: (sessionId: string) => void): () => void;
@@ -175,10 +179,16 @@ export class OrchestratorAttentionControlPlane {
   }
 
   async bindingChanged(binding: OrchestratorBinding): Promise<void> {
+    if (binding.kind === "resident") { await this.reconcile(orchestratorController(binding).controllerId); return; }
     const record = await this.options.store.update(orchestratorController(binding).controllerId, async (current) =>
       current !== undefined && current.actorSessionId !== binding.sessionId && current.status === "armed"
         ? this.cancelled(current, "Orchestrator binding replaced") : current);
     if (record !== undefined) this.remember(record);
+  }
+
+  async resumeForSuccessor(previousActor: string, successor: StrigoiIdentity, transitionId: string): Promise<void> {
+    const record = await resumeAttentionForSuccessor(this.options, previousActor, successor, transitionId);
+    if (record) { this.remember(record); await this.reconcile(record.controllerId, record.epoch); }
   }
 
   async reconcile(controllerId: string, epoch?: string, notify = true): Promise<OrchestratorAttention | undefined> {
@@ -202,7 +212,7 @@ export class OrchestratorAttentionControlPlane {
     await this.options.store.update(controllerId, async (current) => {
       if (current?.status !== "armed") return current;
       const record = await this.refresh(current);
-      if (record.status !== "armed") return record;
+      if (record.status !== "armed" || await successionWait(this.options, record)) return record;
       const sources = await captureAttentionSources(this.options, record);
       const next = { ...record, snapshotId: sources.snapshotId, gaps: sources.gaps,
         coverage: { ...record.coverage, captured: sources.captured } };
@@ -217,7 +227,7 @@ export class OrchestratorAttentionControlPlane {
     return this.options.store.update(controllerId, async (current) => {
       if (current === undefined) return current;
       const record = current.status === "armed" ? await this.refresh(current) : current;
-      if (record.status !== "armed") return record;
+      if (record.status !== "armed" || await successionWait(this.options, record)) return record;
       const binding = await this.options.bindings.findBySessionId(record.actorSessionId);
       if (binding === undefined || binding.key !== record.bindingKey || orchestratorController(binding).controllerId !== record.controllerId
         || !this.hasSourceAuthority(binding, record)) return this.cancelled(record, "Orchestrator scheduling authority lost");
@@ -340,6 +350,8 @@ export class OrchestratorAttentionControlPlane {
   async flush(): Promise<void> { await Promise.all(this.scheduled.values()); }
 
   private async refresh(record: OrchestratorAttention): Promise<OrchestratorAttention> {
+    const preserved = await successionWait(this.options, record);
+    if (preserved) return preserved;
     const binding = await this.options.bindings.findBySessionId(record.actorSessionId);
     if (binding === undefined || binding.key !== record.bindingKey
       || orchestratorController(binding).controllerId !== record.controllerId) return this.cancelled(record, "Orchestrator binding unavailable or replaced");

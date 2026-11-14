@@ -44,6 +44,9 @@ export const OrchestratorAttentionSchema = z.object({
   recovery: z.enum(["ready", "held-missing-process"]),
   armedAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
   actorTurnFloor: ordinal,
+  succession: z.object({ previousActor: z.uuid(), previousEpoch: z.uuid(), transitionId: z.string().min(1),
+    pendingMessageId: z.uuid().optional(), pendingInstructionId: z.uuid().optional(),
+  }).strict().optional(),
   cancelledAt: z.iso.datetime().optional(), cancelReason: text.optional(),
   snapshotId: hash,
   coverage: z.object({

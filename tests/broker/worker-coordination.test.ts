@@ -1240,3 +1240,25 @@ describe("WorkerCoordinationService events and checkpoints", () => {
     })).rejects.toMatchObject({ code: "OWNERSHIP_LOST" });
   });
 });
+
+
+describe("resident recovery adoption receipts", () => {
+  it("returns ephemeral credentials once and replays only tokenless evidence across restart", async () => {
+    const f = await harness(); const owner = controller("resident"); const worker = await register(f.service, { owner });
+    f.advance(60_000);
+    const request = { mutationId: randomUUID(), actor: owner, newController: owner, reason: "resident recovery",
+      credentialDelivery: "ephemeral" as const,
+      members: [{ subjectId: worker.workerId, mode: "adopt" as const, expectedLease: { controllerId: owner.controllerId, version: 1 } }] };
+    const first = await f.service.adoptBatch(request);
+    expect(first.committed).toBe(true); expect(first.outcomes[0]?.leaseToken).toBeTypeOf("string");
+    const stored = (await f.store.load()).receipts.find((receipt) => receipt.mutationId === request.mutationId)!;
+    expect(JSON.stringify(stored).includes(first.outcomes[0]!.leaseToken!)).toBe(false);
+    const sameProcess = await f.service.adoptBatch(request);
+    expect(sameProcess.idempotentReplay).toBe(true); expect(sameProcess.outcomes[0]?.leaseToken).toBeUndefined();
+    const restarted = await harness({ directory: f.directory, nowMs: Date.parse(f.now()) });
+    const replay = await restarted.service.adoptBatch(request);
+    expect(replay).toMatchObject({ committed: true, idempotentReplay: true, outcomes: [{ leaseVersion: 2 }] });
+    expect(replay.outcomes[0]?.leaseToken).toBeUndefined();
+    expect(restarted.service.getSubject(worker.workerId)?.lease.version).toBe(2);
+  });
+});

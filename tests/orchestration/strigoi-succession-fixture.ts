@@ -8,7 +8,7 @@ import { composeStrigoiRuntime } from "../../src/broker/strigoi-runtime.js";
 import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
 import { StrigoiAdmission } from "../../src/orchestration/strigoi-admission.js";
 import { StrigoiContinuity } from "../../src/orchestration/strigoi-continuity.js";
-import type { StrigoiSuccessionTurns } from "../../src/orchestration/strigoi-ports.js";
+import type { StrigoiReconciliationParticipant, StrigoiSuccessionTurns } from "../../src/orchestration/strigoi-ports.js";
 import { composeStrigoiEvidence } from "../../src/persistence/strigoi-evidence-runtime.js";
 import { SessionStore } from "../../src/persistence/session-store.js";
 import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-store.js";
@@ -63,14 +63,15 @@ export async function successionFixture() {
       });
     }),
   };
-  const workers: { reconcile: Mock<() => Promise<import("../../src/domain/strigoi.js").StrigoiHold[]>> } = { reconcile: vi.fn(async () => { trace.push("workers"); return []; }) };
+  const workers: { reconcile: Mock<StrigoiReconciliationParticipant["reconcile"]> } = { reconcile: vi.fn(async () => { trace.push("workers"); return []; }) };
   const delivery: typeof workers & { hold: Mock<() => Promise<void>>; needsAdoption: Mock<() => Promise<boolean>> } = { needsAdoption: vi.fn(async () => true), hold: vi.fn(async () => { trace.push("hold-input"); }), reconcile: vi.fn(async () => { trace.push("delivery"); return []; }) };
+  let bindingObserver: ((binding: import("../../src/domain/orchestrator.js").OrchestratorBinding, session: import("../../src/domain/session.js").SessionRecord | undefined) => Promise<void>) | undefined;
   const make = async () => {
     const admission = new StrigoiAdmission(bindings.strigoi, bindings, registry);
     const reopen = admission.reopen.bind(admission);
     vi.spyOn(admission, "reopen").mockImplementation(async (id) => { await reopen(id); trace.push("release"); });
     const continuity = new StrigoiContinuity({ repository: bindings.strigoi, bindings, admission, packets: evidence.packets, sources: evidence.sources });
-    const manager = new OrchestratorManager(registry, bindings, undefined, { list: async () => ({ codex: "automatic" }) }, async () => []);
+    const manager = new OrchestratorManager(registry, bindings, undefined, { list: async () => ({ codex: "automatic" }) }, async () => [], (binding, session) => bindingObserver?.(binding, session) ?? Promise.resolve());
     const composition = await composeStrigoiRuntime({ repository: bindings.strigoi, bindings, admission, registry, manager, continuity,
       beforeDelete: evidence.beforeDelete, withDeletion: evidence.withDeletion, verifyContinuity: evidence.verify,
       succession: { packets: evidence.packets, sources: evidence.sources, turns, workers, delivery, activity, now: () => now } });
@@ -90,6 +91,7 @@ export async function successionFixture() {
   };
   return { root, evidence, bindings, sessions, transcripts, activity, turns, workers, delivery, submitted, results, trace, states, spawn, initialize, writes, inference, original,
     get registry() { return registry; }, get runtime() { return runtime; },
+    setBindingObserver: (observer: NonNullable<typeof bindingObserver>) => { bindingObserver = observer; },
     setBoundary: (v: typeof boundary) => { boundary = v; }, setAutoExit: (v: boolean) => { autoExit = v; },
     setAutoComplete: (v: boolean) => { autoComplete = v; }, tick: (ms: number) => { now += ms; },
     emitExit: (n = 1) => { handles.get(String(n))!(); }, drive,

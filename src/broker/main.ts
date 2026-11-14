@@ -1,3 +1,4 @@
+import { StrigoiWorkerRecovery } from "../orchestration/strigoi-worker-recovery.js";
 import { composeStrigoiEvidence } from "../persistence/strigoi-evidence-runtime.js";
 import { StrigoiContinuity } from "../orchestration/strigoi-continuity.js";
 import { composeOrchestratorMutationServices } from "./orchestrator-mutation-services.js";
@@ -282,11 +283,13 @@ export async function runBroker(
     createService: (store) => (observedCoordination = new ObservedWorkerCoordinationService({ store: activityCoordinationStore(store, activity) })),
   });
   await workerCoordination.start();
+  const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const orchestratorLiveness = new OrchestratorSessionLiveness({
-    directory: new OrchestratorControllerDirectory(orchestratorStore),
+    directory: new OrchestratorControllerDirectory(orchestratorStore), withAuthority: (work) => orchestratorStore.withAuthority(work),
     registry,
     coordination: workerCoordination.service,
     onError: (error) => console.error("Orchestrator lease liveness observation failed", error),
+    custody: { credentials: workerLeaseCredentials, subjects: workerCoordination.service },
   });
   await orchestratorLiveness.start();
   // The notification feed replays its inbox before anything can write to it, and observes the
@@ -299,7 +302,7 @@ export async function runBroker(
     probe: new CodexOrchestratorModelProbe(undefined, codexOrchestratorHome),
   });
   const strigoiAdmission = new StrigoiAdmission(orchestratorStore.strigoi, orchestratorStore, registry);
-  const attention = await createOrchestratorAttention(stateDirectory, { registry, bindings: orchestratorStore, coordination: observedCoordination, transcripts, inbox: notificationInbox, strigoi: strigoiAdmission }, evidence.attentionStore);
+  const attention = await createOrchestratorAttention(stateDirectory, { registry, bindings: orchestratorStore, coordination: observedCoordination, transcripts, inbox: notificationInbox, strigoi: strigoiAdmission, resident: orchestratorStore.strigoi }, evidence.attentionStore);
   const orchestrators = new OrchestratorManager(
     registry,
     orchestratorStore,
@@ -310,6 +313,10 @@ export async function runBroker(
     (binding) => attention.bindingRemoved(binding).then(() => orchestratorLiveness.bindingRemoved(binding)),
   );
   const strigoi = await composeStrigoiRuntime({ repository: orchestratorStore.strigoi, bindings: orchestratorStore, registry, manager: orchestrators, admission: strigoiAdmission,
+    workers: new StrigoiWorkerRecovery({ repository: orchestratorStore.strigoi, packets: evidence.packets,
+      admission: strigoiAdmission, attention,
+      // The shared service is constructed below before strigoi.start(); quiesce still precedes queue startup.
+      workers: { recoverResident: (...args) => workerControl.recoverResident(...args) } }),
     continuity: new StrigoiContinuity({ repository: orchestratorStore.strigoi, bindings: orchestratorStore,
       admission: strigoiAdmission, packets: evidence.packets, sources: evidence.sources }),
     verifyContinuity: evidence.verify, beforeDelete: evidence.beforeDelete, withDeletion: evidence.withDeletion, onError: (error) => console.error("Strigoi lifecycle held", error) });
@@ -334,7 +341,6 @@ export async function runBroker(
       pending: registry.initialInstructionRecoveryFailure(id) };
   });
   await notificationFeed.start(instructions);
-  const workerLeaseCredentials = new BrokerWorkerLeaseCredentialCustodian();
   const workerBudgets = new WorkerBudgetEnforcer({
     registry,
     coordination: workerCoordination.service,
@@ -364,7 +370,7 @@ export async function runBroker(
   );
   const { orchestratorPeers, workerControl, workflows } = composeOrchestratorMutationServices({
     workflowStore, registry, orchestratorStore, orchestrators, instructions, journal,
-    coordination: workerCoordination.service, workerLeaseCredentials, modalAnswerPolicy, strigoiAdmission,
+    coordination: workerCoordination.service, workerLeaseCredentials, modalAnswerPolicy, strigoiAdmission, residentLiveness: orchestratorLiveness,
   });
   // The same custodian the control service uses, so a handed-off lease is immediately usable by
   // the orchestrator that received it rather than reporting OWNERSHIP_LOST on its next call.

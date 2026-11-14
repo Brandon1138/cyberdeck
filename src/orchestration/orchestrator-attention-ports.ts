@@ -5,5 +5,5 @@ export interface AttentionStorePort {
   list(): Promise<OrchestratorAttention[]>;
   /** Serialized per controller; undefined leaves the existing file intact. */
   update(controllerId: string, change: (current: OrchestratorAttention | undefined) =>
-    Promise<OrchestratorAttention | undefined>): Promise<OrchestratorAttention | undefined>;
+    Promise<OrchestratorAttention | undefined>, admitCommit?: (commit: () => Promise<void>) => Promise<void>): Promise<OrchestratorAttention | undefined>;
 }
