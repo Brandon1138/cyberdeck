@@ -41,6 +41,7 @@ export async function answerOrchestratorModal(
   if (modal.kind === "unknown" || modal.answers.length === 0) return { ...base, code: "MODAL_UNRECOGNIZED", modal };
   if (modal.fingerprint !== request.fingerprint) return { ...base, code: "MODAL_MISMATCH", modal };
   if (!modal.answers.some(({ id }) => id === request.answer)) return { ...base, code: "MODAL_ANSWER_UNSUPPORTED", modal };
+  const targetGeneration = target.generation;
   const policyInput = { cwd: target.cwd, kind: modal.kind, sessionId: target.id,
     answer: request.answer, fingerprint: modal.fingerprint, evidence: modal.evidence };
   const decision = await deps.policy?.evaluate(policyInput);
@@ -51,8 +52,24 @@ export async function answerOrchestratorModal(
     answer: request.answer, kind: modal.kind, reason: request.reason };
   await deps.audit.append({ id: randomUUID(), type: "orchestrator.modal_answer.requested", sessionId: target.id,
     occurredAt: new Date().toISOString(), data: auditData });
-  // The runtime rechecks the fingerprint immediately before selecting its static key sequence.
-  const attempt = await deps.registry.answerWorkerModal(target.id, request.fingerprint, request.answer);
+  if (deps.bindings.withAuthority === undefined) return { ...base, code: "DENIED", detail: "Binding authority transaction unavailable" };
+  const attempt = await deps.bindings.withAuthority(async () => {
+    const currentBinding = await deps.bindings.findBySessionId(request.actorSessionId);
+    const currentTargetBinding = await deps.bindings.findBySessionId(request.targetSessionId);
+    let currentActor, currentTarget;
+    try { currentActor = deps.registry.get(request.actorSessionId); currentTarget = deps.registry.get(request.targetSessionId); }
+    catch { return { code: "DENIED" as const, detail: "Actor or target session is missing" }; }
+    if (currentBinding === undefined || currentTargetBinding === undefined
+      || currentActor.kind !== "orchestrator" || currentActor.executionState !== "active" || currentActor.exitCode !== null
+      || currentTarget.kind !== "orchestrator" || currentTarget.executionState !== "active" || currentTarget.exitCode !== null
+      || currentTarget.cwd !== policyInput.cwd || currentTarget.generation !== targetGeneration
+      || !grantAllows(currentBinding.grant, "thread.enqueue", currentTarget)) {
+      return { code: "DENIED" as const, detail: "Actor or target authority changed during modal checks" };
+    }
+    // The runtime rechecks the fingerprint immediately before selecting its static key sequence.
+    return deps.registry.answerWorkerModal(target.id, request.fingerprint, request.answer);
+  });
+  if ("code" in attempt) return { ...base, ...attempt };
   const warnings: string[] = [];
   await deps.audit.append({ id: randomUUID(), type: "orchestrator.modal_answer.result", sessionId: target.id,
     occurredAt: new Date().toISOString(), data: { ...auditData, status: attempt.status } }).catch(() => {

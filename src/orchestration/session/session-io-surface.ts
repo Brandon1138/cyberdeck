@@ -4,6 +4,7 @@ import { SessionCatalog } from "./session-catalog.js";
 import type { InstructionDelivery } from "./session-ports.js";
 import {
   RegistryError,
+  InstructionRefusedError,
   type AttachmentMode,
   type ExitSink,
   type FailureSink,
@@ -201,7 +202,7 @@ export class SessionIoSurface {
       && metadata.submissionKind === "wake" && metadata.actorSessionId === sessionId
       && runtime.record.kind === "orchestrator";
     if (!wake && runtime.record.executionState === "active" && runtime.controller !== undefined) {
-      throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
+      throw new InstructionRefusedError();
     }
     if (runtime.record.executionState === "active") {
       requireInteractiveInput(runtime);
@@ -216,7 +217,7 @@ export class SessionIoSurface {
       message,
       encoded: () => {
         // Native preflight awaits I/O; revalidate authority and operator quietness at the write.
-        if (runtime.controller !== undefined && !wake) throw new RegistryError("SESSION_BUSY", "A human controller currently owns this thread");
+        if (runtime.controller !== undefined && !wake) throw new InstructionRefusedError();
         if (wake) this.assertWakeBoundary(sessionId, runtime);
         return adapter.submitInput?.(message, runtime.record) ?? Buffer.from(`${message}\n`);
       },

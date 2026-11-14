@@ -2736,8 +2736,10 @@ describe("fleet controls", () => {
       width: 100,
       height: 24,
     });
-    expect(rendered).toContain("2-4 of 10");
-    expect(rendered).not.toContain("/model  ");
+    expect(rendered).toContain("2-4 of 11");
+    expect(rendered).not.toContain("/strigoi  ");
+    expect(rendered).toContain("/model  Choose worker provider, model, and effort");
+    expect(rendered).toContain("› /fable-workers  Inspect or toggle Fable workers");
 
     expect(transitionFleet(fourth.state, snapshot, "escape", NOW_MS).state)
       .toMatchObject({ draft: "", commandPalette: undefined });
@@ -2751,7 +2753,8 @@ describe("fleet controls", () => {
     });
     const snapshot = fleet({ record: orchestrator });
     const opened = transitionFleet(createFleetState(snapshot), snapshot, "/", NOW_MS);
-    const permissions = transitionFleet(opened.state, snapshot, "down", NOW_MS);
+    const model = transitionFleet(opened.state, snapshot, "down", NOW_MS);
+    const permissions = transitionFleet(model.state, snapshot, "down", NOW_MS);
     const fable = transitionFleet(permissions.state, snapshot, "down", NOW_MS);
     const values = transitionFleet(fable.state, snapshot, "enter", NOW_MS);
 

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   CavemanWorkersRequestSchema,
   CreateOrchestratorRequestSchema,
@@ -24,17 +25,16 @@ import {
   type ResetOrchestratorRequest,
 } from "../domain/orchestrator.js";
 import type { CyberdeckCapability } from "../domain/capability.js";
-import type { ApprovalMode, ProviderId, SessionRecord } from "../domain/session.js";
-import { orchestratorSandbox, resolveProviderPermission } from "./permission-policy.js";
+import type { ProviderId, SessionRecord } from "../domain/session.js";
+import { orchestratorLaunchBinding, prepareOrchestratorLaunch } from "./orchestrator-launch-policy.js";
+import type { StrigoiSelection } from "../domain/strigoi.js";
 import type {
   OrchestratorBindingRepository,
   ProviderPermissionPreferenceReader,
   WorkerPreferenceRepository,
 } from "./persistence-ports.js";
-import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
 import { ORCHESTRATOR_CATALOG, orchestratorCatalog, orchestratorModelEfforts, type OrchestratorCatalogEntry } from "./orchestrator-catalog.js";
 import { fallbackWorkerCapabilities, type ResolvedWorkerCapability } from "./worker-capabilities.js";
-import { orchestratorPrompt } from "./orchestrator-prompt.js";
 import type {
   SessionLookupPort,
   SessionResumePort,
@@ -68,18 +68,22 @@ type BoundOrchestratorRequest = EnsureOrchestratorRequest & {
   provider: CreateOrchestratorRequest["provider"];
 };
 
+/** Internal activation callback; the service refreshes policy and the inherited grant here. */
+export type PeerLaunchAdmission = <T>(apply: (capabilities: readonly CyberdeckCapability[]) => Promise<T>) => Promise<T>;
+
 /** What a peer made by an orchestrator carries beyond Fleet's own `create`: lineage and a bounded grant. */
 interface PeerOrigin {
   createdBy: { sessionId: string };
   capabilities: readonly CyberdeckCapability[];
   name?: string;
   startup?: PeerStartupInstruction;
+  admission?: PeerLaunchAdmission;
 }
 
 export class OrchestratorManager {
   constructor(
     private readonly registry: SessionLookupPort & SessionStartPort & SessionResumePort,
-    private readonly store: OrchestratorBindingRepository,
+    private readonly store: OrchestratorBindingRepository & { strigoi?: import("./strigoi-ports.js").StrigoiRepository },
     private readonly workerPreferences?: WorkerPreferenceRepository,
     private readonly providerPermissions?: ProviderPermissionPreferenceReader,
     private readonly readCapabilities?: (provider: ProviderId) => Promise<ResolvedWorkerCapability[]>,
@@ -144,11 +148,12 @@ export class OrchestratorManager {
    * instead of the full default list. Policy — who may ask, for what scope, how many — is the
    * peer service's; this only records what it decided.
    */
-  async createPeer(input: CreatePeerOrchestratorRequest, startup?: PeerStartupInstruction): Promise<OrchestratorManagerResult> {
+  async createPeer(input: CreatePeerOrchestratorRequest, startup?: PeerStartupInstruction, admission?: PeerLaunchAdmission): Promise<OrchestratorManagerResult> {
     const { createdBy, capabilities, name, ...request } = CreatePeerOrchestratorRequestSchema.parse(input);
     return this.createValidatedPeer(request, {
       createdBy,
       capabilities,
+      ...(admission === undefined ? {} : { admission }),
       ...(name === undefined ? {} : { name }),
       ...(startup === undefined ? {} : { startup }),
     });
@@ -173,18 +178,10 @@ export class OrchestratorManager {
   }
 
   /**
-   * The grant is written *during* the start, not after it.
-   *
-   * A provider with no system-prompt flag — Cursor — receives `providerInstructions` as the
-   * session's first message, and that turn runs inside `registry.start`. An orchestrator told what
-   * it is will reach for Cyberdeck's tools immediately, so a binding persisted after `start`
-   * returned would lose the race and the orchestrator's opening move would come back
-   * `ACTOR_NOT_AUTHORIZED`. Persisting from the activation step closes the window for every
-   * provider at once rather than special-casing the one that exposed it.
-   *
-   * `previous` is the binding this call is replacing, if any. A start that fails after the grant is
-   * durable would otherwise strand a binding pointing at a session that never lived, so the prior
-   * state is put back exactly as it was.
+   * Persist the binding at activation, after preparation and before the process can act.
+   * The internal admission callback refreshes the peer grant and encloses activation/spawn,
+   * while discovery and provider initialization stay outside it. If launch subsequently
+   * fails, restore exactly the previous binding rather than leave an unauthorized session.
    */
   private async createBound(
     request: BoundOrchestratorRequest,
@@ -193,67 +190,26 @@ export class OrchestratorManager {
     previous?: OrchestratorBinding,
     origin?: PeerOrigin,
   ): Promise<OrchestratorManagerResult> {
-    const capabilities = origin?.capabilities ?? ORCHESTRATOR_GRANT_CAPABILITIES;
-    const approvalMode = request.approvalMode
-      ?? await this.configuredApprovalMode(request.provider)
-      ?? (request.provider === "claude" ? "auto" : undefined);
-    const sandbox = orchestratorSandbox(request.provider);
-    // Resolved before the session exists so an unsatisfiable request is refused at create time,
-    // and a satisfiable-but-diminished one is reported instead of discovered at a prompt.
-    const plan = resolveProviderPermissionPlan(request.provider, {
-      sandbox,
-      approvalMode,
-      mcpInjected: true,
-      codexApproveForMe: request.provider === "codex",
-    });
-    if (!plan.ok) {
-      throw Object.assign(new Error(plan.message), { code: plan.code });
-    }
-    const warnings = plan.value.shortfalls.map((shortfall) => shortfall.message);
+    let capabilities = origin?.capabilities ?? ORCHESTRATOR_GRANT_CAPABILITIES;
+    const { request: launchRequest, warnings } = await prepareOrchestratorLaunch(request, scope, this.providerPermissions, capabilities, origin?.name);
     const primaryKey = orchestratorKey(scope);
     let binding: OrchestratorBinding | undefined;
     let session: SessionRecord;
     try {
-      session = await this.registry.start({
-        provider: request.provider,
-        ...(request.model === undefined ? {} : { model: request.model }),
-        ...(request.effort === undefined ? {} : { effort: request.effort }),
-        ...(approvalMode === undefined ? {} : { approvalMode }),
-        cwd: request.cwd,
-        detached: true,
-        sandbox,
-        role: "orchestrator",
-        kind: "orchestrator",
-        orchestratorScope: request.scope,
-        name: origin?.name
-          ?? `Cyberdeck orchestrator (${request.provider}${request.model === undefined ? "" : `:${request.model}`})`,
-        providerInstructions: orchestratorPrompt(scope, capabilities),
-      }, origin?.startup?.native === false ? undefined : origin?.startup?.message, async (started) => {
-        const now = new Date().toISOString();
+      session = await this.registry.start(launchRequest, origin?.startup?.native === false ? undefined : origin?.startup?.message, async (started) => {
         binding = {
-          key: peer ? peerOrchestratorKey(primaryKey, started.id) : primaryKey,
-          kind: peer ? "peer" : "primary",
-          sessionId: started.id,
-          provider: request.provider,
-          ...(request.model === undefined ? {} : { model: request.model }),
-          ...(request.effort === undefined ? {} : { effort: request.effort }),
-          cwd: request.cwd,
-          sandbox,
-          scope,
-          grant: {
-            subjectSessionId: started.id,
-            capabilities: [...capabilities],
-            scope,
-          },
+          ...orchestratorLaunchBinding(launchRequest, scope, started, peer ? peerOrchestratorKey(primaryKey, started.id) : primaryKey, peer ? "peer" : "primary", capabilities),
           ...(origin === undefined ? {} : { createdBy: origin.createdBy }),
           ...(origin?.startup === undefined ? {} : { initialInstructionId: origin.startup.id }),
-          createdAt: now,
-          updatedAt: now,
         };
         await this.store.put(binding);
         await this.observeBindingSession?.(binding, started);
         await origin?.startup?.prepare(started);
-      }, ...(origin?.startup === undefined || origin.startup.native === false ? [] : [origin.startup.id]));
+      }, origin?.startup?.native === false ? undefined : origin?.startup?.id,
+      origin?.admission === undefined ? undefined : (apply) => origin.admission!(async (current) => {
+        capabilities = current;
+        return apply();
+      }));
     } catch (error) {
       if (binding !== undefined) {
         try { await this.observeBindingSession?.(binding); }
@@ -286,18 +242,18 @@ export class OrchestratorManager {
     }
   }
 
-  private async configuredApprovalMode(provider: ProviderId): Promise<ApprovalMode | undefined> {
-    const policy = (await this.providerPermissions?.list())?.[provider];
-    if (policy === undefined) return undefined;
-    const resolution = resolveProviderPermission(provider, policy, "read-only");
-    if (!resolution.ok) {
-      throw Object.assign(new Error(resolution.message), {
-        code: "APPROVAL_MODE_NOT_SUPPORTED",
-      });
-    }
-    return resolution.value.application.kind === "post-launch-command"
-      ? "auto"
-      : resolution.value.application.value;
+  /** Internal resident preparation; uses the same live selection and permission policy as a regular Orc. */
+  async validateResidentSelection(selection: StrigoiSelection): Promise<void> {
+    validateCreateSelection({ ...selection, scope: "fleet" }, orchestratorCatalog(await this.capabilities()));
+  }
+
+  async prepareResident(selection: StrigoiSelection) {
+    await this.validateResidentSelection(selection);
+    return prepareOrchestratorLaunch(selection, { kind: "fleet" }, this.providerPermissions, undefined, "Strigoi");
+  }
+
+  async observeResident(binding: OrchestratorBinding, session: SessionRecord): Promise<void> {
+    await this.observeBindingSession?.(binding, session);
   }
 
   async get(cwd: string, scopeKind: "workspace" | "fleet"): Promise<OrchestratorManagerResult | undefined> {
@@ -335,41 +291,51 @@ export class OrchestratorManager {
     capability: Extract<CyberdeckCapability, `worker.start.${string}` | "orchestrator.create">,
     request: OrchestratorGrantToggleRequest,
   ): Promise<OrchestratorGrantToggleResult> {
-    const scope: OrchestratorScope = request.scope === "fleet"
-      ? { kind: "fleet" }
-      : { kind: "workspace", cwd: request.cwd };
-    const key = orchestratorKey(scope);
-    const binding = await this.store.get(key);
-    if (binding === undefined) {
-      if (request.enabled !== undefined) {
-        throw Object.assign(
-          new Error(`No orchestrator binding exists for ${key}; choose an orchestrator first`),
-          { code: "ORCHESTRATOR_NOT_CONFIGURED" },
-        );
+    const apply = async () => {
+      const scope: OrchestratorScope = request.scope === "fleet"
+        ? { kind: "fleet" }
+        : { kind: "workspace", cwd: request.cwd };
+      const binding = request.sessionId ? await this.store.findBySessionId(request.sessionId) : await this.store.get(orchestratorKey(scope));
+      const key = binding?.key ?? orchestratorKey(scope);
+      if (request.sessionId && !binding) throw new Error("ORCHESTRATOR_TARGET_STALE");
+      if (binding === undefined) {
+        if (request.enabled !== undefined) {
+          throw Object.assign(
+            new Error(`No orchestrator binding exists for ${key}; choose an orchestrator first`),
+            { code: "ORCHESTRATOR_NOT_CONFIGURED" },
+          );
+        }
+        return { key, configured: false, enabled: false };
       }
-      return { key, configured: false, enabled: false };
-    }
 
-    const enabled = binding.grant.capabilities.includes(capability);
-    if (request.enabled === undefined || request.enabled === enabled) {
-      return { key, configured: true, enabled, sessionId: binding.sessionId };
-    }
+      const enabled = binding.grant.capabilities.includes(capability);
+      if (request.enabled === undefined || request.enabled === enabled) {
+        return { key, configured: true, enabled, sessionId: binding.sessionId };
+      }
 
-    const capabilities = request.enabled
-      ? [...binding.grant.capabilities, capability]
-      : binding.grant.capabilities.filter((entry) => entry !== capability);
-    const updated: OrchestratorBinding = {
-      ...binding,
-      grant: { ...binding.grant, capabilities },
-      updatedAt: new Date().toISOString(),
+      const capabilities = request.enabled
+        ? [...binding.grant.capabilities, capability]
+        : binding.grant.capabilities.filter((entry) => entry !== capability);
+      const updated: OrchestratorBinding = {
+        ...binding,
+        grant: { ...binding.grant, capabilities },
+        updatedAt: new Date().toISOString(),
+      };
+      if (binding.kind === "resident") {
+        const resident = this.store.strigoi;
+        if (!resident) throw new Error("STRIGOI_UNAVAILABLE");
+        const state = await resident.read();
+        if (state.activeBinding?.sessionId !== binding.sessionId) throw new Error("STRIGOI_STALE_INCARNATION");
+        await resident.compareAndSwap(state.revision, `grant:${randomUUID()}`, { ...state, activeBinding: updated, revision: state.revision + 1, updatedAt: updated.updatedAt });
+      } else await this.store.put(updated);
+      return {
+        key,
+        configured: true,
+        enabled: request.enabled,
+        sessionId: binding.sessionId,
+      };
     };
-    await this.store.put(updated);
-    return {
-      key,
-      configured: true,
-      enabled: request.enabled,
-      sessionId: binding.sessionId,
-    };
+    return this.store.withAuthority ? this.store.withAuthority(apply) : apply();
   }
 
   /**
@@ -397,8 +363,10 @@ export class OrchestratorManager {
     const scope: OrchestratorScope = input.scope === "fleet"
       ? { kind: "fleet" }
       : { kind: "workspace", cwd: input.cwd };
-    const key = orchestratorKey(scope);
-    const binding = await this.store.get(key);
+    const binding = input.sessionId ? await this.store.findBySessionId(input.sessionId) : await this.store.get(orchestratorKey(scope));
+    const key = binding?.key ?? orchestratorKey(scope);
+    if (input.sessionId && !binding) throw new Error("ORCHESTRATOR_TARGET_STALE");
+    if (binding?.kind === "resident") throw new Error("STRIGOI_EVIDENCE_REFERENCED: use strigoi disable; retained continuity cannot be reset");
     if (binding === undefined) return { key, reset: false };
     if (this.isActive(binding.sessionId)) {
       throw Object.assign(
@@ -417,6 +385,7 @@ export class OrchestratorManager {
   async resetSessionBinding(sessionId: string): Promise<OrchestratorSessionResetResult> {
     const binding = await this.store.findBySessionId(sessionId);
     if (binding === undefined) return { reset: false };
+    if (binding.kind === "resident") throw new Error("STRIGOI_EVIDENCE_REFERENCED: use strigoi disable; retained continuity cannot be reset");
     await this.store.reset(binding.key);
     await this.observeBindingRemoval?.(binding);
     return { reset: true, key: binding.key };

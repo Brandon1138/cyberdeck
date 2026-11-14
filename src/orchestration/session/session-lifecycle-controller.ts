@@ -43,7 +43,19 @@ export class SessionLifecycleController {
     this.observer = options.observer;
   }
 
-  async stop(sessionId: string): Promise<void> {
+  /** Unknown-exit sentinel (-1), stop requests, and completed turns are NOT retirement. */
+  async residentRetirement(sessionId: string, generation: number): Promise<"confirmed" | "unknown"> {
+    const runtime = this.catalog.sessions.get(sessionId);
+    if (!runtime || runtime.record.generation !== generation || runtime.terminalFinalizing
+      || runtime.record.exitCode === null || runtime.record.exitCode < 0
+      || ["active", "starting", "errored"].includes(runtime.record.executionState)) return "unknown";
+    // Persist the observed exit before handing its evidence to the succession journal.
+    await this.catalog.persist(runtime);
+    return "confirmed";
+  }
+
+  async stop(sessionId: string, origin: "operator" | "resident" = "operator"): Promise<void> {
+    if (!this.shuttingDown && origin === "operator") await this.catalog.options.residentLifecycle?.beforeStop(sessionId);
     if (this.catalog.options.executions?.cancelStart?.(sessionId)) return;
     const runtime = this.catalog.requireRuntime(sessionId);
     if (runtime.terminalFinalizing === true) return;
@@ -83,13 +95,19 @@ export class SessionLifecycleController {
   }
 
   /** Force only one already-stopping session. Child sessions are deliberately untouched. */
-  forceStop(sessionId: string): void {
+  async forceStop(sessionId: string): Promise<void> {
     const runtime = this.catalog.requireRuntime(sessionId);
-    if (runtime.terminalFinalizing === true) return;
-    if (runtime.record.exitCode !== null) return;
+    if (runtime.terminalFinalizing === true || runtime.record.exitCode !== null) {
+      if (!this.shuttingDown) await this.catalog.options.residentLifecycle?.beforeStop(sessionId);
+      return;
+    }
     if (!runtime.stopRequested) {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Graceful stop must be requested before force");
     }
+    const generation = runtime.record.generation;
+    if (!this.shuttingDown && this.catalog.options.residentLifecycle) await this.catalog.options.residentLifecycle.beforeStop(sessionId);
+    if (runtime.terminalFinalizing || runtime.record.exitCode !== null) return;
+    if (runtime.record.generation !== generation || !runtime.stopRequested) throw new RegistryError("SESSION_NOT_ACTIVE", "Stop target changed during lifecycle fencing");
     requireSessionRuntime(runtime).kill("SIGKILL");
   }
 
@@ -117,6 +135,7 @@ export class SessionLifecycleController {
   }
 
   async resume(sessionId: string): Promise<SessionRecord> {
+    await this.catalog.options.residentLifecycle?.beforeResume(sessionId);
     const runtime = this.catalog.requireRuntime(sessionId);
     this.catalog.assertMayConsume(sessionId);
     if (runtime.terminalFinalizing === true) {
@@ -228,6 +247,7 @@ export class SessionLifecycleController {
   }
 
   async delete(sessionId: string, beforeDelete?: () => Promise<void>): Promise<void> {
+    await this.catalog.options.residentLifecycle?.beforeDelete?.(sessionId);
     const runtime = this.catalog.requireRuntime(sessionId);
     if (
       runtime.record.executionState === "active"
@@ -239,8 +259,16 @@ export class SessionLifecycleController {
     // Keep the thread visible when its isolated evidence cannot be collected. Retirement
     // uses the same execution identity as resume and never deletes the private clone.
     await this.catalog.options.executions?.retire?.(sessionId);
-    await beforeDelete?.();
+    await runtime.launchTail;
+    const commit = () => this.deleteRetired(runtime, beforeDelete);
+    const guard = this.catalog.options.residentLifecycle?.withDeletion;
+    if (guard) await guard(sessionId, commit); else await commit();
+  }
 
+  private async deleteRetired(runtime: RuntimeSession, beforeDelete?: () => Promise<void>): Promise<void> {
+    const sessionId = runtime.record.id;
+    await this.catalog.options.residentLifecycle?.beforeDelete?.(sessionId);
+    await beforeDelete?.();
     // Workers outlive an orchestrator. Detach their live parent reference before
     // removing the parent record, leaving each worker's own durable state intact.
     const children = runtime.record.childIds
@@ -265,7 +293,6 @@ export class SessionLifecycleController {
         await this.catalog.persist(parent);
       }
     }
-    await runtime.launchTail;
     runtime.turns.retire();
     await this.assembly.cleanupLaunchArtifacts(runtime.record, "session-deleted");
     await this.catalog.options.store?.delete(sessionId);

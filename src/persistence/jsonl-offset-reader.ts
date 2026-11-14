@@ -11,13 +11,13 @@ export class JsonlOffsetReader {
   private tail = Promise.resolve();
   constructor(private readonly reset: () => void) {}
 
-  scan(path: string, visit: (line: string, offset: number, bytes: number) => void): Promise<void> {
+  scan(path: string, visit: (line: string, offset: number, bytes: number) => unknown): Promise<void> {
     const operation = this.tail.then(() => this.read(path, visit));
     this.tail = operation.then(() => {}, () => {});
     return operation;
   }
 
-  private async read(path: string, visit: (line: string, offset: number, bytes: number) => void): Promise<void> {
+  private async read(path: string, visit: (line: string, offset: number, bytes: number) => unknown): Promise<void> {
     const file = await open(path, "r").catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return undefined;
       throw error;
@@ -49,7 +49,7 @@ export class JsonlOffsetReader {
         let newline: number;
         while ((newline = partial.indexOf(10)) >= 0) {
           const bytes = newline + 1;
-          visit(partial.subarray(0, newline).toString("utf8").replace(/\r$/u, ""), this.offset, bytes);
+          await visit(partial.subarray(0, newline).toString("utf8").replace(/\r$/u, ""), this.offset, bytes);
           this.offset += bytes; partial = partial.subarray(bytes);
         }
       }

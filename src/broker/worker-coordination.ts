@@ -1,3 +1,4 @@
+import { adoptionReceipt, type AdoptBatchInput, type AdoptBatchResult } from "./worker-adoption.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
@@ -170,20 +171,7 @@ export interface AdoptInput extends LeaseMutationInput {
   newController: ControllerIdentity;
 }
 
-export interface AdoptBatchInput {
-  mutationId: string;
-  actor: ControllerIdentity;
-  newController: ControllerIdentity;
-  members: ReadonlyArray<{
-    subjectId: string;
-    mode: "acquire" | "adopt";
-  }>;
-  reason: string;
-}
-
-export interface AdoptBatchResult extends OwnershipMutationResult {
-  committed: boolean;
-}
+export type { AdoptBatchInput, AdoptBatchResult } from "./worker-adoption.js";
 
 /**
  * One worker in a directed handoff.
@@ -355,6 +343,17 @@ export class WorkerCoordinationService {
   hasCurrentLease(input: CurrentLeaseObservation): boolean {
     const subject = this.subjects.get(input.sessionId);
     return storedLeaseMatches(subject, input, this.now()) && !this.isExpired(subject!, this.now());
+  }
+
+  /** Internal final instruction effect; serialized with transfer/release/cancellation authority. */
+  withInstructionAuthority<T>(subjectId: string, controller: ControllerIdentity, token: string, version: number, apply: () => T | Promise<T>): Promise<T> {
+    return this.exclusive(async () => {
+      this.assertReady();
+      const subject = this.requireSubject(subjectId);
+      const code = this.authCode(subject, controller, token, version, this.now());
+      if (code) throw Object.assign(new Error(code), { code: "OWNERSHIP_LOST" });
+      return apply();
+    });
   }
 
   getBudget(subjectId: string): WorkerBudgetRecord | undefined {
@@ -922,6 +921,9 @@ export class WorkerCoordinationService {
         const original = this.requireSubject(member.subjectId);
         const current = this.expiredCopy(original, now);
         candidates.push({ original, current });
+        if (member.expectedLease && (current.lease.controller?.controllerId !== member.expectedLease.controllerId || current.lease.version !== member.expectedLease.version)) {
+          failures.set(member.subjectId, this.outcome(current, "OWNERSHIP_LOST")); continue;
+        }
         if (TERMINAL_WORKER_LIFECYCLES.has(current.lifecycle)) {
           failures.set(member.subjectId, this.outcome(current, "WORKER_TERMINAL"));
           continue;
@@ -973,7 +975,7 @@ export class WorkerCoordinationService {
         ));
       }
       const result = this.adoptBatchResult(input.mutationId, true, outcomes);
-      await this.persistReceipt(input.mutationId, "adopt", result, {
+      await this.persistReceipt(input.mutationId, "adopt", adoptionReceipt(result, input.credentialDelivery), {
         subjects: changed,
         audits,
         ...(changed.length === 0

@@ -20,6 +20,8 @@ export interface StartupClaudeBindingCleanup {
 }
 
 export interface StartupThreadRetentionPorts {
+  protectedSessionIds?: ReadonlySet<string>;
+  skipDestructiveRetention?: boolean;
   catalog: StartupSessionCatalog;
   scoutReports: StartupScoutReportCleanup;
   claudeBindings: StartupClaudeBindingCleanup;
@@ -31,7 +33,8 @@ export async function retainStartupThreads(
   now: number = Date.now(),
 ): Promise<SessionRecord[]> {
   const loaded = await ports.catalog.load();
-  const expired = new Set(selectExpiredThreads(loaded, policy, now));
+  if (ports.skipDestructiveRetention) return loaded;
+  const expired = new Set(selectExpiredThreads(loaded, policy, now).filter((id) => !ports.protectedSessionIds?.has(id)));
   if (expired.size === 0) return loaded;
 
   await Promise.allSettled(

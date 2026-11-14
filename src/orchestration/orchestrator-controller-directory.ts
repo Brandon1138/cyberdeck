@@ -11,6 +11,7 @@ export interface ControllerSession {
   familyId: string;
   /** The orchestrator session bound to this controller: the wake target and notice-file owner. */
   sessionId: string;
+  resident?: boolean;
 }
 
 /**
@@ -46,5 +47,6 @@ export class OrchestratorControllerDirectory {
 
 function describe(binding: OrchestratorBinding): ControllerSession {
   const controller = orchestratorController(binding);
-  return { controllerId: controller.controllerId, familyId: controller.familyId, sessionId: binding.sessionId };
+  return { controllerId: controller.controllerId, familyId: controller.familyId, sessionId: binding.sessionId,
+    ...(binding.kind === "resident" ? { resident: true } : {}) };
 }

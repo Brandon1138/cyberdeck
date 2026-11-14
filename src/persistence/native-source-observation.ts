@@ -20,8 +20,8 @@ export function validateNativeFrame(provider: string, line: string, nativeSessio
     && parseCodexTurn(line, undefined) === undefined) throw new NativeSourceError("source-error", "NATIVE_FINAL_INVALID");
 }
 
-/** A date-window miss proves no identity. Absence requires an empty/missing native source root. */
-export async function hasNativeRollouts(root: string): Promise<boolean> {
+/** A date-window miss proves no identity. Only inspected, exactly foreign sources may be excluded. */
+export async function hasNativeRollouts(root: string, foreignPaths: ReadonlySet<string> = new Set()): Promise<boolean> {
   let visited = 0;
   const scan = async (directory: string, depth: number): Promise<boolean> => {
     if (depth > 4) throw new NativeSourceError("source-error", "NATIVE_DISCOVERY_LIMIT");
@@ -32,7 +32,7 @@ export async function hasNativeRollouts(root: string): Promise<boolean> {
     for (const entry of entries) {
       if (++visited > 10_000) throw new NativeSourceError("source-error", "NATIVE_DISCOVERY_LIMIT");
       if (entry.isSymbolicLink()) return true;
-      if (entry.isFile() && entry.name.endsWith(".jsonl")) return true;
+      if (entry.isFile() && entry.name.endsWith(".jsonl") && !foreignPaths.has(join(directory, entry.name))) return true;
       if (entry.isDirectory() && await scan(join(directory, entry.name), depth + 1)) return true;
     }
     return false;

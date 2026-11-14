@@ -56,6 +56,7 @@ export interface BrokerServerOptions {
   telemetry?: ActivitySinkPort;
   executionHealth?: () => unknown;
   renewExecutionAttempt?: (input: { sessionId: string; leaseVersion: number; leaseExpiresAt: string; controllerId: string }) => Promise<"renewed" | "not-running">;
+  strigoi?: import("../../orchestration/strigoi-control.js").StrigoiControl;
   socketPath: string;
   registry: SessionRegistry;
   transcripts?: ThreadTranscriptReadPort;

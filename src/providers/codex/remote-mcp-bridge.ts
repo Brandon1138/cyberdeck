@@ -17,7 +17,9 @@ export interface CodexRemoteMcpBridge {
 export interface CodexRemoteMcpBridgeOptions {
   sessionId: string;
   homeDirectory: string;
-  mcp: CyberdeckMcpLaunch;
+  mcp?: CyberdeckMcpLaunch;
+  /** Explicit launch instructions, retained even when the remote TUI drops -c overrides. */
+  developerInstructions?: string;
   /** Short private root: macOS Unix socket paths cannot use the longer system TMPDIR. */
   socketRoot?: string;
   cwd?: string;
@@ -100,14 +102,14 @@ export function bindCodexThreadMcp(data: RawData, options: CodexRemoteMcpBridgeO
     ...params,
     // Bind at the same native boundary as MCP: remote TUI config forwarding cannot omit identity.
     developerInstructions: codexDeveloperInstructions(options.sessionId,
-      typeof params.developerInstructions === "string" ? params.developerInstructions
-        : typeof config?.developer_instructions === "string" ? config.developer_instructions : inherited),
+      options.developerInstructions ?? (typeof params.developerInstructions === "string" ? params.developerInstructions
+        : typeof config?.developer_instructions === "string" ? config.developer_instructions : inherited)),
     config: {
       ...params.config as object,
-      "mcp_servers.cyberdeck": {
+      ...(options.mcp === undefined ? {} : { "mcp_servers.cyberdeck": {
         command: options.mcp.nodePath,
         args: [options.mcp.cliPath, "mcp", "--actor-session", options.sessionId],
-      },
+      } }),
     },
   };
   return Buffer.from(JSON.stringify(message));
@@ -118,7 +120,7 @@ export async function prepareCodexThreadMcp(data: RawData, options: CodexRemoteM
   if (!THREAD_METHODS.has(message.method ?? "")) return data;
   const params = message.params ?? {}, config = params.config as Record<string, unknown> | undefined;
   let inherited: string | undefined;
-  if (typeof params.developerInstructions !== "string" && typeof config?.developer_instructions !== "string") {
+  if (options.developerInstructions === undefined && typeof params.developerInstructions !== "string" && typeof config?.developer_instructions !== "string") {
     const cwd = typeof params.cwd === "string" ? params.cwd : options.cwd ?? process.cwd();
     inherited = await (options.resolveDeveloperInstructions ?? ((directory) => readCodexDeveloperInstructions({
       cwd: directory, env: { ...process.env, CODEX_HOME: options.homeDirectory },

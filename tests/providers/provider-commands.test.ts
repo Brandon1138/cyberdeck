@@ -255,11 +255,12 @@ describe("CodexProviderAdapter", () => {
     const nativeArgs = [...spec.args];
     await adapter.prepareLaunch(orchestrator, spec);
     expect(spec.executable).toBe("/node");
-    expect(spec.args[0]).toMatch(/\/codex\/remote-mcp-launch\.js$/u);
-    expect(spec.args.slice(1, 8)).toEqual([
+    const launcherIndex = spec.args.findIndex(arg => /\/codex\/remote-mcp-launch\.[jt]s$/u.test(arg));
+    expect(launcherIndex).toBeGreaterThanOrEqual(0);
+    expect(spec.args.slice(launcherIndex + 1, launcherIndex + 8)).toEqual([
       "--actor-session", orchestrator.id, "--mcp-node", "/node", "--mcp-cli", "/cyberdeck.js", "--",
     ]);
-    expect(spec.args.slice(8)).toEqual(nativeArgs);
+    expect(spec.args.slice(launcherIndex + 8)).toEqual(nativeArgs);
     expect(spec.args).toContain("--approve-for-me");
     const worker = session({ kind: "worker" });
     const workerSpec = adapter.buildLaunchSpec(worker);

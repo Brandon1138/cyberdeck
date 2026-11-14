@@ -3,7 +3,7 @@ import { ANSI } from "./constants.js";
 import { ResolvedFleetRenderOptions } from "./runtime-options.js";
 import { paint } from "./slash-commands.js";
 
-export type ComposerMode = "task" | "rename" | "project" | "shell";
+export type ComposerMode = "task" | "rename" | "project" | "shell" | "strigoi";
 
 /**
  * Shell mode announces itself with a red `!` and nothing else — no border, no frame. The prefix is
@@ -15,6 +15,7 @@ export const COMPOSER_PROMPTS: Readonly<Record<ComposerMode, {
   placeholder: string;
   tone?: keyof typeof ANSI;
 }>> = {
+  strigoi: { prefix: "›", placeholder: "Message Strigoi · input survives renewal" },
   task: { prefix: "›", placeholder: "Describe a task for a new session" },
   rename: { prefix: "Rename ›", placeholder: "Rename thread" },
   project: { prefix: "Project ›", placeholder: "Repository path · tab completes · enter registers" },

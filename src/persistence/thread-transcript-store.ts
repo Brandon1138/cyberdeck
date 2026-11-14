@@ -1,3 +1,5 @@
+import { withBindingAuthority } from "./binding-authority.js";
+import { parseNativeContinuityMessage, type NativeContinuityMessage } from "../domain/native-continuity-message.js";
 import { providerTurnReceipt, WorkerLedgerStore, WORKER_LEDGER_REJECTIONS, mergeWorkerLedgers } from "./worker-ledger-store.js";
 import { syncPrivateFile } from "./atomic-private-file.js";
 import { InstructionTargetIndex } from "./instruction-target-index.js";
@@ -31,7 +33,7 @@ import type {
 import { ClaudeConversationBindingStore } from "./claude-conversation-bindings.js";
 import { CodexConversationBindingStore } from "./codex-conversation-bindings.js";
 import { CodexConversationDiscovery } from "./codex-conversation-discovery.js";
-import { nativeSourceFailure, validateNativeFrame } from "./native-source-observation.js";
+import { NativeSourceError, nativeSourceFailure, validateNativeFrame } from "./native-source-observation.js";
 import { observedModelParser, type ObservedModel } from "../runtime/observed-model.js";
 import { isClaudeClearFrame } from "../runtime/claude-clear-frame.js";
 export { isClaudeClearFrame };
@@ -52,6 +54,11 @@ export type {
 } from "../orchestration/session/worker-turn-ports.js";
 
 export interface ThreadTranscriptStoreOptions {
+  continuity?: {
+    event(event: ThreadEvent): Promise<void>;
+    native(sessionId: string, id: string, message: NativeContinuityMessage): Promise<void>;
+    beforeDelete(sessionId: string): Promise<void>;
+  };
   now?: () => string;
   idFactory?: () => string;
   maxBytes?: number;
@@ -154,7 +161,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   private readonly codexDiscovery: CodexConversationDiscovery;
 
   constructor(
-    stateDirectory: string,
+    private readonly stateDirectory: string,
     private readonly options: ThreadTranscriptStoreOptions = {},
   ) {
     this.workerLedgers = new WorkerLedgerStore(stateDirectory);
@@ -190,7 +197,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
       if (this.retiredSessions.has(input.sessionId) && (input.kind === "turn" || input.kind === "instruction")) throw new Error("THREAD_RETIRED");
       await this.hydrateWorkerLedger(input.sessionId);
       const event = this.createEvent(input);
-      await this.persist(event);
+      await this.persist(event, input.text);
       this.rememberSemanticTurn(event);
       if (event.kind === "turn" || (event.kind === "instruction" && event.data.instructionState === "rendered")) await this.persistWorkerLedger(event.sessionId);
       return event;
@@ -313,7 +320,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
           text: receipt.text,
           data: receipt.data,
         });
-        await this.persist(event);
+        await this.persist(event, turn.text);
         this.rememberSemanticTurn(event);
         await this.persistWorkerLedger(event.sessionId);
         receipts.push(event);
@@ -339,6 +346,19 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   async captureProviderTurns(input: CaptureProviderTurns): Promise<WorkerTurnTranscript[]> {
     const observation = await this.observeProviderTurns(input);
     return this.commitProviderTurns(observation);
+  }
+
+  /** Capture every original native message, independently of the preview window. */
+  async captureOriginalContext(input: CaptureProviderTurns, _session?: import("../domain/session.js").SessionRecord): Promise<void> {
+    if (!this.options.continuity || !["codex", "claude"].includes(input.provider)) return;
+    const path = input.provider === "claude" ? await this.resolveClaudeTranscript(input) : await this.findCodexTranscript(input);
+    if (path !== undefined && await stat(path).catch(ignoreMissing)) await this.nativeProjection(input, path, "continuity");
+    else if (input.provider === "claude" && await this.claudeConversations.revision(input.sessionId) !== undefined) {
+      throw new NativeSourceError(path === undefined ? "source-error" : "missing", "STRIGOI_NATIVE_SOURCE_UNAVAILABLE");
+    } else if (input.provider === "codex" && await this.codexConversations.exists(input.sessionId)) {
+      const status = this.codexStatuses.get(input.sessionId)?.status;
+      throw new NativeSourceError(status === "missing" ? "missing" : "source-error", "STRIGOI_NATIVE_SOURCE_UNAVAILABLE");
+    }
   }
 
   /**
@@ -475,12 +495,12 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   async read(sessionId: string, afterCursor = 0, limit = 200): Promise<ThreadReadResult> {
     await this.init();
     const boundedLimit = Math.max(1, Math.min(limit, 1_000));
-    return this.enqueueWrite(() => this.segments.read(this.segmentPathsOldestFirst(), afterCursor, boundedLimit, sessionId));
+    return this.enqueueWrite(() => this.segments.read(this.segmentPathsOldestFirst(), afterCursor, boundedLimit, sessionId), false);
   }
 
   async changes(afterCursor = 0, limit = 500): Promise<ThreadReadResult> {
     await this.init();
-    return this.enqueueWrite(() => this.segments.read(this.segmentPathsOldestFirst(), afterCursor, Math.max(1, Math.min(limit, 2_000))));
+    return this.enqueueWrite(() => this.segments.read(this.segmentPathsOldestFirst(), afterCursor, Math.max(1, Math.min(limit, 2_000))), false);
   }
 
   private async loadMetadata(): Promise<void> {
@@ -598,6 +618,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
 
   dropTurnLedger(sessionId: string): Promise<void> {
     return this.enqueueWrite(async () => {
+      await this.options.continuity?.beforeDelete(sessionId);
       await this.init();
       const event = this.createEvent({ sessionId, kind: "lifecycle", source: "broker",
         text: "turn ledger retired", data: { turnLedgerRetired: true } });
@@ -630,13 +651,18 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   }
 
   /** Queue one complete stateful write operation while allowing the queue to recover after errors. */
-  private enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.writeTail.then(operation, operation);
-    this.writeTail = result.then(() => undefined, () => undefined);
-    return result;
+  private enqueueWrite<T>(operation: () => Promise<T>, authority = true): Promise<T> {
+    // Activation may append while holding authority; acquire it before the local tail.
+    const serialize = () => {
+      const result = this.writeTail.then(operation, operation);
+      this.writeTail = result.then(() => undefined, () => undefined);
+      return result;
+    };
+    return authority ? withBindingAuthority(this.stateDirectory, serialize) : serialize();
   }
 
-  private async persist(event: ThreadEvent): Promise<void> {
+  private async persist(event: ThreadEvent, originalText = event.text): Promise<void> {
+    await this.options.continuity?.event({ ...event, ...(originalText === undefined ? {} : { text: originalText }) });
     const serialized = `${JSON.stringify(event)}\n`;
     await this.rotateIfNeeded(Buffer.byteLength(serialized));
     const handle = await openPrivateAppendFile(this.path);
@@ -752,6 +778,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
    * session that legitimately holds the same path.
    */
   async dropClaudeBinding(sessionId: string): Promise<void> {
+    await this.options.continuity?.beforeDelete(sessionId);
     await this.claudeConversations.remove(sessionId);
     this.claudeStatuses.delete(sessionId);
     for (const [path, owner] of this.claimedClaudePaths) {
@@ -761,10 +788,11 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
 
   /** A retired session must not remain a durable claimant of a native Codex conversation. */
   async dropCodexBinding(sessionId: string): Promise<void> {
+    await this.options.continuity?.beforeDelete(sessionId);
     await this.codexConversations.remove(sessionId);
     this.codexStatuses.delete(sessionId);
     this.nativeProjections.delete(`turns:${sessionId}`);
-    this.nativeProjections.delete(`preview:${sessionId}`);
+    this.nativeProjections.delete(`preview:${sessionId}`); this.nativeProjections.delete(`continuity:${sessionId}`);
     this.observedModelCursors.delete(sessionId);
   }
 
@@ -779,7 +807,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     return undefined;
   }
 
-  private async nativeProjection(input: CaptureProviderTurns, path: string, purpose: "turns" | "preview"): Promise<NativeProjection> {
+  private async nativeProjection(input: CaptureProviderTurns, path: string, purpose: "turns" | "preview" | "continuity"): Promise<NativeProjection> {
     const key = `${purpose}:${input.sessionId}`;
     let projection = this.nativeProjections.get(key);
     if (projection === undefined) {
@@ -806,9 +834,14 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     for (const id of value.turns.keys()) {
       if (this.semanticTurnIds.has(this.semanticKey(input.sessionId, `${input.provider}:${id}`))) value.turns.delete(id);
     }
-    await value.reader.scan(path, (line, offset, bytes) => {
+    await value.reader.scan(path, async (line, offset, bytes) => {
       if (line.trim() === "") return;
       validateNativeFrame(input.provider, line, codexIdentity, input.cwd);
+      if (this.options.continuity) {
+        const message = parseNativeContinuityMessage(input.provider, line);
+        if (message) await this.options.continuity.native(input.sessionId, `${path}:${offset}`, message);
+      }
+      if (purpose === "continuity") return;
       if (input.provider === "claude" && isClaudeClearFrame(line)) { value.cleared = true; return; }
       if (purpose === "preview") {
         const message = input.provider === "claude" ? parseClaudeTranscriptLine(line) : parseCodexRolloutLine(line);

@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -16,7 +16,7 @@ import {
   WorkerControlService,
   type WorkerControlOptions,
 } from "../../src/orchestration/worker-control-service.js";
-import type { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
+import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 import { WorkerCoordinationStore } from "../../src/persistence/worker-coordination-store.js";
 
 const WORKER_ID = "11111111-1111-4111-8111-111111111111";
@@ -136,6 +136,18 @@ async function harness(options: {
 }
 
 describe("WorkerEventChannel", () => {
+  it("does not register a fallback controller when resident authority is corrupt", async () => {
+    const { directory, coordination, enqueue } = await harness();
+    try {
+      const store = new OrchestratorStore(directory);
+      await mkdir(join(directory, "orchestration", "strigoi"), { recursive: true });
+      await writeFile(store.strigoi.path, "corrupt\n");
+      const channel = new WorkerEventChannel(coordination, { get: () => worker() }, store, { enqueue }, () => NOW);
+      await expect(channel.submit({ workerId: WORKER_ID, eventId: "event", kind: "PROGRESS", summary: "working" })).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
+      expect(coordination.getSubject(WORKER_ID)).toBeUndefined();
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("submits idempotently and returns duplicate or superseded compact acks", async () => {
     const { channel, coordination } = await harness();
     const first = {

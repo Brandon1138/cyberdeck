@@ -1,3 +1,4 @@
+import { executeStrigoiAction } from "./strigoi.js";
 import { basename } from "node:path";
 import type { FleetProjectAddResult, FleetProjectRemoveResult, } from "../../broker/fleet-project-service.js";
 import { imageInputRefusal, providerAcceptsImages, providerImageMechanism } from "../../domain/image-input.js";
@@ -66,7 +67,9 @@ export async function executeFleetAction(
   } = context;
   let { state, snapshot, nvimLayoutHookInstalled } = context;
   try {
-    if (action?.type === "stop") {
+    if (action?.type === "strigoi" || action?.type === "strigoi-submit") {
+      return { ...await executeStrigoiAction(context), nvimLayoutHookInstalled };
+    } else if (action?.type === "stop") {
       await client.request("session.stopOne", { sessionId: action.sessionId });
       state = {
         ...state,
@@ -429,6 +432,7 @@ export async function executeFleetAction(
     context.setShellInterrupt(undefined);
     state = {
       ...state,
+      ...(action?.type === "strigoi-submit" ? { draft: action.message, strigoiDraft: { message: action.message, messageId: action.messageId } } : {}),
       ...(action?.type === "start" ? { draft: action.request.initialPrompt } : {}),
       // A rejected path is almost always a typo, so the prompt comes back with it still in hand.
       ...(action?.type === "project-add" ? { projectPrompt: { draft: action.path } } : {}),

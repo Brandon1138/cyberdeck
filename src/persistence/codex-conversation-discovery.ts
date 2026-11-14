@@ -64,6 +64,7 @@ export class CodexConversationDiscovery {
     const owners = new Map<string, Set<string>>();
     if (binding !== undefined) owners.set(binding.nativeSessionId, new Set([input.sessionId]));
     let conflictingActorClaim = false;
+    const foreignPaths = new Set<string>();
     for (const directory of candidateDayDirectories(root, createdAt)) {
       const entries = await readdir(directory, { withFileTypes: true }).catch(
         (error: NodeJS.ErrnoException) => {
@@ -81,7 +82,10 @@ export class CodexConversationDiscovery {
         for (const claim of claims) nativeOwners.add(claim);
         owners.set(metadata.id, nativeOwners);
         // Another actor's exact marker is proof this rollout is foreign, not an ambiguity.
-        if (claims.size > 0 && !claims.has(input.sessionId)) continue;
+        if (claims.size > 0 && !claims.has(input.sessionId)) {
+          foreignPaths.add(path);
+          continue;
+        }
         const launchMatches = identity !== undefined && await codexLaunchMatches(path, identity);
         // Preserve #148's narrow legacy rule. New launches must carry their own actor marker.
         if (!input.codexMarkerRequired && launchMatches && claims.size === 0
@@ -100,7 +104,7 @@ export class CodexConversationDiscovery {
     if (candidates.length > 1 || conflictingActorClaim) {
       return this.refuse("conflict", "NATIVE_BINDING_AMBIGUOUS");
     }
-    if (candidates.length === 0) return await hasNativeRollouts(root)
+    if (candidates.length === 0) return await hasNativeRollouts(root, foreignPaths)
       ? this.refuse("unbound", "NATIVE_CONVERSATION_UNBOUND")
       : this.refuse("missing", "NATIVE_SOURCE_MISSING");
     const match = candidates[0]!;

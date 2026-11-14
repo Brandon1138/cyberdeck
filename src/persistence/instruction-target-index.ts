@@ -1,3 +1,5 @@
+import type { InstructionRecord } from "../domain/instruction.js";
+import type { WorkerTurnLedger } from "../orchestration/session/worker-turn-ports.js";
 import type { ThreadEvent } from "../domain/thread.js";
 import type { InstructionTurnTarget } from "../orchestration/session/worker-turn-ports.js";
 
@@ -30,4 +32,15 @@ export class InstructionTargetIndex {
   sessionIds(): string[] { return [...this.sessions.keys()]; }
   remove(sessionId: string): void { this.sessions.delete(sessionId); }
   read(sessionId: string): InstructionTurnTarget[] { return [...(this.sessions.get(sessionId)?.values() ?? [])].map(target => ({ ...target })); }
+}
+
+/** Reconcile a lost queue receipt from the existing per-session durable native target index. */
+export function indexedInstructionReceipt(record: InstructionRecord, ledger: WorkerTurnLedger): Partial<InstructionRecord> | undefined {
+  const target = ledger.instructionTargets?.find(t => t.instructionId === record.id);
+  if (!target) return undefined;
+  const turn = ledger.turns.find(t => t.data?.turnNumber === target.expectedTurn);
+  if (turn?.data?.outcome === "cancelled") return { status: "cancelled", expectedTurn: target.expectedTurn, renderedAt: target.renderedAt };
+  if (ledger.canonicalTurns >= target.expectedTurn) return { status: "completed", expectedTurn: target.expectedTurn,
+    renderedAt: target.renderedAt, submittedAt: record.submittedAt ?? target.renderedAt, completedAt: target.renderedAt };
+  return { status: "rendered", expectedTurn: target.expectedTurn, renderedAt: target.renderedAt };
 }

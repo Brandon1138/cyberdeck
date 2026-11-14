@@ -93,6 +93,11 @@ export class ExecutionTranscriptStore extends ThreadTranscriptStore {
     }
     return receipts;
   }
+  override async captureOriginalContext(input: CaptureWorkerTurns, record?: SessionRecord): Promise<void> {
+    const session = record?.executor === "orbstack-container" ? record : this.container(input.sessionId);
+    if (!session) return super.captureOriginalContext(input, record);
+    await this.containerSource.read(session);
+  }
   override async readTranscriptMessages(input: CaptureWorkerTurns) {
     const session = this.container(input.sessionId);
     return session ? (await this.containerSource.read(session)).messages : super.readTranscriptMessages(input);

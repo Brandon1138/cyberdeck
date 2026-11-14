@@ -208,7 +208,7 @@ export function renderFleetFooter(
         ? "rename"
         : state.projectPrompt !== undefined
           ? "project"
-          : state.shellMode !== undefined ? "shell" : "task",
+          : state.shellMode !== undefined ? "shell" : selected?.strigoi?.canonical ? "strigoi" : "task",
       options,
     );
     const launchContext = state.shellMode !== undefined
@@ -218,7 +218,9 @@ export function renderFleetFooter(
         `enter runs · ${state.shellMode.running === true ? "ctrl+g stops and leaves" : "esc or ctrl+g leaves"}`,
         options.width,
       )
-      : profile === undefined
+      : selected?.strigoi?.canonical
+        ? contextLine(`▶ Strigoi #${selected.strigoi.incarnation} · ${selected.strigoi.readiness}`, "durable resident input", "/strigoi status", options.width)
+        : profile === undefined
         ? contextLine(
           `▶ /model required · ${selected?.record.sandbox ?? "read-only"}`,
           shortPath(cwd, options.home),

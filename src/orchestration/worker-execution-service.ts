@@ -1,3 +1,4 @@
+import type { LaunchAdmission } from "./session/session-ports.js";
 import { randomUUID } from "node:crypto";
 import type { SessionRecord } from "../domain/session.js";
 import type { SessionRuntime } from "../domain/session-runtime.js";
@@ -13,14 +14,14 @@ export class WorkerExecutionService implements SessionExecutionPort {
   private readonly pendingStarts = new Map<string, AbortController>();
   constructor(private readonly store: ExecutionStorePort, private readonly backends: Partial<Record<WorkerExecutor, WorkerExecutionPort>>, private readonly policy?: WorkerExecutionPolicy, private readonly attemptTimeoutMs = 3600000) {}
 
-  async start(record: SessionRecord, launch: ProviderLaunchSpec, replayBytes: number): Promise<SessionRuntime> {
+  async start(record: SessionRecord, launch: ProviderLaunchSpec, replayBytes: number, admission?: LaunchAdmission): Promise<SessionRuntime> {
     if (this.closed) throw new ExecutionError("EXECUTION_ADMISSION_CLOSED");
     if (this.starting.has(record.id)) throw new ExecutionError("EXECUTION_BUSY");
     this.starting.add(record.id);
     let settled!: () => void;
     const completion = new Promise<void>((resolve) => { settled = resolve; }); this.settlements.add(completion);
     const controller = new AbortController(); this.pendingStarts.set(record.id, controller);
-    try { return await this.startExclusive(record, launch, replayBytes, controller.signal); }
+    try { return await this.startExclusive(record, launch, replayBytes, controller.signal, admission); }
     finally { this.starting.delete(record.id); this.pendingStarts.delete(record.id); this.settlements.delete(completion); settled(); }
   }
   cancelStart(sessionId: string): boolean {
@@ -93,7 +94,7 @@ export class WorkerExecutionService implements SessionExecutionPort {
       throw error;
     } finally { this.starting.delete(sessionId); }
   }
-  private async startExclusive(record: SessionRecord, launch: ProviderLaunchSpec, replayBytes: number, signal: AbortSignal): Promise<SessionRuntime> {
+  private async startExclusive(record: SessionRecord, launch: ProviderLaunchSpec, replayBytes: number, signal: AbortSignal, admission?: LaunchAdmission): Promise<SessionRuntime> {
     const request = resolveWorkerExecution(record, this.policy);
     const previous = this.store.get(record.id);
     if (previous !== undefined && (previous.request.executor !== request.executor || previous.request.profile !== request.profile)) {
@@ -129,7 +130,8 @@ export class WorkerExecutionService implements SessionExecutionPort {
       intent = { ...intent, ref: prepared.ref, phase: "ready", updatedAt: new Date().toISOString() };
       await this.store.put(intent);
       record.execution = prepared.ref;
-      const runtime = await backend.start(prepared, replayBytes);
+      const spawn = async () => { signal.throwIfAborted(); return backend.start(prepared, replayBytes); };
+      const runtime = await (admission === undefined ? spawn() : admission(spawn));
       signal.throwIfAborted();
       await this.store.put({ ...intent, phase: "running", updatedAt: new Date().toISOString(),
         ...(request.executor === "orbstack-container" ? { attemptDeadline: new Date(Date.now() + this.attemptTimeoutMs).toISOString() } : {}),

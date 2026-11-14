@@ -87,12 +87,13 @@ it("keeps legacy polling bounded and reports absent activity evidence as Unknown
   const request = vi.fn(async (method: string) => {
     if (method === "session.list") return [record, { ...record, id: "other", attentionState: "working" }];
     if (method === "fleet.projects") return ["/repo"];
+    if (method === "strigoi.inspect") throw Object.assign(new Error("Unknown method"), { code: "METHOD_NOT_FOUND" });
     return [];
   });
   const snapshot = await collectFleetSnapshot({ request } as never);
   expect(snapshot.threads.map(threadStatus)).toEqual(["Unavailable", "Unavailable"]);
   expect(request.mock.calls.map(([method]) => method)).toEqual([
-    "session.list", "fleet.workerCoordination", "fleet.orchestratorOwnership", "fleet.projects",
+    "session.list", "fleet.workerCoordination", "fleet.orchestratorOwnership", "fleet.projects", "strigoi.inspect",
   ]);
   expect(threadStatus({ record: { ...record, executionState: "exited", exitCode: 0 } })).toBe("Exited");
   expect(threadStatus({ record: { ...record, executionState: "failed", exitCode: 1 } })).toBe("Failed");
@@ -100,6 +101,49 @@ it("keeps legacy polling bounded and reports absent activity evidence as Unknown
   expect(threadStatus({ record: { ...record, executionState: "exited", termination: {
     kind: "provider-fault", reason: "Fault before exit", detail: "Fatal provider error", at: NOW,
   } } })).toBe("Failed");
+});
+
+it.each([
+  { label: "undefined", value: undefined }, { label: "null", value: null }, { label: "empty array", value: [] },
+  { label: "empty object", value: {} }, { label: "empty state", value: { state: {} } },
+  { label: "incomplete identity", value: { state: { activeBinding: { sessionId: record.id } } } },
+])("keeps ordinary rows and Unknown truth when optional resident inspection is $label", async ({ value }) => {
+    const request = vi.fn(async (method: string) => {
+      if (method === "session.list") return [record];
+      if (method === "strigoi.inspect") return value;
+      return [];
+    });
+    const snapshot = await collectFleetSnapshot({ request } as never);
+    expect(snapshot.threads).toEqual([{ record }]);
+    expect(threadStatus(snapshot.threads[0]!)).toBe("Unavailable");
+    expect(request.mock.calls.map(([method]) => method)).toEqual([
+      "session.list", "fleet.workerCoordination", "fleet.orchestratorOwnership", "fleet.projects", "strigoi.inspect",
+    ]);
+  },
+);
+
+it("retains valid resident identity and holds without claiming activity for legacy rows", async () => {
+  const resident = { ...record, kind: "orchestrator", provider: "codex" };
+  const hold = { code: "retirement-unconfirmed", detail: "Exit unknown", sourceIds: [record.id] };
+  const inspection = {
+    state: { schemaVersion: 1, revision: 1, desired: "enabled", incarnation: 1, activeGeneration: 1,
+      selection: { provider: "codex", model: "fixture", cwd: "/repo" }, retainedSessionIds: [record.id], updatedAt: NOW, hold,
+      activeBinding: { key: "resident:strigoi", kind: "resident", resident: { name: "strigoi", incarnation: 1 }, sessionId: record.id,
+        provider: "codex", cwd: "/repo", sandbox: "read-only", scope: { kind: "fleet" },
+        grant: { subjectSessionId: record.id, capabilities: ["thread.read"], scope: { kind: "fleet" } }, createdAt: NOW, updatedAt: NOW } },
+    readiness: "held", adoption: "pending", ownership: "unknown", usage: "unknown",
+  };
+  const request = vi.fn(async (method: string) => {
+    if (method === "session.list") return [resident, { ...record, id: "ordinary" }];
+    if (method === "strigoi.inspect") return inspection;
+    return [];
+  });
+  const snapshot = await collectFleetSnapshot({ request } as never);
+  expect(snapshot.threads[0]).toEqual({ record: { ...resident, name: "Strigoi #1" }, strigoi: {
+    canonical: true, incarnation: 1, desired: "enabled", readiness: "held", adoption: "pending", hold, continuationHolds: [],
+  } });
+  expect(snapshot.threads[1]).toEqual({ record: { ...record, id: "ordinary" } });
+  expect(snapshot.threads.map(threadStatus)).toEqual(["Unavailable", "Unavailable"]);
 });
 
 it.each(["Starting", "Idle", "Unavailable", "Stopping", "Stopped", "Interrupted", "Exited"] as const)("keeps %s neutral", (status) => {

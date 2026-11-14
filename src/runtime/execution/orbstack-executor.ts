@@ -107,12 +107,14 @@ export class OrbStackExecutor implements WorkerExecutionPort {
         || mounts.length !== 3 || !mounts.some((m) => m.Source === context.workspace.hostPath && m.Destination === "/workspace" && m.RW === (input.record.sandbox !== "read-only"))
         || !mounts.some((m) => m.Source === context.hostState && m.Destination === "/home/worker" && m.RW)
         || !mounts.some((m) => m.Source === context.hostCredentials && m.Destination === "/run/credentials" && !m.RW)) throw new Error("CONTAINER_BOUNDARY_MISMATCH");
+      // External context verification is preflight, before the launch admission permit.
+      await client.verify();
+      input.signal?.throwIfAborted();
       return { ref, launch: input.launch };
     } catch (error) { this.release(input.identity.executionId); throw error; }
   }
   async start(prepared: PreparedExecution, replayBytes: number): Promise<SessionRuntime> {
     try {
-      await this.options.client.verify();
       const attached = this.options.attach({ executable: "docker", args: ["--context", "orbstack", "start", "--attach", "--interactive", prepared.ref.backendId!],
         cwd: prepared.ref.workspaceId, env: { PATH: process.env.PATH, HOME: process.env.HOME },
         ...(prepared.launch.transport === undefined ? {} : { transport: prepared.launch.transport }),

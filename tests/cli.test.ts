@@ -580,3 +580,31 @@ describe("Cyberdeck CLI", () => {
     });
   });
 });
+
+ it("routes explicit Strigoi enablement and status without an Alfred entity", async () => {
+  const strigoi = vi.fn(async () => ({}));
+  const program = createProgram({ strigoi });
+  vi.spyOn(console, "log").mockImplementation(() => {});
+  await program.parseAsync(["strigoi", "enable", "--provider", "codex", "--model", "gpt-5.6-sol", "--cwd", "/repo", "--effort", "high"], { from: "user" });
+  expect(strigoi).toHaveBeenCalledWith("configure", expect.objectContaining({ provider: "codex", model: "gpt-5.6-sol", cwd: "/repo", effort: "high" }));
+  await program.parseAsync(["strigoi", "status"], { from: "user" });
+  expect(strigoi).toHaveBeenLastCalledWith("inspect", {});
+  expect(program.commands.some(c => c.name() === "alfred")).toBe(false);
+  vi.restoreAllMocks();
+});
+
+it("routes resident lifecycle, renewal, durable say and read-only watch explicitly", async () => {
+  const strigoi = vi.fn(async () => ({ state: { incarnation: 3 } })), strigoiWatch = vi.fn(async () => 0);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  const program = createProgram({ strigoi, strigoiWatch });
+  for (const command of ["suspend", "resume", "disable"]) {
+    await program.parseAsync(["strigoi", command, "--mutation-id", "stable"], { from: "user" });
+    expect(strigoi).toHaveBeenLastCalledWith(command, { mutationId: "stable" });
+  }
+  await program.parseAsync(["strigoi", "renew", "--mutation-id", "renew-stable"], { from: "user" });
+  expect(strigoi).toHaveBeenLastCalledWith("renew", { expectedIncarnation: 3, reason: "operator-request", mutationId: "renew-stable" });
+  await program.parseAsync(["strigoi", "say", "continue", "--message-id", "message-stable"], { from: "user" });
+  expect(strigoi).toHaveBeenLastCalledWith("submit", { message: "continue", messageId: "message-stable" });
+  await program.parseAsync(["strigoi", "watch"], { from: "user" });
+  expect(strigoiWatch).toHaveBeenCalledOnce(); log.mockRestore();
+});

@@ -3,11 +3,22 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { orchestratorController } from "../../src/domain/orchestrator.js";
 import { OrchestratorAttentionStore } from "../../src/persistence/orchestrator-attention-store.js";
 import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-store.js";
+import { OrchestratorAttentionControlPlane } from "../../src/orchestration/orchestrator-attention-control.js";
 import { ACTOR, WORKER, OTHER, attentionHarness, cleanupAttentionHarnesses, NOW } from "../support/attention-harness.js";
 
 afterEach(cleanupAttentionHarnesses);
 
 describe("attention recovery and owner replacement", () => {
+  it("keeps unrelated attention usable when the resident authority shard cannot be read", async () => {
+    const f = await attentionHarness(); const armed = await f.attention.arm(f.request());
+    f.attention.stop(); await f.attention.flush();
+    const read = vi.fn(async () => { throw new Error("STRIGOI_CORRUPT_STATE"); });
+    const attention = new OrchestratorAttentionControlPlane({ ...f.controlOptions, resident: { read } });
+    f.controls.push(attention);
+    await expect(attention.start()).resolves.toBeUndefined();
+    expect((await attention.schedulingSnapshot(armed.controllerId))?.record.status).toBe("armed");
+    expect(read).not.toHaveBeenCalled();
+  });
   it.each([false, true])("recovers a real cancelled owner receipt even after later activity (observed=%s)", async (observed) => {
     const f = await attentionHarness(); const armed = await f.attention.arm(f.request());
     if (!observed) f.attention.stop();

@@ -1,3 +1,4 @@
+import type { LaunchAdmission, LaunchReservation, LaunchOutcome } from "../orchestration/session/session-ports.js";
 import type { ModalAnswerAttempt } from "../domain/modal-descriptor.js";
 import type { InstructionAdmission } from "../domain/instruction.js";
 import type { ResolvedLaunchRecord, SessionRecord, StartSessionRequest } from "../domain/session.js";
@@ -134,6 +135,7 @@ export class SessionRegistry {
       observer: this.observer,
     });
     this.launch = new SessionLaunchCoordinator({
+      onLaunchOutcome: (sessionId) => this.bus.notifySessionUpdate(sessionId),
       catalog: this.catalog,
       workspace: this.workspace,
       scoutSupervision: this.scoutSupervision,
@@ -145,6 +147,10 @@ export class SessionRegistry {
 
   async ready(): Promise<void> {
     await this.recovery;
+  }
+
+  setResidentLifecycle(hooks: NonNullable<SessionRegistryOptions["residentLifecycle"]>): void {
+    this.catalog.options.residentLifecycle = hooks;
   }
 
   initialInstructionRecoveryFailure(sessionId: string): string | undefined {
@@ -164,12 +170,18 @@ export class SessionRegistry {
     initialPrompt?: string,
     activate?: (record: SessionRecord) => Promise<void>,
     initialInstructionId?: string,
+    admission?: LaunchAdmission,
+    launchReservation?: LaunchReservation,
   ): Promise<SessionRecord> {
-    return this.launch.start(request, initialPrompt, activate, initialInstructionId);
+    return this.launch.start(request, initialPrompt, activate, initialInstructionId, admission, launchReservation);
   }
 
   list(): SessionRecord[] {
     return this.reads.list();
+  }
+
+  launchOutcome(reservation: LaunchReservation, generation: number): LaunchOutcome {
+    return this.launch.launchOutcome(reservation, generation);
   }
 
   runtimePresence(sessionId: string): SessionRuntimePresence {
@@ -307,7 +319,16 @@ export class SessionRegistry {
     return this.lifecycle.stop(sessionId);
   }
 
-  forceStop(sessionId: string): void {
+  /** Internal cleanup of an owned late launch; does not change the resident's desired state. */
+  async stopResidentProcess(sessionId: string): Promise<void> {
+    return this.lifecycle.stop(sessionId, "resident");
+  }
+
+  residentRetirement(sessionId: string, generation: number): Promise<"confirmed" | "unknown"> {
+    return this.lifecycle.residentRetirement(sessionId, generation);
+  }
+
+  forceStop(sessionId: string): Promise<void> {
     return this.lifecycle.forceStop(sessionId);
   }
 

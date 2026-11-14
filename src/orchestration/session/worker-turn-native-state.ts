@@ -1,5 +1,5 @@
 import type { SessionRecord } from "../../domain/session.js";
-import type { CaptureWorkerTurns, ProviderTerminalActivity, WorkerTurnObservation } from "./worker-turn-ports.js";
+import type { CaptureWorkerTurns, ProviderTerminalActivity, ProviderWorkCycle, WorkerTurnObservation } from "./worker-turn-ports.js";
 import { projectWorkerTruth, type WorkerTruth } from "../../domain/worker-truth.js";
 import { StringDecoder } from "node:string_decoder";
 
@@ -26,6 +26,7 @@ export class NativeTurnActivity {
   private lastWorkingAt = 0;
   private lastBusyRevision = -1;
   private starting = false;
+  private workCycle: ProviderWorkCycle | undefined;
   private inputAt?: string;
   private generationStartedAt: string;
   private resumed = false;
@@ -42,6 +43,7 @@ export class NativeTurnActivity {
     delete this.inputAt;
     this.screenRevision = -1; this.lastWorkingAt = 0;
     this.lastBusyRevision = -1; this.starting = false;
+    this.workCycle = undefined;
     this.generationStartedAt = startedAt;
     this.resumed = true;
     this.stream = "";
@@ -64,20 +66,27 @@ export class NativeTurnActivity {
     }
     while (this.closedNativeIds.size > 100_000) this.closedNativeIds.delete(this.closedNativeIds.values().next().value!);
   }
-  observeScreen(revision: number, activity: ProviderTerminalActivity = "unknown", at = Date.now(), starting = false): void {
+  observeScreen(revision: number, activity: ProviderTerminalActivity = "unknown", at = Date.now(), starting = false,
+    workCycle?: ProviderWorkCycle): void {
     this.screenRevision = revision;
     if (activity !== "unknown") this.starting = starting && activity === "working";
+    if (workCycle !== undefined && workCycle.id !== this.workCycle?.id) {
+      this.lastWorkingAt = at;
+      this.lastBusyRevision = revision;
+    }
+    this.workCycle = workCycle;
+    const cycleRedraw = workCycle?.active === true;
     // MCP initialization is terminal setup, not evidence of a provider turn after the native end.
-    if (activity === "working" && !this.starting) this.lastWorkingAt = at;
-    if ((activity === "working" && !this.starting) || activity === "needs-input") this.lastBusyRevision = revision;
-    if ((activity === "awaiting-input" || activity === "unknown") && this.view?.current
+    if (activity === "working" && !this.starting && !cycleRedraw) this.lastWorkingAt = at;
+    if ((activity === "working" && !this.starting && !cycleRedraw) || activity === "needs-input") this.lastBusyRevision = revision;
+    if ((activity === "awaiting-input" || activity === "unknown" || cycleRedraw) && this.view?.current
       && this.view.activity === "awaiting-input" && this.view.revision >= this.lastBusyRevision) {
       // A resize or unclassified repaint is not input and does not start a provider turn.
       this.view.revision = revision;
     }
   }
   ownsCurrentEnd(revision: number): boolean {
-    return !this.starting && this.view?.revision === revision && this.view.current && this.view.activity === "awaiting-input";
+    return !this.starting && !this.workCycle?.active && this.view?.revision === revision && this.view.current && this.view.activity === "awaiting-input";
   }
 
   turns(observation: WorkerTurnObservation, revision: number,
@@ -149,7 +158,7 @@ export class NativeTurnActivity {
   activity(screen: ProviderTerminalActivity, revision: number): ProviderTerminalActivity {
     if (this.refused) return screen === "needs-input" || screen === "working" ? screen : "unknown";
     if (screen === "needs-input" || !this.available) return screen;
-    if (this.starting) return "working";
+    if (this.starting || this.workCycle?.active) return "working";
     // A positively ready startup surface belongs to this process, independently of historical
     // native ends. It permits first input, without attributing old completion effects to resume.
     if (screen === "awaiting-input" && this.screenRevision === revision && this.inputAt === undefined

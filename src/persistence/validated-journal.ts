@@ -11,6 +11,9 @@ const version = (info: BigIntStats): string =>
  * rewrite, replacement, truncation or deletion) requires a complete revalidation. An external
  * append cannot safely be treated as append-only: its writer may also have edited the prefix.
  * Reads and our fsynced appends share a queue; failed parsing never publishes a partial cache.
+ * Appends invalidate rather than advance: post-write metadata cannot prove that the prefix
+ * survived a concurrent same-inode edit. Projections must be structured-cloneable data;
+ * readers receive isolated snapshots so they cannot mutate the validated cache.
  */
 export class ValidatedJournal<T> {
   private tail = Promise.resolve();
@@ -26,7 +29,7 @@ export class ValidatedJournal<T> {
         });
         if (file === undefined) {
           this.cached = undefined;
-          return this.project("");
+          return structuredClone(this.project(""));
         }
         try {
           const before = version(await file.stat({ bigint: true }));
@@ -40,23 +43,25 @@ export class ValidatedJournal<T> {
           });
           if (before !== after || current === undefined || after !== version(current)) continue;
           this.cached = { version: after, projection };
-          return projection;
+          return structuredClone(projection);
         } finally { await file.close(); }
       }
       throw new Error("Journal changed during validation");
     });
   }
 
-  append(record: unknown): Promise<void> {
+  async append(record: unknown): Promise<void> {
+    // Snapshot the actual wire bytes before waiting on either the queue or filesystem.
+    const body = `${JSON.stringify(record)}\n`;
     return this.enqueue(async () => {
+      // Even an open/write/sync/close failure may leave visible changes. No projection
+      // inferred from the caller's object can establish what is now on disk.
+      this.cached = undefined;
       const handle = await openPrivateAppendFile(this.path);
       try {
-        await handle.write(`${JSON.stringify(record)}\n`, undefined, "utf8");
+        await handle.writeFile(body, "utf8");
         await handle.sync();
-      } finally {
-        this.cached = undefined;
-        await handle.close();
-      }
+      } finally { await handle.close(); }
     });
   }
 

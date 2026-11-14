@@ -130,6 +130,14 @@ export type ReattachTarget =
   | { status: "stale" };
 
 export interface SessionRegistryOptions {
+  /** Installed by broker composition; never populated from public session.start input. */
+  residentLifecycle?: {
+    validateReservation(reservation: import("./session-ports.js").LaunchReservation): Promise<void>;
+    beforeStop(sessionId: string): Promise<void>;
+    beforeDelete?(sessionId: string): Promise<void>;
+    withDeletion?<T>(sessionId: string, commit: () => Promise<T>): Promise<T>;
+    beforeResume(sessionId: string): Promise<void>;
+  };
   adapters: Record<string, ProviderAdapter>;
   sessionRuntimeFactory: SessionRuntimeFactory<ProviderLaunchSpec>;
   executions?: SessionExecutionPort;
@@ -179,5 +187,13 @@ export class RegistryError extends Error {
   ) {
     super(message);
     this.name = "RegistryError";
+  }
+}
+
+/** Only thrown by instruction guards that prove no input was rendered or submitted. */
+export class InstructionRefusedError extends RegistryError {
+  constructor() {
+    super("SESSION_BUSY", "A human controller currently owns this thread");
+    this.name = "InstructionRefusedError";
   }
 }

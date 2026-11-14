@@ -98,6 +98,7 @@ export class ReplayDigest implements TerminalMarkerSource {
   #waitingNotificationAt = -1;
   #tokens: number | undefined;
   #version = 0;
+  #codexWorkCycle: { id: number; active: boolean } | undefined;
   /** Set while an oversized OSC payload is being thrown away; see {@link append}. */
   #discardingOsc = false;
   /** The one character an `ESC \` terminator could have started in, and nothing else. */
@@ -151,6 +152,7 @@ export class ReplayDigest implements TerminalMarkerSource {
     this.#titleAt = -1;
     this.#waitingNotificationAt = -1;
     this.#tokens = undefined;
+    this.#codexWorkCycle = undefined;
     this.#discardingOsc = false;
     this.#oscSeam = "";
     if (replay !== "") this.append(replay);
@@ -219,6 +221,15 @@ export class ReplayDigest implements TerminalMarkerSource {
     for (const match of consumable.matchAll(CURSOR_WAIT_NOTIFICATION)) {
       this.#waitingNotificationAt = consumableStart + match.index;
     }
+    // Codex's explicit status is a work interval, not a turn receipt. Retain its start across
+    // streaming redraws; only the exactly bound native source can establish completion.
+    for (const sequence of consumable.matchAll(/\u001b\](?:[^\u0007\u001b]|\u001b(?!\\))*(?:\u0007|\u001b\\)/gu)) {
+      const match = /^\u001b\]7501;state=(working|done|idle):app=codex(?:\u0007|\u001b\\)$/u.exec(sequence[0]);
+      if (match === null) continue;
+      if (match[1] === "working") {
+        if (!this.#codexWorkCycle?.active) this.#codexWorkCycle = { id: (this.#codexWorkCycle?.id ?? 0) + 1, active: true };
+      } else if (this.#codexWorkCycle) this.#codexWorkCycle.active = false;
+    }
 
     // Split at the last clear-screen so the frame boundary is exact rather than chunk-aligned. The
     // split lands on the first byte of an escape sequence, so neither half loses a match.
@@ -252,6 +263,10 @@ export class ReplayDigest implements TerminalMarkerSource {
   }
 
   inputFrameText(): string { return this.#inputScreen.text(); }
+
+  codexWorkCycle(): { id: number; active: boolean } | undefined {
+    return this.#codexWorkCycle === undefined ? undefined : { ...this.#codexWorkCycle };
+  }
 
   currentScreen() { return this.#inputScreen.snapshot(); }
   titlePosition(): number { return this.lastTitle() === undefined ? -1 : this.#titleAt; }

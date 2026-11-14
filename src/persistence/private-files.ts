@@ -11,6 +11,8 @@ export async function ensurePrivateDirectory(path: string): Promise<void> {
 export async function openPrivateAppendFile(path: string): Promise<FileHandle> {
   await ensurePrivateDirectory(dirname(path));
   const handle = await open(path, "a", 0o600);
-  await handle.chmod(0o600);
+  // An unnecessary chmod changes ctime, invalidating file-identity-checked journal
+  // projections before every append. Still repair genuinely broader permissions.
+  if (((await handle.stat()).mode & 0o7777) !== 0o600) await handle.chmod(0o600);
   return handle;
 }

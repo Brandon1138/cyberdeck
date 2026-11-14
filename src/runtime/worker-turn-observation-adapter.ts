@@ -56,6 +56,10 @@ class RuntimeReplayObservation implements ReplayObservation {
   progressVersion(provider: string): number {
     return provider === "codex" ? this.codexProgress.observe(this.digest.inputFrameText()) : 0;
   }
+
+  workCycle(provider: string) {
+    return provider === "codex" ? this.digest.codexWorkCycle() : undefined;
+  }
 }
 
 /** Concrete terminal interpretation composed at the broker boundary. */

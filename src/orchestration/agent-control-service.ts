@@ -1,3 +1,6 @@
+import type { LaunchAdmission } from "./session/session-ports.js";
+import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
+import { statusRecord, boundedRecord } from "./agent-thread-projection.js";
 import { ThreadPageOptionsSchema, type ThreadPageOptions } from "../domain/thread.js";
 import { readThreadPage } from "./thread-read-page.js";
 import { consumeSettledNotifications } from "./wait-settlement.js";
@@ -13,7 +16,6 @@ import {
   MAX_THREAD_PAGE,
   MAX_WAIT_SECONDS,
   MAX_WAIT_SEGMENT_SECONDS,
-  THREAD_PREVIEW_CHARS,
 } from "../limits.js";
 import { grantAllows, type CapabilityGrant, type CyberdeckCapability } from "../domain/capability.js";
 import type { BrokerEvent, BrokerEventType } from "../domain/events.js";
@@ -322,6 +324,7 @@ export interface WorkerBudgetRegistrationPort {
 }
 
 export interface AgentControlOptions {
+  strigoi?: StrigoiAdmission;
   /** Injected for tests; production reads the wall clock. */
   now?: () => number;
   /** Longest single transport segment. Must stay under the tightest MCP client call deadline. */
@@ -352,6 +355,7 @@ export interface AgentControlOptions {
 }
 
 export class AgentControlService {
+  private readonly strigoi: StrigoiAdmission | undefined;
   private readonly threadCursors = new Map<string, number>();
   private readonly scoutArtifactCursors = new Map<string, number>();
   private readonly pendingWaits = new Map<string, PendingWait>();
@@ -380,6 +384,7 @@ export class AgentControlService {
     private readonly workerPreferences?: WorkerPreferenceReader,
     options: AgentControlOptions = {},
   ) {
+    this.strigoi = options.strigoi;
     this.now = options.now ?? (() => Date.now());
     this.segmentSeconds = Math.max(1, Math.min(options.segmentSeconds ?? MAX_WAIT_SEGMENT_SECONDS, MAX_WAIT_SECONDS));
     this.audit = options.audit;
@@ -469,9 +474,11 @@ export class AgentControlService {
   }
 
   async answerOrchestratorModal(input: z.input<typeof AnswerOrchestratorModalParamsSchema>) {
-    return answerOrchestratorModal(input, { registry: this.registry, bindings: this.orchestrators,
-      ...(this.modalPolicy === undefined ? {} : { policy: this.modalPolicy }),
-      ...(this.audit === undefined ? {} : { audit: this.audit }) });
+    return admitted(this.strigoi, input.actorSessionId, async () => {
+      return answerOrchestratorModal(input, { registry: this.registry, bindings: this.orchestrators,
+        ...(this.modalPolicy === undefined ? {} : { policy: this.modalPolicy }),
+        ...(this.audit === undefined ? {} : { audit: this.audit }) });
+    });
   }
 
   async stopOrchestrator(
@@ -479,186 +486,191 @@ export class AgentControlService {
     mode: "graceful" | "force" = "graceful",
   ): Promise<OrchestratorStopResult> {
     const request = AgentStopOrchestratorParamsSchema.parse(input);
-    let authorityPath:
-      | "none"
-      | "active-orchestrator-binding"
-      | "scoped-capability-grant" = "none";
-    const finish = async (
-      result: Omit<OrchestratorStopResult, "mode">,
-    ): Promise<OrchestratorStopResult> => {
-      const completed = { ...result, mode };
-      await this.appendOrchestratorAudit("orchestrator.stop.result", request.targetSessionId, {
+    return admitted(this.strigoi, request.actorSessionId, async () => {
+      let authorityPath:
+        | "none"
+        | "active-orchestrator-binding"
+        | "scoped-capability-grant" = "none";
+      const finish = async (
+        result: Omit<OrchestratorStopResult, "mode">,
+      ): Promise<OrchestratorStopResult> => {
+        const completed = { ...result, mode };
+        await this.appendOrchestratorAudit("orchestrator.stop.result", request.targetSessionId, {
+          actorSessionId: request.actorSessionId,
+          targetSessionId: request.targetSessionId,
+          observedGeneration: request.expectedGeneration,
+          reason: request.reason,
+          mode,
+          authorityPath,
+          outcome: completed.outcome,
+          detail: completed.reason ?? null,
+        });
+        return completed;
+      };
+      let binding: OrchestratorBinding;
+      try {
+        binding = await this.requireActiveBinding(request.actorSessionId);
+        authorityPath = "active-orchestrator-binding";
+      } catch (error) {
+        return finish({
+          outcome: "DENIED",
+          targetSessionId: request.targetSessionId,
+          reason: error instanceof Error ? error.message : "Caller is not an active orchestrator",
+        });
+      }
+      const target = this.sessionRecord(request.targetSessionId);
+
+      if (target === undefined) {
+        return finish({
+          outcome: "DENIED",
+          targetSessionId: request.targetSessionId,
+          reason: "Target session does not exist in this broker",
+        });
+      }
+      if (target.kind !== "orchestrator") {
+        return finish({
+          outcome: "NOT_ORCHESTRATOR",
+          targetSessionId: request.targetSessionId,
+          reason: "Target is not an orchestrator session",
+        });
+      }
+      if (request.actorSessionId === target.id) {
+        return finish({
+          outcome: "DENIED",
+          targetSessionId: target.id,
+          reason: "An orchestrator cannot stop itself through the peer-control tool",
+        });
+      }
+      if (!grantAllows(binding.grant, "orchestrator.stop", target)) {
+        return finish({
+          outcome: "DENIED",
+          targetSessionId: target.id,
+          reason: "Target is outside this orchestrator's stop scope",
+        });
+      }
+      authorityPath = "scoped-capability-grant";
+
+      const inspection = await this.orchestratorInspection(target);
+      const generation = target.generation ?? 1;
+      if (request.expectedGeneration !== generation) {
+        return finish({
+          ...inspection,
+          outcome: "TARGET_CHANGED",
+          reason: `Target generation is ${generation}, not ${request.expectedGeneration}`,
+        });
+      }
+      if ((inspection.impact?.nonTerminalChildIds.length ?? 0) > 0) {
+        return finish({
+          ...inspection,
+          outcome: "REQUIRES_HANDOFF",
+          reason: "Target still owns non-terminal workers; MIK-55 handoff is required before stopping it",
+        });
+      }
+      if (target.exitCode !== null) {
+        if ((await this.orchestrators.findBySessionId(target.id))?.kind === "resident") await this.registry.stop(target.id);
+        return finish({
+          ...inspection,
+          outcome: "ALREADY_TERMINAL",
+          reason: "Target provider process is already terminal",
+        });
+      }
+      if (target.executionState === "active" || target.executionState === "starting") {
+        return finish({
+          ...inspection,
+          outcome: "APPROVAL_REQUIRED",
+          reason: "Healthy live orchestrators require explicit operator authority",
+        });
+      }
+      if (!this.registry.ownsProcess(target.id)) {
+        return finish({
+          ...inspection,
+          outcome: "DENIED",
+          reason: "Target process is not owned by this broker instance",
+        });
+      }
+      if (mode === "force" && !this.registry.isStopRequested(target.id)) {
+        return finish({
+          ...inspection,
+          outcome: "DENIED",
+          reason: "Graceful stop must be requested before force escalation",
+        });
+      }
+      if (mode === "force") {
+        const requestedAt = this.registry.stopRequestedAt(target.id);
+        const elapsed = requestedAt === undefined ? 0 : this.now() - Date.parse(requestedAt);
+        if (requestedAt === undefined || !Number.isFinite(elapsed) || elapsed < this.forceStopGraceMs) {
+          return finish({
+            ...inspection,
+            outcome: "DENIED",
+            reason: `Graceful stop must remain pending for ${this.forceStopGraceMs}ms before force escalation`,
+          });
+        }
+      }
+
+      await this.appendOrchestratorAudit("orchestrator.stop.requested", target.id, {
         actorSessionId: request.actorSessionId,
-        targetSessionId: request.targetSessionId,
+        targetSessionId: target.id,
         observedGeneration: request.expectedGeneration,
         reason: request.reason,
         mode,
         authorityPath,
-        outcome: completed.outcome,
-        detail: completed.reason ?? null,
       });
-      return completed;
-    };
-    let binding: OrchestratorBinding;
-    try {
-      binding = await this.requireActiveBinding(request.actorSessionId);
-      authorityPath = "active-orchestrator-binding";
-    } catch (error) {
-      return finish({
-        outcome: "DENIED",
-        targetSessionId: request.targetSessionId,
-        reason: error instanceof Error ? error.message : "Caller is not an active orchestrator",
-      });
-    }
-    const target = this.sessionRecord(request.targetSessionId);
-
-    if (target === undefined) {
-      return finish({
-        outcome: "DENIED",
-        targetSessionId: request.targetSessionId,
-        reason: "Target session does not exist in this broker",
-      });
-    }
-    if (target.kind !== "orchestrator") {
-      return finish({
-        outcome: "NOT_ORCHESTRATOR",
-        targetSessionId: request.targetSessionId,
-        reason: "Target is not an orchestrator session",
-      });
-    }
-    if (request.actorSessionId === target.id) {
-      return finish({
-        outcome: "DENIED",
-        targetSessionId: target.id,
-        reason: "An orchestrator cannot stop itself through the peer-control tool",
-      });
-    }
-    if (!grantAllows(binding.grant, "orchestrator.stop", target)) {
-      return finish({
-        outcome: "DENIED",
-        targetSessionId: target.id,
-        reason: "Target is outside this orchestrator's stop scope",
-      });
-    }
-    authorityPath = "scoped-capability-grant";
-
-    const inspection = await this.orchestratorInspection(target);
-    const generation = target.generation ?? 1;
-    if (request.expectedGeneration !== generation) {
-      return finish({
-        ...inspection,
-        outcome: "TARGET_CHANGED",
-        reason: `Target generation is ${generation}, not ${request.expectedGeneration}`,
-      });
-    }
-    if ((inspection.impact?.nonTerminalChildIds.length ?? 0) > 0) {
-      return finish({
-        ...inspection,
-        outcome: "REQUIRES_HANDOFF",
-        reason: "Target still owns non-terminal workers; MIK-55 handoff is required before stopping it",
-      });
-    }
-    if (target.exitCode !== null) {
-      return finish({
-        ...inspection,
-        outcome: "ALREADY_TERMINAL",
-        reason: "Target provider process is already terminal",
-      });
-    }
-    if (target.executionState === "active" || target.executionState === "starting") {
-      return finish({
-        ...inspection,
-        outcome: "APPROVAL_REQUIRED",
-        reason: "Healthy live orchestrators require explicit operator authority",
-      });
-    }
-    if (!this.registry.ownsProcess(target.id)) {
-      return finish({
-        ...inspection,
-        outcome: "DENIED",
-        reason: "Target process is not owned by this broker instance",
-      });
-    }
-    if (mode === "force" && !this.registry.isStopRequested(target.id)) {
-      return finish({
-        ...inspection,
-        outcome: "DENIED",
-        reason: "Graceful stop must be requested before force escalation",
-      });
-    }
-    if (mode === "force") {
-      const requestedAt = this.registry.stopRequestedAt(target.id);
-      const elapsed = requestedAt === undefined ? 0 : this.now() - Date.parse(requestedAt);
-      if (requestedAt === undefined || !Number.isFinite(elapsed) || elapsed < this.forceStopGraceMs) {
+      // The durable audit write above yields. Re-read every mutation-sensitive field so a stale
+      // preflight cannot stop a provider process that resumed while the intent was being recorded.
+      const current = this.registry.get(target.id);
+      const currentInspection = await this.orchestratorInspection(current);
+      if ((current.generation ?? 1) !== request.expectedGeneration) {
         return finish({
-          ...inspection,
-          outcome: "DENIED",
-          reason: `Graceful stop must remain pending for ${this.forceStopGraceMs}ms before force escalation`,
+          ...currentInspection,
+          outcome: "TARGET_CHANGED",
+          reason: `Target changed to generation ${current.generation ?? 1} before stop execution`,
         });
       }
-    }
+      if ((currentInspection.impact?.nonTerminalChildIds.length ?? 0) > 0) {
+        return finish({
+          ...currentInspection,
+          outcome: "REQUIRES_HANDOFF",
+          reason: "Target acquired non-terminal workers before stop execution",
+        });
+      }
+      if (current.exitCode !== null) {
+        if ((await this.orchestrators.findBySessionId(current.id))?.kind === "resident") await this.registry.stop(current.id);
+        return finish({
+          ...currentInspection,
+          outcome: "ALREADY_TERMINAL",
+          reason: "Target became terminal before stop execution",
+        });
+      }
+      if (current.executionState === "active" || current.executionState === "starting") {
+        return finish({
+          ...currentInspection,
+          outcome: "APPROVAL_REQUIRED",
+          reason: "Target became active before stop execution",
+        });
+      }
+      if (!this.registry.ownsProcess(current.id)) {
+        return finish({
+          ...currentInspection,
+          outcome: "DENIED",
+          reason: "Target process ownership changed before stop execution",
+        });
+      }
+      if (mode === "force" && !this.registry.isStopRequested(current.id)) {
+        return finish({
+          ...currentInspection,
+          outcome: "TARGET_CHANGED",
+          reason: "Graceful stop is no longer pending",
+        });
+      }
 
-    await this.appendOrchestratorAudit("orchestrator.stop.requested", target.id, {
-      actorSessionId: request.actorSessionId,
-      targetSessionId: target.id,
-      observedGeneration: request.expectedGeneration,
-      reason: request.reason,
-      mode,
-      authorityPath,
-    });
-    // The durable audit write above yields. Re-read every mutation-sensitive field so a stale
-    // preflight cannot stop a provider process that resumed while the intent was being recorded.
-    const current = this.registry.get(target.id);
-    const currentInspection = await this.orchestratorInspection(current);
-    if ((current.generation ?? 1) !== request.expectedGeneration) {
+      this.requireCapability((await this.requireActiveBinding(request.actorSessionId)).grant, "orchestrator.stop", current);
+      if (mode === "force") await this.registry.forceStop(current.id);
+      else await this.registry.stop(current.id);
+      const stopped = this.registry.get(target.id);
       return finish({
-        ...currentInspection,
-        outcome: "TARGET_CHANGED",
-        reason: `Target changed to generation ${current.generation ?? 1} before stop execution`,
+        ...await this.orchestratorInspection(stopped),
+        outcome: stopped.exitCode === null ? "STOP_REQUESTED" : "STOPPED",
       });
-    }
-    if ((currentInspection.impact?.nonTerminalChildIds.length ?? 0) > 0) {
-      return finish({
-        ...currentInspection,
-        outcome: "REQUIRES_HANDOFF",
-        reason: "Target acquired non-terminal workers before stop execution",
-      });
-    }
-    if (current.exitCode !== null) {
-      return finish({
-        ...currentInspection,
-        outcome: "ALREADY_TERMINAL",
-        reason: "Target became terminal before stop execution",
-      });
-    }
-    if (current.executionState === "active" || current.executionState === "starting") {
-      return finish({
-        ...currentInspection,
-        outcome: "APPROVAL_REQUIRED",
-        reason: "Target became active before stop execution",
-      });
-    }
-    if (!this.registry.ownsProcess(current.id)) {
-      return finish({
-        ...currentInspection,
-        outcome: "DENIED",
-        reason: "Target process ownership changed before stop execution",
-      });
-    }
-    if (mode === "force" && !this.registry.isStopRequested(current.id)) {
-      return finish({
-        ...currentInspection,
-        outcome: "TARGET_CHANGED",
-        reason: "Graceful stop is no longer pending",
-      });
-    }
-
-    if (mode === "force") this.registry.forceStop(current.id);
-    else await this.registry.stop(current.id);
-    const stopped = this.registry.get(target.id);
-    return finish({
-      ...await this.orchestratorInspection(stopped),
-      outcome: stopped.exitCode === null ? "STOP_REQUESTED" : "STOPPED",
     });
   }
 
@@ -725,6 +737,7 @@ export class AgentControlService {
 
   async startWorker(input: z.input<typeof AgentStartWorkerParamsSchema>): Promise<WorkerStartResult> {
     const request = AgentStartWorkerParamsSchema.parse(input);
+    await admitted(this.strigoi, request.actorSessionId, async () => undefined, "read");
     const binding = await this.requireBinding(request.actorSessionId);
     this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
     if (request.profile === "scout") {
@@ -807,11 +820,17 @@ export class AgentControlService {
       name,
     };
     let worker: SessionRecord;
+    const admission: LaunchAdmission = (apply) => admitted(this.strigoi, request.actorSessionId, async () => {
+      const binding = await this.requireBinding(request.actorSessionId);
+      this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
+      if (isFableModel(request.model)) this.requireCapability(binding.grant, "worker.start.fable", { cwd: request.cwd });
+      return apply();
+    });
+    await admission(async () => undefined);
     if (request.budget === undefined) {
-      worker = await this.registry.start(startRequest, request.prompt);
+      worker = await this.registry.start(startRequest, request.prompt, undefined, undefined, admission);
     } else {
       const workerBudgets = this.workerBudgets!;
-      const controller = orchestratorController(binding);
       let activatedWorkerId: string | undefined;
       try {
         worker = await this.registry.start(
@@ -822,10 +841,11 @@ export class AgentControlService {
               record,
               name,
               declaration: request.budget!,
-              controller,
+              controller: orchestratorController(await this.requireBinding(request.actorSessionId)),
             });
             activatedWorkerId = record.id;
           },
+          undefined, admission,
         );
       } catch (error) {
         if (activatedWorkerId !== undefined) {
@@ -877,6 +897,12 @@ export class AgentControlService {
     }
     const name = request.name ?? taskName(request.brief.objective);
     const leasePolicy = request.leasePolicy ?? "expire-and-discard";
+    const admission: LaunchAdmission = (apply) => admitted(this.strigoi, request.actorSessionId, async () => {
+      const binding = await this.requireBinding(request.actorSessionId);
+      this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
+      return apply();
+    });
+    await admission(async () => undefined);
     const worker = await this.registry.start({
       provider: "cursor",
       model: "composer",
@@ -892,7 +918,7 @@ export class AgentControlService {
       brief: request.brief,
       leasePolicy,
       name,
-    }, scoutDispatchPrompt(request.brief));
+    }, scoutDispatchPrompt(request.brief), undefined, undefined, admission);
     return {
       sessionId: worker.id,
       name,
@@ -966,6 +992,7 @@ export class AgentControlService {
     scoutWave?: ScoutWaveDigest;
   }> {
     const request = AgentWaitWorkersParamsSchema.parse(input);
+    await admitted(this.strigoi, request.actorSessionId, async () => undefined, "read");
     const binding = await this.requireBinding(request.actorSessionId);
     for (const target of request.targets) {
       const worker = this.registry.get(target.sessionId);
@@ -1033,7 +1060,11 @@ export class AgentControlService {
     // One truth, two readers: a target this wait delivered is a settled record the feed no longer
     // needs to announce, so it is consumed here with `deliveredVia: ["wait"]`.
     if (this.notifications !== undefined) {
-      await consumeSettledNotifications(this.notifications, orchestratorController(binding).controllerId, request.targets, outcome.results);
+      await admitted(this.strigoi, request.actorSessionId, async () => {
+        const current = await this.requireBinding(request.actorSessionId);
+        for (const target of request.targets) this.requireCapability(current.grant, "thread.read", this.registry.get(target.sessionId));
+        await consumeSettledNotifications(this.notifications!, orchestratorController(current).controllerId, request.targets, outcome.results);
+      });
     }
     const endMs = this.now();
     const remainingAfterMs = Math.max(0, pending.wait.deadlineMs - endMs);
@@ -1302,39 +1333,6 @@ function actorFamilyKey(record: SessionRecord): string | undefined {
     return orchestratorKey({ kind: "workspace", cwd: record.cwd });
   }
   return undefined;
-}
-
-/** Everything a liveness or duplicate-safety check needs, and nothing that grows with transcript size. */
-function statusRecord(record: SessionRecord, truth: WorkerTruth | undefined): ThreadStatusRecord {
-  return {
-    id: record.id,
-    ...(record.name === undefined ? {} : { name: record.name }),
-    provider: record.provider,
-    executionState: record.executionState,
-    ...(record.attentionState === undefined ? {} : { attentionState: record.attentionState }),
-    ...(truth === undefined ? {} : { truth }),
-    ...(record.termination === undefined ? {} : { termination: record.termination }),
-  };
-}
-
-/**
- * The full view still has to fit a caller's token budget. `latestPreview` is the field that made a
- * 19-thread listing 55k characters, and `launchRecord` is spawn forensics no lister asked for.
- */
-function boundedRecord(record: SessionRecord): SessionRecord {
-  const { launchRecord: _launchRecord, ...rest } = record;
-  return {
-    ...rest,
-    ...(record.latestPreview === undefined
-      ? {}
-      : { latestPreview: truncatePreview(record.latestPreview) }),
-  };
-}
-
-function truncatePreview(preview: string): string {
-  return preview.length <= THREAD_PREVIEW_CHARS
-    ? preview
-    : `${preview.slice(0, THREAD_PREVIEW_CHARS - 1)}…`;
 }
 
 function inScope(scope: { kind: string; cwd?: string }, record: SessionRecord): boolean {

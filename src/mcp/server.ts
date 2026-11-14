@@ -1,3 +1,5 @@
+import { continuityToolRequest } from "./continuity-tool-routing.js";
+import { STRIGOI_TOOLS } from "./strigoi-tools.js";
 import { NOTICE_EXEMPT_TOOLS, NOTIFICATION_TOOLS } from "./notification-tools.js";
 import { ATTENTION_TOOLS } from "./attention-tools.js";
 import { workerBudgetInputSchema, workerWorkspaceInputSchema, scoutBriefInputSchema } from "./worker-input-schemas.js";
@@ -615,6 +617,7 @@ const TOOLS = [
   },
   ...NOTIFICATION_TOOLS,
   ...ATTENTION_TOOLS,
+  ...STRIGOI_TOOLS,
 ] as const;
 
 const UNBOUND_WORKER_TOOLS = new Set<(typeof TOOLS)[number]["name"]>([
@@ -897,6 +900,8 @@ async function callTool(
     );
   }
   const actorSessionId = context.identity.actorSessionId;
+  const continuity = continuityToolRequest(name, args, actorSessionId);
+  if (continuity) return transport.request(continuity.method, continuity.params);
   if (name === "cyberdeck_signal_exception") {
     return transport.request("worker.event.submit", {
       kind: "EXCEPTION",
@@ -984,17 +989,9 @@ async function callTool(
   if (name === "cyberdeck_workers_start") {
     return transport.request("agent.worker.startMany", { actorSessionId, ...args });
   }
-  if (name === "cyberdeck_notifications_read") {
-    return transport.request("agent.notifications.read", { ...args, actorSessionId });
-  }
-  if (name === "cyberdeck_notifications_configure") {
-    return transport.request("agent.notifications.configure", { actorSessionId, policy: args });
-  }
   if (name === "cyberdeck_workers_wait") {
     return transport.request("agent.worker.wait", { actorSessionId, ...args });
   }
-  if (name === "cyberdeck_attention_arm") return transport.request("agent.attention.arm", { ...args, actorSessionId });
-  if (name === "cyberdeck_attention_cancel") return transport.request("agent.attention.cancel", { ...args, actorSessionId });
   if (name === "cyberdeck_thread_message") {
     return transport.request("agent.thread.enqueue", { actorSessionId, ...args });
   }

@@ -19,6 +19,7 @@ const universalOnly = [
   "cyberdeck_workflow_create", "cyberdeck_workflow_cancel",
   "cyberdeck_notifications_read", "cyberdeck_notifications_configure",
   "cyberdeck_attention_arm", "cyberdeck_attention_cancel",
+  "cyberdeck_strigoi_acknowledge", "cyberdeck_strigoi_checkpoint", "cyberdeck_strigoi_read", "cyberdeck_strigoi_renew",
 ];
 const universal = [...workerAllowlist, ...universalOnly].sort();
 async function names(context: McpServerContext): Promise<string[]> {

@@ -20,8 +20,13 @@ import {
 } from "../../src/domain/scout-output.js";
 
 const directories: string[] = [];
+const traceWrites: Promise<void>[] = [];
 afterEach(async () => {
   vi.useRealTimers();
+  // Late output after a persisted cutoff still appends evidence asynchronously. Drain that
+  // append before removing the fixture, rather than racing mkdir/appendFile with recursive rm.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  while (traceWrites.length > 0) await Promise.all(traceWrites.splice(0));
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -166,7 +171,11 @@ async function harness(options: {
           return reportStore.capture(...args);
         },
     collect: reportStore.collect.bind(reportStore),
-    appendTrace: reportStore.appendTrace.bind(reportStore),
+    appendTrace: (...args: Parameters<ScoutReportStore["appendTrace"]>) => {
+      const write = reportStore.appendTrace(...args);
+      traceWrites.push(write);
+      return write;
+    },
     readArtifact: reportStore.readArtifact.bind(reportStore),
     remove: reportStore.remove.bind(reportStore),
   };

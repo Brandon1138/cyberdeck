@@ -1,6 +1,5 @@
 import type { InstructionRecord, InstructionAdmission } from "../../domain/instruction.js";
 import type { ModalAnswerAttempt } from "../../domain/modal-descriptor.js";
-import type { OrchestratorBinding } from "../../domain/orchestrator.js";
 import type {
   SessionRecord,
   StartSessionRequest,
@@ -21,12 +20,27 @@ export interface SessionLookupPort {
   get(sessionId: string): SessionRecord;
 }
 
+/** Internal only: admit activation/spawn after preparation, never initialization waits. */
+export type LaunchAdmission = <T>(apply: () => Promise<T>) => Promise<T>;
+
+/** Broker-internal identity, authorized against the resident journal before use. */
+export interface LaunchReservation { sessionId: string; transitionId: string }
+
+/** Evidence from the owning launch coordinator, never inferred from a PID or recovered record. */
+export type LaunchOutcome = { kind: "owned"; session: SessionRecord }
+  | { kind: "failed"; error: unknown } | { kind: "unresolved" };
+export interface SessionLaunchOutcomePort {
+  launchOutcome(reservation: LaunchReservation, generation: number): LaunchOutcome;
+}
+
 export interface SessionStartPort {
   start(
     request: StartSessionRequest,
     initialPrompt?: string,
     activate?: (record: SessionRecord) => Promise<void>,
     initialInstructionId?: string,
+    admission?: LaunchAdmission,
+    launchReservation?: LaunchReservation,
   ): Promise<SessionRecord>;
 }
 
@@ -47,7 +61,7 @@ export interface SessionProcessControlPort {
   isStopRequested(sessionId: string): boolean;
   stopRequestedAt(sessionId: string): string | undefined;
   stop(sessionId: string): Promise<void>;
-  forceStop(sessionId: string): void;
+  forceStop(sessionId: string): void | Promise<void>;
   /**
    * Press one enumerated answer at the worker's blocking provider prompt. The implementation
    * resolves the answer through the domain's static key table only — there is no byte payload in
@@ -191,6 +205,4 @@ export interface InstructionRepository {
   put(record: InstructionRecord): Promise<void>;
 }
 
-export interface OrchestratorBindingReader {
-  findBySessionId(sessionId: string): Promise<OrchestratorBinding | undefined>;
-}
+export type { OrchestratorBindingLookup as OrchestratorBindingReader } from "../persistence-ports.js";

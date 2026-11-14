@@ -1,3 +1,4 @@
+import { strigoiTransition } from "./strigoi.js";
 import { homedir } from "node:os";
 import { imageInputRefusal, providerAcceptsImages, providerAttachesImagesAtLaunch } from "../../domain/image-input.js";
 import type { CavemanWorkersResult, OrchestratorGrantToggleResult } from "../../domain/orchestrator.js";
@@ -130,6 +131,7 @@ export function grantToggleTransition(
       type: grant.action,
       request: {
         cwd: orchestrator.cwd,
+        ...(snapshot.threads.find(t => t.record.id === orchestrator.id)?.strigoi ? { sessionId: orchestrator.id } : {}),
         scope: orchestrator.orchestratorScope ?? "workspace",
         ...(mode === "status" ? {} : { enabled: mode === "on" }),
       },
@@ -271,7 +273,8 @@ export function workerPolicyTransition(
   snapshot: FleetSnapshot,
   command: string,
 ): FleetTransition | undefined {
-  return visitCommandTransition(state, snapshot, command)
+  return strigoiTransition(state, snapshot, command)
+    ?? visitCommandTransition(state, snapshot, command)
     ?? grantToggleTransition(state, snapshot, command, {
     name: "/fable-workers",
     action: "fable-workers",
