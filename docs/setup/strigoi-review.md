@@ -31,7 +31,29 @@ hashes match before and after. All ten live invocations also passed validation o
   Proposed fix: reset `finalCheck` at every preparation entry, and similarly reset
   the cancellation metadata in `updateAttentionRefresh`.
 
-These findings remain open. The review did not authorize enabling the resident.
+These findings were open at the reviewed source above. The follow-up below fixes
+them. Neither review authorizes enabling the resident.
+
+## PR 166 follow-up remediation
+
+`2ce8b96` resolves the later P2 rotation finding: checkpoint/adoption observation
+and submission deduplication read verified original events from the continuity
+archive as well as retained transcript segments. Multipart originals survive
+rotation and reopen; bounded preview variants do not replace the original.
+Missing, conflicting, incomplete, or mismatched evidence fails closed.
+
+`8ac1b2d` fixes both P3 findings above, including provisional cancellation metadata:
+each scheduling, successor-migration, and refresh preparation starts with fresh
+attempt-local state. Deterministic disk-CAS tests reproduce cancellation and
+ownership changes between preparation and commit.
+
+All five focused files (65 tests) passed. The eight new retention/retry regressions
+were independently rerun and passed. Scoped independent review approved combined
+candidate `d142d87af8f020dba682e9413747fc0723871358`, which integrates these fixes
+with PR 167's worker follow-up recovery while preserving ordinary and resident
+submission fences. This is remediation/integration approval, not a new exhaustive
+audit of the original feature or live-provider qualification. The scaling and
+acceptance limitations below remain.
 
 ## Verified remediation
 
