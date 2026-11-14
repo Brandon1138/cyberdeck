@@ -365,6 +365,7 @@ export async function runBroker(
   });
   await notificationFeed.start(instructions);
   await workerBudgets.start();
+  await instructions.recoverPendingInstructions(id => transcripts.readCompletionLedger(id));
   // The same custodian the control service uses, so a handed-off lease is immediately usable by
   // the orchestrator that received it rather than reporting OWNERSHIP_LOST on its next call.
   const workerHandoff = new WorkerHandoffService({

@@ -10,7 +10,7 @@ import type { StrigoiDeliveryPort, StrigoiRepository } from "./strigoi-ports.js"
 import type { WorkflowService } from "./workflow-service.js";
 
 const fail = (code: string) => Object.assign(new Error(code), { code });
-const safe = (r: InstructionRecord) => ["accepted", "queued"].includes(r.status) && !r.renderedAt && r.launch !== true && r.submissionAttempt?.outcome !== "unknown";
+const safe = (r: InstructionRecord) => ["accepted", "queued"].includes(r.status) && !r.renderedAt && r.launch !== true && r.deliveryAttemptAt === undefined && r.submissionAttempt?.outcome !== "unknown";
 const transitioning = (s: StrigoiState) => s.transition && !["complete", "aborted"].includes(s.transition.phase);
 export interface StrigoiDeliveryOptions {
   repository: StrigoiRepository; bindings: OrchestratorBindingReader; admission: StrigoiAdmission;
@@ -78,7 +78,7 @@ export class StrigoiDelivery implements StrigoiDeliveryPort, InstructionRouting 
         await this.o.instructions.revise(record, async (current, persist) => {
           await this.observe(current, persist);
           if (!safe(current)) {
-            if (current.status === "rendered" || current.submissionAttempt?.outcome === "unknown" && !["completed", "cancelled", "undelivered"].includes(current.status))
+            if (current.status === "rendered" || (current.deliveryAttemptAt !== undefined || current.submissionAttempt?.outcome === "unknown") && !["completed", "cancelled", "undelivered"].includes(current.status))
               holds.push({ code: "STRIGOI_INSTRUCTION_OUTCOME_UNRESOLVED", detail: "Prior submission lacks a confirmed terminal receipt; observe it without retyping.", sourceIds: [current.id, current.messageId] });
             return;
           } // operator cancellation or provider receipt won the queue serializer

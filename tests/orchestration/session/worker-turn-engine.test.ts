@@ -510,7 +510,7 @@ describe("WorkerTurnEngine", () => {
       ledger.resolve({ completedTurns: 2, canonicalTurns: 2, turns: [] });
       await expect(submission).resolves.toMatchObject(boundary === "worker-terminal"
         ? { state: "undelivered", hold: "worker-terminal" }
-        : { state: "queued", hold: boundary === "composer-occupied" ? "composer-occupied" : "provider-busy" });
+        : { state: "queued", hold: boundary === "composer-occupied" ? "composer-occupied" : "completion-restore-pending" });
       expect(f.writes).toEqual([]);
       if (boundary === "lifecycle-fence") expect(f.engine.completedTurns).toBe(0);
     },
@@ -1137,7 +1137,7 @@ describe("WorkerTurnEngine", () => {
       data: { transport: "terminal-replay-fallback" },
     }]);
     await flushMicrotasks();
-    await expect(brokerDelivery).resolves.toMatchObject({ state: "queued", hold: "provider-busy" });
+    await expect(brokerDelivery).resolves.toMatchObject({ state: "queued", hold: "completion-reconcile-pending" });
 
     expect(engine.completedTurns).toBe(1);
     expect(captureProviderTurns).toHaveBeenCalledTimes(2);
@@ -1212,7 +1212,7 @@ describe("WorkerTurnEngine", () => {
       encoded: Buffer.from("do not render while turn two is owed\n"),
       source: "orchestrator",
       instructionId: "held-third-turn",
-    })).resolves.toMatchObject({ state: "queued", hold: "provider-busy" });
+    })).resolves.toMatchObject({ state: "queued", hold: "completion-evidence-pending" });
     expect(writes).toHaveLength(writesBeforeHeldThird);
 
     engine.noteRenderedInstruction({
@@ -1581,7 +1581,7 @@ describe("WorkerTurnEngine", () => {
       encoded: Buffer.from("new generation work\n"),
       source: "orchestrator",
       instructionId: "after-stale-commit",
-    })).resolves.toMatchObject({ state: "queued", hold: "provider-busy" });
+    })).resolves.toMatchObject({ state: "queued", hold: "completion-commit-pending" });
     // Automatic admission cannot get past an uncommitted receipt. External input can still be
     // observed in the new generation, and the old receipt must never complete that instruction.
     engine.noteRenderedInstruction({
@@ -1659,6 +1659,7 @@ describe("WorkerTurnEngine", () => {
       observations,
       captureProviderTurns,
       commitProviderTurns,
+      effects,
       replay,
       writes,
     } = harness({ provider: "cursor" });
@@ -1666,7 +1667,8 @@ describe("WorkerTurnEngine", () => {
       text: "possibly durable",
       data: { transport: "provider-native" },
     }]);
-    commitProviderTurns.mockRejectedValueOnce(failure);
+    const commit = deferred<WorkerTurnTranscript[]>();
+    commitProviderTurns.mockReturnValueOnce(commit.promise);
 
     observations.activity = "working";
     engine.appendOutput(Buffer.from("indeterminate work"), replay);
@@ -1674,6 +1676,13 @@ describe("WorkerTurnEngine", () => {
     engine.appendOutput(Buffer.from("indeterminate prompt"), replay);
     await vi.advanceTimersByTimeAsync(200);
     await flushMicrotasks();
+    await expect(engine.submitInstruction({ message: "held before failure", encoded: Buffer.from("held"),
+      source: "orchestrator", instructionId: "held-before-failure" }))
+      .resolves.toMatchObject({ state: "queued", hold: "completion-commit-pending" });
+    vi.mocked(effects.notifyDeliveryBoundary).mockClear();
+    commit.reject(failure);
+    await flushMicrotasks();
+    expect(effects.notifyDeliveryBoundary).toHaveBeenCalled();
 
     await expect(engine.settlePendingTurnCommit()).rejects.toBe(failure);
     expect(engine.completedTurns).toBe(0);
@@ -1682,7 +1691,7 @@ describe("WorkerTurnEngine", () => {
       encoded: Buffer.from("must not reuse one\n"),
       source: "orchestrator",
       instructionId: "after-rejected-commit",
-    })).resolves.toMatchObject({ state: "queued", hold: "provider-busy" });
+    })).resolves.toMatchObject({ state: "undelivered", hold: "completion-commit-failed" });
     expect(writes).toEqual([]);
   });
 
@@ -1724,7 +1733,7 @@ describe("WorkerTurnEngine", () => {
       encoded: Buffer.from("after poisoned receipt\n"),
       source: "orchestrator",
       instructionId: `after-${_label}-receipt`,
-    })).resolves.toMatchObject({ state: "queued", hold: "provider-busy" });
+    })).resolves.toMatchObject({ state: "undelivered", hold: "completion-commit-failed" });
     expect(writes).toEqual([]);
   });
 
@@ -2143,7 +2152,7 @@ describe("WorkerTurnEngine", () => {
       encoded: Buffer.from("must remain behind turn three\n"),
       source: "orchestrator",
       instructionId: "held-behind-newer-activity",
-    })).resolves.toMatchObject({ state: "queued", hold: "provider-busy" });
+    })).resolves.toMatchObject({ state: "queued", hold: "completion-evidence-pending" });
     vi.mocked(effects.setAttention).mockClear();
     vi.mocked(effects.notifyDeliveryBoundary).mockClear();
     readObservedModel.mockClear();
