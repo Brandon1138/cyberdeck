@@ -1,4 +1,5 @@
 import { attachSession, type AttachTransport } from "./attach.js";
+import { RpcError } from "./rpc-client.js";
 import type { StrigoiInspection } from "../orchestration/strigoi-ports.js";
 /** Logical read-only watch. Explicit session watches and all human writers remain session-bound. */
 export async function watchStrigoi(transport: AttachTransport, options: {
@@ -14,8 +15,15 @@ export async function watchStrigoi(transport: AttachTransport, options: {
       if (inspection.state.desired !== "enabled") return 0;
       const id = inspection.state.activeBinding?.sessionId;
       if (id && id !== lastSession && inspection.runtime?.exitCode === null) {
+        try {
+          await (options.attach ?? attachSession)({ transport, sessionId: id, mode: "watch", closeTransport: false });
+        } catch (error) {
+          // Retirement can win between inspection and the broker's attachment check.
+          if (!(error instanceof RpcError && error.code === "SESSION_NOT_ACTIVE")) throw error;
+          await pause();
+          continue;
+        }
         lastSession = id;
-        await (options.attach ?? attachSession)({ transport, sessionId: id, mode: "watch", closeTransport: false });
         // Provider exit status is not a request to abandon residence; the lifecycle decides recovery.
         if (closed) return 1;
       } else await pause();
