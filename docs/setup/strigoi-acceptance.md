@@ -11,9 +11,11 @@ commit advanced HEAD during testing without changing those bytes. No native prov
 acceptance or human semantic grading has run.
 
 The selected isolated configuration is Codex `gpt-6.1-sol`, effort `high`, with cwd
-`/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114`. Selection does not authorize
-inference. The lifecycle, two controller-crash cases and seven semantic pairs require approval
-of their concrete invocations before `--allow-inference` is used.
+`/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114`. The operator approved
+a ten-minute campaign. Its first lifecycle invocation failed before provider launch because
+the specified PATH selected Codex 0.153.2, whose catalog omitted the selected model.
+The interactive 0.169.0 CLI lists that model/effort. The campaign stopped on first failure;
+all nine later cases remain NOT RUN. See [attempt evidence and corrected retry requirements](strigoi-live-attempt.md).
 
 The original measurement table below describes the pre-remediation source. Current packets use
 authenticated v2 page traversal and the archive appends incremental records. At 1,024 synthetic

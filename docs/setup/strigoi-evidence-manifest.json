@@ -3,7 +3,7 @@
   "baseSha": "76815169071b2e2852b31958a0475955210913df",
   "sourceFixtureStatus": "APPROVED WITH LIMITS at 64b1dfb: independent whole-branch source review; two nonblocking P3 retry findings remain. Native/human acceptance separate.",
   "fullIntegratedStatus": "PASS at source64b1dfb: pnpm check, test --maxWorkers=2, build exit0; 311 files/4216 tests passed, 1 file/27 skipped, 611.40s. All858 source/test/script/config hashes unchanged across run.",
-  "liveStatus": "NOT RUN",
+  "liveStatus": "ATTEMPTED: lifecycle failed before native launch (ORCHESTRATOR_SELECTION_UNSUPPORTED); nine later cases NOT RUN",
   "sourceScope": "Actual production services, persisted reopen and separately owned controller child SIGKILL/restart with synthetic OS transport. No full broker network server, native provider or power-loss qualification. Integrated completion also validates optional Fleet resident inspection at the RPC display boundary; palette/catalog/resident-marker expectations updated without authority, key handling or Unknown-semantics changes.",
   "files": [
     {
@@ -364,14 +364,14 @@
   "remainingGates": [
     "Two nonblocking P3 retry findings documented in docs/setup/strigoi-review.md",
     "Production capacity and capture-time authority contention qualification before broad rollout",
-    "Operator approves concrete isolated live invocations",
+    "Correct CLI PATH and schedule enough time for full lifecycle; ten-minute idle alone consumes the prior total window",
     "Native passive request-level zero-inference proof: UNQUALIFIED without complete upstream counter",
     "Native lifecycle, renewal, process recovery and cleanup support: NOT RUN",
     "Native controller SIGKILL/restart: NOT RUN; synthetic evidence remains separate",
     "All seven matched human semantic grades: NOT RUN"
   ],
   "liveInvocationTemplate": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode lifecycle --state-directory /tmp/sg-operator-01 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only",
-  "authorization": "Operator selected Codex gpt-6.1-sol/high and cwd /Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114. No live inference authorization. User authorized opening a PR; no merge or resident enablement follows.",
+  "authorization": "Operator approved selected isolated campaign with ten-minute total limit. Campaign stopped on first failure before provider launch. No model substitution, resident enablement, broker restart, or merge.",
   "evidencePrivacy": "Only synthetic measurements, commands, hashes and verdicts included. Private live originals remain in operator-selected isolated state outside Git. Local logs/report are ignored handoff artifacts.",
   "preservedAgentsSha256": "ce01da8962cac8487b4d7c26b08b561c3c718e07ff25aa49e191db02cbd0cd3e",
   "completion": {
@@ -603,5 +603,39 @@
     },
     "independentReviewPatchSha256": "c24829864d0387d3b4c2a642bc38fe8a13aefb4213f398393de4925495b0eaf4",
     "invocationPreflight": "All ten selected invocations validate at64b1dfb; all proposed state directories remain absent. No inference launched."
+  },
+  "boundedLiveAttempt": {
+    "source": "6bc9f7361ae850a07d4a8b72897aae14256cb03d",
+    "status": "STOPPED_ON_FIRST_FAILURE_BEFORE_NATIVE_LAUNCH",
+    "error": "Resident hold: ORCHESTRATOR_SELECTION_UNSUPPORTED",
+    "attemptedMode": "lifecycle",
+    "startedAt": "2026-11-14T13:24:40.082Z",
+    "endedAt": "2026-11-14T13:24:40.944Z",
+    "selectedModel": "gpt-6.1-sol",
+    "selectedEffort": "high",
+    "approvedPathCodex": "/opt/homebrew/bin/codex",
+    "approvedPathVersion": "codex-cli 0.153.2",
+    "interactiveCodex": "/Users/brandon/.local/bin/codex",
+    "interactiveVersion": "codex-cli0.169.0",
+    "newCatalogIncludesSelection": true,
+    "newCatalogEfforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+    ],
+    "ownedResources": [
+      "controller"
+    ],
+    "providerProcesses": 0,
+    "encodedSubmissions": 0,
+    "canonicalTurns": [],
+    "cleanup": "stopAll completed",
+    "remainingCases": "9 NOT RUN; sequential stop-on-first-failure",
+    "gateResultSha256": "6507357bd4a593642969b60d358a5c785cdc9c8eaeea6c2df02f75880421296c",
+    "requestCounting": "UNQUALIFIED; no zero-inference proof inferred",
+    "timeLimit": "10 minutes; first failure ended campaign early"
   }
 }
