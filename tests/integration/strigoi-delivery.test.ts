@@ -16,7 +16,7 @@ import { OrchestratorControllerDirectory } from "../../src/orchestration/orchest
 import { WorkerControlService } from "../../src/orchestration/worker-control-service.js";
 import { orchestratorController } from "../../src/domain/orchestrator.js";
 
-it.each(["routine", "workflow", "passive", "transfer"] as const)("runs the actual production composition with native turns and real worker/delivery participants (%s)", async mode => {
+it.each(["routine", "workflow", "workflow-participant", "passive", "transfer"] as const)("runs the actual production composition with native turns and real worker/delivery participants (%s)", async mode => {
   const f = await successionFixture(true); f.runtime.dispose();
   const coordination = new ObservedWorkerCoordinationService({ store: new WorkerCoordinationStore(f.root) }); await coordination.initialize();
   const credentials = new BrokerWorkerLeaseCredentialCustodian();
@@ -114,9 +114,18 @@ it.each(["routine", "workflow", "passive", "transfer"] as const)("runs the actua
     expect(outgoing.status).toBe("queued");
     await attention.arm({ actorSessionId: owner.sessionId, mutationId: randomUUID(), objective: "Review worker", nextAction: "Read exact result", targets: [{ sessionId: worker.id, completionTarget: 1 }] });
     let workflowIds: string[] | undefined;
-    if (mode === "workflow") {
-      const run = await workflows.create({ actorSessionId: owner.sessionId, name: "session-bound decision", participantSessionIds: [worker.id] });
-      const message = await workflows.send({ actorSessionId: worker.id, runId: run.id, targetSessionId: owner.sessionId, text: "Reply needed from old participant" });
+    if (mode === "workflow" || mode === "workflow-participant") {
+      let workflowOwner = owner.sessionId;
+      if (mode === "workflow-participant") {
+        const ordinary = await f.registry.start({ provider: "codex", cwd: f.root, kind: "orchestrator", detached: true, sandbox: "read-only" });
+        const { resident: _resident, ...base } = owner;
+        await f.bindings.put({ ...base, kind: "peer", key: `fleet:peer:${ordinary.id}`, sessionId: ordinary.id,
+          grant: { ...base.grant, subjectSessionId: ordinary.id } });
+        workflowOwner = ordinary.id;
+      }
+      const run = await workflows.create({ actorSessionId: workflowOwner, name: "session-bound decision", participantSessionIds: [owner.sessionId, worker.id] });
+      const message = await workflows.send({ actorSessionId: mode === "workflow-participant" ? workflowOwner : worker.id,
+        runId: run.id, targetSessionId: owner.sessionId, text: "Reply needed from old participant", wake: false });
       workflowIds = [run.id, message.messageId, owner.sessionId];
     }
     const transition = await runtime.succession!.renew(1, "routine continuation", "actual-production-renewal");
@@ -138,7 +147,7 @@ it.each(["routine", "workflow", "passive", "transfer"] as const)("runs the actua
     const wait = (await f.evidence.attentionStore.get(controller.controllerId))!;
     expect(wait.actorSessionId).toBe(state.activeBinding!.sessionId);
     expect((await attention.readPage(wait.actorSessionId, wait.epoch, [], 1200)).workers[0]?.completion?.text).toBe("Worker result during cutover");
-    expect(f.spawn).toHaveBeenCalledTimes(3);
+    expect(f.spawn).toHaveBeenCalledTimes(mode === "workflow-participant" ? 4 : 3);
     expect(f.turns.submit).not.toHaveBeenCalled(); expect(f.workers.reconcile).not.toHaveBeenCalled(); expect(f.delivery.reconcile).not.toHaveBeenCalled();
   } finally { runtime.dispose(); instructions.stop(); await instructions.drain(); attention.stop(); await attention.flush(); liveness.dispose(); await f.close(); }
 }, 30000);

@@ -1,4 +1,5 @@
 import type { StrigoiState, StrigoiSourceRef } from "../domain/strigoi.js";
+import { instructionSessionIds } from "../domain/instruction.js";
 import type { SessionRecord } from "../domain/session.js";
 import type { ThreadEvent } from "../domain/thread.js";
 import { orchestratorController } from "../domain/orchestrator.js";
@@ -53,21 +54,22 @@ export class StrigoiSources implements StrigoiSourcePort {
       await archive.capture("worker-event", `ownership:${subject.subjectId}`, subject, subject.resources.sessionId ? [subject.resources.sessionId] : []);
     }
     for (const record of await instructions.list()) {
-      if (![record.actorSessionId, record.targetSessionId, record.senderSessionId ?? ""].some((id) => residentIds.has(id))) continue;
-      ids.add(record.targetSessionId);
-      await archive.capture("instruction", record.id, record, [record.actorSessionId, record.targetSessionId, ...record.senderSessionId ? [record.senderSessionId] : []]);
+      const sessionIds = instructionSessionIds(record);
+      if (!sessionIds.some((id) => ids.has(id))) continue;
+      sessionIds.forEach((id) => ids.add(id));
+      await archive.capture("instruction", record.id, record, sessionIds);
     }
     for (const event of coordinated.events) {
       if (subjects.some((s) => s.subjectId === event.workerId)) await archive.capture("worker-event", `event:${event.workerId}:${event.eventId}`, event,
         subjects.filter((s) => s.subjectId === event.workerId).flatMap((s) => s.resources.sessionId ? [s.resources.sessionId] : []));
     }
     for (const wait of await attention.list()) {
-      if (!residentIds.has(wait.actorSessionId)) continue;
+      if (!ids.has(wait.actorSessionId)) continue;
       const sessionIds = [wait.actorSessionId, ...wait.statement.targets.map((t) => t.sessionId)];
       sessionIds.forEach((id) => ids.add(id)); await archive.capture("attention", wait.epoch, wait, sessionIds);
     }
     for (const run of await workflows.listRuns()) {
-      if (![run.ownerSessionId, ...run.participantSessionIds].some((id) => residentIds.has(id))) continue;
+      if (![run.ownerSessionId, ...run.participantSessionIds].some((id) => ids.has(id))) continue;
       const sessionIds = [run.ownerSessionId, ...run.participantSessionIds]; sessionIds.forEach((id) => ids.add(id));
       await archive.capture("workflow", run.id, run, sessionIds);
       for (const message of await workflows.listMessages(run.id)) await archive.capture("workflow", message.id, message, [message.fromSessionId, message.toSessionId]);

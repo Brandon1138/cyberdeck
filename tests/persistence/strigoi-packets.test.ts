@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
 import { ArtifactStore } from "../../src/persistence/artifact-store.js";
 import { StrigoiPackets } from "../../src/persistence/strigoi-packets.js";
@@ -59,4 +60,27 @@ it("refuses a manifest beyond 256 KiB and missing source fragments", async () =>
   await expect(packets.write(identity, "", source.slice(1), at)).rejects.toThrow("STRIGOI_SOURCE_PART_MISSING");
   const stored = await artifacts.write({ name: "oversized.json", mediaType: "application/json", content: " ".repeat(256 * 1024 + 1) });
   await expect(packets.read({ artifactId: stored.descriptor.id, sha256: stored.descriptor.digest!.slice(7), coverageId: "coverage" })).rejects.toThrow("STRIGOI_MANIFEST_TOO_LARGE");
+});
+
+it("reads pre-existing v1 linked packets and authenticates v2 cursor proofs without cache authority", async () => {
+  const { artifacts, packets } = await fixture();
+  const refs = []; for (let i = 0; i < 130; i++) refs.push(...await packets.copy({ kind: "turn", id: `legacy-${i}`, revision: "1" }, `original ${i}`, [identity.sessionId]));
+  const put = async (value: unknown) => {
+    const content = JSON.stringify(value), artifact = await artifacts.write({ name: "legacy.json", mediaType: "application/json", content });
+    return { artifactId: artifact.descriptor.id, sha256: createHash("sha256").update(content).digest("hex") };
+  };
+  let inventory: Awaited<ReturnType<typeof put>> | undefined;
+  for (const offset of [128, 64, 0]) inventory = await put({ sources: refs.slice(offset, offset + 64), next: inventory });
+  const coverageId = randomUUID();
+  const legacy = { ...await put({ schemaVersion: 1, author: identity, prose: "Legacy understanding", createdAt: at, coverageId, sourceCount: refs.length, inventory }), coverageId };
+  let cursor: string | undefined, seen = 0;
+  do { const page = await packets.read(legacy, cursor); seen += page.sources.length; cursor = page.nextCursor; } while (cursor);
+  expect(seen).toBe(130);
+  const current = await packets.write(identity, "", refs, at), first = await packets.read(current);
+  const token = JSON.parse(Buffer.from(first.nextCursor!.slice(3), "base64url").toString("utf8"));
+  // A pointer to real source bytes is insufficient without a packet-rooted proof.
+  token.path.at(-1).page = refs[0]!.copy;
+  const forged = "v2:" + Buffer.from(JSON.stringify(token)).toString("base64url");
+  await expect(new StrigoiPackets(artifacts).read(current, forged)).rejects.toThrow("STRIGOI_INVALID_CURSOR");
+  expect((await new StrigoiPackets(artifacts).read(current, first.nextCursor)).sources).toHaveLength(64);
 });

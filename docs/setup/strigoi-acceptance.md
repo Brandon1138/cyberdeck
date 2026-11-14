@@ -1,10 +1,23 @@
 # Strigoi acceptance
 
-Source/fixture acceptance is separate from live qualification. Tasks 1–9 were independently
-reviewed at base `76815169071b2e2852b31958a0475955210913df`. Task 10 adds the acceptance
-surface below. Controller integrated check/test/build passed; independent Task 10 and whole-branch
-review remain required. Two synthetic controller-process SIGKILL/restart cases now run in separately owned children.
-Live provider inference, native crash qualification and human semantic acceptance are **NOT RUN**. No resident enablement or model/cwd selection follows from these artifacts.
+Source/fixture acceptance is separate from live qualification. The initial Task 10 source at
+`205912f` passed its independent scoped review and integrated checks. The subsequent whole-branch
+review found five issues; remediation and a journal-integrity follow-up are now implemented.
+Final whole-branch re-review and a fresh controller check/test/build are in progress for the draft PR.
+Focused remediation coverage passed; no native provider acceptance or human semantic grading has run.
+
+The selected isolated configuration is Codex `gpt-6.1-sol`, effort `high`, with cwd
+`/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114`. Selection does not authorize
+inference. The lifecycle, two controller-crash cases and seven semantic pairs require approval
+of their concrete invocations before `--allow-inference` is used.
+
+The original measurement table below describes the pre-remediation source. Current packets use
+authenticated v2 page traversal and the archive appends incremental records. At 1,024 synthetic
+records the final remediation sample read 17 inventory pages, wrote 564,547 index bytes in the
+capture interval, and measured 6.36 ms unrelated binding delay during acknowledgement. Full log
+validation after each append preserves integrity but leaves quadratic cumulative replay reads:
+the final 768-capture interval took 63.06 s. Capture-time authority contention and production
+capacity remain unqualified. Existing v1 packets remain readable with their original traversal cost.
 
 ## Integrated completion status
 
@@ -81,7 +94,7 @@ in the same `rtk proxy env ...` command, then `pnpm exec vitest run
 tests/integration/strigoi-scaling.test.ts --maxWorkers=1`. Run it without competing test
 jobs. One sample per inventory reports an observation, not a capacity or latency SLO.
 
-## Bounded retained-history observation
+## Historical pre-remediation retained-history observation
 
 One isolated warm-process run on Node 24.18.0, with no competing test jobs from this worker:
 
@@ -112,9 +125,8 @@ fsynced process-ownership journal and final cleanup report preserve resource ide
 Cleanup stops owned sessions and invokes daemon stop with the isolated CODEX_HOME only;
 unsupported native cleanup is explicitly unqualified and evidence is retained.
 
-No live cwd/model has been selected. The following is a concrete command template whose two
-selection arguments must be replaced by the operator before approval; it is **not authorized
-to execute live**. Choose a fresh suffix for every run; an existing directory is refused.
+The selected model/cwd/effort are recorded above. The following reusable template still requires
+those exact arguments and explicit execution approval; it is **not authorized to execute live**. Choose a fresh suffix for every run; an existing directory is refused.
 
 ```sh
 rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode lifecycle --state-directory /tmp/sg-operator-01 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only

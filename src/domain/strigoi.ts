@@ -50,9 +50,11 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const StrigoiArtifactRefSchema = z.object({ artifactId: z.uuid(), sha256: digest }).strict();
 const prose = z.string().refine((value) => Buffer.byteLength(value, "utf8") <= STRIGOI_LIMITS.checkpointProseBytes, "Prose exceeds UTF-8 byte limit");
 export const StrigoiPacketSchema = z.object({
-  schemaVersion: z.literal(1), author: StrigoiIdentitySchema, createdAt: z.iso.datetime(), prose,
+  schemaVersion: z.union([z.literal(1), z.literal(2)]), author: StrigoiIdentitySchema, createdAt: z.iso.datetime(), prose,
   coverageId: z.uuid(), sourceCount: z.number().int().nonnegative(), inventory: StrigoiArtifactRefSchema.optional(),
-}).strict().refine((p) => (p.sourceCount === 0) === (p.inventory === undefined), "Inventory/count mismatch");
+  inventoryPages: z.number().int().positive().optional(),
+}).strict().refine((p) => (p.sourceCount === 0) === (p.inventory === undefined), "Inventory/count mismatch")
+  .refine((p) => p.schemaVersion === 1 ? p.inventoryPages === undefined : (p.sourceCount === 0) === (p.inventoryPages === undefined), "Page index/count mismatch");
 export const StrigoiAdoptionSchema = z.object({
   identity: StrigoiIdentitySchema, packetHash: digest, coverageId: z.uuid(),
   handledSourceIds: z.array(digest).refine((ids) => new Set(ids).size === ids.length, "Duplicate handled IDs"),

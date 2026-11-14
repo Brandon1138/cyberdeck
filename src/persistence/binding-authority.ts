@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { realpath } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { OrchestratorBindingResetSchema, OrchestratorBindingSchema, STRIGOI_KEY, type OrchestratorBinding } from "../domain/orchestrator.js";
 
@@ -13,6 +14,19 @@ async function canonical(path: string): Promise<string> {
     if (parent === path) throw error;
     return join(await canonical(parent), basename(path));
   }
+}
+/** Classify reentry before queue reservation; awaiting here lets readers overtake rearm. */
+export function bindingAuthorityHeld(stateDirectory: string): boolean {
+  const owner = context.getStore();
+  if (!owner?.live) return false;
+  const canonicalSync = (path: string): string => {
+    try { return realpathSync(path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(path) === path) throw error;
+      return join(canonicalSync(dirname(path)), basename(path));
+    }
+  };
+  return owner.key === canonicalSync(resolve(stateDirectory));
 }
 /** Shared by every resident and ordinary binding write in the broker singleton. */
 export async function withBindingAuthority<T>(stateDirectory: string, work: () => Promise<T>): Promise<T> {

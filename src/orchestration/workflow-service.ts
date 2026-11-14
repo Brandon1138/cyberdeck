@@ -83,7 +83,7 @@ export class WorkflowService {
   async continuationHolds(archivedSessionIds: readonly string[]): Promise<import("../domain/strigoi.js").StrigoiHold[]> {
     const holds = [];
     for (const run of await this.store.listRuns()) {
-      if (run.status !== "active" || !archivedSessionIds.includes(run.ownerSessionId)) continue;
+      if (run.status !== "active") continue;
       const messages = await this.store.listMessages(run.id);
       const pending = messages.filter(message => archivedSessionIds.includes(message.toSessionId)
         && !messages.some(reply => reply.causationId === message.messageId && reply.fromSessionId === message.toSessionId));

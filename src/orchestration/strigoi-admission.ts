@@ -75,6 +75,7 @@ export class StrigoiAdmission implements StrigoiAdmissionPort {
     const identity = key({ sessionId: actorSessionId, incarnation: state.incarnation, generation: state.activeGeneration! });
     if (this.closed.has(identity)) throw new StrigoiAdmissionError("STRIGOI_FROZEN");
     if (state.desired !== "enabled") throw new StrigoiAdmissionError("STRIGOI_SUSPENDED");
+    if (state.hold?.code === "continuity-evidence-unavailable") throw new StrigoiAdmissionError("STRIGOI_EVIDENCE_UNAVAILABLE");
     if (state.transition !== undefined && ["sealed", "retiring", "launching", "committed", "adopting", "reconciling"].includes(state.transition.phase)) {
       throw new StrigoiAdmissionError("STRIGOI_RECOVERING");
     }

@@ -241,7 +241,9 @@ export class OrchestratorAttentionControlPlane {
     await this.reconcile(wake.controllerId, wake.attentionEpoch, false);
     let result: T | undefined;
     let policyHeld = false;
-    await this.options.store.update(wake.controllerId, async (record) => {
+    let prepared: OrchestratorAttention | undefined;
+    const validate = async (record: OrchestratorAttention | undefined, effect?: () => T | Promise<T>) => {
+      policyHeld = false;
       if (wake.attentionEpoch === undefined) {
         if (record !== undefined) throw new AttentionWakeHeldError("attention-owns-wake-policy", true);
       } else {
@@ -271,8 +273,14 @@ export class OrchestratorAttentionControlPlane {
             ...(record.lastWake === undefined ? {} : { lastWake: { ...record.lastWake, holdReason: "notification-wake-off" } }) };
         }
       }
-      result = await apply();
+      if (effect) result = await effect();
       return record;
+    };
+    await this.options.store.update(wake.controllerId, async (record) => { prepared = record; return validate(record); }, async (commit) => {
+      // The store has compared the prepared epoch against disk under authority.
+      // Keep final synchronous policy/ownership checks adjacent to the effect.
+      await validate(prepared, apply);
+      await commit();
     });
     // Persist the visible hold without clearing the intent, then let the queue retain eligibility.
     if (policyHeld) throw new AttentionWakeHeldError("notification-wake-off");

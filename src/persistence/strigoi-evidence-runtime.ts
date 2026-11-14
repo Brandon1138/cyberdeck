@@ -1,4 +1,5 @@
 import { StrigoiStoreError } from "./strigoi-store.js";
+import { StrigoiArchiveError } from "./strigoi-archive-error.js";
 import { effectiveInstruction, type InstructionRecord } from "../domain/instruction.js";
 import { StrigoiTurnEvidence } from "./strigoi-turn-evidence.js";
 import { indexedInstructionReceipt } from "./instruction-target-index.js";
@@ -31,8 +32,15 @@ export function composeStrigoiEvidence(stateDirectory: string) {
   const isolateResidentCorruption = async <T>(work: () => Promise<T>, fallback: T): Promise<T> => {
     try { return await work(); }
     catch (error) {
-      if (!(error instanceof StrigoiStoreError) || error.code !== "STRIGOI_CORRUPT_STATE") throw error;
+      if (!(error instanceof StrigoiArchiveError) && (!(error instanceof StrigoiStoreError) || error.code !== "STRIGOI_CORRUPT_STATE")) throw error;
       held = true;
+      if (error instanceof StrigoiArchiveError) await orchestratorStore.withAuthority(async () => {
+        const state = await orchestratorStore.strigoi.read();
+        if (state.hold) return;
+        await orchestratorStore.strigoi.compareAndSwap(state.revision, `archive-hold:${randomUUID()}`, { ...state,
+          revision: state.revision + 1, updatedAt: new Date().toISOString(),
+          hold: { code: "continuity-evidence-unavailable", detail: String(error), sourceIds: [] } });
+      });
       return fallback;
     }
   };
@@ -54,7 +62,11 @@ export function composeStrigoiEvidence(stateDirectory: string) {
   };
   const withDeletion = <T>(id: string, commit: () => Promise<T>) => withEvidenceDeletion(stateDirectory, id, () => beforeDelete(id), commit);
   const transcriptContinuity: NonNullable<ThreadTranscriptStoreOptions["continuity"]> = {
-    event: (event) => capture(() => sources.event(event)), beforeDelete,
+    event: (event) => orchestratorStore.withAuthority(async () => {
+      if (held || await isolateResidentCorruption(() => sources.relevant([event.sessionId]), true)) {
+        await withReferences([event.sessionId], () => capture(() => sources.event(event)));
+      }
+    }), beforeDelete,
     // Explicit verify/recovery must still recapture repaired native evidence while held.
     native: (id, sourceId, message) => isolateResidentCorruption(() => sources.record("turn", `native:${id}:${sourceId}`, message, [id]), undefined),
   };
@@ -63,6 +75,7 @@ export function composeStrigoiEvidence(stateDirectory: string) {
     const state = await orchestratorStore.strigoi.read();
     await packets.verify(await sources.capture(state));
     await packets.verify(await archive.list());
+    await archive.confirm();
     const protectedSessionIds = new Set([...await orchestratorStore.strigoi.retentionPins(), ...await archive.pins(),
       ...(await evidenceSafety(stateDirectory)).deletions.map((d) => d.sessionId)]);
     for (const packet of [state.latestPacket, state.transition?.packet, ...state.continuityReceipts?.map((r) => r.packet) ?? []]) {

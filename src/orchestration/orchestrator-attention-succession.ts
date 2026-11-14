@@ -76,7 +76,7 @@ export async function resumeAttentionForSuccessor(options: OrchestratorAttention
     };
     const binding = await validate(), controllerId = orchestratorController(binding).controllerId;
     let finalCheck: (() => Promise<void>) | undefined;
-    // Attention serialization precedes canonical authority (store observers also archive under it).
+    // Prepare source evidence outside canonical authority; the store compares disk before commit.
     return options.store.update(controllerId, async (current) => {
       await validate();
       if (!current || current.status === "cancelled" || current.actorSessionId === successor.sessionId) return current;

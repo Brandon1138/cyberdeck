@@ -12,7 +12,7 @@ import { WorkerControlService } from "../../src/orchestration/worker-control-ser
 import { StrigoiWorkerRecovery } from "../../src/orchestration/strigoi-worker-recovery.js";
 import { orchestratorController } from "../../src/domain/orchestrator.js";
 
-it.each(["live", "done", "released"] as const)("runs real source inventory and worker/attention reconciliation through the driver without a routine hold (%s)", async (mode) => {
+it.each(["live", "done", "released", "done-gap"] as const)("runs real source inventory and worker/attention reconciliation through the driver without a routine hold (%s)", async (mode) => {
   const f = await successionFixture();
   const coordination = new ObservedWorkerCoordinationService({ store: new WorkerCoordinationStore(f.root) });
   await coordination.initialize();
@@ -41,11 +41,18 @@ it.each(["live", "done", "released"] as const)("runs real source inventory and w
     f.workers.reconcile.mockImplementation((identity, packet) => participant.reconcile(identity, packet));
     f.setBindingObserver(async (binding, session) => {
       await attention.bindingChanged(binding); await liveness.bindingSession(binding, session);
+      if (mode === "done-gap" && binding.sessionId !== owner.sessionId) {
+        await f.transcripts.commitProviderTurns({ sessionId: worker.id, provider: "codex", turnNumber: 1,
+          turns: [{ providerTurnId: "gap-done", providerOccurredAt: new Date().toISOString(), text: "Done after sealing", transport: "provider-native" }] });
+        await coordination.updateLifecycle({ mutationId: randomUUID(), actor: controller, controller,
+          selector: { scope: "single", subjectId: worker.id }, subjectId: worker.id, leaseToken: outcome.leaseToken!, lifecycle: "done", reason: "Finished in sealed gap" });
+        f.emitExit(2);
+      }
       if (mode === "live" && binding.sessionId !== owner.sessionId) await f.transcripts.commitProviderTurns({ sessionId: worker.id,
         provider: "codex", turnNumber: 1, turns: [{ providerTurnId: "gap-result", providerOccurredAt: new Date().toISOString(),
           text: "Result arrived during cutover", transport: "provider-native" }] });
     });
-    if (mode !== "live") {
+    if (mode === "done" || mode === "released") {
       await f.transcripts.commitProviderTurns({ sessionId: worker.id, provider: "codex", turnNumber: 1,
         turns: [{ providerTurnId: "historical-result", providerOccurredAt: new Date().toISOString(),
           text: "Historical retained result", transport: "provider-native" }] });
@@ -67,7 +74,14 @@ it.each(["live", "done", "released"] as const)("runs real source inventory and w
     const state = await f.drive(transition.id);
     expect(state.hold).toBeUndefined(); expect(state.transition?.phase).toBe("complete");
     expect(f.workers.reconcile).toHaveBeenCalledTimes(1);
-    if (mode !== "live") {
+    if (mode === "done-gap") {
+      expect(coordination.getSubject(worker.id)?.lifecycle).toBe("done");
+      expect(f.registry.get(worker.id).exitCode).toBe(0);
+      expect((await f.transcripts.readCompletionLedger(worker.id)).turns[0]?.text).toBe("Done after sealing");
+      expect(renew).not.toHaveBeenCalled(); expect(adopt).not.toHaveBeenCalled();
+      const current = { sessionId: state.activeBinding!.sessionId, incarnation: state.incarnation, generation: state.activeGeneration! };
+      expect((await f.runtime.continuity!.pending(current)).some(ref => ref.sessionIds?.includes(worker.id))).toBe(true);
+    } else if (mode !== "live") {
       const refs = []; let cursor: string | undefined;
       do {
         const page = await f.evidence.packets.read(state.latestPacket!, cursor);

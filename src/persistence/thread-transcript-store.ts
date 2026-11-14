@@ -1,3 +1,4 @@
+import { withBindingAuthority } from "./binding-authority.js";
 import { parseNativeContinuityMessage, type NativeContinuityMessage } from "../domain/native-continuity-message.js";
 import { providerTurnReceipt, WorkerLedgerStore, WORKER_LEDGER_REJECTIONS, mergeWorkerLedgers } from "./worker-ledger-store.js";
 import { syncPrivateFile } from "./atomic-private-file.js";
@@ -160,7 +161,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   private readonly codexDiscovery: CodexConversationDiscovery;
 
   constructor(
-    stateDirectory: string,
+    private readonly stateDirectory: string,
     private readonly options: ThreadTranscriptStoreOptions = {},
   ) {
     this.workerLedgers = new WorkerLedgerStore(stateDirectory);
@@ -494,12 +495,12 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   async read(sessionId: string, afterCursor = 0, limit = 200): Promise<ThreadReadResult> {
     await this.init();
     const boundedLimit = Math.max(1, Math.min(limit, 1_000));
-    return this.enqueueWrite(() => this.segments.read(this.segmentPathsOldestFirst(), afterCursor, boundedLimit, sessionId));
+    return this.enqueueWrite(() => this.segments.read(this.segmentPathsOldestFirst(), afterCursor, boundedLimit, sessionId), false);
   }
 
   async changes(afterCursor = 0, limit = 500): Promise<ThreadReadResult> {
     await this.init();
-    return this.enqueueWrite(() => this.segments.read(this.segmentPathsOldestFirst(), afterCursor, Math.max(1, Math.min(limit, 2_000))));
+    return this.enqueueWrite(() => this.segments.read(this.segmentPathsOldestFirst(), afterCursor, Math.max(1, Math.min(limit, 2_000))), false);
   }
 
   private async loadMetadata(): Promise<void> {
@@ -650,10 +651,14 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
   }
 
   /** Queue one complete stateful write operation while allowing the queue to recover after errors. */
-  private enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.writeTail.then(operation, operation);
-    this.writeTail = result.then(() => undefined, () => undefined);
-    return result;
+  private enqueueWrite<T>(operation: () => Promise<T>, authority = true): Promise<T> {
+    // Activation may append while holding authority; acquire it before the local tail.
+    const serialize = () => {
+      const result = this.writeTail.then(operation, operation);
+      this.writeTail = result.then(() => undefined, () => undefined);
+      return result;
+    };
+    return authority ? withBindingAuthority(this.stateDirectory, serialize) : serialize();
   }
 
   private async persist(event: ThreadEvent, originalText = event.text): Promise<void> {

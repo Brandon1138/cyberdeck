@@ -349,3 +349,27 @@ describe("Strigoi production worker recovery", () => {
   });
 
 });
+
+it.each(["done", "failed", "stopped"] as const)("uses the current %s lifecycle after sealing and process exit", async (lifecycle) => {
+  const f = await fixture(), packet = await f.seal();
+  await f.complete("Successful retained result");
+  await f.coordination.updateLifecycle({ mutationId: randomUUID(), actor: f.controller, controller: f.controller,
+    selector: { scope: "single", subjectId: WORKER }, subjectId: WORKER, leaseToken: f.tokens.get(WORKER)!,
+    lifecycle, reason: "Finished after seal" });
+  f.records.set(WORKER, { ...f.records.get(WORKER)!, exitCode: lifecycle === "done" ? 0 : 1, executionState: "exited" });
+  await f.cutover();
+  const renew = vi.spyOn(f.coordination, "renew"), adopt = vi.spyOn(f.coordination, "adoptBatch");
+  const holds = await f.recovery.reconcile(nextIdentity, packet);
+  expect(holds.map(h => h.code)).toEqual(lifecycle === "done" ? [] : ["worker-interrupted"]);
+  expect(renew).not.toHaveBeenCalled(); expect(adopt).not.toHaveBeenCalled();
+  expect((await f.transcripts.readCompletionLedger(WORKER)).turns[0]?.text).toBe("Successful retained result");
+});
+it("checks current ownership before accepting completion after sealing", async () => {
+  const f = await fixture(), packet = await f.seal();
+  const recipient = await f.transfer();
+  const subject = f.coordination.getSubject(WORKER)!;
+  // Transferred work may finish, but remains the recipient's responsibility.
+  expect(subject.lease.controller?.controllerId).toBe(recipient.controllerId);
+  await f.cutover();
+  expect((await f.recovery.reconcile(nextIdentity, packet)).map(h => h.code)).toContain("worker-ownership-changed");
+});

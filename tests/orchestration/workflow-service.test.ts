@@ -134,3 +134,20 @@ describe("WorkflowService", () => {
     });
   });
 });
+
+it("surfaces archived participant replies owned by an ordinary Orc with original IDs", async () => {
+  const { service, enqueue } = harness();
+  const run = await service.create({ actorSessionId: OWNER, name: "participant renewal", participantSessionIds: [WORKER] });
+  const question = await service.send({ actorSessionId: OWNER, runId: run.id, targetSessionId: WORKER, text: "Please decide", wake: false });
+  expect(await service.continuationHolds([WORKER])).toEqual([expect.objectContaining({
+    code: "STRIGOI_WORKFLOW_CONTINUATION_REQUIRED", sourceIds: [run.id, question.messageId, WORKER],
+  })]);
+  expect(enqueue).not.toHaveBeenCalled();
+  const unrelated = await service.create({ actorSessionId: OWNER, name: "ordinary work", participantSessionIds: [WORKER] });
+  await expect(service.send({ actorSessionId: OWNER, runId: unrelated.id, targetSessionId: WORKER, text: "Routine", wake: true })).resolves.toMatchObject({ wake: true });
+  await service.send({ actorSessionId: WORKER, runId: run.id, targetSessionId: OWNER, text: "Decision", causationId: question.messageId });
+  expect((await service.continuationHolds([WORKER])).map(h => h.sourceIds[0])).not.toContain(run.id);
+  expect((await service.changes(OWNER, run.id))[0]).toEqual(question);
+  await service.cancel(undefined, unrelated.id);
+  expect(await service.continuationHolds([WORKER])).toEqual([]);
+});

@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "baseSha": "76815169071b2e2852b31958a0475955210913df",
-  "sourceFixtureStatus": "PASS - focused predecessor and Task10 proofs plus final integrated check/test/build. Live qualification remains separate.",
-  "fullIntegratedStatus": "PASS - pnpm check, pnpm test --maxWorkers=2, pnpm build all exit0; 308 files/4168 tests passed, 1 file/27 deliberate skips, 456.14s. Earlier failed run preserved.",
+  "sourceFixtureStatus": "Remediation implemented; focused checks passed. Final independent whole-branch re-review in progress; no final source approval yet.",
+  "fullIntegratedStatus": "IN PROGRESS on final remediation source; check passed. Historical Task10 full-suite PASS at 205912f is retained in checks.",
   "liveStatus": "NOT RUN",
   "sourceScope": "Actual production services, persisted reopen and separately owned controller child SIGKILL/restart with synthetic OS transport. No full broker network server, native provider or power-loss qualification. Integrated completion also validates optional Fleet resident inspection at the RPC display boundary; palette/catalog/resident-marker expectations updated without authority, key handling or Unknown-semantics changes.",
   "files": [
@@ -362,16 +362,16 @@
   },
   "scalingAssessment": "Observed binding-authority pause grows to 446 ms at 1024 synthetic records; unbounded retention growth risk remains for final reviewer. No supplied latency SLO or capacity threshold is established. No optimization/retention-policy change.",
   "remainingGates": [
-    "Independent Task10 and whole-branch source review",
-    "Final reviewer practical scaling-risk ruling",
-    "Operator selects exact model/cwd/effort and approves concrete isolated invocation",
-    "Native passive ten-minute request-level zero-inference proof: UNQUALIFIED without complete upstream counter",
-    "Live normal use/renewal/process recovery and cleanup support: NOT RUN",
-    "Native controller-process crash/restart: NOT RUN; executable supervisor exists and synthetic SIGKILL/restart passed; no full broker network/power-loss proof",
-    "All seven human semantic paired cases and three-handoff original constraint/rationale: NOT RUN"
+    "Final independent whole-branch remediation review and practical scaling-risk ruling",
+    "Fresh full integrated test/build completion on final source",
+    "Operator approves concrete isolated live invocations",
+    "Native passive request-level zero-inference proof: UNQUALIFIED without complete upstream counter",
+    "Native lifecycle, renewal, process recovery and cleanup support: NOT RUN",
+    "Native controller SIGKILL/restart: NOT RUN; synthetic evidence remains separate",
+    "All seven matched human semantic grades: NOT RUN"
   ],
   "liveInvocationTemplate": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode lifecycle --state-directory /tmp/sg-operator-01 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only",
-  "authorization": "No live selection or inference authorization. Replacing validate-only with allow-inference requires later operator approval. No resident enablement/release follows.",
+  "authorization": "Operator selected Codex gpt-6.1-sol/high and cwd /Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114. No live inference authorization. User authorized opening a PR; no merge or resident enablement follows.",
   "evidencePrivacy": "Only synthetic measurements, commands, hashes and verdicts included. Private live originals remain in operator-selected isolated state outside Git. Local logs/report are ignored handoff artifacts.",
   "preservedAgentsSha256": "ce01da8962cac8487b4d7c26b08b561c3c718e07ff25aa49e191db02cbd0cd3e",
   "completion": {
@@ -413,7 +413,7 @@
     "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode crash --case reserved-launch --state-directory /tmp/sg-crash-02 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only"
   ],
   "semanticInvocationTemplate": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode semantic --case alfred --state-directory /tmp/sg-sem-01 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only",
-  "fullBuildStatus": "NOT RUN - controller builds after clean full-suite rerun",
+  "fullBuildStatus": "PENDING final controller run",
   "integratedCompletion": {
     "status": "DONE_WITH_CONCERNS",
     "phase": "Task10 pre-review integrated completion, not independent review fix1",
@@ -431,5 +431,114 @@
     "fullSuite": "Controller rerun required, build afterward",
     "live": "NOT RUN"
   },
-  "controllerVerificationNote": "Controller recorded completed check/test/build evidence and status text only; source, scripts and tests are unchanged after the final integrated run. All original failure logs remain preserved."
+  "controllerVerificationNote": "Task10 historical evidence preserved. Current remediation is a draft PR candidate; final review/test/build pending. No native acceptance performed.",
+  "historicalEvidence": "Existing files/checks/scaling entries below describe Task10 at 205912f; they are retained historical evidence, not hashes or final-gate claims for remediation.",
+  "remediation": {
+    "baseSha": "205912fd9feae159e1b25567bb21d7db7ccca17c",
+    "files": {
+      "src/domain/strigoi.ts": "2fd04ef5301314da85dc7a0be8ace40fb8f6f710309bc4d40941d249a944a499",
+      "src/orchestration/orchestrator-attention-control.ts": "0045eef695c15b86b8234e068790808c2b6c189293876b2853c9c79ec64d8003",
+      "src/orchestration/orchestrator-attention-ports.ts": "fad373319c502ed1209fb8e8aefa997501249bbb87fcf375efb7bd7057e60584",
+      "src/orchestration/orchestrator-attention-succession.ts": "a8a3d60a138ff16bdbb579d76d03968e30b4f0c2a85a2866bf7ae91a616f5257",
+      "src/orchestration/strigoi-admission.ts": "de946af2dcad048267bc4a5ad786e11a886b8be689c817dcbe9857d04dbfc260",
+      "src/orchestration/strigoi-continuity.ts": "e4796311d238358161aed4597910f328155913e2725b747e6788a170ca256b1c",
+      "src/orchestration/worker-resident-recovery.ts": "c088890ce189eec7fbbe7d9b0c2f9741553b03f88f43f8f15f362090410bc07a",
+      "src/orchestration/workflow-service.ts": "8f85824777846093eeac8e15462b6befceb69489306fe9e6b988ee57da5c5465",
+      "src/persistence/binding-authority.ts": "3851a77c9e5719b014120fef0dec95b9cc002df67a9cdf72f0969b2fce7193ca",
+      "src/persistence/instruction-store.ts": "6ddb99c0bafb4f85c6deab1eda79548ea10348d510d6be31a04ba81cb724f9d8",
+      "src/persistence/orchestrator-attention-store.ts": "afa54a701320f52b4c7a668095f05846724051c9d71f2d70c070a8bbded25f24",
+      "src/persistence/private-files.ts": "a2e41891020f43b61bc2f88452498a303bc6efc7184b64637046890dc5afabe6",
+      "src/persistence/strigoi-archive-error.ts": "5f7c82abe10d99ed4cb793fb1c480462659afe03a59451a78205c3923432e5d1",
+      "src/persistence/strigoi-evidence-runtime.ts": "7c20ce5c8eb541cce1e07316dec545b37bbf4cf5bb1d5a3913c8bc31fee4e763",
+      "src/persistence/strigoi-packets.ts": "dab462cddba84431272d29fffd725c933c5ef67a932225f1ebfe982e3fb5bf58",
+      "src/persistence/strigoi-page-index.ts": "06890761c0c772adc374ce3e1e28b8a6159426fe388378785d2ff86f3552d566",
+      "src/persistence/strigoi-source-archive.ts": "a2d59de6b2ee8eff66789c939b8ce5a26815894bb360132fdadcb5d49de62540",
+      "src/persistence/strigoi-source-journal.ts": "6dea059da96d32db1c725fee4d81bf21439da998e51f985764f2d3099b3b5be4",
+      "src/persistence/strigoi-sources.ts": "d333c4e165d1920319dd4281b52d46067234f89e30686ed9c0db8d5fec8a7bc5",
+      "src/persistence/thread-transcript-store.ts": "15dc7f31f2b7368202f79e4ace8f124ae137b3bb409a4e4844fc3de983cd0b2e",
+      "src/persistence/validated-journal.ts": "d4e124315e687545e9267cf8e885cc2d7449900203d1778eb063f2e149547351",
+      "tests/integration/strigoi-delivery.test.ts": "a33bece04e52e24dd2d9025375530785c37365b5a74aed6c74952d753663a8ca",
+      "tests/integration/strigoi-remediation-scaling.test.ts": "33fdd140a319914b5b654b2be72ae3e277151c929d06b8cede0d5a745ceb20e5",
+      "tests/integration/strigoi-scaling.test.ts": "212933e2674cfe65a1896ea6b2617c1bebf0dd5623d1ba30f5479e01498cb8e6",
+      "tests/integration/strigoi-worker-recovery.test.ts": "2e5bfb0ddf273c32956e7c5d6b949d564f8d0a1f578952f275597d8cc57e47f2",
+      "tests/orchestration/strigoi-worker-recovery.test.ts": "b6f72662e7dff4685eec74c71af2360c96ca5edad20a607cb5afaed627dcc729",
+      "tests/orchestration/workflow-service.test.ts": "7cd83888bc5ad76b8b2b849f1bf1f5cc2382be7a1abd9b9ecd9d96af9cf5c38f",
+      "tests/persistence/strigoi-authority-order.test.ts": "802b3eb71b169f1cb00ce755770bb94e0476cc2c00ec20c026cba9afc6af8d88",
+      "tests/persistence/strigoi-packets.test.ts": "d3d2b5734270f136aa4b6fbb18a6b711eb3ce0bc3131b58eae662809359e7820",
+      "tests/persistence/strigoi-source-journal.test.ts": "c57bf3e8b2bad8596e06542064c955a46a1871785c905e6f68f8a80c3a9c00fe",
+      "tests/persistence/strigoi-sources.test.ts": "41fc2a46f0c0b994a0d942e582f606e4e8ace4c23247070f05f7437758eb7356",
+      "tests/persistence/validated-journal.test.ts": "6cb962d77725442e16b558b3d1d83bd0a240606f37fa4053f50d16be54ae57cf"
+    },
+    "focusedChecks": "199 distinct tests across 18 files, composed from 17 passing affected files and the corrected 15-test archive rerun; Node24 typecheck passed. Earlier failure log retained.",
+    "review": "IN PROGRESS",
+    "live": "NOT RUN",
+    "scaling": {
+      "node": "v24.18.0",
+      "inventories": [
+        64,
+        256,
+        1024
+      ],
+      "synthetic": true,
+      "samplesPerInventory": 1,
+      "limitation": "Single warm-process local sample; no production failure threshold or asymptotic qualification",
+      "rows": [
+        {
+          "retainedSyntheticRecords": 64,
+          "archiveReferencesBeforeCheckpoint": 78,
+          "packetSources": 82,
+          "pages": 2,
+          "captureMs": 3392.246084,
+          "checkpointMs": 672.2651670000005,
+          "traversalMs": 51.812833999999384,
+          "acknowledgementMs": 90.87120800000048,
+          "unrelatedBaselineMs": 6.0440000000007785,
+          "unrelatedBlockedMs": 6.954499999999825,
+          "inventoryReads": 2,
+          "pageIndexReads": 3,
+          "snapshotWrites": 0,
+          "sourceIndexPersistenceBytes": 56443,
+          "indexBytes": 50945,
+          "rssBytes": 225247232
+        },
+        {
+          "retainedSyntheticRecords": 256,
+          "archiveReferencesBeforeCheckpoint": 274,
+          "packetSources": 274,
+          "pages": 5,
+          "captureMs": 11672.075583999998,
+          "checkpointMs": 1512.2114589999983,
+          "traversalMs": 188.79300000000148,
+          "acknowledgementMs": 175.51474999999846,
+          "unrelatedBaselineMs": 14.107458999998926,
+          "unrelatedBlockedMs": 7.811459000000468,
+          "inventoryReads": 5,
+          "pageIndexReads": 9,
+          "snapshotWrites": 0,
+          "sourceIndexPersistenceBytes": 143788,
+          "indexBytes": 177471,
+          "rssBytes": 337854464
+        },
+        {
+          "retainedSyntheticRecords": 1024,
+          "archiveReferencesBeforeCheckpoint": 1042,
+          "packetSources": 1042,
+          "pages": 17,
+          "captureMs": 63055.733542,
+          "checkpointMs": 2568.7617499999906,
+          "traversalMs": 367.35050000000047,
+          "acknowledgementMs": 383.12429199999315,
+          "unrelatedBaselineMs": 6.803665999992518,
+          "unrelatedBlockedMs": 6.364916999998968,
+          "inventoryReads": 17,
+          "pageIndexReads": 33,
+          "snapshotWrites": 0,
+          "sourceIndexPersistenceBytes": 564547,
+          "indexBytes": 672856,
+          "rssBytes": 405831680
+        }
+      ]
+    },
+    "limits": "Incremental writes and linear packet reads; full post-append archive validation inside capture authority retains quadratic cumulative reads. No production capacity claim."
+  }
 }

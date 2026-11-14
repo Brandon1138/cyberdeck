@@ -25,15 +25,15 @@ export class StrigoiContinuity {
       });
       // Native/transcript queues can acquire authority. Never wait for them while holding it.
       const sources = await this.options.sources.capture(initial);
+      for (const ref of refs) {
+        if (!sources.some((s) => s.kind === ref.kind && s.id === ref.id && s.revision === ref.revision
+          && (ref.sha256 === undefined || s.sha256 === ref.sha256))) throw new Error("STRIGOI_UNKNOWN_SOURCE");
+      }
+      const packet = await this.options.packets.write(identity, prose, sources, new Date().toISOString());
       return this.run(identity, "mutate", async (state) => {
         await authorize?.();
         const previous = this.replay(state, mutationId, requestHash);
         if (previous) { await this.options.repository.confirmMutation(mutationId); return previous.packet; }
-        for (const ref of refs) {
-          if (!sources.some((s) => s.kind === ref.kind && s.id === ref.id && s.revision === ref.revision
-            && (ref.sha256 === undefined || s.sha256 === ref.sha256))) throw new Error("STRIGOI_UNKNOWN_SOURCE");
-        }
-        const packet = await this.options.packets.write(identity, prose, sources, new Date().toISOString());
         // Artifacts are durable before the canonical CAS references them. Caller refs consume nothing.
         await this.save(state, mutationId, { latestPacket: packet,
           continuityReceipts: [...state.continuityReceipts ?? [], { mutationId, requestHash, packet }] });
@@ -42,24 +42,39 @@ export class StrigoiContinuity {
     });
   }
   read(identity: StrigoiIdentity, packet: StrigoiPacketRef, cursor?: string, authorize?: () => Promise<void>) {
-    return this.run(identity, "read", async (state) => {
-      await authorize?.(); this.knownPacket(state, packet); return this.options.packets.read(packet, cursor);
+    return this.options.admission.run(identity.sessionId, "read", async () => {
+      await this.run(identity, "read", async (state) => { await authorize?.(); this.knownPacket(state, packet); });
+      const page = await this.options.packets.read(packet, cursor);
+      return this.run(identity, "read", async (state) => { await authorize?.(); this.knownPacket(state, packet); return page; });
     });
   }
   async acknowledge(input: StrigoiAdoption, mutationId: string, authorize?: () => Promise<void>): Promise<void> {
-    const adoption = StrigoiAdoptionSchema.parse(input);
-    return this.run(adoption.identity, "recovery", async (state) => {
-      await authorize?.();
-      const requestHash = hash(adoption);
-      if (this.replay(state, mutationId, requestHash)) { await this.options.repository.confirmMutation(mutationId); return; }
-      const packet = [state.latestPacket, state.transition?.packet, ...state.continuityReceipts?.map((r) => r.packet) ?? []]
-        .find((p) => p?.sha256 === adoption.packetHash && p.coverageId === adoption.coverageId);
-      if (!packet) throw new Error("STRIGOI_UNKNOWN_COVERAGE");
+    const adoption = StrigoiAdoptionSchema.parse(input), requestHash = hash(adoption);
+    return this.options.admission.run(adoption.identity.sessionId, "recovery", async () => {
+      const initial = await this.run(adoption.identity, "recovery", async (state) => {
+        await authorize?.();
+        if (this.replay(state, mutationId, requestHash)) { await this.options.repository.confirmMutation(mutationId); return; }
+        return this.coveragePacket(state, adoption);
+      });
+      if (!initial) return;
+      // Immutable artifact hashing and inventory traversal own no binding authority.
       const captured = new Set<string>(); let cursor: string | undefined;
-      do { const page = await this.options.packets.read(packet, cursor); page.sources.forEach((s) => captured.add(s.coverageSourceId!)); cursor = page.nextCursor; } while (cursor);
+      do { const page = await this.options.packets.read(initial, cursor); page.sources.forEach((s) => captured.add(s.coverageSourceId!)); cursor = page.nextCursor; } while (cursor);
       if (adoption.handledSourceIds.some((id) => !captured.has(id))) throw new Error("STRIGOI_UNKNOWN_HANDLED_SOURCE");
-      await this.save(state, mutationId, { continuityReceipts: [...state.continuityReceipts ?? [], { mutationId, requestHash, packet, adoption }] });
+      await this.run(adoption.identity, "recovery", async (state) => {
+        await authorize?.();
+        if (this.replay(state, mutationId, requestHash)) { await this.options.repository.confirmMutation(mutationId); return; }
+        const packet = this.coveragePacket(state, adoption);
+        if (JSON.stringify(packet) !== JSON.stringify(initial)) throw new Error("STRIGOI_UNKNOWN_COVERAGE");
+        await this.save(state, mutationId, { continuityReceipts: [...state.continuityReceipts ?? [], { mutationId, requestHash, packet, adoption }] });
+      });
     });
+  }
+  private coveragePacket(state: StrigoiState, adoption: StrigoiAdoption): StrigoiPacketRef {
+    const packet = [state.latestPacket, state.transition?.packet, ...state.continuityReceipts?.map((r) => r.packet) ?? []]
+      .find((p) => p?.sha256 === adoption.packetHash && p.coverageId === adoption.coverageId);
+    if (!packet) throw new Error("STRIGOI_UNKNOWN_COVERAGE");
+    return packet;
   }
   /** Internal inventory for the recovery collaborator; no pending input is silently consumed. */
   pending(identity: StrigoiIdentity): Promise<StrigoiSourceRef[]> {
@@ -85,6 +100,7 @@ export class StrigoiContinuity {
         const state = await this.options.repository.read();
         this.validateIdentity(state, identity);
         if (operation !== "read" && state.desired !== "enabled") throw new Error("STRIGOI_SUSPENDED");
+        if (operation === "mutate" && state.hold?.code === "continuity-evidence-unavailable") throw new Error("STRIGOI_EVIDENCE_UNAVAILABLE");
         return apply(state);
       });
     });

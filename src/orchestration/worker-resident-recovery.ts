@@ -40,6 +40,10 @@ export function recoverResidentWorkers(options: WorkerControlOptions, credential
           || subject.lease.version < prior.lease.version || subject.lease.state === "released") {
           hold(id, "worker-ownership-changed", "Captured ownership is no longer current; no recovery attempted."); continue;
         }
+        // The current successful lifecycle can advance after sealing. Its retained
+        // result needs neither process custody nor a new lease. Ownership above
+        // remains mandatory, including for a terminal subject.
+        if (subject.lifecycle === "done") continue;
         let worker;
         try { worker = options.registry.get(id); }
         catch (error) { if ((error as { code?: string }).code !== "SESSION_NOT_FOUND") throw error; }

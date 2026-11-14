@@ -1,3 +1,4 @@
+import { StrigoiPageIndex } from "./strigoi-page-index.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { STRIGOI_LIMITS, StrigoiArtifactRefSchema, StrigoiPacketSchema, StrigoiPacketRefSchema, StrigoiSourceRefSchema,
@@ -13,7 +14,10 @@ const sourceKey = (s: StrigoiSourceRef) => digest(JSON.stringify([s.kind, s.id, 
 
 /** Linked inventories keep the entry manifest bounded regardless of total obligations. */
 export class StrigoiPackets implements StrigoiPacketPort {
-  constructor(private readonly artifacts: ArtifactStore) {}
+  private readonly index: StrigoiPageIndex;
+  constructor(private readonly artifacts: ArtifactStore) {
+    this.index = new StrigoiPageIndex((body) => this.put("strigoi-page-index", body), (ref) => this.get(ref));
+  }
   async copy(ref: StrigoiSourceRef, text: string, sessionIds: string[]): Promise<StrigoiSourceRef[]> {
     const parsed = StrigoiSourceRefSchema.parse(ref), result: StrigoiSourceRef[] = [];
     const bytes = Buffer.from(text); let offset = 0;
@@ -64,9 +68,14 @@ export class StrigoiPackets implements StrigoiPacketPort {
       page.push(source); bytes += Buffer.byteLength(text);
     }
     if (page.length) pages.push(page);
-    let inventory: StrigoiArtifactRef | undefined;
-    for (const sources of pages.reverse()) inventory = await this.put("strigoi-inventory", JSON.stringify(PageSchema.parse({ sources, next: inventory })));
-    const packet = StrigoiPacketSchema.parse({ schemaVersion: 1, author, prose, createdAt, coverageId, sourceCount: unique.size, inventory });
+    const leaves = []; let offset = 0;
+    for (const sources of pages) {
+      leaves.push({ page: await this.put("strigoi-inventory", JSON.stringify(PageSchema.parse({ sources }))), offset });
+      offset += sources.length;
+    }
+    const inventory = leaves.length ? await this.index.write(leaves) : undefined;
+    const packet = StrigoiPacketSchema.parse({ schemaVersion: 2, author, prose, createdAt, coverageId, sourceCount: unique.size, inventory,
+      ...(leaves.length ? { inventoryPages: leaves.length } : {}) });
     const body = JSON.stringify(packet);
     if (Buffer.byteLength(body) > STRIGOI_LIMITS.packetManifestBytes) throw new Error("STRIGOI_MANIFEST_TOO_LARGE");
     return { ...await this.put("strigoi-packet", body), coverageId };
@@ -76,6 +85,18 @@ export class StrigoiPackets implements StrigoiPacketPort {
     if (Buffer.byteLength(body) > STRIGOI_LIMITS.packetManifestBytes) throw new Error("STRIGOI_MANIFEST_TOO_LARGE");
     const packet = StrigoiPacketSchema.parse(JSON.parse(body));
     if (packet.coverageId !== ref.coverageId) throw new Error("STRIGOI_COVERAGE_MISMATCH");
+    if (packet.schemaVersion === 2) {
+      if (!packet.inventory) {
+        if (cursor !== undefined) throw new Error("STRIGOI_INVALID_CURSOR");
+        return { packet, sources: [] };
+      }
+      const access = await this.index.read(packet.inventory, packet.inventoryPages!, ref.sha256, cursor);
+      const page = PageSchema.parse(JSON.parse(await this.get(access.ref)));
+      if (page.next || access.offset + page.sources.length > packet.sourceCount
+        || (access.last && access.offset + page.sources.length !== packet.sourceCount)) throw new Error("STRIGOI_INVENTORY_COUNT");
+      return { packet, sources: await this.texts(page.sources), ...(access.nextCursor ? { nextCursor: access.nextCursor } : {}) };
+    }
+    // Legacy v1 ordinals remain readable without rewriting existing packets.
     // A cursor is a packet-bound ordinal, never a caller-selected artifact pointer.
     const prefix = `${ref.sha256}:`;
     if (cursor !== undefined && (!cursor.startsWith(prefix) || !/^(0|[1-9][0-9]*)$/.test(cursor.slice(prefix.length)))) throw new Error("STRIGOI_INVALID_CURSOR");
@@ -88,19 +109,21 @@ export class StrigoiPackets implements StrigoiPacketPort {
       const page = PageSchema.parse(JSON.parse(await this.get(current))); count += page.sources.length;
       if (count > packet.sourceCount || (!page.next && count !== packet.sourceCount)) throw new Error("STRIGOI_INVENTORY_COUNT");
       if (i === index) {
-        let bytes = 0;
-        const sources = [];
-        for (const source of page.sources) {
-          if (sourceKey(source) !== source.coverageSourceId) throw new Error("STRIGOI_SOURCE_CORRUPT");
-          const text = await this.get(source.copy!); bytes += Buffer.byteLength(text); sources.push({ ...source, text });
-        }
-        if (bytes > STRIGOI_LIMITS.sourceTextBytesPerPage) throw new Error("STRIGOI_SOURCE_TOO_LARGE");
-        return { packet, sources, ...(page.next ? { nextCursor: `${prefix}${index + 1}` } : {}) };
+        return { packet, sources: await this.texts(page.sources), ...(page.next ? { nextCursor: `${prefix}${index + 1}` } : {}) };
       }
       current = page.next;
     }
     if (index !== 0 || packet.sourceCount !== 0) throw new Error("STRIGOI_INVALID_CURSOR");
     return { packet, sources: [] };
+  }
+  private async texts(refs: StrigoiSourceRef[]) {
+    let bytes = 0; const sources = [];
+    for (const source of refs) {
+      if (sourceKey(source) !== source.coverageSourceId) throw new Error("STRIGOI_SOURCE_CORRUPT");
+      const text = await this.get(source.copy!); bytes += Buffer.byteLength(text); sources.push({ ...source, text });
+    }
+    if (bytes > STRIGOI_LIMITS.sourceTextBytesPerPage) throw new Error("STRIGOI_SOURCE_TOO_LARGE");
+    return sources;
   }
   private async put(logicalKind: string, content: string): Promise<StrigoiArtifactRef> {
     const stored = await this.artifacts.write({ name: `${logicalKind}.json`, logicalKind, mediaType: "application/json", content });

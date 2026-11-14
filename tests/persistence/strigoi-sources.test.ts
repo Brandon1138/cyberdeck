@@ -531,3 +531,34 @@ it.each(["missing", "corrupt"])("fails closed when durable safety state is %s at
   await expect(reopened.beforeDelete(target)).rejects.toThrow();
   await expect(reopened.instructionStore.put(f.f.record)).rejects.toThrow();
 });
+
+it.each(["corrupt", "missing", "journal-corrupt", "journal-missing", "head-corrupt"])("isolates %s archive state introduced after startup and recaptures after explicit repair", async (damage) => {
+  const f = await setup();
+  await f.transcripts.append({ sessionId: actor, kind: "prompt", source: "human", text: "Retain resident intent" });
+  await f.sessions.put(SessionRecordSchema.parse({ ...f.f.registry.get(target), executionState: "exited", exitCode: 0 }));
+  const damagedPath = damage.startsWith("journal") ? `${f.evidence.archive.path}l` : damage === "head-corrupt" ? `${f.evidence.archive.path}l.head` : f.evidence.archive.path;
+  const original = await readFile(damagedPath, "utf8");
+  if (damage.endsWith("corrupt")) await writeFile(damagedPath, "broken"); else await rm(damagedPath);
+  const ordinary = { ...f.f.record, id: crypto.randomUUID(), actorSessionId: target, targetSessionId: target };
+  await expect(f.evidence.instructionStore.put(ordinary)).resolves.toBeUndefined();
+  await expect(f.transcripts.append({ sessionId: target, kind: "prompt", source: "human", text: "Ordinary canonical input" })).resolves.toMatchObject({ sessionId: target });
+  expect(await f.evidence.instructionStore.list(target)).toContainEqual(ordinary);
+  expect((await evidenceSafety(f.root)).retainedSessionIds).toContain(target);
+  expect((await f.evidence.orchestratorStore.strigoi.read()).hold?.code).toBe("continuity-evidence-unavailable");
+  await expect(f.evidence.beforeDelete(target)).rejects.toThrow();
+  await expect(f.continuity.checkpoint(identity, "", [], "corrupt-cp")).rejects.toThrow();
+  await expect(f.evidence.verify()).rejects.toThrow();
+  await writeFile(damagedPath, original);
+  await f.evidence.verify();
+  expect((await f.evidence.archive.list()).some(ref => ref.id === ordinary.id)).toBe(true);
+  expect((await f.evidence.archive.list()).some(ref => ref.id.startsWith("thread:") && ref.sessionIds?.includes(target))).toBe(true);
+  await expect(f.evidence.beforeDelete(target)).rejects.toThrow();
+});
+
+it("propagates genuine archive I/O failures instead of isolating them as corrupt bytes", async () => {
+  const f = await setup();
+  vi.spyOn(f.evidence.archive, "pins").mockRejectedValueOnce(Object.assign(new Error("archive read EIO"), { code: "EIO" }));
+  await expect(f.evidence.instructionStore.put(f.f.record)).rejects.toThrow("archive read EIO");
+  expect(await f.evidence.instructionStore.list()).toEqual([]);
+  expect((await f.evidence.orchestratorStore.strigoi.read()).hold).toBeUndefined();
+});

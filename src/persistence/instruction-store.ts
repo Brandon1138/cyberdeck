@@ -2,6 +2,7 @@ import type { EvidenceReferenceGuard } from "./strigoi-evidence-deletion.js";
 import { join } from "node:path";
 import { InstructionRecordSchema, effectiveInstruction, instructionSessionIds, type InstructionRecord } from "../domain/instruction.js";
 import { ValidatedJournal } from "./validated-journal.js";
+import { withBindingAuthority } from "./binding-authority.js";
 
 /** Append-only instruction snapshots. Latest record per id is the current mailbox state. */
 export class InstructionStore {
@@ -9,7 +10,7 @@ export class InstructionStore {
   private tail: Promise<unknown> = Promise.resolve();
   private readonly journal: ValidatedJournal<Map<string, InstructionRecord>>;
 
-  constructor(stateDirectory: string, private readonly capture?: (record: InstructionRecord) => Promise<void>, private readonly withReferences?: EvidenceReferenceGuard) {
+  constructor(private readonly stateDirectory: string, private readonly capture?: (record: InstructionRecord) => Promise<void>, private readonly withReferences?: EvidenceReferenceGuard) {
     this.path = join(stateDirectory, "orchestration", "instructions.jsonl");
     // Notification recovery reads this mailbox once per controller. Replaying the entire journal
     // for every read made broker startup exceed its readiness deadline on ordinary history.
@@ -19,14 +20,18 @@ export class InstructionStore {
 
   put(record: InstructionRecord): Promise<void> {
     const parsed = InstructionRecordSchema.parse(record);
-    const work = this.tail.catch(() => {}).then(async () => {
-      const prior = (await this.journal.read()).get(parsed.id);
-      validateContinuation(prior, parsed);
-      const commit = async () => { await this.journal.append(parsed); await this.capture?.(parsed); };
-      if (this.withReferences) await this.withReferences(instructionSessionIds(parsed), commit);
-      else await commit();
+    // Activation and resident delivery already own authority. Never reserve a writer
+    // behind which that owner could wait while this writer waits for authority.
+    return withBindingAuthority(this.stateDirectory, () => {
+      const work = this.tail.catch(() => {}).then(async () => {
+        const prior = (await this.journal.read()).get(parsed.id);
+        validateContinuation(prior, parsed);
+        const commit = async () => { await this.journal.append(parsed); await this.capture?.(parsed); };
+        if (this.withReferences) await this.withReferences(instructionSessionIds(parsed), commit);
+        else await commit();
+      });
+      this.tail = work; return work;
     });
-    this.tail = work; return work;
   }
 
   async list(targetSessionId?: string): Promise<InstructionRecord[]> {
