@@ -132,6 +132,73 @@ describe("resident lifecycle through real registry and canonical binding authori
     await f.resident.reconcile(); expect(f.spawn).toHaveBeenCalledOnce();
     expect(f.inference).not.toHaveBeenCalled(); expect(f.writes).not.toHaveBeenCalled();
   });
+  it.each(["enabled", "suspended", "disposed"] as const)("settles an exact runtime exit while activation authority is pending (%s)", async (interleave) => {
+    vi.useFakeTimers(); const f = await fixture();
+    await f.resident.configure(f.selection, "configure");
+    const entered = gate(), release = gate(), activated = gate();
+    const authority = f.bindings.withAuthority.bind(f.bindings);
+    const outcome = f.registry.launchOutcome.bind(f.registry);
+    let gateNextAuthority = false;
+    const outcomes = vi.spyOn(f.registry, "launchOutcome").mockImplementation((...args) => {
+      const result = outcome(...args);
+      if (result.kind === "owned" && !gateNextAuthority) gateNextAuthority = true;
+      return result;
+    });
+    const authorityGate = vi.spyOn(f.bindings, "withAuthority").mockImplementation(async (apply) => {
+      if (gateNextAuthority) {
+        gateNextAuthority = false;
+        authorityGate.mockImplementation(authority);
+        entered.resolve(); await release.promise;
+      }
+      return authority(apply);
+    });
+    const cas = f.bindings.strigoi.compareAndSwap.bind(f.bindings.strigoi);
+    vi.spyOn(f.bindings.strigoi, "compareAndSwap").mockImplementation(async (...args) => {
+      const state = await cas(...args);
+      if (state.activeBinding) activated.resolve();
+      return state;
+    });
+    const reconcile = vi.spyOn(f.resident, "reconcile");
+    f.composition.start(); const launch = f.resident.reconcile();
+    await entered.promise;
+    expect(outcomes.mock.results.at(-1)?.value).toMatchObject({ kind: "owned" });
+    const reserved = await f.bindings.strigoi.read(), old = reserved.transition!.successor!;
+    const notificationsBefore = reconcile.mock.calls.length;
+    f.emitExit();
+    expect(reconcile.mock.calls.length).toBeGreaterThan(notificationsBefore);
+    for (const notification of reconcile.mock.results.slice(notificationsBefore)) expect(notification.value).toBe(launch);
+    expect(outcome({ sessionId: old.sessionId, transitionId: reserved.transition!.id }, old.generation)).toMatchObject({ kind: "failed" });
+    if (interleave === "suspended") await f.resident.setDesired("suspended", "suspend-at-activation");
+    if (interleave === "disposed") f.composition.dispose();
+    release.resolve(); await launch;
+    expect(outcomes.mock.results.at(-1)?.value).toMatchObject({ kind: "failed" });
+    // Read a fresh store: settlement and its deadline must survive loss of coordinator evidence.
+    const settled = await new OrchestratorStore(f.root).strigoi.read();
+    expect(settled.desired).toBe(interleave === "suspended" ? "suspended" : "enabled");
+    expect(settled.activeBinding).toBeUndefined(); expect(settled.hold).toBeUndefined();
+    expect(settled.transition).toMatchObject({ phase: "requested", attempts: 1 });
+    expect(settled.transition?.successor).toBeUndefined();
+    expect(settled.retainedSessionIds).toContain(old.sessionId);
+    expect(Date.parse(settled.transition!.nextAttemptAt!) - Date.now()).toBe(1000);
+    expect(f.spawn).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(999); expect(f.spawn).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    if (interleave === "enabled") {
+      // Await the timer-driven activation, never manually request another reconciliation.
+      await activated.promise;
+      await reconcile.mock.results.at(-1)!.value;
+      const retried = await new OrchestratorStore(f.root).strigoi.read();
+      expect(retried.activeBinding?.sessionId).toBeDefined();
+      expect(retried.activeBinding?.sessionId).not.toBe(old.sessionId);
+      expect(retried.transition?.attempts).toBe(2); expect(f.spawn).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(60_000); expect(f.spawn).toHaveBeenCalledTimes(2);
+    } else {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(f.spawn).toHaveBeenCalledOnce();
+      expect((await new OrchestratorStore(f.root).strigoi.read()).revision).toBe(settled.revision);
+    }
+    expect(f.errors).not.toHaveBeenCalled(); expect(f.inference).not.toHaveBeenCalled(); expect(f.writes).not.toHaveBeenCalled();
+  });
   it("persists process creation failures and retry deadlines through reconstruction, then exhausts the episode", async () => {
     vi.useFakeTimers(); const f = await fixture();
     f.spawn.mockImplementation(() => { throw Object.assign(new Error("process creation failed"), { code: "EAGAIN" }); });

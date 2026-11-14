@@ -223,20 +223,25 @@ export class StrigoiLifecycle {
     }
     // Drain outside authority, then recheck native ownership/generation inside the activation CAS.
     await this.options.admission.freeze(successor);
-    const committed = await this.authority(async () => {
+    const activation = await this.authority(async () => {
       const current = await this.options.repository.read();
-      if (this.disposed || epoch !== this.epoch || current.desired !== "enabled" || current.activeBinding
-        || current.transition?.id !== transition.id || current.transition.successor?.sessionId !== successor.sessionId) return undefined;
+      if (current.activeBinding || current.transition?.id !== transition.id
+        || current.transition.successor?.sessionId !== successor.sessionId) return undefined;
       const fresh = this.options.registry.launchOutcome(reservation, successor.generation);
-      if (fresh.kind !== "owned") return undefined;
+      // Preserve terminal evidence even when suspension/disposal fenced activation while queued.
+      // Settlement takes authority separately; never nest it or depend on a coalesced exit notice.
+      if (fresh.kind === "failed") return fresh;
+      if (fresh.kind !== "owned" || this.disposed || epoch !== this.epoch || current.desired !== "enabled") return undefined;
       const session = fresh.session;
       const binding = { ...orchestratorLaunchBinding(session, { kind: "fleet" }, session, STRIGOI_KEY, "resident"), resident: { name: "strigoi" as const, incarnation: successor.incarnation } };
       const modal = this.options.registry.workerTruth(session.id).modalOpen;
-      return this.write(current, { activeBinding: binding, activeGeneration: session.generation!, incarnation: successor.incarnation,
+      return { kind: "committed" as const, state: await this.write(current, { activeBinding: binding, activeGeneration: session.generation!, incarnation: successor.incarnation,
         transition: { ...current.transition, phase: "complete", successor },
-        hold: modal ? { code: "provider-permission-modal", detail: "Provider requires operator input; no automatic answer or model turn.", sourceIds: [session.id] } : undefined });
+        hold: modal ? { code: "provider-permission-modal", detail: "Provider requires operator input; no automatic answer or model turn.", sourceIds: [session.id] } : undefined }) };
     });
-    if (!committed) { if (this.disposed || epoch !== this.epoch) await this.stopOwned(await this.options.repository.read()); return; }
+    if (activation?.kind === "failed") { await this.settleFailure(state, activation.error); return; }
+    if (!activation) { if (this.disposed || epoch !== this.epoch) await this.stopOwned(await this.options.repository.read()); return; }
+    const committed = activation.state;
     await this.options.manager.observeResident(committed.activeBinding!, outcome.session);
     if (!committed.hold && !this.disposed && epoch === this.epoch) await this.options.admission.reopen(successor);
   }
