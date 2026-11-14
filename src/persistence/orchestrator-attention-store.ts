@@ -51,7 +51,14 @@ export class OrchestratorAttentionStore implements AttentionStorePort {
           await this.write(this.path(controllerId), `${JSON.stringify(parsed)}\n`);
           await this.capture?.(parsed);
         };
-        if (this.withReferences) await this.withReferences([parsed.actorSessionId, ...parsed.statement.targets.map((t) => t.sessionId)], commit);
+        // Only a cancellation of the exact existing record is a release. A changed actor,
+        // epoch, statement, authority, or coverage must still pass reference acquisition.
+        const cancellation = current !== undefined && parsed.status === "cancelled"
+          && JSON.stringify(OrchestratorAttentionSchema.parse({ ...parsed, status: current.status, updatedAt: current.updatedAt,
+            cancelledAt: current.cancelledAt, cancelReason: current.cancelReason, pendingIntent: current.pendingIntent,
+            lastWake: parsed.lastWake && current.lastWake && parsed.lastWake.holdReason === "attention-cancelled"
+              ? { ...parsed.lastWake, holdReason: current.lastWake.holdReason } : parsed.lastWake })) === JSON.stringify(current);
+        if (this.withReferences) await this.withReferences(cancellation ? [] : [parsed.actorSessionId, ...parsed.statement.targets.map((t) => t.sessionId)], commit);
         else await commit();
       }
       return parsed;

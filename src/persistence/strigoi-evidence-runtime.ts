@@ -1,4 +1,5 @@
-import { withEvidenceDeletion, withEvidenceReferences, type EvidenceReferenceGuard } from "./strigoi-evidence-deletion.js";
+import { syncPrivateFile } from "./atomic-private-file.js";
+import { withEvidenceDeletion, withEvidenceReferences, retainEvidenceReferences, evidenceSafety, reconcileEvidenceDeletions, type EvidenceReferenceGuard } from "./strigoi-evidence-deletion.js";
 import { randomUUID } from "node:crypto";
 import { ArtifactStore } from "./artifact-store.js";
 import { OrchestratorStore } from "./orchestrator-store.js";
@@ -18,7 +19,10 @@ export function composeStrigoiEvidence(stateDirectory: string) {
   const packets = new StrigoiPackets(artifactStore), archive = new StrigoiSourceArchive(stateDirectory, packets);
   let sources: StrigoiSources;
   let held = false;
-  const withReferences: EvidenceReferenceGuard = (ids, commit) => withEvidenceReferences(stateDirectory, ids, commit);
+  const withReferences: EvidenceReferenceGuard = (ids, commit) => withEvidenceReferences(stateDirectory, ids, async () => {
+    if (ids.length && (held || await sources.relevant([...ids]))) await retainEvidenceReferences(stateDirectory, ids);
+    return commit();
+  });
   const instructionStore = new InstructionStore(stateDirectory, (record) => held ? Promise.resolve() : sources.record("instruction", record.id, record,
     [record.actorSessionId, record.targetSessionId, ...record.senderSessionId ? [record.senderSessionId] : []]), withReferences);
   const workflowStore = new WorkflowStore(stateDirectory, (record) => held ? Promise.resolve() : sources.record("workflow", record.id, record,
@@ -40,7 +44,8 @@ export function composeStrigoiEvidence(stateDirectory: string) {
     const state = await orchestratorStore.strigoi.read();
     await packets.verify(await sources.capture(state));
     await packets.verify(await archive.list());
-    const protectedSessionIds = new Set([...await orchestratorStore.strigoi.retentionPins(), ...await archive.pins()]);
+    const protectedSessionIds = new Set([...await orchestratorStore.strigoi.retentionPins(), ...await archive.pins(),
+      ...(await evidenceSafety(stateDirectory)).deletions.map((d) => d.sessionId)]);
     for (const packet of [state.latestPacket, state.transition?.packet, ...state.continuityReceipts?.map((r) => r.packet) ?? []]) {
       if (!packet) continue;
       let cursor: string | undefined;
@@ -56,6 +61,8 @@ export function composeStrigoiEvidence(stateDirectory: string) {
   async function startup(transcripts: ThreadTranscriptStore, sessions: SessionStore) {
     sources.attach(transcripts, () => sessions.load());
     try {
+      const interrupted = await reconcileEvidenceDeletions(stateDirectory, new Set((await sessions.load()).map((s) => s.id)), () => syncPrivateFile(sessions.path));
+      if (interrupted.size) console.error("Strigoi evidence: interrupted session deletions remain fenced for explicit retry", [...interrupted]);
       const pins = await orchestratorStore.strigoi.retentionPins();
       // Validate the index even with no current active resident; historical evidence remains pinned.
       await archive.pins();

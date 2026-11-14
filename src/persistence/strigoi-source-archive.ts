@@ -1,5 +1,5 @@
 import { withBindingAuthority } from "./binding-authority.js";
-import { assertEvidenceRetainable } from "./strigoi-evidence-deletion.js";
+import { assertEvidenceRetainable, evidenceSafety } from "./strigoi-evidence-deletion.js";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -16,7 +16,7 @@ export class StrigoiSourceArchive {
   async list(): Promise<StrigoiSourceRef[]> {
     return withBindingAuthority(this.directory, () => this.load());
   }
-  async pins(): Promise<ReadonlySet<string>> { return new Set((await this.list()).flatMap((s) => s.sessionIds ?? [])); }
+  async pins(): Promise<ReadonlySet<string>> { return new Set([...(await evidenceSafety(this.directory)).retainedSessionIds, ...(await this.list()).flatMap((s) => s.sessionIds ?? [])]); }
   capture(kind: StrigoiSourceRef["kind"], id: string, value: unknown, sessionIds: string[]): Promise<void> {
     const text = typeof value === "string" ? value : JSON.stringify(value), revision = digest(text);
     return withBindingAuthority(this.directory, async () => {
