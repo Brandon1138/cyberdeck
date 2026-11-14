@@ -436,7 +436,7 @@ export async function runBroker(
   };
 
   server = new BrokerServer({
-    activity, executionHealth: executionRuntime.health,
+    activity, strigoi: strigoi.control, executionHealth: executionRuntime.health,
     renewExecutionAttempt: async (input) => {
       if (!workerCoordination.service.hasCurrentLease(input)) return "not-running";
       return executionRuntime.executions.renewAttempt(input.sessionId, input.leaseExpiresAt);

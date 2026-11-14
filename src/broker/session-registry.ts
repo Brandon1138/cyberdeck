@@ -328,7 +328,7 @@ export class SessionRegistry {
     return this.lifecycle.residentRetirement(sessionId, generation);
   }
 
-  forceStop(sessionId: string): void {
+  forceStop(sessionId: string): Promise<void> {
     return this.lifecycle.forceStop(sessionId);
   }
 

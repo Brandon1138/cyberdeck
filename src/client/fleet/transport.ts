@@ -1,3 +1,5 @@
+import { strigoiFleetView } from "../../domain/strigoi-view.js";
+import type { StrigoiInspection } from "../../orchestration/strigoi-ports.js";
 import type { FleetOrchestratorOwnershipView, FleetWorkerCoordinationView, } from "../../broker/worker-coordination-view.js";
 import type { SessionRecord } from "../../domain/session.js";
 import { DEFAULT_PERMISSION_POLICIES, UNQUERIED_WORKER_MODELS } from "./constants.js";
@@ -28,11 +30,13 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
   // grouping every thread under "Unregistered" is the wrong answer to a question nobody asked.
   const projects = await client.request<string[]>("fleet.projects", {})
     .then((roots) => roots as readonly string[] | undefined, () => undefined);
+  const resident = await client.request<StrigoiInspection>("strigoi.inspect", {}).catch(() => undefined);
   const threads = sessions.map((record): FleetThread => {
     const workerCoordination = coordinationBySession.get(record.id);
     const ownership = orchestratorOwnership.get(record.id);
     return {
-      record,
+      record: { ...record, ...(resident?.state.activeBinding?.sessionId === record.id ? { name: `Strigoi #${resident.state.incarnation}` } : {}) },
+      ...(resident && strigoiFleetView(resident, record.id) ? { strigoi: strigoiFleetView(resident, record.id)! } : {}),
       ...(workerCoordination === undefined ? {} : { coordination: workerCoordination }),
       ...(ownership === undefined ? {} : { controllerId: ownership.controllerId }),
       ...(ownership?.createdBy === undefined ? {} : { createdBy: ownership.createdBy }),

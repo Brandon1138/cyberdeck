@@ -1,3 +1,4 @@
+import { StrigoiControl } from "../orchestration/strigoi-control.js";
 import type { StrigoiDeliveryOptions } from "../orchestration/strigoi-delivery.js";
 import type { StrigoiContinuityOptions } from "../orchestration/strigoi-continuity.js";
 import type { OrchestratorBindingRepository, ThreadTranscriptReader } from "../orchestration/persistence-ports.js";
@@ -29,7 +30,7 @@ export async function composeProductionStrigoi(o: {
     observeInstruction: NonNullable<StrigoiDeliveryOptions["observeInstruction"]>;
   }; transcripts: ThreadTranscriptReader & WorkerTurnTranscriptPort;
   registry: Parameters<typeof composeStrigoiRuntime>[0]["registry"];
-  manager: Parameters<typeof composeStrigoiRuntime>[0]["manager"]; admission: StrigoiAdmission;
+  manager: Parameters<typeof composeStrigoiRuntime>[0]["manager"] & Pick<import("../orchestration/orchestrator-manager.js").OrchestratorManager, "validateResidentSelection">; admission: StrigoiAdmission;
   instructions: InstructionQueue; workflows: WorkflowService; workerControl: WorkerControlService;
   attention: OrchestratorAttentionControlPlane; coordination: WorkerCoordinationService;
   credentials: WorkerLeaseCredentialCustodian; activity: AgentActivityPort;
@@ -64,5 +65,6 @@ export async function composeProductionStrigoi(o: {
     verifyContinuity: o.evidence.verify, beforeDelete: o.evidence.beforeDelete, withDeletion: o.evidence.withDeletion,
     ...(o.onError ? { onError: o.onError } : {}),
     succession: { packets, sources, turns, workers, delivery, activity: o.activity } });
-  return { ...runtime, delivery, demand, turns, packets, sources };
+  const control = new StrigoiControl({ repository, registry: o.registry, admission: o.admission, lifecycle: runtime.lifecycle, continuity, succession: runtime.succession!, delivery, validateSelection: s => o.manager.validateResidentSelection(s) });
+  return { ...runtime, control, delivery, demand, turns, packets, sources };
 }

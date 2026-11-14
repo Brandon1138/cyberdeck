@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   CavemanWorkersRequestSchema,
   CreateOrchestratorRequestSchema,
@@ -82,7 +83,7 @@ interface PeerOrigin {
 export class OrchestratorManager {
   constructor(
     private readonly registry: SessionLookupPort & SessionStartPort & SessionResumePort,
-    private readonly store: OrchestratorBindingRepository,
+    private readonly store: OrchestratorBindingRepository & { strigoi?: import("./strigoi-ports.js").StrigoiRepository },
     private readonly workerPreferences?: WorkerPreferenceRepository,
     private readonly providerPermissions?: ProviderPermissionPreferenceReader,
     private readonly readCapabilities?: (provider: ProviderId) => Promise<ResolvedWorkerCapability[]>,
@@ -242,8 +243,12 @@ export class OrchestratorManager {
   }
 
   /** Internal resident preparation; uses the same live selection and permission policy as a regular Orc. */
-  async prepareResident(selection: StrigoiSelection) {
+  async validateResidentSelection(selection: StrigoiSelection): Promise<void> {
     validateCreateSelection({ ...selection, scope: "fleet" }, orchestratorCatalog(await this.capabilities()));
+  }
+
+  async prepareResident(selection: StrigoiSelection) {
+    await this.validateResidentSelection(selection);
     return prepareOrchestratorLaunch(selection, { kind: "fleet" }, this.providerPermissions, undefined, "Strigoi");
   }
 
@@ -286,41 +291,51 @@ export class OrchestratorManager {
     capability: Extract<CyberdeckCapability, `worker.start.${string}` | "orchestrator.create">,
     request: OrchestratorGrantToggleRequest,
   ): Promise<OrchestratorGrantToggleResult> {
-    const scope: OrchestratorScope = request.scope === "fleet"
-      ? { kind: "fleet" }
-      : { kind: "workspace", cwd: request.cwd };
-    const key = orchestratorKey(scope);
-    const binding = await this.store.get(key);
-    if (binding === undefined) {
-      if (request.enabled !== undefined) {
-        throw Object.assign(
-          new Error(`No orchestrator binding exists for ${key}; choose an orchestrator first`),
-          { code: "ORCHESTRATOR_NOT_CONFIGURED" },
-        );
+    const apply = async () => {
+      const scope: OrchestratorScope = request.scope === "fleet"
+        ? { kind: "fleet" }
+        : { kind: "workspace", cwd: request.cwd };
+      const binding = request.sessionId ? await this.store.findBySessionId(request.sessionId) : await this.store.get(orchestratorKey(scope));
+      const key = binding?.key ?? orchestratorKey(scope);
+      if (request.sessionId && !binding) throw new Error("ORCHESTRATOR_TARGET_STALE");
+      if (binding === undefined) {
+        if (request.enabled !== undefined) {
+          throw Object.assign(
+            new Error(`No orchestrator binding exists for ${key}; choose an orchestrator first`),
+            { code: "ORCHESTRATOR_NOT_CONFIGURED" },
+          );
+        }
+        return { key, configured: false, enabled: false };
       }
-      return { key, configured: false, enabled: false };
-    }
 
-    const enabled = binding.grant.capabilities.includes(capability);
-    if (request.enabled === undefined || request.enabled === enabled) {
-      return { key, configured: true, enabled, sessionId: binding.sessionId };
-    }
+      const enabled = binding.grant.capabilities.includes(capability);
+      if (request.enabled === undefined || request.enabled === enabled) {
+        return { key, configured: true, enabled, sessionId: binding.sessionId };
+      }
 
-    const capabilities = request.enabled
-      ? [...binding.grant.capabilities, capability]
-      : binding.grant.capabilities.filter((entry) => entry !== capability);
-    const updated: OrchestratorBinding = {
-      ...binding,
-      grant: { ...binding.grant, capabilities },
-      updatedAt: new Date().toISOString(),
+      const capabilities = request.enabled
+        ? [...binding.grant.capabilities, capability]
+        : binding.grant.capabilities.filter((entry) => entry !== capability);
+      const updated: OrchestratorBinding = {
+        ...binding,
+        grant: { ...binding.grant, capabilities },
+        updatedAt: new Date().toISOString(),
+      };
+      if (binding.kind === "resident") {
+        const resident = this.store.strigoi;
+        if (!resident) throw new Error("STRIGOI_UNAVAILABLE");
+        const state = await resident.read();
+        if (state.activeBinding?.sessionId !== binding.sessionId) throw new Error("STRIGOI_STALE_INCARNATION");
+        await resident.compareAndSwap(state.revision, `grant:${randomUUID()}`, { ...state, activeBinding: updated, revision: state.revision + 1, updatedAt: updated.updatedAt });
+      } else await this.store.put(updated);
+      return {
+        key,
+        configured: true,
+        enabled: request.enabled,
+        sessionId: binding.sessionId,
+      };
     };
-    await this.store.put(updated);
-    return {
-      key,
-      configured: true,
-      enabled: request.enabled,
-      sessionId: binding.sessionId,
-    };
+    return this.store.withAuthority ? this.store.withAuthority(apply) : apply();
   }
 
   /**
@@ -348,8 +363,10 @@ export class OrchestratorManager {
     const scope: OrchestratorScope = input.scope === "fleet"
       ? { kind: "fleet" }
       : { kind: "workspace", cwd: input.cwd };
-    const key = orchestratorKey(scope);
-    const binding = await this.store.get(key);
+    const binding = input.sessionId ? await this.store.findBySessionId(input.sessionId) : await this.store.get(orchestratorKey(scope));
+    const key = binding?.key ?? orchestratorKey(scope);
+    if (input.sessionId && !binding) throw new Error("ORCHESTRATOR_TARGET_STALE");
+    if (binding?.kind === "resident") throw new Error("STRIGOI_EVIDENCE_REFERENCED: use strigoi disable; retained continuity cannot be reset");
     if (binding === undefined) return { key, reset: false };
     if (this.isActive(binding.sessionId)) {
       throw Object.assign(
@@ -368,6 +385,7 @@ export class OrchestratorManager {
   async resetSessionBinding(sessionId: string): Promise<OrchestratorSessionResetResult> {
     const binding = await this.store.findBySessionId(sessionId);
     if (binding === undefined) return { reset: false };
+    if (binding.kind === "resident") throw new Error("STRIGOI_EVIDENCE_REFERENCED: use strigoi disable; retained continuity cannot be reset");
     await this.store.reset(binding.key);
     await this.observeBindingRemoval?.(binding);
     return { reset: true, key: binding.key };

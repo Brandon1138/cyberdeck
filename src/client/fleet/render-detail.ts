@@ -1,3 +1,4 @@
+import { strigoiStatus } from "./strigoi.js";
 import { displayWidth, graphemes, graphemeWidth } from "../display-width.js";
 import { workerOwner } from "../owner-sigil.js";
 import { threadFocusInert } from "./list-rows.js";
@@ -54,6 +55,7 @@ export function renderSelectedDetail(snapshot: FleetSnapshot, state: FleetState,
   const truth = thread.workerTruth?.detail ?? (status === "Unavailable"
     ? "Current provider activity is unavailable on this broker" : record.termination?.reason);
   const metadata = [
+    ...(thread.strigoi ? wrapDetailText(thread.strigoi.canonical ? strigoiStatus(thread.strigoi) : "Archived Strigoi incarnation · retained continuity evidence", options.width) : []),
     paint(path, "muted", options.color),
     ...(thread.workerTruth?.lastConfirmed === undefined ? [] : [paint(fit(
       `Observed ${thread.workerTruth.lastConfirmed.state} at ${thread.workerTruth.lastConfirmed.at}`, options.width), "muted", options.color)]),

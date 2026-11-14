@@ -61,6 +61,12 @@ export const PERMISSION_POLICIES: readonly ProviderPermissionPolicy[] = [
   "automatic",
 ];
 export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
+  { name: "/strigoi", description: "Focus and inspect the resident", values: [
+    { value: "status", description: "Show readiness and continuity holds" },
+    { value: "renew", description: "Request renewal at a safe boundary" },
+    { value: "suspend", description: "Durably suspend residence" },
+    { value: "resume", description: "Explicitly resume residence" },
+  ] },
   {
     name: "/model",
     description: "Choose worker provider, model, and effort",

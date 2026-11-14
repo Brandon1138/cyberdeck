@@ -14,6 +14,8 @@ import type {
 } from "./toolkit.js";
 
 export interface CreateProgramOptions {
+  strigoi?: import("./toolkit.js").StrigoiCliRequest;
+  strigoiWatch?: () => Promise<number>;
   runDefault?: () => Promise<void>;
   restartBroker?: () => Promise<void>;
   preflightCockpit?: () => CockpitPreflight;

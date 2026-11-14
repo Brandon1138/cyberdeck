@@ -17,6 +17,12 @@ export function openAction(record: SessionRecord): FleetAction {
 }
 
 export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: number): FleetState {
+  const resident = snapshot.threads.find(t => t.strigoi?.canonical);
+  if (state.residentFocusSessionId !== undefined && state.residentFocusSessionId === state.selectedSessionId && resident && state.residentFocusSessionId !== resident.record.id
+    && state.listView !== "history" && !state.stopAcknowledgement && !state.deleteConfirmation && !threadFocusInert(state)) {
+    state = { ...state, selectedSessionId: resident.record.id };
+  }
+  state = { ...state, residentFocusSessionId: resident && resident.record.id === state.selectedSessionId ? resident.record.id : undefined };
   const selectedWasLive = state.selectedSessionId !== undefined
     && state.lifecycleWatermarks?.[state.selectedSessionId]?.presence === "present";
   state = reconcileLifecycleWatermarks(reconcileReplyWatermarks(state, snapshot), snapshot);

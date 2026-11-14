@@ -62,6 +62,7 @@ export interface OrchestratorModelChoice {
 }
 
 export type SlashCommandName =
+  | "/strigoi"
   | "/view"
   | "/read"
   | "/ack"

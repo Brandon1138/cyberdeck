@@ -71,15 +71,22 @@ export class StrigoiLifecycle {
     return this.inspect();
   }
 
-  async setDesired(desired: StrigoiDesired, mutationId: string): Promise<void> {
+  async setDesired(desired: StrigoiDesired, mutationId: string, expectedSessionId?: string): Promise<void> {
     StrigoiDesiredSchema.parse(desired);
     // Synchronous fence catches preparation/initialization that resolves while freeze drains.
     this.epoch += 1;
     this.clearTimer();
-    await this.freeze(await this.options.repository.read());
+    const validateTarget = (state: StrigoiState) => {
+      if (expectedSessionId && state.activeBinding?.sessionId !== expectedSessionId && state.transition?.successor?.sessionId !== expectedSessionId) {
+        this.wakeSuccession(Date.now()); throw failure("STRIGOI_STALE_INCARNATION");
+      }
+    };
+    const initial = await this.options.repository.read(); validateTarget(initial);
+    await this.freeze(initial);
     if (desired === "enabled") await this.options.verifyContinuity?.();
     const state = await this.authority(async () => {
       const current = await this.options.repository.read();
+      validateTarget(current);
       if (desired === "enabled" && !current.selection) throw failure("STRIGOI_NOT_CONFIGURED");
       if (current.desired === desired && (desired !== "enabled" || !current.hold)) return current;
       // An unresolved assigned identity must survive resume; clearing it would authorize duplicates.
@@ -135,7 +142,7 @@ export class StrigoiLifecycle {
     });
     if (!state) return; // Corruption already disables launches; unrelated stop remains available.
     if ((state.activeBinding?.sessionId === sessionId || state.transition?.successor?.sessionId === sessionId) && state.desired === "enabled") {
-      await this.setDesired("suspended", `stop:${randomUUID()}`);
+      await this.setDesired("suspended", `stop:${randomUUID()}`, sessionId);
     }
   }
 
@@ -144,7 +151,7 @@ export class StrigoiLifecycle {
     const binding = await this.options.bindings.findBySessionId(sessionId);
     if (binding !== undefined && binding.kind !== "resident") return;
     // Unbound ordinary workers have no resident lifecycle. Corruption must not strand them.
-    if ((await this.options.repository.retentionPins()).has(sessionId)) throw failure("STRIGOI_RESUME_REQUIRES_LIFECYCLE");
+    if ((await this.options.repository.retentionPins()).has(sessionId)) throw Object.assign(new Error("STRIGOI_RESUME_REQUIRES_LIFECYCLE: use cyberdeck strigoi resume; retained incarnations cannot resume in place"), { code: "STRIGOI_RESUME_REQUIRES_LIFECYCLE" });
   }
 
   /** Shared runtime fencing after ordinary reconciliation or a drained terminal transition. */

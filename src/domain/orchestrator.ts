@@ -153,7 +153,7 @@ export const CreateOrchestratorRequestSchema = EnsureOrchestratorRequestSchema.e
 export const ResetOrchestratorRequestSchema = EnsureOrchestratorRequestSchema.pick({
   cwd: true,
   scope: true,
-});
+}).extend({ sessionId: z.uuid().optional() });
 
 /**
  * One operator toggle of one durable delegation grant on one scope's binding. `enabled` absent

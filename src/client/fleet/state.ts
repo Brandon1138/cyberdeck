@@ -42,6 +42,7 @@ export interface FleetSignals {
 }
 
 export interface FleetThread {
+  strigoi?: import("../../domain/strigoi.js").StrigoiFleetView;
   nativeAgent?: import("../../domain/fleet-projection.js").FleetProjectionSnapshot["threads"][number]["nativeAgent"];
   record: SessionRecord;
   /** Current shared broker truth; absent when connected to a legacy broker. */
@@ -211,6 +212,9 @@ export interface ShellModeState {
 export type FleetNoticeTone = "neutral" | "warning" | "error" | "confirmation";
 
 export interface FleetState {
+  /** Logical composer retry identity survives a transport ambiguity. */
+  strigoiDraft?: { message: string; messageId: string } | undefined;
+  residentFocusSessionId?: string | undefined;
   projectFilter?: string | undefined;
   selectedSessionId?: string | undefined;
   /** First rendered row in the independently scrolling thread-list body. */
@@ -292,6 +296,8 @@ export interface FleetState {
 export type FleetAction =
   | { type: "stop"; sessionId: string; }
   | { type: "delete"; sessionId: string; }
+  | { type: "strigoi"; operation: "status" | "renew" | "suspend" | "resume"; mutationId: string }
+  | { type: "strigoi-submit"; message: string; messageId: string }
   | { type: "attach"; sessionId: string; }
   | { type: "resume"; sessionId: string; }
   | {

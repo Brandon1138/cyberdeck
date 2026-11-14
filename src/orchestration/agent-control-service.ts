@@ -567,6 +567,7 @@ export class AgentControlService {
         });
       }
       if (target.exitCode !== null) {
+        if ((await this.orchestrators.findBySessionId(target.id))?.kind === "resident") await this.registry.stop(target.id);
         return finish({
           ...inspection,
           outcome: "ALREADY_TERMINAL",
@@ -633,6 +634,7 @@ export class AgentControlService {
         });
       }
       if (current.exitCode !== null) {
+        if ((await this.orchestrators.findBySessionId(current.id))?.kind === "resident") await this.registry.stop(current.id);
         return finish({
           ...currentInspection,
           outcome: "ALREADY_TERMINAL",
@@ -662,7 +664,7 @@ export class AgentControlService {
       }
 
       this.requireCapability((await this.requireActiveBinding(request.actorSessionId)).grant, "orchestrator.stop", current);
-      if (mode === "force") this.registry.forceStop(current.id);
+      if (mode === "force") await this.registry.forceStop(current.id);
       else await this.registry.stop(current.id);
       const stopped = this.registry.get(target.id);
       return finish({

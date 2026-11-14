@@ -11,19 +11,22 @@ export interface StrigoiContinuityOptions {
 /** Records evidence, never drives model turns or changes controller/notification authority. */
 export class StrigoiContinuity {
   constructor(private readonly options: StrigoiContinuityOptions) {}
-  async checkpoint(identity: StrigoiIdentity, prose: string, sourceRefs: StrigoiSourceRef[], mutationId: string): Promise<StrigoiPacketRef> {
+  async checkpoint(identity: StrigoiIdentity, prose: string, sourceRefs: StrigoiSourceRef[], mutationId: string, authorize?: () => Promise<void>): Promise<StrigoiPacketRef> {
     const refs = sourceRefs.map((ref) => StrigoiSourceRefSchema.parse(ref));
     return this.options.admission.run(identity.sessionId, "mutate", async () => {
       const initial = await this.options.repository.read(); this.validateIdentity(initial, identity);
+      await authorize?.();
       const requestHash = hash({ identity, prose, refs });
       const prior = this.replay(initial, mutationId, requestHash);
       if (prior) return this.run(identity, "mutate", async (state) => {
+        await authorize?.();
         const receipt = this.replay(state, mutationId, requestHash)!;
         await this.options.repository.confirmMutation(mutationId); return receipt.packet;
       });
       // Native/transcript queues can acquire authority. Never wait for them while holding it.
       const sources = await this.options.sources.capture(initial);
       return this.run(identity, "mutate", async (state) => {
+        await authorize?.();
         const previous = this.replay(state, mutationId, requestHash);
         if (previous) { await this.options.repository.confirmMutation(mutationId); return previous.packet; }
         for (const ref of refs) {
@@ -38,14 +41,15 @@ export class StrigoiContinuity {
       });
     });
   }
-  read(identity: StrigoiIdentity, packet: StrigoiPacketRef, cursor?: string) {
+  read(identity: StrigoiIdentity, packet: StrigoiPacketRef, cursor?: string, authorize?: () => Promise<void>) {
     return this.run(identity, "read", async (state) => {
-      this.knownPacket(state, packet); return this.options.packets.read(packet, cursor);
+      await authorize?.(); this.knownPacket(state, packet); return this.options.packets.read(packet, cursor);
     });
   }
-  async acknowledge(input: StrigoiAdoption, mutationId: string): Promise<void> {
+  async acknowledge(input: StrigoiAdoption, mutationId: string, authorize?: () => Promise<void>): Promise<void> {
     const adoption = StrigoiAdoptionSchema.parse(input);
     return this.run(adoption.identity, "recovery", async (state) => {
+      await authorize?.();
       const requestHash = hash(adoption);
       if (this.replay(state, mutationId, requestHash)) { await this.options.repository.confirmMutation(mutationId); return; }
       const packet = [state.latestPacket, state.transition?.packet, ...state.continuityReceipts?.map((r) => r.packet) ?? []]

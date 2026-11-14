@@ -95,13 +95,19 @@ export class SessionLifecycleController {
   }
 
   /** Force only one already-stopping session. Child sessions are deliberately untouched. */
-  forceStop(sessionId: string): void {
+  async forceStop(sessionId: string): Promise<void> {
     const runtime = this.catalog.requireRuntime(sessionId);
-    if (runtime.terminalFinalizing === true) return;
-    if (runtime.record.exitCode !== null) return;
+    if (runtime.terminalFinalizing === true || runtime.record.exitCode !== null) {
+      if (!this.shuttingDown) await this.catalog.options.residentLifecycle?.beforeStop(sessionId);
+      return;
+    }
     if (!runtime.stopRequested) {
       throw new RegistryError("SESSION_NOT_ACTIVE", "Graceful stop must be requested before force");
     }
+    const generation = runtime.record.generation;
+    if (!this.shuttingDown && this.catalog.options.residentLifecycle) await this.catalog.options.residentLifecycle.beforeStop(sessionId);
+    if (runtime.terminalFinalizing || runtime.record.exitCode !== null) return;
+    if (runtime.record.generation !== generation || !runtime.stopRequested) throw new RegistryError("SESSION_NOT_ACTIVE", "Stop target changed during lifecycle fencing");
     requireSessionRuntime(runtime).kill("SIGKILL");
   }
 

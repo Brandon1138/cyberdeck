@@ -51,10 +51,11 @@ export class StrigoiSuccession {
   private save(state: StrigoiState, patch: Partial<StrigoiState>) {
     return this.write(state, patch, `succession:${state.transition!.id}:${state.revision + 1}`);
   }
-  async renew(expectedIncarnation: number, reason: string, mutationId: string): Promise<StrigoiTransition> {
+  async renew(expectedIncarnation: number, reason: string, mutationId: string, authorize?: () => Promise<void>): Promise<StrigoiTransition> {
     if (!mutationId.trim() || !reason.trim()) throw fault("STRIGOI_INVALID_MUTATION");
     return this.authority(async () => {
       const state = await this.o.repository.read();
+      await authorize?.();
       const prior = state.successionRequests?.find((r) => r.mutationId === mutationId);
       if (prior) {
         if (prior.expectedIncarnation !== expectedIncarnation || prior.reason !== reason) throw fault("STRIGOI_MUTATION_CONFLICT");

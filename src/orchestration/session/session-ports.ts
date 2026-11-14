@@ -61,7 +61,7 @@ export interface SessionProcessControlPort {
   isStopRequested(sessionId: string): boolean;
   stopRequestedAt(sessionId: string): string | undefined;
   stop(sessionId: string): Promise<void>;
-  forceStop(sessionId: string): void;
+  forceStop(sessionId: string): void | Promise<void>;
   /**
    * Press one enumerated answer at the worker's blocking provider prompt. The implementation
    * resolves the answer through the domain's static key table only — there is no byte payload in

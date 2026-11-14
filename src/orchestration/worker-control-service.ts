@@ -1,3 +1,4 @@
+import { refuseResidentWorkerControl } from "./strigoi-control.js";
 import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
 import { recoverResidentWorkers } from "./worker-resident-recovery.js";
 import { compactEvent } from "./worker-event-projection.js";
@@ -382,6 +383,7 @@ export class WorkerControlService {
     return admitted(this.options.strigoi, request.actorSessionId, async () => {
       return this.exclusive(async () => {
         const { binding, controller } = await this.requireController(request.actorSessionId);
+        await refuseResidentWorkerControl(this.sessionRecord(request.workerId), this.options.orchestrators);
         const subject = await this.reconcileSessionLifecycle(request.workerId);
         if (subject === undefined) {
           return {
@@ -896,7 +898,7 @@ export class WorkerControlService {
           escalation: "Retry force after the grace period",
         };
       }
-      this.options.registry.forceStop(request.workerId);
+      await this.options.registry.forceStop(request.workerId);
     } else {
       await this.options.registry.stop(request.workerId);
     }

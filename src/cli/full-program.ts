@@ -1,3 +1,5 @@
+import { watchStrigoi } from "../client/strigoi-watch.js";
+import { registerStrigoiCommands } from "./strigoi.js";
 import { registerActivityCommands } from "./activity.js";
 import { Command } from "commander";
 import { spawnSync as processSpawnSync } from "node:child_process";
@@ -107,6 +109,8 @@ export function createProgram(options: CreateProgramOptions = {}) {
     .action(runDefault);
 
   const context: CliProgramContext = {
+    strigoiWatch: options.strigoiWatch ?? (() => withClient(client => watchStrigoi(client))),
+    strigoi: options.strigoi ?? ((method, params) => withClient(client => client.request(`strigoi.${method}`, params))),
     runDefault,
     restartBroker,
     runCockpitPreflight,
@@ -131,6 +135,7 @@ export function createProgram(options: CreateProgramOptions = {}) {
     toolkit,
     fleetRuntimeDeps,
   };
+  registerStrigoiCommands(program, context);
   registerActivityCommands(program);
   registerBrokerCommands(program, context);
   registerNvimLayoutCommands(program, context);

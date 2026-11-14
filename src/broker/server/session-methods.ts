@@ -133,6 +133,11 @@ export const sessionMethods: Record<string, BrokerMethodHandler> = {
       if (record.kind === "orchestrator") {
         await server.options.orchestrators?.resetSessionBinding(sessionId);
       }
+    }).catch((error: unknown) => {
+      if (error instanceof Error && error.message.startsWith("STRIGOI_EVIDENCE_REFERENCED")) {
+        throw Object.assign(new Error("STRIGOI_EVIDENCE_REFERENCED: this thread is retained for resident continuity; use strigoi suspend or disable without deleting history"), { code: "STRIGOI_EVIDENCE_REFERENCED" });
+      }
+      throw error;
     });
     return { deleted: true };
   },

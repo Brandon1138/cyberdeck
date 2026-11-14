@@ -96,3 +96,14 @@ export type StrigoiPacketRef = z.infer<typeof StrigoiPacketRefSchema>;
 export type StrigoiHold = z.infer<typeof StrigoiHoldSchema>;
 export type StrigoiTransition = z.infer<typeof StrigoiTransitionSchema>;
 export type StrigoiState = z.infer<typeof StrigoiStateSchema>;
+
+/** Derived operator display data, never a launch, grant or delivery authority. */
+export interface StrigoiFleetView {
+  canonical: boolean;
+  incarnation?: number;
+  desired: StrigoiDesired;
+  readiness: "passive" | "held" | "unconfigured" | "ready";
+  adoption: "not-required" | "pending" | "acknowledged";
+  hold?: StrigoiHold;
+  continuationHolds: StrigoiHold[];
+}
