@@ -1,3 +1,4 @@
+import { deferred } from "./strigoi-admission-fixture.js";
 import { describe, expect, it, vi } from "vitest";
 import { describeBlockedModal } from "../../src/domain/modal-descriptor.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
@@ -55,6 +56,23 @@ describe("orchestrator startup modal answers", () => {
     expect(h.append.mock.calls.map(([event]) => event.type)).toEqual(["orchestrator.modal_answer.requested", "orchestrator.modal_answer.result"]);
     expect(h.append.mock.calls[0]![0].data).toMatchObject({ actorSessionId: ACTOR, targetSessionId: TARGET, answer: "trust" });
   });
+  it.each(["revoked", "unbound-target", "terminal-target", "changed-cwd", "inactive-actor"] as const)(
+    "never presses after %s during the requested audit", async (change) => {
+      const h = harness(), entered = deferred(), finish = deferred();
+      h.append.mockImplementationOnce(async () => { entered.resolve(); await finish.promise; });
+      const pending = answerOrchestratorModal(h.input, h.deps);
+      await entered.promise;
+      if (change === "revoked") h.findBySessionId.mockImplementation(async (id) => id === ACTOR
+        ? { ...binding, grant: { ...binding.grant, capabilities: [] } } : { ...binding, sessionId: TARGET });
+      else if (change === "unbound-target") h.findBySessionId.mockImplementation(async (id) => id === ACTOR ? binding : undefined as never);
+      else if (change === "terminal-target") h.records.get(TARGET)!.executionState = "exited";
+      else if (change === "changed-cwd") h.records.get(TARGET)!.cwd = "/different";
+      else h.records.get(ACTOR)!.executionState = "exited";
+      finish.resolve();
+      await expect(pending).resolves.toMatchObject({ code: "DENIED" });
+      expect(h.press).not.toHaveBeenCalled();
+    },
+  );
   it("denies an ungranted repository before any press", async () => {
     const h = harness(false);
     expect(await answerOrchestratorModal(h.input, h.deps)).toMatchObject({ code: "MODAL_POLICY_DENIED" });

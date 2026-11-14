@@ -25,4 +25,3 @@ export function fixture() {
     message: "hello", status: "accepted", createdAt: at, updatedAt: at, hop: 0 } as InstructionRecord;
   return { admission, repository, bindings, registry, record, state: () => state, set: (next: StrigoiState) => { state = next; } };
 }
-

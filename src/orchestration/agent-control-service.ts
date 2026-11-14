@@ -1,3 +1,4 @@
+import type { LaunchAdmission } from "./session/session-ports.js";
 import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
 import { statusRecord, boundedRecord } from "./agent-thread-projection.js";
 import { ThreadPageOptionsSchema, type ThreadPageOptions } from "../domain/thread.js";
@@ -817,51 +818,53 @@ export class AgentControlService {
       name,
     };
     let worker: SessionRecord;
-    return admitted(this.strigoi, request.actorSessionId, async () => {
+    const admission: LaunchAdmission = (apply) => admitted(this.strigoi, request.actorSessionId, async () => {
       const binding = await this.requireBinding(request.actorSessionId);
       this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
       if (isFableModel(request.model)) this.requireCapability(binding.grant, "worker.start.fable", { cwd: request.cwd });
-      if (request.budget === undefined) {
-        worker = await this.registry.start(startRequest, request.prompt);
-      } else {
-        const workerBudgets = this.workerBudgets!;
-        const controller = orchestratorController(binding);
-        let activatedWorkerId: string | undefined;
-        try {
-          worker = await this.registry.start(
-            startRequest,
-            request.prompt,
-            async (record) => {
-              await workerBudgets.register({
-                record,
-                name,
-                declaration: request.budget!,
-                controller,
-              });
-              activatedWorkerId = record.id;
-            },
-          );
-        } catch (error) {
-          if (activatedWorkerId !== undefined) {
-            await workerBudgets.markLaunchFailed?.({
-              workerId: activatedWorkerId,
-              reason: error instanceof Error ? error.message : String(error),
-            });
-          }
-          throw error;
-        }
-      }
-      const warnings = plan.value.shortfalls.map((shortfall) => shortfall.message);
-      return {
-        sessionId: worker.id,
-        name,
-        provider: worker.provider,
-        ...(worker.model === undefined ? {} : { model: worker.model }),
-        ...(worker.effort === undefined ? {} : { effort: worker.effort }),
-        ...(warnings.length === 0 ? {} : { warnings }),
-        completionTarget: 1,
-      };
+      return apply();
     });
+    await admission(async () => undefined);
+    if (request.budget === undefined) {
+      worker = await this.registry.start(startRequest, request.prompt, undefined, undefined, admission);
+    } else {
+      const workerBudgets = this.workerBudgets!;
+      let activatedWorkerId: string | undefined;
+      try {
+        worker = await this.registry.start(
+          startRequest,
+          request.prompt,
+          async (record) => {
+            await workerBudgets.register({
+              record,
+              name,
+              declaration: request.budget!,
+              controller: orchestratorController(await this.requireBinding(request.actorSessionId)),
+            });
+            activatedWorkerId = record.id;
+          },
+          undefined, admission,
+        );
+      } catch (error) {
+        if (activatedWorkerId !== undefined) {
+          await workerBudgets.markLaunchFailed?.({
+            workerId: activatedWorkerId,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+        throw error;
+      }
+    }
+    const warnings = plan.value.shortfalls.map((shortfall) => shortfall.message);
+    return {
+      sessionId: worker.id,
+      name,
+      provider: worker.provider,
+      ...(worker.model === undefined ? {} : { model: worker.model }),
+      ...(worker.effort === undefined ? {} : { effort: worker.effort }),
+      ...(warnings.length === 0 ? {} : { warnings }),
+      completionTarget: 1,
+    };
   }
 
   private async startScout(request: {
@@ -892,26 +895,28 @@ export class AgentControlService {
     }
     const name = request.name ?? taskName(request.brief.objective);
     const leasePolicy = request.leasePolicy ?? "expire-and-discard";
-    const worker = await admitted(this.strigoi, request.actorSessionId, async () => {
+    const admission: LaunchAdmission = (apply) => admitted(this.strigoi, request.actorSessionId, async () => {
       const binding = await this.requireBinding(request.actorSessionId);
       this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
-      return this.registry.start({
-        provider: "cursor",
-        model: "composer",
-        approvalMode: "auto",
-        cwd: request.cwd,
-        detached: true,
-        sandbox: "read-only",
-        parentSessionId: request.actorSessionId,
-        kind: "worker",
-        role: "worker",
-        workerMode: "normal",
-        profile: "scout",
-        brief: request.brief,
-        leasePolicy,
-        name,
-      }, scoutDispatchPrompt(request.brief));
+      return apply();
     });
+    await admission(async () => undefined);
+    const worker = await this.registry.start({
+      provider: "cursor",
+      model: "composer",
+      approvalMode: "auto",
+      cwd: request.cwd,
+      detached: true,
+      sandbox: "read-only",
+      parentSessionId: request.actorSessionId,
+      kind: "worker",
+      role: "worker",
+      workerMode: "normal",
+      profile: "scout",
+      brief: request.brief,
+      leasePolicy,
+      name,
+    }, scoutDispatchPrompt(request.brief), undefined, undefined, admission);
     return {
       sessionId: worker.id,
       name,

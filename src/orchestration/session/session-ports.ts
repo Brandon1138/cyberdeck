@@ -21,12 +21,16 @@ export interface SessionLookupPort {
   get(sessionId: string): SessionRecord;
 }
 
+/** Internal only: admit activation/spawn after preparation, never initialization waits. */
+export type LaunchAdmission = <T>(apply: () => Promise<T>) => Promise<T>;
+
 export interface SessionStartPort {
   start(
     request: StartSessionRequest,
     initialPrompt?: string,
     activate?: (record: SessionRecord) => Promise<void>,
     initialInstructionId?: string,
+    admission?: LaunchAdmission,
   ): Promise<SessionRecord>;
 }
 

@@ -1,3 +1,4 @@
+import type { LaunchAdmission } from "../orchestration/session/session-ports.js";
 import type { ModalAnswerAttempt } from "../domain/modal-descriptor.js";
 import type { InstructionAdmission } from "../domain/instruction.js";
 import type { ResolvedLaunchRecord, SessionRecord, StartSessionRequest } from "../domain/session.js";
@@ -164,8 +165,9 @@ export class SessionRegistry {
     initialPrompt?: string,
     activate?: (record: SessionRecord) => Promise<void>,
     initialInstructionId?: string,
+    admission?: LaunchAdmission,
   ): Promise<SessionRecord> {
-    return this.launch.start(request, initialPrompt, activate, initialInstructionId);
+    return this.launch.start(request, initialPrompt, activate, initialInstructionId, admission);
   }
 
   list(): SessionRecord[] {

@@ -18,7 +18,7 @@ import {
   type ProviderId,
   type SessionRecord,
 } from "../domain/session.js";
-import type { OrchestratorManagerResult, PeerStartupInstruction } from "./orchestrator-manager.js";
+import type { OrchestratorManagerResult, PeerStartupInstruction, PeerLaunchAdmission } from "./orchestrator-manager.js";
 import type { OrchestratorBindingReader } from "./persistence-ports.js";
 import type { SessionLookupPort } from "./session/session-ports.js";
 
@@ -100,7 +100,7 @@ export interface OrchestratorPeerServiceDeps {
   registry: SessionLookupPort;
   bindings: OrchestratorBindingReader & { list(): Promise<OrchestratorBinding[]> };
   manager: {
-    createPeer(input: CreatePeerOrchestratorRequest, startup?: PeerStartupInstruction): Promise<OrchestratorManagerResult>;
+    createPeer(input: CreatePeerOrchestratorRequest, startup?: PeerStartupInstruction, admission?: PeerLaunchAdmission): Promise<OrchestratorManagerResult>;
   };
   instructions?: {
     prepareLaunch(input: { actorSessionId: string; target: SessionRecord; message: string; instructionId: string; native?: boolean }): Promise<InstructionRecord>;
@@ -137,11 +137,12 @@ export class OrchestratorPeerService {
   async create(input: AgentCreateOrchestratorParams): Promise<OrchestratorCreateResult> {
     const request = AgentCreateOrchestratorParamsSchema.parse(input);
     const previous = this.inFlight.get(request.actorSessionId) ?? Promise.resolve();
-    const run = previous.catch(() => undefined).then(() => admitted(this.deps.strigoi, request.actorSessionId, async () => {
+    const run = previous.catch(() => undefined).then(async () => {
+      await admitted(this.deps.strigoi, request.actorSessionId, async () => undefined);
       const replayed = await this.replay(request);
       if (replayed !== undefined) return replayed;
       return this.decide(request);
-    }));
+    });
     this.inFlight.set(request.actorSessionId, run);
     try {
       return await run;
@@ -272,7 +273,12 @@ export class OrchestratorPeerService {
           ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
         },
         capabilities,
-      }, ...(startup === undefined ? [] : [startup]));
+      }, startup, (apply) => admitted(this.deps.strigoi, actor, async () => {
+        const refusal = await this.admission(request);
+        if (refusal !== undefined) throw Object.assign(new Error(refusal.reason), { code: refusal.code ?? refusal.outcome });
+        const current = (await this.deps.bindings.findBySessionId(actor))!;
+        return apply(peerGrantCapabilities(current.grant.capabilities));
+      }));
     } catch (error) {
       if (preparedBrief !== undefined) await this.deps.instructions!.flush(preparedBrief.targetSessionId).catch(() => undefined);
       const code = error instanceof Error && "code" in error && typeof error.code === "string"
@@ -335,7 +341,7 @@ export class OrchestratorPeerService {
   }
 
   /** Every refusal that needs no launch, in the order a caller would want to hear about them. */
-  private async admission(request: ParsedCreate): Promise<OrchestratorCreateResult | undefined> {
+  private async admission(request: ParsedCreate): Promise<Exclude<OrchestratorCreateResult, { outcome: "CREATED" }> | undefined> {
     const actor = request.actorSessionId;
     const binding = await this.deps.bindings.findBySessionId(actor);
     if (binding === undefined) {

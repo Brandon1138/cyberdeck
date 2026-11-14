@@ -172,7 +172,7 @@ describe("OrchestratorManager", () => {
       orchestratorScope: "workspace",
       effort: "high",
       providerInstructions: expect.stringContaining("Cyberdeck orchestrator"),
-    }), undefined, expect.any(Function));
+    }), undefined, expect.any(Function), undefined, undefined);
     const startedRequest = start.mock.calls[0]![0] as { providerInstructions: string };
     const instructions = startedRequest.providerInstructions;
     expect(instructions).toContain("cyberdeck_provider_capabilities");
@@ -187,8 +187,8 @@ describe("OrchestratorManager", () => {
     expect(instructions).toContain("Never call cyberdeck_notifications_read on a timer");
     expect(instructions).toContain("cyberdeck_workers_wait remains the deliberate synchronous join");
     expect(instructions).toContain("never reread from cursor zero");
-    // Request, no initial prompt, and the activation the grant is written from.
-    expect(start.mock.calls[0]).toHaveLength(3);
+    // Request, no initial prompt, activation, and absent instruction/admission options.
+    expect(start.mock.calls[0]).toHaveLength(5);
     expect(start.mock.calls[0]![1]).toBeUndefined();
     expect(start.mock.calls[0]![0]).not.toHaveProperty("approvalMode");
     expect(put).toHaveBeenCalledOnce();
@@ -233,7 +233,7 @@ describe("OrchestratorManager", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       provider: "claude",
       approvalMode: "auto",
-    }), undefined, expect.any(Function));
+    }), undefined, expect.any(Function), undefined, undefined);
     expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "auto"]));
     expect(launchArgs).not.toContain("plan");
     expect(launchArgs).not.toContain("--dangerously-skip-permissions");
@@ -312,7 +312,7 @@ describe("OrchestratorManager", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       provider: "claude",
       approvalMode: "prompt",
-    }), undefined, expect.any(Function));
+    }), undefined, expect.any(Function), undefined, undefined);
   });
 
   it("keeps an explicit prompt mode ahead of persisted automatic permission policy", async () => {
@@ -349,7 +349,7 @@ describe("OrchestratorManager", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       provider: "claude",
       approvalMode: "prompt",
-    }), undefined, expect.any(Function));
+    }), undefined, expect.any(Function), undefined, undefined);
     expect(launchArgs).toEqual(expect.arrayContaining(["--permission-mode", "manual"]));
   });
 
@@ -622,7 +622,7 @@ describe("OrchestratorManager", () => {
         cwd: "/repo/two",
         name: "codex successor",
         providerInstructions: expect.stringContaining("Before every cyberdeck_orchestrator_create, ask the operator in your current conversation and wait for an express yes."),
-      }), undefined, expect.any(Function));
+      }), undefined, expect.any(Function), undefined, undefined);
       const prompt = (start.mock.calls[0]![0] as { providerInstructions: string }).providerInstructions;
       expect(prompt).toContain("your grant unchanged");
       expect(prompt).toContain("cyberdeck_thread_message reaches a peer you created");
@@ -852,7 +852,7 @@ describe("OrchestratorManager", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       cwd: "/repo/one",
       orchestratorScope: "fleet",
-    }), undefined, expect.any(Function));
+    }), undefined, expect.any(Function), undefined, undefined);
   });
 
   it("always creates a separately bound peer without consulting or replacing the primary binding", async () => {

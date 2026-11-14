@@ -1017,6 +1017,7 @@ export class WorkerControlService {
         detail: "The dialog changed since this fingerprint was read; decide again from the current descriptor",
       };
     }
+    const policyTarget = { cwd: record.cwd, generation: record.generation };
     const policy = this.options.modalPolicy;
     const decision = policy === undefined
       ? { allowed: false, reason: "This broker has no modal answer policy configured" }
@@ -1024,6 +1025,28 @@ export class WorkerControlService {
     if (!decision.allowed) {
       return { ...base, code: "MODAL_POLICY_DENIED", modal: descriptor, detail: decision.reason };
     }
+    const current = await this.requireController(request.actorSessionId);
+    const latest = this.options.coordination.getSubject(request.workerId);
+    const target = this.sessionRecord(request.workerId);
+    if (latest === undefined || target === undefined || target.cwd !== policyTarget.cwd
+      || target.executionState !== "active" || target.exitCode !== null
+      || target.generation !== policyTarget.generation || !this.inGrant(latest, current.binding.grant, "thread.enqueue")) {
+      return { ...base, code: "DENIED", detail: "Worker or input grant changed during modal policy checks" };
+    }
+    const authority = await this.authorize(latest, current.controller, request.reason, request.action);
+    if (authority.rejection !== undefined) return { ...base, ...authority.rejection };
+    const final = await this.requireController(request.actorSessionId);
+    const held = this.options.coordination.getSubject(request.workerId);
+    if (held?.lease.version !== latest.lease.version || held.lease.controller?.controllerId !== final.controller.controllerId) {
+      return { ...base, code: "OWNERSHIP_LOST", detail: "Worker lease changed during modal authorization" };
+    }
+    const finalTarget = this.sessionRecord(request.workerId);
+    if (finalTarget === undefined || finalTarget.cwd !== policyTarget.cwd || finalTarget.generation !== policyTarget.generation
+      || finalTarget.executionState !== "active" || finalTarget.exitCode !== null
+      || !this.inGrant(held, final.binding.grant, "thread.enqueue")) {
+      return { ...base, code: "DENIED", detail: "Input grant changed during modal authorization" };
+    }
+    controller = final.controller;
     let attempt;
     try {
       attempt = await this.options.registry.answerWorkerModal(

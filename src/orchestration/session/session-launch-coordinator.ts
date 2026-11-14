@@ -1,3 +1,4 @@
+import type { LaunchAdmission } from "./session-ports.js";
 import { resolveWorkerExecution } from "../../domain/worker-execution.js";
 import { randomUUID } from "node:crypto";
 import { evaluateStart } from "../../domain/policy.js";
@@ -75,6 +76,7 @@ export class SessionLaunchCoordinator {
     initialPrompt?: string,
     activate?: (record: SessionRecord) => Promise<void>,
     initialInstructionId?: string,
+    admission?: LaunchAdmission,
   ): Promise<SessionRecord> {
     const validated = StartSessionRequestSchema.parse(request);
     const execution = resolveWorkerExecution(validated, this.catalog.options.config.workerExecution);
@@ -202,17 +204,15 @@ export class SessionLaunchCoordinator {
           ? undefined
           : preparedInitialPrompt,
       );
-      // A provider whose launch arguments carry the prompt takes its first model turn the moment
-      // it spawns, so whatever the caller must make durable — a worker's budget above all — gets
-      // its chance before any provider process exists, not merely before initialization.
-      await activate?.(cloneRecord(provisional));
-      // Keep the exact launch attempt discoverable if the broker dies immediately after spawn.
-      if (initialInstructionId !== undefined) await this.catalog.options.store?.put(cloneRecord(provisional));
       sessionRuntime = await this.assembly.spawnPreparedLaunch(
         adapter,
         provisional,
         launchSpec,
         async () => {
+          // Provider and executor preparation have finished. Binding/budget activation and
+          // the spawn share one permit; initialization below never holds it.
+          await activate?.(cloneRecord(provisional));
+          if (initialInstructionId !== undefined) await this.catalog.options.store?.put(cloneRecord(provisional));
           this.requireActiveParent(parsed.parentSessionId);
           if (initialPrompt !== undefined && !deferredInitialPrompt) {
             await this.catalog.options.transcripts?.append({
@@ -226,6 +226,7 @@ export class SessionLaunchCoordinator {
           this.requireActiveParent(parsed.parentSessionId);
         },
         (phase) => { scoutLaunchPhase = phase; },
+        admission,
       );
     } catch (error) {
       releaseReservation();

@@ -23,7 +23,9 @@ export class StrigoiAdmissionError extends Error {
  * never call admission while holding the canonical binding-authority transaction.
  * Repository reads release that transaction before apply. Lifecycle must close/drain
  * before committing cutover/suspension; durable desired/phase state also fences restart.
- * No inference or worker-result wait belongs inside run.
+ * Launch uses creator serializer -> discovery/provider/executor preparation (no permit)
+ * -> fresh permit and grants -> binding/budget activation and spawn. Provider initialization
+ * follows permit release. No inference or worker-result wait belongs inside run.
  *
  * Nested mutations inherit a live internal permit, including while freeze drains it.
  * Queue delivery is deferred until the outer permit releases; provider preflight has

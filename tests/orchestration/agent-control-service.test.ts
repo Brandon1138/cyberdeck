@@ -172,7 +172,7 @@ describe("AgentControlService", () => {
         allocation: { unit: "percent", amount: 20 },
       },
     })).resolves.toMatchObject({ sessionId: WORKER });
-    expect(start.mock.calls[0]).toHaveLength(3);
+    expect(start.mock.calls[0]).toHaveLength(5);
     expect(start.mock.calls[0]?.[0]).not.toHaveProperty("budget");
     expect(register).toHaveBeenCalledWith({
       record: expect.objectContaining({ id: WORKER, parentSessionId: ACTOR }),
@@ -334,7 +334,7 @@ describe("AgentControlService", () => {
       cwd: "/repo/two",
       prompt: "Inspect the sibling repository",
     })).resolves.toMatchObject({ sessionId: WORKER });
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/repo/two" }), expect.any(String));
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/repo/two" }), expect.any(String), undefined, undefined, expect.any(Function));
   });
 
   it("starts an advertised worker with effort and returns only compact wait coordinates", async () => {
@@ -368,8 +368,8 @@ describe("AgentControlService", () => {
       effort: "low",
       completionTarget: 1,
     });
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({ effort: "low", executor: "orbstack-container", executionProfile: "ordinary" }), "Return 8 + 1000");
-    expect(start.mock.calls[0]).toHaveLength(2);
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ effort: "low", executor: "orbstack-container", executionProfile: "ordinary" }), "Return 8 + 1000", undefined, undefined, expect.any(Function));
+    expect(start.mock.calls[0]).toHaveLength(5);
   });
 
   it("tells an automatic Codex worker that its MCP calls will still stop at an approval prompt", async () => {
@@ -413,8 +413,7 @@ describe("AgentControlService", () => {
     expect(result.warnings?.join("\n")).toContain("plan");
     expect(start).toHaveBeenCalledWith(
       expect.objectContaining({ sandbox: "read-only", approvalMode: "auto" }),
-      "Inspect",
-    );
+      "Inspect", undefined, undefined, expect.any(Function));
   });
 
   it("does not warn when the provider delivers everything the request asked for", async () => {
@@ -605,7 +604,7 @@ describe("AgentControlService", () => {
       profile: "scout",
       leasePolicy: "expire-and-discard",
       workerMode: "normal",
-    }), expect.stringContaining("CYBERDECK_SCOUT_CARD_BEGIN"));
+    }), expect.stringContaining("CYBERDECK_SCOUT_CARD_BEGIN"), undefined, undefined, expect.any(Function));
   });
 
   it("rejects incomplete Scout briefs before launch", () => {
@@ -776,7 +775,7 @@ describe("AgentControlService", () => {
       approvalMode: "auto",
       prompt: "Implement the focused fix",
     });
-    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ approvalMode: "auto" }), expect.any(String));
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ approvalMode: "auto" }), expect.any(String), undefined, undefined, expect.any(Function));
 
     await service.startWorker({
       actorSessionId: ACTOR,
@@ -848,7 +847,7 @@ describe("AgentControlService", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       provider: "cursor",
       approvalMode: "auto",
-    }), "Open the pull request");
+    }), "Open the pull request", undefined, undefined, expect.any(Function));
   });
 
   it("snapshots an enabled Caveman preference into newly started workers", async () => {
@@ -871,7 +870,7 @@ describe("AgentControlService", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       kind: "worker",
       workerMode: "caveman",
-    }), "Inspect");
+    }), "Inspect", undefined, undefined, expect.any(Function));
   });
 
   it("lets a per-spawn workerMode opt an orchestrator spawn out of an enabled Caveman preference (MIK-79)", async () => {
@@ -895,7 +894,7 @@ describe("AgentControlService", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       kind: "worker",
       workerMode: "normal",
-    }), "Inspect");
+    }), "Inspect", undefined, undefined, expect.any(Function));
   });
 
   it("denies Fable workers until the operator grant is enabled", async () => {
@@ -952,7 +951,7 @@ describe("AgentControlService", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       parentSessionId: ACTOR,
       model: "fable",
-    }), "Review the architecture");
+    }), "Review the architecture", undefined, undefined, expect.any(Function));
   });
 
   // MIK-96: the binding here is the one `ensure` writes for a brand-new orchestrator — no operator

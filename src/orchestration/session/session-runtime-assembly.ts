@@ -1,3 +1,4 @@
+import type { LaunchAdmission } from "./session-ports.js";
 import type { SessionRuntime } from "../../domain/session-runtime.js";
 import type { SessionRecord } from "../../domain/session.js";
 import type { ScoutRuntimeState } from "../../domain/worker-profile.js";
@@ -155,6 +156,7 @@ export class SessionRuntimeAssembly {
     spec: ProviderLaunchSpec,
     beforeSpawn?: () => Promise<void>,
     onPhase?: (phase: "prepare" | "spawn") => void,
+    admission?: LaunchAdmission,
   ): Promise<SessionRuntime> {
     try {
       onPhase?.("prepare");
@@ -162,13 +164,15 @@ export class SessionRuntimeAssembly {
         throw new Error("EXECUTOR_UNAVAILABLE");
       }
       if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
-      await beforeSpawn?.();
+      const activate: LaunchAdmission = (spawn) => {
+        const apply = async () => { await beforeSpawn?.(); onPhase?.("spawn"); return spawn(); };
+        return admission === undefined ? apply() : admission(apply);
+      };
       const replayBytes = this.catalog.replayBytesFor(record);
-      onPhase?.("spawn");
       if (record.kind !== "orchestrator" && this.catalog.options.executions !== undefined) {
-        return await this.catalog.options.executions.start(record, spec, replayBytes);
+        return await this.catalog.options.executions.start(record, spec, replayBytes, activate);
       }
-      return this.catalog.options.sessionRuntimeFactory(spec, replayBytes);
+      return await activate(async () => this.catalog.options.sessionRuntimeFactory(spec, replayBytes));
     } catch (error) {
       await this.cleanupLaunchArtifacts(record, "launch-failed");
       throw error;

@@ -35,4 +35,3 @@ function truncatePreview(preview: string): string {
     ? preview
     : `${preview.slice(0, THREAD_PREVIEW_CHARS - 1)}…`;
 }
-

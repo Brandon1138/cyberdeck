@@ -68,12 +68,16 @@ type BoundOrchestratorRequest = EnsureOrchestratorRequest & {
   provider: CreateOrchestratorRequest["provider"];
 };
 
+/** Internal activation callback; the service refreshes policy and the inherited grant here. */
+export type PeerLaunchAdmission = <T>(apply: (capabilities: readonly CyberdeckCapability[]) => Promise<T>) => Promise<T>;
+
 /** What a peer made by an orchestrator carries beyond Fleet's own `create`: lineage and a bounded grant. */
 interface PeerOrigin {
   createdBy: { sessionId: string };
   capabilities: readonly CyberdeckCapability[];
   name?: string;
   startup?: PeerStartupInstruction;
+  admission?: PeerLaunchAdmission;
 }
 
 export class OrchestratorManager {
@@ -144,11 +148,12 @@ export class OrchestratorManager {
    * instead of the full default list. Policy — who may ask, for what scope, how many — is the
    * peer service's; this only records what it decided.
    */
-  async createPeer(input: CreatePeerOrchestratorRequest, startup?: PeerStartupInstruction): Promise<OrchestratorManagerResult> {
+  async createPeer(input: CreatePeerOrchestratorRequest, startup?: PeerStartupInstruction, admission?: PeerLaunchAdmission): Promise<OrchestratorManagerResult> {
     const { createdBy, capabilities, name, ...request } = CreatePeerOrchestratorRequestSchema.parse(input);
     return this.createValidatedPeer(request, {
       createdBy,
       capabilities,
+      ...(admission === undefined ? {} : { admission }),
       ...(name === undefined ? {} : { name }),
       ...(startup === undefined ? {} : { startup }),
     });
@@ -173,18 +178,10 @@ export class OrchestratorManager {
   }
 
   /**
-   * The grant is written *during* the start, not after it.
-   *
-   * A provider with no system-prompt flag — Cursor — receives `providerInstructions` as the
-   * session's first message, and that turn runs inside `registry.start`. An orchestrator told what
-   * it is will reach for Cyberdeck's tools immediately, so a binding persisted after `start`
-   * returned would lose the race and the orchestrator's opening move would come back
-   * `ACTOR_NOT_AUTHORIZED`. Persisting from the activation step closes the window for every
-   * provider at once rather than special-casing the one that exposed it.
-   *
-   * `previous` is the binding this call is replacing, if any. A start that fails after the grant is
-   * durable would otherwise strand a binding pointing at a session that never lived, so the prior
-   * state is put back exactly as it was.
+   * Persist the binding at activation, after preparation and before the process can act.
+   * The internal admission callback refreshes the peer grant and encloses activation/spawn,
+   * while discovery and provider initialization stay outside it. If launch subsequently
+   * fails, restore exactly the previous binding rather than leave an unauthorized session.
    */
   private async createBound(
     request: BoundOrchestratorRequest,
@@ -193,7 +190,7 @@ export class OrchestratorManager {
     previous?: OrchestratorBinding,
     origin?: PeerOrigin,
   ): Promise<OrchestratorManagerResult> {
-    const capabilities = origin?.capabilities ?? ORCHESTRATOR_GRANT_CAPABILITIES;
+    let capabilities = origin?.capabilities ?? ORCHESTRATOR_GRANT_CAPABILITIES;
     const approvalMode = request.approvalMode
       ?? await this.configuredApprovalMode(request.provider)
       ?? (request.provider === "claude" ? "auto" : undefined);
@@ -253,7 +250,11 @@ export class OrchestratorManager {
         await this.store.put(binding);
         await this.observeBindingSession?.(binding, started);
         await origin?.startup?.prepare(started);
-      }, ...(origin?.startup === undefined || origin.startup.native === false ? [] : [origin.startup.id]));
+      }, origin?.startup?.native === false ? undefined : origin?.startup?.id,
+      origin?.admission === undefined ? undefined : (apply) => origin.admission!(async (current) => {
+        capabilities = current;
+        return apply();
+      }));
     } catch (error) {
       if (binding !== undefined) {
         try { await this.observeBindingSession?.(binding); }
