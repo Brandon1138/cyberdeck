@@ -1,28 +1,34 @@
 # Strigoi acceptance
 
-Source/fixture acceptance is separate from live qualification. The initial Task 10 source at
-`205912f` passed its independent scoped review and integrated checks. The subsequent whole-branch
-review found five issues; remediation and a journal-integrity follow-up are now implemented.
-Final whole-branch re-review is **source APPROVED with limits** at `64b1dfb`, with two
-nonblocking P3 retry findings recorded in [the review](strigoi-review.md). Fresh controller
-check/test/build passed: **311 files / 4,216 tests passed; 1 file / 27 tests skipped**.
-All 858 source/test/script/configuration hashes were unchanged across the run; the local
-commit advanced HEAD during testing without changing those bytes. No native provider
-acceptance has passed; human semantic grading has not run.
+At source `bdaaa757083e8d1d42299516d5f5c76ea7131b4b`, the approved isolated r06
+lifecycle observed the complete mechanics: 600,514 ms idle, no-checkpoint recovery,
+ordinary input and native worker-result delivery with attention state migration,
+three planned renewals,
+confirmed process exit with service reopen, and a matched ordinary-session baseline
+with six native replies. The physical resident high-water was one. All eight owned
+provider processes exited and the isolated daemon stopped. This is
+**MECHANICS OBSERVED; SEMANTICS UNQUALIFIED**, not full release qualification.
 
-The selected isolated configuration is Codex `gpt-6.1-sol`, effort `high`, with cwd
-`/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114`. After the first
-campaign exposed an older CLI on PATH, the operator approved pinning Codex 0.169.0
-and running full lifecycle qualification. Repository trust was subsequently approved
-and saved only in the fresh isolated test home. The trusted run observed the full
-600,749 ms idle interval with zero encoded prompts and zero canonical turns, then
-failed no-checkpoint recovery with `adoption-outcome-unresolved`. The native transcript
-contains a completed adoption response but lacks the required actor marker; production
-discovery reproduces `NATIVE_CONVERSATION_UNBOUND`. Both owned residents exited and
-the isolated daemon stopped. Normal conversation, worker/result/attention, three
-renewals, later recovery and the matched baseline remain NOT RUN. See
-[attempt evidence](strigoi-live-attempt.md). Complete upstream request counting and
-other live cases remain unqualified.
+Codex 0.169.0 used `gpt-6.1-sol/high` in the selected Strigoi worktree. All CI jobs
+passed at that source: macOS, Linux x64/arm64, five distro jobs, and WSL. Local
+check passed; the full suite had 4,233 passes, 27 skips and one ten-second timeout
+in the fsync-after-committed succession case. The complete affected file then
+passed all 60 tests unchanged; build passed. Original failure evidence is retained.
+Source snapshots matched across the full run.
+
+The independent whole-branch review remains **source APPROVED with limits** at
+`64b1dfb`; subsequent readiness fixes have controller review and regression/live
+evidence, without a new independent-review claim. Two nonblocking P3 retry findings
+remain in [the review](strigoi-review.md). Human grading of the seven semantic pairs,
+complete upstream request counting, passive controller-crash/native orphan cleanup,
+automatic attention-wake delivery, and production capacity remain unqualified.
+Attention was armed and migrated, but its final record has no wake receipt.
+Zero encoded prompts and canonical
+turns during idle do not establish zero upstream inference.
+
+See [native attempts](strigoi-live-attempt.md) and the
+[evidence manifest](strigoi-evidence-manifest.json) for provenance and historical
+failures. Private transcripts remain outside Git.
 
 The original measurement table below describes the pre-remediation source. Current packets use
 authenticated v2 page traversal and the archive appends incremental records. At 1,024 synthetic
@@ -126,7 +132,7 @@ No latency SLO was supplied and no correctness failure was found in this bounded
 no unrelated optimization or retention-policy change is included. Raw measurements and
 sample limitations are embedded in the evidence manifest.
 
-## Concrete isolated live runner (NOT RUN)
+## Concrete isolated live runner
 
 The runner composes the actual Task 7/8 participants before starting the queue. Its private
 native home owns daemon/config/transcripts/sockets; it creates no Fleet/nvim and never opens,
@@ -139,7 +145,7 @@ Cleanup stops owned sessions and invokes daemon stop with the isolated CODEX_HOM
 unsupported native cleanup is explicitly unqualified and evidence is retained.
 
 The selected model/cwd/effort are recorded above. The following reusable template still requires
-those exact arguments and explicit execution approval; it is **not authorized to execute live**. Choose a fresh suffix for every run; an existing directory is refused.
+those exact arguments and explicit execution approval; the r06 execution was explicitly approved for its exact isolated home. A different run requires its own applicable authorization. Choose a fresh suffix; an existing directory is refused.
 
 ```sh
 rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode lifecycle --state-directory /tmp/sg-operator-01 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only

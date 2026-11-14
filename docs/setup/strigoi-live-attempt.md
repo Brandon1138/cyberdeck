@@ -1,3 +1,48 @@
+# Current native lifecycle result — 2026-11-14
+
+At source `bdaaa757083e8d1d42299516d5f5c76ea7131b4b`, the approved isolated r06
+lifecycle observed the complete mechanics: 600,514 ms idle, no-checkpoint recovery,
+ordinary input and native worker-result delivery with attention state migration,
+three planned renewals,
+confirmed process exit with service reopen, and a matched ordinary-session baseline
+with six native replies. The physical resident high-water was one. All eight owned
+provider processes exited and the isolated daemon stopped. This is
+**MECHANICS OBSERVED; SEMANTICS UNQUALIFIED**, not full release qualification.
+
+Codex 0.169.0 used `gpt-6.1-sol/high` in the selected Strigoi worktree. All CI jobs
+passed at that source: macOS, Linux x64/arm64, five distro jobs, and WSL. Local
+check passed; the full suite had 4,233 passes, 27 skips and one ten-second timeout
+in the fsync-after-committed succession case. The complete affected file then
+passed all 60 tests unchanged; build passed. Original failure evidence is retained.
+Source snapshots matched across the full run.
+
+The independent whole-branch review remains **source APPROVED with limits** at
+`64b1dfb`; subsequent readiness fixes have controller review and regression/live
+evidence, without a new independent-review claim. Two nonblocking P3 retry findings
+remain in [the review](strigoi-review.md). Human grading of the seven semantic pairs,
+complete upstream request counting, passive controller-crash/native orphan cleanup,
+automatic attention-wake delivery, and production capacity remain unqualified.
+Attention was armed and migrated, but its final record has no wake receipt.
+Zero encoded prompts and canonical
+turns during idle do not establish zero upstream inference.
+
+See [native attempts](strigoi-live-attempt.md) and the
+[evidence manifest](strigoi-evidence-manifest.json) for provenance and historical
+failures. Private transcripts remain outside Git.
+
+The run started at `2026-11-14T18:16:24.464Z` and finished at `2026-11-14T18:53:12.259Z`.
+The matched baseline recorded six canonical native completions. Across the run,
+18 canonical completions were recorded; 17 calls passed through the observed
+input encoder (initial worker input uses launch construction). Neither count is
+an upstream inference-request count. Renewal adoption durations were approximately
+145, 303, and 356 seconds; they are observations, not a capacity guarantee.
+
+Private result: `/tmp/sg14r06/gate-result.json`.
+SHA-256: `481c5d51ea0fff3b5da5c669aba42749b054ff37dad5b97bb69ee82082fd5c2d`.
+
+The sections below preserve earlier failures and their remediation. Their pending
+or unresolved statements describe those historical attempts, not the current result.
+
 ## Started native work and the completion deadline
 
 At source `576c2f3`, full check/test/build passed (4,226 tests; 27 skips), all
