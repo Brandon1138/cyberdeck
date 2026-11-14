@@ -152,7 +152,7 @@ export class StrigoiLifecycle {
     let state = await this.options.repository.read();
     if (this.disposed) return;
     if (state.hold?.code === "continuity-evidence-unavailable") { await this.freeze(state); return; }
-    if (this.succession && (state.transition?.predecessor && state.transition.phase !== "aborted"
+    if (this.succession && (state.transition?.predecessor
       || state.activeBinding && (!this.owned(state.activeBinding.sessionId)
         || this.options.registry.get(state.activeBinding.sessionId).exitCode !== null))) {
       await this.succession.recover(state); return;

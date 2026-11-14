@@ -189,3 +189,11 @@ export class RegistryError extends Error {
     this.name = "RegistryError";
   }
 }
+
+/** Only thrown by instruction guards that prove no input was rendered or submitted. */
+export class InstructionRefusedError extends RegistryError {
+  constructor() {
+    super("SESSION_BUSY", "A human controller currently owns this thread");
+    this.name = "InstructionRefusedError";
+  }
+}

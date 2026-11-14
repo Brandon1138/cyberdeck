@@ -182,4 +182,68 @@ describe("succession durable boundary faults through the real registry/evidence 
     });
     finish(); await admitted; expect((await advance).transition?.phase).toBe("complete");
   });
+  it.each(["continue", "abort"])("holds a shared admission drain beyond 120 seconds, allowing %s without duplicate effects", async (action) => {
+    const f = await fixture(), t = await f.runtime.succession!.renew(1, "long drain", "r");
+    await f.drive(t.id, 1);
+    let entered!: () => void, finish!: () => void, freezing!: () => void;
+    const started = new Promise<void>((r) => { entered = r; }), pending = new Promise<void>((r) => { finish = r; });
+    const frozen = new Promise<void>((r) => { freezing = r; });
+    const effect = vi.fn();
+    const admitted = f.runtime.admission.run(t.predecessor!.sessionId, "mutate", async () => { entered(); await pending; effect(); });
+    await started;
+    const freeze = f.runtime.admission.freeze.bind(f.runtime.admission);
+    const freezingCalls = vi.spyOn(f.runtime.admission, "freeze").mockImplementation((identity) => { const work = freeze(identity); freezing(); return work; });
+    const capture = vi.spyOn(f.evidence.sources, "capture");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const driving = f.drive(t.id, 1); await frozen;
+      f.tick(120_001); await vi.advanceTimersByTimeAsync(120_001);
+      expect((await driving).hold?.code).toBe("awaiting-safe-boundary");
+      expect((await f.runtime.lifecycle.inspect()).readiness).toBe("held");
+      await f.bindings.withAuthority(async () => { expect((await f.bindings.strigoi.read()).transition?.phase).toBe("checkpointing"); });
+      await f.drive(t.id, 2);
+      expect(freezingCalls).toHaveBeenCalledOnce(); expect(capture).not.toHaveBeenCalled();
+      expect(f.trace).not.toContain("stop"); expect(effect).not.toHaveBeenCalled();
+      await expect(f.runtime.admission.run(t.predecessor!.sessionId, "mutate", async () => {})).rejects.toThrow("FROZEN");
+      if (action === "abort") {
+        await f.runtime.succession!.abort(t.id, "abort-held-drain");
+        expect((await f.bindings.strigoi.read()).transition?.phase).toBe("aborted");
+        await f.runtime.lifecycle.reconcile(); // No serialization slot or reopen waits on the mutation.
+        await expect(f.runtime.admission.run(t.predecessor!.sessionId, "mutate", async () => {})).rejects.toThrow("FROZEN");
+      }
+      finish(); await admitted;
+      await f.runtime.lifecycle.reconcile();
+      const state = await f.drive(t.id);
+      expect(effect).toHaveBeenCalledOnce();
+      if (action === "continue") {
+        expect(state.transition?.phase).toBe("complete"); expect(capture).toHaveBeenCalledOnce();
+        expect(f.trace.filter((v) => v === "stop")).toHaveLength(1); expect(f.spawn).toHaveBeenCalledTimes(2);
+        expect(f.submitted.map((s) => s.kind)).toEqual(["checkpoint", "adoption"]);
+      } else {
+        expect(state.transition?.phase).toBe("aborted"); expect(state.incarnation).toBe(1);
+        expect(capture).not.toHaveBeenCalled(); expect(f.trace).not.toContain("stop"); expect(f.spawn).toHaveBeenCalledOnce();
+        await expect(f.runtime.admission.run(t.predecessor!.sessionId, "mutate", async () => "open")).resolves.toBe("open");
+      }
+    } finally { finish(); await admitted; vi.useRealTimers(); }
+  });
+  it.each(["suspend", "dispose"])("rechecks the lifecycle epoch after drain when %s arrives during the wait", async (action) => {
+    const f = await fixture(), t = await f.runtime.succession!.renew(1, "fenced drain", "r");
+    await f.drive(t.id, 1);
+    let entered!: () => void, finish!: () => void, freezing!: () => void;
+    const started = new Promise<void>((r) => { entered = r; }), pending = new Promise<void>((r) => { finish = r; });
+    const frozen = new Promise<void>((r) => { freezing = r; });
+    const admitted = f.runtime.admission.run(t.predecessor!.sessionId, "mutate", async () => { entered(); await pending; });
+    await started;
+    const freeze = f.runtime.admission.freeze.bind(f.runtime.admission);
+    vi.spyOn(f.runtime.admission, "freeze").mockImplementation((identity) => { const work = freeze(identity); freezing(); return work; });
+    const capture = vi.spyOn(f.evidence.sources, "capture");
+    const driving = f.drive(t.id, 1); await frozen;
+    const suspension = action === "suspend" ? f.runtime.lifecycle.setDesired("suspended", "during-drain") : Promise.resolve(f.runtime.dispose());
+    finish(); await admitted; await suspension; await driving;
+    expect(capture).not.toHaveBeenCalled(); expect(f.trace).not.toContain("sealed"); expect(f.spawn).toHaveBeenCalledOnce();
+    // Explicit suspension stops the provider after drain; succession itself never seals/retires it.
+    expect(f.trace.filter((v) => v === "stop")).toHaveLength(action === "suspend" ? 1 : 0);
+    expect((await f.bindings.strigoi.read()).transition?.phase).toBe("checkpointing");
+    await expect(f.runtime.admission.run(t.predecessor!.sessionId, "mutate", async () => {})).rejects.toThrow("FROZEN");
+  });
 });

@@ -33,6 +33,7 @@ const delays = [1000, 5000, 30000];
 export class StrigoiSuccession {
   private tail: Promise<unknown> = Promise.resolve();
   private reconciliation: { id: string; work: Promise<import("../domain/strigoi.js").StrigoiHold[]> } | undefined;
+  private drain?: { id: string; done: boolean; wait: Promise<boolean> };
   constructor(private readonly o: StrigoiSuccessionOptions) { o.lifecycle.attachSuccession(this); }
   private now() { return this.o.now?.() ?? Date.now(); }
   private at() { return new Date(this.now()).toISOString(); }
@@ -77,7 +78,7 @@ export class StrigoiSuccession {
       const id = state.activeBinding?.sessionId;
       if (!id) return;
       if (this.o.registry.ownsProcess(id) && this.o.registry.get(id).exitCode === null) {
-        if (state.transition?.phase === "complete" && !state.hold) {
+        if (state.transition && ["complete", "aborted"].includes(state.transition.phase) && !state.hold) {
           await this.advance(state.transition.id);
         }
         return;
@@ -104,6 +105,9 @@ export class StrigoiSuccession {
         if (marker) await this.o.repository.confirmMutation(marker);
         await this.event(state);
         if (t.phase === "complete" || t.phase === "aborted") {
+          if (t.phase === "aborted" && !await this.startDrain(t).wait && !this.drain!.done) {
+            this.o.lifecycle.wakeSuccession(this.now() + 1000); break;
+          }
           const actor = t.phase === "complete" ? t.successor! : t.predecessor!;
           if (!this.o.registry.ownsProcess(actor.sessionId) || this.o.registry.get(actor.sessionId).exitCode !== null) {
             await this.hold(t, epoch, "successor-unavailable", "Completed transition has no owned active runtime; lifecycle recovery must reconcile it."); break;
@@ -134,7 +138,12 @@ export class StrigoiSuccession {
         await this.write(s, { transition: { ...t, phase: "aborted", lastMutationId: `abort:${mutationId}` }, hold: undefined }, `abort:${mutationId}`);
       });
       const s = await this.o.repository.read();
-      if (s.desired === "enabled") await this.o.admission.reopen(s.transition!.predecessor!);
+      // Abort is durable immediately; an admitted mutation still owns its permit.
+      // Keep the barrier closed until it drains, then let lifecycle recheck fresh state.
+      const drain = this.startDrain(s.transition!);
+      await Promise.resolve();
+      if (s.desired === "enabled" && drain.done) await this.o.admission.reopen(s.transition!.predecessor!);
+      else { void drain.wait.catch(() => {}); this.o.lifecycle.wakeSuccession(this.now() + 1000); }
     });
   }
   private async change(id: string, epoch: number, patch: (s: StrigoiState, t: StrigoiTransition) => Partial<StrigoiState>): Promise<boolean> {
@@ -235,11 +244,29 @@ export class StrigoiSuccession {
   }
   private async seal(s: StrigoiState, epoch: number): Promise<boolean> {
     const t = s.transition!;
-    await this.o.admission.freeze(t.predecessor!);
+    const drain = this.startDrain(t);
+    if (!drain.done && !await drain.wait)
+      return this.hold(t, epoch, "awaiting-safe-boundary", "120-second admission drain elapsed; the barrier remains closed and admitted work is not killed.");
+    // A drain completion grants no authority by itself. Suspension/disposal can fence
+    // this await, and later ticks must use the current transition and epoch.
+    s = await this.o.repository.read();
+    if (!this.o.lifecycle.permitsSuccession(epoch) || s.desired !== "enabled" || s.transition?.id !== t.id
+      || !["requested", "checkpointing"].includes(s.transition.phase)) return false;
     let prepared: Awaited<ReturnType<StrigoiSuccession["preparePacket"]>>;
     try { prepared = await this.preparePacket(s); }
     catch (error) { return this.hold(t, epoch, "continuity-evidence-unavailable", `Cannot seal original continuity evidence: ${String(error)}`); }
     return this.change(t.id, epoch, (_s, current) => ({ transition: this.phase(current, "sealed", prepared), hold: undefined }));
+  }
+  private startDrain(t: StrigoiTransition) {
+    if (this.drain?.id === t.id) return this.drain;
+    const drain = { id: t.id, done: false, wait: Promise.resolve(false) };
+    const work = this.o.admission.freeze(t.predecessor!).then(() => {
+      drain.done = true;
+      this.o.lifecycle.wakeSuccession(this.now() + 1);
+    });
+    drain.wait = this.bounded(work).then((result) => result.done);
+    this.drain = drain;
+    return drain;
   }
   private async preparePacket(s: StrigoiState) {
     const t = s.transition!;
@@ -293,6 +320,13 @@ export class StrigoiSuccession {
           turnHistory: [...current.turnHistory?.filter((a) => a.id !== attempt.id) ?? [], { ...ended, kind }] } }));
       }
       if (attempt.attempt >= 2) return this.hold(t, epoch, `${kind}-retries-exhausted`, "Two terminated attempts exhausted; no unbounded inference retries.");
+      // A proven refusal permits a later attempt, not a retry into the same owner/modal.
+      const boundary = await this.o.turns.boundary(actor);
+      if (boundary !== "safe") {
+        if (boundary === "modal" || this.now() - Date.parse(attempt.startedAt) >= 120_000)
+          return this.hold(t, epoch, boundary === "modal" ? "provider-permission-modal" : "awaiting-safe-boundary", "The refused turn awaits a confirmed safe boundary before retry.");
+        return false;
+      }
     }
     const next = { id: randomUUID(), attempt: (attempt?.attempt ?? 0) + 1, startedAt: this.at(), outcome: "unknown" as const };
     if (!await this.change(t.id, epoch, (_s, current) => ({ transition: { ...this.phase(current, kind === "checkpoint" ? "checkpointing" : "adopting"), [field]: next }, hold: undefined }))) return false;

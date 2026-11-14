@@ -63,6 +63,18 @@ describe("serialized succession", () => {
     expect((await f.drive(t.id)).hold?.code).toBe("checkpoint-retries-exhausted");
     expect(f.submitted).toHaveLength(2);
   });
+  it("waits for the human boundary after a proven refusal without spending the retry", async () => {
+    const f = await fixture(); f.setAutoComplete(false);
+    const t = await f.runtime.succession!.renew(1, "human attach race", "r");
+    await f.drive(t.id, 1);
+    f.results.set(f.submitted[0]!.id, { outcome: "terminated" }); f.setBoundary("busy");
+    f.tick(120_000);
+    expect((await f.drive(t.id)).hold?.code).toBe("awaiting-safe-boundary");
+    expect(f.submitted).toHaveLength(1); expect(f.trace).not.toContain("stop");
+    f.setBoundary("safe"); f.setAutoComplete(true);
+    expect((await f.drive(t.id)).transition?.phase).toBe("complete");
+    expect(f.submitted.map((s) => s.kind)).toEqual(["checkpoint", "checkpoint", "adoption"]);
+  });
   it("keeps suspension across reconstruction and refuses late inference/launch", async () => {
     const f = await fixture(); const t = await f.runtime.succession!.renew(1, "renew", "r");
     await f.runtime.lifecycle.setDesired("suspended", "suspend");

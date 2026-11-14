@@ -3,6 +3,7 @@ import type { ThreadEvent } from "../domain/thread.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
 import type { ThreadTranscriptReader } from "./persistence-ports.js";
 import type { SessionInstructionPort, LaunchAdmission } from "./session/session-ports.js";
+import { InstructionRefusedError } from "./session/session-registry-ports.js";
 import type { WorkerTurnTranscriptPort } from "./session/worker-turn-ports.js";
 import type { StrigoiSuccessionTurns } from "./strigoi-ports.js";
 
@@ -13,7 +14,9 @@ export class StrigoiTurns implements StrigoiSuccessionTurns {
     private readonly prompt: (kind: "checkpoint" | "adoption", identity: StrigoiIdentity, packet?: StrigoiPacketRef) => Promise<string>) {}
 
   async boundary(identity: StrigoiIdentity): Promise<"safe" | "busy" | "modal" | "unknown"> {
-    if (this.registry.get(identity.sessionId).generation !== identity.generation) return "unknown";
+    const record = this.registry.get(identity.sessionId);
+    if (record.generation !== identity.generation) return "unknown";
+    if (record.attachmentState === "controlled") return "busy";
     const truth = this.registry.workerTruth(identity.sessionId);
     if (truth.modalOpen) return "modal";
     return truth.state === "idle" ? "safe" : truth.state === "working" || truth.state === "stalled" ? "busy" : "unknown";
@@ -27,9 +30,16 @@ export class StrigoiTurns implements StrigoiSuccessionTurns {
     // after this append cannot prove that bytes were not sent. Succession only observes it.
     await this.transcripts.append({ sessionId: identity.sessionId, kind: "instruction", source: "broker", text: message,
       data: { instructionId: id, instructionState: "queued", successionKind: kind, generation: identity.generation } });
-    const result = await this.registry.submitInstruction(identity.sessionId, message, "broker", { successionKind: kind, generation: identity.generation }, id,
-      (apply) => admit(async () => apply()));
-    if (result.state !== "rendered") await this.transcripts.append({ sessionId: identity.sessionId, kind: "instruction", source: "broker",
+    try {
+      const result = await this.registry.submitInstruction(identity.sessionId, message, "broker", { successionKind: kind, generation: identity.generation }, id,
+        (apply) => admit(async () => apply()));
+      if (result.state === "rendered") return;
+    } catch (error) {
+      // A code/message alone cannot prove refusal: transport or persistence can fail
+      // after writing. Only the production pre-write guards carry this evidence.
+      if (!(error instanceof InstructionRefusedError)) throw error;
+    }
+    await this.transcripts.append({ sessionId: identity.sessionId, kind: "instruction", source: "broker",
       data: { instructionId: id, generation: identity.generation, successionOutcome: "terminated", instructionState: "undelivered" } });
   }
 
