@@ -224,6 +224,7 @@ export class SessionLifecycleController {
       pid: runtime.record.pid,
     });
     await this.catalog.persist(runtime);
+    this.bus.notifyDeliveryBoundary(sessionId);
     return cloneRecord(runtime.record);
   }
 

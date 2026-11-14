@@ -9,6 +9,8 @@ import { CorrelationIdSchema, JobIdSchema } from "../../src/domain/control-plane
 import type { JobSnapshot } from "../../src/control-plane/job-control-plane.js";
 import { JobStore } from "../../src/persistence/job-store.js";
 import { SessionStore } from "../../src/persistence/session-store.js";
+import { InstructionStore } from "../../src/persistence/instruction-store.js";
+import { ThreadTranscriptStore } from "../../src/persistence/thread-transcript-store.js";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { FleetDetachStore } from "../../src/persistence/fleet-detach-store.js";
 import { collectFleetSnapshot, createFleetState, renderFleet } from "../../src/client/fleet.js";
@@ -16,6 +18,36 @@ import { collectFleetSnapshot, createFleetState, renderFleet } from "../../src/c
 const NOW = "2026-07-21T10:00:00.000Z";
 
 describe("broker durable startup", () => {
+  it.each(["queued", "rendered"] as const)("recovers an ordinary %s follow-up after startup loses its process generation", async status => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-followup-recovery-"));
+    const session = durableRecord({ name: "Same worker", attentionState: "done" });
+    await new SessionStore(directory).put(session);
+    const instructions = new InstructionStore(directory);
+    const instruction = { id: randomUUID(), actorSessionId: randomUUID(), targetSessionId: session.id,
+      message: "continue once", messageId: randomUUID(), status,
+      holdReason: "provider-busy", hop: 0, createdAt: NOW, updatedAt: NOW };
+    await instructions.put(instruction);
+    if (status === "rendered") {
+      const transcripts = new ThreadTranscriptStore(directory);
+      await transcripts.append({ sessionId: session.id, kind: "instruction", source: "orchestrator", text: instruction.message,
+        data: { instructionId: instruction.id, expectedTurn: 1, renderedAt: NOW, instructionState: "rendered" } });
+      await transcripts.commitProviderTurns({ sessionId: session.id, provider: "claude", turnNumber: 1,
+        turns: [{ providerTurnId: "exact-followup-reply", providerOccurredAt: NOW, text: "matching reply", transport: "provider-native" }] });
+    }
+    const server = await runBroker(join(directory, "broker.sock"), directory);
+    try {
+      expect(await new InstructionStore(directory).list(session.id)).toEqual([
+        expect.objectContaining({ id: instruction.id, messageId: instruction.messageId,
+          ...(status === "queued" ? { status: "queued", holdReason: "worker-interrupted", holdDetail: expect.stringContaining("same session") }
+            : { status: "completed", expectedTurn: 1 }) }),
+      ]);
+      if (status === "rendered") expect((await instructions.list(session.id))[0]?.holdReason).toBeUndefined();
+    } finally {
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("rebuilds jobs from an injected temporary state directory without launching a provider", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-broker-recovery-"));
     const socketPath = join(directory, "broker.sock");

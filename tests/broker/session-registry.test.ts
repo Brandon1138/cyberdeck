@@ -2123,7 +2123,8 @@ describe("SessionRegistry", () => {
     expect(ptys).toHaveLength(1);
 
     commitGate.resolve();
-    await expect(secondAdmission).resolves.toMatchObject({ state: "undelivered", hold: "worker-terminal" });
+    // The pending durable commit now refuses admission immediately, before the later stop.
+    await expect(secondAdmission).resolves.toMatchObject({ state: "queued", hold: "completion-commit-pending" });
     expect(ptys[0]!.writes).toHaveLength(writesBeforeSecondInput);
     const resumed = await resume;
 
