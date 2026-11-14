@@ -2,6 +2,7 @@ import { StrigoiStoreError } from "./strigoi-store.js";
 import { StrigoiArchiveError } from "./strigoi-archive-error.js";
 import { effectiveInstruction, type InstructionRecord } from "../domain/instruction.js";
 import { StrigoiTurnEvidence } from "./strigoi-turn-evidence.js";
+import { archivedTurnEvents } from "./strigoi-turn-events.js";
 import { indexedInstructionReceipt } from "./instruction-target-index.js";
 import { instructionSessionIds } from "../domain/instruction.js";
 import { syncPrivateFile } from "./atomic-private-file.js";
@@ -118,5 +119,6 @@ export function composeStrigoiEvidence(stateDirectory: string) {
     if (!turnTranscripts) throw new Error("STRIGOI_TRANSCRIPTS_UNAVAILABLE");
     return indexedInstructionReceipt(record, await turnTranscripts.readCompletionLedger(effectiveInstruction(record).targetSessionId));
   };
-  return { turnPrompt: access.prompt.bind(access), observeInstruction, orchestratorStore, artifactStore, instructionStore, workflowStore, attentionStore, packets, sources, archive, transcriptContinuity, beforeDelete, withDeletion, startup, verify: async () => { await verify(); } };
+  const turnEvents = (sessionId: string) => archivedTurnEvents(archive, packets, sessionId);
+  return { turnEvents, turnPrompt: access.prompt.bind(access), observeInstruction, orchestratorStore, artifactStore, instructionStore, workflowStore, attentionStore, packets, sources, archive, transcriptContinuity, beforeDelete, withDeletion, startup, verify: async () => { await verify(); } };
 }

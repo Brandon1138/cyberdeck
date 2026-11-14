@@ -12,7 +12,8 @@ import { nativeTurnIdentity } from "./session/worker-turn-native-state.js";
 export class StrigoiTurns implements StrigoiSuccessionTurns {
   constructor(private readonly registry: Pick<SessionInstructionPort, "get" | "submitInstruction"> & { workerTruth(id: string): WorkerTruth },
     private readonly transcripts: ThreadTranscriptReader & WorkerTurnTranscriptPort,
-    private readonly prompt: (kind: "checkpoint" | "adoption", identity: StrigoiIdentity, packet?: StrigoiPacketRef) => Promise<string>) {}
+    private readonly prompt: (kind: "checkpoint" | "adoption", identity: StrigoiIdentity, packet?: StrigoiPacketRef) => Promise<string>,
+    private readonly archivedEvents?: (sessionId: string) => Promise<ThreadEvent[]>) {}
 
   async boundary(identity: StrigoiIdentity): Promise<"safe" | "busy" | "modal" | "unknown"> {
     const record = this.registry.get(identity.sessionId);
@@ -49,7 +50,7 @@ export class StrigoiTurns implements StrigoiSuccessionTurns {
     const intent = events.find((e) => e.data.instructionId === id && e.data.generation === identity.generation);
     if (!intent) return { outcome: "unknown" };
     if (events.some((e) => e.data.instructionId === id && e.data.generation === identity.generation && e.data.successionOutcome === "terminated")) return { outcome: "terminated" };
-    const rendered = events.find((e) => e.data.instructionId === id && e.data.instructionState === "rendered");
+    const rendered = events.find((e) => e.data.instructionId === id && e.data.generation === identity.generation && e.data.instructionState === "rendered");
     if (!rendered) return { outcome: "unknown" }; // queued or ambiguous is not permission to retype
     const receipt = events.find((e) => e.kind === "turn" && e.data.turnNumber === rendered.data.expectedTurn && e.data.transport === "provider-native");
     if (!receipt) {
@@ -78,12 +79,14 @@ export class StrigoiTurns implements StrigoiSuccessionTurns {
   }
 
   private async events(sessionId: string): Promise<ThreadEvent[]> {
-    const events: ThreadEvent[] = []; let cursor = 0;
+    const archived = await this.archivedEvents?.(sessionId) ?? [];
+    const events = new Map(archived.map(event => [event.id, event])); let cursor = 0;
     for (;;) {
       const page = await this.transcripts.read(sessionId, cursor, 100);
       if (page.fragment || page.continuation) throw new Error("STRIGOI_TURN_EVIDENCE_REQUIRES_PAGED_READER");
-      events.push(...page.events);
-      if (page.nextCursor <= cursor || page.events.length === 0) return events;
+      // Archived originals take precedence over storage-elided transcript previews.
+      for (const event of page.events) if (!events.has(event.id)) events.set(event.id, event);
+      if (page.nextCursor <= cursor || page.events.length === 0) return [...events.values()].sort((a, b) => a.cursor - b.cursor);
       cursor = page.nextCursor;
     }
   }

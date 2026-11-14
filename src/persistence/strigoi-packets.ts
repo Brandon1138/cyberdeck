@@ -51,6 +51,16 @@ export class StrigoiPackets implements StrigoiPacketPort {
       if (hash.digest("hex") !== group[0]!.sha256) throw new Error("STRIGOI_SOURCE_CORRUPT");
     }
   }
+  /** Reassemble one original from its verified immutable parts, never preview text. */
+  async original(sources: StrigoiSourceRef[]): Promise<string> {
+    const first = sources[0];
+    if (!first || sources.some(s => s.kind !== first.kind || s.id !== first.id || s.revision !== first.revision || s.sha256 !== first.sha256)) {
+      throw new Error("STRIGOI_SOURCE_GROUP_MISMATCH");
+    }
+    await this.verify(sources);
+    const parts = [...sources].sort((a, b) => a.part! - b.part!);
+    return (await Promise.all(parts.map(source => this.get(source.copy!)))).join("");
+  }
   async write(author: StrigoiIdentity, prose: string, sources: StrigoiSourceRef[], createdAt: string): Promise<StrigoiPacketRef> {
     // Validate prose before performing any writes.
     const coverageId = randomUUID();
