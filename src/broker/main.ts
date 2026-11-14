@@ -1,6 +1,7 @@
 import { WorkflowStore } from "../persistence/workflow-store.js";
 import { composeOrchestratorMutationServices } from "./orchestrator-mutation-services.js";
 import { StrigoiAdmission } from "../orchestration/strigoi-admission.js";
+import { composeStrigoiRuntime } from "./strigoi-runtime.js";
 import { ContainerNativeSource } from "../runtime/activity/container-native-source.js";
 import { TurnNativeCapture } from "../runtime/activity/turn-native-capture.js";
 import { ExecutionTranscriptStore } from "../persistence/execution-transcript-store.js";
@@ -308,6 +309,8 @@ export async function runBroker(
     (binding, session) => attention.bindingChanged(binding).then(() => orchestratorLiveness.bindingSession(binding, session)),
     (binding) => attention.bindingRemoved(binding).then(() => orchestratorLiveness.bindingRemoved(binding)),
   );
+  const strigoi = await composeStrigoiRuntime({ repository: orchestratorStore.strigoi, bindings: orchestratorStore, registry, manager: orchestrators, admission: strigoiAdmission,
+    onError: (error) => console.error("Strigoi lifecycle held", error) });
   const notificationFeed = composeOrchestratorNotificationFeed({
     strigoi: strigoiAdmission,
     attention,
@@ -414,6 +417,7 @@ export async function runBroker(
   const shutdown = async (reason: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    strigoi.dispose();
     // Admission stops first, then in-flight jobs drain and persist, then live sessions stop.
     await runtime.shutdown(reason);
     localWorkerControl.close();
@@ -468,6 +472,7 @@ export async function runBroker(
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();
+  strigoi.start();
   await journal.append(brokerEvent("broker.started", { socketPath, pid: process.pid }));
 
   process.once("SIGINT", () => { void shutdown("SIGINT"); });

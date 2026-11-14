@@ -1,4 +1,4 @@
-import type { LaunchAdmission } from "../orchestration/session/session-ports.js";
+import type { LaunchAdmission, LaunchReservation } from "../orchestration/session/session-ports.js";
 import type { ModalAnswerAttempt } from "../domain/modal-descriptor.js";
 import type { InstructionAdmission } from "../domain/instruction.js";
 import type { ResolvedLaunchRecord, SessionRecord, StartSessionRequest } from "../domain/session.js";
@@ -148,6 +148,10 @@ export class SessionRegistry {
     await this.recovery;
   }
 
+  setResidentLifecycle(hooks: NonNullable<SessionRegistryOptions["residentLifecycle"]>): void {
+    this.catalog.options.residentLifecycle = hooks;
+  }
+
   initialInstructionRecoveryFailure(sessionId: string): string | undefined {
     return this.assembly.initialInstructionRecoveryFailure(sessionId);
   }
@@ -166,8 +170,9 @@ export class SessionRegistry {
     activate?: (record: SessionRecord) => Promise<void>,
     initialInstructionId?: string,
     admission?: LaunchAdmission,
+    launchReservation?: LaunchReservation,
   ): Promise<SessionRecord> {
-    return this.launch.start(request, initialPrompt, activate, initialInstructionId, admission);
+    return this.launch.start(request, initialPrompt, activate, initialInstructionId, admission, launchReservation);
   }
 
   list(): SessionRecord[] {
@@ -307,6 +312,11 @@ export class SessionRegistry {
 
   async stop(sessionId: string): Promise<void> {
     return this.lifecycle.stop(sessionId);
+  }
+
+  /** Internal cleanup of an owned late launch; does not change the resident's desired state. */
+  async stopResidentProcess(sessionId: string): Promise<void> {
+    return this.lifecycle.stop(sessionId, "resident");
   }
 
   forceStop(sessionId: string): void {

@@ -23,6 +23,9 @@ export interface SessionLookupPort {
 /** Internal only: admit activation/spawn after preparation, never initialization waits. */
 export type LaunchAdmission = <T>(apply: () => Promise<T>) => Promise<T>;
 
+/** Broker-internal identity, authorized against the resident journal before use. */
+export interface LaunchReservation { sessionId: string; transitionId: string }
+
 export interface SessionStartPort {
   start(
     request: StartSessionRequest,
@@ -30,6 +33,7 @@ export interface SessionStartPort {
     activate?: (record: SessionRecord) => Promise<void>,
     initialInstructionId?: string,
     admission?: LaunchAdmission,
+    launchReservation?: LaunchReservation,
   ): Promise<SessionRecord>;
 }
 

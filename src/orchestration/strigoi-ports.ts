@@ -6,6 +6,16 @@ export type {
 
 import type { InstructionAdmission, InstructionRecord } from "../domain/instruction.js";
 import type { StrigoiIdentity, StrigoiState } from "../domain/strigoi.js";
+import type { SessionRecord } from "../domain/session.js";
+
+export interface StrigoiInspection {
+  state: StrigoiState;
+  runtime?: SessionRecord;
+  ownership: "owned" | "unknown" | "none";
+  readiness: "passive" | "held" | "unconfigured";
+  adoption: "not-required" | "pending";
+  usage: "unknown";
+}
 
 export interface StrigoiRepository {
   read(): Promise<StrigoiState>;

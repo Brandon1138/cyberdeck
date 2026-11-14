@@ -130,6 +130,12 @@ export type ReattachTarget =
   | { status: "stale" };
 
 export interface SessionRegistryOptions {
+  /** Installed by broker composition; never populated from public session.start input. */
+  residentLifecycle?: {
+    validateReservation(reservation: import("./session-ports.js").LaunchReservation): Promise<void>;
+    beforeStop(sessionId: string): Promise<void>;
+    beforeResume(sessionId: string): Promise<void>;
+  };
   adapters: Record<string, ProviderAdapter>;
   sessionRuntimeFactory: SessionRuntimeFactory<ProviderLaunchSpec>;
   executions?: SessionExecutionPort;

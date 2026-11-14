@@ -24,17 +24,16 @@ import {
   type ResetOrchestratorRequest,
 } from "../domain/orchestrator.js";
 import type { CyberdeckCapability } from "../domain/capability.js";
-import type { ApprovalMode, ProviderId, SessionRecord } from "../domain/session.js";
-import { orchestratorSandbox, resolveProviderPermission } from "./permission-policy.js";
+import type { ProviderId, SessionRecord } from "../domain/session.js";
+import { orchestratorLaunchBinding, prepareOrchestratorLaunch } from "./orchestrator-launch-policy.js";
+import type { StrigoiSelection } from "../domain/strigoi.js";
 import type {
   OrchestratorBindingRepository,
   ProviderPermissionPreferenceReader,
   WorkerPreferenceRepository,
 } from "./persistence-ports.js";
-import { resolveProviderPermissionPlan } from "../domain/permission-resolution.js";
 import { ORCHESTRATOR_CATALOG, orchestratorCatalog, orchestratorModelEfforts, type OrchestratorCatalogEntry } from "./orchestrator-catalog.js";
 import { fallbackWorkerCapabilities, type ResolvedWorkerCapability } from "./worker-capabilities.js";
-import { orchestratorPrompt } from "./orchestrator-prompt.js";
 import type {
   SessionLookupPort,
   SessionResumePort,
@@ -191,61 +190,16 @@ export class OrchestratorManager {
     origin?: PeerOrigin,
   ): Promise<OrchestratorManagerResult> {
     let capabilities = origin?.capabilities ?? ORCHESTRATOR_GRANT_CAPABILITIES;
-    const approvalMode = request.approvalMode
-      ?? await this.configuredApprovalMode(request.provider)
-      ?? (request.provider === "claude" ? "auto" : undefined);
-    const sandbox = orchestratorSandbox(request.provider);
-    // Resolved before the session exists so an unsatisfiable request is refused at create time,
-    // and a satisfiable-but-diminished one is reported instead of discovered at a prompt.
-    const plan = resolveProviderPermissionPlan(request.provider, {
-      sandbox,
-      approvalMode,
-      mcpInjected: true,
-      codexApproveForMe: request.provider === "codex",
-    });
-    if (!plan.ok) {
-      throw Object.assign(new Error(plan.message), { code: plan.code });
-    }
-    const warnings = plan.value.shortfalls.map((shortfall) => shortfall.message);
+    const { request: launchRequest, warnings } = await prepareOrchestratorLaunch(request, scope, this.providerPermissions, capabilities, origin?.name);
     const primaryKey = orchestratorKey(scope);
     let binding: OrchestratorBinding | undefined;
     let session: SessionRecord;
     try {
-      session = await this.registry.start({
-        provider: request.provider,
-        ...(request.model === undefined ? {} : { model: request.model }),
-        ...(request.effort === undefined ? {} : { effort: request.effort }),
-        ...(approvalMode === undefined ? {} : { approvalMode }),
-        cwd: request.cwd,
-        detached: true,
-        sandbox,
-        role: "orchestrator",
-        kind: "orchestrator",
-        orchestratorScope: request.scope,
-        name: origin?.name
-          ?? `Cyberdeck orchestrator (${request.provider}${request.model === undefined ? "" : `:${request.model}`})`,
-        providerInstructions: orchestratorPrompt(scope, capabilities),
-      }, origin?.startup?.native === false ? undefined : origin?.startup?.message, async (started) => {
-        const now = new Date().toISOString();
+      session = await this.registry.start(launchRequest, origin?.startup?.native === false ? undefined : origin?.startup?.message, async (started) => {
         binding = {
-          key: peer ? peerOrchestratorKey(primaryKey, started.id) : primaryKey,
-          kind: peer ? "peer" : "primary",
-          sessionId: started.id,
-          provider: request.provider,
-          ...(request.model === undefined ? {} : { model: request.model }),
-          ...(request.effort === undefined ? {} : { effort: request.effort }),
-          cwd: request.cwd,
-          sandbox,
-          scope,
-          grant: {
-            subjectSessionId: started.id,
-            capabilities: [...capabilities],
-            scope,
-          },
+          ...orchestratorLaunchBinding(launchRequest, scope, started, peer ? peerOrchestratorKey(primaryKey, started.id) : primaryKey, peer ? "peer" : "primary", capabilities),
           ...(origin === undefined ? {} : { createdBy: origin.createdBy }),
           ...(origin?.startup === undefined ? {} : { initialInstructionId: origin.startup.id }),
-          createdAt: now,
-          updatedAt: now,
         };
         await this.store.put(binding);
         await this.observeBindingSession?.(binding, started);
@@ -287,18 +241,14 @@ export class OrchestratorManager {
     }
   }
 
-  private async configuredApprovalMode(provider: ProviderId): Promise<ApprovalMode | undefined> {
-    const policy = (await this.providerPermissions?.list())?.[provider];
-    if (policy === undefined) return undefined;
-    const resolution = resolveProviderPermission(provider, policy, "read-only");
-    if (!resolution.ok) {
-      throw Object.assign(new Error(resolution.message), {
-        code: "APPROVAL_MODE_NOT_SUPPORTED",
-      });
-    }
-    return resolution.value.application.kind === "post-launch-command"
-      ? "auto"
-      : resolution.value.application.value;
+  /** Internal resident preparation; uses the same live selection and permission policy as a regular Orc. */
+  async prepareResident(selection: StrigoiSelection) {
+    validateCreateSelection({ ...selection, scope: "fleet" }, orchestratorCatalog(await this.capabilities()));
+    return prepareOrchestratorLaunch(selection, { kind: "fleet" }, this.providerPermissions, undefined, "Strigoi");
+  }
+
+  async observeResident(binding: OrchestratorBinding, session: SessionRecord): Promise<void> {
+    await this.observeBindingSession?.(binding, session);
   }
 
   async get(cwd: string, scopeKind: "workspace" | "fleet"): Promise<OrchestratorManagerResult | undefined> {

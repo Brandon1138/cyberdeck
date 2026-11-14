@@ -43,7 +43,8 @@ export class SessionLifecycleController {
     this.observer = options.observer;
   }
 
-  async stop(sessionId: string): Promise<void> {
+  async stop(sessionId: string, origin: "operator" | "resident" = "operator"): Promise<void> {
+    if (!this.shuttingDown && origin === "operator") await this.catalog.options.residentLifecycle?.beforeStop(sessionId);
     if (this.catalog.options.executions?.cancelStart?.(sessionId)) return;
     const runtime = this.catalog.requireRuntime(sessionId);
     if (runtime.terminalFinalizing === true) return;
@@ -117,6 +118,7 @@ export class SessionLifecycleController {
   }
 
   async resume(sessionId: string): Promise<SessionRecord> {
+    await this.catalog.options.residentLifecycle?.beforeResume(sessionId);
     const runtime = this.catalog.requireRuntime(sessionId);
     this.catalog.assertMayConsume(sessionId);
     if (runtime.terminalFinalizing === true) {

@@ -1,4 +1,4 @@
-import type { LaunchAdmission } from "./session-ports.js";
+import type { LaunchAdmission, LaunchReservation } from "./session-ports.js";
 import { resolveWorkerExecution } from "../../domain/worker-execution.js";
 import { randomUUID } from "node:crypto";
 import { evaluateStart } from "../../domain/policy.js";
@@ -54,6 +54,7 @@ export class SessionLaunchCoordinator {
   private readonly observer: SessionRuntimeObserver;
   /** Starts admitted by policy but not yet represented in the catalog. */
   private pendingWorkerStarts = 0;
+  private readonly claimedReservations = new Set<string>();
 
   constructor(options: SessionLaunchCoordinatorOptions) {
     this.catalog = options.catalog;
@@ -77,8 +78,21 @@ export class SessionLaunchCoordinator {
     activate?: (record: SessionRecord) => Promise<void>,
     initialInstructionId?: string,
     admission?: LaunchAdmission,
+    launchReservation?: LaunchReservation,
   ): Promise<SessionRecord> {
     const validated = StartSessionRequestSchema.parse(request);
+    if (launchReservation !== undefined) {
+      if (validated.kind !== "orchestrator" || validated.provider !== "codex" || initialPrompt !== undefined
+        || initialInstructionId !== undefined || admission === undefined || activate === undefined
+        || this.catalog.options.store === undefined || this.catalog.options.residentLifecycle === undefined) {
+        throw new Error("STRIGOI_RESERVATION_UNAUTHORIZED");
+      }
+      await this.catalog.options.residentLifecycle.validateReservation(launchReservation);
+      if (this.claimedReservations.has(launchReservation.sessionId) || this.catalog.sessions.has(launchReservation.sessionId)) {
+        throw new Error("STRIGOI_RESERVATION_ALREADY_CLAIMED");
+      }
+      this.claimedReservations.add(launchReservation.sessionId);
+    }
     const execution = resolveWorkerExecution(validated, this.catalog.options.config.workerExecution);
     validated.executor = execution.executor;
     validated.executionProfile = execution.profile;
@@ -125,7 +139,7 @@ export class SessionLaunchCoordinator {
       reservationHeld = false;
     };
 
-    const id = randomUUID();
+    const id = launchReservation?.sessionId ?? randomUUID();
     const now = new Date().toISOString();
     let scout: ScoutRuntimeState | undefined;
     try {
@@ -211,8 +225,9 @@ export class SessionLaunchCoordinator {
         async () => {
           // Provider and executor preparation have finished. Binding/budget activation and
           // the spawn share one permit; initialization below never holds it.
+          if (launchReservation !== undefined) await this.catalog.options.residentLifecycle!.validateReservation(launchReservation);
           await activate?.(cloneRecord(provisional));
-          if (initialInstructionId !== undefined) await this.catalog.options.store?.put(cloneRecord(provisional));
+          if (initialInstructionId !== undefined || launchReservation !== undefined) await this.catalog.options.store?.put(cloneRecord(provisional));
           this.requireActiveParent(parsed.parentSessionId);
           if (initialPrompt !== undefined && !deferredInitialPrompt) {
             await this.catalog.options.transcripts?.append({
