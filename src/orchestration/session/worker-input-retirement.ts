@@ -1,7 +1,7 @@
 import { advanceInstruction, type InstructionLifecycleState } from "../../domain/worker-truth.js";
 import type { SessionRecord } from "../../domain/session.js";
 import type { InstructionStateUpdate } from "./session-ports.js";
-import type { InstructionTurnTarget, WorkerTurnObservation } from "./worker-turn-ports.js";
+import type { InstructionTurnTarget, WorkerTurnObservation, WorkerTurnLedger } from "./worker-turn-ports.js";
 import type { RenderedInstruction } from "./worker-turn-state.js";
 
 export function advanceRendered(sessionId: string, entries: RenderedInstruction[], state: InstructionLifecycleState,
@@ -31,6 +31,24 @@ export function settleRetiredInstruction(sessionId: string, entries: RenderedIns
   return advanceRendered(sessionId, entries, state, target, notify);
 }
 
+/** Restore exact durable input identities, never infer completion from an aggregate turn count. */
+export function restoreRenderedInstructions(sessionId: string, entries: RenderedInstruction[], ledger: WorkerTurnLedger,
+  notify: (update: InstructionStateUpdate) => void): RenderedInstruction[] {
+  const restored = [...entries];
+  for (const target of ledger.instructionTargets ?? []) {
+    if (restored.some(entry => entry.instructionId === target.instructionId)) continue;
+    const receipt = ledger.turns.find(turn => turn.data?.turnNumber === target.expectedTurn);
+    if (receipt !== undefined) {
+      notify({ sessionId, instructionId: target.instructionId, turn: target.expectedTurn,
+        state: receipt.data?.outcome === "cancelled" ? "cancelled" : "completed", at: new Date().toISOString() });
+    } else if (target.expectedTurn > ledger.completedTurns) {
+      // There is no messageHead/submitKey: recovery must observe consumption, never retype input.
+      restored.push({ ...target, state: "rendered" });
+    }
+  }
+  return restored;
+}
+
 /** Assigned targets cannot be reused after their process generation ends without answering. */
 export class WorkerInputRetirement {
   private readonly targets = new Map<number, InstructionTurnTarget>();
@@ -40,6 +58,7 @@ export class WorkerInputRetirement {
   private retired = false;
   cancel(): void { this.retired = true; }
   get busy(): boolean { return this.retiring > 0 || this.failed; }
+  get failure(): boolean { return this.failed; }
   constructor(private readonly host: { record(): SessionRecord; completed(): number; protect(target: number): void; needsSettlement(target: number): boolean; finished(): void; settle(target: number, abandoned: boolean): void; commit(observation: WorkerTurnObservation): Promise<void> }) {}
   /** Launch argv alone is not admission; retirement starts when its turn is submitted. */
   remember(target: InstructionTurnTarget): void {
@@ -66,7 +85,7 @@ export class WorkerInputRetirement {
             data: { outcome: "cancelled", instructionId: target.instructionId, instructionTargets: [target] } }] });
         this.host.settle(target.expectedTurn, true);
       }
-    }).catch(error => { if (this.retired) return; this.failed = true; throw error; }).finally(() => { this.retiring -= 1; if (!this.busy && !this.retired) this.host.finished(); });
+    }).catch(error => { if (this.retired) return; this.failed = true; throw error; }).finally(() => { this.retiring -= 1; if (!this.retired) this.host.finished(); });
     void this.pending.catch(() => undefined); // The lifecycle barrier owns failure and refuses resume.
   }
 }

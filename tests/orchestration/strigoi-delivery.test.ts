@@ -198,6 +198,7 @@ it("reconstructs from the same journal after an ambiguous native write without r
     await expect(f.delivery.submit("unknown write", id)).rejects.toThrow("lost native write response");
     const record = (await f.queue.list())[0]!;
     expect(record).toMatchObject({ status: "accepted", submissionAttempt: { outcome: "unknown" } });
+    expect(record.deliveryAttemptAt).toBeUndefined();
     f.queue.stop();
     const admission = new StrigoiAdmission(f.repository, f.bindings, f.registry);
     restarted = new InstructionQueue(f.registry, f.bindings, new InstructionStore(f.directory), undefined, admission);
@@ -205,7 +206,11 @@ it("reconstructs from the same journal after an ambiguous native write without r
       instructions: restarted, workflows: f.workflows, demand: async () => false,
       authorizeWorker: async (_actor, _target, apply) => apply(),
       observeInstruction: async r => indexedInstructionReceipt(r, await f.transcripts.readCompletionLedger(effectiveInstruction(r).targetSessionId)) });
-    restarted.start(); await delivery.flush(); await delivery.submit("unknown write", id);
+    restarted.start();
+    const ordinaryRecovery = vi.fn(async () => { throw new Error("Resident receipt belongs to resident reconciliation"); });
+    await restarted.recoverPendingInstructions(ordinaryRecovery);
+    expect(ordinaryRecovery).not.toHaveBeenCalled();
+    await delivery.flush(); await delivery.submit("unknown write", id);
     expect(f.effects).toEqual(["unknown write"]);
     expect((await restarted.withdrawForOperator({ targetSessionId: ACTOR, instructionId: record.id, messageId: id,
       reason: "cannot withdraw written bytes", authority: { path: "/operator/decision", sha256: "b".repeat(64) } })).outcome).toBe("TOO_LATE");
@@ -215,6 +220,25 @@ it("reconstructs from the same journal after an ambiguous native write without r
     expect((await restarted.list())[0]?.status).toBe("completed");
     expect(f.effects).toEqual(["unknown write"]);
   } finally { restarted?.stop(); await restarted?.drain(); await f.close(); }
+});
+
+it("preserves ordinary ambiguous-write fences with resident routing installed", async () => {
+  const f = await fixture();
+  try {
+    const { resident: _resident, ...ordinary } = f.bound;
+    await f.bindings.put({ ...ordinary, key: "fleet", kind: "primary", sessionId: NEXT,
+      grant: { ...ordinary.grant, subjectSessionId: NEXT } });
+    f.registry.submitInstruction.mockImplementationOnce(async (_id, message) => {
+      f.effects.push(message); throw new Error("ordinary write response lost");
+    });
+    const record = await f.queue.enqueue({ actorSessionId: NEXT, targetSessionId: WORKER, message: "ordinary uncertain input" });
+    expect(record).toMatchObject({ status: "queued", holdReason: "delivery-outcome-unknown", deliveryAttemptAt: expect.any(String) });
+    expect(record.submissionAttempt).toBeUndefined();
+    await f.queue.recoverPendingInstructions(id => f.transcripts.readCompletionLedger(id));
+    await f.queue.flush(WORKER);
+    expect(await f.queue.withdraw(WORKER, record.messageId)).toMatchObject({ status: "queued", deliveryAttemptAt: record.deliveryAttemptAt });
+    expect(f.effects).toEqual(["ordinary uncertain input"]);
+  } finally { await f.close(); }
 });
 
 it("keeps append-only receipts and all original envelope fields immutable in the journal", async () => {
