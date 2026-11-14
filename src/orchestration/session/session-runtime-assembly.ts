@@ -157,6 +157,7 @@ export class SessionRuntimeAssembly {
     beforeSpawn?: () => Promise<void>,
     onPhase?: (phase: "prepare" | "spawn") => void,
     admission?: LaunchAdmission,
+    creationFailed?: () => void,
   ): Promise<SessionRuntime> {
     try {
       onPhase?.("prepare");
@@ -172,7 +173,12 @@ export class SessionRuntimeAssembly {
       if (record.kind !== "orchestrator" && this.catalog.options.executions !== undefined) {
         return await this.catalog.options.executions.start(record, spec, replayBytes, activate);
       }
-      return await activate(async () => this.catalog.options.sessionRuntimeFactory(spec, replayBytes));
+      return await activate(async () => {
+        // The synchronous factory contract returns an owned handle or fails creation. An
+        // admission/executor error outside this call is not evidence that creation failed.
+        try { return this.catalog.options.sessionRuntimeFactory(spec, replayBytes); }
+        catch (error) { creationFailed?.(); throw error; }
+      });
     } catch (error) {
       await this.cleanupLaunchArtifacts(record, "launch-failed");
       throw error;

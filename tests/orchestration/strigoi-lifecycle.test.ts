@@ -6,7 +6,7 @@ import { StrigoiLifecycle } from "../../src/orchestration/strigoi-lifecycle.js";
 import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
 import type { SessionRecord } from "../../src/domain/session.js";
-import type { SessionStartPort } from "../../src/orchestration/session/session-ports.js";
+import type { SessionStartPort, SessionLaunchOutcomePort } from "../../src/orchestration/session/session-ports.js";
 
 const selection = { provider: "codex" as const, model: "gpt-5.6-sol", cwd: "/repo" };
 const roots: string[] = [], residents: StrigoiLifecycle[] = [];
@@ -22,7 +22,14 @@ async function fixture() {
     await admit!(async () => { await activate!(record); records.set(record.id, record); });
     return record;
   });
-  const registry = { start, get: (id: string) => { const r = records.get(id); if (!r) throw new Error("missing"); return r; },
+  let launchError: unknown = new Error("preparation failed");
+  const reject = (error: unknown) => { launchError = error; start.mockRejectedValue(error); };
+  const launchOutcome = vi.fn<SessionLaunchOutcomePort["launchOutcome"]>((reservation, generation) => {
+    const session = records.get(reservation.sessionId);
+    if (session) return session.generation === generation ? { kind: "owned", session } : { kind: "unresolved" };
+    return { kind: "failed", error: launchError };
+  });
+  const registry = { start, launchOutcome, get: (id: string) => { const r = records.get(id); if (!r) throw new Error("missing"); return r; },
     resume: vi.fn(), ownsProcess: (id: string) => records.has(id), stopResidentProcess: vi.fn(async (id: string) => { records.delete(id); }),
     workerTruth: () => ({ modalOpen: modal }), submit: vi.fn() };
   const manager = new OrchestratorManager(registry, bindings, undefined, undefined, async () => []);
@@ -30,7 +37,7 @@ async function fixture() {
   const options = { repository: bindings.strigoi, bindings, registry, manager, admission };
   const make = () => { const r = new StrigoiLifecycle(options); residents.push(r); return r; };
   const resident = make();
-  return { resident, make, start, registry, admission, bindings, records, setModal: (v: boolean) => { modal = v; } };
+  return { resident, make, start, reject, registry, admission, bindings, records, setModal: (v: boolean) => { modal = v; } };
 }
 
 describe("passive Strigoi lifecycle", () => {
@@ -52,7 +59,7 @@ describe("passive Strigoi lifecycle", () => {
   });
   it("persists the three transient failure delays across restarts, then holds", async () => {
     vi.useFakeTimers(); const f = await fixture();
-    f.start.mockRejectedValue(Object.assign(new Error("temporary preparation failure"), { code: "ETIMEDOUT" }));
+    f.reject(Object.assign(new Error("temporary preparation failure"), { code: "ETIMEDOUT" }));
     await f.resident.configure(selection, "configure"); let resident = f.resident;
     for (const delay of [1000, 5000, 30000]) {
       await resident.reconcile();
@@ -67,7 +74,7 @@ describe("passive Strigoi lifecycle", () => {
     expect((await resident.inspect()).state.hold?.code).toBe("launch-retries-exhausted");
   });
   it.each(["AUTHENTICATION_REQUIRED", "INVALID_SESSION_CWD", "PROVIDER_NOT_REGISTERED"])("holds %s immediately", async (code) => {
-    const f = await fixture(); f.start.mockRejectedValue(Object.assign(new Error(code), { code }));
+    const f = await fixture(); f.reject(Object.assign(new Error(code), { code }));
     await f.resident.configure(selection, "configure"); await f.resident.reconcile(); await f.resident.reconcile();
     expect(f.start).toHaveBeenCalledOnce(); expect((await f.resident.inspect()).state.hold?.code).toBe(code);
   });
@@ -78,14 +85,14 @@ describe("passive Strigoi lifecycle", () => {
   });
   it("explicit resume starts a fresh bounded episode after a preparation hold", async () => {
     const f = await fixture(); const launch = f.start.getMockImplementation()!;
-    f.start.mockRejectedValueOnce(Object.assign(new Error("credentials"), { code: "AUTHENTICATION_REQUIRED" }));
+    f.reject(Object.assign(new Error("credentials"), { code: "AUTHENTICATION_REQUIRED" }));
     await f.resident.configure(selection, "configure"); await f.resident.reconcile();
     await f.resident.setDesired("enabled", "resume"); f.start.mockImplementation(launch); await f.resident.reconcile();
     expect(f.start).toHaveBeenCalledTimes(2); expect((await f.resident.inspect()).state.transition?.attempts).toBe(1);
   });
   it("holds wrapped credential failure immediately", async () => {
     const f = await fixture();
-    f.start.mockRejectedValue(Object.assign(new Error("RC unavailable", { cause: Object.assign(new Error("login required"), { code: "AUTHENTICATION_REQUIRED" }) }), { code: "CODEX_REMOTE_CONTROL_UNAVAILABLE" }));
+    f.reject(Object.assign(new Error("RC unavailable", { cause: Object.assign(new Error("login required"), { code: "AUTHENTICATION_REQUIRED" }) }), { code: "CODEX_REMOTE_CONTROL_UNAVAILABLE" }));
     await f.resident.configure(selection, "configure"); await f.resident.reconcile();
     expect((await f.resident.inspect()).state.hold?.code).toBe("AUTHENTICATION_REQUIRED");
     expect((await f.resident.inspect()).state.transition?.nextAttemptAt).toBeUndefined();
@@ -100,6 +107,7 @@ describe("passive Strigoi lifecycle", () => {
   });
   it("lost spawn response holds the assigned identity through restart without duplicate launch", async () => {
     const f = await fixture();
+    f.registry.launchOutcome.mockReturnValue({ kind: "unresolved" });
     f.start.mockImplementationOnce(async (_request, _prompt, activate, _instruction, admit, reservation) => {
       await admit!(async () => { await activate!({ id: reservation!.sessionId, generation: 1 } as SessionRecord); });
       throw new Error("spawn response lost");
@@ -108,6 +116,24 @@ describe("passive Strigoi lifecycle", () => {
     const restarted = f.make(); await restarted.reconcile();
     expect((await restarted.inspect()).state.hold?.code).toBe("launch-ownership-unresolved");
     expect(f.start).toHaveBeenCalledOnce();
+  });
+  it("settles a reservation fenced immediately after its durable append before registry entry", async () => {
+    const f = await fixture(); await f.resident.configure(selection, "configure");
+    const append = f.bindings.strigoi.compareAndSwap.bind(f.bindings.strigoi);
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>((r) => { enter = r; }), wait = new Promise<void>((r) => { release = r; });
+    vi.spyOn(f.bindings.strigoi, "compareAndSwap").mockImplementationOnce(async (...args) => {
+      const state = await append(...args); enter(); await wait; return state;
+    });
+    const launch = f.resident.reconcile(); await entered;
+    const suspend = f.resident.setDesired("suspended", "suspend"); release();
+    await Promise.all([launch, suspend]);
+    expect(f.start).not.toHaveBeenCalled();
+    expect((await f.resident.inspect()).state.desired).toBe("suspended");
+    expect((await f.resident.inspect()).state.transition?.successor).toBeUndefined();
+    f.resident.dispose(); const restarted = f.make();
+    await restarted.setDesired("enabled", "resume"); await restarted.reconcile();
+    expect(f.start).toHaveBeenCalledOnce(); expect((await restarted.inspect()).state.transition?.attempts).toBe(1);
   });
   it("suspension wins a late launch result and stops only the owned process", async () => {
     const f = await fixture(); let release!: () => void, entered!: () => void;

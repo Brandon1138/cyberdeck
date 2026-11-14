@@ -1,4 +1,4 @@
-import type { LaunchAdmission, LaunchReservation } from "./session-ports.js";
+import type { LaunchAdmission, LaunchReservation, LaunchOutcome } from "./session-ports.js";
 import { resolveWorkerExecution } from "../../domain/worker-execution.js";
 import { randomUUID } from "node:crypto";
 import { evaluateStart } from "../../domain/policy.js";
@@ -36,6 +36,7 @@ export interface SessionLaunchCoordinatorOptions {
   scoutSupervision: ScoutSessionSupervisorFactory;
   assembly: SessionRuntimeAssembly;
   observer: SessionRuntimeObserver;
+  onLaunchOutcome: (sessionId: string) => void;
 }
 
 /**
@@ -52,9 +53,28 @@ export class SessionLaunchCoordinator {
   private readonly scoutSupervision: ScoutSessionSupervisorFactory;
   private readonly assembly: SessionRuntimeAssembly;
   private readonly observer: SessionRuntimeObserver;
+  private readonly onLaunchOutcome: (sessionId: string) => void;
   /** Starts admitted by policy but not yet represented in the catalog. */
   private pendingWorkerStarts = 0;
   private readonly claimedReservations = new Set<string>();
+
+  private readonly outcomes = new Map<string, {
+    transitionId: string; generation: number; phase: "preparing" | "uncertain" | "failed" | "ready";
+    runtime?: SessionRuntime; error?: unknown;
+  }>();
+
+  launchOutcome(reservation: LaunchReservation, generation: number): LaunchOutcome {
+    const evidence = this.outcomes.get(reservation.sessionId);
+    if (!evidence || evidence.transitionId !== reservation.transitionId || evidence.generation !== generation) return { kind: "unresolved" };
+    if (evidence.phase === "failed") return { kind: "failed", error: evidence.error ?? new Error("Launch terminated") };
+    const runtime = this.catalog.sessions.get(reservation.sessionId);
+    if (evidence.phase === "ready" && evidence.runtime && runtime?.sessionRuntime === evidence.runtime
+      && !runtime.stopRequested && runtime.record.generation === generation
+      && runtime.record.executionState === "active" && runtime.record.exitCode === null) {
+      return { kind: "owned", session: cloneRecord(runtime.record) };
+    }
+    return { kind: "unresolved" };
+  }
 
   constructor(options: SessionLaunchCoordinatorOptions) {
     this.catalog = options.catalog;
@@ -62,6 +82,7 @@ export class SessionLaunchCoordinator {
     this.scoutSupervision = options.scoutSupervision;
     this.assembly = options.assembly;
     this.observer = options.observer;
+    this.onLaunchOutcome = options.onLaunchOutcome;
   }
 
   /**
@@ -80,6 +101,23 @@ export class SessionLaunchCoordinator {
     admission?: LaunchAdmission,
     launchReservation?: LaunchReservation,
   ): Promise<SessionRecord> {
+    let claimed = false;
+    try {
+      return await this.startAttempt(request, initialPrompt, activate, initialInstructionId, admission, launchReservation, () => { claimed = true; });
+    } catch (error) {
+      const evidence = launchReservation && this.outcomes.get(launchReservation.sessionId);
+      if (claimed && evidence && evidence.transitionId === launchReservation!.transitionId) {
+        evidence.error = error;
+        if (evidence.phase === "preparing") evidence.phase = "failed";
+      }
+      throw error;
+    }
+  }
+
+  private async startAttempt(
+    request: StartSessionRequest, initialPrompt?: string, activate?: (record: SessionRecord) => Promise<void>,
+    initialInstructionId?: string, admission?: LaunchAdmission, launchReservation?: LaunchReservation, claimed?: () => void,
+  ): Promise<SessionRecord> {
     const validated = StartSessionRequestSchema.parse(request);
     if (launchReservation !== undefined) {
       if (validated.kind !== "orchestrator" || validated.provider !== "codex" || initialPrompt !== undefined
@@ -87,11 +125,22 @@ export class SessionLaunchCoordinator {
         || this.catalog.options.store === undefined || this.catalog.options.residentLifecycle === undefined) {
         throw new Error("STRIGOI_RESERVATION_UNAUTHORIZED");
       }
-      await this.catalog.options.residentLifecycle.validateReservation(launchReservation);
+      try {
+        await this.catalog.options.residentLifecycle.validateReservation(launchReservation);
+      } catch (error) {
+        // This invocation was rejected before preparation. Do not overwrite evidence from
+        // another invocation (or a recovered session) under the same reservation.
+        if (!this.claimedReservations.has(launchReservation.sessionId) && !this.catalog.sessions.has(launchReservation.sessionId)) {
+          this.outcomes.set(launchReservation.sessionId, { transitionId: launchReservation.transitionId, generation: 1, phase: "failed", error });
+        }
+        throw error;
+      }
       if (this.claimedReservations.has(launchReservation.sessionId) || this.catalog.sessions.has(launchReservation.sessionId)) {
         throw new Error("STRIGOI_RESERVATION_ALREADY_CLAIMED");
       }
       this.claimedReservations.add(launchReservation.sessionId);
+      this.outcomes.set(launchReservation.sessionId, { transitionId: launchReservation.transitionId, generation: 1, phase: "preparing" });
+      claimed?.();
     }
     const execution = resolveWorkerExecution(validated, this.catalog.options.config.workerExecution);
     validated.executor = execution.executor;
@@ -240,9 +289,22 @@ export class SessionLaunchCoordinator {
           }
           this.requireActiveParent(parsed.parentSessionId);
         },
-        (phase) => { scoutLaunchPhase = phase; },
+        (phase) => {
+          scoutLaunchPhase = phase;
+          if (phase === "spawn" && launchReservation) this.outcomes.get(id)!.phase = "uncertain";
+        },
         admission,
+        () => { if (launchReservation) this.outcomes.get(id)!.phase = "failed"; },
       );
+      if (launchReservation) {
+        const evidence = this.outcomes.get(id)!;
+        evidence.runtime = sessionRuntime;
+        sessionRuntime.onExit(() => {
+          evidence.phase = "failed";
+          // Initialization cleanup can detach the ordinary observer before termination arrives.
+          this.onLaunchOutcome(id);
+        });
+      }
     } catch (error) {
       releaseReservation();
       // The worktree was made for a worker that never started, so it holds nothing and belongs to
@@ -351,6 +413,10 @@ export class SessionLaunchCoordinator {
       }
     }
 
+    if (launchReservation) {
+      const evidence = this.outcomes.get(id)!;
+      if (evidence.phase !== "failed") evidence.phase = "ready";
+    }
     return cloneRecord(runtime.record);
   }
 

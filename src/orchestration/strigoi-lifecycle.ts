@@ -5,7 +5,7 @@ import type { SessionRecord } from "../domain/session.js";
 import type { OrchestratorBindingRepository } from "./persistence-ports.js";
 import type { OrchestratorManager } from "./orchestrator-manager.js";
 import { orchestratorLaunchBinding } from "./orchestrator-launch-policy.js";
-import type { LaunchReservation, SessionLookupPort, SessionStartPort } from "./session/session-ports.js";
+import type { LaunchReservation, SessionLookupPort, SessionStartPort, SessionLaunchOutcomePort } from "./session/session-ports.js";
 import type { StrigoiAdmissionPort, StrigoiInspection, StrigoiRepository } from "./strigoi-ports.js";
 import { strigoiPrompt } from "./strigoi-prompt.js";
 
@@ -32,7 +32,7 @@ export interface StrigoiLifecycleOptions {
   bindings: OrchestratorBindingRepository;
   admission: StrigoiAdmissionPort;
   manager: Pick<OrchestratorManager, "prepareResident" | "observeResident">;
-  registry: SessionLookupPort & SessionStartPort & {
+  registry: SessionLookupPort & SessionStartPort & SessionLaunchOutcomePort & {
     ownsProcess(sessionId: string): boolean;
     stopResidentProcess(sessionId: string): Promise<void>;
     workerTruth(sessionId: string): { modalOpen: boolean };
@@ -135,7 +135,11 @@ export class StrigoiLifecycle {
   private async reconcileOnce(): Promise<void> {
     const epoch = this.epoch;
     let state = await this.options.repository.read();
-    if (this.disposed || state.desired !== "enabled") return;
+    if (this.disposed) return;
+    if (!state.activeBinding && state.transition?.successor) {
+      await this.resolveAssigned(state, epoch); return;
+    }
+    if (state.desired !== "enabled") return;
     if (state.activeBinding) {
       if (!this.owned(state.activeBinding.sessionId)) { await this.freeze(state); await this.hold("launch-ownership-unresolved", "Recorded identity has no owned runtime; succession is not implemented in Task 4."); return; }
       const record = this.options.registry.get(state.activeBinding.sessionId);
@@ -151,9 +155,6 @@ export class StrigoiLifecycle {
       if (!state.hold && state.desired === "enabled" && !this.disposed && epoch === this.epoch) await this.options.admission.reopen(identity(state)!);
       return;
     }
-    if (state.transition?.successor) {
-      await this.hold("launch-ownership-unresolved", "A launch identity is assigned. Reconcile owned execution before any retry."); return;
-    }
     if (state.hold) return;
     if (state.transition?.nextAttemptAt && Date.parse(state.transition.nextAttemptAt) > Date.now()) {
       this.schedule(Date.parse(state.transition.nextAttemptAt)); return;
@@ -163,26 +164,33 @@ export class StrigoiLifecycle {
     }
     if (state.incarnation > 0) { await this.hold("continuity-required", "A previous incarnation requires the succession facility."); return; }
     await this.freeze(state); // Always outside the canonical authority transaction.
+    let reservedHere = false;
     state = await this.authority(async () => {
       const current = await this.options.repository.read();
       if (this.disposed || epoch !== this.epoch || current.desired !== "enabled" || current.activeBinding || current.transition?.successor) return current;
       const successor = { sessionId: randomUUID(), incarnation: current.incarnation + 1, generation: 1 };
-      return this.write(current, { transition: { id: current.transition?.id ?? randomUUID(), expectedIncarnation: current.incarnation,
+      const reserved = await this.write(current, { transition: { id: current.transition?.id ?? randomUUID(), expectedIncarnation: current.incarnation,
         reason: "passive-start", phase: "launching", attempts: (current.transition?.attempts ?? 0) + 1, successor },
         retainedSessionIds: [...current.retainedSessionIds, successor.sessionId] });
+      reservedHere = true;
+      return reserved;
     });
-    if (this.disposed || epoch !== this.epoch || state.desired !== "enabled" || !state.transition?.successor) return;
+    if (!reservedHere) return;
+    if (this.disposed || epoch !== this.epoch || state.desired !== "enabled") {
+      await this.settleFailure(state, failure("STRIGOI_LAUNCH_CANCELLED")); return;
+    }
     await this.launch(state, epoch);
   }
 
   private async launch(reserved: StrigoiState, epoch: number): Promise<void> {
     const transition = reserved.transition!, successor = transition.successor!;
-    let activationEntered = false;
+    let registryEntered = false;
     try {
       const { request } = await this.options.manager.prepareResident(reserved.selection!);
       request.providerInstructions += `\n\n${strigoiPrompt(reserved)}`;
-      const session = await this.options.registry.start(request, undefined, async (record) => {
-        activationEntered = true;
+      if (this.disposed || epoch !== this.epoch) throw failure("STRIGOI_LAUNCH_CANCELLED");
+      registryEntered = true;
+      await this.options.registry.start(request, undefined, async (record) => {
         const current = await this.options.repository.read();
         await this.write(current, { transition: { ...current.transition!, successor: { ...successor, generation: record.generation! } } });
       }, undefined, async (apply) => this.authority(async () => {
@@ -190,37 +198,63 @@ export class StrigoiLifecycle {
         await this.validateReservation({ sessionId: successor.sessionId, transitionId: transition.id });
         return apply();
       }), { sessionId: successor.sessionId, transitionId: transition.id });
-      if (session.id !== successor.sessionId || !session.generation || !this.owned(session.id)
-        || session.executionState !== "active" || session.exitCode !== null) throw failure("STRIGOI_LAUNCH_IDENTITY_MISMATCH");
-      const actual = { ...successor, generation: session.generation };
-      await this.options.admission.freeze(actual);
-      const committed = await this.authority(async () => {
-        const current = await this.options.repository.read();
-        if (this.disposed || epoch !== this.epoch || current.desired !== "enabled" || current.transition?.successor?.sessionId !== session.id) return undefined;
-        const binding = { ...orchestratorLaunchBinding(request, { kind: "fleet" }, session, STRIGOI_KEY, "resident"), resident: { name: "strigoi" as const, incarnation: actual.incarnation } };
-        const modal = this.options.registry.workerTruth(session.id).modalOpen;
-        return this.write(current, { activeBinding: binding, activeGeneration: actual.generation, incarnation: actual.incarnation,
-          transition: { ...current.transition, phase: "complete", successor: actual },
-          hold: modal ? { code: "provider-permission-modal", detail: "Provider requires operator input; no automatic answer or model turn.", sourceIds: [session.id] } : undefined });
-      });
-      if (!committed) { await this.stopOwned(await this.options.repository.read()); return; }
-      await this.options.manager.observeResident(committed.activeBinding!, session);
-      if (!committed.hold && !this.disposed && epoch === this.epoch) await this.options.admission.reopen(actual);
     } catch (error) {
-      if (this.disposed) return;
-      await this.authority(async () => {
-        const current = await this.options.repository.read();
-        if (current.desired !== "enabled" || current.transition?.successor?.sessionId !== successor.sessionId) return;
-        if (activationEntered || current.activeBinding) {
-          await this.write(current, { hold: { code: "launch-ownership-unresolved", detail: "Launch/activation outcome is unresolved; do not start another process.", sourceIds: [successor.sessionId] } }); return;
-        }
-        const code = launchFailureCode(error), detail = error instanceof Error ? error.message : String(error);
-        const due = Date.now() + RETRY_DELAYS[transition.attempts - 1]!;
-        await this.write(current, { transition: { ...transition, successor: undefined, phase: "requested", ...(permanent(code) ? {} : { nextAttemptAt: new Date(due).toISOString() }) },
-          hold: permanent(code) ? { code, detail, sourceIds: [successor.sessionId] } : undefined });
-        if (!permanent(code)) this.schedule(due);
-      });
+      // Manager preparation precedes the registry entirely. Once start is entered only the
+      // coordinator's execution evidence can prove failure, irrespective of activation callbacks.
+      if (!registryEntered) { await this.settleFailure(reserved, error); return; }
     }
+    await this.resolveAssigned(await this.options.repository.read(), epoch);
+  }
+
+  private async resolveAssigned(state: StrigoiState, epoch: number): Promise<void> {
+    const transition = state.transition, successor = transition?.successor;
+    if (!successor || !transition || state.activeBinding) return;
+    const reservation = { sessionId: successor.sessionId, transitionId: transition.id };
+    const outcome = this.options.registry.launchOutcome(reservation, successor.generation);
+    if (outcome.kind === "failed") { await this.settleFailure(state, outcome.error); return; }
+    if (outcome.kind !== "owned") {
+      await this.hold("launch-ownership-unresolved", "Launch outcome has no matching owned execution or proven failure; do not start another process."); return;
+    }
+    if (this.disposed || epoch !== this.epoch || state.desired !== "enabled") {
+      await this.stopOwned(state);
+      const stopped = this.options.registry.launchOutcome(reservation, successor.generation);
+      if (stopped.kind === "failed") await this.settleFailure(state, stopped.error);
+      return;
+    }
+    // Drain outside authority, then recheck native ownership/generation inside the activation CAS.
+    await this.options.admission.freeze(successor);
+    const committed = await this.authority(async () => {
+      const current = await this.options.repository.read();
+      if (this.disposed || epoch !== this.epoch || current.desired !== "enabled" || current.activeBinding
+        || current.transition?.id !== transition.id || current.transition.successor?.sessionId !== successor.sessionId) return undefined;
+      const fresh = this.options.registry.launchOutcome(reservation, successor.generation);
+      if (fresh.kind !== "owned") return undefined;
+      const session = fresh.session;
+      const binding = { ...orchestratorLaunchBinding(session, { kind: "fleet" }, session, STRIGOI_KEY, "resident"), resident: { name: "strigoi" as const, incarnation: successor.incarnation } };
+      const modal = this.options.registry.workerTruth(session.id).modalOpen;
+      return this.write(current, { activeBinding: binding, activeGeneration: session.generation!, incarnation: successor.incarnation,
+        transition: { ...current.transition, phase: "complete", successor },
+        hold: modal ? { code: "provider-permission-modal", detail: "Provider requires operator input; no automatic answer or model turn.", sourceIds: [session.id] } : undefined });
+    });
+    if (!committed) { if (this.disposed || epoch !== this.epoch) await this.stopOwned(await this.options.repository.read()); return; }
+    await this.options.manager.observeResident(committed.activeBinding!, outcome.session);
+    if (!committed.hold && !this.disposed && epoch === this.epoch) await this.options.admission.reopen(successor);
+  }
+
+  private async settleFailure(reserved: StrigoiState, error: unknown): Promise<void> {
+    const transition = reserved.transition!, successor = transition.successor!;
+    await this.authority(async () => {
+      const current = await this.options.repository.read();
+      if (current.activeBinding || current.transition?.id !== transition.id || current.transition.successor?.sessionId !== successor.sessionId) return;
+      const code = launchFailureCode(error), detail = error instanceof Error ? error.message : String(error);
+      const due = Date.now() + RETRY_DELAYS[transition.attempts - 1]!;
+      // Settle even while suspended/disposed: desired state is preserved, and resume may safely
+      // reset this episode. Retention pins remain; a settled identity is never reused.
+      await this.write(current, { transition: { ...current.transition, successor: undefined, phase: "requested",
+        nextAttemptAt: permanent(code) ? undefined : new Date(due).toISOString() },
+        hold: permanent(code) ? { code, detail, sourceIds: [successor.sessionId] } : undefined });
+      if (!permanent(code) && current.desired === "enabled") this.schedule(due);
+    });
   }
 
   private authority<T>(apply: () => Promise<T>): Promise<T> {
@@ -237,8 +271,10 @@ export class StrigoiLifecycle {
   }
   private owned(id: string): boolean { try { return this.options.registry.ownsProcess(id); } catch { return false; } }
   private async stopOwned(state: StrigoiState): Promise<void> {
-    for (const id of new Set([state.activeBinding?.sessionId, state.transition?.successor?.sessionId])) {
-      if (id && this.owned(id)) await this.options.registry.stopResidentProcess(id);
+    for (const target of [identity(state), state.transition?.successor]) {
+      if (target && this.owned(target.sessionId) && this.options.registry.get(target.sessionId).generation === target.generation) {
+        await this.options.registry.stopResidentProcess(target.sessionId);
+      }
     }
   }
   private async hold(code: string, detail: string): Promise<void> {

@@ -26,6 +26,13 @@ export type LaunchAdmission = <T>(apply: () => Promise<T>) => Promise<T>;
 /** Broker-internal identity, authorized against the resident journal before use. */
 export interface LaunchReservation { sessionId: string; transitionId: string }
 
+/** Evidence from the owning launch coordinator, never inferred from a PID or recovered record. */
+export type LaunchOutcome = { kind: "owned"; session: SessionRecord }
+  | { kind: "failed"; error: unknown } | { kind: "unresolved" };
+export interface SessionLaunchOutcomePort {
+  launchOutcome(reservation: LaunchReservation, generation: number): LaunchOutcome;
+}
+
 export interface SessionStartPort {
   start(
     request: StartSessionRequest,

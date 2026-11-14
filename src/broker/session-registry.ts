@@ -1,4 +1,4 @@
-import type { LaunchAdmission, LaunchReservation } from "../orchestration/session/session-ports.js";
+import type { LaunchAdmission, LaunchReservation, LaunchOutcome } from "../orchestration/session/session-ports.js";
 import type { ModalAnswerAttempt } from "../domain/modal-descriptor.js";
 import type { InstructionAdmission } from "../domain/instruction.js";
 import type { ResolvedLaunchRecord, SessionRecord, StartSessionRequest } from "../domain/session.js";
@@ -135,6 +135,7 @@ export class SessionRegistry {
       observer: this.observer,
     });
     this.launch = new SessionLaunchCoordinator({
+      onLaunchOutcome: (sessionId) => this.bus.notifySessionUpdate(sessionId),
       catalog: this.catalog,
       workspace: this.workspace,
       scoutSupervision: this.scoutSupervision,
@@ -177,6 +178,10 @@ export class SessionRegistry {
 
   list(): SessionRecord[] {
     return this.reads.list();
+  }
+
+  launchOutcome(reservation: LaunchReservation, generation: number): LaunchOutcome {
+    return this.launch.launchOutcome(reservation, generation);
   }
 
   runtimePresence(sessionId: string): SessionRuntimePresence {
