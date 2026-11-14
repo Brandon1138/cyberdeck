@@ -1,3 +1,7 @@
+import { effectiveInstruction, type InstructionRecord } from "../domain/instruction.js";
+import { StrigoiTurnEvidence } from "./strigoi-turn-evidence.js";
+import { indexedInstructionReceipt } from "./instruction-target-index.js";
+import { instructionSessionIds } from "../domain/instruction.js";
 import { syncPrivateFile } from "./atomic-private-file.js";
 import { withEvidenceDeletion, withEvidenceReferences, retainEvidenceReferences, evidenceSafety, reconcileEvidenceDeletions, type EvidenceReferenceGuard } from "./strigoi-evidence-deletion.js";
 import { randomUUID } from "node:crypto";
@@ -18,13 +22,14 @@ export function composeStrigoiEvidence(stateDirectory: string) {
   const orchestratorStore = new OrchestratorStore(stateDirectory), artifactStore = new ArtifactStore(stateDirectory);
   const packets = new StrigoiPackets(artifactStore), archive = new StrigoiSourceArchive(stateDirectory, packets);
   let sources: StrigoiSources;
+  let turnTranscripts: ThreadTranscriptStore | undefined;
   let held = false;
   const withReferences: EvidenceReferenceGuard = (ids, commit) => withEvidenceReferences(stateDirectory, ids, async () => {
     if (ids.length && (held || await sources.relevant([...ids]))) await retainEvidenceReferences(stateDirectory, ids);
     return commit();
   });
   const instructionStore = new InstructionStore(stateDirectory, (record) => held ? Promise.resolve() : sources.record("instruction", record.id, record,
-    [record.actorSessionId, record.targetSessionId, ...record.senderSessionId ? [record.senderSessionId] : []]), withReferences);
+    instructionSessionIds(record)), withReferences);
   const workflowStore = new WorkflowStore(stateDirectory, (record) => held ? Promise.resolve() : sources.record("workflow", record.id, record,
     "ownerSessionId" in record ? [record.ownerSessionId, ...record.participantSessionIds] : [record.fromSessionId, record.toSessionId]), withReferences);
   const attentionStore = new OrchestratorAttentionStore(stateDirectory, undefined, (record) => held ? Promise.resolve() : sources.record("attention", record.epoch, record,
@@ -59,6 +64,7 @@ export function composeStrigoiEvidence(stateDirectory: string) {
     return protectedSessionIds;
   }
   async function startup(transcripts: ThreadTranscriptStore, sessions: SessionStore) {
+    turnTranscripts = transcripts;
     sources.attach(transcripts, () => sessions.load());
     try {
       const interrupted = await reconcileEvidenceDeletions(stateDirectory, new Set((await sessions.load()).map((s) => s.id)), () => syncPrivateFile(sessions.path));
@@ -80,5 +86,10 @@ export function composeStrigoiEvidence(stateDirectory: string) {
       return { protectedSessionIds: new Set<string>(), skipDestructiveRetention: true };
     }
   }
-  return { orchestratorStore, artifactStore, instructionStore, workflowStore, attentionStore, packets, sources, archive, transcriptContinuity, beforeDelete, withDeletion, startup, verify: async () => { await verify(); } };
+  const access = new StrigoiTurnEvidence({ repository: orchestratorStore.strigoi, packets, sources, artifacts: artifactStore });
+  const observeInstruction = async (record: InstructionRecord) => {
+    if (!turnTranscripts) throw new Error("STRIGOI_TRANSCRIPTS_UNAVAILABLE");
+    return indexedInstructionReceipt(record, await turnTranscripts.readCompletionLedger(effectiveInstruction(record).targetSessionId));
+  };
+  return { turnPrompt: access.prompt.bind(access), observeInstruction, orchestratorStore, artifactStore, instructionStore, workflowStore, attentionStore, packets, sources, archive, transcriptContinuity, beforeDelete, withDeletion, startup, verify: async () => { await verify(); } };
 }

@@ -1,9 +1,7 @@
-import { StrigoiWorkerRecovery } from "../orchestration/strigoi-worker-recovery.js";
+import { composeProductionStrigoi } from "./strigoi-production.js";
 import { composeStrigoiEvidence } from "../persistence/strigoi-evidence-runtime.js";
-import { StrigoiContinuity } from "../orchestration/strigoi-continuity.js";
 import { composeOrchestratorMutationServices } from "./orchestrator-mutation-services.js";
 import { StrigoiAdmission } from "../orchestration/strigoi-admission.js";
-import { composeStrigoiRuntime } from "./strigoi-runtime.js";
 import { ContainerNativeSource } from "../runtime/activity/container-native-source.js";
 import { TurnNativeCapture } from "../runtime/activity/turn-native-capture.js";
 import { ExecutionTranscriptStore } from "../persistence/execution-transcript-store.js";
@@ -312,14 +310,6 @@ export async function runBroker(
     (binding, session) => attention.bindingChanged(binding).then(() => orchestratorLiveness.bindingSession(binding, session)),
     (binding) => attention.bindingRemoved(binding).then(() => orchestratorLiveness.bindingRemoved(binding)),
   );
-  const strigoi = await composeStrigoiRuntime({ repository: orchestratorStore.strigoi, bindings: orchestratorStore, registry, manager: orchestrators, admission: strigoiAdmission,
-    workers: new StrigoiWorkerRecovery({ repository: orchestratorStore.strigoi, packets: evidence.packets,
-      admission: strigoiAdmission, attention,
-      // The shared service is constructed below before strigoi.start(); quiesce still precedes queue startup.
-      workers: { recoverResident: (...args) => workerControl.recoverResident(...args) } }),
-    continuity: new StrigoiContinuity({ repository: orchestratorStore.strigoi, bindings: orchestratorStore,
-      admission: strigoiAdmission, packets: evidence.packets, sources: evidence.sources }),
-    verifyContinuity: evidence.verify, beforeDelete: evidence.beforeDelete, withDeletion: evidence.withDeletion, onError: (error) => console.error("Strigoi lifecycle held", error) });
   const notificationFeed = composeOrchestratorNotificationFeed({
     strigoi: strigoiAdmission,
     attention,
@@ -334,13 +324,6 @@ export async function runBroker(
     try { return registry.get(id); } catch { return undefined; }
   }, (record, worker) => nativeCapture.captureInstruction(record, worker)), (record) => notificationFeed.observeInstruction(record)),
   (record) => (apply) => attention.admitWake(record, apply), strigoiAdmission);
-  instructions.start();
-  await instructions.recoverLaunchInstructions(async (id) => {
-    const ledger = await transcripts.readCompletionLedger(id);
-    return { canonicalTurns: ledger.canonicalTurns, cancelled: initialInstructionReceipt(ledger).cancelled,
-      pending: registry.initialInstructionRecoveryFailure(id) };
-  });
-  await notificationFeed.start(instructions);
   const workerBudgets = new WorkerBudgetEnforcer({
     registry,
     coordination: workerCoordination.service,
@@ -349,7 +332,6 @@ export async function runBroker(
     credentials: workerLeaseCredentials,
   });
   registry.setWorkerBudgetGate(workerBudgets);
-  await workerBudgets.start();
   const agentControl = new AgentControlService(
     registry,
     orchestratorStore,
@@ -372,6 +354,17 @@ export async function runBroker(
     workflowStore, registry, orchestratorStore, orchestrators, instructions, journal,
     coordination: workerCoordination.service, workerLeaseCredentials, modalAnswerPolicy, strigoiAdmission, residentLiveness: orchestratorLiveness,
   });
+  const strigoi = await composeProductionStrigoi({ evidence, registry, transcripts, manager: orchestrators,
+    admission: strigoiAdmission, instructions, workflows, workerControl, attention, coordination: workerCoordination.service,
+    credentials: workerLeaseCredentials, activity, onError: error => console.error("Strigoi lifecycle held", error) });
+  instructions.start();
+  await instructions.recoverLaunchInstructions(async (id) => {
+    const ledger = await transcripts.readCompletionLedger(id);
+    return { canonicalTurns: ledger.canonicalTurns, cancelled: initialInstructionReceipt(ledger).cancelled,
+      pending: registry.initialInstructionRecoveryFailure(id) };
+  });
+  await notificationFeed.start(instructions);
+  await workerBudgets.start();
   // The same custodian the control service uses, so a handed-off lease is immediately usable by
   // the orchestrator that received it rather than reporting OWNERSHIP_LOST on its next call.
   const workerHandoff = new WorkerHandoffService({

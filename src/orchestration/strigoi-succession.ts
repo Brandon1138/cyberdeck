@@ -19,6 +19,7 @@ export interface StrigoiSuccessionOptions extends StrigoiLifecycleOptions {
   delivery?: StrigoiReconciliationParticipant & {
     /** Close ordinary turn dispatch, not durable input acceptance. Idempotent across restart. */
     hold(identity: StrigoiIdentity, transitionId: string): Promise<void>;
+    flush?(): Promise<void>;
     /** Current durable obligations, not transcript byte counts. Missing evidence never wakes a model. */
     needsAdoption?(identity: StrigoiIdentity, packet: import("../domain/strigoi.js").StrigoiPacketRef): Promise<boolean>;
   };
@@ -116,6 +117,7 @@ export class StrigoiSuccession {
             await this.o.manager.observeResident(state.activeBinding!, this.o.registry.get(actor.sessionId));
           }
           await this.o.lifecycle.reconcileActive(epoch);
+          await this.o.delivery?.flush?.();
           break;
         }
         if (!await this.step(state, epoch)) {
@@ -234,11 +236,12 @@ export class StrigoiSuccession {
         catch (error) { return this.hold(t, epoch, "reconciliation-outcome-unresolved", `Participant failed with unresolved effects: ${String(error)}`); }
         if (!reconciled.done) return this.hold(t, epoch, "reconciliation-outcome-unresolved", "120-second reconciliation elapsed; the existing invocation remains in flight.");
         this.reconciliation = undefined;
-        const holds = reconciled.value;
+        const continuationHolds = reconciled.value.filter(h => h.code === "STRIGOI_WORKFLOW_CONTINUATION_REQUIRED");
+        const holds = reconciled.value.filter(h => h.code !== "STRIGOI_WORKFLOW_CONTINUATION_REQUIRED");
         if (holds.length) return this.change(t.id, epoch, () => ({ hold: holds[0] })).then(() => false);
         if (!this.o.registry.ownsProcess(t.successor!.sessionId) || this.o.registry.get(t.successor!.sessionId).exitCode !== null)
           return this.hold(t, epoch, "successor-unavailable", "The committed successor is unavailable; do not create another adoption chain.");
-        return this.change(t.id, epoch, (_s, current) => ({ transition: this.phase(current, "complete"), hold: undefined }));
+        return this.change(t.id, epoch, (_s, current) => ({ transition: this.phase(current, "complete"), continuationHolds, hold: undefined }));
       }
       default: return false;
     }

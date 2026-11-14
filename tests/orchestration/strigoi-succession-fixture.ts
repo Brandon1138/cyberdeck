@@ -18,7 +18,7 @@ import type { SessionRuntime } from "../../src/domain/session-runtime.js";
 import type { StrigoiState } from "../../src/domain/strigoi.js";
 import { AgentActivityStore } from "../../src/persistence/agent-activity-store.js";
 
-export async function successionFixture() {
+export async function successionFixture(native = false) {
   const root = await mkdtemp(join(tmpdir(), "strigoi-succession-"));
   const evidence = composeStrigoiEvidence(root), bindings = evidence.orchestratorStore;
   const activity = await AgentActivityStore.open(join(root, "activity"));
@@ -43,10 +43,23 @@ export async function successionFixture() {
       kill: () => { trace.push("stop"); if (autoExit) exit(); }, onOutput: () => () => {},
       onExit: (cb) => { exits.add(cb); handles.set(String(spawn.mock.calls.length), exit); return () => { exits.delete(cb); }; } };
   });
+  const nativeResults = new Map<string, import("../../src/orchestration/session/worker-turn-ports.js").ObservedWorkerTurn[]>();
+  const observations = new WorkerTurnObservationAdapter();
+  if (native) {
+    vi.spyOn(observations, "activity").mockReturnValue("awaiting-input");
+    vi.spyOn(observations, "starting").mockReturnValue(false);
+    vi.spyOn(observations, "composer").mockReturnValue({ modalOpen: false, occupied: false, inputReady: true });
+    inference.mockImplementation((text: string) => Buffer.from(text));
+    vi.spyOn(transcripts, "observeProviderTurns").mockImplementation(async input => {
+      const turns = nativeResults.get(input.sessionId) ?? [], last = turns.at(-1);
+      return { ...input, nativeSourceAvailable: true, nativeSourceStatus: "available", nativeActivity: "idle", turns,
+        nativeActivityEvidence: { kind: "fixture-native-end", id: last?.providerTurnId ?? `startup:${input.sessionId}`, occurredAt: last?.providerOccurredAt ?? input.createdAt } };
+    });
+  }
   const options = { config: BrokerRuntimeConfigSchema.parse({}),
     adapters: { codex: { id: "codex", buildLaunchSpec: adapter.buildLaunchSpec.bind(adapter), buildResumeSpec: adapter.buildResumeSpec.bind(adapter), initializeSession: initialize, submitInput: inference } },
     sessionRuntimeFactory: spawn, journal: { append: async () => {} }, store: sessions, transcripts,
-    workerTurnObservation: new WorkerTurnObservationAdapter(),
+    workerTurnObservation: observations,
   } satisfies ConstructorParameters<typeof SessionRegistry>[0];
   let registry = new SessionRegistry(options); await registry.ready();
   const results = new Map<string, Awaited<ReturnType<StrigoiSuccessionTurns["observe"]>>>();
@@ -89,7 +102,7 @@ export async function successionFixture() {
     for (let i = 0; i < count; i++) { await runtime.succession!.advance(id); await Promise.resolve(); }
     return bindings.strigoi.read();
   };
-  return { root, evidence, bindings, sessions, transcripts, activity, turns, workers, delivery, submitted, results, trace, states, spawn, initialize, writes, inference, original,
+  return { root, evidence, bindings, sessions, transcripts, activity, observations, nativeResults, turns, workers, delivery, submitted, results, trace, states, spawn, initialize, writes, inference, original,
     get registry() { return registry; }, get runtime() { return runtime; },
     setBindingObserver: (observer: NonNullable<typeof bindingObserver>) => { bindingObserver = observer; },
     setBoundary: (v: typeof boundary) => { boundary = v; }, setAutoExit: (v: boolean) => { autoExit = v; },
@@ -100,6 +113,6 @@ export async function successionFixture() {
       if (recoverRegistry) { registry = new SessionRegistry({ ...options, recoveredSessions: await sessions.load() }); await registry.ready(); }
       runtime = await make(); return runtime;
     },
-    close: async () => { runtime.dispose(); autoExit = true; await registry.stopAll(); await new Promise((r) => setTimeout(r, 30)); await activity.close(); await rm(root, { recursive: true, force: true }); },
+    close: async () => { runtime.dispose(); autoExit = true; await registry.stopAll(); await new Promise((r) => setTimeout(r, 30)); await activity.close(); await transcripts.changes(0, 1); await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); },
   };
 }

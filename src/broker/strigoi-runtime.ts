@@ -22,13 +22,14 @@ export async function composeStrigoiRuntime(options: StrigoiLifecycleOptions & {
     ...(options.beforeDelete ? { beforeDelete: options.beforeDelete } : {}),
   });
   let unsubscribe: (() => void) | undefined;
+  const reconcile = async () => { await lifecycle.reconcile(); await options.succession?.delivery?.flush?.(); };
   return {
-    lifecycle, continuity: options.continuity, succession, workers,
-    // Task 8 must supply delivery and the native succession composition before production release.
-    integration: succession && workers && options.succession?.delivery ? "composed" as const : "awaiting-task8-delivery" as const,
+    lifecycle, continuity: options.continuity, succession, workers, delivery: options.succession?.delivery,
+    // Partial composition remains available only to isolated lifecycle embeddings.
+    integration: succession && workers && options.succession?.delivery ? "composed" as const : "incomplete" as const,
     start: () => {
-      unsubscribe ??= options.registry.onSessionUpdate(() => { void lifecycle.reconcile().catch(report); });
-      void lifecycle.reconcile().catch(report);
+      unsubscribe ??= options.registry.onSessionUpdate(() => { void reconcile().catch(report); });
+      void reconcile().catch(report);
     },
     dispose: () => { unsubscribe?.(); lifecycle.dispose(); },
   };

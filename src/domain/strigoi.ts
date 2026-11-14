@@ -72,6 +72,7 @@ export const StrigoiStateSchema = z.object({
   successionRequests: z.array(z.object({ mutationId: z.string(), expectedIncarnation: z.number().int(), reason: z.string(), transitionId: z.string() })).optional(),
   successionHistory: z.array(StrigoiTransitionSchema).optional(),
   continuityReceipts: z.array(StrigoiContinuityReceiptSchema).optional(),
+  continuationHolds: z.array(StrigoiHoldSchema).optional(),
   hold: StrigoiHoldSchema.optional(), updatedAt: z.iso.datetime(),
 }).refine((state) => state.desired !== "enabled" || state.selection !== undefined, "Enabled resident requires a selection")
   .refine((state) => state.activeBinding === undefined || (isStrigoiBinding(state.activeBinding)

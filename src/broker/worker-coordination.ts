@@ -345,6 +345,17 @@ export class WorkerCoordinationService {
     return storedLeaseMatches(subject, input, this.now()) && !this.isExpired(subject!, this.now());
   }
 
+  /** Internal final instruction effect; serialized with transfer/release/cancellation authority. */
+  withInstructionAuthority<T>(subjectId: string, controller: ControllerIdentity, token: string, version: number, apply: () => T | Promise<T>): Promise<T> {
+    return this.exclusive(async () => {
+      this.assertReady();
+      const subject = this.requireSubject(subjectId);
+      const code = this.authCode(subject, controller, token, version, this.now());
+      if (code) throw Object.assign(new Error(code), { code: "OWNERSHIP_LOST" });
+      return apply();
+    });
+  }
+
   getBudget(subjectId: string): WorkerBudgetRecord | undefined {
     return this.subjects.get(subjectId)?.budget;
   }

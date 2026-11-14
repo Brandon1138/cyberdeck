@@ -68,3 +68,10 @@ export interface StrigoiSuccessionTurns {
   submit(id: string, identity: StrigoiIdentity, kind: "checkpoint" | "adoption", packet: import("../domain/strigoi.js").StrigoiPacketRef | undefined,
     admit: import("./session/session-ports.js").LaunchAdmission): Promise<void>;
 }
+
+export interface StrigoiDeliveryPort extends StrigoiReconciliationParticipant {
+  submit(message: string, messageId: string): Promise<InstructionRecord>;
+  hold(identity: StrigoiIdentity, transitionId: string): Promise<void>;
+  needsAdoption(identity: StrigoiIdentity, packet: import("../domain/strigoi.js").StrigoiPacketRef): Promise<boolean>;
+  flush(): Promise<void>;
+}

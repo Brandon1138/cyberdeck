@@ -79,6 +79,21 @@ export class WorkflowService {
     return this.store.listRuns();
   }
 
+  /** Session-bound obligations remain in the original run; no participant/reply migration. */
+  async continuationHolds(archivedSessionIds: readonly string[]): Promise<import("../domain/strigoi.js").StrigoiHold[]> {
+    const holds = [];
+    for (const run of await this.store.listRuns()) {
+      if (run.status !== "active" || !archivedSessionIds.includes(run.ownerSessionId)) continue;
+      const messages = await this.store.listMessages(run.id);
+      const pending = messages.filter(message => archivedSessionIds.includes(message.toSessionId)
+        && !messages.some(reply => reply.causationId === message.messageId && reply.fromSessionId === message.toSessionId));
+      for (const message of pending) holds.push({ code: "STRIGOI_WORKFLOW_CONTINUATION_REQUIRED",
+        detail: `Run ${run.id}, message ${message.messageId} requires a reply by archived session ${message.toSessionId}. Retain this run and message; explicitly continue or replace the obligation with existing workflow create/send/cancel operations. No reply or participant was migrated.`,
+        sourceIds: [run.id, message.messageId, message.toSessionId] });
+    }
+    return holds;
+  }
+
   async changes(actorSessionId: string, runId: string, afterCursor = 0): Promise<WorkflowMessage[]> {
     const run = await this.requireParticipant(actorSessionId, runId);
     return (await this.store.listMessages(run.id)).filter((message) => message.cursor > afterCursor);

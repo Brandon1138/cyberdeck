@@ -1,11 +1,12 @@
 import type { EvidenceReferenceGuard } from "./strigoi-evidence-deletion.js";
 import { join } from "node:path";
-import { InstructionRecordSchema, type InstructionRecord } from "../domain/instruction.js";
+import { InstructionRecordSchema, effectiveInstruction, instructionSessionIds, type InstructionRecord } from "../domain/instruction.js";
 import { ValidatedJournal } from "./validated-journal.js";
 
 /** Append-only instruction snapshots. Latest record per id is the current mailbox state. */
 export class InstructionStore {
   readonly path: string;
+  private tail: Promise<unknown> = Promise.resolve();
   private readonly journal: ValidatedJournal<Map<string, InstructionRecord>>;
 
   constructor(stateDirectory: string, private readonly capture?: (record: InstructionRecord) => Promise<void>, private readonly withReferences?: EvidenceReferenceGuard) {
@@ -16,16 +17,21 @@ export class InstructionStore {
     this.journal = new ValidatedJournal(this.path, projectInstructions);
   }
 
-  async put(record: InstructionRecord): Promise<void> {
+  put(record: InstructionRecord): Promise<void> {
     const parsed = InstructionRecordSchema.parse(record);
-    const commit = async () => { await this.journal.append(parsed); await this.capture?.(parsed); };
-    if (this.withReferences) await this.withReferences([parsed.actorSessionId, parsed.targetSessionId, ...parsed.senderSessionId ? [parsed.senderSessionId] : []], commit);
-    else await commit();
+    const work = this.tail.catch(() => {}).then(async () => {
+      const prior = (await this.journal.read()).get(parsed.id);
+      validateContinuation(prior, parsed);
+      const commit = async () => { await this.journal.append(parsed); await this.capture?.(parsed); };
+      if (this.withReferences) await this.withReferences(instructionSessionIds(parsed), commit);
+      else await commit();
+    });
+    this.tail = work; return work;
   }
 
   async list(targetSessionId?: string): Promise<InstructionRecord[]> {
     const latest = await this.journal.read();
-    return structuredClone([...latest.values()].filter((record) => targetSessionId === undefined || record.targetSessionId === targetSessionId));
+    return structuredClone([...latest.values()].filter((record) => targetSessionId === undefined || (record.targetSessionId === targetSessionId || effectiveInstruction(record).targetSessionId === targetSessionId)));
   }
 }
 
@@ -36,7 +42,23 @@ function projectInstructions(content: string): Map<string, InstructionRecord> {
   for (const line of lines) {
     if (line.trim() === "") continue;
     const record = InstructionRecordSchema.parse(JSON.parse(line));
+    validateContinuation(latest.get(record.id), record);
     latest.set(record.id, record);
   }
   return latest;
+}
+
+function validateContinuation(prior: InstructionRecord | undefined, record: InstructionRecord): void {
+  for (const receipt of record.continuations ?? []) {
+    if (receipt.instructionId !== record.id || receipt.originalActorSessionId !== record.actorSessionId
+      || receipt.originalTargetSessionId !== record.targetSessionId) throw new Error("INSTRUCTION_CONTINUATION_IDENTITY_MISMATCH");
+    if (!record.logicalRecipient && receipt.effectiveTargetSessionId !== record.targetSessionId) throw new Error("INSTRUCTION_EXPLICIT_TARGET_IMMUTABLE");
+  }
+  if (!prior) return;
+  for (const key of ["actorSessionId", "targetSessionId", "senderSessionId", "message", "messageId", "logicalRecipient", "workflowRunId", "createdAt"] as const) {
+    if (JSON.stringify(prior[key]) !== JSON.stringify(record[key])) throw new Error("INSTRUCTION_ORIGINAL_IMMUTABLE");
+  }
+  const previous = prior.continuations ?? [], next = record.continuations ?? [];
+  if (previous.some((receipt, i) => JSON.stringify(receipt) !== JSON.stringify(next[i]))) throw new Error("INSTRUCTION_CONTINUATION_APPEND_ONLY");
+  if (next.length > previous.length && (prior.launch === true || !["accepted", "queued"].includes(prior.status))) throw new Error("INSTRUCTION_CONTINUATION_UNSAFE");
 }

@@ -2,8 +2,8 @@ import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows } from "../domain/capability.js";
-import { InstructionRecordSchema, WakeContextSchema, WakeHeldError, type InstructionRecord, type InstructionAdmission } from "../domain/instruction.js";
-import { AttentionError, AttentionWakeHeldError } from "../domain/orchestrator-attention.js";
+import { InstructionRecordSchema, WakeContextSchema, effectiveInstruction, type InstructionRecord, type InstructionAdmission } from "../domain/instruction.js";
+import { InstructionDelivery, type InstructionRouting } from "./instruction-delivery.js";
 import { instructionReachedProvider, type InstructionLifecycleState } from "../domain/worker-truth.js";
 import type { SessionRecord } from "../domain/session.js";
 import type {
@@ -55,6 +55,9 @@ export const EnqueueBrokerInstructionParamsSchema = z.object({
 });
 
 export class InstructionQueue {
+  private routing?: InstructionRouting;
+  private routingTail: Promise<unknown> = Promise.resolve();
+  setRouting(routing: InstructionRouting): void { this.routing = routing; }
   private subscriptions: Array<() => void> = [];
   /**
    * One writer per target at a time.
@@ -94,6 +97,17 @@ export class InstructionQueue {
   stop(): void {
     for (const unsubscribe of this.subscriptions) unsubscribe();
     this.subscriptions = [];
+  }
+
+  /** Drain already-scheduled receipt writers after unsubscribing; never starts new work. */
+  async drain(): Promise<void> {
+    for (;;) {
+      const routing = this.routingTail;
+      await routing.catch(() => {});
+      await Promise.allSettled([...this.writers.values()]);
+      await Promise.resolve();
+      if (routing === this.routingTail && !this.writers.size) return;
+    }
   }
 
   /** Persist the first instruction during activation, before the target is in the live catalog. */
@@ -253,10 +267,13 @@ export class InstructionQueue {
   flush(targetSessionId: string, verifyMessageId?: string): Promise<InstructionRecord[]> {
     if (this.strigoi?.deferDelivery(() => this.flush(targetSessionId, verifyMessageId))) return Promise.resolve([]);
     return this.serialize(targetSessionId, async () => {
-      const records = await this.store.list(targetSessionId);
+      const key = await this.routing?.key(targetSessionId) ?? targetSessionId;
+      const records = (await this.store.list()).filter(record => effectiveInstruction(record).targetSessionId === targetSessionId
+        || key === "resident:strigoi" && record.logicalRecipient !== undefined);
       const rendered = records.find((record) => record.messageId === verifyMessageId && record.status === "rendered"
         && record.brokerOwned === true && record.wake?.attentionEpoch !== undefined);
       if (rendered !== undefined) this.registry.verifyInstructionSubmission?.(targetSessionId, rendered.id);
+      if (records.some(record => record.logicalRecipient && record.status === "rendered")) return [];
       const pending = records
         .filter((record) => record.status === "accepted" || record.status === "queued");
       const results: InstructionRecord[] = [];
@@ -289,17 +306,42 @@ export class InstructionQueue {
   }
 
   private serialize<T>(targetSessionId: string, work: () => Promise<T>): Promise<T> {
-    const next = (this.writers.get(targetSessionId) ?? Promise.resolve())
-      .catch(() => undefined)
-      .then(work);
-    this.writers.set(targetSessionId, next);
-    return next.finally(() => {
-      if (this.writers.get(targetSessionId) === next) this.writers.delete(targetSessionId);
+    // Reserve keys in call order. Async identity reads must not let a later flush overtake a receipt.
+    const reservation = this.routingTail.catch(() => {}).then(async () => await this.routing?.key(targetSessionId) ?? targetSessionId);
+    this.routingTail = reservation;
+    return reservation.then(key => {
+      const next = (this.writers.get(key) ?? Promise.resolve()).catch(() => undefined).then(work);
+      this.writers.set(key, next);
+      return next.finally(() => { if (this.writers.get(key) === next) this.writers.delete(key); });
     });
   }
 
   list(targetSessionId?: string): Promise<InstructionRecord[]> {
     return this.store.list(targetSessionId);
+  }
+
+  /** Broker-only acceptance into the existing journal; identity resolver runs under its serializer. */
+  acceptResident(message: string, messageId: string, actor: () => Promise<string>): Promise<InstructionRecord> {
+    return this.serialize("resident:strigoi", async () => {
+      const request = z.object({ message: z.string().trim().min(1), messageId: z.uuid() }).parse({ message, messageId });
+      const prior = (await this.store.list()).find(r => r.logicalRecipient && r.messageId === request.messageId);
+      if (prior) {
+        if (prior.message !== request.message) throw Object.assign(new Error("Message ID reused"), { code: "STRIGOI_MESSAGE_CONFLICT" });
+        await this.store.put(prior); return prior; // confirm durability after a lost append/fsync response
+      }
+      const sessionId = await actor(), at = new Date().toISOString();
+      const record = InstructionRecordSchema.parse({ id: randomUUID(), actorSessionId: sessionId, targetSessionId: sessionId,
+        message: request.message, messageId: request.messageId, logicalRecipient: { kind: "resident", key: "resident:strigoi" },
+        status: "accepted", createdAt: at, updatedAt: at });
+      await this.store.put(record); return record;
+    });
+  }
+  /** Reconciliation shares the same writer as withdrawal and provider receipts. */
+  revise(record: InstructionRecord, edit: (current: InstructionRecord, persist: () => Promise<void>) => Promise<void>): Promise<void> {
+    return this.serialize(record.targetSessionId, async () => {
+      const current = (await this.store.list()).find(r => r.id === record.id);
+      if (current) await edit(current, () => this.store.put(current));
+    });
   }
 
   /**
@@ -315,7 +357,7 @@ export class InstructionQueue {
       const record = (await this.store.list(targetSessionId))
         .find((candidate) => candidate.messageId === messageId);
       if (record === undefined) return undefined;
-      if (record.status !== "accepted" && record.status !== "queued") return record;
+      if (record.submissionAttempt?.outcome === "unknown" || record.status !== "accepted" && record.status !== "queued") return record;
       return this.persistState(record, "cancelled", {});
     });
   }
@@ -333,7 +375,7 @@ export class InstructionQueue {
         return { outcome: "IDENTITY_MISMATCH" as const };
       }
       if (record.status === "cancelled") return { outcome: "CANCELLED" as const, instruction: record };
-      if (record.status !== "accepted" && record.status !== "queued") {
+      if (record.submissionAttempt?.outcome === "unknown" || record.status !== "accepted" && record.status !== "queued") {
         return { outcome: "TOO_LATE" as const, instruction: record };
       }
       const instruction = await this.persistState(record, "cancelled", {
@@ -356,7 +398,9 @@ export class InstructionQueue {
       const record = (await this.store.list(update.sessionId)).find(({ id }) => id === update.instructionId);
       // Recovered runtimes can emit stale generation-local observations. Durable terminal
       // receipts never regress, including when that old runtime later stops or resumes.
-      if (record === undefined || record.status === update.state
+      if (record === undefined || effectiveInstruction(record).targetSessionId !== update.sessionId
+        || record.continuations?.length && ["accepted", "queued"].includes(record.status)
+        || record.status === update.state
         || ["completed", "undelivered", "cancelled"].includes(record.status)) return;
       if (instructionProgress(record.status, update.state) !== update.state) return;
       await this.store.put(InstructionRecordSchema.parse({
@@ -379,86 +423,9 @@ export class InstructionQueue {
     if (instructionReachedProvider(update.state)) await this.flush(update.sessionId);
   }
 
-  private async tryDeliver(record: InstructionRecord): Promise<InstructionRecord> {
-    if (record.launch === true) {
-      let target: SessionRecord | undefined;
-      try { target = this.registry.get(record.targetSessionId); } catch { /* Failed before catalog registration. */ }
-      if (target === undefined || !["starting", "active"].includes(target.executionState)) {
-        if (record.holdReason === "native-recovery-unavailable") return record;
-        return this.persistState(record, "undelivered", { holdReason: "worker-terminal" });
-      }
-      if (target.initialInstructionId === record.id && target.pid > 0 && target.executionState === "active") {
-        return this.persistState(record, "rendered", { renderedAt: target.updatedAt, expectedTurn: 1, holdReason: undefined });
-      }
-      return this.persistState(record, "queued", { holdReason: "provider-starting" });
-    }
-    const source = record.brokerOwned === true
-      ? "broker"
-      : record.senderSessionId !== undefined && record.senderSessionId !== record.actorSessionId
-        ? "worker"
-        : "orchestrator";
-    let delivery;
-    try {
-      if (record.wake?.attentionEpoch !== undefined && this.wakeAdmission === undefined) {
-        throw new AttentionWakeHeldError("attention-admission-unavailable");
-      }
-      const wake = record.submissionKind === "wake" ? this.wakeAdmission?.(record) : undefined;
-      const resident = this.strigoi?.instruction(record);
-      const admission: InstructionAdmission | undefined = resident === undefined ? wake
-        : (apply) => resident(() => wake === undefined ? apply() : wake(apply));
-      delivery = await this.registry.submitInstruction(record.targetSessionId, record.message, source, {
-        actorSessionId: record.actorSessionId,
-        senderSessionId: record.senderSessionId ?? record.actorSessionId,
-        messageId: record.messageId,
-        workflowRunId: record.workflowRunId ?? null,
-        brokerOwned: record.brokerOwned === true,
-        ...(record.submissionKind === undefined ? {} : { submissionKind: record.submissionKind }),
-      }, record.id, ...(admission === undefined ? [] as const : [admission] as const));
-    } catch (error) {
-      if (error instanceof AttentionWakeHeldError) {
-        return this.persistState(record, error.obsolete ? "cancelled" : "queued", { holdReason: error.holdReason });
-      }
-      if (record.wake?.attentionEpoch !== undefined && error instanceof AttentionError) {
-        return this.persistState(record, "cancelled", { holdReason: error.code });
-      }
-      if (error instanceof WakeHeldError) {
-        return this.persistState(record, "queued", { holdReason: error.holdReason });
-      }
-      const code = typeof error === "object" && error !== null && "code" in error
-        ? error.code
-        : undefined;
-      if (typeof code === "string" && (code.startsWith("STRIGOI_") || code === "CAPABILITY_DENIED" || code === "ACTOR_NOT_AUTHORIZED")) {
-        return this.persistState(record, "queued", { holdReason: code });
-      }
-      if (code === "SESSION_BUSY") {
-        return this.persistState(record, "queued", { holdReason: "human-controller" });
-      }
-      // The thread is gone, not busy. Rethrowing left the record `accepted`, and an `accepted`
-      // record is both retried forever and deduplicated against the retry that would replace it.
-      if (code === "SESSION_NOT_FOUND") {
-        return this.persistState(record, "undelivered", { holdReason: "worker-terminal" });
-      }
-      if (code === "WORKER_BUDGET_EXHAUSTED") {
-        return this.persistState(record, "undelivered", {
-          holdReason: "worker-budget-exhausted",
-        });
-      }
-      throw error;
-    }
-    // `rendered` is the strongest thing an enqueue can honestly claim: the bytes are in the
-    // provider's input surface. Whether the provider took them is observed later, or never.
-    if (delivery.state === "undelivered") {
-      return this.persistState(record, "undelivered", {
-        ...(delivery.hold === undefined ? {} : { holdReason: record.submissionKind === "wake" ? `wake-${delivery.hold}` : delivery.hold }),
-      });
-    }
-    return delivery.state === "queued"
-      ? this.persistState(record, "queued", { ...(delivery.hold === undefined ? {} : { holdReason: record.submissionKind === "wake" ? `wake-${delivery.hold}` : delivery.hold }) })
-      : this.persistState(record, "rendered", {
-          holdReason: undefined,
-          renderedAt: delivery.at,
-          ...(delivery.expectedTurn === undefined ? {} : { expectedTurn: delivery.expectedTurn }),
-        });
+  private tryDeliver(record: InstructionRecord): Promise<InstructionRecord> {
+    return new InstructionDelivery({ registry: this.registry, store: this.store, strigoi: this.strigoi,
+      routing: this.routing, wakeAdmission: this.wakeAdmission, persistState: (...args) => this.persistState(...args) }).deliver(record);
   }
 
   private async persistState(
