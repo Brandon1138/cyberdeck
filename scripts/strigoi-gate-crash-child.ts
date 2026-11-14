@@ -59,7 +59,7 @@ async function run({ options: o, token, restart, synthetic }: CrashChildRequest)
     sessionsDirectory: join(nativeRoot, "sessions"), runCommand: async (exe, args, options) => {
       if (options.env.CODEX_HOME !== home.directory) throw new Error("Native home escaped ownership");
       record({ resource: "native-command", executable: exe, args, home: home.directory });
-      return (await command("rtk", ["proxy", exe, ...args], { ...options, timeout: 30_000 })).stdout;
+      return (await command(exe, [...args], { ...options, timeout: 30_000 })).stdout;
     } });
   const adapter: ProviderAdapter = {
     id: "codex",

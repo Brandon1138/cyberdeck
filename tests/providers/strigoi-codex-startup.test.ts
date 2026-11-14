@@ -14,4 +14,20 @@ describe("Strigoi native Codex instructions", () => {
     for (const text of ["Strigoi", "Alfred", "packet-1", "coverage-1", "uncertainty", "No startup greeting", "authority"]) expect(native).toContain(text);
     expect(spec.args).toContain("--approve-for-me");
   });
+
+  it("uses the identity bridge without MCP, preserving passive launch and idempotent preparation", async () => {
+    const adapter = new CodexProviderAdapter({ runCommand: async () => JSON.stringify({ status: "connected" }) });
+    const record = { id: "resident", provider: "codex", kind: "orchestrator", cwd: "/repo",
+      sandbox: "workspace-write", approvalMode: "auto", providerInstructions: strigoiPrompt({}) } as SessionRecord;
+    const spec = adapter.buildLaunchSpec(record);
+    await adapter.prepareLaunch(record, spec);
+    const args = [...spec.args];
+    expect(args.some(arg => /remote-mcp-launch\.[jt]s$/u.test(arg))).toBe(true);
+    expect(args).not.toContain("--mcp-node");
+    // Only the wrapper separator exists; no native positional prompt was introduced.
+    expect(args.filter(arg => arg === "--")).toHaveLength(1);
+    expect(args.find(arg => arg.startsWith("developer_instructions="))).toContain("Strigoi");
+    await adapter.prepareLaunch(record, spec);
+    expect(spec.args).toEqual(args);
+  });
 });

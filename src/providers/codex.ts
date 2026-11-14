@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { closeSync, openSync, readSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,9 @@ import type { CodexOrchestratorHomePort } from "./codex/orchestrator-home.js";
 import { codexDeveloperInstructions, codexSessionClaims } from "./codex/native-session-identity.js";
 import type { CodexConversationBindingStore } from "../persistence/codex-conversation-bindings.js";
 import { readCodexDeveloperInstructions, type CodexDeveloperInstructionsReader } from "./codex/effective-instructions.js";
+
+const remoteLauncher = fileURLToPath(new URL(import.meta.url.endsWith(".ts")
+  ? "./codex/remote-mcp-launch.ts" : "./codex/remote-mcp-launch.js", import.meta.url));
 
 /**
  * Codex workers name both permission dimensions independently. Top-level orchestrators use the
@@ -222,14 +226,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
       );
     }
     await this.prepareIdentity(session, spec);
-    if (this.options.mcp !== undefined) {
-      // The PTY owns this launcher and its private bridge, so a broker restart leaves both alive.
-      const launcher = fileURLToPath(new URL("./codex/remote-mcp-launch.js", import.meta.url));
-      if (spec.args[0] === launcher) return;
-      spec.args.unshift(launcher, "--actor-session", session.id,
-        "--mcp-node", this.options.mcp.nodePath, "--mcp-cli", this.options.mcp.cliPath, "--");
-      spec.executable = this.options.mcp.nodePath;
-    }
+    // Identity is required even without MCP (including the isolated acceptance runner).
+    // The PTY owns this launcher and bridge, so a broker restart leaves both alive.
+    if (spec.args.includes(remoteLauncher)) return;
+    const loader = remoteLauncher.endsWith(".ts") ? ["--import", createRequire(import.meta.url).resolve("tsx")] : [];
+    const mcp = this.options.mcp;
+    spec.args.unshift(...loader, remoteLauncher, "--actor-session", session.id,
+      ...(mcp === undefined ? [] : ["--mcp-node", mcp.nodePath, "--mcp-cli", mcp.cliPath]), "--");
+    spec.executable = mcp?.nodePath ?? process.execPath;
   }
 
   private remoteArgs(session: SessionRecord): string[] {
@@ -252,7 +256,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   private async prepareIdentity(session: SessionRecord, spec: ProviderLaunchSpec): Promise<void> {
-    if (spec.args[0] === fileURLToPath(new URL("./codex/remote-mcp-launch.js", import.meta.url))) return;
+    if (spec.args.includes(remoteLauncher)) return;
     // A container owns a private native source; never load the host's instructions into it.
     if (session.providerInstructions !== undefined || session.executor === "orbstack-container") return;
     const inherited = await (this.options.resolveDeveloperInstructions ?? readCodexDeveloperInstructions)({

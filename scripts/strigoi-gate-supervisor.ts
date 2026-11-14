@@ -58,7 +58,7 @@ export async function runCrashGate(o: StrigoiGateOptions, synthetic = false): Pr
     return observation;
   };
   try {
-    const version = async (...args: string[]) => (await promisify(execFile)("rtk", ["proxy", ...args], { timeout: 30_000 })).stdout.trim();
+    const version = async (exe: string, ...args: string[]) => (await promisify(execFile)(exe, args, { timeout: 30_000 })).stdout.trim();
     result.versions = { source: await version("git", "rev-parse", "HEAD"), dirty: await version("git", "status", "--porcelain"),
       provider: synthetic ? "NOT RUN: synthetic transport" : await version("codex", "--version") };
     const before = await launch(false); result.before = before; await record(before);

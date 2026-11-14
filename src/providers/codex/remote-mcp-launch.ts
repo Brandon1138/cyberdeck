@@ -16,7 +16,20 @@ export async function runCodexRemoteMcpLaunch(
   if (remoteIndex < 0 || nativeArgs[remoteIndex + 1] !== "unix://") {
     throw new Error("Codex orchestrator MCP requires its dedicated local app-server");
   }
-  const bridge = await openCodexRemoteMcpBridge(options);
+  // The remote TUI omits this -c override from thread/start. Preserve the exact launch
+  // instructions at the bridge, without reading positional prompt text as configuration.
+  const end = nativeArgs.indexOf("--");
+  let developerInstructions = options.developerInstructions;
+  for (let i = 0; i < (end < 0 ? nativeArgs.length : end); i++) {
+    if ((nativeArgs[i] === "-c" || nativeArgs[i] === "--config")
+      && nativeArgs[i + 1]?.startsWith("developer_instructions=")) {
+      const value: unknown = JSON.parse(nativeArgs[++i]!.slice("developer_instructions=".length));
+      if (typeof value !== "string") throw new Error("Invalid Codex developer instructions");
+      developerInstructions = value;
+    }
+  }
+  const bridge = await openCodexRemoteMcpBridge({ ...options,
+    ...(developerInstructions === undefined ? {} : { developerInstructions }) });
   nativeArgs[remoteIndex + 1] = bridge.address;
   const native = spawn("codex", nativeArgs, { env: environment, stdio: "inherit" });
   const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
@@ -37,14 +50,16 @@ export async function runCodexRemoteMcpLaunch(
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  if (args[0] !== "--actor-session" || args[2] !== "--mcp-node" || args[4] !== "--mcp-cli"
-    || args[6] !== "--" || !args[1] || !args[3] || !args[5]) {
+  const hasMcp = args[2] === "--mcp-node";
+  const separator = hasMcp ? 6 : 2;
+  if (args[0] !== "--actor-session" || !args[1] || args[separator] !== "--"
+    || (hasMcp && (!args[3] || args[4] !== "--mcp-cli" || !args[5]))) {
     throw new Error("Invalid Codex orchestrator MCP launcher arguments");
   }
   process.exitCode = await runCodexRemoteMcpLaunch({
-    sessionId: args[1], mcp: { nodePath: args[3], cliPath: args[5] },
+    sessionId: args[1], ...(hasMcp ? { mcp: { nodePath: args[3]!, cliPath: args[5]! } } : {}),
     homeDirectory: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
-  }, args.slice(7));
+  }, args.slice(separator + 1));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

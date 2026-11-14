@@ -61,7 +61,7 @@ export async function runStrigoiGate(o: StrigoiGateOptions): Promise<void> {
   let activity: AgentActivityStore | undefined, daemonPrepared = false;
   const result: Record<string, unknown> = { status: "RUNNING", plan, selection: o.selection, providerUsage: null, costUsd: null, startedAt: new Date().toISOString(), stages: [] };
   const save = async () => writeFile(join(o.stateDirectory, "gate-result.json"), JSON.stringify({ ...result, processes, submissions }, null, 2), { mode: 0o600 });
-  const version = async (...args: string[]) => (await command("rtk", ["proxy", ...args], { timeout: 30_000 })).stdout.trim();
+  const version = async (exe: string, ...args: string[]) => (await command(exe, args, { timeout: 30_000 })).stdout.trim();
   try {
     result.versions = { node: process.version, provider: await version("codex", "--version"), source: await version("git", "rev-parse", "HEAD"), dirty: await version("git", "status", "--porcelain") };
     await mkdir(nativeRoot, { mode: 0o700 });
@@ -79,7 +79,7 @@ export async function runStrigoiGate(o: StrigoiGateOptions): Promise<void> {
         daemonPrepared = true; ownership({ resource: "native-daemon", home: home.directory, command: args });
         // Every native command uses the isolated home supplied in the launch spec.
         if (options.env.CODEX_HOME !== home.directory) throw new Error("Native home escaped ownership");
-        return (await command("rtk", ["proxy", exe, ...args], { ...options, timeout: 30_000 })).stdout;
+        return (await command(exe, [...args], { ...options, timeout: 30_000 })).stdout;
       } });
     const launchSpec = provider.buildLaunchSpec.bind(provider);
     provider.buildLaunchSpec = (session, prompt) => {
@@ -260,7 +260,7 @@ export async function runStrigoiGate(o: StrigoiGateOptions): Promise<void> {
     try { await activity?.close(); } catch (error) { cleanup.activity = String(error); }
     // Stop only the native daemon in the newly created home, never discover a primary PID.
     if (daemonPrepared) {
-      try { await command("rtk", ["proxy", "codex", "app-server", "daemon", "stop"], { env: { ...process.env, CODEX_HOME: home.directory }, timeout: 30_000 }); cleanup.daemon = "isolated stop completed"; }
+      try { await command("codex", ["app-server", "daemon", "stop"], { env: { ...process.env, CODEX_HOME: home.directory }, timeout: 30_000 }); cleanup.daemon = "isolated stop completed"; }
       catch { cleanup.daemon = "UNQUALIFIED: isolated daemon stop unavailable; retained owned home needs operator inspection"; }
     }
     cleanup.processes = processes; cleanup.nativeEntries = await readdir(home.directory).catch(() => []);

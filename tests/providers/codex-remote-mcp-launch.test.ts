@@ -59,13 +59,24 @@ process.on('SIGTERM', () => process.exit(12));
     await rm(directory, { recursive: true, force: true });
   });
 
-  function start(args: string[] = []) {
+  function start(args: string[] = [], mcp = true) {
     return spawn(process.execPath, ["--import", require.resolve("tsx"), launcher,
-      "--actor-session", "orc-terminal", "--mcp-node", "/node", "--mcp-cli", "/cyberdeck.js", "--",
+      "--actor-session", "orc-terminal", ...(mcp ? ["--mcp-node", "/node", "--mcp-cli", "/cyberdeck.js"] : []), "--",
       "--remote", "unix://", ...args,
     ], { env: { ...process.env, CODEX_HOME: home, PATH: `${directory}:${process.env.PATH}`,
       CD_LAUNCH_PROOF: join(directory, "proof.json") }, stdio: ["ignore", "pipe", "pipe"] });
   }
+
+  it.each([true, false])("retains explicit launch instructions across a TUI that drops -c (MCP=%s)", async mcp => {
+    const instructions = "Strigoi: remain passive; packet=exact-packet; preserve uncertainty.";
+    const child = start(["-c", `developer_instructions=${JSON.stringify(instructions)}`,
+      "--", 'developer_instructions="foreign prompt text"'], mcp);
+    const [code] = await once(child, "exit");
+    expect(code).toBe(7);
+    const { request } = JSON.parse(await readFile(join(directory, "proof.json"), "utf8"));
+    expect(request.params.developerInstructions).toBe(`${instructions}\n\n[cyberdeck-native-session:orc-terminal]`);
+    expect(request.params.config["mcp_servers.cyberdeck"] !== undefined).toBe(mcp);
+  });
 
   it("keeps the native arguments and exit status, then cleans the private bridge", async () => {
     const child = start(["--no-alt-screen", "--", "Preserve --remote in this prompt"]);
