@@ -315,8 +315,9 @@ export class StrigoiSuccession {
         return true;
       }
       if (result.outcome === "unknown") {
-        if (this.now() - Date.parse(attempt.startedAt) >= 120_000)
-          return this.hold(t, epoch, `${kind}-outcome-unresolved`, "120-second attempt elapsed; rendered/submitted execution is unresolved and will not be retyped.");
+        const timeout = result.nativeTurnObserved ? 600_000 : 120_000;
+        if (this.now() - Date.parse(attempt.startedAt) >= timeout)
+          return this.hold(t, epoch, `${kind}-outcome-unresolved`, `${timeout / 1000}-second attempt elapsed; rendered/submitted execution is unresolved and will not be retyped.`);
         return false;
       }
       if (attempt.outcome !== "terminated") {

@@ -6,6 +6,7 @@ import type { SessionInstructionPort, LaunchAdmission } from "./session/session-
 import { InstructionRefusedError } from "./session/session-registry-ports.js";
 import type { WorkerTurnTranscriptPort } from "./session/worker-turn-ports.js";
 import type { StrigoiSuccessionTurns } from "./strigoi-ports.js";
+import { nativeTurnIdentity } from "./session/worker-turn-native-state.js";
 
 /** Native instruction/semantic-receipt adapter. No terminal scrape can establish adoption. */
 export class StrigoiTurns implements StrigoiSuccessionTurns {
@@ -51,7 +52,20 @@ export class StrigoiTurns implements StrigoiSuccessionTurns {
     const rendered = events.find((e) => e.data.instructionId === id && e.data.instructionState === "rendered");
     if (!rendered) return { outcome: "unknown" }; // queued or ambiguous is not permission to retype
     const receipt = events.find((e) => e.kind === "turn" && e.data.turnNumber === rendered.data.expectedTurn && e.data.transport === "provider-native");
-    if (!receipt) return { outcome: "unknown" };
+    if (!receipt) {
+      const record = this.registry.get(identity.sessionId);
+      if (record.generation !== identity.generation || typeof rendered.data.expectedTurn !== "number") return { outcome: "unknown" };
+      const native = await this.transcripts.observeProviderTurns?.({ ...nativeTurnIdentity(record),
+        turnNumber: rendered.data.expectedTurn, allowFallback: false }).catch(() => undefined);
+      const at = native?.nativeActivityEvidence?.occurredAt;
+      // A current native start/end can justify waiting for the durable semantic receipt. It
+      // cannot acknowledge adoption, advance coverage, or authorize another submission.
+      const observed = native?.nativeSourceAvailable === true
+        && (native.nativeActivity === "working" || native.nativeActivity === "idle")
+        && at !== undefined && Date.parse(at) >= Date.parse(rendered.occurredAt)
+        && Date.parse(at) >= Date.parse(record.createdAt);
+      return { outcome: "unknown", ...(observed ? { nativeTurnObserved: true } : {}) };
+    }
     if (receipt.data.outcome === "cancelled") return { outcome: "terminated" };
     let result: unknown;
     try { result = JSON.parse((receipt.text ?? "").trim().replace(/^```(?:json)?\s*\n?|\n?```$/g, "")); }

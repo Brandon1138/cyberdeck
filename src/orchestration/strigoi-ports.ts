@@ -60,6 +60,8 @@ export interface StrigoiSuccessionTurns {
   boundary(identity: StrigoiIdentity): Promise<"safe" | "busy" | "modal" | "unknown">;
   observe(id: string, identity: StrigoiIdentity): Promise<{
     outcome: "unknown" | "completed" | "terminated";
+    /** Exactly attributed native activity after this attempt's rendered input, not completion. */
+    nativeTurnObserved?: boolean;
     checkpoint?: string;
     adoption?: import("../domain/strigoi.js").StrigoiAdoption;
     usage?: { inputTokens?: number; outputTokens?: number };

@@ -1,3 +1,23 @@
+## Started native work and the completion deadline
+
+At source `576c2f3`, full check/test/build passed (4,226 tests; 27 skips), all
+source snapshots matched, and every CI job including macOS and WSL passed. The
+approved r05 lifecycle passed 600,676 ms idle, no-checkpoint recovery, ordinary
+input, and native worker delivery. First planned renewal then reached the fixed
+120-second adoption hold while reading nine evidence pages. Its exact native
+completion arrived after approximately 151 seconds. All provider processes exited;
+the first isolated daemon-stop call timed out, and the subsequent scoped stop
+confirmed `notRunning`. Original result and cleanup failure remain preserved.
+
+The next remediation distinguishes unknown submission from observed native work.
+Unknown execution and hung submission retain the 120-second bound. An exactly
+bound native start/end after the rendered input permits at most ten minutes for
+the durable semantic receipt, measured from the original persisted attempt start.
+This observation cannot acknowledge adoption, transfer coverage, or cause replay.
+Stale, unbound, unreadable, and timestamp-free evidence cannot extend the bound.
+Typecheck and 53 focused checks pass, including restart and no-replay regressions.
+A fresh r06 full lifecycle is explicitly approved; its result is pending.
+
 ## Work-cycle remediation and fresh qualification
 
 The delayed-redraw defect below now has a failing-before/passing-after regression.

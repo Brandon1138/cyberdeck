@@ -7,7 +7,7 @@ import type { SessionRecord } from "../../src/domain/session.js";
 import { SessionIoSurface } from "../../src/orchestration/session/session-io-surface.js";
 import { WorkerTurnEngineFactory } from "../../src/orchestration/session/worker-turn-engine.js";
 import { RegistryError } from "../../src/orchestration/session/session-registry-ports.js";
-import type { AppendWorkerTurnTranscriptEvent } from "../../src/orchestration/session/worker-turn-ports.js";
+import type { AppendWorkerTurnTranscriptEvent, WorkerTurnObservation } from "../../src/orchestration/session/worker-turn-ports.js";
 
 function fixture() {
   const identity = { sessionId: randomUUID(), incarnation: 1, generation: 1 }, events: ThreadEvent[] = [];
@@ -16,11 +16,13 @@ function fixture() {
       occurredAt: new Date().toISOString(), kind: "instruction", source: "broker", data: { ...metadata, instructionId, instructionState: "rendered", expectedTurn: 1 } }));
     return { state: "rendered", expectedTurn: 1, at: new Date().toISOString() };
   });
-  const registry = { get: () => ({ generation: 1 }), workerTruth: () => ({ state: "idle", modalOpen: false }), submitInstruction: submit };
+  const record = { id: identity.sessionId, generation: 1, provider: "codex", cwd: "/tmp", createdAt: new Date().toISOString() };
+  const registry = { get: () => record, workerTruth: () => ({ state: "idle", modalOpen: false }), submitInstruction: submit };
+  const observeProviderTurns = vi.fn<() => Promise<WorkerTurnObservation>>(async () => ({ sessionId: identity.sessionId, provider: "codex", turnNumber: 1, turns: [] }));
   const transcripts = { append: async (event: AppendWorkerTurnTranscriptEvent) => { events.push({ ...event, data: event.data ?? {}, id: randomUUID(), cursor: events.length + 1, occurredAt: new Date().toISOString() }); },
-    read: async (_id: string, cursor = 0) => ({ events: events.filter((e) => e.cursor > cursor), nextCursor: events.length }) };
+    read: async (_id: string, cursor = 0) => ({ events: events.filter((e) => e.cursor > cursor), nextCursor: events.length }), observeProviderTurns };
   const turns = new StrigoiTurns(registry as never, transcripts as never, async () => "checkpoint instruction");
-  return { identity, events, submit, turns, transcripts };
+  return { identity, events, submit, turns, transcripts, record, observeProviderTurns };
 }
 
 function productionFixture() {
@@ -46,6 +48,31 @@ function productionFixture() {
   return { ...f, turns, io, engine, writes, observeProviderTurns };
 }
 describe("real succession instruction transport", () => {
+  it.each(["working", "idle"] as const)("waits for a semantic receipt after current native %s without treating it as completed", async (activity) => {
+    const f = fixture(), id = randomUUID();
+    await f.turns.submit(id, f.identity, "adoption", undefined, async (apply) => apply());
+    const rendered = f.events.find(e => e.data.instructionState === "rendered")!;
+    f.observeProviderTurns.mockResolvedValue({ sessionId: f.identity.sessionId, provider: "codex", turnNumber: 1, turns: [],
+      nativeSourceAvailable: true, nativeActivity: activity,
+      nativeActivityEvidence: { id: "native-progress", kind: activity === "working" ? "task_started" : "task_complete", occurredAt: rendered.occurredAt } });
+    expect(await f.turns.observe(id, f.identity)).toEqual({ outcome: "unknown", nativeTurnObserved: true });
+    expect(f.submit).toHaveBeenCalledOnce();
+    expect(f.observeProviderTurns).toHaveBeenCalledWith(expect.objectContaining({ sessionId: f.identity.sessionId, turnNumber: 1, allowFallback: false }));
+    f.record.generation++;
+    expect(await f.turns.observe(id, f.identity)).toEqual({ outcome: "unknown" });
+  });
+
+  it.each(["old", "unbound", "no-timestamp", "unreadable"])("does not extend the unknown-submission deadline from %s evidence", async (kind) => {
+    const f = fixture(), id = randomUUID();
+    await f.turns.submit(id, f.identity, "adoption", undefined, async (apply) => apply());
+    if (kind === "unreadable") f.observeProviderTurns.mockRejectedValue(new Error("unreadable"));
+    else f.observeProviderTurns.mockResolvedValue({ sessionId: f.identity.sessionId, provider: "codex", turnNumber: 1, turns: [],
+      nativeSourceAvailable: kind !== "unbound", nativeActivity: "working",
+      nativeActivityEvidence: { id: "native-progress", kind: "task_started", ...(kind === "no-timestamp" ? {} : {
+        occurredAt: kind === "old" ? "2000-01-01T00:00:00.000Z" : new Date().toISOString() }) } });
+    expect(await f.turns.observe(id, f.identity)).toEqual({ outcome: "unknown" });
+  });
+
   it.each(["before submission", "during native preflight"])("records a production human-control refusal %s and continues after detach", async (when) => {
     const f = productionFixture(), id = randomUUID(), admission = vi.fn(async (apply: () => Promise<unknown>) => apply());
     try {

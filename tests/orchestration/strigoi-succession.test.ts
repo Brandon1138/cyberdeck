@@ -46,6 +46,30 @@ describe("serialized succession", () => {
     expect(state.hold?.code).toBe("checkpoint-outcome-unresolved");
     expect(f.submitted).toHaveLength(1); expect(f.trace).not.toContain("stop");
   });
+  it("keeps a started native turn bounded at ten minutes across reconstruction without replay", async () => {
+    const f = await fixture(); f.setAutoComplete(false);
+    const t = await f.runtime.succession!.renew(1, "renew", "native-running");
+    await f.drive(t.id, 1);
+    f.results.set(f.submitted[0]!.id, { outcome: "unknown", nativeTurnObserved: true });
+    f.tick(120_000); await f.reconstruct();
+    expect((await f.drive(t.id, 1)).hold).toBeUndefined();
+    expect(f.submitted).toHaveLength(1); expect(f.trace).not.toContain("stop");
+    f.tick(480_000);
+    expect((await f.drive(t.id, 1)).hold?.code).toBe("checkpoint-outcome-unresolved");
+    expect(f.submitted).toHaveLength(1); expect(f.trace).not.toContain("stop");
+  });
+
+  it("accepts a late native receipt without another inference attempt", async () => {
+    const f = await fixture(); f.setAutoComplete(false);
+    const t = await f.runtime.succession!.renew(1, "renew", "native-late");
+    await f.drive(t.id, 1);
+    f.results.set(f.submitted[0]!.id, { outcome: "unknown", nativeTurnObserved: true });
+    f.tick(151_000); expect((await f.drive(t.id, 1)).hold).toBeUndefined();
+    f.results.set(f.submitted[0]!.id, { outcome: "completed", checkpoint: "Retained original constraints" });
+    f.setAutoComplete(true);
+    expect((await f.drive(t.id)).transition?.phase).toBe("complete");
+    expect(f.submitted.map(s => s.kind)).toEqual(["checkpoint", "adoption"]);
+  });
   it("does not infer retirement from kill or completed checkpoint", async () => {
     const f = await fixture(); f.setAutoExit(false);
     const t = await f.runtime.succession!.renew(1, "renew", "r");
