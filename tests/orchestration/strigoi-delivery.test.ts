@@ -1,3 +1,5 @@
+import { SessionStore } from "../../src/persistence/session-store.js";
+import { appendFile } from "node:fs/promises";
 import { InstructionStore } from "../../src/persistence/instruction-store.js";
 import { StrigoiAdmission } from "../../src/orchestration/strigoi-admission.js";
 import { effectiveInstruction, InstructionRecordSchema } from "../../src/domain/instruction.js";
@@ -236,5 +238,74 @@ it("reconciliation honors durable suspension before minting a receipt or deliver
     await expect(f.delivery.reconcile(nextIdentity, packet)).rejects.toMatchObject({ code: "STRIGOI_STALE_RECOVERY" });
     await f.delivery.flush();
     expect(f.effects).toEqual([]); expect((await f.queue.list())[0]?.continuations).toBeUndefined();
+  } finally { await f.close(); }
+});
+
+
+it("retains an archived queued workflow wake without blocking eligible same-target FIFO", async () => {
+  const f = await fixture();
+  try {
+    f.setBusy(true);
+    const run = await f.workflows.create({ actorSessionId: ACTOR, name: "old workflow wake", participantSessionIds: [WORKER] });
+    const message = await f.workflows.send({ actorSessionId: ACTOR, runId: run.id, targetSessionId: WORKER, text: "old wake", wake: true });
+    const original = (await f.queue.list(WORKER))[0]!;
+    expect(original).toMatchObject({ status: "queued", workflowRunId: run.id, messageId: message.messageId });
+    const packet = await f.seal(); await f.cutover();
+    expect(await f.delivery.reconcile(nextIdentity, packet)).toContainEqual(expect.objectContaining({
+      code: "STRIGOI_WORKFLOW_CONTINUATION_REQUIRED", sourceIds: [run.id, message.messageId, original.id],
+    }));
+    await f.finish();
+    const first = await f.queue.enqueue({ actorSessionId: NEXT, targetSessionId: WORKER, message: "routine first" });
+    const second = await f.queue.enqueue({ actorSessionId: NEXT, targetSessionId: WORKER, message: "routine second" });
+    expect(f.effects).toEqual([]);
+    expect((await f.queue.list(WORKER)).find(r => r.id === second.id)?.holdReason).toBe("composer-occupied");
+    // Each rendered instruction occupies the scripted composer until its receipt arrives.
+    f.setBusy(false);
+    f.registry.submitInstruction.mockImplementation(async (_id, text, _source, _meta, _instruction, admit) => {
+      if (f.effects.length === 1) return { state: "queued", hold: "composer-occupied", at: f.now() };
+      return admit!(async () => { f.effects.push(text); return { state: "rendered", at: f.now() }; });
+    });
+    await f.queue.flush(WORKER);
+    expect(f.effects).toEqual(["routine first"]);
+    f.registry.submitInstruction.mockImplementation(async (_id, text, _source, _meta, _instruction, admit) =>
+      admit!(async () => { f.effects.push(text); return { state: "rendered", at: f.now() }; }));
+    f.update({ sessionId: WORKER, instructionId: first.id, state: "completed", at: f.now() });
+    await f.queue.flush(WORKER);
+    expect(f.effects).toEqual(["routine first", "routine second"]);
+    const held = (await f.queue.list(WORKER)).find(r => r.id === original.id)!;
+    expect(held).toMatchObject({ ...original, holdReason: "STRIGOI_WORKFLOW_CONTINUATION_REQUIRED", updatedAt: expect.any(String) });
+    expect(held.continuations).toBeUndefined();
+    expect(await f.evidence.workflowStore.listMessages(run.id)).toEqual([message]);
+  } finally { await f.close(); }
+});
+
+it.each(["primary", "peer"] as const)("delivers to an established ordinary %s despite resident-only corruption", async kind => {
+  const f = await fixture();
+  try {
+    const { resident: _resident, ...ordinary } = f.bound;
+    await f.bindings.put({ ...ordinary, key: "fleet", kind: "primary", sessionId: WORKER,
+      grant: { ...ordinary.grant, subjectSessionId: WORKER } });
+    await f.bindings.put({ ...ordinary, key: kind === "peer" ? `fleet:peer:${NEXT}` : "workspace:/repo", kind,
+      sessionId: NEXT, grant: { ...ordinary.grant, subjectSessionId: NEXT } });
+    f.records.set(WORKER, { ...f.records.get(WORKER)!, kind: "orchestrator" });
+    await appendFile(f.repository.path, "corrupt resident record\n");
+    // Production startup fences retention and source capture when resident evidence is corrupt.
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await f.evidence.startup(f.transcripts, new SessionStore(f.directory))).toMatchObject({ skipDestructiveRetention: true });
+    diagnostic.mockRestore();
+    await expect(f.delivery.key(NEXT)).resolves.toBe(NEXT);
+    const at = f.now();
+    const direct = InstructionRecordSchema.parse({ id: randomUUID(), actorSessionId: WORKER, targetSessionId: NEXT,
+      messageId: randomUUID(), message: "ordinary", status: "accepted", createdAt: at, updatedAt: at });
+    await expect(f.delivery.prepare(direct, async () => {})).resolves.toBeUndefined();
+    expect(await f.queue.enqueue({ actorSessionId: WORKER, targetSessionId: NEXT, message: "ordinary" })).toMatchObject({ status: "rendered" });
+    expect(await f.queue.enqueue({ actorSessionId: NEXT, targetSessionId: WORKER, message: "ordinary reply" })).toMatchObject({ status: "rendered" });
+    expect(f.effects).toEqual(["ordinary", "ordinary reply"]);
+    for (const targetSessionId of [ACTOR, randomUUID()]) {
+      await expect(f.delivery.key(targetSessionId)).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
+      await expect(f.delivery.prepare({ ...direct, targetSessionId }, async () => {})).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
+    }
+    await expect(f.delivery.prepare({ ...direct, actorSessionId: ACTOR }, async () => {})).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
+    expect(f.effects).toEqual(["ordinary", "ordinary reply"]);
   } finally { await f.close(); }
 });

@@ -38,7 +38,7 @@ export class StrigoiDelivery implements StrigoiDeliveryPort, InstructionRouting 
   }
   async key(sessionId: string): Promise<string> {
     if (sessionId === "resident:strigoi") return sessionId;
-    try { if (this.o.registry.get(sessionId).kind !== "orchestrator") return sessionId; } catch { /* Archived identity still uses its durable resident key. */ }
+    if (await this.ordinaryTarget(sessionId)) return sessionId;
     return (await this.o.repository.retentionPins()).has(sessionId) ? "resident:strigoi" : sessionId;
   }
   async hold(identity: StrigoiIdentity, transitionId: string): Promise<void> {
@@ -112,7 +112,7 @@ export class StrigoiDelivery implements StrigoiDeliveryPort, InstructionRouting 
     // Established unrelated bindings retain their existing path even if the resident shard is corrupt.
     if (!record.logicalRecipient && !record.continuations?.length) {
       const actor = await this.o.bindings.findBySessionId(record.actorSessionId);
-      if (actor && actor.kind !== "resident" && this.o.registry.get(record.targetSessionId).kind !== "orchestrator") return undefined;
+      if (actor && actor.kind !== "resident" && await this.ordinaryTarget(record.targetSessionId)) return undefined;
     }
     const state = await this.o.repository.read(), pins = await this.o.repository.retentionPins();
     const involved = !!record.logicalRecipient || pins.has(record.actorSessionId) || pins.has(record.targetSessionId);
@@ -120,16 +120,22 @@ export class StrigoiDelivery implements StrigoiDeliveryPort, InstructionRouting 
     await this.observe(record, persist);
     if (!safe(record)) throw fail("STRIGOI_INSTRUCTION_ALREADY_RENDERED");
     const effective = this.resolve(record, state, pins);
+    let attemptRecorded = false;
     const authority = <T>(apply: () => T | Promise<T>): Promise<T> => this.authority(async () => {
       const current = await this.o.repository.read(), currentPins = await this.o.repository.retentionPins();
       const latest = this.resolve(record, current, currentPins);
       if (latest.actorSessionId !== effective.actorSessionId || latest.targetSessionId !== effective.targetSessionId) throw fail("STRIGOI_STALE_INCARNATION");
       if (involved) {
         return this.authorize(record, latest, current, false, async () => {
+          // Native Enter retries retain this admission after delivery has returned. They must
+          // recheck authority, but never write this pre-render snapshot over later receipts.
+          // The retry's final composer/epoch guard may decline without pressing any key.
+          if (attemptRecorded) return apply();
           this.receipt(record, latest, current);
           record.submissionAttempt = { actorSessionId: latest.actorSessionId, targetSessionId: latest.targetSessionId,
             generation: this.o.registry.get(latest.targetSessionId).generation ?? 1, at: new Date().toISOString(), outcome: "unknown" };
           await persist(); // ambiguous failure after this point is never safe to retype
+          attemptRecorded = true;
           try {
             const result = await apply();
             if (typeof result === "object" && result !== null && "state" in result && ["queued", "undelivered"].includes(String(result.state))) {
@@ -149,6 +155,12 @@ export class StrigoiDelivery implements StrigoiDeliveryPort, InstructionRouting 
       pins.has(effective.targetSessionId) && effective.targetSessionId !== effective.actorSessionId
         ? this.o.admission.run(effective.targetSessionId, "mutate", () => authority(apply)) : authority(apply));
     return { effective, admission };
+  }
+  private async ordinaryTarget(sessionId: string): Promise<boolean> {
+    try { if (this.o.registry.get(sessionId).kind !== "orchestrator") return true; }
+    catch { /* Unknown/archived identities require the durable binding and resident checks. */ }
+    const binding = await this.o.bindings.findBySessionId(sessionId);
+    return binding !== undefined && binding.kind !== "resident";
   }
   private async observe(record: InstructionRecord, persist: () => Promise<void>): Promise<void> {
     if (["completed", "cancelled", "undelivered"].includes(record.status)) return;

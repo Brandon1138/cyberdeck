@@ -280,8 +280,12 @@ export class InstructionQueue {
       for (const [index, record] of pending.entries()) {
         const attempted = await this.tryDeliver(record);
         results.push(attempted);
-        // Ordinary instructions preserve FIFO. A human-controller hold is the sole exception:
-        // the distinct wake channel may pass it, using its own turn/composer/operator gate.
+        // Keep the exact session-bound obligation queued for explicit workflow continuation.
+        // It is ineligible for automatic delivery and must not block independent routine work.
+        if (attempted.workflowRunId && attempted.holdReason === "STRIGOI_WORKFLOW_CONTINUATION_REQUIRED"
+          && !attempted.renderedAt && attempted.submissionAttempt?.outcome !== "unknown") continue;
+        // Eligible ordinary instructions preserve FIFO. A human-controller hold permits
+        // the distinct wake channel to pass it, using its own turn/composer/operator gate.
         // Everything else behind this head receives an explicit hold instead of staying accepted.
         if (instructionReachedProvider(attempted.status)) continue;
         // A terminal worker holds nothing back: the next record hits the same dead session and
