@@ -30,6 +30,21 @@ describe("Strigoi identity and durable state", () => {
       expect(OrchestratorBindingSchema.safeParse({ ...resident, ...invalid }).success).toBe(false);
     }
   });
+  it.each(["primary", undefined])("reserves the resident key against kind %s", (kind) => {
+    expect(OrchestratorBindingSchema.safeParse({ ...resident, kind, resident: undefined }).success).toBe(false);
+  });
+  it("requires state and transition to share a current incarnation", () => {
+    const successorId = "22222222-2222-4222-8222-222222222222";
+    const transition = { id: "t", expectedIncarnation: 1, reason: "renew", phase: "launching", attempts: 0,
+      predecessor: { sessionId, incarnation: 1, generation: 1 }, successor: { sessionId: successorId, incarnation: 2, generation: 1 } };
+    const unrelated = { ...transition, expectedIncarnation: 99, predecessor: { ...transition.predecessor, incarnation: 99 }, successor: { ...transition.successor, incarnation: 100 } };
+    expect(StrigoiStateSchema.safeParse({ ...state, transition: unrelated }).success).toBe(false);
+    expect(StrigoiStateSchema.safeParse({ ...state, activeBinding: undefined, transition: unrelated }).success).toBe(false);
+    expect(StrigoiStateSchema.safeParse({ ...state, transition }).success).toBe(true);
+    const activeBinding = { ...resident, sessionId: successorId, grant: { ...resident.grant, subjectSessionId: successorId }, resident: { name: "strigoi", incarnation: 2 } };
+    expect(StrigoiStateSchema.safeParse({ ...state, incarnation: 2, activeBinding, transition }).success).toBe(true);
+    expect(StrigoiStateSchema.safeParse({ ...state, incarnation: 2, activeBinding: { ...activeBinding, sessionId, grant: { ...activeBinding.grant, subjectSessionId: sessionId } }, transition }).success).toBe(false);
+  });
   it("validates state identity, selection, transitions and packet hashes", () => {
     expect(StrigoiStateSchema.safeParse(state).success).toBe(true);
     const packet = { artifactId: "p", coverageId: "c", sha256: "a".repeat(64) };

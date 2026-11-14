@@ -37,6 +37,8 @@ export const StrigoiStateSchema = z.object({
 }).refine((state) => state.desired !== "enabled" || state.selection !== undefined, "Enabled resident requires a selection")
   .refine((state) => state.activeBinding === undefined || (isStrigoiBinding(state.activeBinding)
     && state.activeBinding.resident?.incarnation === state.incarnation), "Active binding must match resident incarnation")
+  .refine((state) => state.transition === undefined || state.incarnation === state.transition.expectedIncarnation
+    || state.incarnation === state.transition.successor?.incarnation, "State incarnation must belong to the transition")
   .refine((state) => {
     const binding = state.activeBinding;
     if (binding === undefined || state.transition === undefined) return true;

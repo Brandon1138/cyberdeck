@@ -99,7 +99,9 @@ export const OrchestratorBindingSchema = OrchestratorBindingRecordSchema
     && binding.grant.scope.kind === "fleet"
   ), "A resident binding must identify Strigoi and its fleet grant")
   .refine((binding) => binding.kind === "resident" || binding.resident === undefined,
-    "Resident metadata belongs only to resident bindings");
+    "Resident metadata belongs only to resident bindings")
+  .refine((binding) => binding.key !== STRIGOI_KEY || binding.kind === "resident",
+    "The Strigoi key is reserved for the resident binding");
 
 /**
  * Every capability a binding is granted, primary or peer.
