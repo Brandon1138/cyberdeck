@@ -223,7 +223,7 @@ describe("OrchestratorPeerService", () => {
       scope: "fleet",
       name: "codex successor",
       createdBy: { sessionId: ACTOR, approval, depth: 1 },
-    }), expect.objectContaining({ id: expect.any(String), message: "Pick up PR #61", prepare: expect.any(Function) }));
+    }), expect.objectContaining({ id: expect.any(String), message: "Pick up PR #61", prepare: expect.any(Function) }), expect.any(Function));
     expect(events[0]!.data).not.toHaveProperty("brief");
     expect(JSON.stringify(events)).not.toContain("Pick up PR #61");
     const granted = (createPeer.mock.calls[0]![0] as { capabilities: string[] }).capabilities;
@@ -352,7 +352,7 @@ describe("OrchestratorPeerService", () => {
     await expect(service.create(parsed)).resolves.toMatchObject({
       outcome: "CREATED", createdBy: { approval: offsetApproval },
     });
-    expect(createPeer).toHaveBeenCalledWith(expect.objectContaining({ createdBy: expect.objectContaining({ approval: offsetApproval }) }));
+    expect(createPeer).toHaveBeenCalledWith(expect.objectContaining({ createdBy: expect.objectContaining({ approval: offsetApproval }) }), undefined, expect.any(Function));
     expect(events[0]?.data.approval).toEqual(offsetApproval);
     expect(stored.at(-1)?.createdBy?.approval).toEqual(offsetApproval);
   });
@@ -583,7 +583,7 @@ describe("OrchestratorPeerService", () => {
     expect(created).toMatchObject({ outcome: "CREATED" });
     expect(first.createPeer).toHaveBeenCalledWith(expect.objectContaining({
       createdBy: { sessionId: ACTOR, mutationId: "durable", approval, depth: 1 },
-    }), expect.objectContaining({ message: "hello" }));
+    }), expect.objectContaining({ message: "hello" }), expect.any(Function));
 
     // A fresh service with an empty replay map, reading the same binding log.
     first.instructionRecords[0]!.status = "completed";

@@ -1,3 +1,8 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
+import { deferred } from "./strigoi-admission-fixture.js";
 import { describe, expect, it, vi } from "vitest";
 import { describeBlockedModal } from "../../src/domain/modal-descriptor.js";
 import type { BrokerEvent } from "../../src/domain/events.js";
@@ -31,7 +36,7 @@ function harness(allowed = true, provider = "claude", text = CLAUDE_TRUST) {
   const deps = { registry: { get: (id: string) => records.get(id)!, answerWorkerModal: press,
     workerTruth: () => ({ state: "blocked-modal" as const, modal, completedTurns: 0, canonicalTurns: 0,
       pendingInstructions: 0, composerOccupied: false, modalOpen: true, terminal: false, detail: "Startup prompt" }) } as never,
-    bindings: { findBySessionId }, policy, audit: { append } };
+    bindings: { findBySessionId, withAuthority: <T>(apply: () => Promise<T>) => apply() }, policy, audit: { append } };
   const input = { actorSessionId: ACTOR, targetSessionId: TARGET, fingerprint: modal.fingerprint, answer: "trust", reason: "Approved repository startup" };
   return { deps, input, press, append, records, findBySessionId, replace: () => {
     modal = describeBlockedModal("claude", CLAUDE_TRUST.replace("/Users/op/repos/api/worktrees/fix-races", "/a/different/folder"));
@@ -39,6 +44,62 @@ function harness(allowed = true, provider = "claude", text = CLAUDE_TRUST) {
 }
 
 describe("orchestrator startup modal answers", () => {
+  it.each(["revoked", "scope", "target"] as const)("refuses %s committed before the final authority boundary", async (change) => {
+    const root = await mkdtemp(join(tmpdir(), "modal-authority-"));
+    try {
+      const store = new OrchestratorStore(root), h = harness(), entered = deferred(), finish = deferred();
+      await store.put(binding);
+      const target = { ...binding, key: `fleet:peer:${TARGET}`, sessionId: TARGET, grant: { ...binding.grant, subjectSessionId: TARGET } };
+      await store.put(target);
+      const pending = answerOrchestratorModal(h.input, { ...h.deps, bindings: {
+        findBySessionId: (id) => store.findBySessionId(id),
+        withAuthority: async (apply) => { entered.resolve(); await finish.promise; return store.withAuthority(apply); },
+      } });
+      await entered.promise;
+      if (change === "target") await store.reset(target.key);
+      else await store.put({ ...binding, grant: { ...binding.grant,
+        ...(change === "revoked" ? { capabilities: [] } : { scope: { kind: "workspace", cwd: "/elsewhere" } }) } });
+      finish.resolve(); await expect(pending).resolves.toMatchObject({ code: "DENIED" });
+      expect(h.press).not.toHaveBeenCalled();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  it.each(["revoked", "scope", "target"] as const)("serializes %s during final target lookup through the modal effect", async (change) => {
+    const root = await mkdtemp(join(tmpdir(), "modal-authority-"));
+    try {
+      const store = new OrchestratorStore(root), writer = new OrchestratorStore(root), h = harness();
+      await store.put(binding);
+      const target = { ...binding, key: `fleet:peer:${TARGET}`, sessionId: TARGET, grant: { ...binding.grant, subjectSessionId: TARGET } };
+      await store.put(target);
+      const entered = deferred(), finish = deferred(), effectEntered = deferred(), effectFinish = deferred(), committed = vi.fn();
+      let final = false, effectFinished = false;
+      const press = h.press.getMockImplementation()!;
+      h.press.mockImplementation(async (...args) => { effectEntered.resolve(); await effectFinish.promise; effectFinished = true; return press(...args); });
+      const pending = answerOrchestratorModal(h.input, { ...h.deps, bindings: {
+        withAuthority: (apply) => store.withAuthority(async () => { final = true; return apply(); }),
+        findBySessionId: async (id) => {
+          const snapshot = await store.findBySessionId(id);
+          if (final && id === TARGET) { entered.resolve(); await finish.promise; }
+          return snapshot;
+        },
+      } });
+      await entered.promise;
+      const mutation = (change === "target" ? writer.reset(target.key) : writer.put({ ...binding,
+        grant: { ...binding.grant, ...(change === "revoked" ? { capabilities: [] } : { scope: { kind: "workspace" as const, cwd: "/elsewhere" } }) } })).then(() => { expect(effectFinished).toBe(true); committed(); });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(committed).not.toHaveBeenCalled(); expect(h.press).not.toHaveBeenCalled();
+      finish.resolve(); await effectEntered.promise;
+      expect(committed).not.toHaveBeenCalled(); // the asynchronous effect also owns the boundary
+      effectFinish.resolve(); await expect(pending).resolves.toMatchObject({ code: "PRESSED" }); await mutation;
+      expect(h.press).toHaveBeenCalledOnce();
+      const after = await answerOrchestratorModal(h.input, { ...h.deps, bindings: store });
+      expect(after.code).toBe("DENIED"); expect(h.press).toHaveBeenCalledOnce();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  it("fails closed without the canonical binding authority seam", async () => {
+    const h = harness();
+    await expect(answerOrchestratorModal(h.input, { ...h.deps, bindings: { findBySessionId: h.findBySessionId } })).resolves.toMatchObject({ code: "DENIED" });
+    expect(h.press).not.toHaveBeenCalled();
+  });
   it.each([true, false])("uses the shared hook policy for a bound peer, granted=%s", async (granted) => {
     const h = harness(granted, "codex", CODEX_HOOK_REVIEW);
     expect(await answerOrchestratorModal({ ...h.input, answer: "continue-without-hooks" }, h.deps))
@@ -55,6 +116,23 @@ describe("orchestrator startup modal answers", () => {
     expect(h.append.mock.calls.map(([event]) => event.type)).toEqual(["orchestrator.modal_answer.requested", "orchestrator.modal_answer.result"]);
     expect(h.append.mock.calls[0]![0].data).toMatchObject({ actorSessionId: ACTOR, targetSessionId: TARGET, answer: "trust" });
   });
+  it.each(["revoked", "unbound-target", "terminal-target", "changed-cwd", "inactive-actor"] as const)(
+    "never presses after %s during the requested audit", async (change) => {
+      const h = harness(), entered = deferred(), finish = deferred();
+      h.append.mockImplementationOnce(async () => { entered.resolve(); await finish.promise; });
+      const pending = answerOrchestratorModal(h.input, h.deps);
+      await entered.promise;
+      if (change === "revoked") h.findBySessionId.mockImplementation(async (id) => id === ACTOR
+        ? { ...binding, grant: { ...binding.grant, capabilities: [] } } : { ...binding, sessionId: TARGET });
+      else if (change === "unbound-target") h.findBySessionId.mockImplementation(async (id) => id === ACTOR ? binding : undefined as never);
+      else if (change === "terminal-target") h.records.get(TARGET)!.executionState = "exited";
+      else if (change === "changed-cwd") h.records.get(TARGET)!.cwd = "/different";
+      else h.records.get(ACTOR)!.executionState = "exited";
+      finish.resolve();
+      await expect(pending).resolves.toMatchObject({ code: "DENIED" });
+      expect(h.press).not.toHaveBeenCalled();
+    },
+  );
   it("denies an ungranted repository before any press", async () => {
     const h = harness(false);
     expect(await answerOrchestratorModal(h.input, h.deps)).toMatchObject({ code: "MODAL_POLICY_DENIED" });

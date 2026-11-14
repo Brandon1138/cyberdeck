@@ -36,6 +36,15 @@ export const InstructionStatusSchema = InstructionLifecycleStateSchema;
  */
 const LEGACY_STATUS: Readonly<Record<string, string>> = { delivered: "rendered" };
 
+/** Broker-minted addressing; public enqueue schemas deliberately do not accept these fields. */
+export const LogicalInstructionRecipientSchema = z.object({ kind: z.literal("resident"), key: z.literal("resident:strigoi") }).strict();
+export const InstructionContinuationSchema = z.object({
+  instructionId: z.uuid(), originalActorSessionId: z.uuid(), originalTargetSessionId: z.uuid(),
+  transitionId: z.string().min(1), incarnation: z.number().int().positive(), generation: z.number().int().positive(),
+  effectiveActorSessionId: z.uuid(), effectiveTargetSessionId: z.uuid(), effectiveSenderSessionId: z.uuid().optional(),
+  at: z.iso.datetime(),
+}).strict();
+
 export const InstructionRecordSchema = z.preprocess(
   (value) => {
     if (typeof value !== "object" || value === null) return value;
@@ -45,6 +54,11 @@ export const InstructionRecordSchema = z.preprocess(
   },
   z.object({
     id: z.uuid(),
+    logicalRecipient: LogicalInstructionRecipientSchema.optional(),
+    continuations: z.array(InstructionContinuationSchema).optional(),
+    /** Durable before native write: unknown attempts are observation-only after a crash. */
+    submissionAttempt: z.object({ targetSessionId: z.uuid(), actorSessionId: z.uuid(), generation: z.number().int().positive(),
+      at: z.iso.datetime(), outcome: z.enum(["unknown", "refused"]) }).strict().optional(),
     actorSessionId: z.uuid(),
     senderSessionId: z.uuid().optional(),
     targetSessionId: z.uuid(),
@@ -91,3 +105,14 @@ export type InstructionStatus = z.infer<typeof InstructionStatusSchema>;
 
 /** Runtime-only authority transaction, applied after provider preflight and before writing. */
 export type InstructionAdmission = <T>(apply: () => T | Promise<T>) => Promise<T>;
+
+/** Runtime projection only. Never persist it in place of the immutable original envelope. */
+export function effectiveInstruction(record: InstructionRecord): InstructionRecord {
+  const receipt = record.continuations?.at(-1);
+  return receipt ? { ...record, actorSessionId: receipt.effectiveActorSessionId,
+    targetSessionId: receipt.effectiveTargetSessionId, senderSessionId: receipt.effectiveSenderSessionId } : record;
+}
+export function instructionSessionIds(record: InstructionRecord): string[] {
+  return [...new Set([record.actorSessionId, record.targetSessionId, ...record.senderSessionId ? [record.senderSessionId] : [],
+    ...record.continuations?.flatMap(r => [r.effectiveActorSessionId, r.effectiveTargetSessionId, ...r.effectiveSenderSessionId ? [r.effectiveSenderSessionId] : []]) ?? []])];
+}

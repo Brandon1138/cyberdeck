@@ -29,12 +29,14 @@ export async function cleanupAttentionHarnesses(): Promise<void> {
   vi.restoreAllMocks();
 }
 
-export async function attentionHarness(options: { peer?: boolean; workspace?: boolean } = {}) {
+export async function attentionHarness(options: { peer?: boolean; workspace?: boolean; resident?: boolean; now?: () => string } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "cyberdeck-attention-test-"));
   const scope = options.workspace ? { kind: "workspace" as const, cwd: "/repo" } : { kind: "fleet" as const };
   const primaryKey = scope.kind === "fleet" ? "fleet" : "workspace:/repo";
   const bound: OrchestratorBinding = {
-    key: options.peer ? `${primaryKey}:peer:${ACTOR}` : primaryKey, kind: options.peer ? "peer" : "primary",
+    key: options.resident ? "resident:strigoi" : options.peer ? `${primaryKey}:peer:${ACTOR}` : primaryKey,
+    kind: options.resident ? "resident" : options.peer ? "peer" : "primary",
+    ...(options.resident ? { resident: { name: "strigoi" as const, incarnation: 1 } } : {}),
     sessionId: ACTOR, provider: "codex", model: "gpt-6.1-sol", cwd: "/repo", sandbox: "workspace-write", scope,
     grant: { subjectSessionId: ACTOR, capabilities: [...ORCHESTRATOR_GRANT_CAPABILITIES], scope },
     createdAt: NOW, updatedAt: NOW,
@@ -66,7 +68,7 @@ export async function attentionHarness(options: { peer?: boolean; workspace?: bo
   };
   const controller = orchestratorController(bound);
   const coordination = new ObservedWorkerCoordinationService({ store: new WorkerCoordinationStore(directory),
-    now: () => NOW, eventRateLimit: 1_000 });
+    now: options.now ?? (() => NOW), eventRateLimit: 1_000 });
   await coordination.initialize();
   const tokens = new Map<string, string>();
   for (const id of [WORKER, OTHER]) {

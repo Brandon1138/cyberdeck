@@ -26,7 +26,7 @@ export const OrchestratorScopeSchema = z.discriminatedUnion("kind", [
  * same scope alongside it — `cyberdeck_orchestrator_create` makes one without replacing the
  * primary, whose grant also carries the scope's peer-create kill-switch.
  */
-export const OrchestratorBindingKindSchema = z.enum(["primary", "peer"]);
+export const OrchestratorBindingKindSchema = z.enum(["primary", "peer", "resident"]);
 
 /** Model-asserted operator approval; validate presence without rewriting the verbatim quote. */
 export const PeerApprovalSchema = z.object({
@@ -38,6 +38,7 @@ export const PeerApprovalSchema = z.object({
 
 /** The marker a peer key carries between its scope's key and the peer session's own id. */
 const PEER_KEY_MARKER = ":peer:";
+export const STRIGOI_KEY = "resident:strigoi";
 const CONTROLLER_ID_PREFIX = "orchestrator:";
 const MAX_CONTROLLER_ID_LENGTH = 256;
 const HASH_SUFFIX_PREFIX = ":sha256:";
@@ -60,6 +61,7 @@ const OrchestratorBindingRecordSchema = z.object({
   sandbox: SandboxSchema,
   scope: OrchestratorScopeSchema,
   grant: CapabilityGrantSchema,
+  resident: z.object({ name: z.literal("strigoi"), incarnation: z.number().int().positive() }).optional(),
   /**
    * The orchestrator that asked for this peer through `cyberdeck_orchestrator_create`. Absent on
    * every primary and on peers Fleet created by hand; present only on peers an orchestrator made.
@@ -87,10 +89,19 @@ export const OrchestratorBindingSchema = OrchestratorBindingRecordSchema
     kind: record.kind ?? bindingKindFromKey(record.key, record.sessionId),
   }))
   .refine(
-    (binding) => binding.kind === "primary"
+    (binding) => binding.kind !== "peer"
       || peerPrimaryKey(binding.key, binding.sessionId) !== undefined,
     "A peer binding's key must end with its :peer:<sessionId> suffix",
-  );
+  )
+  .refine((binding) => binding.kind !== "resident" || (
+    binding.key === STRIGOI_KEY && binding.scope.kind === "fleet"
+    && binding.resident !== undefined && binding.grant.subjectSessionId === binding.sessionId
+    && binding.grant.scope.kind === "fleet"
+  ), "A resident binding must identify Strigoi and its fleet grant")
+  .refine((binding) => binding.kind === "resident" || binding.resident === undefined,
+    "Resident metadata belongs only to resident bindings")
+  .refine((binding) => binding.key !== STRIGOI_KEY || binding.kind === "resident",
+    "The Strigoi key is reserved for the resident binding");
 
 /**
  * Every capability a binding is granted, primary or peer.
@@ -142,7 +153,7 @@ export const CreateOrchestratorRequestSchema = EnsureOrchestratorRequestSchema.e
 export const ResetOrchestratorRequestSchema = EnsureOrchestratorRequestSchema.pick({
   cwd: true,
   scope: true,
-});
+}).extend({ sessionId: z.uuid().optional() });
 
 /**
  * One operator toggle of one durable delegation grant on one scope's binding. `enabled` absent

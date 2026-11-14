@@ -1,3 +1,4 @@
+import type { LaunchAdmission } from "./session-ports.js";
 import type { SessionRuntime } from "../../domain/session-runtime.js";
 import type { SessionRecord } from "../../domain/session.js";
 import type { ExecutionIdentity, ExecutionInspection, ExecutionRecord, ExecutionRef, WorkerExecutionRequest } from "../../domain/worker-execution.js";
@@ -24,7 +25,7 @@ export interface ExecutionStorePort {
   list(): ExecutionRecord[];
 }
 export interface SessionExecutionPort {
-  start(record: SessionRecord, launch: ProviderLaunchSpec, replayBytes: number): Promise<SessionRuntime>;
+  start(record: SessionRecord, launch: ProviderLaunchSpec, replayBytes: number, admission?: LaunchAdmission): Promise<SessionRuntime>;
   cancelStart?(sessionId: string): boolean;
   retire?(sessionId: string): Promise<void>;
 }

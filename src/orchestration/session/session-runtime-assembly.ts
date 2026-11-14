@@ -1,3 +1,4 @@
+import type { LaunchAdmission } from "./session-ports.js";
 import type { SessionRuntime } from "../../domain/session-runtime.js";
 import type { SessionRecord } from "../../domain/session.js";
 import type { ScoutRuntimeState } from "../../domain/worker-profile.js";
@@ -155,6 +156,8 @@ export class SessionRuntimeAssembly {
     spec: ProviderLaunchSpec,
     beforeSpawn?: () => Promise<void>,
     onPhase?: (phase: "prepare" | "spawn") => void,
+    admission?: LaunchAdmission,
+    creationFailed?: () => void,
   ): Promise<SessionRuntime> {
     try {
       onPhase?.("prepare");
@@ -162,13 +165,20 @@ export class SessionRuntimeAssembly {
         throw new Error("EXECUTOR_UNAVAILABLE");
       }
       if (adapter.prepareLaunch !== undefined) await adapter.prepareLaunch(record, spec);
-      await beforeSpawn?.();
+      const activate: LaunchAdmission = (spawn) => {
+        const apply = async () => { await beforeSpawn?.(); onPhase?.("spawn"); return spawn(); };
+        return admission === undefined ? apply() : admission(apply);
+      };
       const replayBytes = this.catalog.replayBytesFor(record);
-      onPhase?.("spawn");
       if (record.kind !== "orchestrator" && this.catalog.options.executions !== undefined) {
-        return await this.catalog.options.executions.start(record, spec, replayBytes);
+        return await this.catalog.options.executions.start(record, spec, replayBytes, activate);
       }
-      return this.catalog.options.sessionRuntimeFactory(spec, replayBytes);
+      return await activate(async () => {
+        // The synchronous factory contract returns an owned handle or fails creation. An
+        // admission/executor error outside this call is not evidence that creation failed.
+        try { return this.catalog.options.sessionRuntimeFactory(spec, replayBytes); }
+        catch (error) { creationFailed?.(); throw error; }
+      });
     } catch (error) {
       await this.cleanupLaunchArtifacts(record, "launch-failed");
       throw error;
@@ -176,7 +186,8 @@ export class SessionRuntimeAssembly {
   }
 
   /**
-   * Cleanup is deliberately non-throwing: it runs on exit, delete, and failed-launch paths, and a
+   * Cleanup records ordinary failures; continuity refusals on deletion must propagate.
+   * Otherwise it is non-throwing: it runs on exit, delete, and failed-launch paths, and a
    * failure to remove one artifact must be recorded rather than raised so it can never mask the
    * primary outcome that triggered it.
    */
@@ -206,16 +217,23 @@ export class SessionRuntimeAssembly {
       try {
         await transcripts.dropClaudeBinding.call(transcripts, record.id);
       } catch (error) {
+        if (error instanceof Error && error.message.startsWith("STRIGOI_EVIDENCE_")) throw error;
         cleanupFailures.push(error instanceof Error ? error.message : String(error));
       }
     }
     if (reason === "session-deleted" && transcripts?.dropCodexBinding !== undefined) {
       try { await transcripts.dropCodexBinding(record.id); }
-      catch (error) { cleanupFailures.push(error instanceof Error ? error.message : String(error)); }
+      catch (error) {
+        if (error instanceof Error && error.message.startsWith("STRIGOI_EVIDENCE_")) throw error;
+        cleanupFailures.push(error instanceof Error ? error.message : String(error));
+      }
     }
     if (reason === "session-deleted" && transcripts?.dropTurnLedger !== undefined) {
       try { await transcripts.dropTurnLedger(record.id); }
-      catch (error) { cleanupFailures.push(error instanceof Error ? error.message : String(error)); }
+      catch (error) {
+        if (error instanceof Error && error.message.startsWith("STRIGOI_EVIDENCE_")) throw error;
+        cleanupFailures.push(error instanceof Error ? error.message : String(error));
+      }
     }
     for (const message of cleanupFailures) {
       await this.catalog.appendTranscript(

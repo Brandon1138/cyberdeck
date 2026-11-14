@@ -1,3 +1,4 @@
+import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { grantAllows, type CyberdeckCapability } from "../domain/capability.js";
@@ -17,7 +18,7 @@ import {
   type ProviderId,
   type SessionRecord,
 } from "../domain/session.js";
-import type { OrchestratorManagerResult, PeerStartupInstruction } from "./orchestrator-manager.js";
+import type { OrchestratorManagerResult, PeerStartupInstruction, PeerLaunchAdmission } from "./orchestrator-manager.js";
 import type { OrchestratorBindingReader } from "./persistence-ports.js";
 import type { SessionLookupPort } from "./session/session-ports.js";
 
@@ -95,10 +96,11 @@ export type OrchestratorCreateResult =
   };
 
 export interface OrchestratorPeerServiceDeps {
+  strigoi?: StrigoiAdmission;
   registry: SessionLookupPort;
   bindings: OrchestratorBindingReader & { list(): Promise<OrchestratorBinding[]> };
   manager: {
-    createPeer(input: CreatePeerOrchestratorRequest, startup?: PeerStartupInstruction): Promise<OrchestratorManagerResult>;
+    createPeer(input: CreatePeerOrchestratorRequest, startup?: PeerStartupInstruction, admission?: PeerLaunchAdmission): Promise<OrchestratorManagerResult>;
   };
   instructions?: {
     prepareLaunch(input: { actorSessionId: string; target: SessionRecord; message: string; instructionId: string; native?: boolean }): Promise<InstructionRecord>;
@@ -136,6 +138,7 @@ export class OrchestratorPeerService {
     const request = AgentCreateOrchestratorParamsSchema.parse(input);
     const previous = this.inFlight.get(request.actorSessionId) ?? Promise.resolve();
     const run = previous.catch(() => undefined).then(async () => {
+      await admitted(this.deps.strigoi, request.actorSessionId, async () => undefined);
       const replayed = await this.replay(request);
       if (replayed !== undefined) return replayed;
       return this.decide(request);
@@ -214,8 +217,8 @@ export class OrchestratorPeerService {
       return refusal;
     }
 
-    const binding = (await this.deps.bindings.findBySessionId(actor))!;
-    const capabilities = peerGrantCapabilities(binding.grant.capabilities);
+    let binding = (await this.deps.bindings.findBySessionId(actor))!;
+    let capabilities = peerGrantCapabilities(binding.grant.capabilities);
     const depth = (binding.createdBy?.depth ?? 0) + 1;
     const approval = request.approval!;
     if (request.brief !== undefined && this.deps.instructions === undefined) {
@@ -239,6 +242,11 @@ export class OrchestratorPeerService {
       depth,
       briefRequested: request.brief !== undefined,
     });
+
+    const currentRefusal = await this.admission(request);
+    if (currentRefusal !== undefined) return currentRefusal;
+    binding = (await this.deps.bindings.findBySessionId(actor))!;
+    capabilities = peerGrantCapabilities(binding.grant.capabilities);
 
     let created: OrchestratorManagerResult;
     let preparedBrief: InstructionRecord | undefined;
@@ -265,7 +273,15 @@ export class OrchestratorPeerService {
           ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
         },
         capabilities,
-      }, ...(startup === undefined ? [] : [startup]));
+      }, startup, (apply) => admitted(this.deps.strigoi, actor, async () => {
+        if (this.deps.bindings.withAuthority === undefined) throw Object.assign(new Error("Binding authority transaction unavailable"), { code: "AUTHORITY_UNAVAILABLE" });
+        return this.deps.bindings.withAuthority(async () => {
+          const current = await this.deps.bindings.findBySessionId(actor);
+          const refusal = await this.admission(request, { binding: current });
+          if (refusal !== undefined) throw Object.assign(new Error(refusal.reason), { code: refusal.code ?? refusal.outcome });
+          return apply(peerGrantCapabilities(current!.grant.capabilities));
+        });
+      }));
     } catch (error) {
       if (preparedBrief !== undefined) await this.deps.instructions!.flush(preparedBrief.targetSessionId).catch(() => undefined);
       const code = error instanceof Error && "code" in error && typeof error.code === "string"
@@ -304,9 +320,12 @@ export class OrchestratorPeerService {
       warnings,
     };
     this.record(request, result, instructionId);
-    if (startup?.native === false) await this.deps.instructions!.flush(created.session.id).catch((error) => {
-      warnings.push(`Initial queue flush failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    if (startup?.native === false) {
+      const flush = () => this.deps.instructions!.flush(created.session.id).catch((error) => {
+        warnings.push(`Initial queue flush failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      if (!this.deps.strigoi?.deferDelivery(flush)) await flush();
+    }
     result.brief = instructionId === undefined ? { delivery: "not-requested" }
       : await this.briefState(created.session.id, instructionId);
     try {
@@ -325,16 +344,19 @@ export class OrchestratorPeerService {
   }
 
   /** Every refusal that needs no launch, in the order a caller would want to hear about them. */
-  private async admission(request: ParsedCreate): Promise<OrchestratorCreateResult | undefined> {
+  private async admission(request: ParsedCreate, snapshot?: { binding: OrchestratorBinding | undefined }): Promise<Exclude<OrchestratorCreateResult, { outcome: "CREATED" }> | undefined> {
     const actor = request.actorSessionId;
-    const binding = await this.deps.bindings.findBySessionId(actor);
+    const binding = snapshot === undefined ? await this.deps.bindings.findBySessionId(actor) : snapshot.binding;
     if (binding === undefined) {
       return { outcome: "DENIED", code: "ACTOR_NOT_AUTHORIZED", reason: `${actor} is not a bound Cyberdeck orchestrator` };
     }
-    const record = this.sessionRecord(actor);
-    if (record?.kind !== "orchestrator" || record.executionState !== "active" || record.exitCode !== null) {
-      return { outcome: "DENIED", code: "ACTOR_NOT_ACTIVE", reason: `${actor} is not an active Cyberdeck orchestrator` };
-    }
+    const inactive = () => {
+      const record = this.sessionRecord(actor);
+      return record?.kind === "orchestrator" && record.executionState === "active" && record.exitCode === null
+        ? undefined : { outcome: "DENIED" as const, code: "ACTOR_NOT_ACTIVE", reason: `${actor} is not an active Cyberdeck orchestrator` };
+    };
+    const activityRefusal = inactive();
+    if (activityRefusal !== undefined) return activityRefusal;
     if (request.approval === undefined) {
       return {
         outcome: "APPROVAL_REQUIRED",
@@ -367,7 +389,7 @@ export class OrchestratorPeerService {
         reason: `A workspace orchestrator may only create peers in its own workspace ${binding.scope.cwd}, not fleet-wide`,
       };
     }
-    return undefined;
+    return inactive();
   }
 
   private record<T extends OrchestratorCreateResult>(request: ParsedCreate, result: T, instructionId?: string): T {

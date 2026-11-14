@@ -1,3 +1,4 @@
+export type { StrigoiRepository } from "./strigoi-ports.js";
 import type { OrchestratorBinding } from "../domain/orchestrator.js";
 import type { ProviderId } from "../domain/session.js";
 import type { ThreadReadResult } from "../domain/thread.js";
@@ -5,6 +6,8 @@ import type { WorkflowMessage, WorkflowRun } from "../domain/workflow.js";
 import type { ProviderPermissionPolicy } from "./permission-policy.js";
 
 export interface OrchestratorBindingLookup {
+  /** Internal, canonical binding queue through activation/effect. Mutators fail closed without it. */
+  withAuthority?<T>(apply: () => Promise<T>): Promise<T>;
   findBySessionId(sessionId: string): Promise<OrchestratorBinding | undefined>;
 }
 

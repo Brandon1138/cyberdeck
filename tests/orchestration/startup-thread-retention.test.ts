@@ -155,3 +155,18 @@ describe("startup thread retention", () => {
     expect(operations).not.toContain("scout:second-old");
   });
 });
+
+it("protects resident source sessions regardless of age, count or ordinary pin policy", async () => {
+  const fake = ports([record("resident"), record("worker"), record("unreferenced")]);
+  const drops = { dropTurnLedger: async (id: string) => { fake.operations.push(`ledger:${id}`); },
+    dropCodexBinding: async (id: string) => { fake.operations.push(`codex:${id}`); } };
+  const retained = await retainStartupThreads({ ...fake, claudeBindings: { ...fake.claudeBindings, ...drops }, protectedSessionIds: new Set(["resident", "worker"]) },
+    { ...policy, keepPinned: false, maxThreads: 0 });
+  expect(retained.map((r) => r.id)).toEqual(["resident", "worker"]);
+  expect(fake.operations).toEqual(["load", "binding:unreferenced", "codex:unreferenced", "ledger:unreferenced", "compact:resident,worker"]);
+});
+it("skips compaction and every evidence cleanup when pin loading failed", async () => {
+  const fake = ports([record("old")]);
+  expect(await retainStartupThreads({ ...fake, skipDestructiveRetention: true }, policy)).toHaveLength(1);
+  expect(fake.operations).toEqual(["load"]);
+});

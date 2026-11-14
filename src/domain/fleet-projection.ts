@@ -46,6 +46,7 @@ export interface FleetProjectionSnapshot {
   nativeAgentNotice?: string;
   threads: Array<{
     record: SessionRecord;
+    strigoi?: import("./strigoi.js").StrigoiFleetView;
     /** Current broker observation, separate from persisted lifecycle and task outcome. */
     workerTruth?: WorkerTruth;
     runtimePresence?: SessionRuntimePresence;

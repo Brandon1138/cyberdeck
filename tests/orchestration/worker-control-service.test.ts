@@ -1,3 +1,4 @@
+import { deferred } from "./strigoi-admission-fixture.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -156,6 +157,7 @@ async function harness(options: {
 
   return {
     coordination,
+    bindings,
     control: build(),
     /** A fresh control service over the same substrate: the broker-restart case. */
     rebuild: build,
@@ -1080,6 +1082,29 @@ describe("WorkerControlService answer_modal", () => {
     bench.setTruth(workerId, blockedTruth(modal));
     return { bench, workerId, modal };
   }
+
+  it.each(["revoked", "transferred", "terminal", "changed-cwd"] as const)("never presses after %s during policy", async (change) => {
+    const entered = deferred(), finish = deferred();
+    const { bench, workerId, modal } = await blockedWorker(trustDescriptor(), {
+      evaluate: async () => { entered.resolve(); await finish.promise; return { allowed: true, reason: "fixture" }; },
+    });
+    const pending = bench.control.control({ actorSessionId: ORC, action: "answer_modal", workerId,
+      fingerprint: modal.fingerprint, answer: "trust", reason: "test" });
+    await entered.promise;
+    if (change === "revoked") bench.bindings.get(ORC)!.grant.capabilities = [];
+    else if (change === "terminal") bench.sessions.get(workerId)!.executionState = "exited";
+    else if (change === "changed-cwd") bench.sessions.get(workerId)!.cwd = "/different";
+    else {
+      const recipient = { controllerId: "orchestrator:workspace:/other", familyId: "orchestrator:workspace:/other",
+        scope: { kind: "fleet" as const, scopeId: "fleet" } };
+      const result = await bench.coordination.handoffBatch({ mutationId: randomUUID(), actor: recipient, recipient,
+        recipientSessionId: OTHER_ORC, directive: "Take over", members: [{ subjectId: workerId }], reason: "operator handoff" });
+      expect(result.committed).toBe(true);
+    }
+    finish.resolve();
+    await expect(pending).resolves.toMatchObject({ code: change === "transferred" ? "OWNERSHIP_LOST" : "DENIED" });
+    expect(bench.modalPresses).toEqual([]);
+  });
 
   it("presses a policy-permitted answer and journals who answered which dialog", async () => {
     const { bench, workerId, modal } = await blockedWorker();

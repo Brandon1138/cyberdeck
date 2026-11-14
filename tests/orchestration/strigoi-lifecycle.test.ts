@@ -1,0 +1,187 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { StrigoiLifecycle } from "../../src/orchestration/strigoi-lifecycle.js";
+import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
+import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
+import type { SessionRecord } from "../../src/domain/session.js";
+import type { SessionStartPort, SessionLaunchOutcomePort } from "../../src/orchestration/session/session-ports.js";
+
+const selection = { provider: "codex" as const, model: "gpt-5.6-sol", cwd: "/repo" };
+const roots: string[] = [], residents: StrigoiLifecycle[] = [];
+afterEach(async () => { residents.splice(0).forEach((r) => r.dispose()); vi.useRealTimers(); for (const p of roots.splice(0)) await rm(p, { recursive: true, force: true }); });
+async function fixture(verifyContinuity?: () => Promise<void>) {
+  const root = await mkdtemp(join(tmpdir(), "strigoi-lifecycle-")); roots.push(root);
+  const bindings = new OrchestratorStore(root), records = new Map<string, SessionRecord>();
+  let modal = false;
+  const start = vi.fn<SessionStartPort["start"]>(async (request, prompt, activate, _instruction, admit, reservation) => {
+    expect(prompt).toBeUndefined(); expect(reservation).toBeDefined();
+    const record = { ...request, id: reservation!.sessionId, generation: 7, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      executionState: "active", attachmentState: "detached", pid: 42, exitCode: null, childIds: [] } as SessionRecord;
+    await admit!(async () => { await activate!(record); records.set(record.id, record); });
+    return record;
+  });
+  let launchError: unknown = new Error("preparation failed");
+  const reject = (error: unknown) => { launchError = error; start.mockRejectedValue(error); };
+  const launchOutcome = vi.fn<SessionLaunchOutcomePort["launchOutcome"]>((reservation, generation) => {
+    const session = records.get(reservation.sessionId);
+    if (session) return session.generation === generation ? { kind: "owned", session } : { kind: "unresolved" };
+    return { kind: "failed", error: launchError };
+  });
+  const registry = { start, launchOutcome, get: (id: string) => { const r = records.get(id); if (!r) throw new Error("missing"); return r; },
+    resume: vi.fn(), ownsProcess: (id: string) => records.has(id), stopResidentProcess: vi.fn(async (id: string) => { records.delete(id); }),
+    workerTruth: () => ({ modalOpen: modal }), submit: vi.fn() };
+  const manager = new OrchestratorManager(registry, bindings, undefined, undefined, async () => []);
+  const admission = { freeze: vi.fn(async () => {}), reopen: vi.fn(async () => {}), run: vi.fn(), instruction: vi.fn() };
+  const options = { repository: bindings.strigoi, bindings, registry, manager, admission, ...(verifyContinuity ? { verifyContinuity } : {}) };
+  const make = () => { const r = new StrigoiLifecycle(options); residents.push(r); return r; };
+  const resident = make();
+  return { resident, make, start, reject, registry, admission, bindings, records, setModal: (v: boolean) => { modal = v; } };
+}
+
+describe("passive Strigoi lifecycle", () => {
+  it("repeated reconciliation starts once with native guidance and actual generation, never inference", async () => {
+    vi.useFakeTimers();
+    const f = await fixture(); await f.resident.configure(selection, "configure");
+    await Promise.all([f.resident.reconcile(), f.resident.reconcile(), f.resident.reconcile()]);
+    const state = (await f.resident.inspect()).state;
+    expect(f.start).toHaveBeenCalledOnce(); expect(f.registry.submit).not.toHaveBeenCalled();
+    expect(state.activeGeneration).toBe(7); expect(state.activeBinding?.kind).toBe("resident");
+    expect(f.start.mock.calls[0]![0]).toMatchObject({ name: "Strigoi", kind: "orchestrator", providerInstructions: expect.stringContaining("Alfred") });
+    await vi.advanceTimersByTimeAsync(3_600_000); await f.resident.inspect();
+    expect(f.start).toHaveBeenCalledOnce(); expect(f.registry.submit).not.toHaveBeenCalled();
+  });
+  it("suspension survives restart without launch", async () => {
+    const f = await fixture(); await f.resident.configure(selection, "configure");
+    await f.resident.setDesired("suspended", "suspend"); f.resident.dispose();
+    await f.make().reconcile(); expect(f.start).not.toHaveBeenCalled();
+  });
+  it("persists the three transient failure delays across restarts, then holds", async () => {
+    vi.useFakeTimers(); const f = await fixture();
+    f.reject(Object.assign(new Error("temporary preparation failure"), { code: "ETIMEDOUT" }));
+    await f.resident.configure(selection, "configure"); let resident = f.resident;
+    for (const delay of [1000, 5000, 30000]) {
+      await resident.reconcile();
+      const state = (await resident.inspect()).state;
+      expect(Date.parse(state.transition!.nextAttemptAt!) - Date.now()).toBe(delay);
+      resident.dispose(); resident = f.make(); await resident.reconcile();
+      await vi.advanceTimersByTimeAsync(delay);
+      // A scheduled reconciliation can be waiting on fsync; join it before the next assertion.
+      await resident.reconcile();
+    }
+    expect(f.start).toHaveBeenCalledTimes(3);
+    expect((await resident.inspect()).state.hold?.code).toBe("launch-retries-exhausted");
+  });
+  it.each(["AUTHENTICATION_REQUIRED", "INVALID_SESSION_CWD", "PROVIDER_NOT_REGISTERED"])("holds %s immediately", async (code) => {
+    const f = await fixture(); f.reject(Object.assign(new Error(code), { code }));
+    await f.resident.configure(selection, "configure"); await f.resident.reconcile(); await f.resident.reconcile();
+    expect(f.start).toHaveBeenCalledOnce(); expect((await f.resident.inspect()).state.hold?.code).toBe(code);
+  });
+  it("rejects unsupported configuration without enabling", async () => {
+    const f = await fixture();
+    await expect(f.resident.configure({ ...selection, provider: "claude" } as never, "bad")).rejects.toThrow();
+    expect((await f.resident.inspect()).state.desired).toBe("disabled");
+  });
+  it("explicit resume starts a fresh bounded episode after a preparation hold", async () => {
+    const f = await fixture(); const launch = f.start.getMockImplementation()!;
+    f.reject(Object.assign(new Error("credentials"), { code: "AUTHENTICATION_REQUIRED" }));
+    await f.resident.configure(selection, "configure"); await f.resident.reconcile();
+    await f.resident.setDesired("enabled", "resume"); f.start.mockImplementation(launch); await f.resident.reconcile();
+    expect(f.start).toHaveBeenCalledTimes(2); expect((await f.resident.inspect()).state.transition?.attempts).toBe(1);
+  });
+  it("holds wrapped credential failure immediately", async () => {
+    const f = await fixture();
+    f.reject(Object.assign(new Error("RC unavailable", { cause: Object.assign(new Error("login required"), { code: "AUTHENTICATION_REQUIRED" }) }), { code: "CODEX_REMOTE_CONTROL_UNAVAILABLE" }));
+    await f.resident.configure(selection, "configure"); await f.resident.reconcile();
+    expect((await f.resident.inspect()).state.hold?.code).toBe("AUTHENTICATION_REQUIRED");
+    expect((await f.resident.inspect()).state.transition?.nextAttemptAt).toBeUndefined();
+  });
+  it("does not trust or kill a persisted PID when the current broker owns no process", async () => {
+    const f = await fixture(); await f.resident.configure(selection, "configure"); await f.resident.reconcile();
+    f.registry.ownsProcess = () => false;
+    f.resident.dispose(); const restarted = f.make(); await restarted.reconcile();
+    expect((await restarted.inspect()).state.hold?.code).toBe("launch-ownership-unresolved");
+    await restarted.setDesired("suspended", "suspend");
+    expect(f.registry.stopResidentProcess).not.toHaveBeenCalled(); expect(f.start).toHaveBeenCalledOnce();
+  });
+  it("lost spawn response holds the assigned identity through restart without duplicate launch", async () => {
+    const f = await fixture();
+    f.registry.launchOutcome.mockReturnValue({ kind: "unresolved" });
+    f.start.mockImplementationOnce(async (_request, _prompt, activate, _instruction, admit, reservation) => {
+      await admit!(async () => { await activate!({ id: reservation!.sessionId, generation: 1 } as SessionRecord); });
+      throw new Error("spawn response lost");
+    });
+    await f.resident.configure(selection, "configure"); await f.resident.reconcile(); f.resident.dispose();
+    const restarted = f.make(); await restarted.reconcile();
+    expect((await restarted.inspect()).state.hold?.code).toBe("launch-ownership-unresolved");
+    expect(f.start).toHaveBeenCalledOnce();
+  });
+  it("settles a reservation fenced immediately after its durable append before registry entry", async () => {
+    const f = await fixture(); await f.resident.configure(selection, "configure");
+    const append = f.bindings.strigoi.compareAndSwap.bind(f.bindings.strigoi);
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>((r) => { enter = r; }), wait = new Promise<void>((r) => { release = r; });
+    vi.spyOn(f.bindings.strigoi, "compareAndSwap").mockImplementationOnce(async (...args) => {
+      const state = await append(...args); enter(); await wait; return state;
+    });
+    const launch = f.resident.reconcile(); await entered;
+    const suspend = f.resident.setDesired("suspended", "suspend"); release();
+    await Promise.all([launch, suspend]);
+    expect(f.start).not.toHaveBeenCalled();
+    expect((await f.resident.inspect()).state.desired).toBe("suspended");
+    expect((await f.resident.inspect()).state.transition?.successor).toBeUndefined();
+    f.resident.dispose(); const restarted = f.make();
+    await restarted.setDesired("enabled", "resume"); await restarted.reconcile();
+    expect(f.start).toHaveBeenCalledOnce(); expect((await restarted.inspect()).state.transition?.attempts).toBe(1);
+  });
+  it("suspension wins a late launch result and stops only the owned process", async () => {
+    const f = await fixture(); let release!: () => void, entered!: () => void;
+    const ready = new Promise<void>((r) => { entered = r; }), wait = new Promise<void>((r) => { release = r; });
+    const original = f.start.getMockImplementation()!;
+    f.start.mockImplementationOnce(async (...args) => { const record = await original(...args); entered(); await wait; return record; });
+    await f.resident.configure(selection, "configure"); const launch = f.resident.reconcile(); await ready;
+    await f.resident.setDesired("suspended", "suspend"); release(); await launch;
+    const state = (await f.resident.inspect()).state;
+    expect(state.desired).toBe("suspended"); expect(state.activeBinding).toBeUndefined(); expect(f.registry.stopResidentProcess).toHaveBeenCalled();
+  });
+  it("permission modal holds without answering or starting another process", async () => {
+    const f = await fixture(); f.setModal(true); await f.resident.configure(selection, "configure"); await f.resident.reconcile();
+    await f.resident.reconcile(); expect(f.start).toHaveBeenCalledOnce();
+    expect((await f.resident.inspect()).state.hold?.code).toBe("provider-permission-modal");
+    expect(f.registry.submit).not.toHaveBeenCalled();
+    expect(f.admission.reopen).not.toHaveBeenCalled();
+    f.setModal(false); await f.resident.reconcile();
+    expect((await f.resident.inspect()).state.hold).toBeUndefined();
+    expect(f.admission.reopen).toHaveBeenCalledOnce(); expect(f.start).toHaveBeenCalledOnce();
+  });
+  it.each(["generation", "inactive", "ownership", "epoch", "hold"])("terminal runtime fencing does not reopen on %s mismatch", async (condition) => {
+    const f = await fixture(); await f.resident.configure(selection, "configure"); await f.resident.reconcile();
+    f.admission.reopen.mockClear();
+    const epoch = f.resident.successionEpoch(), state = await f.bindings.strigoi.read();
+    const record = f.records.get(state.activeBinding!.sessionId)!;
+    if (condition === "generation") record.generation! += 1;
+    if (condition === "inactive") record.executionState = "starting";
+    if (condition === "ownership") f.registry.ownsProcess = () => false;
+    if (condition === "epoch") f.resident.dispose();
+    if (condition === "hold") await f.bindings.strigoi.compareAndSwap(state.revision, "hold", { ...state, revision: state.revision + 1,
+      hold: { code: "continuity-evidence-unavailable", detail: "Missing evidence", sourceIds: [] } });
+    await f.resident.reconcileActive(epoch);
+    expect(f.admission.reopen).not.toHaveBeenCalled();
+  });
+});
+
+it("preserves the continuity evidence hold until explicit resume verifies repaired evidence", async () => {
+  const verify = vi.fn(async () => {}), f = await fixture(verify);
+  await f.resident.configure(selection, "config");
+  const state = await f.bindings.strigoi.read();
+  await f.bindings.strigoi.compareAndSwap(state.revision, "evidence-hold", { ...state, revision: state.revision + 1,
+    hold: { code: "continuity-evidence-unavailable", detail: "Corrupt source index", sourceIds: [] } });
+  await f.resident.reconcile(); expect(f.start).not.toHaveBeenCalled();
+  expect((await f.resident.inspect()).state.hold?.code).toBe("continuity-evidence-unavailable");
+  verify.mockRejectedValueOnce(new Error("Still corrupt"));
+  await expect(f.resident.setDesired("enabled", "resume-bad")).rejects.toThrow("Still corrupt");
+  expect((await f.resident.inspect()).state.hold?.code).toBe("continuity-evidence-unavailable");
+  await f.resident.setDesired("enabled", "resume-good"); await f.resident.reconcile();
+  expect(f.start).toHaveBeenCalledTimes(1); expect(f.registry.submit).not.toHaveBeenCalled();
+});
