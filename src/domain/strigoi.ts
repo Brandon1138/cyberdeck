@@ -31,19 +31,20 @@ export const StrigoiTransitionSchema = z.object({
     "Successor incarnation must increase");
 export const StrigoiStateSchema = z.object({
   schemaVersion: z.literal(1), revision: z.number().int().nonnegative(), desired: StrigoiDesiredSchema,
-  selection: StrigoiSelectionSchema.optional(), activeBinding: OrchestratorBindingSchema.optional(), incarnation: z.number().int().nonnegative(),
+  selection: StrigoiSelectionSchema.optional(), activeGeneration: z.number().int().positive().optional(), activeBinding: OrchestratorBindingSchema.optional(), incarnation: z.number().int().nonnegative(),
   transition: StrigoiTransitionSchema.optional(), latestPacket: StrigoiPacketRefSchema.optional(), retainedSessionIds: z.array(z.uuid()),
   hold: StrigoiHoldSchema.optional(), updatedAt: z.iso.datetime(),
 }).refine((state) => state.desired !== "enabled" || state.selection !== undefined, "Enabled resident requires a selection")
   .refine((state) => state.activeBinding === undefined || (isStrigoiBinding(state.activeBinding)
     && state.activeBinding.resident?.incarnation === state.incarnation), "Active binding must match resident incarnation")
+  .refine((state) => (state.activeBinding === undefined) === (state.activeGeneration === undefined), "Active binding requires its generation")
   .refine((state) => state.transition === undefined || state.incarnation === state.transition.expectedIncarnation
     || state.incarnation === state.transition.successor?.incarnation, "State incarnation must belong to the transition")
   .refine((state) => {
     const binding = state.activeBinding;
     if (binding === undefined || state.transition === undefined) return true;
     return [state.transition.predecessor, state.transition.successor].every((identity) =>
-      identity === undefined || identity.incarnation !== state.incarnation || identity.sessionId === binding.sessionId);
+      identity === undefined || identity.incarnation !== state.incarnation || (identity.sessionId === binding.sessionId && identity.generation === state.activeGeneration));
   }, "Active binding and transition identity must agree");
 
 export type StrigoiIdentity = z.infer<typeof StrigoiIdentitySchema>;

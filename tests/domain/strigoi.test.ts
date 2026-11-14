@@ -11,7 +11,7 @@ const resident = {
 };
 const state = {
   schemaVersion: 1, revision: 1, desired: "enabled", selection: { provider: "codex", model: "model", cwd: "/repo" },
-  activeBinding: resident, incarnation: 1, retainedSessionIds: [sessionId], updatedAt: "2026-11-14T10:00:00.000Z",
+  activeBinding: resident, incarnation: 1, activeGeneration: 1, retainedSessionIds: [sessionId], updatedAt: "2026-11-14T10:00:00.000Z",
 };
 
 describe("Strigoi identity and durable state", () => {
@@ -52,10 +52,11 @@ describe("Strigoi identity and durable state", () => {
       predecessor: { sessionId, incarnation: 1, generation: 1 }, successor: { sessionId: "22222222-2222-4222-8222-222222222222", incarnation: 2, generation: 2 }, packet };
     expect(StrigoiStateSchema.safeParse({ ...state, transition, latestPacket: packet }).success).toBe(true);
     for (const invalid of [
-      { selection: undefined }, { incarnation: 2 }, { activeBinding: { ...resident, key: "fleet" } },
+      { selection: undefined }, { incarnation: 2 }, { activeGeneration: undefined }, { activeGeneration: 0 }, { activeBinding: { ...resident, key: "fleet" } },
       { latestPacket: { ...packet, sha256: "bad" } },
       { transition: { ...transition, successor: { ...transition.successor, incarnation: 1 } } },
       { transition: { ...transition, predecessor: { ...transition.predecessor, generation: 0 } } },
+      { transition: { ...transition, predecessor: { ...transition.predecessor, generation: 2 } } },
       { transition: { ...transition, predecessor: { ...transition.predecessor, sessionId: transition.successor.sessionId } } },
     ]) expect(StrigoiStateSchema.safeParse({ ...state, ...invalid }).success).toBe(false);
   });

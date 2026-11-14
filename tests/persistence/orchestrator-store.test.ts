@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -66,7 +66,7 @@ describe("OrchestratorStore", () => {
     const initial = await store.strigoi.read();
     await expect(store.put(resident)).rejects.toThrow("CAS");
     await expect(store.reset(resident.key)).rejects.toThrow("CAS");
-    await store.strigoi.compareAndSwap(0, "activate", { ...initial, revision: 1, desired: "enabled", selection: { provider: "codex", model: "model", cwd: "/repo" }, activeBinding: resident, incarnation: 1 });
+    await store.strigoi.compareAndSwap(0, "activate", { ...initial, revision: 1, desired: "enabled", selection: { provider: "codex", model: "model", cwd: "/repo" }, activeBinding: resident, incarnation: 1, activeGeneration: 1 });
     expect(await store.get(resident.key)).toEqual(resident);
     expect(await store.findBySessionId(sessionId)).toEqual(resident);
     expect(await store.list()).toContainEqual(resident);
@@ -75,6 +75,7 @@ describe("OrchestratorStore", () => {
     expect(await store.get(ordinary.key)).toEqual(ordinary);
     expect(await store.list()).toEqual([ordinary]);
     expect(await store.findBySessionId(ordinary.sessionId)).toEqual(ordinary);
+    await expect(store.findBySessionId(sessionId)).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
   });
 
   it("rejects legacy resident records while leaving ordinary bindings readable", async () => {
@@ -88,6 +89,44 @@ describe("OrchestratorStore", () => {
     await appendFile(store.path, `${JSON.stringify(resident)}\n${JSON.stringify(resident)}\n`);
     await expect(store.strigoi.read()).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
     expect(await store.list()).toEqual([ordinary]);
+  });
+
+
+  it("rejects session collisions in both write orders and concurrent writes", async () => {
+    for (const order of ["resident-first", "ordinary-first", "concurrent"] as const) {
+      const directory = await mkdtemp(join(tmpdir(), "cyberdeck-collision-")); directories.push(directory);
+      const store = new OrchestratorStore(directory), sessionId = "22222222-2222-4222-8222-222222222222", scope = { kind: "fleet" as const };
+      const ordinary = binding(sessionId, "model");
+      const resident: OrchestratorBinding = { ...ordinary, key: "resident:strigoi", kind: "resident", scope, resident: { name: "strigoi", incarnation: 1 }, grant: { subjectSessionId: sessionId, capabilities: ["thread.list"], scope } };
+      const initial = await store.strigoi.read();
+      const activate = () => store.strigoi.compareAndSwap(0, "activate", { ...initial, revision: 1, desired: "enabled", selection: { provider: "codex", model: "model", cwd: "/repo" }, activeBinding: resident, incarnation: 1, activeGeneration: 1 });
+      if (order === "resident-first") { await activate(); await expect(store.put(ordinary)).rejects.toMatchObject({ code: "STRIGOI_SESSION_CONFLICT" }); }
+      else if (order === "ordinary-first") { await store.put(ordinary); await expect(activate()).rejects.toMatchObject({ code: "STRIGOI_SESSION_CONFLICT" }); }
+      else { const results = await Promise.allSettled([store.put(ordinary), activate()]); expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1); expect(results.find((r) => r.status === "rejected")).toMatchObject({ reason: { code: "STRIGOI_SESSION_CONFLICT" } }); }
+    }
+  });
+  it("fails closed on a preexisting collision while unrelated bindings remain readable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-existing-collision-")); directories.push(directory);
+    const store = new OrchestratorStore(directory), id = "22222222-2222-4222-8222-222222222222", scope = { kind: "fleet" as const };
+    const ordinary = binding("11111111-1111-4111-8111-111111111111", "model"); await store.put(ordinary);
+    const resident: OrchestratorBinding = { ...binding(id, "model"), key: "resident:strigoi", kind: "resident", scope, resident: { name: "strigoi", incarnation: 1 }, grant: { subjectSessionId: id, capabilities: ["thread.list"], scope } };
+    const initial = await store.strigoi.read();
+    await store.strigoi.compareAndSwap(0, "activate", { ...initial, revision: 1, desired: "enabled", selection: { provider: "codex", model: "model", cwd: "/repo" }, activeBinding: resident, incarnation: 1, activeGeneration: 1 });
+    const collision = { ...binding(id, "model"), key: "fleet", scope, grant: { subjectSessionId: id, capabilities: ["thread.list"], scope } };
+    await appendFile(store.path, `${JSON.stringify(collision)}\n`);
+    await expect(store.findBySessionId(id)).rejects.toMatchObject({ code: "STRIGOI_SESSION_CONFLICT" });
+    await expect(store.get("fleet")).rejects.toMatchObject({ code: "STRIGOI_SESSION_CONFLICT" });
+    await expect(store.list()).rejects.toMatchObject({ code: "STRIGOI_SESSION_CONFLICT" });
+    expect(await store.get(ordinary.key)).toEqual(ordinary);
+    expect(await store.findBySessionId(ordinary.sessionId)).toEqual(ordinary);
+  });
+  it("isolates filesystem faults but fails closed for unknown session authority", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-resident-fs-")); directories.push(directory);
+    const store = new OrchestratorStore(directory), ordinary = binding("11111111-1111-4111-8111-111111111111", "model");
+    await store.put(ordinary); await mkdir(store.strigoi.path, { recursive: true });
+    await expect(store.strigoi.read()).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
+    expect(await store.list()).toEqual([ordinary]); expect(await store.findBySessionId(ordinary.sessionId)).toEqual(ordinary);
+    await expect(store.findBySessionId("22222222-2222-4222-8222-222222222222")).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
   });
 
   /**
