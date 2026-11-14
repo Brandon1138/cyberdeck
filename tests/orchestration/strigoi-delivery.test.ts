@@ -279,20 +279,27 @@ it("retains an archived queued workflow wake without blocking eligible same-targ
   } finally { await f.close(); }
 });
 
-it.each(["primary", "peer"] as const)("delivers to an established ordinary %s despite resident-only corruption", async kind => {
+it.each(["primary", "peer"].flatMap(kind => ["startup", "runtime", "runtime-event", "runtime-native"].map(timing => ({ kind, timing }))))("delivers to an established ordinary $kind despite $timing resident-only corruption", async ({ kind, timing }) => {
   const f = await fixture();
   try {
     const { resident: _resident, ...ordinary } = f.bound;
     await f.bindings.put({ ...ordinary, key: "fleet", kind: "primary", sessionId: WORKER,
       grant: { ...ordinary.grant, subjectSessionId: WORKER } });
-    await f.bindings.put({ ...ordinary, key: kind === "peer" ? `fleet:peer:${NEXT}` : "workspace:/repo", kind,
+    await f.bindings.put({ ...ordinary, key: kind === "peer" ? `fleet:peer:${NEXT}` : "workspace:/repo", kind: kind as "primary" | "peer",
       sessionId: NEXT, grant: { ...ordinary.grant, subjectSessionId: NEXT } });
     f.records.set(WORKER, { ...f.records.get(WORKER)!, kind: "orchestrator" });
     await appendFile(f.repository.path, "corrupt resident record\n");
     // Production startup fences retention and source capture when resident evidence is corrupt.
     const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
-    expect(await f.evidence.startup(f.transcripts, new SessionStore(f.directory))).toMatchObject({ skipDestructiveRetention: true });
+    if (timing === "startup") expect(await f.evidence.startup(f.transcripts, new SessionStore(f.directory))).toMatchObject({ skipDestructiveRetention: true });
     diagnostic.mockRestore();
+    if (timing === "runtime-event") await f.evidence.transcriptContinuity.event({ id: randomUUID(), sessionId: NEXT,
+      cursor: 1, kind: "turn", source: "provider", text: "Ordinary event survives corruption", occurredAt: new Date().toISOString(), data: {} });
+    if (timing === "runtime-native") await f.evidence.transcriptContinuity.native!(NEXT, "native-ordinary", { role: "assistant", text: "Ordinary native result" });
+    const established = (await f.bindings.findBySessionId(NEXT))!;
+    await f.bindings.put({ ...established, grant: { ...established.grant, capabilities: [] } });
+    expect((await f.bindings.findBySessionId(NEXT))!.grant.capabilities).toEqual([]);
+    await f.bindings.put(established);
     await expect(f.delivery.key(NEXT)).resolves.toBe(NEXT);
     const at = f.now();
     const direct = InstructionRecordSchema.parse({ id: randomUUID(), actorSessionId: WORKER, targetSessionId: NEXT,
@@ -307,5 +314,7 @@ it.each(["primary", "peer"] as const)("delivers to an established ordinary %s de
     }
     await expect(f.delivery.prepare({ ...direct, actorSessionId: ACTOR }, async () => {})).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
     expect(f.effects).toEqual(["ordinary", "ordinary reply"]);
+    await expect(f.evidence.beforeDelete(NEXT)).rejects.toThrow("STRIGOI_EVIDENCE_REFERENCED");
+    await expect(f.evidence.verify()).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
   } finally { await f.close(); }
 });

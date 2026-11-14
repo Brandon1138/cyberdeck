@@ -1,7 +1,7 @@
 # Strigoi: durable resident Orc design
 
 Date: 2026-11-14.
-Status: approved by the operator on 2026-11-14 as the basis for implementation planning; not implemented.
+Status: approved by the operator on 2026-11-14 as the basis for implementation planning; source implementation and fixture acceptance recorded; live qualification NOT RUN.
 Approval does not enable a live resident or select a live model.
 Product intent: [brief](../../design/strigoi-brief.md).
 Architecture decision: [ADR 0001](../../adr/0001-strigoi-durable-fleet-orc.md).
@@ -341,3 +341,5 @@ Choices approved with this design: dedicated resident binding, serialized handof
 with a visible gap, and Codex as the first provider to qualify. Exact live
 model/effort/cwd are chosen at enablement, not inferred from this
 document. There is no automatic live activation as a consequence of approving docs.
+
+Implementation evidence: [source/fixture acceptance and remaining live gates](../../setup/strigoi-acceptance.md). Historical pre-implementation observations above retain their original baseline.

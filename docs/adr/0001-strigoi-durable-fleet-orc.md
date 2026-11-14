@@ -1,7 +1,7 @@
 # ADR 0001: Strigoi as a durable Fleet Orc
 
 Date: 2026-11-14.
-Status: accepted by the operator on 2026-11-14 as the basis for implementation planning; not implemented.
+Status: accepted by the operator on 2026-11-14 as the basis for implementation planning; source implementation and fixture acceptance recorded; live qualification NOT RUN.
 
 ## Context
 
@@ -139,3 +139,5 @@ See the [product brief](../design/strigoi-brief.md) and
 [approved design](../superpowers/specs/2026-11-14-strigoi-design.md). A functioning
 process, written packet, or successful acknowledgement alone is insufficient proof
 of Strigoi's durability.
+
+Implementation evidence: [source/fixture acceptance and remaining live gates](../setup/strigoi-acceptance.md). Historical pre-implementation observations above retain their original baseline.

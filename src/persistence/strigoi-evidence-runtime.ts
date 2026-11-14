@@ -1,3 +1,4 @@
+import { StrigoiStoreError } from "./strigoi-store.js";
 import { effectiveInstruction, type InstructionRecord } from "../domain/instruction.js";
 import { StrigoiTurnEvidence } from "./strigoi-turn-evidence.js";
 import { indexedInstructionReceipt } from "./instruction-target-index.js";
@@ -24,16 +25,28 @@ export function composeStrigoiEvidence(stateDirectory: string) {
   let sources: StrigoiSources;
   let turnTranscripts: ThreadTranscriptStore | undefined;
   let held = false;
+  // Corruption can appear after startup. Disable only resident evidence capture;
+  // canonical ordinary records still commit, with conservative durable pins. Never
+  // swallow arbitrary I/O/publication failures or resident/ordinary identity conflicts.
+  const isolateResidentCorruption = async <T>(work: () => Promise<T>, fallback: T): Promise<T> => {
+    try { return await work(); }
+    catch (error) {
+      if (!(error instanceof StrigoiStoreError) || error.code !== "STRIGOI_CORRUPT_STATE") throw error;
+      held = true;
+      return fallback;
+    }
+  };
+  const capture = (work: () => Promise<void>) => held ? Promise.resolve() : isolateResidentCorruption(work, undefined);
   const withReferences: EvidenceReferenceGuard = (ids, commit) => withEvidenceReferences(stateDirectory, ids, async () => {
-    if (ids.length && (held || await sources.relevant([...ids]))) await retainEvidenceReferences(stateDirectory, ids);
+    if (ids.length && (held || await isolateResidentCorruption(() => sources.relevant([...ids]), true))) await retainEvidenceReferences(stateDirectory, ids);
     return commit();
   });
-  const instructionStore = new InstructionStore(stateDirectory, (record) => held ? Promise.resolve() : sources.record("instruction", record.id, record,
-    instructionSessionIds(record)), withReferences);
-  const workflowStore = new WorkflowStore(stateDirectory, (record) => held ? Promise.resolve() : sources.record("workflow", record.id, record,
-    "ownerSessionId" in record ? [record.ownerSessionId, ...record.participantSessionIds] : [record.fromSessionId, record.toSessionId]), withReferences);
-  const attentionStore = new OrchestratorAttentionStore(stateDirectory, undefined, (record) => held ? Promise.resolve() : sources.record("attention", record.epoch, record,
-    [record.actorSessionId, ...record.statement.targets.map((t) => t.sessionId)]), withReferences);
+  const instructionStore = new InstructionStore(stateDirectory, (record) => capture(() => sources.record("instruction", record.id, record,
+    instructionSessionIds(record))), withReferences);
+  const workflowStore = new WorkflowStore(stateDirectory, (record) => capture(() => sources.record("workflow", record.id, record,
+    "ownerSessionId" in record ? [record.ownerSessionId, ...record.participantSessionIds] : [record.fromSessionId, record.toSessionId])), withReferences);
+  const attentionStore = new OrchestratorAttentionStore(stateDirectory, undefined, (record) => capture(() => sources.record("attention", record.epoch, record,
+    [record.actorSessionId, ...record.statement.targets.map((t) => t.sessionId)])), withReferences);
   sources = new StrigoiSources({ repository: orchestratorStore.strigoi, archive, instructions: instructionStore,
     workflows: workflowStore, attention: attentionStore, coordination: new WorkerCoordinationStore(stateDirectory) });
   const beforeDelete = async (id: string) => {
@@ -41,8 +54,9 @@ export function composeStrigoiEvidence(stateDirectory: string) {
   };
   const withDeletion = <T>(id: string, commit: () => Promise<T>) => withEvidenceDeletion(stateDirectory, id, () => beforeDelete(id), commit);
   const transcriptContinuity: NonNullable<ThreadTranscriptStoreOptions["continuity"]> = {
-    event: (event) => held ? Promise.resolve() : sources.event(event), beforeDelete,
-    native: (id, sourceId, message) => sources.record("turn", `native:${id}:${sourceId}`, message, [id]),
+    event: (event) => capture(() => sources.event(event)), beforeDelete,
+    // Explicit verify/recovery must still recapture repaired native evidence while held.
+    native: (id, sourceId, message) => isolateResidentCorruption(() => sources.record("turn", `native:${id}:${sourceId}`, message, [id]), undefined),
   };
   async function verify() {
     await orchestratorStore.strigoi.retentionPins();

@@ -59,8 +59,9 @@ describe("resident controller directory", () => {
   it("maps the current resident session to its stable identity", async () => {
     const resident: OrchestratorBinding = { ...binding(PRIMARY, "resident:strigoi", "primary"), kind: "resident", resident: { name: "strigoi", incarnation: 1 } };
     const directory = new OrchestratorControllerDirectory({ list: async () => [resident], findBySessionId: async (id) => id === PRIMARY ? resident : undefined });
-    await expect(directory.forSession(PRIMARY)).resolves.toEqual({ controllerId: "orchestrator:resident:strigoi", familyId: "orchestrator:resident:strigoi", sessionId: PRIMARY });
-    await expect(directory.forController("orchestrator:resident:strigoi")).resolves.toMatchObject({ sessionId: PRIMARY });
+    const expected = { controllerId: "orchestrator:resident:strigoi", familyId: "orchestrator:resident:strigoi", sessionId: PRIMARY, resident: true };
+    await expect(directory.forSession(PRIMARY)).resolves.toEqual(expected);
+    await expect(directory.forController("orchestrator:resident:strigoi")).resolves.toEqual(expected);
   });
 
   it("uses the resident grant and Fleet peer-create switch for admission", async () => {

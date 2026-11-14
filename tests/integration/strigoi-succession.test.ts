@@ -38,7 +38,8 @@ describe("succession durable boundary faults through the real registry/evidence 
     const sync = vi.spyOn(f.bindings.strigoi, "confirmMutation");
     const state = await f.drive(t.id);
     expect(sync).toHaveBeenCalled();
-    expect(state.transition?.phase === "complete" || state.hold !== undefined).toBe(true);
+    if (phase === "checkpointing") expect(state.hold).toMatchObject({ code: "checkpoint-outcome-unresolved", sourceIds: [f.original.activeBinding!.sessionId] });
+    else { expect(state.transition?.phase).toBe("complete"); expect(state.hold).toBeUndefined(); }
     expect(f.spawn.mock.calls.length).toBeLessThanOrEqual(2);
   });
   it.each((["requested", "checkpointing", "sealed", "retiring", "launching", "committed", "adopting", "reconciling", "complete"] as StrigoiPhase[])
@@ -60,7 +61,8 @@ describe("succession durable boundary faults through the real registry/evidence 
     if (phase === "checkpointing" && side === "after") f.tick(120_000);
     id ??= (await f.runtime.succession!.renew(1, "fault", "r")).id;
     const state = await f.drive(id);
-    expect(state.transition?.phase === "complete" || state.hold !== undefined).toBe(true);
+    if (phase === "checkpointing" && side === "after") expect(state.hold).toMatchObject({ code: "checkpoint-outcome-unresolved", sourceIds: [f.original.activeBinding!.sessionId] });
+    else { expect(state.transition?.phase).toBe("complete"); expect(state.hold).toBeUndefined(); }
     expect(f.spawn.mock.calls.length).toBeLessThanOrEqual(2);
     expect(f.registry.list().filter((s) => s.exitCode === null)).toHaveLength(1);
     const disk = await new OrchestratorStore(f.root).strigoi.read();

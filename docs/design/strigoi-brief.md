@@ -1,6 +1,6 @@
 # Strigoi: product brief
 
-Status: approved product direction and architecture on 2026-11-14; not implemented.
+Status: approved product direction and architecture on 2026-11-14; source implementation and fixture acceptance recorded; live qualification NOT RUN.
 Date: 2026-11-14.
 
 ## Intent
@@ -89,3 +89,5 @@ about the ongoing work. A valid packet and a "ready" reply do not establish that
 See [ADR 0001](../adr/0001-strigoi-durable-fleet-orc.md) for the architectural
 decision and [the design](../superpowers/specs/2026-11-14-strigoi-design.md) for
 lifecycle, handoff, recovery, and acceptance contracts.
+
+Implementation evidence: [source/fixture acceptance and remaining live gates](../setup/strigoi-acceptance.md). Historical pre-implementation observations above retain their original baseline.

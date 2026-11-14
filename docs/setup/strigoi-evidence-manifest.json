@@ -1,0 +1,435 @@
+{
+  "schemaVersion": 1,
+  "baseSha": "76815169071b2e2852b31958a0475955210913df",
+  "sourceFixtureStatus": "PASS - focused predecessor and Task10 proofs plus final integrated check/test/build. Live qualification remains separate.",
+  "fullIntegratedStatus": "PASS - pnpm check, pnpm test --maxWorkers=2, pnpm build all exit0; 308 files/4168 tests passed, 1 file/27 deliberate skips, 456.14s. Earlier failed run preserved.",
+  "liveStatus": "NOT RUN",
+  "sourceScope": "Actual production services, persisted reopen and separately owned controller child SIGKILL/restart with synthetic OS transport. No full broker network server, native provider or power-loss qualification. Integrated completion also validates optional Fleet resident inspection at the RPC display boundary; palette/catalog/resident-marker expectations updated without authority, key handling or Unknown-semantics changes.",
+  "files": [
+    {
+      "path": "src/persistence/strigoi-evidence-runtime.ts",
+      "sha256": "f50dee4affc19b1efbc78b3861785a9bfdceef789d7d1b68a4cd5df96af0268c"
+    },
+    {
+      "path": "scripts/run-live-strigoi-gate.ts",
+      "sha256": "7c5bafde03ff9963e18fd6ebe0ebfc67ac2d63fa611b29a69d9bc3e8f5e3a332"
+    },
+    {
+      "path": "scripts/strigoi-gate-options.ts",
+      "sha256": "408464a6ab9674b599135f88072645707bcb230086d6890c7722edb2ecb3ff0a"
+    },
+    {
+      "path": "scripts/strigoi-gate-services.ts",
+      "sha256": "43bcf8ae6bb77531e96c9740ee2365b31520d9c04ec19c0fce7726a2a8a2050b"
+    },
+    {
+      "path": "tests/fixtures/strigoi/harness.ts",
+      "sha256": "b92ddb8832d9233f252d56f3b8d9063674edbf7a6599712daf042d4af1f63bf5"
+    },
+    {
+      "path": "tests/fixtures/strigoi/production.ts",
+      "sha256": "816ffd3d9fc3fccce84e131d5904c8a9dc39eb67a88498f68b460a45b6aea0f5"
+    },
+    {
+      "path": "tests/fixtures/strigoi/semantic-cases.json",
+      "sha256": "25df3f65a597eb5a323b40d5a5a4586095aed7e3d0010ebbcc77df885722a05e"
+    },
+    {
+      "path": "tests/integration/strigoi-recovery.test.ts",
+      "sha256": "3f6b25d1a28234f26a83a53b1949282101321b16616166d466c1214b68c37435"
+    },
+    {
+      "path": "tests/integration/strigoi-scaling.test.ts",
+      "sha256": "f51429b89c9cb2cde1ad885cc4fa20cebe6717daf8650502b0de501f27b5e854"
+    },
+    {
+      "path": "tests/integration/strigoi-runner.test.ts",
+      "sha256": "f14c708b8dab4fb61d653e4082e73f30a40e8644a87c67d884466b8ffa31daba"
+    },
+    {
+      "path": "tests/integration/strigoi-succession.test.ts",
+      "sha256": "128a25ce14916c9f2f51879189e684d6d236b5249926fbb00d378cc0aceb40d7"
+    },
+    {
+      "path": "tests/orchestration/strigoi-delivery.test.ts",
+      "sha256": "32d3484844f02454cf957cd880545d37036ae13728f4b972210c2828603fd18f"
+    },
+    {
+      "path": "tests/orchestration/strigoi-succession-fixture.ts",
+      "sha256": "4ba4f8cb776d5cf87b6e24e502312faa6a8c3929d62cc0b0f89443190466bd50"
+    },
+    {
+      "path": "docs/setup/strigoi-acceptance.md",
+      "sha256": "be37ea1248908a8d7670cb702e745a9bc118093d1a8d350210b03ed9e76053a1"
+    },
+    {
+      "path": "docs/design/strigoi-brief.md",
+      "sha256": "cc0b648012d9aefcaeea807c6d695c34713c82b741a740f912aceede407aead8"
+    },
+    {
+      "path": "docs/adr/0001-strigoi-durable-fleet-orc.md",
+      "sha256": "3654a8b49620f99a89a7a23cdc2788aa9d68ea68da09c50f9d54962dbf945a8e"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-11-14-strigoi-design.md",
+      "sha256": "a073f515a21c5bbdda7c1382176867d2ff03942237d34044b4dcd7cc4249c43c"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-11-14-strigoi.md",
+      "sha256": "3c9ce6443a8c1204a397654e3fa90d6cb44638855dad4763ae29d9f343292908"
+    },
+    {
+      "path": "scripts/strigoi-gate-supervisor.ts",
+      "sha256": "563897fcf3011512eb525411ba53df25b7745918e77fc2541794d5cc29a506cd"
+    },
+    {
+      "path": "scripts/strigoi-gate-crash-child.ts",
+      "sha256": "0990b8693aedcaa55b2a7894c5641185ac423279153de6ece323d85805e97f6c"
+    },
+    {
+      "path": "scripts/strigoi-gate-semantics.ts",
+      "sha256": "30598a0d2efc444158dae94163f25787f1173a577128267bbaf2c001cdeb57a6"
+    },
+    {
+      "path": "tests/integration/strigoi-supervisor.test.ts",
+      "sha256": "7931ff041418edf4d30d13b63a5a4100864aaacfe4caf4230ee29fedfdaa1dfb"
+    },
+    {
+      "path": "tests/integration/strigoi-semantics.test.ts",
+      "sha256": "63a94667680a237e855851d7e96ec3a50f4e5822702301229ddc9de38a1309a0"
+    },
+    {
+      "path": "src/client/fleet/transport.ts",
+      "sha256": "472bc43185dbc3b14d530d36b8f2a7d9849d6370a0914cdcd4d2d96539fdb662"
+    },
+    {
+      "path": "tests/client/fleet-truth.test.ts",
+      "sha256": "3641a21cc1ff9cd3d59f1a4abe3bc26bbed1db8563ebef136f04c0a4012ef6af"
+    },
+    {
+      "path": "tests/client/fleet.test.ts",
+      "sha256": "f5d4fe9a92c076833ce0b4eae873dfff18408a5f4b5842f6987c2f5c56d21104"
+    },
+    {
+      "path": "tests/mcp/capability-exposure.test.ts",
+      "sha256": "4de82cea7476bbcc7567a8c367da605dfbfcdfe8adcb0fc22940df49b85c9b4a"
+    },
+    {
+      "path": "tests/orchestration/orchestrator-controller-directory.test.ts",
+      "sha256": "377d197a0036ef77badda34eb5c254a0b363aa087276e7746eb01467acb7e582"
+    },
+    {
+      "path": "docs/setup/strigoi-evidence-manifest.json",
+      "selfHashOmitted": true
+    }
+  ],
+  "checks": [
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/orchestration/strigoi-delivery.test.ts tests/integration/strigoi-runner.test.ts --maxWorkers=2",
+      "exitCode": 1,
+      "result": "3 behavioral failures / 18 passes before production fix",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/pre-fix-corrected.log",
+      "logSha256": "98af8d329e1af80329ca87dece9cf4fcf6d5865fda071efbd120b5848e779e5d"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/persistence/strigoi-sources.test.ts --maxWorkers=1",
+      "exitCode": 0,
+      "result": "32 passed",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/retention-final.log",
+      "logSha256": "5bb86bc7681828b6e8b02de1a3fb1d49a23053c12bc32da106f9758362018b27"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/orchestration/strigoi-delivery.test.ts tests/integration/strigoi-runner.test.ts tests/integration/strigoi-succession.test.ts tests/architecture --maxWorkers=2",
+      "exitCode": 0,
+      "result": "101 passed / 5 files",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/focused-final.log",
+      "logSha256": "ecb67c13543d85cf6c0661a3c730b87d420e7d298c21f7037b27f4bbf33e0eef"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/integration/strigoi-recovery.test.ts --reporter=verbose --maxWorkers=1",
+      "exitCode": 0,
+      "result": "53 passed; preceded final added assertions and cases",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/matrix-third.log",
+      "logSha256": "25e545c4923bced0cf108cacc1f97b3d54f505322277cd747d430bf3b98793ee"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/integration/strigoi-delivery.test.ts tests/integration/strigoi-delivery-retry.test.ts tests/integration/strigoi-worker-recovery.test.ts tests/orchestration/strigoi-worker-recovery.test.ts tests/orchestration/strigoi-continuity.test.ts tests/orchestration/strigoi-turns.test.ts tests/integration/strigoi-runner.test.ts --maxWorkers=2",
+      "exitCode": 0,
+      "result": "54 passed / 7 files",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/covering.log",
+      "logSha256": "e19bfe178e73b13d7354eab5dcdb6c35cf5780b377090f6c6c0cd23aa31d62b2"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/integration/strigoi-recovery.test.ts -t 'matrix: (routine|retained-history|no-checkpoint|three-renewals|intent:)' --reporter=verbose --maxWorkers=1",
+      "exitCode": 0,
+      "result": "7 passed / 47 deliberately unselected",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/final-assertions.log",
+      "logSha256": "3e9898ff3a8a4c010d59d0243cc38b41d46b630debbc52c78705eb6c4f0af803"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/integration/strigoi-recovery.test.ts -t 'matrix: intent:(reservation|checkpoint-complete|adoption-complete)' --reporter=verbose --maxWorkers=1",
+      "exitCode": 0,
+      "result": "3 passed / 54 deliberately unselected",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/intermediate-boundaries.log",
+      "logSha256": "934e1c58af375df1491002f6a531c9ef5565ac7e1d11838ef84ec0824673a36a"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/integration/strigoi-runner.test.ts tests/architecture --maxWorkers=1",
+      "exitCode": 0,
+      "result": "18 passed / 3 files",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/runner-architecture-final.log",
+      "logSha256": "29822a0649f0127a41beb2dd7230f2b251cbd42fc0fce6f3329abba712d8a411"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode lifecycle --state-directory /tmp/sg-t10-val --cwd /tmp --model FIXTURE_VALIDATION_ONLY --validate-only",
+      "exitCode": 0,
+      "result": "VALIDATED; live NOT RUN; no state created",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/validate-only-short.log",
+      "logSha256": "3fe8c73e4467eb56d418e2c48ed377ccac7a7122afaf86fc9f47f7d653b524d7"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin STRIGOI_MEASURE_OUTPUT=/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114/.superpowers/sdd/2026-11-14-strigoi/task-10-logs/scaling.json pnpm exec vitest run tests/integration/strigoi-scaling.test.ts --maxWorkers=1",
+      "exitCode": 0,
+      "result": "1 passed; 64/256/1024 synthetic inventories; no competing worker test jobs",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/scaling.log",
+      "logSha256": "55d53a85ede3ab5d71f7d690feae85d1dba5f04344a08e8e334b9c6ee25a1844"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/integration/strigoi-succession.test.ts tests/integration/strigoi-recovery.test.ts --reporter=verbose --maxWorkers=2",
+      "exitCode": 0,
+      "result": "114 passed / 2 files, 416.07 seconds; 54 recovery cases and 60 predecessor integration cases; additional 3 intermediate boundaries tested separately",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/acceptance-final.log",
+      "logSha256": "0d075654f6b5d5400e01f63df9eb443f338a0cad8231e37ddb70e48f4b21a237"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec tsc -p tsconfig.json --noEmit",
+      "exitCode": 0,
+      "result": "PASS - final source, runner and all fixture types",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/typecheck-last.log",
+      "logSha256": "091858270ceae1cc96e6f2516b8774ccf4bb73f2829bc73394e73f2d7fbf605d"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin STRIGOI_CRASH_EVIDENCE_DIRECTORY=/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114/.superpowers/sdd/2026-11-14-strigoi/task-10-logs pnpm exec vitest run tests/integration/strigoi-runner.test.ts tests/integration/strigoi-supervisor.test.ts tests/integration/strigoi-semantics.test.ts tests/architecture --maxWorkers=1",
+      "exitCode": 0,
+      "result": "33 passed / 5 files, 10.49 seconds",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/completion-focused-final.log",
+      "logSha256": "bf66ef15cb3f889a1a1dae91435a0b4d7df825b03cda60fa956fe210d8c2694e"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin STRIGOI_CRASH_EVIDENCE_DIRECTORY=/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114/.superpowers/sdd/2026-11-14-strigoi/task-10-logs pnpm exec vitest run tests/integration/strigoi-supervisor.test.ts --maxWorkers=1",
+      "exitCode": 0,
+      "result": "3 passed, 4.74 seconds; after final script identity/cleanup tightening",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/completion-supervisor-final.log",
+      "logSha256": "06f339c89848cffff88d1e9809af5cc3981aa71f42a2377397f7fe9f250dd538"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec tsc -p tsconfig.json --noEmit",
+      "exitCode": 0,
+      "result": "PASS final source",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/completion-types-last.log",
+      "logSha256": "c6963f1b75fab3ea6ee1a735f8b7838f5cbed6f65bdd34376c911fb7ec560b3e"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode crash --case passive --state-directory /tmp/sg-c-val-01 --cwd /tmp --model FIXTURE_VALIDATION_ONLY --validate-only",
+      "exitCode": 0,
+      "result": "VALIDATED; no state or provider created",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/completion-validate-crash.log",
+      "logSha256": "5ba445976b6187b1e805a5cfa2a0448f7a654e6d5ec460f96ffed36d0e5ee8c4"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode semantic --case three-handoffs --state-directory /tmp/sg-s-val-01 --cwd /tmp --model FIXTURE_VALIDATION_ONLY --validate-only",
+      "exitCode": 0,
+      "result": "VALIDATED; fixed three-handoff pair selected; no state or provider created",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/completion-validate-semantic.log",
+      "logSha256": "93139c33f9a7e6b4a2faa11709d4a04cfea7787a0c067091e7afd16196887f53"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm test --maxWorkers=2",
+      "exitCode": 1,
+      "result": "Controller full run: 16 failed / 4145 passed / 27 skipped; 4 failed / 304 passed / 1 skipped files; 457.43 seconds",
+      "executedBy": "controller",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/controller-integrated-test.log",
+      "logSha256": "7983d12b000bb816007741a906f32a58ba6b8cd2ed67cb5925d1b789e268f981"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/client/fleet-truth.test.ts --maxWorkers=1",
+      "exitCode": 1,
+      "result": "Diagnostic pre-fix: 4 failed / 35 passed; malformed reply crashes and false resident label; initial parameter table clarified before final run",
+      "executedBy": "worker",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/integrated-completion-pre-fix.log",
+      "logSha256": "b8e3ddd000eb0ac635ef003d58e1871d5811c53435ce85267693c94d3a241e18"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/client/fleet-truth.test.ts tests/client/fleet.test.ts tests/mcp/capability-exposure.test.ts tests/orchestration/orchestrator-controller-directory.test.ts --maxWorkers=2",
+      "exitCode": 0,
+      "result": "4 files / 256 passed; 7.69 seconds, before malformed parameter table clarification",
+      "executedBy": "worker",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/integrated-completion-four-files.log",
+      "logSha256": "67712e11dd51f043ea2b4c5698d83bc8c9df914146321673a11fe733783079cc"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec vitest run tests/client/fleet-truth.test.ts tests/client/fleet.test.ts tests/mcp/capability-exposure.test.ts tests/orchestration/orchestrator-controller-directory.test.ts tests/client/fleet-strigoi.test.ts tests/client/fleet-snapshot-feed.test.ts tests/mcp/strigoi-tools.test.ts tests/broker/strigoi-methods.test.ts tests/domain/strigoi.test.ts tests/orchestration/orchestrator-session-liveness.test.ts tests/architecture --maxWorkers=2",
+      "exitCode": 0,
+      "result": "12 files / 328 passed; 14.93 seconds; final source and all four failing files plus affected checks",
+      "executedBy": "worker",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/integrated-completion-focused-final.log",
+      "logSha256": "1d9aaaac22812d2eae0f1084d2311aa7bf8a2fe00c43e71fbe4dc4beed9773e1"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec tsc -p tsconfig.json --noEmit",
+      "exitCode": 0,
+      "result": "PASS final integrated-completion source",
+      "executedBy": "worker",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/integrated-completion-types.log",
+      "logSha256": "405555a65c03229c48174f12ebeae4319c0baad2cadf3fcac21ebb263f30a6bb"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm check",
+      "exitCode": 0,
+      "result": "Final integrated typecheck PASS",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/controller-integrated-check-final.log",
+      "logSha256": "594ad024b9907e1071b23a20b73d65998775e7c7953ba3ce5d5735740800ac1c"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm test --maxWorkers=2",
+      "exitCode": 0,
+      "result": "308 files/4168 tests PASS; 1 file/27 deliberate skips; 456.14s",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/controller-integrated-test-final.log",
+      "logSha256": "f9ed193b32380918f6c3ca80fd8e07fb73cc0652a187d93a3ddd9c85cae1323a"
+    },
+    {
+      "command": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm build",
+      "exitCode": 0,
+      "result": "TypeScript emit and client asset copy PASS",
+      "localLog": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/controller-integrated-build.log",
+      "logSha256": "9a8ffc1fd364a1b10c0b06777bebece8856174d2ff580006e716a84983ea5b59"
+    }
+  ],
+  "scaling": {
+    "node": "v24.18.0",
+    "inventories": [
+      64,
+      256,
+      1024
+    ],
+    "synthetic": true,
+    "samplesPerInventory": 1,
+    "limitation": "Single warm-process local sample; no production failure threshold or asymptotic qualification",
+    "rows": [
+      {
+        "retainedSyntheticRecords": 64,
+        "archiveReferencesBeforeCheckpoint": 78,
+        "packetSources": 82,
+        "pages": 2,
+        "captureMs": 2583.029167,
+        "checkpointMs": 250.2150419999998,
+        "traversalMs": 15.672625000000153,
+        "acknowledgementMs": 24.94666700000016,
+        "unrelatedBaselineMs": 3.9907499999999345,
+        "unrelatedBlockedMs": 27.176042000000052,
+        "indexBytes": 39800,
+        "rssBytes": 193232896
+      },
+      {
+        "retainedSyntheticRecords": 256,
+        "archiveReferencesBeforeCheckpoint": 274,
+        "packetSources": 274,
+        "pages": 5,
+        "captureMs": 8519.833875,
+        "checkpointMs": 437.13087500000074,
+        "traversalMs": 115.68124999999964,
+        "acknowledgementMs": 140.93074999999953,
+        "unrelatedBaselineMs": 5.158458999998402,
+        "unrelatedBlockedMs": 142.24658400000044,
+        "indexBytes": 131348,
+        "rssBytes": 297893888
+      },
+      {
+        "retainedSyntheticRecords": 1024,
+        "archiveReferencesBeforeCheckpoint": 1042,
+        "packetSources": 1042,
+        "pages": 17,
+        "captureMs": 37131.957582999996,
+        "checkpointMs": 1469.3653330000016,
+        "traversalMs": 533.8556249999965,
+        "acknowledgementMs": 446.156624999996,
+        "unrelatedBaselineMs": 7.136709000005794,
+        "unrelatedBlockedMs": 446.2593330000018,
+        "indexBytes": 497708,
+        "rssBytes": 271548416
+      }
+    ]
+  },
+  "scalingAssessment": "Observed binding-authority pause grows to 446 ms at 1024 synthetic records; unbounded retention growth risk remains for final reviewer. No supplied latency SLO or capacity threshold is established. No optimization/retention-policy change.",
+  "remainingGates": [
+    "Independent Task10 and whole-branch source review",
+    "Final reviewer practical scaling-risk ruling",
+    "Operator selects exact model/cwd/effort and approves concrete isolated invocation",
+    "Native passive ten-minute request-level zero-inference proof: UNQUALIFIED without complete upstream counter",
+    "Live normal use/renewal/process recovery and cleanup support: NOT RUN",
+    "Native controller-process crash/restart: NOT RUN; executable supervisor exists and synthetic SIGKILL/restart passed; no full broker network/power-loss proof",
+    "All seven human semantic paired cases and three-handoff original constraint/rationale: NOT RUN"
+  ],
+  "liveInvocationTemplate": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode lifecycle --state-directory /tmp/sg-operator-01 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only",
+  "authorization": "No live selection or inference authorization. Replacing validate-only with allow-inference requires later operator approval. No resident enablement/release follows.",
+  "evidencePrivacy": "Only synthetic measurements, commands, hashes and verdicts included. Private live originals remain in operator-selected isolated state outside Git. Local logs/report are ignored handoff artifacts.",
+  "preservedAgentsSha256": "ce01da8962cac8487b4d7c26b08b561c3c718e07ff25aa49e191db02cbd0cd3e",
+  "completion": {
+    "status": "DONE_WITH_CONCERNS",
+    "phase": "Approved Task10 pre-review completion, not fix round1",
+    "syntheticControllerCrash": "OBSERVED: passive and reserved-launch, exact production holds, no duplicate incarnation or restart launch/submission",
+    "semanticSelection": "Seven fixed executable --mode semantic --case pairs, matched no-handoff inputs and mandatory human review; live NOT RUN",
+    "requestObservability": "UNQUALIFIED: input framing, canonical completion and cumulative token/allowance telemetry do not constitute a complete upstream inference request trace",
+    "nativeCleanup": "UNQUALIFIED: native orphan resources are retained; no stale PID kill or guessed retirement",
+    "newFiles": 5,
+    "totalOwnedFiles": 24
+  },
+  "completionCrashEvidence": [
+    {
+      "caseId": "passive",
+      "localEvidence": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/completion-crash-passive.json",
+      "sha256": "cdf1d1b6cd7f2abedb5ca2f18ad6e964ac585a4bdac3b9c5cada8f15fcb5a2c0",
+      "status": "EXPECTED_HOLD_NO_DUPLICATE",
+      "signal": "SIGKILL",
+      "holdCode": "retirement-unconfirmed",
+      "restartLaunches": 0,
+      "restartSubmissions": 0,
+      "nativeProvider": "NOT RUN"
+    },
+    {
+      "caseId": "reserved-launch",
+      "localEvidence": ".superpowers/sdd/2026-11-14-strigoi/task-10-logs/completion-crash-reserved-launch.json",
+      "sha256": "7a9677d5975da73635a50b075138942289251d4f2ffe8a9d0340771b0b61d0a1",
+      "status": "EXPECTED_HOLD_NO_DUPLICATE",
+      "signal": "SIGKILL",
+      "holdCode": "launch-ownership-unresolved",
+      "restartLaunches": 0,
+      "restartSubmissions": 0,
+      "nativeProvider": "NOT RUN"
+    }
+  ],
+  "crashInvocationTemplates": [
+    "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode crash --case passive --state-directory /tmp/sg-crash-01 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only",
+    "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode crash --case reserved-launch --state-directory /tmp/sg-crash-02 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only"
+  ],
+  "semanticInvocationTemplate": "rtk proxy env PATH=/Users/brandon/.local/share/mise/installs/node/24.18.0/bin:/opt/homebrew/bin:/usr/bin:/bin pnpm exec node --import tsx scripts/run-live-strigoi-gate.ts --mode semantic --case alfred --state-directory /tmp/sg-sem-01 --cwd /OPERATOR/SELECTED/CWD --model OPERATOR_SELECTED_MODEL --validate-only",
+  "fullBuildStatus": "NOT RUN - controller builds after clean full-suite rerun",
+  "integratedCompletion": {
+    "status": "DONE_WITH_CONCERNS",
+    "phase": "Task10 pre-review integrated completion, not independent review fix1",
+    "totalOwnedFiles": 29,
+    "additionalFiles": [
+      "src/client/fleet/transport.ts",
+      "tests/client/fleet-truth.test.ts",
+      "tests/client/fleet.test.ts",
+      "tests/mcp/capability-exposure.test.ts",
+      "tests/orchestration/orchestrator-controller-directory.test.ts"
+    ],
+    "preservation": "All preceding 24 files and AGENTS verified against manifest before status documentation updates; predecessor source/tests unchanged",
+    "productionChange": "Validate optional resident display inspection; malformed replies preserve ordinary rows/Unknown and cannot invent resident labels",
+    "testContracts": "Exact palette navigation/escape; four universal-only tools with unchanged worker allowlist; exact resident marker/controller/family/session identity",
+    "fullSuite": "Controller rerun required, build afterward",
+    "live": "NOT RUN"
+  },
+  "controllerVerificationNote": "Controller recorded completed check/test/build evidence and status text only; source, scripts and tests are unchanged after the final integrated run. All original failure logs remain preserved."
+}

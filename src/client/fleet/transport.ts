@@ -1,5 +1,6 @@
 import { strigoiFleetView } from "../../domain/strigoi-view.js";
-import type { StrigoiInspection } from "../../orchestration/strigoi-ports.js";
+import { StrigoiStateSchema } from "../../domain/strigoi.js";
+import { z } from "zod";
 import type { FleetOrchestratorOwnershipView, FleetWorkerCoordinationView, } from "../../broker/worker-coordination-view.js";
 import type { SessionRecord } from "../../domain/session.js";
 import { DEFAULT_PERMISSION_POLICIES, UNQUERIED_WORKER_MODELS } from "./constants.js";
@@ -8,6 +9,14 @@ import { reconcileReplyWatermarks } from "./visit-state.js";
 import { reconcileLifecycleWatermarks } from "./lifecycle-state.js";
 import { isLiveThread } from "./runtime-presence.js";
 import { FleetSnapshot, FleetState, FleetThread, FleetTransport, StartFleetAction, ThreadStatus } from "./state.js";
+
+// Optional display data crosses a versioned RPC boundary. A missing or malformed reply
+// must not hide ordinary rows, invent resident identity, or supply provider activity truth.
+const ResidentDisplayInspection = z.object({
+  state: StrigoiStateSchema,
+  readiness: z.enum(["passive", "held", "unconfigured", "ready"]),
+  adoption: z.enum(["not-required", "pending", "acknowledged"]),
+});
 
 export async function collectFleetSnapshot(client: FleetTransport): Promise<FleetSnapshot> {
   const sessions = await client.request<SessionRecord[]>("session.list", {});
@@ -30,7 +39,8 @@ export async function collectFleetSnapshot(client: FleetTransport): Promise<Flee
   // grouping every thread under "Unregistered" is the wrong answer to a question nobody asked.
   const projects = await client.request<string[]>("fleet.projects", {})
     .then((roots) => roots as readonly string[] | undefined, () => undefined);
-  const resident = await client.request<StrigoiInspection>("strigoi.inspect", {}).catch(() => undefined);
+  const inspection = ResidentDisplayInspection.safeParse(await client.request<unknown>("strigoi.inspect", {}).catch(() => undefined));
+  const resident = inspection.success ? inspection.data : undefined;
   const threads = sessions.map((record): FleetThread => {
     const workerCoordination = coordinationBySession.get(record.id);
     const ownership = orchestratorOwnership.get(record.id);

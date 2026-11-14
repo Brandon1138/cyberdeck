@@ -34,10 +34,15 @@ export async function successionFixture(native = false) {
   });
   const adapter = new CodexProviderAdapter();
   const writes: Mock = vi.fn(), inference: Mock = vi.fn(), initialize: Mock<() => Promise<void>> = vi.fn(async () => {});
+  let launchingResident = false, activeResidents = 0, activeHighWater = 0;
+  const activeSamples: number[] = [];
+  const sample = () => { activeSamples.push(activeResidents); activeHighWater = Math.max(activeHighWater, activeResidents); };
   const spawn: Mock<() => SessionRuntime> = vi.fn((): SessionRuntime => {
     trace.push("launch");
+    const resident = launchingResident; let exited = false;
+    if (resident) activeResidents++; sample();
     const exits = new Set<(code: number) => void>();
-    const exit = () => { trace.push("confirmed-retirement"); for (const cb of exits) cb(0); };
+    const exit = () => { if (exited) return; exited = true; if (resident) activeResidents--; sample(); trace.push("confirmed-retirement"); for (const cb of exits) cb(0); };
     // The provisional session is already persisted by the coordinator at this point.
     return { pid: 123, write: writes, snapshot: () => Buffer.alloc(0), resize: () => {},
       kill: () => { trace.push("stop"); if (autoExit) exit(); }, onOutput: () => () => {},
@@ -57,7 +62,7 @@ export async function successionFixture(native = false) {
     });
   }
   const options = { config: BrokerRuntimeConfigSchema.parse({}),
-    adapters: { codex: { id: "codex", buildLaunchSpec: adapter.buildLaunchSpec.bind(adapter), buildResumeSpec: adapter.buildResumeSpec.bind(adapter), initializeSession: initialize, submitInput: inference } },
+    adapters: { codex: { id: "codex", buildLaunchSpec: (session, prompt) => { launchingResident = session.kind === "orchestrator"; return adapter.buildLaunchSpec(session, prompt); }, buildResumeSpec: adapter.buildResumeSpec.bind(adapter), initializeSession: initialize, submitInput: inference } },
     sessionRuntimeFactory: spawn, journal: { append: async () => {} }, store: sessions, transcripts,
     workerTurnObservation: observations,
   } satisfies ConstructorParameters<typeof SessionRegistry>[0];
@@ -103,6 +108,7 @@ export async function successionFixture(native = false) {
     return bindings.strigoi.read();
   };
   return { root, evidence, bindings, sessions, transcripts, activity, observations, nativeResults, turns, workers, delivery, submitted, results, trace, states, spawn, initialize, writes, inference, original,
+    get activeHighWater() { return activeHighWater; }, activeSamples,
     get registry() { return registry; }, get runtime() { return runtime; },
     setBindingObserver: (observer: NonNullable<typeof bindingObserver>) => { bindingObserver = observer; },
     setBoundary: (v: typeof boundary) => { boundary = v; }, setAutoExit: (v: boolean) => { autoExit = v; },
