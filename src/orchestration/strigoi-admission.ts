@@ -21,7 +21,9 @@ export class StrigoiAdmissionError extends Error {
  * for a mutation permit, and deferred delivery releases the outer permit before entering
  * provider preflight. Never await freeze inside a permit or service serializer, and
  * never call admission while holding the canonical binding-authority transaction.
- * Repository reads release that transaction before apply. Lifecycle must close/drain
+ * Peer/modal effects hold that canonical queue through their final checks and effect.
+ * Reentrant store calls reuse its live owner; no provider preflight belongs there.
+ * Lifecycle must close/drain
  * before committing cutover/suspension; durable desired/phase state also fences restart.
  * Launch uses creator serializer -> discovery/provider/executor preparation (no permit)
  * -> fresh permit and grants -> binding/budget activation and spawn. Provider initialization

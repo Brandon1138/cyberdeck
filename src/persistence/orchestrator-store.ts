@@ -23,6 +23,13 @@ export class OrchestratorStore {
     this.journal = new ValidatedJournal(this.path, projectBindings);
   }
 
+  /** Internal boundary: hold the canonical queue through final checks and effect.
+   * Nested store reads/writes reuse it; acquire Strigoi admission before entering.
+   */
+  withAuthority<T>(apply: () => Promise<T>): Promise<T> {
+    return withBindingAuthority(this.stateDirectory, apply);
+  }
+
   async get(key: string): Promise<OrchestratorBinding | undefined> {
     return withBindingAuthority(this.stateDirectory, async () => {
       if (key === STRIGOI_KEY) return (await this.strigoi.readWithinAuthority()).activeBinding;

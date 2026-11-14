@@ -274,10 +274,13 @@ export class OrchestratorPeerService {
         },
         capabilities,
       }, startup, (apply) => admitted(this.deps.strigoi, actor, async () => {
-        const refusal = await this.admission(request);
-        if (refusal !== undefined) throw Object.assign(new Error(refusal.reason), { code: refusal.code ?? refusal.outcome });
-        const current = (await this.deps.bindings.findBySessionId(actor))!;
-        return apply(peerGrantCapabilities(current.grant.capabilities));
+        if (this.deps.bindings.withAuthority === undefined) throw Object.assign(new Error("Binding authority transaction unavailable"), { code: "AUTHORITY_UNAVAILABLE" });
+        return this.deps.bindings.withAuthority(async () => {
+          const current = await this.deps.bindings.findBySessionId(actor);
+          const refusal = await this.admission(request, { binding: current });
+          if (refusal !== undefined) throw Object.assign(new Error(refusal.reason), { code: refusal.code ?? refusal.outcome });
+          return apply(peerGrantCapabilities(current!.grant.capabilities));
+        });
       }));
     } catch (error) {
       if (preparedBrief !== undefined) await this.deps.instructions!.flush(preparedBrief.targetSessionId).catch(() => undefined);
@@ -341,16 +344,19 @@ export class OrchestratorPeerService {
   }
 
   /** Every refusal that needs no launch, in the order a caller would want to hear about them. */
-  private async admission(request: ParsedCreate): Promise<Exclude<OrchestratorCreateResult, { outcome: "CREATED" }> | undefined> {
+  private async admission(request: ParsedCreate, snapshot?: { binding: OrchestratorBinding | undefined }): Promise<Exclude<OrchestratorCreateResult, { outcome: "CREATED" }> | undefined> {
     const actor = request.actorSessionId;
-    const binding = await this.deps.bindings.findBySessionId(actor);
+    const binding = snapshot === undefined ? await this.deps.bindings.findBySessionId(actor) : snapshot.binding;
     if (binding === undefined) {
       return { outcome: "DENIED", code: "ACTOR_NOT_AUTHORIZED", reason: `${actor} is not a bound Cyberdeck orchestrator` };
     }
-    const record = this.sessionRecord(actor);
-    if (record?.kind !== "orchestrator" || record.executionState !== "active" || record.exitCode !== null) {
-      return { outcome: "DENIED", code: "ACTOR_NOT_ACTIVE", reason: `${actor} is not an active Cyberdeck orchestrator` };
-    }
+    const inactive = () => {
+      const record = this.sessionRecord(actor);
+      return record?.kind === "orchestrator" && record.executionState === "active" && record.exitCode === null
+        ? undefined : { outcome: "DENIED" as const, code: "ACTOR_NOT_ACTIVE", reason: `${actor} is not an active Cyberdeck orchestrator` };
+    };
+    const activityRefusal = inactive();
+    if (activityRefusal !== undefined) return activityRefusal;
     if (request.approval === undefined) {
       return {
         outcome: "APPROVAL_REQUIRED",
@@ -383,7 +389,7 @@ export class OrchestratorPeerService {
         reason: `A workspace orchestrator may only create peers in its own workspace ${binding.scope.cwd}, not fleet-wide`,
       };
     }
-    return undefined;
+    return inactive();
   }
 
   private record<T extends OrchestratorCreateResult>(request: ParsedCreate, result: T, instructionId?: string): T {

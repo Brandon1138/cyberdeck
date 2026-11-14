@@ -1,7 +1,8 @@
+import { deferred, fixture } from "../orchestration/strigoi-admission-fixture.js";
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { orchestratorController, type OrchestratorBinding } from "../../src/domain/orchestrator.js";
 import { OrchestratorControllerDirectory } from "../../src/orchestration/orchestrator-controller-directory.js";
 import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
@@ -31,6 +32,57 @@ function binding(sessionId: string, model: string): OrchestratorBinding {
 }
 
 describe("OrchestratorStore", () => {
+  it("serializes resident CAS behind the same final-effect authority boundary", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "resident-transaction-")); directories.push(directory);
+    const store = new OrchestratorStore(directory), writer = new OrchestratorStore(directory);
+    const state = fixture().state();
+    await store.strigoi.compareAndSwap(0, "activate", state);
+    const entered = deferred(), finish = deferred();
+    let effectFinished = false;
+    const effect = store.withAuthority(async () => {
+      expect(await writer.findBySessionId(state.activeBinding!.sessionId)).toEqual(state.activeBinding);
+      entered.resolve(); await finish.promise;
+      expect((await store.strigoi.read()).desired).toBe("enabled");
+      effectFinished = true;
+    });
+    await entered.promise;
+    const suspend = writer.strigoi.compareAndSwap(1, "suspend", { ...state, revision: 2, desired: "suspended" })
+      .then(() => { expect(effectFinished).toBe(true); });
+    finish.resolve(); await effect; await suspend;
+    expect((await store.strigoi.read()).desired).toBe("suspended");
+  });
+  it("holds one coherent authority transaction across instances, nested reads/writes and reset", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "binding-transaction-")); directories.push(directory);
+    const store = new OrchestratorStore(directory), writer = new OrchestratorStore(directory);
+    const original = binding("11111111-1111-4111-8111-111111111111", "model");
+    await store.put(original);
+    const entered = deferred(), finish = deferred(), reset = vi.fn();
+    const transaction = store.withAuthority(async () => {
+      expect(await writer.findBySessionId(original.sessionId)).toEqual(original);
+      entered.resolve(); await finish.promise;
+      await writer.put({ ...original, model: "replacement" });
+      expect((await store.get(original.key))!.model).toBe("replacement");
+    });
+    await entered.promise;
+    const resetPending = writer.reset(original.key).then(reset);
+    await new Promise((resolve) => setTimeout(resolve, 10)); expect(reset).not.toHaveBeenCalled();
+    finish.resolve(); await transaction; await resetPending;
+    expect(await store.get(original.key)).toBeUndefined();
+  });
+  it("releases authority after failure and cannot reuse an expired async owner", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "binding-owner-")); directories.push(directory);
+    const store = new OrchestratorStore(directory), startLate = deferred(), lateEntered = vi.fn();
+    let late!: Promise<void>;
+    await expect(store.withAuthority(async () => {
+      late = startLate.promise.then(() => store.withAuthority(async () => { lateEntered(); }));
+      throw new Error("activation failed");
+    })).rejects.toThrow("activation failed");
+    const entered = deferred(), finish = deferred();
+    const next = store.withAuthority(async () => { entered.resolve(); await finish.promise; });
+    await entered.promise; startLate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 10)); expect(lateEntered).not.toHaveBeenCalled();
+    finish.resolve(); await next; await late; expect(lateEntered).toHaveBeenCalledOnce();
+  });
   it("invalidates a binding with an append-only reset and accepts a clean replacement", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-orchestrator-store-"));
     directories.push(directory);

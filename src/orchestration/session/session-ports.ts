@@ -1,6 +1,5 @@
 import type { InstructionRecord, InstructionAdmission } from "../../domain/instruction.js";
 import type { ModalAnswerAttempt } from "../../domain/modal-descriptor.js";
-import type { OrchestratorBinding } from "../../domain/orchestrator.js";
 import type {
   SessionRecord,
   StartSessionRequest,
@@ -195,6 +194,4 @@ export interface InstructionRepository {
   put(record: InstructionRecord): Promise<void>;
 }
 
-export interface OrchestratorBindingReader {
-  findBySessionId(sessionId: string): Promise<OrchestratorBinding | undefined>;
-}
+export type { OrchestratorBindingLookup as OrchestratorBindingReader } from "../persistence-ports.js";

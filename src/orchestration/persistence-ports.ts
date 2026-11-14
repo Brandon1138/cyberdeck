@@ -6,6 +6,8 @@ import type { WorkflowMessage, WorkflowRun } from "../domain/workflow.js";
 import type { ProviderPermissionPolicy } from "./permission-policy.js";
 
 export interface OrchestratorBindingLookup {
+  /** Internal, canonical binding queue through activation/effect. Mutators fail closed without it. */
+  withAuthority?<T>(apply: () => Promise<T>): Promise<T>;
   findBySessionId(sessionId: string): Promise<OrchestratorBinding | undefined>;
 }
 
