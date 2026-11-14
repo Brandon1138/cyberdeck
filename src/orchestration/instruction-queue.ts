@@ -1,5 +1,7 @@
 import { admitted, type StrigoiAdmission } from "./strigoi-admission.js";
 import { randomUUID } from "node:crypto";
+import { recoverPendingInstructions } from "./instruction-recovery.js";
+import type { WorkerTurnLedger } from "./session/worker-turn-ports.js";
 import { z } from "zod";
 import { grantAllows } from "../domain/capability.js";
 import { InstructionRecordSchema, WakeContextSchema, effectiveInstruction, type InstructionRecord, type InstructionAdmission } from "../domain/instruction.js";
@@ -185,6 +187,12 @@ export class InstructionQueue {
     }
   }
 
+  /** Run after worker budget/authority recovery and after event subscriptions are installed. */
+  async recoverPendingInstructions(readLedger: (sessionId: string) => Promise<WorkerTurnLedger>): Promise<void> {
+    await recoverPendingInstructions(await this.store.list(), readLedger,
+      update => this.applyState(update), id => this.flush(id));
+  }
+
   async enqueue(input: z.input<typeof EnqueueInstructionParamsSchema>): Promise<InstructionRecord> {
     const request = EnqueueInstructionParamsSchema.parse(input);
     const record = await admitted(this.strigoi, request.actorSessionId, () =>
@@ -300,6 +308,7 @@ export class InstructionQueue {
           } else {
             results.push(await this.persistState(behind, "queued", {
               holdReason: behind.submissionKind === "wake" && !holdReason.startsWith("wake-") ? `wake-${holdReason}` : holdReason,
+              holdDetail: attempted.holdDetail,
             }));
           }
         }
@@ -361,7 +370,7 @@ export class InstructionQueue {
       const record = (await this.store.list(targetSessionId))
         .find((candidate) => candidate.messageId === messageId);
       if (record === undefined) return undefined;
-      if (record.submissionAttempt?.outcome === "unknown" || record.status !== "accepted" && record.status !== "queued") return record;
+      if (record.deliveryAttemptAt !== undefined || record.submissionAttempt?.outcome === "unknown" || record.status !== "accepted" && record.status !== "queued") return record;
       return this.persistState(record, "cancelled", {});
     });
   }
@@ -379,7 +388,7 @@ export class InstructionQueue {
         return { outcome: "IDENTITY_MISMATCH" as const };
       }
       if (record.status === "cancelled") return { outcome: "CANCELLED" as const, instruction: record };
-      if (record.submissionAttempt?.outcome === "unknown" || record.status !== "accepted" && record.status !== "queued") {
+      if (record.deliveryAttemptAt !== undefined || record.submissionAttempt?.outcome === "unknown" || record.status !== "accepted" && record.status !== "queued") {
         return { outcome: "TOO_LATE" as const, instruction: record };
       }
       const instruction = await this.persistState(record, "cancelled", {
@@ -406,6 +415,7 @@ export class InstructionQueue {
         || record.continuations?.length && ["accepted", "queued"].includes(record.status)
         || record.status === update.state
         || ["completed", "undelivered", "cancelled"].includes(record.status)) return;
+      if (update.turn !== undefined && record.expectedTurn !== undefined && update.turn !== record.expectedTurn) return;
       if (instructionProgress(record.status, update.state) !== update.state) return;
       await this.store.put(InstructionRecordSchema.parse({
         ...record,
@@ -414,7 +424,9 @@ export class InstructionQueue {
         // A provider can be seen to have taken the payload only once, and the broker may report that
         // as `acknowledged` or straight through to `completed` if the turn was faster than a poll.
         // The stamp is about the fact, not about which frame carried the news.
-        ...(update.state === "rendered" ? { renderedAt: record.renderedAt ?? update.at, holdReason: undefined } : {}),
+        ...(update.state === "rendered" ? { renderedAt: record.renderedAt ?? update.at, holdReason: undefined, holdDetail: undefined } : {}),
+        ...(instructionReachedProvider(update.state) ? { holdReason: undefined, holdDetail: undefined,
+          deliveryAttemptAt: undefined, ...(update.turn === undefined ? {} : { expectedTurn: update.turn }) } : {}),
         ...(record.submittedAt === undefined && instructionReachedProvider(update.state)
           ? { submittedAt: update.at }
           : {}),

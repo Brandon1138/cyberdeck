@@ -28,12 +28,16 @@ export class InstructionDelivery {
       }
       return this.o.persistState(record, "queued", { holdReason: "provider-starting" });
     }
+    if (record.deliveryAttemptAt !== undefined) return this.o.persistState(record, "queued", {
+      holdReason: "delivery-outcome-unknown",
+      holdDetail: "Delivery attempt has no durable outcome. Inspect this instruction ID in the worker transcript before retrying; text will not be resent automatically",
+    });
     const source = record.brokerOwned === true
       ? "broker"
       : record.senderSessionId !== undefined && record.senderSessionId !== record.actorSessionId
         ? "worker"
         : "orchestrator";
-    let delivery;
+    let delivery, attemptAt: string | undefined;
     try {
       if (record.wake?.attentionEpoch !== undefined && this.o.wakeAdmission === undefined) {
         throw new AttentionWakeHeldError("attention-admission-unavailable");
@@ -41,6 +45,19 @@ export class InstructionDelivery {
       const wake = record.submissionKind === "wake" ? this.o.wakeAdmission?.(record) : undefined;
       const routed = await this.o.routing?.prepare(record, async () => this.o.store.put(record));
       const effective = routed?.effective ?? effectiveInstruction(record);
+      // Resident routing owns its generation-specific submissionAttempt fence. Ordinary
+      // workers use the queue attempt fence; neither may bypass the other's unknown outcome.
+      if (routed === undefined) {
+        let target: SessionRecord | undefined;
+        try { target = this.o.registry.get(effective.targetSessionId); } catch { /* Normal refusal below. */ }
+        if (target?.executionState === "cancelled" && target.attentionState === "interrupted") {
+          return this.o.persistState(record, "queued", { holdReason: "worker-interrupted",
+            holdDetail: "Broker recovery lost the process generation. Resume this same session to retry the retained instruction; no replacement or automatic restart is performed" });
+        }
+        attemptAt = new Date().toISOString();
+        await this.o.persistState(record, record.status, { deliveryAttemptAt: attemptAt });
+        record = { ...record, deliveryAttemptAt: undefined };
+      }
       const resident = routed?.admission ?? this.o.strigoi?.instruction(effective);
       const admission: InstructionAdmission | undefined = resident === undefined ? wake
         : (apply) => resident(() => wake === undefined ? apply() : wake(apply));
@@ -81,19 +98,24 @@ export class InstructionDelivery {
           holdReason: "worker-budget-exhausted",
         });
       }
-      throw error;
+      if (attemptAt === undefined) throw error;
+      return this.o.persistState(record, "queued", { deliveryAttemptAt: attemptAt,
+        holdReason: "delivery-outcome-unknown",
+        holdDetail: "Delivery attempt failed with uncertain write outcome. Inspect the retained instruction ID and provider transcript before retrying; text will not be resent automatically" });
     }
     // `rendered` is the strongest thing an enqueue can honestly claim: the bytes are in the
     // provider's input surface. Whether the provider took them is observed later, or never.
     if (delivery.state === "undelivered") {
       return this.o.persistState(record, "undelivered", {
+        holdDetail: delivery.detail,
         ...(delivery.hold === undefined ? {} : { holdReason: record.submissionKind === "wake" ? `wake-${delivery.hold}` : delivery.hold }),
       });
     }
     return delivery.state === "queued"
-      ? this.o.persistState(record, "queued", { ...(delivery.hold === undefined ? {} : { holdReason: record.submissionKind === "wake" ? `wake-${delivery.hold}` : delivery.hold }) })
+      ? this.o.persistState(record, "queued", { holdDetail: delivery.detail, ...(delivery.hold === undefined ? {} : { holdReason: record.submissionKind === "wake" ? `wake-${delivery.hold}` : delivery.hold }) })
       : this.o.persistState(record, "rendered", {
           holdReason: undefined,
+          holdDetail: undefined,
           renderedAt: delivery.at,
           ...(delivery.expectedTurn === undefined ? {} : { expectedTurn: delivery.expectedTurn }),
         });

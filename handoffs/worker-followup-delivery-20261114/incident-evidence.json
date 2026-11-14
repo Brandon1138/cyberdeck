@@ -1,0 +1,83 @@
+{
+  "sessionId": "d4c51479-26d3-4667-a5b3-83639677146f",
+  "source": "orchestration/instructions.jsonl",
+  "instructions": [
+    {
+      "line": 49029,
+      "id": "14b69850-5d6f-4257-9212-d2ef994a1d70",
+      "messageId": "cad65429-5085-42fb-bb57-067fa86cf12e",
+      "status": "accepted",
+      "createdAt": "2026-11-14T12:36:03.099Z",
+      "updatedAt": "2026-11-14T12:36:03.099Z"
+    },
+    {
+      "line": 49030,
+      "id": "14b69850-5d6f-4257-9212-d2ef994a1d70",
+      "messageId": "cad65429-5085-42fb-bb57-067fa86cf12e",
+      "status": "queued",
+      "createdAt": "2026-11-14T12:36:03.099Z",
+      "updatedAt": "2026-11-14T12:36:04.035Z",
+      "holdReason": "provider-busy"
+    },
+    {
+      "line": 49031,
+      "id": "14b69850-5d6f-4257-9212-d2ef994a1d70",
+      "messageId": "cad65429-5085-42fb-bb57-067fa86cf12e",
+      "status": "queued",
+      "createdAt": "2026-11-14T12:36:03.099Z",
+      "updatedAt": "2026-11-14T12:49:00.263Z",
+      "holdReason": "provider-busy"
+    },
+    {
+      "line": 49104,
+      "id": "b3f17965-55f7-4733-abaf-16e80c1944ef",
+      "messageId": "0e442145-90da-4055-a462-d39551fe4592",
+      "status": "accepted",
+      "createdAt": "2026-11-14T12:54:00.514Z",
+      "updatedAt": "2026-11-14T12:54:00.514Z"
+    },
+    {
+      "line": 49105,
+      "id": "14b69850-5d6f-4257-9212-d2ef994a1d70",
+      "messageId": "cad65429-5085-42fb-bb57-067fa86cf12e",
+      "status": "queued",
+      "createdAt": "2026-11-14T12:36:03.099Z",
+      "updatedAt": "2026-11-14T12:54:01.206Z",
+      "holdReason": "provider-busy"
+    },
+    {
+      "line": 49106,
+      "id": "b3f17965-55f7-4733-abaf-16e80c1944ef",
+      "messageId": "0e442145-90da-4055-a462-d39551fe4592",
+      "status": "queued",
+      "createdAt": "2026-11-14T12:54:00.514Z",
+      "updatedAt": "2026-11-14T12:54:01.213Z",
+      "holdReason": "provider-busy"
+    },
+    {
+      "line": 49107,
+      "id": "14b69850-5d6f-4257-9212-d2ef994a1d70",
+      "messageId": "cad65429-5085-42fb-bb57-067fa86cf12e",
+      "status": "undelivered",
+      "createdAt": "2026-11-14T12:36:03.099Z",
+      "updatedAt": "2026-11-14T12:55:03.189Z",
+      "holdReason": "worker-terminal"
+    },
+    {
+      "line": 49108,
+      "id": "b3f17965-55f7-4733-abaf-16e80c1944ef",
+      "messageId": "0e442145-90da-4055-a462-d39551fe4592",
+      "status": "undelivered",
+      "createdAt": "2026-11-14T12:54:00.514Z",
+      "updatedAt": "2026-11-14T12:55:03.202Z",
+      "holdReason": "worker-terminal"
+    }
+  ],
+  "ledger": {
+    "completedTurns": 1,
+    "canonicalTurns": 1,
+    "providerOccurredThrough": "2026-11-14T12:50:03.711Z",
+    "instructionTargets": []
+  },
+  "certainty": "Generic holds do not identify the exact historical admission gate. No prompt bodies copied."
+}

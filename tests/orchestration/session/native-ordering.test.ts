@@ -371,7 +371,7 @@ describe("independent refused native source fallback", () => {
     await f.engine.reconcileCanonicalTurns();
     expect(f.engine.projectTruth()).toMatchObject({ state: "idle", taskOutcome: "unknown", completedTurns: 0, canonicalTurns: 0 });
     expect(await f.engine.submitInstruction({ source: "orchestrator", message: "next task", encoded: Buffer.from("next task"), instructionId: "next" }))
-      .toMatchObject({ state: "queued", hold: "provider-busy" });
+      .toMatchObject({ state: "queued", hold: "native-evidence-unavailable" });
     expect(f.writes).toHaveLength(0);
     expect(f.engine.completedTurns).toBe(0);
   });
@@ -396,9 +396,10 @@ describe("native instruction admission", () => {
     const f = harness(); f.engine.finishInitialization();
     f.observeProviderTurns.mockRejectedValueOnce(new Error("native source unreadable"));
     const input = { source: "orchestrator" as const, message: "new work", encoded: Buffer.from("new work"), instructionId: "new" };
-    expect(await f.engine.submitInstruction(input)).toMatchObject({ state: "queued", hold: "provider-busy" });
+    expect(await f.engine.submitInstruction(input)).toMatchObject({ state: "queued", hold: "completion-reconcile-pending" });
     expect(f.writes).toHaveLength(0);
     f.observeProviderTurns.mockResolvedValueOnce(nativeObservation("idle", true));
+    await f.engine.reconcileCanonicalTurns(); // The existing native poll owns read recovery.
     expect(await f.engine.submitInstruction(input)).toMatchObject({ state: "rendered", expectedTurn: 2 });
     expect(f.effects.notifyInstructionState).not.toHaveBeenCalledWith(expect.objectContaining({ instructionId: "new", state: "completed" }));
   });
@@ -427,7 +428,7 @@ describe("native instruction admission", () => {
     f.observeProviderTurns.mockReturnValueOnce(pending.promise);
     const first = f.engine.submitInstruction({ source: "orchestrator", message: "first", encoded: Buffer.from("first"), instructionId: "first" });
     await flushMicrotasks();
-    expect(await f.engine.submitInstruction({ source: "orchestrator", message: "second", encoded: Buffer.from("second"), instructionId: "second" })).toMatchObject({ state: "queued", hold: "provider-busy" });
+    expect(await f.engine.submitInstruction({ source: "orchestrator", message: "second", encoded: Buffer.from("second"), instructionId: "second" })).toMatchObject({ state: "queued", hold: "admission-in-progress" });
     expect(f.writes).toHaveLength(0);
     pending.resolve({ sessionId: f.record.id, provider: "codex", turnNumber: 1, turns: [] });
     expect(await first).toMatchObject({ state: "rendered", expectedTurn: 1 });
@@ -441,7 +442,7 @@ describe("native instruction admission", () => {
     const admitted = f.engine.submitInstruction({ source: "orchestrator", message: "automation", encoded: Buffer.from("automation"), instructionId: "auto" });
     await flushMicrotasks(); f.engine.noteHumanInput();
     pending.resolve({ sessionId: f.record.id, provider: "codex", turnNumber: 1, turns: [] });
-    expect(await admitted).toMatchObject({ state: "queued", hold: "provider-busy" });
+    expect(await admitted).toMatchObject({ state: "queued", hold: "observation-changed" });
     expect(f.writes).toHaveLength(0);
   });
 
@@ -819,10 +820,10 @@ describe("independent retirement ordering and retained outcomes",()=>{
     expect(await f.engine.submitInstruction({source:"orchestrator",message:"first",encoded:Buffer.from("first"),instructionId:"retire-before-next"})).toMatchObject({state:"rendered",expectedTurn:1});
     const commit=deferred<WorkerTurnTranscript[]>();f.commitProviderTurns.mockReturnValueOnce(commit.promise);
     f.engine.stopPendingInstructions();await flushMicrotasks();expect(f.commitProviderTurns).toHaveBeenCalledOnce();
-    expect(await f.engine.submitInstruction({source:"orchestrator",message:"next",encoded:Buffer.from("next"),instructionId:"blocked-next"})).toMatchObject({state:"queued",hold:"provider-busy"});expect(f.writes).toHaveLength(1);
+    expect(await f.engine.submitInstruction({source:"orchestrator",message:"next",encoded:Buffer.from("next"),instructionId:"blocked-next"})).toMatchObject({state:"queued",hold:"completion-commit-pending"});expect(f.writes).toHaveLength(1);
     const settlement=f.engine.settlePendingTurnCommit();
     if(reject){commit.reject(new Error("temporary retirement write rejected"));await expect(settlement).rejects.toThrow();
-      expect(await f.engine.submitInstruction({source:"orchestrator",message:"retry",encoded:Buffer.from("retry"),instructionId:"blocked-retry"})).toMatchObject({state:"queued",hold:"provider-busy"});expect(f.writes).toHaveLength(1);
+      expect(await f.engine.submitInstruction({source:"orchestrator",message:"retry",encoded:Buffer.from("retry"),instructionId:"blocked-retry"})).toMatchObject({state:"undelivered",hold:"completion-commit-failed"});expect(f.writes).toHaveLength(1);
     }else{commit.resolve([{text:"cancelled",data:{transport:"broker-lifecycle",outcome:"cancelled",turnNumber:1}}]);await settlement;
       expect(f.engine.waitResult(1,500)).toMatchObject({status:"stopped",turnOutcome:"cancelled",provenance:"broker-lifecycle"});expect(f.engine.canonicalTurns).toBe(0);}
   });

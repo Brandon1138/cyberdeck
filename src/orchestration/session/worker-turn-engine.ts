@@ -1,4 +1,5 @@
 import { WorkerTruthObservation } from "../../domain/worker-truth-observation.js";
+import { workerDeliveryHold } from "./worker-delivery-hold.js";
 import {
   modalAnswerKeySequence,
   type ModalAnswerAttempt,
@@ -6,6 +7,7 @@ import {
 import type { SessionRecord } from "../../domain/session.js";
 import {
   providerLimitFromTermination,
+  deliveryHoldFailed,
   type ComposerObservation,
   type DeliveryHoldReason,
   type InstructionLifecycleState,
@@ -29,7 +31,7 @@ import type {
   WorkerTurnTranscriptMessage,
   WorkerTurnTranscriptPort,
 } from "./worker-turn-ports.js";
-import { WorkerInputRetirement, advanceRendered, settleRetiredInstruction } from "./worker-input-retirement.js";
+import { WorkerInputRetirement, advanceRendered, settleRetiredInstruction, restoreRenderedInstructions } from "./worker-input-retirement.js";
 import { WorkerInputAdmission, heldInstructionDelivery, terminalInstructionDelivery } from "./worker-input-admission.js";
 import { WorkerCompletionLedger, WorkerTurnReconciler, WorkerStallTracker, completionReservationFloor } from "./worker-turn-state.js";
 import type { CompletionLedgerEntry, RenderedInstruction, WorkerStatusReading,
@@ -127,6 +129,7 @@ export class WorkerTurnEngine {
     hold: () => this.deliveryHold(), capture: () => this.turnCaptureOwner?.settlement,
     needsRestore: () => this.completionLedger.needsRestore(this.record.provider, this.options.transcripts),
     restore: () => this.restoreCompletionLedger(), reconcile: () => this.reconcileCanonicalTurns(),
+    released: () => this.notifyDeliveryBoundary(),
   });
   private readonly inputTargets = new WorkerInputRetirement({ record: () => this.record,
     completed: () => this.completedTurnCount, protect: (target) => this.completionLedger.protect(target),
@@ -350,7 +353,7 @@ export class WorkerTurnEngine {
     return this.admission.run(() => {
       const epoch = this.observationEpoch, revision = this.activityRevision;
       const render = () => epoch !== this.observationEpoch || revision !== this.activityRevision
-        ? this.holdInstruction("provider-busy", input.source, input.instructionId)
+        ? this.holdInstruction("observation-changed", input.source, input.instructionId)
         : this.renderInstruction(input);
       return input.admission === undefined ? render() : input.admission(render);
     }, (hold) => hold === "worker-terminal"
@@ -812,30 +815,20 @@ export class WorkerTurnEngine {
   }
 
   private deliveryHold(): DeliveryHoldReason | undefined {
-    if (this.record.executionState !== "active") return "worker-terminal";
     this.observeComposer();
-    if (this.composer.modalOpen || this.activity === "needs-input") return "provider-modal";
-    if (this.composer.occupied) return "composer-occupied";
-    // A launch receipt and any rendered input own the next turn before the TUI repaints.
-    if (this.initialInstructionPending() || (this.record.executor === "orbstack-container" && this.rendered.length > 0)
-      || this.rendered.some((entry) => entry.state === "rendered")) return "provider-busy";
-    // An indeterminate or incomplete durable receipt has no automatic recovery path. Accepting
-    // another instruction would write work whose completion can never be captured while the poisoned
-    // reservation remains, so fail closed at the existing provider-busy delivery boundary.
-    if (this.pendingTurnCommit?.poisoned === true || this.inputTargets.busy) return "provider-busy";
-    const captureFloor = Math.max(
-      this.completedTurnCount,
-      this.turnCaptureOwner?.bankedThrough ?? this.turnCaptureOwner?.completionTarget ?? 0,
-    );
-    // A screen completion beyond the current capture is already old work, but no durable receipt
-    // owns it yet. More input would create another turn behind an ordinal backlog the engine has not
-    // drained, so keep it queued until the exact per-target evidence is accounted for.
-    if ((this.deferredScreenCompletionTarget ?? 0) > captureFloor) return "provider-busy";
-    const activity = this.nativeActivity.activity(this.activity, this.activityRevision);
-    if (activity === "working" || this.observedWorking
-      || (this.nativeActivity.available && activity === "unknown")) return "provider-busy";
-    if (this.inputReadiness.pending) return "provider-starting";
-    return undefined;
+    return workerDeliveryHold({
+      active: this.record.executionState === "active", modal: this.composer.modalOpen || this.activity === "needs-input",
+      occupied: this.composer.occupied, launch: this.initialInstructionPending(),
+      rendered: (this.record.executor === "orbstack-container" && this.rendered.length > 0)
+        || this.rendered.some(entry => entry.state === "rendered"),
+      ...(this.pendingTurnCommit === undefined ? {} : { commit: this.pendingTurnCommit }),
+      retiring: this.inputTargets.busy, retirementFailed: this.inputTargets.failure,
+      deferred: this.deferredScreenCompletionTarget ?? 0,
+      captured: Math.max(this.completedTurnCount, this.turnCaptureOwner?.bankedThrough ?? this.turnCaptureOwner?.completionTarget ?? 0),
+      nativeRefused: this.nativeActivity.refused, nativeAvailable: this.nativeActivity.available,
+      activity: this.nativeActivity.activity(this.activity, this.activityRevision),
+      observedWorking: this.observedWorking, starting: this.inputReadiness.pending,
+    });
   }
 
   private async terminalDelivery(
@@ -851,7 +844,7 @@ export class WorkerTurnEngine {
     source: "orchestrator" | "worker" | "broker",
     instructionId: string | undefined,
   ): Promise<InstructionDelivery> {
-    this.deliveryHeld = true;
+    this.deliveryHeld = !deliveryHoldFailed(hold);
     if (hold === "provider-starting") this.inputReadiness.hold();
     return heldInstructionDelivery(hold, source, instructionId,
       (data) => this.appendTranscript("lifecycle", "broker", "instruction held", data),
@@ -898,7 +891,8 @@ export class WorkerTurnEngine {
   }
 
   private notifyDeliveryBoundary(): void {
-    if (!this.deliveryHeld || this.deliveryHold() !== undefined) return;
+    const hold = this.deliveryHold();
+    if (!this.deliveryHeld || (hold !== undefined && !deliveryHoldFailed(hold))) return;
     this.deliveryHeld = false;
     this.options.effects.notifyDeliveryBoundary();
   }
@@ -1280,9 +1274,11 @@ export class WorkerTurnEngine {
   }
 
   private finishTurnCapture(claim: TurnCaptureClaim): void {
+    const current = this.isCurrentCapture(claim);
     this.releaseTurnCapture(claim);
     this.pendingTurnCaptures.delete(claim.settlement);
     claim.settle();
+    if (current && this.pendingTurnCommit?.poisoned) this.notifyDeliveryBoundary();
   }
 
   private releaseTurnCapture(claim: TurnCaptureClaim): void {
@@ -1420,6 +1416,9 @@ export class WorkerTurnEngine {
         : this.isCurrentCapture(claim));
     if (ledger === undefined) return false;
     this.inputTargets.restore(ledger.instructionTargets);
+    this.rendered = restoreRenderedInstructions(this.record.id, this.rendered, ledger, update => this.options.effects.notifyInstructionState(update));
+    const pendingInput = this.rendered.at(-1);
+    if (pendingInput !== undefined) this.nativeActivity.noteInput(pendingInput.renderedAt);
     this.nativeActivity.committed(ledger.turns);
     this.currentLatestResult ??= ledger.turns.at(-1)?.text;
     if (ledger.completedTurns > 0) this.advanceRenderedInstructions("completed", ledger.completedTurns);
