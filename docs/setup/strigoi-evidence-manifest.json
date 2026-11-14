@@ -3,7 +3,7 @@
   "baseSha": "76815169071b2e2852b31958a0475955210913df",
   "sourceFixtureStatus": "APPROVED WITH LIMITS at 64b1dfb: independent whole-branch source review; two nonblocking P3 retry findings remain. Native/human acceptance separate.",
   "fullIntegratedStatus": "PASS at source64b1dfb: pnpm check, test --maxWorkers=2, build exit0; 311 files/4216 tests passed, 1 file/27 skipped, 611.40s. All858 source/test/script/config hashes unchanged across run.",
-  "liveStatus": "ATTEMPTED with pinned Codex0.169.0: resident launch observed, then native workspace-trust hold before prompts or idle gate; two owned resident exits and isolated daemon cleanup confirmed. Native trust approval pending.",
+  "liveStatus": "FAILED trusted full lifecycle: ten-minute idle observed; no-checkpoint recovery adoption-outcome-unresolved. Native completion lacks actor marker; production discovery NATIVE_CONVERSATION_UNBOUND. Both residents exited and isolated daemon stopped. Later stages NOT RUN.",
   "sourceScope": "Actual production services, persisted reopen and separately owned controller child SIGKILL/restart with synthetic OS transport. No full broker network server, native provider or power-loss qualification. Integrated completion also validates optional Fleet resident inspection at the RPC display boundary; palette/catalog/resident-marker expectations updated without authority, key handling or Unknown-semantics changes.",
   "files": [
     {
@@ -60,7 +60,7 @@
     },
     {
       "path": "docs/setup/strigoi-acceptance.md",
-      "sha256": "be37ea1248908a8d7670cb702e745a9bc118093d1a8d350210b03ed9e76053a1"
+      "sha256": "7ba2bb9c59f77b0fc3328af82d646408f731954264c050d60fcfef7093f3a8de"
     },
     {
       "path": "docs/design/strigoi-brief.md",
@@ -703,7 +703,71 @@
         }
       ]
     },
-    "pendingApproval": "Trust repository root only inside fresh isolated acceptance home; no native trust answer or config change yet",
-    "remainingCases": "NOT RUN"
+    "pendingApproval": "Resolved: operator approved repository-root trust only in fresh isolated acceptance home; applied in /tmp/sg14r02/native/cyberdeck-orchestrator/config.toml",
+    "remainingCases": "Superseded by trustedFullLifecycleAttempt; other nine cases NOT RUN"
+  },
+  "trustedFullLifecycleAttempt": {
+    "source": "45c7a549c4bb21d1d9b986622d4ab3f2ea17cebe",
+    "status": "FAILED_OR_UNAVAILABLE",
+    "error": "No-checkpoint recovery held: adoption-outcome-unresolved",
+    "startedAt": "2026-11-14T13:39:37.181Z",
+    "endedAt": "2026-11-14T13:51:51.746Z",
+    "provider": "codex-cli 0.169.0",
+    "passive": {
+      "stage": "passive",
+      "elapsedMs": 600749,
+      "encodedInstructionRequests": 0,
+      "canonicalTurns": 0,
+      "inferenceRequests": null,
+      "status": "UNQUALIFIED"
+    },
+    "activeResidentHighWater": 1,
+    "encodedSubmissions": 1,
+    "canonicalTurns": [
+      {
+        "sessionId": "dd0c8d32-793c-4c03-8db3-cff68c2cc291",
+        "canonicalTurns": 0
+      },
+      {
+        "sessionId": "cf3081dd-2993-414d-ace7-711413cfde18",
+        "canonicalTurns": 0
+      }
+    ],
+    "nativeCompletionFrames": 1,
+    "nativeActorClaims": [],
+    "resolution": {
+      "status": "unbound",
+      "reason": "NATIVE_CONVERSATION_UNBOUND"
+    },
+    "nativeSelection": [
+      {
+        "model": "gpt-6.1-sol",
+        "effort": "high"
+      }
+    ],
+    "cleanup": {
+      "sessions": "stopAll completed",
+      "daemon": "isolated stop completed",
+      "processes": [
+        {
+          "pid": 23901,
+          "executable": "codex",
+          "exited": true,
+          "sessionId": "dd0c8d32-793c-4c03-8db3-cff68c2cc291",
+          "resident": true
+        },
+        {
+          "pid": 27994,
+          "executable": "codex",
+          "exited": true,
+          "sessionId": "cf3081dd-2993-414d-ace7-711413cfde18",
+          "resident": true
+        }
+      ]
+    },
+    "gateResultSha256": "bc7c3e8293d904e031c53de02a48e12327681508d4de797b7306ed2e419b3f8c",
+    "nativeTranscriptSha256": "bbceae0cf66622046150edc35747212f33c5d009e21882a6fb1d8acacf24b9e9",
+    "remaining": "Normal delivery, worker/result/attention, three renewals, later recovery and matched baseline NOT RUN",
+    "limit": "CLI developer-instruction override is present in launch construction but actor marker is absent from native developer records. Exact omission point not established. No forged binding or prompt replay."
   }
 }

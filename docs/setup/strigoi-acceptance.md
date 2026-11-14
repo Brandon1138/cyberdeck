@@ -8,17 +8,21 @@ nonblocking P3 retry findings recorded in [the review](strigoi-review.md). Fresh
 check/test/build passed: **311 files / 4,216 tests passed; 1 file / 27 tests skipped**.
 All 858 source/test/script/configuration hashes were unchanged across the run; the local
 commit advanced HEAD during testing without changing those bytes. No native provider
-acceptance or human semantic grading has run.
+acceptance has passed; human semantic grading has not run.
 
 The selected isolated configuration is Codex `gpt-6.1-sol`, effort `high`, with cwd
 `/Users/brandon/code/personal/cyberdeck/worktrees/strigoi-20261114`. After the first
 campaign exposed an older CLI on PATH, the operator approved pinning Codex 0.169.0
-and running full lifecycle qualification. Native launch now succeeds, but a
-workspace-trust modal blocks before prompts or idle observation. Codex applies
-that trust to the repository root and warns that folder settings may run automatically.
-Approval to save trust only in a fresh isolated test home is pending. Both attempted
-resident processes exited and both isolated daemons stopped. See
-[attempt evidence](strigoi-live-attempt.md). Other live cases remain NOT RUN.
+and running full lifecycle qualification. Repository trust was subsequently approved
+and saved only in the fresh isolated test home. The trusted run observed the full
+600,749 ms idle interval with zero encoded prompts and zero canonical turns, then
+failed no-checkpoint recovery with `adoption-outcome-unresolved`. The native transcript
+contains a completed adoption response but lacks the required actor marker; production
+discovery reproduces `NATIVE_CONVERSATION_UNBOUND`. Both owned residents exited and
+the isolated daemon stopped. Normal conversation, worker/result/attention, three
+renewals, later recovery and the matched baseline remain NOT RUN. See
+[attempt evidence](strigoi-live-attempt.md). Complete upstream request counting and
+other live cases remain unqualified.
 
 The original measurement table below describes the pre-remediation source. Current packets use
 authenticated v2 page traversal and the archive appends incremental records. At 1,024 synthetic
