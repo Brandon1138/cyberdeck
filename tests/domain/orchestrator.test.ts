@@ -220,3 +220,13 @@ describe("peer keys", () => {
     expect(primaryOrchestratorKey(markerPathPeer)).toBe("workspace:/tmp/repo:peer:archive");
   });
 });
+
+describe("resident binding isolation", () => {
+  it("leaves primary and peer identities unchanged and rejects a resident with another key", () => {
+    const primary = OrchestratorBindingSchema.parse(record());
+    const peer = OrchestratorBindingSchema.parse(record({ key: PEER_KEY, kind: "peer", sessionId: PEER_SESSION }));
+    expect(orchestratorController(primary)).toEqual({ controllerId: "orchestrator:fleet", familyId: "orchestrator:fleet", scope: { kind: "fleet", scopeId: "fleet" } });
+    expect(orchestratorController(peer)).toEqual({ controllerId: `orchestrator:${PEER_KEY}`, familyId: "orchestrator:fleet", scope: { kind: "fleet", scopeId: PEER_KEY } });
+    expect(OrchestratorBindingSchema.safeParse(record({ kind: "resident", resident: { name: "strigoi", incarnation: 1 } })).success).toBe(false);
+  });
+});
