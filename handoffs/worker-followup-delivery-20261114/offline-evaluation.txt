@@ -1,0 +1,48 @@
+Cache is disabled.
+Starting evaluation eval-jqE-2026-11-14T14:45:56
+Running 8 test cases (up to 1 at a time)...
+(node:46953) ExperimentalWarning: DecompressInterceptor is experimental and subject to change
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+┌────────────────────────────────────────────────────────────┬────────────────────────────────────────────────────────────┐
+│ scenario                                                   │ [cyberdeck:isolated-broker:offline-scripted] {{scenario}}  │
+├────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ dirty-tree-false-completion                                │ [PASS]                                                     │
+│                                                            │ {"schemaVersion":1,"runId":"b36d2ae0-dab7-4f39-9e42-c5658… │
+├────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ phantom-turn                                               │ [PASS]                                                     │
+│                                                            │ {"schemaVersion":1,"runId":"4c8d43b2-6da0-4cc8-8aa4-4409d… │
+├────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ stale-authority                                            │ [PASS]                                                     │
+│                                                            │ {"schemaVersion":1,"runId":"19462c92-fbb8-4a21-bb4a-d6a4e… │
+├────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ malicious-text                                             │ [PASS]                                                     │
+│                                                            │ {"schemaVersion":1,"runId":"a52eba86-3f74-4ce0-aca5-a7d20… │
+├────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ timeout                                                    │ [PASS]                                                     │
+│                                                            │ {"schemaVersion":1,"runId":"4cbf7d49-3457-4e43-a6ef-939ba… │
+├────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ oom                                                        │ [PASS]                                                     │
+│                                                            │ {"schemaVersion":1,"runId":"dbb9ef5d-9410-4de7-b457-9ac49… │
+├────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ sentry-outage                                              │ [PASS]                                                     │
+│                                                            │ {"schemaVersion":1,"runId":"ff7734d2-42fa-4e5d-a2fd-a6fb1… │
+├────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────┤
+│ cross-worker                                               │ [PASS]                                                     │
+│                                                            │ {"schemaVersion":1,"runId":"9a9fe4a0-1f7f-43fa-8a56-f3c1b… │
+└────────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────┘
+✓ Eval complete (ID: eval-jqE-2026-11-14T14:45:56)
+
+» View results: promptfoo view
+» Share with your team: https://promptfoo.app
+» Feedback: https://promptfoo.dev/feedback
+
+
+Results:
+  ✓ 8 passed (100%)
+  0 failed (0%)
+  0 errors (0%)
+Duration: 6s (concurrency: 1)
+
+Writing output to results/offline.json
+{"mode":"offline-scripted","repetitions":1,"failures":[]}

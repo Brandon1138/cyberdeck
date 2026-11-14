@@ -322,7 +322,7 @@ export function projectWorkerTruth(input: WorkerTruthInput): WorkerTruth {
 export const InstructionLifecycleStateSchema = z.enum([
   /** (1) The broker validated and durably recorded it. Nothing has reached the provider. */
   "accepted",
-  /** (2) Waiting for a safe provider boundary. Deliberately not written yet. */
+  /** (2) Waiting for a safe boundary; deliveryAttemptAt, when present, fences an unknown write outcome. */
   "queued",
   /** (3) Written into the provider's input surface. Visible, not consumed. */
   "rendered",
@@ -396,6 +396,18 @@ export const DeliveryHoldReasonSchema = z.enum([
    * started before it existed, so that older turn's answer would settle the wait asking about it.
    */
   "provider-busy",
+  "launch-pending",
+  "input-consumption-pending",
+  "completion-commit-pending",
+  "completion-commit-failed",
+  "input-retirement-pending",
+  "input-retirement-failed",
+  "completion-evidence-pending",
+  "native-evidence-unavailable",
+  "admission-in-progress",
+  "completion-restore-pending",
+  "completion-reconcile-pending",
+  "observation-changed",
   /** The worker is terminal and will never consume anything. */
   "worker-terminal",
 ]);
@@ -408,5 +420,22 @@ export const DELIVERY_HOLD_DETAIL: Readonly<Record<DeliveryHoldReason, string>> 
   "composer-occupied": "The worker's composer already holds unsent text; the instruction is held until it clears",
   "provider-starting": "Provider input readiness is unconfirmed; the instruction remains queued until a recognized empty composer appears. Inspect the provider if startup does not finish",
   "provider-busy": "The worker is mid-turn; the instruction is held until that turn finishes so it is answered by its own turn",
+  "launch-pending": "Waiting for the native launch receipt; native reconciliation retries automatically. Inspect the bound transcript if it never arrives",
+  "input-consumption-pending": "Prior input was rendered but consumption is unconfirmed; submission verification and native reconciliation own recovery. Do not resend its text",
+  "completion-commit-pending": "Waiting for the durable completion commit to settle; its settlement triggers retry",
+  "completion-commit-failed": "Delivery failed: completion journal ownership is uncertain. Preserve the journal and reconcile its receipts before resuming this worker; no new input was written",
+  "input-retirement-pending": "Waiting for prior generation input targets to retire; retirement settlement triggers retry",
+  "input-retirement-failed": "Delivery failed: prior generation input retirement failed. Inspect and reconcile the retained instruction targets before resuming; no new input was written",
+  "completion-evidence-pending": "Waiting for exact reserved completion evidence; native reconciliation and capture settlement retry automatically. Inspect the bound transcript if evidence remains missing",
+  "native-evidence-unavailable": "Native activity cannot be established; native reconciliation retries automatically. Inspect transcript availability, binding and completion boundaries if this persists",
+  "admission-in-progress": "Another input admission owns the worker; its release triggers retry",
+  "completion-restore-pending": "Completion ledger restoration is unavailable; native reconciliation retries. Inspect the completion ledger if this persists",
+  "completion-reconcile-pending": "Completion reconciliation has not settled; native reconciliation retries without terminal output",
+  "observation-changed": "Input or terminal activity changed during admission; retry requires the current generation's safe boundary",
   "worker-terminal": "The worker is terminal and cannot consume this instruction",
 };
+
+/** A failed durable reservation cannot be retried or released by pretending the provider is idle. */
+export function deliveryHoldFailed(hold: DeliveryHoldReason): boolean {
+  return hold === "completion-commit-failed" || hold === "input-retirement-failed";
+}

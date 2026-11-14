@@ -65,6 +65,9 @@ export const InstructionRecordSchema = z.preprocess(
     expectedTurn: z.number().int().positive().optional(),
     /** Why the instruction is being held rather than written. */
     holdReason: z.string().optional(),
+    holdDetail: z.string().optional(),
+    /** Durable attempt fence. If its outcome is lost, never blindly repeat a possible PTY write. */
+    deliveryAttemptAt: z.iso.datetime().optional(),
     workflowRunId: z.uuid().optional(),
     messageId: z.uuid(),
     causationId: z.uuid().optional(),

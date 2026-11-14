@@ -11,6 +11,32 @@ function observation(activity: "working" | "idle", occurredAt = "2026-10-13T12:0
 }
 
 describe("exact native activity observations", () => {
+  it("recovers the same idle evidence after a transient native read failure without terminal bytes", () => {
+    const native = new NativeTurnActivity(createdAt);
+    native.noteInput(createdAt);
+    native.observe(observation("idle"), 1, 1);
+    expect(native.activity("unknown", 1)).toBe("awaiting-input");
+    native.observe({ sessionId: "session", provider: "codex", turnNumber: 1, turns: [], nativeSourceAvailable: false,
+      nativeSourceStatus: "source-error", nativeActivity: "unknown" }, 1, 1);
+    expect(native.activity("unknown", 1)).toBe("unknown");
+    native.observe(observation("idle"), 1, 1);
+    expect(native.activity("unknown", 1)).toBe("awaiting-input");
+  });
+
+  it.each(["input", "working", "generation"])("does not revive idle after a read outage crosses a newer %s fence", fence => {
+    const native = new NativeTurnActivity(createdAt);
+    native.noteInput(createdAt);
+    native.observe(observation("idle"), 1, 1);
+    native.observe({ sessionId: "session", provider: "codex", turnNumber: 1, turns: [], nativeSourceAvailable: false,
+      nativeSourceStatus: "source-error", nativeActivity: "unknown" }, 1, 1);
+    const later = "2026-10-13T12:00:02.000Z";
+    if (fence === "input") native.noteInput(later);
+    if (fence === "working") native.observeScreen(2, "working", Date.parse(later));
+    if (fence === "generation") native.reset(later);
+    native.observe(observation("idle"), 2, 2);
+    expect(native.activity("unknown", 2)).not.toBe("awaiting-input");
+  });
+
   it("keeps proven native idle through unclassified attachment redraws", () => {
     const native = new NativeTurnActivity(createdAt);
     native.noteInput(createdAt);
