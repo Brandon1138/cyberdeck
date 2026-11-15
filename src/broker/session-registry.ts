@@ -11,6 +11,7 @@ import { SessionCatalog } from "../orchestration/session/session-catalog.js";
 import { SessionIoSurface } from "../orchestration/session/session-io-surface.js";
 import { SessionLaunchCoordinator } from "../orchestration/session/session-launch-coordinator.js";
 import { SessionLifecycleController } from "../orchestration/session/session-lifecycle-controller.js";
+import { hostProcessGroupAbsent } from "../runtime/host-process-retirement.js";
 import { SessionReadModel } from "../orchestration/session/session-read-model.js";
 import { SessionRuntimeAssembly } from "../orchestration/session/session-runtime-assembly.js";
 import { SessionRuntimeObserver } from "../orchestration/session/session-runtime-observer.js";
@@ -129,6 +130,7 @@ export class SessionRegistry {
     this.reads = new SessionReadModel(this.catalog);
     this.wait = new SessionWaitCoordinator({ catalog: this.catalog, bus: this.bus });
     this.lifecycle = new SessionLifecycleController({
+      hostProcessGroupAbsent,
       catalog: this.catalog,
       bus: this.bus,
       assembly: this.assembly,

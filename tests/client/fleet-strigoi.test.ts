@@ -59,3 +59,19 @@ it("labels the resident composer as a durable message without requiring a worker
   expect(output).toContain("durable resident input");
   expect(output).not.toContain("/model required");
 });
+
+import { currentSessionRows } from "../../src/client/fleet/current-sessions.js";
+it("keeps enabled unavailable Strigoi in Live without claiming runtime presence", () => {
+  const held = thread("2"); held.record.exitCode = -1; held.record.executionState = "cancelled";
+  held.runtimePresence = "absent";
+  held.strigoi = { ...held.strigoi!, readiness: "held", adoption: "pending", recovery: { phase: "adopting", ownership: "unknown",
+    lastAttemptAt: "2026-11-15T12:00:00.000Z", nextAction: "Verify process retirement" },
+    hold: { code: "successor-unavailable", detail: "Lost ownership", sourceIds: ["2"] } };
+  const snap = { threads: [held] }, state = createFleetState(snap);
+  const rows = currentSessionRows(snap, state);
+  expect(rows.some(r => r.kind === "thread" && r.thread.record.id === "2")).toBe(true);
+  expect(held.runtimePresence).toBe("absent");
+  expect(strigoiStatus(held.strigoi)).toContain("ownership unknown");
+  expect(strigoiStatus(held.strigoi)).toContain("last attempt 2026-11-15");
+  expect(strigoiStatus(held.strigoi)).toContain("next: Verify process retirement");
+});

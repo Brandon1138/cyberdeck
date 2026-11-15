@@ -18,6 +18,7 @@ export interface SessionLifecycleControllerOptions {
   bus: SessionUpdateBus;
   assembly: SessionRuntimeAssembly;
   observer: SessionRuntimeObserver;
+  hostProcessGroupAbsent?: (pid: number, group: number) => boolean;
 }
 
 /**
@@ -37,21 +38,34 @@ export class SessionLifecycleController {
   private shuttingDown = false;
 
   constructor(options: SessionLifecycleControllerOptions) {
+    this.hostProcessGroupAbsent = options.hostProcessGroupAbsent;
     this.catalog = options.catalog;
     this.bus = options.bus;
     this.assembly = options.assembly;
     this.observer = options.observer;
   }
+  private readonly hostProcessGroupAbsent: SessionLifecycleControllerOptions["hostProcessGroupAbsent"];
 
   /** Unknown-exit sentinel (-1), stop requests, and completed turns are NOT retirement. */
   async residentRetirement(sessionId: string, generation: number): Promise<"confirmed" | "unknown"> {
     const runtime = this.catalog.sessions.get(sessionId);
-    if (!runtime || runtime.record.generation !== generation || runtime.terminalFinalizing
-      || runtime.record.exitCode === null || runtime.record.exitCode < 0
-      || ["active", "starting", "errored"].includes(runtime.record.executionState)) return "unknown";
-    // Persist the observed exit before handing its evidence to the succession journal.
-    await this.catalog.persist(runtime);
-    return "confirmed";
+    if (!runtime || runtime.record.generation !== generation || runtime.terminalFinalizing) return "unknown";
+    const record = runtime.record;
+    if (record.exitCode !== null && record.exitCode >= 0 && !["active", "starting", "errored"].includes(record.executionState)) {
+      await this.catalog.persist(runtime); return "confirmed";
+    }
+    const prior = record.retirementObservation;
+    const confirmedAbsent = prior?.generation === generation && prior.pid === record.pid && prior.processGroup === record.recoveryProcessGroup;
+    if (!runtime.sessionRuntime && record.exitCode === -1 && record.executor !== "orbstack-container"
+      && record.recoveryProcessGroup === record.pid && record.pid > 1
+      && (confirmedAbsent || this.hostProcessGroupAbsent?.(record.pid, record.recoveryProcessGroup))) {
+      // Absence is separately recorded. Never turn a lost exit (-1) into a fabricated exit code.
+      record.retirementObservation = confirmedAbsent ? prior : { generation, pid: record.pid, processGroup: record.recoveryProcessGroup,
+        kind: "host-process-group-absent", observedAt: new Date().toISOString() };
+      // Also re-sync a prior receipt visible after a failed append/fsync.
+      await this.catalog.persist(runtime); return "confirmed";
+    }
+    return "unknown";
   }
 
   async stop(sessionId: string, origin: "operator" | "resident" = "operator"): Promise<void> {
@@ -216,6 +230,8 @@ export class SessionLifecycleController {
     delete runtime.controller;
     runtime.watchers.clear();
     runtime.record.pid = sessionRuntime.pid;
+    runtime.record.recoveryProcessGroup = record.executor !== "orbstack-container" ? sessionRuntime.recoveryProcessGroup : undefined;
+    delete runtime.record.retirementObservation;
     runtime.record.generation = record.generation;
     if (record.codexActorMarker !== undefined) runtime.record.codexActorMarker = record.codexActorMarker;
     if (record.execution !== undefined) runtime.record.execution = record.execution;

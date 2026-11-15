@@ -9,6 +9,7 @@ import type { StrigoiFleetView } from "../../domain/strigoi.js";
 import { threadFocusInert } from "./list-rows.js";
 export function strigoiStatus(view: StrigoiFleetView): string {
   return `Strigoi #${view.incarnation ?? "?"} · ${view.desired} · ${view.readiness} · adoption ${view.adoption}`
+    + (view.recovery ? ` · ${view.recovery.phase} · ownership ${view.recovery.ownership} · last attempt ${view.recovery.lastAttemptAt ?? "none"} · next: ${view.recovery.nextAction}` : "")
     + (view.hold ? ` · HOLD ${view.hold.code}: ${view.hold.detail} [${view.hold.sourceIds.join(", ")}]` : "")
     + view.continuationHolds.map(h => ` · Continuation ${h.code}: ${h.detail} [${h.sourceIds.join(", ")}]`).join("");
 }

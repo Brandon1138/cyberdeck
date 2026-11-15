@@ -41,6 +41,9 @@ export const StrigoiTransitionSchema = z.object({
   packetBytes: z.number().int().nonnegative().optional(), recovery: z.boolean().optional(),
   lastMutationId: z.string().optional(),
   adoptionDeferred: z.boolean().optional(),
+  supersededBy: z.string().optional(),
+  /** Consecutive replacements before a usable recovery boundary; survives broker restart. */
+  recoveryAttempts: z.number().int().nonnegative().optional(),
   turnHistory: z.array(SuccessionTurnSchema.extend({ kind: z.enum(["checkpoint", "adoption"]) })).optional(),
 }).refine((transition) => transition.predecessor === undefined || transition.predecessor.incarnation === transition.expectedIncarnation,
   "Predecessor must match expected incarnation")
@@ -102,6 +105,7 @@ export type StrigoiState = z.infer<typeof StrigoiStateSchema>;
 /** Derived operator display data, never a launch, grant or delivery authority. */
 export interface StrigoiFleetView {
   canonical: boolean;
+  recovery?: { phase: StrigoiPhase; ownership: "owned" | "unknown" | "none"; lastAttemptAt?: string | undefined; nextAction: string };
   incarnation?: number;
   desired: StrigoiDesired;
   readiness: "passive" | "held" | "unconfigured" | "ready";

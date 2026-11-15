@@ -77,7 +77,7 @@ export function hasCurrentActivity(thread: FleetThread): boolean {
 }
 
 export function nodeDisposition(node: SessionNode): "current" | "unconfirmed" | "history" {
-  if (node.members.some(t => threadRuntimePresence(t) === "present" || hasCurrentActivity(t))) return "current";
+  if (node.members.some(t => t.strigoi?.canonical && t.strigoi.desired === "enabled" || threadRuntimePresence(t) === "present" || hasCurrentActivity(t))) return "current";
   return node.members.some(t => threadRuntimePresence(t) === "unknown") ? "unconfirmed" : "history";
 }
 

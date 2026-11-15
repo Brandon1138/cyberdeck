@@ -150,6 +150,10 @@ export const SessionRecordSchema = StartSessionRequestSchema.extend({
   attachmentState: AttachmentStateSchema,
   /** Zero means a durable launch attempt failed before a provider process existed. */
   pid: z.number().int().nonnegative(),
+  /** Broker-only host transport evidence; absent in legacy records. Never a public start option. */
+  recoveryProcessGroup: z.number().int().positive().optional(),
+  retirementObservation: z.object({ generation: z.number().int().positive(), pid: z.number().int().positive(),
+    processGroup: z.number().int().positive(), observedAt: z.iso.datetime(), kind: z.literal("host-process-group-absent") }).strict().optional(),
   exitCode: z.number().int().nullable(),
   childIds: z.array(z.uuid()),
   attentionState: ThreadAttentionStateSchema.optional(),
