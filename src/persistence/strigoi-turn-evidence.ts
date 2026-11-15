@@ -1,4 +1,4 @@
-import type { StrigoiIdentity, StrigoiPacketRef, StrigoiArtifactRef } from "../domain/strigoi.js";
+import { STRIGOI_LIMITS, type StrigoiIdentity, type StrigoiPacketRef, type StrigoiArtifactRef } from "../domain/strigoi.js";
 import { createHash } from "node:crypto";
 import type { StrigoiPacketPort, StrigoiRepository, StrigoiSourcePort } from "../orchestration/strigoi-ports.js";
 import type { ArtifactStore } from "./artifact-store.js";
@@ -51,7 +51,7 @@ export class StrigoiTurnEvidence {
       // Inline small evidence avoids a model/tool round trip. Large or legacy evidence retains
       // bounded pages; no text is truncated to meet a latency target.
       let selectedPath: string | undefined;
-      if (Buffer.byteLength(inline) > 12 * 1024) {
+      if (Buffer.byteLength(inline) > STRIGOI_LIMITS.recoveryInlineBytes) {
         const selectedPages: typeof sources[] = []; let page: typeof sources = [], bytes = 0;
         for (const source of sources) {
           const size = Buffer.byteLength(source.text ?? "");

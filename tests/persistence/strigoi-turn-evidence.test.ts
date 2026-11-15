@@ -16,7 +16,7 @@ it("provides all native adoption evidence through bounded linked private pages",
     const identity = { sessionId: randomUUID(), incarnation: 1, generation: 1 };
     const refs: import("../../src/domain/strigoi.js").StrigoiSourceRef[] = [];
     for (let i = 0; i < 66; i++) refs.push(...await packets.copy({ kind: "instruction", id: `instruction:${i}`, revision: "1" }, `Original obligation ${i}`, [identity.sessionId]));
-    const long = "é".repeat(20000);
+    const long = "é".repeat(100000);
     refs.push(...await packets.copy({ kind: "turn", id: "long-original", revision: "1" }, long, [identity.sessionId]));
     const packet = await packets.write(identity, "All original obligations", refs, new Date().toISOString());
     const evidence = new StrigoiTurnEvidence({ repository: new StrigoiStore(root), packets, artifacts, sources: { capture: async () => refs } });

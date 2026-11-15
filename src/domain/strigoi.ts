@@ -8,6 +8,7 @@ export const STRIGOI_LIMITS = {
   packetManifestBytes: 256 * 1024,
   sourceReferencesPerPage: 64,
   sourceTextBytesPerPage: 32 * 1024,
+  recoveryInlineBytes: 128 * 1024,
 } as const;
 
 export function isStrigoiBinding(binding: OrchestratorBinding): boolean {
