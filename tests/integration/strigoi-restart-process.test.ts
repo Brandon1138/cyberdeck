@@ -1,8 +1,9 @@
-import { fork, type ChildProcess } from "node:child_process";
+import { execFile, fork, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import type { StrigoiState } from "../../src/domain/strigoi.js";
+import { promisify } from "node:util";
 import type { SessionRecord } from "../../src/domain/session.js";
 interface Observation { id: number; state: StrigoiState; records: SessionRecord[]; owned: string[]; launches: number; submissions: number; error?: string }
 async function controller(root: string) {
@@ -30,6 +31,8 @@ it.each(["graceful", "forced", "provider-death", "repeated-before-adoption"])("r
     const original = current.ready.state.activeBinding!.sessionId;
     expect(current.ready.owned).toEqual([original]);
     expect(current.ready.records[0]?.recoveryProcessGroup).toBe(current.ready.records[0]?.pid);
+    const group = await promisify(execFile)("ps", ["-o", "pgid=", "-p", String(current.ready.records[0]!.pid)]);
+    expect(Number(group.stdout.trim())).toBe(current.ready.records[0]!.pid);
     if (mode === "graceful") { await current.call("close"); await current.exited; }
     else if (mode === "provider-death") { await current.call("stop-provider"); }
     else { current.child.kill("SIGKILL"); await current.exited; }
@@ -100,3 +103,55 @@ it("a surviving exact host group holds recovery without signalling it or launchi
     live.kill(); await gone; await rm(root, { recursive: true, force: true });
   }
 }, 30000);
+
+import { RpcClient } from "../../src/client/rpc-client.js";
+import { join } from "node:path";
+import type { StrigoiInspection } from "../../src/orchestration/strigoi-ports.js";
+it("full isolated broker daemon preserves unknown-ownership holds through graceful and forced restart", async () => {
+  const root = await mkdtemp("/tmp/strigoi-daemon-");
+  const live = new PtyProcess({ executable: process.execPath, args: ["-e", "process.stdin.resume();setInterval(()=>{},1000)"], cwd: root, env: {} }, 1024);
+  const gone = new Promise<void>(resolve => live.onExit(() => resolve()));
+  const children: ChildProcess[] = [];
+  let client: RpcClient | undefined;
+  const launch = async () => {
+    const child = fork(fileURLToPath(new URL("../fixtures/strigoi/restart-daemon.ts", import.meta.url)), [root],
+      { execArgv: ["--import", "tsx"], stdio: ["ignore", "ignore", "pipe", "ipc"] });
+    children.push(child); let stderr = "";
+    child.stderr?.on("data", b => { stderr = (stderr + b).slice(-5000); });
+    const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`daemon timeout: ${stderr}`)), 15000);
+      child.once("message", () => { clearTimeout(timer); resolve(); });
+      child.once("exit", () => { clearTimeout(timer); reject(new Error(`daemon exited: ${stderr}`)); });
+    });
+    client = await RpcClient.connect(join(root, "broker.sock"));
+    return { child, exited };
+  };
+  try {
+    const seed = await controller(root); children.push(seed.child);
+    const original = seed.ready.state.activeBinding!.sessionId;
+    await seed.call("close"); await seed.exited;
+    const store = new SessionStore(root), [record] = await store.load();
+    await store.put({ ...record!, pid: live.pid, recoveryProcessGroup: live.pid, exitCode: null, executionState: "active", retirementObservation: undefined });
+    for (const signal of ["SIGTERM", "SIGKILL", "SIGTERM"] as const) {
+      const daemon = await launch();
+      let inspection: StrigoiInspection | undefined;
+      for (let n = 0; n < 100; n++) {
+        inspection = await client!.request<StrigoiInspection>("strigoi.inspect", {});
+        if (inspection.state.hold) break;
+        await new Promise(r => setTimeout(r, 30));
+      }
+      expect(inspection).toMatchObject({ ownership: "unknown", readiness: "held", state: { desired: "enabled", incarnation: 1,
+        activeBinding: { sessionId: original }, hold: { code: "retirement-unconfirmed" } } });
+      expect((await client!.request<SessionRecord[]>("session.list", {}))).toHaveLength(1);
+      expect(() => process.kill(live.pid, 0)).not.toThrow();
+      client!.close(); client = undefined;
+      daemon.child.kill(signal);
+      await Promise.race([daemon.exited, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("daemon shutdown timeout")), 10000).unref())]);
+    }
+  } finally {
+    client?.close();
+    for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    live.kill(); await gone; await rm(root, { recursive: true, force: true });
+  }
+}, 60000);
