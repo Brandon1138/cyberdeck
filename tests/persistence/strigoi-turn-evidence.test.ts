@@ -34,3 +34,27 @@ it("provides all native adoption evidence through bounded linked private pages",
     expect(Buffer.byteLength(prompt)).toBeLessThan(4096);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+it("inlines small recovery evidence including native instruction restrictions and the latest packet checkpoint", async () => {
+  const root = await mkdtemp(join(tmpdir(), "strigoi-inline-"));
+  try {
+    const artifacts = new ArtifactStore(root), packets = new StrigoiPackets(artifacts);
+    const identity = { sessionId: randomUUID(), incarnation: 1, generation: 1 };
+    const refs = [
+      ...await packets.copy({ kind: "turn", id: "native:config", revision: "1" }, JSON.stringify({ role: "developer", text: "Task restriction: no deployment" }), [identity.sessionId]),
+      ...await packets.copy({ kind: "turn", id: "native:constraint", revision: "1" }, JSON.stringify({ role: "user", text: "AMBER-731. Never publish without separate approval." }), [identity.sessionId]),
+    ];
+    const packet = await packets.write(identity, "New checkpoint: unresolved choice requires operator decision", refs, new Date().toISOString());
+    const evidence = new StrigoiTurnEvidence({ repository: new StrigoiStore(root), packets, artifacts, sources: { capture: async () => refs } });
+    const prompt = await evidence.prompt("adoption", identity, packet);
+    expect(prompt).toContain("no file read is needed");
+    expect(prompt).toContain("AMBER-731. Never publish without separate approval.");
+    expect(prompt).toContain("New checkpoint: unresolved choice requires operator decision");
+    expect(prompt).toContain("Deferred originals remain pending");
+    expect(prompt).toContain("Task restriction: no deployment");
+    expect(Buffer.byteLength(prompt)).toBeLessThan(5000);
+    const originals = []; let cursor: string | undefined;
+    do { const page = await packets.read(packet, cursor); originals.push(...page.sources); cursor = page.nextCursor; } while (cursor);
+    expect(originals.map(s => s.coverageSourceId)).toEqual(refs.map(s => s.coverageSourceId));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

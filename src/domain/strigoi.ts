@@ -62,6 +62,8 @@ export const StrigoiAdoptionSchema = z.object({
   identity: StrigoiIdentitySchema, packetHash: digest, coverageId: z.uuid(),
   handledSourceIds: z.array(digest).refine((ids) => new Set(ids).size === ids.length, "Duplicate handled IDs"),
   account: prose.refine((value) => value.trim().length > 0, "Adoption account required"),
+  /** Conversational checkpoint chain only; unread originals remain pending. */
+  recovery: z.object({ version: z.literal(1), baseMutationId: z.string().min(1).optional() }).strict().optional(),
 }).strict();
 export const StrigoiContinuityReceiptSchema = z.object({
   mutationId: z.string().min(1), requestHash: digest, packet: StrigoiPacketRefSchema,

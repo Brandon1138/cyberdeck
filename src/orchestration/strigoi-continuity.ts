@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { recoveryCheckpoint } from "../domain/strigoi-recovery.js";
 import { StrigoiAdoptionSchema, StrigoiIdentitySchema, StrigoiSourceRefSchema,
   type StrigoiAdoption, type StrigoiIdentity, type StrigoiPacketRef, type StrigoiSourceRef, type StrigoiState } from "../domain/strigoi.js";
 import type { StrigoiAdmissionPort, StrigoiRepository, StrigoiPacketPort, StrigoiSourcePort } from "./strigoi-ports.js";
@@ -65,6 +66,7 @@ export class StrigoiContinuity {
         await authorize?.();
         if (this.replay(state, mutationId, requestHash)) { await this.options.repository.confirmMutation(mutationId); return; }
         const packet = this.coveragePacket(state, adoption);
+        if (adoption.recovery?.baseMutationId !== undefined) recoveryCheckpoint(state, adoption.recovery.baseMutationId);
         if (JSON.stringify(packet) !== JSON.stringify(initial)) throw new Error("STRIGOI_UNKNOWN_COVERAGE");
         await this.save(state, mutationId, { continuityReceipts: [...state.continuityReceipts ?? [], { mutationId, requestHash, packet, adoption }] });
       });

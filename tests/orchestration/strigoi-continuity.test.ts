@@ -69,3 +69,16 @@ it("allows exact recovery acknowledgements while frozen but never after suspensi
   f.set({ ...f.state(), desired: "suspended" });
   await expect(continuity.acknowledge(adoption, "other")).rejects.toThrow("STRIGOI_SUSPENDED");
 });
+
+it("persists a validated checkpoint chain without marking deferred evidence handled", async () => {
+  const { f, packets, sources, continuity } = await setup();
+  sources.push(...await packets.copy({ kind: "artifact", id: "historical-config", revision: "1" }, "Old config", [identity.sessionId]));
+  const packet = await continuity.checkpoint(identity, "Intent", [], "cp");
+  const adoption = { identity, packetHash: packet.sha256, coverageId: packet.coverageId, handledSourceIds: [sources[0]!.coverageSourceId!],
+    account: "Do not publish", recovery: { version: 1 as const } };
+  await expect(continuity.acknowledge({ ...adoption, recovery: { version: 1, baseMutationId: "missing" } }, "bad-base")).rejects.toThrow("STRIGOI_UNKNOWN_RECOVERY_BASE");
+  await continuity.acknowledge(adoption, "adopt-a");
+  await continuity.acknowledge({ ...adoption, handledSourceIds: [], recovery: { version: 1, baseMutationId: "adopt-a" } }, "adopt-b");
+  expect(f.state().continuityReceipts?.at(-1)?.adoption?.recovery?.baseMutationId).toBe("adopt-a");
+  expect(await continuity.pending(identity)).toEqual([sources[1]]);
+});
