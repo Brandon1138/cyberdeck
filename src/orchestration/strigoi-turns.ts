@@ -1,4 +1,5 @@
-import { StrigoiAdoptionSchema, type StrigoiIdentity, type StrigoiPacketRef } from "../domain/strigoi.js";
+import { type StrigoiIdentity, type StrigoiPacketRef, type StrigoiArtifactRef } from "../domain/strigoi.js";
+import { parseRecoveryAdoption } from "../domain/strigoi-recovery-receipt.js";
 import type { ThreadEvent } from "../domain/thread.js";
 import type { WorkerTruth } from "../domain/worker-truth.js";
 import type { ThreadTranscriptReader } from "./persistence-ports.js";
@@ -13,7 +14,8 @@ export class StrigoiTurns implements StrigoiSuccessionTurns {
   constructor(private readonly registry: Pick<SessionInstructionPort, "get" | "submitInstruction"> & { workerTruth(id: string): WorkerTruth },
     private readonly transcripts: ThreadTranscriptReader & WorkerTurnTranscriptPort,
     private readonly prompt: (kind: "checkpoint" | "adoption", identity: StrigoiIdentity, packet?: StrigoiPacketRef) => Promise<string>,
-    private readonly archivedEvents?: (sessionId: string) => Promise<ThreadEvent[]>) {}
+    private readonly archivedEvents?: (sessionId: string) => Promise<ThreadEvent[]>,
+    private readonly resolveRecoverySourceMap?: (ref: StrigoiArtifactRef) => Promise<unknown>) {}
 
   async boundary(identity: StrigoiIdentity): Promise<"safe" | "busy" | "modal" | "unknown"> {
     const record = this.registry.get(identity.sessionId);
@@ -74,8 +76,8 @@ export class StrigoiTurns implements StrigoiSuccessionTurns {
     if (intent.data.successionKind === "checkpoint") {
       return { outcome: "completed", ...(typeof result === "object" && result !== null && "checkpoint" in result && typeof result.checkpoint === "string" ? { checkpoint: result.checkpoint } : {}) };
     }
-    const adoption = StrigoiAdoptionSchema.safeParse(result);
-    return { outcome: "completed", ...(adoption.success ? { adoption: adoption.data } : {}) };
+    const adoption = await parseRecoveryAdoption(result, intent.text ?? "", this.resolveRecoverySourceMap);
+    return { outcome: "completed", ...(adoption ? { adoption } : {}) };
   }
 
   private async events(sessionId: string): Promise<ThreadEvent[]> {

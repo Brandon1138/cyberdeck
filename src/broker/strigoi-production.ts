@@ -27,6 +27,7 @@ export async function composeProductionStrigoi(o: {
     attentionStore: { list(): Promise<OrchestratorAttention[]> };
     verify(): Promise<void>; beforeDelete(id: string): Promise<void>; withDeletion<T>(id: string, commit: () => Promise<T>): Promise<T>;
     turnPrompt: ConstructorParameters<typeof StrigoiTurns>[2];
+    resolveRecoverySourceMap?: ConstructorParameters<typeof StrigoiTurns>[4];
     turnEvents: NonNullable<ConstructorParameters<typeof StrigoiTurns>[3]>;
     observeInstruction: NonNullable<StrigoiDeliveryOptions["observeInstruction"]>;
   }; transcripts: ThreadTranscriptReader & WorkerTurnTranscriptPort;
@@ -61,7 +62,7 @@ export async function composeProductionStrigoi(o: {
       }
       return o.coordination.withInstructionAuthority(target, controller, credential.leaseToken, credential.leaseVersion, apply);
     } });
-  const turns = new StrigoiTurns(o.registry, o.transcripts, o.evidence.turnPrompt, o.evidence.turnEvents);
+  const turns = new StrigoiTurns(o.registry, o.transcripts, o.evidence.turnPrompt, o.evidence.turnEvents, o.evidence.resolveRecoverySourceMap);
   const runtime = await composeStrigoiRuntime({ ...shared, registry: o.registry, manager: o.manager, continuity,
     verifyContinuity: o.evidence.verify, beforeDelete: o.evidence.beforeDelete, withDeletion: o.evidence.withDeletion,
     ...(o.onError ? { onError: o.onError } : {}),

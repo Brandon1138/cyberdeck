@@ -12,6 +12,8 @@ Adoption may include `recovery: {version: 1, baseMutationId?: string}`. Its acco
 
 `handledSourceIds` still names only original source parts actually inspected in that adoption turn. Reading a derived checkpoint does not claim its originals were reread. Deferred originals are not acknowledged and remain in `pending()`. Conversational adoption is distinct from exhaustive historical coverage; current instructions govern and historical evidence never grants new authority. The checkpoint remains a model account, with semantic correctness requiring live qualification.
 
+Native adoption replies use compact `handledSourceIndices` instead of copying 64-character hashes. The observation adapter expands them only against the source map in the broker's durable original instruction. Duplicate/out-of-range indices, missing/ambiguous maps and model-supplied mappings are rejected. Expanded receipts still pass the unchanged identity, packet and original-coverage checks; stored receipts and public acknowledgments retain full source IDs. Legacy native receipts remain readable.
+
 This is an additive receipt field within the existing state schema. Older readers may discard the optimization marker and fall back to full evidence; deployment rollback still requires compatibility qualification. No instruction submission fence, retirement identity, notification consumption rule or journal format is replaced.
 
 ## Acceptance

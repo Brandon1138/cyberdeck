@@ -7,6 +7,7 @@ import { ArtifactStore } from "../../src/persistence/artifact-store.js";
 import { StrigoiPackets } from "../../src/persistence/strigoi-packets.js";
 import { StrigoiTurnEvidence } from "../../src/persistence/strigoi-turn-evidence.js";
 import { StrigoiStore } from "../../src/persistence/strigoi-store.js";
+import { parseRecoveryAdoption, RECOVERY_SOURCE_MAP } from "../../src/domain/strigoi-recovery-receipt.js";
 
 it("provides all native adoption evidence through bounded linked private pages", async () => {
   const root = await mkdtemp(join(tmpdir(), "strigoi-native-pages-"));
@@ -53,6 +54,11 @@ it("inlines small recovery evidence including native instruction restrictions an
     expect(prompt).toContain("Deferred originals remain pending");
     expect(prompt).toContain("Task restriction: no deployment");
     expect(Buffer.byteLength(prompt)).toBeLessThan(5000);
+    const decoded = await parseRecoveryAdoption({ identity, packetHash: packet.sha256, coverageId: packet.coverageId,
+      handledSourceIndices: [1], account: "AMBER-731; no publication", recovery: { version: 1 } }, prompt, evidence.resolveRecoverySourceMap.bind(evidence));
+    expect(decoded?.handledSourceIds).toEqual([refs[1]!.coverageSourceId]);
+    const mapRef = JSON.parse(prompt.split("\n").find(line => line.startsWith(RECOVERY_SOURCE_MAP))!.slice(RECOVERY_SOURCE_MAP.length));
+    await expect(evidence.resolveRecoverySourceMap({ ...mapRef, sha256: "f".repeat(64) })).rejects.toThrow("STRIGOI_ARTIFACT_HASH_MISMATCH");
     const originals = []; let cursor: string | undefined;
     do { const page = await packets.read(packet, cursor); originals.push(...page.sources); cursor = page.nextCursor; } while (cursor);
     expect(originals.map(s => s.coverageSourceId)).toEqual(refs.map(s => s.coverageSourceId));
