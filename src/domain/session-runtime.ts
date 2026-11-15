@@ -13,6 +13,8 @@ export type SessionRuntimeExitListener = (exitCode: number, signal?: number) => 
  */
 export interface SessionRuntime {
   readonly pid: number;
+  /** Host PTY session/process group, when the transport guarantees one. */
+  readonly recoveryProcessGroup?: number;
   write(data: Buffer): void;
   resize(cols: number, rows: number): void;
   snapshot(): Buffer;

@@ -36,6 +36,7 @@ export interface StrigoiLifecycleOptions {
   registry: SessionLookupPort & SessionStartPort & SessionLaunchOutcomePort & {
     ownsProcess(sessionId: string): boolean;
     stopResidentProcess(sessionId: string): Promise<void>;
+    residentRetirement?(sessionId: string, generation: number): Promise<"confirmed" | "unknown">;
     workerTruth(sessionId: string): { modalOpen: boolean };
   };
   onError?: (error: unknown) => void;
@@ -91,8 +92,9 @@ export class StrigoiLifecycle {
       if (current.desired === desired && (desired !== "enabled" || !current.hold)) return current;
       // An unresolved assigned identity must survive resume; clearing it would authorize duplicates.
       let transition = current.transition?.predecessor || current.transition?.successor ? current.transition : undefined;
+      if (desired === "enabled" && transition) transition = { ...transition, recoveryAttempts: 0 };
       if (desired === "enabled" && transition?.predecessor && transition.phase === "launching" && !transition.successor)
-        transition = { ...transition, attempts: 0, nextAttemptAt: undefined, launchStartedAt: undefined };
+        transition = { ...transition, attempts: 0, recoveryAttempts: 0, nextAttemptAt: undefined, launchStartedAt: undefined };
       return this.write(current, { desired, ...(desired === "enabled" ? { hold: undefined, transition } : {}) }, mutationId);
     });
     if (desired !== "enabled") await this.stopOwned(state);
@@ -247,6 +249,9 @@ export class StrigoiLifecycle {
     const reservation = { sessionId: successor.sessionId, transitionId: transition.id };
     const outcome = this.options.registry.launchOutcome(reservation, successor.generation);
     if (outcome.kind === "failed") { await this.settleFailure(state, outcome.error); return; }
+    if (outcome.kind === "unresolved" && await this.options.registry.residentRetirement?.(successor.sessionId, successor.generation) === "confirmed") {
+      await this.settleFailure(state, failure("STRIGOI_RESERVED_RUNTIME_RETIRED")); return;
+    }
     if (outcome.kind !== "owned") {
       await this.hold("launch-ownership-unresolved", "Launch outcome has no matching owned execution or proven failure; do not start another process."); return;
     }

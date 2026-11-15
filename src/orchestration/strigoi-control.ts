@@ -29,7 +29,10 @@ export class StrigoiControl {
     const result = await this.o.succession.renew(expectedIncarnation, reason, mutationId);
     this.wake(); return result;
   }
-  submit(message: string, messageId: string) { return this.o.delivery.submit(message, messageId); }
+  async submit(message: string, messageId: string) {
+    const result = await this.o.delivery.submit(message, messageId);
+    this.wake(); return result;
+  }
   async checkpoint(actor: string, prose: string, sources: StrigoiSourceRef[], mutationId: string) {
     const identity = await this.actor(actor, "thread.enqueue");
     return this.o.continuity.checkpoint(identity, prose, sources, mutationId, this.guard(identity, "thread.enqueue"));

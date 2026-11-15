@@ -1,3 +1,4 @@
+import { hostProcessGroupAbsent } from "../runtime/host-process-retirement.js";
 import { composeProductionStrigoi } from "./strigoi-production.js";
 import { composeStrigoiEvidence } from "../persistence/strigoi-evidence-runtime.js";
 import { composeOrchestratorMutationServices } from "./orchestrator-mutation-services.js";
@@ -252,6 +253,7 @@ export async function runBroker(
     submitEvent: (input) => workerEvents.submit(input),
   });
   registry = new SessionRegistry({
+    hostProcessGroupAbsent,
     adapters: executionRuntime.adapters,
     sessionRuntimeFactory: createSessionRuntime,
     executions: executionRuntime.executions,

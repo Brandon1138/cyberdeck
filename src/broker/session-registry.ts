@@ -129,6 +129,7 @@ export class SessionRegistry {
     this.reads = new SessionReadModel(this.catalog);
     this.wait = new SessionWaitCoordinator({ catalog: this.catalog, bus: this.bus });
     this.lifecycle = new SessionLifecycleController({
+      ...(options.hostProcessGroupAbsent ? { hostProcessGroupAbsent: options.hostProcessGroupAbsent } : {}),
       catalog: this.catalog,
       bus: this.bus,
       assembly: this.assembly,
