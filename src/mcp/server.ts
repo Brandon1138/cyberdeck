@@ -1,6 +1,7 @@
 import { continuityToolRequest } from "./continuity-tool-routing.js";
 import { STRIGOI_TOOLS } from "./strigoi-tools.js";
-import { NOTICE_EXEMPT_TOOLS, NOTIFICATION_TOOLS } from "./notification-tools.js";
+import { NOTIFICATION_TOOLS } from "./notification-tools.js";
+import { pendingNotice } from "./optional-notice.js";
 import { ATTENTION_TOOLS } from "./attention-tools.js";
 import { workerBudgetInputSchema, workerWorkspaceInputSchema, scoutBriefInputSchema } from "./worker-input-schemas.js";
 import { createInterface } from "node:readline";
@@ -19,12 +20,19 @@ import { ORCHESTRATOR_CATALOG } from "../orchestration/orchestrator-catalog.js";
 import { PEER_BRIEF_MAX_CHARS } from "../orchestration/orchestrator-peer-service.js";
 import { readWorkerCapabilities } from "../orchestration/worker-capabilities.js";
 import { CYBERDECK_VERSION } from "../broker/version.js";
+import { callerDeadline } from "../orchestration/caller-deadline.js";
 
 /** The providers the orchestrator catalog can host the Cyberdeck MCP server in. */
 const ORCHESTRATOR_PROVIDER_IDS = ORCHESTRATOR_CATALOG.map(({ provider }) => provider);
 
 export interface McpBrokerTransport {
-  request<T = unknown>(method: string, params: unknown): Promise<T>;
+  request<T = unknown>(method: string, params: unknown, options?: { timeoutMs: number }): Promise<T>;
+  requestWithDeadline?<T = unknown>(method: string, params: unknown, timeoutMs: number): Promise<T>;
+}
+
+function boundedRequest<T>(transport: McpBrokerTransport, method: string, params: unknown, timeoutMs: number): Promise<T> {
+  return transport.requestWithDeadline === undefined ? transport.request<T>(method, params)
+    : transport.requestWithDeadline<T>(method, params, timeoutMs);
 }
 
 /**
@@ -80,6 +88,10 @@ export class McpToolError extends Error {
 }
 
 const REMEDIES: Record<string, string> = {
+  WORKER_ROLE_REQUIRED:
+    "This reporting tool is worker-only. Orchestrators, including peers, report through their canonical reply; no binding or grant change is needed.",
+  CONTROL_PLANE_TIMEOUT:
+    "The caller deadline expired, not the operation. Worker state and mutation outcome remain unknown. Reconcile the original messageId or mutationId before retrying; never resend ambiguous provider input.",
   CYBERDECK_BROKER_UNREACHABLE:
     "The Cyberdeck broker is not accepting connections. Start it with `cyberdeck up`, then reconnect this server with /mcp.",
   ACTOR_NOT_AUTHORIZED:
@@ -627,16 +639,21 @@ const UNBOUND_WORKER_TOOLS = new Set<(typeof TOOLS)[number]["name"]>([
   // cancellation requires the owner, so neither belongs to a non-owner worker's surface.
   "cyberdeck_workflow_status", "cyberdeck_workflow_changes", "cyberdeck_workflow_send",
 ]);
+const WORKER_REPORT_TOOLS = new Set<string>([
+  "cyberdeck_report_progress", "cyberdeck_request_decision", "cyberdeck_respond_checkpoint",
+  "cyberdeck_signal_exception", "cyberdeck_signal_risk",
+]);
 async function exposedTools(context: McpServerContext): Promise<readonly (typeof TOOLS)[number][]> {
   if (context.transport === undefined) return TOOLS;
   try {
-    const actor = await context.transport.request<unknown>("agent.actor.describe", { actorSessionId: context.identity.actorSessionId });
+    const actor = await callerDeadline(boundedRequest<unknown>(context.transport, "agent.actor.describe", { actorSessionId: context.identity.actorSessionId }, 1_000), 1_000, "Tool catalog identity");
     if (!isRecord(actor)) return TOOLS;
     // An Orc can start MCP before its activation append finishes. Do not narrow an unbound
     // or unknown Orc and strand its harness with a pre-grant catalog. Only known workers narrow.
     if (actor.status === "unbound" && actor.sessionKind === "worker") {
       return TOOLS.filter((tool) => UNBOUND_WORKER_TOOLS.has(tool.name));
     }
+    if (actor.sessionKind === "orchestrator") return TOOLS.filter((tool) => !WORKER_REPORT_TOOLS.has(tool.name));
   } catch { /* Recovery on an unavailable or older broker retains the universal catalog. */ }
   return TOOLS;
 }
@@ -692,7 +709,13 @@ export async function handleMcpRequest(
       const { actorSessionId: _suppliedActor, ...args } = isRecord(request.params?.arguments)
         ? request.params.arguments
         : {};
-      const result = await callTool(context, name, args);
+      const timeoutMs = name === "cyberdeck_workers_wait"
+        ? Math.min(typeof args.timeoutSeconds === "number" ? args.timeoutSeconds : DEFAULT_WAIT_SECONDS, MAX_WAIT_SEGMENT_SECONDS) * 1_000 + 1_000
+        : 15_000;
+      const boundedContext = context.transport === undefined ? context : { ...context, transport: {
+        request: <T = unknown>(method: string, params: unknown) => boundedRequest<T>(context.transport!, method, params, timeoutMs),
+      } };
+      const result = await callerDeadline(callTool(boundedContext, name, args), timeoutMs, String(name));
       const content: Array<Record<string, unknown>> = [
         { type: "text", text: JSON.stringify(result) },
       ];
@@ -748,30 +771,6 @@ function toolFailure(context: McpServerContext, error: unknown): Record<string, 
     }],
     isError: true,
   };
-}
-
-/**
- * The busy-path notice: one line beside a tool result when the orchestrator's inbox changed.
- *
- * The broker owns the inbox and the debounce, so this is one local RPC after every tool call that
- * is not itself the drain. Anything that goes wrong here is swallowed: a tool result is never
- * failed, delayed or decorated with a fabricated notice because the broker could not be asked.
- */
-async function pendingNotice(
-  context: McpServerContext,
-  name: unknown,
-): Promise<Record<string, unknown> | undefined> {
-  if (context.transport === undefined || typeof name !== "string" || NOTICE_EXEMPT_TOOLS.has(name)) {
-    return undefined;
-  }
-  try {
-    const result = await context.transport.request("agent.notifications.notice", {
-      actorSessionId: context.identity.actorSessionId,
-    });
-    return isRecord(result) && isRecord(result.notice) ? result.notice : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function failureCode(error: unknown): string {

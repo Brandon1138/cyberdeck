@@ -68,6 +68,55 @@ function granted(...capabilities: readonly string[]): OrchestratorBinding {
 }
 
 describe("AgentControlService", () => {
+  it("does not acknowledge notifications when result collection arrives after the caller deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: (value: unknown) => void;
+      const acknowledgeByDedupeKey = vi.fn();
+      const service = new AgentControlService(
+        { get: () => worker, waitForWorkerResults: () => new Promise(resolve => { finish = resolve; }) } as never,
+        { findBySessionId: async () => binding } as never, {} as never, undefined,
+        { notifications: { acknowledgeByDedupeKey } },
+      );
+      const pending = expect(service.waitForWorkers({ actorSessionId: ACTOR, targets: [{ sessionId: WORKER }], timeoutSeconds: 1 }))
+        .rejects.toMatchObject({ code: "CONTROL_PLANE_TIMEOUT" });
+      await vi.advanceTimersByTimeAsync(1_250); await pending;
+      finish({ timedOut: false, results: [{ sessionId: WORKER, status: "completed", completedTurns: 1 }] });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(acknowledgeByDedupeKey).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+  it("counts binding lookup against the wait budget and never begins collection after a timed-out lookup", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveBinding!: (value: OrchestratorBinding) => void;
+      const waitForWorkerResults = vi.fn(async () => ({ timedOut: true, results: [] }));
+      const service = new AgentControlService(
+        { get: () => worker, waitForWorkerResults } as never,
+        { findBySessionId: () => new Promise(resolve => { resolveBinding = resolve; }) } as never,
+        {} as never,
+      );
+      const result = expect(service.waitForWorkers({ actorSessionId: ACTOR, targets: [{ sessionId: WORKER }], timeoutSeconds: 1 }))
+        .rejects.toMatchObject({ code: "CONTROL_PLANE_TIMEOUT", message: expect.stringContaining("binding lookup") });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await result;
+      resolveBinding(binding);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(waitForWorkerResults).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("subtracts completed admission time from the collection segment", async () => {
+    let clock = Date.parse(now);
+    const waitForWorkerResults = vi.fn(async () => ({ timedOut: true, results: [] }));
+    const service = new AgentControlService(
+      { get: () => worker, waitForWorkerResults } as never,
+      { findBySessionId: async () => { clock += 800; return binding; } } as never,
+      {} as never, undefined, { now: () => clock },
+    );
+    await service.waitForWorkers({ actorSessionId: ACTOR, targets: [{ sessionId: WORKER }], timeoutSeconds: 1 });
+    expect(waitForWorkerResults).toHaveBeenCalledWith([{ sessionId: WORKER, completionTarget: 1 }], 200, 1200);
+  });
   it("cannot request child-environment grants through worker-start input", () => {
     const parsed = AgentStartWorkerParamsSchema.parse({
       actorSessionId: ACTOR,
@@ -1120,6 +1169,7 @@ describe("AgentControlService", () => {
       { get: () => worker, waitForWorkerResults } as never,
       { findBySessionId: vi.fn(async () => binding) } as never,
       { read: vi.fn() } as never,
+      undefined, { now: () => Date.parse(now) },
     );
 
     await expect(service.waitForWorkers({
@@ -1327,6 +1377,7 @@ describe("AgentControlService", () => {
       { read: vi.fn() } as never,
       undefined,
       {
+        now: () => Date.parse(now),
         workerCoordination: {
           listSubjects: vi.fn(),
           projectEvents,

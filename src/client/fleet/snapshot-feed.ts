@@ -1,6 +1,7 @@
 import type { FleetProjectionReply } from "../../domain/fleet-projection.js";
 import type { FleetSnapshot, InteractiveFleetTransport } from "./state.js";
 import { collectFleetSnapshot } from "./transport.js";
+import { callerDeadline } from "../../orchestration/caller-deadline.js";
 
 /** One outstanding refresh and one pending invalidation, independently of visual frame wakeups. */
 export class FleetSnapshotFeed {
@@ -18,6 +19,11 @@ export class FleetSnapshotFeed {
   private coalesce: ReturnType<typeof setTimeout> | undefined;
   private unsubscribe: (() => void)[] = [];
   private lastRefresh = 0;
+  private lastSuccess: number | undefined;
+  private staleTimer: ReturnType<typeof setTimeout> | undefined;
+  private observation: AbortController | undefined;
+  private legacyInFlight: Promise<FleetSnapshot> | undefined;
+  private legacyGeneration = 0;
   private notify = () => {};
   private reconnect: (() => Promise<InteractiveFleetTransport>) | undefined;
   private connected = (_client: InteractiveFleetTransport) => {};
@@ -65,16 +71,27 @@ export class FleetSnapshotFeed {
   refresh(): Promise<void> {
     if (this.inFlight !== undefined) { this.pending = true; return this.inFlight; }
     this.pending = false;
-    const operation = this.collect().then(() => {
+    this.observation = new AbortController();
+    const generation = this.generation;
+    this.staleTimer = setTimeout(() => {
+      const age = this.lastSuccess === undefined ? "no snapshot yet" : `${Math.floor((Date.now() - this.lastSuccess) / 1_000)}s old`;
+      this.error = `Fleet refresh pending; cached data is stale (${age}).`;
+      if (!this.disposed) this.notify();
+    }, 2_000);
+    const operation = callerDeadline(this.collect(generation, performance.now() + 5_000), 5_000, "Fleet refresh", this.observation.signal).then(() => {
       this.error = undefined;
+      this.lastSuccess = Date.now();
       if (!this.disposed) this.notify();
     }).catch((error: unknown) => {
+      // A late reply must not overwrite a later refresh or an action snapshot.
+      this.generation++;
       if (isDisconnected(error)) this.disconnect();
       this.error = `Fleet refresh failed; showing cached data: ${error instanceof Error ? error.message : String(error)}`;
       if (!this.disposed) this.notify();
       throw error;
     });
     this.inFlight = operation.finally(() => {
+      if (this.staleTimer !== undefined) clearTimeout(this.staleTimer);
       this.inFlight = undefined;
       this.lastRefresh = Date.now();
       if (this.pending) this.invalidate();
@@ -82,28 +99,31 @@ export class FleetSnapshotFeed {
     return this.inFlight;
   }
 
-  private async collect(): Promise<void> {
+  private async collect(generation: number, deadline: number): Promise<void> {
     if (this.disconnected) {
       if (this.reconnect === undefined) return;
       const client = await this.reconnect();
-      if (this.disposed) { client.close(); return; }
+      if (this.disposed || generation !== this.generation) { client.close(); return; }
       this.client = client; this.disconnected = false; this.version = undefined; this.compact = client.fleetProjection === true;
       this.connected(client); this.listen();
     }
-    const generation = this.generation;
     if (!this.compact) {
-      await this.collectLegacy(generation);
+      await this.collectLegacy(generation, deadline);
       return;
     }
     let reply: FleetProjectionReply;
-    try { reply = await this.client.request("fleet.snapshot", { version: this.version }); }
+    try { reply = await (this.client.requestWithDeadline === undefined
+      ? this.client.request<FleetProjectionReply>("fleet.snapshot", { version: this.version })
+      : this.client.requestWithDeadline<FleetProjectionReply>("fleet.snapshot", { version: this.version }, 5_000)); }
     catch (error) {
+      if (this.disposed || generation !== this.generation) return;
       if (!(typeof error === "object" && error !== null && "code" in error && error.code === "METHOD_NOT_FOUND")) throw error;
-      this.compact = false; await this.collectLegacy(generation); return;
+      this.compact = false; await this.collectLegacy(generation, deadline); return;
     }
+    if (this.disposed || generation !== this.generation) return;
     // Structural fallback also supports simple older transports; only the wire broker sends versions.
     if (typeof reply !== "object" || reply === null || !("kind" in reply)) {
-      this.compact = false; await this.collectLegacy(generation); return;
+      this.compact = false; await this.collectLegacy(generation, deadline); return;
     }
     if (this.disposed) return;
     if (generation !== this.generation) { this.pending = true; return; }
@@ -124,8 +144,24 @@ export class FleetSnapshotFeed {
     this.version = reply.version;
   }
 
-  private async collectLegacy(generation: number): Promise<void> {
-    const snapshot = await collectFleetSnapshot(this.client);
+  private async collectLegacy(generation: number, deadline: number): Promise<void> {
+    const client = this.client;
+    if (this.legacyInFlight === undefined) this.legacyGeneration = generation;
+    const sourceGeneration = this.legacyGeneration;
+    const operation = this.legacyInFlight ?? collectFleetSnapshot({ request: <T = unknown>(method: string, params: unknown) => {
+      const remaining = Math.max(0, deadline - performance.now());
+      if (remaining === 0 || generation !== this.generation || this.disposed) return Promise.reject(new Error("Fleet refresh expired"));
+      return client.requestWithDeadline === undefined ? client.request<T>(method, params)
+        : client.requestWithDeadline<T>(method, params, remaining);
+    } });
+    this.legacyInFlight = operation;
+    void operation.then(() => { if (this.legacyInFlight === operation) this.legacyInFlight = undefined; },
+      () => { if (this.legacyInFlight === operation) this.legacyInFlight = undefined; });
+    const snapshot = await operation;
+    if (sourceGeneration !== generation) {
+      this.pending = true;
+      throw new Error("Expired Fleet response discarded; refreshing current data");
+    }
     if (generation === this.generation && !this.disposed) this.snapshot = snapshot;
     else this.pending = true;
   }
@@ -160,6 +196,9 @@ export class FleetSnapshotFeed {
 
   dispose(): void {
     this.disposed = true;
+    this.observation?.abort();
+    this.generation++;
+    if (this.staleTimer !== undefined) clearTimeout(this.staleTimer);
     if (this.timer !== undefined) clearInterval(this.timer);
     if (this.coalesce !== undefined) clearTimeout(this.coalesce);
     for (const unsubscribe of this.unsubscribe.splice(0)) unsubscribe();

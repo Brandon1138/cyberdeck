@@ -87,6 +87,7 @@ export class WorkerEventChannel {
   submit(input: WorkerEventSubmitParams): Promise<EventAck> {
     return this.exclusive(async () => {
       const request = WorkerEventSubmitParamsSchema.parse(input);
+      this.requireWorker(request.workerId);
       const semanticError = validateSemantics(request);
       const eventId = request.eventId ?? randomUUID();
       if (semanticError !== undefined) {
@@ -273,7 +274,7 @@ export class WorkerEventChannel {
     const session = this.sessions.get(workerId);
     if ((session.kind ?? "worker") !== "worker") {
       throw Object.assign(new Error(`Session ${workerId} is not a worker`), {
-        code: "ACTOR_NOT_AUTHORIZED",
+        code: "WORKER_ROLE_REQUIRED",
       });
     }
     return session;

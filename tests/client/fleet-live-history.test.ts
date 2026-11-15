@@ -316,7 +316,7 @@ describe("Fleet compact rows, detail and interaction height", () => {
     const thread = worker("one", "unknown"); thread.record.cwd = "/private/tmp/工程-é";
     const snapshot = { threads: [thread] }, state = createFleetState(snapshot);
     const detail = renderSelectedDetail(snapshot, state, options(), 10).join("\n");
-    for (const value of ["Task one", "gpt-6.1-sol · max", "cwd /private/tmp/工程-é", "owner operator", "No recognized current input surface", "The original assistant reply."]) expect(detail).toContain(value);
+    for (const value of ["Task one", "gpt-6.1-sol · max", "cwd /private/tmp/工程-é", "owner unknown", "No recognized current input surface", "The original assistant reply."]) expect(detail).toContain(value);
     delete thread.record.observedModel;
     expect(renderSelectedDetail(snapshot, state, options(), 10).join("\n")).toContain("~gpt-6.1-sol · max");
   });
@@ -326,7 +326,7 @@ describe("Fleet compact rows, detail and interaction height", () => {
     const detail = renderSelectedDetail(snapshot, state, options(), 10);
     expect(detail.slice(1, 4).join("")).toBe(thread.record.name);
     expect(detail.join("\n")).toContain("gpt-6.1-sol · max");
-    expect(detail.join("\n")).toContain("owner operator");
+    expect(detail.join("\n")).toContain("owner unknown");
   });
   it("explains why a queued idle thread remains actionable", () => {
     const thread = worker("one", "idle"); thread.workerTruth!.pendingInstructions = 2;

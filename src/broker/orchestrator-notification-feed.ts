@@ -74,7 +74,10 @@ export function composeOrchestratorNotificationFeed(
     inbox: options.inbox,
     bindings: options.bindings,
     registry: options.registry,
-    delivery: { notice: (controllerId) => delivery?.notice(controllerId) ?? Promise.resolve(undefined) },
+    delivery: {
+      notice: (controllerId) => delivery?.notice(controllerId) ?? Promise.resolve(undefined),
+      peek: (controllerId) => delivery?.peek(controllerId) ?? Promise.resolve(undefined),
+    },
     ...(options.attention === undefined ? {} : { attention: options.attention }),
   });
   return {

@@ -9,6 +9,7 @@ import { encodeFrame, JsonlDecoder } from "../protocol/jsonl.js";
 interface PendingRequest {
   resolve: (result: unknown) => void;
   reject: (error: RpcError) => void;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 export class RpcError extends Error {
@@ -35,6 +36,7 @@ export class RpcClient {
           const pending = this.pending.get(frame.id);
           if (pending === undefined) continue;
           this.pending.delete(frame.id);
+          if (pending.timer !== undefined) clearTimeout(pending.timer);
           if (frame.ok) pending.resolve(frame.result);
           else pending.reject(new RpcError(frame.error.code, frame.error.message));
         } else {
@@ -57,19 +59,28 @@ export class RpcClient {
     return new RpcClient(socket);
   }
 
-  request<T = unknown>(method: string, params: unknown): Promise<T> {
+  request<T = unknown>(method: string, params: unknown, options?: { timeoutMs: number }): Promise<T> {
     if (this.closed) {
       return Promise.reject(new RpcError("BROKER_DISCONNECTED", "Broker connection is closed"));
     }
     const id = this.nextRequestId++;
     const result = new Promise<T>((resolve, reject) => {
-      this.pending.set(id, {
+      const pending: PendingRequest = {
         resolve: (value) => resolve(value as T),
         reject,
-      });
+      };
+      if (options !== undefined) pending.timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new RpcError("CONTROL_PLANE_TIMEOUT", `${method} exceeded ${options.timeoutMs}ms; outcome unknown. Reconcile durable state before retrying a mutation.`));
+      }, options.timeoutMs);
+      this.pending.set(id, pending);
     });
     this.sendFrame({ type: "request", id, method, params });
     return result;
+  }
+
+  requestWithDeadline<T = unknown>(method: string, params: unknown, timeoutMs: number): Promise<T> {
+    return this.request<T>(method, params, { timeoutMs });
   }
 
   sendFrame(frame: ClientFrame): void {
@@ -99,7 +110,10 @@ export class RpcClient {
     if (this.closed) return;
     this.closed = true;
     const error = new RpcError("BROKER_DISCONNECTED", "Broker connection closed");
-    for (const pending of this.pending.values()) pending.reject(error);
+    for (const pending of this.pending.values()) {
+      if (pending.timer !== undefined) clearTimeout(pending.timer);
+      pending.reject(error);
+    }
     this.pending.clear();
     for (const listener of this.closeListeners) listener();
   }
