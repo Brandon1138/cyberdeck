@@ -130,6 +130,8 @@ export type ReattachTarget =
   | { status: "stale" };
 
 export interface SessionRegistryOptions {
+  /** Read-only host adapter. Missing evidence always leaves recovered ownership unknown. */
+  hostProcessGroupAbsent?: (pid: number, group: number) => boolean;
   /** Installed by broker composition; never populated from public session.start input. */
   residentLifecycle?: {
     validateReservation(reservation: import("./session-ports.js").LaunchReservation): Promise<void>;

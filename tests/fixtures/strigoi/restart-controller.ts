@@ -1,3 +1,4 @@
+import { hostProcessGroupAbsent } from "../../../src/runtime/host-process-retirement.js";
 // Isolated controller process using production lifecycle/stores and a real host PTY.
 // No socket, provider CLI, credentials or shared state. Model output is deliberately absent.
 import { SessionRegistry } from "../../../src/broker/session-registry.js";
@@ -16,7 +17,7 @@ const evidence = composeStrigoiEvidence(root), store = new SessionStore(root);
 const transcripts = new ThreadTranscriptStore(root, { continuity: evidence.transcriptContinuity });
 await evidence.startup(transcripts, store);
 let launches = 0, submissions = 0, clock = Date.now();
-const registry = new SessionRegistry({ config: BrokerRuntimeConfigSchema.parse({}), store, transcripts,
+const registry = new SessionRegistry({ hostProcessGroupAbsent, config: BrokerRuntimeConfigSchema.parse({}), store, transcripts,
   recoveredSessions: await store.load(), journal: { append: async () => {} },
   workerTurnObservation: new WorkerTurnObservationAdapter(),
   adapters: { codex: { id: "codex", buildLaunchSpec: () => ({ executable: process.execPath,
