@@ -39,7 +39,7 @@ import type { CompletionLedgerEntry, RenderedInstruction, WorkerStatusReading,
 import { admitSubmitRetry, normalizedHead, SubmitVerifier, type SubmitRetryResult } from "./worker-submit-verification.js";
 import { WorkerInputReadiness } from "./worker-input-readiness.js";
 import { observeWorkerModal, projectWorkerTurnTruth, workerPreviewKind, updateWorkerPreview } from "./worker-turn-truth.js";
-import { NativeTurnActivity, pendingExitTruth, supportsNativeTurnObservation, nativeReadFailure, nativeTurnIdentity } from "./worker-turn-native-state.js";
+import { NativeTurnActivity, hasNativeTurnPort, pendingExitTruth, supportsNativeTurnObservation, nativeReadFailure, nativeTurnIdentity } from "./worker-turn-native-state.js";
 export interface WorkerTurnAppendResult {
   fatal: boolean;
   termination?: SessionTermination;
@@ -116,8 +116,8 @@ export class WorkerTurnEngine {
     interval: CANONICAL_RECONCILE_QUIET_MS,
     epoch: () => this.observationEpoch,
     canPoll: () => (this.record.provider === "claude" || this.record.provider === "codex")
-      && this.record.profile !== "scout" && this.hasNativeTurnPort(),
-    canReconcile: () => this.hasNativeTurnPort() && supportsNativeTurnObservation(this.record, this.suppressSemanticTurns === true),
+      && this.record.profile !== "scout" && hasNativeTurnPort(this.options.transcripts),
+    canReconcile: () => hasNativeTurnPort(this.options.transcripts) && supportsNativeTurnObservation(this.record, this.suppressSemanticTurns === true),
     active: () => !this.terminalFinalizing
       && (this.record.executionState === "active" || this.record.executionState === "starting"),
     reconcile: () => this.reconcileCanonicalTurns().then(() => undefined),
@@ -600,7 +600,7 @@ export class WorkerTurnEngine {
     this.terminalFinalizing = true;
     const frozenArmedReplay = this.idleTimer === undefined ? undefined : rawReplay();
     this.releaseTimers(frozenArmedReplay);
-    const initialNativeRead = this.initialInstructionPending() && this.hasNativeTurnPort()
+    const initialNativeRead = this.initialInstructionPending() && hasNativeTurnPort(this.options.transcripts)
       ? this.reconcileCanonicalTurns() : undefined;
     const captures = [...this.pendingTurnCaptures];
     const requiresSettlement = initialNativeRead !== undefined || captures.length > 0
@@ -1012,7 +1012,7 @@ export class WorkerTurnEngine {
       }
     } else if (observation?.nativeFallbackAllowed === false || observation?.nativeSourceAvailable === true
       || (this.record.provider === "claude" && observation?.activityVersion !== undefined)
-      || (observation === undefined && this.hasNativeTurnPort()
+      || (observation === undefined && hasNativeTurnPort(this.options.transcripts)
         && (this.record.provider === "claude" || this.record.provider === "codex"))) {
       // A bound native source owns completion; missing receipts and read errors prove no completion.
       return;
@@ -1403,11 +1403,6 @@ export class WorkerTurnEngine {
 
   private armCanonicalReconcile(): void { this.reconciler.armQuiet(); }
 
-  private hasNativeTurnPort(): boolean {
-    return this.options.transcripts?.observeProviderTurns !== undefined
-      && this.options.transcripts.commitProviderTurns !== undefined;
-  }
-
   private async restoreCompletionLedger(claim?: TurnCaptureClaim): Promise<boolean> {
     const epoch = this.observationEpoch, revision = this.observationRevision;
     const ledger = await this.completionLedger.restore(this.options.transcripts!, this.record.id,
@@ -1451,7 +1446,7 @@ export class WorkerTurnEngine {
       || this.turnCaptureOwner !== undefined
       || this.pendingTurnCommit !== undefined
     ) {
-      return !this.hasNativeTurnPort();
+      return !hasNativeTurnPort(this.options.transcripts);
     }
     if (!supportsNativeTurnObservation(this.record, this.suppressSemanticTurns === true)) return true;
     if (this.idleTimer !== undefined) return false;
@@ -1475,6 +1470,12 @@ export class WorkerTurnEngine {
         return false;
       }
       observation = this.mergeNativeObservation(observation, claim);
+      if (transcripts.refreshNativeReadiness && this.nativeActivity.needsReadiness(this.activity, this.activityRevision)) {
+        const refreshed = await transcripts.refreshNativeReadiness({ ...nativeTurnIdentity(this.record),
+          turnNumber: before + 1, allowFallback: false }, observation).catch(() => undefined);
+        if (!this.isCurrentCapture(claim) || claim.activityRevision !== this.activityRevision) return false;
+        if (refreshed) observation = this.mergeNativeObservation(refreshed, claim);
+      }
       const nativeTurns = observation.turns.filter((turn) => turn.transport === "provider-native");
       const readable = (observation.nativeSourceAvailable !== false || observation.nativeSourceStatus === "missing") && !this.nativeActivity.refused;
       if (this.completedTurnCount !== before || observation.turnNumber !== before + 1) return false;

@@ -1,5 +1,5 @@
 import type { SessionRecord } from "../../domain/session.js";
-import type { CaptureWorkerTurns, ProviderTerminalActivity, ProviderWorkCycle, WorkerTurnObservation } from "./worker-turn-ports.js";
+import type { CaptureWorkerTurns, ProviderTerminalActivity, ProviderWorkCycle, WorkerTurnObservation, WorkerTurnTranscriptPort } from "./worker-turn-ports.js";
 import { projectWorkerTruth, type WorkerTruth } from "../../domain/worker-truth.js";
 import { StringDecoder } from "node:string_decoder";
 
@@ -89,6 +89,11 @@ export class NativeTurnActivity {
     return !this.starting && !this.workCycle?.active && this.view?.revision === revision && this.view.current && this.view.activity === "awaiting-input";
   }
 
+  needsReadiness(screen: ProviderTerminalActivity, revision: number): boolean {
+    return this.available && !this.refused && !this.starting && !this.workCycle?.active
+      && screen === "awaiting-input" && this.activity(screen, revision) === "unknown";
+  }
+
   turns(observation: WorkerTurnObservation, revision: number,
     rendered: readonly { expectedTurn: number; renderedAt: string }[] = []): WorkerTurnObservation["turns"] {
     const turns = observation.turns;
@@ -153,6 +158,16 @@ export class NativeTurnActivity {
       if (newEvidence && captureRevision === currentRevision) {
         this.view = { activity, revision: currentRevision, current: currentGeneration };
       }
+      const ready = observation.nativeReadiness;
+      if (!this.refused && ready && ready.nativeSessionId === observation.nativeSessionId
+        && observation.nativeActivity === "idle" && evidence !== undefined
+        && occurredAt !== undefined && Number.isFinite(Date.parse(occurredAt))
+        && Date.parse(occurredAt) >= Math.max(Date.parse(this.generationStartedAt), this.inputAt === undefined ? 0 : Date.parse(this.inputAt))
+        && captureRevision === currentRevision && !this.starting && !this.workCycle?.active
+        && Number.isFinite(Date.parse(ready.observedAt)) && Date.parse(ready.observedAt) >= Math.max(
+          Date.parse(this.generationStartedAt), this.inputAt === undefined ? 0 : Date.parse(this.inputAt), this.lastWorkingAt)) {
+        this.view = { activity: "awaiting-input", revision: currentRevision, current: true };
+      }
     }
     return previousAvailability !== this.available || previousRefusal !== this.refused || before !== this.activity("unknown", currentRevision);
   }
@@ -182,4 +197,8 @@ export function supportsNativeTurnObservation(record: SessionRecord, suppressed:
 export function nativeReadFailure(record: SessionRecord, turnNumber: number): WorkerTurnObservation {
   return { sessionId: record.id, provider: record.provider, turnNumber, turns: [], nativeSourceAvailable: false,
     nativeSourceStatus: "source-error", nativeFallbackAllowed: false, nativeActivity: "unknown" };
+}
+
+export function hasNativeTurnPort(transcripts: WorkerTurnTranscriptPort | undefined): boolean {
+  return transcripts?.observeProviderTurns !== undefined && transcripts.commitProviderTurns !== undefined;
 }

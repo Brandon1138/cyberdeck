@@ -116,6 +116,9 @@ export interface WorkerTurnObservation {
   nativeSessionId?: string;
   /** Provider-authored activity only; idle is never a statement about task success. */
   nativeActivity?: "working" | "idle" | "unknown";
+  /** Fresh exact-thread runtime read, followed by an unchanged bound native transcript read.
+   * Admission evidence only: never a canonical completion or an instruction receipt. */
+  nativeReadiness?: { nativeSessionId: string; observedAt: string };
   nativeActivityEvidence?: { id: string; occurredAt?: string; kind: string; providerTurnId?: string;
     generation?: number; executionId?: string; nativeSessionId?: string;
     /** Exact source identity/interval to retain if the engine banks an authoritative negative closure. */
@@ -137,6 +140,7 @@ export interface WorkerTurnLedger {
 export interface WorkerTurnTranscriptPort {
   append(event: AppendWorkerTurnTranscriptEvent): Promise<unknown>;
   observeProviderTurns?(input: CaptureWorkerTurns): Promise<WorkerTurnObservation>;
+  refreshNativeReadiness?(input: CaptureWorkerTurns, prior: WorkerTurnObservation): Promise<WorkerTurnObservation | undefined>;
   /** Durable high-water and recent receipts, restored before assigning new Claude ordinals. */
   readCompletionLedger?(sessionId: string): Promise<WorkerTurnLedger>;
   /** Return one ordered durable acknowledgement per observed turn, including deduped turns. */

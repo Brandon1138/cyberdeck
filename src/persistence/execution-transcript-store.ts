@@ -31,6 +31,10 @@ export class ExecutionTranscriptStore extends ThreadTranscriptStore {
     const record = this.session(id);
     return record?.executor === "orbstack-container" ? record : undefined;
   }
+  override refreshNativeReadiness(input: CaptureWorkerTurns, prior: WorkerTurnObservation): Promise<WorkerTurnObservation | undefined> {
+    // A host daemon cannot establish the state of a container's native process.
+    return this.container(input.sessionId) ? Promise.resolve(undefined) : super.refreshNativeReadiness(input, prior);
+  }
   override async observeProviderTurns(input: CaptureWorkerTurns): Promise<WorkerTurnObservation> {
     const current = this.container(input.sessionId);
     if (!current) return super.observeProviderTurns(input);
