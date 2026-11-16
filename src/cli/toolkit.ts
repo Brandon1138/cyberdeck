@@ -48,7 +48,7 @@ export interface ScoutEgressStatus {
   enabled: boolean;
 }
 
-export type StrigoiCliRequest = (method: "configure" | "inspect" | "suspend" | "resume" | "disable" | "renew" | "submit", params: Record<string, unknown>) => Promise<unknown>;
+export type StrigoiCliRequest = (method: "configure" | "inspect" | "suspend" | "resume" | "disable" | "renew" | "submit" | "legacyRetirementInspect" | "legacyRetirementConfirm", params: Record<string, unknown>) => Promise<unknown>;
 
 export interface CliToolkit {
   runBroker(): Promise<unknown>;

@@ -1,3 +1,5 @@
+import { hostProcessGroupAbsent } from "../runtime/host-process-retirement.js";
+import { probeLegacyCodexRetirement } from "../runtime/legacy-codex-retirement.js";
 import { composeProductionStrigoi } from "./strigoi-production.js";
 import { composeStrigoiEvidence } from "../persistence/strigoi-evidence-runtime.js";
 import { composeOrchestratorMutationServices } from "./orchestrator-mutation-services.js";
@@ -252,6 +254,7 @@ export async function runBroker(
     submitEvent: (input) => workerEvents.submit(input),
   });
   registry = new SessionRegistry({
+    hostProcessGroupAbsent,
     adapters: executionRuntime.adapters,
     sessionRuntimeFactory: createSessionRuntime,
     executions: executionRuntime.executions,
@@ -355,6 +358,7 @@ export async function runBroker(
     coordination: workerCoordination.service, workerLeaseCredentials, modalAnswerPolicy, strigoiAdmission, residentLiveness: orchestratorLiveness,
   });
   const strigoi = await composeProductionStrigoi({ evidence, registry, transcripts, manager: orchestrators,
+    legacyRetirementProbe: record => probeLegacyCodexRetirement(record, codexOrchestratorHome.directory),
     admission: strigoiAdmission, instructions, workflows, workerControl, attention, coordination: workerCoordination.service,
     credentials: workerLeaseCredentials, activity, onError: error => console.error("Strigoi lifecycle held", error) });
   instructions.start();

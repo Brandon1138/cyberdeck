@@ -19,6 +19,7 @@ import type { WorkerLeaseCredentialCustodian } from "./worker-lease-credential-c
 import type { StrigoiAdmission } from "../orchestration/strigoi-admission.js";
 import type { AgentActivityPort } from "../orchestration/agent-activity-port.js";
 import { composeStrigoiRuntime } from "./strigoi-runtime.js";
+import { StrigoiLegacyRetirement } from "../orchestration/strigoi-legacy-retirement.js";
 
 /** Complete internal composition. Construct before queue.start; start only after broker listen. */
 export async function composeProductionStrigoi(o: {
@@ -27,6 +28,7 @@ export async function composeProductionStrigoi(o: {
     attentionStore: { list(): Promise<OrchestratorAttention[]> };
     verify(): Promise<void>; beforeDelete(id: string): Promise<void>; withDeletion<T>(id: string, commit: () => Promise<T>): Promise<T>;
     turnPrompt: ConstructorParameters<typeof StrigoiTurns>[2];
+    resolveRecoverySourceMap?: ConstructorParameters<typeof StrigoiTurns>[4];
     turnEvents: NonNullable<ConstructorParameters<typeof StrigoiTurns>[3]>;
     observeInstruction: NonNullable<StrigoiDeliveryOptions["observeInstruction"]>;
   }; transcripts: ThreadTranscriptReader & WorkerTurnTranscriptPort;
@@ -36,6 +38,7 @@ export async function composeProductionStrigoi(o: {
   attention: OrchestratorAttentionControlPlane; coordination: WorkerCoordinationService;
   credentials: WorkerLeaseCredentialCustodian; activity: AgentActivityPort;
   onError?: (error: unknown) => void;
+  legacyRetirementProbe?: ConstructorParameters<typeof StrigoiLegacyRetirement>[0]["probe"];
 }) {
   const { orchestratorStore: bindings, packets, sources } = o.evidence, repository = bindings.strigoi;
   const shared = { repository, bindings, admission: o.admission, packets, sources };
@@ -61,11 +64,12 @@ export async function composeProductionStrigoi(o: {
       }
       return o.coordination.withInstructionAuthority(target, controller, credential.leaseToken, credential.leaseVersion, apply);
     } });
-  const turns = new StrigoiTurns(o.registry, o.transcripts, o.evidence.turnPrompt, o.evidence.turnEvents);
+  const turns = new StrigoiTurns(o.registry, o.transcripts, o.evidence.turnPrompt, o.evidence.turnEvents, o.evidence.resolveRecoverySourceMap);
   const runtime = await composeStrigoiRuntime({ ...shared, registry: o.registry, manager: o.manager, continuity,
     verifyContinuity: o.evidence.verify, beforeDelete: o.evidence.beforeDelete, withDeletion: o.evidence.withDeletion,
     ...(o.onError ? { onError: o.onError } : {}),
     succession: { packets, sources, turns, workers, delivery, activity: o.activity } });
-  const control = new StrigoiControl({ repository, registry: o.registry, admission: o.admission, lifecycle: runtime.lifecycle, continuity, succession: runtime.succession!, delivery, validateSelection: s => o.manager.validateResidentSelection(s) });
+  const legacyRetirement = new StrigoiLegacyRetirement({ repository, bindings, registry: o.registry, ...(o.legacyRetirementProbe ? { probe: o.legacyRetirementProbe } : {}) });
+  const control = new StrigoiControl({ repository, registry: o.registry, admission: o.admission, lifecycle: runtime.lifecycle, continuity, succession: runtime.succession!, delivery, legacyRetirement, validateSelection: s => o.manager.validateResidentSelection(s) });
   return { ...runtime, control, delivery, demand, turns, packets, sources };
 }

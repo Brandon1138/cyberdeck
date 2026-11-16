@@ -1,6 +1,7 @@
 import { OwnershipSubjectSchema, type OwnershipSubject } from "../domain/worker-coordination.js";
 import { OrchestratorAttentionSchema, type OrchestratorAttention } from "../domain/orchestrator-attention.js";
 import type { StrigoiHold, StrigoiIdentity, StrigoiPacketRef, StrigoiSourceRef } from "../domain/strigoi.js";
+import { strigoiSuccessionLineage } from "../domain/strigoi-succession-lineage.js";
 import type { StrigoiAdmission } from "./strigoi-admission.js";
 import type { StrigoiPacketPort, StrigoiReconciliationParticipant, StrigoiRepository } from "./strigoi-ports.js";
 import type { WorkerControlService } from "./worker-control-service.js";
@@ -32,15 +33,15 @@ export class StrigoiWorkerRecovery implements StrigoiReconciliationParticipant {
           || !transition?.predecessor || transition.successor?.sessionId !== identity.sessionId
           || !["reconciling", "complete"].includes(transition.phase)
           || JSON.stringify(transition.packet) !== JSON.stringify(packet)) throw new Error("STRIGOI_STALE_RECOVERY");
-        return transition;
+        return { transition, predecessors: strigoiSuccessionLineage(state).map(link => link.predecessor?.sessionId) };
       };
-      const transition = await validate();
+      const { transition, predecessors } = await validate();
       const inventory = await this.inventory(packet);
       await validate();
       const holds = await this.options.workers.recoverResident(identity, inventory.workers, async () => { await validate(); });
       await validate();
       for (const wait of inventory.waits) {
-        if (wait.actorSessionId === transition.predecessor!.sessionId && wait.status === "armed"
+        if (predecessors.includes(wait.actorSessionId) && wait.status === "armed"
           && !await this.options.attention.schedulingRecord(wait.controllerId)) {
           return [...holds, { code: "attention-evidence-missing", detail: "Captured armed wait has no current durable record; refusing to infer cancellation or consumption.", sourceIds: [wait.epoch] }];
         }

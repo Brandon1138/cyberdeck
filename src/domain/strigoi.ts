@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { OrchestratorBindingSchema, STRIGOI_KEY, type OrchestratorBinding } from "./orchestrator.js";
 import { ReasoningEffortSchema } from "./session.js";
+import { LegacyRetirementReceiptSchema } from "./strigoi-legacy-retirement.js";
 
 export { STRIGOI_KEY } from "./orchestrator.js";
 export const STRIGOI_LIMITS = {
@@ -8,6 +9,7 @@ export const STRIGOI_LIMITS = {
   packetManifestBytes: 256 * 1024,
   sourceReferencesPerPage: 64,
   sourceTextBytesPerPage: 32 * 1024,
+  recoveryInlineBytes: 256 * 1024,
 } as const;
 
 export function isStrigoiBinding(binding: OrchestratorBinding): boolean {
@@ -41,6 +43,9 @@ export const StrigoiTransitionSchema = z.object({
   packetBytes: z.number().int().nonnegative().optional(), recovery: z.boolean().optional(),
   lastMutationId: z.string().optional(),
   adoptionDeferred: z.boolean().optional(),
+  supersededBy: z.string().optional(),
+  /** Consecutive replacements before a usable recovery boundary; survives broker restart. */
+  recoveryAttempts: z.number().int().nonnegative().optional(),
   turnHistory: z.array(SuccessionTurnSchema.extend({ kind: z.enum(["checkpoint", "adoption"]) })).optional(),
 }).refine((transition) => transition.predecessor === undefined || transition.predecessor.incarnation === transition.expectedIncarnation,
   "Predecessor must match expected incarnation")
@@ -59,6 +64,8 @@ export const StrigoiAdoptionSchema = z.object({
   identity: StrigoiIdentitySchema, packetHash: digest, coverageId: z.uuid(),
   handledSourceIds: z.array(digest).refine((ids) => new Set(ids).size === ids.length, "Duplicate handled IDs"),
   account: prose.refine((value) => value.trim().length > 0, "Adoption account required"),
+  /** Conversational checkpoint chain only; unread originals remain pending. */
+  recovery: z.object({ version: z.literal(1), baseMutationId: z.string().min(1).optional() }).strict().optional(),
 }).strict();
 export const StrigoiContinuityReceiptSchema = z.object({
   mutationId: z.string().min(1), requestHash: digest, packet: StrigoiPacketRefSchema,
@@ -73,6 +80,7 @@ export const StrigoiStateSchema = z.object({
   transition: StrigoiTransitionSchema.optional(), latestPacket: StrigoiPacketRefSchema.optional(), retainedSessionIds: z.array(z.uuid()),
   successionRequests: z.array(z.object({ mutationId: z.string(), expectedIncarnation: z.number().int(), reason: z.string(), transitionId: z.string() })).optional(),
   successionHistory: z.array(StrigoiTransitionSchema).optional(),
+  legacyRetirements: z.array(LegacyRetirementReceiptSchema).optional(),
   continuityReceipts: z.array(StrigoiContinuityReceiptSchema).optional(),
   continuationHolds: z.array(StrigoiHoldSchema).optional(),
   hold: StrigoiHoldSchema.optional(), updatedAt: z.iso.datetime(),
@@ -102,6 +110,7 @@ export type StrigoiState = z.infer<typeof StrigoiStateSchema>;
 /** Derived operator display data, never a launch, grant or delivery authority. */
 export interface StrigoiFleetView {
   canonical: boolean;
+  recovery?: { phase: StrigoiPhase; ownership: "owned" | "unknown" | "none"; lastAttemptAt?: string | undefined; nextAction: string };
   incarnation?: number;
   desired: StrigoiDesired;
   readiness: "passive" | "held" | "unconfigured" | "ready";

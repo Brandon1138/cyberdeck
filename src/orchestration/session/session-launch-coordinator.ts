@@ -324,6 +324,8 @@ export class SessionLaunchCoordinator {
     const record: SessionRecord = {
       ...provisional,
       pid: sessionRuntime.pid,
+      ...(provisional.executor !== "orbstack-container" && sessionRuntime.recoveryProcessGroup === sessionRuntime.pid
+        ? { recoveryProcessGroup: sessionRuntime.recoveryProcessGroup } : {}),
       executionState: "active",
       updatedAt: new Date().toISOString(),
       launchRecord: resolvedLaunchRecord(launchSpec, "launch"),

@@ -76,6 +76,7 @@ export interface NotificationsReadResult {
 /** The delivery service's busy-path entry point, as the control plane sees it. */
 export interface NotificationNoticePort {
   notice(controllerId: string): Promise<{ notice: Notice; text: string } | undefined>;
+  peek?(controllerId: string): Promise<{ notice: Notice; text: string; cursor: number } | undefined>;
 }
 
 export class OrchestratorNotificationControlError extends Error {
@@ -181,6 +182,16 @@ export class OrchestratorNotificationControlPlane {
       const delivered = await this.options.delivery.notice(orchestratorController(binding).controllerId);
       return delivered === undefined ? {} : { notice: { ...delivered.notice, text: delivered.text } };
     });
+  }
+
+  async peek(input: z.input<typeof AgentNotificationsNoticeParamsSchema>) {
+    const request = AgentNotificationsNoticeParamsSchema.parse(input);
+    return admitted(this.options.strigoi, request.actorSessionId, async () => {
+      const binding = await this.options.bindings.findBySessionId(request.actorSessionId);
+      if (binding === undefined || this.options.delivery?.peek === undefined) return {};
+      const hint = await this.options.delivery.peek(orchestratorController(binding).controllerId);
+      return hint === undefined ? {} : { notice: { ...hint.notice, text: hint.text }, cursor: hint.cursor };
+    }, "read");
   }
 
   /** The key a wait acknowledges when it delivers a completed target. */

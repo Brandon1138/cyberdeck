@@ -120,5 +120,5 @@ export function composeStrigoiEvidence(stateDirectory: string) {
     return indexedInstructionReceipt(record, await turnTranscripts.readCompletionLedger(effectiveInstruction(record).targetSessionId));
   };
   const turnEvents = (sessionId: string) => archivedTurnEvents(archive, packets, sessionId);
-  return { turnEvents, turnPrompt: access.prompt.bind(access), observeInstruction, orchestratorStore, artifactStore, instructionStore, workflowStore, attentionStore, packets, sources, archive, transcriptContinuity, beforeDelete, withDeletion, startup, verify: async () => { await verify(); } };
+  return { turnEvents, turnPrompt: access.prompt.bind(access), resolveRecoverySourceMap: access.resolveRecoverySourceMap.bind(access), observeInstruction, orchestratorStore, artifactStore, instructionStore, workflowStore, attentionStore, packets, sources, archive, transcriptContinuity, beforeDelete, withDeletion, startup, verify: async () => { await verify(); } };
 }

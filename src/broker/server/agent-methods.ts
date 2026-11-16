@@ -120,6 +120,9 @@ export const agentMethods: Record<string, BrokerMethodHandler> = {
   "agent.notifications.notice": async (server, _context, frame) => {
     return requireNotifications(server.options).notice(AgentNotificationsNoticeParamsSchema.parse(frame.params));
   },
+  "agent.notifications.peek": async (server, _context, frame) => {
+    return requireNotifications(server.options).peek(AgentNotificationsNoticeParamsSchema.parse(frame.params));
+  },
   "agent.thread.enqueue": async (server, _context, frame) => {
     return requireInstructions(server.options).enqueue(EnqueueInstructionParamsSchema.parse(frame.params));
   },

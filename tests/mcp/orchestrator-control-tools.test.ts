@@ -15,7 +15,7 @@ function context(transport: McpBrokerTransport): McpServerContext {
   return {
     identity: { actorSessionId: ACTOR, brokerSocketPath: SOCKET },
     transport: {
-      request: <T,>(method: string, params: unknown): Promise<T> => method === "agent.notifications.notice"
+      request: <T,>(method: string, params: unknown): Promise<T> => method === "agent.notifications.peek"
         ? Promise.resolve(undefined as T)
         : transport.request<T>(method, params),
     },

@@ -4,6 +4,8 @@ import type { StrigoiLifecycle, StrigoiLifecycleOptions } from "./strigoi-lifecy
 import type { StrigoiContinuity } from "./strigoi-continuity.js";
 import type { StrigoiSuccession } from "./strigoi-succession.js";
 import type { StrigoiDeliveryPort } from "./strigoi-ports.js";
+import type { StrigoiLegacyRetirement } from "./strigoi-legacy-retirement.js";
+import type { LegacyRetirementRequest } from "../domain/strigoi-legacy-retirement.js";
 
 const fail = (code: string) => Object.assign(new Error(code), { code });
 /** Thin application facade: canonical lifecycle, continuity and instruction services own all state. */
@@ -11,8 +13,17 @@ export class StrigoiControl {
   constructor(private readonly o: Pick<StrigoiLifecycleOptions, "repository" | "registry" | "admission"> & {
     lifecycle: StrigoiLifecycle; continuity: StrigoiContinuity; succession: StrigoiSuccession;
     delivery: StrigoiDeliveryPort; validateSelection(selection: StrigoiSelection): Promise<void>;
+    legacyRetirement?: StrigoiLegacyRetirement;
   }) {}
   inspect() { return this.o.lifecycle.inspect(); }
+  legacyRetirementInspect() {
+    if (!this.o.legacyRetirement) throw fail("STRIGOI_LEGACY_PROBE_UNAVAILABLE");
+    return this.o.legacyRetirement.inspect();
+  }
+  legacyRetirementConfirm(request: LegacyRetirementRequest) {
+    if (!this.o.legacyRetirement) throw fail("STRIGOI_LEGACY_PROBE_UNAVAILABLE");
+    return this.o.legacyRetirement.confirm(request);
+  }
   async configure(selection: StrigoiSelection, mutationId: string) {
     await this.o.validateSelection(selection);
     await this.o.lifecycle.configure(selection, mutationId);
@@ -29,7 +40,10 @@ export class StrigoiControl {
     const result = await this.o.succession.renew(expectedIncarnation, reason, mutationId);
     this.wake(); return result;
   }
-  submit(message: string, messageId: string) { return this.o.delivery.submit(message, messageId); }
+  async submit(message: string, messageId: string) {
+    const result = await this.o.delivery.submit(message, messageId);
+    this.wake(); return result;
+  }
   async checkpoint(actor: string, prose: string, sources: StrigoiSourceRef[], mutationId: string) {
     const identity = await this.actor(actor, "thread.enqueue");
     return this.o.continuity.checkpoint(identity, prose, sources, mutationId, this.guard(identity, "thread.enqueue"));

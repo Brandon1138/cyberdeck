@@ -42,6 +42,7 @@ export function cloneRecord(record: SessionRecord): SessionRecord {
         }),
     ...(launchRecord === undefined ? {} : { launchRecord }),
     ...(record.termination === undefined ? {} : { termination: { ...record.termination } }),
+    ...(record.retirementObservation === undefined ? {} : { retirementObservation: { ...record.retirementObservation } }),
   };
 }
 

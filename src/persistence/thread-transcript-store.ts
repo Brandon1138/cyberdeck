@@ -1,4 +1,5 @@
 import { withBindingAuthority } from "./binding-authority.js";
+import { refreshCodexNativeReadiness } from "./codex-native-readiness.js";
 import { parseNativeContinuityMessage, type NativeContinuityMessage } from "../domain/native-continuity-message.js";
 import { providerTurnReceipt, WorkerLedgerStore, WORKER_LEDGER_REJECTIONS, mergeWorkerLedgers } from "./worker-ledger-store.js";
 import { syncPrivateFile } from "./atomic-private-file.js";
@@ -65,12 +66,13 @@ export interface ThreadTranscriptStoreOptions {
   retainedFiles?: number;
   claudeProjectsDirectory?: string;
   codexSessionsDirectory?: string;
+  /** Existing managed daemon only; this read never starts a daemon or a thread. */
+  codexRemoteHome?: string;
   claudeConversations?: ClaudeConversationBindingStore;
   codexConversations?: CodexConversationBindingStore;
   /** Called when startup moves aside a ledger the reader refused; defaults to a console warning. */
   onLedgerQuarantine?: (event: { sessionId: string; reason: string; path: string }) => void;
 }
-
 
 /**
  * Whether a Claude session's semantic capture is following a file, and why it is not.
@@ -202,6 +204,11 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
       if (event.kind === "turn" || (event.kind === "instruction" && event.data.instructionState === "rendered")) await this.persistWorkerLedger(event.sessionId);
       return event;
     });
+  }
+
+  refreshNativeReadiness(input: CaptureProviderTurns, prior: WorkerTurnObservation): Promise<WorkerTurnObservation | undefined> {
+    return refreshCodexNativeReadiness(input, prior, this.codexConversations,
+      value => this.observeProviderTurns(value), this.options.codexRemoteHome);
   }
 
   /** Read and prepare provider turns without mutating the semantic transcript. */
@@ -950,22 +957,6 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
     this.codexStatuses.set(input.sessionId, resolved);
     return resolved.path;
   }
-
 }
 
-export async function pruneLegacyTranscript(
-  stateDirectory: string,
-  confirmed: boolean,
-): Promise<{ path: string; removed: boolean }> {
-  const path = join(stateDirectory, "threads", "transcript.jsonl");
-  if (!confirmed) {
-    throw new Error("Legacy transcript prune requires --confirm-delete-legacy-transcript");
-  }
-  try {
-    await unlink(path);
-    return { path, removed: true };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { path, removed: false };
-    throw error;
-  }
-}
+export { pruneLegacyTranscript } from "./legacy-transcript-prune.js";

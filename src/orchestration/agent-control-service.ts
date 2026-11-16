@@ -984,7 +984,17 @@ export class AgentControlService {
    * plus a ticket, so an accepted 600-second wait is honored across calls instead of being killed
    * by an MCP client deadline the caller cannot see or configure.
    */
-  async waitForWorkers(input: z.input<typeof AgentWaitWorkersParamsSchema>): Promise<{
+  async waitForWorkers(input: z.input<typeof AgentWaitWorkersParamsSchema>) {
+    const request = AgentWaitWorkersParamsSchema.parse(input);
+    const startedAtMs = this.now();
+    const budgetMs = Math.min(request.timeoutSeconds, this.segmentSeconds) * 1_000;
+    const observation = new AbortController();
+    // The small response allowance covers projection/serialization, never another wait segment.
+    try { return await callerDeadline(this.waitForWorkersWithinDeadline(request, startedAtMs, budgetMs, observation.signal), budgetMs + 250, "Worker wait (including admission and collection)"); }
+    finally { observation.abort(); }
+  }
+
+  private async waitForWorkersWithinDeadline(input: z.input<typeof AgentWaitWorkersParamsSchema>, startedAtMs: number, budgetMs: number, observation: AbortSignal): Promise<{
     timedOut: boolean;
     results: Awaited<ReturnType<WorkerTruthQueryPort["waitForWorkerResults"]>>["results"];
     wait: WaitEnvelope;
@@ -992,20 +1002,18 @@ export class AgentControlService {
     scoutWave?: ScoutWaveDigest;
   }> {
     const request = AgentWaitWorkersParamsSchema.parse(input);
-    await admitted(this.strigoi, request.actorSessionId, async () => undefined, "read");
-    const binding = await this.requireBinding(request.actorSessionId);
+    const admissionStarted = performance.now();
+    await callerDeadline(admitted(this.strigoi, request.actorSessionId, async () => undefined, "read"), budgetMs, "Worker wait admission");
+    const binding = await callerDeadline(this.requireBinding(request.actorSessionId), Math.max(0, budgetMs - (performance.now() - admissionStarted)), "Worker wait binding lookup");
     for (const target of request.targets) {
       const worker = this.registry.get(target.sessionId);
       this.requireCapability(binding.grant, "thread.read", worker);
     }
 
-    const pending = this.openWait(request);
-    // The deadline was derived from `openWait`'s clock read, so the remaining budget is measured
-    // against that same read. A second `this.now()` here could straddle a millisecond tick and turn
-    // a fresh 30-second wait into a 29_999 ms segment — the budget the caller asked for, minus a
-    // scheduling artifact.
+    const pending = this.openWait(request, startedAtMs);
+    // Admission and binding lookup spend the same budget as result collection.
     const remainingMs = Math.max(0, pending.wait.deadlineMs - pending.nowMs);
-    let segmentMs = Math.min(remainingMs, this.segmentSeconds * 1_000);
+    let segmentMs = Math.min(remainingMs, Math.max(0, budgetMs - (pending.nowMs - startedAtMs)));
     let outcome: Awaited<ReturnType<WorkerTruthQueryPort["waitForWorkerResults"]>>;
     let intervention: WaitInterventionSummary | undefined;
     if (
@@ -1057,11 +1065,13 @@ export class AgentControlService {
       );
     }
 
-    // One truth, two readers: a target this wait delivered is a settled record the feed no longer
-    // needs to announce, so it is consumed here with `deliveredVia: ["wait"]`.
+    // A late collection cannot consume notifications for a caller that already timed out.
+    observation.throwIfAborted();
     if (this.notifications !== undefined) {
       await admitted(this.strigoi, request.actorSessionId, async () => {
+        observation.throwIfAborted();
         const current = await this.requireBinding(request.actorSessionId);
+        observation.throwIfAborted();
         for (const target of request.targets) this.requireCapability(current.grant, "thread.read", this.registry.get(target.sessionId));
         await consumeSettledNotifications(this.notifications!, orchestratorController(current).controllerId, request.targets, outcome.results);
       });
@@ -1125,14 +1135,8 @@ export class AgentControlService {
     };
   }
 
-  /**
-   * Resolves the ticket for this call, expiring stale ones so a resume cannot inherit a dead clock.
-   *
-   * Returns the clock read it made as `nowMs`. One read answers every time question this call has —
-   * which tickets are stale, when a fresh wait started, when it is due, and how much budget is left
-   * — so those answers cannot disagree with each other by a tick.
-   */
-  private openWait(request: z.infer<typeof AgentWaitWorkersParamsSchema>): {
+  /** Fresh tickets inherit request arrival time; stale tickets cannot inherit a dead clock. */
+  private openWait(request: z.infer<typeof AgentWaitWorkersParamsSchema>, startedAtMs: number): {
     wait: PendingWait;
     resumed: boolean;
     nowMs: number;
@@ -1156,8 +1160,8 @@ export class AgentControlService {
     const wait: PendingWait = {
       waitId: randomUUID(),
       actorSessionId: request.actorSessionId,
-      startedAtMs: now,
-      deadlineMs: now + request.timeoutSeconds * 1_000,
+      startedAtMs,
+      deadlineMs: startedAtMs + request.timeoutSeconds * 1_000,
       timeoutSeconds: request.timeoutSeconds,
       settleOnIntervention: request.settleOnIntervention === true,
     };
@@ -1383,3 +1387,4 @@ function validateScoutScope(cwd: string, scope: readonly string[]): void {
   const violation = scoutScopeViolation(cwd, scope);
   if (violation !== undefined) throw new AgentControlError("CAPABILITY_DENIED", violation);
 }
+import { callerDeadline } from "./caller-deadline.js";

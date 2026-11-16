@@ -26,17 +26,29 @@ export async function productionFixture() {
     if (result.state !== "rendered") return result;
     effects.push({ id: args[4]!, sessionId: args[0], text: args[1], ...(typeof args[3]?.successionKind === "string" ? { kind: args[3].successionKind } : {}) });
     if (args[3]?.successionKind) {
-      let path: string | undefined = JSON.parse(args[1].match(/page at ("[^"\n]+")./)![1]!);
+      const inlineMarker = "Recovery evidence is included below; no file read is needed for these sources.\n";
+      const inline = args[1].includes(inlineMarker) ? JSON.parse(args[1].split(inlineMarker)[1]!.split("\n")[0]!) : undefined;
+      const pathMatch = args[1].match(/page at ("[^"\n]+")./);
+      if (!inline && !pathMatch) throw new Error("Missing fixture recovery evidence");
+      let path: string | undefined = pathMatch ? JSON.parse(pathMatch[1]!) : undefined;
       const handled: string[] = [];
+      const handledIndices: number[] = [];
+      if (inline) handled.push(...inline.sources.map((s: { coverageSourceId: string }) => s.coverageSourceId));
+      if (inline) handledIndices.push(...inline.sources.map((s: { sourceIndex: number }) => s.sourceIndex));
       while (path) {
         const page = JSON.parse(await readFile(path, "utf8"));
         if (page.sources.length > 64 || Buffer.byteLength(page.sources.map((s: { text: string }) => s.text).join("")) > 32768) throw new Error("Unbounded evidence page");
         handled.push(...page.sources.map((s: { coverageSourceId: string }) => s.coverageSourceId)); path = page.nextPath;
+        handledIndices.push(...page.sources.map((s: { sourceIndex: number }) => s.sourceIndex));
       }
       const state = await evidence.orchestratorStore.strigoi.read();
+      const contract = args[1].match(/Return only compact JSON matching (\{[^\n]+\})/);
+      const recovery = contract ? JSON.parse(contract[1]!).recovery : undefined;
+      const compact = contract && "handledSourceIndices" in JSON.parse(contract[1]!);
       await respond(args[0], JSON.stringify(args[3].successionKind === "checkpoint" ? { checkpoint: "Preserve original constraint: review only; no publication because approval is outstanding." }
         : { identity: state.transition!.successor, packetHash: state.transition!.packet!.sha256,
-          coverageId: state.transition!.packet!.coverageId, handledSourceIds: handled, account: "Synthetic receipt, not a semantic score; evidence inspected." }), result.expectedTurn!);
+          coverageId: state.transition!.packet!.coverageId, ...(compact ? { handledSourceIndices: handledIndices } : { handledSourceIds: handled }), account: "Synthetic receipt, not a semantic score; evidence inspected.",
+          ...(recovery ? { recovery } : {}) }), result.expectedTurn!);
     }
     return result;
   });

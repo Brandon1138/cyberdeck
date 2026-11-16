@@ -8,6 +8,7 @@ import { orchestratorLaunchBinding } from "./orchestrator-launch-policy.js";
 import type { LaunchReservation, SessionLookupPort, SessionStartPort, SessionLaunchOutcomePort } from "./session/session-ports.js";
 import type { StrigoiAdmissionPort, StrigoiInspection, StrigoiRepository } from "./strigoi-ports.js";
 import { strigoiPrompt } from "./strigoi-prompt.js";
+import { legacyRetirementMatches } from "../domain/strigoi-legacy-retirement.js";
 
 const RETRY_DELAYS = [1000, 5000, 30000] as const;
 const errorCode = (error: unknown): string => typeof error === "object" && error !== null && "code" in error ? String(error.code) : "LAUNCH_FAILED";
@@ -36,6 +37,7 @@ export interface StrigoiLifecycleOptions {
   registry: SessionLookupPort & SessionStartPort & SessionLaunchOutcomePort & {
     ownsProcess(sessionId: string): boolean;
     stopResidentProcess(sessionId: string): Promise<void>;
+    residentRetirement?(sessionId: string, generation: number): Promise<"confirmed" | "unknown">;
     workerTruth(sessionId: string): { modalOpen: boolean };
   };
   onError?: (error: unknown) => void;
@@ -53,6 +55,13 @@ export class StrigoiLifecycle {
   attachSuccession(succession: { recover(state: StrigoiState): Promise<void> }): void { this.succession = succession; }
   successionEpoch(): number { return this.epoch; }
   permitsSuccession(epoch: number): boolean { return !this.disposed && epoch === this.epoch; }
+  async retirement(sessionId: string, generation: number): Promise<"confirmed" | "unknown"> {
+    if (await this.options.registry.residentRetirement?.(sessionId, generation) === "confirmed") return "confirmed";
+    if (this.options.registry.ownsProcess(sessionId)) return "unknown";
+    const record = this.options.registry.get(sessionId), state = await this.options.repository.read();
+    return record.generation === generation && state.legacyRetirements?.some(receipt => legacyRetirementMatches(receipt, record))
+      ? "confirmed" : "unknown";
+  }
   wakeSuccession(due: number): void { if (!this.disposed) this.schedule(due); }
 
   /** Core boot calls this before exposing the socket; no provider work is performed here. */
@@ -91,8 +100,9 @@ export class StrigoiLifecycle {
       if (current.desired === desired && (desired !== "enabled" || !current.hold)) return current;
       // An unresolved assigned identity must survive resume; clearing it would authorize duplicates.
       let transition = current.transition?.predecessor || current.transition?.successor ? current.transition : undefined;
+      if (desired === "enabled" && transition) transition = { ...transition, recoveryAttempts: 0 };
       if (desired === "enabled" && transition?.predecessor && transition.phase === "launching" && !transition.successor)
-        transition = { ...transition, attempts: 0, nextAttemptAt: undefined, launchStartedAt: undefined };
+        transition = { ...transition, attempts: 0, recoveryAttempts: 0, nextAttemptAt: undefined, launchStartedAt: undefined };
       return this.write(current, { desired, ...(desired === "enabled" ? { hold: undefined, transition } : {}) }, mutationId);
     });
     if (desired !== "enabled") await this.stopOwned(state);
@@ -100,11 +110,20 @@ export class StrigoiLifecycle {
 
   reconcile(): Promise<void> {
     if (this.disposed) return Promise.resolve();
-    if (this.pending) return this.pending;
-    const work = this.reconcileOnce();
-    this.pending = work.finally(() => { this.pending = undefined; });
+    if (this.pending) { this.reconcileAgain = true; return this.pending; }
+    const work = async () => {
+      do {
+        this.reconcileAgain = false;
+        await this.reconcileOnce();
+      } while (this.reconcileAgain && !this.disposed);
+    };
+    this.pending = work().finally(() => {
+      this.pending = undefined;
+      if (this.reconcileAgain && !this.disposed) this.wakeSuccession(Date.now());
+    });
     return this.pending;
   }
+  private reconcileAgain = false;
 
   async inspect(): Promise<StrigoiInspection> {
     const state = await this.options.repository.read();
@@ -247,6 +266,9 @@ export class StrigoiLifecycle {
     const reservation = { sessionId: successor.sessionId, transitionId: transition.id };
     const outcome = this.options.registry.launchOutcome(reservation, successor.generation);
     if (outcome.kind === "failed") { await this.settleFailure(state, outcome.error); return; }
+    if (outcome.kind === "unresolved" && await this.options.registry.residentRetirement?.(successor.sessionId, successor.generation) === "confirmed") {
+      await this.settleFailure(state, failure("STRIGOI_RESERVED_RUNTIME_RETIRED")); return;
+    }
     if (outcome.kind !== "owned") {
       await this.hold("launch-ownership-unresolved", "Launch outcome has no matching owned execution or proven failure; do not start another process."); return;
     }

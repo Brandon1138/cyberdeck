@@ -32,6 +32,7 @@ const delays = [1000, 5000, 30000];
 
 /** One serialized driver per resident. Every effect is preceded by durable intent and fresh authority. */
 export class StrigoiSuccession {
+  private activityRevision: number | undefined;
   private tail: Promise<unknown> = Promise.resolve();
   private reconciliation: { id: string; work: Promise<import("../domain/strigoi.js").StrigoiHold[]> } | undefined;
   private drain?: { id: string; done: boolean; wait: Promise<boolean> };
@@ -95,7 +96,17 @@ export class StrigoiSuccession {
       // A bounded phase loop; waiting turns/unknown effects yield instead of blocking broker boot.
       for (let step = 0; step < 20; step++) {
         const state = await this.o.repository.read(), t = state.transition;
-        if (!t || t.id !== transitionId) throw fault("STRIGOI_STALE_TRANSITION");
+        if (!t) throw fault("STRIGOI_STALE_TRANSITION");
+        // Internal recovery callers may retain a prior link's ID after a lost response.
+        // Follow only explicit durable supersession edges, never an unrelated renewal.
+        const visited = new Set<string>();
+        while (transitionId !== t.id && !visited.has(transitionId)) {
+          visited.add(transitionId);
+          const next = state.successionHistory?.find(prior => prior.id === transitionId)?.supersededBy;
+          if (!next) throw fault("STRIGOI_STALE_TRANSITION");
+          transitionId = next;
+        }
+        if (transitionId !== t.id) throw fault("STRIGOI_STALE_TRANSITION");
         if (state.desired !== "enabled" || !this.o.lifecycle.permitsSuccession(epoch)) break;
         if (state.hold?.code === "continuity-evidence-unavailable") break;
         if (t.predecessor && !["requested", "checkpointing", "aborted"].includes(t.phase)) await this.o.admission.freeze(t.predecessor);
@@ -105,7 +116,10 @@ export class StrigoiSuccession {
         // uses the recorded per-phase revision marker below, not the current state revision.
         const marker = t.lastMutationId;
         if (marker) await this.o.repository.confirmMutation(marker);
-        await this.event(state);
+        if (this.activityRevision !== state.revision) {
+          this.activityRevision = state.revision;
+          await this.event(state).catch(error => this.o.onError?.(error));
+        }
         if (t.phase === "complete" || t.phase === "aborted") {
           if (t.phase === "aborted" && !await this.startDrain(t).wait && !this.drain!.done) {
             this.o.lifecycle.wakeSuccession(this.now() + 1000); break;
@@ -138,7 +152,7 @@ export class StrigoiSuccession {
         // Once a stop has been issued its outcome can be unknown: never reopen an actor
         // that a delayed stop may kill. Proven retirement is an irreversible forward boundary.
         if (t.retirementConfirmedAt || t.stopRequestedAt || !["requested", "checkpointing", "sealed"].includes(t.phase)
-          || await this.o.registry.residentRetirement(t.predecessor!.sessionId, t.predecessor!.generation) === "confirmed") throw fault("STRIGOI_ABORT_UNSAFE");
+          || await this.o.lifecycle.retirement(t.predecessor!.sessionId, t.predecessor!.generation) === "confirmed") throw fault("STRIGOI_ABORT_UNSAFE");
         await this.write(s, { transition: { ...t, phase: "aborted", lastMutationId: `abort:${mutationId}` }, hold: undefined }, `abort:${mutationId}`);
       });
       const s = await this.o.repository.read();
@@ -173,13 +187,13 @@ export class StrigoiSuccession {
     if (!this.o.lifecycle.permitsSuccession(epoch) || (await this.o.repository.read()).desired !== "enabled") return false;
     if (["committed", "adopting", "reconciling"].includes(t.phase) && t.successor
       && (!this.o.registry.ownsProcess(t.successor.sessionId) || this.o.registry.get(t.successor.sessionId).generation !== t.successor.generation
-        || this.o.registry.get(t.successor.sessionId).exitCode !== null)) return this.hold(t, epoch, "successor-unavailable", "Committed successor has no exact owned active runtime; no adoption execution is authorized.");
+        || this.o.registry.get(t.successor.sessionId).exitCode !== null)) return this.replaceUnavailable(s, epoch);
     switch (t.phase) {
       case "requested":
       case "checkpointing": {
         if (!this.o.delivery) return this.hold(t, epoch, "delivery-participant-missing", "Task 8 production delivery participant is not wired.");
         await this.o.delivery.hold(old, t.id);
-        const retired = await this.o.registry.residentRetirement(old.sessionId, old.generation) === "confirmed";
+        const retired = await this.o.lifecycle.retirement(old.sessionId, old.generation) === "confirmed";
         if (!retired && this.o.registry.ownsProcess(old.sessionId)) {
           if (t.checkpointTurn && !await this.turn(s, epoch, "checkpoint")) return false;
           const boundary = await this.o.turns.boundary(old);
@@ -196,13 +210,13 @@ export class StrigoiSuccession {
       }
       case "sealed": return this.change(t.id, epoch, (_s, current) => ({ transition: this.phase(current, "retiring"), hold: undefined }));
       case "retiring": {
-        if (await this.o.registry.residentRetirement(old.sessionId, old.generation) !== "confirmed") {
+        if (await this.o.lifecycle.retirement(old.sessionId, old.generation) !== "confirmed") {
           if (!t.stopRequestedAt && this.o.registry.ownsProcess(old.sessionId)) {
             if (!await this.change(t.id, epoch, (_s, current) => ({ transition: { ...current, stopRequestedAt: this.at() } }))) return false;
             // Request once, outside authority. A lost stop result is reconciled, not absence.
             await this.o.registry.stopResidentProcess(old.sessionId);
           }
-          if (await this.o.registry.residentRetirement(old.sessionId, old.generation) !== "confirmed")
+          if (await this.o.lifecycle.retirement(old.sessionId, old.generation) !== "confirmed")
             return this.hold(t, epoch, "retirement-unconfirmed", "No exact-generation observed retirement; no successor may launch.");
         }
         return this.change(t.id, epoch, (_s, current) => ({ transition: this.phase(current, "launching", { retirementConfirmedAt: this.at() }), hold: undefined }));
@@ -246,6 +260,26 @@ export class StrigoiSuccession {
       }
       default: return false;
     }
+  }
+  private async replaceUnavailable(s: StrigoiState, epoch: number): Promise<boolean> {
+    const t = s.transition!, successor = t.successor!;
+    if (await this.o.lifecycle.retirement(successor.sessionId, successor.generation) !== "confirmed")
+      return this.hold(t, epoch, "successor-unavailable", "Lost ownership is not an observed exit. Verify the exact host process and process group are absent (legacy identities need operator reconciliation); recovery will recheck without launching or sending adoption.");
+    const attempts = t.recoveryAttempts ?? 0;
+    if (attempts >= 3) return this.hold(t, epoch, "recovery-retries-exhausted", "Three replacements before usable recovery; inspect provider/auth evidence and explicitly resume to retry.");
+    const due = t.nextAttemptAt ?? new Date(this.now() + delays[attempts]!).toISOString();
+    if (!t.nextAttemptAt) { await this.change(t.id, epoch, (_s, current) => ({ transition: { ...current, nextAttemptAt: due } })); return false; }
+    if (Date.parse(due) > this.now()) return false;
+    // Archive the interrupted phase and its attempt IDs before starting the next link. Packets and
+    // obligations remain retained; no receipt is inferred from a launch or a lost turn.
+    const nextId = randomUUID();
+    return this.change(t.id, epoch, (current, prior) => ({
+      successionHistory: [...current.successionHistory ?? [], { ...prior, supersededBy: nextId }],
+      transition: { id: nextId, expectedIncarnation: successor.incarnation, predecessor: successor,
+        reason: "runtime-recovery", recovery: true, recoveryAttempts: attempts + 1,
+        phase: "requested", attempts: 0, requestedAt: this.at(), phaseTimes: { requested: this.at() } },
+      hold: undefined,
+    }));
   }
   private async seal(s: StrigoiState, epoch: number): Promise<boolean> {
     const t = s.transition!;
@@ -391,6 +425,8 @@ export class StrigoiSuccession {
     s = await this.o.repository.read(); t = s.transition!;
     const outcome = this.o.registry.launchOutcome(reservation, t.successor!.generation);
     if (outcome.kind === "failed") return this.launchFailed(t, epoch, outcome.error);
+    if (outcome.kind === "unresolved" && await this.o.registry.residentRetirement(successor.sessionId, successor.generation) === "confirmed")
+      return this.launchFailed(t, epoch, fault("STRIGOI_RESERVED_RUNTIME_RETIRED"));
     if (outcome.kind !== "owned") return this.hold(t, epoch, "launch-ownership-unresolved", "Assigned launch has no matching owned execution or proven failure.");
     await this.o.admission.freeze(t.successor!);
     let failed: { error: unknown } | undefined;

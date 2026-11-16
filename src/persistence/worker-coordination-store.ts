@@ -69,6 +69,8 @@ export interface WorkerCoordinationStoreOptions {
   /** Bytes of growth before a lossless checkpoint is considered. */
   checkpointBytes?: number;
   onCheckpointError?: (error: unknown) => void;
+  /** Opt-in diagnostics. No journal payload, subject identity, or credentials are emitted. */
+  onTiming?: (sample: { stage: "append-queue" | "load-queue" | "lock" | "append-fsync" | "replay" | "checkpoint"; durationMs: number }) => void;
 }
 
 /**
@@ -103,28 +105,44 @@ export class WorkerCoordinationStore {
       receipts: transaction.receipts ?? [],
     });
     assertSupportedVersions(envelope);
-    const write = (): Promise<void> => withJournalExclusivity(this.path, async () => {
-      const handle = await openPrivateAppendFile(this.path);
-      try {
-        await handle.write(`${JSON.stringify(envelope)}\n`, undefined, "utf8");
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      // Maintenance cannot turn an already-fsynced mutation into a reported failure.
-      await this.maybeCheckpoint();
-    });
+    const queuedAt = performance.now();
+    const write = (): Promise<void> => {
+      this.timing("append-queue", queuedAt);
+      const lockAt = performance.now();
+      return withJournalExclusivity(this.path, async () => {
+        this.timing("lock", lockAt);
+        const appendAt = performance.now();
+        const handle = await openPrivateAppendFile(this.path);
+        try {
+          await handle.write(`${JSON.stringify(envelope)}\n`, undefined, "utf8");
+          await handle.sync();
+        } finally {
+          await handle.close();
+          this.timing("append-fsync", appendAt);
+        }
+        // Maintenance cannot turn an already-fsynced mutation into a reported failure.
+        await this.maybeCheckpoint();
+      });
+    };
     // Chain on settle, not on success: one failed append must not poison every later append.
     this.writeTail = this.writeTail.then(write, write);
     await this.writeTail;
   }
 
   async load(): Promise<WorkerCoordinationState> {
-    const load = () => withJournalExclusivity(this.path, async () => {
-      const state = await this.replay();
-      await this.maybeCheckpoint();
-      return state;
-    });
+    const queuedAt = performance.now();
+    const load = () => {
+      this.timing("load-queue", queuedAt);
+      const lockAt = performance.now();
+      return withJournalExclusivity(this.path, async () => {
+        this.timing("lock", lockAt);
+        const replayAt = performance.now();
+        const state = await this.replay();
+        this.timing("replay", replayAt);
+        await this.maybeCheckpoint();
+        return state;
+      });
+    };
     const operation = this.writeTail.then(load, load);
     this.writeTail = operation.then(() => {}, () => {});
     return operation;
@@ -177,13 +195,20 @@ export class WorkerCoordinationStore {
       // Retained audit/receipt history is never expired. Doubling the trigger avoids repeatedly
       // rewriting a journal whose irreducible history already exceeds the initial threshold.
       this.checkpointAt = Math.max(this.checkpointAt * 2, info.size * 2);
-      await this.checkpoint();
+      const checkpointAt = performance.now();
+      try { await this.checkpoint(); }
+      finally { this.timing("checkpoint", checkpointAt); }
     } catch (error) {
       try {
         if (this.options.onCheckpointError !== undefined) this.options.onCheckpointError(error);
         else console.error(`Worker coordination checkpoint failed (${this.path})`, error);
       } catch { /* Observation cannot invalidate an acknowledged append. */ }
     }
+  }
+
+  private timing(stage: Parameters<NonNullable<WorkerCoordinationStoreOptions["onTiming"]>>[0]["stage"], startedAt: number): void {
+    try { this.options.onTiming?.({ stage, durationMs: performance.now() - startedAt }); }
+    catch { /* Diagnostics cannot change durability or caller outcomes. */ }
   }
 
   /** Remove intermediate snapshots, retaining every transaction id, receipt and audit. */

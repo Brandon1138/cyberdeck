@@ -226,6 +226,18 @@ async function testBroker(directory?: string) {
 }
 
 describe("orchestrator notification feed on a test broker", () => {
+  it("routes read-only peek through production composition without consuming the original notice", async () => {
+    const broker = await testBroker();
+    const actorSessionId = (await broker.ensure("fleet")).session.id;
+    await broker.client.request("agent.notifications.configure", { actorSessionId, policy: { wake: "off" } });
+    const worker = (await broker.startWorker(actorSessionId)).sessionId;
+    await broker.settle(actorSessionId, worker);
+    const peek = () => broker.client.request("agent.notifications.peek", { actorSessionId });
+    expect(await peek()).toMatchObject({ notice: { pending: 1 }, cursor: expect.any(Number) });
+    expect(await peek()).toMatchObject({ notice: { pending: 1 } });
+    expect((await broker.read(actorSessionId)).notifications[0]!.deliveredVia).not.toContain("tool-result");
+    expect(await broker.notice(actorSessionId)).toMatchObject({ notice: { pending: 1 } });
+  });
   it("settles a worker into the orchestrator's inbox, notices once, drains by cursor and replays until acknowledged (rows 1, 11)", async () => {
     const broker = await testBroker();
     const orc = (await broker.ensure("fleet")).session.id;

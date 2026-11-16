@@ -15,6 +15,7 @@ export interface FleetTransport {
   /** Updated RPC transports may probe the compact Fleet protocol; legacy embedders keep polling. */
   readonly fleetProjection?: boolean;
   request<T = unknown>(method: string, params: unknown): Promise<T>;
+  requestWithDeadline?<T = unknown>(method: string, params: unknown, timeoutMs: number): Promise<T>;
 }
 
 export interface InteractiveFleetTransport extends FleetTransport, AttachTransport { }

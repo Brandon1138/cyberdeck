@@ -39,7 +39,7 @@ export function renderSelectedDetail(snapshot: FleetSnapshot, state: FleetState,
   const nativeParent = thread.nativeAgent === undefined ? undefined : snapshot.threads.find(t => t.record.id === thread.nativeAgent!.parentThreadId)
     ?? snapshot.threads.find(t => t.record.id === thread.nativeAgent!.rootSessionId);
   const owner = thread.nativeAgent !== undefined ? `native worker for ${nativeParent?.record.name ?? thread.nativeAgent.parentName} · observed only` : record.kind === "orchestrator" ? `controller ${thread.controllerId ?? "unavailable"}`
-    : thread.coordination === undefined ? "owner operator"
+    : thread.coordination === undefined ? "owner unknown · coordination unavailable"
       : (() => {
         const current = workerOwner(thread.coordination);
         if (current.kind === "unattributed") return "owner unattributed";

@@ -31,7 +31,7 @@ function context(
  */
 function withoutNoticePiggyback(transport: McpBrokerTransport): McpBrokerTransport {
   return {
-    request: <T,>(method: string, params: unknown): Promise<T> => method === "agent.notifications.notice"
+    request: <T,>(method: string, params: unknown): Promise<T> => method === "agent.notifications.peek"
       ? Promise.resolve(undefined as T)
       : transport.request<T>(method, params),
   };

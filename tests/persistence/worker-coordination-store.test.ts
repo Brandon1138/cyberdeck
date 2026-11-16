@@ -63,6 +63,15 @@ function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 describe("WorkerCoordinationStore and migration", () => {
+  it("reports queue, lock, fsync and replay timings without allowing observer failure to affect durability", async () => {
+    const samples: Array<{ stage: string; durationMs: number }> = [];
+    const store = new WorkerCoordinationStore(await directory(), { onTiming: sample => { samples.push(sample); throw new Error("observer failed"); } });
+    await store.append({});
+    await store.load();
+    expect(samples.map(sample => sample.stage)).toEqual(["append-queue", "lock", "append-fsync", "load-queue", "lock", "replay"]);
+    expect(samples.every(sample => Number.isFinite(sample.durationMs) && sample.durationMs >= 0)).toBe(true);
+    expect((await readFile(store.path, "utf8")).trim().split("\n")).toHaveLength(1);
+  });
   it("migrates stable primary binding, orphans unresolved parent, and replays idempotently", async () => {
     const stateDirectory = await directory();
     const orchestrators = new OrchestratorStore(stateDirectory);

@@ -32,6 +32,86 @@ function transport(version = "epoch:1") {
 }
 afterEach(() => { vi.useRealTimers(); });
 
+it("coalesces a hung legacy transport across refresh deadlines and clears observation timers on disposal", async () => {
+  vi.useFakeTimers();
+  const client = transport();
+  client.request.mockImplementation(async (method: string) => {
+    if (method === "fleet.snapshot") throw Object.assign(new Error("old broker"), { code: "METHOD_NOT_FOUND" });
+    if (method === "session.list") return new Promise(() => {});
+    return {};
+  });
+  const feed = new FleetSnapshotFeed(client as never);
+  const first = expect(feed.refresh()).rejects.toMatchObject({ code: "CONTROL_PLANE_TIMEOUT" });
+  await vi.advanceTimersByTimeAsync(5_000); await first;
+  const second = expect(feed.refresh()).rejects.toMatchObject({ code: "CONTROL_PLANE_TIMEOUT" });
+  await vi.advanceTimersByTimeAsync(5_000); await second;
+  expect(client.request.mock.calls.filter(([method]) => method === "session.list")).toHaveLength(1);
+  const third = expect(feed.refresh()).rejects.toMatchObject({ code: "CONTROL_PLANE_CANCELLED" });
+  feed.dispose(); await third;
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("uses the expiring RPC path for legacy reads", async () => {
+  const client = transport();
+  const bounded = Object.assign(client, { fleetProjection: false, requestWithDeadline: vi.fn(async (method: string) => method === "strigoi.inspect" ? undefined : []) });
+  const feed = new FleetSnapshotFeed(bounded as never);
+  await feed.refresh();
+  expect(bounded.requestWithDeadline).toHaveBeenCalledWith("session.list", {}, expect.any(Number));
+  expect(bounded.request).not.toHaveBeenCalled();
+  feed.dispose();
+});
+
+it("never applies retained legacy work from a timed-out generation over a newer action snapshot", async () => {
+  vi.useFakeTimers();
+  const client = Object.assign(transport(), { fleetProjection: false });
+  let finish!: (value: unknown) => void;
+  client.request.mockImplementation(async (method: string) => method === "session.list"
+    ? new Promise(resolve => { finish = resolve; }) : []);
+  const feed = new FleetSnapshotFeed(client as never);
+  const expired = expect(feed.refresh()).rejects.toMatchObject({ code: "CONTROL_PLANE_TIMEOUT" });
+  await vi.advanceTimersByTimeAsync(5_000); await expired;
+  const latest = { threads: [{ record: { ...record, name: "newer action" } }] };
+  feed.resync(latest);
+  const retry = expect(feed.refresh()).rejects.toThrow("Expired Fleet response discarded");
+  finish([{ ...record, name: "obsolete response" }]);
+  await retry;
+  expect(feed.snapshot).toEqual(latest);
+  feed.dispose();
+});
+
+it("marks held modal data stale, bounds the refresh and fences a late reply after activity recovers", async () => {
+  vi.useFakeTimers();
+  const client = transport(), feed = new FleetSnapshotFeed(client as never);
+  const thread = (state: "blocked-modal" | "working" | "idle") => ({ record, workerTruth: {
+    state, terminal: false, completedTurns: 1, canonicalTurns: 1, pendingInstructions: 0,
+    composerOccupied: false, modalOpen: state === "blocked-modal", detail: state,
+  } });
+  client.request.mockImplementationOnce(async () => ({ kind: "full", version: "epoch:1",
+    snapshot: { threads: [thread("blocked-modal")] } }));
+  await feed.refresh();
+  expect(threadStatus(feed.snapshot.threads[0]!)).toBe("Needs you");
+  let finish!: (value: unknown) => void;
+  client.request.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const held = expect(feed.refresh()).rejects.toMatchObject({ code: "CONTROL_PLANE_TIMEOUT" });
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(feed.error).toContain("stale (2s old)");
+  await vi.advanceTimersByTimeAsync(3_000);
+  await held;
+  client.request.mockImplementationOnce(async () => ({ kind: "full", version: "epoch:2",
+    snapshot: { threads: [thread("working")] } }));
+  await feed.refresh();
+  expect(threadStatus(feed.snapshot.threads[0]!)).toBe("Working");
+  finish({ kind: "full", version: "epoch:old", snapshot: { threads: [thread("blocked-modal")] } });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(threadStatus(feed.snapshot.threads[0]!)).toBe("Working");
+  expect(feed.error).toBeUndefined();
+  client.request.mockImplementationOnce(async () => ({ kind: "full", version: "epoch:3",
+    snapshot: { threads: [thread("idle")] } }));
+  await feed.refresh();
+  expect(threadStatus(feed.snapshot.threads[0]!)).toBe("Idle");
+  feed.dispose();
+});
+
 it("applies truth-only deltas without stale attention or per-session truth requests", async () => {
   const client = transport(), feed = new FleetSnapshotFeed(client as never);
   const truth = { state: "idle", terminal: false, completedTurns: 1, canonicalTurns: 1,

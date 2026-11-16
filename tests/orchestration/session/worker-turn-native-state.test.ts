@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { WorkerTurnObservationAdapter } from "../../../src/runtime/worker-turn-observation-adapter.js";
 import { describe, expect, it } from "vitest";
 import { NativeTurnActivity } from "../../../src/orchestration/session/worker-turn-native-state.js";
 import type { WorkerTurnObservation } from "../../../src/orchestration/session/worker-turn-ports.js";
@@ -11,6 +13,18 @@ function observation(activity: "working" | "idle", occurredAt = "2026-10-13T12:0
 }
 
 describe("exact native activity observations", () => {
+  it.each([false, true])("keeps the known native end when done precedes a stale Working footer (native=%s)", hasNative => {
+    const native = new NativeTurnActivity(createdAt);
+    native.noteInput(createdAt);
+    native.observeScreen(1, "working", Date.parse("2026-10-13T12:00:00.500Z"), false, { id: 1, active: true });
+    if (hasNative) native.observe(observation("idle"), 1, 1);
+    native.observeScreen(2, "working", Date.parse("2026-10-13T12:00:04Z"), false, { id: 1, active: false });
+    native.observeScreen(3, "awaiting-input", Date.parse("2026-10-13T12:00:05Z"), false, { id: 1, active: false });
+    expect(native.ownsCurrentEnd(3)).toBe(hasNative);
+    native.observeScreen(4, "working", Date.parse("2026-10-13T12:00:06Z"), false, { id: 1, active: false });
+    native.observeScreen(5, "awaiting-input", Date.parse("2026-10-13T12:00:07Z"), false, { id: 1, active: false });
+    expect(native.ownsCurrentEnd(5)).toBe(false);
+  });
   it("waits for the Codex work cycle to close without dating its redraws as new work", () => {
     const native = new NativeTurnActivity(createdAt);
     native.noteInput(createdAt);
@@ -168,4 +182,53 @@ describe("exact native activity observations", () => {
     native.observe(observation("working", "2026-10-13T12:00:03.000Z", "next-start"), 2, 2);
     expect(native.activity("unknown", 2)).toBe("working");
   });
+});
+
+
+describe("fresh remote readiness after ancillary terminal work", () => {
+  function stalled() {
+    const native = new NativeTurnActivity(createdAt);
+    native.noteInput(createdAt);
+    native.observe(observation("idle"), 1, 1);
+    native.observeScreen(2, "working", Date.parse("2026-10-13T12:00:03.000Z"), false, { id: 2, active: true });
+    native.observeScreen(3, "awaiting-input", Date.parse("2026-10-13T12:00:04.000Z"), false, { id: 2, active: false });
+    native.observe(observation("idle"), 3, 3);
+    return native;
+  }
+  const ready = (): WorkerTurnObservation => ({ ...observation("idle"), nativeSessionId: "exact-thread",
+    nativeReadiness: { nativeSessionId: "exact-thread", observedAt: "2026-10-13T12:00:05.000Z" } });
+  it("reopens admission on a fresh bound idle read without inventing a completion", () => {
+    const native = stalled();
+    expect(native.needsReadiness("awaiting-input", 3)).toBe(true);
+    expect(native.ownsCurrentEnd(3)).toBe(false);
+    native.observe(ready(), 3, 3);
+    expect(native.ownsCurrentEnd(3)).toBe(true);
+    expect(native.activity("awaiting-input", 3)).toBe("awaiting-input");
+    expect(native.turns(ready(), 3)).toEqual([]);
+  });
+  it.each(["input", "generation", "revision", "active-cycle", "wrong-thread", "read-error", "native-working", "old-read"])("preserves the %s fence", fence => {
+    const native = stalled(), read = ready();
+    if (fence === "input") native.noteInput("2026-10-13T12:00:02.000Z");
+    if (fence === "generation") native.reset("2026-10-13T12:00:02.000Z");
+    if (fence === "active-cycle") native.observeScreen(3, "working", Date.parse("2026-10-13T12:00:04.000Z"), false, {id: 3, active: true});
+    if (fence === "wrong-thread") read.nativeReadiness!.nativeSessionId = "another-thread";
+    if (fence === "read-error") read.nativeSourceStatus = "source-error";
+    if (fence === "native-working") read.nativeActivity = "working";
+    if (fence === "old-read") read.nativeReadiness!.observedAt = "2026-10-13T12:00:02.000Z";
+    native.observe(read, 3, fence === "revision" ? 4 : 3);
+    expect(native.ownsCurrentEnd(fence === "revision" ? 4 : 3)).toBe(false);
+  });
+});
+
+
+it("recovers the retained real Codex ancillary-cycle bytes only with fresh runtime idle", () => {
+ const adapter=new WorkerTurnObservationAdapter(), replay=adapter.createReplay(128*1024);
+ const native=new NativeTurnActivity(createdAt);
+ native.noteInput(createdAt);native.observe(observation("idle"),1,1);
+ const bytes=readFileSync(new URL("../../fixtures/codex-ancillary-cycle.pty",import.meta.url));
+ replay.appendBytes(bytes.subarray(0,32));native.observeScreen(2,adapter.activity("codex",replay),Date.parse("2026-10-13T12:00:03Z"),false,replay.workCycle?.("codex"));
+ replay.appendBytes(bytes.subarray(32));native.observeScreen(3,"awaiting-input",Date.parse("2026-10-13T12:00:04Z"),false,replay.workCycle?.("codex"));
+ native.observe(observation("idle"),3,3);expect(native.ownsCurrentEnd(3)).toBe(false);
+ native.observe({...observation("idle"),nativeSessionId:"native",nativeReadiness:{nativeSessionId:"native",observedAt:"2026-10-13T12:00:05Z"}},3,3);
+ expect(native.ownsCurrentEnd(3)).toBe(true);
 });

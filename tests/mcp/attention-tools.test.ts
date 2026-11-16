@@ -25,7 +25,7 @@ describe("attention MCP surface", () => {
     ] as const) {
       await handleMcpRequest(context, { jsonrpc: "2.0", id: name, method: "tools/call", params: { name, arguments: args } });
     }
-    const calls = request.mock.calls.filter(([method]) => method !== "agent.notifications.notice");
+    const calls = request.mock.calls.filter(([method]) => method !== "agent.notifications.peek");
     expect(calls).toEqual([
       ["agent.attention.arm", { actorSessionId: ACTOR, objective: "Wait" }],
       ["agent.attention.cancel", { actorSessionId: ACTOR, epoch: WORKER }],

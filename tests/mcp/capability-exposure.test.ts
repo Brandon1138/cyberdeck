@@ -22,6 +22,8 @@ const universalOnly = [
   "cyberdeck_strigoi_acknowledge", "cyberdeck_strigoi_checkpoint", "cyberdeck_strigoi_read", "cyberdeck_strigoi_renew",
 ];
 const universal = [...workerAllowlist, ...universalOnly].sort();
+const workerReports = ["cyberdeck_report_progress", "cyberdeck_request_decision", "cyberdeck_respond_checkpoint", "cyberdeck_signal_exception", "cyberdeck_signal_risk"];
+const orchestratorCatalog = universal.filter(name => !workerReports.includes(name));
 async function names(context: McpServerContext): Promise<string[]> {
   const response = await handleMcpRequest(context, { jsonrpc: "2.0", id: 1, method: "tools/list" });
   return (response!.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name).sort();
@@ -37,7 +39,9 @@ it.each([
   { status: "unbound" },
   { status: "unknown" },
 ])("retains the universal catalog for $status actors with $capabilities", async (actor) => {
-  expect(await names({ identity, transport: { request: (async () => actor) as never } })).toEqual(universal);
+  expect(await names({ identity, transport: { request: (async () => actor) as never } })).toEqual(
+    "sessionKind" in actor && actor.sessionKind === "orchestrator" ? orchestratorCatalog : universal,
+  );
 });
 
 it.each(["unavailable", "METHOD_NOT_FOUND", "BROKER_DISCONNECTED"])("retains the universal catalog on an %s broker", async (code) => {
@@ -65,7 +69,7 @@ it("keeps a once-cached Orc catalog usable across grant expansion with tools: {}
   const initialized = await handleMcpRequest(context, { jsonrpc: "2.0", id: 1, method: "initialize" });
   expect(initialized!.result).toMatchObject({ capabilities: { tools: {} } });
   const cached = await names(context);
-  expect(cached).toEqual(universal);
+  expect(cached).toEqual(orchestratorCatalog);
   const denied = await handleMcpRequest(context, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "cyberdeck_orchestrator_create", arguments: {} } });
   expect(denied!.result).toMatchObject({ isError: true });
   capabilities = ["orchestrator.create"];

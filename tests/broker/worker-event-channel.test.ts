@@ -136,6 +136,16 @@ async function harness(options: {
 }
 
 describe("WorkerEventChannel", () => {
+  it("rejects an orchestrator report with a role-specific error before registration", async () => {
+    const { directory, coordination, enqueue } = await harness();
+    try {
+      const channel = new WorkerEventChannel(coordination, { get: () => ({ ...worker(), kind: "orchestrator" }) },
+        { findBySessionId: async () => binding() }, { enqueue });
+      await expect(channel.submit({ workerId: WORKER_ID, kind: "PROGRESS", summary: "done" }))
+        .rejects.toMatchObject({ code: "WORKER_ROLE_REQUIRED" });
+      expect(coordination.getSubject(WORKER_ID)).toBeUndefined();
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
   it("does not register a fallback controller when resident authority is corrupt", async () => {
     const { directory, coordination, enqueue } = await harness();
     try {

@@ -3,6 +3,7 @@ import { grantAllows } from "../domain/capability.js";
 import { orchestratorController, STRIGOI_KEY } from "../domain/orchestrator.js";
 import { AttentionError, type OrchestratorAttention } from "../domain/orchestrator-attention.js";
 import type { StrigoiIdentity } from "../domain/strigoi.js";
+import { strigoiSuccessionLineage } from "../domain/strigoi-succession-lineage.js";
 import type { OrchestratorAttentionOptions } from "./orchestrator-attention-control.js";
 import { admitted } from "./strigoi-admission.js";
 import { captureAttentionSources } from "./orchestrator-attention-source.js";
@@ -43,9 +44,10 @@ export async function updateAttentionRefresh(options: OrchestratorAttentionOptio
 
 async function preservesPredecessor(options: OrchestratorAttentionOptions, record: OrchestratorAttention): Promise<boolean> {
   if (record.bindingKey !== STRIGOI_KEY) return false;
-  const transition = (await options.resident?.read())?.transition;
-  return transition?.predecessor?.sessionId === record.actorSessionId
-    && ["sealed", "retiring", "launching", "committed", "adopting", "reconciling"].includes(transition.phase);
+  const state = await options.resident?.read();
+  if (!state?.transition || ["complete", "aborted"].includes(state.transition.phase)) return false;
+  return strigoiSuccessionLineage(state).some(transition => transition.predecessor?.sessionId === record.actorSessionId
+    && ["sealed", "retiring", "launching", "committed", "adopting", "reconciling"].includes(transition.phase));
 }
 
 /** The live durable record is the snapshot. Packet history can never override a cancel tombstone. */
@@ -65,12 +67,14 @@ export async function resumeAttentionForSuccessor(options: OrchestratorAttention
   successor: StrigoiIdentity, transitionId: string): Promise<OrchestratorAttention | undefined> {
   return admitted(options.strigoi, successor.sessionId, async () => {
     if (!options.resident || !options.bindings.withAuthority) throw new Error("STRIGOI_ATTENTION_AUTHORITY_REQUIRED");
-    const validate = async () => {
+    const validate = async (waitActor?: string) => {
       const state = await options.resident!.read(), binding = state.activeBinding;
       if (state.desired !== "enabled" || binding?.sessionId !== successor.sessionId || state.incarnation !== successor.incarnation
         || state.activeGeneration !== successor.generation || options.registry.get(successor.sessionId).generation !== successor.generation
         || state.transition?.id !== transitionId || state.transition.predecessor?.sessionId !== previousActor
         || !["reconciling", "complete"].includes(state.transition.phase)) throw new Error("STRIGOI_STALE_RECOVERY");
+      if (waitActor && !strigoiSuccessionLineage(state).some(link => link.predecessor?.sessionId === waitActor))
+        throw new Error("STRIGOI_WAIT_CHANGED");
       const current = await options.bindings.findBySessionId(successor.sessionId);
       if (!current || current.kind !== "resident" || JSON.stringify(current.grant) !== JSON.stringify(binding.grant)) throw new Error("STRIGOI_STALE_RECOVERY");
       return current;
@@ -82,7 +86,8 @@ export async function resumeAttentionForSuccessor(options: OrchestratorAttention
       finalCheck = undefined;
       await validate();
       if (!current || current.status === "cancelled" || current.actorSessionId === successor.sessionId) return current;
-      if (current.actorSessionId !== previousActor || current.bindingKey !== binding.key) throw new Error("STRIGOI_WAIT_CHANGED");
+      if (current.bindingKey !== binding.key) throw new Error("STRIGOI_WAIT_CHANGED");
+      await validate(current.actorSessionId);
       const preserved = await successionWait(options, current);
       if (preserved?.status === "cancelled") return preserved;
       const actorLedger = await options.transcripts.readCompletionLedger(successor.sessionId);
@@ -91,11 +96,11 @@ export async function resumeAttentionForSuccessor(options: OrchestratorAttention
         reviewNotifiedAt: _review, ...rest } = current;
       let next: OrchestratorAttention = { ...rest, actorSessionId: successor.sessionId, epoch, armedAt: at, updatedAt: at,
         recovery: "ready", readSequence: 0, receipts: [], actorTurnFloor: actorLedger.completedTurns,
-        succession: { previousActor, previousEpoch: current.epoch, transitionId,
+        succession: { previousActor: current.actorSessionId, previousEpoch: current.epoch, transitionId,
           ...(pendingIntent ? { pendingMessageId: pendingIntent.messageId, ...(pendingIntent.instructionId ? { pendingInstructionId: pendingIntent.instructionId } : {}) } : {}) },
         coverage: { captured: current.coverage.captured, consumed: current.coverage.consumed, evaluated: [], noticed: [], submitted: [] },
         ...(pendingIntent ? { pendingIntent: { epoch, messageId, coverage: pendingIntent.coverage, createdAt: at, readSequenceFloor: 0 }, lastWake: { epoch, messageId, intendedAt: at } } : {}) };
-      const fresh = await validate();
+      const fresh = await validate(current.actorSessionId);
       if (!["thread.read", "thread.enqueue"].every((capability) => grantAllows(fresh.grant, capability as "thread.read" | "thread.enqueue", fresh))) {
         throw new AttentionError("CAPABILITY_DENIED", "Successor attention grant changed");
       }
@@ -116,7 +121,7 @@ export async function resumeAttentionForSuccessor(options: OrchestratorAttention
       // preserves the store's capture/pin/deletion ordering without waiting on transcripts
       // under authority, and suspension/revocation queued during capture wins the write.
       finalCheck = async () => {
-        const final = await validate();
+        const final = await validate(current.actorSessionId);
         if (JSON.stringify(final.grant) !== JSON.stringify(fresh.grant)
           || JSON.stringify(authoritiesFor(final)) !== JSON.stringify(authorities)) {
           throw new AttentionError("OWNERSHIP_LOST", "Wait authority changed during capture");

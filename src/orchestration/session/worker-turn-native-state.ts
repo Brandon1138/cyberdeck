@@ -1,5 +1,5 @@
 import type { SessionRecord } from "../../domain/session.js";
-import type { CaptureWorkerTurns, ProviderTerminalActivity, ProviderWorkCycle, WorkerTurnObservation } from "./worker-turn-ports.js";
+import type { CaptureWorkerTurns, ProviderTerminalActivity, ProviderWorkCycle, WorkerTurnObservation, WorkerTurnTranscriptPort } from "./worker-turn-ports.js";
 import { projectWorkerTruth, type WorkerTruth } from "../../domain/worker-truth.js";
 import { StringDecoder } from "node:string_decoder";
 
@@ -74,8 +74,12 @@ export class NativeTurnActivity {
       this.lastWorkingAt = at;
       this.lastBusyRevision = revision;
     }
+    const closingCycle = workCycle !== undefined && !workCycle.active
+      && this.workCycle?.active === true && this.workCycle.id === workCycle.id;
     this.workCycle = workCycle;
-    const cycleRedraw = workCycle?.active === true;
+    // The done marker can arrive before the same chunk erases its old Working footer.
+    // Closing the known interval is not a new interval or unannounced provider work.
+    const cycleRedraw = workCycle?.active === true || closingCycle;
     // MCP initialization is terminal setup, not evidence of a provider turn after the native end.
     if (activity === "working" && !this.starting && !cycleRedraw) this.lastWorkingAt = at;
     if ((activity === "working" && !this.starting && !cycleRedraw) || activity === "needs-input") this.lastBusyRevision = revision;
@@ -87,6 +91,11 @@ export class NativeTurnActivity {
   }
   ownsCurrentEnd(revision: number): boolean {
     return !this.starting && !this.workCycle?.active && this.view?.revision === revision && this.view.current && this.view.activity === "awaiting-input";
+  }
+
+  needsReadiness(screen: ProviderTerminalActivity, revision: number): boolean {
+    return this.available && !this.refused && !this.starting && !this.workCycle?.active
+      && screen === "awaiting-input" && this.activity(screen, revision) === "unknown";
   }
 
   turns(observation: WorkerTurnObservation, revision: number,
@@ -153,6 +162,16 @@ export class NativeTurnActivity {
       if (newEvidence && captureRevision === currentRevision) {
         this.view = { activity, revision: currentRevision, current: currentGeneration };
       }
+      const ready = observation.nativeReadiness;
+      if (!this.refused && ready && ready.nativeSessionId === observation.nativeSessionId
+        && observation.nativeActivity === "idle" && evidence !== undefined
+        && occurredAt !== undefined && Number.isFinite(Date.parse(occurredAt))
+        && Date.parse(occurredAt) >= Math.max(Date.parse(this.generationStartedAt), this.inputAt === undefined ? 0 : Date.parse(this.inputAt))
+        && captureRevision === currentRevision && !this.starting && !this.workCycle?.active
+        && Number.isFinite(Date.parse(ready.observedAt)) && Date.parse(ready.observedAt) >= Math.max(
+          Date.parse(this.generationStartedAt), this.inputAt === undefined ? 0 : Date.parse(this.inputAt), this.lastWorkingAt)) {
+        this.view = { activity: "awaiting-input", revision: currentRevision, current: true };
+      }
     }
     return previousAvailability !== this.available || previousRefusal !== this.refused || before !== this.activity("unknown", currentRevision);
   }
@@ -182,4 +201,8 @@ export function supportsNativeTurnObservation(record: SessionRecord, suppressed:
 export function nativeReadFailure(record: SessionRecord, turnNumber: number): WorkerTurnObservation {
   return { sessionId: record.id, provider: record.provider, turnNumber, turns: [], nativeSourceAvailable: false,
     nativeSourceStatus: "source-error", nativeFallbackAllowed: false, nativeActivity: "unknown" };
+}
+
+export function hasNativeTurnPort(transcripts: WorkerTurnTranscriptPort | undefined): boolean {
+  return transcripts?.observeProviderTurns !== undefined && transcripts.commitProviderTurns !== undefined;
 }

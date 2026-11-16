@@ -156,6 +156,18 @@ describe("OrchestratorNotificationDelivery", () => {
     expect(store.noticeState(CONTROLLER).lastNoticedCursor).toBeGreaterThan(first.cursor);
   });
 
+  it("keeps bounded peek hints replayable without recording delivery or advancing the hook cursor", async () => {
+    state = "working";
+    await append();
+    const before = store.noticeState(CONTROLLER);
+    const hint = await delivery.peek(CONTROLLER);
+    expect(hint?.notice.pending).toBe(1);
+    expect(await delivery.peek(CONTROLLER)).toEqual(hint);
+    expect(store.noticeState(CONTROLLER)).toEqual(before);
+    expect(store.listPending(CONTROLLER, 0, 50)[0]!.deliveredVia).not.toContain("tool-result");
+    expect(await delivery.notice(CONTROLLER)).toBeDefined();
+  });
+
   it("row 3: one deterministic broker wake after coalescing; rendered records are marked, not acknowledged", async () => {
     const notification = await append();
     await advance(99);

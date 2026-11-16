@@ -108,6 +108,12 @@ export class OrchestratorNotificationDelivery {
     return this.snapshot(controllerId).result;
   }
 
+  /** Loss-tolerant hint for bounded clients: no delivery receipt or debounce cursor is advanced. */
+  async peek(controllerId: string): Promise<(RenderedNotice & { cursor: number }) | undefined> {
+    const { result, head } = this.snapshot(controllerId);
+    return result === undefined ? undefined : { ...result, cursor: head };
+  }
+
   private snapshot(controllerId: string): { result: RenderedNotice | undefined; head: number; ids: string[] } {
     const inbox = this.options.inbox;
     // The port clamps pages to 50: kind counts and oldest age describe this first page only.

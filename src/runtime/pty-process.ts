@@ -92,6 +92,7 @@ export class PtyProcess implements SessionRuntime {
   private exit?: { exitCode: number; signal?: number };
 
   readonly pid: number;
+  get recoveryProcessGroup(): number { return this.pid; }
 
   constructor(
     launchSpec: ProviderLaunchSpec,

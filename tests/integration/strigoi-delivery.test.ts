@@ -15,6 +15,7 @@ import { OrchestratorSessionLiveness } from "../../src/orchestration/orchestrato
 import { OrchestratorControllerDirectory } from "../../src/orchestration/orchestrator-controller-directory.js";
 import { WorkerControlService } from "../../src/orchestration/worker-control-service.js";
 import { orchestratorController } from "../../src/domain/orchestrator.js";
+import { STRIGOI_LIMITS } from "../../src/domain/strigoi.js";
 
 it.each(["routine", "workflow", "workflow-participant", "passive", "transfer"] as const)("runs the actual production composition with native turns and real worker/delivery participants (%s)", async mode => {
   const f = await successionFixture(true); f.runtime.dispose();
@@ -63,19 +64,41 @@ it.each(["routine", "workflow", "workflow-participant", "passive", "transfer"] a
     if (result.state !== "rendered" || responses.has(args[4]!)) return result;
     responses.add(args[4]!); messages.push(args[1]);
     if (args[3]?.successionKind) {
-      const path = JSON.parse(args[1].match(/page at ("[^"\n]+")./)![1]!) as string;
-      const coverage: string[] = []; let next: string | undefined = path;
+      const path = args[1].match(/page at ("[^"\n]+")\./);
+      const sources: { coverageSourceId: string; sourceIndex?: number }[] = [];
+      let next: string | undefined = path ? JSON.parse(path[1]!) : undefined;
+      if (!next) {
+        expect(args[3].successionKind).toBe("adoption");
+        const marker = "Recovery evidence is included below; no file read is needed for these sources.\n";
+        expect(args[1]).toContain(marker);
+        const inline = args[1].split(marker)[1]!.split("\n")[0]!;
+        expect(Buffer.byteLength(inline)).toBeLessThanOrEqual(STRIGOI_LIMITS.recoveryInlineBytes);
+        sources.push(...JSON.parse(inline).sources);
+      }
+      const visited = new Set<string>();
       while (next) {
+        expect(visited.has(next)).toBe(false); visited.add(next);
         const page = JSON.parse(await readFile(next, "utf8"));
         expect(page.sources.length).toBeLessThanOrEqual(64);
         expect(Buffer.byteLength(page.sources.map((s: { text: string }) => s.text).join(""))).toBeLessThanOrEqual(32768);
-        coverage.push(...page.sources.map((s: { coverageSourceId: string }) => s.coverageSourceId)); next = page.nextPath;
+        sources.push(...page.sources); next = page.nextPath;
       }
       const s = await f.bindings.strigoi.read();
+      const adoption = args[3].successionKind === "adoption"
+        ? JSON.parse(args[1].split("Return only compact JSON matching ")[1]!.split("\n")[0]!) : undefined;
+      if (adoption) {
+        expect(adoption).toMatchObject({ identity: s.transition!.successor, packetHash: s.transition!.packet!.sha256,
+          coverageId: s.transition!.packet!.coverageId, recovery: { version: 1 } });
+        if ("handledSourceIndices" in adoption) {
+          expect(sources.every(source => Number.isInteger(source.sourceIndex))).toBe(true);
+        }
+      }
       await respond(args[0], JSON.stringify(args[3].successionKind === "checkpoint"
         ? { checkpoint: "Preserve the operator question and review the worker result." }
-        : { identity: s.transition!.successor, packetHash: s.transition!.packet!.sha256,
-          coverageId: s.transition!.packet!.coverageId, handledSourceIds: coverage, account: "Read original pages; continue queued input and review worker result." }), result.expectedTurn!);
+        : { ...adoption, ...("handledSourceIndices" in adoption
+          ? { handledSourceIndices: sources.map(source => source.sourceIndex) }
+          : { handledSourceIds: sources.map(source => source.coverageSourceId) }),
+          account: "Read supplied evidence; continue queued input and review worker result." }), result.expectedTurn!);
     }
     return result;
   });
