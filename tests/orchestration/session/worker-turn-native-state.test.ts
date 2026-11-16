@@ -13,6 +13,18 @@ function observation(activity: "working" | "idle", occurredAt = "2026-10-13T12:0
 }
 
 describe("exact native activity observations", () => {
+  it.each([false, true])("keeps the known native end when done precedes a stale Working footer (native=%s)", hasNative => {
+    const native = new NativeTurnActivity(createdAt);
+    native.noteInput(createdAt);
+    native.observeScreen(1, "working", Date.parse("2026-10-13T12:00:00.500Z"), false, { id: 1, active: true });
+    if (hasNative) native.observe(observation("idle"), 1, 1);
+    native.observeScreen(2, "working", Date.parse("2026-10-13T12:00:04Z"), false, { id: 1, active: false });
+    native.observeScreen(3, "awaiting-input", Date.parse("2026-10-13T12:00:05Z"), false, { id: 1, active: false });
+    expect(native.ownsCurrentEnd(3)).toBe(hasNative);
+    native.observeScreen(4, "working", Date.parse("2026-10-13T12:00:06Z"), false, { id: 1, active: false });
+    native.observeScreen(5, "awaiting-input", Date.parse("2026-10-13T12:00:07Z"), false, { id: 1, active: false });
+    expect(native.ownsCurrentEnd(5)).toBe(false);
+  });
   it("waits for the Codex work cycle to close without dating its redraws as new work", () => {
     const native = new NativeTurnActivity(createdAt);
     native.noteInput(createdAt);

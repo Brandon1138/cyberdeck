@@ -74,8 +74,12 @@ export class NativeTurnActivity {
       this.lastWorkingAt = at;
       this.lastBusyRevision = revision;
     }
+    const closingCycle = workCycle !== undefined && !workCycle.active
+      && this.workCycle?.active === true && this.workCycle.id === workCycle.id;
     this.workCycle = workCycle;
-    const cycleRedraw = workCycle?.active === true;
+    // The done marker can arrive before the same chunk erases its old Working footer.
+    // Closing the known interval is not a new interval or unannounced provider work.
+    const cycleRedraw = workCycle?.active === true || closingCycle;
     // MCP initialization is terminal setup, not evidence of a provider turn after the native end.
     if (activity === "working" && !this.starting && !cycleRedraw) this.lastWorkingAt = at;
     if ((activity === "working" && !this.starting && !cycleRedraw) || activity === "needs-input") this.lastBusyRevision = revision;
