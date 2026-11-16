@@ -165,8 +165,8 @@ describe("resident lifecycle through real registry and canonical binding authori
     const reserved = await f.bindings.strigoi.read(), old = reserved.transition!.successor!;
     const notificationsBefore = reconcile.mock.calls.length;
     f.emitExit();
-    expect(reconcile.mock.calls.length).toBeGreaterThan(notificationsBefore);
-    for (const notification of reconcile.mock.results.slice(notificationsBefore)) expect(notification.value).toBe(launch);
+    // Composition retains this notification as one trailing pass while activation settles.
+    expect(reconcile.mock.calls.length).toBe(notificationsBefore);
     expect(outcome({ sessionId: old.sessionId, transitionId: reserved.transition!.id }, old.generation)).toMatchObject({ kind: "failed" });
     if (interleave === "suspended") await f.resident.setDesired("suspended", "suspend-at-activation");
     if (interleave === "disposed") f.composition.dispose();
