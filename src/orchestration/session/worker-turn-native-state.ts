@@ -78,7 +78,10 @@ export class NativeTurnActivity {
   }
   observeScreen(revision: number, activity: ProviderTerminalActivity = "unknown", at = Date.now(), starting = false,
     workCycle?: ProviderWorkCycle): void {
+    const bootstrapRedraw = this.bootstrapReady(this.screenRevision) && activity === "awaiting-input"
+      && !starting && !workCycle?.active;
     this.screenRevision = revision;
+    if (bootstrapRedraw) this.bootstrapRevision = revision;
     if (activity !== "unknown") this.starting = starting && activity === "working";
     if (workCycle !== undefined && workCycle.id !== this.workCycle?.id) {
       this.lastWorkingAt = at;

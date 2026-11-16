@@ -377,6 +377,11 @@ export class WorkerTurnEngine {
       && this.rendered.length === 0 && this.nativeActivity.pristine();
   }
 
+  /** Recovery attempts must use actual input admission, not the UI's readable idle surface. */
+  async readyForInstruction(): Promise<boolean> {
+    return await this.reconcileCanonicalTurns() && this.deliveryHold() === undefined;
+  }
+
   private async renderInstruction(input: SubmitWorkerInstruction): Promise<InstructionDelivery> {
     const encoded = typeof input.encoded === "function" ? input.encoded() : input.encoded;
     this.stallTracker.reset();

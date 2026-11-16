@@ -11,7 +11,8 @@ import { nativeTurnIdentity } from "./session/worker-turn-native-state.js";
 
 /** Native instruction/semantic-receipt adapter. No terminal scrape can establish adoption. */
 export class StrigoiTurns implements StrigoiSuccessionTurns {
-  constructor(private readonly registry: Pick<SessionInstructionPort, "get" | "submitInstruction"> & { workerTruth(id: string): WorkerTruth },
+  constructor(private readonly registry: Pick<SessionInstructionPort, "get" | "submitInstruction"> & {
+    workerTruth(id: string): WorkerTruth; readyForInstruction?(id: string): Promise<boolean> },
     private readonly transcripts: ThreadTranscriptReader & WorkerTurnTranscriptPort,
     private readonly prompt: (kind: "checkpoint" | "adoption", identity: StrigoiIdentity, packet?: StrigoiPacketRef) => Promise<string>,
     private readonly archivedEvents?: (sessionId: string) => Promise<ThreadEvent[]>,
@@ -21,6 +22,11 @@ export class StrigoiTurns implements StrigoiSuccessionTurns {
     const record = this.registry.get(identity.sessionId);
     if (record.generation !== identity.generation) return "unknown";
     if (record.attachmentState === "controlled") return "busy";
+    if (this.registry.readyForInstruction && !await this.registry.readyForInstruction(identity.sessionId)) {
+      return this.registry.workerTruth(identity.sessionId).modalOpen ? "modal" : "unknown";
+    }
+    if (this.registry.get(identity.sessionId).generation !== identity.generation) return "unknown";
+    if (this.registry.get(identity.sessionId).attachmentState === "controlled") return "busy";
     const truth = this.registry.workerTruth(identity.sessionId);
     if (truth.modalOpen) return "modal";
     return truth.state === "idle" ? "safe" : truth.state === "working" || truth.state === "stalled" ? "busy" : "unknown";

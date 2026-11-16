@@ -24,6 +24,9 @@ Working titles do not permanently invalidate fresh native proof. A single operat
 at a recognized pristine hook-review prompt advances the revision without counting as a
 model prompt; other keys retain ordinary input fencing. This never trusts hooks.
 
+Succession refreshes that same input-admission gate before creating a bounded recovery
+attempt. Fleet's readable idle projection alone cannot spend a checkpoint or adoption retry.
+
 Before writing actual prompt bytes, the engine invalidates bootstrap admission synchronously.
 Bootstrap does not create a transcript binding, native completion, or fallback receipt.
 All subsequent inputs require normal native attribution. Conflicting, corrupt, or missing
