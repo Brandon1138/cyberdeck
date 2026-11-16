@@ -1,4 +1,4 @@
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,6 +11,29 @@ afterEach(async () => {
 });
 
 describe("FleetPreferenceStore", () => {
+  it.each(["attention", "runtime", "projects"])("replays preview view %s without losing watermarks or rewriting history", async view => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-")); directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+    await store.setVisitPreferences({ view: "history", replies: {} });
+    const preferences = { view, replies: { one: { seen: null, latest: "Unseen answer", canonicalTurns: 1 } },
+      lifecycleInitialized: true, lifecycle: { one: { generation: 2, acknowledgedGeneration: 0 } } };
+    await appendFile(store.path, JSON.stringify({ recordType: "fleet.visit", eventId: "11111111-1111-4111-8111-111111111111",
+      persistedAt: "2026-11-13T00:17:22.039Z", preferences }) + "\n");
+    const before = await readFile(store.path, "utf8");
+    expect(await new FleetPreferenceStore(directory).visitPreferences()).toEqual({ ...preferences, view: "history",
+      lifecycle: { one: { ...preferences.lifecycle.one, baselineGeneration: 0 } } });
+    expect(await readFile(store.path, "utf8")).toBe(before);
+    await expect(store.setVisitPreferences(preferences as never)).rejects.toThrow();
+  });
+
+  it.each(["unknown", null, 42])("still rejects unsupported persisted view %s", async view => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-")); directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+    await store.setVisitPreferences({ replies: {} });
+    await appendFile(store.path, JSON.stringify({ recordType: "fleet.visit", eventId: "11111111-1111-4111-8111-111111111111",
+      persistedAt: "2026-11-13T00:17:22.039Z", preferences: { view, replies: {} } }) + "\n");
+    await expect(store.visitPreferences()).rejects.toThrow("Invalid Fleet preference at line 2");
+  });
   it("keeps the latest explicit model and effort for each project", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-"));
     directories.push(directory);

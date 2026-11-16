@@ -8,6 +8,7 @@ import type { CyberdeckMcpLaunch } from "../provider.js";
 import { ensurePrivateDirectory } from "../../persistence/private-files.js";
 import { codexDeveloperInstructions } from "./native-session-identity.js";
 import { readCodexDeveloperInstructions } from "./effective-instructions.js";
+import { CodexRemoteBootstrap } from "./remote-bootstrap.js";
 
 export interface CodexRemoteMcpBridge {
   readonly address: string;
@@ -55,6 +56,7 @@ export const openCodexRemoteMcpBridge: CodexRemoteMcpBridgeFactory = async (opti
   const clients = new WebSocketServer({ server, maxPayload: 0 });
   const connections = new Set<WebSocket>();
   let closing: Promise<void> | undefined;
+  const bootstrap = new CodexRemoteBootstrap(options.homeDirectory, options.sessionId);
 
   clients.on("connection", (client) => {
     const upstream = connect();
@@ -63,23 +65,35 @@ export const openCodexRemoteMcpBridge: CodexRemoteMcpBridgeFactory = async (opti
     const terminate = () => { client.terminate(); upstream.terminate(); };
     client.on("error", terminate);
     upstream.on("error", terminate);
-    client.on("close", () => { connections.delete(client); upstream.terminate(); });
-    upstream.on("close", () => { connections.delete(upstream); client.terminate(); });
+    client.on("close", () => { connections.delete(client); upstream.terminate(); void bootstrap.revoke().catch(() => {}); });
+    upstream.on("close", () => { connections.delete(upstream); client.terminate(); void bootstrap.revoke().catch(() => {}); });
     client.pause();
     upstream.once("open", () => {
-      forward(client, upstream, (data) => prepareCodexThreadMcp(data, options));
-      forward(upstream, client);
+      forward(client, upstream, async (data, binary) => {
+        if (binary) { await bootstrap.revoke(); return data; }
+        const prepared = await prepareCodexThreadMcp(data, options);
+        await bootstrap.outgoing(prepared.toString());
+        return prepared;
+      });
+      forward(upstream, client, async (data, binary) => {
+        if (binary) await bootstrap.revoke();
+        else await bootstrap.incoming(data.toString());
+        return data;
+      });
       client.resume();
     });
   });
 
   const close = (): Promise<void> => closing ??= (async () => {
+    let revocationFailure: unknown;
+    await bootstrap.revoke().catch(error => { revocationFailure = error; });
     for (const connection of connections) connection.terminate();
     clients.close();
     if (server.listening) await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     });
     await rm(directory, { recursive: true, force: true });
+    if (revocationFailure) throw revocationFailure;
   })();
 
   try {
@@ -129,12 +143,12 @@ export async function prepareCodexThreadMcp(data: RawData, options: CodexRemoteM
   return bindCodexThreadMcp(data, options, inherited);
 }
 
-function forward(source: WebSocket, destination: WebSocket, transform?: (data: RawData) => RawData | Promise<RawData>): void {
+function forward(source: WebSocket, destination: WebSocket, transform?: (data: RawData, binary: boolean) => RawData | Promise<RawData>): void {
   let pending = Promise.resolve();
   source.on("message", (data, binary) => {
     source.pause();
     pending = pending.then(async () => {
-      const forwarded = binary || !transform ? data : await transform(data);
+      const forwarded = !transform ? data : await transform(data, binary);
       await new Promise<void>((resolve, reject) => destination.send(forwarded, { binary }, error => error ? reject(error) : resolve()));
       source.resume();
     }).catch(() => { source.terminate(); destination.terminate(); });

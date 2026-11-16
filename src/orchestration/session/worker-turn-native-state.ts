@@ -30,6 +30,7 @@ export class NativeTurnActivity {
   private inputAt?: string;
   private generationStartedAt: string;
   private resumed = false;
+  private bootstrapRevision = -1;
   private stream = "";
   private streamDecoder = new StringDecoder("utf8");
   private streamActivity: ProviderTerminalActivity = "unknown";
@@ -46,16 +47,25 @@ export class NativeTurnActivity {
     this.workCycle = undefined;
     this.generationStartedAt = startedAt;
     this.resumed = true;
+    this.bootstrapRevision = -1;
     this.stream = "";
     this.streamDecoder = new StringDecoder("utf8");
     this.streamActivity = "unknown";
   }
 
-  noteInput(at: string): void { this.inputAt = at; delete this.view; this.screenRevision = -1; }
+  noteInput(at: string): void { this.inputAt = at; delete this.view; this.screenRevision = -1; this.bootstrapRevision = -1; }
+  // Terminal setup can emit Working titles before any model input. Exact empty native history
+  // supersedes that old presentation; current work/composer/revision gates still own admission.
+  pristine(): boolean { return !this.resumed && this.inputAt === undefined; }
+  bootstrapReady(revision: number): boolean { return this.pristine() && this.bootstrapRevision === revision; }
   admit(revision: number): void {
     // An admission fence is not provider input. Preserve the already known idle boundary while
     // preflight drains historical receipts; actual bytes invalidate it through noteInput.
     if (this.view?.revision === revision - 1 && this.view.activity === "awaiting-input") this.view.revision = revision;
+    if (this.bootstrapReady(revision - 1)) {
+      this.bootstrapRevision = revision;
+      if (this.screenRevision === revision - 1) this.screenRevision = revision;
+    }
     if (this.screenRevision === revision - 1 && this.inputAt === undefined && this.lastWorkingAt === 0) this.screenRevision = revision;
   }
   committed(turns: readonly { data?: Record<string, unknown> | undefined }[]): void {
@@ -140,6 +150,10 @@ export class NativeTurnActivity {
     if (observation.nativeSourceAvailable === undefined) return false;
     const before = this.activity("unknown", currentRevision);
     const previousAvailability = this.available, previousRefusal = this.refused;
+    this.bootstrapRevision = observation.nativeBootstrap && this.pristine() && captureRevision === currentRevision
+      && !this.starting && !this.workCycle?.active && observation.turns.length === 0
+      && (observation.nativeSourceStatus === "missing" || observation.nativeSourceStatus === "unbound")
+      && Date.parse(observation.nativeBootstrap.observedAt) >= Math.max(Date.parse(this.generationStartedAt), this.lastWorkingAt) ? currentRevision : -1;
     this.refused = observation.nativeSourceStatus === "unbound" || observation.nativeSourceStatus === "conflict"
       || observation.nativeSourceStatus === "source-error" || observation.nativeSourceReason === "NATIVE_COMPLETION_BOUNDARY_MISSING";
     this.available = observation.nativeSourceAvailable;
@@ -177,6 +191,7 @@ export class NativeTurnActivity {
   }
 
   activity(screen: ProviderTerminalActivity, revision: number): ProviderTerminalActivity {
+    if (this.bootstrapReady(revision) && screen === "awaiting-input" && this.screenRevision === revision) return screen;
     if (this.refused) return screen === "needs-input" || screen === "working" ? screen : "unknown";
     if (screen === "needs-input" || !this.available) return screen;
     if (this.starting || this.workCycle?.active) return "working";

@@ -203,7 +203,16 @@ function projectPreferences(content: string): PreferenceProjection {
   for (const [index, line] of lines.entries()) {
     if (line.trim() === "") continue;
     try {
-      const record = FleetPreferenceRecordSchema.parse(JSON.parse(line));
+      const raw: unknown = JSON.parse(line);
+      // Preview clients wrote these view names to the shared journal. They have no current UI
+      // equivalent: retain the last supported view, while replaying every content watermark.
+      // Normalize only on read; neither widen the write contract nor rewrite historical records.
+      if (raw && typeof raw === "object" && "recordType" in raw && raw.recordType === "fleet.visit"
+        && "preferences" in raw && raw.preferences && typeof raw.preferences === "object"
+        && "view" in raw.preferences && ["attention", "runtime", "projects"].includes(String(raw.preferences.view))) {
+        delete raw.preferences.view;
+      }
+      const record = FleetPreferenceRecordSchema.parse(raw);
       switch (record.recordType) {
         case "fleet.project": result.projects.set(record.root, record.registered); break;
         case "fleet.launch-profile": result.profiles[record.cwd] = record.profile; break;

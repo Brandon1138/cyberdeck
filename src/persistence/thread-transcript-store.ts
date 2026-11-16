@@ -1,5 +1,5 @@
 import { withBindingAuthority } from "./binding-authority.js";
-import { refreshCodexNativeReadiness } from "./codex-native-readiness.js";
+import { readCodexBootstrapReadiness, refreshCodexNativeReadiness } from "./codex-native-readiness.js";
 import { parseNativeContinuityMessage, type NativeContinuityMessage } from "../domain/native-continuity-message.js";
 import { providerTurnReceipt, WorkerLedgerStore, WORKER_LEDGER_REJECTIONS, mergeWorkerLedgers } from "./worker-ledger-store.js";
 import { syncPrivateFile } from "./atomic-private-file.js";
@@ -224,11 +224,15 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
       native = { turns: [], available: false, status: failure.status, reason: failure.reason };
     }
     const { turns: nativeTurns, available: nativeAvailable, activityVersion } = native;
+    const nativeBootstrap = input.allowCodexBootstrap && !this.initialInstructions.has(input.sessionId)
+      && !nativeAvailable && (native.status === "unbound" || native.status === "missing")
+      && !await this.codexConversations.exists(input.sessionId)
+      ? await readCodexBootstrapReadiness(input, this.options.codexRemoteHome) : undefined;
     // Cursor and Antigravity have no native transcript at all, so a fallback is their only turn and
     // is always allowed. For Claude and Codex the caller controls it, and only permits one after the
     // native read has been retried and come back empty.
     const nativeProvider = input.provider === "claude" || input.provider === "codex";
-    const fallbackRequested = nativeProvider ? input.allowFallback === true && native.status === "missing"
+    const fallbackRequested = nativeProvider ? input.allowFallback === true && native.status === "missing" && !input.allowCodexBootstrap
       : input.allowFallback ?? (input.provider === "cursor" || input.provider === "antigravity");
     const nativeOrdinal = this.semanticKey(input.sessionId, `${input.provider}:${input.turnNumber}`);
     const fallbackAllowed = fallbackRequested && input.turnNumber > (this.completionLedgers.get(input.sessionId)?.completedTurns ?? 0)
@@ -259,6 +263,7 @@ export class ThreadTranscriptStore implements WorkerTurnTranscriptPort {
       provider: input.provider,
       turnNumber: input.turnNumber,
       ...(activityVersion === undefined ? {} : { activityVersion }),
+      ...(nativeBootstrap === undefined ? {} : { nativeBootstrap }),
       ...(nativeProvider ? {
         nativeSourceAvailable: nativeAvailable,
         nativeSourceStatus: native.status ?? (nativeAvailable ? "available" : "unbound"),

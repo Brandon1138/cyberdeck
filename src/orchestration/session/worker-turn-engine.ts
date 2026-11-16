@@ -361,7 +361,21 @@ export class WorkerTurnEngine {
       : this.holdInstruction(hold, input.source, input.instructionId));
   }
 
-  noteHumanInput(): void { this.activityRevision += 1; this.nativeActivity.noteInput(new Date(this.now()).toISOString()); }
+  noteHumanInput(data?: Buffer): void {
+    // Escape skips this positively recognized startup review without running/trusting hooks.
+    // It remains operator activity and invalidates the revision, but is not a model prompt.
+    const hookSkip = data?.length === 1 && data[0] === 0x1b && this.canBootstrapCodex()
+      && this.currentModalDescriptor()?.kind === "hook-review";
+    this.activityRevision += 1;
+    if (!hookSkip) this.nativeActivity.noteInput(new Date(this.now()).toISOString());
+  }
+
+  private canBootstrapCodex(): boolean {
+    return this.record.provider === "codex" && this.record.codexActorMarker === true
+      && this.record.generation === 1 && this.record.launchRecord?.mode === "launch"
+      && this.record.initialInstructionId === undefined && this.completedTurnCount === 0
+      && this.rendered.length === 0 && this.nativeActivity.pristine();
+  }
 
   private async renderInstruction(input: SubmitWorkerInstruction): Promise<InstructionDelivery> {
     const encoded = typeof input.encoded === "function" ? input.encoded() : input.encoded;
@@ -825,7 +839,7 @@ export class WorkerTurnEngine {
       retiring: this.inputTargets.busy, retirementFailed: this.inputTargets.failure,
       deferred: this.deferredScreenCompletionTarget ?? 0,
       captured: Math.max(this.completedTurnCount, this.turnCaptureOwner?.bankedThrough ?? this.turnCaptureOwner?.completionTarget ?? 0),
-      nativeRefused: this.nativeActivity.refused, nativeAvailable: this.nativeActivity.available,
+      nativeRefused: this.nativeActivity.refused && !this.nativeActivity.bootstrapReady(this.activityRevision), nativeAvailable: this.nativeActivity.available,
       activity: this.nativeActivity.activity(this.activity, this.activityRevision),
       observedWorking: this.observedWorking, starting: this.inputReadiness.pending,
     });
@@ -1460,6 +1474,7 @@ export class WorkerTurnEngine {
           ...nativeTurnIdentity(this.record),
           turnNumber: before + 1,
           allowFallback: false,
+          allowCodexBootstrap: this.canBootstrapCodex(),
         });
       } catch {
         this.mergeNativeObservation(nativeReadFailure(this.record, claim.completionTarget), claim);
@@ -1477,7 +1492,8 @@ export class WorkerTurnEngine {
         if (refreshed) observation = this.mergeNativeObservation(refreshed, claim);
       }
       const nativeTurns = observation.turns.filter((turn) => turn.transport === "provider-native");
-      const readable = (observation.nativeSourceAvailable !== false || observation.nativeSourceStatus === "missing") && !this.nativeActivity.refused;
+      const readable = this.nativeActivity.bootstrapReady(this.activityRevision)
+        || (observation.nativeSourceAvailable !== false || observation.nativeSourceStatus === "missing") && !this.nativeActivity.refused;
       if (this.completedTurnCount !== before || observation.turnNumber !== before + 1) return false;
       if (nativeTurns.length === 0) return readable;
       const nativeObservation: WorkerTurnObservation = {

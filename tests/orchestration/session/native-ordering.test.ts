@@ -3,6 +3,7 @@ import { SessionRuntimeAssembly } from "../../../src/orchestration/session/sessi
 import { ContainerNativeSource } from "../../../src/runtime/activity/container-native-source.js";
 import { ExecutionTranscriptStore } from "../../../src/persistence/execution-transcript-store.js";
 import { SessionIoSurface } from "../../../src/orchestration/session/session-io-surface.js";
+import { CODEX_HOOK_REVIEW } from "../../fixtures/provider-startup-dialogs.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { appendFile, mkdir, mkdtemp, rm, writeFile, stat, unlink, symlink, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -193,6 +194,52 @@ function nativeObservation(activity: "idle" | "working", turns: boolean = false)
     turns: turns ? [{providerTurnId: "old", providerOccurredAt:"2026-08-20T09:00:01.000Z", text:"old completion", transport:"provider-native" as const}] : []};
 }
 describe("idle readiness survives presentation changes", () => {
+  it.each(["skip", "trust", "ordinary-escape"])("preserves pristine launch only for explicit hook skip (%s)", async action => {
+    const f = harness({ generation: 1, codexActorMarker: true, launchRecord: { mode: "launch" } as never });
+    f.engine.finishInitialization();
+    if (action !== "ordinary-escape") {
+      f.observations.activity = "needs-input";
+      f.observations.composer = { modalOpen: true, occupied: false, inputReady: false };
+      f.engine.appendOutput(Buffer.from(CODEX_HOOK_REVIEW));
+      expect(f.engine.projectTruth().modal?.kind).toBe("hook-review");
+    }
+    f.engine.noteHumanInput(Buffer.from(action === "trust" ? "2" : "\u001b"));
+    f.observations.activity = "awaiting-input";
+    f.observations.composer = { modalOpen: false, occupied: false, inputReady: true };
+    f.engine.appendOutput(Buffer.from("ready"));
+    await f.engine.reconcileCanonicalTurns();
+    expect(f.observeProviderTurns).toHaveBeenLastCalledWith(expect.objectContaining({ allowCodexBootstrap: action === "skip" }));
+    expect(f.writes).toEqual([]); expect(f.engine.completedTurns).toBe(0);
+  });
+  it("admits only the first pristine prompt from exact empty-thread readiness, without a receipt", async () => {
+    const f = harness({ generation: 1, codexActorMarker: true, launchRecord: { mode: "launch" } as never });
+    f.engine.finishInitialization();
+    f.observations.activity = "working";
+    f.engine.appendOutput(Buffer.from("setup spinner before any native turn"));
+    f.observations.activity = "awaiting-input";
+    f.engine.appendOutput(Buffer.from("ready"));
+    f.observeProviderTurns.mockImplementation(async input => ({ sessionId: f.record.id, provider: "codex", turnNumber: 1,
+      nativeSourceAvailable: false, nativeSourceStatus: "unbound", nativeFallbackAllowed: false, turns: [],
+      ...(input.allowCodexBootstrap ? { nativeBootstrap: { nativeSessionId: "new", observedAt: new Date().toISOString() } } : {}) }));
+    await vi.waitFor(async () => expect(await f.engine.reconcileCanonicalTurns()).toBe(true));
+    expect(await f.engine.submitInstruction({ source: "broker", instructionId: "first", message: "first", encoded: Buffer.from("first") }))
+      .toMatchObject({ state: "rendered", expectedTurn: 1 });
+    expect(f.engine.completedTurns).toBe(0); expect(f.engine.canonicalTurns).toBe(0);
+    await f.engine.reconcileCanonicalTurns();
+    expect(f.observeProviderTurns).toHaveBeenLastCalledWith(expect.objectContaining({ allowCodexBootstrap: false }));
+    expect(await f.engine.submitInstruction({ source: "broker", instructionId: "second", message: "second", encoded: Buffer.from("second") }))
+      .toMatchObject({ state: "queued" });
+    expect(f.writes.map(b => b.toString())).toEqual(["first"]);
+  });
+
+  it.each(["human-input", "resume"])("never requests bootstrap after %s", async reason => {
+    const f = harness({ generation: 1, codexActorMarker: true, launchRecord: { mode: "launch" } as never });
+    f.engine.finishInitialization();
+    if (reason === "human-input") f.engine.noteHumanInput(Buffer.from("x"));
+    if (reason === "resume") f.engine.resetForResume();
+    await f.engine.reconcileCanonicalTurns();
+    expect(f.observeProviderTurns).toHaveBeenLastCalledWith(expect.objectContaining({ allowCodexBootstrap: false }));
+  });
   async function idleOrchestrator(workingAt = "2026-08-20T09:00:00.500Z", starting = false) {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(workingAt));

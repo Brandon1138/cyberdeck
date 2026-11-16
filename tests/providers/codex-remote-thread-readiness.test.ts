@@ -31,6 +31,17 @@ describe("Codex current-thread readiness read", () => {
     expect(calls.map(c=>c.method)).toEqual(["initialize","initialized","thread/read"]);
     expect(calls.at(-1)?.params).toEqual({threadId:"native",includeTurns:false});
   });
+  it.each(["fresh", "preview", "updated", "fork", "ephemeral", "missing"])("checks exact-start metadata without unsupported turn hydration (%s)", async change => {
+    const thread = (response as any).thread;
+    Object.assign(thread, { preview: "", forkedFromId: null, ephemeral: false, createdAt: 100, updatedAt: 100 });
+    if (change === "preview") thread.preview = "earlier input";
+    if (change === "updated") thread.updatedAt = 101;
+    if (change === "fork") thread.forkedFromId = "old";
+    if (change === "ephemeral") thread.ephemeral = true;
+    if (change === "missing") delete thread.createdAt;
+    expect(await readCodexRemoteIdle({ ...input(), freshBootstrap: true })).toBe(change === "fresh");
+    expect(calls.at(-1)?.params).toEqual({ threadId: "native", includeTurns: false });
+  });
   it.each(["active","notLoaded","systemError"])("refuses %s",async type=>{
     (response as any).thread.status={type};expect(await readCodexRemoteIdle(input())).toBe(false);
   });
