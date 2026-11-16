@@ -15,7 +15,7 @@ export class InstructionStore {
     // Notification recovery reads this mailbox once per controller. Replaying the entire journal
     // for every read made broker startup exceed its readiness deadline on ordinary history.
     // The shared cache checks file identity on every read, including other writers and replacement.
-    this.journal = new ValidatedJournal(this.path, projectInstructions);
+    this.journal = new ValidatedJournal(this.path, instructionProjector());
   }
 
   put(record: InstructionRecord): Promise<void> {
@@ -40,17 +40,26 @@ export class InstructionStore {
   }
 }
 
-function projectInstructions(content: string): Map<string, InstructionRecord> {
-  const latest = new Map<string, InstructionRecord>();
-  const lines = content.split("\n");
-  if (!content.endsWith("\n")) lines.pop();
-  for (const line of lines) {
-    if (line.trim() === "") continue;
-    const record = InstructionRecordSchema.parse(JSON.parse(line));
-    validateContinuation(latest.get(record.id), record);
-    latest.set(record.id, record);
-  }
-  return latest;
+function instructionProjector(): (content: string) => Map<string, InstructionRecord> {
+  let committed = "", validated = new Map<string, InstructionRecord>();
+  return (content) => {
+    // ValidatedJournal still reads the entire changed file and checks descriptor/path identity.
+    // Reuse requires comparing EVERY committed character, not assuming an append preserved the
+    // prefix. A rewrite/truncation restarts validation; a torn tail is never part of the cache.
+    const unchangedPrefix = content.startsWith(committed);
+    const latest = unchangedPrefix ? new Map(validated) : new Map<string, InstructionRecord>();
+    const boundary = content.lastIndexOf("\n") + 1;
+    for (const line of content.slice(unchangedPrefix ? committed.length : 0, boundary).split("\n")) {
+      if (line.trim() === "") continue;
+      const record = InstructionRecordSchema.parse(JSON.parse(line));
+      validateContinuation(latest.get(record.id), record);
+      latest.set(record.id, record);
+    }
+    // A rejected suffix must not publish partial records or poison the next validation.
+    committed = content.slice(0, boundary);
+    validated = latest;
+    return latest;
+  };
 }
 
 function validateContinuation(prior: InstructionRecord | undefined, record: InstructionRecord): void {

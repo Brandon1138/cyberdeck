@@ -1,9 +1,7 @@
 import { WorkerTruthObservation } from "../../domain/worker-truth-observation.js";
 import { workerDeliveryHold } from "./worker-delivery-hold.js";
-import {
-  modalAnswerKeySequence,
-  type ModalAnswerAttempt,
-} from "../../domain/modal-descriptor.js";
+import type { ModalAnswerAttempt } from "../../domain/modal-descriptor.js";
+import { answerWorkerModal } from "./worker-modal-answer.js";
 import type { SessionRecord } from "../../domain/session.js";
 import {
   providerLimitFromTermination,
@@ -361,7 +359,26 @@ export class WorkerTurnEngine {
       : this.holdInstruction(hold, input.source, input.instructionId));
   }
 
-  noteHumanInput(): void { this.activityRevision += 1; this.nativeActivity.noteInput(new Date(this.now()).toISOString()); }
+  noteHumanInput(data?: Buffer): void {
+    // Escape skips this positively recognized startup review without running/trusting hooks.
+    // It remains operator activity and invalidates the revision, but is not a model prompt.
+    const hookSkip = data?.length === 1 && data[0] === 0x1b && this.canBootstrapCodex()
+      && this.currentModalDescriptor()?.kind === "hook-review";
+    this.activityRevision += 1;
+    if (!hookSkip) this.nativeActivity.noteInput(new Date(this.now()).toISOString());
+  }
+
+  private canBootstrapCodex(): boolean {
+    return this.record.provider === "codex" && this.record.codexActorMarker === true
+      && this.record.generation === 1 && this.record.launchRecord?.mode === "launch"
+      && this.record.initialInstructionId === undefined && this.completedTurnCount === 0
+      && this.rendered.length === 0 && this.nativeActivity.pristine();
+  }
+
+  /** Recovery attempts must use actual input admission, not the UI's readable idle surface. */
+  async readyForInstruction(): Promise<boolean> {
+    return await this.reconcileCanonicalTurns() && this.deliveryHold() === undefined;
+  }
 
   private async renderInstruction(input: SubmitWorkerInstruction): Promise<InstructionDelivery> {
     const encoded = typeof input.encoded === "function" ? input.encoded() : input.encoded;
@@ -451,35 +468,12 @@ export class WorkerTurnEngine {
     return observeWorkerModal(this.record.provider, this.composer, this.activity, this.replay, this.options.effects.hasRuntime?.());
   }
 
-  /**
-   * Press one enumerated answer at the blocking prompt, or refuse with the exact reason.
-   *
-   * Every refusal is decided here against the live descriptor rather than the caller's copy: the
-   * fingerprint pins the answer to the dialog that is actually on screen, and the key bytes come
-   * only from the domain's static table. There is no path from caller text to the PTY.
-   */
   answerModal(request: { fingerprint: string; answer: string }): ModalAnswerAttempt {
     this.observeComposer();
-    const descriptor = this.currentModalDescriptor();
-    if (descriptor === undefined) return { status: "no-modal" };
-    if (descriptor.kind === "unknown" || descriptor.answers.length === 0) {
-      return { status: "unrecognized", descriptor };
-    }
-    if (descriptor.fingerprint !== request.fingerprint) {
-      return { status: "fingerprint-mismatch", descriptor };
-    }
-    const answer = descriptor.answers.find((option) => option.id === request.answer);
-    const keys = answer === undefined
-      ? undefined
-      : modalAnswerKeySequence(this.record.provider, descriptor.kind, answer.id);
-    if (answer === undefined || keys === undefined) {
-      return { status: "unsupported-answer", descriptor };
-    }
-    this.options.effects.write(keys);
-    // The press may start a turn (plan-confirm) or merely clear a gate (trust). Either way the
-    // stall clock restarts from the keypress, exactly as it does for a submitted instruction.
-    this.resetStallObservation();
-    return { status: "pressed", descriptor, answer };
+    return answerWorkerModal(this.record.provider, this.currentModalDescriptor(), request, {
+      write: (keys) => this.options.effects.write(keys),
+      resetStallObservation: () => this.resetStallObservation(),
+    });
   }
 
   waitResult(completionTarget: number, maxResultChars = 1_200): WorkerResultSnapshot {
@@ -745,7 +739,7 @@ export class WorkerTurnEngine {
 
   private armedScreenReservationTarget(claim: TurnCaptureClaim | undefined): number {
     if (
-      this.idleTimer === undefined
+      this.nativeActivity.currentEndCommitted(this.activityRevision) || this.idleTimer === undefined
       || this.activity !== "awaiting-input"
       || !this.observedWorking
     ) return 0;
@@ -825,7 +819,7 @@ export class WorkerTurnEngine {
       retiring: this.inputTargets.busy, retirementFailed: this.inputTargets.failure,
       deferred: this.deferredScreenCompletionTarget ?? 0,
       captured: Math.max(this.completedTurnCount, this.turnCaptureOwner?.bankedThrough ?? this.turnCaptureOwner?.completionTarget ?? 0),
-      nativeRefused: this.nativeActivity.refused, nativeAvailable: this.nativeActivity.available,
+      nativeRefused: this.nativeActivity.refused && !this.nativeActivity.bootstrapReady(this.activityRevision), nativeAvailable: this.nativeActivity.available,
       activity: this.nativeActivity.activity(this.activity, this.activityRevision),
       observedWorking: this.observedWorking, starting: this.inputReadiness.pending,
     });
@@ -1246,6 +1240,8 @@ export class WorkerTurnEngine {
       this.options.effects.notifySessionUpdate();
       return;
     }
+    // Native receipt and a delayed terminal done marker describe the same completed turn.
+    if (this.nativeActivity.currentEndCommitted(this.activityRevision)) { this.observedWorking = false; this.notifyDeliveryBoundary(); return; }
     const owner = this.turnCaptureOwner;
     if (owner !== undefined) {
       const deferredTarget = owner.kind === "reconcile"
@@ -1460,6 +1456,7 @@ export class WorkerTurnEngine {
           ...nativeTurnIdentity(this.record),
           turnNumber: before + 1,
           allowFallback: false,
+          allowCodexBootstrap: this.canBootstrapCodex(),
         });
       } catch {
         this.mergeNativeObservation(nativeReadFailure(this.record, claim.completionTarget), claim);
@@ -1477,7 +1474,8 @@ export class WorkerTurnEngine {
         if (refreshed) observation = this.mergeNativeObservation(refreshed, claim);
       }
       const nativeTurns = observation.turns.filter((turn) => turn.transport === "provider-native");
-      const readable = (observation.nativeSourceAvailable !== false || observation.nativeSourceStatus === "missing") && !this.nativeActivity.refused;
+      const readable = this.nativeActivity.bootstrapReady(this.activityRevision)
+        || (observation.nativeSourceAvailable !== false || observation.nativeSourceStatus === "missing") && !this.nativeActivity.refused;
       if (this.completedTurnCount !== before || observation.turnNumber !== before + 1) return false;
       if (nativeTurns.length === 0) return readable;
       const nativeObservation: WorkerTurnObservation = {

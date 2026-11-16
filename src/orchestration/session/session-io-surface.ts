@@ -141,7 +141,7 @@ export class SessionIoSurface {
     if (data.length > 0 && !focusReport && runtime.controller?.clientId === clientId && clientId !== undefined) {
       this.lastOperatorInput.set(runtime, this.now());
     }
-    if (data.length > 0 && !focusReport) runtime.turns.noteHumanInput();
+    if (data.length > 0 && !focusReport) runtime.turns.noteHumanInput(data);
     requireSessionRuntime(runtime).write(data);
     await this.catalog.appendEvent("session.input", sessionId, { bytes: data.length });
   }

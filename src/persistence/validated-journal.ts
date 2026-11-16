@@ -18,7 +18,13 @@ const version = (info: BigIntStats): string =>
 export class ValidatedJournal<T> {
   private tail = Promise.resolve();
   private cached: { version: string; projection: T } | undefined;
-  constructor(private readonly path: string, private readonly project: (content: string) => T) {}
+  constructor(private readonly path: string,
+    private readonly projector: ((content: string) => T) | { bytes: (content: Buffer) => T }) {}
+
+  private project(content: Buffer): T {
+    return typeof this.projector === "function"
+      ? this.projector(content.toString("utf8")) : this.projector.bytes(content);
+  }
 
   read(): Promise<T> {
     return this.enqueue(async () => {
@@ -29,13 +35,13 @@ export class ValidatedJournal<T> {
         });
         if (file === undefined) {
           this.cached = undefined;
-          return structuredClone(this.project(""));
+          return structuredClone(this.project(Buffer.alloc(0)));
         }
         try {
           const before = version(await file.stat({ bigint: true }));
           const projection = this.cached?.version === before
             ? this.cached.projection
-            : this.project(await file.readFile("utf8"));
+            : this.project(await file.readFile());
           const after = version(await file.stat({ bigint: true }));
           const current = await stat(this.path, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
             if (error.code === "ENOENT") return undefined;

@@ -1,13 +1,12 @@
 import { assertEvidenceRetainable } from "./strigoi-evidence-deletion.js";
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import { STRIGOI_KEY, StrigoiStateSchema, type StrigoiState } from "../domain/strigoi.js";
 import type { StrigoiRepository } from "../orchestration/strigoi-ports.js";
 import { syncPrivateFile, writeAtomicPrivateFile } from "./atomic-private-file.js";
 import { projectBindings, withBindingAuthority } from "./binding-authority.js";
-import { openPrivateAppendFile } from "./private-files.js";
+import { ValidatedJournal } from "./validated-journal.js";
 
 export class StrigoiStoreError extends Error {
   constructor(readonly code: "STRIGOI_CORRUPT_STATE" | "STRIGOI_REVISION_CONFLICT" | "STRIGOI_MUTATION_CONFLICT" | "STRIGOI_SESSION_CONFLICT" | "STRIGOI_IO_ERROR", message: string, readonly sessionId?: string) { super(message); this.name = "StrigoiStoreError"; }
@@ -33,13 +32,15 @@ const hash = (expected: number, next: StrigoiState): string => createHash("sha25
 /** One broker owns the directory; all instances in that broker share this serialized authority. */
 export class StrigoiStore implements StrigoiRepository {
   readonly path: string;
-  private readonly legacyPath: string;
+  private readonly journal: ValidatedJournal<ReturnType<typeof projectResident>>;
+  private readonly legacy: ValidatedJournal<ReturnType<typeof projectLegacy>>;
   private readonly stateDirectory: string;
   constructor(stateDirectory: string) {
     stateDirectory = resolve(stateDirectory);
     this.stateDirectory = stateDirectory;
     this.path = join(stateDirectory, "orchestration", "strigoi", "records.jsonl");
-    this.legacyPath = join(stateDirectory, "orchestration", "bindings.jsonl");
+    this.journal = new ValidatedJournal(this.path, { bytes: projectResident });
+    this.legacy = new ValidatedJournal(join(stateDirectory, "orchestration", "bindings.jsonl"), projectLegacy);
   }
   private enqueue<T>(work: () => Promise<T>): Promise<T> { return withBindingAuthority(this.stateDirectory, work); }
   /** Caller must hold withBindingAuthority for this state directory. */
@@ -79,8 +80,7 @@ export class StrigoiStore implements StrigoiRepository {
           await writeAtomicPrivateFile(`${this.path}.tail-${randomUUID()}`, JSON.stringify({ encoding: "base64", bytes: loaded.tail.toString("base64") }) + "\n");
           await writeAtomicPrivateFile(this.path, loaded.committed);
         }
-        const file = await openPrivateAppendFile(this.path);
-        try { await file.writeFile(`${JSON.stringify({ revision: parsed.revision, mutationId, requestHash, state: parsed })}\n`); await file.sync(); } finally { await file.close(); }
+        await this.journal.append({ revision: parsed.revision, mutationId, requestHash, state: parsed });
         await syncPrivateFile(this.path);
       } catch { throw new StrigoiStoreError("STRIGOI_IO_ERROR", "Resident journal write or sync failed"); }
       return structuredClone(parsed);
@@ -90,31 +90,40 @@ export class StrigoiStore implements StrigoiRepository {
     if (state.activeBinding && [...ordinary.values()].some((binding) => binding.sessionId === state.activeBinding?.sessionId)) throw new StrigoiStoreError("STRIGOI_SESSION_CONFLICT", "Resident session conflicts with ordinary binding", state.activeBinding.sessionId);
   }
   private async load() {
-    const legacy = await readFile(this.legacyPath, "utf8").catch((e: NodeJS.ErrnoException) => { if (e.code === "ENOENT") return ""; throw e; });
-    const legacyLines = legacy.split("\n");
-    if (!legacy.endsWith("\n")) legacyLines.pop();
-    for (const line of legacyLines) {
-      try { const value = JSON.parse(line) as { key?: unknown; kind?: unknown }; if (value.key === STRIGOI_KEY || value.kind === "resident") throw new StrigoiStoreError("STRIGOI_CORRUPT_STATE", "Resident record in legacy binding journal"); }
-      catch (e) { if (e instanceof StrigoiStoreError) throw e; }
-    }
-    const ordinary = projectBindings(legacy);
-    const content = await readFile(this.path).catch((e: NodeJS.ErrnoException) => { if (e.code === "ENOENT") return Buffer.alloc(0); throw new StrigoiStoreError("STRIGOI_CORRUPT_STATE", "Resident journal unavailable"); });
-    const boundary = content.lastIndexOf(10) + 1;
-    const committed = content.subarray(0, boundary).toString("utf8"), tail = content.subarray(boundary);
-    let state = initial();
-    const mutations = new Map<string, z.infer<typeof RecordSchema>>();
-    const pins = new Set<string>();
-    try {
-      for (const line of committed.split("\n")) {
-        if (!line) continue;
-        const record = RecordSchema.parse(JSON.parse(line));
-        if (record.revision !== state.revision + 1 || record.state.revision !== record.revision || mutations.has(record.mutationId) || hash(state.revision, record.state) !== record.requestHash) throw new Error("Invalid resident journal sequence");
-        validateAdvance(state, record.state);
-        for (const id of [...record.state.retainedSessionIds, record.state.activeBinding?.sessionId, record.state.transition?.predecessor?.sessionId, record.state.transition?.successor?.sessionId]) if (id) pins.add(id);
-        mutations.set(record.mutationId, record); state = record.state;
-      }
-    } catch { throw new StrigoiStoreError("STRIGOI_CORRUPT_STATE", "Invalid resident journal"); }
-    this.checkCollision(state, ordinary);
-    return { state, mutations, committed, tail, pins, ordinary };
+    const ordinary = await this.legacy.read();
+    const loaded = await this.journal.read().catch(() => { throw new StrigoiStoreError("STRIGOI_CORRUPT_STATE", "Resident journal unavailable or invalid"); });
+    // Both files are identity-checked on every read. A changed ordinary binding must still
+    // collide with an unchanged resident projection; neither cache grants independent authority.
+    this.checkCollision(loaded.state, ordinary);
+    return { ...loaded, tail: Buffer.from(loaded.tail), ordinary };
   }
+}
+
+function projectLegacy(legacy: string) {
+  const legacyLines = legacy.split("\n");
+  if (!legacy.endsWith("\n")) legacyLines.pop();
+  for (const line of legacyLines) {
+    try { const value = JSON.parse(line) as { key?: unknown; kind?: unknown }; if (value.key === STRIGOI_KEY || value.kind === "resident") throw new StrigoiStoreError("STRIGOI_CORRUPT_STATE", "Resident record in legacy binding journal"); }
+    catch (e) { if (e instanceof StrigoiStoreError) throw e; }
+  }
+  return projectBindings(legacy);
+}
+
+function projectResident(content: Buffer) {
+  const boundary = content.lastIndexOf(10) + 1;
+  const committed = content.subarray(0, boundary).toString("utf8"), tail = content.subarray(boundary);
+  let state = initial();
+  const mutations = new Map<string, z.infer<typeof RecordSchema>>();
+  const pins = new Set<string>();
+  try {
+    for (const line of committed.split("\n")) {
+      if (!line) continue;
+      const record = RecordSchema.parse(JSON.parse(line));
+      if (record.revision !== state.revision + 1 || record.state.revision !== record.revision || mutations.has(record.mutationId) || hash(state.revision, record.state) !== record.requestHash) throw new Error("Invalid resident journal sequence");
+      validateAdvance(state, record.state);
+      for (const id of [...record.state.retainedSessionIds, record.state.activeBinding?.sessionId, record.state.transition?.predecessor?.sessionId, record.state.transition?.successor?.sessionId]) if (id) pins.add(id);
+      mutations.set(record.mutationId, record); state = record.state;
+    }
+  } catch { throw new StrigoiStoreError("STRIGOI_CORRUPT_STATE", "Invalid resident journal"); }
+  return { state, mutations, committed, tail, pins };
 }

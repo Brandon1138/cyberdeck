@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -59,4 +59,42 @@ it("ignores a torn tail but never serves cached instructions over corrupt commit
   await appendFile(store.path, "broken}\n");
   await expect(store.list()).rejects.toThrow();
   await expect(store.list()).rejects.toThrow();
+});
+
+it("validates only new snapshots after checking the complete committed prefix", async () => {
+  const { store, record } = await setup();
+  await appendFile(store.path, Array.from({ length: 200 }, () => JSON.stringify(record) + "\n").join(""));
+  await store.list();
+  const parse = vi.spyOn(InstructionRecordSchema, "parse");
+  await store.put({ ...record, status: "submitted" });
+  expect((await store.list())[0]!.status).toBe("submitted");
+  expect(parse).toHaveBeenCalledTimes(2); // incoming write and its actual journal bytes
+});
+
+it("revalidates edited history even when a valid snapshot was appended", async () => {
+  const { store, record } = await setup();
+  await store.put({ ...record, status: "submitted" });
+  await store.list();
+  const original = await readFile(store.path, "utf8");
+  // Same-size edit to the first immutable message, masked by a later valid snapshot.
+  await writeFile(store.path, original.replace('"message":"brief"', '"message":"other"')
+    + JSON.stringify({ ...record, status: "completed" }) + "\n");
+  await expect(store.list()).rejects.toThrow("INSTRUCTION_ORIGINAL_IMMUTABLE");
+  await writeFile(store.path, original);
+  expect((await store.list())[0]!.status).toBe("submitted");
+});
+
+it("completes torn snapshots and discards a failed suffix without publishing it", async () => {
+  const { store, record } = await setup();
+  const original = await readFile(store.path, "utf8");
+  await store.list();
+  const next = JSON.stringify({ ...record, status: "submitted" });
+  await appendFile(store.path, next.slice(0, 40));
+  expect((await store.list())[0]!.status).toBe("queued");
+  await appendFile(store.path, next.slice(40) + "\ninvalid\n");
+  await expect(store.list()).rejects.toThrow();
+  await writeFile(store.path, original + next + "\n");
+  expect((await store.list())[0]!.status).toBe("submitted");
+  await writeFile(store.path, original);
+  expect((await store.list())[0]!.status).toBe("queued");
 });

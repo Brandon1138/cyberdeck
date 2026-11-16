@@ -22,15 +22,35 @@ export async function composeStrigoiRuntime(options: StrigoiLifecycleOptions & {
     ...(options.beforeDelete ? { beforeDelete: options.beforeDelete } : {}),
   });
   let unsubscribe: (() => void) | undefined;
-  const reconcile = async () => { await lifecycle.reconcile(); await options.succession?.delivery?.flush?.(); };
+  let pending: Promise<void> | undefined, dirty = false, disposed = false;
+  const reconcile = (): void => {
+    if (disposed) return;
+    dirty = true;
+    if (pending) return;
+    // Coalesce the complete background pass. Sharing only lifecycle.reconcile() gives every
+    // screen-update waiter its own delivery flush when that shared lifecycle promise settles.
+    pending = Promise.resolve().then(async () => {
+      while (dirty && !disposed) {
+        dirty = false;
+        try {
+          await lifecycle.reconcile();
+          if (!disposed) await options.succession?.delivery?.flush?.();
+        } catch (error) { report(error); }
+      }
+    }).finally(() => {
+      pending = undefined;
+      if (dirty && !disposed) reconcile();
+    });
+  };
   return {
     lifecycle, continuity: options.continuity, succession, workers, delivery: options.succession?.delivery,
     // Partial composition remains available only to isolated lifecycle embeddings.
     integration: succession && workers && options.succession?.delivery ? "composed" as const : "incomplete" as const,
     start: () => {
-      unsubscribe ??= options.registry.onSessionUpdate(() => { void reconcile().catch(report); });
-      void reconcile().catch(report);
+      if (disposed) return;
+      unsubscribe ??= options.registry.onSessionUpdate(reconcile);
+      reconcile();
     },
-    dispose: () => { unsubscribe?.(); lifecycle.dispose(); },
+    dispose: () => { disposed = true; dirty = false; unsubscribe?.(); lifecycle.dispose(); },
   };
 }

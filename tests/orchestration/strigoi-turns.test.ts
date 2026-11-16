@@ -22,7 +22,7 @@ function fixture() {
   const transcripts = { append: async (event: AppendWorkerTurnTranscriptEvent) => { events.push({ ...event, data: event.data ?? {}, id: randomUUID(), cursor: events.length + 1, occurredAt: new Date().toISOString() }); },
     read: async (_id: string, cursor = 0) => ({ events: events.filter((e) => e.cursor > cursor), nextCursor: events.length }), observeProviderTurns };
   const turns = new StrigoiTurns(registry as never, transcripts as never, async () => "checkpoint instruction");
-  return { identity, events, submit, turns, transcripts, record, observeProviderTurns };
+  return { identity, events, submit, turns, transcripts, record, observeProviderTurns, registry };
 }
 
 function productionFixture() {
@@ -44,10 +44,21 @@ function productionFixture() {
   const io = new SessionIoSurface({ catalog: { options: {}, sessions: new Map([[record.id, runtime]]), requireRuntime: () => runtime,
     assertMayConsume: () => {}, requireAdapter: () => ({ submitInput: (s: string) => Buffer.from(s) }), appendEvent: async () => {} } as never,
     bus: { onSessionUpdate: () => {}, notifyControllerReleased: () => {} } as never });
-  const turns = new StrigoiTurns({ get: () => record, workerTruth: () => engine.projectTruth(), submitInstruction: io.submitInstruction.bind(io) }, transcripts, async () => "checkpoint");
+  const turns = new StrigoiTurns({ get: () => record, workerTruth: () => engine.projectTruth(),
+    readyForInstruction: () => engine.readyForInstruction(), submitInstruction: io.submitInstruction.bind(io) }, transcripts, async () => "checkpoint");
   return { ...f, turns, io, engine, writes, observeProviderTurns };
 }
 describe("real succession instruction transport", () => {
+  it("does not call a readable idle surface safe when native admission is refused", async () => {
+    const f = productionFixture();
+    try {
+      f.observeProviderTurns.mockResolvedValue({ sessionId: f.identity.sessionId, provider: "codex", turnNumber: 1,
+        nativeSourceAvailable: false, nativeSourceStatus: "unbound", nativeFallbackAllowed: false, turns: [] } as never);
+      expect(f.engine.projectTruth().state).toBe("idle");
+      expect(await f.turns.boundary(f.identity)).toBe("unknown");
+      expect(f.writes).not.toHaveBeenCalled();
+    } finally { f.engine.releaseTimers(); }
+  });
   it.each(["working", "idle"] as const)("waits for a semantic receipt after current native %s without treating it as completed", async (activity) => {
     const f = fixture(), id = randomUUID();
     await f.turns.submit(id, f.identity, "adoption", undefined, async (apply) => apply());
@@ -77,6 +88,7 @@ describe("real succession instruction transport", () => {
     const f = productionFixture(), id = randomUUID(), admission = vi.fn(async (apply: () => Promise<unknown>) => apply());
     try {
       expect(await f.turns.boundary(f.identity)).toBe("safe");
+      f.observeProviderTurns.mockClear();
       if (when === "before submission") await f.io.attach(f.identity.sessionId, "human", "control", () => {});
       else f.observeProviderTurns.mockImplementationOnce(async () => {
         await f.io.attach(f.identity.sessionId, "human", "control", () => {});

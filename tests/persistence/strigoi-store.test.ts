@@ -39,6 +39,56 @@ describe("StrigoiStore", () => {
     await rename(`${s.path}.replacement`, s.path);
     await expect(s.read()).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
   });
+  it("preserves arbitrary torn-tail bytes through cached reads and quarantine", async () => {
+    const { s } = await store(), initial = await s.read();
+    const first = { ...initial, revision: 1 };
+    await s.compareAndSwap(0, "one", first);
+    const tail = Buffer.from([0xff, 0xfe, 0xc3, 0x00, 0x7b]);
+    await appendFile(s.path, tail);
+    expect(await s.read()).toEqual(first);
+    expect(await s.read()).toEqual(first);
+    await s.compareAndSwap(1, "two", { ...first, revision: 2 });
+    const directory = s.path.slice(0, s.path.lastIndexOf("/"));
+    const quarantined = (await readdir(directory)).find(name => name.startsWith("records.jsonl.tail-"))!;
+    expect(JSON.parse(await readFile(join(directory, quarantined), "utf8")).bytes).toBe(tail.toString("base64"));
+    expect((await s.read()).revision).toBe(2);
+  });
+  it("invalidates warm resident and legacy caches without leaking mutable snapshots", async () => {
+    const { d, s } = await store(), initial = await s.read();
+    await s.compareAndSwap(0, "one", { ...initial, revision: 1 });
+    (await s.read()).retainedSessionIds.push("11111111-1111-4111-8111-111111111111");
+    expect((await s.read()).retainedSessionIds).toEqual([]);
+    await new StrigoiStore(d).compareAndSwap(1, "two", { ...initial, revision: 2, desired: "suspended" });
+    expect((await s.read()).revision).toBe(2);
+    const original = await readFile(s.path, "utf8");
+    await writeFile(s.path, original.replace('"schemaVersion":1', '"schemaVersion":2'));
+    await expect(s.read()).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
+    await writeFile(s.path, original);
+    expect((await s.read()).revision).toBe(2);
+    const legacy = join(d, "orchestration", "bindings.jsonl");
+    await writeFile(legacy, '{"key":"resident:strigoi"}\n');
+    await expect(s.read()).rejects.toMatchObject({ code: "STRIGOI_CORRUPT_STATE" });
+    await writeFile(legacy, "");
+    expect((await s.read()).revision).toBe(2);
+    await writeFile(s.path, "");
+    expect(await s.read()).toEqual(initial);
+  });
+  it("detects changed ordinary bindings against an unchanged cached resident", async () => {
+    const { d, s } = await store(), initial = await s.read();
+    const sessionId = "11111111-1111-4111-8111-111111111111", scope = { kind: "fleet" as const };
+    const activeBinding = { key: "resident:strigoi", kind: "resident" as const, sessionId, provider: "codex" as const,
+      cwd: "/repo", sandbox: "read-only" as const, scope, grant: { subjectSessionId: sessionId, capabilities: ["thread.list" as const], scope },
+      resident: { name: "strigoi" as const, incarnation: 1 }, createdAt: initial.updatedAt, updatedAt: initial.updatedAt };
+    await s.compareAndSwap(0, "activate", { ...initial, revision: 1, desired: "enabled", activeBinding,
+      selection: { provider: "codex", model: "model", cwd: "/repo" }, incarnation: 1, activeGeneration: 1 });
+    await s.read();
+    const { resident: _resident, ...ordinary } = activeBinding;
+    const legacy = join(d, "orchestration", "bindings.jsonl");
+    await writeFile(legacy, JSON.stringify({ ...ordinary, key: "fleet", kind: "primary" }) + "\n");
+    await expect(s.read()).rejects.toMatchObject({ code: "STRIGOI_SESSION_CONFLICT", sessionId });
+    await writeFile(legacy, "");
+    expect((await s.read()).activeBinding?.sessionId).toBe(sessionId);
+  });
   it("lets suspension defeat a prepared activation", async () => {
     const { d, s } = await store(); const initial = await s.read();
     const id = "11111111-1111-4111-8111-111111111111", scope = { kind: "fleet" as const };

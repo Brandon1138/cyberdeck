@@ -7,6 +7,8 @@ import WebSocket from "ws";
 export function readCodexRemoteIdle(input: {
   homeDirectory: string; nativeSessionId: string; cwd: string; transcriptPath: string;
   timeoutMs?: number;
+  /** Only with an exact fresh thread/start receipt, never a native completion substitute. */
+  freshBootstrap?: boolean;
 }): Promise<boolean> {
   return new Promise(resolve => {
     const socket = new WebSocket("ws://localhost", {
@@ -29,7 +31,8 @@ export function readCodexRemoteIdle(input: {
       if (settled || binary) return;
       try {
         const frame = JSON.parse(data.toString()) as { id?: unknown; error?: unknown; result?: {
-          thread?: { id?: string; cwd?: string; path?: string; status?: { type?: string }; canAcceptDirectInput?: boolean };
+          thread?: { id?: string; cwd?: string; path?: string; status?: { type?: string }; canAcceptDirectInput?: boolean;
+            preview?: string; createdAt?: number; updatedAt?: number; forkedFromId?: string | null; ephemeral?: boolean };
         } };
         if (frame.id === 1 && !initialized) {
           if (frame.error !== undefined || frame.result === undefined) { finish(); return; }
@@ -39,9 +42,18 @@ export function readCodexRemoteIdle(input: {
         } else if (frame.id === 2 && initialized) {
           const thread = frame.result?.thread;
           if (frame.error !== undefined || thread?.id !== input.nativeSessionId || thread.cwd !== input.cwd
-            || typeof thread.path !== "string" || thread.status?.type !== "idle" || thread.canAcceptDirectInput !== true) {
+            || thread.status?.type !== "idle" || thread.canAcceptDirectInput !== true) {
             finish(); return;
           }
+          // The managed daemon cannot list turns before materialization. Freshness belongs to
+          // the bridge's correlated start + uninterrupted, unrevoked subscription, not the empty
+          // turns array in this metadata response. Refuse any metadata suggesting prior input.
+          if (input.freshBootstrap) {
+            finish(thread.preview === "" && thread.forkedFromId === null && thread.ephemeral === false
+              && typeof thread.createdAt === "number" && thread.createdAt > 0 && thread.updatedAt === thread.createdAt);
+            return;
+          }
+          if (typeof thread.path !== "string") { finish(); return; }
           // Managed native homes share sessions through a symlink. Require the same file,
           // without rejecting the daemon's legitimate spelling of that exact bound path.
           if (thread.path === input.transcriptPath) finish(true);

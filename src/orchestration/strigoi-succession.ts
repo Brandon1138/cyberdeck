@@ -368,6 +368,13 @@ export class StrigoiSuccession {
         return false;
       }
     }
+    // A readable startup composer is not native admission. Do not spend bounded inference
+    // attempts before the same production preflight used to deliver input is ready.
+    if (!attempt) {
+      const boundary = await this.o.turns.boundary(actor);
+      if (boundary === "modal") return this.hold(t, epoch, "provider-permission-modal", "The provider startup prompt requires operator attention before recovery input.");
+      if (boundary !== "safe") return false;
+    }
     const next = { id: randomUUID(), attempt: (attempt?.attempt ?? 0) + 1, startedAt: this.at(), outcome: "unknown" as const };
     if (!await this.change(t.id, epoch, (_s, current) => ({ transition: { ...this.phase(current, kind === "checkpoint" ? "checkpointing" : "adopting"), [field]: next }, hold: undefined }))) return false;
     const submission = this.o.turns.submit(next.id, actor, kind, t.packet, (apply) => this.o.admission.run(actor.sessionId, "recovery", () => this.authority(async () => {

@@ -13,6 +13,26 @@ function observation(activity: "working" | "idle", occurredAt = "2026-10-13T12:0
 }
 
 describe("exact native activity observations", () => {
+  it.each(["semantic", "activity"])("matches only the current committed end (%s identity)", identity => {
+    const native = new NativeTurnActivity(createdAt), end = observation("idle");
+    end.nativeActivityEvidence!.providerTurnId = "one";
+    native.observe(end, 1, 1);
+    expect(native.currentEndCommitted(1)).toBe(false);
+    native.committed([{ data: { transport: "provider-native", ...(identity === "semantic"
+      ? { semanticTurnId: "codex:one" } : { nativeActivityId: "native-idle" }) } }]);
+    expect(native.currentEndCommitted(1)).toBe(true);
+    native.noteInput("2026-10-13T12:00:02.000Z");
+    expect(native.currentEndCommitted(1)).toBe(false);
+    const next = observation("idle", "2026-10-13T12:00:03.000Z", "next");
+    next.nativeActivityEvidence!.providerTurnId = "two";
+    native.observe(next, 2, 2);
+    expect(native.ownsCurrentEnd(2)).toBe(true);
+    expect(native.currentEndCommitted(2)).toBe(false);
+    native.reset("2026-10-13T12:00:04.000Z");
+    native.observe(end, 3, 3);
+    expect(native.currentEndCommitted(3)).toBe(false);
+  });
+
   it.each([false, true])("keeps the known native end when done precedes a stale Working footer (native=%s)", hasNative => {
     const native = new NativeTurnActivity(createdAt);
     native.noteInput(createdAt);

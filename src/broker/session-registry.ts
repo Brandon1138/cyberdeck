@@ -284,6 +284,10 @@ export class SessionRegistry {
     return this.reads.workerTruth(sessionId);
   }
 
+  readyForInstruction(sessionId: string): Promise<boolean> {
+    return this.catalog.requireRuntime(sessionId).turns.readyForInstruction();
+  }
+
   answerWorkerModal(
     sessionId: string,
     fingerprint: string,

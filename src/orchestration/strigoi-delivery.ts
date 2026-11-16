@@ -51,10 +51,18 @@ export class StrigoiDelivery implements StrigoiDeliveryPort, InstructionRouting 
     if (!s.activeBinding || s.desired !== "enabled" || transitioning(s) || s.hold) return;
     const pins = await this.o.repository.retentionPins();
     for (const record of await this.o.instructions.list()) {
+      if (["completed", "cancelled", "undelivered"].includes(record.status)) continue;
       if (record.logicalRecipient || pins.has(record.actorSessionId)) await this.o.instructions.revise(record, (current, persist) => this.observe(current, persist));
     }
     const targets = new Set([s.activeBinding.sessionId]);
-    for (const record of await this.o.instructions.list()) if (["accepted", "queued"].includes(record.status)) targets.add(effectiveInstruction(record).targetSessionId);
+    for (const record of await this.o.instructions.list()) {
+      // Resident recovery must not synchronously retry the entire fleet's unrelated backlog.
+      // Outgoing resident work and explicit incoming targets retain their normal queue ordering.
+      if (["accepted", "queued"].includes(record.status)
+        && (record.logicalRecipient || pins.has(record.actorSessionId) || pins.has(record.targetSessionId))) {
+        targets.add(effectiveInstruction(record).targetSessionId);
+      }
+    }
     for (const target of targets) await this.o.instructions.flush(target);
   }
   async needsAdoption(identity: StrigoiIdentity, packet: StrigoiPacketRef): Promise<boolean> {

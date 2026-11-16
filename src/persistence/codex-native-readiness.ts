@@ -3,6 +3,20 @@ import { join } from "node:path";
 import { readCodexRemoteIdle } from "../providers/codex/remote-thread-readiness.js";
 import type { CaptureWorkerTurns, WorkerTurnObservation } from "../orchestration/session/worker-turn-ports.js";
 import type { CodexConversationBindingStore } from "./codex-conversation-bindings.js";
+import { readBootstrap } from "../providers/codex/remote-bootstrap.js";
+
+export async function readCodexBootstrapReadiness(input: CaptureWorkerTurns, homeDirectory?: string): Promise<WorkerTurnObservation["nativeBootstrap"]> {
+  if (input.provider !== "codex" || !input.codexMarkerRequired || !input.allowCodexBootstrap
+    || input.turnNumber !== 1 || input.initialInstructionId !== undefined) return;
+  const home = homeDirectory ?? join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "cyberdeck-orchestrator");
+  const receipt = await readBootstrap(home, input.sessionId);
+  if (!receipt || receipt.cwd !== input.cwd || Date.parse(receipt.createdAt) < Date.parse(input.createdAt)) return;
+  if (!await readCodexRemoteIdle({ homeDirectory: home, nativeSessionId: receipt.nativeSessionId,
+    cwd: receipt.cwd, transcriptPath: "", freshBootstrap: true })) return;
+  const current = await readBootstrap(home, input.sessionId);
+  if (JSON.stringify(current) !== JSON.stringify(receipt)) return;
+  return { nativeSessionId: receipt.nativeSessionId, observedAt: new Date().toISOString() };
+}
 
 /** A runtime idle read cannot replace transcript identity or newer native work. */
 export async function refreshCodexNativeReadiness(

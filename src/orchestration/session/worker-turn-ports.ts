@@ -84,6 +84,8 @@ export interface CaptureWorkerTurns {
   initialInstructionId?: string | undefined;
   /** Marker-injected Codex launches cannot adopt legacy markerless rollouts. */
   codexMarkerRequired?: boolean;
+  /** Engine-owned fresh passive launch gate; authorizes only an exact empty native runtime read. */
+  allowCodexBootstrap?: boolean;
 }
 
 export type WorkerTurnTransport = "provider-native" | "terminal-replay-fallback" | "broker-lifecycle";
@@ -119,6 +121,8 @@ export interface WorkerTurnObservation {
   /** Fresh exact-thread runtime read, followed by an unchanged bound native transcript read.
    * Admission evidence only: never a canonical completion or an instruction receipt. */
   nativeReadiness?: { nativeSessionId: string; observedAt: string };
+  /** Exact bridge-created, still-empty thread. No transcript binding, fallback, or completion. */
+  nativeBootstrap?: { nativeSessionId: string; observedAt: string };
   nativeActivityEvidence?: { id: string; occurredAt?: string; kind: string; providerTurnId?: string;
     generation?: number; executionId?: string; nativeSessionId?: string;
     /** Exact source identity/interval to retain if the engine banks an authoritative negative closure. */

@@ -42,7 +42,7 @@ function sessionRecord(): SessionRecord {
 
 function harness(
   recordOverrides: Partial<SessionRecord> = {},
-  options: { preview?: WorkerTurnPreviewPort; transcripts?: WorkerTurnTranscriptPort; tokenCount?: number; progressVersion?: () => number } = {},
+  options: { preview?: WorkerTurnPreviewPort; transcripts?: WorkerTurnTranscriptPort; tokenCount?: number; progressVersion?: () => number; workCycle?: ReplayObservation["workCycle"] } = {},
 ) {
   let frame = "";
   let activity: ReturnType<WorkerTurnObservationPort["activity"]> = "unknown";
@@ -63,6 +63,7 @@ function harness(
     }),
     tokenCount: () => options.tokenCount,
     get version() { return frame.length; },
+    ...(options.workCycle === undefined ? {} : { workCycle: options.workCycle }),
     ...(options.progressVersion === undefined ? {} : { progressVersion: options.progressVersion }),
   };
   const fatalTermination = vi.fn<WorkerTurnObservationPort["fatalTermination"]>()
@@ -1277,6 +1278,40 @@ describe("WorkerTurnEngine", () => {
       ([update]) => update.instructionId === "held-third-turn"
         && update.state === "completed",
     )).toHaveLength(0);
+  });
+
+  it("does not reserve a phantom turn when terminal done follows the banked native end", async () => {
+    vi.useFakeTimers();
+    const gate = deferred<void>();
+    let active = true;
+    const f = harness({}, { workCycle: () => ({ id: 1, active }) });
+    const end = new Date().toISOString();
+    f.commitProviderTurns.mockImplementation(async observation => observation.turns.map(turn => ({ text: turn.text,
+      data: { transport: turn.transport, semanticTurnId: `codex:${turn.providerTurnId}` } })));
+    f.observeProviderTurns.mockImplementation(async input => ({
+      sessionId: input.sessionId, provider: input.provider, turnNumber: input.turnNumber,
+      nativeSourceAvailable: true, nativeSourceStatus: "available", nativeActivity: "idle",
+      nativeActivityEvidence: { id: "end:one", kind: "task_complete", occurredAt: end, providerTurnId: "one" },
+      turns: input.turnNumber === 1 ? [{ providerTurnId: "one", providerOccurredAt: end,
+        text: "adoption acknowledged", transport: "provider-native" }] : [],
+    }));
+    vi.mocked(f.effects.appendEvent).mockImplementation(type => type === "session.turn_reconciled" ? gate.promise : Promise.resolve());
+    f.observations.activity = "working";
+    f.engine.appendOutput(Buffer.from("adoption working"), f.replay);
+    const reconcile = f.engine.reconcileCanonicalTurns();
+    await flushMicrotasks();
+    expect(f.engine.completedTurns).toBe(1);
+    active = false;
+    f.observations.activity = "awaiting-input";
+    f.engine.appendOutput(Buffer.from("late adoption done"), f.replay);
+    await vi.advanceTimersByTimeAsync(200);
+    gate.resolve(); await reconcile;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(f.engine.completedTurns).toBe(1);
+    await expect(f.engine.readyForInstruction()).resolves.toBe(true);
+    await expect(f.engine.submitInstruction({ instructionId: "ordinary-after-adoption", message: "ordinary follow-up", encoded: Buffer.from("ordinary follow-up\r"), source: "broker" }))
+      .resolves.toMatchObject({ state: "rendered", expectedTurn: 2 });
+    expect(f.writes).toHaveLength(1);
   });
 
   it("re-arms a later screen turn after a committed reconcile releases ownership", async () => {
