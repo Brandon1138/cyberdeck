@@ -1,9 +1,7 @@
 import { WorkerTruthObservation } from "../../domain/worker-truth-observation.js";
 import { workerDeliveryHold } from "./worker-delivery-hold.js";
-import {
-  modalAnswerKeySequence,
-  type ModalAnswerAttempt,
-} from "../../domain/modal-descriptor.js";
+import type { ModalAnswerAttempt } from "../../domain/modal-descriptor.js";
+import { answerWorkerModal } from "./worker-modal-answer.js";
 import type { SessionRecord } from "../../domain/session.js";
 import {
   providerLimitFromTermination,
@@ -470,35 +468,12 @@ export class WorkerTurnEngine {
     return observeWorkerModal(this.record.provider, this.composer, this.activity, this.replay, this.options.effects.hasRuntime?.());
   }
 
-  /**
-   * Press one enumerated answer at the blocking prompt, or refuse with the exact reason.
-   *
-   * Every refusal is decided here against the live descriptor rather than the caller's copy: the
-   * fingerprint pins the answer to the dialog that is actually on screen, and the key bytes come
-   * only from the domain's static table. There is no path from caller text to the PTY.
-   */
   answerModal(request: { fingerprint: string; answer: string }): ModalAnswerAttempt {
     this.observeComposer();
-    const descriptor = this.currentModalDescriptor();
-    if (descriptor === undefined) return { status: "no-modal" };
-    if (descriptor.kind === "unknown" || descriptor.answers.length === 0) {
-      return { status: "unrecognized", descriptor };
-    }
-    if (descriptor.fingerprint !== request.fingerprint) {
-      return { status: "fingerprint-mismatch", descriptor };
-    }
-    const answer = descriptor.answers.find((option) => option.id === request.answer);
-    const keys = answer === undefined
-      ? undefined
-      : modalAnswerKeySequence(this.record.provider, descriptor.kind, answer.id);
-    if (answer === undefined || keys === undefined) {
-      return { status: "unsupported-answer", descriptor };
-    }
-    this.options.effects.write(keys);
-    // The press may start a turn (plan-confirm) or merely clear a gate (trust). Either way the
-    // stall clock restarts from the keypress, exactly as it does for a submitted instruction.
-    this.resetStallObservation();
-    return { status: "pressed", descriptor, answer };
+    return answerWorkerModal(this.record.provider, this.currentModalDescriptor(), request, {
+      write: (keys) => this.options.effects.write(keys),
+      resetStallObservation: () => this.resetStallObservation(),
+    });
   }
 
   waitResult(completionTarget: number, maxResultChars = 1_200): WorkerResultSnapshot {
