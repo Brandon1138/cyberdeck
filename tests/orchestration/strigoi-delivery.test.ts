@@ -39,6 +39,30 @@ async function fixture() {
   return { ...f, queue, workflows, delivery, registry, effects, finish, close, setBusy: (value: boolean) => { busy = value; }, beforeWrite: (fn: () => Promise<void>) => { beforeWrite = fn; }, update: (value: InstructionStateUpdate) => update(value) };
 }
 
+it("flushes only resident obligations and leaves unrelated backlog and terminal history untouched", async () => {
+  const f = await fixture();
+  try {
+    await f.seal(); await f.cutover(); await f.finish();
+    const now = f.now(), unrelatedTarget = randomUUID();
+    const make = (actorSessionId: string, targetSessionId: string, status = "queued") => InstructionRecordSchema.parse({
+      id: randomUUID(), messageId: randomUUID(), actorSessionId, targetSessionId,
+      message: "retained work", status, createdAt: now, updatedAt: now,
+    });
+    const outgoing = make(ACTOR, WORKER), incoming = make(randomUUID(), ACTOR);
+    const logical = { ...make(NEXT, NEXT), logicalRecipient: { kind: "resident" as const, key: "resident:strigoi" as const } };
+    const unrelated = make(randomUUID(), unrelatedTarget), terminal = make(ACTOR, WORKER, "completed");
+    for (const record of [outgoing, incoming, logical, unrelated, terminal]) await f.evidence.instructionStore.put(record);
+    const flush = vi.spyOn(f.queue, "flush").mockResolvedValue([]);
+    const revise = vi.spyOn(f.queue, "revise");
+    await f.delivery.flush();
+    expect(new Set(flush.mock.calls.map(([target]) => target))).toEqual(new Set([NEXT, WORKER, ACTOR]));
+    expect(revise.mock.calls.map(([record]) => record.id)).toEqual([outgoing.id, logical.id]);
+    expect((await f.queue.list()).find(record => record.id === unrelated.id)).toEqual(unrelated);
+    expect(f.effects).toEqual([]);
+    flush.mockRestore(); revise.mockRestore();
+  } finally { await f.close(); }
+});
+
 it("continues cutover input once in order, preserving original identities and logical replay", async () => {
   const f = await fixture();
   try {
