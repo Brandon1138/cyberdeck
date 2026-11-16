@@ -40,7 +40,10 @@ export function indexedInstructionReceipt(record: InstructionRecord, ledger: Wor
   if (!target) return undefined;
   const turn = ledger.turns.find(t => t.data?.turnNumber === target.expectedTurn);
   if (turn?.data?.outcome === "cancelled") return { status: "cancelled", expectedTurn: target.expectedTurn, renderedAt: target.renderedAt };
+  const occurredAt = turn?.data?.providerOccurredAt;
+  const completedAt = turn?.data?.nativeTimestampKnown !== false && typeof occurredAt === "string"
+    && Number.isFinite(Date.parse(occurredAt)) && Date.parse(occurredAt) >= Date.parse(target.renderedAt) ? occurredAt : undefined;
   if (ledger.canonicalTurns >= target.expectedTurn) return { status: "completed", expectedTurn: target.expectedTurn,
-    renderedAt: target.renderedAt, submittedAt: record.submittedAt ?? target.renderedAt, completedAt: target.renderedAt };
+    renderedAt: target.renderedAt, submittedAt: record.submittedAt ?? target.renderedAt, ...(completedAt === undefined ? {} : { completedAt }) };
   return { status: "rendered", expectedTurn: target.expectedTurn, renderedAt: target.renderedAt };
 }

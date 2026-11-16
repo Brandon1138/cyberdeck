@@ -21,6 +21,7 @@ export class NativeTurnActivity {
   refused = false;
   private view?: { activity: ProviderTerminalActivity; revision: number; current: boolean };
   private seenEvidence?: string;
+  private seenTurnId: string | undefined;
   private readonly closedNativeIds = new Set<string>();
   private screenRevision = -1;
   private lastWorkingAt = 0;
@@ -41,6 +42,7 @@ export class NativeTurnActivity {
     this.available = false; this.refused = false;
     delete this.view;
     delete this.seenEvidence;
+    this.seenTurnId = undefined;
     delete this.inputAt;
     this.screenRevision = -1; this.lastWorkingAt = 0;
     this.lastBusyRevision = -1; this.starting = false;
@@ -106,6 +108,11 @@ export class NativeTurnActivity {
     return !this.starting && !this.workCycle?.active && this.view?.revision === revision && this.view.current && this.view.activity === "awaiting-input";
   }
 
+  currentEndCommitted(revision: number): boolean {
+    return this.ownsCurrentEnd(revision) && ((this.seenTurnId !== undefined && this.closedNativeIds.has(this.seenTurnId))
+      || (this.seenEvidence !== undefined && this.closedNativeIds.has(`activity:${this.seenEvidence}`)));
+  }
+
   needsReadiness(screen: ProviderTerminalActivity, revision: number): boolean {
     return this.available && !this.refused && !this.starting && !this.workCycle?.active
       && screen === "awaiting-input" && this.activity(screen, revision) === "unknown";
@@ -167,7 +174,10 @@ export class NativeTurnActivity {
       const evidence = observation.nativeActivityEvidence;
       const occurredAt = evidence?.occurredAt;
       const newEvidence = evidence !== undefined && this.seenEvidence !== evidence.id;
-      if (evidence !== undefined && captureRevision === currentRevision) this.seenEvidence = evidence.id;
+      if (evidence !== undefined && captureRevision === currentRevision) {
+        this.seenEvidence = evidence.id;
+        this.seenTurnId = evidence.providerTurnId === undefined ? undefined : `${observation.provider}:${evidence.providerTurnId}`;
+      }
       const currentGeneration = evidence !== undefined && (occurredAt === undefined
         ? !this.resumed && this.inputAt === undefined && !(observation.nativeActivity === "idle" && this.lastWorkingAt > 0)
         : Number.isFinite(Date.parse(occurredAt)) && Date.parse(occurredAt) >= Math.max(

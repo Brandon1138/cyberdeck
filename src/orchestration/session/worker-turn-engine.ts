@@ -739,7 +739,7 @@ export class WorkerTurnEngine {
 
   private armedScreenReservationTarget(claim: TurnCaptureClaim | undefined): number {
     if (
-      this.idleTimer === undefined
+      this.nativeActivity.currentEndCommitted(this.activityRevision) || this.idleTimer === undefined
       || this.activity !== "awaiting-input"
       || !this.observedWorking
     ) return 0;
@@ -1240,6 +1240,8 @@ export class WorkerTurnEngine {
       this.options.effects.notifySessionUpdate();
       return;
     }
+    // Native receipt and a delayed terminal done marker describe the same completed turn.
+    if (this.nativeActivity.currentEndCommitted(this.activityRevision)) { this.observedWorking = false; this.notifyDeliveryBoundary(); return; }
     const owner = this.turnCaptureOwner;
     if (owner !== undefined) {
       const deferredTarget = owner.kind === "reconcile"
