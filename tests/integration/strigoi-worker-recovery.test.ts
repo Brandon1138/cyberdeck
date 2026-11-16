@@ -12,7 +12,7 @@ import { WorkerControlService } from "../../src/orchestration/worker-control-ser
 import { StrigoiWorkerRecovery } from "../../src/orchestration/strigoi-worker-recovery.js";
 import { orchestratorController } from "../../src/domain/orchestrator.js";
 
-it.each(["live", "done", "released", "done-gap"] as const)("runs real source inventory and worker/attention reconciliation through the driver without a routine hold (%s)", async (mode) => {
+it.each(["live", "replacement", "done", "released", "done-gap"] as const)("runs real source inventory and worker/attention reconciliation through the driver without a routine hold (%s)", async (mode) => {
   const f = await successionFixture();
   const coordination = new ObservedWorkerCoordinationService({ store: new WorkerCoordinationStore(f.root) });
   await coordination.initialize();
@@ -48,9 +48,13 @@ it.each(["live", "done", "released", "done-gap"] as const)("runs real source inv
           selector: { scope: "single", subjectId: worker.id }, subjectId: worker.id, leaseToken: outcome.leaseToken!, lifecycle: "done", reason: "Finished in sealed gap" });
         f.emitExit(2);
       }
-      if (mode === "live" && binding.sessionId !== owner.sessionId) await f.transcripts.commitProviderTurns({ sessionId: worker.id,
+      if ((mode === "live" || mode === "replacement") && binding.sessionId !== owner.sessionId) await f.transcripts.commitProviderTurns({ sessionId: worker.id,
         provider: "codex", turnNumber: 1, turns: [{ providerTurnId: "gap-result", providerOccurredAt: new Date().toISOString(),
           text: "Result arrived during cutover", transport: "provider-native" }] });
+      if (mode === "replacement" && binding.resident?.incarnation === 2) {
+        f.emitExit(3); // B dies before its attention participant can run.
+        await vi.waitFor(() => expect(f.registry.get(binding.sessionId).exitCode).toBe(0));
+      }
     });
     if (mode === "done" || mode === "released") {
       await f.transcripts.commitProviderTurns({ sessionId: worker.id, provider: "codex", turnNumber: 1,
@@ -68,10 +72,17 @@ it.each(["live", "done", "released", "done-gap"] as const)("runs real source inv
     }
     const historical = coordination.getSubject(worker.id)!;
     const renew = vi.spyOn(coordination, "renew"), adopt = vi.spyOn(coordination, "adoptBatch");
-    const armed = mode === "live" ? await attention.arm({ actorSessionId: owner.sessionId, mutationId: randomUUID(),
+    const armed = mode === "live" || mode === "replacement" ? await attention.arm({ actorSessionId: owner.sessionId, mutationId: randomUUID(),
       objective: "Review the live worker", nextAction: "Read its exact result", targets: [{ sessionId: worker.id, completionTarget: 1 }] }) : undefined;
     const transition = await f.runtime.succession!.renew(1, "routine worker continuation", "worker-renewal");
-    const state = await f.drive(transition.id);
+    let state = await f.drive(transition.id);
+    if (mode === "replacement") {
+      expect(state.transition?.nextAttemptAt).toBeDefined();
+      expect(await attention.schedulingRecord(controller.controllerId)).toMatchObject({ status: "armed", actorSessionId: owner.sessionId });
+      f.tick(1001); state = await f.drive(transition.id);
+      expect(state.incarnation).toBe(3);
+      expect(state.successionHistory).toContainEqual(expect.objectContaining({ id: transition.id, supersededBy: state.transition!.id }));
+    }
     expect(state.hold).toBeUndefined(); expect(state.transition?.phase).toBe("complete");
     expect(f.workers.reconcile).toHaveBeenCalledTimes(1);
     if (mode === "done-gap") {
@@ -81,7 +92,7 @@ it.each(["live", "done", "released", "done-gap"] as const)("runs real source inv
       expect(renew).not.toHaveBeenCalled(); expect(adopt).not.toHaveBeenCalled();
       const current = { sessionId: state.activeBinding!.sessionId, incarnation: state.incarnation, generation: state.activeGeneration! };
       expect((await f.runtime.continuity!.pending(current)).some(ref => ref.sessionIds?.includes(worker.id))).toBe(true);
-    } else if (mode !== "live") {
+    } else if (mode !== "live" && mode !== "replacement") {
       const refs = []; let cursor: string | undefined;
       do {
         const page = await f.evidence.packets.read(state.latestPacket!, cursor);
@@ -101,7 +112,7 @@ it.each(["live", "done", "released", "done-gap"] as const)("runs real source inv
       expect((await workers.lease({ actorSessionId: wait.actorSessionId, action: "renew", scope: "worker", workerId: worker.id, reason: "normal continuation" })).results[0]?.code).toBe("ALREADY_CONTROLLED");
       expect(credentials.get(controller.controllerId, worker.id)?.leaseToken).toBe(outcome.leaseToken);
     }
-    expect(f.spawn).toHaveBeenCalledTimes(3); // initial Orc, existing worker, successor; no redispatch
+    expect(f.spawn).toHaveBeenCalledTimes(mode === "replacement" ? 4 : 3); // existing worker is never redispatched
     expect(f.inference).not.toHaveBeenCalled(); // deterministic special-turn receipts, no provider
   } finally {
     liveness.dispose(); attention.stop(); await attention.flush(); await f.close();
