@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { successionFixture } from "./strigoi-succession-fixture.js";
+import { StrigoiLegacyRetirement } from "../../src/orchestration/strigoi-legacy-retirement.js";
 const fixtures: Awaited<ReturnType<typeof successionFixture>>[] = [];
 afterEach(async () => { for (const f of fixtures.splice(0)) await f.close(); });
 async function passiveRecovery() {
@@ -41,6 +42,45 @@ it("unknown ownership or a stale generation never authorizes a replacement", asy
   expect(held.hold?.code).toBe("successor-unavailable");
   expect(held.hold?.detail).toContain("legacy identities need operator reconciliation");
   expect(f.spawn).toHaveBeenCalledTimes(2); expect(f.submitted).toEqual([]);
+});
+it("uses an audited legacy receipt after restart for exactly one normal replacement and adoption", async () => {
+  const f = await passiveRecovery(), before = await f.bindings.strigoi.read();
+  const id = before.activeBinding!.sessionId;
+  f.emitExit(2); await new Promise(r => setTimeout(r, 20));
+  // Seed a historical catalog shape, without inventing a retirement marker.
+  const record = f.registry.get(id);
+  await f.sessions.put({ ...record, exitCode: -1, executionState: "cancelled", recoveryProcessGroup: undefined,
+    codexActorMarker: true, launchRecord: { mode: "launch", transport: "pty", resolvedAt: record.createdAt,
+      executable: "/node", args: ["/app/providers/codex/remote-mcp-launch.js", "--actor-session", id, "--remote", "unix://"],
+      cwd: f.root, cyberdeckEnv: {}, inheritedEnvCount: 0, truncated: false } });
+  await f.reconstruct(true); await f.runtime.lifecycle.reconcile();
+  expect((await f.bindings.strigoi.read()).hold?.code).toBe("successor-unavailable");
+  expect(f.spawn).toHaveBeenCalledTimes(2);
+  await f.runtime.lifecycle.setDesired("suspended", "legacy-suspend");
+  const service = new StrigoiLegacyRetirement({ repository: f.bindings.strigoi, bindings: f.bindings, registry: f.registry,
+    probe: async () => ({ kind: "host-group-absent-and-managed-daemon-empty", observedAt: new Date().toISOString(),
+      homeDirectory: "/managed", socketPath: "/socket", daemonPid: 1234, daemonIdentitySha256: "a".repeat(64) }) });
+  const { proof: _proof, desired: _desired, requiresOperatorProvenanceConfirmation: _confirmation, ...identity } = await service.inspect();
+  const receipt = await service.confirm({ ...identity, mutationId: "legacy-receipt", confirmHostPtyProvenance: true,
+    confirmManagedDaemonProvenance: true, managedHome: "/managed", provenance: "Fixture operator audited the historical PTY and managed daemon home." });
+  await f.reconstruct(true); await f.runtime.lifecycle.reconcile();
+  expect(f.spawn).toHaveBeenCalledTimes(2);
+  expect((await f.bindings.strigoi.read()).desired).toBe("suspended");
+  await f.runtime.lifecycle.setDesired("enabled", "legacy-resume");
+  await f.runtime.lifecycle.reconcile(); f.tick(1001); await f.runtime.lifecycle.reconcile();
+  const recovered = await f.bindings.strigoi.read();
+  expect(recovered.incarnation).toBe(3);
+  expect(recovered.transition).toMatchObject({ phase: "adopting", adoptionDeferred: true });
+  expect(recovered.legacyRetirements).toEqual([receipt]);
+  expect(recovered.retainedSessionIds).toContain(id);
+  expect(f.registry.get(id)).toMatchObject({ exitCode: -1 });
+  expect(f.registry.get(id).recoveryProcessGroup).toBeUndefined();
+  expect(f.spawn).toHaveBeenCalledTimes(3); expect(f.submitted).toEqual([]);
+  f.delivery.needsAdoption.mockResolvedValue(true);
+  await f.drive(recovered.transition!.id); await f.reconstruct(); await f.runtime.lifecycle.reconcile();
+  expect((await f.bindings.strigoi.read()).transition?.phase).toBe("complete");
+  expect(f.spawn).toHaveBeenCalledTimes(3);
+  expect(f.submitted.map(t => t.kind)).toEqual(["adoption"]);
 });
 it("persists replacement retry limits and backoff through repeated reconstruction", async () => {
   const f = await passiveRecovery();

@@ -8,6 +8,7 @@ import { orchestratorLaunchBinding } from "./orchestrator-launch-policy.js";
 import type { LaunchReservation, SessionLookupPort, SessionStartPort, SessionLaunchOutcomePort } from "./session/session-ports.js";
 import type { StrigoiAdmissionPort, StrigoiInspection, StrigoiRepository } from "./strigoi-ports.js";
 import { strigoiPrompt } from "./strigoi-prompt.js";
+import { legacyRetirementMatches } from "../domain/strigoi-legacy-retirement.js";
 
 const RETRY_DELAYS = [1000, 5000, 30000] as const;
 const errorCode = (error: unknown): string => typeof error === "object" && error !== null && "code" in error ? String(error.code) : "LAUNCH_FAILED";
@@ -54,6 +55,13 @@ export class StrigoiLifecycle {
   attachSuccession(succession: { recover(state: StrigoiState): Promise<void> }): void { this.succession = succession; }
   successionEpoch(): number { return this.epoch; }
   permitsSuccession(epoch: number): boolean { return !this.disposed && epoch === this.epoch; }
+  async retirement(sessionId: string, generation: number): Promise<"confirmed" | "unknown"> {
+    if (await this.options.registry.residentRetirement?.(sessionId, generation) === "confirmed") return "confirmed";
+    if (this.options.registry.ownsProcess(sessionId)) return "unknown";
+    const record = this.options.registry.get(sessionId), state = await this.options.repository.read();
+    return record.generation === generation && state.legacyRetirements?.some(receipt => legacyRetirementMatches(receipt, record))
+      ? "confirmed" : "unknown";
+  }
   wakeSuccession(due: number): void { if (!this.disposed) this.schedule(due); }
 
   /** Core boot calls this before exposing the socket; no provider work is performed here. */

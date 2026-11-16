@@ -33,7 +33,34 @@ These tests do not prove a live provider, healthy live-provider broker-daemon co
 1. Review and merge the PR only after separate approval; build the exact approved revision with Node 24.18.0. Preserve the shared state directory and journals.
 2. Record `cyberdeck strigoi status`, session/runtime identity and the exact broker binary revision. Investigate the legacy PID/group and any remote provider work read-only. If ownership is unresolved, keep the hold; do not patch state or signal a recorded PID. Any fencing/retirement of legacy work needs a separately reviewed concrete action.
 3. Only after explicit approval for the shared restart/activation, stop through the normal broker lifecycle and start the approved binary. Verify desired state, exactly one owned active resident, retained packet/obligations and pending versus acknowledged adoption separately. Meaningful operator input should trigger adoption and exactly one logical delivery. Do not send a synthetic greeting as proof.
-4. On regression, suspend through the resident lifecycle under explicit approval, preserve all new journal records, and return to the previous binary under the approved restart procedure. Older schema readers strip optional fields and cannot use new absence receipts; expect conservative holds rather than convergence. Do not edit/reset the state directory or replay ambiguous inputs.
+4. On regression, suspend through the resident lifecycle under the approved rollback procedure and preserve all new journal records. Use only a tested rollback build that understands every persisted schema field. Older schema readers strip unknown fields before verifying journal hashes and can reject the advanced journal as corrupt; they do not necessarily start with a conservative hold. A rollback build with receipt-schema compatibility but without receipt-driven retirement can retain the records and safely hold. Do not edit/reset the state directory or replay ambiguous inputs.
+
+## Explicit legacy retirement reconciliation
+
+`cyberdeck strigoi reconcile-legacy` inspects an unavailable committed/adopting/reconciling host Codex successor without changing state. This Darwin-only migration is deliberately limited to a terminal, unknown-exit (`-1`) legacy PTY launch carrying the exact actor-session arguments and remote managed-daemon transport. It does not retrofit an automatic process-group marker.
+
+An operator must audit two historical facts that current process inspection cannot establish: the original launch used the node-pty setsid contract (initial process group equals PTY PID), and the identified managed Codex home served that launch. An empty unrelated daemon is insufficient. If either attribution remains unknown, keep the hold.
+
+After the approved suspension, inspect again and bind confirmation to the returned session, generation, PID, transition, revision and record hash:
+
+```sh
+cyberdeck strigoi suspend --mutation-id <stable-suspend-id>
+cyberdeck strigoi reconcile-legacy
+cyberdeck strigoi reconcile-legacy \
+  --confirm-host-pty-provenance --confirm-managed-daemon-provenance \
+  --managed-home <audited-absolute-managed-home> \
+  --session-id <id> --generation <n> --pid <pid> \
+  --transition-id <id> --expected-revision <revision> \
+  --record-sha256 <hash> --mutation-id <stable-confirmation-id> \
+  --provenance '<historical launch and managed-home evidence>'
+```
+
+Confirmation performs fresh bounded read-only checks: PID and process group absence, one managed daemon with matching PID/start time, ownership of its canonical control socket, a complete empty native loaded-thread roster, and unchanged daemon/socket identity afterward. Unknown, nonempty, changed or unavailable evidence fails closed. The authority lock and final identity/revision recheck fence stale confirmation. Retry an uncertain response with exactly the same mutation ID and payload; inspect the durable result before issuing another operation.
+
+The receipt is separately appended to the Strigoi journal. Confirmation preserves suspended desired state, the hold, exit `-1`, missing process-group marker, selection, packet and prior history. It neither starts a provider nor sends inference. A later approved `strigoi resume` uses the existing backoff, successor creation, packet reconciliation and adoption path. The saved model/effort remain unchanged. Suspend and preserve advanced state on rollback; restoring a snapshot would erase later receipts and is not a rollback strategy.
+
+Deterministic tests exercise the receipt through a fresh registry/controller, ordinary replacement and exactly one adoption, as well as stale identities, ambiguous writes and ownership races. Native socket and Darwin process tests cover incomplete rosters, daemon changes, extra servers and reappearing process groups. Live private-provider qualification and shared operational acceptance must be reported separately.
+
 ## Interrupted replacement attention
 
 An interrupted A→B→C recovery can leave the durable worker-review wait owned by A until C reconciles it. Attention preservation and the missing-record check follow only explicit `supersededBy` links from the current transition, with exact adjacent session/incarnation/generation matches. Unrelated completed renewals and retained packet prose do not authorize a transfer. Invalid or ambiguous linked history fails closed.

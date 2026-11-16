@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { OrchestratorBindingSchema, STRIGOI_KEY, type OrchestratorBinding } from "./orchestrator.js";
 import { ReasoningEffortSchema } from "./session.js";
+import { LegacyRetirementReceiptSchema } from "./strigoi-legacy-retirement.js";
 
 export { STRIGOI_KEY } from "./orchestrator.js";
 export const STRIGOI_LIMITS = {
@@ -79,6 +80,7 @@ export const StrigoiStateSchema = z.object({
   transition: StrigoiTransitionSchema.optional(), latestPacket: StrigoiPacketRefSchema.optional(), retainedSessionIds: z.array(z.uuid()),
   successionRequests: z.array(z.object({ mutationId: z.string(), expectedIncarnation: z.number().int(), reason: z.string(), transitionId: z.string() })).optional(),
   successionHistory: z.array(StrigoiTransitionSchema).optional(),
+  legacyRetirements: z.array(LegacyRetirementReceiptSchema).optional(),
   continuityReceipts: z.array(StrigoiContinuityReceiptSchema).optional(),
   continuationHolds: z.array(StrigoiHoldSchema).optional(),
   hold: StrigoiHoldSchema.optional(), updatedAt: z.iso.datetime(),

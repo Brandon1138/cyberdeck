@@ -19,6 +19,7 @@ import type { WorkerLeaseCredentialCustodian } from "./worker-lease-credential-c
 import type { StrigoiAdmission } from "../orchestration/strigoi-admission.js";
 import type { AgentActivityPort } from "../orchestration/agent-activity-port.js";
 import { composeStrigoiRuntime } from "./strigoi-runtime.js";
+import { StrigoiLegacyRetirement } from "../orchestration/strigoi-legacy-retirement.js";
 
 /** Complete internal composition. Construct before queue.start; start only after broker listen. */
 export async function composeProductionStrigoi(o: {
@@ -37,6 +38,7 @@ export async function composeProductionStrigoi(o: {
   attention: OrchestratorAttentionControlPlane; coordination: WorkerCoordinationService;
   credentials: WorkerLeaseCredentialCustodian; activity: AgentActivityPort;
   onError?: (error: unknown) => void;
+  legacyRetirementProbe?: ConstructorParameters<typeof StrigoiLegacyRetirement>[0]["probe"];
 }) {
   const { orchestratorStore: bindings, packets, sources } = o.evidence, repository = bindings.strigoi;
   const shared = { repository, bindings, admission: o.admission, packets, sources };
@@ -67,6 +69,7 @@ export async function composeProductionStrigoi(o: {
     verifyContinuity: o.evidence.verify, beforeDelete: o.evidence.beforeDelete, withDeletion: o.evidence.withDeletion,
     ...(o.onError ? { onError: o.onError } : {}),
     succession: { packets, sources, turns, workers, delivery, activity: o.activity } });
-  const control = new StrigoiControl({ repository, registry: o.registry, admission: o.admission, lifecycle: runtime.lifecycle, continuity, succession: runtime.succession!, delivery, validateSelection: s => o.manager.validateResidentSelection(s) });
+  const legacyRetirement = new StrigoiLegacyRetirement({ repository, bindings, registry: o.registry, ...(o.legacyRetirementProbe ? { probe: o.legacyRetirementProbe } : {}) });
+  const control = new StrigoiControl({ repository, registry: o.registry, admission: o.admission, lifecycle: runtime.lifecycle, continuity, succession: runtime.succession!, delivery, legacyRetirement, validateSelection: s => o.manager.validateResidentSelection(s) });
   return { ...runtime, control, delivery, demand, turns, packets, sources };
 }

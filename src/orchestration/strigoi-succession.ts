@@ -152,7 +152,7 @@ export class StrigoiSuccession {
         // Once a stop has been issued its outcome can be unknown: never reopen an actor
         // that a delayed stop may kill. Proven retirement is an irreversible forward boundary.
         if (t.retirementConfirmedAt || t.stopRequestedAt || !["requested", "checkpointing", "sealed"].includes(t.phase)
-          || await this.o.registry.residentRetirement(t.predecessor!.sessionId, t.predecessor!.generation) === "confirmed") throw fault("STRIGOI_ABORT_UNSAFE");
+          || await this.o.lifecycle.retirement(t.predecessor!.sessionId, t.predecessor!.generation) === "confirmed") throw fault("STRIGOI_ABORT_UNSAFE");
         await this.write(s, { transition: { ...t, phase: "aborted", lastMutationId: `abort:${mutationId}` }, hold: undefined }, `abort:${mutationId}`);
       });
       const s = await this.o.repository.read();
@@ -193,7 +193,7 @@ export class StrigoiSuccession {
       case "checkpointing": {
         if (!this.o.delivery) return this.hold(t, epoch, "delivery-participant-missing", "Task 8 production delivery participant is not wired.");
         await this.o.delivery.hold(old, t.id);
-        const retired = await this.o.registry.residentRetirement(old.sessionId, old.generation) === "confirmed";
+        const retired = await this.o.lifecycle.retirement(old.sessionId, old.generation) === "confirmed";
         if (!retired && this.o.registry.ownsProcess(old.sessionId)) {
           if (t.checkpointTurn && !await this.turn(s, epoch, "checkpoint")) return false;
           const boundary = await this.o.turns.boundary(old);
@@ -210,13 +210,13 @@ export class StrigoiSuccession {
       }
       case "sealed": return this.change(t.id, epoch, (_s, current) => ({ transition: this.phase(current, "retiring"), hold: undefined }));
       case "retiring": {
-        if (await this.o.registry.residentRetirement(old.sessionId, old.generation) !== "confirmed") {
+        if (await this.o.lifecycle.retirement(old.sessionId, old.generation) !== "confirmed") {
           if (!t.stopRequestedAt && this.o.registry.ownsProcess(old.sessionId)) {
             if (!await this.change(t.id, epoch, (_s, current) => ({ transition: { ...current, stopRequestedAt: this.at() } }))) return false;
             // Request once, outside authority. A lost stop result is reconciled, not absence.
             await this.o.registry.stopResidentProcess(old.sessionId);
           }
-          if (await this.o.registry.residentRetirement(old.sessionId, old.generation) !== "confirmed")
+          if (await this.o.lifecycle.retirement(old.sessionId, old.generation) !== "confirmed")
             return this.hold(t, epoch, "retirement-unconfirmed", "No exact-generation observed retirement; no successor may launch.");
         }
         return this.change(t.id, epoch, (_s, current) => ({ transition: this.phase(current, "launching", { retirementConfirmedAt: this.at() }), hold: undefined }));
@@ -263,7 +263,7 @@ export class StrigoiSuccession {
   }
   private async replaceUnavailable(s: StrigoiState, epoch: number): Promise<boolean> {
     const t = s.transition!, successor = t.successor!;
-    if (await this.o.registry.residentRetirement(successor.sessionId, successor.generation) !== "confirmed")
+    if (await this.o.lifecycle.retirement(successor.sessionId, successor.generation) !== "confirmed")
       return this.hold(t, epoch, "successor-unavailable", "Lost ownership is not an observed exit. Verify the exact host process and process group are absent (legacy identities need operator reconciliation); recovery will recheck without launching or sending adoption.");
     const attempts = t.recoveryAttempts ?? 0;
     if (attempts >= 3) return this.hold(t, epoch, "recovery-retries-exhausted", "Three replacements before usable recovery; inspect provider/auth evidence and explicitly resume to retry.");

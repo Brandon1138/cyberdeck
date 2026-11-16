@@ -4,6 +4,7 @@ import { z } from "zod";
 import { StrigoiAdoptionSchema, StrigoiPacketRefSchema, StrigoiSelectionSchema, StrigoiSourceRefSchema, STRIGOI_LIMITS } from "../../domain/strigoi.js";
 import type { BrokerMethodHandler } from "./method-context.js";
 import type { BrokerServerOptions } from "./options.js";
+import { LegacyRetirementRequestSchema } from "../../domain/strigoi-legacy-retirement.js";
 const mutationId = z.string().min(1).default(() => randomUUID());
 const mutation = z.object({ mutationId }).strict();
 const actor = z.object({ actorSessionId: z.uuid() });
@@ -14,6 +15,8 @@ function control(options: BrokerServerOptions) {
 }
 export const strigoiMethods: Record<string, BrokerMethodHandler> = {
   "strigoi.inspect": async (s, _c, f) => { z.object({}).strict().parse(f.params); return control(s.options).inspect(); },
+  "strigoi.legacyRetirementInspect": async (s, _c, f) => { z.object({}).strict().parse(f.params); return control(s.options).legacyRetirementInspect(); },
+  "strigoi.legacyRetirementConfirm": async (s, _c, f) => control(s.options).legacyRetirementConfirm(LegacyRetirementRequestSchema.parse(f.params)),
   "strigoi.configure": async (s, _c, f) => {
     const { mutationId: id, ...selection } = StrigoiSelectionSchema.extend({ cwd: z.string().refine(isAbsolute, "cwd must be absolute"), mutationId }).strict().parse(f.params);
     return control(s.options).configure(selection, id);
