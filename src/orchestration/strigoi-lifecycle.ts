@@ -102,11 +102,20 @@ export class StrigoiLifecycle {
 
   reconcile(): Promise<void> {
     if (this.disposed) return Promise.resolve();
-    if (this.pending) return this.pending;
-    const work = this.reconcileOnce();
-    this.pending = work.finally(() => { this.pending = undefined; });
+    if (this.pending) { this.reconcileAgain = true; return this.pending; }
+    const work = async () => {
+      do {
+        this.reconcileAgain = false;
+        await this.reconcileOnce();
+      } while (this.reconcileAgain && !this.disposed);
+    };
+    this.pending = work().finally(() => {
+      this.pending = undefined;
+      if (this.reconcileAgain && !this.disposed) this.wakeSuccession(Date.now());
+    });
     return this.pending;
   }
+  private reconcileAgain = false;
 
   async inspect(): Promise<StrigoiInspection> {
     const state = await this.options.repository.read();

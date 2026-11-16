@@ -51,3 +51,6 @@ Legacy resident reconciliation is still an operational prerequisite for activati
 
 
 A second worker-side MCP run isolated a closing-frame race: the `done` marker for the existing work interval can precede erasure of its old Working footer in the same terminal update. Treat that exact active-to-inactive interval edge as a redraw of known work. It does not create native completion evidence, does not exempt a new interval, and does not exempt a later independent working frame. Regression cases require an already valid native end and preserve later-work fences. The earlier worker fixture at `/tmp/cdmcp-VVyx65` is retained as a failed gate; it must not be counted as passing because the initial canonical answer alone completed.
+
+
+A final provider-loss run also exposed a coalesced-reconciliation wake hazard. Previously, an update arriving while `reconcile()` was pending only received the old promise; if that pass had already observed the previous live state, no pass remained to handle the exit. Reconciliation now records invalidation and drains another pass after the current one, with disposal fencing and a late-wake safeguard. A deferred durable-read regression proves a coalesced request produces a later pass and disposal suppresses that rerun. This preserves lifecycle retirement and admission rules.
