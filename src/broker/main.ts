@@ -177,6 +177,7 @@ export async function runBroker(
   socketPath = brokerSocketPath,
   stateDirectory = appStateDirectory,
 ): Promise<BrokerServer> {
+  process.title = "cyberdeck-broker";
   await ensurePrivateDirectory(stateDirectory);
   const evidence = composeStrigoiEvidence(stateDirectory);
   const { orchestratorStore, artifactStore, instructionStore, workflowStore } = evidence;
