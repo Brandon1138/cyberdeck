@@ -3,13 +3,14 @@ import { effectiveInstruction, type InstructionRecord } from "../domain/instruct
 import type { SessionRecord } from "../domain/session.js";
 import type { AgentActivityPort } from "./agent-activity-port.js";
 
-interface Instructions { put(record: InstructionRecord): Promise<void>; list(targetSessionId?: string): Promise<InstructionRecord[]> }
+import type { InstructionRepository } from "./session/session-ports.js";
 /** Activity follows the acknowledged instruction write; recorder failure cannot rewrite its outcome. */
-export function activityInstructionStore(store: Instructions, recorder: AgentActivityPort,
+export function activityInstructionStore(store: InstructionRepository, recorder: AgentActivityPort,
   session: (id: string) => SessionRecord | undefined,
   capture?: (record: InstructionRecord, session: SessionRecord | undefined) => Promise<void>,
-): Instructions {
+): InstructionRepository {
   return {
+    ...(store.listUnsettled && { listUnsettled: store.listUnsettled.bind(store) }),
     list: (id) => store.list(id),
     put: async (record) => {
       await store.put(record);

@@ -177,7 +177,6 @@ export async function runBroker(
   socketPath = brokerSocketPath,
   stateDirectory = appStateDirectory,
 ): Promise<BrokerServer> {
-  process.title = "cyberdeck-broker";
   await ensurePrivateDirectory(stateDirectory);
   const evidence = composeStrigoiEvidence(stateDirectory);
   const { orchestratorStore, artifactStore, instructionStore, workflowStore } = evidence;
@@ -475,6 +474,7 @@ export async function runBroker(
     workerEvents,
     nvimBindings,
     localWorkerControl,
+    onClose: () => instructionStore.close(),
     onShutdown: () => { void shutdown("request"); },
   });
   await server.listen();
@@ -488,6 +488,7 @@ export async function runBroker(
 
 const invokedPath = process.argv[1] === undefined ? undefined : resolve(process.argv[1]);
 if (invokedPath === fileURLToPath(import.meta.url)) {
+  process.title = "cyberdeck-broker";
   await runBroker().catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     process.exitCode = 1;

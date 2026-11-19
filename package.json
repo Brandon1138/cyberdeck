@@ -31,6 +31,7 @@
   ],
   "files": [
     "dist/src",
+    "dist/native/bin",
     "contrib/nvim",
     "docs/linux-*.md",
     "docs/architecture/nvim-surface.md",
@@ -49,6 +50,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-client-assets.mjs",
+    "build:native": "node scripts/build-native-core.mjs",
+    "bench:index": "node scripts/bench-instruction-index.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "prepack": "pnpm run build",
     "prepublishOnly": "pnpm test && pnpm check",

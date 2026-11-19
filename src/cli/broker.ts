@@ -6,6 +6,7 @@ export function registerBrokerCommands(program: Command, context: CliProgramCont
   const { restartBroker, toolkit } = context;
   const broker = program.command("broker").description("manage the durable broker process");
   broker.command("run").action(async () => {
+    process.title = "cyberdeck-broker";
     await toolkit.runBroker();
   });
   broker.command("start").action(startDetachedBroker);
