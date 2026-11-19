@@ -7,7 +7,7 @@ import type { OrchestratorManager } from "./orchestrator-manager.js";
 import { orchestratorLaunchBinding } from "./orchestrator-launch-policy.js";
 import type { LaunchReservation, SessionLookupPort, SessionStartPort, SessionLaunchOutcomePort } from "./session/session-ports.js";
 import type { StrigoiAdmissionPort, StrigoiInspection, StrigoiRepository } from "./strigoi-ports.js";
-import { strigoiPrompt } from "./strigoi-prompt.js";
+import { loadStrigoiPrompt, type StrigoiPromptOptions } from "./strigoi-prompt.js";
 import { legacyRetirementMatches } from "../domain/strigoi-legacy-retirement.js";
 
 const RETRY_DELAYS = [1000, 5000, 30000] as const;
@@ -29,7 +29,7 @@ const identity = (state: StrigoiState): StrigoiIdentity | undefined => state.act
   : { sessionId: state.activeBinding.sessionId, incarnation: state.incarnation, generation: state.activeGeneration! };
 const failure = (code: string): Error => Object.assign(new Error(code), { code });
 
-export interface StrigoiLifecycleOptions {
+export interface StrigoiLifecycleOptions extends StrigoiPromptOptions {
   repository: StrigoiRepository;
   bindings: OrchestratorBindingRepository;
   admission: StrigoiAdmissionPort;
@@ -40,7 +40,6 @@ export interface StrigoiLifecycleOptions {
     residentRetirement?(sessionId: string, generation: number): Promise<"confirmed" | "unknown">;
     workerTruth(sessionId: string): { modalOpen: boolean };
   };
-  onError?: (error: unknown) => void;
   verifyContinuity?: () => Promise<void>;
 }
 
@@ -241,7 +240,7 @@ export class StrigoiLifecycle {
     let registryEntered = false;
     try {
       const { request } = await this.options.manager.prepareResident(reserved.selection!);
-      request.providerInstructions += `\n\n${strigoiPrompt(reserved)}`;
+      request.providerInstructions += `\n\n${await loadStrigoiPrompt(reserved, this.options)}`;
       if (this.disposed || epoch !== this.epoch) throw failure("STRIGOI_LAUNCH_CANCELLED");
       registryEntered = true;
       await this.options.registry.start(request, undefined, async (record) => {

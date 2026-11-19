@@ -4,7 +4,7 @@ import type { AgentActivityPort } from "./agent-activity-port.js";
 import type { StrigoiContinuity } from "./strigoi-continuity.js";
 import { strigoiLaunchFailureIsPermanent, type StrigoiLifecycle, type StrigoiLifecycleOptions } from "./strigoi-lifecycle.js";
 import type { StrigoiInspection, StrigoiPacketPort, StrigoiSourcePort, StrigoiReconciliationParticipant, StrigoiSuccessionTurns } from "./strigoi-ports.js";
-import { strigoiPrompt } from "./strigoi-prompt.js";
+import { loadStrigoiPrompt } from "./strigoi-prompt.js";
 
 export interface StrigoiSuccessionOptions extends StrigoiLifecycleOptions {
   lifecycle: StrigoiLifecycle;
@@ -415,7 +415,7 @@ export class StrigoiSuccession {
       let enteredRegistry = false;
       try {
         const { request } = await this.o.manager.prepareResident(s.selection!);
-        request.providerInstructions += `\n\n${strigoiPrompt(s)}`;
+        request.providerInstructions += `\n\n${await loadStrigoiPrompt(s, this.o)}`;
         if (!this.o.lifecycle.permitsSuccession(epoch)) throw fault("STRIGOI_SUSPENDED");
         enteredRegistry = true;
         await this.o.registry.start(request, undefined, async (record) => {
