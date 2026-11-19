@@ -124,8 +124,9 @@ export function fleetFrameLayout(
       step: state.orchestratorPicker.step,
       choices: state.workerModels.orchestratorChoices.map(({ provider, model }) =>
         [provider.provider, model, provider.efforts, provider.fallbackReason]),
+      projects: snapshot.projects,
       sessions: existingOrchestrators(snapshot).map(({ id }) => id),
-      footerRows: 2 + noticeRows + (state.orchestratorPicker.step === "effort" ? 1 : 0),
+      footerRows: 2 + noticeRows + (state.orchestratorPicker.step !== "target" ? 1 : 0),
     }, `orchestrator-picker:${state.orchestratorPicker.step}`);
   }
 

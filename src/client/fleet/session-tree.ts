@@ -48,9 +48,12 @@ export function sessionTree(snapshot: FleetSnapshot): SessionGroup[] {
       const record = node.thread.record;
       const project = projectRootFor(sectionPath(node.thread), snapshot.projects ?? [])
         ?? projectRootFor(record.cwd, snapshot.projects ?? []);
-      const key = record.kind === "orchestrator" && (record.orchestratorScope === "fleet" || project === undefined)
+      const fallbackKey = record.kind === "orchestrator" && (record.orchestratorScope === "fleet" || project === undefined)
         ? FLEET_ORCS_KEY : project ?? OTHER_WORKERS_KEY;
-      if (!groups.has(key)) groups.set(key, { key, label: "Standalone / Unattributed workers", nodes: [] });
+      const key = record.projectRoot === null
+        ? record.kind === "orchestrator" ? FLEET_ORCS_KEY : OTHER_WORKERS_KEY
+        : record.projectRoot ?? fallbackKey;
+      if (!groups.has(key)) groups.set(key, { key, label: key === OTHER_WORKERS_KEY ? "Standalone / Unattributed workers" : key, nodes: [] });
       groups.get(key)!.nodes.push(node);
     }
     const ordered = (entries: SessionNode[]): void => {

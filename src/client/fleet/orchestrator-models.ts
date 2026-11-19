@@ -6,7 +6,7 @@ export function adoptOrchestratorModels(state: FleetState, workerModels: WorkerM
   const next = { ...state, workerModels };
   const picker = state.orchestratorPicker;
   if (picker === undefined || (picker.step === "target" && picker.focus.kind === "existing")) return next;
-  const index = picker.step === "effort" ? picker.modelIndex
+  const index = picker.step !== "target" ? picker.modelIndex
     : picker.focus.kind === "profile" ? picker.focus.modelIndex : -1;
   const selected = state.workerModels.orchestratorChoices[index];
   const modelIndex = workerModels.orchestratorChoices.findIndex((choice) =>

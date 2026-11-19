@@ -30,7 +30,7 @@ export class FleetProjection {
     const owners = new Map(fleetOrchestratorOwnership(bindings.filter((binding) => ids.has(binding.sessionId)))
       .map((entry) => [entry.sessionId, entry]));
     const snapshot: FleetProjectionSnapshot = {
-      ...(this.options.nativeAgents === undefined ? {} : { currentLayout: "sessions" as const }),
+      currentLayout: "sessions",
       ...(this.options.nativeAgents?.notice === undefined ? {} : { nativeAgentNotice: this.options.nativeAgents.notice }),
       threads: sessions.map(({ launchRecord: _launch, providerInstructions: _instructions, imageAttachments: _images, ...record }) => ({
         record: { ...structuredClone(record), ...(resident?.state.activeBinding?.sessionId === record.id ? { name: `Strigoi #${resident.state.incarnation}` } : {}) },

@@ -1133,7 +1133,7 @@ describe("fleet presentation", () => {
       home: "/Users/brandon",
     });
 
-    expect(rendered).toContain("0 live Orcs · 2 live managed workers · 1 working · 0 needs you · 0 unread · 2 history · 1 failed");
+    expect(rendered).toContain("2 live · 1 working · 0 needs you · 0 unread · 2 history · 1 failed");
     expect(rendered).toContain("Finished earlier");
     expect(rendered).toContain("Finished before that");
   });
@@ -1698,6 +1698,25 @@ describe("fleet controls", () => {
       },
     });
     expect(launched.state.orchestratorPicker).toBeUndefined();
+  });
+
+  it("selects a registered project after effort and launches the Orc with Fleet authority", () => {
+    const snapshot = { ...fleet(), projects: ["/projects/parking", "/projects/ammo"] };
+    const initial = createFleetState(snapshot, "/home/operator");
+    const press = (state: typeof initial, key: string) => transitionFleet(state, snapshot, key, NOW_MS);
+    const effort = press(press(initial, "ctrl+o").state, "enter").state;
+    const home = press(effort, "enter");
+    expect(home.action).toBeUndefined();
+    expect(renderFleet(snapshot, home.state, { width: 100, height: 25, color: false }))
+      .toContain("New Orc · choose its home");
+    expect(press(home.state, "escape").state.orchestratorPicker).toEqual(effort.orchestratorPicker);
+    expect(press(home.state, "enter").action).toMatchObject({ request: { cwd: "/home/operator", scope: "fleet" } });
+    const selected = press(home.state, "down").state;
+    expect(press(selected, "enter").action).toMatchObject({ type: "create-orchestrator",
+      request: { cwd: "/projects/parking", projectRoot: "/projects/parking", scope: "fleet" } });
+    const removed = transitionFleet(selected, { ...snapshot, projects: [] }, "enter", NOW_MS);
+    expect(removed.action).toBeUndefined();
+    expect(removed.state.notice).toContain("removed");
   });
 
   it("uses arrows in the picker and Escape moves back one step", () => {
