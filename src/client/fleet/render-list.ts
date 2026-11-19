@@ -255,7 +255,7 @@ export function renderFleetFooter(
       paint("─".repeat(options.width), "dim", options.color),
       ...helpLines.map((line) => paint(fit(line, options.width), "dim", options.color)),
       paint(fit(launchContext, options.width), "dim", options.color),
-      paint(fit(options.width < 80 ? "←→ fold · enter open · /view workers · ? more"
+      paint(fit(options.width < 80 ? "←→ fold · enter open · ? more"
         : `↑↓ · ←→ fold · pgup/dn · home/end · enter open/start · ctrl+] detach/reattach · ctrl+n nvim · ? more · ${destructiveHint}`, options.width), "dim", options.color),
     ];
     if (footer.length <= options.height) {
@@ -309,15 +309,12 @@ export function renderHeader(
 ): string[] {
   return prepared([threads, state, options, "renderHeader"], () => {
     const live = threads.filter(isLiveThread);
-    const native = threads.filter(thread => thread.nativeAgent !== undefined && threadRuntimePresence(thread) !== "absent");
     const current = threads.filter(thread => threadRuntimePresence(thread) !== "absent");
     const statuses = current.map(threadStatus);
     const count = (status: ThreadStatus) => statuses.filter((candidate) => candidate === status).length;
     // Process liveness is a separate fact from current activity and verified task outcomes.
     const primary = [
-      `${live.filter(t => t.record.kind === "orchestrator").length} live Orcs`,
-      `${live.filter(t => t.record.kind !== "orchestrator" && !t.nativeAgent).length} live managed workers`,
-      ...(native.length === 0 ? [] : [`${native.length} native discovered`]),
+      `${live.length} live`,
       `${count("Working")} working`, `${count("Needs you")} needs you`,
       ...(current.some(t => threadRuntimePresence(t) === "unknown") ? [`${current.filter(t => threadRuntimePresence(t) === "unknown").length} runtime unconfirmed`] : []),
       `${threads.filter(({ record }) => isUnreadThread(state, record.id)).length} unread`,
@@ -378,7 +375,7 @@ export function renderHeader(
 export function shortcutHelp(width: number, destructive: "stop" | "delete"): string[] {
   const entries = [
     "pgup/dn page", "alt+k/j half", "home/end", "shift+↑↓ reorder", "←→ fold project",
-    "a add project", "d remove project", "ctrl+w diagnostics", "/view live|workers|unread|history", "/read inspect · * unread", "/ack session notices", "←→ fold/parent · enter open/inspect",
+    "a add project", "d remove project", "ctrl+w diagnostics", "/view live|unread|history", "/read inspect · * unread", "/ack session notices", "←→ fold/parent · enter open/inspect",
     "@ mention", "alt+1–9 open", "esc back/clear",
     "ctrl+r rename", "ctrl+j/opt+enter newline", "ctrl+v paste image", "ctrl+] detach/reattach", "ctrl+n nvim (folder: main checkout)", "! shell", "ctrl+s shell popup", "ctrl+t pin to top", "ctrl+d mark for handoff", "/handoff give marked to an orc", "ctrl+l lease detail", `ctrl+x ${destructive}`, "? close",
   ];

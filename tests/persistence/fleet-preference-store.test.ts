@@ -26,6 +26,18 @@ describe("FleetPreferenceStore", () => {
     await expect(store.setVisitPreferences(preferences as never)).rejects.toThrow();
   });
 
+  it("restores the former Workers tab as Live and preserves its unread replies", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-"));
+    directories.push(directory);
+    const store = new FleetPreferenceStore(directory);
+    await store.setVisitPreferences({ replies: {} });
+    const replies = { one: { seen: null, latest: "Unseen answer", canonicalTurns: 1 } };
+    await appendFile(store.path, JSON.stringify({ recordType: "fleet.visit",
+      eventId: "11111111-1111-4111-8111-111111111111", persistedAt: "2026-11-13T00:17:22.039Z",
+      preferences: { view: "workers", replies } }) + "\n");
+    expect(await new FleetPreferenceStore(directory).visitPreferences()).toMatchObject({ view: "live", replies });
+  });
+
   it.each(["unknown", null, 42])("still rejects unsupported persisted view %s", async view => {
     const directory = await mkdtemp(join(tmpdir(), "cyberdeck-fleet-preferences-")); directories.push(directory);
     const store = new FleetPreferenceStore(directory);

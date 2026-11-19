@@ -26,7 +26,7 @@ it("keeps historical rows, filters unmatched projections, omits launch payloads 
   } as unknown as BrokerServerOptions;
   const projection = new FleetProjection(options);
   const initial = await projection.read();
-  expect(initial.reply).toMatchObject({ kind: "full", snapshot: { threads: [{ record: { id, latestPreview: "old history" } }] } });
+  expect(initial.reply).toMatchObject({ kind: "full", snapshot: { currentLayout: "sessions", threads: [{ record: { id, latestPreview: "old history" } }] } });
   expect(initial.retained.snapshot.threads[0]!.record.launchRecord).toBeUndefined();
   expect(await projection.read(initial.retained.version, initial.retained)).toMatchObject({ reply: { kind: "unchanged" } });
   sessions = [];

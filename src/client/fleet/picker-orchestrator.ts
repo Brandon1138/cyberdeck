@@ -20,6 +20,28 @@ export function transitionOrchestratorPicker(
 ): FleetTransition {
   const picker = state.orchestratorPicker!;
   const choices = state.workerModels.orchestratorChoices;
+  if (picker.step === "project") {
+    const { modelIndex, effortIndex, projectRoot } = picker;
+    if (key === "escape") {
+      return { state: { ...state, notice: undefined, orchestratorPicker: { step: "effort", modelIndex, effortIndex } } };
+    }
+    const projects = [undefined, ...(snapshot.projects ?? [])];
+    const index = projects.indexOf(projectRoot);
+    if (key === "up" || key === "down") {
+      const next = boundedIndex(index + (key === "up" ? -1 : 1), projects.length);
+      return { state: { ...state, orchestratorPicker: { ...picker, projectRoot: projects[next] }, notice: undefined } };
+    }
+    if (key !== "enter") return { state };
+    if (index < 0) {
+      return { state: {
+        ...state,
+        orchestratorPicker: { ...picker, projectRoot: undefined },
+        notice: "Project was removed. Choose a home again.",
+        noticeTone: "warning",
+      } };
+    }
+    return createSelectedOrchestrator(state, picker, projectRoot);
+  }
   if (key === "escape") {
     return {
       state: {
@@ -186,7 +208,15 @@ export function transitionOrchestratorPicker(
     };
   }
 
-  const selection = orchestratorSelection(picker, choices);
+  if (snapshot.projects?.length) {
+    return { state: { ...state, orchestratorPicker: { ...picker, step: "project" }, notice: undefined } };
+  }
+  return createSelectedOrchestrator(state, picker);
+}
+
+function createSelectedOrchestrator(state: FleetState, picker: Exclude<OrchestratorPickerState, { step: "target" }>,
+  projectRoot?: string): FleetTransition {
+  const selection = orchestratorSelection(picker, state.workerModels.orchestratorChoices);
   return {
     state: { ...state, orchestratorPicker: undefined, notice: undefined },
     action: {
@@ -196,7 +226,8 @@ export function transitionOrchestratorPicker(
         provider: selection.provider.provider,
         model: selection.model,
         ...(selection.effort === undefined ? {} : { effort: selection.effort }),
-        cwd: state.fallbackCwd,
+        cwd: projectRoot ?? state.fallbackCwd,
+        ...(projectRoot === undefined ? {} : { projectRoot }),
         scope: "fleet",
       },
     },
@@ -210,12 +241,13 @@ export function renderOrchestratorPicker(
 ): string {
   const picker = state.orchestratorPicker!;
   const choices = state.workerModels.orchestratorChoices;
-  const selection = picker.step === "effort" ? orchestratorSelection(picker, choices) : undefined;
-  const stepNumber = picker.step === "target" ? 1 : 2;
+  const selection = picker.step !== "target" ? orchestratorSelection(picker, choices) : undefined;
+  const totalSteps = snapshot.projects?.length || picker.step === "project" ? 3 : 2;
+  const stepNumber = picker.step === "target" ? 1 : picker.step === "effort" ? 2 : 3;
   const lines = [
     ...renderHeader(orderedThreads(snapshot), state, options),
     "",
-    paint(`Orchestrator  ${stepNumber} of 2`, "dim", options.color),
+    paint(`Orchestrator  ${stepNumber} of ${totalSteps}`, "dim", options.color),
     "",
   ];
 
@@ -253,6 +285,12 @@ export function renderOrchestratorPicker(
         ? "ctrl+x delete"
         : "ctrl+x stop";
     }
+  } else if (picker.step === "project") {
+    lines.push("New Orc · choose its home", "",
+      pickerRow("No project (Fleet)", picker.projectRoot === undefined, options.color));
+    for (const root of snapshot.projects ?? []) {
+      lines.push(pickerRow(fit(root, Math.max(1, options.width - 2)), root === picker.projectRoot, options.color));
+    }
   } else {
     lines.push(`${selection!.provider.label} effort`, "");
     lines.push(...selection!.provider.efforts.map((effort, index) =>
@@ -271,8 +309,9 @@ export function renderOrchestratorPicker(
       ? []
       : [paint(fit(`${selection.provider.label} · ${selection.model} · ${selection.effort ?? "Provider managed"}`, options.width), "muted", options.color)]),
     paint(
-      fit(picker.step === "effort"
-        ? "↑↓ select · enter create in cockpit · esc back"
+      fit(picker.step === "effort" && snapshot.projects?.length
+        ? "↑↓ select · enter choose project · esc back"
+        : picker.step !== "target" ? "↑↓ select · enter create in cockpit · esc back"
         : targetHint, options.width),
       "dim",
       options.color,
@@ -287,7 +326,7 @@ export function renderOrchestratorPicker(
 }
 
 export function orchestratorSelection(
-  picker: Extract<OrchestratorPickerState, { step: "effort"; }>,
+  picker: Exclude<OrchestratorPickerState, { step: "target"; }>,
   choices: readonly OrchestratorModelChoice[],
 ) {
   const choice = choices[picker.modelIndex]!;

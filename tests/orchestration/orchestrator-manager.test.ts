@@ -9,6 +9,7 @@ import {
   ORCHESTRATOR_GRANT_CAPABILITIES,
   type OrchestratorBinding,
 } from "../../src/domain/orchestrator.js";
+import { SessionStore } from "../../src/persistence/session-store.js";
 import { OrchestratorStore } from "../../src/persistence/orchestrator-store.js";
 import { orchestratorPrompt } from "../../src/orchestration/orchestrator-prompt.js";
 import type { SessionRecord } from "../../src/domain/session.js";
@@ -260,6 +261,27 @@ describe("OrchestratorManager", () => {
     });
     expect(result.session).toMatchObject({ approvalMode: "auto", sandbox: "workspace-write" });
     expect(result.warnings).toBeUndefined();
+  });
+
+  it("persists the chosen project across catalog reload while the Orc retains Fleet authority", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cyberdeck-project-orc-"));
+    try {
+      const catalog = new SessionStore(directory);
+      const start = activatingStart(async (request: object) => {
+        const session = { ...record, ...request };
+        await catalog.put(session);
+        return session;
+      });
+      const manager = new OrchestratorManager({ start } as never, new OrchestratorStore(directory));
+      const projectRoot = "/projects/parking";
+      const result = await manager.create({ provider: "codex", model: "gpt-5.6-sol", cwd: projectRoot,
+        projectRoot, scope: "fleet" });
+      expect(result.binding.grant.scope).toEqual({ kind: "fleet" });
+      expect(await new SessionStore(directory).load()).toMatchObject([{ cwd: projectRoot, projectRoot,
+        orchestratorScope: "fleet" }]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("uses Codex automatic review without an MCP approval shortfall", async () => {

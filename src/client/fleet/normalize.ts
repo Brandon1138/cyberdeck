@@ -49,7 +49,7 @@ export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: 
       ? ORCS_SECTION_KEY
       : folders.find(({ threads: workers }) =>
         workers.some(({ record }) => record.id === selectedRecord.id))?.cwd;
-  const treeLayout = snapshot.currentLayout === "sessions" || state.listView === "workers";
+  const treeLayout = snapshot.currentLayout === "sessions";
   if (treeLayout && selectedSessionId !== undefined) {
     const revealed = revealCurrentSession({ ...state, listView: "live" }, snapshot, selectedSessionId);
     const selectedRow = currentSessionRows(snapshot, revealed).find(row => row.kind === "thread" && row.thread.record.id === selectedSessionId);

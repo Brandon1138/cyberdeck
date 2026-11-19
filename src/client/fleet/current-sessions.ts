@@ -28,7 +28,7 @@ export function currentSessionRows(snapshot: FleetSnapshot, state: FleetState): 
   const matches = (node: SessionNode): boolean => forced(node) || node.members.some(t => inScope(t) && (
     view === "history" ? threadRuntimePresence(t) === "absent"
       : view === "unread" ? isUnreadThread(state, t.record.id)
-      : view === "workers" ? t.record.kind !== "orchestrator" : true));
+      : true));
   const open = (key: string, defaultClosed = false) => !state.collapsedCwds?.includes(key)
     && (!defaultClosed || state.openFolderCwds?.includes(key) === true);
   const emitNodes = (nodes: SessionNode[], depth: number, parentKey: string, ancestors: string[], partition = true): void => {
@@ -67,7 +67,7 @@ export function currentSessionRows(snapshot: FleetSnapshot, state: FleetState): 
   for (const group of sessionTree(snapshot)) {
     const nodes = group.nodes.flatMap(scopedNode).filter(matches);
     const emptyProject = group.nodes.length === 0 && snapshot.projects?.includes(group.key)
-      && (!filter || group.key === filter) && (view === "live" || view === "workers");
+      && (!filter || group.key === filter) && view === "live";
     if (!nodes.length && !emptyProject) continue;
     const members = nodes.flatMap(n => n.members).filter(inScope);
     const collapsed = !open(group.key, view === "live" && nodes.every(n => nodeDisposition(n) !== "current" && !forced(n)));
@@ -81,11 +81,7 @@ export function currentSessionRows(snapshot: FleetSnapshot, state: FleetState): 
     const attention = [activity, notices.length ? `${notices.length} notices` : "", unread ? `${unread} unread` : ""].filter(Boolean).join(" · ");
     if (attention) rows.push({ kind: "section", label: `  ${attention}` });
     if (collapsed) continue;
-    if (view === "workers") {
-      // Deliberately flatten this view: it is the direct escape from any collapsed Orc tree.
-      const workers = members.filter(t => t.record.kind !== "orchestrator");
-      emitNodes(workers.map(thread => ({ thread, children: [], members: [thread] })), 1, group.key, [group.key]);
-    } else emitNodes(nodes, 1, group.key, [group.key]);
+    emitNodes(nodes, 1, group.key, [group.key]);
     if (notices.length && view !== "unread") {
       const expanded = state.expandedLifecycleCwds?.includes(group.key) === true;
       rows.push({ kind: "lifecycle", cwd: group.key, threads: notices, expanded });
@@ -93,7 +89,7 @@ export function currentSessionRows(snapshot: FleetSnapshot, state: FleetState): 
     }
   }
   if (!rows.some(row => row.kind === "thread" || row.kind === "folder")) rows.push({ kind: "section", label:
-    view === "workers" ? "No workers in this scope." : view === "unread" ? "No unread assistant replies." : "No sessions in this scope." });
+    view === "unread" ? "No unread assistant replies." : "No sessions in this scope." });
   return rows;
 }
 

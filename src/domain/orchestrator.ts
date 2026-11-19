@@ -7,6 +7,7 @@ import {
 } from "./capability.js";
 import {
   ApprovalModeSchema,
+  ProjectRootSchema,
   ProviderIdSchema,
   ReasoningEffortSchema,
   SandboxSchema,
@@ -146,6 +147,7 @@ export const EnsureOrchestratorRequestSchema = z.object({
 });
 
 export const CreateOrchestratorRequestSchema = EnsureOrchestratorRequestSchema.extend({
+  projectRoot: ProjectRootSchema.optional(),
   provider: ProviderIdSchema,
   model: z.string().trim().min(1),
 });

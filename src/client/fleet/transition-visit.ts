@@ -41,7 +41,7 @@ export function transitionVisitControls(state: FleetState, snapshot: FleetSnapsh
     }
   }
   if (state.focusedViewControl !== undefined && state.draft === "") {
-    const views = ["live", "workers", "unread", "history"] as const;
+    const views = ["live", "unread", "history"] as const;
     if (key === "left" || key === "right") {
       const index = views.indexOf(state.focusedViewControl);
       return { state: { ...state, focusedViewControl: views[Math.max(0, Math.min(views.length - 1, index + (key === "left" ? -1 : 1)))] } };

@@ -58,16 +58,18 @@ it("supports left-to-parent and folding nested native workers without sending pr
   expect(transitionFleet(folded.state, snapshot, "enter", now).action).toBeUndefined();
 });
 
-it("makes all workers reachable independently of Orc folds", () => {
+it("groups a Fleet Orc under its chosen project and folds its workers there", () => {
   const snapshot = hierarchyFixture();
-  const folded = { ...createFleetState(snapshot), collapsedCwds: [workerTreeKey("Parking Orc")] };
-  const state = transitionFleet({ ...folded, draft: "/view workers" }, snapshot, "enter", now).state;
-  expect(state.listView).toBe("workers");
-  expect(visible(snapshot, state)).toContain("Nested review");
-  expect(visible(snapshot, state)).not.toContain("Parking Orc");
-  const row = fleetListRows(snapshot, state).find(row => row.kind === "folder" && row.label === "Unconfirmed workers")!;
-  const expanded = transitionFleet(focusRow(state, row), snapshot, "enter", now);
-  expect(visible(snapshot, expanded.state).filter(id => id.startsWith("old-native"))).toHaveLength(54);
+  const orc = snapshot.threads.find(t => t.record.id === "Parking Orc")!;
+  orc.record.orchestratorScope = "fleet";
+  orc.record.projectRoot = "/projects/parking";
+  const project = sessionTree(snapshot).find(group => group.key === "/projects/parking")!;
+  expect(project.nodes.map(node => node.thread.record.id)).toEqual(["Parking Orc"]);
+  expect(project.nodes[0]!.children.map(node => node.thread.record.id)).toContain("Browser verification");
+  const state = { ...createFleetState(snapshot), selectedSessionId: orc.record.id };
+  expect(visible(snapshot, transitionFleet(state, snapshot, "left", now).state)).not.toContain("Browser verification");
+  const frame = renderFleet(snapshot, state, { width: 120, height: 45, color: false, now });
+  expect(frame).toContain("[Live]  Unread  History");
 });
 
 it("reveals only the inspected historical or unconfirmed target through closed ancestors", () => {
@@ -117,7 +119,7 @@ it.each([32, 48, 60, 100, 160])("bounds the tree at width %s and keeps the count
   const frame = renderFleet(snapshot, createFleetState(snapshot), { width, height: 45, color: false, now });
   expect(frame.split("\n").length).toBeLessThanOrEqual(45);
   expect(frame.split("\n").every(line => displayWidth(line) <= width)).toBe(true);
-  if (width >= 60) { expect(frame).toContain("native discovered"); expect(frame).toContain("unconfirmed"); }
+  if (width >= 60) { expect(frame).toContain("unconfirmed"); }
   expect(frame).not.toContain("57 native workers");
 });
 
@@ -160,12 +162,12 @@ it("counts native and managed unconfirmed records once without calling them live
     treeThread("managed-unknown", "unknown"), treeThread("native-unknown", "unknown", { nativeParent: "missing" }),
   ] };
   const frame = renderFleet(snapshot, createFleetState(snapshot), { width: 160, height: 40, color: false, now });
-  expect(frame).toContain("0 live Orcs · 0 live managed workers · 1 native discovered");
+  expect(frame).toContain("0 live ·");
   expect(frame.match(/2 runtime unconfirmed/g)).toHaveLength(1);
 });
 
 
-it.each(["live", "workers"] as const)("filters cross-project descendants and rollups in %s", listView => {
+it("filters cross-project descendants and rollups in Live", () => {
   const fleet = treeThread("Fleet", "idle", { kind: "orchestrator", cwd: "/home/operator", controller: "fleet-controller" });
   fleet.record.orchestratorScope = "fleet";
   const parking = treeThread("parking-worker", "working", { nativeParent: "Fleet", cwd: "/projects/parking" });
@@ -174,13 +176,12 @@ it.each(["live", "workers"] as const)("filters cross-project descendants and rol
   const nested = treeThread("parking-grandchild", "working", { nativeParent: parent.record.id, root: "Fleet", cwd: "/projects/parking" });
   const snapshot: FleetSnapshot = { currentLayout: "sessions", projects: ["/projects/parking", "/projects/other"],
     threads: [fleet, parking, other, parent, nested] };
-  const state: FleetState = { ...createFleetState(snapshot), listView, projectFilter: "/projects/parking" };
+  const state: FleetState = { ...createFleetState(snapshot), listView: "live", projectFilter: "/projects/parking" };
   const ids = visible(snapshot, state);
   expect(ids).toContain("parking-worker");
   expect(ids).toContain("parking-grandchild");
   expect(ids).not.toContain("other-worker");
-  if (listView === "live") expect(ids).toContain("cross-project-parent");
-  else expect(ids).not.toContain("cross-project-parent");
+  expect(ids).toContain("cross-project-parent");
   const rows = fleetListRows(snapshot, state);
   expect(rows.filter(row => row.kind === "section").map(row => row.label).join(" ")).not.toContain("3 working");
 });

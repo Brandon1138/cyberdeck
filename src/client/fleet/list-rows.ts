@@ -125,7 +125,7 @@ export function historyExpanded(state: FleetState, cwd: string): boolean {
  * folders below hold workers only.
  */
 export function fleetListRows(snapshot: FleetSnapshot, state: FleetState): FleetListRow[] {
-  if (snapshot.currentLayout === "sessions" || state.listView === "workers") return currentSessionRows(snapshot, state);
+  if (snapshot.currentLayout === "sessions") return currentSessionRows(snapshot, state);
   return prepared([snapshot, state, "fleetListRows"], () => {
     const orcs = orchestratorThreads(snapshot.threads);
     // One assignment for the whole frame, so an Orc's row and its workers' rows cannot disagree.

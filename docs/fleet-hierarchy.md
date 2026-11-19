@@ -1,17 +1,17 @@
 # Fleet hierarchy and activity
 
-Live groups Unassigned / Fleet orchestrators above registered projects. A Fleet-scoped Orc stays at the top even when its working directory belongs to a project. Workspace Orcs are grouped by registered repository root (including declared sibling worktrees). Unregistered Orcs remain in the top group. This presentation does not grant or change cross-project authority or peer-creation permissions.
+Live groups Unassigned / Fleet orchestrators above registered projects. Ctrl+O offers a project choice after model and effort when projects are registered. The Orc starts in that directory and appears under its project with Fleet authority. Choosing No project keeps it in the Fleet group, as do existing Fleet Orcs without an explicit placement. Workspace Orcs are grouped by registered repository root (including declared sibling worktrees). Unregistered Orcs remain in the top group. This presentation does not grant or change cross-project authority or peer-creation permissions.
 
 Native workers follow their recorded parent edges. Broker-managed workers follow their current lease controller, including after a handoff; a former creator is not treated as the current owner. Workers without a represented owner remain discoverable under their project or Standalone / Unattributed workers. An ended parent does not imply its children ended.
 
 - Left/right folds a group or a parent with children. Left on a leaf goes to its parent.
 - Enter opens a broker-managed session, toggles a group, or inspects an observed native worker. Native controls remain with the parent.
 - Folds persist through the existing folder-disposition store. New tree groups use distinct keys from the legacy Orc roster.
-- `/view workers` lists workers independently of Orc folds. `/filter <project root>` narrows the tree; `/filter all` clears it.
+- The three tabs are Live, Unread and History. Expand an Orc to inspect its workers. `/filter <project root>` narrows the tree and `/filter all` clears it.
 - Confirmed-ended sessions are disclosed under History. Runtime-unconfirmed sessions are folded separately, without inferring that an old record is dead. Observed working/blocked descendants remain in the current tree.
 - Group rollups retain working, attention, lifecycle notice and unread counts when folded. Traversing or folding does not mark replies read.
 
-Header counts distinguish live Orcs, live managed workers, discovered native workers and unconfirmed runtime presence. Native discovery is not a process-liveness claim. Narrow rows prioritize role, task and status; selected detail retains model, owner, path and last confirmed observation.
+The header summarizes live sessions, activity, unread replies and unconfirmed runtime presence. Native discovery is not a process-liveness claim. Narrow rows prioritize role, task and status; selected detail retains model, owner, path and last confirmed observation.
 
 ## False-stall regression
 
