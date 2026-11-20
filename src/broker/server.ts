@@ -75,6 +75,7 @@ export class BrokerServer {
   close(): Promise<void> {
     if (this.closePromise !== undefined) return this.closePromise;
     this.closePromise = (async () => {
+      this.options.onClose?.();
       for (const socket of this.sockets) socket.end();
       if (this.listening) {
         await new Promise<void>((resolve) => {

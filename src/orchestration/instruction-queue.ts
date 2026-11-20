@@ -154,7 +154,7 @@ export class InstructionQueue {
    * delivers it to a live target or retires it as undelivered.
    */
   async recoverLaunchInstructions(readCanonicalTurns: (sessionId: string) => Promise<number | { canonicalTurns: number; cancelled?: boolean | undefined; pending?: string | undefined }>): Promise<void> {
-    for (const record of await this.store.list()) {
+    for (const record of await (this.store.listUnsettled?.() ?? this.store.list())) {
       if (record.launch === undefined || ["completed", "undelivered", "cancelled"].includes(record.status)) continue;
       await this.serialize(record.targetSessionId, async () => {
         const current = (await this.store.list(record.targetSessionId)).find(({ id }) => id === record.id)!;
@@ -189,7 +189,7 @@ export class InstructionQueue {
 
   /** Run after worker budget/authority recovery and after event subscriptions are installed. */
   async recoverPendingInstructions(readLedger: (sessionId: string) => Promise<WorkerTurnLedger>): Promise<void> {
-    await recoverPendingInstructions(await this.store.list(), readLedger,
+    await recoverPendingInstructions(await (this.store.listUnsettled?.() ?? this.store.list()), readLedger,
       update => this.applyState(update), id => this.flush(id));
   }
 
@@ -276,7 +276,8 @@ export class InstructionQueue {
     if (this.strigoi?.deferDelivery(() => this.flush(targetSessionId, verifyMessageId))) return Promise.resolve([]);
     return this.serialize(targetSessionId, async () => {
       const key = await this.routing?.key(targetSessionId) ?? targetSessionId;
-      const records = (await this.store.list()).filter(record => effectiveInstruction(record).targetSessionId === targetSessionId
+      const candidates = await this.store.list(key === "resident:strigoi" ? undefined : targetSessionId);
+      const records = candidates.filter(record => effectiveInstruction(record).targetSessionId === targetSessionId
         || key === "resident:strigoi" && record.logicalRecipient !== undefined);
       const rendered = records.find((record) => record.messageId === verifyMessageId && record.status === "rendered"
         && record.brokerOwned === true && record.wake?.attentionEpoch !== undefined);

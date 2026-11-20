@@ -206,6 +206,7 @@ export async function runCyberdeck(
   toolkit: CliToolkit,
   fleetRuntimeDeps: FleetRuntimeDeps,
 ): Promise<void> {
+  process.title = "cyberdeck-fleet";
   let client: RpcClient;
   try {
     client = await RpcClient.connect(brokerSocketPath);

@@ -201,6 +201,7 @@ export interface SessionInstructionPort extends SessionLookupPort {
 }
 
 export interface InstructionRepository {
+  listUnsettled?(): Promise<InstructionRecord[]>;
   list(targetSessionId?: string): Promise<InstructionRecord[]>;
   put(record: InstructionRecord): Promise<void>;
 }

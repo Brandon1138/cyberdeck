@@ -96,5 +96,6 @@ export interface BrokerServerOptions {
   nvimBindings?: NvimBindingService;
   /** Versioned same-user read/control boundary for native local clients. */
   localWorkerControl?: LocalWorkerControlService;
+  onClose?: () => void;
   onShutdown?: () => void;
 }

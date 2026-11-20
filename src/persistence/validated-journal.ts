@@ -27,6 +27,11 @@ export class ValidatedJournal<T> {
   }
 
   read(): Promise<T> {
+    return this.readSelected(value => value);
+  }
+
+  /** Clone only the selected result while the validated projection is exclusively held. */
+  readSelected<R>(select: (value: T) => R): Promise<R> {
     return this.enqueue(async () => {
       for (let attempt = 0; attempt < 3; attempt++) {
         const file = await open(this.path, "r").catch((error: NodeJS.ErrnoException) => {
@@ -35,7 +40,7 @@ export class ValidatedJournal<T> {
         });
         if (file === undefined) {
           this.cached = undefined;
-          return structuredClone(this.project(Buffer.alloc(0)));
+          return structuredClone(select(this.project(Buffer.alloc(0))));
         }
         try {
           const before = version(await file.stat({ bigint: true }));
@@ -49,7 +54,7 @@ export class ValidatedJournal<T> {
           });
           if (before !== after || current === undefined || after !== version(current)) continue;
           this.cached = { version: after, projection };
-          return structuredClone(projection);
+          return structuredClone(select(projection));
         } finally { await file.close(); }
       }
       throw new Error("Journal changed during validation");
@@ -71,7 +76,7 @@ export class ValidatedJournal<T> {
     });
   }
 
-  private enqueue<R>(work: () => Promise<R>): Promise<R> {
+  enqueue<R>(work: () => Promise<R>): Promise<R> {
     const operation = this.tail.then(work);
     this.tail = operation.then(() => {}, () => {});
     return operation;

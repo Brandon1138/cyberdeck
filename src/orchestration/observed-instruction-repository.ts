@@ -7,6 +7,7 @@ export function observeInstructionRepository(
   onPut: (record: InstructionRecord) => void,
 ): InstructionRepository {
   return {
+    ...(store.listUnsettled && { listUnsettled: store.listUnsettled.bind(store) }),
     list: (targetSessionId) => store.list(targetSessionId),
     async put(record) {
       await store.put(record);
