@@ -108,7 +108,8 @@ export type OrchestratorPickerState =
     stopAcknowledgement?: StopAcknowledgement | undefined;
     deleteConfirmation?: DeleteConfirmation | undefined;
   }
-  | { step: "effort"; modelIndex: number; effortIndex: number; };
+  | { step: "effort"; modelIndex: number; effortIndex: number; }
+  | { step: "project"; modelIndex: number; effortIndex: number; projectRoot?: string | undefined; };
 
 /**
  * The directed handoff, in the two answers it needs: which orchestrator receives the marked

@@ -50,7 +50,11 @@ export const ThreadAttentionStateSchema = z.enum([
  */
 export const MAX_IMAGE_ATTACHMENTS = 8;
 
+/** Optional placement in the Fleet tree, independent of control scope. */
+export const ProjectRootSchema = z.string().refine(isAbsolute, "projectRoot must be an absolute path");
+
 export const StartSessionRequestSchema = z.object({
+  projectRoot: ProjectRootSchema.nullish(),
   provider: ProviderIdSchema,
   cwd: z.string().refine(isAbsolute, "cwd must be an absolute path"),
   detached: z.boolean(),

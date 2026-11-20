@@ -12,7 +12,7 @@ const state = { ...createFleetState(snapshot), selectedSessionId: "Parking Orc" 
 const variants: Array<[string, FleetState]> = [
   ["live", state],
   ["folded", { ...state, collapsedCwds: [workerTreeKey("Parking Orc")] }],
-  ["workers", { ...state, listView: "workers", focusedViewControl: "workers" }],
+  ["unread", { ...state, listView: "unread", focusedViewControl: "unread" }],
   ["history", { ...state, listView: "history", focusedViewControl: "history" }],
 ];
 const measurements = [];

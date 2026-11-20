@@ -110,7 +110,7 @@ export function renderHistoryRow(cwd: string, count: number, expanded: boolean, 
 
 export function renderViewControls(state: FleetState, options: ResolvedFleetRenderOptions): string {
   const view = state.listView ?? "live";
-  const controls = (["live", "workers", "unread", "history"] as const).map((candidate) => {
+  const controls = (["live", "unread", "history"] as const).map((candidate) => {
     const label = candidate[0]!.toUpperCase() + candidate.slice(1);
     const text = candidate === view ? `[${label}]` : label;
     return `${state.focusedViewControl === candidate ? SELECTION_RULE : ""}${paint(text, state.focusedViewControl === candidate || candidate === view ? "bold" : "muted", options.color)}`;

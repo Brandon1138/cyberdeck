@@ -21,7 +21,7 @@ export const FleetFolderDispositionSchema = z.object({
   liveHistoryExpanded: z.boolean().optional(),
 });
 
-export const FleetListViewSchema = z.enum(["live", "workers", "unread", "history"]);
+export const FleetListViewSchema = z.enum(["live", "unread", "history"]);
 /** Content watermarks, never timestamps of process activity. Null is an honest empty baseline. */
 export const FleetReplyWatermarkSchema = z.object({
   seen: z.string().max(600).nullable(),
@@ -33,7 +33,8 @@ export const FleetReplyWatermarkSchema = z.object({
   updatedAt: z.iso.datetime().optional(),
 });
 export const FleetVisitPreferencesSchema = z.object({
-  view: FleetListViewSchema.optional(),
+  // Workers used to be a separate tab. Keep existing visit watermarks when restoring it.
+  view: z.preprocess(view => view === "workers" ? "live" : view, FleetListViewSchema).optional(),
   replies: z.record(z.string(), FleetReplyWatermarkSchema).default({}),
   lifecycle: z.record(z.string(), z.object({
     generation: z.number().int().positive(),
