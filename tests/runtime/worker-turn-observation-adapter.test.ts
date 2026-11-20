@@ -35,6 +35,30 @@ describe("WorkerTurnObservationAdapter", () => {
     }
   });
 
+  it("reads Cursor Plan and Run Everything footers without inventing completion or readiness", () => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    const plan = ["Plan (shift+tab to cycle)", "Claude Opus 5.5 300K High · 41%", "~/project ·", "branch/name"];
+    const observe = (rows: string[]) => {
+      replay.appendBytes(Buffer.from(redraw(rows)));
+      return { activity: adapter.activity("cursor", replay), ...adapter.composer("cursor", replay) };
+    };
+    for (const path of [["~/project · main"], ["~/project ·", "branch/name"]]) {
+      expect(observe(["Reply text", "→ Add a follow-up", ...plan.slice(0, 2), ...path]))
+        .toMatchObject({ activity: "awaiting-input", inputReady: true, occupied: false });
+    }
+    expect(observe(["→ operator draft", ...plan])).toMatchObject({ occupied: true, inputReady: false });
+    expect(observe(["→ Add a follow-up       ctrl+c to stop", "1 task",
+      "Claude Opus 5.5 300K High · 69.8% · 19 files edited      Run Everything", "~/project · main"]))
+      .toMatchObject({ activity: "working", occupied: false, inputReady: false });
+    expect(observe(["→ Add a follow-up", ...plan, "unexpected dialog"])).toMatchObject({ inputReady: false });
+    expect(observe(["Add a follow-up"])).toMatchObject({ activity: "unknown", inputReady: false });
+    expect(observe(["│ ▶ [a] Trust this workspace    │", "│   [q] Quit                    │"]))
+      .toMatchObject({ activity: "needs-input", inputReady: false });
+    expect(observe([...PROVIDER_SCREENS.find(x => x.provider === "cursor")!.modal, "→ Add a follow-up", ...plan]))
+      .toMatchObject({ activity: "needs-input", inputReady: false });
+  });
+
   it("keeps Claude's composer readable after Kitty keyboard mode changes", () => {
     const adapter = new WorkerTurnObservationAdapter();
     const replay = adapter.createReplay(128 * 1024);

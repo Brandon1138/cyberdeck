@@ -80,6 +80,7 @@ export function threadStatus(thread: FleetThread): ThreadStatus {
     // or process exit. Current fault/stop/uncertainty still wins over an old successful report.
     if ((thread.workerTruth.state === "idle" || thread.workerTruth.state === "exited")
       && thread.workerTruth.taskOutcome === "succeeded") return "Done";
+    if (thread.record.provider === "cursor" && thread.workerTruth.state === "unknown") return "Unconfirmed";
     return TRUTH_STATUS[thread.workerTruth.state] ?? "Unavailable";
   }
   // Legacy records describe process lifecycle, not current provider activity. Persisted turn

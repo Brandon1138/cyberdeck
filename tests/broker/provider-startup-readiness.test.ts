@@ -1,3 +1,4 @@
+import { threadStatus } from "../../src/client/fleet/transport.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -112,6 +113,43 @@ async function harness(provider: ProviderId = "codex", initialPrompt?: string, n
 }
 
 describe("automated provider startup delivery", () => {
+  it("settles two Cursor turns once each and keeps a ready-only observation at zero", async () => {
+    const { registry, record, handles } = await harness("cursor");
+    const emit = (frame: string) => handles[0]!.emit(CLEAR + frame);
+    const footer = "\r\nPlan (shift+tab to cycle)\r\nClaude Opus 5.5 300K High · 41%\r\n~/project · main";
+    const ready = "→ Add a follow-up" + footer;
+    const label = () => threadStatus({ record, workerTruth: registry.workerTruth(record.id) });
+    emit(ready);
+    expect(label()).toBe("Idle");
+    expect(registry.workerTruth(record.id).completedTurns).toBe(0);
+    for (const target of [1, 2]) {
+      emit("→ Add a follow-up       ctrl+c to stop" + footer);
+      expect(label()).toBe("Working");
+      emit("│ ▶ [a] Trust this workspace   │\r\n│   [q] Quit                   │");
+      expect(label()).toBe("Needs you");
+      await new Promise(resolve => setTimeout(resolve, 250));
+      expect(registry.workerTruth(record.id).completedTurns).toBe(target - 1);
+      emit("Result " + target + "\r\n" + ready);
+      const result = await registry.waitForWorkerResults([{ sessionId: record.id, completionTarget: target }], 3000);
+      expect(result.results[0]).toMatchObject({ status: "completed", completedTurns: target });
+      expect(label()).toBe("Idle");
+      emit(ready);
+      await new Promise(resolve => setTimeout(resolve, 250));
+      expect(registry.workerTruth(record.id)).toMatchObject({ completedTurns: target, taskOutcome: "unknown" });
+    }
+  });
+
+  it("keeps Cursor input held when an observed run becomes unrecognizable", async () => {
+    let now = 0;
+    const { registry, record, handles, enqueue } = await harness("cursor", undefined, () => now);
+    handles[0]!.emit(CLEAR + "Composing 12 tokens\r\nctrl+c to stop");
+    handles[0]!.emit(CLEAR + "Unrecognized surface");
+    now = 2000;
+    expect(registry.workerTruth(record.id)).toMatchObject({ state: "unknown", completedTurns: 0 });
+    expect(await enqueue("Follow-up")).toMatchObject({ status: "queued" });
+    expect(handles[0]!.writes).toHaveLength(0);
+  });
+
   it("reports an unrecognized startup screen after a bounded wait and keeps the brief held", async () => {
     let now = 0;
     const { registry, record, handles, queue, enqueue } = await harness("claude", undefined, () => now);

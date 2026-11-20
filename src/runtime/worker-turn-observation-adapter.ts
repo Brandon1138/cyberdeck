@@ -83,12 +83,13 @@ implements WorkerTurnObservationPort, WorkerTurnPreviewPort {
     // An unreliable screen can retain a draft hold, but it can never authorize input. Once the
     // projection is reliable, erased history is not evidence that a draft still occupies the UI.
     const frame = digest.currentScreen()?.text ?? replay.frameText();
+    const activity = this.activity(provider, replay);
     const composer = frameComposerState(provider as ProviderId, frame, {
-      modalOpen: this.activity(provider, replay) === "needs-input",
+      modalOpen: activity === "needs-input",
     });
     return {
       ...composer,
-      inputReady: !composer.modalOpen && !composer.occupied
+      inputReady: !composer.modalOpen && !composer.occupied && (provider !== "cursor" || activity !== "working")
         && frameInputReady(provider as ProviderId, digest.inputFrameText()),
     };
   }

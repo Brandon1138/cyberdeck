@@ -1,3 +1,4 @@
+import { cursorComposer } from "./cursor-composer.js";
 import { startupDialogPosition } from "./startup-dialog-activity.js";
 import type { ProviderId } from "./session.js";
 import { InputScreen, type RenderedTerminalScreen } from "./terminal-screen.js";
@@ -101,6 +102,14 @@ export function markerTerminalActivity(
     if (isWorkingLine(provider, line)) workingAt = Math.max(workingAt, at);
     if (isWaitingLine(provider, line)) waitingAt = Math.max(waitingAt, at);
   }
+  if (provider === "cursor") {
+    const composer = cursorComposer(screen.text);
+    if (composer) {
+      if (blockedAt >= 0) return "needs-input";
+      if (composer.working || workingAt >= 0) return "working";
+      if (!/^(?:\d+[.)]\s|Yes\b|No,?\s|Upgrade your plan)/iu.test(composer.content)) return "awaiting-input";
+    }
+  }
   // A working UI can retain and repaint its composer so an operator can queue a follow-up. That
   // prompt is not an idle transition while a working control remains on this screen.
   if (workingAt < 0) waitingAt = Math.max(waitingAt, currentComposerPosition(provider, screen));
@@ -141,7 +150,7 @@ function isWorkingLine(provider: ProviderId, line: string): boolean {
 }
 
 function isWaitingLine(provider: ProviderId, line: string): boolean {
-  if (provider === "cursor") return /^(?:Add a follow-up|No matches|\/(?:run-everything|model \[filter\])(?:\s+.*)?)$/iu.test(line);
+  if (provider === "cursor") return /^(?:No matches|\/(?:run-everything|model \[filter\])(?:\s+.*)?)$/iu.test(line);
   if (provider === "antigravity") return /^\? for shortcuts\b/iu.test(line) || /^> Plan mode:/iu.test(line);
   return false;
 }
@@ -340,6 +349,7 @@ export function blockedPromptIndexInTail(provider: ProviderId, tail: string): nu
   const common = Math.max(
     lastRegexIndex(tail, /^\s*Do you trust the contents of this project\?(?:\s*> Yes, I trust this folder)?\s*$/gimu),
     dialogAffordanceIndexInTail(tail),
+    provider === "cursor" ? lastRegexIndex(tail, /^[ \t]*│[ \t]*(?:▶[ \t]*)?\[a\] Trust this workspace[ \t]*│\s*│[ \t]*(?:▶[ \t]*)?\[q\] Quit[ \t]*│/gimu) : -1,
   );
   const providerPrompt = provider === "codex"
     ? Math.max(

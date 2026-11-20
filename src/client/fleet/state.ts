@@ -357,7 +357,7 @@ export interface FleetTransition {
 
 export type StartFleetAction = Extract<FleetAction, { type: "start"; }>;
 
-export type ThreadStatus = "Starting" | "Working" | "Needs you" | "Idle" | "Stalled" | "Provider limit" | "Done" | "Stopping" | "Stopped" | "Interrupted" | "Exited" | "Failed" | "Unavailable";
+export type ThreadStatus = "Starting" | "Working" | "Needs you" | "Idle" | "Stalled" | "Provider limit" | "Done" | "Stopping" | "Stopped" | "Interrupted" | "Exited" | "Failed" | "Unavailable" | "Unconfirmed";
 
 export interface FleetRenderOptions {
   /** A full-resolution image placement, available only when the terminal supports native graphics. */

@@ -146,6 +146,7 @@ export class WorkerTurnEngine {
   private observationRevision = 0;
   /** Changes whenever newer terminal or instruction activity can make completion UI effects stale. */
   private activityRevision = 0;
+  private observedCursorWork = false;
   /** The one capture allowed to commit the next completion ordinal in this epoch. */
   private turnCaptureOwner?: TurnCaptureClaim;
   /** Every observation/commit pipeline that began before the current lifecycle fence. */
@@ -233,6 +234,7 @@ export class WorkerTurnEngine {
 
   /** Reset only the replay observation when a new process generation is adopted. */
   resetReplay(replay: string): void {
+    this.observedCursorWork = false;
     this.replay.reset(replay);
     this.inputReadiness.reset();
   }
@@ -282,6 +284,7 @@ export class WorkerTurnEngine {
     if (this.terminalScreenReservationsDiscarded) return { fatal: false };
 
     const activity = this.options.observations.activity(this.record.provider, this.replay);
+    if (this.record.provider === "cursor" && activity === "working") this.observedCursorWork = true;
     this.nativeActivity.observeScreen(this.activityRevision, activity, this.now(), this.options.observations.starting?.(this.record.provider, this.replay) === true, this.replay.workCycle?.(this.record.provider));
     if (this.inputReadiness.starting) {
       // Loading history and MCP startup can spin then become idle without any model turn.
@@ -440,7 +443,7 @@ export class WorkerTurnEngine {
     this.observeComposer();
     return this.truthObservation.observe(projectWorkerTurnTruth({
       terminalFinalizing: false,
-      readiness: this.inputReadiness, deliveryHeld: this.deliveryHeld,
+      readiness: this.inputReadiness, observedCursorWork: this.observedCursorWork, deliveryHeld: this.deliveryHeld,
       nativeTurnSettled: this.nativeTurnSettled,
       frameText: this.replay.modalFrameText?.() ?? this.replay.frameText(),
       scoutTransport: this.record.scout?.transport,

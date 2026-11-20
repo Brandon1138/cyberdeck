@@ -1,3 +1,4 @@
+import { cursorComposer } from "../domain/cursor-composer.js";
 import type { ProviderId } from "../domain/session.js";
 import type { ComposerObservation } from "../domain/worker-truth.js";
 import { cursorFooterStart, plainTerminalText, providerTerminalActivity } from "./terminal-replay.js";
@@ -121,6 +122,10 @@ export function frameInputReady(provider: ProviderId, frame: string): boolean {
     : /^>(?:\s+(.*))?$/u;
   let footer = false;
   if (/^\s*loading(?:…|\.{3})?\s*$/imu.test(frame)) return false;
+  if (provider === "cursor") {
+    const composer = cursorComposer(frame);
+    if (composer) return !composer.working && (composer.content === "" || COMPOSER_PLACEHOLDERS.some(p => p.test(composer.content)));
+  }
   const end = provider === "cursor" ? cursorFooterStart(lines) : lines.length;
   for (let index = end - 1; index >= first; index -= 1) {
     const line = lines[index]!.trim();
@@ -174,7 +179,7 @@ export function frameComposerState(
   // The composer's own line is read before any hint beside it: a hint proves something is unsent,
   // the line says what, and the engine needs the what before it will press Enter on it.
   if (!modalOpen) {
-    const bare = bareComposerContent(provider, lines, first);
+    const bare = (provider === "cursor" ? cursorComposer(frame)?.content : undefined) ?? bareComposerContent(provider, lines, first);
     if (bare !== undefined) {
       if (bare === "" || COMPOSER_PLACEHOLDERS.some((placeholder) => placeholder.test(bare))) {
         return { modalOpen, occupied: false };
