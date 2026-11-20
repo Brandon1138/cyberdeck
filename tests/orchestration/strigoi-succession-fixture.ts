@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vi, type Mock } from "vitest";
@@ -20,6 +20,8 @@ import { AgentActivityStore } from "../../src/persistence/agent-activity-store.j
 
 export async function successionFixture(native = false) {
   const root = await mkdtemp(join(tmpdir(), "strigoi-succession-"));
+  const alfredSkillPath = join(root, "alfred.md"), skillContent = "Alfred fixture: preserve commitments across renewal.\n";
+  await writeFile(alfredSkillPath, skillContent);
   const evidence = composeStrigoiEvidence(root), bindings = evidence.orchestratorStore;
   const activity = await AgentActivityStore.open(join(root, "activity"));
   const sessions = new SessionStore(root), transcripts = new ThreadTranscriptStore(root, { continuity: evidence.transcriptContinuity });
@@ -90,12 +92,12 @@ export async function successionFixture(native = false) {
     vi.spyOn(admission, "reopen").mockImplementation(async (id) => { await reopen(id); trace.push("release"); });
     const continuity = new StrigoiContinuity({ repository: bindings.strigoi, bindings, admission, packets: evidence.packets, sources: evidence.sources });
     const manager = new OrchestratorManager(registry, bindings, undefined, { list: async () => ({ codex: "automatic" }) }, async () => [], (binding, session) => bindingObserver?.(binding, session) ?? Promise.resolve());
-    const composition = await composeStrigoiRuntime({ repository: bindings.strigoi, bindings, admission, registry, manager, continuity,
+    const composition = await composeStrigoiRuntime({ repository: bindings.strigoi, bindings, admission, registry, manager, continuity, alfredSkillPath,
       beforeDelete: evidence.beforeDelete, withDeletion: evidence.withDeletion, verifyContinuity: evidence.verify,
       succession: { packets: evidence.packets, sources: evidence.sources, turns, workers, delivery, activity, now: () => now } });
     // Tests drive deterministic phase ticks, never the production timer.
     vi.spyOn(composition.lifecycle, "wakeSuccession").mockImplementation(() => {});
-    return { ...composition, admission };
+    return { ...composition, admission, manager };
   };
   let runtime = await make();
   await runtime.lifecycle.configure({ provider: "codex", model: "gpt-5.6-sol", cwd: root }, "configure");
@@ -107,7 +109,7 @@ export async function successionFixture(native = false) {
     for (let i = 0; i < count; i++) { await runtime.succession!.advance(id); await Promise.resolve(); }
     return bindings.strigoi.read();
   };
-  return { root, evidence, bindings, sessions, transcripts, activity, observations, nativeResults, turns, workers, delivery, submitted, results, trace, states, spawn, initialize, writes, inference, original,
+  return { alfredSkillPath, skillContent, root, evidence, bindings, sessions, transcripts, activity, observations, nativeResults, turns, workers, delivery, submitted, results, trace, states, spawn, initialize, writes, inference, original,
     get activeHighWater() { return activeHighWater; }, activeSamples,
     get registry() { return registry; }, get runtime() { return runtime; },
     setBindingObserver: (observer: NonNullable<typeof bindingObserver>) => { bindingObserver = observer; },

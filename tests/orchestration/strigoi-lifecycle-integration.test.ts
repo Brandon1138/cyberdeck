@@ -19,6 +19,8 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 function gate() { let resolve!: () => void; const promise = new Promise<void>((r) => { resolve = r; }); return { promise, resolve }; }
 async function fixture(stage?: "prepare" | "initialize") {
   const root = await mkdtemp(join(tmpdir(), "strigoi-native-")); roots.push(root);
+  const alfredSkillPath = join(root, "alfred.md"), skillContent = "Alfred fixture: follow through on the operator's commitments.\n";
+  await writeFile(alfredSkillPath, skillContent);
   const bindings = new OrchestratorStore(root), durable = new Map<string, SessionRecord>();
   const entered = gate(), release = gate(), writes = vi.fn(), inference = vi.fn();
   const adapter = new CodexProviderAdapter();
@@ -47,7 +49,7 @@ async function fixture(stage?: "prepare" | "initialize") {
   await registry.ready();
   const manager = new OrchestratorManager(registry, bindings, undefined, { list: async () => ({ codex: "automatic" }) }, async () => []);
   const admission = new StrigoiAdmission(bindings.strigoi, bindings, registry), errors = vi.fn();
-  const composition = await composeStrigoiRuntime({ repository: bindings.strigoi, bindings, registry, manager, admission, onError: errors });
+  const composition = await composeStrigoiRuntime({ repository: bindings.strigoi, bindings, registry, manager, admission, onError: errors, alfredSkillPath });
   const resident = composition.lifecycle;
   const reconstruct = async (recoverRegistry = false) => {
     composition.dispose();
@@ -56,13 +58,13 @@ async function fixture(stage?: "prepare" | "initialize") {
     const recoveredBindings = new OrchestratorStore(root);
     const next = await composeStrigoiRuntime({ repository: recoveredBindings.strigoi, bindings: recoveredBindings, registry: nextRegistry,
       manager: new OrchestratorManager(nextRegistry, recoveredBindings, undefined, { list: async () => ({ codex: "automatic" }) }, async () => []),
-      admission: new StrigoiAdmission(recoveredBindings.strigoi, recoveredBindings, nextRegistry), onError: errors });
+      admission: new StrigoiAdmission(recoveredBindings.strigoi, recoveredBindings, nextRegistry), onError: errors, alfredSkillPath });
     cleanups.push(async () => { next.dispose(); await next.lifecycle.reconcile(); if (recoverRegistry) await nextRegistry.stopAll(); });
     return next.lifecycle;
   };
   cleanups.push(async () => { release.resolve(); composition.dispose(); await resident.reconcile(); await registry.stopAll(); });
   const selection = { provider: "codex" as const, model: "gpt-5.6-sol", cwd: root };
-  return { reconstruct, initialize, emitExit: () => emitExit(), setReportExit: (value: boolean) => { reportExit = value; }, root, selection, registry, bindings, admission, composition, resident, entered, release, durable, spawn, writes, inference, nativeBuild, errors };
+  return { alfredSkillPath, skillContent, reconstruct, initialize, emitExit: () => emitExit(), setReportExit: (value: boolean) => { reportExit = value; }, root, selection, registry, bindings, admission, composition, resident, entered, release, durable, spawn, writes, inference, nativeBuild, errors };
 }
 
 describe("resident lifecycle through real registry and canonical binding authority", () => {
@@ -81,9 +83,23 @@ describe("resident lifecycle through real registry and canonical binding authori
     expect(f.spawn).toHaveBeenCalledOnce(); expect(f.writes).not.toHaveBeenCalled(); expect(f.inference).not.toHaveBeenCalled();
     expect(f.nativeBuild.mock.calls[0]![1]).toBeUndefined();
     expect(f.spawn.mock.calls[0]![0].args).toContain("--approve-for-me");
+    const nativeInstructions = f.spawn.mock.calls[0]![0].args.find(arg => arg.startsWith("developer_instructions="))!;
+    expect(JSON.parse(nativeInstructions.slice("developer_instructions=".length))).toContain(f.skillContent);
+    expect(f.errors).not.toHaveBeenCalled();
     const state = await f.bindings.strigoi.read();
     expect(state.activeGeneration).toBe(1); expect(state.transition?.successor?.sessionId).toBe(state.activeBinding?.sessionId);
     await expect(f.admission.run(state.activeBinding!.sessionId, "mutate", async () => "allowed")).resolves.toBe("allowed");
+  });
+  it("starts passively with an explicit diagnostic if Alfred is unavailable", async () => {
+    const f = await fixture(); await rm(f.alfredSkillPath);
+    await f.resident.configure(f.selection, "configure"); await f.resident.reconcile();
+    expect(f.errors).toHaveBeenCalledWith(expect.objectContaining({ code: "STRIGOI_ALFRED_UNAVAILABLE" }));
+    const state = await f.bindings.strigoi.read();
+    const instructions = f.registry.get(state.activeBinding!.sessionId).providerInstructions!;
+    expect(instructions).toContain("The Alfred skill was not loaded.");
+    expect(instructions).toContain("No startup greeting");
+    expect(instructions).toContain("Before every cyberdeck_orchestrator_create");
+    expect(f.spawn).toHaveBeenCalledOnce(); expect(f.inference).not.toHaveBeenCalled(); expect(f.writes).not.toHaveBeenCalled();
   });
   it.each(["prepare", "initialize"] as const)("suspends during %s and refuses late activation", async (stage) => {
     const f = await fixture(stage); await f.resident.configure(f.selection, "configure");
