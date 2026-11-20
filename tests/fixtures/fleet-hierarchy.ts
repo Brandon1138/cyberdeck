@@ -13,7 +13,7 @@ export function treeThread(id: string, state: WorkerTruthState = "idle", options
     model: "gpt-6-astra", effort: "high", sandbox: "workspace-write", detached: true,
     createdAt: TREE_NOW, updatedAt: TREE_NOW, executionState: ended ? "exited" : "active", attachmentState: "detached",
     pid: native ? 0 : 42, exitCode: ended ? 0 : null, childIds: [] }, workerTruth: truth,
-    runtimePresence: ended ? "absent" : native || state === "unknown" ? "unknown" : "present",
+    runtimePresence: ended ? "absent" : state === "unknown" ? "unknown" : "present",
     ...(options.controller ? { controllerId: options.controller } : {}),
     ...(native ? { nativeAgent: { threadId: id, parentThreadId: options.nativeParent!, parentName: options.nativeParent!,
       rootSessionId: options.root ?? options.nativeParent! } } : {}) };

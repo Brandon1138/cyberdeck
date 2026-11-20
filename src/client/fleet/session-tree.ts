@@ -1,6 +1,6 @@
 import { prepared } from "./frame-cache.js";
 import { projectRootFor, sectionPath } from "./list-groups.js";
-import { threadRuntimePresence } from "./runtime-presence.js";
+import { isLiveThread, threadRuntimePresence } from "./runtime-presence.js";
 import type { FleetSnapshot, FleetThread } from "./state.js";
 
 export const FLEET_ORCS_KEY = "/@fleet-orchestrators";
@@ -15,14 +15,19 @@ export interface SessionNode {
 }
 export interface SessionGroup { key: string; label: string; nodes: SessionNode[] }
 
+export function visibleInLive(thread: FleetThread): boolean {
+  return isLiveThread(thread) || (thread.strigoi?.canonical === true && thread.strigoi.desired === "enabled");
+}
+
 /** Only recorded native edges and current lease holders establish parentage. */
-export function sessionTree(snapshot: FleetSnapshot): SessionGroup[] {
-  return prepared([snapshot, "sessionTree"], () => {
-    const nodes = new Map(snapshot.threads.map(thread => [thread.record.id, { thread, children: [], members: [] } as SessionNode]));
-    const controllers = new Map(snapshot.threads.filter(t => t.record.kind === "orchestrator" && t.controllerId)
+export function sessionTree(snapshot: FleetSnapshot, liveOnly = false): SessionGroup[] {
+  return prepared([snapshot, "sessionTree", liveOnly], () => {
+    const threads = liveOnly ? snapshot.threads.filter(visibleInLive) : snapshot.threads;
+    const nodes = new Map(threads.map(thread => [thread.record.id, { thread, children: [], members: [] } as SessionNode]));
+    const controllers = new Map(threads.filter(t => t.record.kind === "orchestrator" && t.controllerId)
       .map(t => [t.controllerId!, t.record.id]));
     const parents = new Map<string, string>();
-    for (const thread of snapshot.threads) {
+    for (const thread of threads) {
       if (thread.record.kind === "orchestrator") continue;
       const native = thread.nativeAgent;
       const parent = native === undefined ? controllers.get(thread.coordination?.currentController?.controllerId ?? "")
@@ -39,7 +44,7 @@ export function sessionTree(snapshot: FleetSnapshot): SessionGroup[] {
       }
     }
     const groups = new Map<string, SessionGroup>([[FLEET_ORCS_KEY, {
-      key: FLEET_ORCS_KEY, label: "Unassigned / Fleet orchestrators", nodes: [],
+      key: FLEET_ORCS_KEY, label: "Fleet Orcs", nodes: [],
     }]]);
     for (const root of snapshot.projects ?? []) groups.set(root, { key: root, label: root, nodes: [] });
     for (const [id, node] of nodes) {
@@ -50,7 +55,7 @@ export function sessionTree(snapshot: FleetSnapshot): SessionGroup[] {
         ?? projectRootFor(record.cwd, snapshot.projects ?? []);
       const fallbackKey = record.kind === "orchestrator" && (record.orchestratorScope === "fleet" || project === undefined)
         ? FLEET_ORCS_KEY : project ?? OTHER_WORKERS_KEY;
-      const key = record.projectRoot === null
+      const key = node.thread.strigoi?.canonical ? FLEET_ORCS_KEY : record.projectRoot === null
         ? record.kind === "orchestrator" ? FLEET_ORCS_KEY : OTHER_WORKERS_KEY
         : record.projectRoot ?? fallbackKey;
       if (!groups.has(key)) groups.set(key, { key, label: key === OTHER_WORKERS_KEY ? "Standalone / Unattributed workers" : key, nodes: [] });
@@ -70,18 +75,6 @@ export function sessionTree(snapshot: FleetSnapshot): SessionGroup[] {
     return [...groups.values()].sort((a, b) => a.key === FLEET_ORCS_KEY ? -1 : b.key === FLEET_ORCS_KEY ? 1
       : a.key === OTHER_WORKERS_KEY ? 1 : b.key === OTHER_WORKERS_KEY ? -1 : a.key.localeCompare(b.key));
   });
-}
-
-/** Activity observations do not establish process presence, but actionable work stays discoverable. */
-export function hasCurrentActivity(thread: FleetThread): boolean {
-  return threadRuntimePresence(thread) !== "absent" && thread.workerTruth?.terminal !== true
-    && ["working", "starting", "blocked-modal", "blocked-composer", "stalled", "provider-limit", "errored", "failed"]
-      .includes(thread.workerTruth?.state ?? "");
-}
-
-export function nodeDisposition(node: SessionNode): "current" | "unconfirmed" | "history" {
-  if (node.members.some(t => t.strigoi?.canonical && t.strigoi.desired === "enabled" || threadRuntimePresence(t) === "present" || hasCurrentActivity(t))) return "current";
-  return node.members.some(t => threadRuntimePresence(t) === "unknown") ? "unconfirmed" : "history";
 }
 
 export function activitySummary(threads: readonly FleetThread[]): string {

@@ -22,7 +22,7 @@ export function renderFleetList(
   options: ResolvedFleetRenderOptions,
 ): string {
   const threads = orderedThreads(snapshot);
-  const header = [...renderHeader(threads, state, options), ""];
+  const header = [...renderHeader(threads, state, options, snapshot.currentLayout), ""];
 
   // The column only exists once some thread actually has a pull request, so a
   // fleet without `gh` — or without PRs — never pays for it, and it is only ever
@@ -306,10 +306,12 @@ export function renderHeader(
   threads: readonly FleetThread[],
   state: FleetState,
   options: ResolvedFleetRenderOptions,
+  layout?: FleetSnapshot["currentLayout"],
 ): string[] {
-  return prepared([threads, state, options, "renderHeader"], () => {
+  return prepared([threads, state, options, layout, "renderHeader"], () => {
+    const liveView = layout === "sessions" && (state.listView ?? "live") === "live";
     const live = threads.filter(isLiveThread);
-    const current = threads.filter(thread => threadRuntimePresence(thread) !== "absent");
+    const current = liveView ? live : threads.filter(thread => threadRuntimePresence(thread) !== "absent");
     const statuses = current.map(threadStatus);
     const count = (status: ThreadStatus) => statuses.filter((candidate) => candidate === status).length;
     // Process liveness is a separate fact from current activity and verified task outcomes.
@@ -317,7 +319,7 @@ export function renderHeader(
       `${live.length} live`,
       `${count("Working")} working`, `${count("Needs you")} needs you`,
       ...(current.some(t => threadRuntimePresence(t) === "unknown") ? [`${current.filter(t => threadRuntimePresence(t) === "unknown").length} runtime unconfirmed`] : []),
-      `${threads.filter(({ record }) => isUnreadThread(state, record.id)).length} unread`,
+      ...(liveView ? [] : [`${threads.filter(({ record }) => isUnreadThread(state, record.id)).length} unread`]),
     ];
     const supplementary = [
       `${threads.filter(isHistoricalThread).length} history`,
@@ -326,11 +328,12 @@ export function renderHeader(
       ...(count("Interrupted") === 0 ? [] : [`${count("Interrupted")} interrupted`]),
       ...(count("Failed") === 0 ? [] : [`${count("Failed")} failed`]),
     ];
-    const orchestrator = threads.find(({ record }) =>
+    const contextThreads = liveView ? live : threads;
+    const orchestrator = contextThreads.find(({ record }) =>
       record.kind === "orchestrator" && record.orchestratorScope === "fleet")?.record
-      ?? threads.find(({ record }) =>
+      ?? contextThreads.find(({ record }) =>
         record.kind === "orchestrator" && record.cwd === state.fallbackCwd)?.record
-      ?? threads.find(({ record }) => record.kind === "orchestrator")?.record;
+      ?? contextThreads.find(({ record }) => record.kind === "orchestrator")?.record;
     const scope = orchestrator?.orchestratorScope === "fleet"
       ? "fleet"
       : shortPath(orchestrator?.cwd ?? state.fallbackCwd, options.home);
@@ -351,7 +354,7 @@ export function renderHeader(
       else countLines.push(entry);
     }
     // Process/activity breakdown is supplementary; the three operator counts never get cut off.
-    if (textWidth >= 100) {
+    if (!liveView && textWidth >= 100) {
       for (const entry of supplementary) {
         const last = countLines.at(-1)!;
         if (displayWidth(`${last} · ${entry}`) <= countWidth) countLines[countLines.length - 1] = `${last} · ${entry}`;

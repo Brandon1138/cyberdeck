@@ -157,7 +157,7 @@ export function fleetFrameLayout(
     0,
   );
   const footerHeight = renderFleetFooter(snapshot, state, options).length;
-  const headerHeight = renderHeader(threads, state, options).length + 1;
+  const headerHeight = renderHeader(threads, state, options, snapshot.currentLayout).length + 1;
   const bodyHeight = Math.max(0, options.height - footerHeight);
   const viewportHeight = Math.max(0, bodyHeight - headerHeight);
   const shellTranscript = state.shellMode === undefined
