@@ -9,7 +9,7 @@ function thread(id: string, native = false): FleetThread {
   return { record: { id, name: id, kind: native ? "worker" : "orchestrator", role: native ? "worker" : "orchestrator", provider: "codex", cwd: native ? "/repo/worker" : "/repo",
     sandbox: "read-only", detached: true, createdAt: NOW, updatedAt: NOW, executionState: "active", attachmentState: "detached",
     pid: native ? 0 : 42, exitCode: null, childIds: [] } as SessionRecord,
-    runtimePresence: native ? "unknown" : "present",
+    runtimePresence: "present",
     workerTruth: projectWorkerTruth({ executionState: "active", exitCode: null, activity: "working",
       composer: { occupied: false, modalOpen: false }, completedTurns: 0, canonicalTurns: 0, pendingInstructions: 0 }),
     ...(native ? { nativeAgent: { threadId: id, parentThreadId: "native-parent", parentName: "Astra", rootSessionId: "parent" } } : {}) };
@@ -21,7 +21,7 @@ it("shows active native workers nested under their orchestrator", () => {
   expect(rows.some(row => row.kind === "folder" && row.cwd === "/repo")).toBe(true);
   expect(rows.find(row => row.kind === "thread" && row.thread.record.id === "publication")).toMatchObject({ tree: { depth: 2, parentKey: "/@session/parent" } });
   const body = renderFleet(snapshot, createFleetState(snapshot), { width: 140, height: 30, color: false });
-  expect(body).toContain("publication"); expect(body).toContain("native"); expect(body).toContain("/empty");
+  expect(body).toContain("publication"); expect(body).toContain("native"); expect(body).not.toContain("/empty");
 });
 it.each(["enter", "right", " ", "ctrl+x", "ctrl+d", "ctrl+r", "ctrl+t", "ctrl+n", "shift+up", "alt+2"])("keeps native observation read-only for %s", key => {
   const result = transitionFleet({ ...createFleetState(snapshot), selectedSessionId: "publication" }, snapshot, key);

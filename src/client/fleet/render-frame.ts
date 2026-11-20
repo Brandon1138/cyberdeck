@@ -58,7 +58,7 @@ export function threadListViewportHeight(
   );
   return Math.max(
     0,
-    bodyHeight - renderHeader(orderedThreads(snapshot), state, options).length - 1,
+    bodyHeight - renderHeader(orderedThreads(snapshot), state, options, snapshot.currentLayout).length - 1,
   );
 }
 

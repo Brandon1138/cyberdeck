@@ -22,9 +22,36 @@ it("keeps Fleet Orcs above projects, follows native edges and current leases, an
   expect(project.nodes[0]?.children.map(n => n.thread.record.id)).toContain("Browser verification");
   expect(visible(snapshot)).toEqual(["Executive", "Standalone", "Parking Orc", "Browser verification", "Implement presence", "Nested review"]);
   const rows = fleetListRows(snapshot, createFleetState(snapshot));
-  expect(rows.find(row => row.kind === "folder" && row.label === "Unconfirmed workers")).toMatchObject({ collapsed: true, threadCount: 54 });
-  expect(rows.find(row => row.kind === "folder" && row.label === "History")).toMatchObject({ collapsed: true, threadCount: 80 });
+  expect(rows.some(row => row.kind === "folder" && row.label === "Unconfirmed workers")).toBe(false);
+  expect(rows.some(row => row.kind === "folder" && row.label === "History")).toBe(false);
   expect(rows.length).toBeLessThan(25);
+});
+
+it("opens on Fleet Orcs and adds a project only while it has live sessions", () => {
+  const resident = treeThread("Strigoi", "idle", { kind: "orchestrator", controller: "resident" });
+  resident.record.orchestratorScope = "fleet";
+  const root = "/projects/cyberdeck";
+  const fresh: FleetSnapshot = { currentLayout: "sessions", projects: [root], threads: [resident] };
+  const rows = (snapshot: FleetSnapshot) => fleetListRows(snapshot, createFleetState(snapshot));
+  expect(createFleetState(fresh).listView).toBe("live");
+  expect(rows(fresh).map(row => row.kind)).toEqual(["views", "folder", "thread"]);
+  expect(rows(fresh)[1]).toMatchObject({ label: "Fleet Orcs" });
+  const astra = treeThread("Astra", "idle", { kind: "orchestrator", controller: "astra" });
+  astra.record.orchestratorScope = "fleet";
+  astra.record.projectRoot = root;
+  const worker = hierarchyFixture().threads.find(t => t.record.id === "Browser verification")!;
+  for (const owner of [resident, astra]) {
+    worker.coordination!.currentController!.controllerId = owner.controllerId!;
+    const active = { ...fresh, threads: [resident, astra, worker] };
+    expect(rows(active).filter(row => row.kind === "folder").map(row => row.label)).toEqual(["Fleet Orcs", root]);
+    expect(rows(active).find(row => row.kind === "thread" && row.thread === worker))
+      .toMatchObject({ tree: { parentKey: workerTreeKey(owner.record.id) } });
+    expect(visible(active, { ...createFleetState(active), collapsedCwds: [workerTreeKey(owner.record.id)] }))
+      .not.toContain(worker.record.id);
+  }
+  const unknown = { ...worker, runtimePresence: "unknown" as const };
+  expect(rows({ ...fresh, threads: [resident, unknown, { ...astra, runtimePresence: "absent" }] }))
+    .toEqual(rows(fresh));
 });
 
 it("folds an Orc without attaching it, preserves its focus and persists the fold", () => {
@@ -36,7 +63,7 @@ it("folds an Orc without attaching it, preserves its focus and persists the fold
   expect(state.selectedSessionId).toBe("Parking Orc");
   expect(state.focusedFolderCwd).toBeUndefined();
   expect(visible(snapshot, state)).not.toContain("Browser verification");
-  expect(fleetListRows(snapshot, state).some(row => row.kind === "section" && row.label.includes("needs attention"))).toBe(true);
+  expect(fleetListRows(snapshot, state).some(row => row.kind === "section" && row.label.includes("needs attention"))).toBe(false);
   const restored = restoreFolderDispositions(createFleetState(snapshot), snapshot, {
     [workerTreeKey("Parking Orc")]: { collapsed: true, expanded: false },
   });
@@ -78,15 +105,16 @@ it("reveals only the inspected historical or unconfirmed target through closed a
     const state = revealFleetThread({ ...createFleetState(snapshot), projectFilter: "/elsewhere",
       collapsedCwds: [FLEET_ORCS_KEY, "/projects/parking", workerTreeKey("Parking Orc")] }, snapshot, id);
     expect(visible(snapshot, state)).toContain(id);
-    expect(visible(snapshot, state).filter(candidate => candidate.startsWith("old-native") || candidate.startsWith("retired-orc"))).toEqual([id]);
+    expect(state.listView).toBe("history");
+    expect(visible(snapshot, { ...state, listView: "live" })).not.toContain(id);
   }
 });
 
-it("retains a live worker under its ended parent and never infers the worker ended with it", () => {
+it("retains a live worker when its ended parent is hidden and never infers the worker ended with it", () => {
   const snapshot: FleetSnapshot = { currentLayout: "sessions", threads: [
     treeThread("ended", "exited", { kind: "orchestrator" }), treeThread("active-child", "working", { nativeParent: "ended" }),
   ] };
-  expect(visible(snapshot)).toEqual(["ended", "active-child"]);
+  expect(visible(snapshot)).toEqual(["active-child"]);
 });
 
 it("keeps orphaned workers outside their former creator and follows a handoff", () => {
@@ -119,18 +147,16 @@ it.each([32, 48, 60, 100, 160])("bounds the tree at width %s and keeps the count
   const frame = renderFleet(snapshot, createFleetState(snapshot), { width, height: 45, color: false, now });
   expect(frame.split("\n").length).toBeLessThanOrEqual(45);
   expect(frame.split("\n").every(line => displayWidth(line) <= width)).toBe(true);
-  if (width >= 60) { expect(frame).toContain("unconfirmed"); }
+  expect(frame).not.toContain("unconfirmed");
   expect(frame).not.toContain("57 native workers");
 });
 
 
-it("keeps empty registered projects navigable without treating synthetic groups as paths", () => {
+it("hides empty registered projects without treating synthetic groups as paths", () => {
   const snapshot: FleetSnapshot = { currentLayout: "sessions", projects: ["/projects/empty"], threads: [] };
   const state = createFleetState(snapshot);
   const project = fleetListRows(snapshot, state).find(row => row.kind === "folder" && row.cwd === "/projects/empty");
-  expect(project).toBeDefined();
-  expect(transitionFleet(focusRow(state, project), snapshot, "ctrl+n", now).action)
-    .toEqual({ type: "open-checkout", cwd: "/projects/empty" });
+  expect(project).toBeUndefined();
   const populated = hierarchyFixture();
   const group = fleetListRows(populated, createFleetState(populated)).find(row => row.kind === "folder" && row.cwd === FLEET_ORCS_KEY);
   expect(transitionFleet(focusRow(createFleetState(populated), group), populated, "ctrl+n", now).action).toBeUndefined();
@@ -163,7 +189,8 @@ it("counts native and managed unconfirmed records once without calling them live
   ] };
   const frame = renderFleet(snapshot, createFleetState(snapshot), { width: 160, height: 40, color: false, now });
   expect(frame).toContain("0 live ·");
-  expect(frame.match(/2 runtime unconfirmed/g)).toHaveLength(1);
+  expect(frame).not.toContain("unconfirmed");
+  expect(visible(snapshot)).toEqual([]);
 });
 
 

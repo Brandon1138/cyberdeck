@@ -35,7 +35,7 @@ export function renderTreeThread(thread: FleetThread, tree: FleetTreeRow, state:
   const role = thread.record.kind === "orchestrator" ? "ORC" : thread.nativeAgent ? "native" : "managed";
   const disclosure = tree.key ? tree.collapsed ? "▸" : "▾" : "·";
   const prefix = `${indentation(tree)}${disclosure} ${role} `;
-  const marker = `${isUnreadThread(state, thread.record.id) ? "* " : ""}${thread.record.pinned ? "⌃ " : ""}`;
+  const marker = `${state.listView === "unread" && isUnreadThread(state, thread.record.id) ? "* " : ""}${thread.record.pinned ? "⌃ " : ""}`;
   const name = thread.record.name ?? thread.record.role ?? thread.record.id.slice(0, 8);
   const title = `${marker}${name}`;
   const status = threadStatus(thread);

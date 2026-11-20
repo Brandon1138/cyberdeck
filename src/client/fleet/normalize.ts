@@ -54,9 +54,8 @@ export function normalizeState(state: FleetState, snapshot: FleetSnapshot, now: 
     const revealed = revealCurrentSession({ ...state, listView: "live" }, snapshot, selectedSessionId);
     const selectedRow = currentSessionRows(snapshot, revealed).find(row => row.kind === "thread" && row.thread.record.id === selectedSessionId);
     if (selectedRow?.kind === "thread") selectedCwd = selectedRow.tree?.ancestors[0];
-    if (!threadFocusInert(state) && (state.stopAcknowledgement?.sessionId === selectedSessionId
-      || selectedWasLive && threadRuntimePresence(threads.find(t => t.record.id === selectedSessionId)!) === "absent")) {
-      state = { ...revealed, listView: state.listView };
+    if (!threadFocusInert(state) && state.stopAcknowledgement?.sessionId === selectedSessionId) {
+      state = revealed;
     }
   }
   // The explicit stop/delete ladder stays on the same durable id even when stopping folds it

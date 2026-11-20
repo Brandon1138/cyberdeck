@@ -1,6 +1,6 @@
 import type { FleetSnapshot, FleetState } from "./state.js";
 import type { FleetListRow, FleetTreeRow } from "./list-rows.js";
-import { sessionTree, workerTreeKey, nodeDisposition, activitySummary, type SessionNode } from "./session-tree.js";
+import { sessionTree, workerTreeKey, visibleInLive, activitySummary, type SessionNode } from "./session-tree.js";
 import { threadRuntimePresence } from "./runtime-presence.js";
 import { isUnreadThread } from "./visit-state.js";
 import { pendingLifecycleThreads } from "./lifecycle-state.js";
@@ -14,7 +14,7 @@ export function currentSessionRows(snapshot: FleetSnapshot, state: FleetState): 
   const view = state.listView ?? "live";
   const filter = state.projectFilter?.replace(/\/$/u, "");
   if (filter) rows.push({ kind: "section", label: `Project: ${filter} · /filter all to clear` });
-  if (snapshot.nativeAgentNotice) rows.push({ kind: "section", label: snapshot.nativeAgentNotice });
+  if (view !== "live" && snapshot.nativeAgentNotice) rows.push({ kind: "section", label: snapshot.nativeAgentNotice });
   const inScope = (thread: FleetThread): boolean => !filter || thread.record.id === state.revealedHistorySessionId
     || [thread.record.cwd, sectionPath(thread)].some(path => path === filter || path.startsWith(`${filter}/`));
   // Ownership can cross projects. Keep only matching descendants and their structural ancestors.
@@ -29,48 +29,40 @@ export function currentSessionRows(snapshot: FleetSnapshot, state: FleetState): 
     view === "history" ? threadRuntimePresence(t) === "absent"
       : view === "unread" ? isUnreadThread(state, t.record.id)
       : true));
-  const open = (key: string, defaultClosed = false) => !state.collapsedCwds?.includes(key)
-    && (!defaultClosed || state.openFolderCwds?.includes(key) === true);
-  const emitNodes = (nodes: SessionNode[], depth: number, parentKey: string, ancestors: string[], partition = true): void => {
-    const visible = nodes.filter(matches);
-    const emit = (node: SessionNode, at: number, parent: string, path: string[]) => {
+  const open = (key: string) => !state.collapsedCwds?.includes(key);
+  const emitNodes = (nodes: SessionNode[], depth: number, parentKey: string, ancestors: string[]): void => {
+    for (const node of nodes.filter(matches)) {
       const key = workerTreeKey(node.thread.record.id);
       const children = node.children.filter(matches);
       const collapsed = !open(key);
-      const descendants = node.members.slice(1).filter(inScope);
-      const activity = activitySummary(descendants);
-      const tree: FleetTreeRow = { depth: at, parentKey: parent, ancestors: path,
-        ...(children.length ? { key, collapsed, summary: `${activity ? `${activity} · ` : ""}${descendants.length} worker${descendants.length === 1 ? "" : "s"}` } : {}) };
+      const tree: FleetTreeRow = { depth, parentKey, ancestors };
+      if (children.length) {
+        tree.key = key;
+        tree.collapsed = collapsed;
+        if (view !== "live") {
+          const descendants = node.members.slice(1).filter(inScope);
+          const activity = activitySummary(descendants);
+          tree.summary = [activity, `${descendants.length} worker${descendants.length === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
+        }
+      }
       const custody = node.thread.coordination === undefined ? undefined : leaseCustodyBadge(leaseCustody(node.thread.coordination));
       rows.push({ kind: "thread", cwd: node.thread.record.cwd, thread: node.thread, tree,
         ...(custody === undefined ? {} : { leaseBadge: custody }) });
-      if (children.length) rows.push({ kind: "section", label: `${"  ".repeat(Math.min(at + 1, 4))}${tree.summary}` });
-      if (!collapsed) emitNodes(children, at + 1, key, [...path, key]);
-    };
-    if (view === "history" || view === "unread" || !partition) {
-      for (const node of visible) emit(node, depth, parentKey, ancestors);
-      return;
-    }
-    for (const node of visible.filter(n => nodeDisposition(n) === "current" || forced(n))) emit(node, depth, parentKey, ancestors);
-    for (const disposition of ["unconfirmed", "history"] as const) {
-      const hidden = visible.filter(n => nodeDisposition(n) === disposition && !forced(n));
-      if (!hidden.length) continue;
-      const key = `/@tree-bucket/${encodeURIComponent(parentKey)}/${disposition}`;
-      const members = hidden.flatMap(n => n.members).filter(inScope);
-      const collapsed = !open(key, true);
-      rows.push({ kind: "folder", cwd: key, label: disposition === "history" ? "History"
-        : members.every(t => t.record.kind !== "orchestrator") ? "Unconfirmed workers" : "Unconfirmed sessions",
-        threadCount: members.length, collapsed, tree: { depth, parentKey, ancestors, summary: `${members.length}` } });
-      if (!collapsed) emitNodes(hidden, depth + 1, key, [...ancestors, key], false);
+      if (tree.summary) rows.push({ kind: "section", label: `${"  ".repeat(Math.min(depth + 1, 4))}${tree.summary}` });
+      if (!collapsed) emitNodes(children, depth + 1, key, [...ancestors, key]);
     }
   };
-  for (const group of sessionTree(snapshot)) {
+  for (const group of sessionTree(snapshot, view === "live")) {
     const nodes = group.nodes.flatMap(scopedNode).filter(matches);
-    const emptyProject = group.nodes.length === 0 && snapshot.projects?.includes(group.key)
-      && (!filter || group.key === filter) && view === "live";
-    if (!nodes.length && !emptyProject) continue;
+    if (!nodes.length) continue;
     const members = nodes.flatMap(n => n.members).filter(inScope);
-    const collapsed = !open(group.key, view === "live" && nodes.every(n => nodeDisposition(n) !== "current" && !forced(n)));
+    const collapsed = !open(group.key);
+    if (view === "live") {
+      rows.push({ kind: "folder", cwd: group.key, label: group.label, threadCount: members.length, collapsed,
+        tree: { depth: 0, ancestors: [] } });
+      if (!collapsed) emitNodes(nodes, 1, group.key, [group.key]);
+      continue;
+    }
     const activity = activitySummary(members);
     const notices = pendingLifecycleThreads(members, state);
     const orcs = members.filter(t => t.record.kind === "orchestrator").length;
@@ -95,10 +87,11 @@ export function currentSessionRows(snapshot: FleetSnapshot, state: FleetState): 
 
 /** Reveal exactly one target and its ancestors without expanding unrelated history. */
 export function revealCurrentSession(state: FleetState, snapshot: FleetSnapshot, id: string): FleetState {
-  if (!snapshot.threads.some(t => t.record.id === id)) return state;
-  let next: FleetState = { ...state, revealedHistorySessionId: id };
+  const target = snapshot.threads.find(t => t.record.id === id);
+  if (!target) return state;
+  let next: FleetState = { ...state, listView: !visibleInLive(target) && (state.listView ?? "live") === "live" ? "history" : state.listView, revealedHistorySessionId: id };
   // A fully opened projection gives the real path, including nested native parents.
-  const probe = { ...next, listView: "live" as const, collapsedCwds: [],
+  const probe = { ...next, collapsedCwds: [],
     openFolderCwds: sessionTree(snapshot).map(group => group.key) };
   const row = currentSessionRows(snapshot, probe).find(row => row.kind === "thread" && row.thread.record.id === id);
   if (row?.kind === "thread" && row.tree) next = { ...next,
