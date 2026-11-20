@@ -47,6 +47,8 @@ describe("WorkerTurnObservationAdapter", () => {
       expect(observe(["Reply text", "→ Add a follow-up", ...plan.slice(0, 2), ...path]))
         .toMatchObject({ activity: "awaiting-input", inputReady: true, occupied: false });
     }
+    expect(observe(["⠠⠜ Working  1 token", "→ Add a follow-up", ...plan]))
+      .toMatchObject({ activity: "working", inputReady: false });
     expect(observe(["→ operator draft", ...plan])).toMatchObject({ occupied: true, inputReady: false });
     expect(observe(["→ Add a follow-up       ctrl+c to stop", "1 task",
       "Claude Opus 5.5 300K High · 69.8% · 19 files edited      Run Everything", "~/project · main"]))

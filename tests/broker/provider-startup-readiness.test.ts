@@ -123,7 +123,7 @@ describe("automated provider startup delivery", () => {
     expect(label()).toBe("Idle");
     expect(registry.workerTruth(record.id).completedTurns).toBe(0);
     for (const target of [1, 2]) {
-      emit("→ Add a follow-up       ctrl+c to stop" + footer);
+      emit("⠠⠜ Working\r\n→ Add a follow-up       ctrl+c to stop" + (target === 1 ? footer.replace(" · 41%", "") : footer));
       expect(label()).toBe("Working");
       emit("│ ▶ [a] Trust this workspace   │\r\n│   [q] Quit                   │");
       expect(label()).toBe("Needs you");

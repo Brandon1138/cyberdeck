@@ -22,7 +22,9 @@ function isStatusBar(rows: string[]): boolean {
   const hasMode = /^(?:(?:Plan|Ask|Agent) \(shift\+tab to cycle\)|\d+ tasks?)$/iu.test(first);
   const [model, path, branch, ...extra] = hasMode ? remaining : rows;
   // The cwd and branch may wrap across two rows on a narrow PTY.
-  return !extra.length && !!model && /^[\w][\w .()/-]*\s+·\s+\d+(?:\.\d+)?%(?:\s+·\s+\d+ files? edited)?(?:\s+Run Everything)?$/iu.test(model)
+  // Fresh conversations have a model and cwd before Cursor draws its first context meter.
+  const freshModel = hasMode && /^(?:Claude|GPT|Composer|Grok|Gemini) [\w .()/-]+$/iu.test(model ?? "");
+  return !extra.length && !!model && (freshModel || /^[\w][\w .()/-]*\s+·\s+\d+(?:\.\d+)?%(?:\s+·\s+\d+ files? edited)?(?:\s+Run Everything)?$/iu.test(model))
     && !!path && /^(?:~\/|\/)[^\n]*$/u.test(path)
     && (branch === undefined || /·$/u.test(path) && /^[\w./-]+$/u.test(branch));
 }

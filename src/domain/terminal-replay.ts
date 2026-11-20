@@ -137,6 +137,7 @@ function isWorkingLine(provider: ProviderId, line: string): boolean {
   if (provider === "cursor") {
     if (/^[→›❯]\s+Add a follow-up\s{2,}ctrl\+c to stop$/iu.test(line)
         || /^[\u2800-\u28ff]+\s+Editing\s+[\d.,]+[km]?\s+tokens?$/iu.test(line)) return true;
+    if (/^[\u2800-\u28ff]{2}\s+Working(?:\s+[\d.,]+[km]? tokens?)?$/iu.test(line)) return true;
     return /^(?:[\u2800-\u28ff]\s*)?Composing(?:\s+[\d.,]+[km]?\s+tokens?)?(?:\s+(?:ctrl\+c to stop|[·(].*))?$/iu.test(line)
       || /^ctrl\+c to stop(?:\s*[·)].*)?$/iu.test(line);
   }
