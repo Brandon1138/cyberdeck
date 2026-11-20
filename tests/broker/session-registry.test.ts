@@ -661,6 +661,22 @@ describe("SessionRegistry", () => {
     expect(prepareLaunch.mock.invocationCallOrder[0]).toBeLessThan(ptyFactory.mock.invocationCallOrder[0]!);
   });
 
+  it("settles one Grok LRU turn when the work footer changes to an empty follow-up", async () => {
+    const cursor: ProviderAdapter = { ...adapters.codex, id: "cursor" };
+    const { registry, ptys } = harness({ adapters: { ...adapters, cursor } });
+    const worker = await registry.start(request({ provider: "cursor", model: "grok-4.7-low" }), "Test and delete the LRU cache.");
+    const footer = "\r\nGrok 4.7 256K  · 10.3%· 1 file       Run Everything\r\nLow                     edited\r\n~/code/personal/cyberdeck · main";
+    const repaint = "\x1b[2J\x1b[H";
+    ptys[0]!.emitOutput(repaint + "⠘⠆ Editing  1.04k tokens\r\n→ Add a follow-up                 ctrl+c to stop" + footer);
+    expect(registry.workerTruth(worker.id).state).toBe("working");
+    const finished = repaint + "LRU assertions passed. File deleted.\r\n→ Add a follow-up" + footer;
+    ptys[0]!.emitOutput(finished);
+    await vi.waitFor(() => expect(registry.workerTruth(worker.id)).toMatchObject({ state: "idle", completedTurns: 1 }));
+    ptys[0]!.emitOutput(finished);
+    await flushMicrotasks();
+    expect(registry.workerTruth(worker.id).completedTurns).toBe(1);
+  });
+
   it("finishes provider setup before submitting a deferred initial prompt", async () => {
     const initializeSession = vi.fn(async (
       _session: SessionRecord,

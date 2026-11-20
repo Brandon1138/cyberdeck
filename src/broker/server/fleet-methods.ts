@@ -33,10 +33,17 @@ export const fleetMethods: Record<string, BrokerMethodHandler> = {
     return requireInstructions(server.options).withdrawForOperator(WithdrawInstructionParamsSchema.parse(frame.params));
   },
   "fleet.snapshot": async (server, context, frame) => {
-    const { version } = z.object({ version: z.string().optional() }).parse(frame.params);
+    const { version, includeTiming } = z.object({
+      version: z.string().optional(), includeTiming: z.boolean().optional(),
+    }).parse(frame.params);
+    const startedAt = includeTiming ? performance.timeOrigin + performance.now() : undefined;
     const result = await server.fleetProjection.read(version, context.fleetProjection);
     context.fleetProjection = result.retained;
-    return result.reply;
+    if (startedAt === undefined) return result.reply;
+    return { ...result.reply, timing: {
+      handlerStartedAtMs: startedAt,
+      projectionMs: performance.timeOrigin + performance.now() - startedAt,
+    } };
   },
   "fleet.subscribe": async (server, context) => { server.subscribeFleet(context); return { subscribed: true }; },
   "fleet.unsubscribe": async (server, context) => { server.unsubscribeFleet(context); return { subscribed: false }; },

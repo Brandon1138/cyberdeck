@@ -195,6 +195,23 @@ describe("AgentControlService", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
+  it("registers an unbudgeted worker with its launcher before provider startup", async () => {
+    const register = vi.fn(async () => undefined);
+    const start = vi.fn(async (request, _prompt, activate) => {
+      const record = { ...worker, ...request, id: WORKER };
+      await activate(record);
+      expect(register).toHaveBeenCalledWith({
+        record, name: "launch-test", controller: orchestratorController(binding),
+      });
+      return record;
+    });
+    const service = new AgentControlService({ start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never, {} as never, undefined,
+      { workerBudgets: { register } });
+    await service.startWorker({ actorSessionId: ACTOR, provider: "codex", cwd: "/repo/one", name: "launch-test", prompt: "test" });
+    expect(start).toHaveBeenCalledOnce();
+  });
+
   it("registers a budget with the durable worker record before activation completes", async () => {
     const register = vi.fn(async () => undefined);
     const start = vi.fn(async (request, _prompt, activate) => {

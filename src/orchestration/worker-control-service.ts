@@ -517,12 +517,15 @@ export class WorkerControlService {
     controller: ControllerIdentity,
     mutationId: string,
   ): Promise<LeaseControlResult> {
-    if (request.scope === "worker") {
+    if (request.scope === "worker" && !request.preview) {
       const single = await this.takeSingle(request, binding, controller, mutationId);
       if (single !== undefined) return single;
     }
-    const plan = await this.planFor(request, binding.grant, controller);
+    const plan = await this.planFor(request, binding.grant, controller, !request.preview);
     if (request.preview) {
+      if (request.scope === "worker" && !plan.eligible.length && !plan.blocked.length) {
+        plan.blocked.push({ workerId: request.workerId!, code: "SUBJECT_UNKNOWN_TO_BROKER", detail: "No registered worker in scope" });
+      }
       return {
         action: request.action,
         scope: request.scope,
@@ -621,7 +624,6 @@ export class WorkerControlService {
         summary: { NOT_ELIGIBLE: 1 },
       };
     }
-    if (request.preview) return undefined;
     const selector = { scope: "single" as const, subjectId: workerId };
     const result = request.action === "acquire"
       ? await this.options.coordination.acquire({

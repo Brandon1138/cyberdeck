@@ -1,6 +1,6 @@
 import type { ProviderId } from "../domain/session.js";
 import type { ComposerObservation } from "../domain/worker-truth.js";
-import { plainTerminalText, providerTerminalActivity } from "./terminal-replay.js";
+import { cursorFooterStart, plainTerminalText, providerTerminalActivity } from "./terminal-replay.js";
 import { InputScreen } from "./input-screen.js";
 
 /**
@@ -121,7 +121,8 @@ export function frameInputReady(provider: ProviderId, frame: string): boolean {
     : /^>(?:\s+(.*))?$/u;
   let footer = false;
   if (/^\s*loading(?:…|\.{3})?\s*$/imu.test(frame)) return false;
-  for (let index = lines.length - 1; index >= first; index -= 1) {
+  const end = provider === "cursor" ? cursorFooterStart(lines) : lines.length;
+  for (let index = end - 1; index >= first; index -= 1) {
     const line = lines[index]!.trim();
     const boxed = /^[│┃┆┊║▌▏▕]\s*(?:›|❯|>)\s*(.*?)\s*[│┃┆┊║▌▏▕]$/u.exec(line);
     const match = boxed ?? prompt.exec(line);
@@ -214,7 +215,8 @@ export function frameComposerState(
  */
 function bareComposerContent(provider: ProviderId, lines: readonly string[], first: number): string | undefined {
   let continuations = 0;
-  for (let index = lines.length - 1; index >= first; index -= 1) {
+  const end = provider === "cursor" ? cursorFooterStart(lines) : lines.length;
+  for (let index = end - 1; index >= first; index -= 1) {
     const raw = lines[index]!;
     const line = raw.trim();
     // The prompt glyph decides before any footer word can: a draft that mentions `Plan mode` or

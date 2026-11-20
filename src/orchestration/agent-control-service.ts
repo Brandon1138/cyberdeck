@@ -312,12 +312,12 @@ export class AgentControlError extends Error {
   }
 }
 
-/** Durable budget registration performed before a newly launched worker can take its first turn. */
+/** Durable ownership and optional budget registration performed before a newly launched worker can take its first turn. */
 export interface WorkerBudgetRegistrationPort {
   register(input: {
     record: SessionRecord;
     name: string;
-    declaration: WorkerBudgetDeclaration;
+    declaration?: WorkerBudgetDeclaration;
     controller: ReturnType<typeof orchestratorController>;
   }): Promise<void>;
   markLaunchFailed?(input: { workerId: string; reason: string }): Promise<void>;
@@ -802,7 +802,7 @@ export class AgentControlService {
     // `workerMode` on this one spawn (e.g. "normal" for a research worker) wins over it (MIK-79).
     const workerMode = request.workerMode
       ?? ((await this.workerPreferences?.get())?.caveman === true ? "caveman" : "normal");
-    const startRequest: Parameters<SessionStartPort["start"]>[0] = {
+    const startRequest = {
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
       ...(request.effort === undefined ? {} : { effort: request.effort }),
@@ -818,8 +818,7 @@ export class AgentControlService {
       role: "worker",
       workerMode,
       name,
-    };
-    let worker: SessionRecord;
+    } satisfies Parameters<SessionStartPort["start"]>[0];
     const admission: LaunchAdmission = (apply) => admitted(this.strigoi, request.actorSessionId, async () => {
       const binding = await this.requireBinding(request.actorSessionId);
       this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
@@ -827,36 +826,7 @@ export class AgentControlService {
       return apply();
     });
     await admission(async () => undefined);
-    if (request.budget === undefined) {
-      worker = await this.registry.start(startRequest, request.prompt, undefined, undefined, admission);
-    } else {
-      const workerBudgets = this.workerBudgets!;
-      let activatedWorkerId: string | undefined;
-      try {
-        worker = await this.registry.start(
-          startRequest,
-          request.prompt,
-          async (record) => {
-            await workerBudgets.register({
-              record,
-              name,
-              declaration: request.budget!,
-              controller: orchestratorController(await this.requireBinding(request.actorSessionId)),
-            });
-            activatedWorkerId = record.id;
-          },
-          undefined, admission,
-        );
-      } catch (error) {
-        if (activatedWorkerId !== undefined) {
-          await workerBudgets.markLaunchFailed?.({
-            workerId: activatedWorkerId,
-            reason: error instanceof Error ? error.message : String(error),
-          });
-        }
-        throw error;
-      }
-    }
+    const worker = await this.startOwnedWorker(startRequest, request.prompt, admission, request.budget);
     const warnings = plan.value.shortfalls.map((shortfall) => shortfall.message);
     return {
       sessionId: worker.id,
@@ -867,6 +837,34 @@ export class AgentControlService {
       ...(warnings.length === 0 ? {} : { warnings }),
       completionTarget: 1,
     };
+  }
+
+  private async startOwnedWorker(
+    request: Parameters<SessionStartPort["start"]>[0] & { parentSessionId: string; name: string },
+    prompt: string,
+    admission: LaunchAdmission,
+    budget?: WorkerBudgetDeclaration,
+  ): Promise<SessionRecord> {
+    const registration = this.workerBudgets;
+    if (registration === undefined) return this.registry.start(request, prompt, undefined, undefined, admission);
+    let registeredId: string | undefined;
+    try {
+      return await this.registry.start(request, prompt, async record => {
+        const binding = await this.requireBinding(request.parentSessionId);
+        await registration.register({
+          record, name: request.name, controller: orchestratorController(binding),
+          ...(budget === undefined ? {} : { declaration: budget }),
+        });
+        registeredId = record.id;
+      }, undefined, admission);
+    } catch (error) {
+      if (registeredId !== undefined) {
+        await registration.markLaunchFailed?.({
+          workerId: registeredId, reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+      throw error;
+    }
   }
 
   private async startScout(request: {
@@ -903,7 +901,7 @@ export class AgentControlService {
       return apply();
     });
     await admission(async () => undefined);
-    const worker = await this.registry.start({
+    const worker = await this.startOwnedWorker({
       provider: "cursor",
       model: "composer",
       approvalMode: "auto",
@@ -918,7 +916,7 @@ export class AgentControlService {
       brief: request.brief,
       leasePolicy,
       name,
-    }, scoutDispatchPrompt(request.brief), undefined, undefined, admission);
+    }, scoutDispatchPrompt(request.brief), admission);
     return {
       sessionId: worker.id,
       name,

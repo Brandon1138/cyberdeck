@@ -126,6 +126,8 @@ export function markerTerminalActivity(
 
 function isWorkingLine(provider: ProviderId, line: string): boolean {
   if (provider === "cursor") {
+    if (/^[→›❯]\s+Add a follow-up\s{2,}ctrl\+c to stop$/iu.test(line)
+        || /^[\u2800-\u28ff]+\s+Editing\s+[\d.,]+[km]?\s+tokens?$/iu.test(line)) return true;
     return /^(?:[\u2800-\u28ff]\s*)?Composing(?:\s+[\d.,]+[km]?\s+tokens?)?(?:\s+(?:ctrl\+c to stop|[·(].*))?$/iu.test(line)
       || /^ctrl\+c to stop(?:\s*[·)].*)?$/iu.test(line);
   }
@@ -144,11 +146,23 @@ function isWaitingLine(provider: ProviderId, line: string): boolean {
   return false;
 }
 
+/** Cursor's narrow status bar wraps the usage meter, effort and cwd below its input. */
+export function cursorFooterStart(lines: readonly string[]): number {
+  let end = lines.length;
+  while (end > 0 && lines[end - 1]!.trim() === "") end--;
+  if (!/^(?:~(?:\/|$)|\/|[A-Z]:\\)/iu.test(lines[end - 1]?.trim() ?? "")) return lines.length;
+  let index = end - 2;
+  if (/^(?:Low|Medium|High|Extra High|Auto)(?:\s+edited)?$/iu.test(lines[index]?.trim() ?? "")) index--;
+  const meter = lines[index]?.trim() ?? "";
+  return /^\S[^\n]*?\s+\d+(?:\.\d+)?[KM]\s*·\s*[\d.]+%/iu.test(meter) ? index : lines.length;
+}
+
 /** A bottom composer is idle evidence even when it holds an operator draft, never task success. */
 function currentComposerPosition(provider: ProviderId, screen: RenderedTerminalScreen): number {
   const rows = [...screen.text.matchAll(/[^\n]+/gu)];
   let footer = false;
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
+  const end = provider === "cursor" ? cursorFooterStart(rows.map(row => row[0])) : rows.length;
+  for (let index = end - 1; index >= 0; index -= 1) {
     const match = rows[index]!;
     const line = match[0].trim();
     const prompt = provider === "codex" ? /^›(?:\s|$)/u

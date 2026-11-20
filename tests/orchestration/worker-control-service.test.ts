@@ -597,6 +597,16 @@ describe("WorkerControlService directed handoffs", () => {
 });
 
 describe("WorkerControlService recovery", () => {
+  it("does not create a lease while previewing an unregistered worker", async () => {
+    const bench = await harness();
+    const workerId = bench.addSession({ parentSessionId: ORC });
+    const result = await bench.control.lease({
+      actorSessionId: ORC, action: "acquire", scope: "worker", workerId, reason: "inspect", preview: true,
+    });
+    expect(result.plan?.blocked).toMatchObject([{ workerId, code: "SUBJECT_UNKNOWN_TO_BROKER" }]);
+    expect(bench.coordination.getSubject(workerId)).toBeUndefined();
+  });
+
   it("previews the adoptable set and the blocked cases without mutating anything", async () => {
     const bench = await harness();
     const recoverable = bench.addSession();
