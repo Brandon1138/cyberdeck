@@ -97,7 +97,7 @@ describe("ModalAnswerPolicy", () => {
     expect(decision.reason).toContain("cyberdeck modal-answers on --root /repo");
   });
 
-  it("denies when no grant covers the resolved root, naming the fix", async () => {
+  it("denies when the operator switched the resolved root off, naming the fix", async () => {
     const decision = await policy({ commonDir: { "/repo": "/repo/.git" } })
       .evaluate({ cwd: "/repo", kind: "workspace-trust" });
     expect(decision.allowed).toBe(false);

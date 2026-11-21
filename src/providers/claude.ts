@@ -48,7 +48,7 @@ export interface ClaudeProviderAdapterOptions extends SessionLaunchFilesOptions 
   nativeSessionId?: string;
   /**
    * Pre-spawn workspace trust for the session cwd. The broker supplies a policy-gated hook — trust
-   * is written only for repositories the operator granted (`cyberdeck modal-answers on`), so the
+   * is written unless the operator switched the repository off (`cyberdeck modal-answers off`), so the
    * adapter never decides trust on its own. Omitted, the folder-trust dialog surfaces as before.
    */
   workspaceTrust?: (cwd: string) => Promise<void>;
