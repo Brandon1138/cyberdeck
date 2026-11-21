@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CURSOR_BUILD_PROMPT } from "./cursor-composer.js";
 import { z } from "zod";
 import { plainTerminalLines, plainTerminalText } from "./terminal-replay.js";
 import {
@@ -170,6 +171,7 @@ const CURSOR_TRUST_ANSWERS: readonly ModalAnswerOption[] = [
 
 const RULES: Readonly<Record<string, readonly ModalRecognitionRule[]>> = {
   cursor: [
+    { kind: "plan-confirm", pattern: CURSOR_BUILD_PROMPT, answers: [] },
     {
       kind: "workspace-trust",
       pattern: /Workspace Trust Required|workspace-trust|Do you trust the (?:files|contents)/giu,

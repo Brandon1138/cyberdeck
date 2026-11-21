@@ -72,7 +72,7 @@ interface BudgetTranscripts {
 export interface WorkerBudgetRegistrationInput {
   record: SessionRecord;
   name: string;
-  declaration: WorkerBudgetDeclaration;
+  declaration?: WorkerBudgetDeclaration;
   controller: ControllerIdentity;
 }
 
@@ -161,7 +161,7 @@ export class WorkerBudgetEnforcer implements WorkerBudgetGate {
   /** Durable activation callback used by standard worker spawn before provider initialization. */
   async register(input: WorkerBudgetRegistrationInput): Promise<void> {
     const result = await this.options.coordination.registerSubject({
-      mutationId: `worker-budget:register:${input.record.id}`,
+      mutationId: input.declaration ? `worker-budget:register:${input.record.id}` : `worker:register:${input.record.id}`,
       actor: input.controller,
       subjectId: input.record.id,
       subjectKind: "worker",
@@ -183,11 +183,11 @@ export class WorkerBudgetEnforcer implements WorkerBudgetGate {
         eventStreamId: `worker:${input.record.id}`,
       },
       controller: input.controller,
-      budget: input.declaration,
-      reason: `register broker-owned scoped budget for worker ${input.record.id}`,
+      ...(input.declaration === undefined ? {} : { budget: input.declaration }),
+      reason: input.declaration ? `register broker-owned scoped budget for worker ${input.record.id}` : "register worker at launch",
     });
     this.captureCredential(input.controller, result);
-    if (this.started) this.schedule(input.record.id, true);
+    if (this.started && input.declaration) this.schedule(input.record.id, true);
   }
 
   async markLaunchFailed(input: { workerId: string; reason: string }): Promise<void> {
@@ -195,7 +195,7 @@ export class WorkerBudgetEnforcer implements WorkerBudgetGate {
       mutationId: `worker-budget:launch-failed:${input.workerId}`,
       subjectId: input.workerId,
       lifecycle: "failed",
-      reason: truncateReason(`budgeted worker launch failed: ${input.reason}`),
+      reason: truncateReason(`worker launch failed: ${input.reason}`),
     });
   }
 

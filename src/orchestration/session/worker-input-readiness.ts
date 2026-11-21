@@ -4,6 +4,7 @@ import type { ProviderTerminalActivity } from "./worker-turn-ports.js";
 /** Generation-local startup evidence. Native launch prompts may run before an idle TUI exists. */
 export class WorkerInputReadiness {
   private observed = false;
+  observedCursorWork = false;
   private startedAt: number;
   private timer?: ReturnType<typeof setTimeout>;
   starting = false;
@@ -42,6 +43,7 @@ export class WorkerInputReadiness {
 
   reset(): void {
     this.observed = false;
+    this.observedCursorWork = false;
     this.starting = true;
     this.startedAt = this.now();
     this.arm();
@@ -52,6 +54,10 @@ export class WorkerInputReadiness {
     // repainting as a model completion. Native argv/deferred prompts keep their first real turn.
     this.starting = !initialPromptInFlight;
     this.arm();
+  }
+
+  observeActivity(provider: string, activity: ProviderTerminalActivity): void {
+    if (provider === "cursor" && activity === "working") this.observedCursorWork = true;
   }
 
   observe(activity: ProviderTerminalActivity, composer: ComposerObservation): void {

@@ -517,12 +517,14 @@ export class WorkerControlService {
     controller: ControllerIdentity,
     mutationId: string,
   ): Promise<LeaseControlResult> {
-    if (request.scope === "worker") {
-      const single = await this.takeSingle(request, binding, controller, mutationId);
-      if (single !== undefined) return single;
+    if (request.scope === "worker" && !request.preview) {
+      return this.takeSingle(request, binding, controller, mutationId);
     }
-    const plan = await this.planFor(request, binding.grant, controller);
+    const plan = await this.planFor(request, binding.grant, controller, !request.preview);
     if (request.preview) {
+      if (request.scope === "worker" && !plan.eligible.length && !plan.blocked.length) {
+        plan.blocked.push({ workerId: request.workerId!, code: "SUBJECT_UNKNOWN_TO_BROKER", detail: "No registered worker in scope" });
+      }
       return {
         action: request.action,
         scope: request.scope,
@@ -592,23 +594,20 @@ export class WorkerControlService {
     binding: OrchestratorBinding,
     controller: ControllerIdentity,
     mutationId: string,
-  ): Promise<LeaseControlResult | undefined> {
+  ): Promise<LeaseControlResult> {
     const workerId = request.workerId!;
-    let subject = await this.reconcileSessionLifecycle(workerId);
+    const subject = await this.reconcileSessionLifecycle(workerId)
+      ?? await this.registerFromSession(workerId, controller, request.reason);
     if (subject === undefined) {
-      const registered = await this.registerFromSession(workerId, controller, request.reason);
-      if (registered === undefined) {
-        return {
-          action: request.action,
-          scope: request.scope,
-          mutationId,
-          controllerId: controller.controllerId,
-          idempotentReplay: false,
-          results: [{ workerId, code: "NOT_ELIGIBLE", message: "No such worker session in this broker" }],
-          summary: { NOT_ELIGIBLE: 1 },
-        };
-      }
-      subject = registered;
+      return {
+        action: request.action,
+        scope: request.scope,
+        mutationId,
+        controllerId: controller.controllerId,
+        idempotentReplay: false,
+        results: [{ workerId, code: "NOT_ELIGIBLE", message: "No such worker session in this broker" }],
+        summary: { NOT_ELIGIBLE: 1 },
+      };
     }
     if (!this.inGrant(subject, binding.grant, "worker.start")) {
       return {
@@ -621,7 +620,6 @@ export class WorkerControlService {
         summary: { NOT_ELIGIBLE: 1 },
       };
     }
-    if (request.preview) return undefined;
     const selector = { scope: "single" as const, subjectId: workerId };
     const result = request.action === "acquire"
       ? await this.options.coordination.acquire({

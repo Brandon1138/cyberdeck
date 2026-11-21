@@ -1,3 +1,8 @@
+export const managedCursorPermissionsSchema = {
+  if: { properties: { provider: { const: "cursor" } }, required: ["provider"] },
+  then: { properties: { approvalMode: { const: "auto" }, sandbox: { const: "workspace-write" } } },
+};
+
 export function workerBudgetInputSchema(): Record<string, unknown> {
   return {
     type: "object",

@@ -195,6 +195,23 @@ describe("AgentControlService", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
+  it("registers an unbudgeted worker with its launcher before provider startup", async () => {
+    const register = vi.fn(async () => undefined);
+    const start = vi.fn(async (request, _prompt, activate) => {
+      const record = { ...worker, ...request, id: WORKER };
+      await activate(record);
+      expect(register).toHaveBeenCalledWith({
+        record, name: "launch-test", controller: orchestratorController(binding),
+      });
+      return record;
+    });
+    const service = new AgentControlService({ start } as never,
+      { findBySessionId: vi.fn(async () => binding) } as never, {} as never, undefined,
+      { workerBudgets: { register } });
+    await service.startWorker({ actorSessionId: ACTOR, provider: "codex", cwd: "/repo/one", name: "launch-test", prompt: "test" });
+    expect(start).toHaveBeenCalledOnce();
+  });
+
   it("registers a budget with the durable worker record before activation completes", async () => {
     const register = vi.fn(async () => undefined);
     const start = vi.fn(async (request, _prompt, activate) => {
@@ -864,7 +881,7 @@ describe("AgentControlService", () => {
     expect(launchArgs).toEqual(expect.arrayContaining(["-s", "workspace-write"]));
   });
 
-  it("applies persisted Composer automatic mode to MCP-started workers", async () => {
+  it("requires Run Everything for standard managed Cursor workers", async () => {
     const start = vi.fn(async (request) => ({
       ...worker,
       ...request,
@@ -889,14 +906,20 @@ describe("AgentControlService", () => {
       provider: "cursor",
       model: "composer-2.5",
       cwd: "/repo/one",
-      sandbox: "workspace-write",
       prompt: "Open the pull request",
     });
 
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       provider: "cursor",
       approvalMode: "auto",
+      sandbox: "workspace-write",
     }), "Open the pull request", undefined, undefined, expect.any(Function));
+    for (const incompatible of [{ approvalMode: "prompt" }, { sandbox: "read-only" }] as const) {
+      await expect(service.startWorker({
+        actorSessionId: ACTOR, provider: "cursor", cwd: "/repo/one", prompt: "inspect", ...incompatible,
+      })).rejects.toMatchObject({ code: "PROVIDER_APPROVAL_MODE_UNSUPPORTED" });
+    }
+    expect(start).toHaveBeenCalledOnce();
   });
 
   it("snapshots an enabled Caveman preference into newly started workers", async () => {

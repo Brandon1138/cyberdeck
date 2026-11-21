@@ -1,3 +1,4 @@
+import { CURSOR_BUILD_PROMPT, cursorComposerActivity, cursorFooterStart, isCursorWorkingLine } from "./cursor-composer.js";
 import { startupDialogPosition } from "./startup-dialog-activity.js";
 import type { ProviderId } from "./session.js";
 import { InputScreen, type RenderedTerminalScreen } from "./terminal-screen.js";
@@ -14,13 +15,7 @@ export const BLOCKED_PROMPT_TAIL_CHARS = 8_000;
 
 export type ProviderTerminalActivity = "working" | "awaiting-input" | "needs-input" | "unknown";
 
-/**
- * Every literal whose last occurrence can decide an activity verdict.
- *
- * Named in one place because a marker source that tracks occurrences incrementally has to know the
- * whole set up front — it sees each PTY chunk exactly once, so a literal added to the decision
- * below and not to this list would simply never be found.
- */
+/** Incremental marker sources track each activity literal as its PTY chunk arrives. */
 export const ACTIVITY_MARKERS = [
   "esc to interrupt",
   "Composing",
@@ -101,6 +96,10 @@ export function markerTerminalActivity(
     if (isWorkingLine(provider, line)) workingAt = Math.max(workingAt, at);
     if (isWaitingLine(provider, line)) waitingAt = Math.max(waitingAt, at);
   }
+  if (provider === "cursor") {
+    const activity = cursorComposerActivity(screen.text, blockedAt >= 0, workingAt >= 0);
+    if (activity !== undefined) return activity;
+  }
   // A working UI can retain and repaint its composer so an operator can queue a follow-up. That
   // prompt is not an idle transition while a working control remains on this screen.
   if (workingAt < 0) waitingAt = Math.max(waitingAt, currentComposerPosition(provider, screen));
@@ -125,10 +124,7 @@ export function markerTerminalActivity(
 }
 
 function isWorkingLine(provider: ProviderId, line: string): boolean {
-  if (provider === "cursor") {
-    return /^(?:[\u2800-\u28ff]\s*)?Composing(?:\s+[\d.,]+[km]?\s+tokens?)?(?:\s+(?:ctrl\+c to stop|[·(].*))?$/iu.test(line)
-      || /^ctrl\+c to stop(?:\s*[·)].*)?$/iu.test(line);
-  }
+  if (provider === "cursor") return isCursorWorkingLine(line);
   if (provider === "antigravity") {
     return /^[\u2800-\u28ff]\s+(?:Thinking|Working|Composing|Generating|Running|Searching|Reading)\b/iu.test(line);
   }
@@ -139,7 +135,7 @@ function isWorkingLine(provider: ProviderId, line: string): boolean {
 }
 
 function isWaitingLine(provider: ProviderId, line: string): boolean {
-  if (provider === "cursor") return /^(?:Add a follow-up|No matches|\/(?:run-everything|model \[filter\])(?:\s+.*)?)$/iu.test(line);
+  if (provider === "cursor") return /^(?:No matches|\/(?:run-everything|model \[filter\])(?:\s+.*)?)$/iu.test(line);
   if (provider === "antigravity") return /^\? for shortcuts\b/iu.test(line) || /^> Plan mode:/iu.test(line);
   return false;
 }
@@ -148,7 +144,8 @@ function isWaitingLine(provider: ProviderId, line: string): boolean {
 function currentComposerPosition(provider: ProviderId, screen: RenderedTerminalScreen): number {
   const rows = [...screen.text.matchAll(/[^\n]+/gu)];
   let footer = false;
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
+  const end = provider === "cursor" ? cursorFooterStart(rows.map(row => row[0])) : rows.length;
+  for (let index = end - 1; index >= 0; index -= 1) {
     const match = rows[index]!;
     const line = match[0].trim();
     const prompt = provider === "codex" ? /^›(?:\s|$)/u
@@ -326,6 +323,8 @@ export function blockedPromptIndexInTail(provider: ProviderId, tail: string): nu
   const common = Math.max(
     lastRegexIndex(tail, /^\s*Do you trust the contents of this project\?(?:\s*> Yes, I trust this folder)?\s*$/gimu),
     dialogAffordanceIndexInTail(tail),
+    provider === "cursor" ? lastRegexIndex(tail, CURSOR_BUILD_PROMPT) : -1,
+    provider === "cursor" ? lastRegexIndex(tail, /^[ \t]*│[ \t]*(?:▶[ \t]*)?\[a\] Trust this workspace[ \t]*│\s*│[ \t]*(?:▶[ \t]*)?\[q\] Quit[ \t]*│/gimu) : -1,
   );
   const providerPrompt = provider === "codex"
     ? Math.max(

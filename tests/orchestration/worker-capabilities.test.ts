@@ -36,7 +36,7 @@ describe("worker provider capabilities", () => {
           "cursor-grok-4.5-high",
         ]),
         efforts: [],
-        approvalModes: ["prompt", "auto"],
+        approvalModes: ["auto"],
       }),
       expect.objectContaining({
         provider: "antigravity",

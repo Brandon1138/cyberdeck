@@ -35,6 +35,50 @@ describe("WorkerTurnObservationAdapter", () => {
     }
   });
 
+  it("reads Cursor Plan and Run Everything footers without inventing completion or readiness", () => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    const plan = ["Plan (shift+tab to cycle)", "Claude Opus 5.5 300K High · 41%", "~/project ·", "branch/name"];
+    const observe = (rows: string[]) => {
+      replay.appendBytes(Buffer.from(redraw(rows)));
+      return { activity: adapter.activity("cursor", replay), ...adapter.composer("cursor", replay) };
+    };
+    for (const path of [["~/project · main"], ["~/project ·", "branch/name"]]) {
+      expect(observe(["Reply text", "→ Add a follow-up", ...plan.slice(0, 2), ...path]))
+        .toMatchObject({ activity: "awaiting-input", inputReady: true, occupied: false });
+    }
+    expect(observe(["⠠⠜ Working  1 token", "→ Add a follow-up", ...plan]))
+      .toMatchObject({ activity: "working", inputReady: false });
+    expect(observe(["→ operator draft", ...plan])).toMatchObject({ occupied: true, inputReady: false });
+    expect(observe(["→ Add a follow-up       ctrl+c to stop", "1 task",
+      "Claude Opus 5.5 300K High · 69.8% · 19 files edited      Run Everything", "~/project · main"]))
+      .toMatchObject({ activity: "working", occupied: false, inputReady: false });
+    expect(observe(["→ Add a follow-up", ...plan, "unexpected dialog"])).toMatchObject({ inputReady: false });
+    expect(observe(["Add a follow-up"])).toMatchObject({ activity: "unknown", inputReady: false });
+    expect(observe(["│ ▶ [a] Trust this workspace    │", "│   [q] Quit                    │"]))
+      .toMatchObject({ activity: "needs-input", inputReady: false });
+    expect(observe([...PROVIDER_SCREENS.find(x => x.provider === "cursor")!.modal, "→ Add a follow-up", ...plan]))
+      .toMatchObject({ activity: "needs-input", inputReady: false });
+  });
+
+  it("reports Grok's build decision and the wrapped Run Everything composer", () => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    const observe = (lines: string[]) => {
+      replay.appendBytes(Buffer.from("\x1b[2J\x1b[H" + lines.join("\r\n")));
+      return { activity: adapter.activity("cursor", replay), ...adapter.composer("cursor", replay) };
+    };
+    expect(observe(["│ Ready to build?  │", "│                  │", "│ → 1. Yes, build locally (b) │",
+      "│   2. Yes, build in cloud (c) │", "│   3. No, propose changes (p or Esc) │"]))
+      .toMatchObject({ activity: "needs-input", modalOpen: true, inputReady: false });
+    const footer = ["Grok 4.7 256K·   11.8%·   1 file     Run Everything", "Low                     edited",
+      "~/code/personal/cyberdeck · main"];
+    expect(observe(["→ Add a follow-up       ctrl+c to stop", ...footer]))
+      .toMatchObject({ activity: "working", occupied: false, inputReady: false });
+    expect(observe(["Progress event accepted.", "→ Add a follow-up", ...footer]))
+      .toMatchObject({ activity: "awaiting-input", occupied: false, inputReady: true });
+  });
+
   it("keeps Claude's composer readable after Kitty keyboard mode changes", () => {
     const adapter = new WorkerTurnObservationAdapter();
     const replay = adapter.createReplay(128 * 1024);

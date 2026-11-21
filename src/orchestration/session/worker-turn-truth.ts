@@ -36,7 +36,7 @@ export function projectWorkerTurnTruth(input: WorkerTruthInput & {
     completedTurns: truth.completedTurns, canonicalTurns: truth.canonicalTurns, pendingInstructions: truth.pendingInstructions,
   });
   return projectWorkerTruth({ ...truth,
-    awaitingInputReady: scoutTransport !== "headless-stream-json" && readiness.pending && (!nativeTurnSettled || deliveryHeld),
+    awaitingInputReady: !readiness.observedCursorWork && scoutTransport !== "headless-stream-json" && readiness.pending && (!nativeTurnSettled || deliveryHeld),
     ...((!nativeTurnSettled || deliveryHeld) && readiness.stalledForSeconds !== undefined ? {
       startupStalledForSeconds: readiness.stalledForSeconds,
       startupEvidence: frameText.replace(/\s+/gu, " ").trim().slice(-240),

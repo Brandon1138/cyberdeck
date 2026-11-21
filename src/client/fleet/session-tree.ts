@@ -30,8 +30,9 @@ export function sessionTree(snapshot: FleetSnapshot, liveOnly = false): SessionG
     for (const thread of threads) {
       if (thread.record.kind === "orchestrator") continue;
       const native = thread.nativeAgent;
-      const parent = native === undefined ? controllers.get(thread.coordination?.currentController?.controllerId ?? "")
-        : nodes.has(native.parentThreadId) ? native.parentThreadId : native.rootSessionId;
+      const holder = thread.coordination?.currentController;
+      const parent = holder ? controllers.get(holder.controllerId)
+        : native && (nodes.has(native.parentThreadId) ? native.parentThreadId : native.rootSessionId);
       if (parent && parent !== thread.record.id && nodes.has(parent)) parents.set(thread.record.id, parent);
     }
     // Corrupt or incomplete edges must not strand a worker or recurse forever.

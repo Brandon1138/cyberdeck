@@ -3,7 +3,7 @@ import { STRIGOI_TOOLS } from "./strigoi-tools.js";
 import { NOTIFICATION_TOOLS } from "./notification-tools.js";
 import { pendingNotice } from "./optional-notice.js";
 import { ATTENTION_TOOLS } from "./attention-tools.js";
-import { workerBudgetInputSchema, workerWorkspaceInputSchema, scoutBriefInputSchema } from "./worker-input-schemas.js";
+import { managedCursorPermissionsSchema, workerBudgetInputSchema, workerWorkspaceInputSchema, scoutBriefInputSchema } from "./worker-input-schemas.js";
 import { createInterface } from "node:readline";
 import {
   DEFAULT_THREAD_PAGE,
@@ -339,7 +339,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_worker_start",
-    description: "Start one explicit worker and return sessionId/completionTarget. Set profile scout with cwd plus structured brief for enforced Tier 1 Cursor Composer read-only inspection; provider/model/sandbox/approval are then resolved by Cyberdeck. Otherwise use exact IDs: Codex gpt-5.6-luna|terra|sol; Claude haiku|sonnet|opus|fable; Cursor composer; Antigravity gemini-3.6-flash-low|medium|high with matching effort. Orchestrator spawns default to the operator's caveman-workers box preference; pass workerMode \"normal\" to opt this one spawn out (e.g. a research worker you want eloquent). Prefer cyberdeck_workers_start for fan-out, then cyberdeck_workers_wait.",
+    description: "Start one explicit worker and return sessionId/completionTarget. Set profile scout with cwd plus structured brief for enforced Tier 1 Cursor Composer read-only inspection; provider/model/sandbox/approval are then resolved by Cyberdeck. Otherwise use exact IDs: Codex gpt-5.6-luna|terra|sol; Claude haiku|sonnet|opus|fable; Cursor composer; Antigravity gemini-3.6-flash-low|medium|high with matching effort. Standard Cursor workers use workspace-write and Run Everything. Orchestrator spawns default to the operator's caveman-workers box preference; pass workerMode \"normal\" to opt this one spawn out (e.g. a research worker you want eloquent). Prefer cyberdeck_workers_start for fan-out, then cyberdeck_workers_wait.",
     inputSchema: {
       type: "object",
       properties: {
@@ -367,6 +367,7 @@ const TOOLS = [
       oneOf: [
         {
           required: ["provider", "prompt"],
+          ...managedCursorPermissionsSchema,
           not: { anyOf: [{ required: ["profile"] }, { required: ["brief"] }, { required: ["leasePolicy"] }] },
         },
         {
@@ -383,7 +384,7 @@ const TOOLS = [
   },
   {
     name: "cyberdeck_workers_start",
-    description: `Start up to ${MAX_FANOUT_BATCH} explicitly selected workers in one compact call. Each result is independently ok/error and successful results include sessionId plus completionTarget for cyberdeck_workers_wait. Orchestrator spawns default to the operator's caveman-workers box preference; set workerMode "normal" on any worker to opt that one spawn out.`,
+    description: `Start up to ${MAX_FANOUT_BATCH} explicitly selected workers in one compact call. Each result is independently ok/error and successful results include sessionId plus completionTarget for cyberdeck_workers_wait. Standard Cursor workers use workspace-write and Run Everything. Orchestrator spawns default to the operator's caveman-workers box preference; set workerMode "normal" on any worker to opt that one spawn out.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -418,6 +419,7 @@ const TOOLS = [
             oneOf: [
               {
                 required: ["provider", "prompt"],
+                ...managedCursorPermissionsSchema,
                 not: { anyOf: [{ required: ["profile"] }, { required: ["brief"] }, { required: ["leasePolicy"] }] },
               },
               {

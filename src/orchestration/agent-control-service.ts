@@ -312,12 +312,12 @@ export class AgentControlError extends Error {
   }
 }
 
-/** Durable budget registration performed before a newly launched worker can take its first turn. */
+/** Durable ownership and optional budget registration performed before a newly launched worker can take its first turn. */
 export interface WorkerBudgetRegistrationPort {
   register(input: {
     record: SessionRecord;
     name: string;
-    declaration: WorkerBudgetDeclaration;
+    declaration?: WorkerBudgetDeclaration;
     controller: ReturnType<typeof orchestratorController>;
   }): Promise<void>;
   markLaunchFailed?(input: { workerId: string; reason: string }): Promise<void>;
@@ -739,7 +739,8 @@ export class AgentControlService {
     const request = AgentStartWorkerParamsSchema.parse(input);
     await admitted(this.strigoi, request.actorSessionId, async () => undefined, "read");
     const binding = await this.requireBinding(request.actorSessionId);
-    this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
+    const resource = { cwd: request.cwd };
+    this.requireCapability(binding.grant, "worker.start", resource);
     if (request.profile === "scout") {
       return this.startScout(request);
     }
@@ -752,18 +753,20 @@ export class AgentControlService {
     // Provider is not gated here for anyone: the capability catalog serves every provider's model
     // list to every orchestrator, so a dispatch that follows what was advertised must not bounce off
     // a switch the catalog never mentioned (MIK-96). Only Fable is gated, and the catalog says so.
-    if (isFableModel(request.model) && !grantAllows(
-      binding.grant,
-      "worker.start.fable",
-      { cwd: request.cwd },
-    )) {
+    if (isFableModel(request.model) && !grantAllows(binding.grant, "worker.start.fable", resource)) {
       throw new AgentControlError(
         "CAPABILITY_DENIED",
         "Fable workers are disabled for this orchestrator; the operator can run /fable-workers on",
       );
     }
-    const approvalMode = request.approvalMode
-      ?? await this.configuredApprovalMode(request.provider, request.sandbox);
+    const cursor = request.provider === "cursor";
+    const sandbox = request.sandbox ?? (cursor ? "workspace-write" : "read-only");
+    if (cursor && (sandbox === "read-only" || request.approvalMode === "prompt")) {
+      throw new AgentControlError("PROVIDER_APPROVAL_MODE_UNSUPPORTED",
+        "Managed Cursor workers require workspace-write and Run Everything. Use the Scout profile for read-only inspection.");
+    }
+    const approvalMode = cursor ? "auto" : request.approvalMode
+      ?? await this.configuredApprovalMode(request.provider, sandbox);
     // Judged against what the providers advertise right now, which is the same set Fleet's composer
     // and `cyberdeck_provider_capabilities` are served, so an offered model can never be a refused one.
     const advertised = await this.workerCapabilities?.resolve();
@@ -782,14 +785,14 @@ export class AgentControlService {
       const checked = await validateWorkerWorkspace({
         workspace,
         cwd: request.cwd,
-        sandbox: request.sandbox,
+        sandbox,
         probe: this.workspaceProbe,
       });
       if (!checked.ok) throw new AgentControlError(checked.code, checked.message);
       workspace = checked.value;
     }
     const plan = resolveProviderPermissionPlan(request.provider, {
-      sandbox: request.sandbox,
+      sandbox,
       approvalMode,
       writableRoots: workspaceWritableRoots(workspace),
       // Every delegated worker is started with `kind: "worker"`, which is what makes the adapters
@@ -802,7 +805,7 @@ export class AgentControlService {
     // `workerMode` on this one spawn (e.g. "normal" for a research worker) wins over it (MIK-79).
     const workerMode = request.workerMode
       ?? ((await this.workerPreferences?.get())?.caveman === true ? "caveman" : "normal");
-    const startRequest: Parameters<SessionStartPort["start"]>[0] = {
+    const startRequest = {
       provider: request.provider,
       ...(request.model === undefined ? {} : { model: request.model }),
       ...(request.effort === undefined ? {} : { effort: request.effort }),
@@ -811,52 +814,22 @@ export class AgentControlService {
       detached: true,
       ...(request.executor === undefined ? {} : { executor: request.executor }),
       ...(request.executionProfile === undefined ? {} : { executionProfile: request.executionProfile }),
-      sandbox: request.sandbox,
+      sandbox,
       ...(workspace === undefined ? {} : { workspace }),
       parentSessionId: request.actorSessionId,
       kind: "worker",
       role: "worker",
       workerMode,
       name,
-    };
-    let worker: SessionRecord;
+    } satisfies Parameters<SessionStartPort["start"]>[0];
     const admission: LaunchAdmission = (apply) => admitted(this.strigoi, request.actorSessionId, async () => {
       const binding = await this.requireBinding(request.actorSessionId);
-      this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
-      if (isFableModel(request.model)) this.requireCapability(binding.grant, "worker.start.fable", { cwd: request.cwd });
+      this.requireCapability(binding.grant, "worker.start", resource);
+      if (isFableModel(request.model)) this.requireCapability(binding.grant, "worker.start.fable", resource);
       return apply();
     });
     await admission(async () => undefined);
-    if (request.budget === undefined) {
-      worker = await this.registry.start(startRequest, request.prompt, undefined, undefined, admission);
-    } else {
-      const workerBudgets = this.workerBudgets!;
-      let activatedWorkerId: string | undefined;
-      try {
-        worker = await this.registry.start(
-          startRequest,
-          request.prompt,
-          async (record) => {
-            await workerBudgets.register({
-              record,
-              name,
-              declaration: request.budget!,
-              controller: orchestratorController(await this.requireBinding(request.actorSessionId)),
-            });
-            activatedWorkerId = record.id;
-          },
-          undefined, admission,
-        );
-      } catch (error) {
-        if (activatedWorkerId !== undefined) {
-          await workerBudgets.markLaunchFailed?.({
-            workerId: activatedWorkerId,
-            reason: error instanceof Error ? error.message : String(error),
-          });
-        }
-        throw error;
-      }
-    }
+    const worker = await this.startOwnedWorker(startRequest, request.prompt, admission, request.budget);
     const warnings = plan.value.shortfalls.map((shortfall) => shortfall.message);
     return {
       sessionId: worker.id,
@@ -867,6 +840,34 @@ export class AgentControlService {
       ...(warnings.length === 0 ? {} : { warnings }),
       completionTarget: 1,
     };
+  }
+
+  private async startOwnedWorker(
+    request: Parameters<SessionStartPort["start"]>[0] & { parentSessionId: string; name: string },
+    prompt: string,
+    admission: LaunchAdmission,
+    budget?: WorkerBudgetDeclaration,
+  ): Promise<SessionRecord> {
+    const registration = this.workerBudgets;
+    if (registration === undefined) return this.registry.start(request, prompt, undefined, undefined, admission);
+    let registeredId: string | undefined;
+    try {
+      return await this.registry.start(request, prompt, async record => {
+        const binding = await this.requireBinding(request.parentSessionId);
+        await registration.register({
+          record, name: request.name, controller: orchestratorController(binding),
+          ...(budget === undefined ? {} : { declaration: budget }),
+        });
+        registeredId = record.id;
+      }, undefined, admission);
+    } catch (error) {
+      if (registeredId !== undefined) {
+        await registration.markLaunchFailed?.({
+          workerId: registeredId, reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+      throw error;
+    }
   }
 
   private async startScout(request: {
@@ -903,7 +904,7 @@ export class AgentControlService {
       return apply();
     });
     await admission(async () => undefined);
-    const worker = await this.registry.start({
+    const worker = await this.startOwnedWorker({
       provider: "cursor",
       model: "composer",
       approvalMode: "auto",
@@ -918,7 +919,7 @@ export class AgentControlService {
       brief: request.brief,
       leasePolicy,
       name,
-    }, scoutDispatchPrompt(request.brief), undefined, undefined, admission);
+    }, scoutDispatchPrompt(request.brief), admission);
     return {
       sessionId: worker.id,
       name,

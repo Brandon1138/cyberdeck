@@ -19,6 +19,20 @@ function observed(overrides: Partial<WorkerTruthInput> = {}): FleetThread {
     canonicalTurns: 0, pendingInstructions: 0, ...overrides }) };
 }
 
+it("shows Cursor readiness separately from a previously observed completion", () => {
+  const current = observed({ activity: "awaiting-input", completedTurns: 1 });
+  current.record = { ...record, provider: "cursor" };
+  const snapshot = { threads: [current] };
+  const view = () => renderFleet(snapshot, { ...createFleetState(snapshot), selectedSessionId: record.id },
+    { color: false, width: 140, height: 40 });
+  expect(threadStatus(current)).toBe("Idle");
+  expect(view()).toContain("Last turn completed");
+  current.workerTruth = projectWorkerTruth({ executionState: "active", exitCode: null, activity: "unknown",
+    composer: { modalOpen: false, occupied: false }, completedTurns: 1, canonicalTurns: 0, pendingInstructions: 0 });
+  expect(threadStatus(current)).toBe("Unconfirmed");
+  expect(view()).not.toContain("Last turn completed");
+});
+
 describe.each(["worker", "orchestrator"] as const)("Fleet %s truth parity", (kind) => {
   it.each([
     ["prompt-free startup", { awaitingInputReady: true }, "Starting"],

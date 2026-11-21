@@ -282,6 +282,7 @@ export class WorkerTurnEngine {
     if (this.terminalScreenReservationsDiscarded) return { fatal: false };
 
     const activity = this.options.observations.activity(this.record.provider, this.replay);
+    this.inputReadiness.observeActivity(this.record.provider, activity);
     this.nativeActivity.observeScreen(this.activityRevision, activity, this.now(), this.options.observations.starting?.(this.record.provider, this.replay) === true, this.replay.workCycle?.(this.record.provider));
     if (this.inputReadiness.starting) {
       // Loading history and MCP startup can spin then become idle without any model turn.

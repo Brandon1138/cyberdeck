@@ -13,7 +13,7 @@ export const AgentStandardWorkerInputSchema = z.object({
   model: z.string().optional(),
   effort: ReasoningEffortSchema.optional(),
   cwd: z.string().min(1),
-  sandbox: SandboxSchema.default("read-only"),
+  sandbox: SandboxSchema.optional(),
   executor: WorkerExecutorSchema.optional(),
   executionProfile: z.string().max(64).optional(),
   approvalMode: ApprovalModeSchema.optional(),

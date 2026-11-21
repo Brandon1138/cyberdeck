@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { frameComposerState, terminalComposerState } from "../../src/runtime/composer-state.js";
+import { frameInputReady, frameComposerState, terminalComposerState } from "../../src/runtime/composer-state.js";
 import { ReplayDigest } from "../../src/runtime/replay-digest.js";
 import {
   TAIL_BYTES,
@@ -240,4 +240,18 @@ describe("ReplayDigest", () => {
     digest.append("b");
     expect(digest.version).toBe(2);
   });
+});
+
+it("reads the Cursor Grok work and idle surfaces above a wrapped status bar", () => {
+  const footer = ["Grok 4.7 256K  · 10.3%· 1 file       Run Everything", "Low                     edited", "~/code/personal/cyberdeck · main"];
+  const idle = ["LRU tests passed.", "→ Add a follow-up", ...footer].join("\n");
+  const busy = ["⠘⠆ Editing  1.04k tokens", "→ Add a follow-up                 ctrl+c to stop", ...footer].join("\n");
+  expect(providerTerminalActivity("cursor", busy)).toBe("working");
+  expect(frameInputReady("cursor", busy)).toBe(false);
+  expect(providerTerminalActivity("cursor", idle)).toBe("awaiting-input");
+  expect(frameInputReady("cursor", idle)).toBe(true);
+  const draft = ["→ keep my draft", ...footer].join("\n");
+  expect(frameInputReady("cursor", draft)).toBe(false);
+  expect(frameComposerState("cursor", draft, { modalOpen: false })).toMatchObject({ occupied: true, content: "keep my draft" });
+  expect(frameInputReady("cursor", idle + "\nSelect a model")).toBe(false);
 });

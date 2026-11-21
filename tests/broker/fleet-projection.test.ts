@@ -95,6 +95,13 @@ it("coalesces updates for every session kind on the wire, retains full details a
     await server.listen(); client = await RpcClient.connect(join(directory, "broker.sock"));
     const initial = await client.request<FleetProjectionReply>("fleet.snapshot", {});
     expect(initial.kind).toBe("full");
+    expect(initial).not.toHaveProperty("timing");
+    const sent = performance.timeOrigin + performance.now();
+    const traced = await client.request<{ timing: { handlerStartedAtMs: number; projectionMs: number } }>(
+      "fleet.snapshot", { includeTiming: true, version: initial.version },
+    );
+    expect(traced.timing.handlerStartedAtMs).toBeGreaterThanOrEqual(sent);
+    expect(traced.timing.projectionMs).toBeGreaterThanOrEqual(0);
     expect(await client.request("session.list", {})).toMatchObject([{ launchRecord: record.launchRecord }]);
     expect(await client.request("session.launchRecord", { sessionId: id })).toMatchObject({ launchRecord: record.launchRecord });
     await client.request("fleet.subscribe", {});

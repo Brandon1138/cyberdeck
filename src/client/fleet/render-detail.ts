@@ -56,6 +56,8 @@ export function renderSelectedDetail(snapshot: FleetSnapshot, state: FleetState,
     ? "Current provider activity is unavailable on this broker" : record.termination?.reason);
   const metadata = [
     ...(thread.strigoi ? wrapDetailText(thread.strigoi.canonical ? strigoiStatus(thread.strigoi) : "Archived Strigoi incarnation · retained continuity evidence", options.width) : []),
+    ...(record.provider === "cursor" && status === "Idle" && (thread.workerTruth?.completedTurns ?? 0) > 0
+      ? [paint("Last turn completed", "muted", options.color)] : []),
     paint(path, "muted", options.color),
     ...(thread.workerTruth?.lastConfirmed === undefined ? [] : [paint(fit(
       `Observed ${thread.workerTruth.lastConfirmed.state} at ${thread.workerTruth.lastConfirmed.at}`, options.width), "muted", options.color)]),

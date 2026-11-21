@@ -54,6 +54,24 @@ it("opens on Fleet Orcs and adds a project only while it has live sessions", () 
     .toEqual(rows(fresh));
 });
 
+it("folds both leased providers under the current Orc even when a native parent points elsewhere", () => {
+  const fixture = hierarchyFixture();
+  const owner = fixture.threads.find(t => t.record.id === "Parking Orc")!;
+  const previous = treeThread("previous", "idle", { kind: "orchestrator", controller: "previous" });
+  const lease = fixture.threads.find(t => t.record.id === "Browser verification")!.coordination!;
+  const luna = treeThread("Luna", "idle", { nativeParent: previous.record.id });
+  const grok = treeThread("Grok", "blocked-modal");
+  grok.record.provider = "cursor";
+  for (const thread of [luna, grok]) thread.coordination = { ...lease, sessionId: thread.record.id, subjectId: thread.record.id };
+  const snapshot = { ...fixture, threads: [owner, previous, grok, luna] };
+  const state = { ...createFleetState(snapshot), selectedSessionId: owner.record.id };
+  const folded = transitionFleet(state, snapshot, "left", now).state;
+  expect(visible(snapshot, folded)).toEqual(expect.arrayContaining([owner.record.id, previous.record.id]));
+  for (const worker of [luna, grok]) expect(visible(snapshot, folded)).not.toContain(worker.record.id);
+  const expanded = transitionFleet(folded, snapshot, "right", now).state;
+  expect(visible(snapshot, expanded)).toEqual(expect.arrayContaining(["Grok", "Luna"]));
+});
+
 it("folds an Orc without attaching it, preserves its focus and persists the fold", () => {
   const snapshot = hierarchyFixture();
   let state: FleetState = { ...createFleetState(snapshot), selectedSessionId: "Parking Orc" };
