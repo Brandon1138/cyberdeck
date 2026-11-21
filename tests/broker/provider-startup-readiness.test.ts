@@ -113,10 +113,12 @@ async function harness(provider: ProviderId = "codex", initialPrompt?: string, n
 }
 
 describe("automated provider startup delivery", () => {
-  it("settles two Cursor turns once each and keeps a ready-only observation at zero", async () => {
+  it.each([
+    { model: "Opus", footer: "\r\nPlan (shift+tab to cycle)\r\nClaude Opus 5.5 300K High · 41%\r\n~/project · main" },
+    { model: "Grok", footer: "\r\nGrok 4.7 256K·   11.8%·   1 file     Run Everything\r\nLow                  edited\r\n~/project · main" },
+  ])("settles two Cursor $model turns once each and keeps a ready-only observation at zero", async ({ footer }) => {
     const { registry, record, handles } = await harness("cursor");
     const emit = (frame: string) => handles[0]!.emit(CLEAR + frame);
-    const footer = "\r\nPlan (shift+tab to cycle)\r\nClaude Opus 5.5 300K High · 41%\r\n~/project · main";
     const ready = "→ Add a follow-up" + footer;
     const label = () => threadStatus({ record, workerTruth: registry.workerTruth(record.id) });
     emit(ready);

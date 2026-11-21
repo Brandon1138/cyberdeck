@@ -1,4 +1,4 @@
-import { cursorComposer } from "./cursor-composer.js";
+import { CURSOR_BUILD_PROMPT, cursorComposer } from "./cursor-composer.js";
 import { startupDialogPosition } from "./startup-dialog-activity.js";
 import type { ProviderId } from "./session.js";
 import { InputScreen, type RenderedTerminalScreen } from "./terminal-screen.js";
@@ -350,6 +350,7 @@ export function blockedPromptIndexInTail(provider: ProviderId, tail: string): nu
   const common = Math.max(
     lastRegexIndex(tail, /^\s*Do you trust the contents of this project\?(?:\s*> Yes, I trust this folder)?\s*$/gimu),
     dialogAffordanceIndexInTail(tail),
+    provider === "cursor" ? lastRegexIndex(tail, CURSOR_BUILD_PROMPT) : -1,
     provider === "cursor" ? lastRegexIndex(tail, /^[ \t]*│[ \t]*(?:▶[ \t]*)?\[a\] Trust this workspace[ \t]*│\s*│[ \t]*(?:▶[ \t]*)?\[q\] Quit[ \t]*│/gimu) : -1,
   );
   const providerPrompt = provider === "codex"

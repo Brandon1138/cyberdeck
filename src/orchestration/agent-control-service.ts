@@ -762,8 +762,14 @@ export class AgentControlService {
         "Fable workers are disabled for this orchestrator; the operator can run /fable-workers on",
       );
     }
-    const approvalMode = request.approvalMode
-      ?? await this.configuredApprovalMode(request.provider, request.sandbox);
+    const cursor = request.provider === "cursor";
+    const sandbox = request.sandbox ?? (cursor ? "workspace-write" : "read-only");
+    if (cursor && (sandbox === "read-only" || request.approvalMode === "prompt")) {
+      throw new AgentControlError("PROVIDER_APPROVAL_MODE_UNSUPPORTED",
+        "Managed Cursor workers require workspace-write and Run Everything. Use the Scout profile for read-only inspection.");
+    }
+    const approvalMode = cursor ? "auto" : request.approvalMode
+      ?? await this.configuredApprovalMode(request.provider, sandbox);
     // Judged against what the providers advertise right now, which is the same set Fleet's composer
     // and `cyberdeck_provider_capabilities` are served, so an offered model can never be a refused one.
     const advertised = await this.workerCapabilities?.resolve();
@@ -782,14 +788,14 @@ export class AgentControlService {
       const checked = await validateWorkerWorkspace({
         workspace,
         cwd: request.cwd,
-        sandbox: request.sandbox,
+        sandbox,
         probe: this.workspaceProbe,
       });
       if (!checked.ok) throw new AgentControlError(checked.code, checked.message);
       workspace = checked.value;
     }
     const plan = resolveProviderPermissionPlan(request.provider, {
-      sandbox: request.sandbox,
+      sandbox,
       approvalMode,
       writableRoots: workspaceWritableRoots(workspace),
       // Every delegated worker is started with `kind: "worker"`, which is what makes the adapters
@@ -811,7 +817,7 @@ export class AgentControlService {
       detached: true,
       ...(request.executor === undefined ? {} : { executor: request.executor }),
       ...(request.executionProfile === undefined ? {} : { executionProfile: request.executionProfile }),
-      sandbox: request.sandbox,
+      sandbox,
       ...(workspace === undefined ? {} : { workspace }),
       parentSessionId: request.actorSessionId,
       kind: "worker",

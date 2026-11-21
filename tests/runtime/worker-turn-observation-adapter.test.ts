@@ -61,6 +61,24 @@ describe("WorkerTurnObservationAdapter", () => {
       .toMatchObject({ activity: "needs-input", inputReady: false });
   });
 
+  it("reports Grok's build decision and the wrapped Run Everything composer", () => {
+    const adapter = new WorkerTurnObservationAdapter();
+    const replay = adapter.createReplay(128 * 1024);
+    const observe = (lines: string[]) => {
+      replay.appendBytes(Buffer.from("\x1b[2J\x1b[H" + lines.join("\r\n")));
+      return { activity: adapter.activity("cursor", replay), ...adapter.composer("cursor", replay) };
+    };
+    expect(observe(["│ Ready to build?  │", "│                  │", "│ → 1. Yes, build locally (b) │",
+      "│   2. Yes, build in cloud (c) │", "│   3. No, propose changes (p or Esc) │"]))
+      .toMatchObject({ activity: "needs-input", modalOpen: true, inputReady: false });
+    const footer = ["Grok 4.7 256K·   11.8%·   1 file     Run Everything", "Low                     edited",
+      "~/code/personal/cyberdeck · main"];
+    expect(observe(["→ Add a follow-up       ctrl+c to stop", ...footer]))
+      .toMatchObject({ activity: "working", occupied: false, inputReady: false });
+    expect(observe(["Progress event accepted.", "→ Add a follow-up", ...footer]))
+      .toMatchObject({ activity: "awaiting-input", occupied: false, inputReady: true });
+  });
+
   it("keeps Claude's composer readable after Kitty keyboard mode changes", () => {
     const adapter = new WorkerTurnObservationAdapter();
     const replay = adapter.createReplay(128 * 1024);
