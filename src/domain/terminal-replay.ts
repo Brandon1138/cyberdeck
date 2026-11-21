@@ -1,4 +1,4 @@
-import { CURSOR_BUILD_PROMPT, cursorComposer } from "./cursor-composer.js";
+import { CURSOR_BUILD_PROMPT, cursorComposerActivity, cursorFooterStart, isCursorWorkingLine } from "./cursor-composer.js";
 import { startupDialogPosition } from "./startup-dialog-activity.js";
 import type { ProviderId } from "./session.js";
 import { InputScreen, type RenderedTerminalScreen } from "./terminal-screen.js";
@@ -15,13 +15,7 @@ export const BLOCKED_PROMPT_TAIL_CHARS = 8_000;
 
 export type ProviderTerminalActivity = "working" | "awaiting-input" | "needs-input" | "unknown";
 
-/**
- * Every literal whose last occurrence can decide an activity verdict.
- *
- * Named in one place because a marker source that tracks occurrences incrementally has to know the
- * whole set up front — it sees each PTY chunk exactly once, so a literal added to the decision
- * below and not to this list would simply never be found.
- */
+/** Incremental marker sources track each activity literal as its PTY chunk arrives. */
 export const ACTIVITY_MARKERS = [
   "esc to interrupt",
   "Composing",
@@ -103,12 +97,8 @@ export function markerTerminalActivity(
     if (isWaitingLine(provider, line)) waitingAt = Math.max(waitingAt, at);
   }
   if (provider === "cursor") {
-    const composer = cursorComposer(screen.text);
-    if (composer) {
-      if (blockedAt >= 0) return "needs-input";
-      if (composer.working || workingAt >= 0) return "working";
-      if (!/^(?:\d+[.)]\s|Yes\b|No,?\s|Upgrade your plan)/iu.test(composer.content)) return "awaiting-input";
-    }
+    const activity = cursorComposerActivity(screen.text, blockedAt >= 0, workingAt >= 0);
+    if (activity !== undefined) return activity;
   }
   // A working UI can retain and repaint its composer so an operator can queue a follow-up. That
   // prompt is not an idle transition while a working control remains on this screen.
@@ -134,13 +124,7 @@ export function markerTerminalActivity(
 }
 
 function isWorkingLine(provider: ProviderId, line: string): boolean {
-  if (provider === "cursor") {
-    if (/^[→›❯]\s+Add a follow-up\s{2,}ctrl\+c to stop$/iu.test(line)
-        || /^[\u2800-\u28ff]+\s+Editing\s+[\d.,]+[km]?\s+tokens?$/iu.test(line)) return true;
-    if (/^[\u2800-\u28ff]{2}\s+Working(?:\s+[\d.,]+[km]? tokens?)?$/iu.test(line)) return true;
-    return /^(?:[\u2800-\u28ff]\s*)?Composing(?:\s+[\d.,]+[km]?\s+tokens?)?(?:\s+(?:ctrl\+c to stop|[·(].*))?$/iu.test(line)
-      || /^ctrl\+c to stop(?:\s*[·)].*)?$/iu.test(line);
-  }
+  if (provider === "cursor") return isCursorWorkingLine(line);
   if (provider === "antigravity") {
     return /^[\u2800-\u28ff]\s+(?:Thinking|Working|Composing|Generating|Running|Searching|Reading)\b/iu.test(line);
   }
@@ -154,17 +138,6 @@ function isWaitingLine(provider: ProviderId, line: string): boolean {
   if (provider === "cursor") return /^(?:No matches|\/(?:run-everything|model \[filter\])(?:\s+.*)?)$/iu.test(line);
   if (provider === "antigravity") return /^\? for shortcuts\b/iu.test(line) || /^> Plan mode:/iu.test(line);
   return false;
-}
-
-/** Cursor's narrow status bar wraps the usage meter, effort and cwd below its input. */
-export function cursorFooterStart(lines: readonly string[]): number {
-  let end = lines.length;
-  while (end > 0 && lines[end - 1]!.trim() === "") end--;
-  if (!/^(?:~(?:\/|$)|\/|[A-Z]:\\)/iu.test(lines[end - 1]?.trim() ?? "")) return lines.length;
-  let index = end - 2;
-  if (/^(?:Low|Medium|High|Extra High|Auto)(?:\s+edited)?$/iu.test(lines[index]?.trim() ?? "")) index--;
-  const meter = lines[index]?.trim() ?? "";
-  return /^\S[^\n]*?\s+\d+(?:\.\d+)?[KM]\s*·\s*[\d.]+%/iu.test(meter) ? index : lines.length;
 }
 
 /** A bottom composer is idle evidence even when it holds an operator draft, never task success. */

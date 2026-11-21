@@ -518,8 +518,7 @@ export class WorkerControlService {
     mutationId: string,
   ): Promise<LeaseControlResult> {
     if (request.scope === "worker" && !request.preview) {
-      const single = await this.takeSingle(request, binding, controller, mutationId);
-      if (single !== undefined) return single;
+      return this.takeSingle(request, binding, controller, mutationId);
     }
     const plan = await this.planFor(request, binding.grant, controller, !request.preview);
     if (request.preview) {
@@ -595,23 +594,20 @@ export class WorkerControlService {
     binding: OrchestratorBinding,
     controller: ControllerIdentity,
     mutationId: string,
-  ): Promise<LeaseControlResult | undefined> {
+  ): Promise<LeaseControlResult> {
     const workerId = request.workerId!;
-    let subject = await this.reconcileSessionLifecycle(workerId);
+    const subject = await this.reconcileSessionLifecycle(workerId)
+      ?? await this.registerFromSession(workerId, controller, request.reason);
     if (subject === undefined) {
-      const registered = await this.registerFromSession(workerId, controller, request.reason);
-      if (registered === undefined) {
-        return {
-          action: request.action,
-          scope: request.scope,
-          mutationId,
-          controllerId: controller.controllerId,
-          idempotentReplay: false,
-          results: [{ workerId, code: "NOT_ELIGIBLE", message: "No such worker session in this broker" }],
-          summary: { NOT_ELIGIBLE: 1 },
-        };
-      }
-      subject = registered;
+      return {
+        action: request.action,
+        scope: request.scope,
+        mutationId,
+        controllerId: controller.controllerId,
+        idempotentReplay: false,
+        results: [{ workerId, code: "NOT_ELIGIBLE", message: "No such worker session in this broker" }],
+        summary: { NOT_ELIGIBLE: 1 },
+      };
     }
     if (!this.inGrant(subject, binding.grant, "worker.start")) {
       return {

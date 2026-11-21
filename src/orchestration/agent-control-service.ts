@@ -739,7 +739,8 @@ export class AgentControlService {
     const request = AgentStartWorkerParamsSchema.parse(input);
     await admitted(this.strigoi, request.actorSessionId, async () => undefined, "read");
     const binding = await this.requireBinding(request.actorSessionId);
-    this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
+    const resource = { cwd: request.cwd };
+    this.requireCapability(binding.grant, "worker.start", resource);
     if (request.profile === "scout") {
       return this.startScout(request);
     }
@@ -752,11 +753,7 @@ export class AgentControlService {
     // Provider is not gated here for anyone: the capability catalog serves every provider's model
     // list to every orchestrator, so a dispatch that follows what was advertised must not bounce off
     // a switch the catalog never mentioned (MIK-96). Only Fable is gated, and the catalog says so.
-    if (isFableModel(request.model) && !grantAllows(
-      binding.grant,
-      "worker.start.fable",
-      { cwd: request.cwd },
-    )) {
+    if (isFableModel(request.model) && !grantAllows(binding.grant, "worker.start.fable", resource)) {
       throw new AgentControlError(
         "CAPABILITY_DENIED",
         "Fable workers are disabled for this orchestrator; the operator can run /fable-workers on",
@@ -827,8 +824,8 @@ export class AgentControlService {
     } satisfies Parameters<SessionStartPort["start"]>[0];
     const admission: LaunchAdmission = (apply) => admitted(this.strigoi, request.actorSessionId, async () => {
       const binding = await this.requireBinding(request.actorSessionId);
-      this.requireCapability(binding.grant, "worker.start", { cwd: request.cwd });
-      if (isFableModel(request.model)) this.requireCapability(binding.grant, "worker.start.fable", { cwd: request.cwd });
+      this.requireCapability(binding.grant, "worker.start", resource);
+      if (isFableModel(request.model)) this.requireCapability(binding.grant, "worker.start.fable", resource);
       return apply();
     });
     await admission(async () => undefined);

@@ -34,3 +34,31 @@ function isStatusBar(rows: string[]): boolean {
     && !!path && /^(?:~\/|\/)[^\n]*$/u.test(path)
     && (branch === undefined || /·$/u.test(path) && /^[\w./-]+$/u.test(branch));
 }
+
+/** Cursor's narrow status bar wraps the usage meter, effort and cwd below its input. */
+export function cursorFooterStart(lines: readonly string[]): number {
+  let end = lines.length;
+  while (end > 0 && lines[end - 1]!.trim() === "") end--;
+  if (!/^(?:~(?:\/|$)|\/|[A-Z]:\\)/iu.test(lines[end - 1]?.trim() ?? "")) return lines.length;
+  let index = end - 2;
+  if (/^(?:Low|Medium|High|Extra High|Auto)(?:\s+edited)?$/iu.test(lines[index]?.trim() ?? "")) index--;
+  const meter = lines[index]?.trim() ?? "";
+  return /^\S[^\n]*?\s+\d+(?:\.\d+)?[KM]\s*·\s*[\d.]+%/iu.test(meter) ? index : lines.length;
+}
+
+export function isCursorWorkingLine(line: string): boolean {
+  if (/^[→›❯]\s+Add a follow-up\s{2,}ctrl\+c to stop$/iu.test(line)
+      || /^[\u2800-\u28ff]+\s+Editing\s+[\d.,]+[km]?\s+tokens?$/iu.test(line)) return true;
+  if (/^[\u2800-\u28ff]{2}\s+Working(?:\s+[\d.,]+[km]? tokens?)?$/iu.test(line)) return true;
+  return /^(?:[\u2800-\u28ff]\s*)?Composing(?:\s+[\d.,]+[km]?\s+tokens?)?(?:\s+(?:ctrl\+c to stop|[·(].*))?$/iu.test(line)
+    || /^ctrl\+c to stop(?:\s*[·)].*)?$/iu.test(line);
+}
+
+export function cursorComposerActivity(frame: string, blocked: boolean, working: boolean) {
+  const composer = cursorComposer(frame);
+  if (!composer) return undefined;
+  if (blocked) return "needs-input";
+  if (composer.working || working) return "working";
+  if (!/^(?:\d+[.)]\s|Yes\b|No,?\s|Upgrade your plan)/iu.test(composer.content)) return "awaiting-input";
+  return undefined;
+}

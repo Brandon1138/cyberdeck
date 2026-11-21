@@ -24,20 +24,19 @@ export function updateWorkerPreview(record: SessionRecord, preview: WorkerTurnPr
 
 export function projectWorkerTurnTruth(input: WorkerTruthInput & {
   terminalFinalizing: boolean;
-  observedCursorWork?: boolean;
   readiness: WorkerInputReadiness;
   nativeTurnSettled: boolean;
   deliveryHeld: boolean;
   frameText: string;
   scoutTransport?: string | undefined;
 }) {
-  const { terminalFinalizing, observedCursorWork, readiness, nativeTurnSettled, deliveryHeld, frameText, scoutTransport, ...truth } = input;
+  const { terminalFinalizing, readiness, nativeTurnSettled, deliveryHeld, frameText, scoutTransport, ...truth } = input;
   if (terminalFinalizing) return projectWorkerTruth({
     executionState: "active", exitCode: null, activity: "working", composer: { modalOpen: false, occupied: false },
     completedTurns: truth.completedTurns, canonicalTurns: truth.canonicalTurns, pendingInstructions: truth.pendingInstructions,
   });
   return projectWorkerTruth({ ...truth,
-    awaitingInputReady: !observedCursorWork && scoutTransport !== "headless-stream-json" && readiness.pending && (!nativeTurnSettled || deliveryHeld),
+    awaitingInputReady: !readiness.observedCursorWork && scoutTransport !== "headless-stream-json" && readiness.pending && (!nativeTurnSettled || deliveryHeld),
     ...((!nativeTurnSettled || deliveryHeld) && readiness.stalledForSeconds !== undefined ? {
       startupStalledForSeconds: readiness.stalledForSeconds,
       startupEvidence: frameText.replace(/\s+/gu, " ").trim().slice(-240),

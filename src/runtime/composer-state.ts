@@ -1,7 +1,7 @@
-import { cursorComposer } from "../domain/cursor-composer.js";
+import { cursorComposer, cursorFooterStart } from "../domain/cursor-composer.js";
 import type { ProviderId } from "../domain/session.js";
 import type { ComposerObservation } from "../domain/worker-truth.js";
-import { cursorFooterStart, plainTerminalText, providerTerminalActivity } from "./terminal-replay.js";
+import { plainTerminalText, providerTerminalActivity } from "./terminal-replay.js";
 import { InputScreen } from "./input-screen.js";
 
 /**
