@@ -1,6 +1,7 @@
 import type { FleetTreeRow } from "./list-rows.js";
 import { threadFocusInert } from "./list-rows.js";
 import type { FleetState, FleetThread } from "./state.js";
+import type { SessionRecord } from "../../domain/session.js";
 import type { ResolvedFleetRenderOptions } from "./runtime-options.js";
 import { fit, pad } from "./render-composer.js";
 import { rowGutter } from "./render-rows.js";
@@ -14,6 +15,11 @@ import { isHandoffMarked } from "./picker-handoff.js";
 import { pullRequestLabel, pullRequestTone } from "../pr-status.js";
 
 const indentation = (tree: FleetTreeRow) => "  ".repeat(Math.min(tree.depth, 3));
+
+/** Broker attachment truth: a terminal holds the session (`open`) or only views it; headless says nothing. */
+const TERMINAL_LABEL: Record<SessionRecord["attachmentState"], string | undefined> = {
+  controlled: "open", watched: "watching", detached: undefined,
+};
 
 export function renderTreeFolder(cwd: string, heading: string | undefined, collapsed: boolean,
   tree: FleetTreeRow, state: FleetState, options: ResolvedFleetRenderOptions, scrollbar?: "track" | "thumb"): string {
@@ -32,15 +38,16 @@ export function renderTreeFolder(cwd: string, heading: string | undefined, colla
 export function renderTreeThread(thread: FleetThread, tree: FleetTreeRow, state: FleetState,
   options: ResolvedFleetRenderOptions, scrollbar?: "track" | "thumb", custody?: LeaseCustodyBadge): string {
   const selected = !threadFocusInert(state) && thread.record.id === state.selectedSessionId;
-  const role = thread.record.kind === "orchestrator" ? "ORC" : thread.nativeAgent ? "native" : "managed";
+  // Only rows that differ from a managed worker carry a role word, so an Orc stands out by having one.
+  const role = thread.record.kind === "orchestrator" ? "Orc " : thread.nativeAgent ? "native " : "";
   const disclosure = tree.key ? tree.collapsed ? "▸" : "▾" : "·";
-  const prefix = `${indentation(tree)}${disclosure} ${role} `;
+  const prefix = `${indentation(tree)}${disclosure} ${role}`;
   const marker = `${state.listView === "unread" && isUnreadThread(state, thread.record.id) ? "* " : ""}${thread.record.pinned ? "⌃ " : ""}`;
   const name = thread.record.name ?? thread.record.role ?? thread.record.id.slice(0, 8);
   const title = `${marker}${name}`;
   const status = threadStatus(thread);
   const pr = options.pullRequests.get(thread.record.id);
-  const right = [status, custody?.label, options.width >= 100 ? compactThreadIdentity(thread.record) : undefined].filter(Boolean).join(" · ");
+  const right = [status, TERMINAL_LABEL[thread.record.attachmentState], custody?.label, options.width >= 100 ? compactThreadIdentity(thread.record) : undefined].filter(Boolean).join(" · ");
   const available = Math.max(1, options.width - 2);
   const prLabel = pr && options.width >= 80 ? pullRequestLabel(pr) : "";
   const prWidth = prLabel ? displayWidth(prLabel) + 1 : 0;

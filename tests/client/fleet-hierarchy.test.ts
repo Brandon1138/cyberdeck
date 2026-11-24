@@ -194,10 +194,24 @@ it("retains handoff marks and attributed PR badges on tree rows", () => {
   const state = { ...createFleetState(snapshot), selectedSessionId: "Browser verification", handoffMarks: ["Browser verification"] };
   const frame = renderFleet(snapshot, state, { width: 160, height: 55, color: false, now,
     pullRequests: new Map([["Browser verification", { state: "open", number: 164 }]]) });
-  const row = frame.split("\n").find(line => line.includes("managed Browser verification"))!;
+  const row = frame.split("\n").find(line => line.includes("· Browser verification"))!;
   expect(row).toContain("#164");
   expect(row).toContain("Needs you");
   expect(row.slice(0, 2).trim()).toHaveLength(2);
+});
+
+it("names only Orcs and native workers, and says which sessions a terminal holds", () => {
+  const snapshot = hierarchyFixture();
+  const record = (id: string) => snapshot.threads.find(t => t.record.id === id)!.record;
+  record("Parking Orc").attachmentState = "controlled";
+  record("Browser verification").attachmentState = "watched";
+  const lines = renderFleet(snapshot, createFleetState(snapshot), { width: 120, height: 40, color: false, now }).split("\n");
+  const row = (name: string) => lines.find(line => line.includes(` ${name} `))!;
+  expect(row("Orc Parking Orc")).toMatch(/Working · open\b/u);
+  expect(row("Orc Executive")).not.toMatch(/ · (open|watching)\b/u);
+  expect(row("· Browser verification")).toMatch(/Needs you · watching\b/u);
+  expect(row("native Nested review")).toBeDefined();
+  expect(lines.join("\n")).not.toMatch(/\b(ORC|managed) /u);
 });
 
 
