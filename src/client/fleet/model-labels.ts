@@ -40,6 +40,7 @@ export function cursorModelLabel(model: string): string | undefined {
     "claude-fable-5": "Fable 5",
     "claude-fable-5-thinking": "Fable 5 Thinking",
     "cursor-grok-4.5": "Grok 4.5",
+    "cursor-grok-4.7": "Grok 4.7",
     "kimi-k2.7-code": "Kimi K2.7 Code",
     "kimi-k3": "Kimi K3",
     "glm-5.2": "GLM 5.2",

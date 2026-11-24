@@ -4,9 +4,10 @@ import { pullRequestLabel } from "../pr-status.js";
 import { PULL_REQUEST_CELL_WIDTH, WORKTREE_TAG_WIDTH, workerModelCatalog } from "./constants.js";
 import { fleetListRows, orderedThreads } from "./list-rows.js";
 import { handoffRecipients } from "./picker-handoff.js";
-import { existingOrchestrators } from "./picker-orchestrator.js";
+import { existingOrchestrators, visibleOrchestratorModels } from "./picker-orchestrator.js";
 import { commandPaletteCandidates } from "./picker-palette.js";
-import { pickerModelChoices, pickerScrollOffset } from "./picker-worker.js";
+import { pickerModelChoices } from "./picker-worker.js";
+import { pickerScrollOffset } from "./render-rows.js";
 import { renderComposerLines } from "./render-composer.js";
 import { renderFleetFooter, renderHeader, renderShellTranscript, shellTranscriptScrollOffset } from "./render-list.js";
 import { ResolvedFleetRenderOptions, WorkerModelCatalog } from "./runtime-options.js";
@@ -119,15 +120,21 @@ export function fleetFrameLayout(
     }, `handoff-picker:${state.handoffPicker.step}`);
   }
   if (state.orchestratorPicker !== undefined) {
+    const picker = state.orchestratorPicker;
+    const filter = picker.step === "target" ? picker.filter ?? "" : "";
+    const shown = picker.step === "target"
+      ? visibleOrchestratorModels(state.workerModels.orchestratorChoices, filter)
+      : state.workerModels.orchestratorChoices.map((choice, modelIndex) => ({ choice, modelIndex }));
     return frame({
       surface: "orchestrator-picker",
-      step: state.orchestratorPicker.step,
-      choices: state.workerModels.orchestratorChoices.map(({ provider, model }) =>
-        [provider.provider, model, provider.efforts, provider.fallbackReason]),
+      step: picker.step,
+      filter,
+      choices: shown.map(({ choice }) =>
+        [choice.provider.provider, choice.model, choice.provider.efforts, choice.provider.fallbackReason]),
       projects: snapshot.projects,
       sessions: existingOrchestrators(snapshot).map(({ id }) => id),
-      footerRows: 2 + noticeRows + (state.orchestratorPicker.step !== "target" ? 1 : 0),
-    }, `orchestrator-picker:${state.orchestratorPicker.step}`);
+      footerRows: 2 + noticeRows + (picker.step !== "target" ? 1 : 0),
+    }, `orchestrator-picker:${picker.step}:${filter}`);
   }
 
   const threads = orderedThreads(snapshot);

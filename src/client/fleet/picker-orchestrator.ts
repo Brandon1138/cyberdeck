@@ -6,7 +6,7 @@ import { isTerminalSession, orderedThreads } from "./list-rows.js";
 import { friendlyModel } from "./model-labels.js";
 import { displayThreadName, fit } from "./render-composer.js";
 import { renderHeader } from "./render-list.js";
-import { boundedIndex } from "./render-rows.js";
+import { boundedIndex, pickerScrollOffset } from "./render-rows.js";
 import { type OrchestratorModelChoice, ResolvedFleetRenderOptions } from "./runtime-options.js";
 import { paint, renderNotice } from "./slash-commands.js";
 import { FleetSnapshot, FleetState, FleetTransition, OrchestratorPickerFocus, OrchestratorPickerState } from "./state.js";
@@ -23,6 +23,15 @@ export function transitionOrchestratorPicker(
   if (picker.step === "project") {
     const { modelIndex, effortIndex, projectRoot } = picker;
     if (key === "escape") {
+      if (providerManagedOnly(choices[modelIndex])) {
+        return {
+          state: {
+            ...state,
+            notice: undefined,
+            orchestratorPicker: { step: "target", focus: { kind: "profile", modelIndex }, filter: "" },
+          },
+        };
+      }
       return { state: { ...state, notice: undefined, orchestratorPicker: { step: "effort", modelIndex, effortIndex } } };
     }
     const projects = [undefined, ...(snapshot.projects ?? [])];
@@ -58,14 +67,20 @@ export function transitionOrchestratorPicker(
     const delta = key === "up" ? -1 : 1;
     if (picker.step === "target") {
       const existing = picker.existingExpanded ? existingOrchestrators(snapshot) : [];
-      const current = picker.focus.kind === "existing-group"
-        ? 0 : orchestratorFocusIndex(picker.focus, existing) + 1;
-      const index = boundedIndex(current + delta, 1 + existing.length + choices.length);
+      const visible = visibleOrchestratorModels(choices, picker.filter ?? "");
+      const index = boundedIndex(
+        orchestratorTargetPosition(picker.focus, existing, visible) + delta,
+        1 + existing.length + visible.length,
+      );
       return {
         state: {
           ...state,
-          orchestratorPicker: { ...picker, focus: index === 0
-            ? { kind: "existing-group" } : orchestratorFocusAt(index - 1, existing) },
+          orchestratorPicker: {
+            ...picker,
+            focus: index === 0
+              ? { kind: "existing-group" }
+              : orchestratorTargetFocus(index - 1, existing, visible),
+          },
         },
       };
     }
@@ -151,6 +166,19 @@ export function transitionOrchestratorPicker(
     };
   }
 
+  if (picker.step === "target" && (key === "backspace" || ([...key].length === 1 && key.charCodeAt(0) >= 0x20))) {
+    const filter = key === "backspace"
+      ? [...(picker.filter ?? "")].slice(0, -1).join("")
+      : `${picker.filter ?? ""}${key}`;
+    const visible = visibleOrchestratorModels(choices, filter);
+    const focus = picker.focus;
+    const focusedModel = focus.kind === "profile" ? focus.modelIndex : undefined;
+    const nextFocus = focusedModel !== undefined && !visible.some((row) => row.modelIndex === focusedModel)
+      ? { kind: "profile" as const, modelIndex: visible[0]?.modelIndex ?? focusedModel }
+      : focus;
+    return { state: { ...state, notice: undefined, orchestratorPicker: { ...picker, filter, focus: nextFocus } } };
+  }
+
   if (key !== "enter") return { state };
   if (picker.step === "target") {
     const focus = picker.focus;
@@ -188,30 +216,57 @@ export function transitionOrchestratorPicker(
         },
       };
     }
-    const modelIndex = focus.modelIndex;
-    const choice = choices[modelIndex];
-    if (choice === undefined) {
+    const visible = visibleOrchestratorModels(choices, picker.filter ?? "");
+    const selected = visible.find((row) => row.modelIndex === focus.modelIndex);
+    if (selected === undefined) {
+      const filter = picker.filter?.trim() ?? "";
       return {
         state: {
           ...state,
-          notice: "No orchestrator model is available",
+          notice: filter === "" ? "No orchestrator model is available" : `No model matches ${filter}`,
           noticeTone: "error",
         },
       };
     }
-    return {
-      state: {
-        ...state,
-        orchestratorPicker: { step: "effort", modelIndex, effortIndex: 0 },
-        notice: undefined,
-      },
-    };
+    return continueOrchestratorModel(state, snapshot, selected.modelIndex);
   }
 
   if (snapshot.projects?.length) {
     return { state: { ...state, orchestratorPicker: { ...picker, step: "project" }, notice: undefined } };
   }
   return createSelectedOrchestrator(state, picker);
+}
+
+function continueOrchestratorModel(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  modelIndex: number,
+): FleetTransition {
+  const choice = state.workerModels.orchestratorChoices[modelIndex];
+  if (choice === undefined) {
+    return { state: { ...state, notice: "No orchestrator model is available", noticeTone: "error" } };
+  }
+  // Cursor's only effort is the slug itself. A one-row "Provider managed" screen is a keypress
+  // that chooses nothing, so Enter goes on to the project or creates the Orc.
+  if (providerManagedOnly(choice)) {
+    if (snapshot.projects?.length) {
+      return {
+        state: {
+          ...state,
+          orchestratorPicker: { step: "project", modelIndex, effortIndex: 0 },
+          notice: undefined,
+        },
+      };
+    }
+    return createSelectedOrchestrator(state, { step: "effort", modelIndex, effortIndex: 0 });
+  }
+  return {
+    state: {
+      ...state,
+      orchestratorPicker: { step: "effort", modelIndex, effortIndex: 0 },
+      notice: undefined,
+    },
+  };
 }
 
 function createSelectedOrchestrator(state: FleetState, picker: Exclude<OrchestratorPickerState, { step: "target" }>,
@@ -242,8 +297,13 @@ export function renderOrchestratorPicker(
   const picker = state.orchestratorPicker!;
   const choices = state.workerModels.orchestratorChoices;
   const selection = picker.step !== "target" ? orchestratorSelection(picker, choices) : undefined;
-  const totalSteps = snapshot.projects?.length || picker.step === "project" ? 3 : 2;
-  const stepNumber = picker.step === "target" ? 1 : picker.step === "effort" ? 2 : 3;
+  const focusedChoice = picker.step === "target"
+    ? (picker.focus.kind === "profile" ? choices[picker.focus.modelIndex] : undefined)
+    : choices[picker.modelIndex];
+  const skipsEffort = providerManagedOnly(focusedChoice);
+  const hasProjects = (snapshot.projects?.length ?? 0) > 0 || picker.step === "project";
+  const totalSteps = 1 + (skipsEffort ? 0 : 1) + (hasProjects ? 1 : 0);
+  const stepNumber = picker.step === "target" ? 1 : picker.step === "effort" ? 2 : skipsEffort ? 2 : 3;
   const lines = [
     ...renderHeader(orderedThreads(snapshot), state, options),
     "",
@@ -254,6 +314,7 @@ export function renderOrchestratorPicker(
   // Set only when the focused row is an existing orchestrator, never a "New orchestrator"
   // profile — that row has nothing for ctrl+x to target, so the hint stays silent on it.
   let destructiveHint: string | undefined;
+  let range = "";
   if (picker.step === "target") {
     const existing = existingOrchestrators(snapshot);
     const focusIndex = orchestratorFocusIndex(picker.focus, existing);
@@ -267,17 +328,40 @@ export function renderOrchestratorPicker(
       lines.push(...existing.map((record, index) =>
         pickerRow(existingOrchestratorLabel(record, options.color), index === focusIndex, options.color)));
     }
-    lines.push("", "New orchestrator", "");
-    const fallback = choices.find((choice) => choice.provider.provider === "codex")?.provider.fallbackReason;
-    if (fallback !== undefined) {
-      lines.push(paint(fit(`~ Codex models are a stored list — ${fallback}`, options.width), "muted", options.color), "");
+    const filter = picker.filter ?? "";
+    lines.push("", filter.trim() === "" ? "New orchestrator" : `New orchestrator · ${filter}`, "");
+    const announced = new Set<string>();
+    for (const choice of choices) {
+      const reason = choice.provider.fallbackReason;
+      if (reason === undefined || announced.has(choice.provider.provider)) continue;
+      announced.add(choice.provider.provider);
+      lines.push(paint(
+        fit(`~ ${choice.provider.label} models are a stored list — ${reason}`, options.width),
+        "muted",
+        options.color,
+      ));
     }
-    lines.push(...choices.map((choice, index) =>
+    if (announced.size > 0) lines.push("");
+    const visible = visibleOrchestratorModels(choices, filter);
+    const footerRows = (state.notice === undefined ? 0 : 1) + 2;
+    const visibleRows = Math.max(1, options.height - footerRows - lines.length);
+    const focusedModel = picker.focus.kind === "profile" ? picker.focus.modelIndex : undefined;
+    const selectedSlot = focusedModel === undefined
+      ? 0
+      : visible.findIndex((row) => row.modelIndex === focusedModel);
+    const offset = pickerScrollOffset(Math.max(0, selectedSlot), visible.length, visibleRows);
+    lines.push(...visible.slice(offset, offset + visibleRows).map((row) =>
       pickerRow(
-        `${choice.label}  ${paint(choice.provider.label, "dim", options.color)}`,
-        existing.length + index === focusIndex,
+        `${row.choice.label}  ${paint(row.choice.provider.label, "dim", options.color)}`,
+        focusedModel === row.modelIndex,
         options.color,
       )));
+    if (visible.length === 0) {
+      lines.push(paint(`No model matches ${filter.trim()}`, "muted", options.color));
+    }
+    if (visible.length > visibleRows) {
+      range = ` · ${offset + 1}-${Math.min(visible.length, offset + visibleRows)} of ${visible.length}`;
+    }
     const selectedExisting = existing[focusIndex];
     if (selectedExisting !== undefined) {
       destructiveHint = isTerminalSession(selectedExisting)
@@ -297,11 +381,11 @@ export function renderOrchestratorPicker(
       pickerRow(effort === "native-default" ? "Provider managed" : effort, index === picker.effortIndex, options.color)));
   }
 
-  const targetHint = picker.step === "target" && picker.focus.kind === "existing-group"
+  const targetHint = `${picker.step === "target" && picker.focus.kind === "existing-group"
     ? "↑↓ select · enter expand/collapse · ←→ fold/unfold · esc back"
     : destructiveHint === undefined
     ? "↑↓ select · enter focus/next · esc back"
-    : `↑↓ select · enter focus/next · ${destructiveHint} · esc back`;
+    : `↑↓ select · enter focus/next · ${destructiveHint} · esc back`} · type to filter${range}`;
   const footer = [
     ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
     paint("─".repeat(options.width), "dim", options.color),
@@ -340,7 +424,58 @@ export function orchestratorSelection(
 }
 
 export function initialOrchestratorPicker(_snapshot: FleetSnapshot, _cwd: string): OrchestratorPickerState {
-  return { step: "target", focus: { kind: "profile", modelIndex: 0 } };
+  return { step: "target", focus: { kind: "profile", modelIndex: 0 }, filter: "" };
+}
+
+/** New-orchestrator rows matching what was typed. `modelIndex` stays an index into the full catalog. */
+export function visibleOrchestratorModels(
+  choices: readonly OrchestratorModelChoice[],
+  filter: string,
+): readonly { choice: OrchestratorModelChoice; modelIndex: number }[] {
+  const needle = filter.trim().toLowerCase();
+  if (needle === "") return choices.map((choice, modelIndex) => ({ choice, modelIndex }));
+  return choices.flatMap((choice, modelIndex) =>
+    `${choice.model} ${choice.label} ${choice.provider.provider} ${choice.provider.label}`
+      .toLowerCase()
+      .includes(needle)
+      ? [{ choice, modelIndex }]
+      : []);
+}
+
+/**
+ * Cursor's effort is the slug. Its catalog effort list is only `native-default`, so the effort
+ * step would be a single "Provider managed" row. Codex and Claude keep that step even when a
+ * discovered model has no other rung: choosing provider-managed is still an answer there.
+ */
+function providerManagedOnly(choice: OrchestratorModelChoice | undefined): boolean {
+  const efforts = choice?.provider.efforts ?? [];
+  return choice?.provider.provider === "cursor"
+    && efforts.length === 1
+    && efforts[0] === "native-default";
+}
+
+function orchestratorTargetPosition(
+  focus: OrchestratorPickerFocus,
+  existing: readonly SessionRecord[],
+  visible: readonly { modelIndex: number }[],
+): number {
+  if (focus.kind === "existing-group") return 0;
+  if (focus.kind === "existing") {
+    const at = existing.findIndex((record) => record.id === focus.sessionId);
+    return at < 0 ? 0 : at + 1;
+  }
+  const slot = visible.findIndex((row) => row.modelIndex === focus.modelIndex);
+  return slot < 0 ? 0 : 1 + existing.length + slot;
+}
+
+function orchestratorTargetFocus(
+  index: number,
+  existing: readonly SessionRecord[],
+  visible: readonly { modelIndex: number }[],
+): OrchestratorPickerFocus {
+  const record = existing[index];
+  if (record !== undefined) return { kind: "existing", sessionId: record.id };
+  return { kind: "profile", modelIndex: visible[index - existing.length]?.modelIndex ?? 0 };
 }
 
 /** Index among target rows, excluding the disclosure; -1 for that header or a deleted Orc. */

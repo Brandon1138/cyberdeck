@@ -3020,6 +3020,8 @@ describe("fleet controls", () => {
     // Cursor writes no transcript at all, so its column can never be more than a launch value.
     expect(threadIdentity(session({ provider: "cursor", model: "cursor-grok-4.6-high" })))
       .toBe("~Cursor Grok 4.6 High · Provider managed");
+    expect(threadIdentity(session({ provider: "cursor", model: "cursor-grok-4.7-xhigh" })))
+      .toBe("~Grok 4.7 Extra High · Provider managed");
   });
 
   it("offers the models the providers currently advertise, marking a list nobody could verify", () => {

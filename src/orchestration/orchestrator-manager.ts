@@ -163,18 +163,31 @@ export class OrchestratorManager {
     request: CreateOrchestratorRequest,
     origin?: PeerOrigin,
   ): Promise<OrchestratorManagerResult> {
-    const capabilities = request.provider === "codex" ? await this.capabilities() : undefined;
-    validateCreateSelection(request, orchestratorCatalog(capabilities));
+    validateCreateSelection(request, orchestratorCatalog(await this.capabilities()));
     const scope: OrchestratorScope = request.scope === "fleet"
       ? { kind: "fleet" }
       : { kind: "workspace", cwd: request.cwd };
     return this.createBound(request, scope, true, undefined, origin);
   }
 
-  /** Fleet and creation validate against the same first-party Codex discovery context. */
+  /**
+   * Fleet and creation validate against the same discovery context.
+   *
+   * Codex is the first-party listing. Cursor is `agent models`. Both are returned together so a
+   * model the picker offered is the model create will accept. Claude has no listing to ask for.
+   */
   async capabilities(): Promise<ResolvedWorkerCapability[]> {
-    return this.readCapabilities?.("codex")
-      ?? fallbackWorkerCapabilities("Codex orchestrator discovery is unavailable", "codex");
+    if (this.readCapabilities === undefined) {
+      return [
+        ...fallbackWorkerCapabilities("Codex orchestrator discovery is unavailable", "codex"),
+        ...fallbackWorkerCapabilities("Cursor orchestrator discovery is unavailable", "cursor"),
+      ];
+    }
+    const [codex, cursor] = await Promise.all([
+      this.readCapabilities("codex"),
+      this.readCapabilities("cursor"),
+    ]);
+    return [...codex, ...cursor];
   }
 
   /**
