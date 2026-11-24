@@ -5,7 +5,8 @@ import type { WorkerHandoffResult } from "../../orchestration/worker-handoff-ser
 import { displayWidth } from "../display-width.js";
 import { SELECTION_RULE } from "./constants.js";
 import { isTerminalSession, orderedThreads } from "./list-rows.js";
-import { existingOrchestratorLabel, existingOrchestrators, pickerRow, renderCursorlessPickerFrame } from "./picker-orchestrator.js";
+import { existingOrchestratorLabel, existingOrchestrators } from "./orchestrator-targets.js";
+import { pickerRow, renderCursorlessPickerFrame } from "./picker-frame.js";
 import { cutToWidthFromEnd, displayThreadName, fit } from "./render-composer.js";
 import { renderHeader } from "./render-list.js";
 import { boundedIndex } from "./render-rows.js";

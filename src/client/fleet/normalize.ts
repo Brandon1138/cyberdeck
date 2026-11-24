@@ -7,7 +7,7 @@ import { reconcileReplyWatermarks } from "./visit-state.js";
 import { reconcileLifecycleWatermarks, pendingLifecycleThreads } from "./lifecycle-state.js";
 import { isLiveThread, threadRuntimePresence } from "./runtime-presence.js";
 import { handoffMarks, isHandoffEligible } from "./picker-handoff.js";
-import { existingOrchestrators, orchestratorFocusAt, orchestratorFocusIndex } from "./picker-orchestrator.js";
+import { existingOrchestrators, orchestratorFocusAt, orchestratorFocusIndex } from "./orchestrator-targets.js";
 import { FleetAction, FleetSnapshot, FleetState, OrchestratorPickerState } from "./state.js";
 
 export function openAction(record: SessionRecord): FleetAction {

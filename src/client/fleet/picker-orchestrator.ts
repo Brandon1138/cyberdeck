@@ -1,16 +1,22 @@
-import type { SessionRecord } from "../../domain/session.js";
-import { stripTerminalControl } from "../../domain/terminal-replay.js";
 import { DELETE_CONFIRMATION_MS } from "./constants.js";
 import { threadSubject } from "./list-groups.js";
 import { isTerminalSession, orderedThreads } from "./list-rows.js";
-import { friendlyModel } from "./model-labels.js";
-import { displayThreadName, fit } from "./render-composer.js";
+import {
+  existingOrchestratorLabel,
+  existingOrchestrators,
+  orchestratorFocusIndex,
+  orchestratorTargetFocus,
+  orchestratorTargetPosition,
+  providerManagedOnly,
+  visibleOrchestratorModels,
+} from "./orchestrator-targets.js";
+import { pickerRow, renderCursorlessPickerFrame } from "./picker-frame.js";
+import { fit } from "./render-composer.js";
 import { renderHeader } from "./render-list.js";
-import { boundedIndex } from "./render-rows.js";
+import { boundedIndex, pickerScrollOffset } from "./render-rows.js";
 import { type OrchestratorModelChoice, ResolvedFleetRenderOptions } from "./runtime-options.js";
 import { paint, renderNotice } from "./slash-commands.js";
-import { FleetSnapshot, FleetState, FleetTransition, OrchestratorPickerFocus, OrchestratorPickerState } from "./state.js";
-import { threadStatus } from "./transport.js";
+import { FleetSnapshot, FleetState, FleetTransition, OrchestratorPickerState } from "./state.js";
 
 export function transitionOrchestratorPicker(
   state: FleetState,
@@ -23,6 +29,15 @@ export function transitionOrchestratorPicker(
   if (picker.step === "project") {
     const { modelIndex, effortIndex, projectRoot } = picker;
     if (key === "escape") {
+      if (providerManagedOnly(choices[modelIndex])) {
+        return {
+          state: {
+            ...state,
+            notice: undefined,
+            orchestratorPicker: { step: "target", focus: { kind: "profile", modelIndex }, filter: "" },
+          },
+        };
+      }
       return { state: { ...state, notice: undefined, orchestratorPicker: { step: "effort", modelIndex, effortIndex } } };
     }
     const projects = [undefined, ...(snapshot.projects ?? [])];
@@ -58,14 +73,20 @@ export function transitionOrchestratorPicker(
     const delta = key === "up" ? -1 : 1;
     if (picker.step === "target") {
       const existing = picker.existingExpanded ? existingOrchestrators(snapshot) : [];
-      const current = picker.focus.kind === "existing-group"
-        ? 0 : orchestratorFocusIndex(picker.focus, existing) + 1;
-      const index = boundedIndex(current + delta, 1 + existing.length + choices.length);
+      const visible = visibleOrchestratorModels(choices, picker.filter ?? "");
+      const index = boundedIndex(
+        orchestratorTargetPosition(picker.focus, existing, visible) + delta,
+        1 + existing.length + visible.length,
+      );
       return {
         state: {
           ...state,
-          orchestratorPicker: { ...picker, focus: index === 0
-            ? { kind: "existing-group" } : orchestratorFocusAt(index - 1, existing) },
+          orchestratorPicker: {
+            ...picker,
+            focus: index === 0
+              ? { kind: "existing-group" }
+              : orchestratorTargetFocus(index - 1, existing, visible),
+          },
         },
       };
     }
@@ -151,6 +172,19 @@ export function transitionOrchestratorPicker(
     };
   }
 
+  if (picker.step === "target" && (key === "backspace" || ([...key].length === 1 && key.charCodeAt(0) >= 0x20))) {
+    const filter = key === "backspace"
+      ? [...(picker.filter ?? "")].slice(0, -1).join("")
+      : `${picker.filter ?? ""}${key}`;
+    const visible = visibleOrchestratorModels(choices, filter);
+    const focus = picker.focus;
+    const focusedModel = focus.kind === "profile" ? focus.modelIndex : undefined;
+    const nextFocus = focusedModel !== undefined && !visible.some((row) => row.modelIndex === focusedModel)
+      ? { kind: "profile" as const, modelIndex: visible[0]?.modelIndex ?? focusedModel }
+      : focus;
+    return { state: { ...state, notice: undefined, orchestratorPicker: { ...picker, filter, focus: nextFocus } } };
+  }
+
   if (key !== "enter") return { state };
   if (picker.step === "target") {
     const focus = picker.focus;
@@ -188,30 +222,57 @@ export function transitionOrchestratorPicker(
         },
       };
     }
-    const modelIndex = focus.modelIndex;
-    const choice = choices[modelIndex];
-    if (choice === undefined) {
+    const visible = visibleOrchestratorModels(choices, picker.filter ?? "");
+    const selected = visible.find((row) => row.modelIndex === focus.modelIndex);
+    if (selected === undefined) {
+      const filter = picker.filter?.trim() ?? "";
       return {
         state: {
           ...state,
-          notice: "No orchestrator model is available",
+          notice: filter === "" ? "No orchestrator model is available" : `No model matches ${filter}`,
           noticeTone: "error",
         },
       };
     }
-    return {
-      state: {
-        ...state,
-        orchestratorPicker: { step: "effort", modelIndex, effortIndex: 0 },
-        notice: undefined,
-      },
-    };
+    return continueOrchestratorModel(state, snapshot, selected.modelIndex);
   }
 
   if (snapshot.projects?.length) {
     return { state: { ...state, orchestratorPicker: { ...picker, step: "project" }, notice: undefined } };
   }
   return createSelectedOrchestrator(state, picker);
+}
+
+function continueOrchestratorModel(
+  state: FleetState,
+  snapshot: FleetSnapshot,
+  modelIndex: number,
+): FleetTransition {
+  const choice = state.workerModels.orchestratorChoices[modelIndex];
+  if (choice === undefined) {
+    return { state: { ...state, notice: "No orchestrator model is available", noticeTone: "error" } };
+  }
+  // Cursor's only effort is the slug itself. A one-row "Provider managed" screen is a keypress
+  // that chooses nothing, so Enter goes on to the project or creates the Orc.
+  if (providerManagedOnly(choice)) {
+    if (snapshot.projects?.length) {
+      return {
+        state: {
+          ...state,
+          orchestratorPicker: { step: "project", modelIndex, effortIndex: 0 },
+          notice: undefined,
+        },
+      };
+    }
+    return createSelectedOrchestrator(state, { step: "effort", modelIndex, effortIndex: 0 });
+  }
+  return {
+    state: {
+      ...state,
+      orchestratorPicker: { step: "effort", modelIndex, effortIndex: 0 },
+      notice: undefined,
+    },
+  };
 }
 
 function createSelectedOrchestrator(state: FleetState, picker: Exclude<OrchestratorPickerState, { step: "target" }>,
@@ -242,8 +303,13 @@ export function renderOrchestratorPicker(
   const picker = state.orchestratorPicker!;
   const choices = state.workerModels.orchestratorChoices;
   const selection = picker.step !== "target" ? orchestratorSelection(picker, choices) : undefined;
-  const totalSteps = snapshot.projects?.length || picker.step === "project" ? 3 : 2;
-  const stepNumber = picker.step === "target" ? 1 : picker.step === "effort" ? 2 : 3;
+  const focusedChoice = picker.step === "target"
+    ? (picker.focus.kind === "profile" ? choices[picker.focus.modelIndex] : undefined)
+    : choices[picker.modelIndex];
+  const skipsEffort = providerManagedOnly(focusedChoice);
+  const hasProjects = (snapshot.projects?.length ?? 0) > 0 || picker.step === "project";
+  const totalSteps = 1 + (skipsEffort ? 0 : 1) + (hasProjects ? 1 : 0);
+  const stepNumber = picker.step === "target" ? 1 : picker.step === "effort" ? 2 : skipsEffort ? 2 : 3;
   const lines = [
     ...renderHeader(orderedThreads(snapshot), state, options),
     "",
@@ -254,6 +320,7 @@ export function renderOrchestratorPicker(
   // Set only when the focused row is an existing orchestrator, never a "New orchestrator"
   // profile — that row has nothing for ctrl+x to target, so the hint stays silent on it.
   let destructiveHint: string | undefined;
+  let range = "";
   if (picker.step === "target") {
     const existing = existingOrchestrators(snapshot);
     const focusIndex = orchestratorFocusIndex(picker.focus, existing);
@@ -267,17 +334,40 @@ export function renderOrchestratorPicker(
       lines.push(...existing.map((record, index) =>
         pickerRow(existingOrchestratorLabel(record, options.color), index === focusIndex, options.color)));
     }
-    lines.push("", "New orchestrator", "");
-    const fallback = choices.find((choice) => choice.provider.provider === "codex")?.provider.fallbackReason;
-    if (fallback !== undefined) {
-      lines.push(paint(fit(`~ Codex models are a stored list — ${fallback}`, options.width), "muted", options.color), "");
+    const filter = picker.filter ?? "";
+    lines.push("", filter.trim() === "" ? "New orchestrator" : `New orchestrator · ${filter}`, "");
+    const announced = new Set<string>();
+    for (const choice of choices) {
+      const reason = choice.provider.fallbackReason;
+      if (reason === undefined || announced.has(choice.provider.provider)) continue;
+      announced.add(choice.provider.provider);
+      lines.push(paint(
+        fit(`~ ${choice.provider.label} models are a stored list — ${reason}`, options.width),
+        "muted",
+        options.color,
+      ));
     }
-    lines.push(...choices.map((choice, index) =>
+    if (announced.size > 0) lines.push("");
+    const visible = visibleOrchestratorModels(choices, filter);
+    const footerRows = (state.notice === undefined ? 0 : 1) + 2;
+    const visibleRows = Math.max(1, options.height - footerRows - lines.length);
+    const focusedModel = picker.focus.kind === "profile" ? picker.focus.modelIndex : undefined;
+    const selectedSlot = focusedModel === undefined
+      ? 0
+      : visible.findIndex((row) => row.modelIndex === focusedModel);
+    const offset = pickerScrollOffset(Math.max(0, selectedSlot), visible.length, visibleRows);
+    lines.push(...visible.slice(offset, offset + visibleRows).map((row) =>
       pickerRow(
-        `${choice.label}  ${paint(choice.provider.label, "dim", options.color)}`,
-        existing.length + index === focusIndex,
+        `${row.choice.label}  ${paint(row.choice.provider.label, "dim", options.color)}`,
+        focusedModel === row.modelIndex,
         options.color,
       )));
+    if (visible.length === 0) {
+      lines.push(paint(`No model matches ${filter.trim()}`, "muted", options.color));
+    }
+    if (visible.length > visibleRows) {
+      range = ` · ${offset + 1}-${Math.min(visible.length, offset + visibleRows)} of ${visible.length}`;
+    }
     const selectedExisting = existing[focusIndex];
     if (selectedExisting !== undefined) {
       destructiveHint = isTerminalSession(selectedExisting)
@@ -297,11 +387,11 @@ export function renderOrchestratorPicker(
       pickerRow(effort === "native-default" ? "Provider managed" : effort, index === picker.effortIndex, options.color)));
   }
 
-  const targetHint = picker.step === "target" && picker.focus.kind === "existing-group"
+  const targetHint = `${picker.step === "target" && picker.focus.kind === "existing-group"
     ? "↑↓ select · enter expand/collapse · ←→ fold/unfold · esc back"
     : destructiveHint === undefined
     ? "↑↓ select · enter focus/next · esc back"
-    : `↑↓ select · enter focus/next · ${destructiveHint} · esc back`;
+    : `↑↓ select · enter focus/next · ${destructiveHint} · esc back`} · type to filter${range}`;
   const footer = [
     ...(state.notice === undefined ? [] : [renderNotice(state.notice, state.noticeTone, options.width, options.color)]),
     paint("─".repeat(options.width), "dim", options.color),
@@ -340,113 +430,5 @@ export function orchestratorSelection(
 }
 
 export function initialOrchestratorPicker(_snapshot: FleetSnapshot, _cwd: string): OrchestratorPickerState {
-  return { step: "target", focus: { kind: "profile", modelIndex: 0 } };
-}
-
-/** Index among target rows, excluding the disclosure; -1 for that header or a deleted Orc. */
-export function orchestratorFocusIndex(
-  focus: OrchestratorPickerFocus,
-  existing: readonly SessionRecord[],
-): number {
-  return focus.kind === "profile"
-    ? existing.length + focus.modelIndex
-    : focus.kind === "existing-group" ? -1
-      : existing.findIndex((record) => record.id === focus.sessionId);
-}
-
-/** The inverse: the durable focus a row position names, so navigation never stores a position. */
-export function orchestratorFocusAt(
-  index: number,
-  existing: readonly SessionRecord[],
-): OrchestratorPickerFocus {
-  const record = existing[index];
-  return record === undefined
-    ? { kind: "profile", modelIndex: Math.max(0, index - existing.length) }
-    : { kind: "existing", sessionId: record.id };
-}
-
-/**
- * Every orchestrator the broker still holds, live or terminal, in the fleet list's own order.
- *
- * Terminal rows stay until they are deleted, exactly as they do in the fleet list. Filtering them
- * out broke the ctrl+x ladder on the real broker: `SessionRegistry.stop()` moves a live
- * orchestrator to cancelled/stopping on the first press, so the row vanished before the second
- * press could arm the delete and the third could run it. A row that cannot be reached is a row
- * that cannot be cleaned up, so retention is now the whole record set and the label carries the
- * state instead.
- */
-export function existingOrchestrators(snapshot: FleetSnapshot): SessionRecord[] {
-  return orderedThreads(snapshot)
-    .map(({ record }) => record)
-    .filter((record) => record.kind === "orchestrator" && record.role === "orchestrator");
-}
-
-export function existingOrchestratorLabel(record: SessionRecord, color: boolean): string {
-  const name = displayThreadName(
-    record.name ?? `${friendlyModel(record.provider, record.model)} orchestrator`,
-  );
-  const lifecycle = record.attachmentState === "controlled"
-    ? paint("in use", "yellow", color)
-    : record.executionState === "active"
-      ? paint("available", "green", color)
-      : record.executionState === "starting"
-        ? paint("starting", "green", color)
-        // Anything else wears its own outcome rather than a join affordance. A stopped orchestrator
-        // sits in this list until it is deleted, and must not read as one waiting to be joined.
-        : paint(terminalOrchestratorState(record), "dim", color);
-  return `${name}  ${paint(record.id.slice(0, 8), "dim", color)}  ${lifecycle}`;
-}
-
-/**
- * The fleet list's own status vocabulary, lowercased for a picker row. Only non-active records
- * reach it, so the `active` branch of {@link threadStatus} — the one that reads the terminal
- * replay — is unreachable and the empty replay below is never consulted.
- */
-export function terminalOrchestratorState(record: SessionRecord): string {
-  return threadStatus({ record }).toLowerCase();
-}
-
-export function pickerRow(value: string, selected: boolean, color: boolean): string {
-  return `${paint(selected ? "›" : "·", selected ? "bold" : "dim", color)} ${selected ? paint(value, "bold", color) : value}`;
-}
-
-/**
- * A cursorless picker still needs a visible interaction anchor in a very short pane.
- *
- * Every selected picker row — including the directed-handoff draft — starts with `›`. Keep that
- * row inside the body window, and when the footer itself would consume the pane, spend the first
- * physical row on the selection before retaining as many trailing hints as still fit. This is a
- * visual anchor only; it never turns a picker into a terminal caret owner.
- */
-export function renderCursorlessPickerFrame(
-  lines: readonly string[],
-  footer: readonly string[],
-  height: number,
-  priorityFooterRows = 0,
-): string {
-  const frameHeight = Math.max(1, height);
-  const selectedIndex = lines.findLastIndex((line) =>
-    stripTerminalControl(line).startsWith("› "));
-  const fallbackIndex = lines.findLastIndex((line) => stripTerminalControl(line).trim() !== "");
-  const anchorIndex = Math.max(0, selectedIndex === -1 ? fallbackIndex : selectedIndex);
-
-  if (frameHeight <= footer.length) {
-    const footerCapacity = frameHeight - 1;
-    const priorityFooter = footer.slice(0, Math.min(priorityFooterRows, footerCapacity));
-    const trailingCapacity = footerCapacity - priorityFooter.length;
-    const trailingFooter = trailingCapacity === 0
-      ? []
-      : footer.slice(priorityFooterRows).slice(-trailingCapacity);
-    const visibleFooter = [...priorityFooter, ...trailingFooter];
-    return [lines[anchorIndex] ?? footer.at(-1) ?? "", ...visibleFooter].join("\n");
-  }
-
-  const bodyHeight = frameHeight - footer.length;
-  const firstBodyRow = Math.max(
-    0,
-    Math.min(anchorIndex - bodyHeight + 1, lines.length - bodyHeight),
-  );
-  const body = lines.slice(firstBodyRow, firstBodyRow + bodyHeight);
-  while (body.length < bodyHeight) body.push("");
-  return [...body, ...footer].join("\n");
+  return { step: "target", focus: { kind: "profile", modelIndex: 0 }, filter: "" };
 }
