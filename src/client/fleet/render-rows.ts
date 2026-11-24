@@ -20,6 +20,17 @@ export function boundedIndex(value: number, length: number): number {
 }
 
 /**
+ * Keep the selected row on screen. The model list is longer than a terminal — Cursor alone
+ * contributes one entry per model-and-effort pair — so without a window the selection walks off the
+ * bottom and the picker stops responding to the eye. Derived from the index rather than stored, so
+ * there is no second cursor that can disagree with the selection.
+ */
+export function pickerScrollOffset(selectedIndex: number, total: number, visibleRows: number): number {
+  const centered = selectedIndex - Math.floor(visibleRows / 2);
+  return Math.max(0, Math.min(centered, Math.max(0, total - visibleRows)));
+}
+
+/**
  * Left gutter shared by folder and thread rows. The focused row carries a rule
  * rather than a color change, so the bar reads the same with color disabled.
  */

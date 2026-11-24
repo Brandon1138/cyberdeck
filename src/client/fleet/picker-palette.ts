@@ -3,7 +3,7 @@ import { CONFIGURABLE_PERMISSION_PROVIDERS, permissionProviderLabel, resolveProv
 import { COMMAND_PALETTE_VISIBLE_ROWS, DEFAULT_PERMISSION_POLICIES, PERMISSION_POLICIES, SLASH_COMMANDS } from "./constants.js";
 import { composerCwd } from "./model-labels.js";
 import { openHandoffPicker } from "./picker-handoff.js";
-import { pickerRow, renderCursorlessPickerFrame } from "./picker-orchestrator.js";
+import { pickerRow, renderCursorlessPickerFrame } from "./picker-frame.js";
 import { openWorkerPicker } from "./picker-worker.js";
 import { fit, renderComposerLines } from "./render-composer.js";
 import { renderHeader } from "./render-list.js";

@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SessionRecord } from "../../src/domain/session.js";
 import { OrchestratorManager } from "../../src/orchestration/orchestrator-manager.js";
-import { WorkerCapabilityCatalog, parseCodexModelCatalog } from "../../src/orchestration/worker-capability-catalog.js";
+import {
+  WorkerCapabilityCatalog, parseCodexModelCatalog, type ProviderModelListing,
+} from "../../src/orchestration/worker-capability-catalog.js";
 import { fleetMethods } from "../../src/broker/server/fleet-methods.js";
 
 function setup(unavailable = false) {
@@ -36,7 +38,18 @@ describe("Codex orchestrator launch discovery", () => {
     // Fleet's RPC and creation use the same first-party catalog instance.
     await expect(fleetMethods["orchestrator.capabilities"]!(
       { options: { orchestrators: manager } } as never, {} as never, {} as never,
-    )).resolves.toEqual([expect.objectContaining({ models: ["gpt-6-astra", "future-codex-model", "empty-efforts", "future-efforts"] })]);
+    )).resolves.toEqual([
+      expect.objectContaining({
+        provider: "codex",
+        source: "provider-query",
+        models: ["gpt-6-astra", "future-codex-model", "empty-efforts", "future-efforts"],
+      }),
+      expect.objectContaining({
+        provider: "cursor",
+        source: "provider-query",
+        models: ["gpt-6-astra", "future-codex-model", "empty-efforts", "future-efforts"],
+      }),
+    ]);
     const probes = list.mock.calls.length;
     const result = await manager.create({ ...request, model });
     expect(result.binding).toMatchObject({ provider: "codex", model });
@@ -77,5 +90,43 @@ describe("Codex orchestrator launch discovery", () => {
     await expect(manager.create({ ...request, provider: "antigravity", model: "gpt-5.6-sol" }))
       .rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
     expect(start).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the stored Cursor slugs when discovery fails and still refuses a slug they do not name", async () => {
+    const { manager, start } = setup(true);
+    await manager.create({ provider: "cursor", model: "kimi-k3-max", cwd: "/repo", scope: "fleet" });
+    expect(start.mock.calls[0]![0]).toMatchObject({ provider: "cursor", model: "kimi-k3-max" });
+    expect(start.mock.calls[0]![0].effort).toBeUndefined();
+    await expect(manager.create({
+      provider: "cursor", model: "cursor-grok-4.7-xhigh", cwd: "/repo", scope: "fleet",
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
+  });
+
+  it("accepts a Cursor slug the listing named and refuses one it did not, without an effort field", async () => {
+    const list = vi.fn(async (provider: string): Promise<ProviderModelListing> => {
+      if (provider === "cursor") return { models: [{ id: "cursor-grok-4.7-xhigh", label: "Grok 4.7 Extra High" }] };
+      if (provider === "codex") return { models: [{ id: "gpt-6-astra", efforts: ["high"] }] };
+      return { unavailable: `${provider} has no orchestrator model discovery` };
+    });
+    const catalog = new WorkerCapabilityCatalog({ probe: { list } });
+    const start = vi.fn(async (request: Partial<SessionRecord>, _prompt: unknown, activate?: (session: SessionRecord) => Promise<void>) => {
+      const session = { ...request, id: "11111111-1111-4111-8111-111111111111", createdAt: "2026-09-04T12:00:00Z" } as SessionRecord;
+      await activate?.(session);
+      return session;
+    });
+    const manager = new OrchestratorManager(
+      { start } as never, { put: vi.fn() } as never, undefined, undefined,
+      (provider) => catalog.resolve(provider),
+    );
+    await expect(manager.create({
+      provider: "cursor", model: "cursor-grok-4.7-xhigh", cwd: "/repo", scope: "fleet",
+    })).resolves.toMatchObject({ binding: { provider: "cursor", model: "cursor-grok-4.7-xhigh" } });
+    expect(start.mock.calls[0]![0].effort).toBeUndefined();
+    await expect(manager.create({
+      provider: "cursor", model: "composer-2.5", cwd: "/repo", scope: "fleet",
+    })).rejects.toMatchObject({ code: "ORCHESTRATOR_SELECTION_UNSUPPORTED" });
+    await manager.create({ provider: "codex", model: "gpt-6-astra", effort: "high", cwd: "/repo", scope: "fleet" });
+    expect(start.mock.calls[1]![0]).toMatchObject({ provider: "codex", model: "gpt-6-astra", effort: "high" });
+    expect(list.mock.calls.map(([provider]) => provider)).toEqual(expect.arrayContaining(["codex", "cursor"]));
   });
 });

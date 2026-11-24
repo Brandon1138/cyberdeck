@@ -40,22 +40,41 @@ export const ORCHESTRATOR_CATALOG: readonly OrchestratorCatalogEntry[] = [
   },
 ];
 
-/** Codex models come from discovery configured for the orchestrator's first-party launch. */
+/**
+ * Codex and Cursor models come from discovery. Claude stays on its stored aliases.
+ *
+ * A live Cursor listing replaces the four stored slugs and keeps `native-default` as the only
+ * effort: Cursor encodes effort in the slug, and copying a per-model effort range would offer a
+ * flag the adapter refuses. A Cursor entry that is not a provider query keeps those four slugs
+ * and carries the reason. It does not adopt the worker snapshot's longer model list. An omitted
+ * Cursor entry leaves the stored slugs alone, with no failure banner, because nobody was asked.
+ */
 export function orchestratorCatalog(
   capabilities: readonly ResolvedWorkerCapability[] = [],
 ): readonly OrchestratorCatalogEntry[] {
   const codex = capabilities.find((entry) => entry.provider === "codex");
+  const cursor = capabilities.find((entry) => entry.provider === "cursor");
   return ORCHESTRATOR_CATALOG.map((entry) => {
-    if (entry.provider !== "codex") return entry;
-    if (codex?.source !== "provider-query") {
-      return { ...entry, fallbackReason: codex?.fallbackReason ?? "Codex model discovery is unavailable" };
+    if (entry.provider === "codex") {
+      if (codex?.source !== "provider-query") {
+        return { ...entry, fallbackReason: codex?.fallbackReason ?? "Codex model discovery is unavailable" };
+      }
+      return {
+        ...entry,
+        models: codex.models,
+        modelLabels: codex.modelLabels ?? {},
+        modelEfforts: Object.fromEntries(codex.models.map((model) =>
+          [model, capabilityModelEfforts(codex, model)])),
+      };
+    }
+    if (entry.provider !== "cursor" || cursor === undefined) return entry;
+    if (cursor.source !== "provider-query") {
+      return { ...entry, fallbackReason: cursor.fallbackReason ?? "Cursor model discovery is unavailable" };
     }
     return {
       ...entry,
-      models: codex.models,
-      modelLabels: codex.modelLabels ?? {},
-      modelEfforts: Object.fromEntries(codex.models.map((model) =>
-        [model, capabilityModelEfforts(codex, model)])),
+      models: cursor.models,
+      modelLabels: cursor.modelLabels ?? {},
     };
   });
 }

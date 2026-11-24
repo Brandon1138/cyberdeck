@@ -69,6 +69,7 @@ import { GitWorkspaceProbe } from "../orchestration/git-workspace-probe.js";
 import { GitWorktreeProvisioner } from "../orchestration/git-worktree-provisioner.js";
 import { WorkerCapabilityCatalog } from "../orchestration/worker-capability-catalog.js";
 import { CodexOrchestratorModelProbe } from "../providers/codex-orchestrator-model-probe.js";
+import { OrchestratorModelProbe } from "../providers/orchestrator-model-probe.js";
 import { InstructionQueue } from "../orchestration/instruction-queue.js";
 import { LocalWorkerControlService } from "../orchestration/local-worker-control-service.js";
 import { WorkerBudgetEnforcer } from "./worker-budget-enforcer.js";
@@ -297,10 +298,11 @@ export async function runBroker(
   // coordination substrate and the instruction repository through the two seams composed above.
   const notificationInbox = new OrchestratorNotificationStore(stateDirectory);
   await notificationInbox.load();
-  // Each launch context has its own cached catalog; orchestrators force first-party Codex.
+  // Each launch context has its own cached catalog. Codex stays on the first-party probe;
+  // Cursor asks `agent models` through the same parser, and the two listings do not share a cache.
   const workerCapabilities = new WorkerCapabilityCatalog();
   const orchestratorCapabilities = new WorkerCapabilityCatalog({
-    probe: new CodexOrchestratorModelProbe(undefined, codexOrchestratorHome),
+    probe: new OrchestratorModelProbe(new CodexOrchestratorModelProbe(undefined, codexOrchestratorHome)),
   });
   const strigoiAdmission = new StrigoiAdmission(orchestratorStore.strigoi, orchestratorStore, registry);
   const attention = await createOrchestratorAttention(stateDirectory, { registry, bindings: orchestratorStore, coordination: observedCoordination, transcripts, inbox: notificationInbox, strigoi: strigoiAdmission, resident: orchestratorStore.strigoi }, evidence.attentionStore);

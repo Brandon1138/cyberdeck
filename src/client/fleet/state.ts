@@ -104,6 +104,8 @@ export type OrchestratorPickerState =
     step: "target";
     focus: OrchestratorPickerFocus;
     existingExpanded?: boolean;
+    /** Narrows New orchestrator rows by label, slug, and provider. Existing Orcs stay listed. */
+    filter?: string;
     /** Mirrors the fleet list's ctrl+x ladder, scoped to the picker's own selection. */
     stopAcknowledgement?: StopAcknowledgement | undefined;
     deleteConfirmation?: DeleteConfirmation | undefined;

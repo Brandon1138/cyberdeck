@@ -2,10 +2,10 @@ import { stripTerminalControl } from "../../domain/terminal-replay.js";
 import { expandPath } from "../path-completion.js";
 import { composerCwd, friendlyEffort } from "./model-labels.js";
 import { adoptOrchestratorModels } from "./orchestrator-models.js";
-import { pickerRow, renderCursorlessPickerFrame } from "./picker-orchestrator.js";
+import { pickerRow, renderCursorlessPickerFrame } from "./picker-frame.js";
 import { fit } from "./render-composer.js";
 import { renderHeader } from "./render-list.js";
-import { boundedIndex } from "./render-rows.js";
+import { boundedIndex, pickerScrollOffset } from "./render-rows.js";
 import { ResolvedFleetRenderOptions, WorkerModelCatalog, WorkerModelChoice } from "./runtime-options.js";
 import { paint, shortPath } from "./slash-commands.js";
 import { FleetSnapshot, FleetState, FleetTransition, LaunchProfile } from "./state.js";
@@ -296,17 +296,6 @@ export function adoptWorkerModels(state: FleetState, workerModels: WorkerModelCa
   return modelIndex === -1
     ? { ...next, workerPicker: { ...picker, step: "model", modelIndex: 0, effortIndex: 0 } }
     : { ...next, workerPicker: { ...picker, modelIndex } };
-}
-
-/**
- * Keep the selected row on screen. The model list is longer than a terminal — Cursor alone
- * contributes one entry per model-and-effort pair — so without a window the selection walks off the
- * bottom and the picker stops responding to the eye. Derived from the index rather than stored, so
- * there is no second cursor that can disagree with the selection.
- */
-export function pickerScrollOffset(selectedIndex: number, total: number, visibleRows: number): number {
-  const centered = selectedIndex - Math.floor(visibleRows / 2);
-  return Math.max(0, Math.min(centered, total - visibleRows));
 }
 
 export function renderWorkerPicker(state: FleetState, options: ResolvedFleetRenderOptions): string {
