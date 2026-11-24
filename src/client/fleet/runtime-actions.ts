@@ -11,7 +11,7 @@ import { RpcError } from "../rpc-client.js";
 import { orderedThreads } from "./list-rows.js";
 import { composerCwd } from "./model-labels.js";
 import { handoffNotice } from "./picker-handoff.js";
-import { existingOrchestrators, orchestratorFocusAt } from "./picker-orchestrator.js";
+import { existingOrchestrators, orchestratorFocusAt } from "./orchestrator-targets.js";
 import { adoptWorkerModels, appendShellOutput } from "./picker-worker.js";
 import { layoutOrchestratorSessionIds } from "./render-rows.js";
 import { FleetRuntimeOptions, OrchestratorCockpitTarget, ResolvedFleetRenderOptions } from "./runtime-options.js";

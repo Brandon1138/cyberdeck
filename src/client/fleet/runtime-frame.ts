@@ -4,7 +4,7 @@ import { pullRequestLabel } from "../pr-status.js";
 import { PULL_REQUEST_CELL_WIDTH, WORKTREE_TAG_WIDTH, workerModelCatalog } from "./constants.js";
 import { fleetListRows, orderedThreads } from "./list-rows.js";
 import { handoffRecipients } from "./picker-handoff.js";
-import { existingOrchestrators, visibleOrchestratorModels } from "./picker-orchestrator.js";
+import { existingOrchestrators, visibleOrchestratorModels } from "./orchestrator-targets.js";
 import { commandPaletteCandidates } from "./picker-palette.js";
 import { pickerModelChoices } from "./picker-worker.js";
 import { pickerScrollOffset } from "./render-rows.js";

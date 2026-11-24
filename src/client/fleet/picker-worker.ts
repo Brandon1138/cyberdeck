@@ -2,7 +2,7 @@ import { stripTerminalControl } from "../../domain/terminal-replay.js";
 import { expandPath } from "../path-completion.js";
 import { composerCwd, friendlyEffort } from "./model-labels.js";
 import { adoptOrchestratorModels } from "./orchestrator-models.js";
-import { pickerRow, renderCursorlessPickerFrame } from "./picker-orchestrator.js";
+import { pickerRow, renderCursorlessPickerFrame } from "./picker-frame.js";
 import { fit } from "./render-composer.js";
 import { renderHeader } from "./render-list.js";
 import { boundedIndex, pickerScrollOffset } from "./render-rows.js";

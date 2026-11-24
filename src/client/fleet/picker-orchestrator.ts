@@ -1,16 +1,22 @@
-import type { SessionRecord } from "../../domain/session.js";
-import { stripTerminalControl } from "../../domain/terminal-replay.js";
 import { DELETE_CONFIRMATION_MS } from "./constants.js";
 import { threadSubject } from "./list-groups.js";
 import { isTerminalSession, orderedThreads } from "./list-rows.js";
-import { friendlyModel } from "./model-labels.js";
-import { displayThreadName, fit } from "./render-composer.js";
+import {
+  existingOrchestratorLabel,
+  existingOrchestrators,
+  orchestratorFocusIndex,
+  orchestratorTargetFocus,
+  orchestratorTargetPosition,
+  providerManagedOnly,
+  visibleOrchestratorModels,
+} from "./orchestrator-targets.js";
+import { pickerRow, renderCursorlessPickerFrame } from "./picker-frame.js";
+import { fit } from "./render-composer.js";
 import { renderHeader } from "./render-list.js";
 import { boundedIndex, pickerScrollOffset } from "./render-rows.js";
 import { type OrchestratorModelChoice, ResolvedFleetRenderOptions } from "./runtime-options.js";
 import { paint, renderNotice } from "./slash-commands.js";
-import { FleetSnapshot, FleetState, FleetTransition, OrchestratorPickerFocus, OrchestratorPickerState } from "./state.js";
-import { threadStatus } from "./transport.js";
+import { FleetSnapshot, FleetState, FleetTransition, OrchestratorPickerState } from "./state.js";
 
 export function transitionOrchestratorPicker(
   state: FleetState,
@@ -425,163 +431,4 @@ export function orchestratorSelection(
 
 export function initialOrchestratorPicker(_snapshot: FleetSnapshot, _cwd: string): OrchestratorPickerState {
   return { step: "target", focus: { kind: "profile", modelIndex: 0 }, filter: "" };
-}
-
-/** New-orchestrator rows matching what was typed. `modelIndex` stays an index into the full catalog. */
-export function visibleOrchestratorModels(
-  choices: readonly OrchestratorModelChoice[],
-  filter: string,
-): readonly { choice: OrchestratorModelChoice; modelIndex: number }[] {
-  const needle = filter.trim().toLowerCase();
-  if (needle === "") return choices.map((choice, modelIndex) => ({ choice, modelIndex }));
-  return choices.flatMap((choice, modelIndex) =>
-    `${choice.model} ${choice.label} ${choice.provider.provider} ${choice.provider.label}`
-      .toLowerCase()
-      .includes(needle)
-      ? [{ choice, modelIndex }]
-      : []);
-}
-
-/**
- * Cursor's effort is the slug. Its catalog effort list is only `native-default`, so the effort
- * step would be a single "Provider managed" row. Codex and Claude keep that step even when a
- * discovered model has no other rung: choosing provider-managed is still an answer there.
- */
-function providerManagedOnly(choice: OrchestratorModelChoice | undefined): boolean {
-  const efforts = choice?.provider.efforts ?? [];
-  return choice?.provider.provider === "cursor"
-    && efforts.length === 1
-    && efforts[0] === "native-default";
-}
-
-function orchestratorTargetPosition(
-  focus: OrchestratorPickerFocus,
-  existing: readonly SessionRecord[],
-  visible: readonly { modelIndex: number }[],
-): number {
-  if (focus.kind === "existing-group") return 0;
-  if (focus.kind === "existing") {
-    const at = existing.findIndex((record) => record.id === focus.sessionId);
-    return at < 0 ? 0 : at + 1;
-  }
-  const slot = visible.findIndex((row) => row.modelIndex === focus.modelIndex);
-  return slot < 0 ? 0 : 1 + existing.length + slot;
-}
-
-function orchestratorTargetFocus(
-  index: number,
-  existing: readonly SessionRecord[],
-  visible: readonly { modelIndex: number }[],
-): OrchestratorPickerFocus {
-  const record = existing[index];
-  if (record !== undefined) return { kind: "existing", sessionId: record.id };
-  return { kind: "profile", modelIndex: visible[index - existing.length]?.modelIndex ?? 0 };
-}
-
-/** Index among target rows, excluding the disclosure; -1 for that header or a deleted Orc. */
-export function orchestratorFocusIndex(
-  focus: OrchestratorPickerFocus,
-  existing: readonly SessionRecord[],
-): number {
-  return focus.kind === "profile"
-    ? existing.length + focus.modelIndex
-    : focus.kind === "existing-group" ? -1
-      : existing.findIndex((record) => record.id === focus.sessionId);
-}
-
-/** The inverse: the durable focus a row position names, so navigation never stores a position. */
-export function orchestratorFocusAt(
-  index: number,
-  existing: readonly SessionRecord[],
-): OrchestratorPickerFocus {
-  const record = existing[index];
-  return record === undefined
-    ? { kind: "profile", modelIndex: Math.max(0, index - existing.length) }
-    : { kind: "existing", sessionId: record.id };
-}
-
-/**
- * Every orchestrator the broker still holds, live or terminal, in the fleet list's own order.
- *
- * Terminal rows stay until they are deleted, exactly as they do in the fleet list. Filtering them
- * out broke the ctrl+x ladder on the real broker: `SessionRegistry.stop()` moves a live
- * orchestrator to cancelled/stopping on the first press, so the row vanished before the second
- * press could arm the delete and the third could run it. A row that cannot be reached is a row
- * that cannot be cleaned up, so retention is now the whole record set and the label carries the
- * state instead.
- */
-export function existingOrchestrators(snapshot: FleetSnapshot): SessionRecord[] {
-  return orderedThreads(snapshot)
-    .map(({ record }) => record)
-    .filter((record) => record.kind === "orchestrator" && record.role === "orchestrator");
-}
-
-export function existingOrchestratorLabel(record: SessionRecord, color: boolean): string {
-  const name = displayThreadName(
-    record.name ?? `${friendlyModel(record.provider, record.model)} orchestrator`,
-  );
-  const lifecycle = record.attachmentState === "controlled"
-    ? paint("in use", "yellow", color)
-    : record.executionState === "active"
-      ? paint("available", "green", color)
-      : record.executionState === "starting"
-        ? paint("starting", "green", color)
-        // Anything else wears its own outcome rather than a join affordance. A stopped orchestrator
-        // sits in this list until it is deleted, and must not read as one waiting to be joined.
-        : paint(terminalOrchestratorState(record), "dim", color);
-  return `${name}  ${paint(record.id.slice(0, 8), "dim", color)}  ${lifecycle}`;
-}
-
-/**
- * The fleet list's own status vocabulary, lowercased for a picker row. Only non-active records
- * reach it, so the `active` branch of {@link threadStatus} — the one that reads the terminal
- * replay — is unreachable and the empty replay below is never consulted.
- */
-export function terminalOrchestratorState(record: SessionRecord): string {
-  return threadStatus({ record }).toLowerCase();
-}
-
-export function pickerRow(value: string, selected: boolean, color: boolean): string {
-  return `${paint(selected ? "›" : "·", selected ? "bold" : "dim", color)} ${selected ? paint(value, "bold", color) : value}`;
-}
-
-/**
- * A cursorless picker still needs a visible interaction anchor in a very short pane.
- *
- * Every selected picker row — including the directed-handoff draft — starts with `›`. Keep that
- * row inside the body window, and when the footer itself would consume the pane, spend the first
- * physical row on the selection before retaining as many trailing hints as still fit. This is a
- * visual anchor only; it never turns a picker into a terminal caret owner.
- */
-export function renderCursorlessPickerFrame(
-  lines: readonly string[],
-  footer: readonly string[],
-  height: number,
-  priorityFooterRows = 0,
-): string {
-  const frameHeight = Math.max(1, height);
-  const selectedIndex = lines.findLastIndex((line) =>
-    stripTerminalControl(line).startsWith("› "));
-  const fallbackIndex = lines.findLastIndex((line) => stripTerminalControl(line).trim() !== "");
-  const anchorIndex = Math.max(0, selectedIndex === -1 ? fallbackIndex : selectedIndex);
-
-  if (frameHeight <= footer.length) {
-    const footerCapacity = frameHeight - 1;
-    const priorityFooter = footer.slice(0, Math.min(priorityFooterRows, footerCapacity));
-    const trailingCapacity = footerCapacity - priorityFooter.length;
-    const trailingFooter = trailingCapacity === 0
-      ? []
-      : footer.slice(priorityFooterRows).slice(-trailingCapacity);
-    const visibleFooter = [...priorityFooter, ...trailingFooter];
-    return [lines[anchorIndex] ?? footer.at(-1) ?? "", ...visibleFooter].join("\n");
-  }
-
-  const bodyHeight = frameHeight - footer.length;
-  const firstBodyRow = Math.max(
-    0,
-    Math.min(anchorIndex - bodyHeight + 1, lines.length - bodyHeight),
-  );
-  const body = lines.slice(firstBodyRow, firstBodyRow + bodyHeight);
-  while (body.length < bodyHeight) body.push("");
-  return [...body, ...footer].join("\n");
 }
